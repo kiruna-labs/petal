@@ -67,7 +67,7 @@ export interface HostAdapter {
   clipboardWriteText(text: string): Promise<void>;
   log(pluginId: string, level: LogLevel, args: string[]): void;
   /** Lifecycle observations (frame reported ready/activated/error). */
-  onFrameEvent?(pluginId: string, event: 'ready' | 'activated' | 'error', payload: unknown): void;
+  onFrameEvent?(pluginId: string, event: 'ready' | 'activated' | 'error' | 'dismiss', payload: unknown): void;
 }
 
 export interface AttachOptions {
@@ -90,7 +90,9 @@ export interface PluginBroker {
   /** Route a `message` event from the host window. Returns true when it came from an attached frame. */
   handleMessage(event: { source: unknown; data: unknown }): boolean;
   /** Send a permission-gated event to every frame of one plugin. */
-  emit(pluginId: string, event: HostEvent, payload?: unknown, transfer?: Transferable[]): void;
+  emit(pluginId: string, event: HostEvent, payload?: unknown): void;
+  /** Send to the plugin's LOGIC frame only (surfaces excluded). Required for anything with a transfer list, since a MessagePort can move once. */
+  emitLogic(pluginId: string, event: HostEvent, payload?: unknown, transfer?: Transferable[]): void;
   /** Send a permission-gated event to every attached plugin. */
   broadcast(event: HostEvent, payload?: unknown): void;
   /** Deliver an inbound data packet already parsed to `plugin/<id>[/<sub>]`. */
@@ -117,6 +119,20 @@ class BridgeError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+const ERROR_CODES: readonly BridgeErrorCode[] = ['denied', 'rate-limited', 'invalid', 'unavailable', 'internal'];
+
+/** Adapters may throw `{ code, message }` to pick the error a plugin sees; anything else is 'internal'. */
+function adapterError(e: unknown): BridgeError {
+  if (typeof e === 'object' && e !== null) {
+    const code = (e as { code?: unknown }).code;
+    const message = (e as { message?: unknown }).message;
+    if (typeof code === 'string' && (ERROR_CODES as readonly string[]).includes(code)) {
+      return new BridgeError(code as BridgeErrorCode, typeof message === 'string' ? message : code);
+    }
+  }
+  return new BridgeError('internal', 'host error');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -319,7 +335,7 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
     dispatch(instance, req).then(
       (result) => post(instance.frame, okResponse(req.id, result)),
       (e: unknown) => {
-        const err = e instanceof BridgeError ? e : new BridgeError('internal', 'host error');
+        const err = e instanceof BridgeError ? e : adapterError(e);
         if (err.code === 'denied') {
           const key = `${instance.plugin.manifest.id}:${req.method}`;
           if (!deniedOnce.has(key)) {
@@ -364,15 +380,21 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
       if (data.kind === 'req') {
         handleRequest(instance, data);
       } else if (data.kind === 'evt') {
-        if (data.event === 'ready' || data.event === 'activated' || data.event === 'error') {
+        if (data.event === 'ready' || data.event === 'activated' || data.event === 'error' || data.event === 'dismiss') {
           adapter.onFrameEvent?.(instance.plugin.manifest.id, data.event, data.payload);
         }
       }
       // 'res' from a frame is meaningless; the host never sends requests.
       return true;
     },
-    emit(pluginId, event, payload, transfer) {
-      for (const inst of byFrame.values()) if (inst.plugin.manifest.id === pluginId) sendGated(inst, event, payload, transfer);
+    emit(pluginId, event, payload) {
+      for (const inst of byFrame.values()) if (inst.plugin.manifest.id === pluginId) sendGated(inst, event, payload);
+    },
+    emitLogic(pluginId, event, payload, transfer) {
+      for (const inst of byFrame.values()) {
+        if (inst.plugin.manifest.id !== pluginId || inst.surface) continue;
+        sendGated(inst, event, payload, transfer);
+      }
     },
     broadcast(event, payload) {
       for (const inst of byFrame.values()) sendGated(inst, event, payload);
@@ -391,4 +413,9 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
       return [...new Set([...byFrame.values()].map((i) => i.plugin.manifest.id))];
     },
   };
+}
+
+/** Build the error an adapter throws to hand a typed failure to the plugin. */
+export function bridgeFailure(code: BridgeErrorCode, message: string): Error & { code: BridgeErrorCode } {
+  return Object.assign(new Error(message), { code });
 }

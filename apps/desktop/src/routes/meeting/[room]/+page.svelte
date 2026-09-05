@@ -75,6 +75,10 @@
   import { createPillWindow } from '$lib/meeting/pillWindow.svelte';
   import { createMeetingSession } from '$lib/meeting/meetingSession.svelte';
   import { createLocalToast } from '$lib/meeting/localToast.svelte';
+  import PluginSurfaces from '$lib/plugins/PluginSurfaces.svelte';
+  import PluginToolbarButtons from '$lib/plugins/PluginToolbarButtons.svelte';
+  import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
+  import { getVersion } from '@tauri-apps/api/app';
   import {
     inviteCopyAriaLabel,
     inviteCopyTooltip,
@@ -601,7 +605,26 @@
       await meeting.handleLeave();
     }
   }
+
+  // Plugins (plugins/README.md §2.7): the shared host lives in
+  // PluginSurfaces; the route only renders the host-drawn toolbar cells into
+  // Gallery's slot and shows plugin toasts through the same local toast shell.
+  let pluginButtons = $state<ToolbarButtonModel[]>([]);
+  let pluginsRef = $state<PluginSurfaces | null>(null);
+  const pluginToast = createLocalToast(3000);
+  let pluginToastVariant = $state<'info' | 'degraded'>('info');
+  let pluginHostVersion = $state('0.0.0');
+  onMount(() => {
+    void getVersion()
+      .then((v) => (pluginHostVersion = v))
+      .catch(() => {});
+    return () => pluginToast.dispose();
+  });
 </script>
+
+{#snippet pluginActions()}
+  <PluginToolbarButtons buttons={pluginButtons} onActivate={(p, b, el) => pluginsRef?.activate(p, b, el)} />
+{/snippet}
 
 <main class:pill={!pill.expanded}>
   <div class="frame">
@@ -642,7 +665,27 @@
         onOpenNetwork={openNetworkCockpit}
         onRenameRoom={meeting.handleRenameRoom}
         onReportBug={feedbackEnabled ? () => (feedbackOpen = true) : undefined}
+        {pluginActions}
       />
+
+      <PluginSurfaces
+        bind:this={pluginsRef}
+        bind:buttons={pluginButtons}
+        participants={meeting.presence}
+        roomLabel={meeting.roomLabel}
+        phase={meeting.meetingPhase}
+        hostVersion={pluginHostVersion}
+        onToast={(text, variant) => {
+          pluginToastVariant = variant;
+          pluginToast.show(text);
+        }}
+      />
+
+      {#if pluginToast.visible}
+        <div class="toast-anchor" transition:toastTransition>
+          <Toast variant={pluginToastVariant} message={pluginToast.message} />
+        </div>
+      {/if}
 
       {#if inviteToast.visible}
         <div class="toast-anchor" transition:toastTransition>

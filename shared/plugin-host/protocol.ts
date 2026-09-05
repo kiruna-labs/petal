@@ -48,8 +48,8 @@ export const HOST_EVENTS = [
 ] as const;
 export type HostEvent = (typeof HOST_EVENTS)[number];
 
-/** Frame -> host lifecycle events. */
-export const FRAME_EVENTS = ['ready', 'activated', 'error'] as const;
+/** Frame -> host lifecycle events. `dismiss` = a surface frame saw Escape (focus lives inside the frame, so the host cannot). */
+export const FRAME_EVENTS = ['ready', 'activated', 'error', 'dismiss'] as const;
 export type FrameEvent = (typeof FRAME_EVENTS)[number];
 
 export interface RequestEnvelope {

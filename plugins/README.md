@@ -326,10 +326,27 @@ commit; later the scanner, vetting workflow, and storefront.
 | Webhook notifier | `petal.webhook-notifier` / local | meeting:read, storage, net:fetch:user-urls, ui:settings | none | settings surface with URL and "Send test"; posts `{event, room, count, at}` for meeting started, ended, participant joined; off until a URL is set |
 | Window link | `petal.window-link` / local | shares:read, ui:header-button | none | header button "Open URL", hidden when the share has no source URL; the native button is removed in the same PR |
 
-Built-ins are compiled into both clients through a `@petal/plugins` alias
-(desktop `svelte.config.js`; web via a `web-harness/plugins` symlink that
-`scripts/deploy-web-harness.sh` dereferences). They are preinstalled with
+Built-ins are compiled into both clients by `shared/plugin-host/builtins.ts`
+through relative `?raw` imports (`../../plugins/<id>/plugin.js`), which
+resolve the same way in the desktop app, the web dev server, Vercel's staged
+deploy (the `web-harness/plugins` symlink is dereferenced next to `shared/` by
+`scripts/deploy-web-harness.sh`), and every rendered test that aliases
+`@petal/shared`. No second alias to keep in sync. They are preinstalled with
 source `builtin` and enabled by default, except the webhook notifier.
+
+**Built-ins are buildless** (decided while implementing I-2): each is one
+plain-JS `plugin.js` with no imports, registered through the
+`globalThis.__petalRegister` hook the frame runtime installs. Reason: the
+clients import them with `?raw`, and a build step before every app build
+(including Vercel's remote web build, which has no `plugins/node_modules`)
+would be fragile. Third-party plugins use `@petal/plugin-sdk` + Vite and
+produce the same single-file shape. `build-all.mjs` still packs built-ins
+into `bundle.json` for registry publishing.
+
+**M1 storage note:** the enabled map and per-plugin KV live in
+`localStorage` on both clients for now (`shared/plugin-host/settingsModel.ts`
+keys, cleared by factory reset). The desktop moves installed bundles and KV
+to the Rust-owned files described in §2.2 with the registry client (I-5a).
 
 ### 2.12 Native tier and frame tap (design only)
 
@@ -446,7 +463,7 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | Issue | Milestone | Scope | Owner | State |
 |---|---|---|---|---|
 | I-1 | M1 | shared/plugin-host, plugins/sdk, workspace, build-all, docs stub | seinfish | done on branch (2026-09-05) |
-| I-2 | M1 | adapters, surfaces, reactions (local), Settings section | unassigned | not started |
+| I-2 | M1 | adapters, surfaces, reactions (local), Settings section | seinfish | done on branch (2026-09-05); web plugins sheet deferred to I-10 |
 | I-3 | M2 | data bus (web + Rust), contracts | unassigned | not started |
 | I-4 | M2 | state + advertisement | unassigned | not started |
 | I-5a | M3 | registry client | unassigned | not started |

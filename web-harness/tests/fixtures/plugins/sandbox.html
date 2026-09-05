@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      html, body { margin: 0; background: #0d0f12; color: #f5f6f7; font: 14px system-ui; }
+      #controls { position: fixed; bottom: 0; left: 0; right: 0; height: 80px; display: flex; gap: 8px; padding: 8px; }
+      #overlay { position: fixed; inset: 0 0 80px 0; pointer-events: none; }
+      #popovers { position: fixed; inset: 0; pointer-events: none; }
+      #popovers > * { pointer-events: auto; }
+    </style>
+  </head>
+  <body>
+    <div id="logic" hidden></div>
+    <div id="overlay"></div>
+    <div id="popovers"></div>
+    <div id="controls"></div>
+    <script type="module" src="./sandbox.ts"></script>
+  </body>
+</html>

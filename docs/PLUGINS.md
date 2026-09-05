@@ -34,8 +34,25 @@ my-plugin/
   dist/plugin.js      # built output, single ESM
 ```
 
-Build with `vite build`. Pack with `node plugins/build-all.mjs <dir>` to get a
-`bundle.json`, which is what the registry publishes and what Petal installs.
+Build with `vite build` (use `pluginLibConfig` from `@petal/plugin-sdk/vite`
+so the output is one self-contained ES module). Pack with
+`node plugins/build-all.mjs <dir>` to get a `bundle.json`, which is what the
+registry publishes and what Petal installs.
+
+Petal's own built-in plugins (`plugins/reactions/` and friends) skip the build
+step entirely: each is one plain `plugin.js` with no imports that registers
+via the `globalThis.__petalRegister` hook. That is only because the clients
+compile them in directly; write yours with the SDK.
+
+## What runs where *(M1)*
+
+Every enabled plugin gets one hidden sandboxed frame running your `activate`.
+Each UI surface you declare (`popover`, `overlay`; `panel` and `settings` come
+later) is a separate frame of the same module where `mountSurface(petal,
+surface)` runs; talk to your logic frame over `surface.channel` /
+`petal.ui.channel(surfaceId)`. Toolbar buttons are drawn by Petal from your
+manifest; clicks arrive via `petal.ui.onAction` and a button with `opens`
+toggles that surface for you.
 
 ## Manifest reference *(M1)*
 

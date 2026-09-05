@@ -263,6 +263,13 @@ export const FRAME_RUNTIME_SOURCE = String.raw`
       hostOrigin = event.origin && event.origin !== 'null' ? event.origin : '*';
       if (event.ports && event.ports[0]) surfacePort = event.ports[0];
       applyInit(env.payload || {});
+      if (init.surface) {
+        // Keyboard focus is inside this frame while a popover is open, so the
+        // host never sees Escape; forward it as a dismiss request.
+        document.addEventListener('keydown', function (e) {
+          if (e.key === 'Escape') send({ v: PROTOCOL, kind: 'evt', event: 'dismiss', payload: { surfaceId: init.surface.id } });
+        });
+      }
       send({ v: PROTOCOL, kind: 'evt', event: 'ready', payload: { pluginId: petal.plugin.id } });
       maybeActivate();
       return;

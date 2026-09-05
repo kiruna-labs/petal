@@ -3645,3 +3645,44 @@ canvas#test-canvas.p613-presentation-source {
     padding: 4px 8px;
   }
 }
+
+/* =========================================================================
+   Plugins (plugins/README.md §2.7) — host-drawn toolbar cells, the overlay
+   that plugin overlay frames fill, and the popover layer.
+   ========================================================================= */
+.plugin-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5; /* under .controlbar (6) and .toast (50) */
+  overflow: hidden;
+}
+
+.plugin-popover-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 40;
+}
+
+.plugin-popover-layer > * {
+  pointer-events: auto;
+}
+
+.plugin-control-button {
+  position: relative;
+}
+
+.plugin-control-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent, #7ff0a3);
+  color: var(--bg-base, #121416);
+  font: 600 10px/16px var(--font-ui);
+  text-align: center;
+}

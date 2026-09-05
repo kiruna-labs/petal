@@ -31,9 +31,10 @@ function bootFrame() {
     parent,
     addEventListener: (_type: string, cb: (ev: unknown) => void) => listeners.push(cb),
   };
+  const docListeners: Array<(ev: unknown) => void> = [];
   const sandbox: Record<string, unknown> = {
     window: win,
-    document: { body: { tag: 'body' } },
+    document: { body: { tag: 'body' }, addEventListener: (_type: string, cb: (ev: unknown) => void) => docListeners.push(cb) },
     TextEncoder,
     TextDecoder,
     Uint8Array,
@@ -52,7 +53,10 @@ function bootFrame() {
   const deliver = (data: unknown, source: unknown = parent, ports: unknown[] = []) => {
     for (const cb of listeners) cb({ source, data, origin: 'tauri://localhost', ports });
   };
-  return { win, hostInbox, deliver, parent };
+  const pressKey = (key: string) => {
+    for (const cb of docListeners) cb({ key });
+  };
+  return { win, hostInbox, deliver, parent, pressKey };
 }
 
 test('frame runtime: init -> ready -> activate, then requests and events flow', async () => {
@@ -112,8 +116,8 @@ test('frame runtime: init -> ready -> activate, then requests and events flow', 
   assert.equal(pub.params.reliable, false);
 });
 
-test('frame runtime: a surface frame mounts instead of activating', async () => {
-  const { win, hostInbox, deliver } = bootFrame();
+test('frame runtime: a surface frame mounts instead of activating, and forwards Escape as dismiss', async () => {
+  const { win, hostInbox, deliver, pressKey } = bootFrame();
   const seen: string[] = [];
   (win as any).__petalRegister({
     activate() {
@@ -133,6 +137,11 @@ test('frame runtime: a surface frame mounts instead of activating', async () => 
   assert.deepEqual(seen, ['mount:popover:picker:body']);
   assert.deepEqual(port.posted, [{ hello: 1 }], 'channel messages reach the transferred port');
   assert.equal(hostInbox.at(-1)!.env.event, 'activated');
+  pressKey('Enter');
+  assert.equal(hostInbox.at(-1)!.env.event, 'activated', 'other keys are not forwarded');
+  pressKey('Escape');
+  // The envelope was built inside the vm realm (different Object prototype), so compare by value.
+  assert.equal(JSON.stringify(hostInbox.at(-1)!.env), JSON.stringify({ v: PROTOCOL_VERSION, kind: 'evt', event: 'dismiss', payload: { surfaceId: 'picker' } }));
 });
 
 test('frame runtime: activate errors are reported, not swallowed', async () => {

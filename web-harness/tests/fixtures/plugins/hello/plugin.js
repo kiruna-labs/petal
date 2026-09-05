@@ -4,7 +4,7 @@ const definition = {
   activate(petal) {
     petal.log.info('hello fixture active in', petal.meeting.room().label);
     petal.ui.onAction((action) => {
-      if (action.buttonId === 'hello') petal.ui.toast('Hello from a plugin');
+      if (action.buttonId === 'hello') petal.ui.toast('Hello from a plugin').catch(() => {});
     });
     // Sandbox probe for the rendered/e2e tests: none of these may exist.
     const leaks = ['__TAURI_INTERNALS__', '__TAURI__', 'ipc'].filter((k) => k in globalThis);

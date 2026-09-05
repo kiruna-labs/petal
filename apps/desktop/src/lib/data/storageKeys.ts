@@ -1,3 +1,5 @@
+import { clearPluginStorage } from '@petal/shared/plugin-host/settingsModel';
+
 export interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
@@ -28,6 +30,8 @@ export const FACTORY_RESET_STORAGE_KEYS = [
 export function clearFactoryResetStorage(storage: Pick<StorageLike, 'removeItem'> | undefined) {
   if (!storage) return;
   for (const key of FACTORY_RESET_STORAGE_KEYS) storage.removeItem(key);
+  // Plugin enabled map + per-plugin KV (dynamic keys) — plugins/README.md §2.2.
+  clearPluginStorage(storage as StorageLike);
 }
 
 export function browserStorage(): StorageLike | undefined {
