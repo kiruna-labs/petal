@@ -188,10 +188,92 @@ pub fn find_window_at(x: f64, y: f64) -> Option<(u32, i32)> {
             &mut owner_cid,
         )
     };
-    if err != 0 || wid == 0 {
-        return None;
+    let hit = if err != 0 || wid == 0 {
+        None
+    } else {
+        Some((wid, owner_cid))
+    };
+    note_hit_test(hit);
+    hit
+}
+
+// ============================================================================
+// Hit-test health (the 0.9.7 lesson). `find_window_at` can fail SILENTLY: a
+// wrong FFI declaration made it return `None` on every call for an entire
+// release while its caller fell back to the registry walk and nothing was
+// logged. These counters plus a one-shot LIVE / all-MISS verdict make that
+// state visible in the log the release e2e gate greps
+// (.github/workflows/nightly-loopback.yml, "SLS hit-test evidence").
+// ============================================================================
+
+static HIT_TEST_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HIT_TEST_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static HIT_TEST_LIVE_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static HIT_TEST_SILENT_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Calls to `find_window_at` with zero hits before the run is called out as
+/// silent. At the telepointer sender's 45 Hz that is ~10 s of a live share --
+/// the cursor is always over SOME window (the desktop window spans every
+/// display), so a healthy hit-test cannot miss that long.
+pub const HIT_TEST_SILENT_THRESHOLD: u64 = 450;
+
+/// What the counters say about the hit-test. Pure; unit-tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitTestHealth {
+    /// Too few calls to judge (or never called: no share active).
+    Undetermined,
+    /// At least one real window came back.
+    Live,
+    /// Many calls, never a window: API/signature drift, the 0.9.7 class.
+    Silent,
+}
+
+pub fn hit_test_health(calls: u64, hits: u64) -> HitTestHealth {
+    if hits > 0 {
+        HitTestHealth::Live
+    } else if calls >= HIT_TEST_SILENT_THRESHOLD {
+        HitTestHealth::Silent
+    } else {
+        HitTestHealth::Undetermined
     }
-    Some((wid, owner_cid))
+}
+
+/// (calls, hits) so far in this process.
+pub fn hit_test_counters() -> (u64, u64) {
+    (
+        HIT_TEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+        HIT_TEST_HITS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+fn note_hit_test(hit: Option<(u32, i32)>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let calls = HIT_TEST_CALLS.fetch_add(1, Relaxed) + 1;
+    let hits = match hit {
+        Some(_) => HIT_TEST_HITS.fetch_add(1, Relaxed) + 1,
+        None => HIT_TEST_HITS.load(Relaxed),
+    };
+    match hit_test_health(calls, hits) {
+        HitTestHealth::Undetermined => {}
+        HitTestHealth::Live => {
+            if let Some((wid, owner_cid)) = hit {
+                if !HIT_TEST_LIVE_LOGGED.swap(true, Relaxed) {
+                    log::info!(
+                        "winsrv: SLS hit-test LIVE (first hit wid={wid} owner_cid={owner_cid} after {calls} calls)"
+                    );
+                }
+            }
+        }
+        HitTestHealth::Silent => {
+            if !HIT_TEST_SILENT_LOGGED.swap(true, Relaxed) {
+                log::warn!(
+                    "winsrv: SLS hit-test answered MISS on all {calls} calls -- suspect SkyLight API/signature drift (the 0.9.7 telepointer regression class); callers are running on the registry fallback"
+                );
+            }
+        }
+    }
 }
 
 
@@ -477,6 +559,27 @@ mod tests {
                 "SLSFindWindowAndOwner returned no window at ({p}, {p}): {hit:?}"
             );
         }
+    }
+
+    #[test]
+    fn hit_test_health_flags_a_silent_run_but_not_a_short_one() {
+        assert_eq!(hit_test_health(0, 0), HitTestHealth::Undetermined);
+        assert_eq!(
+            hit_test_health(HIT_TEST_SILENT_THRESHOLD - 1, 0),
+            HitTestHealth::Undetermined,
+            "a short run of misses (share just started, cursor off-screen) is not evidence"
+        );
+        assert_eq!(
+            hit_test_health(HIT_TEST_SILENT_THRESHOLD, 0),
+            HitTestHealth::Silent,
+            "~10 s of a live share with zero hits is the 0.9.7 signature"
+        );
+        assert_eq!(hit_test_health(1, 1), HitTestHealth::Live);
+        assert_eq!(
+            hit_test_health(HIT_TEST_SILENT_THRESHOLD * 10, 1),
+            HitTestHealth::Live,
+            "one real hit ever is enough to rule out a dead FFI path"
+        );
     }
 
     #[test]

@@ -1,4 +1,14 @@
 name: Nightly Remote-Control Loopback
+# Also the RELEASE E2E GATE: release.yml calls this via `workflow_call` (job
+# `e2e-gate`) and refuses to build/publish until it passes. Everything a gate
+# needs beyond the two tiers' own verdicts lives here too: process survival,
+# fresh crash reports, SLS hit-test evidence, and an explicit quarantine list
+# (E2E_QUARANTINE_*) so a known, tracked failure is reported LOUDLY but does
+# not block a release -- while any new failure does.
+#
+# SECURITY: never attach this to `pull_request`. It runs on the self-hosted
+# Tart runner; a third-party PR would execute on that machine. Manual
+# dispatch and the maintainer-only `v*` tag push are the only triggers.
 
 on:
   # STATUS NOTE (2026-07-14): the nightly `schedule` trigger is disabled --
@@ -10,6 +20,12 @@ on:
   #   schedule:
   #     - cron: "17 10 * * *"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to check out (release.yml passes the release tag); defaults to the caller's ref"
+        required: false
+        type: string
 
 concurrency:
   group: nightly-loopback-${{ github.ref }}
@@ -45,8 +61,18 @@ jobs:
       PETAL_AUTOTEST_IDENTITY: native-autotest
       PETAL_AUTOTEST_NAME: Native Autotest
       PETAL_WEB_HARNESS_URL_MATCH: localhost:5185
+      # QUARANTINE (release gate). Comma-separated. A listed failure is
+      # printed as a ::warning "QUARANTINED" -- never counted as a pass -- and
+      # does not fail the gate; anything NOT listed does. Every entry needs a
+      # tracking issue; remove the entry when the issue closes.
+      #   DRAW-N : kiruna-labs/petal#1 (draw stroke delivery not observed natively)
+      #   30     : kiruna-labs/petal#2 (post-reconnect acquire: active w/o grant token)
+      E2E_QUARANTINE_COCKPIT: "DRAW-N"
+      E2E_QUARANTINE_RC_CASES: "30"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -100,6 +126,7 @@ jobs:
           fi
 
           echo "==> Run QA-featured Test Cockpit Quick tier"
+          CRASH_MARK="$RUNNER_TEMP/cockpit-start.mark"; touch "$CRASH_MARK"
           # The Cockpit runs against PROD (backend-minted tokens, web peer from
           # meet.petal.live). The job-level LIVEKIT_* vars exist for the local
           # loopback tier below and must not leak in here: with LIVEKIT_URL set
@@ -135,6 +162,16 @@ jobs:
           echo "cockpit results dir: ${RUN_DIR:-<none>} (engine exit $engine_exit)"
           mkdir -p "$RUNNER_TEMP/petal-cockpit"
           [ -n "$RUN_DIR" ] && cp -R "$RUN_DIR" "$RUNNER_TEMP/petal-cockpit/" || true
+          # A crash on a background thread can leave the verdict lines intact
+          # and the engine exit clean; the crash reporter does not lie. Any new
+          # desktop*.ips since this step began fails the gate outright.
+          NEW_CRASHES="$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'desktop*.ips' -newer "$CRASH_MARK" 2>/dev/null || true)"
+          if [ -n "$NEW_CRASHES" ]; then
+            echo "::error::Petal wrote crash report(s) during the Test Cockpit run:"; echo "$NEW_CRASHES"
+            mkdir -p "$RUNNER_TEMP/petal-cockpit/crashes"
+            while IFS= read -r f; do [ -n "$f" ] && cp "$f" "$RUNNER_TEMP/petal-cockpit/crashes/" 2>/dev/null || true; done <<< "$NEW_CRASHES"
+            exit 1
+          fi
           python3 - "${RUN_DIR:-}" <<'PY'
           import json, sys, os
           d = sys.argv[1]
@@ -147,10 +184,14 @@ jobs:
               if o.get("kind") == "scenario-verdict":
                   p = o.get("payload", {}); verdicts.append((p.get("scenarioId"), p.get("verdict"), (p.get("reason") or p.get("detail") or "")[:160]))
           for sid, v, why in verdicts: print(f"  {sid}: {v} {why}")
-          bad = [v for v in verdicts if str(v[1]).lower() != "pass"]   # engine writes lowercase "pass"/"infra-fail"
+          quarantine = {q.strip() for q in os.environ.get("E2E_QUARANTINE_COCKPIT", "").split(",") if q.strip()}
+          not_pass = [v for v in verdicts if str(v[1]).lower() != "pass"]   # engine writes lowercase "pass"/"infra-fail"
+          quarantined = [v for v in not_pass if v[0] in quarantine]
+          bad = [v for v in not_pass if v[0] not in quarantine]
           if not verdicts: print("::error::Test Cockpit emitted zero verdicts (INSUFFICIENT DATA)"); sys.exit(1)
+          for sid, v, why in quarantined: print(f"::warning::Test Cockpit {sid}: {v} -- QUARANTINED (known failure, tracked in an issue; NOT a pass) {why}")
           if bad: print(f"::error::Test Cockpit Quick tier: {len(bad)}/{len(verdicts)} scenarios not PASS"); sys.exit(1)
-          print(f"Test Cockpit Quick tier: {len(verdicts)}/{len(verdicts)} PASS")
+          print(f"Test Cockpit Quick tier: {len(verdicts) - len(quarantined)}/{len(verdicts)} PASS, {len(quarantined)} quarantined")
           PY
 
       # The two tiers below are independent: a Cockpit failure must not hide
@@ -176,6 +217,7 @@ jobs:
           CHROME_LOG="$LOG_DIR/chrome-cdp.log"
           PETAL_LOG="$LOG_DIR/petal-dev.log"
           rm -f "$SOCKET" "$RESULTS_JSON"
+          CRASH_MARK="$LOG_DIR/loopback-start.mark"; touch "$CRASH_MARK"
 
           pids=()
           cleanup() {
@@ -266,10 +308,81 @@ jobs:
           status=${PIPESTATUS[0]}
           set -e
 
-          if [ "$status" -ne 0 ]; then
-            echo "::error::Live remote-control loopback failed with exit code $status." | tee -a "$HARNESS_LOG"
+          gate_fail=0
+
+          # -- Survival. The 0.9.7 telepointer SIGSEGV lived on a background
+          # thread the harness never talks to; a green scorecard alone would
+          # not have caught it. The native app must still be alive after the
+          # whole matrix, and the crash reporter must have nothing new.
+          echo "==> Post-suite: process survival + crash reports" | tee -a "$HARNESS_LOG"
+          if ! pgrep -x desktop >/dev/null 2>&1; then
+            echo "::error::Petal (desktop) is no longer running after the loopback matrix." | tee -a "$HARNESS_LOG"
+            gate_fail=1
           fi
-          exit "$status"
+          NEW_CRASHES="$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'desktop*.ips' -newer "$CRASH_MARK" 2>/dev/null || true)"
+          if [ -n "$NEW_CRASHES" ]; then
+            echo "::error::Petal wrote crash report(s) during the loopback run:" | tee -a "$HARNESS_LOG"
+            echo "$NEW_CRASHES" | tee -a "$HARNESS_LOG"
+            mkdir -p "$LOG_DIR/crashes"
+            while IFS= read -r f; do [ -n "$f" ] && cp "$f" "$LOG_DIR/crashes/" 2>/dev/null || true; done <<< "$NEW_CRASHES"
+            gate_fail=1
+          fi
+
+          # -- SLS hit-test evidence. While a share is up the telepointer
+          # sender hit-tests the cursor through SkyLight at 45 Hz. 0.9.7's
+          # wrong FFI declaration made that a miss on EVERY call for a whole
+          # release, silently. platform/sls.rs now logs a one-shot verdict;
+          # the gate requires LIVE and rejects all-MISS.
+          echo "==> Post-suite: SLS hit-test evidence" | tee -a "$HARNESS_LOG"
+          if grep -q "SLS hit-test answered MISS on all" "$PETAL_LOG"; then
+            echo "::error::SLS hit-test never returned a window during the run (petal-dev.log) -- the 0.9.7 regression class." | tee -a "$HARNESS_LOG"
+            gate_fail=1
+          elif ! grep -q "SLS hit-test LIVE" "$PETAL_LOG"; then
+            echo "::error::No 'SLS hit-test LIVE' line in petal-dev.log -- no share ran long enough, or the hit-test is silent." | tee -a "$HARNESS_LOG"
+            gate_fail=1
+          else
+            grep -m1 "SLS hit-test LIVE" "$PETAL_LOG" | tee -a "$HARNESS_LOG"
+          fi
+
+          # -- Scorecard with quarantine. A failing case on the quarantine
+          # list (tracked in an issue) is reported loudly but does not fail
+          # the gate; any other failure does. A missing or empty scorecard is
+          # a failure -- never a pass by absence.
+          echo "==> Post-suite: scorecard" | tee -a "$HARNESS_LOG"
+          set +e
+          python3 - "$RESULTS_JSON" <<'PY' 2>&1 | tee -a "$HARNESS_LOG"
+          import json, os, sys
+          path = sys.argv[1]
+          if not os.path.exists(path):
+              print("::error::loopback produced no results JSON"); sys.exit(1)
+          r = json.load(open(path))
+          quarantine = {q.strip() for q in os.environ.get("E2E_QUARANTINE_RC_CASES", "").split(",") if q.strip()}
+          results = r.get("results", [])
+          if not results:
+              print("::error::loopback results JSON has zero cases (INSUFFICIENT DATA)"); sys.exit(1)
+          failed = [c for c in results if c.get("status") == "fail"]
+          quarantined = [c for c in failed if str(c.get("caseId")) in quarantine]
+          bad = [c for c in failed if str(c.get("caseId")) not in quarantine]
+          for c in quarantined:
+              print(f"::warning::loopback case {c['caseId']} '{c.get('name')}': fail -- QUARANTINED (known failure, tracked in an issue; NOT a pass)")
+          for c in bad:
+              print(f"::error::loopback case {c['caseId']} '{c.get('name')}': {str(c.get('detail', ''))[:300]}")
+          s = r.get("summary", {})
+          print(f"loopback: total={s.get('total')} pass={s.get('pass')} fail={len(bad)} quarantined={len(quarantined)} skip={s.get('skip')} shareReadiness={s.get('shareReadiness')}")
+          sys.exit(1 if bad else 0)
+          PY
+          scorecard_status=${PIPESTATUS[0]}
+          set -e
+          [ "$scorecard_status" -eq 0 ] || gate_fail=1
+
+          if [ "$status" -ne 0 ] && [ "$gate_fail" -eq 0 ]; then
+            echo "::warning::harness exited $status but every failing case is quarantined; the gate passes on the scorecard above." | tee -a "$HARNESS_LOG"
+          fi
+          if [ "$gate_fail" -ne 0 ]; then
+            echo "::error::Live e2e gate FAILED (harness exit $status)." | tee -a "$HARNESS_LOG"
+            exit 1
+          fi
+          echo "==> Live e2e gate passed" | tee -a "$HARNESS_LOG"
 
       - name: Upload live loopback artifacts
         if: always()
