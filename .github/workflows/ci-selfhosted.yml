@@ -1,0 +1,84 @@
+# Self-hosted CI for the checks that need a real display and a real
+# WindowServer session (screen capture, compositor pixels, TCC grants) --
+# things a GitHub-hosted runner cannot provide.
+#
+# ci.yml stays manual-only because GitHub's macOS runners bill at 10x. This
+# workflow runs on the repo's own Mac ([self-hosted, macOS], registered via
+# scripts/runner/register.sh) so every push to main gets the FULL local gate
+# (scripts/ci-local.sh -- the same thing every agent runs before pushing) plus
+# the native pixel gate that only works with a real display and Screen
+# Recording: scripts/verify-no-black-frame-native.sh (CLAUDE.md "Never show
+# a black frame").
+#
+# TRIGGER NOTE (2026-08-22): push/pull_request are commented out until the
+# runner is registered (needs repo admin -- see
+# internal/docs/OPEN_SOURCE_GOAL_2026-08-22.md). Without a runner every
+# queued run just sits pending/cancelled, the same clutter-without-signal
+# nightly-loopback.yml documents. scripts/runner/register.sh prints the
+# reminder; flip these on in the same commit that restores nightly's schedule:
+#   push:
+#     branches: [main]
+#   pull_request:
+#     branches: [main]
+name: CI (self-hosted)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-selfhosted-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  local-gate:
+    name: ci-local.sh + native no-black-frame gate
+    runs-on: [self-hosted, macOS]
+    # ci-local.sh is ~10-15min warm on this machine; the native gate builds
+    # one example + two probe runs. Backstop well above that (#724 pattern).
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      CARGO_INCREMENTAL: 0
+      PETAL_DISABLE_AUDIO: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # verify-deploy-freshness / provenance wrappers inspect history.
+          fetch-depth: 0
+
+      - name: Runner preflight (tools, TCC, GUI session, no foreign dev instance)
+        run: scripts/runner/preflight.sh
+
+      - name: scripts/ci-local.sh
+        shell: bash
+        run: |
+          set -uo pipefail
+          LOG="$RUNNER_TEMP/ci-local.log"
+          timeout 2700 scripts/ci-local.sh > "$LOG" 2>&1
+          EXIT=$?
+          tail -n 60 "$LOG"
+          echo "CI_EXIT=$EXIT"
+          exit $EXIT
+
+      - name: Native no-black-frame pixel gate (both directions)
+        shell: bash
+        run: |
+          set -uo pipefail
+          LOG="$RUNNER_TEMP/no-black-frame-native.log"
+          timeout 1500 scripts/verify-no-black-frame-native.sh > "$LOG" 2>&1
+          EXIT=$?
+          tail -n 40 "$LOG"
+          echo "GATE_EXIT=$EXIT"
+          exit $EXIT
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-selfhosted-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: ignore

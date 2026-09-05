@@ -1,0 +1,2375 @@
+{
+  "slugify": [
+    {
+      "input": "Design Review",
+      "slug": "design-review"
+    },
+    {
+      "input": "design-review",
+      "slug": "design-review"
+    },
+    {
+      "input": "  design   review  ",
+      "slug": "design-review"
+    },
+    {
+      "input": "eng-sync",
+      "slug": "eng-sync"
+    },
+    {
+      "input": "quick-mr2dzrhh",
+      "slug": "quick-mr2dzrhh"
+    },
+    {
+      "input": "---",
+      "slug": "room"
+    },
+    {
+      "input": "!!!",
+      "slug": "room"
+    },
+    {
+      "input": "cafe creme",
+      "slug": "cafe-creme"
+    },
+    {
+      "input": "Eng / Sync #2",
+      "slug": "eng-sync-2"
+    },
+    {
+      "input": "UPPER lower 123",
+      "slug": "upper-lower-123"
+    }
+  ],
+  "roomCredentials": [
+    {
+      "input": " ROOM-8535E993A1B76ED8A9EE59B265F53DFC ",
+      "normalized": "room-8535e993a1b76ed8a9ee59b265f53dfc",
+      "accessCode": "abc-defg-hjk",
+      "livekitRoom": "petal-room-room-8535e993a1b76ed8a9ee59b265f53dfc"
+    }
+  ],
+  "inviteLinks": [
+    {
+      "label": "renamed-room",
+      "accessCode": "abc-defg-hjk",
+      "credential": "room-8535e993a1b76ed8a9ee59b265f53dfc",
+      "httpsPath": "/renamed-room/abc-defg-hjk",
+      "nativeDeepLink": "petal://join/abc-defg-hjk",
+      "webJoinQuery": "?code=abc-defg-hjk"
+    }
+  ],
+  "roomMetadataRegistration": {
+    "request": {
+      "name": "Eng meeting",
+      "room": "room-8535e993a1b76ed8a9ee59b265f53dfc",
+      "open": false
+    },
+    "livekitRoom": "petal-room-room-8535e993a1b76ed8a9ee59b265f53dfc",
+    "metadata": "{\"displayName\":\"Eng meeting\",\"open\":false}"
+  },
+  "tokenResponse": {
+    "url": "wss://livekit.example.com",
+    "token": "<jwt>",
+    "room": "petal-room-room-8535e993a1b76ed8a9ee59b265f53dfc",
+    "displayName": "Eng meeting"
+  },
+  "roomStatusRequest": {
+    "maxRooms": 64,
+    "request": {
+      "rooms": [
+        {
+          "room": "room-8535e993a1b76ed8a9ee59b265f53dfc",
+          "accessCode": "abc-defg-hjk"
+        },
+        {
+          "room": "room-00000000000000000000000000000001"
+        }
+      ]
+    },
+    "responseKeys": [
+      "id",
+      "name",
+      "occupancy",
+      "open"
+    ],
+    "directoryGetStatus": 410
+  },
+  "closedRoomTokenRequest": {
+    "metadata": "{\"displayName\":\"Eng meeting\",\"open\":false,\"removed\":[\"web-11111111-1111-4111-8111-111111111111\"]}",
+    "request": {
+      "room": "room-8535e993a1b76ed8a9ee59b265f53dfc",
+      "identity": "web-22222222-2222-4222-8222-222222222222",
+      "displayName": "Till",
+      "accessCode": "abc-defg-hjk"
+    },
+    "removedIdentity": "web-11111111-1111-4111-8111-111111111111",
+    "refusedStatus": 403
+  },
+  "windowTracks": [
+    {
+      "windowId": 1,
+      "trackName": "petal-window-1"
+    },
+    {
+      "windowId": 123456,
+      "trackName": "petal-window-123456"
+    },
+    {
+      "windowId": 2147483647,
+      "trackName": "petal-window-2147483647"
+    }
+  ],
+  "micTrack": {
+    "trackName": "petal-mic",
+    "source": "microphone"
+  },
+  "cameraTracks": [
+    {
+      "identity": "Web Tester",
+      "trackName": "petal-camera-web-tester"
+    },
+    {
+      "identity": "___",
+      "trackName": "petal-camera-anon"
+    },
+    {
+      "identity": "637511f2-851a-47f8-b043-823656bfc54b",
+      "trackName": "petal-camera-637511f2-851a-47f8-b043-823656bfc54b"
+    }
+  ],
+  "cameraWindowIds": [
+    {
+      "trackName": "petal-camera-web-tester",
+      "windowId": 2970122102
+    },
+    {
+      "trackName": "petal-camera-web-riley",
+      "windowId": 2311409066
+    },
+    {
+      "trackName": "petal-camera-native-validation",
+      "windowId": 2447038813
+    }
+  ],
+  "sourceKindMetadata": {
+    "metadata": "{\"petalWindowKinds\":{\"42\":\"display\",\"43\":\"window\"}}",
+    "displayWindowId": 42,
+    "windowWindowId": 43,
+    "missingWindowId": 44
+  },
+  "sourceScaleMetadata": {
+    "metadata": "{\"petalWindowScales\":{\"42\":0.64,\"43\":1.5,\"44\":0,\"45\":-1,\"46\":\"1.0\"}}",
+    "downscaledWindowId": 42,
+    "retinaWindowId": 43,
+    "invalidWindowId": 44,
+    "missingWindowId": 99
+  },
+  "identityPaletteMetadata": {
+    "metadata": "{\"petalIdentityPaletteIndex\":2,\"petalWindowKinds\":{\"42\":\"display\"}}",
+    "paletteIndex": 2,
+    "windowId": 42
+  },
+  "windowZOrderMetadata": {
+    "metadata": "{\"petalWindowZOrder\":[42,7,99],\"petalWindowKinds\":{\"42\":\"window\"}}",
+    "orderedWindowIds": [42, 7, 99],
+    "frontmostWindowId": 42,
+    "middleWindowId": 7,
+    "backmostWindowId": 99,
+    "missingWindowId": 100
+  },
+  "windowUrlMetadata": {
+    "metadata": "{\"petalWindowUrls\":{\"123\":\"https://example.com/docs\",\"124\":\"https://example.com/docs?token=x#frag\",\"125\":\"file:///tmp/nope\"}}",
+    "plainWindowId": 123,
+    "plainUrl": "https://example.com/docs",
+    "minimizedWindowId": 124,
+    "minimizedUrl": "https://example.com/docs",
+    "nonHttpWindowId": 125,
+    "missingWindowId": 999
+  },
+  "testCockpitScenarios": [
+    {
+      "id": "SHARE-N2W-Q",
+      "tier": "quick"
+    },
+    {
+      "id": "SHARE-W2N-Q",
+      "tier": "quick"
+    },
+    {
+      "id": "DRAW-N",
+      "tier": "quick"
+    },
+    {
+      "id": "CAM",
+      "tier": "quick"
+    },
+    {
+      "id": "CAM-N2W",
+      "tier": "gap"
+    },
+    {
+      "id": "AUD",
+      "tier": "quick"
+    },
+    {
+      "id": "AUD-N2W",
+      "tier": "gap"
+    },
+    {
+      "id": "TELE",
+      "tier": "quick"
+    },
+    {
+      "id": "CHAOS-DEVICE",
+      "tier": "full"
+    },
+    {
+      "id": "CHAOS-DISPLAY-CHANGE",
+      "tier": "full"
+    },
+    {
+      "id": "CHAOS-NET",
+      "tier": "full"
+    },
+    {
+      "id": "CHAOS-LIFECYCLE",
+      "tier": "full"
+    },
+    {
+      "id": "MULTI-3",
+      "tier": "full"
+    },
+    {
+      "id": "RC-P1080",
+      "tier": "full"
+    },
+    {
+      "id": "SOAK-W2N-STALL",
+      "tier": "soak"
+    },
+    {
+      "id": "SOAK-N2W-STALL",
+      "tier": "soak"
+    },
+    {
+      "id": "CHAOS-NET-SOAK",
+      "tier": "soak"
+    },
+    {
+      "id": "SHARE-N2N",
+      "tier": "full"
+    },
+    {
+      "id": "SHARE-MULTIWIN",
+      "tier": "native"
+    },
+    {
+      "id": "SHARE-MULTIDISP",
+      "tier": "multi-display"
+    },
+    {
+      "id": "SHARE-DESKTOP",
+      "tier": "native"
+    },
+    {
+      "id": "CAM-BITRATE",
+      "tier": "gap"
+    },
+    {
+      "id": "CAM-STALL",
+      "tier": "gap"
+    },
+    {
+      "id": "ROOM-JOIN",
+      "tier": "gap"
+    },
+    {
+      "id": "RC-N2N",
+      "tier": "gap"
+    },
+    {
+      "id": "RC-N2W",
+      "tier": "gap"
+    },
+    {
+      "id": "UI-MAIN",
+      "tier": "ui"
+    },
+    {
+      "id": "UI-GALLERY",
+      "tier": "ui"
+    },
+    {
+      "id": "UI-PILL",
+      "tier": "ui"
+    },
+    {
+      "id": "UI-DOCK",
+      "tier": "ui"
+    }
+  ],
+  "topics": {
+    "telepointer": "petal.telepointer",
+    "remoteControl": "petal.remote-control",
+    "remoteClipboardText": "petal.remote-control.clipboard-text",
+    "viewerDemand": "petal.viewer-demand",
+    "pipelineStats": "petal.pipeline-stats",
+    "latencyProbe": "petal.latency-probe",
+    "draw": "petal.draw",
+    "aiChat": "petal.ai-chat"
+  },
+  "telepointerFields": [
+    "activity",
+    "surfaceOwnerId",
+    "userId",
+    "visible",
+    "windowId",
+    "x",
+    "y"
+  ],
+  "identityPalette": {
+    "hash": "utf16-hash-times-31-mod-6",
+    "names": [
+      "plum",
+      "blue",
+      "green",
+      "amber",
+      "lilac",
+      "slate"
+    ],
+    "hex": [
+      "#f06cc9",
+      "#6e8bff",
+      "#7ff0a3",
+      "#e8b84b",
+      "#d6b8f0",
+      "#8fa6b8"
+    ]
+  },
+  "viewerDemandFields": [
+    "height",
+    "kind",
+    "needsRepublish",
+    "pixelHeight",
+    "pixelWidth",
+    "scale",
+    "seq",
+    "targetUserId",
+    "v",
+    "viewerId",
+    "visible",
+    "width",
+    "windowId"
+  ],
+  "pipelineStatsMessages": [
+    {
+      "name": "sender",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "role": "sender",
+        "reporterId": "native-1",
+        "ownerIdentity": "native-1",
+        "windowId": 42,
+        "seq": 7,
+        "sentAtMs": 1720000000123,
+        "grabbed": {
+          "width": 1280,
+          "height": 720,
+          "fps": 30,
+          "kbps": null
+        },
+        "encodedSent": {
+          "width": 1280,
+          "height": 720,
+          "fps": 29.5,
+          "kbps": 1800
+        },
+        "received": null,
+        "decoded": null,
+        "captureState": {
+          "state": "live",
+          "fps": 30,
+          "dirtyRectCount": 2,
+          "dirtyAreaPx": 184320,
+          "occlusionPct": 0,
+          "cpu": {
+            "lockCopyMs": 0.74,
+            "convertMs": 1.32,
+            "captureFrameReturnMs": 0.21
+          }
+        },
+        "receiverFreeze": null,
+        "publicationSid": "TR_sender",
+        "shareEpoch": "e1",
+        "lifecycle": "captureReady"
+      },
+      "fields": [
+        "captureState",
+        "decoded",
+        "encodedSent",
+        "grabbed",
+        "lifecycle",
+        "ownerIdentity",
+        "publicationSid",
+        "received",
+        "receiverFreeze",
+        "reporterId",
+        "role",
+        "sentAtMs",
+        "seq",
+        "shareEpoch",
+        "v",
+        "windowId"
+      ],
+      "stageFields": [
+        "fps",
+        "height",
+        "kbps",
+        "width"
+      ],
+      "captureStateFields": [
+        "cpu",
+        "dirtyAreaPx",
+        "dirtyRectCount",
+        "fps",
+        "occlusionPct",
+        "state"
+      ],
+      "captureCpuFields": [
+        "captureFrameReturnMs",
+        "convertMs",
+        "lockCopyMs"
+      ],
+      "receiverFreezeFields": [
+        "framesDropped",
+        "freezeCount",
+        "qualityLimitationReason"
+      ]
+    },
+    {
+      "name": "receiver",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "role": "receiver",
+        "reporterId": "web-1",
+        "ownerIdentity": "native-1",
+        "windowId": 42,
+        "seq": 8,
+        "sentAtMs": 1720000000456,
+        "grabbed": null,
+        "encodedSent": null,
+        "received": {
+          "width": 1280,
+          "height": 720,
+          "fps": 29.2,
+          "kbps": 1720
+        },
+        "decoded": {
+          "width": 1280,
+          "height": 720,
+          "fps": 28.9,
+          "kbps": null
+        },
+        "captureState": null,
+        "receiverFreeze": {
+          "freezeCount": 1,
+          "framesDropped": 3,
+          "qualityLimitationReason": "stats-frame-starvation"
+        },
+        "publicationSid": "TR_receiver",
+        "shareEpoch": "e2",
+        "lifecycle": "firstPresented"
+      },
+      "fields": [
+        "captureState",
+        "decoded",
+        "encodedSent",
+        "grabbed",
+        "lifecycle",
+        "ownerIdentity",
+        "publicationSid",
+        "received",
+        "receiverFreeze",
+        "reporterId",
+        "role",
+        "sentAtMs",
+        "seq",
+        "shareEpoch",
+        "v",
+        "windowId"
+      ],
+      "stageFields": [
+        "fps",
+        "height",
+        "kbps",
+        "width"
+      ],
+      "captureStateFields": [
+        "cpu",
+        "dirtyAreaPx",
+        "dirtyRectCount",
+        "fps",
+        "occlusionPct",
+        "state"
+      ],
+      "captureCpuFields": [
+        "captureFrameReturnMs",
+        "convertMs",
+        "lockCopyMs"
+      ],
+      "receiverFreezeFields": [
+        "framesDropped",
+        "freezeCount",
+        "qualityLimitationReason"
+      ]
+    }
+  ],
+  "drawMessages": [
+    {
+      "name": "begin",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "type": "begin",
+        "ownerIdentity": "web-1",
+        "windowId": 42,
+        "seq": 1,
+        "strokeId": "stroke-web-1-1",
+        "points": [
+          {
+            "x": 0.125,
+            "y": 0.25
+          }
+        ]
+      },
+      "fields": [
+        "ownerIdentity",
+        "points",
+        "seq",
+        "strokeId",
+        "type",
+        "v",
+        "windowId"
+      ],
+      "pointFields": [
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "points",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "type": "points",
+        "ownerIdentity": "web-1",
+        "windowId": 42,
+        "seq": 2,
+        "strokeId": "stroke-web-1-1",
+        "points": [
+          {
+            "x": 0.25,
+            "y": 0.375
+          },
+          {
+            "x": 0.5,
+            "y": 0.625
+          }
+        ]
+      },
+      "fields": [
+        "ownerIdentity",
+        "points",
+        "seq",
+        "strokeId",
+        "type",
+        "v",
+        "windowId"
+      ],
+      "pointFields": [
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "end",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "type": "end",
+        "ownerIdentity": "web-1",
+        "windowId": 42,
+        "seq": 3,
+        "strokeId": "stroke-web-1-1",
+        "points": []
+      },
+      "fields": [
+        "ownerIdentity",
+        "points",
+        "seq",
+        "strokeId",
+        "type",
+        "v",
+        "windowId"
+      ],
+      "pointFields": [
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "text",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "type": "text",
+        "ownerIdentity": "web-1",
+        "windowId": 42,
+        "seq": 4,
+        "strokeId": "text-web-1-1",
+        "points": [
+          {
+            "x": 0.375,
+            "y": 0.5
+          }
+        ],
+        "text": "Hello Petal"
+      },
+      "fields": [
+        "ownerIdentity",
+        "points",
+        "seq",
+        "strokeId",
+        "text",
+        "type",
+        "v",
+        "windowId"
+      ],
+      "pointFields": [
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "clear",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "type": "clear",
+        "ownerIdentity": "web-1",
+        "windowId": 42,
+        "seq": 5,
+        "strokeId": null,
+        "points": []
+      },
+      "fields": [
+        "ownerIdentity",
+        "points",
+        "seq",
+        "strokeId",
+        "type",
+        "v",
+        "windowId"
+      ],
+      "pointFields": [
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "camera-begin",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "type": "begin",
+        "ownerIdentity": "web-1",
+        "windowId": 2970122102,
+        "seq": 6,
+        "strokeId": "stroke-camera-web-1-1",
+        "points": [
+          {
+            "x": 0.5,
+            "y": 0.5
+          }
+        ]
+      },
+      "fields": [
+        "ownerIdentity",
+        "points",
+        "seq",
+        "strokeId",
+        "type",
+        "v",
+        "windowId"
+      ],
+      "pointFields": [
+        "x",
+        "y"
+      ]
+    }
+  ],
+  "latencyProbeMessages": [
+    {
+      "name": "ping",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "kind": "ping",
+        "probeId": 42,
+        "senderId": "native-1",
+        "sendTimeMs": 1720000000123
+      },
+      "fields": [
+        "kind",
+        "probeId",
+        "sendTimeMs",
+        "senderId",
+        "v"
+      ]
+    },
+    {
+      "name": "pong",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "kind": "pong",
+        "probeId": 42,
+        "senderId": "web-1",
+        "sendTimeMs": 1720000000123,
+        "receiverReceiveTimeMs": 1720000000148,
+        "receiverSendTimeMs": 1720000000150
+      },
+      "fields": [
+        "kind",
+        "probeId",
+        "receiverReceiveTimeMs",
+        "receiverSendTimeMs",
+        "sendTimeMs",
+        "senderId",
+        "v"
+      ]
+    }
+  ],
+  "remoteControlMessages": [
+    {
+      "name": "request",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 6,
+        "kind": "request"
+      },
+      "fields": [
+        "controllerId",
+        "kind",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "release",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 7,
+        "kind": "release"
+      },
+      "fields": [
+        "controllerId",
+        "kind",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "status",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 14,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "status",
+        "status": "active",
+        "message": "Remote control active for shared window",
+        "supportsBinaryHotPath": true
+      },
+      "fields": [
+        "controllerId",
+        "grantToken",
+        "kind",
+        "message",
+        "seq",
+        "status",
+        "supportsBinaryHotPath",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "status-request-unavailable",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 15,
+        "kind": "status",
+        "status": "requestUnavailable",
+        "message": "Remote control is not available because this window is not being shared."
+      },
+      "fields": [
+        "controllerId",
+        "kind",
+        "message",
+        "seq",
+        "status",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "pointer-move",
+      "reliable": false,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 8,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "pointer",
+        "action": "move",
+        "x": 0.5,
+        "y": 0.25,
+        "button": -1,
+        "buttons": 0,
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": false,
+          "shift": true
+        }
+      },
+      "fields": [
+        "action",
+        "button",
+        "buttons",
+        "controllerId",
+        "grantToken",
+        "kind",
+        "modifiers",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "pointer-down",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 9,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "pointer",
+        "action": "down",
+        "x": 0.5,
+        "y": 0.25,
+        "button": 0,
+        "buttons": 1,
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": false,
+          "shift": true
+        }
+      },
+      "fields": [
+        "action",
+        "button",
+        "buttons",
+        "controllerId",
+        "grantToken",
+        "kind",
+        "modifiers",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "pointer-up",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 10,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "pointer",
+        "action": "up",
+        "x": 0.5,
+        "y": 0.25,
+        "button": 0,
+        "buttons": 0,
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": false,
+          "shift": true
+        }
+      },
+      "fields": [
+        "action",
+        "button",
+        "buttons",
+        "controllerId",
+        "grantToken",
+        "kind",
+        "modifiers",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "pointer-click",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 15,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "pointer",
+        "action": "click",
+        "x": 0.5,
+        "y": 0.25,
+        "button": 0,
+        "buttons": 0,
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": false,
+          "shift": true
+        }
+      },
+      "fields": [
+        "action",
+        "button",
+        "buttons",
+        "controllerId",
+        "grantToken",
+        "kind",
+        "modifiers",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "pointer-double-click",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 16,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "pointer",
+        "action": "down",
+        "x": 0.5,
+        "y": 0.25,
+        "button": 0,
+        "buttons": 1,
+        "clickCount": 2,
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": false,
+          "shift": false
+        }
+      },
+      "fields": [
+        "action",
+        "button",
+        "buttons",
+        "clickCount",
+        "controllerId",
+        "grantToken",
+        "kind",
+        "modifiers",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "wheel",
+      "reliable": false,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 11,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "wheel",
+        "x": 0.25,
+        "y": 0.75,
+        "deltaX": -12,
+        "deltaY": 120,
+        "deltaMode": 0,
+        "modifiers": {
+          "alt": false,
+          "ctrl": true,
+          "meta": false,
+          "shift": false
+        }
+      },
+      "fields": [
+        "controllerId",
+        "deltaMode",
+        "deltaX",
+        "deltaY",
+        "grantToken",
+        "kind",
+        "modifiers",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "key",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 12,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "key",
+        "action": "down",
+        "key": "c",
+        "code": "KeyC",
+        "repeat": false,
+        "location": 0,
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": true,
+          "shift": false
+        }
+      },
+      "fields": [
+        "action",
+        "code",
+        "controllerId",
+        "grantToken",
+        "key",
+        "kind",
+        "location",
+        "modifiers",
+        "repeat",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "text",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 13,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "text",
+        "text": "hello",
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": false,
+          "shift": true
+        }
+      },
+      "fields": [
+        "controllerId",
+        "grantToken",
+        "kind",
+        "modifiers",
+        "seq",
+        "targetUserId",
+        "text",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "pointer-click-v2-canonical-fingerprint",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 15,
+        "kind": "pointer",
+        "action": "click",
+        "x": 0.5,
+        "y": 0.25,
+        "button": 0,
+        "buttons": 0,
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": false,
+          "shift": true
+        },
+        "controlSessionId": "grant_opaque_example",
+        "inputId": "input-example-000000000",
+        "inputSeq": 15,
+        "operationFingerprintVersion": 1,
+        "operationFingerprint": "b3b509e59b423c9c15ee5bde3bf661aa52ff0cd6a65c9cffd81f419ff09ccaa1"
+      },
+      "fields": [
+        "action",
+        "button",
+        "buttons",
+        "controlSessionId",
+        "controllerId",
+        "inputId",
+        "inputSeq",
+        "kind",
+        "modifiers",
+        "operationFingerprint",
+        "operationFingerprintVersion",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "result-applied-v2",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 16,
+        "kind": "result",
+        "controlSessionId": "grant_opaque_example",
+        "inputId": "AAAAAAAAAAAAAAAAAAAAAA",
+        "inputSeq": 15,
+        "operationFingerprintVersion": 1,
+        "operationFingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "outcome": "applied",
+        "deliveryRoute": "replay"
+      },
+      "fields": [
+        "controlSessionId",
+        "controllerId",
+        "deliveryRoute",
+        "inputId",
+        "inputSeq",
+        "kind",
+        "operationFingerprint",
+        "operationFingerprintVersion",
+        "outcome",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "result-replay-failed-v2",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 17,
+        "kind": "result",
+        "controlSessionId": "grant_opaque_example",
+        "inputId": "AAAAAAAAAAAAAAAAAAAAAA",
+        "inputSeq": 16,
+        "operationFingerprintVersion": 1,
+        "operationFingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "outcome": "replayFailed",
+        "deliveryRoute": "replay",
+        "failureCode": "injectionTimeout"
+      },
+      "fields": [
+        "controlSessionId",
+        "controllerId",
+        "deliveryRoute",
+        "failureCode",
+        "inputId",
+        "inputSeq",
+        "kind",
+        "operationFingerprint",
+        "operationFingerprintVersion",
+        "outcome",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "request-capable-window",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 17,
+        "kind": "request",
+        "targetKind": "window",
+        "controllerCapabilities": [
+          "legacyControl",
+          "discretePointerV1",
+          "discreteScrollV1"
+        ]
+      },
+      "fields": [
+        "controllerCapabilities",
+        "controllerId",
+        "kind",
+        "seq",
+        "targetKind",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "status-active-capable-window",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 18,
+        "kind": "status",
+        "status": "active",
+        "message": "Remote control active for shared window",
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "targetKind": "window",
+        "shareInstanceId": "share-instance-example",
+        "hostCapabilities": [
+          "discretePointerV1",
+          "discreteScrollV1",
+          "windowLocalPointer",
+          "globalKeyboard",
+          "uiaInvoke",
+          "uiaScroll",
+          "unicodeText"
+        ]
+      },
+      "fields": [
+        "controllerId",
+        "grantToken",
+        "hostCapabilities",
+        "kind",
+        "message",
+        "seq",
+        "shareInstanceId",
+        "status",
+        "targetKind",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "pointer-click-capable-window",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 18,
+        "kind": "pointer",
+        "action": "click",
+        "targetKind": "window",
+        "shareInstanceId": "share-instance-example",
+        "x": 0.5,
+        "y": 0.25,
+        "button": 0,
+        "buttons": 0,
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": false,
+          "shift": true
+        },
+        "controlSessionId": "grant_opaque_example",
+        "inputId": "input-capable-example",
+        "inputSeq": 18,
+        "operationFingerprintVersion": 1,
+        "operationFingerprint": "a4e9531ddc93c944a2005c8fbfbc8f0bb5ed7fdda6a174a5dafdbd360b6fc72a"
+      },
+      "fields": [
+        "action",
+        "button",
+        "buttons",
+        "controlSessionId",
+        "controllerId",
+        "inputId",
+        "inputSeq",
+        "kind",
+        "modifiers",
+        "operationFingerprint",
+        "operationFingerprintVersion",
+        "seq",
+        "shareInstanceId",
+        "targetKind",
+        "targetUserId",
+        "v",
+        "windowId",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "result-submitted-capable-display",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 19,
+        "kind": "result",
+        "targetKind": "display",
+        "shareInstanceId": "share-instance-example",
+        "controlSessionId": "grant_opaque_example",
+        "inputId": "input-capable-example",
+        "inputSeq": 19,
+        "operationFingerprintVersion": 1,
+        "operationFingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "outcome": "submitted",
+        "deliveryRoute": "replay"
+      },
+      "fields": [
+        "controlSessionId",
+        "controllerId",
+        "deliveryRoute",
+        "inputId",
+        "inputSeq",
+        "kind",
+        "operationFingerprint",
+        "operationFingerprintVersion",
+        "outcome",
+        "seq",
+        "shareInstanceId",
+        "targetKind",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "status-controller-upgrade-required",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 20,
+        "kind": "status",
+        "status": "requestUnavailable",
+        "message": "Controller upgrade required",
+        "targetKind": "window",
+        "shareInstanceId": "share-instance-example",
+        "hostCapabilities": [
+          "discretePointerV1",
+          "windowLocalPointer"
+        ],
+        "reason": "controllerUpgradeRequired"
+      },
+      "fields": [
+        "controllerId",
+        "hostCapabilities",
+        "kind",
+        "message",
+        "reason",
+        "seq",
+        "shareInstanceId",
+        "status",
+        "targetKind",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "status-awaiting-consent",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 25,
+        "kind": "status",
+        "status": "awaitingConsent",
+        "message": "Waiting for the sharer to approve remote control."
+      },
+      "fields": [
+        "controllerId",
+        "kind",
+        "message",
+        "seq",
+        "status",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "status-denied",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 26,
+        "kind": "status",
+        "status": "denied",
+        "message": "The sharer declined remote control.",
+        "reason": "consentDenied"
+      },
+      "fields": [
+        "controllerId",
+        "kind",
+        "message",
+        "reason",
+        "seq",
+        "status",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    }
+  ],
+  "remoteClipboardMessages": [
+    {
+      "name": "copy-request",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "native-controller-1",
+        "windowId": 42,
+        "seq": 27,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "copy",
+        "operationId": "0123456789abcdef0123456789abcdef"
+      },
+      "fields": [
+        "controllerId",
+        "grantToken",
+        "kind",
+        "operationId",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    },
+    {
+      "name": "copy-request-capable-window",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "windows-host-1",
+        "controllerId": "mac-controller-1",
+        "windowId": 42,
+        "seq": 28,
+        "grantToken": "0123456789abcdef0123456789abcdef",
+        "kind": "copy",
+        "operationId": "fedcba9876543210fedcba9876543210",
+        "targetKind": "window",
+        "shareInstanceId": "share-instance-example"
+      },
+      "fields": [
+        "controllerId",
+        "grantToken",
+        "kind",
+        "operationId",
+        "seq",
+        "shareInstanceId",
+        "targetKind",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
+    }
+  ],
+  "remoteClipboardStreams": {
+    "topic": "petal.remote-control.clipboard-text",
+    "mimeType": "text/plain; charset=utf-8",
+    "directions": [
+      "copyResponse",
+      "paste"
+    ],
+    "attributes": [
+      "direction",
+      "grantToken",
+      "operationId",
+      "windowId"
+    ],
+    "operationIdHexLength": 32,
+    "maxBytes": 1048576,
+    "reliability": "reliable",
+    "destination": "oneAuthenticatedParticipant",
+    "successSignals": {
+      "copyResponse": "targetedTextStreamOnly",
+      "paste": "none"
+    },
+    "textRules": [
+      "nonempty",
+      "validUtf8",
+      "noNul",
+      "plainTextOnly",
+      "rejectRecognizedFileClipboardFormats",
+      "rejectOversize"
+    ]
+  },
+  "remoteControlPacketPolicy": [
+    {
+      "packet": "request",
+      "reliability": "reliable",
+      "destination": "host",
+      "authority": "authenticatedController"
+    },
+    {
+      "packet": "release",
+      "reliability": "reliable",
+      "destination": "host",
+      "authority": "authenticatedController"
+    },
+    {
+      "packet": "status",
+      "reliability": "reliable",
+      "destination": "controller",
+      "authority": "authenticatedHost"
+    },
+    {
+      "packet": "result",
+      "reliability": "reliable",
+      "destination": "controller",
+      "authority": "authenticatedHost"
+    },
+    {
+      "packet": "pointerMoveNoButtons",
+      "reliability": "lossy",
+      "destination": "host",
+      "authority": "authenticatedController"
+    },
+    {
+      "packet": "pointerHeldOrDiscrete",
+      "reliability": "reliable",
+      "destination": "host",
+      "authority": "authenticatedController"
+    },
+    {
+      "packet": "wheelLegacy",
+      "reliability": "lossy",
+      "destination": "host",
+      "authority": "authenticatedController"
+    },
+    {
+      "packet": "scrollDiscrete",
+      "reliability": "reliable",
+      "destination": "host",
+      "authority": "authenticatedController"
+    },
+    {
+      "packet": "key",
+      "reliability": "reliable",
+      "destination": "host",
+      "authority": "authenticatedController"
+    },
+    {
+      "packet": "text",
+      "reliability": "reliable",
+      "destination": "host",
+      "authority": "authenticatedController"
+    },
+    {
+      "packet": "copyRequest",
+      "reliability": "reliable",
+      "destination": "host",
+      "authority": "authenticatedController"
+    },
+    {
+      "packet": "clipboardTextStream",
+      "reliability": "reliable",
+      "destination": "targetParticipant",
+      "authority": "authenticatedRemoteControlGrant"
+    }
+  ],
+  "testCockpitJourneys": [
+    {
+      "id": "SHARE-01",
+      "title": "Real native window",
+      "feature": "A",
+      "direction": "nat-nat",
+      "priority": "P0",
+      "depth": "short",
+      "status": "covered",
+      "runnable": "SHARE-N2N",
+      "legacy": []
+    },
+    {
+      "id": "SHARE-02",
+      "title": "Crisp text",
+      "feature": "A",
+      "direction": "web-nat",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "SHARE-W2N-Q",
+      "legacy": [
+        "SHARE-W2N-Q"
+      ]
+    },
+    {
+      "id": "SHARE-03",
+      "title": "Smooth & fast",
+      "feature": "A",
+      "direction": "web-nat",
+      "priority": "P0",
+      "depth": "short",
+      "status": "covered",
+      "runnable": "SHARE-W2N-Q",
+      "legacy": [
+        "SHARE-W2N-Q"
+      ]
+    },
+    {
+      "id": "SHARE-04",
+      "title": "No stall (endurance)",
+      "feature": "A",
+      "direction": "both",
+      "priority": "P1",
+      "depth": "long",
+      "status": "covered",
+      "runnable": "SOAK-W2N-STALL",
+      "legacy": [
+        "SOAK-W2N-STALL",
+        "SOAK-N2W-STALL"
+      ]
+    },
+    {
+      "id": "SHARE-05",
+      "title": "Multi-window",
+      "feature": "A",
+      "direction": "nat-web",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "SHARE-MULTIWIN",
+      "legacy": []
+    },
+    {
+      "id": "SHARE-06",
+      "title": "Multi-display",
+      "feature": "A",
+      "direction": "nat-web",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "SHARE-MULTIDISP",
+      "legacy": []
+    },
+    {
+      "id": "SHARE-07",
+      "title": "Clean lifecycle",
+      "feature": "A",
+      "direction": "nat-web",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "CHAOS-LIFECYCLE",
+      "legacy": [
+        "CHAOS-LIFECYCLE"
+      ]
+    },
+    {
+      "id": "SHARE-08",
+      "title": "Occluded window",
+      "feature": "A",
+      "direction": "nat-web",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "SHARE-N2W-Q",
+      "legacy": [
+        "SHARE-N2W-Q"
+      ]
+    },
+    {
+      "id": "SHARE-09",
+      "title": "Network recovery",
+      "feature": "A",
+      "direction": "web-nat",
+      "priority": "P1",
+      "depth": "short-long",
+      "status": "partial",
+      "runnable": "CHAOS-NET",
+      "legacy": [
+        "CHAOS-NET"
+      ]
+    },
+    {
+      "id": "SHARE-10",
+      "title": "Full desktop",
+      "feature": "A",
+      "direction": "nat-web",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "SHARE-DESKTOP",
+      "legacy": []
+    },
+    {
+      "id": "CAM-01",
+      "title": "Camera on",
+      "feature": "B",
+      "direction": "web-nat",
+      "priority": "P0",
+      "depth": "short",
+      "status": "covered",
+      "runnable": "CAM",
+      "legacy": [
+        "CAM"
+      ]
+    },
+    {
+      "id": "CAM-02",
+      "title": "Camera off tile",
+      "feature": "B",
+      "direction": "web-nat",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "CAM",
+      "legacy": [
+        "CAM"
+      ]
+    },
+    {
+      "id": "CAM-03",
+      "title": "Bitrate scaling",
+      "feature": "B",
+      "direction": "web-nat",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "CAM-BITRATE",
+      "legacy": []
+    },
+    {
+      "id": "CAM-04",
+      "title": "Camera stall",
+      "feature": "B",
+      "direction": "web-nat",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "CAM-STALL",
+      "legacy": []
+    },
+    {
+      "id": "CAM-05",
+      "title": "Camera seen (reverse)",
+      "feature": "B",
+      "direction": "nat-web",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "CAM-N2W",
+      "legacy": []
+    },
+    {
+      "id": "AUD-01",
+      "title": "Voice heard",
+      "feature": "C",
+      "direction": "web-nat",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "AUD",
+      "legacy": [
+        "AUD"
+      ]
+    },
+    {
+      "id": "AUD-02",
+      "title": "Mute toggle",
+      "feature": "C",
+      "direction": "nat-web",
+      "priority": "P1",
+      "depth": "short",
+      "status": "covered",
+      "runnable": "AUD",
+      "legacy": [
+        "AUD"
+      ]
+    },
+    {
+      "id": "AUD-03",
+      "title": "Audio device swap",
+      "feature": "C",
+      "direction": "nat-local",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "CHAOS-DEVICE",
+      "legacy": [
+        "CHAOS-DEVICE"
+      ]
+    },
+    {
+      "id": "AUD-04",
+      "title": "Voice heard (reverse)",
+      "feature": "C",
+      "direction": "nat-web",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "AUD-N2W",
+      "legacy": []
+    },
+    {
+      "id": "RC-01",
+      "title": "Click",
+      "feature": "D",
+      "direction": "web-nat",
+      "priority": "P2",
+      "depth": "short",
+      "status": "gap",
+      "legacy": [
+        "RC-P1080"
+      ]
+    },
+    {
+      "id": "RC-02",
+      "title": "Drag-select",
+      "feature": "D",
+      "direction": "web-nat",
+      "priority": "P2",
+      "depth": "short",
+      "status": "gap",
+      "legacy": [
+        "RC-P1080"
+      ]
+    },
+    {
+      "id": "RC-03",
+      "title": "Type",
+      "feature": "D",
+      "direction": "web-nat",
+      "priority": "P2",
+      "depth": "short",
+      "status": "gap",
+      "legacy": [
+        "RC-P1080"
+      ]
+    },
+    {
+      "id": "RC-04",
+      "title": "Shortcuts",
+      "feature": "D",
+      "direction": "web-nat",
+      "priority": "P2",
+      "depth": "short",
+      "status": "gap",
+      "legacy": [
+        "RC-P1080"
+      ]
+    },
+    {
+      "id": "RC-05",
+      "title": "Latency",
+      "feature": "D",
+      "direction": "web-nat",
+      "priority": "P2",
+      "depth": "short",
+      "status": "gap",
+      "legacy": [
+        "RC-P1080"
+      ]
+    },
+    {
+      "id": "RC-06",
+      "title": "Scaled tier",
+      "feature": "D",
+      "direction": "web-nat",
+      "priority": "P2",
+      "depth": "short",
+      "status": "gap",
+      "legacy": [
+        "RC-P1080"
+      ]
+    },
+    {
+      "id": "RC-07",
+      "title": "Control (reverse & nat-nat)",
+      "feature": "D",
+      "direction": "nat-nat",
+      "priority": "P2",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "RC-N2N",
+      "legacy": []
+    },
+    {
+      "id": "PTR-01",
+      "title": "Telepointer",
+      "feature": "E",
+      "direction": "web-nat",
+      "priority": "P0",
+      "depth": "short",
+      "status": "covered",
+      "runnable": "TELE",
+      "legacy": [
+        "TELE"
+      ]
+    },
+    {
+      "id": "PTR-02",
+      "title": "Draw stroke",
+      "feature": "E",
+      "direction": "both",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "DRAW-N",
+      "legacy": [
+        "DRAW-N"
+      ]
+    },
+    {
+      "id": "RES-01",
+      "title": "Bad network",
+      "feature": "F",
+      "direction": "web-nat",
+      "priority": "P1",
+      "depth": "short-long",
+      "status": "covered",
+      "runnable": "CHAOS-NET",
+      "legacy": [
+        "CHAOS-NET",
+        "CHAOS-NET-SOAK"
+      ]
+    },
+    {
+      "id": "RES-02",
+      "title": "Device swap",
+      "feature": "F",
+      "direction": "nat-local",
+      "priority": "P1",
+      "depth": "short",
+      "status": "covered",
+      "runnable": "CHAOS-DEVICE",
+      "legacy": [
+        "CHAOS-DEVICE"
+      ]
+    },
+    {
+      "id": "RES-03",
+      "title": "Display change",
+      "feature": "F",
+      "direction": "nat-local",
+      "priority": "P2",
+      "depth": "short",
+      "status": "covered",
+      "runnable": "CHAOS-DISPLAY-CHANGE",
+      "legacy": [
+        "CHAOS-DISPLAY-CHANGE"
+      ]
+    },
+    {
+      "id": "RES-04",
+      "title": "Display sleep",
+      "feature": "F",
+      "direction": "web-nat",
+      "priority": "P1",
+      "depth": "short",
+      "status": "gap",
+      "legacy": []
+    },
+    {
+      "id": "RES-05",
+      "title": "Peer leaves",
+      "feature": "F",
+      "direction": "web-nat",
+      "priority": "P1",
+      "depth": "short",
+      "status": "covered",
+      "runnable": "CHAOS-LIFECYCLE",
+      "legacy": [
+        "CHAOS-LIFECYCLE"
+      ]
+    },
+    {
+      "id": "RES-06",
+      "title": "Hidden app share survives",
+      "feature": "F",
+      "direction": "nat-web",
+      "priority": "P1",
+      "depth": "short",
+      "status": "gap",
+      "legacy": []
+    },
+    {
+      "id": "RES-07",
+      "title": "System sleep/wake",
+      "feature": "F",
+      "direction": "nat-web",
+      "priority": "P1",
+      "depth": "short",
+      "status": "gap",
+      "legacy": []
+    },
+    {
+      "id": "ROOM-01",
+      "title": "Join room",
+      "feature": "G",
+      "direction": "nat-web",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "ROOM-JOIN",
+      "legacy": []
+    },
+    {
+      "id": "ROOM-02",
+      "title": "Multi-peer",
+      "feature": "G",
+      "direction": "nat-web",
+      "priority": "P0",
+      "depth": "short",
+      "status": "covered",
+      "runnable": "MULTI-3",
+      "legacy": [
+        "MULTI-3"
+      ]
+    },
+    {
+      "id": "JOIN-03",
+      "title": "Join link",
+      "feature": "G",
+      "direction": "web-local",
+      "priority": "P0",
+      "depth": "short",
+      "status": "gap",
+      "legacy": []
+    },
+    {
+      "id": "JOIN-04",
+      "title": "Leave & rejoin",
+      "feature": "G",
+      "direction": "nat-web",
+      "priority": "P1",
+      "depth": "short",
+      "status": "gap",
+      "legacy": []
+    },
+    {
+      "id": "UI-01",
+      "title": "Main menu",
+      "feature": "H",
+      "direction": "nat-local",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "UI-MAIN",
+      "legacy": []
+    },
+    {
+      "id": "UI-02",
+      "title": "Gallery view",
+      "feature": "H",
+      "direction": "nat-local",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "UI-GALLERY",
+      "legacy": []
+    },
+    {
+      "id": "UI-03",
+      "title": "Menubar pill",
+      "feature": "H",
+      "direction": "nat-local",
+      "priority": "P1",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "UI-PILL",
+      "legacy": []
+    },
+    {
+      "id": "UI-04",
+      "title": "Dock icon",
+      "feature": "H",
+      "direction": "nat-local",
+      "priority": "P2",
+      "depth": "short",
+      "status": "partial",
+      "runnable": "UI-DOCK",
+      "legacy": []
+    },
+    {
+      "id": "INST-01",
+      "title": "DMG launches clean",
+      "feature": "I",
+      "direction": "nat-local",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "legacy": []
+    },
+    {
+      "id": "INST-02",
+      "title": "First-run permissions",
+      "feature": "I",
+      "direction": "nat-local",
+      "priority": "P0",
+      "depth": "short",
+      "status": "blind-spot",
+      "legacy": []
+    },
+    {
+      "id": "INST-03",
+      "title": "Auto-update from previous",
+      "feature": "I",
+      "direction": "nat-local",
+      "priority": "P0",
+      "depth": "short",
+      "status": "gap",
+      "legacy": []
+    },
+    {
+      "id": "INST-04",
+      "title": "Web app loads",
+      "feature": "I",
+      "direction": "web-local",
+      "priority": "P0",
+      "depth": "short",
+      "status": "partial",
+      "legacy": []
+    }
+  ],
+  "rules": {
+    "reliability": {
+      "lossy": [
+        "pointer.move.buttons==0",
+        "wheel"
+      ],
+      "reliable": [
+        "pointer.move.buttons!=0",
+        "pointer.down",
+        "pointer.up",
+        "pointer.click",
+        "key",
+        "text",
+        "request",
+        "release",
+        "status",
+        "result"
+      ]
+    }
+  },
+  "remoteControlBinaryFrames": [
+    {
+      "name": "pointer-move",
+      "hex": "500104012a0000002a0000000080004000000000000000b54dd086",
+      "length": 27
+    },
+    {
+      "name": "wheel",
+      "hex": "500105002b0000002a000000008000400002f4ff780000b54dd086",
+      "length": 27
+    }
+  ],
+  "fnv1a32TestVectors": [
+    {
+      "input": "",
+      "hashHex": "811c9dc5"
+    },
+    {
+      "input": "a",
+      "hashHex": "e40c292c"
+    },
+    {
+      "input": "0123456789abcdef0123456789abcdef",
+      "hashHex": "86d04db5"
+    }
+  ],
+  "aiTracks": [
+    {
+      "windowId": 1,
+      "trackName": "petal-ai-window-1"
+    },
+    {
+      "windowId": 42,
+      "trackName": "petal-ai-window-42"
+    }
+  ],
+  "aiChatMessages": [
+    {
+      "name": "startRequest",
+      "reliable": true,
+      "authorizedSenders": "any-participant",
+      "message": {
+        "v": 1,
+        "type": "startRequest",
+        "windowId": 42,
+        "ownerIdentity": "web-1"
+      }
+    },
+    {
+      "name": "state",
+      "reliable": true,
+      "authorizedSenders": "window-owner-only",
+      "message": {
+        "v": 1,
+        "type": "state",
+        "windowId": 42,
+        "ownerIdentity": "web-1",
+        "active": true,
+        "startedBy": "web-2",
+        "secondsLeft": 240,
+        "activeSpeaker": "web-2"
+      }
+    },
+    {
+      "name": "stateDisabled",
+      "reliable": true,
+      "authorizedSenders": "window-owner-only",
+      "message": {
+        "v": 1,
+        "type": "state",
+        "windowId": 42,
+        "ownerIdentity": "web-1",
+        "active": false,
+        "error": "disabled"
+      }
+    },
+    {
+      "name": "pttStart",
+      "reliable": true,
+      "authorizedSenders": "self-only",
+      "message": {
+        "v": 1,
+        "type": "pttStart",
+        "windowId": 42,
+        "ownerIdentity": "web-1"
+      }
+    },
+    {
+      "name": "transcript",
+      "reliable": true,
+      "authorizedSenders": "window-owner-only",
+      "message": {
+        "v": 1,
+        "type": "transcript",
+        "windowId": 42,
+        "ownerIdentity": "web-1",
+        "role": "assistant",
+        "text": "The build failed on line 12.",
+        "final": true
+      }
+    },
+    {
+      "name": "sendText",
+      "reliable": true,
+      "authorizedSenders": "any-participant",
+      "message": {
+        "v": 1,
+        "type": "sendText",
+        "windowId": 42,
+        "ownerIdentity": "web-1",
+        "text": "what does this button do?"
+      }
+    }
+  ],
+  "aiChatEndReasons": [
+    "stopped",
+    "time-limit",
+    "disabled",
+    "not-shared",
+    "busy",
+    "rate-limited",
+    "hosted-unavailable",
+    "offline",
+    "mint-failed",
+    "model-unavailable",
+    "quota",
+    "error"
+  ]
+}

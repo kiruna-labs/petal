@@ -1,0 +1,117 @@
+/* Petal — global stylesheet.
+   Token system + self-hosted fonts, wired in from the root layout
+   (src/routes/+layout.svelte). Design tokens live in the SHARED package
+   (shared/ui/tokens.css, imported below via the `@petal/shared` alias — the
+   single source of truth for both this app and web-harness);
+   src/styles/fonts.css holds the Manrope @font-face rule. */
+
+@import '@petal/shared/ui/tokens.css';
+@import '@petal/shared/ui/meeting-controls.css';
+@import './fonts.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-synthesis: none;
+  overflow: hidden;
+  user-select: none;
+}
+
+#app,
+main {
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+.text-pretty {
+  text-wrap: pretty;
+}
+
+.focus-ring:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.hit-40 {
+  position: relative;
+}
+
+.hit-40::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 40px;
+  height: 40px;
+  transform: translate(-50%, -50%);
+}
+
+/* Soft focus-ring selection tint matching the shared interaction language. */
+::selection {
+  background: color-mix(in srgb, var(--focus-ring) 32%, transparent);
+  color: var(--text-primary);
+}
+
+/* Windows owns only the outer rectangular window shape through DWM. Keep
+   every in-app semantic surface on the shared radius scale; only the CSS
+   shell radius changes so it cannot double-round the native window. Pills
+   and circles remain fully round through the shared --radius-pill token. */
+html[data-platform='windows'] {
+  --radius-shell: 0px;
+}
+
+/* Windows-only scrollbars: thin dark thumbs that match the graphite UI.
+   Deliberately NOT styled for macOS — WKWebView ::-webkit-scrollbar rules
+   would turn the overlay scrollbars permanent and regress the macOS look. */
+html[data-platform='windows'] {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+html[data-platform='windows'] ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+html[data-platform='windows'] ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html[data-platform='windows'] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
+
+html[data-platform='windows'] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+html[data-platform='windows'] ::-webkit-scrollbar-corner {
+  background: transparent;
+}

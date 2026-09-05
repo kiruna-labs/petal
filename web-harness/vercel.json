@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npm install",
+  "buildCommand": "VITE_PETAL_BACKEND_URL=https://app.petal.live VITE_USERDISPATCH_PUBLIC_KEY=${VITE_USERDISPATCH_PUBLIC_KEY:-pk_2692a1152395a821c2e571ba38b92b3edca7d16329e485fa} npm run build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/*.ts": {
+      "maxDuration": 10
+    }
+  },
+  "rewrites": [
+    { "source": "/fidelity", "destination": "/fidelity.html" },
+    { "source": "/:label/:code", "destination": "/api/j?label=:label&code=:code" },
+    { "source": "/:code", "destination": "/api/j?code=:code" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

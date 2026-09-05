@@ -1,0 +1,61 @@
+# CLT-only build recipe (no full Xcode license needed -- see root CLAUDE.md
+# "CLT-only build gotcha" for the full story). Two things baked in here so
+# nobody needs to remember env vars by hand:
+#
+# 1. `-L .../swift/macosx` -- link-time search path for CLT's static Swift
+#    compatibility libs (needed by Swift-bridged crates: screencapturekit,
+#    apple-cf, apple-metal). Without it: "library 'swiftCompatibility56' not
+#    found" at link time.
+# 2. `-Wl,-rpath,.../swift-5.5/macosx` -- embeds a proper LC_RPATH into the
+#    built binary so it finds `libswift_Concurrency.dylib` at RUN time via
+#    the binary's own rpath, with NO runtime env var required. This is the
+#    fix for a real, previously-misdiagnosed bug: `DYLD_LIBRARY_PATH` works
+#    when you launch the raw binary directly from a shell that has it set,
+#    but macOS deliberately STRIPS all `DYLD_*` environment variables (a
+#    security measure against dylib injection) for any process launched
+#    through normal channels -- `open`, Finder double-click, Dock, even
+#    `launchctl setenv` has no effect on it. So a build that only relies on
+#    `DYLD_LIBRARY_PATH` crashes instantly ("Library not loaded:
+#    @rpath/libswift_Concurrency.dylib ... no LC_RPATH's found") the moment
+#    anyone launches it the normal way, and only "works" when hand-run from
+#    a shell with the env var set -- which is not how this app ships or how
+#    a user runs it. The rpath flag below removes the dependency on that env
+#    var entirely.
+#
+# ⚠️ DEV/CLT-ONLY — MUST NOT ship in a release binary (issue #99). These
+# paths point at Command Line Tools, which END USERS DO NOT HAVE INSTALLED, so
+# a release build that inherits this rpath fails to load
+# libswift_Concurrency.dylib on launch. On macOS 13+ (our floor) that dylib
+# ships IN the OS at /usr/lib/swift, so a full-Xcode CI build targeting 13.0
+# needs NONE of this. The release CI (#102) overrides these by setting the
+# `RUSTFLAGS` env var (which takes precedence over `target.*.rustflags` here)
+# and `MACOSX_DEPLOYMENT_TARGET=13.0`. Do NOT do a local `tauri build` for a
+# real release on this CLT-only machine — use CI.
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-L", "/Library/Developer/CommandLineTools/usr/lib/swift/macosx",
+    "-C", "link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx",
+]
+
+# Same CLT recipe for the x86_64 slice, so `--target x86_64-apple-darwin`
+# builds run under Rosetta 2 as a local Intel-code-path peer (#549, and
+# the project history §3.2 -- there is no second Mac).
+#
+# ⚠️ These builds ALSO need `MACOSX_DEPLOYMENT_TARGET=13.0` in the
+# environment. Rust's default deployment target for x86_64-apple-darwin
+# predates 10.14.4, which makes the linker back-deploy the Swift runtime as
+# `@rpath/libswiftCore.dylib` instead of `/usr/lib/swift/libswiftCore.dylib`.
+# The CLT rpath above ships only the concurrency shims, so such a binary
+# aborts at launch with "Library not loaded: @rpath/libswiftCore.dylib".
+# See docs/TESTING.md, "Rosetta x86_64 peer tier".
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-L", "/Library/Developer/CommandLineTools/usr/lib/swift/macosx",
+    "-C", "link-arg=-Wl,-rpath,/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx",
+]
+# LiveKit's prebuilt Windows WebRTC archive is compiled against the static
+# MSVC runtime (/MT). Rust and cxx_build default to the dynamic runtime (/MD),
+# which passes `cargo check` but fails the final link with LNK2038/LNK2005.
+# Keep every Rust/C++ object in the Windows build on the same runtime.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

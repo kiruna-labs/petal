@@ -1,0 +1,79 @@
+# SBOM freshness gate.
+#
+# Regenerates sbom/*.cdx.json from the committed lockfiles and fails if the
+# result differs from what is checked in -- so a Cargo.lock / package-lock.json
+# change cannot land without its SBOM. Also runs the cargo-deny license check
+# against deny.toml (advisories are reported, not gating -- see
+# sbom/LICENSE_AUDIT.md for the tracked list).
+#
+# Runs on ubuntu: cargo-cyclonedx only needs to resolve the lockfile, not
+# build, and --target all covers the macOS + Windows graphs regardless of
+# host. npm sbom is --package-lock-only so node_modules just needs to exist.
+name: SBOM
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.lock"
+      - "**/Cargo.toml"
+      - "**/package-lock.json"
+      - "**/package.json"
+      - "sbom/**"
+      - "deny.toml"
+      - "scripts/generate-sbom.sh"
+      - ".github/workflows/sbom.yml"
+
+concurrency:
+  group: sbom-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: Regenerate + diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Pin the generators: `npm sbom` output changes between npm majors and
+      # cargo-cyclonedx between minors, and this job diffs bytes. Keep these
+      # in step with what scripts/generate-sbom.sh documents as prereqs.
+      - name: Pin npm 11
+        run: npm install -g npm@11 && npm -v
+
+      - name: Install cargo-cyclonedx + cargo-deny
+        run: cargo install --locked cargo-cyclonedx@0.5.9 cargo-deny@0.20.2
+
+      - name: npm ci (all roots, no scripts)
+        run: |
+          for r in apps/desktop backend web-harness site; do
+            (cd "$r" && npm ci --ignore-scripts)
+          done
+
+      - name: Regenerate SBOMs
+        run: scripts/generate-sbom.sh
+
+      - name: SBOMs are in sync with lockfiles
+        run: |
+          if ! git diff --exit-code -- sbom/; then
+            echo "::error::sbom/ is stale. Run scripts/generate-sbom.sh and commit the result."
+            exit 1
+          fi
+
+      - name: cargo deny -- licenses (gating)
+        run: cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml check licenses
+
+      - name: cargo deny -- advisories (report only)
+        continue-on-error: true
+        run: cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml check advisories

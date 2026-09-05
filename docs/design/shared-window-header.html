@@ -1,0 +1,147 @@
+padding:56px 60px 64px;display:flex;flex-direction:column;gap:44px;align-items:flex-start">
+
+  <!-- header row -->
+  <div style="display:flex;align-items:center;gap:12px">
+    <span style="font:600 10.5px 'JetBrains Mono',monospace;padding:4px 8px;background:#fff;color:#0d0e10;border-radius:5px">1a</span>
+    <span style="font:600 15px 'Albert Sans',sans-serif;color:rgba(255,255,255,.95)">Shared-window header bar — identity color · View · Control · Draw</span>
+  </div>
+
+  <!-- ============ IN-CONTEXT COMPOSITION ============ -->
+  <div style="position:relative;width:1160px;border-radius:18px;overflow:hidden;background:linear-gradient(160deg,#35707A,#1D4750 48%,#122E36);padding:60px 70px 66px">
+    <div style="position:absolute;top:-40%;left:50%;width:70%;height:80%;transform:translateX(-50%);background:radial-gradient(closest-side,rgba(52,199,89,.16),transparent);pointer-events:none"></div>
+
+    <!-- the shared window -->
+    <div style="position:relative;border-radius:12px;overflow:hidden;box-shadow:0 40px 90px -30px rgba(0,0,0,.75),0 0 0 1px rgba(0,0,0,.3)">
+
+      <!-- TAKT SHARED-WINDOW HEADER BAR -->
+      <div style="height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 14px 0 16px;background:#E8B84B;color:#271B04;border-bottom:1px solid rgba(39,27,4,.22);box-shadow:inset 0 1px 0 rgba(39,27,4,.18)">
+
+        <!-- LEFT cluster -->
+        <div style="display:flex;align-items:center;gap:14px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="width:12px;height:12px;border-radius:99px;background:#FF5F57;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.25)"></span>
+            <span style="width:12px;height:12px;border-radius:99px;background:#FEBC2E;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.25)"></span>
+            <span style="width:12px;height:12px;border-radius:99px;background:#28C840;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.25)"></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px">
+            <span style="width:22px;height:22px;border-radius:6px;background:linear-gradient(160deg,#9E86FF,#6B4FD6);display:flex;align-items:center;justify-content:center;font:700 13px 'Albert Sans';color:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.3)">e</span>
+            <span style="font:600 14px 'Albert Sans';color:#271B04">eMacs<span style="color:rgba(39,27,4,.62);font-weight:500"> by Robert</span></span>
+          </div>
+        </div>
+
+        <!-- RIGHT cluster -->
+        <div style="display:flex;align-items:center;gap:8px">
+
+          <!-- Debug -->
+          <div onclick="{{ noop }}" style="display:flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:8px;background:transparent;border:1px solid transparent;color:rgba(39,27,4,.82);font:600 12.5px 'Albert Sans';cursor:pointer;user-select:none;transition:background .12s,color .12s,border-color .12s" style-hover="background:rgba(39,27,4,.12);border-color:rgba(39,27,4,.18);color:#271B04" style-active="background:rgba(39,27,4,.18);box-shadow:inset 0 1px 2px rgba(0,0,0,.35);transform:translateY(.5px)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"></path><path d="M14.12 3.88 16 2"></path><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"></path><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6Z"></path><path d="M12 20v-9"></path><path d="M6.53 9C4.6 8.8 3 7.1 3 5"></path><path d="M6 13H2"></path><path d="M3 21c0-2.1 1.7-3.9 3.8-4"></path><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"></path><path d="M22 13h-4"></path><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"></path></svg>
+            Debug
+          </div>
+
+          <!-- Open URL -->
+          <div onclick="{{ noop }}" style="display:flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:8px;background:transparent;border:1px solid transparent;color:rgba(39,27,4,.82);font:600 12.5px 'Albert Sans';cursor:pointer;user-select:none;transition:background .12s,color .12s,border-color .12s" style-hover="background:rgba(39,27,4,.12);border-color:rgba(39,27,4,.18);color:#271B04" style-active="background:rgba(39,27,4,.18);box-shadow:inset 0 1px 2px rgba(0,0,0,.35);transform:translateY(.5px)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"></path><path d="M7 17 17 7"></path></svg>
+            Open URL
+          </div>
+
+          <!-- 3-way toggle -->
+          <div style="position:relative;display:flex;height:30px;padding:3px;border-radius:9px;background:rgba(39,27,4,.08);border:1px solid rgba(39,27,4,.14);margin-left:2px">
+            <div style="position:absolute;top:3px;left:3px;width:86px;height:24px;border-radius:6px;background:rgba(39,27,4,.16);border:1px solid rgba(39,27,4,.18);box-shadow:0 1px 2px rgba(0,0,0,.35),inset 0 1px 0 rgba(39,27,4,.18);transition:transform .24s cubic-bezier(.4,0,.2,1);transform:{{ toggleX }}"></div>
+            <div onclick="{{ setView }}" style="position:relative;z-index:1;width:86px;height:24px;display:flex;align-items:center;justify-content:center;gap:6px;font:600 12px 'Albert Sans';cursor:pointer;user-select:none;transition:color .16s;color:{{ viewC }}">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+              View
+            </div>
+            <div onclick="{{ setControl }}" style="position:relative;z-index:1;width:86px;height:24px;display:flex;align-items:center;justify-content:center;gap:6px;font:600 12px 'Albert Sans';cursor:pointer;user-select:none;transition:color .16s;color:{{ controlC }}">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51L3 3Z"></path><path d="m13 13 6 6"></path></svg>
+              Control
+            </div>
+            <div onclick="{{ setDraw }}" style="position:relative;z-index:1;width:86px;height:24px;display:flex;align-items:center;justify-content:center;gap:6px;font:600 12px 'Albert Sans';cursor:pointer;user-select:none;transition:color .16s;color:{{ drawC }}">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>
+              Draw
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== the app's own window, beneath the Takt bar ===== -->
+      <!-- native menu bar (Emacs) -->
+      <div style="height:26px;display:flex;align-items:center;gap:18px;padding:0 14px;background:#3a3a3c;border-bottom:1px solid #2a2a2c;font:400 12px 'Albert Sans';color:rgba(255,255,255,.82)">
+        <span>File</span><span>Edit</span><span>Options</span><span>Buffers</span><span>Tools</span><span>Lisp</span><span>Help</span>
+      </div>
+      <!-- editor buffer -->
+      <div style="height:328px;background:#1b1c22;padding:16px 20px;font:400 13px/1.7 'JetBrains Mono',monospace;color:rgba(255,255,255,.7);position:relative">
+        <div><span style="color:#7FF0A3">(defun</span> <span style="color:#82AAFF">takt/share-window</span> (win mode)</div>
+        <div>  <span style="color:rgba(255,255,255,.4)">"Attach the Takt header to WIN and set interaction MODE."</span></div>
+        <div>  (<span style="color:#7FF0A3">interactive</span>)</div>
+        <div>  (<span style="color:#82AAFF">let</span> ((bar (<span style="color:#82AAFF">make-overlay-bar</span> win)))</div>
+        <div>    (<span style="color:#82AAFF">setf</span> (<span style="color:#C792EA">bar-mode</span> bar) mode)</div>
+        <div>    (<span style="color:#82AAFF">pcase</span> mode</div>
+        <div>      (<span style="color:#E8B84B">'view</span>    (takt/lock-input bar))</div>
+        <div>      (<span style="color:#E8B84B">'control</span> (takt/grant-pointer bar))</div>
+        <div>      (<span style="color:#E8B84B">'draw</span>    (takt/enable-annotate bar)))</div>
+        <div>    bar))</div>
+        <div style="margin-top:8px;color:rgba(255,255,255,.25)">;; sharing to 3 viewers — Robert (owner)</div>
+        <!-- remote telepointer -->
+        <div style="position:absolute;left:360px;top:150px;display:flex;align-items:flex-start;gap:4px;animation:ptrDrift 3.4s cubic-bezier(.4,0,.2,1) infinite">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="#34C759" stroke="#0d0e10" stroke-width="1.5" stroke-linejoin="round"><path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51L3 3Z"></path></svg>
+          <span style="font:600 10.5px 'Albert Sans';color:#0d0e10;background:#34C759;padding:2px 6px;border-radius:5px;margin-top:10px">Sam</span>
+        </div>
+        <!-- modeline -->
+        <div style="position:absolute;left:0;right:0;bottom:0;height:24px;display:flex;align-items:center;gap:12px;padding:0 14px;background:#34C759;color:#062B12;font:600 11px 'JetBrains Mono'">
+          <span>-:**-</span><span>share.el</span><span style="opacity:.7">Top</span><span style="opacity:.7">L4</span><span style="margin-left:auto;opacity:.7">(Emacs-Lisp)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ STATES REFERENCE ============ -->
+  <div style="display:flex;flex-direction:column;gap:18px;width:100%">
+    <span style="font:600 11px 'JetBrains Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(255,255,255,.4)">Button states — normal · hover · pressed</span>
+    <div style="display:flex;gap:40px;flex-wrap:wrap;background:linear-gradient(180deg,#161618,#0C0C0E);border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:28px 32px">
+
+      <!-- Debug states -->
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <span style="font:500 11px 'JetBrains Mono';color:rgba(255,255,255,.35)">Debug / Open URL</span>
+        <div style="display:flex;align-items:center;gap:14px">
+          <div style="display:flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:8px;background:transparent;border:1px solid transparent;color:rgba(255,255,255,.82);font:600 12.5px 'Albert Sans'"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"></path><path d="M7 17 17 7"></path></svg>Open URL</div>
+          <div style="display:flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:8px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.96);font:600 12.5px 'Albert Sans'"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"></path><path d="M7 17 17 7"></path></svg>Open URL</div>
+          <div style="display:flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:8px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.96);font:600 12.5px 'Albert Sans';box-shadow:inset 0 1px 2px rgba(0,0,0,.35)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"></path><path d="M7 17 17 7"></path></svg>Open URL</div>
+        </div>
+        <div style="display:flex;gap:14px;font:500 10px 'JetBrains Mono';color:rgba(255,255,255,.3)"><span style="width:87px">normal</span><span style="width:87px">hover</span><span style="width:87px">pressed</span></div>
+      </div>
+
+      <!-- Toggle states -->
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <span style="font:500 11px 'JetBrains Mono';color:rgba(255,255,255,.35)">Toggle — active segment</span>
+        <div style="display:flex;align-items:center;gap:14px">
+          <div style="position:relative;display:flex;height:30px;padding:3px;border-radius:9px;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08)"><div style="position:absolute;top:3px;left:3px;width:86px;height:24px;border-radius:6px;background:rgba(255,255,255,.11);border:1px solid rgba(255,255,255,.1);box-shadow:0 1px 2px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.07)"></div><div style="position:relative;z-index:1;width:86px;display:flex;align-items:center;justify-content:center;gap:6px;font:600 12px 'Albert Sans';color:rgba(255,255,255,.98)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>View</div><div style="position:relative;z-index:1;width:86px;display:flex;align-items:center;justify-content:center;gap:6px;font:600 12px 'Albert Sans';color:rgba(255,255,255,.55)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 3 7.07 16.97 2.51-7.39 7.39-2.51L3 3Z"></path><path d="m13 13 6 6"></path></svg>Control</div><div style="position:relative;z-index:1;width:86px;display:flex;align-items:center;justify-content:center;gap:6px;font:600 12px 'Albert Sans';color:rgba(255,255,255,.55)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>Draw</div></div>
+        </div>
+        <div style="font:500 10px 'JetBrains Mono';color:rgba(255,255,255,.3)">click any segment on the live bar above to switch</div>
+      </div>
+    </div>
+  </div>
+
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script="">
+class Component extends DCLogic {
+  state = { mode: 'view' };
+  renderVals() {
+    const idx = { view: 0, control: 1, draw: 2 }[this.state.mode];
+    const c = (m) => this.state.mode === m ? '#271B04' : 'rgba(39,27,4,.58)';
+    return {
+      noop: () => {},
+      toggleX: `translateX(${idx * 86}px)`,
+      viewC: c('view'),
+      controlC: c('control'),
+      drawC: c('draw'),
+      setView: () => this.setState({ mode: 'view' }),
+      setControl: () => this.setState({ mode: 'control' }),
+      setDraw: () => this.setState({ mode: 'draw' }),
+    };
+  }
+}
+</script>
+
+
+</body></html>

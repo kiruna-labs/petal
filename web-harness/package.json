@@ -1,0 +1,33 @@
+{
+  "name": "web-harness",
+  "version": "0.9.7",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Petal browser client",
+  "repository": "https://github.com/kiruna-labs/petal",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && tsc -p tests && vite build",
+    "preview": "vite preview",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "verify:browser": "node ../scripts/verify-web-harness-browser.mjs"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@types/node": "^26.1.0",
+    "@vercel/node": "^3.2.0",
+    "dotenv": "^17.4.2",
+    "livekit-server-sdk": "^2.16.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "~6.0.2",
+    "vite": "^6.0.3"
+  },
+  "dependencies": {
+    "@sentry/browser": "^10.65.0",
+    "@userdispatch/sdk": "1.0.1",
+    "livekit-client": "^2.20.0"
+  }
+}

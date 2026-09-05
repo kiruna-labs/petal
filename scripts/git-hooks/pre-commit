@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Commit-identity guard. Installed via `core.hooksPath = scripts/git-hooks`
+# (scripts/ci-local.sh sets it); runs for every commit in every worktree of
+# this repo.
+#
+# Why: a checkout with no repo-level identity silently falls through to the
+# machine's GLOBAL git identity, which may belong to another person, company
+# or project. That is how a batch of commits here were once authored under
+# an unrelated organisation's address (2026-09-05). This hook refuses the
+# commit unless the identity was set deliberately for this repository --
+# repo-local config, or a global `includeIf` rule scoped to this repo -- and
+# refuses any address listed in the operator's private denylist.
+#
+# Bypass (only with a real reason): git commit --no-verify
+set -uo pipefail
+
+email="$(git config --get user.email || true)"
+origin="$(git config --show-origin --get user.email 2>/dev/null | cut -f1 | sed 's/^file://')"
+global_files="$(git config --global --list --show-origin 2>/dev/null | cut -f1 | sed 's/^file://' | sort -u)"
+
+fail() {
+  printf '\n\033[1;31mpre-commit BLOCKED: %s\033[0m\n' "$1" >&2
+  printf '%s\n' "$2" >&2
+  exit 1
+}
+
+[ -n "$email" ] || fail "no user.email configured for this repository." \
+  "Set it for THIS repo:  git config user.email you@example.com   (and user.name)."
+
+if [ -n "$origin" ] && printf '%s\n' "$global_files" | grep -qxF "$origin"; then
+  fail "user.email '$email' comes from your GLOBAL git config ($origin), not from this repository." \
+    "A global identity may belong to another project or organisation. Set a repo-scoped one instead:
+  git config user.email you@example.com && git config user.name 'Your Name'
+or add a global includeIf rule for this repo (git-config(1) \"includeIf\")."
+fi
+
+denylist="${PETAL_FORBIDDEN_AUTHOR_EMAILS:-$HOME/.config/petal/forbidden-author-emails}"
+if [ -f "$denylist" ]; then
+  for who in "$email" "$(git config --get user.name || true)"; do :; done
+  if grep -qixF -- "$email" "$denylist"; then
+    fail "user.email '$email' is on this machine's forbidden-author list ($denylist)." \
+      "This address must never author a commit in this repository. Set the repo identity:
+  git config user.email you@example.com"
+  fi
+fi
+exit 0

@@ -1,0 +1,76 @@
+# cargo-deny configuration for the desktop crate (apps/desktop/src-tauri).
+#
+# Run from the repo root:
+#   cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml check licenses
+#   cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml check advisories
+#
+# Results are recorded in sbom/LICENSE_AUDIT.md. Adding a crate whose license
+# is not in the allowlist below fails the check -- add it here with a note
+# (and to THIRD_PARTY_NOTICES.md) rather than loosening the rule.
+
+[graph]
+# Audit every platform we ship, not just the host.
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
+all-features = false
+
+[licenses]
+# Licenses compatible with redistributing Petal under Apache-2.0.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "BSL-1.0",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Unlicense",
+  "0BSD",
+  "OpenSSL",
+  # MPL-2.0 is file-level copyleft: unmodified use + source availability
+  # (crates.io) is sufficient. See THIRD_PARTY_NOTICES.md.
+  "MPL-2.0",
+  # Bitstream Vera / fonts shipped by some GUI crates.
+  "OFL-1.1",
+]
+confidence-threshold = 0.8
+
+# Crates whose manifest declares no SPDX `license` but ship license files.
+[[licenses.clarify]]
+name = "tauri-nspanel"
+expression = "MIT OR Apache-2.0"
+license-files = [
+  { path = "LICENSE_MIT", hash = 0 },
+  { path = "LICENSE_APACHE-2.0", hash = 0 },
+]
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0 }]
+
+[licenses.private]
+ignore = true
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-git = []

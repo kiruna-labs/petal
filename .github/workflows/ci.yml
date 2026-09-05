@@ -1,0 +1,162 @@
+# Continuous integration for Petal (issue #102).
+#
+# Two jobs, both on a FULL-Xcode macOS runner:
+#   - frontend: svelte-check + the static build (the same gates used locally).
+#   - rust:     cargo build + cargo test --lib of the real desktop crate.
+#
+# The rust job deliberately sets RUSTFLAGS="" so cargo IGNORES the DEV-ONLY
+# Command Line Tools Swift rpath baked into apps/desktop/src-tauri/.cargo/
+# config.toml (env RUSTFLAGS takes precedence over config target.*.rustflags).
+# Building clean this way on a stock macos runner is the real proof for #99:
+# with full Xcode + MACOSX_DEPLOYMENT_TARGET=13.0, the Swift concurrency runtime
+# resolves from the OS (/usr/lib/swift on macOS 12+), so no CLT path is needed.
+# It also validates the vendored screencapturekit patch under full Xcode, not
+# just the CLT-only dev machine.
+name: CI
+
+# COST NOTE (2026-07-03): CI is intentionally **manual-only** (`workflow_dispatch`)
+# for the time being. macOS runners bill at 10x and every push was triggering a
+# full ~4min build, so the primary gate is now LOCAL: run `scripts/ci-local.sh`
+# before pushing (it runs the exact same checks this workflow does). Re-enable the
+# `push`/`pull_request` triggers below when the cost constraint lifts. When this
+# workflow IS run it must still be green — hence the macos-26 runners: apple-metal
+# 0.8.8 (a transitive dep of our vendored screencapturekit) has a Swift bridge
+# using MTLSamplerDescriptor.reductionMode / MTLSamplerReductionMode / lodBias,
+# which only resolve against the macOS 26 SDK. macos-15's SDK lacks them and the
+# build fails ("cannot find 'MTLSamplerReductionMode' in scope"). macos-26 matches
+# the local Xcode 26.6 that builds this cleanly.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (check + test + build)
+    runs-on: macos-26
+    # #724: no job here had a backstop -- a hang (rust-gate's macOS runner
+    # stalled ~36min on a single test with no other signal) would otherwise
+    # idle toward GitHub's 6h default instead of failing loudly.
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Remote-control Swift sentinel preflight (#51)
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: npm run autotest:remote-control-loopback:check
+      - run: npm run build
+
+  rust:
+    name: Rust (build + test, full Xcode, no CLT rpath)
+    runs-on: macos-26
+    # #724: same macOS Rust-job backstop as rust-gate.yml -- see that file's
+    # `rust` job comment for the measured-duration basis.
+    timeout-minutes: 30
+    env:
+      # See file header — this is the #99 proof: no Command Line Tools rpath.
+      RUSTFLAGS: ""
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      # tauri's build context expects the frontendDist ("../build") to exist.
+      - name: Build frontend
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: cargo build
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --locked
+
+      # `cargo build` above does NOT cover examples/ -- that needs --examples.
+      # Keep this in lockstep with scripts/ci-local.sh's and rust-gate.yml's
+      # examples build; divergence between them is how compositor_probe
+      # stayed broken for weeks with every gate green (#594, #635).
+      - name: cargo build (examples)
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --examples --locked
+
+      - name: cargo test (lib)
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --lib --locked
+
+      # Sanity: the built binary must NOT carry a Command Line Tools rpath
+      # (that is exactly the #99 bug). Fail CI loudly if one sneaks back in.
+      - name: Assert no CLT rpath in the binary (#99)
+        working-directory: apps/desktop/src-tauri
+        run: |
+          BIN=target/debug/desktop
+          if otool -l "$BIN" | grep -q "CommandLineTools"; then
+            echo "::error::Built binary carries a CommandLineTools rpath — it will not launch on user Macs (issue #99)."
+            otool -l "$BIN" | grep -A2 LC_RPATH
+            exit 1
+          fi
+          echo "OK: no CommandLineTools rpath in $BIN"
+
+  # #130: the gate must actually RUN the backend + web-harness tests (they were
+  # never in CI before). These are pure JS/TS, so they run on cheap ubuntu (1x
+  # billing), not the 10x macOS runners. Mirrored in scripts/ci-local.sh.
+  backend:
+    name: Backend (typecheck + tests)
+    runs-on: ubuntu-latest
+    # #724: unbounded-hang backstop, see the `frontend` job's comment above.
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  web-harness:
+    name: Web-harness (build + tests)
+    runs-on: ubuntu-latest
+    # #724: unbounded-hang backstop, see the `frontend` job's comment above.
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web-harness
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web-harness/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Remote-control loopback preflight (#51)
+        run: node ../apps/desktop/scripts/remote-control-local-loopback.mjs --check-only --skip-swift-typecheck

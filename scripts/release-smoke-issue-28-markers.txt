@@ -1,0 +1,22 @@
+# Optional broader marker set for GitHub issue #28 live-validation runs.
+# Pass with:
+#   scripts/release-smoke.sh --app /Applications/Petal.app --assert-log \
+#     --markers-file scripts/release-smoke-issue-28-markers.txt
+#
+# Keep this file to stable, already-emitted log substrings. It is intentionally
+# additive to release-smoke.sh's default permission/share/remote-control markers.
+session: stop_share(window
+unpublish succeeded
+share_border: show border
+compositor feed: track subscribed for window
+compositor feed: window
+compositor: opened remote window
+compositor: closed remote window
+telepointer: received update
+resilience: room reconnecting
+resilience: room reconnected
+session: window
+quality ->
+remote-control: status emitted
+remote-control-latency: controller send_ts_ms=
+remote-control-latency: host enqueue_ts_ms=

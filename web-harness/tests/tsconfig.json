@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    /* Tests run under Node (node --test with native type stripping), but some
+       browser-facing modules still need DOM types for lightweight fakes. */
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"]
+  },
+  "include": ["."]
+}

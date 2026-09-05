@@ -1,0 +1,7 @@
+{
+  "name": "s12-pill-drag-preflight",
+  "commands": [
+    { "name": "accessibility", "cmd": "accessibility_status", "expect": { "ok": true } },
+    { "name": "state-before-drag", "cmd": "dump_state", "expect": { "ok": true } }
+  ]
+}

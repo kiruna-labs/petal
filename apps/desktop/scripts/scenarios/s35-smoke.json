@@ -1,0 +1,14 @@
+{
+  "name": "s35-smoke",
+  "commands": [
+    {
+      "name": "state",
+      "type": "pollUntil",
+      "cmd": "dump_state",
+      "timeoutMs": 2000,
+      "intervalMs": 100,
+      "expr": { "path": "ok", "equals": true }
+    },
+    { "name": "accessibility", "cmd": "accessibility_status", "expect": { "ok": true } }
+  ]
+}

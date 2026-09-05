@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Hardened runtime (required for notarized Developer ID distribution).
+         Adapted from a prior Tauri app's entitlements, plus the camera +
+         audio-input device entitlements Petal needs (that app didn't capture
+         mic/camera the way Petal does). Screen Recording needs NO entitlement
+         here — it is pure TCC (NSScreenCaptureUsageDescription in Info.plist). -->
+
+    <!-- We do not JIT; keep executable memory locked down. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+
+    <!-- Petal loads native/Swift + LiveKit/WebRTC dylibs we did not sign
+         ourselves (screencapturekit bridge, libwebrtc, Swift runtime). Without
+         this, the hardened runtime refuses to load them and the app aborts on
+         launch. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- WebRTC/LiveKit transport + the token/rooms backend. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Mic capture (SPEC §4.9) and camera self-view. Paired with the
+         NS*UsageDescription strings in Info.plist. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+
+    <!-- Apple Events, so a background `osascript` child can ask Chrome/Safari
+         for a shared window's URL (#915, Open URL button). Paired with
+         NSAppleEventsUsageDescription in Info.plist. Without this, the
+         hardened runtime denies the app's Apple Events silently (a fast
+         -1743, not a prompt), and the shipped 0.9.4 app never carried it. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,41 @@
+/* Self-hosted variable fonts, copied from the approved design bundle
+   (the design bundle -- see apps/desktop/src/styles/fonts.css for
+   the full writeup on the bundle's misleading `manrope-N.woff2` naming:
+   manrope-5 is the widest-coverage Manrope variable instance, manrope-3 is
+   actually Albert Sans variable, manrope-1 is actually JetBrains Mono
+   variable). No Google Fonts / runtime network dependency. */
+
+@font-face {
+  font-family: 'Manrope';
+  src: url('./assets/fonts/manrope-variable.woff2') format('woff2-variations'),
+       url('./assets/fonts/manrope-variable.woff2') format('woff2');
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Albert Sans';
+  src: url('./assets/fonts/albert-sans-variable.woff2') format('woff2-variations'),
+       url('./assets/fonts/albert-sans-variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./assets/fonts/jetbrains-mono-variable.woff2') format('woff2-variations'),
+       url('./assets/fonts/jetbrains-mono-variable.woff2') format('woff2');
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Fredoka';
+  src: url('./assets/fonts/fredoka-latin-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}

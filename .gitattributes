@@ -1,0 +1,2 @@
+* text=auto eol=lf
+apps/desktop/src-tauri/fixtures/window-tracking/*.golden.json -linguist-generated

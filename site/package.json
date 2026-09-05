@@ -1,0 +1,28 @@
+{
+  "name": "petal-docs-site",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Petal documentation site",
+  "repository": "https://github.com/kiruna-labs/petal",
+  "type": "module",
+  "scripts": {
+    "dev": "npm run sync:auto && astro dev",
+    "start": "npm run dev",
+    "prebuild": "npm run sync:auto",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "sync:auto": "node scripts/sync-auto-content.mjs",
+    "check:drift": "node scripts/sync-auto-content.mjs --check-drift",
+    "check:pii": "node scripts/scan-for-pii.mjs"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.41.3",
+    "astro": "^7.0.2",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "starlight-links-validator": "^0.25.2"
+  }
+}
