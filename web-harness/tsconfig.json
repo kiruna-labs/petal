@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "esnext",
+    "lib": ["ES2023", "DOM"],
+    "types": ["vite/client"],
+    "allowArbitraryExtensions": true,
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* @petal/shared -> repo-root shared/ package (design tokens, shared
+       components, shared logic) — one location consumed by BOTH this client
+       and the desktop app; never duplicate files into per-client copies.
+       Resolved through the `shared` symlink (-> ../shared), not `../shared`
+       directly -- see vite.config.ts's alias comment for why (#662). */
+    "paths": {
+      "@petal/shared/*": ["./shared/*"]
+    },
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src", "./shared"]
+}

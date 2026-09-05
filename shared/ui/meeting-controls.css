@@ -1,0 +1,226 @@
+/* Shared meeting-control language used by the desktop and browser clients.
+   Keep interaction states token-driven so the same controls feel identical
+   whether they live in the gallery, compact pill, or browser shell. */
+
+.meeting-split {
+  display: inline-flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  min-height: var(--meeting-split-height, var(--control-size));
+  /* The pill is ONE control at rest: the container carries the same
+     --fill-strong every single ControlButton has, and its segments stay
+     transparent until hovered (meetingControlsRendered.test.ts measures
+     both). #918 moved the fill onto the segments, which lit both halves. */
+  background: var(--fill-strong);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+/* Inside the pill, segments are transparent at rest (the pill carries the
+   fill) and light up individually on hover/active with the same fill scale
+   ControlButton uses. Geometry: square the inner corners so the container's
+   border-radius + overflow:hidden shapes the pill. */
+.meeting-split > .control-button,
+.meeting-split > .meeting-split-primary {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.meeting-split > .control-button:first-child,
+.meeting-split > .meeting-split-primary:first-child {
+  border-radius: var(--radius-pill) 0 0 var(--radius-pill);
+}
+
+.meeting-split > .control-button:not(:disabled),
+.meeting-split > .meeting-split-primary:not(:disabled) {
+  background: transparent;
+}
+
+.meeting-split > .control-button:hover:not(:disabled),
+.meeting-split > .control-button:focus-visible,
+.meeting-split > .meeting-split-primary:hover:not(:disabled),
+.meeting-split > .meeting-split-primary:focus-visible {
+  background: var(--fill-bright);
+  opacity: 1;
+}
+
+.meeting-split > .control-button:active:not(:disabled),
+.meeting-split > .meeting-split-primary:active:not(:disabled) {
+  background: var(--fill-bright);
+  opacity: 0.8;
+}
+
+.meeting-split-options {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 var(--meeting-split-options-width, 24px);
+  min-width: var(--meeting-split-options-width, 24px);
+  min-height: var(--meeting-split-height, var(--control-size));
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--hairline);
+  background: transparent; /* quiet at rest, like the primary segment */
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-feedback) var(--ease-standard),
+    color var(--motion-feedback) var(--ease-standard);
+}
+
+.meeting-split-options:hover,
+.meeting-split-options:focus-visible {
+  background: var(--fill-bright);
+  color: var(--text-strong);
+}
+
+.meeting-split-options[aria-expanded='true'] {
+  background: var(--fill-bright);
+  color: var(--text-strong);
+}
+
+.meeting-split-options:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.meeting-split-options:active {
+  background: var(--fill-bright);
+  opacity: 0.8;
+}
+
+.meeting-split-options svg {
+  width: 13px;
+  height: 13px;
+  transition: transform var(--motion-feedback) var(--ease-standard);
+}
+
+.meeting-split-options[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.meeting-control-label {
+  display: block;
+  max-width: 92px;
+  margin-top: 6px;
+  color: var(--text-soft);
+  font: 600 var(--text-micro) / 1.15 var(--font-ui);
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.meeting-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 188px;
+  max-width: min(280px, calc(100vw - 16px));
+  max-height: min(360px, calc(100vh - 16px));
+  box-sizing: border-box;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-popover);
+  background: var(--popover-bg);
+  box-shadow: var(--shadow-panel);
+  overscroll-behavior: contain;
+}
+
+.meeting-menu-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.meeting-menu-section + .meeting-menu-section {
+  border-top: 1px solid var(--hairline);
+}
+
+.meeting-menu-section-label {
+  padding: 5px 10px 4px;
+  color: var(--text-dim);
+  font: 700 10px / 1.1 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.meeting-menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--text-strong);
+  font: 600 var(--text-micro) / 1.2 var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-feedback) var(--ease-standard),
+    color var(--motion-feedback) var(--ease-standard);
+}
+
+.meeting-menu-row:hover,
+.meeting-menu-row:focus-visible,
+.meeting-menu-row[aria-selected='true'] {
+  background: var(--fill-strong);
+  color: var(--text-primary);
+}
+
+.meeting-menu-row:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.meeting-menu-row:disabled {
+  color: var(--text-faint);
+  opacity: var(--disabled-opacity);
+  cursor: not-allowed;
+}
+
+.meeting-menu-row-copy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.meeting-menu-row-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: var(--id-blue);
+}
+
+.meeting-menu-status {
+  margin: 4px 10px 6px;
+  color: var(--text-soft);
+  font: 500 var(--text-micro) / 1.3 var(--font-ui);
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.meeting-menu-status[role='alert'] {
+  color: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .meeting-split-options,
+  .meeting-split-options svg,
+  .meeting-menu-row {
+    transition: none;
+  }
+}

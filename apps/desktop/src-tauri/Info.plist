@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Hard floor: ScreenCaptureKit single-window capture requires macOS 12.3+;
+	     we target 13.0 per SPEC §1 (also set in tauri.conf.json bundle.macOS).
+	     Keep these in sync. -->
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Petal needs Screen Recording access so you can choose which of your windows to share with your team. We never see or share anything you don't explicitly select.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Petal needs microphone access so your teammates can hear you during a call. Your mic is off until you join and unmute.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Petal needs camera access for your video tile so teammates can see you. Your camera stays off until you turn it on in a meeting.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Petal reads the address of a shared browser window so viewers can open the same page.</string>
+</dict>
+</plist>

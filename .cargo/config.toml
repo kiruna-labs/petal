@@ -1,0 +1,7 @@
+# Load-bearing for the Windows MSVC link (#673): the prebuilt libwebrtc static
+# library is compiled with the static CRT (`/MT`), so the Rust MSVC target must
+# `+crt-static` (static CRT) too, or link fails with LNK2038
+# RuntimeLibrary mismatch (MT_StaticRelease vs MD_DynamicRelease) inside
+# libwebrtc_sys. CI (rust-gate.yml) treats this as required -- see its comment.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

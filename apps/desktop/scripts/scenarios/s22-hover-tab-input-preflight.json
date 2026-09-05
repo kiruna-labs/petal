@@ -1,0 +1,7 @@
+{
+  "name": "s22-hover-tab-input-preflight",
+  "commands": [
+    { "name": "accessibility", "cmd": "accessibility_status", "expect": { "ok": true } },
+    { "name": "state-before-hover", "cmd": "dump_state", "expect": { "ok": true } }
+  ]
+}

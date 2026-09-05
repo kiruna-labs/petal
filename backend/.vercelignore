@@ -1,0 +1,8 @@
+# Never upload local secrets into the Vercel deployment source.
+# backend/.env holds a real GEMINI_API_KEY and was being included in the
+# deployment file tree (not publicly served, but readable by anyone with
+# team access via the Vercel API). Runtime env comes from Vercel project
+# settings, so this file is not needed in the deployment.
+.env
+.env.local
+.env.*.local

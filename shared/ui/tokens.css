@@ -1,0 +1,179 @@
+/* Petal — design tokens, distilled from the approved components canvas.
+   Dark-first (v1 is dark-only). Values extracted from Petal-Build-Map.md §1.
+   Philosophy: graphite/monochrome by default. Color is rationed — Plum for the
+   live-room hero only; red ONLY for a muted mic + leaving.
+
+   SINGLE SOURCE OF TRUTH for BOTH clients — the desktop app
+   (apps/desktop/src/styles/app.css) and the web client (web-harness/src/
+   style.css) import this file directly via the `@petal/shared` Vite alias.
+   Edit it here only; there are no per-client copies. (web-harness
+   historically carried a verbatim copy that drifted — `--hairline` and
+   `--radius-tile` were stale relative to this file — which is why this
+   shared file exists.) */
+
+:root {
+  /* Dark-first design (v1 is dark-only): force the UA color scheme dark on
+     every platform so native surfaces (scrollbars, context menus, autofill,
+     form controls, selection) render dark instead of light-mode. */
+  color-scheme: dark;
+
+  /* ---- Surfaces (near-black ramp) ---- */
+  --bg-base:        #0a0a0b;   /* deepest / desktop backdrop */
+  --bg-base-2:      #0d0e10;
+  /* Comp-lifted surfaces: named so approved mock values stay pixel-exact
+     without silently shifting the base ramp. */
+  --gallery-frame:  #0b0c0e;
+  --menu-shell:     #0e0c10;
+  --controlbar-bg:  #0a0a0c;
+  --surface:        #16171a;   /* cards, bars, tiles */
+  --surface-2:      #1a1c20;
+  --surface-raised: #1f2024;   /* popovers, hover */
+  --hairline:       rgba(255,255,255,0.07);
+  --hairline-strong:rgba(255,255,255,0.10);
+
+  /* ---- White-alpha ladders (fills / text) ---- */
+  --fill-weak:   rgba(255,255,255,0.04);
+  --fill-base:   rgba(255,255,255,0.06);
+  --fill-strong: rgba(255,255,255,0.08);
+  --fill-bright: rgba(255,255,255,0.10);
+  --text-dim:    rgba(255,255,255,0.62);
+  --text-soft:   rgba(255,255,255,0.75);
+  --text-strong: rgba(255,255,255,0.88);
+
+  /* ---- Interaction states ---- */
+  --focus-ring:          var(--id-blue);
+  --focus-ring-width:    2px;
+  --focus-ring-offset:   2px;
+  --disabled-opacity:    0.38;
+
+  /* ---- Surfaces (named comp-lifted) ---- */
+  --popover-bg:         linear-gradient(180deg, var(--surface-raised), var(--surface)); /* menubar-popover convention, test-pinned */
+  --graphite-gradient:  linear-gradient(160deg, #202124, #17181b);                       /* ParticipantTile camera-off (comp) */
+  --hero-gradient:      linear-gradient(165deg, #16181b, #0b0c0e 80%);                   /* MainMenu quiet hero */
+  --hero-gradient-live: linear-gradient(165deg, #123021, #0b140e 78%);                   /* LiveHero live hero */
+  --hero-bloom-live:    radial-gradient(58% 80% at 82% 24%, rgba(52,199,89,0.30), transparent 68%);
+  --mix-base:           #0c0c0e;                                                          /* NamePill identity color-mix base */
+  --glass-chip:         rgba(8,10,12,0.68);                                                 /* gallery/participant translucent name chips */
+  --glass-name:         rgba(8,10,12,0.55);
+  --glass-panel:        rgba(20,22,24,0.92);                                                /* gallery tooltip panels */
+  --glass-panel-strong: rgba(20,22,24,0.94);                                                /* menubar-popover control tooltips */
+  --glass-filmstrip:    rgba(15,16,19,0.72);                                                /* Filmstrip rail */
+
+  /* ---- Live CTA (shared green, was duplicated in LiveHero + MainMenu) ---- */
+  --cta-live-bg:     #34c759;
+  --cta-live-ink:    #06280f;
+  --cta-live-shadow: 0 6px 22px -6px rgba(52,199,89,0.6);
+  --live-soft:       #5fe084;  /* LiveHero live dot + eyebrow */
+  --live-face-bg:    #274031;  /* LiveHero face */
+  --live-face-ring:  #0e1a12;
+  --live-face-ink:   #9fe6b4;
+
+  /* ---- Text ---- */
+  --text-primary:   #F5F6F7;   /* placeholder near-white — exact value not extracted from source design, confirm before ship */
+  --text-muted:     #8fa6b8;
+  --text-faint:     rgba(255,255,255,0.45);
+
+  /* ---- Accent: Plum (brand — main-menu live hero ONLY) ---- */
+  --plum:           #f06cc9;
+  --plum-light:     #f7b6dd;
+  --plum-lilac:     #d6b8f0;
+  --plum-bloom:     rgba(230,200,255,0.16); /* radial hero bloom */
+  --plum-tint-bg:   #241019;
+
+  /* ---- Live / success (green) ---- */
+  --live:           #34c759;
+  --live-bright:    #7ff0a3;
+  --live-bg:        #062b12;
+  --live-tint:      rgba(127,240,163,0.18);
+
+  /* ---- Danger (red/coral — RESERVED: destructive actions like leave) ---- */
+  --danger:         #ff6b5e;
+  --danger-tint-06: rgba(255,107,94,0.06);
+  --danger-tint-12: rgba(255,107,94,0.12);
+  --danger-tint-16: rgba(255,107,94,0.16);
+  --danger-tint-25: rgba(255,107,94,0.25);
+
+  /* ---- Warning (amber — "optional" / degraded) ---- */
+  --warning:        #e8b84b;
+  --warning-bg:     #3a2f10;
+
+  /* ---- Identity palette (telepointers + owner accents; NOT face tiles) ----
+     Red/coral is intentionally excluded (reserved for danger).
+     Keep these values in lockstep with src/lib/data/identityColor.ts. */
+  --id-plum:  #f06cc9;
+  --id-blue:  #6e8bff;
+  --id-green: #7ff0a3;
+  --id-amber: #e8b84b;
+  --id-lilac: #d6b8f0;
+  --id-slate: #8fa6b8;
+
+  /* ---- Typography ---- */
+  --font-display: 'Manrope', -apple-system, system-ui, sans-serif;      /* wordmark, hero */
+  --font-ui:      'Albert Sans', -apple-system, system-ui, sans-serif;  /* body, labels, controls */
+  --font-mono:    'JetBrains Mono', ui-monospace, monospace;            /* code, counters */
+
+  --text-hero:    28px;   /* approximate — main-menu hero */
+  --text-body:    14px;
+  --text-label:   13.5px; /* button labels, weight 700 */
+  --text-caption: 12.5px;
+  --text-micro:   12px;
+  --weight-btn:   700;
+
+  /* ---- Shape ---- */
+  --radius-pill:   999px;   /* pills + circular controls */
+  --radius-card:   16px;
+  --radius-tile:   16px;    /* gallery tiles — approved comp value */
+  --radius-chip:   8px;
+  --radius-shell:  24px;    /* app-shell window radius (+layout.svelte; comp gallery frame) */
+  --radius-menu:   20px;    /* MainMenu card (comp §7, 380x580 radius 20) + Onboarding shell */
+  --radius-popover: 14px;   /* popovers + row cards: MainMenu popover, MeetingChrome pill, PermissionRow rows, NetworkCockpit gauge, IdentitySetup card, Settings/DeviceSelect popovers */
+  --radius-control: 12px;   /* small control surfaces: Button, CloseButton, Filmstrip, OfflineState, NetworkCockpit rows, MainMenu inputs' buttons */
+  --radius-input:  10px;    /* text inputs/selects: DeviceSelect, IdentitySetup (comp §8c "rounded 10px"), FeedbackModal, Settings, MainMenu create-input */
+  --radius-badge:  5px;     /* Settings journey step markers */
+  --radius-check:  4px;     /* menubar-popover remote-icon checkmark */
+
+  /* ---- Elevation ---- */
+  --shadow-float: 0 18px 48px -22px rgba(0,0,0,0.78);
+  --shadow-panel: 0 30px 80px -28px rgba(0,0,0,0.86);
+  --shadow-pill:  0 10px 26px -10px rgba(0,0,0,0.70);
+  --shadow-inset-hairline: inset 0 0 0 1px var(--hairline);
+  --shadow-menu:    0 40px 90px -30px rgba(0,0,0,0.6);  /* MainMenu card (comp §7) */
+  --shadow-tooltip: 0 10px 28px rgba(0,0,0,0.28);       /* Gallery + menubar-popover control chips (4 sites, identical) */
+
+  /* ---- Sizing ---- */
+  --control-size:      44px;  /* the one circular control, comfortable density */
+  --control-size-compact: 32px;
+  --menubar-max-height: 24px; /* HARD cap for interactive menubar content (macOS) */
+
+  /* ---- Motion (functional, subtle) ----
+     Semantic roles keep CSS and JS transitions on the same timing register.
+     The fast/base names remain compatibility aliases for older consumers. */
+  --motion-feedback: 120ms;
+  --motion-exit:     120ms;
+  --motion-enter:    180ms;
+  --motion-layout:   220ms;
+  --motion-distance: 4px;
+  --motion-tooltip-delay: 550ms;
+  --motion-fast:     var(--motion-feedback);
+  --motion-base:     var(--motion-enter);
+  --share-border-sweep-duration: 420ms;
+  --ease-standard:   cubic-bezier(0.2, 0, 0, 1);
+  --ease-exit:       cubic-bezier(0.4, 0, 1, 1);
+  --spring:          cubic-bezier(0.34, 1.56, 0.64, 1); /* direct-manipulation only */
+  --press-scale:     0.96;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-feedback: 0ms;
+    --motion-exit: 0ms;
+    --motion-enter: 0ms;
+    --motion-layout: 0ms;
+    --motion-distance: 0px;
+    --motion-tooltip-delay: 0ms;
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+    --share-border-sweep-duration: 0ms;
+    --press-scale: 1;
+  }
+}

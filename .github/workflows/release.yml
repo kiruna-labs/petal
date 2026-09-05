@@ -1,0 +1,778 @@
+# Release for Petal (issue #102 + #103 + #104).
+#
+# Builds a UNIVERSAL (aarch64 + x86_64) macOS bundle and an x86-64 Windows
+# NSIS installer, signs/notarizes the macOS bundle, signs both updater payloads
+# with the Tauri minisign key, and PUBLISHES everything to Vercel Blob (private
+# distribution — no public GitHub releases repo, per the production plan). The
+# client's auto-updater (`plugins.updater.endpoints` -> our Vercel
+# `/api/updater`) then serves the combined `latest.json`; `/api/download` and
+# its `?platform=macos|windows` variants redirect to the matching installer.
+# Windows Authenticode signing is intentionally not configured yet.
+#
+# Trigger: `workflow_dispatch` (manual, with a tag input) OR a pushed `v*` tag
+# (issue #671 item 5 -- re-added; see COST NOTE below for the history of why
+# it was removed and why it's back).
+#
+# COST NOTE (2026-07-03, re-add 2026-08-06): releases were built + published
+# LOCALLY for a while (full Xcode 26.6 + the maintainer's notary profile +
+# scripts/publish-blob.mjs), so the auto tag-push trigger was removed then — a
+# stray `git push --tags` must not spend a 10x macOS runner by accident. #671
+# re-adds it, guarded to `v*`, now that any of several developers cutting a
+# release is the point: `concurrency` below stops two simultaneous tag-pushes
+# from interleaving their Blob `put()` calls, and `workflow_dispatch` stays
+# available alongside it for a manual/throwaway run.
+#
+# RUNNER: macos-26 is REQUIRED, not incidental. `apple-metal` 0.8.8 (a hard,
+# transitive dep of our vendored `screencapturekit`) has a Swift bridge that uses
+# MTLSamplerDescriptor.reductionMode / MTLSamplerReductionMode / lodBias, which
+# only resolve against the macOS 26 SDK. macos-15's SDK lacks them and the Swift
+# build fails ("cannot find 'MTLSamplerReductionMode' in scope"). macos-26 ships
+# the same SDK as the local Xcode 26.6 that builds this cleanly. (Robustness
+# follow-up if a cheaper runner is ever wanted: pin apple-metal below 0.8.8 in
+# vendor/screencapturekit/Cargo.toml — we don't use Metal ourselves.)
+#
+# PIPELINE (#916): four jobs. `windows-release` and `deploy-web` run in
+# parallel; `release` (macOS) waits for both.
+#   deploy-web       stages backend/ + web-harness/ on Vercel as PRODUCTION
+#                    deployments WITHOUT assigning the domains
+#                    (`--prod --skip-domain`), verifies them through the
+#                    deployment-protection bypass header, exports both URLs.
+#   release          builds/signs/notarizes, then -- publish runs only --
+#                    `vercel promote`s the two staged deployments so
+#                    app.petal.live / meet.petal.live serve this commit,
+#                    re-verifies the real domains, and only then publishes to
+#                    Blob. publish-blob.mjs's deploy-freshness gate therefore
+#                    passes by construction; a failed native build leaves
+#                    production untouched.
+#
+# DRY RUN: dispatch with `publish: false` to exercise every secret (cert
+# import, notarize + staple, minisign, Windows build, Vercel staging) without
+# promoting the deployments or touching latest.json. The signed artifacts are
+# uploaded to the run instead. Tag pushes always publish.
+#
+# Required repo secrets:
+#   VERCEL_TOKEN                 team-scoped token for the kiruna-labs Vercel team
+#   VERCEL_AUTOMATION_BYPASS_SECRET  the Protection-Bypass-for-Automation secret
+#                                (identical value provisioned on BOTH projects)
+#   APPLE_CERTIFICATE            base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD   password for that .p12
+#   APPLE_SIGNING_IDENTITY       "Developer ID Application: Kiruna Labs, Inc. (X83RP84J8Z)"
+#   APPLE_TEAM_ID                X83RP84J8Z
+#
+#   Notarization auth -- supply EITHER set:
+#     (preferred) App Store Connect API key, file-based, no keychain involved:
+#       APPLE_API_ISSUER         issuer UUID from App Store Connect > Keys
+#       APPLE_API_KEY            the Key ID (e.g. ABCD123456)
+#       APPLE_API_KEY_P8_BASE64  base64 of AuthKey_<KEYID>.p8
+#     (fallback) Apple ID + app-specific password:
+#       APPLE_ID                 Apple ID email
+#       APPLE_PASSWORD           app-specific password
+#   TAURI_SIGNING_PRIVATE_KEY    contents of ~/.tauri/petal-updater.key (minisign)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   its password ("" if the key has none)
+#   BLOB_READ_WRITE_TOKEN        Vercel Blob store RW token (same store the backend reads)
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label: macos-26 (GitHub-hosted, default) or self-hosted"
+        required: false
+        default: macos-26
+        type: choice
+        options: [macos-26, self-hosted]
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+      publish:
+        description: "Publish: promote the staged Vercel deployments and write latest.json. Untick for a dry run that only builds, signs, notarizes and stages."
+        required: false
+        default: true
+        type: boolean
+  push:
+    tags:
+      - 'v*'
+
+# Prevent two simultaneous release runs from interleaving their Vercel Blob
+# put() calls -- without this, `latest.json` can end up published alongside a
+# tarball whose bytes came from a DIFFERENT run, breaking the minisign
+# signature pairing and bricking auto-update for everyone (#671 item 3). Do
+# not cancel an in-flight release just because another one started; queue
+# instead, since a cancelled-mid-publish run can leave Blob in a half-updated
+# state (e.g. latest.json written, tarball not yet).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# contents: write so this workflow can create a GitHub Release object, not
+# just publish to Vercel Blob (#671 item 8). Was `read`.
+permissions:
+  contents: write
+
+jobs:
+  # Ask Apple whether the notarization credentials work BEFORE spending a
+  # 25-minute universal build on them (#916 dry run 4: 401 at notarytool
+  # after everything else had passed). ~1 min on the macOS runner; both
+  # build jobs wait on it. scripts/ci/notary-preflight.sh tries the API key,
+  # then the Apple ID pair, and fails with a precise ::error:: otherwise.
+  notary-preflight:
+    name: Verify notarization credentials with Apple
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'self-hosted') && fromJSON('["self-hosted","macOS"]') || 'macos-26' }}
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.notary.outputs.mode }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          sparse-checkout: scripts/ci
+      - name: Verify notarization credentials
+        id: notary
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash scripts/ci/notary-preflight.sh
+
+  # Windows is built first so a tagged release cannot publish macOS alone.
+  # This lane intentionally leaves Authenticode disabled for now; the Tauri
+  # updater signature below is still mandatory and is separate from the
+  # browser/SmartScreen trust provided by Authenticode.
+  windows-release:
+    needs: notary-preflight
+    name: Build Windows x86-64 release (no Authenticode)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      PETAL_BACKEND_URL: https://app.petal.live
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve version from tag
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.tag }}"
+          } else {
+            $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tag must be vMAJOR.MINOR.PATCH, got '$tag'"
+          }
+          "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "VERSION=$($tag.Substring(1))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Verify version lockstep
+        run: node scripts/version-lockstep.mjs ${{ steps.version.outputs.VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build frontend for Tauri context
+        working-directory: apps/desktop
+        run: npm run build
+
+      # The release overlay enables the production updater endpoint and
+      # createUpdaterArtifacts. The NSIS executable is both the human download
+      # and the Windows updater payload; the .sig is Tauri's mandatory update
+      # signature, not Authenticode signing.
+      - name: Build Windows NSIS + updater artifacts
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
+          PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+        run: >-
+          npm run tauri build --
+          --config src-tauri/tauri.release.conf.json
+          --target x86_64-pc-windows-msvc
+          --bundles nsis,updater
+
+      - name: Verify Windows release artifacts
+        id: verify-windows
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          $nsisDir = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          if (-not (Test-Path -LiteralPath $nsisDir)) {
+            throw "NSIS bundle directory does not exist: $nsisDir"
+          }
+
+          $installers = @(Get-ChildItem -LiteralPath $nsisDir -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS setup executable, found $($installers.Count): $($installers.Name -join ', ')"
+          }
+          $installer = $installers[0]
+          $expectedName = '^Petal_{0}_.+-setup\.exe$' -f [regex]::Escape($env:VERSION)
+          if ($installer.Name -notmatch $expectedName) {
+            throw "Unexpected versioned NSIS filename '$($installer.Name)'; expected Petal_${env:VERSION}_*-setup.exe"
+          }
+
+          $signatures = @(Get-ChildItem -LiteralPath $nsisDir -Filter '*.exe.sig' -File)
+          if ($signatures.Count -ne 1) {
+            throw "Expected exactly one NSIS updater signature, found $($signatures.Count): $($signatures.Name -join ', ')"
+          }
+          $signature = $signatures[0]
+          if ($signature.Name -ne "$($installer.Name).sig") {
+            throw "Updater signature '$($signature.Name)' does not match installer '$($installer.Name)'"
+          }
+          if ($signature.Length -le 0 -or [string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $signature.FullName -Raw))) {
+            throw "Updater signature is empty: $($signature.FullName)"
+          }
+
+          function Get-PeMachine([string]$path) {
+            $bytes = [IO.File]::ReadAllBytes($path)
+            if ($bytes.Length -lt 0x40 -or [Text.Encoding]::ASCII.GetString($bytes, 0, 2) -ne 'MZ') {
+              throw "Not a valid PE/DOS executable: $path"
+            }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length -or $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
+              throw "No valid PE signature: $path"
+            }
+            return [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          }
+
+          # The NSIS installer STUB is always a 32-bit PE (0x014c) regardless of
+          # the payload it carries -- checking the stub's machine type rejected
+          # every release from v0.8.5 to v0.9.4 (#916). The architecture that
+          # matters is the app binary the installer unpacks, which is the
+          # top-level .exe cargo produced for the x86_64-pc-windows-msvc target.
+          $stubMachine = Get-PeMachine $installer.FullName
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release'
+          $appBinaries = @(Get-ChildItem -LiteralPath $releaseDir -Filter '*.exe' -File)
+          if ($appBinaries.Count -lt 1) {
+            throw "No app binary found in $releaseDir to verify the payload architecture"
+          }
+          foreach ($bin in $appBinaries) {
+            $machine = Get-PeMachine $bin.FullName
+            if ($machine -ne 0x8664) {
+              throw "App binary $($bin.Name) PE machine type is 0x$('{0:x4}' -f $machine), expected x86-64 0x8664"
+            }
+            Write-Host "ok   $($bin.Name) is x86-64 (0x8664)"
+          }
+          $machine = 0x8664
+
+          $authenticode = Get-AuthenticodeSignature -FilePath $installer.FullName
+          if ($authenticode.Status.ToString() -ne 'NotSigned') {
+            throw "Expected the current release to be Authenticode-unsigned, got status '$($authenticode.Status)'"
+          }
+          Write-Host "::warning::Windows installer is intentionally Authenticode-unsigned; SmartScreen may warn users."
+
+          $stage = Join-Path $env:RUNNER_TEMP 'windows-release'
+          if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path $stage $installer.Name)
+          Copy-Item -LiteralPath $signature.FullName -Destination (Join-Path $stage $signature.Name)
+
+          @"
+          ### Windows release artifact
+          - Installer: `$($installer.Name)`
+          - App binary PE machine: `0x$('{0:x4}' -f $machine)` (NSIS stub itself: `0x$('{0:x4}' -f $stubMachine)`, always 32-bit)
+          - Authenticode: **NotSigned** (intentional for now; SmartScreen may warn)
+          - Tauri updater signature: present
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload Windows release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-${{ github.run_id }}
+          path: ${{ runner.temp }}/windows-release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Stage both web services for THIS commit as production deployments that
+  # are not yet reachable on the custom domains. Cheap (ubuntu, ~3 min) and
+  # parallel with Windows, so a bad Vercel token or a broken web build fails
+  # the run before the 10x macOS runner starts.
+  deploy-web:
+    needs: notary-preflight
+    name: Stage backend + web-harness on Vercel (no domain)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      backend-url: ${{ steps.backend.outputs.url }}
+      web-url: ${{ steps.web.outputs.url }}
+    env:
+      # Team `kiruna-labs`. Project ids are not secrets; the token is.
+      VERCEL_ORG_ID: team_HUx56nXbsbsz2jLQAtSu9AUa
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          # verify-deploy-freshness.sh needs origin/main + full ancestry.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Fail closed on the cheap runner. The Blob check is read-only
+      # (`list()`), proves BLOB_READ_WRITE_TOKEN before anything is built, and
+      # shows which manifest version the downgrade gate will compare against.
+      # A DRY RUN without the Vercel secrets still proves the Apple/Tauri/
+      # Windows legs: the web staging is skipped with a warning and the run
+      # summary says so. A publish run fails closed here instead.
+      - name: Preflight secrets
+        id: preflight
+        env:
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+          PUBLISH: ${{ github.event_name == 'push' || inputs.publish == true }}
+        run: |
+          set -euo pipefail
+          echo "skip-web=false" >> "$GITHUB_OUTPUT"
+          if [ -z "${VERCEL_TOKEN:-}" ] || [ -z "${VERCEL_AUTOMATION_BYPASS_SECRET:-}" ]; then
+            if [ "$PUBLISH" = "true" ]; then
+              echo "::error::VERCEL_TOKEN and VERCEL_AUTOMATION_BYPASS_SECRET are required to publish"
+              exit 1
+            fi
+            echo "::warning::VERCEL_TOKEN / VERCEL_AUTOMATION_BYPASS_SECRET missing -- dry run will NOT stage the web services"
+            echo "skip-web=true" >> "$GITHUB_OUTPUT"
+          fi
+          [ -n "${BLOB_READ_WRITE_TOKEN:-}" ] || { echo "::error::BLOB_READ_WRITE_TOKEN secret is missing"; exit 1; }
+          SCRATCH="$RUNNER_TEMP/blobcheck"
+          mkdir -p "$SCRATCH"
+          (cd "$SCRATCH" && npm init -y >/dev/null 2>&1 && npm i @vercel/blob@^2 >/dev/null 2>&1)
+          cat > "$SCRATCH/check.mjs" <<'EOF'
+          import { list } from '@vercel/blob';
+          const { blobs } = await list({ prefix: 'latest.json', token: process.env.BLOB_READ_WRITE_TOKEN });
+          const live = blobs.find((b) => b.pathname === 'latest.json');
+          if (!live) { console.log('blob token OK; no latest.json published yet'); process.exit(0); }
+          const manifest = await (await fetch(live.url)).json();
+          console.log(`blob token OK; live latest.json version=${manifest.version}`);
+          EOF
+          (cd "$SCRATCH" && node check.mjs)
+
+      - name: Install Vercel CLI
+        if: ${{ steps.preflight.outputs.skip-web != 'true' }}
+        run: npm i -g vercel@59
+
+      # `--prod --skip-domain`: a production-target deployment (production env
+      # vars, production build) that keeps its unique URL and does NOT take
+      # over app.petal.live until `vercel promote` in the release job.
+      # PETAL_DEPLOY_COMMIT is what api/version.ts reports and what
+      # verify-deploy-freshness.sh compares against origin/main.
+      - name: Stage backend
+        if: ${{ steps.preflight.outputs.skip-web != 'true' }}
+        id: backend
+        working-directory: backend
+        env:
+          VERCEL_PROJECT_ID: prj_oi8RLddPbTrKSalKvix1GEgdti1W
+        run: |
+          set -euo pipefail
+          COMMIT="$(git rev-parse "HEAD^{commit}")"
+          URL="$(vercel deploy --prod --skip-domain --yes --token "$VERCEL_TOKEN" -e "PETAL_DEPLOY_COMMIT=$COMMIT")"
+          echo "staged backend: $URL (commit $COMMIT)"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # scripts/deploy-web-harness.sh stages a self-contained copy (the
+      # `shared/` symlink dereferenced, #662), runs the Sentry-DSN fail-closed
+      # build gate, and passes -b PETAL_DEPLOY_COMMIT itself.
+      - name: Stage web-harness
+        if: ${{ steps.preflight.outputs.skip-web != 'true' }}
+        id: web
+        env:
+          VERCEL_PROJECT_ID: prj_OwXNV8ZFq9moT4jWcNVa1bxlz1lk
+          PETAL_DEPLOY_URL_FILE: ${{ runner.temp }}/web-harness-url.txt
+        run: |
+          set -euo pipefail
+          bash scripts/deploy-web-harness.sh --prod --skip-domain --yes --token "$VERCEL_TOKEN"
+          URL="$(tail -n1 "$PETAL_DEPLOY_URL_FILE" | tr -d '[:space:]')"
+          case "$URL" in https://*) ;; *) echo "::error::deploy-web-harness.sh did not yield a deployment URL (got '$URL')"; exit 1 ;; esac
+          echo "staged web-harness: $URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # Same three verifiers a human runs after a manual deploy, pointed at the
+      # staged URLs. PETAL_PREPUBLISH skips only the checks that compare
+      # against the not-yet-published manifest; the release job re-runs the
+      # full set against the real domains after promote + publish.
+      - name: Verify staged deployments
+        if: ${{ steps.preflight.outputs.skip-web != 'true' }}
+        env:
+          PETAL_BACKEND_URL: ${{ steps.backend.outputs.url }}
+          PETAL_WEB_HARNESS_URL: ${{ steps.web.outputs.url }}
+          PETAL_UPDATER_URL: ${{ steps.backend.outputs.url }}/api/updater
+          PETAL_DOWNLOAD_URL: ${{ steps.backend.outputs.url }}/api/download
+          PETAL_PREPUBLISH: "1"
+        run: |
+          set -uo pipefail
+          FAIL=0
+          bash scripts/verify-backend-live.sh || FAIL=1
+          bash scripts/verify-web-harness-live.sh || FAIL=1
+          bash scripts/verify-deploy-freshness.sh || FAIL=1
+          exit $FAIL
+
+      - name: Summary
+        env:
+          SKIPPED: ${{ steps.preflight.outputs.skip-web }}
+        run: |
+          {
+            if [ "$SKIPPED" = "true" ]; then
+              echo "### Web staging SKIPPED (dry run without VERCEL_TOKEN / VERCEL_AUTOMATION_BYPASS_SECRET)"
+            else
+              echo "### Staged Vercel deployments (not yet on the domains)"
+              echo "- backend: ${{ steps.backend.outputs.url }}"
+              echo "- web-harness: ${{ steps.web.outputs.url }}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    needs: [windows-release, deploy-web]
+    name: Build, sign, notarize, publish macOS + Windows
+    # Defaults to GitHub-hosted macos-26; `self-hosted` selects the project's
+    # own registered macOS runner
+    # (scripts/runner/register.sh) where the same secrets are injected by
+    # Actions and nothing sensitive lives on disk.
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'self-hosted') && fromJSON('["self-hosted","macOS"]') || 'macos-26' }}
+    # Measured 2026-09-03 on macos-26: ~20 min build + bundle. Anything past
+    # 90 min is a hang (a locked keychain prompt, a stuck notary wait), and
+    # the default 360 min ceiling just burns the 10x runner.
+    timeout-minutes: 90
+    env:
+      # Full Xcode + no CLT rpath (the #99 recipe, identical to ci.yml). env
+      # RUSTFLAGS="" overrides the DEV-ONLY CLT swift rpath in .cargo/config.toml.
+      RUSTFLAGS: ""
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      CARGO_INCREMENTAL: 0
+      # Bake the production backend URL into the shipped binary (token/rooms
+      # flow reads it via option_env! at build time — see transport/token.rs).
+      PETAL_BACKEND_URL: https://app.petal.live
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          # `git tag -l --format='%(contents)'` below needs the pushed tag's
+          # annotation locally (#671 item 7). fetch-depth: 0 already fetches
+          # every branch and tag; do NOT add `fetch-tags: true` on top -- on a
+          # tag-push run checkout then fetches both `<sha>:refs/tags/<tag>`
+          # and `refs/tags/*:refs/tags/*` and git aborts with "Cannot fetch
+          # both ... to refs/tags/<tag>" (actions/checkout#1467). That killed
+          # the v0.9.0 and v0.9.1 hosted releases before they built anything.
+          # Full history: publish-blob.mjs's deploy-freshness gate runs
+          # verify-deploy-freshness.sh, which needs the live deployments'
+          # build commits present locally (`git cat-file -e`) and ancestry
+          # against origin/main (`merge-base --is-ancestor`) -- both fail
+          # spuriously on a depth-1 shallow clone.
+          fetch-depth: 0
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
+          # Release notes source (#671 item 7): read here, where the real git
+          # checkout lives -- the publish step later runs from a scratch npm
+          # dir with no .git of its own, so it can't read this itself.
+          # Multiline-safe via GITHUB_OUTPUT's heredoc delimiter form; empty
+          # (no output) for a lightweight tag or one with no message, which
+          # scripts/publish-blob-lib.mjs's resolveReleaseNotes() treats as
+          # "fall back to the hardcoded format."
+          {
+            echo "TAG_ANNOTATION<<PETAL_TAG_ANNOTATION_EOF"
+            git tag -l --format='%(contents)' "$TAG"
+            echo "PETAL_TAG_ANNOTATION_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify version lockstep
+        run: node scripts/version-lockstep.mjs "$VERSION"
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Import Apple Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          # A fresh keychain auto-locks after 300s of inactivity. The universal
+          # build takes ~20 min, so by the time tauri reached codesign the
+          # keychain was locked and codesign sat on a GUI password prompt for
+          # 4h+ until the run was cancelled (#916, run 33806700411). -lut:
+          # no lock on sleep, lock only after 6h.
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+          security default-keychain -s build.keychain
+          rm certificate.p12
+          # Prove the identity is usable non-interactively NOW, not 20 min later.
+          security find-identity -v -p codesigning build.keychain | grep -q 'Developer ID Application' \
+            || { echo "::error::no Developer ID Application identity in build.keychain after import"; exit 1; }
+
+      # Same script as the notary-preflight job: re-decodes the .p8 on THIS
+      # runner (RUNNER_TEMP, never the workspace) and re-verifies with Apple,
+      # so a key revoked between the two jobs still fails before the build.
+      - name: Select notarization auth
+        id: notary
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash scripts/ci/notary-preflight.sh
+
+      # Universal build. tauri build notarizes + staples from whichever auth
+      # the step above selected, and emits the signed updater
+      # artifact (Petal.app.tar.gz + .sig) because bundle.createUpdaterArtifacts
+      # is on and TAURI_SIGNING_PRIVATE_KEY is present.
+      #
+      # `--config src-tauri/tauri.release.conf.json` is load-bearing: the
+      # committed tauri.conf.json ships NO updater endpoint/pubkey (open-source
+      # builds must not phone home). Only this overlay injects the official
+      # app.petal.live feed + minisign pubkey + createUpdaterArtifacts.
+      - name: Build (universal, signed, notarized)
+        working-directory: apps/desktop
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The bundler checks APPLE_ID/APPLE_PASSWORD BEFORE APPLE_API_*, and
+          # an env var set to "" still counts as set -- dry run 4 (#916) took
+          # the Apple-ID branch with empty credentials and got Apple's 401
+          # "Username or password is incorrect" while the API key was valid.
+          # So the secrets arrive under neutral names and the script below
+          # exports ONLY the chosen path's variables.
+          NOTARY_MODE: ${{ steps.notary.outputs.mode }}
+          NOTARY_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          NOTARY_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          NOTARY_API_KEY_PATH: ${{ steps.notary.outputs.key-path }}
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
+          PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+        run: |
+          set -euo pipefail
+          unset APPLE_ID APPLE_PASSWORD APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH
+          case "$NOTARY_MODE" in
+            apikey)
+              export APPLE_API_ISSUER="$NOTARY_API_ISSUER" APPLE_API_KEY="$NOTARY_API_KEY" APPLE_API_KEY_PATH="$NOTARY_API_KEY_PATH"
+              echo "notarizing with the App Store Connect API key (Apple ID vars unset)" ;;
+            appleid)
+              export APPLE_ID="$NOTARY_APPLE_ID" APPLE_PASSWORD="$NOTARY_APPLE_PASSWORD"
+              echo "notarizing with the Apple ID + app-specific password (API key vars unset)" ;;
+            *) echo "::error::unknown notarization mode '$NOTARY_MODE'"; exit 1 ;;
+          esac
+          unset NOTARY_API_ISSUER NOTARY_API_KEY NOTARY_API_KEY_PATH NOTARY_APPLE_ID NOTARY_APPLE_PASSWORD
+          ../../scripts/run-with-source-provenance.sh --require-clean bash -c \
+            'npm ci && CARGO_TARGET_DIR="$PETAL_PROVENANCE_OUTPUT_ROOT/apps/desktop/src-tauri/target" npx tauri build --config src-tauri/tauri.release.conf.json --target universal-apple-darwin --bundles app dmg updater'
+
+      # tauri notarizes + staples the .app but never touches the DMG it packs
+      # it into (the same gap docs/RELEASING.md's local recipe closes by hand):
+      # dry run 7 (#916) reached the smoke gate with a DMG that spctl called
+      # "Unnotarized Developer ID". Sign, submit, staple, verify -- in that
+      # order; signing after notarizing invalidates the ticket.
+      - name: Sign, notarize and staple the DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_MODE: ${{ steps.notary.outputs.mode }}
+          NOTARY_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          NOTARY_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          NOTARY_API_KEY_PATH: ${{ steps.notary.outputs.key-path }}
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          DMG: ${{ github.workspace }}/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/Petal_${{ steps.version.outputs.VERSION }}_universal.dmg
+        run: |
+          set -euo pipefail
+          test -f "$DMG" || { echo "::error::DMG not found at $DMG"; exit 1; }
+          codesign --force --sign "$APPLE_SIGNING_IDENTITY" "$DMG"
+          case "$NOTARY_MODE" in
+            apikey)  AUTH=(--key "$NOTARY_API_KEY_PATH" --key-id "$NOTARY_API_KEY" --issuer "$NOTARY_API_ISSUER") ;;
+            appleid) AUTH=(--apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID") ;;
+            *) echo "::error::unknown notarization mode '$NOTARY_MODE'"; exit 1 ;;
+          esac
+          xcrun notarytool submit "$DMG" "${AUTH[@]}" --wait --timeout 45m | tee "$RUNNER_TEMP/dmg-notarize.txt"
+          grep -q 'status: Accepted' "$RUNNER_TEMP/dmg-notarize.txt" || {
+            id="$(grep -oE 'id: [0-9a-f-]{36}' "$RUNNER_TEMP/dmg-notarize.txt" | head -1 | cut -d' ' -f2)"
+            [ -n "$id" ] && xcrun notarytool log "$id" "${AUTH[@]}" || true
+            echo "::error::DMG notarization was not Accepted"; exit 1; }
+          xcrun stapler staple "$DMG"
+          spctl -a -vvv -t open --context context:primary-signature "$DMG"
+
+      - name: Verify pre-publish release guards
+        run: bash scripts/verify-universal-app.sh apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Petal.app
+
+      - name: Release smoke gate (static artifacts)
+        env:
+          PETAL_RELEASE_APP: ${{ github.workspace }}/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/Petal.app
+          PETAL_RELEASE_DMG: ${{ github.workspace }}/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/Petal_${{ steps.version.outputs.VERSION }}_universal.dmg
+          PETAL_RELEASE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PETAL_RELEASE_BACKEND_URL: ${{ env.PETAL_BACKEND_URL }}
+        run: bash scripts/release-smoke.sh --static-only
+
+      - name: Download Windows release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release-${{ github.run_id }}
+          path: ${{ runner.temp }}/windows-release
+
+      # Dry run: run EVERY publish gate (universal/entitlements/clean tarball/
+      # Sentry + PostHog bake/backend URL/staple/downgrade) against the real
+      # artifacts, without uploading. The first 0.9.5 publish failed at the
+      # PostHog gate that no dry run had reached (#916).
+      - name: Verify publish gates (dry run, no upload)
+        if: ${{ !(github.event_name == 'push' || inputs.publish == true) }}
+        env:
+          PETAL_PUBLISH_DRY_RUN: "1"
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+          PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
+          PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          TAG: ${{ steps.version.outputs.TAG }}
+          TAG_ANNOTATION: ${{ steps.version.outputs.TAG_ANNOTATION }}
+          BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle
+          WINDOWS_BUNDLE_DIR: ${{ runner.temp }}/windows-release
+        run: bash scripts/ci/run-publisher.sh
+
+      # Dry run: hand the signed, notarized artifacts to the run instead of
+      # Blob. Everything above has already proven the secrets.
+      - name: Upload release artifacts (dry run)
+        if: ${{ !(github.event_name == 'push' || inputs.publish == true) }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: petal-release-dry-run-${{ steps.version.outputs.TAG }}-${{ github.run_id }}
+          path: |
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            ${{ runner.temp }}/windows-release/*
+          if-no-files-found: error
+          retention-days: 7
+
+      # Point of no return for the web side. Both staged deployments are
+      # verified already (deploy-web); promoting assigns app.petal.live and
+      # meet.petal.live to them. Runs only after the native build has passed
+      # its guards, so a failed build never leaves the web ahead of native.
+      - name: Promote staged web deployments to production
+        if: ${{ github.event_name == 'push' || inputs.publish == true }}
+        env:
+          VERCEL_ORG_ID: team_HUx56nXbsbsz2jLQAtSu9AUa
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          BACKEND_URL: ${{ needs.deploy-web.outputs.backend-url }}
+          WEB_URL: ${{ needs.deploy-web.outputs.web-url }}
+        run: |
+          set -euo pipefail
+          npm i -g vercel@59 >/dev/null 2>&1
+          VERCEL_PROJECT_ID=prj_oi8RLddPbTrKSalKvix1GEgdti1W vercel promote "$BACKEND_URL" --yes --token "$VERCEL_TOKEN"
+          VERCEL_PROJECT_ID=prj_OwXNV8ZFq9moT4jWcNVa1bxlz1lk vercel promote "$WEB_URL" --yes --token "$VERCEL_TOKEN"
+
+      # The real domains must now serve this commit. Still pre-publish for the
+      # manifest-dependent checks; the post-publish step below closes those.
+      - name: Verify production domains serve this commit
+        if: ${{ github.event_name == 'push' || inputs.publish == true }}
+        env:
+          PETAL_PREPUBLISH: "1"
+        run: |
+          set -uo pipefail
+          FAIL=0
+          bash scripts/verify-backend-live.sh || FAIL=1
+          bash scripts/verify-web-harness-live.sh || FAIL=1
+          bash scripts/verify-deploy-freshness.sh || FAIL=1
+          exit $FAIL
+
+      - name: Publish artifacts + latest.json to Vercel Blob
+        if: ${{ github.event_name == 'push' || inputs.publish == true }}
+        env:
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+          # The publisher verifies both values are baked into BOTH slices; on
+          # x86_64 the compiler splits them across instructions, which is only
+          # checkable by reconstruction against the expected value. Without
+          # these the first 0.9.5 publish refused at the PostHog gate (#916).
+          PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
+          PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          TAG: ${{ steps.version.outputs.TAG }}
+          TAG_ANNOTATION: ${{ steps.version.outputs.TAG_ANNOTATION }}
+          # Absolute so the publisher (run from a scratch dir) still finds it.
+          BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle
+          WINDOWS_BUNDLE_DIR: ${{ runner.temp }}/windows-release
+          PETAL_VERIFY_DEPLOY_FRESHNESS_SCRIPT: ${{ github.workspace }}/scripts/verify-deploy-freshness.sh
+        run: bash scripts/ci/run-publisher.sh
+
+      # Full post-release check: manifest version == this release, download
+      # redirect names this DMG, deployed web bundle carries this version.
+      - name: Verify published release end-to-end
+        if: ${{ github.event_name == 'push' || inputs.publish == true }}
+        env:
+          PETAL_EXPECTED_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: bash scripts/verify-web-harness-live.sh
+
+      - name: Summary
+        env:
+          PUBLISHED: ${{ github.event_name == 'push' || inputs.publish == true }}
+        run: |
+          if [ "$PUBLISHED" = "true" ]; then
+            {
+              echo "### Petal ${{ steps.version.outputs.TAG }} published"
+              echo ""
+              echo "- backend + web-harness promoted to app.petal.live / meet.petal.live for this commit."
+              echo "- Universal DMG + updater artifact signed, notarized, stapled, and uploaded to Vercel Blob."
+              echo "- Windows x86-64 NSIS installer uploaded unsigned for Authenticode (Tauri updater signature present)."
+              echo "- Combined auto-updater manifest served at \`/api/updater\`; downloads at \`/api/download\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Petal ${{ steps.version.outputs.TAG }} DRY RUN -- nothing published"
+              echo ""
+              echo "- Cert import, notarize + staple, minisign, Windows build and Vercel staging all passed."
+              echo "- Staged deployments were NOT promoted; latest.json untouched. Signed artifacts are attached to this run."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

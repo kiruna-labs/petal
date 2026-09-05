@@ -1,0 +1,374 @@
+[
+  {
+    "t_ms": 0,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 266,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 478,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 727,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 1089,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 1377,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 1702,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 2057,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 2396,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 2595,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 2923,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 3265,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 3602,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 3925,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 4275,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 4628,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 4937,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 5170,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 5445,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 5688,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 6008,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 6355,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 6689,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 6931,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 7284,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 7622,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 7780,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 8123,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 8477,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 8799,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 8998,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 9334,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 9672,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 9891,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 10250,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 10527,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 10886,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": [
+      [
+        406,
+        260,
+        728,
+        420,
+        332
+      ]
+    ]
+  },
+  {
+    "t_ms": 11040,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 11345,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 11608,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 11940,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 12215,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 12502,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 12838,
+    "visible": [
+      406,
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 13056,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 13417,
+    "visible": [
+      82
+    ],
+    "changed": []
+  },
+  {
+    "t_ms": 13771,
+    "visible": [
+      82
+    ],
+    "changed": []
+  }
+]

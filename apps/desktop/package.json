@@ -1,0 +1,53 @@
+{
+  "name": "desktop",
+  "version": "0.9.8",
+  "license": "Apache-2.0",
+  "description": "Petal desktop app - low-latency, multi-window screensharing for macOS and Windows",
+  "repository": "https://github.com/kiruna-labs/petal",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "pretest": "playwright install chromium-headless-shell",
+    "test": "node --import tsx --test tests/*.test.ts && node --test scripts/test-remote-control-harness-preflight.mjs scripts/test-remote-control-exit-accounting.mjs scripts/test-process-lease-ledger.mjs scripts/test-remote-control-share-readiness.mjs && node scripts/check-panel-close.mjs && echo 'panel-close check passed'",
+    "lint:panel-close": "node scripts/check-panel-close.mjs",
+    "tauri": "tauri",
+    "dev:clean": "bash scripts/dev.sh",
+    "autotest": "node scripts/autotest-run.mjs",
+    "autotest:remote-control": "node scripts/remote-control-scenario.mjs",
+    "autotest:remote-control-loopback": "node scripts/remote-control-local-loopback.mjs",
+    "autotest:remote-control-loopback:check": "node scripts/remote-control-local-loopback.mjs --check-only",
+    "release:smoke": "bash ../../scripts/release-smoke.sh"
+  },
+  "dependencies": {
+    "@fontsource/albert-sans": "^5.2.8",
+    "@fontsource/fredoka": "^5.2.10",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-clipboard-manager": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2",
+    "@tauri-apps/plugin-updater": "^2",
+    "@userdispatch/sdk": "^1.0.1",
+    "livekit-client": "^2.20.0"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tauri-apps/cli": "^2",
+    "playwright": "^1.61.1",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "~6.0.2",
+    "tsx": "^4.19.0",
+    "vite": "^6.0.3"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true
+  }
+}

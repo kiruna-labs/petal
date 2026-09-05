@@ -1,0 +1,151 @@
+[
+  {
+    "t_ms": 0,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "Shareable(100 @ 350,300,300x400)"
+  },
+  {
+    "t_ms": 40,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "Shareable(100 @ 390,300,300x400)"
+  },
+  {
+    "t_ms": 80,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "Shareable(100 @ 430,300,300x400)"
+  },
+  {
+    "t_ms": 120,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "Shareable(100 @ 470,300,300x400)"
+  },
+  {
+    "t_ms": 160,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "NoHit"
+  },
+  {
+    "t_ms": 200,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "NoHit"
+  },
+  {
+    "t_ms": 240,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "NoHit"
+  },
+  {
+    "t_ms": 280,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "NoHit"
+  },
+  {
+    "t_ms": 320,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "BlockedByOwnProcess"
+  },
+  {
+    "t_ms": 360,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "BlockedByOwnProcess"
+  },
+  {
+    "t_ms": 400,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "BlockedByOwnProcess"
+  },
+  {
+    "t_ms": 440,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "BlockedByOwnProcess"
+  },
+  {
+    "t_ms": 480,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "Shareable(500 @ 450,450,200x200)"
+  },
+  {
+    "t_ms": 520,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "Shareable(500 @ 450,450,200x200)"
+  },
+  {
+    "t_ms": 560,
+    "cursor": [
+      500.0,
+      500.0
+    ],
+    "decision": "BlockedByExternalWindow"
+  },
+  {
+    "t_ms": 600,
+    "cursor": [
+      5.0,
+      5.0
+    ],
+    "decision": "NoHit"
+  },
+  {
+    "t_ms": 640,
+    "cursor": [
+      5.0,
+      5.0
+    ],
+    "decision": "NoHit"
+  },
+  {
+    "t_ms": 680,
+    "cursor": [
+      5.0,
+      5.0
+    ],
+    "decision": "NoHit"
+  },
+  {
+    "t_ms": 760,
+    "cursor": null,
+    "decision": "NoCursor"
+  }
+]

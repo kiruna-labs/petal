@@ -1,0 +1,25 @@
+/* Petal — self-hosted fonts.
+   Albert Sans + JetBrains Mono ship via @fontsource npm packages (imported in
+   the app entry point, see src/main.ts) — no Google Fonts network dependency.
+
+   Manrope ships from the approved design bundle as a single variable font
+   (the design bundle -> assets/fonts/manrope-variable.woff2).
+   NOTE on source file naming: the design bundle's `fonts/README.txt` does not
+   actually give a weight-to-filename map, and inspecting the 8 `manrope-*.woff2`
+   files' internal font tables shows they are not 8 static Manrope weights —
+   they are 3 different variable-font families (JetBrains Mono, Albert Sans,
+   and Manrope) mislabeled under a shared `manrope-N` naming scheme, and the
+   6 files that are genuinely Manrope are redundant variable-font instances
+   (same wght 200-800 axis) that differ only in glyph-subset coverage.
+   manrope-5.woff2 was picked because it has the widest glyph coverage (280
+   glyphs) of the Manrope instances. Single variable file + `font-weight: 200
+   800` covers every weight the design calls for. */
+
+@font-face {
+  font-family: 'Manrope';
+  src: url('../assets/fonts/manrope-variable.woff2') format('woff2-variations'),
+       url('../assets/fonts/manrope-variable.woff2') format('woff2');
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: swap;
+}

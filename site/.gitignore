@@ -1,0 +1,30 @@
+# build output
+dist/
+# generated types
+.astro/
+
+# dependencies
+node_modules/
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+
+# environment variables
+.env
+.env.production
+
+# macOS-specific files
+.DS_Store
+
+# AUTO-pulled content (issue #437): regenerated from the repo's source docs
+# by scripts/sync-auto-content.mjs on every `npm run dev` / `npm run build`.
+# Never commit these — the manifest hash is the thing that's pinned, not the
+# generated output, so there's exactly one source of truth per page.
+src/content/docs/customizing/self-hosting.md
+src/content/docs/customizing/backend-api.md
+src/fragments/
+.vercel

@@ -1,0 +1,122 @@
+/* Petal Docs — brand alignment with petal-website (petal.live).
+   Self-hosted fonts (same files as the marketing site + desktop app):
+   Manrope for headings/brand, Albert Sans for body copy, JetBrains Mono
+   for code. Accent color matches --plum from petal-website/styles/main.css. */
+
+@font-face {
+	font-family: 'Manrope';
+	src: url('/docs/fonts/manrope-variable.woff2') format('woff2-variations'),
+		url('/docs/fonts/manrope-variable.woff2') format('woff2');
+	font-weight: 200 800;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'Albert Sans';
+	src: url('/docs/fonts/albert-sans-400.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'Albert Sans';
+	src: url('/docs/fonts/albert-sans-500.woff2') format('woff2');
+	font-weight: 500;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'Albert Sans';
+	src: url('/docs/fonts/albert-sans-600.woff2') format('woff2');
+	font-weight: 600;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'Albert Sans';
+	src: url('/docs/fonts/albert-sans-700.woff2') format('woff2');
+	font-weight: 700 800;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'JetBrains Mono';
+	src: url('/docs/fonts/jetbrains-mono-400.woff2') format('woff2');
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+
+@font-face {
+	font-family: 'JetBrains Mono';
+	src: url('/docs/fonts/jetbrains-mono-500.woff2') format('woff2');
+	font-weight: 500;
+	font-style: normal;
+	font-display: swap;
+}
+
+/* petal.live never offers a light theme — it is one committed dark identity
+   (--bg:#0b0b0c, --text:#e7e7ea, --surface2:#17181b, --line:rgba(255,255,255,.07)
+   in petal-website/styles/main.css). Force the docs site to the same palette
+   in BOTH the dark and light Starlight variants, so the theme toggle (which
+   we also hide below, since petal.live has none) can never diverge from it.
+
+   `:root[data-theme='light']` must repeat every BASE token Starlight's own
+   props.css redefines for light mode (--sl-color-white, --sl-color-gray-*),
+   not just the semantic --sl-color-bg/text ones — headings and sidebar
+   labels read --sl-color-white directly, and Starlight's light-mode value
+   for it is near-black (meant to sit on a white page). Leaving it
+   unoverridden produced near-invisible dark-on-dark headings when a
+   visitor's OS is in light mode (caught in review, 2026-08-05). */
+:root,
+:root[data-theme='light'] {
+	--sl-font: 'Albert Sans', -apple-system, system-ui, sans-serif;
+	--sl-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+	--sl-color-white: hsl(0, 0%, 100%);
+	--sl-color-gray-1: hsl(224, 20%, 94%);
+	--sl-color-gray-2: hsl(224, 6%, 77%);
+	--sl-color-gray-3: hsl(224, 6%, 56%);
+	--sl-color-gray-4: hsl(224, 7%, 36%);
+	--sl-color-gray-5: hsl(224, 10%, 23%);
+	--sl-color-gray-6: hsl(224, 14%, 16%);
+	--sl-color-black: hsl(224, 10%, 10%);
+
+	--sl-color-bg: #0b0b0c;
+	--sl-color-bg-nav: #0b0b0c;
+	--sl-color-bg-sidebar: #0b0b0c;
+	--sl-color-bg-inline-code: #17181b;
+	--sl-color-text: #e7e7ea;
+
+	--sl-color-hairline: rgba(255, 255, 255, 0.07);
+	--sl-color-hairline-light: rgba(255, 255, 255, 0.11);
+	--sl-color-hairline-shade: rgba(255, 255, 255, 0.07);
+
+	/* Brand accent = --plum (#c96ba6) from petal-website/styles/main.css,
+	   the same pink used in the Petal favicon. */
+	--sl-color-accent-low: #3a2430;
+	--sl-color-accent: #c96ba6;
+	--sl-color-accent-high: #e6b9d4;
+	--sl-color-text-accent: #e6b9d4;
+}
+
+/* No light/dark switcher on petal.live — drop the picker rather than leave a
+   control that (now) never changes anything. */
+starlight-theme-select {
+	display: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.site-title {
+	font-family: 'Manrope', -apple-system, system-ui, sans-serif;
+}

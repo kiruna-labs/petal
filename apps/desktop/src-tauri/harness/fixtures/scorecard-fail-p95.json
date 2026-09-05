@@ -1,0 +1,29 @@
+{
+  "generated_at_unix_ms": 1783123200000,
+  "scenarios": [
+    {
+      "scenario_name": "3p-1share-perfect",
+      "participant_count": 3,
+      "shares_per_bot": 1,
+      "impairment_profile": "perfect",
+      "latency": {
+        "sample_count": 1800,
+        "min_ms": 20.1,
+        "avg_ms": 96.3,
+        "p50_ms": 88.4,
+        "p95_ms": 151.0,
+        "max_ms": 188.2
+      },
+      "freeze": {
+        "freeze_count": 0,
+        "total_missing_frames": 0,
+        "longest_freeze_us": 0,
+        "frames_received": 1800
+      },
+      "delivered_fps": 30.0,
+      "delivered_width": 1280,
+      "delivered_height": 720,
+      "reconnect_ms": null
+    }
+  ]
+}

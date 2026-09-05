@@ -1,0 +1,51 @@
+[package]
+name = "petal-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "M3 self-evaluation harness (SPEC.md §7): headless participant bots, synthetic test-pattern publish/subscribe, latency/freeze measurement, and a scorecard/regression gate."
+
+# Deliberately its own workspace root (not folded into ../Cargo.toml's
+# implicit single-package workspace) -- see harness/README-ish doc comment in
+# src/lib.rs for why. Keeps `cargo build`/`cargo test` in `../` (the actual
+# shipping app) completely unaffected by anything added here.
+[workspace]
+
+[lib]
+name = "petal_harness"
+path = "src/lib.rs"
+
+# Live-I/O stays behind `--features live-io` so the default harness crate remains
+# a CI-safe pure scorecard/metrics build with no LiveKit or app-crate link.
+[[bin]]
+name = "petal-harness"
+path = "src/bin/harness.rs"
+
+[[bin]]
+name = "petal-scorecard-gate"
+path = "src/bin/scorecard_gate.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "1"
+rand = "0.8"
+desktop = { path = "..", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+log = { version = "0.4", optional = true }
+env_logger = { version = "0.11", optional = true }
+
+[dev-dependencies]
+
+[features]
+default = []
+live-io = ["dep:desktop", "dep:tokio", "dep:log", "dep:env_logger"]
+
+# The live-io feature links the app crate, which links LiveKit/webrtc with
+# `-ObjC`. Mirror the app crate's local screencapturekit patch here because
+# this harness is its own workspace and therefore does not inherit ../Cargo.toml
+# patches. Without it, the historical CoreMediaBridge Swift duplicate-symbol
+# blocker returns at link time.
+[patch.crates-io]
+screencapturekit = { path = "../../vendor/screencapturekit" }

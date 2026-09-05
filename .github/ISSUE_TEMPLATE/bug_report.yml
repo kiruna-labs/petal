@@ -1,0 +1,76 @@
+name: Bug report
+description: Something in Petal is broken or behaving unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues do not belong here** — please follow SECURITY.md and
+        report privately via the repository's Security tab.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Join a room with...
+        2. Share a window from...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "14.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Chip
+      options: ["Apple Silicon", "Intel"]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Petal version
+      description: From the About panel, or the commit if you built from source.
+    validations:
+      required: true
+  - type: dropdown
+    id: topology
+    attributes:
+      label: Which peers were involved?
+      options:
+        - Native app to native app
+        - Native app to browser client
+        - Browser client to browser client
+        - Only one participant / not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: build
+    attributes:
+      label: How did you get Petal?
+      options:
+        - Official download
+        - Built from source
+        - Self-hosted deployment
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        From `~/Library/Logs/Petal/petal.log`. Please review before pasting —
+        logs can contain window titles and room names.
+      render: text

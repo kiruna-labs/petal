@@ -1,0 +1,127 @@
+# Rust verification gate for PRs that can affect the desktop/native contract.
+#
+# The full CI workflow remains manual-only for cost, but #338 showed that a
+# human/agent can otherwise merge a relevant PR after an incomplete local cargo
+# run and describe it as "no assertion failure observed." This workflow makes
+# that state unambiguous: for native/contract/backend-relevant PRs, GitHub must
+# show an explicit Rust build/test result. If `webrtc-sys` cannot download its
+# external WebRTC artifact, this check fails or stays red/pending instead of
+# looking like a pass.
+name: Rust PR Gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/rust-gate.yml"
+      - ".github/workflows/ci.yml"
+      - "scripts/ci-local.sh"
+      - "apps/desktop/src-tauri/**"
+      - "contracts/**"
+      - "backend/**"
+
+concurrency:
+  group: rust-pr-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust build + lib tests
+    runs-on: macos-26
+    # #724: recent macOS runs measure ~10-14min; a stalled test (or any other
+    # hang) must fail loudly instead of idling toward GitHub's 6h default.
+    timeout-minutes: 30
+    env:
+      # Match the manual CI/release proof: do not inherit the dev-only CLT rpath.
+      RUSTFLAGS: ""
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build frontend for Tauri context
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: cargo build
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --locked
+
+      # `cargo build` above does NOT cover examples/ -- that needs --examples.
+      # Keep this in lockstep with scripts/ci-local.sh's and ci.yml's examples
+      # build; divergence between them is how compositor_probe stayed broken
+      # for weeks with every gate green (#594, #635) -- this workflow's own
+      # PR-triggered runs are the ones most likely to catch a break the moment
+      # it lands, so it must not be the one gate left out.
+      - name: cargo build (examples)
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --examples --locked
+
+      - name: cargo test (lib)
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --lib --locked
+
+      - name: Assert no CommandLineTools rpath in debug binary (#99)
+        working-directory: apps/desktop/src-tauri
+        run: |
+          BIN=target/debug/desktop
+          if otool -l "$BIN" | grep -q "CommandLineTools"; then
+            echo "::error::Built binary carries a CommandLineTools rpath — it will not launch on user Macs (issue #99)."
+            otool -l "$BIN" | grep -A2 LC_RPATH
+            exit 1
+          fi
+          echo "OK: no CommandLineTools rpath in $BIN"
+
+  windows:
+    name: Windows build + lib tests
+    runs-on: windows-latest
+    # #724: recent Windows runs measure ~20-27min; same backstop as the
+    # macOS `rust` job above, with headroom for the slower runner.
+    timeout-minutes: 45
+    env:
+      # No dev-only CLT rpath recipe applies here (that's macOS-only in
+      # .cargo/config.toml), so RUSTFLAGS is intentionally left unset: it
+      # must not override .cargo/config.toml's target.x86_64-pc-windows-msvc
+      # `+crt-static`, which is load-bearing for the MSVC link (#673).
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # cargo build's own build.rs (ensure_frontend_dist) will invoke
+      # `npm run build` itself when the frontend dist is missing/stale, since
+      # the `custom-protocol` Cargo feature is on by default -- but that
+      # requires node_modules to already be installed. Install + build it
+      # explicitly here (mirroring the macOS leg above) so that step is fast,
+      # deterministic, and visible in its own log rather than buried inside
+      # the cargo build step.
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build frontend for Tauri context
+        working-directory: apps/desktop
+        run: npm run build
+
+      - name: cargo build
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --locked
+
+      - name: cargo test (lib)
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --lib --locked

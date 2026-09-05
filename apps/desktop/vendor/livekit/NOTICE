@@ -1,0 +1,4 @@
+This directory is a MODIFIED copy of the `livekit` crate (0.7.49) from
+https://github.com/livekit/rust-sdks, licensed under the Apache License 2.0
+(see LICENSE in this directory). Local modifications are documented in
+PETAL_PATCH.md, per Apache-2.0 §4(b).

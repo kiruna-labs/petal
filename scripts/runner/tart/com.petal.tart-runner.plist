@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  GUEST-side LaunchAgent for the Petal Tart runner. Installed by
+  provision-guest.sh into the admin user's ~/Library/LaunchAgents. It is an
+  Aqua-session agent (not a daemon) because the tests need WindowServer and
+  TCC grants; the host starts a job with `launchctl kickstart -k` after
+  writing ~/tart-runner/job.env. RunAtLoad runs the probe once at login.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.petal.tart-runner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/tart-runner/agent.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__HOME__/tart-runner</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>StandardOutPath</key>
+  <string>__HOME__/tart-runner/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/tart-runner/launchd.log</string>
+</dict>
+</plist>

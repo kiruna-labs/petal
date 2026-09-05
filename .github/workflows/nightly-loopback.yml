@@ -1,0 +1,283 @@
+name: Nightly Remote-Control Loopback
+
+on:
+  # STATUS NOTE (2026-07-14): the nightly `schedule` trigger is disabled --
+  # no self-hosted macOS runner has ever been registered for this repo, so
+  # every scheduled run just sat cancelled/pending for at least 5 straight
+  # days (pure clutter, zero signal). Manual dispatch still works once a
+  # runner is registered per the job's own setup comment below; restore the
+  # schedule trigger at that point:
+  #   schedule:
+  #     - cron: "17 10 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-loopback-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  live-loopback:
+    name: Live remote-control loopback
+    # Repo owner setup required: register a self-hosted macOS runner with these
+    # labels, logged in at a real display, with Chrome installed, livekit-server
+    # on PATH, and Accessibility/Screen Recording grants already approved for
+    # the Petal dev binary and the terminal/runner service that launches it.
+    runs-on: [self-hosted, macOS]
+    env:
+      # Match .github/workflows/ci.yml's desktop Rust build recipe.
+      RUSTFLAGS: ""
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      CARGO_INCREMENTAL: 0
+      LIVEKIT_URL: ws://localhost:7880
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+      PETAL_DISABLE_AUDIO: 1
+      PETAL_AUTOTEST_ROOM: rctest
+      # Autotest rooms are ownership-checked: an unknown QA key is refused
+      # ("no ownership record"). FRESH_ROOM=1 creates a dedicated test room,
+      # exactly as scripts/rc-live-suite.sh launches Petal (#916, first VM run).
+      PETAL_AUTOTEST_FRESH_ROOM: "1"
+      PETAL_ACCESSORY_UI: "1"
+      PETAL_AUTOTEST_IDENTITY: native-autotest
+      PETAL_AUTOTEST_NAME: Native Autotest
+      PETAL_WEB_HARNESS_URL_MATCH: localhost:5185
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            web-harness/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: Install desktop deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Check desktop frontend
+        working-directory: apps/desktop
+        run: npm run check
+
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        env:
+          # The Test Cockpit's test-pattern pages live under routes/dev/**,
+          # which a plain build strips (COCKPIT_RUNBOOK "Build requirements").
+          PETAL_INCLUDE_DEV_ROUTES: "1"
+        run: npm run build
+
+      - name: Build desktop Rust app
+        working-directory: apps/desktop/src-tauri
+        run: cargo build --locked
+
+      - name: Run Test Cockpit Quick tier when QA grants are present
+        # Test Cockpit commands are compiled only in the QA/privileged build
+        # (`cockpit-privileged`). Self-hosted CI can run Quick when the local
+        # setup marker/TCC grants are present; Full/Soak chaos scenarios that
+        # need sudo net impairment, multiple displays, or test-peer TCC grants
+        # must skip here until the runner is provisioned for those capabilities.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MARKER="$HOME/Library/Application Support/com.petal.app/.cockpit-setup-complete"
+          if [ ! -f "$MARKER" ]; then
+            echo "::notice::Skipping Test Cockpit Quick tier: cockpit setup marker is missing on this runner."
+            echo "::notice::Run scripts/cockpit-setup.sh on the self-hosted Mac to enable QA-featured cockpit runs."
+            exit 0
+          fi
+
+          echo "==> Run QA-featured Test Cockpit Quick tier"
+          # The Cockpit runs against PROD (backend-minted tokens, web peer from
+          # meet.petal.live). The job-level LIVEKIT_* vars exist for the local
+          # loopback tier below and must not leak in here: with LIVEKIT_URL set
+          # the app dials that (localhost:7880, refused -- first VM run, #916).
+          set +e
+          # PETAL_BACKEND_URL is read at RUNTIME first (transport/token.rs);
+          # an EMPTY value means "no backend" (the loopback tier's setting), so
+          # the Cockpit needs the real one here.
+          # Likewise the loopback tier's PETAL_AUTOTEST_* vars: they would start
+          # the autotest join hook inside the Cockpit process and override its
+          # generated identity with "native-autotest", which prod's token
+          # endpoint rejects (400: not a generated participant id).
+          # The QA binary MUST come from build-cockpit-primary.sh (COCKPIT_RUNBOOK
+          # "Build requirements"): it stamps the generated test-pattern asset
+          # provenance the engine verifies, and enforces the #315 Swift runtime
+          # policy. cockpit.mjs's bare `cargo run` produced a binary whose
+          # SHARE-N2W-Q / DRAW-N / TELE all reported INFRA-FAIL on provenance.
+          env -u LIVEKIT_URL -u LIVEKIT_API_KEY -u LIVEKIT_API_SECRET \
+              -u PETAL_AUTOTEST_ROOM -u PETAL_AUTOTEST_IDENTITY -u PETAL_AUTOTEST_NAME \
+              -u PETAL_AUTOTEST_FRESH_ROOM -u PETAL_ACCESSORY_UI -u RUSTFLAGS \
+            bash apps/desktop/scripts/build-cockpit-primary.sh
+          build_exit=$?
+          if [ "$build_exit" -ne 0 ]; then echo "::error::build-cockpit-primary.sh failed ($build_exit)"; exit "$build_exit"; fi
+          env -u LIVEKIT_URL -u LIVEKIT_API_KEY -u LIVEKIT_API_SECRET \
+              -u PETAL_AUTOTEST_ROOM -u PETAL_AUTOTEST_IDENTITY -u PETAL_AUTOTEST_NAME \
+              -u PETAL_AUTOTEST_FRESH_ROOM -u PETAL_ACCESSORY_UI \
+            PETAL_BACKEND_URL=https://app.petal.live PETAL_DISABLE_AUDIO=1 RUST_LOG=info \
+            apps/desktop/src-tauri/target/debug/desktop --test-case=quick
+          engine_exit=$?
+          set -e
+          # The engine's exit code does not carry the verdicts; run.jsonl does.
+          RUN_DIR="$(ls -dt "$HOME/Library/Logs/Petal/test-runs/"*/ 2>/dev/null | head -1)"
+          echo "cockpit results dir: ${RUN_DIR:-<none>} (engine exit $engine_exit)"
+          mkdir -p "$RUNNER_TEMP/petal-cockpit"
+          [ -n "$RUN_DIR" ] && cp -R "$RUN_DIR" "$RUNNER_TEMP/petal-cockpit/" || true
+          python3 - "${RUN_DIR:-}" <<'PY'
+          import json, sys, os
+          d = sys.argv[1]
+          if not d or not os.path.exists(os.path.join(d, "run.jsonl")):
+              print("::error::Test Cockpit produced no run.jsonl"); sys.exit(1)
+          verdicts = []
+          for line in open(os.path.join(d, "run.jsonl")):
+              try: o = json.loads(line)
+              except Exception: continue
+              if o.get("kind") == "scenario-verdict":
+                  p = o.get("payload", {}); verdicts.append((p.get("scenarioId"), p.get("verdict"), (p.get("reason") or p.get("detail") or "")[:160]))
+          for sid, v, why in verdicts: print(f"  {sid}: {v} {why}")
+          bad = [v for v in verdicts if str(v[1]).lower() != "pass"]   # engine writes lowercase "pass"/"infra-fail"
+          if not verdicts: print("::error::Test Cockpit emitted zero verdicts (INSUFFICIENT DATA)"); sys.exit(1)
+          if bad: print(f"::error::Test Cockpit Quick tier: {len(bad)}/{len(verdicts)} scenarios not PASS"); sys.exit(1)
+          print(f"Test Cockpit Quick tier: {len(verdicts)}/{len(verdicts)} PASS")
+          PY
+
+      # The two tiers below are independent: a Cockpit failure must not hide
+      # the loopback suite's verdict (or vice versa). The job still fails.
+      - name: Install web-harness deps
+        if: ${{ !cancelled() }}
+        working-directory: web-harness
+        run: npm ci
+
+      - name: Run live loopback harness
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LOG_DIR="$RUNNER_TEMP/petal-nightly-loopback"
+          mkdir -p "$LOG_DIR"
+          SOCKET="$LOG_DIR/petal-rc.sock"
+          RESULTS_JSON="$LOG_DIR/remote-control-results.json"
+          HARNESS_LOG="$LOG_DIR/remote-control-live.log"
+          LIVEKIT_LOG="$LOG_DIR/livekit.log"
+          WEB_LOG="$LOG_DIR/web-harness.log"
+          CHROME_LOG="$LOG_DIR/chrome-cdp.log"
+          PETAL_LOG="$LOG_DIR/petal-dev.log"
+          rm -f "$SOCKET" "$RESULTS_JSON"
+
+          pids=()
+          cleanup() {
+            for pid in "${pids[@]:-}"; do
+              if kill -0 "$pid" >/dev/null 2>&1; then
+                kill "$pid" >/dev/null 2>&1 || true
+              fi
+            done
+          }
+          trap cleanup EXIT
+
+          echo "==> Preflight runner tools" | tee "$HARNESS_LOG"
+          command -v livekit-server | tee -a "$HARNESS_LOG"
+          test -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+          echo "==> Start local LiveKit" | tee -a "$HARNESS_LOG"
+          if ! lsof -iTCP:7880 -sTCP:LISTEN >/dev/null 2>&1; then
+            livekit-server --dev >"$LIVEKIT_LOG" 2>&1 &
+            pids+=("$!")
+            sleep 2
+          fi
+
+          echo "==> Start web-harness on :5185" | tee -a "$HARNESS_LOG"
+          if ! lsof -iTCP:5185 -sTCP:LISTEN >/dev/null 2>&1; then
+            (
+              cd web-harness
+              PETAL_BACKEND_URL= npm exec vite -- --port 5185 --strictPort
+            ) >"$WEB_LOG" 2>&1 &
+            pids+=("$!")
+            sleep 4
+          fi
+
+          echo "==> Start Chrome with CDP on :9222" | tee -a "$HARNESS_LOG"
+          if ! lsof -iTCP:9222 -sTCP:LISTEN >/dev/null 2>&1; then
+            rm -rf "$LOG_DIR/chrome-profile"
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+              --remote-debugging-port=9222 \
+              --user-data-dir="$LOG_DIR/chrome-profile" \
+              --no-first-run \
+              --no-default-browser-check \
+              --disable-backgrounding-occluded-windows \
+              --disable-background-timer-throttling \
+              --disable-renderer-backgrounding \
+              "http://localhost:5185/" >"$CHROME_LOG" 2>&1 &
+            pids+=("$!")
+            sleep 5
+          fi
+
+          echo "==> Start Petal dev with autotest socket" | tee -a "$HARNESS_LOG"
+          (
+            cd apps/desktop
+            PETAL_BACKEND_URL= \
+            PETAL_AUTOTEST_SOCK="$SOCKET" \
+            npm run dev:clean
+          ) >"$PETAL_LOG" 2>&1 &
+          pids+=("$!")
+
+          echo "==> Wait for native join and autotest socket" | tee -a "$HARNESS_LOG"
+          joined=""
+          # `npm run dev:clean` may rebuild the Rust app first (minutes on a
+          # fresh runner), so the budget is generous; a real join failure or
+          # an ownership refusal still fails within a second of appearing.
+          # Readiness is the autotest socket, as in scripts/rc-live-suite.sh --
+          # with FRESH_ROOM the joined room is not literally named 'rctest'.
+          for _ in $(seq 1 600); do
+            if grep -qE "join_room\('[^']*'\) failed|autotest room ownership rejected" "$PETAL_LOG" 2>/dev/null; then
+              echo "::error::Native join failed; see petal-dev.log artifact." | tee -a "$HARNESS_LOG"
+              grep -E "join_room\('[^']*'\) failed|autotest room ownership rejected" "$PETAL_LOG" | tee -a "$HARNESS_LOG"
+              exit 1
+            fi
+            if [ -S "$SOCKET" ]; then
+              joined=1
+              sleep 2
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$joined" ]; then
+            echo "::error::Petal did not open $SOCKET within 600s; see petal-dev.log artifact." | tee -a "$HARNESS_LOG"
+            exit 1
+          fi
+
+          echo "==> Run live remote-control local loopback" | tee -a "$HARNESS_LOG"
+          set +e
+          PETAL_AUTOTEST_SOCK="$SOCKET" \
+            node apps/desktop/scripts/remote-control-local-loopback.mjs --live --json "$RESULTS_JSON" \
+            2>&1 | tee -a "$HARNESS_LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Live remote-control loopback failed with exit code $status." | tee -a "$HARNESS_LOG"
+          fi
+          exit "$status"
+
+      - name: Upload live loopback artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-loopback-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/petal-nightly-loopback/*.log
+            ${{ runner.temp }}/petal-nightly-loopback/*.json
+            ${{ runner.temp }}/petal-cockpit/**
+          if-no-files-found: warn

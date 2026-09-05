@@ -1,0 +1,369 @@
+[package]
+name = "desktop"
+version = "0.9.8"
+description = "Low-latency, multi-window screensharing for macOS"
+authors = ["Kiruna Labs, Inc."]
+license = "Apache-2.0"
+repository = "https://github.com/kiruna-labs/petal"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+autotest = []
+# Test Cockpit privileged capabilities (#253 Phase -1; engine work in #255/
+# #257/#261/#262). Gates window-pixel capture, AX-based input injection, and
+# network-impairment script invocation entirely OUT of a standard
+# customer-distributed build -- a stock download has zero compiled code path
+# to any of them, not merely a runtime-disabled one. Only the separate
+# internal/QA build channel (own Tauri identifier/build config, same
+# signing/notarization pipeline -- see docs/RELEASING.md) enables this
+# feature, and even there the capabilities stay inert until
+# `scripts/cockpit-setup.sh`'s one-time local marker file is present (see
+# `test_cockpit::preflight_or_refuse(&AppHandle)`). NEVER enable for a real signed/
+# notarized customer release build.
+cockpit-privileged = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-opener = "2"
+# Global keyboard shortcut (SPEC.md §4.2: "a global shortcut to toggle the
+# last-shared window is the power-user feature engineers will love") --
+# official Tauri plugin, not a hand-rolled `NSEvent` global monitor, since
+# it already handles registration/unregistration lifecycle, cross-platform
+# accelerator parsing, and conflict-safe (un)registration on app
+# quit/reload. See `src/shortcuts.rs` for the actual registration + handler.
+tauri-plugin-global-shortcut = "2"
+# Invite-link copy (issue #2): official clipboard plugin, because
+# `navigator.clipboard.writeText` inside WKWebView is unreliable /
+# permission-gated -- the plugin routes the write through the native
+# NSPasteboard instead. Frontend counterpart:
+# `@tauri-apps/plugin-clipboard-manager` (package.json) + the
+# `clipboard-manager:allow-write-text` permission (capabilities/default.json).
+tauri-plugin-clipboard-manager = "2"
+# `petal://join/<room>` deep links (issue #2, SPEC.md line 158). Scheme
+# is declared in tauri.conf.json (`plugins.deep-link.desktop.schemes`);
+# handler + URL parsing live in `src/deep_link.rs`. NOTE (per the official
+# plugin docs): runtime scheme registration is NOT possible on macOS --
+# LaunchServices only reads a bundled .app's Info.plist -- so link clicks
+# only resolve to Petal from an installed bundle, never the `tauri dev`
+# binary. The parse/navigate handler itself is still exercised in dev.
+tauri-plugin-deep-link = "2"
+# Single-instance guard. Prevents the "two Petals at once" conflict: if the
+# app is already running (e.g. `tauri dev`'s `target/debug/desktop`) and a
+# SECOND copy is launched -- most commonly a stale `.app` bundle that
+# LaunchServices still resolves `com.petal.app` to -- the second process
+# detects the running one, hands it focus, and exits instead of coming up as a
+# rogue duplicate. Without this, clicks/tests can land on the wrong (often
+# stale/unfixed) instance. See `run()`'s registration (must be the FIRST
+# plugin) and `scripts/dev.sh` for the complementary bundle-cleanup step.
+# `deep-link` feature: the official deep-link plugin docs' combo guidance --
+# a second launch's `petal://` URL arrives via argv on Windows/Linux and
+# must be forwarded to the deep-link plugin by single-instance (macOS
+# delivers via Apple Events to the running instance directly, so the
+# feature is belt-and-braces there, but it's the documented shape).
+# Single-instance stays the FIRST registered plugin; deep-link registers
+# right after it (see run()).
+#
+# Exact-pinned (not "2"/"2.4"): `instance_lock.rs` reimplements this crate's
+# PRIVATE macOS wire protocol (socket path derivation + handoff format) as a
+# last-resort fallback for a real TOCTOU race in its macOS backend -- see that
+# module's doc comment. That reimplementation has no semver contract with
+# upstream; a routine minor/patch bump could silently change the wire format
+# with zero compile-time signal. Bump this deliberately, re-diff
+# `platform_impl/macos.rs` against `instance_lock.rs` by hand, and update the
+# pin together.
+tauri-plugin-single-instance = { version = "=2.4.2", features = ["deep-link"] }
+# Silent auto-update (issue #103, the production plan "make it updatable"):
+# official Tauri updater. It fetches the signed updater manifest from the
+# backend (`plugins.updater.endpoints` in tauri.conf.json -> our Vercel
+# `/api/updater`, which serves the CI-published `latest.json` from Vercel
+# Blob), verifies the `.app.tar.gz` against the minisign `pubkey` baked in
+# tauri.conf.json, installs, and relaunches. Frontend counterpart:
+# `@tauri-apps/plugin-updater` + `@tauri-apps/plugin-process` (relaunch),
+# driven from `src/lib/updater.ts`. `bundle.createUpdaterArtifacts: true`
+# (tauri.conf.json) makes `tauri build` emit the signed `.app.tar.gz`.
+tauri-plugin-updater = "2"
+# Needed only so the updater can relaunch the app after installing an update
+# (`@tauri-apps/plugin-process` `relaunch()` on the JS side).
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "native-tls"] }
+base64 = "0.22.1"
+log = "0.4"
+thiserror = "1"
+env_logger = "0.11"
+# File-based logging sink for the real app binary (see src/logging.rs's
+# module doc comment for the full rationale): a GUI app launched via
+# `open`/Finder/Dock has no attached stdout/stderr, so `env_logger` alone
+# (already used, but only by the `examples/*_probe.rs` harnesses -- the real
+# `lib.rs::run()` never called any `*_logger::init()` before this) is
+# insufficient. `fern` is a thin multi-sink builder over the same `log`
+# facade already used by ~70 existing call sites across this crate -- no new
+# logging framework/macros, just a second sink (a real file under
+# `~/Library/Logs/Petal/`) added alongside stdout.
+#
+# #905's per-day rolling sink is a small hand-rolled `log::Log` impl in
+# `logging.rs` (`DailyLogSink`/`daily_log_write`), NOT `fern`'s own
+# `DateBased` output (its `date-based` feature was tried first): that type's
+# actual file handle/state lives in a private submodule
+# (`fern::log_impl::DateBased`) with no way to observe a roll or force a
+# reopen from outside the crate, and this fix needs both (gzip the file the
+# instant it rolls off, and force a reopen mid-day when the same-day size
+# backstop trips) -- see `DailyLogSink`'s doc comment in logging.rs for the
+# full reasoning. `chrono` (below, promoted out of `[dev-dependencies]`) is
+# still needed directly for the UTC date arithmetic that sink does itself.
+fern = "0.7"
+# Parses `RUST_LOG`'s standard comma-separated per-module directive syntax
+# (e.g. `info,desktop::remote_control=debug`) -- the SAME crate `env_logger`
+# (above) already uses internally for this, already resolved in Cargo.lock at
+# 2.0.0 as its transitive dependency, so declaring it directly adds no new
+# code to the dependency graph. `logging.rs::resolve_log_filter` uses its
+# `Builder`/`Filter` to build the real per-target enabled/disabled decision
+# (`Filter::enabled`), replacing the previous bare-`LevelFilter`-only parse
+# that silently fell back to `info` on anything but a single level word (#595).
+env_filter = "2"
+tokio = { version = "1", features = ["full"] }
+# `CancellationToken` (#682): ties a receiver decode loop's lifetime to its
+# `ReceiveWindowState` entry structurally -- removing/replacing the entry
+# cancels the task by construction instead of relying on every call site to
+# separately remember to signal it. Already present transitively (via
+# livekit/tungstenite) at 0.7.18; declared directly here since subscriber.rs
+# now depends on it, not just re-exports of it.
+tokio-util = "0.7"
+# `native-tls` enabled explicitly: livekit's default features (`[tokio]`)
+# don't pull in any TLS backend for the signaling websocket, which fails at
+# connect time with "TLS support not compiled in" otherwise. Chosen over
+# rustls here since this is a macOS-only app (uses the system's Secure
+# Transport via `native-tls`, no extra vendored TLS stack).
+livekit = { version = "0.7", features = ["native-tls"] }
+# Pin webrtc-sys (a transitive dep of livekit) to exactly 0.3.35 (#133). 0.3.36
+# does NOT compile against libwebrtc 0.3.38's FrameMetadata API (missing a
+# `user_data: &[u8]` param) -- see the M0 writeup in CLAUDE.md. Declaring it here
+# as a direct `=` dependency stops `cargo update` from silently moving it; drop
+# this only once the upstream livekit release train ships 0.3.36+ in sync.
+webrtc-sys = "=0.3.35"
+livekit-api = "0.5"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+getrandom = "0.3.4"
+dotenvy = "0.15"
+# Test Cockpit MULTI-3 independently fingerprints the native presence roster
+# with the browser's SHA-256 canonicalization (#261). Already locked transitively.
+sha2 = "0.10"
+# Query-param encoding for compositor.rs's header webview URL (owner display
+# name / source window title, both arbitrary user/OS strings that can
+# contain spaces, em dashes, etc. -- share_border.rs's own hand-rolled `#`-only
+# encoder isn't sufficient here). Already present transitively (pulled in by
+# `tauri`/`url`'s own dependency graph -- verified via `cargo tree -i
+# percent-encoding` before adding it directly), so this adds no new link-time
+# surface, just a direct, versioned dependency on a crate already being built.
+percent-encoding = "2.3"
+# Updater architecture guard (#90): inspect the signed `.app.tar.gz` bytes
+# before the official updater installer can replace the current app.
+flate2 = "1"
+tar = "0.4"
+# Settings "Export logs" (issue #121): direct use of the zip crate already
+# present in Cargo.lock via Tauri's dependency graph, so no new archive tool or
+# shell-specific packaging path is needed.
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+# Off-device crash/error reporting (#281). DSN is compile-time embedded via
+# `option_env!("PETAL_SENTRY_DSN")` in logging.rs -- see that module for the
+# full rationale (a notarized `.app` launched via Dock has no shell env, so a
+# runtime-only var would never be set for real users). `default-features =
+# false` deliberately drops `contexts` (sentry-contexts auto-sets
+# `server_name` to the machine hostname when otherwise unset -- often
+# personally identifying, e.g. "Tills-MacBook-Pro" -- which conflicts with
+# this issue's allowlist-first PII policy) and `debug-images`/`release-health`
+# (native `.ips` symbolication + session tracking are both out of scope, see
+# logging.rs). `transport` pulls in `reqwest` + `native-tls`, matching the
+# `native-tls` choice already made for `reqwest`/`livekit` above (no new TLS
+# stack). `panic` gives us `sentry_panic::panic_handler`, called directly from
+# the EXISTING `install_panic_hook()` -- NOT via Sentry's own auto-installed
+# `PanicIntegration` hook (`default_integrations: false` in logging.rs
+# disables that), so there is exactly one panic hook, not two competing ones.
+sentry = { version = "0.48", default-features = false, features = ["panic", "backtrace", "transport", "native-tls"] }
+# Bridges `log::error!`/`log::warn!` into Sentry (events/breadcrumbs
+# respectively) -- chained as a second `fern` output alongside the existing
+# file sink, not a hand-rolled bridge. See logging.rs for the PII
+# allowlist+scrub `before_send`/`before_breadcrumb` hooks that sit between
+# this bridge and the network.
+sentry-log = "0.48"
+# Crisp-mode still-image encode (#384 Phase 1 spike, crisp_still.rs). `image`
+# is ALREADY resolved in this workspace's dependency graph (pulled in
+# unconditionally by `arboard`, via `tauri-plugin-clipboard-manager`; see
+# `cargo tree -i image`), so declaring it directly adds no new crate to the
+# build -- only enables its `webp` feature. That feature pulls in
+# `image-webp`, a pure-Rust lossless WebP encoder (`WebPEncoder::new_lossless`)
+# with NO C/libwebp toolchain dependency -- deliberately avoided given this
+# crate's documented history of `-ObjC`/duplicate-Swift-symbol linker fights
+# from new native-code dependencies (see `transport/mod.rs`'s M0 writeup).
+# `default-features = false` because this crate needs a small codec set, not
+# `image`'s whole default format zoo (gif/tiff/avif/etc): png (Windows
+# thumbnails), webp (web-harness), and jpeg (macOS SCK picker thumbnails,
+# matching the frontend's `data:image/jpeg` thumbnail wire contract).
+image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg"] }
+# AI chat (#656) push-to-talk capture + assistant playback. Deliberately NOT
+# LiveKit's PlatformAudio: that ADM owns the meeting mic and exposes no frame
+# tap, and AI audio must be independent of meeting mute state. cpal covers both
+# directions, so no second audio layer is pulled in. Whether this coexists with
+# the ADM in-process is #654 Q3/Q5.
+cpal = "0.15"
+# The Gemini Live socket. Pinned to the version already resolved transitively
+# via livekit so no second copy of tungstenite enters the tree; native-tls
+# matches reqwest's backend, avoiding a rustls CryptoProvider install.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "native-tls"] }
+futures-util = "0.3"
+# Promoted out of [dev-dependencies] (#905): `logging.rs`'s per-day log
+# rolling needs UTC date arithmetic (today's date string, parsing a
+# `petal.log.<date>` file's date back out for retention/export) -- the same
+# crate the token_probe example already used for RFC3339 timestamps, and
+# already resolved non-dev via `fern`'s own `date-based` feature above plus
+# livekit/serde_with/pbjson-types transitively, so this is a visibility
+# change, not a new dependency.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+# Paused-time coverage for the single terminal room-join budget (#569).
+tokio = { version = "1", features = ["test-util"] }
+# `examples/windows_share_source_probe.rs` frame counter (already resolved
+# transitively via tauri, so this adds no new crate to the build).
+parking_lot = "0.12"
+# Exercise the real client/scope/envelope path for the closed #550 diagnostics.
+# This only enables Sentry's in-memory TestTransport in test builds.
+sentry = { version = "0.48", default-features = false, features = ["test"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Native remote clipboard access: Unicode text, sequence numbers, and standard
+# shell/file-list format detection. It is already transitively locked through
+# arboard; the direct declaration makes the bounded clipboard seam explicit.
+clipboard-win = { version = "5.4.1", features = ["std"] }
+# Core Audio's default endpoint is not exposed by LiveKit's PlatformAudio, and
+# Media Foundation is the Windows-native camera capture surface. `windows` is
+# already locked transitively; these bindings add no second media stack.
+# These bindings support the unified WGC window/display capture pipeline
+# (windows_screen_capture.rs), the receiver compositor (windows_compositor.rs),
+# and the display+window picker enumeration (window_source.rs) -- the extra
+# features below are the WinRT Graphics Capture projection, its D3D11 interop,
+# the User32/Gdi/Dwm/Shell/Threading surface those modules use, and
+# Win32_UI_Accessibility (SetWinEventHook) for the window-change watcher
+# (window_change_watcher.rs) that drives the picker's auto-refresh.
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_System_WinRT_Direct3D11", "Security_Authorization_AppCapabilityAccess", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Accessibility", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation", "Wdk_System_SystemServices", "Win32_Security"] }
+windows-core = "0.61.2"
+# `windows` disables the async adapter's default `std` feature; the
+# borderless-capture consent operation needs its bounded completion bridge.
+windows-future = { version = "0.2.1", features = ["std"] }
+# WebView2 COM interface for disabling autofill (IsGeneralAutofillEnabled /
+# IsPasswordAutosaveEnabled). Already in Cargo.lock (0.38.2) via wry 0.55 --
+# a direct dep adds no new build surface, same reasoning as percent-encoding above.
+webview2-com = "0.38"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "8.0.0", features = ["macos_15_0", "async"] }
+yuv-sys = "0.3"
+# Backs `instance_lock.rs`'s `flock(2)` call and Unix-socket handoff --
+# genuinely Unix-only (`std::os::unix::io::AsRawFd`, `libc::flock`,
+# `std::os::unix::net::UnixStream`), and that module is itself macOS-only
+# (see its `mod instance_lock;` gate in lib.rs), so this must stay scoped
+# here rather than in the unconditional `[dependencies]` table -- an earlier
+# version put it there and broke the Windows build outright (`std::os::unix`
+# doesn't exist on that target). Already present transitively (e.g. via
+# screencapturekit); promoted to a direct, macOS-scoped dependency here.
+libc = "0.2"
+# Menubar pill (menubar.rs) adds NSStatusBar/NSStatusItem/NSView/NSButton/
+# NSColor/NSBezierPath/NSGraphicsContext/NSFont/NSScreen/NSApplication to the
+# feature set already used by window_source.rs (NSWorkspace etc.) — needed to
+# build + draw a custom NSStatusItem view and read screen geometry for
+# popover positioning.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWorkspace", "NSRunningApplication", "NSImage", "NSBitmapImageRep", "libc", "NSImageRep", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSView", "NSButton", "NSControl", "NSColor", "NSBezierPath", "NSGraphicsContext", "NSFont", "NSFontDescriptor", "objc2-core-foundation", "NSScreen", "NSApplication", "NSEvent", "NSResponder", "NSWindow", "NSPasteboard"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString", "NSObject", "NSGeometry", "std", "NSData", "NSArray", "NSDictionary", "NSValue", "NSAttributedString", "NSNotification", "NSOperation", "NSProcessInfo", "block2", "NSBundle", "NSURL"] }
+# `exception` feature: objc2::exception::catch, used by compositor.rs to trap
+# Objective-C NSExceptions at the native window-close boundary and LOG them
+# instead of letting them unwind into Rust as a foreign exception, which
+# aborts the whole app (observed live: SIGABRT via __rust_foreign_exception in
+# tao's run-loop observer during compositor window teardown). Pulls in the
+# tiny objc2-exception-helper C shim only — no new ObjC class metadata, so no
+# new -ObjC duplicate-symbol surface (see transport/mod.rs's linker history).
+objc2 = { version = "0.6.4", features = ["exception"] }
+# Needed for NSImage's closure-based `imageWithSize:flipped:drawingHandler:`
+# (menubar.rs's pill-drawing entry point) — an Objective-C block.
+block2 = "0.6"
+# Pinned to a specific rev (#133), NOT the moving `branch = "v2.1"` ref, so
+# `cargo update`/lockfile regeneration can't silently pull a newer nspanel commit
+# and break the borderless-panel lifecycle. This rev is the v2.1 branch head as of
+# 2026-07-03; bump deliberately (and re-test the panel hide/retire behavior) if updating.
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }
+core-foundation = "0.10"
+core-graphics = "0.24"
+# Connection resilience (SPEC.md §4.8, resilience.rs): watches
+# `SCDynamicStore`'s `State:/Network/Global/IPv4` key to detect a primary
+# network interface change (e.g. Wi-Fi -> Ethernet). Chosen over a raw
+# `Network.framework`/`NWPathMonitor` FFI binding (e.g. `network-framework-sys`)
+# specifically because it's pure C CoreFoundation/SystemConfiguration FFI --
+# no Objective-C or Swift symbols at all -- so it cannot reintroduce the
+# `-ObjC`/duplicate-Swift-symbol linker fight this codebase already fought
+# once (see transport/mod.rs's M0 blocker writeup). Verified this stays
+# link-clean with a real `cargo check --lib` before committing to it.
+system-configuration = "0.7.0"
+
+# Receiver-side compositor (SPEC.md §4.4, compositor.rs + native_display.rs):
+# real, native-window-hosted decode-to-display. `native_display.rs`'s FFI is
+# deliberately raw `extern "C"` against AVFoundation/CoreMedia/CoreVideo's
+# stable C ABIs (linked via `#[link(name = "...", kind = "framework")]` in
+# that module itself, no new Cargo dependency needed for it) rather than
+# adding `objc2-av-foundation`/`objc2-core-media`/`objc2-core-video` binding
+# crates -- see that module's own doc comment for why (avoiding a repeat of
+# the exact `-ObjC` duplicate-Swift/ObjC-metadata linker fight documented
+# just above and in `transport/mod.rs`: every new crate carrying its own
+# Objective-C class metadata is a new surface for that collision to recur).
+# The one real Objective-C message send this module needs
+# (`AVSampleBufferDisplayLayer` alloc/init/enqueue) goes through the already-
+# present `objc2` crate's `msg_send!`/`class!` machinery directly, which adds
+# no class metadata of its own.
+
+# Locally patched fork of `screencapturekit` 8.0.0 (see
+# apps/desktop/vendor/screencapturekit/PETAL_PATCH.md): renames two duplicate
+# Swift structs (`AudioBufferBridge`/`AudioBufferListRaw`) that collide with
+# identically-named structs in `apple-cf` 0.9.3's own `CoreMediaBridge`
+# module once the `-ObjC` linker flag (required transitively by
+# `livekit`/`webrtc-sys` on macOS) forces whole-archive loading of both.
+# Public API (window enumeration etc., used by window_source.rs) is
+# untouched — only the two colliding Swift type names were renamed.
+[patch.crates-io]
+screencapturekit = { path = "../vendor/screencapturekit" }
+livekit = { path = "../vendor/livekit" }
+libwebrtc = { path = "../vendor/libwebrtc" }
+# Windows Media Foundation hardware H.264 encoder/decoder factories (see
+# vendor/webrtc-sys/PETAL_PATCH.md). Upstream webrtc-sys 0.3.35 only wires
+# hardware codec factories on Linux (NVENC via dlopen) and macOS
+# (VideoToolbox); the Windows build arm registers no hardware factory at all,
+# so Windows H.264 encode/decode silently falls back to OpenH264 (software).
+# This vendored copy adds `src/mf/*` — MF MFT-based encoder/decoder factories
+# compiled only for `target_os = "windows"`.
+webrtc-sys = { path = "../vendor/webrtc-sys" }
+
+# Locally patched fork of `tauri-nspanel` at the pinned rev above (see
+# apps/desktop/vendor/tauri-nspanel/PETAL_PATCH.md, issue #705): fixes a real
+# activation-policy leak in `builder.rs`'s `build()` — a `no_activate` panel
+# (every panel this app builds) flips NSApp to `.Prohibited`, and a
+# `window_builder.build()?` error skipped the restore that used to sit only
+# at the end of the function, permanently leaking the app un-activatable
+# (no Dock icon) for the rest of the process. Everything else is untouched —
+# see the PETAL_PATCH.md for the upstream diff. `tauri-nspanel` is a git
+# dependency (not crates.io), so it needs its own `[patch."<url>"]` table —
+# `[patch.crates-io]` above only patches the crates.io source.
+[patch."https://github.com/ahkohd/tauri-nspanel"]
+tauri-nspanel = { path = "../vendor/tauri-nspanel" }

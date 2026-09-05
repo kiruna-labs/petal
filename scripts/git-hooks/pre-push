@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+#
+# Local replacement for .github/workflows/rust-gate.yml, which existed
+# specifically because #338 showed a human/agent could merge a Rust/contract
+# PR after an incomplete local cargo run and describe it as "no assertion
+# failure observed" -- GitHub Actions billing on macOS runners (10x the
+# per-minute cost of Linux) made that workflow unreliable in practice, so this
+# hook gives the same guarantee -- an independent, non-skippable cargo
+# build+test result for any push touching Rust/contract paths -- without
+# depending on GitHub Actions at all.
+#
+# Installed via `git config core.hooksPath scripts/git-hooks` (done
+# automatically by scripts/ci-local.sh; see its top). Runs the same
+# dev-toolchain Rust gate scripts/ci-local.sh already runs (warm target/
+# cache, fast) -- the deeper full-Xcode/no-CLT-rpath portability proof stays
+# at release-build time, matching ci-local.sh's own documented tradeoff.
+#
+# Bypass only for a genuine reason (e.g. a docs-only follow-up push you've
+# already gated in the same session): `git push --no-verify`. Per this repo's
+# norms, that should be rare and deliberate, not routine.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+RUST_PATHS_REGEX='^(apps/desktop/src-tauri/|contracts/|backend/|scripts/ci-local\.sh|scripts/git-hooks/)'
+ZERO_SHA=0000000000000000000000000000000000000000
+touched_rust_paths=0
+# Author/committer denylist (see scripts/git-hooks/pre-commit): the operator
+# keeps a private list of addresses that must never appear in this repo's
+# history, e.g. an identity belonging to another organisation. Checked over
+# the commits being pushed, so it also catches commits made with --no-verify
+# or from a checkout without the pre-commit hook.
+DENYLIST="${PETAL_FORBIDDEN_AUTHOR_EMAILS:-$HOME/.config/petal/forbidden-author-emails}"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$ZERO_SHA" ] && continue # deleting a ref -- nothing to verify
+
+  if [ "$remote_sha" = "$ZERO_SHA" ]; then
+    # Brand new branch/ref: diff from its merge-base with origin/main so we
+    # only look at what THIS push actually introduces, not all of history.
+    base="$(git merge-base "$local_sha" origin/main 2>/dev/null || true)"
+    [ -z "$base" ] && base="$local_sha"
+  else
+    base="$remote_sha"
+  fi
+
+  if [ -f "$DENYLIST" ]; then
+    bad="$(git log --format='%h %ae %ce' "$base..$local_sha" 2>/dev/null | grep -iFf "$DENYLIST" || true)"
+    if [ -n "$bad" ]; then
+      printf '\n\033[1;31mpre-push BLOCKED: commits authored/committed by a forbidden address (%s):\033[0m\n%s\n' "$DENYLIST" "$bad" >&2
+      printf 'Rewrite them before pushing (git rebase -i %s, then git commit --amend --reset-author on each).\n' "$base" >&2
+      exit 1
+    fi
+  fi
+
+  if git diff --name-only "$base" "$local_sha" 2>/dev/null | grep -qE "$RUST_PATHS_REGEX"; then
+    touched_rust_paths=1
+  fi
+done
+
+if [ "$touched_rust_paths" -eq 0 ]; then
+  exit 0
+fi
+
+printf '\n\033[1;36mpre-push: Rust/contract paths changed -- running cargo build + cargo test --lib\033[0m\n'
+printf '(this is the local replacement for the disabled rust-gate.yml; see scripts/git-hooks/pre-push)\n'
+
+cd apps/desktop/src-tauri
+
+if ! timeout 300 cargo build --locked; then
+  printf '\n\033[1;31mpre-push BLOCKED: cargo build --locked failed.\033[0m\n' >&2
+  printf 'Fix the build before pushing. Bypass only with a genuine reason: git push --no-verify\n' >&2
+  exit 1
+fi
+
+if ! DYLD_FALLBACK_LIBRARY_PATH=/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx \
+    timeout 180 cargo test --lib --locked; then
+  printf '\n\033[1;31mpre-push BLOCKED: cargo test --lib --locked failed.\033[0m\n' >&2
+  printf 'Fix the failing test(s) before pushing. Bypass only with a genuine reason: git push --no-verify\n' >&2
+  exit 1
+fi
+
+printf '\n\033[1;32mpre-push: Rust gate passed -- push proceeding.\033[0m\n'

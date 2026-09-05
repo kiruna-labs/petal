@@ -1,0 +1,26 @@
+{
+  "name": "petal-backend",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "Petal token/rooms backend - mints scoped LiveKit tokens",
+  "repository": "https://github.com/kiruna-labs/petal",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx test/distribution.ts && node --import tsx test/privacy.ts && node --import tsx test/ai-token.ts && node --import tsx test/rooms-resilience.ts && node --import tsx test/hardening.ts",
+    "test:local": "node --import tsx test/local.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^2.15.0",
+    "@sentry/node": "^10.65.0",
+    "@vercel/blob": "^2.5.0",
+    "livekit-server-sdk": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "@vercel/node": "^3.2.0",
+    "tsx": "^4.19.0",
+    "typescript": "~6.0.2"
+  }
+}

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Petal self-hosted GitHub Actions runner -- LaunchAgent template.
+  Installed by scripts/runner/register.sh into ~/Library/LaunchAgents with
+  __RUNNER_DIR__ / __HOME__ substituted. It is deliberately a LaunchAgent
+  (per-user, Aqua session) and NOT a LaunchDaemon: the display-requiring
+  tests need WindowServer, TCC grants, and AVSampleBufferDisplayLayer, none
+  of which exist outside a logged-in GUI session. `svc.sh install` would
+  produce a daemon; do not use it.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.petal.actions-runner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__RUNNER_DIR__/run.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__RUNNER_DIR__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/petal-actions-runner.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/petal-actions-runner.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:__HOME__/.cargo/bin:__HOME__/.volta/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DEVELOPER_DIR</key>
+    <string>/Applications/Xcode.app/Contents/Developer</string>
+  </dict>
+</dict>
+</plist>
