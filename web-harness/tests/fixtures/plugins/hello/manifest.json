@@ -1,0 +1,16 @@
+{
+  "manifestVersion": 1,
+  "id": "petal.test-hello",
+  "version": "1.0.0",
+  "name": "Hello (test)",
+  "description": "Fixture plugin used by the plugin-host tests.",
+  "apiVersion": 1,
+  "minHostVersion": "0.1.0",
+  "scope": "local",
+  "entry": "plugin.js",
+  "permissions": ["meeting:read", "ui:toolbar-button", "ui:toast"],
+  "contributes": {
+    "toolbarButtons": [{ "id": "hello", "label": "Hello", "icon": "smile" }]
+  },
+  "native": null
+}

@@ -78,8 +78,10 @@ especially for development.
 | `apps/desktop/src-tauri/src/plugins/` | Rust: installed-state store, KV storage, registry verify/install, data bus, metadata state, net fetch, commands |
 | `contracts/plugin-registry/` | registry index and bundle schemas plus signed test fixtures, vendored by the marketplace repo |
 
-A root `package.json` with `"workspaces": ["plugins/*"]` covers the SDK and
-plugins only; `apps/desktop` and `web-harness` keep their own lockfiles.
+`plugins/package.json` is the npm workspace root for the SDK and the
+first-party plugins. It is deliberately not the repo root: a hoisted
+`node_modules` at the repo root could shadow `apps/desktop` and
+`web-harness` dependency resolution, and both keep their own lockfiles.
 
 ### 2.2 Package format
 
@@ -443,7 +445,7 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 
 | Issue | Milestone | Scope | Owner | State |
 |---|---|---|---|---|
-| I-1 | M1 | shared/plugin-host, plugins/sdk, workspace, build-all, docs stub | unassigned | in progress |
+| I-1 | M1 | shared/plugin-host, plugins/sdk, workspace, build-all, docs stub | seinfish | done on branch (2026-09-05) |
 | I-2 | M1 | adapters, surfaces, reactions (local), Settings section | unassigned | not started |
 | I-3 | M2 | data bus (web + Rust), contracts | unassigned | not started |
 | I-4 | M2 | state + advertisement | unassigned | not started |
