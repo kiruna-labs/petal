@@ -4236,7 +4236,16 @@ mod tests {
     }
 
     fn set_mtime(path: &std::path::Path, time: SystemTime) {
-        File::open(path).unwrap().set_modified(time).unwrap();
+        // Open for WRITE: on Windows, SetFileTime needs FILE_WRITE_ATTRIBUTES
+        // on the handle, so a read-only `File::open` fails with ERROR_ACCESS_DENIED
+        // (os error 5) -- every mtime-driven test in this module failed that way
+        // on the Windows PR gate. POSIX futimens does not care either way.
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
