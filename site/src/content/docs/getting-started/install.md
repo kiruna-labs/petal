@@ -59,7 +59,10 @@ but the initial unsigned installer may still produce a SmartScreen warning.
 On first launch, Petal walks you through granting the macOS permissions it
 needs — Screen Recording, Microphone, Camera, and Accessibility. See
 [Permissions setup](/docs/getting-started/permissions-setup/) for what each one
-is for and how to grant it.
+is for and how to grant it. Windows has no equivalent permission model, so
+the Windows build skips straight to picking your name and color.
+
+![Petal's first-launch permission checklist on macOS](../../../assets/screenshots/onboarding.png)
 
 ## Staying up to date
 
@@ -69,4 +72,4 @@ own never installs anything: when a new version is available, the app shows
 a notification with a **Restart now** action, and only clicking that
 downloads, installs, and relaunches with the update applied — you don't need
 to re-download the app yourself. You can also trigger a check manually from
-**Settings → Updates → Check for updates**.
+**Settings → About → Check for updates**.

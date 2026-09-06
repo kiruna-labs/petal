@@ -46,7 +46,7 @@ the device and reselect it in **Settings > Devices** if you want it back.
 Petal checks for updates automatically on launch. If you want to check
 right now instead of waiting:
 
-1. Open **Settings > Updates**.
+1. Open **Settings > About**.
 2. Click **Check for updates**.
 3. The result appears inline: you're up to date, an update is ready (look
    for the "Restart now" toast to install it), an update installed and
@@ -58,28 +58,36 @@ string, not a generic "something went wrong."
 ## Exporting logs for a bug report
 
 1. Open **Settings > Diagnostics**.
-2. Click **Export logs**.
-3. Petal reveals a zip of your local logs in Finder (or reports the saved
-   path if it can't open Finder directly). Nothing is uploaded automatically
-   — attach the zip yourself to whatever bug report or email you're sending.
+2. Pick a range — **Last 2 days**, **Last 7 days**, or **All logs** — and
+   click **Export logs**.
+3. Petal reveals a zip of your local logs in Finder (Explorer on Windows), or
+   reports the saved path if it can't. Nothing is uploaded automatically —
+   attach the zip yourself to whatever bug report or email you're sending.
 
-Logs also live directly at `~/Library/Logs/Petal/petal.log` if you need to
-tail them live while reproducing a problem.
+Logs also live directly in `~/Library/Logs/Petal/` (macOS) or
+`%APPDATA%\Petal\logs\` (Windows) if you need to tail them live while
+reproducing a problem. The active file is `petal.log.<YYYY-MM-DD>` (UTC
+dates; it rolls at midnight, and older days are gzipped).
 
 ## Factory reset
 
 Reset Petal is the last resort — use it if the app is in a broken state that
 permission fixes and updates don't resolve.
 
-**What it clears**, from **Settings > Reset > Reset Petal**:
+**What it clears**, from **Settings > About > Reset…**:
 
 - Your local identity (display name, identity color) and onboarding state
 - Saved rooms and favorites
-- Device choices (microphone/speaker selections)
+- Device choices (microphone/speaker/camera selections)
 - Saved window positions and sizes (main window, meeting window, pill
   window, window-picker layout)
 
 Petal quits automatically after resetting.
+
+**What it leaves alone:** your sharing preferences (sharing priority and
+hover-tab position), the **Debug mode** setting, and your AI chat settings —
+including a saved Gemini API key. Remove the key from **Settings > AI chat**
+yourself if you're handing the machine to someone else.
 
 **What it does not clear on its own (macOS only):** macOS permissions
 (Screen Recording, Microphone, Camera, Accessibility). If you also want to reset those — for
