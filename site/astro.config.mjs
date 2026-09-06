@@ -59,7 +59,12 @@ export default defineConfig({
 							label: 'Viewing shared windows',
 							slug: 'using/viewing-shared-windows',
 						},
+						{
+							label: 'Telepointers and drawing',
+							slug: 'using/telepointers-and-drawing',
+						},
 						{ label: 'Remote control', slug: 'using/remote-control' },
+						{ label: 'AI chat', slug: 'using/ai-chat' },
 						{
 							label: 'Cameras and audio',
 							slug: 'using/cameras-and-audio',
