@@ -7,6 +7,11 @@ Petal shares individual windows, not your whole screen. You can share more
 than one window at a time (up to four), and each one is a separate share
 that your teammates can move and resize independently on their own desktops.
 
+![A shared TextEdit window on the sharer's Mac, with the identity-colored border and the hover tab on its right edge](../../../assets/screenshots/sharing-window.png)
+
+_A window you are sharing, seen on your own Mac: the rounded border and the
+square on the right edge are both in your identity color._
+
 ## Start sharing with the hover tab
 
 While you're in a meeting, move your cursor over any window you want to
@@ -14,6 +19,8 @@ share. Petal shows one fixed 40×40 square on a vertical rail at the window's
 right edge. It sits just outside the window when the monitor's work area has
 room, and insets into the right edge when it doesn't, so it is reachable for
 ordinary, maximized, and top-aligned windows on either platform.
+
+![Close-up of the hover tab on a shared window's right edge](../../../assets/screenshots/hover-tab.png)
 
 Click the square (or press **Enter** or **Space** when it has focus) to
 perform the direct action: an unshared window starts sharing, a shared window
