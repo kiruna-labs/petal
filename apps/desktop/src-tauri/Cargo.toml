@@ -307,7 +307,7 @@ block2 = "0.6"
 # 2026-07-03; bump deliberately (and re-test the panel hide/retire behavior) if updating.
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }
 core-foundation = "0.10"
-core-graphics = "0.24"
+core-graphics = "0.25"
 # Connection resilience (SPEC.md §4.8, resilience.rs): watches
 # `SCDynamicStore`'s `State:/Network/Global/IPv4` key to detect a primary
 # network interface change (e.g. Wi-Fi -> Ethernet). Chosen over a raw
