@@ -85,7 +85,7 @@ tauri-plugin-deep-link = "2"
 # with zero compile-time signal. Bump this deliberately, re-diff
 # `platform_impl/macos.rs` against `instance_lock.rs` by hand, and update the
 # pin together.
-tauri-plugin-single-instance = { version = "=2.4.2", features = ["deep-link"] }
+tauri-plugin-single-instance = { version = "=2.4.4", features = ["deep-link"] }
 # Silent auto-update (issue #103, the production plan "make it updatable"):
 # official Tauri updater. It fetches the signed updater manifest from the
 # backend (`plugins.updater.endpoints` in tauri.conf.json -> our Vercel
@@ -155,7 +155,7 @@ livekit = { version = "0.7", features = ["native-tls"] }
 # `user_data: &[u8]` param) -- see the M0 writeup in CLAUDE.md. Declaring it here
 # as a direct `=` dependency stops `cargo update` from silently moving it; drop
 # this only once the upstream livekit release train ships 0.3.36+ in sync.
-webrtc-sys = "=0.3.35"
+webrtc-sys = "=0.3.43"
 livekit-api = "0.5"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
