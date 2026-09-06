@@ -22,7 +22,7 @@
     "svelte-check": "^4.0.0",
     "tsx": "^4.19.0",
     "typescript": "~6.0.2",
-    "vite": "^6.0.3"
+    "vite": "^8.2.2"
   },
   "dependencies": {
     "@sentry/browser": "^10.65.0",
