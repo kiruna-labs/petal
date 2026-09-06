@@ -16,7 +16,6 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@types/node": "^26.1.0",
-    "@vercel/node": "^3.2.0",
     "dotenv": "^17.4.2",
     "livekit-server-sdk": "^2.16.0",
     "svelte": "^5.0.0",

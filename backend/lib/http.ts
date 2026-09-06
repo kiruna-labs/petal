@@ -1,4 +1,4 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from './vercel.js';
 import { LiveKitConfigError } from './livekit.js';
 import { GeminiConfigError } from './gemini.js';
 import { captureApiError, errorTypeName, flushSentry } from './sentry.js';

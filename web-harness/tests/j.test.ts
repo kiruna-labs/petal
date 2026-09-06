@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../api/_lib/vercel.js';
 import joinHandler, {
   desktopDownloadPlatformForUserAgent,
   downloadUrlForPlatform,

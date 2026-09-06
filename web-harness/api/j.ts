@@ -7,7 +7,7 @@
 // (this project's domain) alongside the browser SPA that "Join in browser"
 // falls back to, rather than on the bare API host (app.petal.live).
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from './_lib/vercel.js';
 import { applyCors } from './_lib/http.js';
 import { credentialForAccessCode, normalizeAccessCode } from './_lib/slug.js';
 
