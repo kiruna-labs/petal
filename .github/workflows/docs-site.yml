@@ -1,0 +1,169 @@
+# Docs site (docs.petal.live / petal.live/docs) — gate on every PR, deploy on main.
+#
+# The site is its own Vercel project (`petal-docs`), separate from the app. It
+# was previously deployed by hand, which is why the published docs drifted
+# behind `main`. This workflow closes that gap: a PR that touches the site (or
+# one of its AUTO-pulled sources) must build clean, and a merge to `main`
+# publishes it.
+#
+# WHY THE BUILD RUNS HERE AND NOT ON VERCEL: `site/scripts/sync-auto-content.mjs`
+# reads three files that live OUTSIDE `site/` (docs/SELF_HOSTING.md,
+# backend/README.md, web-harness/README.md). A Vercel remote build only receives
+# the project's own root directory, so the sync would find nothing. We build in
+# CI, where the whole repository is checked out, and upload the finished output
+# with the Build Output API (`--prebuilt`).
+#
+# REQUIRED SECRET: VERCEL_TOKEN (team-scoped, kiruna-labs). It is NOT currently
+# set on this repository — until it is, the deploy job logs a warning and skips
+# rather than failing, so the PR gate still works. The project and team ids are
+# not secrets and live below, matching release.yml's convention.
+
+name: Docs site
+
+on:
+  pull_request:
+    paths:
+      - 'site/**'
+      - 'docs/SELF_HOSTING.md'
+      - 'backend/README.md'
+      - 'web-harness/README.md'
+      - '.github/workflows/docs-site.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'docs/SELF_HOSTING.md'
+      - 'backend/README.md'
+      - 'web-harness/README.md'
+      - '.github/workflows/docs-site.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Docs site build + gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install
+        working-directory: site
+        run: npm ci
+
+      # `prebuild` runs sync:auto, so this also proves the AUTO pull works.
+      # starlight-links-validator runs inside `astro build` and fails the build
+      # on a dangling internal link.
+      - name: Build (includes AUTO sync + internal link validation)
+        working-directory: site
+        run: npm run build
+
+      # Fails if an AUTO source changed without its hash being re-pinned —
+      # i.e. the docs site and the in-repo docs would have silently diverged.
+      - name: Drift gate
+        working-directory: site
+        run: npm run check:drift
+
+      # Scans the BUILT output, not the sources, so anything a template pulled
+      # in is covered too.
+      - name: PII / secrets gate
+        working-directory: site
+        run: npm run check:pii
+
+      - name: Upload built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site-dist
+          path: site/dist
+          retention-days: 7
+
+  deploy:
+    name: Deploy to Vercel
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: docs-site
+    env:
+      VERCEL_ORG_ID: team_HUx56nXbsbsz2jLQAtSu9AUa
+      VERCEL_PROJECT_ID: prj_aQL1lpBarc1P0x726ufrS9eX6IF2
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Check for the deploy token
+        id: token
+        run: |
+          if [ -z "${VERCEL_TOKEN:-}" ]; then
+            echo "::warning::VERCEL_TOKEN is not set on this repository — skipping the deploy. The docs site will stay on its last published build. Add the secret to enable publishing."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install
+        if: steps.token.outputs.present == 'true'
+        working-directory: site
+        run: npm ci
+
+      - name: Build
+        if: steps.token.outputs.present == 'true'
+        working-directory: site
+        run: npm run build
+
+      # astro.config.mjs sets outDir to ./dist/docs so the served path matches
+      # the /docs base the marketing site proxies to. The Build Output API
+      # serves `static/` from the deployment root, so the whole dist/ (which
+      # contains docs/) is the static root.
+      - name: Stage the Build Output API directory
+        if: steps.token.outputs.present == 'true'
+        working-directory: site
+        run: |
+          set -euo pipefail
+          test -d dist/docs || { echo "::error::expected site/dist/docs from the build"; exit 1; }
+          rm -rf .vercel/output
+          mkdir -p .vercel/output/static
+          cp -R dist/. .vercel/output/static/
+          printf '{"version":3}\n' > .vercel/output/config.json
+          echo "staged $(find .vercel/output/static -type f | wc -l) files"
+
+      - name: Deploy
+        if: steps.token.outputs.present == 'true'
+        working-directory: site
+        run: |
+          set -euo pipefail
+          npx --yes vercel@59 deploy --prebuilt --prod \
+            --token "$VERCEL_TOKEN" --yes > deploy-url.txt
+          echo "Deployed: $(cat deploy-url.txt)"
+          echo "### Docs site deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "$(cat deploy-url.txt)" >> "$GITHUB_STEP_SUMMARY"
+
+      # Proves the deploy is actually serving this commit's content rather than
+      # reporting success on a stale build.
+      - name: Verify the live site
+        if: steps.token.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 10); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' https://petal.live/docs/)"
+            if [ "$code" = "200" ]; then echo "petal.live/docs -> 200"; exit 0; fi
+            echo "attempt $i: $code"; sleep 15
+          done
+          echo "::error::petal.live/docs did not return 200 after the deploy"
+          exit 1
