@@ -26,9 +26,9 @@ trap 'rm -rf "$STAGE_DIR"' EXIT
 # there but skipped here is an unscanned publication.
 EXCLUDES=(
   ':!internal/**'
-  ':!CLAUDE.md'
-  ':!AGENTS.md'
-  ':!.claude/**'
+  ':!**/CLAUDE.md'
+  ':!**/AGENTS.md'
+  ':!**/.claude/**'
   # Third-party content we redistribute but did not author. Upstream changelogs
   # and lockfiles legitimately carry other people's contact details; they are
   # not this project's PII, and rewriting them would corrupt the vendored copy.
