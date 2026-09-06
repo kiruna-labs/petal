@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      :root {
+        --font-ui: Arial, sans-serif;
+        --font-mono: monospace;
+        --surface: #17191d;
+        --text-primary: #f5f6f7;
+        --text-muted: #b8bcc5;
+        --text-faint: #8c929e;
+        --fill-weak: rgba(255, 255, 255, 0.05);
+        --radius-chip: 6px;
+        --radius-tile: 10px;
+        --shadow-inset-hairline: inset 0 0 0 1px #333842;
+        --focus-ring: #6e8bff;
+        --focus-ring-width: 2px;
+        --focus-ring-offset: 2px;
+      }
+      html, body, #app { width: 100%; margin: 0; }
+      body { background: #0d0f12; }
+      /* Same horizontal budget the Settings panel gives a section at 400px. */
+      #app { box-sizing: border-box; padding: 0 20px; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./plugin-settings.js"></script>
+  </body>
+</html>

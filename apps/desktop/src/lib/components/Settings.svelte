@@ -52,6 +52,9 @@
   } from '$lib/remoteControlPolicyCopy';
   import type { RemoteControlPolicy } from '$lib/ipc';
   import DeviceSelect from './DeviceSelect.svelte';
+  import PluginSettingsRows from '$lib/plugins/PluginSettingsRows.svelte';
+  import { installedPlugins } from '$lib/plugins/pluginCatalog';
+  import { browserStorage } from '$lib/data/storageKeys';
   import IdentitySetup from './IdentitySetup.svelte';
   import PermissionRow from './PermissionRow.svelte';
   import TestCockpitResults from './TestCockpitResults.svelte';
@@ -237,6 +240,7 @@
   let launchedScope = $state<Set<string>>(new Set());
   // Feature groups the user has collapsed (default: all expanded).
   let collapsedFeatures = $state<Set<string>>(new Set());
+  const installedPluginList = installedPlugins();
   const cockpitFeatureGroupsView = cockpitFeatureGroups();
   // AI chat (#656). The key is WRITE-ONLY: `ai_chat_settings` returns
   // `hasApiKey`, never the value (mirrors Rust's `settings::Redacted`), so this
@@ -1484,6 +1488,15 @@
           <span class="device-note error">{aiChatError}</span>
         {/if}
       </div>
+    </section>
+
+    <!-- ============ Plugins (plugins/README.md) ============ -->
+    <section class="section">
+      <h2 class="section-title">Plugins</h2>
+      <PluginSettingsRows installed={installedPluginList} storage={browserStorage()} />
+      <span class="support-description">
+        Plugins add features to Petal without adding them to the app itself. Changes apply the next time you join a meeting.
+      </span>
     </section>
 
     <!-- ============ Diagnostics ============ -->

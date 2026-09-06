@@ -24,6 +24,7 @@ import { setupTiles } from './tiles';
 import { setupConnection } from './connection';
 import { installEncodedAudioWorkaroundFromUrl } from './encodedAudioProbe';
 import { setupControls, shouldShowFirstVisitOnboarding } from './controls';
+import { setupPlugins } from './plugins/setupPlugins';
 import { addSentryBreadcrumb, initSentry, installGlobalErrorMirror } from './sentryReporting';
 import { initAnalytics } from './analytics';
 import { FeedbackReportController } from './feedbackReport';
@@ -603,6 +604,9 @@ Object.assign(ctx.cb, {
 });
 
 const controls = setupControls(ctx, feedbackReport);
+// Plugins (plugins/README.md): after the controls exist so plugin toolbar
+// cells land in the same row; the room bridge is driven from connection.ts.
+ctx.hook.plugins = setupPlugins(ctx);
 Object.assign(ctx.cb, {
   resolveIdentity: controls.resolveIdentity,
   submitMeetingField: controls.submitMeetingField,

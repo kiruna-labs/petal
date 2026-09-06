@@ -242,6 +242,7 @@ export function setupConnection(
     shareBtn.textContent = 'Share test pattern';
     micCheckbox.disabled = true;
     state.room = null;
+    ctx.hook?.plugins?.roomDisconnected();
     state.sharing = false;
     state.screenSharing = false;
     setShareState('not sharing', false);
@@ -447,6 +448,7 @@ export function setupConnection(
     const metadataWorker = cb.ensureFrameMetadataWorker();
     const newRoom = createRoom(metadataWorker ? { frameMetadata: { worker: metadataWorker } } : undefined);
     state.room = newRoom;
+    ctx.hook?.plugins?.roomConnected(newRoom);
     state.currentMeetingCode = meetingCode;
 
     newRoom.on(RoomEvent.ConnectionStateChanged, (connectionState: ConnectionState) => {
@@ -745,6 +747,7 @@ export function setupConnection(
       shareBtn.disabled = true;
       micCheckbox.disabled = true;
       state.room = null;
+      ctx.hook?.plugins?.roomDisconnected();
       ctx.hook.pipelineStats?.resetSession();
       cb.stopViewerDemandHeartbeat();
       cb.stopLatencyProbe();

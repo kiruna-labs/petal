@@ -360,6 +360,9 @@ export interface HarnessHook {
   testPatternMeasurement: HarnessMeasurementApi | null;
   /** #510 production encoded-audio receiver workaround state. */
   encodedAudioProbe: import('./encodedAudioProbe.ts').EncodedAudioWorkaroundState;
+  /** Plugin host bridge (plugins/README.md). Set by setupPlugins; connection.ts
+   * calls roomConnected/roomDisconnected so plugins get meeting.* events. */
+  plugins?: import('./plugins/setupPlugins.ts').PluginsHook | null;
 }
 
 export interface ActiveRemoteControl {
