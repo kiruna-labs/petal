@@ -5,9 +5,10 @@
 > ledger, not a license to bundle unrelated native-window changes into the
 > share-indicator fix.
 >
-> Status: the capture-indicator and Petal View changes are implemented in the
-> current worktree. Rows marked **unverified** require a real packaged/release
-> run; this Windows host cannot provide the macOS half of the placement matrix.
+> Status: the capture-indicator and Petal View changes are merged on `main`.
+> Rows marked **unverified** require a real packaged/release run; the Windows
+> host this was written on cannot provide the macOS half of the placement
+> matrix.
 
 ## Policy matrix
 
@@ -120,14 +121,14 @@ custom chrome. Collect results across Windows 10/11, mixed-DPI monitors,
 remote-desktop sessions, and GPU/VM environments. A failure should remain a
 safe system-indicator result, not a new capture error.
 
-### P1 — local NSIS architecture gate mismatch
+### P1 — local NSIS architecture gate mismatch (resolved)
 
 A fresh local `Petal_0.9.4_x64-setup.exe` was produced, but its PE header is
-`0x014c` while the bundled `desktop.exe` is `0x8664`; the existing release gate
-expects the setup executable itself to be `0x8664`. Resolve this release-tooling
-question (or change the gate to validate the payload deliberately) separately;
-it is not part of the capture-indicator change and the installed package was
-not used as runtime evidence here.
+`0x014c` while the bundled `desktop.exe` is `0x8664`; the release gate at the
+time expected the setup executable itself to be `0x8664`. **Resolved in
+`.github/workflows/release.yml` (#916):** the NSIS stub is always `0x014c`,
+so the gate now validates the `desktop.exe` cargo produced instead of the
+stub. Kept here as the record of why the gate looks the way it does.
 
 ### P2 — native corner ownership is still mixed
 
@@ -151,9 +152,11 @@ required, but the cross-surface matrix lacks a single live stress run.
 
 ## Verification record
 
-- `bun run check`: passed with 0 errors and 0 warnings; the full frontend
-  suite passed (727 tests, including the focused hover, work-area, tooltip,
-  Petal View, indicator, and consent coverage), and `bun run build` completed.
+- Frontend check + test suite (run at the time with `bun`; the repo's scripts
+  are `npm run check` / `npm test` / `npm run build` in `apps/desktop` now):
+  passed with 0 errors and 0 warnings; the full frontend suite passed (727
+  tests at the time, including the focused hover, work-area, tooltip, Petal
+  View, indicator, and consent coverage), and the build completed.
 - Rendered Petal View dual-UA fixture at 640×400 and 160×120: passed,
   including pending Share, idle/shared palettes, placement stale-event
   filtering, mouse-up restoration, title wrapping, three full-size title

@@ -10,8 +10,8 @@ Two ways to cut a signed, notarized release. **Local is the default right now**
 | Runs on | your Mac | GitHub Actions (`macos-26`, ~10× billing) |
 | Signs + notarizes + staples | yes (you run the steps) | yes (automatic) |
 | Feeds auto-update | optional (see below) | yes (uploads `latest.json` to Vercel Blob) |
-| Trigger | run the commands below | manually run the Release workflow with a `vX.Y.Z` tag input |
-| Proven | ✅ (arm64 DMG verified notarized/accepted) | ⏳ universal leg unexercised until first run |
+| Trigger | run the commands below | push a `vX.Y.Z` tag (publishes), or **Actions → Release → Run workflow** for a dry run / a self-hosted runner |
+| Proven | ✅ (arm64 DMG verified notarized/accepted) | ✅ dry runs through notarize + staple + smoke on `macos-26` (2026-09-03); first *published* cloud release still pending |
 
 Both produce a DMG that opens on a stock Mac with no Gatekeeper warning.
 
@@ -145,13 +145,25 @@ middle number doesn't climb fast. A fresh version per build keeps DMG filenames,
 notarization records, and the auto-updater (`latest.json` compares versions)
 unambiguous.
 
-Update the version in **all release mirrors** so they stay in lockstep:
+Use the bump tool — it writes every mirror in one go:
+
+```
+node scripts/bump-version.mjs <new-version>   # e.g. 0.9.7
+node scripts/version-lockstep.mjs             # self-check: all nine fields agree
+```
+
+The **nine lockstep fields** across seven files (`scripts/version-lockstep.mjs`
+is the authority; `ci-local.sh` runs it):
 - `apps/desktop/src-tauri/tauri.conf.json`  (`"version"` — drives the DMG name + updater manifest)
 - `apps/desktop/src-tauri/Cargo.toml`       (`version = "…"`)
+- `apps/desktop/src-tauri/Cargo.lock`       (the `name = "desktop"` package entry)
 - `apps/desktop/package.json`               (`"version"`)
-- `apps/desktop/package-lock.json`           (top-level package entry)
+- `apps/desktop/package-lock.json`           (top-level `version` **and** `packages[""].version`)
 - `web-harness/package.json`                 (`"version"` — the isolated Vercel build mirror)
-- `web-harness/package-lock.json`            (top-level package entry)
+- `web-harness/package-lock.json`            (top-level `version` **and** `packages[""].version`)
+
+Editing these by hand and missing `Cargo.lock` or a lockfile's `packages[""]`
+entry fails the gate, which is why the tool exists.
 
 The release workflow checks these mirrors against the tag and fails before a
 desktop artifact is built if any value drifts. The web harness is built from
@@ -258,8 +270,8 @@ no network attempt is made. The token is a `phc_…` project key for the
 committed. Add it as the GitHub Actions secret `PETAL_POSTHOG_KEY` (and pass
 it into a local release command the same way you pass `PETAL_SENTRY_DSN`).
 The closed event list is `docs/POSTHOG_EVENT_ALLOWLIST.md`. Do not
-wire PostHog into the backend. The browser client uses the same twelve
-events via `web-harness/src/analytics.ts` and bakes
+wire PostHog into the backend. The browser client emits the same events
+(minus the native-only `annotation_toggled`) via `web-harness/src/analytics.ts` and bakes
 `VITE_PETAL_POSTHOG_KEY` at web-harness build time (Vercel project env, never
 git). Local and `scripts/deploy-web-harness.sh --build-only` stay keyless.
 
@@ -546,24 +558,29 @@ share-liveness marker (`share liveness confirmed`) is only emitted after
 several affirmatively-changed frames — a frozen share fails it, so actually
 move content in the shared window during step 7. For a non-default
 Team ID, backend URL, or log path, set `PETAL_RELEASE_TEAM_ID`,
-`PETAL_RELEASE_BACKEND_URL`, or `PETAL_RELEASE_LOG`. For the broader GitHub #28
-live pass, add `--markers-file scripts/release-smoke-issue-28-markers.txt`.
+`PETAL_RELEASE_BACKEND_URL`, or `PETAL_RELEASE_LOG`. For the broader live
+pass (the marker set that originated in GitHub #28, now closed), add
+`--markers-file scripts/release-smoke-issue-28-markers.txt`.
 
 **6. (Optional) feed auto-update** — only if you want existing installs to
-update to this local build. The publisher now requires both platform artifacts;
-use the verified Windows artifact staged by the release workflow (or stage a
-matching Windows `.exe` and `.exe.sig` yourself):
+update to this local build. `WINDOWS_BUNDLE_DIR` is optional: with it, the
+publisher uploads the verified Windows artifact (stage the release workflow's
+`.exe` + `.exe.sig`, or a matching pair you built) and writes
+`windows-x86_64` into `latest.json`; without it the run prints `windows: none
+(macOS-only publish; latest.json will omit windows-x86_64)` and publishes a
+macOS-only manifest (a user directive of 2026-08-25 — Windows is not a
+release blocker while it is early). `TAG` / `TAG_ANNOTATION` feed the release
+notes; omit them and the notes fall back to `Petal v<version>`.
 ```
 cd /path/to/petal
 BLOB_READ_WRITE_TOKEN=<vercel blob token> \
 VERSION=<version> \
+TAG=v<version> \
 BUNDLE_DIR=apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle \
-WINDOWS_BUNDLE_DIR=/path/to/windows-release-artifact \
+WINDOWS_BUNDLE_DIR=/path/to/windows-release-artifact   # optional \
 PETAL_VERIFY_DEPLOY_FRESHNESS_SCRIPT="$PWD/scripts/verify-deploy-freshness.sh" \
   node scripts/publish-blob.mjs
 ```
-Do not publish a macOS-only manifest: the combined manifest is the contract for
-all supported desktop platforms.
 **Deploy-freshness gate (user directive 2026-08-22: web ships in sync with
 native, always).** `publish-blob.mjs` now runs
 `scripts/verify-deploy-freshness.sh` as its FIRST gate and refuses to publish
@@ -595,7 +612,12 @@ rather than pasting the literal value into a shell command.
 
 This uploads the DMG + signed updater tarball + `latest.json` to Vercel Blob
 (served at `https://app.petal.live/api/updater`). The publisher
-must only run after `scripts/verify-universal-app.sh` passes. That pre-publish
+must only run after `scripts/verify-universal-app.sh` passes — and it does not
+trust you: `publish-blob.mjs` re-runs its own gates, in this order, before
+writing anything: deploy freshness → universal slices → entitlements → clean
+tarball (no AppleDouble) → Sentry DSN baked → PostHog key baked → backend URL
+baked → app stapled inside the tarball → version is not a downgrade of the
+live manifest. That pre-publish
 guard separately verifies both required native slices and the pinned updater
 trust anchors in `apps/desktop/src-tauri/tauri.release.conf.json`:
 `plugins.updater.endpoints` must be exactly
@@ -649,10 +671,17 @@ log-marker string that isn't part of the tool's actual output contract.
 
 ## Cloud release (CI)
 
-Create and push the version tag, then run the workflow manually. The workflow
-(`.github/workflows/release.yml`, #916) checks out the requested tag and runs
-three jobs:
+Pushing a `v*` tag starts a **publishing** run on its own. Use **Actions →
+Release → Run workflow** instead when you want a dry run (`publish: false` —
+exercises every secret, uploads the signed artifacts to the run, touches
+neither the domains nor `latest.json`) or the project's own registered
+self-hosted macOS runner (`runner: self-hosted`); don't do both for one tag
+or you get two runs serialized by the `release` concurrency group. The
+workflow (`.github/workflows/release.yml`, #916) checks out the requested tag
+and runs four jobs:
 
+0. **`notary-preflight`** (`macos-26`, ~1 min) — verifies the Apple
+   credentials (`notarytool` auth) before any paid build time is spent.
 1. **`windows-release`** — the x86-64 NSIS/updater build. The architecture
    gate checks the app binary cargo produced, not the NSIS installer stub
    (the stub is always a 32-bit PE; checking it rejected every release from
@@ -704,11 +733,13 @@ covers both). Project ids and the team id are not secrets and live in the
 workflow file.
 ```
 git tag v<version>          # e.g. v0.1.1  (must match tauri.conf.json's version)
-git push origin v<version>
+git push origin v<version>  # this push IS the trigger for a publishing run
 ```
-Then: GitHub → **Actions → Release → Run workflow**, enter the tag.
+Watch it under **Actions → Release**. (Use **Run workflow** only for a dry
+run or the self-hosted runner, as described above.)
 
-It runs on both a paid `windows-latest` runner and a paid `macos-26` runner
+It runs on a paid `windows-latest` runner, two paid `macos-26` jobs
+(`notary-preflight` + `release`) and one `ubuntu-latest` job (`deploy-web`)
 (~10× billing for macOS; measured 2026-09-03 on `macos-26`: ~20 min for the universal build + bundle, then notarization; the job is capped at 90 minutes because the one hang seen so far — a locked signing keychain — otherwise sits on a password prompt until the 6-hour default). Watch it under
 the repo's **Actions** tab; if it fails on signing/notarization/upload it's
 almost always one wrong secret value — re-paste that one secret and re-run.
@@ -766,8 +797,10 @@ account, and the correct CI integration depends on that choice.
 ### Marketing website follow-up (separate repository)
 
 The `petal-website` repository is not part of this checkout, so its homepage
-cannot be changed by this release work. The repository owner must update and
-deploy that project separately:
+cannot be changed by this release work. Still open — and while it is, GitHub
+#888 stands: the web surfaces offer "Download Petal for Windows" while a
+macOS-only publish has no Windows artifact, so that button lands on a JSON
+404. The repository owner must update and deploy that project separately:
 
 1. Detect the visitor's operating system for the primary **Download Petal** CTA.
 2. Keep explicit fallback links to
