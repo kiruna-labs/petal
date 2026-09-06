@@ -8,6 +8,9 @@ Implemented in `apps/desktop/src-tauri/src/analytics.rs` (native) and
 `web-harness/src/analytics.ts` (browser). Local and CI builds are keyless
 and no-op; a desktop release bakes `PETAL_POSTHOG_KEY`, and a production
 web-harness build bakes `VITE_PETAL_POSTHOG_KEY` (never commit the token).
+The ingest host can be overridden the same way (`PETAL_POSTHOG_HOST` /
+`VITE_PETAL_POSTHOG_HOST`); `scripts/publish-blob.mjs` checks the baked
+key per slice before publishing.
 Do not add events from the backend. Do not add `posthog-js`.
 
 Dedicated project: **Petal** (id `317298`) in org Kiruna Labs, US cloud —
@@ -70,7 +73,7 @@ deltas.
 |---|---|---|
 | `meeting_joined` | — | Room connect succeeded |
 | `meeting_left` | `duration_bucket`, `reconnect_count_bucket` | Leave or disconnect |
-| `join_failed` | `reason`: `network` \| `no_backend` \| `token` \| `timeout` | Join did not connect |
+| `join_failed` | `reason`: `network` \| `no_backend` \| `token` \| `timeout` | Join did not connect. `no_backend` is native-only (a build with no baked `PETAL_BACKEND_URL`); the web classifier only yields `timeout` \| `token` \| `network`. |
 | `share_started` | `source`: `window` \| `display` \| `picker` | A share published |
 | `share_stopped` | `reason`: `user` \| `window_gone` \| `capture_failed` | A share ended |
 | `remote_audio_silent` | `duration_bucket` | Remote-track watchdog `EnteredAlarm` (#787 class) |
@@ -80,7 +83,7 @@ deltas.
 | `permission_denied` | `kind`: `screen` \| `mic` \| `camera` | User denied or lost a capture/mic/camera grant. Web screen-picker dismiss (`getDisplayMedia` `NotAllowedError`) is not this event. |
 | `remote_control_input` | `kind`: `click` \| `type` \| `paste` \| `scroll` | Host applied a coalesced remote-control input (see below). Web cannot inject OS input; the coalescer is tested but the host emulator must not emit. |
 | `device_changed` | `kind`: `display` \| `camera` \| `mic`, `change`: `switched` \| `failed` \| `reconfigured` \| `sleep` \| `wake` | Display / webcam / mic actually changed (see below) |
-| `annotation_toggled` | `state`: `on` \| `off` | #872. `draw_active` is the ONLY thing that makes the sharer overlay capture the cursor. Nothing recorded it, so a report of "I cannot click on buttons in my apps" was undiagnosable from telemetry. Emitted on a real state change only. No strokes, coordinates, or window titles. |
+| `annotation_toggled` | `state`: `on` \| `off` | #872. `draw_active` is the ONLY thing that makes the sharer overlay capture the cursor. Nothing recorded it, so a report of "I cannot click on buttons in my apps" was undiagnosable from telemetry. Emitted on a real state change only. No strokes, coordinates, or window titles. Native only today: the web client's `EVENT_NAMES` has the other twelve and does not emit this one. |
 
 No new event without an explicit add to this table. Do not map
 `log::error!` onto these; emit from the same call sites that today `warn!`

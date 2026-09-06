@@ -1,27 +1,32 @@
 # Petal backend
 
-Stateless token + room-discovery service for Petal. It exists for one reason:
+Stateless token + room service for Petal. It exists for one reason:
 **mint scoped LiveKit JWTs server-side so the LiveKit API secret never ships
-inside a client** (the P0 blocker, internal/ISSUES.md #96). It also provides cross-machine
-room **discovery** (#98).
+inside a client** (the P0 blocker, internal/ISSUES.md #96). It also lets a
+client that already holds a room credential check that room's live status
+across machines (#98).
 
 **Minimal-backend design (product directive):** the only infrastructure is
 **LiveKit + this lean Vercel function — no database.** Rooms live entirely on
-LiveKit; discovery reads LiveKit's active-room list and the human room name rides
-in LiveKit room `metadata`. The only env vars are the three LiveKit creds.
-Favorites/recents and logs/stats stay local on the client.
+LiveKit; the human room name rides in LiveKit room `metadata`. The core
+meeting service needs only the three LiveKit credentials; everything else in
+the environment (listed under "Environment" below) enables an optional
+integration. Favorites/recents and logs/stats stay local on the client.
 
 ## Endpoints
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | POST | `/api/token` | `{ room, identity, displayName? }` | `{ url, token, room, displayName? }` |
-| GET | `/api/rooms` | — | `{ rooms: [{ id, name, open, occupancy }] }` |
 | POST | `/api/rooms` | `{ name, open?, room? }` | `{ room }` (generates or stamps a credential) |
+| POST | `/api/rooms/status` | `{ rooms: [{ room, accessCode? }] }` (credentials you already hold) | `{ rooms: [{ id, name, open, occupancy }] }` — proof-of-possession status, only for the rooms whose credential you sent |
+| GET | `/api/rooms` | — | `410 Gone` — the public room directory was removed; use `/api/rooms/status` |
+| POST | `/api/gallery-token` | `{ room, identity }` + `Authorization: Bearer <livekit jwt>` | a hidden, subscribe-only token for the in-webview gallery bridge |
 | POST | `/api/ai-token` | `{ room, identity }` + `Authorization: Bearer <livekit jwt>` | `{ token, expireTime, model }` |
 | POST | `/api/admin` | `{ action: "kick" \| "close", room, identity? }` | `{ ok, action, room }` |
+| GET | `/api/version` | — | `{ commit }` (`PETAL_DEPLOY_COMMIT`), read by the deploy-freshness gate |
 | GET | `/api/updater` (alias `/latest.json`) | — | the Tauri updater manifest, verbatim from Blob |
-| GET | `/api/download` | — | 302 to the current signed DMG's Blob URL |
+| GET | `/api/download?platform=macos\|windows` | — | 302 to the current signed installer's Blob URL |
 | GET | `/` | — | 302 redirect to the marketing site (petal.live) |
 
 `room` in the token request is the internal credential
@@ -31,9 +36,9 @@ Favorites/recents and logs/stats stay local on the client.
 tokens. The returned `room` is the LiveKit room name (`petal-room-<credential>`),
 and `displayName` is the human room name read from LiveKit metadata when it is
 available.
-Public room discovery never returns the credential, derived LiveKit room name,
-or participant identities; its `id` is an
-opaque stable display/matching id and `occupancy` is the live participant count.
+There is no public room directory: `/api/rooms/status` only answers for a
+credential the caller already holds, and never returns participant
+identities — just whether the room is open and its live participant count.
 The create response returns the short access code to the creator. Native clients
 that already generated a credential pass it as `room` so the backend stamps that
 LiveKit room's metadata instead of creating a separate generated room. For those
@@ -153,9 +158,11 @@ a database):
 | `Petal_<version>_windows_x86_64-setup.exe` | the unsigned Windows x86-64 NSIS download/updater artifact |
 | `Petal_<version>_windows_x86_64-setup.exe.sig` | Windows Tauri updater signature |
 
-`latest.json` contains `darwin-aarch64`, `darwin-x86_64`, and
-`windows-x86_64` entries. The Windows `.sig` is a Tauri updater signature; it
-is not Authenticode signing and does not prevent SmartScreen warnings.
+`latest.json` contains `darwin-aarch64` and `darwin-x86_64` entries, plus
+`windows-x86_64` whenever the publish included a Windows artifact (a
+macOS-only publish omits that key). The Windows `.sig` is a Tauri updater
+signature; it is not Authenticode signing and does not prevent SmartScreen
+warnings.
 
 This backend only **reads** from Blob (`lib/blob.ts`, via `list()`) — CI does
 all the writing, this service never uploads anything. Three endpoints serve
@@ -175,7 +182,19 @@ that content:
 - **`GET /`** — this project is a pure API host (app.petal.live); it just
   302-redirects to the marketing site at `https://petal.live/`.
 
-**New required env var: `BLOB_READ_WRITE_TOKEN`** (alongside the 3 existing
+## Environment
+
+| Variable | Needed for |
+|---|---|
+| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | **Required.** Token minting and every room operation. |
+| `PETAL_ALLOWED_ORIGINS` | CORS allowlist for browser callers (comma-separated origins). |
+| `PETAL_ADMIN_TOKEN` | `/api/admin` kick/close. Without it the endpoint answers `503`. |
+| `BLOB_READ_WRITE_TOKEN` | `/api/updater` and `/api/download` (release distribution; see below). |
+| `SENTRY_DSN` | Backend error reporting. |
+| `GEMINI_API_KEY`, `GEMINI_LIVE_MODEL`, `GEMINI_API_VERSION` | `/api/ai-token` (AI chat). |
+| `PETAL_DEPLOY_COMMIT` | Reported by `/api/version`; set by the deploy script. |
+
+**Distribution env var: `BLOB_READ_WRITE_TOKEN`** (alongside the 3 required
 `LIVEKIT_*` ones). Despite the name, this backend
 only ever calls `list()` with it — Vercel Blob's `list()` API needs a token
 even for read-only access; the actual blob URLs it returns are public CDN
@@ -195,6 +214,7 @@ Needs a local SFU: `livekit-server --dev` (listens on `:7880`, key/secret
 ```bash
 npm install
 npm run typecheck
+npm test             # offline suites: distribution, privacy, ai-token, rooms-resilience, hardening
 npm run test:local   # runs against livekit-server :7880 (real create/list/delete)
 ```
 
@@ -218,7 +238,7 @@ round-trip against the running server, and rooms-directory idempotency.
 ## Client config (#97)
 
 Desktop clients read `PETAL_BACKEND_URL` and call this service for
-`POST /api/token` and `GET /api/rooms`; browser harness builds can set
+`POST /api/token` and `POST /api/rooms/status`; browser harness builds can set
 `VITE_PETAL_BACKEND_URL` to the same deployed base URL. LiveKit API secrets stay
 in this backend's environment only. Local probe binaries may still use
 `LIVEKIT_*` directly for transport diagnostics, but the app join/gallery/rooms

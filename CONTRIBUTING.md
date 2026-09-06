@@ -49,9 +49,16 @@ Never test against Petal's hosted infrastructure. Run a local stack, or see
 scripts/ci-local.sh
 ```
 
-This is the primary gate and mirrors CI: frontend check + build, backend
-typecheck + tests, `cargo build` + `cargo test --lib`, browser-client build +
-tests, the docs-site build, and the PII/secrets scan over the whole tree.
+This is the primary gate and mirrors CI. Budget real time for it — it is
+around twenty steps, not five: the nine-field version-lockstep check, release
+tooling unit tests (`bump-version`, `publish-blob`, source provenance), the
+harness contract tests, frontend check + build, backend typecheck + tests,
+`cargo build` + `cargo test --lib` (run twice: once plain, once with the
+`cockpit-privileged` feature), `cargo build --examples`, the vendored
+`tauri-nspanel` tests, clang syntax checks over `scripts/probes/`, the
+browser-client build + tests plus its isolated-deploy simulation, the web
+no-black-frame pixel gate, the docs-site build, and the PII/secrets scan over
+the public tree. Read `scripts/ci-local.sh` itself for the current list.
 
 Two things it does that you should know about up front:
 
@@ -92,7 +99,8 @@ commit — see [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
 
 **One shared UI + logic codebase.** Shared design tokens
 (`shared/ui/tokens.css`), presentational components (`shared/ui/components/`),
-and pure logic (`shared/logic/` — meeting codes, join input, local echo) are
+and pure logic (`shared/logic/` — meeting codes, join input, local echo,
+stroke expiry, tile layout mode, debug-header visibility) are
 the SINGLE SOURCE, imported by BOTH the desktop app (`apps/desktop`) and the
 browser client (`web-harness`) via the `@petal/shared` alias. Edit there, never
 in per-client copies. `web-harness/` is a real user-facing client, not a test

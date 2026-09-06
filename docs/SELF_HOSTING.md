@@ -79,8 +79,9 @@ vercel --prod
 ```
 
 The deployment's base URL is the value to use for `PETAL_BACKEND_URL` below.
-The backend exposes `/api/token`, `/api/rooms`, and the other handlers listed
-in [`backend/README.md`](../backend/README.md). Browser callers must also be
+The backend exposes `/api/token`, `/api/rooms/status`, and the other handlers
+listed in [`backend/README.md`](../backend/README.md) (`GET /api/rooms`, the
+old public room directory, is gone and answers `410`). Browser callers must also be
 allowed by CORS. Set `PETAL_ALLOWED_ORIGINS` to a comma-separated list such as
 the origin of your web harness:
 
@@ -101,6 +102,8 @@ meetings:
   repository's Vercel Blob-based release distribution. If you do not operate
   those distribution endpoints, they are not needed for token or room APIs.
 - `GEMINI_API_KEY` enables AI chat via `/api/ai-token`. See the next section.
+- `PETAL_DEPLOY_COMMIT` is reported by `GET /api/version`; the release
+  tooling's deploy-freshness gate reads it, but meetings don't need it.
 
 For a non-Vercel host, deploy the same `backend/api/*.ts` handlers with a
 compatible serverless adapter and provide the same environment variables.
@@ -181,10 +184,12 @@ you host your own browser peer (`web-harness/`), set
 environment so the desktop app's invite links point at your deployment.
 
 **There is no hosted default.** A build that leaves `PETAL_BACKEND_URL` unset
-bakes no backend at all: `cargo` prints a warning for release builds, and at
-runtime every join fails with a message telling the user the build has no token
-backend. This is deliberate — a default would mean every third-party build
-silently minting tokens against the maintainers' LiveKit and Vercel accounts.
+bakes no backend at all. A **release** build refuses to compile in that state
+(`build.rs` hard-fails; set `PETAL_ALLOW_NO_BACKEND=1` to build a deliberately
+backend-less release, in which every join fails at runtime with a message
+saying the build has no token backend). This is deliberate — a default would
+mean every third-party build silently minting tokens against the maintainers'
+LiveKit and Vercel accounts.
 
 In a **debug** build, leaving it unset (or setting it explicitly empty) instead
 activates the local dev token mint, which reads `LIVEKIT_URL`,
@@ -259,6 +264,15 @@ contains the hosted Petal default, so replace that value for a self-hosted
 deployment rather than deploying it unchanged. The harness calls
 `<backend-origin>/api/token` and uses the LiveKit URL returned by that
 response.
+
+Two telemetry caveats if you deploy with the repository's own helper,
+`scripts/deploy-web-harness.sh`: it **fails closed unless the built bundle
+contains a Sentry ingest URL**, and it defaults `VITE_SENTRY_DSN` and
+`VITE_USERDISPATCH_PUBLIC_KEY` (the feedback-form key) to Petal's own values.
+A self-hosted deployment should override both — or deploy with a plain
+`npm run build` and your own hosting — so it doesn't report into the
+maintainers' projects. `VITE_PETAL_POSTHOG_KEY` is unset unless you set it, so
+product analytics stay off by default.
 
 For local development against a local LiveKit server, leave
 `VITE_PETAL_BACKEND_URL` unset and use the harness's local token middleware;

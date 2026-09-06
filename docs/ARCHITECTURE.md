@@ -7,8 +7,10 @@ For build/run/verify rules see the root `CLAUDE.md`.
 
 ## Shape
 
-Tauri 2 app with supported macOS and Windows desktop clients; the Windows
-native surface is complete for the current product feature set. Rust core
+Tauri 2 app with macOS and Windows desktop clients. macOS is the mature
+client; the Windows native surface is substantial (capture, compositor,
+remote control, overlays) but still early, incomplete in places, and under
+heavy development — treat it as in-progress, not shipped. Rust core
 (`apps/desktop/src-tauri`, crate `desktop`) plus
 a Svelte 5 / TypeScript / Vite SPA frontend (`apps/desktop/src`, SvelteKit with
 `adapter-static`, `ssr = false`). A managed SFU (LiveKit) carries media and
@@ -56,7 +58,8 @@ Roughly `platform → capture/transport → session → chrome → diagnostics`.
     `Native` CVPixelBuffer → compositor, no CPU copy.
   - `audio.rs` — mic capture (`PlatformAudio`/WebRTC ADM), Opus publish, real
     mute, device hot-swap.
-  - `camera.rs` — native webcam capture (AVFoundation, macOS-gated).
+  - `camera/` — native webcam capture: `avf.rs` (AVFoundation, macOS),
+    `mf.rs` (Media Foundation, Windows), `mod.rs` (the shared surface).
 - **`native_display.rs`** — the zero-copy decode-to-display path: CVPixelBuffer
   → `CMSampleBuffer` → `AVSampleBufferDisplayLayer`.
 - **`compositor.rs`** — one borderless `NSPanel` per subscribed remote shared
@@ -72,11 +75,19 @@ Roughly `platform → capture/transport → session → chrome → diagnostics`.
     resize republish.
   - `room.rs` — `join_room`/`leave_room` + the per-connection watcher fan-out
     (telepointer, presence, resilience, audio, compositor feed).
-  - `camera.rs` — camera publish start/stop.
+  - `url_refresh.rs` — keeps the shared browser-window URL metadata fresh.
   - `commands.rs` — the `#[tauri::command]` wrappers.
-- **Native chrome / UI surfaces** — `hover_tab.rs` (the fixed 40×40 right-edge
-  Share/Stop rail, threshold-based drag/preset placement, native-options hold, and cursor tracker), `share_border.rs` (macOS identity border on a shared
-  window), `menubar.rs` (the macOS `NSStatusItem` pill + popover),
+  - Camera publish start/stop lives beside it in the top-level
+    `camera_session.rs` (every camera Tauri command).
+- **Native chrome / UI surfaces** — `hover_core.rs` (the cross-platform
+  hover-tab policy: the fixed 40×40 rail geometry, 6px drag threshold,
+  vertical-offset presets, share-state model) + `hover_tab.rs` (the macOS
+  `NSPanel` adapter: native-options hold and cursor tracker; Windows uses
+  `windows_hover.rs`), `share_border.rs` (macOS identity border on a shared
+  window), `share_overlay.rs` / `share_notice.rs` (the sharer-side overlay
+  and the "you are sharing" notice), `share_priority.rs` (the persisted
+  sharing-priority + hover-tab-position preferences,
+  `share-preferences.json`), `menubar.rs` (the macOS `NSStatusItem` pill + popover),
   `region_window.rs` (the cross-platform Petal View selector and its
   label-addressed title-bar controls), `windows_share_overlay.rs` (the
   Windows sharer telepointer/custom-indicator surface and the shared
@@ -211,7 +222,7 @@ and overlay surfaces described below.
   another injection route.
 - `windows_audio_device.rs` — WASAPI mic capture + playout (behind
   `transport::audio`).
-- `transport/windows_camera.rs` — Media Foundation camera capture.
+- `transport/camera/mf.rs` — Media Foundation camera capture.
 - `session_stub.rs` — the real Windows session: WASAPI mic publication, remote
   playout, MF camera, WGC share publication on the shared LiveKit connection
   (NOT a stub).
@@ -239,7 +250,8 @@ Windows), `updater.rs` (Mach-O guard on macOS, NSIS PE guard on Windows),
 | `main` | macOS/Windows `WebviewWindow` | the SPA: onboarding, `/main`, `/meeting/[room]`, `/settings` |
 | `hover-tab` | macOS `NSPanel`; Windows non-topmost `WebviewWindow` | fixed 40×40 right-edge Share/Stop rail; Windows inserts it immediately above the source so unrelated foreground windows occlude it naturally; pointer drag and native Top/Center/Bottom presets change one global vertical offset; right-click and keyboard shortcuts open the native options menu |
 | `share-border` | macOS `NSPanel` | macOS identity border drawn around a window you're sharing |
-| `share-bar-*` | macOS `NSPanel` × active shares | full-width native bar above a shared local window |
+| `share-notice` | macOS/Windows `WebviewWindow` | the sharer-side "you are sharing" notice |
+| `control-consent` | macOS `NSPanel`; Windows `WebviewWindow` | the queued, non-activating remote-control consent prompt (ordinary control and full-control escalation) |
 | `menubar-popover` | macOS `NSPanel` | the menubar pill's popover (roster + controls) |
 | `region-window-*` | macOS/Windows transparent `WebviewWindow` | Petal View selector, title-bar Share/Stop, and region placement surface |
 | `petal-sharer-pointer-*` | Windows transparent `WebviewWindow` | local telepointers/Draw plus the optional Petal identity capture border; verified same/lower-integrity ordinary windows use Win32 ownership, elevated or integrity-unknown sources keep WGC's system indicator and receive only a passive unowned telepointer, and lost replacement readiness fails back to WGC |
@@ -300,10 +312,11 @@ The authoritative, drift-proof registry is **`apps/desktop/src/lib/ipc.ts`**
 (`COMMANDS` + `EVENTS`, #132) — every frontend `invoke`/`listen` goes through
 it, and it is kept in lockstep with the Rust `#[tauri::command]` handlers in
 `lib.rs::run()`'s `generate_handler!`. Read that file for the current list
-rather than trusting a copy here. Registration is per-platform: macOS
-registers the full macOS surface (`lib.rs:809`), Windows a parallel set
-including `windows_compositor::*` (`lib.rs:1229`); `ipc.ts` documents the
-union the frontend actually calls. High-level groups:
+rather than trusting a copy here. Registration is per-platform: `lib.rs` has
+two `generate_handler!` call sites — macOS registers the full macOS surface,
+Windows a parallel set including `windows_compositor::*`; `ipc.ts` documents
+the union the frontend actually calls. High-level groups (a sample, not the
+full ~180-command list):
 
 - **Permissions:** `check_/request_` × screen-recording/microphone/camera.
 - **Sharing:** `list_shareable_windows`, `capture_window_thumbnail`,
@@ -322,17 +335,30 @@ union the frontend actually calls. High-level groups:
 - **Remote control:** `remote_control_send`/`_set_active`/`_answer_consent`/
   `_answer_escalation`/`_revoke`/`_allowed`/`set_remote_control_allowed`, plus
   native-only `remote_clipboard_copy`/`remote_clipboard_paste`.
+- **Draw / annotations:** `draw_send`, `compositor_set_draw_active`.
+- **AI chat:** the `ai_chat_*` family (the largest single group in `ipc.ts`,
+  ~21 commands: session start/stop, push-to-talk, control gating, panel
+  placement), plus `compositor_ai_chat_overlay_*` / `region_ai_chat_*`.
+- **Sharer chrome:** `share_notice_*`, `share_overlay_*`,
+  `control_consent_*`, `compositor_raise_participant_windows`.
 - **Windows/diag:** `open_*_window`, `open_main_route`, `get_network_snapshot`,
   `get_event_journal`, `set_cockpit_open`, `record_video_stream_state`,
-  `export_logs`, `log_window_stack_command`, `animate_main_window_resize`.
+  `export_logs`, `log_window_stack_command`, `animate_main_window_resize`,
+  the updater commands, and the test-cockpit commands.
 
 - **Events (Rust → frontend):** `hover-tab-update`/`-hide`, `share-error`,
-  `share-picker-changed`, `share-state-changed`, `region-share-state-changed`,
+  `share-picker-changed`/`-opened`/`-visibility-changed`,
+  `share-state-changed`, `remote-share-started`, `region-share-state-changed`,
   `region-placement-settled`, `region-placement-released`,
-  `telepointer-update`, `presence-update`, `resilience-event`, `room-left`,
-  `mic-mute-changed`, `remote-control-status`, `control-consent-requested`
-  (typed ordinary-control or full-control-escalation prompt),
-  `share-control-mode-changed`, `network-stats`, `journal-appended`.
+  `region-view-options-changed`, `region-control-state-changed`,
+  `region-warning`, `telepointer-update`, `draw-update`, `presence-update`,
+  `room-updated`, `resilience-event`, `room-left`, `mic-mute-changed`,
+  `camera-publish-state`, `desktop-windows-changed`, `debug-mode-changed`,
+  `remote-control-status`, `control-consent-requested` (typed
+  ordinary-control or full-control-escalation prompt),
+  `share-control-mode-changed`, `meeting-restore-pill-requested`,
+  `network-stats`, `journal-appended`, `test-progress`, and the `ai-chat-*`
+  family. `EVENTS` in `ipc.ts` is the complete list (~40).
 
 ## Remote-control control modes (Windows)
 
@@ -347,7 +373,7 @@ global route with the cursor staying. Escalation is **user-initiated**: the
 controller requests, the existing non-activating `control-consent` panel
 queues the prompt, and the sharer approves or denies (`set_share_control_mode`).
 A 30-second timeout fails closed; Petal never auto-escalates. See
-`docs/remote-control-trust-model.md` and `plans/windows-remote-control-modes.md`.
+`docs/remote-control-trust-model.md`.
 
 ## Native remote clipboard boundary
 
@@ -386,7 +412,11 @@ tests on both sides. See **`docs/CONTRACTS.md`** before changing any of them.
 
 ## Frontend routes
 
-`/` (onboarding gate) · `/main` (menu) · `/meeting/[room]` (in-meeting; its
-logic lives in `lib/meeting/*.svelte.ts` rune controllers, #137) · `/settings` ·
-plus native-surface routes (`/menubar-popover`, `/compositor/*`, `/window-picker`,
-`/network-cockpit`, `/region-window`) and `/dev/*` harnesses.
+`/` (onboarding gate) · `/onboarding` · `/main` (menu) · `/meeting/[room]`
+(in-meeting; its logic lives in `lib/meeting/*.svelte.ts` rune controllers,
+#137) · `/settings` · plus native-surface routes (`/menubar-popover`,
+`/hover-tab`, `/share-border`, `/share-notice`, `/control-consent`,
+`/compositor/*` — `surface`, `control`, `pointer`, `ai-chat` —
+`/ai-chat-panel`, `/window-picker`, `/network-cockpit`, `/region-window`) and
+`/dev/*` harnesses (`find apps/desktop/src/routes -name +page.svelte` is the
+authoritative list).
