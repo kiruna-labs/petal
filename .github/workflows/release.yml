@@ -22,6 +22,16 @@
 # from interleaving their Blob `put()` calls, and `workflow_dispatch` stays
 # available alongside it for a manual/throwaway run.
 #
+# E2E GATE (post-0.9.7): 0.9.7 shipped a telepointer SIGSEGV no hosted CI could
+# see -- it only fires with a real window share on a real WindowServer. Job
+# `e2e-gate` now runs .github/workflows/nightly-loopback.yml (Test Cockpit
+# Quick tier against prod + the 32-case remote-control loopback, plus process
+# survival, crash-report and SLS hit-test evidence checks) on the self-hosted
+# Tart runner at the release tag, and `release` refuses to start until it is
+# green. `e2e-watchdog` turns "no runner picked it up" into a loud failure
+# instead of a silently queued release. `skip_e2e` (manual dispatch only) is
+# the emergency bypass and is stamped into the run summary.
+#
 # RUNNER: macos-26 is REQUIRED, not incidental. `apple-metal` 0.8.8 (a hard,
 # transitive dep of our vendored `screencapturekit`) has a Swift bridge that uses
 # MTLSamplerDescriptor.reductionMode / MTLSamplerReductionMode / lodBias, which
@@ -89,6 +99,11 @@ on:
         required: false
         default: true
         type: boolean
+      skip_e2e:
+        description: "EMERGENCY ONLY: skip the self-hosted e2e gate (Test Cockpit Quick + remote-control loopback) that must otherwise pass before anything is built or published. Recorded in the run summary."
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - 'v*'
@@ -138,6 +153,62 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: bash scripts/ci/notary-preflight.sh
+
+  # Pre-publish end-to-end gate. See the E2E GATE note in the header.
+  #
+  # SECURITY: this is the ONLY automatic trigger wired to the self-hosted
+  # runner, and a `v*` tag push is maintainer-only. Never attach the gate (or
+  # nightly-loopback.yml) to `pull_request`: a third-party PR would execute on
+  # that machine, ephemeral VM or not.
+  #
+  # The gate tests a debug build of the tagged commit, not the notarized DMG
+  # (the Test Cockpit is compiled only into the QA build). Same commit, same
+  # code paths, different binary -- an accepted trade for the first version.
+  e2e-gate:
+    needs: notary-preflight
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_e2e) }}
+    uses: ./.github/workflows/nightly-loopback.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+
+  # The self-hosted runner is ON-DEMAND (scripts/runner/tart/ephemeral-runner.sh
+  # clones a guest only once a job is queued), so "runner offline" looks like a
+  # job queued forever -- and `timeout-minutes` only counts RUNNING time. This
+  # watchdog fails the run if the gate is still queued after
+  # E2E_QUEUE_BUDGET_MIN, so a release never silently hangs on RexMundi being
+  # down. Once the gate is picked up the watchdog exits 0 and the gate's own
+  # result decides.
+  e2e-watchdog:
+    needs: notary-preflight
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_e2e) }}
+    name: E2E gate queue watchdog
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      E2E_QUEUE_BUDGET_MIN: "20"
+    steps:
+      - name: Fail if the e2e gate is still queued after the budget
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + E2E_QUEUE_BUDGET_MIN * 60 ))
+          while :; do
+            # A reusable-workflow job is listed as "e2e-gate / <its job name>".
+            state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+              --jq '[.jobs[] | select(.name | startswith("e2e-gate"))] | map(.status) | first // "missing"')"
+            echo "$(date -u +%FT%TZ) e2e-gate job status: $state"
+            case "$state" in
+              in_progress|completed) echo "e2e gate was picked up by a self-hosted runner"; exit 0 ;;
+            esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::The e2e gate has sat queued for ${E2E_QUEUE_BUDGET_MIN} min with no self-hosted runner taking it. Check the tart ephemeral-runner LaunchAgent on RexMundi (launchctl list | grep petal; ~/Library/Logs/petal-tart-runner/loop.log)."
+              exit 1
+            fi
+            sleep 30
+          done
 
   # Windows is built first so a tagged release cannot publish macOS alone.
   # This lane intentionally leaves Authenticode disabled for now; the Tauri
@@ -445,7 +516,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    needs: [windows-release, deploy-web]
+    needs: [windows-release, deploy-web, e2e-gate, e2e-watchdog]
+    # `needs` alone would SKIP this job whenever e2e-gate is skipped
+    # (skip_e2e), so spell the policy out: both build prerequisites succeeded,
+    # and the gate + watchdog each either passed or were explicitly skipped.
+    # A failed or cancelled gate never reaches here.
+    if: ${{ !cancelled() && needs.windows-release.result == 'success' && needs.deploy-web.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.e2e-gate.result) && contains(fromJSON('["success","skipped"]'), needs.e2e-watchdog.result) }}
     name: Build, sign, notarize, publish macOS + Windows
     # Defaults to GitHub-hosted macos-26; `self-hosted` selects the project's
     # own registered macOS runner
@@ -776,3 +852,11 @@ jobs:
               echo "- Staged deployments were NOT promoted; latest.json untouched. Signed artifacts are attached to this run."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+          {
+            echo ""
+            if [ "${{ needs.e2e-gate.result }}" = "skipped" ]; then
+              echo "- :warning: **E2E GATE SKIPPED** -- \`skip_e2e\` was set on manual dispatch. This run did NOT pass the Test Cockpit / remote-control loopback gate."
+            else
+              echo "- E2E gate (Test Cockpit Quick + remote-control loopback on the self-hosted runner): **${{ needs.e2e-gate.result }}**."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
