@@ -44,7 +44,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import Button from './Button.svelte';
-  import Checkbox from '@petal/shared/ui/components/Checkbox.svelte';
+  import Switch from '@petal/shared/ui/components/Switch.svelte';
   import {
     REMOTE_CONTROL_POLICY_DESCRIPTION,
     REMOTE_CONTROL_POLICY_OPTIONS,
@@ -1167,6 +1167,85 @@
       unlisten?.();
     };
   });
+
+  // ---- #923 layout: section index chips + AI chat consent step ---------------
+  // The chip row mirrors the sections in DOM order (Permissions and the Test
+  // cockpit are conditional in both places), so a chip resolves its section
+  // by index — the Permissions section markup is pinned by tests and cannot
+  // carry an id.
+  const sectionChips = $derived.by(() => {
+    const chips = [{ label: 'Devices' }];
+    if (isMac()) chips.push({ label: 'Permissions' });
+    chips.push({ label: 'Privacy' }, { label: 'AI chat' }, { label: 'Diagnostics' });
+    if (showTestCockpit) chips.push({ label: 'Cockpit' });
+    chips.push({ label: 'Account' }, { label: 'About' });
+    return chips;
+  });
+  let settingsBody = $state<HTMLElement | null>(null);
+  let currentSectionIndex = $state(0);
+  // While a chip-initiated (smooth) scroll is in flight, the scroll-spy must
+  // not fight it: the body's bottom clamp would otherwise re-highlight the
+  // last chip when a short penultimate section can only reach max scroll.
+  let jumpTargetTop: number | null = null;
+  let jumpDeadline = 0;
+
+  function bodySections(): HTMLElement[] {
+    return settingsBody
+      ? Array.from(settingsBody.querySelectorAll<HTMLElement>(':scope > section.section'))
+      : [];
+  }
+
+  function jumpToSection(index: number) {
+    const body = settingsBody;
+    const target = bodySections()[index];
+    if (!body || !target) return;
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    const top = Math.min(Math.max(0, target.offsetTop - 6), body.scrollHeight - body.clientHeight);
+    jumpTargetTop = top;
+    jumpDeadline = Date.now() + 800;
+    body.scrollTo({ top, behavior: reduced ? 'auto' : 'smooth' });
+    currentSectionIndex = index;
+  }
+
+  function handleBodyScroll() {
+    const body = settingsBody;
+    if (!body) return;
+    if (jumpTargetTop !== null) {
+      if (Math.abs(body.scrollTop - jumpTargetTop) > 1 && Date.now() < jumpDeadline) return;
+      jumpTargetTop = null; // arrived (or gave up): the user's chip choice stands
+      return;
+    }
+    const sections = bodySections();
+    const probe = body.scrollTop + 56;
+    let current = 0;
+    sections.forEach((section, index) => {
+      if (section.offsetTop <= probe) current = index;
+    });
+    // At the very bottom the last section may never reach the probe line.
+    if (body.scrollTop + body.clientHeight >= body.scrollHeight - 2) current = sections.length - 1;
+    currentSectionIndex = current;
+  }
+
+  // Turning AI chat ON is a consent boundary (see the section comment below):
+  // the switch does not flip until the user confirms the two consequences.
+  // Turning it OFF is immediate.
+  let aiChatConsentOpen = $state(false);
+
+  function handleAiChatSwitch(event: Event & { currentTarget: HTMLInputElement }) {
+    const enabled = event.currentTarget.checked;
+    if (enabled && !aiChat.enabled) {
+      event.currentTarget.checked = false;
+      aiChatConsentOpen = true;
+      return;
+    }
+    aiChatConsentOpen = false;
+    void handleAiChatEnabledChange(enabled);
+  }
+
+  function confirmAiChat() {
+    aiChatConsentOpen = false;
+    void handleAiChatEnabledChange(true);
+  }
 </script>
 
 <!-- Escape closes the reset confirm from anywhere while it is open
@@ -1177,139 +1256,156 @@
     <span class="title" data-tauri-drag-region>Settings</span>
   </div>
 
-  <div class="settings-body">
+  <!-- #923: one chip per section, in DOM order. Jumps scroll the body; the
+       current chip follows the scroll position. -->
+  <nav class="section-index" aria-label="Settings sections">
+    {#each sectionChips as chip, index (chip.label)}
+      <button
+        type="button"
+        class="index-chip"
+        aria-current={currentSectionIndex === index ? 'true' : undefined}
+        onclick={() => jumpToSection(index)}
+      >
+        {chip.label}
+      </button>
+    {/each}
+  </nav>
+
+  <div class="settings-body" bind:this={settingsBody} onscroll={handleBodyScroll}>
     <!-- ============ Devices ============ -->
     <section class="section">
       <h2 class="section-title">Devices</h2>
-
-      {#if cameraDenied}
-        <!-- Camera TCC is denied/restricted (issue #8): show the real
-             recovery path — System Settings deep link (Privacy & Security →
-             Camera) + relaunch hint + retry — never the bare dead-end
-             placeholder. Interactive, so no aria-hidden here. -->
-        <div class="preview-box denied">
-          <span class="preview-label">Camera access is turned off for Petal</span>
-          <span class="preview-reason">
-            Enable Petal under Privacy &amp; Security → Camera, then relaunch if the preview stays dark.
-          </span>
-          <div class="preview-actions">
-            <Button variant="primary" onclick={() => void openPrivacySettings('camera')}>
-              Open System Settings
-            </Button>
-            <Button variant="ghost" onclick={() => void acquirePreview(cameraValue)}>Try again</Button>
-          </div>
-        </div>
-      {:else}
-        <div class="preview-box" aria-hidden="true">
-          {#if previewStream}
-            <!-- Real camera feed via getUserMedia (see acquirePreview above). -->
-            <!-- svelte-ignore a11y_media_has_caption -->
-            <video class="preview-video" bind:this={previewVideo} autoplay playsinline muted></video>
+      <div class="group">
+        <div class="row stack">
+          {#if cameraDenied}
+            <!-- Camera TCC is denied/restricted (issue #8): show the real
+                 recovery path — System Settings deep link (Privacy & Security →
+                 Camera) + relaunch hint + retry — never the bare dead-end
+                 placeholder. Interactive, so no aria-hidden here. -->
+            <div class="preview-box denied">
+              <span class="preview-label">Camera access is turned off for Petal</span>
+              <span class="preview-reason">
+                Enable Petal under Privacy &amp; Security → Camera, then relaunch if the preview stays dark.
+              </span>
+              <div class="preview-actions">
+                <Button variant="primary" onclick={() => void openPrivacySettings('camera')}>
+                  Open System Settings
+                </Button>
+                <Button variant="ghost" onclick={() => void acquirePreview(cameraValue)}>Try again</Button>
+              </div>
+            </div>
           {:else}
-            <!-- Fallback placeholder — shown until a stream is acquired, or
-                 when acquisition fails (reason line below). -->
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M2 7a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"></path>
-              <path d="M16 10l5-3v10l-5-3"></path>
-            </svg>
-            <span class="preview-label">Camera preview unavailable</span>
-            {#if previewError}
-              <span class="preview-reason">{previewError}</span>
+            <div class="preview-box" aria-hidden="true">
+              {#if previewStream}
+                <!-- Real camera feed via getUserMedia (see acquirePreview above). -->
+                <!-- svelte-ignore a11y_media_has_caption -->
+                <video class="preview-video" bind:this={previewVideo} autoplay playsinline muted></video>
+              {:else}
+                <!-- Fallback placeholder — shown until a stream is acquired, or
+                     when acquisition fails (reason line below). -->
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2 7a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"></path>
+                  <path d="M16 10l5-3v10l-5-3"></path>
+                </svg>
+                <span class="preview-label">Camera preview unavailable</span>
+                {#if previewError}
+                  <span class="preview-reason">{previewError}</span>
+                {/if}
+              {/if}
+            </div>
+          {/if}
+          <span class="row-title">Camera</span>
+          <DeviceSelect
+            id="camera-device"
+            label="Camera"
+            value={cameraValue}
+            options={cameraOptions}
+            emptyLabel="No cameras found"
+            disabled={noCameras || cameraDevicesError !== null}
+            onchange={(value) => void handleCameraSelect(value)}
+          />
+          {#if cameraDevicesError}
+            <span class="device-note error">{cameraDevicesError}</span>
+          {:else if cameraNote}
+            <span class:status-error={cameraNote.startsWith('Could not')} class="device-note">{cameraNote}</span>
+          {/if}
+        </div>
+
+        {#if !isMac()}
+          <div class="row stack">
+            <span class="row-title">Camera resolution</span>
+            <DeviceSelect
+              id="camera-resolution"
+              label="Camera resolution"
+              value={cameraResolutionId}
+              options={CAMERA_RESOLUTION_PRESETS.map((p) => ({ id: p.id, label: p.label }))}
+              emptyLabel="No camera"
+              disabled={!cameraModesAvailable}
+              disabledOptions={cameraResolutionDisabled}
+              onchange={(value) => void handleResolutionSelect(value)}
+            />
+          </div>
+
+          <div class="row stack">
+            <span class="row-title">Camera frame rate</span>
+            <DeviceSelect
+              id="camera-fps"
+              label="Camera frame rate"
+              value={String(cameraFps)}
+              options={CAMERA_FPS_PRESETS.map((fps) => ({ id: String(fps), label: `${fps} fps` }))}
+              emptyLabel="No camera"
+              disabled={!cameraModesAvailable || cameraResolutionId === 'auto'}
+              disabledOptions={cameraFpsDisabled}
+              onchange={(value) => void handleFpsSelect(value)}
+            />
+            {#if hasDisabledCameraPresets && cameraModesAvailable}
+              <span class="device-note">Greyed-out modes are not supported by this camera.</span>
             {/if}
-          {/if}
-        </div>
-      {/if}
-
-      <div class="field">
-        <span class="field-label">Camera</span>
-        <DeviceSelect
-          id="camera-device"
-          label="Camera"
-          value={cameraValue}
-          options={cameraOptions}
-          emptyLabel="No cameras found"
-          disabled={noCameras || cameraDevicesError !== null}
-          onchange={(value) => void handleCameraSelect(value)}
-        />
-        {#if cameraDevicesError}
-          <span class="device-note error">{cameraDevicesError}</span>
-        {:else if cameraNote}
-          <span class:status-error={cameraNote.startsWith('Could not')} class="device-note">{cameraNote}</span>
+            {#if cameraPrefsNote}
+              <span class:status-error={cameraPrefsNote.startsWith('Could not')} class="device-note">{cameraPrefsNote}</span>
+            {/if}
+          </div>
         {/if}
-      </div>
 
-      {#if !isMac()}
-        <div class="field">
-          <span class="field-label">Camera resolution</span>
+        {#if audioDevicesError}
+          <!-- Honest backend failure (no audio hardware / ADM init failed) —
+               surfaced instead of silently keeping stale sample options. -->
+          <div class="row stack">
+            <span class="device-note error">{audioDevicesError}</span>
+          </div>
+        {/if}
+
+        <div class="row stack">
+          <span class="row-title">Microphone</span>
           <DeviceSelect
-            id="camera-resolution"
-            label="Camera resolution"
-            value={cameraResolutionId}
-            options={CAMERA_RESOLUTION_PRESETS.map((p) => ({ id: p.id, label: p.label }))}
-            emptyLabel="No camera"
-            disabled={!cameraModesAvailable}
-            disabledOptions={cameraResolutionDisabled}
-            onchange={(value) => void handleResolutionSelect(value)}
+            id="microphone-device"
+            label="Microphone"
+            value={micValue}
+            options={micOptions}
+            emptyLabel="No microphones found"
+            disabled={noMics || audioDevicesError !== null}
+            onchange={(value) => void handleMicSelect(value)}
           />
+          {#if micNote}
+            <span class="device-note">{micNote}</span>
+          {/if}
         </div>
 
-        <div class="field">
-          <span class="field-label">Camera frame rate</span>
+        <div class="row stack">
+          <span class="row-title">Speaker</span>
           <DeviceSelect
-            id="camera-fps"
-            label="Camera frame rate"
-            value={String(cameraFps)}
-            options={CAMERA_FPS_PRESETS.map((fps) => ({ id: String(fps), label: `${fps} fps` }))}
-            emptyLabel="No camera"
-            disabled={!cameraModesAvailable || cameraResolutionId === 'auto'}
-            disabledOptions={cameraFpsDisabled}
-            onchange={(value) => void handleFpsSelect(value)}
+            id="speaker-device"
+            label="Speaker"
+            value={speakerValue}
+            options={speakerOptions}
+            emptyLabel="No speakers found"
+            disabled={noSpeakers || audioDevicesError !== null}
+            onchange={(value) => void handleSpeakerSelect(value)}
           />
-          {#if hasDisabledCameraPresets && cameraModesAvailable}
-            <span class="device-note">Greyed-out modes are not supported by this camera.</span>
-          {/if}
-          {#if cameraPrefsNote}
-            <span class:status-error={cameraPrefsNote.startsWith('Could not')} class="device-note">{cameraPrefsNote}</span>
+          {#if speakerNote}
+            <span class="device-note">{speakerNote}</span>
           {/if}
         </div>
-      {/if}
-
-      {#if audioDevicesError}
-        <!-- Honest backend failure (no audio hardware / ADM init failed) —
-             surfaced instead of silently keeping stale sample options. -->
-        <span class="device-note error">{audioDevicesError}</span>
-      {/if}
-
-      <div class="field">
-        <span class="field-label">Microphone</span>
-        <DeviceSelect
-          id="microphone-device"
-          label="Microphone"
-          value={micValue}
-          options={micOptions}
-          emptyLabel="No microphones found"
-          disabled={noMics || audioDevicesError !== null}
-          onchange={(value) => void handleMicSelect(value)}
-        />
-        {#if micNote}
-          <span class="device-note">{micNote}</span>
-        {/if}
-      </div>
-
-      <div class="field">
-        <span class="field-label">Speaker</span>
-        <DeviceSelect
-          id="speaker-device"
-          label="Speaker"
-          value={speakerValue}
-          options={speakerOptions}
-          emptyLabel="No speakers found"
-          disabled={noSpeakers || audioDevicesError !== null}
-          onchange={(value) => void handleSpeakerSelect(value)}
-        />
-        {#if speakerNote}
-          <span class="device-note">{speakerNote}</span>
-        {/if}
       </div>
     </section>
 
@@ -1357,56 +1453,63 @@
     <!-- ============ Privacy &amp; Sharing ============ -->
     <section class="section">
       <h2 class="section-title">Privacy &amp; Sharing</h2>
-      <fieldset class="policy-row" aria-describedby="remote-control-policy-description">
-        <legend class="support-title">{REMOTE_CONTROL_POLICY_TITLE}</legend>
-        <span class="support-description" id="remote-control-policy-description">
-          {REMOTE_CONTROL_POLICY_DESCRIPTION}
-        </span>
-        <div class="policy-options" role="radiogroup" aria-label={REMOTE_CONTROL_POLICY_TITLE}>
-          {#each REMOTE_CONTROL_POLICY_OPTIONS as option (option.value)}
-            <label class="policy-option">
-              <input
-                type="radio"
-                name="remote-control-policy"
-                value={option.value}
-                checked={remoteControlPolicy === option.value}
-                onchange={() => onRemoteControlPolicyChange?.(option.value)}
-              />
-              <span class="policy-option-copy">
-                <span class="policy-option-label">{option.label}</span>
-                <span class="policy-option-hint">{option.hint}</span>
-              </span>
-            </label>
-          {/each}
-        </div>
-      </fieldset>
-      <label class="toggle-row">
-        <Checkbox
-          checked={localEchoEnabled}
-          onchange={(e) => onLocalEchoEnabledChange?.(e.currentTarget.checked)}
-        />
-        <span class="toggle-copy">
-          <span class="support-title">Local echo (experimental)</span>
-          <span class="support-description">
-            When you're controlling someone else's window, show instant local feedback for your
-            own clicks, keys, and typing (a ripple, a pending text strip) before the real frame
-            arrives. It's a prediction of what you sent, not confirmation it happened — off by default.
+      <div class="group">
+        <!-- Remote-control policy (consent flow): three selectable rows in one
+             radiogroup. Every label WRAPS (no nowrap anywhere) so the 400px
+             main window can never clip the copy. -->
+        <fieldset class="policy-row" aria-describedby="remote-control-policy-description">
+          <legend class="row-title">{REMOTE_CONTROL_POLICY_TITLE}</legend>
+          <span class="row-description" id="remote-control-policy-description">
+            {REMOTE_CONTROL_POLICY_DESCRIPTION}
           </span>
-        </span>
-      </label>
-      <label class="toggle-row">
-        <Checkbox
-          checked={debugSettings.enabled}
-          onchange={(e) => void handleDebugModeEnabledChange(e.currentTarget.checked)}
-        />
-        <span class="toggle-copy">
-          <span class="support-title">{DEBUG_MODE_SETTING_TITLE}</span>
-          <span class="support-description">{DEBUG_MODE_SETTING_DESCRIPTION}</span>
-        </span>
-      </label>
-      {#if debugModeError}
-        <span class="device-note error">{debugModeError}</span>
-      {/if}
+          <div class="policy-options" role="radiogroup" aria-label={REMOTE_CONTROL_POLICY_TITLE}>
+            {#each REMOTE_CONTROL_POLICY_OPTIONS as option (option.value)}
+              <label class="policy-option" class:selected={remoteControlPolicy === option.value}>
+                <input
+                  type="radio"
+                  name="remote-control-policy"
+                  value={option.value}
+                  checked={remoteControlPolicy === option.value}
+                  onchange={() => onRemoteControlPolicyChange?.(option.value)}
+                />
+                <span class="policy-option-copy">
+                  <span class="policy-option-label">{option.label}</span>
+                  <span class="policy-option-hint">{option.hint}</span>
+                </span>
+                <svg class="policy-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M5 12.5 10 17.5 19 7"></path>
+                </svg>
+              </label>
+            {/each}
+          </div>
+        </fieldset>
+        <label class="row switch-row">
+          <span class="row-copy">
+            <span class="row-title">Local echo (experimental)</span>
+            <span class="row-description">
+              Instant local preview of your own clicks and typing while you control someone else's
+              window — a prediction, not confirmation. Off by default.
+            </span>
+          </span>
+          <Switch
+            checked={localEchoEnabled}
+            onchange={(e) => onLocalEchoEnabledChange?.(e.currentTarget.checked)}
+          />
+        </label>
+        <label class="row switch-row">
+          <span class="row-copy">
+            <span class="row-title">{DEBUG_MODE_SETTING_TITLE}</span>
+            <span class="row-description">{DEBUG_MODE_SETTING_DESCRIPTION}</span>
+          </span>
+          <Switch
+            checked={debugSettings.enabled}
+            onchange={(e) => void handleDebugModeEnabledChange(e.currentTarget.checked)}
+          />
+        </label>
+        {#if debugModeError}
+          <div class="row stack"><span class="device-note error">{debugModeError}</span></div>
+        {/if}
+      </div>
     </section>
 
     <!-- ============ AI chat (#656) ============
@@ -1418,70 +1521,98 @@
          shared window, AND other participants can start a session on a window
          YOU share, which sends that window and the room's voice to Google. Do
          not compress these back into one line: the second is the one a user
-         would not otherwise expect. The key field stays visible here so a user
-         can prepare a key before turning the feature on — it is inert until
-         they do. -->
+         would not otherwise expect. #923 moved that copy into a confirm step
+         that opens when the switch is flipped on (the switch stays off until
+         the user confirms), and the key field into the section below the
+         switch, shown once the feature is on or a key is already saved. -->
     <section class="section">
       <h2 class="section-title">AI chat</h2>
-      <label class="toggle-row">
-        <Checkbox
-          checked={aiChat.enabled}
-          onchange={(e) => void handleAiChatEnabledChange(e.currentTarget.checked)}
-        />
-        <span class="toggle-copy">
-          <span class="support-title">{AI_CHAT_CONSENT_TITLE}</span>
-          <span class="support-description">{AI_CHAT_CONSENT_DESCRIPTION}</span>
-          <span class="support-description consent-warning">
-            {AI_CHAT_CONSENT_SHARED_WINDOW_WARNING}
+      <div class="group">
+        <label class="row switch-row">
+          <span class="row-copy">
+            <span class="row-title">AI chat on shared windows</span>
+            <span class="row-description">
+              {#if aiChat.enabled}
+                On — anyone in your meetings can start AI chat on a window you share.
+              {:else}
+                Adds an AI chat button to every shared window in your meetings.
+              {/if}
+            </span>
           </span>
-        </span>
-      </label>
-
-      <div class="field">
-        <span class="field-label">Gemini API key (optional)</span>
-        {#if aiChat.hasApiKey}
-          <div class="ai-key-saved">
-            <span class="ai-key-state">Key saved</span>
-            <button
-              type="button"
-              class="reset-button"
-              disabled={aiChatBusy}
-              onclick={() => void handleAiChatRemoveKey()}
-            >
-              Remove
-            </button>
+          <Switch checked={aiChat.enabled} disabled={aiChatBusy} onchange={handleAiChatSwitch} />
+        </label>
+        {#if aiChatConsentOpen}
+          <div class="consent" role="group" aria-label={AI_CHAT_CONSENT_TITLE}>
+            <span class="row-description">{AI_CHAT_CONSENT_DESCRIPTION}</span>
+            <span class="row-description consent-warning">
+              {AI_CHAT_CONSENT_SHARED_WINDOW_WARNING}
+            </span>
+            <div class="consent-actions">
+              <Button variant="ghost" onclick={() => (aiChatConsentOpen = false)}>Cancel</Button>
+              <Button variant="primary" onclick={confirmAiChat}>{AI_CHAT_CONSENT_TITLE}</Button>
+            </div>
           </div>
         {/if}
-        <div class="ai-key-row">
-          <input
-            class="input ai-key-input"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder={aiChat.hasApiKey ? 'Replace the saved key' : 'Paste your Gemini API key'}
-            bind:value={aiChatKeyDraft}
-          />
-          <Button
-            variant="primary"
-            disabled={aiChatBusy || aiChatKeyDraft.trim().length === 0}
-            onclick={() => void handleAiChatSaveKey()}
-          >
-            Save
-          </Button>
-        </div>
-        <span class="support-description">
-          Bring your own key and AI chat bills to your own Google account.
-          {AI_CHAT_COST_NOTE}
-          {AI_CHAT_KEY_DATA_USE_NOTE}
-        </span>
-        <button type="button" class="link-button" onclick={() => void openAiChatKeyPage()}>
-          Get a key at aistudio.google.com/apikey
-        </button>
-        {#if aiChatNote}
-          <span class="device-note">{aiChatNote}</span>
-        {/if}
-        {#if aiChatError}
-          <span class="device-note error">{aiChatError}</span>
+        {#if aiChat.enabled || aiChat.hasApiKey}
+          <div class="row stack sub-row">
+            <span class="row-copy">
+              <span class="row-title">Gemini API key <span class="row-optional">optional</span></span>
+              <span class="row-description">
+                Bring your own key and AI chat bills to your own Google account. {AI_CHAT_COST_NOTE}
+              </span>
+            </span>
+            {#if aiChat.hasApiKey}
+              <div class="ai-key-saved">
+                <span class="ai-key-state">Key saved</span>
+                <button
+                  type="button"
+                  class="reset-button small"
+                  disabled={aiChatBusy}
+                  onclick={() => void handleAiChatRemoveKey()}
+                >
+                  Remove
+                </button>
+              </div>
+            {/if}
+            <div class="ai-key-row">
+              <input
+                class="input ai-key-input"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder={aiChat.hasApiKey ? 'Replace the saved key' : 'Paste your Gemini API key'}
+                bind:value={aiChatKeyDraft}
+              />
+              <Button
+                variant="primary"
+                disabled={aiChatBusy || aiChatKeyDraft.trim().length === 0}
+                onclick={() => void handleAiChatSaveKey()}
+              >
+                Save
+              </Button>
+            </div>
+            <span class="row-description">
+              {AI_CHAT_KEY_DATA_USE_NOTE}
+              <button type="button" class="link-button" onclick={() => void openAiChatKeyPage()}>
+                Get a key at aistudio.google.com/apikey
+              </button>
+            </span>
+            {#if aiChatNote}
+              <span class="device-note">{aiChatNote}</span>
+            {/if}
+            {#if aiChatError}
+              <span class="device-note error">{aiChatError}</span>
+            {/if}
+          </div>
+        {:else if aiChatNote || aiChatError}
+          <div class="row stack">
+            {#if aiChatNote}
+              <span class="device-note">{aiChatNote}</span>
+            {/if}
+            {#if aiChatError}
+              <span class="device-note error">{aiChatError}</span>
+            {/if}
+          </div>
         {/if}
       </div>
     </section>
@@ -1489,12 +1620,29 @@
     <!-- ============ Diagnostics ============ -->
     <section class="section">
       <h2 class="section-title">Diagnostics</h2>
-      <div class="support-row">
-        <div class="support-copy">
-          <span class="support-title">Export logs</span>
-          <span class="support-description">
-            Reveal a zip of your logs to attach to an email. Nothing leaves this device.
+      <div class="group">
+        <div class="row stack">
+          <span class="row-copy">
+            <span class="row-title">Export logs</span>
+            <span class="row-description">
+              Reveals a zip of your logs to attach to a bug report. Nothing leaves this device.
+            </span>
           </span>
+          <div class="row-controls">
+            <select
+              class="range-select"
+              bind:value={exportLogsDays}
+              disabled={exportLogsBusy}
+              aria-label="Log export date range"
+            >
+              <option value={2}>Last 2 days</option>
+              <option value={7}>Last 7 days</option>
+              <option value={0}>All logs</option>
+            </select>
+            <Button variant="primary" disabled={exportLogsBusy} onclick={() => void handleExportLogs()}>
+              {exportLogsBusy ? 'Exporting...' : 'Export logs'}
+            </Button>
+          </div>
           {#if exportLogsNote}
             <span class="device-note">{exportLogsNote}</span>
           {/if}
@@ -1502,114 +1650,20 @@
             <span class="device-note error">{exportLogsError}</span>
           {/if}
         </div>
-        <div class="export-logs-actions">
-          <select
-            class="export-logs-range"
-            bind:value={exportLogsDays}
-            disabled={exportLogsBusy}
-            aria-label="Log export date range"
-          >
-            <option value={2}>Last 2 days</option>
-            <option value={7}>Last 7 days</option>
-            <option value={0}>All logs</option>
-          </select>
-          <Button variant="primary" disabled={exportLogsBusy} onclick={() => void handleExportLogs()}>
-            {exportLogsBusy ? 'Exporting...' : 'Export logs'}
-          </Button>
-        </div>
-      </div>
-      {#if isMac()}
-      <label class="toggle-row">
-        <Checkbox
-          checked={sentryEnabled}
-          onchange={(e) => onSentryEnabledChange?.(e.currentTarget.checked)}
-        />
-        <span class="toggle-copy">
-          <span class="support-title">Send crash and error reports to Sentry</span>
-          <span class="support-description">
-            Helps us diagnose problems and improve Petal. Used for diagnostics generally, not just crashes.
+        {#if isMac()}
+        <label class="row switch-row">
+          <span class="row-copy">
+            <span class="row-title">Send crash and error reports to Sentry</span>
+            <span class="row-description">
+              Helps us diagnose problems and improve Petal. Used for diagnostics generally, not just crashes.
+            </span>
           </span>
-        </span>
-      </label>
-      {/if}
-    </section>
-
-    <!-- ============ Reset ============ -->
-    <section class="section">
-      <h2 class="section-title">Reset</h2>
-      <div class="support-row reset-row">
-        <div class="support-copy">
-          <span class="support-title">Reset Petal</span>
-          <span class="support-description">
-            Clears Petal's identity, rooms, favorites, device choices, and saved window positions. Petal will quit.
-          </span>
-          {#if resetNote}
-            <span class="device-note">{resetNote}</span>
-          {/if}
-        </div>
-        <div
-          class="reset-actions"
-          bind:this={resetActionsRoot}
-          onfocusout={handleResetFocusOut}
-        >
-          <button
-            type="button"
-            class="reset-button danger"
-            disabled={resetBusy}
-            aria-haspopup="dialog"
-            aria-expanded={resetConfirmOpen}
-            onclick={toggleResetConfirm}
-          >
-            Reset Petal
-          </button>
-          <div
-            class="reset-popover"
-            class:open={resetConfirmOpen}
-            class:open-above={resetOpenAbove}
-            role="dialog"
-            aria-label="Confirm reset"
-            aria-hidden={!resetConfirmOpen}
-          >
-              <span class="reset-popover-note">
-                "Reset and quit" clears Petal's local data and quits.
-              </span>
-              {#if isMac()}
-                <span class="device-note">
-                  To also reset macOS permissions, paste these commands into Terminal afterwards
-                  (copied to your clipboard when you click "Reset and quit" below, or copy them now):
-                </span>
-                <div class="reset-command-row">
-                  <pre class="reset-command">{permissionResetCommand}</pre>
-                  <button type="button" class="reset-button copy" onclick={() => void copyPermissionResetCommand()}>
-                    Copy
-                  </button>
-                </div>
-              {/if}
-              {#if resetCopyFailedConfirm}
-                <span class="device-note error">
-                  Could not copy the commands above automatically. Select and copy them manually
-                  before continuing, since Petal won't be able to do it after it quits.
-                </span>
-              {/if}
-              {#if resetError}
-                <span class="device-note error">{resetError}</span>
-              {/if}
-              <div class="reset-popover-actions">
-                {#if resetCopyFailedConfirm}
-                  <button type="button" class="reset-button confirm" disabled={resetBusy} onclick={() => void handleFactoryReset(true)}>
-                    {resetBusy ? 'Resetting...' : 'Quit anyway'}
-                  </button>
-                {:else}
-                  <button type="button" class="reset-button confirm" disabled={resetBusy} onclick={() => void handleFactoryReset()}>
-                    {resetBusy ? 'Resetting...' : 'Reset and quit'}
-                  </button>
-                {/if}
-                <button type="button" class="reset-button" disabled={resetBusy} onclick={() => (resetConfirmOpen = false)}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-        </div>
+          <Switch
+            checked={sentryEnabled}
+            onchange={(e) => onSentryEnabledChange?.(e.currentTarget.checked)}
+          />
+        </label>
+        {/if}
       </div>
     </section>
 
@@ -1752,7 +1806,7 @@
           {/if}
           {#if cockpitStatus?.summary?.skipped?.length}
             <div class="cockpit-skipped">
-              <span class="support-title">Skipped</span>
+              <span class="row-title">Skipped</span>
               {#each cockpitStatus.summary.skipped as skipped}
                 <span class="device-note">{skipped.id}: {skipped.reason}</span>
               {/each}
@@ -1771,33 +1825,6 @@
       </section>
     {/if}
 
-    <!-- ============ Updates ============ -->
-    <section class="section">
-      <h2 class="section-title">Updates</h2>
-      <div class="support-row">
-        <div class="support-copy">
-          <span class="support-title">Check for updates</span>
-          <span class="support-description">
-            {#if buildInfo}
-              Currently on v{displayBuildVersion(buildInfo)} ({buildInfo.commit}). Petal checks automatically on
-              launch; use this to check right now.
-            {:else}
-              Petal checks automatically on launch; use this to check right now.
-            {/if}
-          </span>
-          {#if checkUpdatesNote}
-            <span class="device-note">{checkUpdatesNote}</span>
-          {/if}
-          {#if checkUpdatesError}
-            <span class="device-note error">{checkUpdatesError}</span>
-          {/if}
-        </div>
-        <Button variant="primary" disabled={checkUpdatesBusy} onclick={() => void handleCheckForUpdates()}>
-          {checkUpdatesBusy ? 'Checking...' : 'Check for updates'}
-        </Button>
-      </div>
-    </section>
-
     <!-- ============ Account ============ -->
     <section class="section">
       <h2 class="section-title">Account</h2>
@@ -1808,10 +1835,112 @@
         {onIdentityChange}
       />
     </section>
+
+    <!-- ============ About: updates + reset ============ -->
+    <section class="section">
+      <div class="section-head">
+        <h2 class="section-title">About</h2>
+        {#if buildInfo}
+          <span class="section-meta">v{displayBuildVersion(buildInfo)} · {buildInfo.commit}</span>
+        {/if}
+      </div>
+      <div class="group">
+        <div class="row">
+          <span class="row-copy">
+            <span class="row-title">Updates</span>
+            <span class="row-description">Petal checks automatically on launch.</span>
+            {#if checkUpdatesNote}
+              <span class="device-note">{checkUpdatesNote}</span>
+            {/if}
+            {#if checkUpdatesError}
+              <span class="device-note error">{checkUpdatesError}</span>
+            {/if}
+          </span>
+          <Button variant="ghost" disabled={checkUpdatesBusy} onclick={() => void handleCheckForUpdates()}>
+            {checkUpdatesBusy ? 'Checking...' : 'Check for updates'}
+          </Button>
+        </div>
+        <div class="row reset-row">
+          <span class="row-copy">
+            <span class="row-title">Reset Petal</span>
+            <span class="row-description">
+              Clears Petal's identity, rooms, favorites, device choices, and saved window positions. Petal will quit.
+            </span>
+            {#if resetNote}
+              <span class="device-note">{resetNote}</span>
+            {/if}
+          </span>
+          <div
+            class="reset-actions"
+            bind:this={resetActionsRoot}
+            onfocusout={handleResetFocusOut}
+          >
+            <button
+              type="button"
+              class="reset-button danger"
+              disabled={resetBusy}
+              aria-haspopup="dialog"
+              aria-expanded={resetConfirmOpen}
+              onclick={toggleResetConfirm}
+            >
+              Reset…
+            </button>
+            <div
+              class="reset-popover"
+              class:open={resetConfirmOpen}
+              class:open-above={resetOpenAbove}
+              role="dialog"
+              aria-label="Confirm reset"
+              aria-hidden={!resetConfirmOpen}
+            >
+                <span class="reset-popover-note">
+                  "Reset and quit" clears Petal's local data and quits.
+                </span>
+                {#if isMac()}
+                  <span class="device-note">
+                    To also reset macOS permissions, paste these commands into Terminal afterwards
+                    (copied to your clipboard when you click "Reset and quit" below, or copy them now):
+                  </span>
+                  <div class="reset-command-row">
+                    <pre class="reset-command">{permissionResetCommand}</pre>
+                    <button type="button" class="reset-button copy" onclick={() => void copyPermissionResetCommand()}>
+                      Copy
+                    </button>
+                  </div>
+                {/if}
+                {#if resetCopyFailedConfirm}
+                  <span class="device-note error">
+                    Could not copy the commands above automatically. Select and copy them manually
+                    before continuing, since Petal won't be able to do it after it quits.
+                  </span>
+                {/if}
+                {#if resetError}
+                  <span class="device-note error">{resetError}</span>
+                {/if}
+                <div class="reset-popover-actions">
+                  {#if resetCopyFailedConfirm}
+                    <button type="button" class="reset-button confirm" disabled={resetBusy} onclick={() => void handleFactoryReset(true)}>
+                      {resetBusy ? 'Resetting...' : 'Quit anyway'}
+                    </button>
+                  {:else}
+                    <button type="button" class="reset-button confirm" disabled={resetBusy} onclick={() => void handleFactoryReset()}>
+                      {resetBusy ? 'Resetting...' : 'Reset and quit'}
+                    </button>
+                  {/if}
+                  <button type="button" class="reset-button" disabled={resetBusy} onclick={() => (resetConfirmOpen = false)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 </div>
 
 <style>
+  /* ---- #923 layout: one row primitive, two heading styles, a section index ---- */
   .settings {
     display: flex;
     flex-direction: column;
@@ -1825,7 +1954,7 @@
   }
 
   /* Frameless: the panel IS the window — no card frame, fills the route.
-     The body keeps its own 18px padding + internal scroll. */
+     The body keeps its own padding + internal scroll. */
   .settings.frameless {
     width: 100%;
     flex: 1;
@@ -1850,30 +1979,296 @@
     text-wrap: balance;
   }
 
+  /* Section index: one chip per section. Seven chips do not fit one line at
+     the 400px window width, so the row wraps (two lines) rather than hiding
+     chips behind a sideways scroll. */
+  .section-index {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    flex-shrink: 0;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .index-chip {
+    flex-shrink: 0;
+    padding: 6px 11px;
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: var(--fill-weak);
+    color: var(--text-dim);
+    font: 600 12px var(--font-ui);
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color var(--motion-fast) var(--ease-standard),
+      color var(--motion-fast) var(--ease-standard);
+  }
+
+  .index-chip:hover {
+    background: var(--fill-base);
+    color: var(--text-strong);
+  }
+
+  .index-chip[aria-current='true'] {
+    background: var(--fill-strong);
+    color: var(--text-primary);
+  }
+
+  .index-chip:focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+  }
+
   .settings-body {
+    position: relative;
     flex: 1;
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: none;
-    padding: 18px;
+    padding: 8px 14px 22px;
     display: flex;
     flex-direction: column;
-    gap: clamp(14px, 2vh, 18px);
+    gap: 20px;
   }
 
   .section {
     display: flex;
     flex-direction: column;
+    gap: 6px;
+  }
+
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
     gap: 10px;
   }
 
+  /* Heading style 1 of 2: the section label. */
   .section-title {
-    margin: 0 0 2px;
-    font: 600 11px var(--font-mono);
+    margin: 0;
+    padding: 8px 4px 2px;
+    font: 700 11.5px var(--font-display);
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-faint);
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
     text-wrap: balance;
+  }
+
+  .section-meta {
+    font: 500 11px var(--font-mono);
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The group: one bordered surface per section; rows separate with a hairline. */
+  .group {
+    display: flex;
+    flex-direction: column;
+    border-radius: var(--radius-popover);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    overflow: visible; /* the reset popover overlays past the group edge */
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 48px;
+    padding: 11px 14px;
+    box-sizing: border-box;
+  }
+
+  .group > :last-child {
+    border-bottom-left-radius: inherit;
+    border-bottom-right-radius: inherit;
+  }
+
+  .row + .row,
+  .policy-row + .row,
+  .row + .policy-row,
+  .consent + .row {
+    border-top: 1px solid var(--hairline);
+  }
+
+  /* A row whose control needs the full width stacks: copy, then control. */
+  .row.stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .row.sub-row {
+    background: var(--fill-weak);
+  }
+
+  .switch-row {
+    cursor: pointer;
+  }
+
+  .row-copy {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  /* Heading style 2 of 2: the row title. */
+  .row-title {
+    font: 600 13.5px var(--font-ui);
+    color: var(--text-primary);
+    text-wrap: pretty;
+  }
+
+  .row-optional {
+    margin-left: 4px;
+    font: 500 11.5px var(--font-ui);
+    color: var(--text-faint);
+  }
+
+  .row-description {
+    font: 500 12px/1.4 var(--font-ui);
+    color: var(--text-dim);
+    text-wrap: pretty;
+  }
+
+  /* The half of the AI chat consent a user would not expect: what turning the
+     switch on lets OTHER people do to a window of theirs. Lifted out of the
+     muted ramp so it cannot read as fine print. Wraps like every other
+     description — it is never clipped at any panel width. */
+  .consent-warning {
+    color: var(--warning);
+    font-weight: 600;
+  }
+
+  .row-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .row-controls :global(.btn) {
+    flex-shrink: 0;
+  }
+
+  .row > :global(.btn) {
+    flex-shrink: 0;
+  }
+
+  /* The consent step for AI chat: opens under the switch row, closes on
+     Cancel or confirm. Same warning tint as the copy it carries. */
+  .consent {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px 14px;
+    border-top: 1px solid var(--hairline);
+    background: color-mix(in srgb, var(--warning) 7%, transparent);
+  }
+
+  .consent-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 2px;
+  }
+
+  /* Remote-control policy: a fieldset that reads as three selectable rows.
+     Every label WRAPS (overflow-wrap, never nowrap) so the 400px main window
+     can never clip the copy. */
+  .policy-row {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+    margin: 0;
+    padding: 11px 14px 8px;
+    border: 0;
+  }
+
+  .policy-row legend {
+    padding: 0;
+  }
+
+  .policy-options {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 8px -6px 0;
+  }
+
+  .policy-option {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 7px 8px 7px 6px;
+    border-radius: var(--radius-input);
+    cursor: pointer;
+    transition: background-color var(--motion-fast) var(--ease-standard);
+  }
+
+  .policy-option:hover {
+    background: var(--fill-weak);
+  }
+
+  .policy-option.selected {
+    background: var(--fill-base);
+  }
+
+  /* The native radio stays the interactive element (keyboard, screen readers);
+     the check glyph on the right is the visible state. */
+  .policy-option input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .policy-option:has(input:focus-visible) {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+  }
+
+  .policy-option-copy {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .policy-option-label {
+    font: 500 13px var(--font-ui);
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+  }
+
+  .policy-option-hint {
+    font: 400 12px var(--font-ui);
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
+
+  .policy-check {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    color: var(--text-strong);
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-standard);
+  }
+
+  .policy-option.selected .policy-check {
+    opacity: 1;
   }
 
   .preview-box {
@@ -1883,7 +2278,7 @@
     justify-content: center;
     gap: 8px;
     height: 120px;
-    border-radius: var(--radius-tile);
+    border-radius: var(--radius-input);
     background: linear-gradient(160deg, var(--surface-2), var(--surface));
     box-shadow: var(--shadow-inset-hairline);
     color: var(--text-faint);
@@ -1939,20 +2334,8 @@
     text-wrap: pretty;
   }
 
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .field-label {
-    font: 500 12px var(--font-ui);
-    color: var(--text-dim);
-  }
-
-
   .input {
-    height: 40px;
+    height: 36px;
     border-radius: var(--radius-input);
     background: var(--fill-base);
     border: 1px solid var(--hairline-strong);
@@ -1965,23 +2348,17 @@
 
   .input::placeholder {
     color: var(--text-faint);
-    font-size: 11px;
+    font-size: 11.5px;
   }
 
   .input:focus-visible {
-    outline: 2px solid var(--id-blue);
-    outline-offset: 2px;
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
   }
 
-  .select:focus-visible {
-    outline: 2px solid var(--id-blue);
-    outline-offset: 2px;
-  }
-
-  /* One-line honest device status under a select (issue #28) — same
-     quiet register as .preview-reason. */
+  /* One-line honest device status under a select (issue #28). */
   .device-note {
-    font: 500 10px var(--font-mono);
+    font: 500 10.5px var(--font-mono);
     color: var(--text-faint);
     text-wrap: pretty;
   }
@@ -2024,13 +2401,11 @@
   /* Text link in the settings register: wraps rather than clipping, since the
      URL is long relative to the 400px window. */
   .link-button {
-    align-self: flex-start;
-    max-width: 100%;
     padding: 0;
     border: none;
     background: none;
     color: var(--id-blue);
-    font: 500 11px/1.35 var(--font-ui);
+    font: 500 12px/1.4 var(--font-ui);
     text-align: left;
     text-decoration: underline;
     text-underline-offset: 2px;
@@ -2039,148 +2414,44 @@
   }
 
   .link-button:focus-visible {
-    outline: 2px solid var(--id-blue);
-    outline-offset: 2px;
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
   }
 
   .permission-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-  }
-
-  .support-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 14px;
-    padding: 12px;
-    border-radius: var(--radius-tile);
-    background: var(--fill-weak);
-    box-shadow: var(--shadow-inset-hairline);
-  }
-
-  .export-logs-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .export-logs-range {
-    font: 500 12px var(--font-ui);
-    color: var(--text-primary);
-    background: var(--fill-weak);
-    border: none;
-    box-shadow: var(--shadow-inset-hairline);
-    border-radius: var(--radius-chip);
-    padding: 6px 8px;
-  }
-
-  .export-logs-range:disabled {
-    opacity: 0.6;
-  }
-
-  .toggle-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 12px;
-    border-radius: var(--radius-tile);
-    background: var(--fill-weak);
-    box-shadow: var(--shadow-inset-hairline);
-    cursor: pointer;
-  }
-
-  .toggle-copy {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  /* Remote-control policy (consent flow): a 3-way radio row in the same
-     tile shell as `.toggle-row`. Every label WRAPS (no nowrap anywhere) so
-     the 400px main window can never clip the copy. */
-  .policy-row {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
     gap: 6px;
-    margin: 0;
-    padding: 12px;
-    border: 0;
-    border-radius: var(--radius-tile);
-    background: var(--fill-weak);
-    box-shadow: var(--shadow-inset-hairline);
   }
 
-  .policy-row legend {
-    padding: 0;
-  }
-
-  .policy-options {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-top: 4px;
-  }
-
-  .policy-option {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    min-width: 0;
-    cursor: pointer;
-  }
-
-  .policy-option input {
-    margin: 2px 0 0;
-    flex: 0 0 auto;
-    accent-color: var(--id-blue);
-  }
-
-  .policy-option-copy {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .policy-option-label {
-    font: 500 13px var(--font-ui);
+  .range-select {
+    font: 500 12.5px var(--font-ui);
     color: var(--text-primary);
-    overflow-wrap: anywhere;
-  }
-
-  .policy-option-hint {
-    font: 400 12px var(--font-ui);
-    color: var(--text-muted);
-    overflow-wrap: anywhere;
-  }
-
-  .support-copy {
-    display: flex;
+    background: var(--fill-base);
+    border: 1px solid var(--hairline-strong);
+    border-radius: var(--radius-input);
+    padding: 7px 10px;
     min-width: 0;
-    flex: 1;
-    flex-direction: column;
-    gap: 4px;
   }
 
-  .support-title {
-    font: 600 13px var(--font-ui);
-    color: var(--text-primary);
+  .range-select:disabled {
+    opacity: var(--disabled-opacity);
   }
 
+  .range-select:focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+  }
+
+  /* The cockpit section keeps its own dense panel (privileged builds only). */
   .cockpit-panel {
     display: flex;
     flex-direction: column;
     gap: 10px;
     padding: 12px;
-    border-radius: var(--radius-tile);
-    background: var(--fill-weak);
-    box-shadow: var(--shadow-inset-hairline);
+    border-radius: var(--radius-popover);
+    background: var(--surface);
+    border: 1px solid var(--hairline);
   }
 
   .cockpit-toolbar {
@@ -2538,20 +2809,6 @@
     gap: 4px;
   }
 
-  .support-description {
-    font: 500 11px/1.35 var(--font-ui);
-    color: var(--text-muted);
-    text-wrap: pretty;
-  }
-
-  /* The half of the AI chat consent a user would not expect: what turning the
-     switch on lets OTHER people do to a window of theirs. Lifted out of the
-     muted ramp so it cannot read as fine print. Wraps like every other
-     description — it is never clipped at any panel width. */
-  .consent-warning {
-    color: var(--warning);
-    font-weight: 600;
-  }
 
   /* The Reset button centers against its copy like every other row button.
      The confirm lives in an anchored popover that OVERLAYS the page, so
@@ -2631,11 +2888,10 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 112px;
-    height: 36px;
+    min-width: 96px;
+    height: 34px;
     padding: 0 12px;
-    /* A button, not a tile: --radius-tile is 16 (gallery tiles); buttons use
-       the 12px control radius (pre-sweep value). */
+    /* A button, not a tile: buttons use the 12px control radius. */
     border-radius: var(--radius-control);
     border: 1px solid var(--hairline-strong);
     background: var(--fill-base);
@@ -2649,6 +2905,11 @@
       transform var(--motion-fast) var(--ease-standard);
   }
 
+  .reset-button.small {
+    min-width: 0;
+    height: 30px;
+  }
+
   .reset-button:hover:not(:disabled) {
     background: var(--fill-bright);
   }
@@ -2657,6 +2918,7 @@
     transform: scale(var(--press-scale, 0.96));
   }
 
+  /* The one destructive-coloured control on the panel. */
   .reset-button.danger,
   .reset-button.confirm {
     background: var(--danger-tint-16);
@@ -2698,12 +2960,4 @@
   .reset-button.copy {
     flex-shrink: 0;
   }
-
-  @media (max-width: 390px) {
-    .support-row {
-      align-items: stretch;
-      flex-direction: column;
-    }
-  }
-
 </style>
