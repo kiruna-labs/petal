@@ -50,7 +50,10 @@ check() {
     FAILURES=$((FAILURES + 1))
     return
   fi
-  if [ -n "$expect_pattern" ] && ! echo "$body" | grep -qE "$expect_pattern"; then
+  # Here-string, not `echo | grep -q`: under pipefail grep exiting on the first
+  # match sends echo SIGPIPE and a large body (the ~1 MB JS bundle) reports
+  # failure although it matched -- it failed the 0.9.7 release's final check.
+  if [ -n "$expect_pattern" ] && ! grep -qE "$expect_pattern" <<<"$body"; then
     echo "FAIL: $desc -- GET $url returned $status but body didn't match /$expect_pattern/" >&2
     FAILURES=$((FAILURES + 1))
     return
@@ -69,7 +72,7 @@ check_body_contains() {
     FAILURES=$((FAILURES + 1))
     return
   fi
-  if ! echo "$body" | grep -qE "$expect_pattern"; then
+  if ! grep -qE "$expect_pattern" <<<"$body"; then   # here-string: see check() above
     echo "FAIL: $desc -- GET $url returned 200 but body didn't match /$expect_pattern/" >&2
     FAILURES=$((FAILURES + 1))
     return
