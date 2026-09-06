@@ -3,7 +3,7 @@
 // Thin Vercel adapter over handleToken. Browser callers are CORS-allowlisted;
 // native/server callers normally send no Origin header.
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { handleToken } from '../lib/handlers.js';
 import { applyCors, clientRateLimitKey, sendApiError } from '../lib/http.js';
 

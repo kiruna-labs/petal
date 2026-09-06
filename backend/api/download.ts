@@ -2,7 +2,7 @@
 // Bare requests remain macOS-compatible; `?platform=macos|windows` selects a
 // deterministic platform-specific artifact for websites and invite surfaces.
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { findBlobByPrefixSuffix } from '../lib/blob.js';
 import { applyCors, sendApiError } from '../lib/http.js';
 

@@ -2,7 +2,7 @@
 // Admin-only LiveKit control primitives for revoking a participant or closing
 // a room. The bearer token is a server/admin secret, never a room credential.
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { handleAdminControl } from '../lib/handlers.js';
 import { applyCors, sendApiError } from '../lib/http.js';
 

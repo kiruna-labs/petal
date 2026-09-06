@@ -2,7 +2,7 @@
 // the parts j.ts needs. See that file for the full version used by the
 // token/rooms/admin/etc. endpoints, which stay in the backend project.
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from './vercel.js';
 
 const DEFAULT_ALLOWED_ORIGINS = ['https://meet.petal.live'];
 

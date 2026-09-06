@@ -7,7 +7,7 @@
 //   Clients that hold credentials use POST /api/rooms/status instead. 410 (not
 //   404/405) so a stale client fails loudly with the reason.
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { handleCreateRoom } from '../lib/handlers.js';
 import { applyCors, clientRateLimitKey, sendApiError } from '../lib/http.js';
 

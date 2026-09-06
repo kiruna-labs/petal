@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { getGlobalDispatcher, MockAgent, setGlobalDispatcher } from 'undici';
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import adminHandler from '../api/admin.js';
 import downloadHandler from '../api/download.js';
 import galleryTokenHandler from '../api/gallery-token.js';

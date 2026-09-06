@@ -3,7 +3,7 @@
 // CI produces latest.json and uploads it to Vercel Blob at the stable
 // pathname "latest.json" (issue #104); this handler only serves it.
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { findBlobByPathname, fetchBlobJson } from '../lib/blob.js';
 import { applyCors } from '../lib/http.js';
 import { captureApiError, errorTypeName, flushSentry } from '../lib/sentry.js';
