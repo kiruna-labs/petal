@@ -265,7 +265,7 @@ windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Media_Aud
 windows-core = "0.61.2"
 # `windows` disables the async adapter's default `std` feature; the
 # borderless-capture consent operation needs its bounded completion bridge.
-windows-future = { version = "0.2.1", features = ["std"] }
+windows-future = { version = "0.100.0", features = ["std"] }
 # WebView2 COM interface for disabling autofill (IsGeneralAutofillEnabled /
 # IsPasswordAutosaveEnabled). Already in Cargo.lock (0.38.2) via wry 0.55 --
 # a direct dep adds no new build surface, same reasoning as percent-encoding above.
