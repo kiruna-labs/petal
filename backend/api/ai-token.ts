@@ -18,7 +18,7 @@
 // `requestedExpireTime` is the ceiling we asked for. The two are never
 // conflated: the requested value is not evidence of what Google granted.
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { handleAiToken } from '../lib/handlers.js';
 import { applyCors, clientRateLimitKey, sendApiError } from '../lib/http.js';
 
