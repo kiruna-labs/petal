@@ -3083,17 +3083,17 @@
       "version": "2.1.1"
     },
     {
-      "bom-ref": "cookie@0.6.0",
+      "bom-ref": "cookie@0.7.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/cookie/-/cookie-0.6.0.tgz"
+          "url": "https://registry.npmjs.org/cookie/-/cookie-0.7.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "53bd5cc936a6ba1d4244d09fa4663ab68dbc971bcdc0f1b81aecff1158e07f7266cefd2f943a756ad4fd792e5d0e33181ee7291db5a7b3a2f07f704acfab2f77"
+          "content": "ca48b95e72ae7fbe74979d2e193965b7a90a20b6389d0d5e34841ab685c40726797568272aa6e7aa64eb044e41e0dee5acc24a436cad58c8933b6a34bfa130ff"
         }
       ],
       "licenses": [
@@ -3110,10 +3110,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/cookie@0.6.0",
+      "purl": "pkg:npm/cookie@0.7.2",
       "scope": "optional",
       "type": "library",
-      "version": "0.6.0"
+      "version": "0.7.2"
     },
     {
       "bom-ref": "debug@4.4.3",
@@ -5813,7 +5813,7 @@
         "@sveltejs/acorn-typescript@1.0.10",
         "@types/cookie@0.6.0",
         "acorn@8.17.0",
-        "cookie@0.6.0",
+        "cookie@0.7.2",
         "devalue@5.8.1",
         "esm-env@1.2.2",
         "kleur@4.1.5",
@@ -5982,7 +5982,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "cookie@0.6.0"
+      "ref": "cookie@0.7.2"
     },
     {
       "dependsOn": [

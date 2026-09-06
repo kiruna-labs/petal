@@ -1,0 +1,100 @@
+# Dependabot version updates (llitllit/petal#928).
+#
+# Without this file Dependabot only ALERTS; it never opens update PRs, which is
+# how the public repo reached 46 open advisories with zero pull requests. One
+# entry per manifest, weekly, with non-major updates GROUPED so a quiet week
+# is one reviewable PR per ecosystem rather than one per package. Majors stay
+# separate PRs on purpose: they are the ones that need a human to read the
+# changelog.
+#
+# Security updates (the alert-driven PRs) are a repo setting, not this file:
+#   Settings > Code security > Dependabot security updates -- enabled alongside
+#   this commit via `gh api -X PUT repos/kiruna-labs/petal/automated-security-fixes`.
+#
+# Every Dependabot PR that touches a lockfile trips the SBOM freshness gate
+# (.github/workflows/sbom.yml) until `bash scripts/generate-sbom.sh` is run and
+# committed on the PR branch -- that is intended: a lockfile change must land
+# with its SBOM.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      desktop-non-major:
+        update-types: [minor, patch]
+    labels: [dependencies, area:desktop]
+
+  - package-ecosystem: npm
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      backend-non-major:
+        update-types: [minor, patch]
+    labels: [dependencies, area:backend]
+
+  - package-ecosystem: npm
+    directory: /web-harness
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      web-harness-non-major:
+        update-types: [minor, patch]
+    labels: [dependencies, area:web-harness]
+
+  - package-ecosystem: npm
+    directory: /site
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      site-non-major:
+        update-types: [minor, patch]
+    labels: [dependencies, area:site]
+
+  - package-ecosystem: cargo
+    directory: /apps/desktop/src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo-non-major:
+        update-types: [minor, patch]
+    labels: [dependencies, area:desktop]
+
+  # The Rust bench/harness crate has its own lockfile and carries the same
+  # glib alert as the app; keep the two locks moving together.
+  - package-ecosystem: cargo
+    directory: /apps/desktop/src-tauri/harness
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    groups:
+      harness-cargo-non-major:
+        update-types: [minor, patch]
+    labels: [dependencies, area:desktop]
+
+  # Pinned action versions in the workflows (checkout, setup-node, rust
+  # toolchain, upload-artifact ...).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        update-types: [minor, patch]
+    labels: [dependencies, area:ci]
