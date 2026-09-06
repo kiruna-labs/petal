@@ -85,12 +85,19 @@ async function findOne(dir, suffix) {
 }
 
 async function upload(pathname, data, contentType) {
+  // latest.json is the one pathname that is OVERWRITTEN each release and read
+  // through the Blob CDN by /api/updater; the default cache-control is 30
+  // days. Keep it to 60 s so a release is visible within a minute (the 0.9.7
+  // publish was followed by minutes of the CDN still serving 0.9.4). The
+  // versioned installers never change, so they keep the default.
+  const cacheControlMaxAge = pathname === 'latest.json' ? 60 : undefined;
   const { url } = await put(pathname, data, {
     access: 'public',
     addRandomSuffix: false,
     allowOverwrite: true,
     contentType,
     token,
+    ...(cacheControlMaxAge !== undefined ? { cacheControlMaxAge } : {}),
   });
   console.log(`  uploaded ${pathname} -> ${url}`);
   return url;
