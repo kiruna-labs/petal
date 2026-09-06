@@ -206,7 +206,7 @@ cd backend
 npm test
 ```
 
-`npm test` runs both `test/distribution.ts` (mocked Vercel Blob/API fetches; covers the distribution/update endpoints and blob helpers) and `test/privacy.ts` (covers room-credential/access-code derivation, Sentry PII-scrub allowlisting, and admin-auth error contracts).
+`npm test` runs five offline suites: `test/distribution.ts` (mocked Vercel Blob/API fetches; covers the distribution/update endpoints and blob helpers), `test/privacy.ts` (room-credential/access-code derivation, Sentry PII-scrub allowlisting, admin-auth error contracts), `test/ai-token.ts` (the `/api/ai-token` mint: bearer verification, identity shape, rate limits), `test/rooms-resilience.ts` (room create/status behaviour when LiveKit misbehaves), and `test/hardening.ts` (input hardening across the handlers).
 
 There is also a live local integration test:
 
@@ -217,7 +217,7 @@ LIVEKIT_URL=ws://localhost:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret
 
 `npm run test:local` runs `test/local.ts` against `livekit-server --dev`, and verifies slug lockstep, JWT grants, LiveKit admin create/list/delete, and room-directory behavior.
 
-**`npm test` only proves the SOURCE is correct — it never touches the live deployment.** Real incident (2026-07-05): the invite-link route (`api/j.ts`) and a round of copy edits to the join/download pages were correct on `main` and passed `npm test`, but the live backend still served the OLD build because it was never redeployed (`vercel --prod` is a separate, manual step from `git push`). Unit tests against the handler functions cannot catch "forgot to redeploy" — only hitting the actual production URL can.
+**`npm test` only proves the SOURCE is correct — it never touches the live deployment.** Real incident (2026-07-05): the invite-link route (then `backend/api/j.ts`, now `web-harness/api/j.ts`) and a round of copy edits to the join/download pages were correct on `main` and passed `npm test`, but the live backend still served the OLD build because it was never redeployed (`vercel --prod` is a separate, manual step from `git push`). Unit tests against the handler functions cannot catch "forgot to redeploy" — only hitting the actual production URL can.
 
 **After every `cd backend && vercel --prod` deploy, run:**
 ```sh
@@ -520,9 +520,14 @@ permission dance at all.
 ### Remote control
 
 1. In the browser tab, click **Request control** on the shared-window tile.
-   With remote control left enabled (the default — desktop's "Disable remote
-   control" checkbox describes the *action*, so seeing that label means it's
-   currently *allowed*), control is granted immediately, no approval prompt.
+   The sharer's **Settings → Privacy & Sharing → Remote control of my shared
+   windows** policy decides what happens next (since 2026-08-22,
+   `af043a3e`): the default **Ask me each time** raises the native consent
+   panel on the sharer — click **Allow** there (it auto-denies after 30s);
+   **Allow automatically** grants immediately with no prompt (the old
+   behaviour, and what unattended harness runs configure); **Off** refuses.
+   A per-share "Allow remote control" lock in the hover-tab menu is a second,
+   independent gate.
 2. Click once inside the video tile (establishes pointer target + focus),
    then type. Check `~/Library/Logs/Petal/petal.log` for
    `remote-control: received kind=Pointer`/`kind=Key` and
@@ -874,7 +879,9 @@ status" line for a live/human-only suite goes stale silently — nothing
 re-runs it automatically. Re-run `scripts/rc-live-suite.sh` after any change
 near `meetingCode.ts`/`rooms.rs`/`remote_control.rs` and update this line.
 
-The numbered remote-control matrix is now 30 cases. Cases 5, 8, 15, 16, 21,
+The numbered remote-control matrix is now 32 cases (31 = consent allow,
+32 = consent deny, added with the sharer consent prompt, `af043a3e`; the
+"30-case" figures in older entries below predate them). Cases 5, 8, 15, 16, 21,
 25, 26, and 28 use the standalone AppKit sentinel's JSONL event log plus the
 owner-gated `remote-control-status`/`remote-control-disable` socket commands;
 case 23 runs automatically when `displayplacer list` reports a second display.
@@ -945,9 +952,9 @@ cases 22/25/28/29 (each got a genuine independent read for the first time
 now that the cascade is gone — worth a fresh investigation pass, not yet
 triaged). Also found: `scripts/rc-live-suite.sh`'s own wrapper hits a
 macOS-bash-3.2 `set -u` "unbound variable" bug on `"${MODE_ARGS[@]}"` when
-empty (i.e. every default, non-`--press-to-photon` run) — worked around by
-invoking `remote-control-local-loopback.mjs --live` directly; not yet fixed
-in the wrapper itself.
+empty (i.e. every default, non-`--press-to-photon` run) — worked around at
+the time by invoking `remote-control-local-loopback.mjs --live` directly.
+Since fixed in the wrapper (`${MODE_ARGS[@]+"${MODE_ARGS[@]}"}`).
 
 **Live status (2026-08-14, CURRENT): 27 pass / 2 fail / 1 skip**, up from
 **2 pass / 28 fail** at the start of the same session. Full video path
@@ -981,11 +988,13 @@ and a replayed op's terminal result does not reach the controller. Cases
 and pass otherwise. Case 23 skips without a second display, by design.
 
 **Exit-code caveat for anyone automating "is the suite green":** the suite
-exits non-zero on ANY failed case, including the known #820 residue — there is
-no expected-failures allowlist. Until 29/30 are fixed, a supervising script
-must parse `/tmp/rc-results.json` and compare the failing case IDs against the
-known set rather than trusting the exit code; treat any failure OUTSIDE
-{29, 30} (or a skip of a pass-bar case) as a real regression.
+exits non-zero on ANY failed case — there is no expected-failures allowlist.
+While a known residue exists, a supervising script must parse
+`/tmp/rc-results.json` and compare the failing case IDs against the known set
+rather than trusting the exit code; treat any failure outside that set (or a
+skip of a pass-bar case) as a real regression. (#820 — the 29/30 residue
+above — has since been closed, 2026-08-15; the next live run sets the new
+expected set, and nobody has recorded one here yet.)
 
 **Do not read the #446 note in the entry above as still explaining cases 5/8/21.**
 Case 5 and case 8 pass. The three direct routes
@@ -1013,9 +1022,10 @@ were nearly cited as evidence in the session that produced the numbers above:
 - **Nothing about a second display** (case 23) or a second machine.
 
 This human-run suite's status log is separate from the Test Cockpit's automatic
-baseline-diffing system. After a Cockpit run, use
-`scripts/cockpit-baseline-compare.mjs` as documented below to detect per-machine
-regressions; the comparison does not update or replace the live-status entry
+baseline-diffing system. The Cockpit compares each run against the per-machine
+baseline itself (the former `cockpit-baseline-compare.mjs` script was ported
+into Rust, `test_cockpit/conclusions.rs`, #479) to detect per-machine
+regressions; that comparison does not update or replace the live-status entry
 above.
 
 ## Test Cockpit
@@ -1027,8 +1037,8 @@ oracle observed the native host effect, while `ContentVerified` means decoded
 content was checked. `WireShape`, `LivenessProxy`, and `Scaffold` are weaker
 signals. A passing weaker signal is rendered mechanically as `PASS (proxy — not
 content-verified)` in the run conclusion. `RC-P1080` is tagged `HostEffect`
-because its intended oracle compares the host sentinel ledger; live execution
-still depends on the active-share setup tracked by #470.
+because its intended oracle compares the host sentinel ledger; its live
+execution depends on the active-share setup (#470, closed 2026-07-15).
 
 Each real cockpit run now compares its artifacts with the per-machine,
 ignored `baseline.json` automatically. The comparison is embedded in the
@@ -1361,8 +1371,9 @@ That doc predated the Test Cockpit build-out and was still labeled "DRAFT v2"
 with no updates since. Multi-participant validation now has two current,
 actively-maintained owners instead: the Cockpit's `MULTI-3` scenario
 (automated, native tier) for the mechanical join/roster/independence proof,
-and issue #28 (the running live-validation tracker) for anything needing a
-human end-to-end pass. Don't recreate a third parallel tracking doc for this.
+and `docs/PRE-RELEASE-TESTING.md`'s human checklist for anything needing a
+human end-to-end pass (issue #28, the old running live-validation tracker,
+is closed). Don't recreate a third parallel tracking doc for this.
 
 ### SHARE-W2N-Q walking skeleton and Rust engine (#254/#257)
 
@@ -1382,7 +1393,7 @@ What it does:
   journal tail. Read-only, synchronous, non-privileged.
 - `web-harness`'s `__petalHarness.cockpitAutoScenario.join(code)` /
   `.sharePattern()` (`src/
-  cockpit.ts`, wired in `src/controls.ts`/`src/main.ts`) expose the same
+  cockpit.ts`, wired in `src/main.ts`) expose the same
   join/publish paths the interactive UI uses as plain callables, plus a
   `?auto=<scenarioId>` URL param that runs an unattended join -> self-check
   -> sharePattern step list with no CDP required for that flow itself.
@@ -1608,7 +1619,9 @@ reliably die when the top PID gets SIGTERM'd. `release_owned_processes` prints
 `"nothing this script started is still alive"` even when that's false. **Every
 time this suite reports a failure, confirm with your own `pgrep -fl
 "target/debug/desktop"` before starting the next attempt** — don't trust the
-cleanup line. Tracked as #798; not yet fixed.
+cleanup line. Tracked as #798, fixed 2026-08-14 (the suite now tears down the
+descendants it recorded before signalling) — the manual `pgrep` check is
+still cheap insurance.
 
 **4. The `--live` wrapper buffers ALL child output until the child exits — zero
 incremental visibility during the actual test matrix.**
@@ -2251,10 +2264,26 @@ still rejects translated execution for release evidence, and that stays true.
 | `PETAL_AUTOTEST_TOGGLE_CYCLES` | desktop autotest | Number of stop/start cycles; defaults to the code's fallback when unset. |
 | `PETAL_AUTOTEST_SOCK` | desktop autotest and scenario scripts | Unix socket path for newline-delimited JSON commands. |
 | `PETAL_AUTOTEST_SHARE_WITH_BORDER` | `apps/desktop/src-tauri/src/autotest.rs` | Enables the bordered hover-tab share path for the autotest's initial share instead of the plain toggle-share path, exercising the exact hover-tab lifecycle. |
-| `PETAL_AUTOTEST_SHARE_COLOR` | `apps/desktop/src-tauri/src/hover_tab.rs` | Overrides the hover-tab/share-border color used when no explicit color is supplied to a share. |
+| `PETAL_AUTOTEST_SHARE_COLOR` | `apps/desktop/src-tauri/src/hover_core.rs` | Overrides the hover-tab/share-border color used when no explicit color is supplied to a share. |
+| `PETAL_AUTOTEST_FRESH_ROOM` | `apps/desktop/src-tauri/src/autotest.rs` | `1` creates a dedicated room when the QA room key has no persisted mapping. |
+| `PETAL_AUTOTEST_REQUEST_AX` | `apps/desktop/src-tauri/src/autotest.rs` | `1` fires the real onboarding Accessibility request at startup (for TCC-grant rigs). |
+| `PETAL_AUTOTEST_PICKER_TARGET` | `apps/desktop/src-tauri/src/window_picker.rs` | Debug-only exact target (`window:<id>`, `pid:<pid>`, `owner:<App>`) that bypasses the interactive system picker while still running the real picker capture/publish path. |
+| `PETAL_DISABLE_AX` / `PETAL_DISABLE_AX_GETWINDOW` | `apps/desktop/src-tauri/src/platform/ax.rs` | Kill switches for the Accessibility fast paths (bisecting AX-related hangs). |
+| `PETAL_DISABLE_SLS` | `apps/desktop/src-tauri/src/platform/sls.rs` | Disables the SkyLight private-API path. |
+| `PETAL_FORCE_SOFTWARE_ENCODE` | `apps/desktop/src-tauri/src/transport/publisher.rs` | Forces the software H.264 encoder instead of VideoToolbox hardware. |
+| `PETAL_TRACE_PANEL_GEOMETRY` | `compositor.rs`, `ai_chat/panel.rs` | One ordered log line per geometry write and refused write (see `docs/ENGINEERING.md`). |
+| `PETAL_TEST_CROSS_VOLUME_DIR` | `apps/desktop/src-tauri/src/updater.rs` (test) | Directory on a *different* volume; without it `install_across_a_real_volume_boundary` early-returns as a pass. Not set by `ci-local.sh` or CI. |
+| `PETAL_RECORD_WINDOW_FIXTURES` / `_SECS`, `PETAL_BLESS_GOLDENS` | `apps/desktop/src-tauri/src/window_fixtures.rs` | Record window-tracking characterization fixtures / re-bless goldens (#742). |
+| `PETAL_AX_OBS_DIAG` | `apps/desktop/src-tauri/src/platform/ax_observer.rs` | Verbose AX-observer diagnostics. |
+| `PETAL_TEST_REAL_WINEVENTS` / `PETAL_TEST_REAL_OVERLAY_WINEVENTS` | `apps/desktop/src-tauri/src/window_change_watcher.rs` (Windows) | Opt the Windows watcher tests into real WinEvent hooks. |
+| `PETAL_REMOTE_CONTROL_WEB_JOIN_TIMEOUT_MS` | `apps/desktop/scripts/remote-control-scenario.mjs` | Web-peer join timeout for the remote-control scenario (sibling of `…SHARE_READY_TIMEOUT_MS` below). |
+| `PETAL_LOG_PATH` | `apps/desktop/scripts/remote-control-scenario.mjs` | Override the petal.log path the scenario tails. |
+| `PETAL_RC_SENTINEL_CLICK_DELAY_MS`, `PETAL_RC_BURST_*` (`CADENCES`, `DRAIN_MS`, `MIN_CLICKS`, `SECONDS`, `SETTLE_MS`) | `apps/desktop/scripts/remote-control-scenario.mjs` | Rapid-click-burst mode tuning. |
+| `PETAL_ACCEPTANCE_416_TRIALS` / `_ACCESS_CODE` / `_LOG` | `apps/desktop/scripts` (#416 acceptance rig) | Trial count, room, and log path for the #416 resize-fight acceptance sampler. |
+| `PETAL_BUILD_DATE`, `PETAL_GIT_COMMIT`, `PETAL_RELEASE_BUNDLE_ID` | `build.rs` / `lib.rs` | Build-time bakes shown in Settings → Updates and used by the release identity checks. |
 | `PETAL_BACKEND_URL` | `apps/desktop/scripts/cockpit.mjs`, `test_cockpit` engine | Prod backend to mint tokens against; default `https://app.petal.live`. |
 | `PETAL_HARNESS_URL` | `apps/desktop/scripts/cockpit.mjs`, `test_cockpit` engine | web-harness origin the headless Chrome peer navigates to; default `https://meet.petal.live`. |
-| `PETAL_CHROME_BIN` | `apps/desktop/scripts/cockpit.mjs` | Path to the branded Google Chrome binary to launch headless; default `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`. |
+| `PETAL_CHROME_BIN` | `apps/desktop/scripts/cockpit.mjs`, `scripts/verify-no-black-frame.mjs`, `scripts/verify-web-harness-browser.mjs`, `scripts/verify-speaker-playout.sh`, `test_cockpit/mod.rs`, the browser-driven `apps/desktop/tests/*.test.ts` | Path to the branded Google Chrome binary to launch headless; default `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`. |
 | `PETAL_COCKPIT_ARTIFACT_RETENTION_DAYS` | `test_cockpit` engine | Max age for pruning video/audio artifacts referenced by `run.jsonl`; default `14`. Structured `run.jsonl` and `scorecard.json` are never pruned. |
 | `PETAL_COCKPIT_ARTIFACT_RETENTION_RUNS` | `test_cockpit` engine | Minimum recent runs per scenario whose video/audio artifacts are retained even if older than the age cutoff; default `20`. |
 | `PETAL_COCKPIT_NATIVE_PEER_SOCKET` | `test_cockpit/mod.rs` | Per-run Unix socket path the parent cockpit process injects into the spawned test-peer binary for command handoff during the SHARE-N2N scenario. |

@@ -61,7 +61,7 @@ audio journey must be run with audio explicitly enabled.
 | ID | Journey | Coverage | Runs via |
 |---|---|---|---|
 | AUD-01 | A web peer speaks → the native app actually **hears** it (decoded PCM carries energy, snippet artifact a human can play) | 🤖 | cockpit `AUD-01` with `PETAL_DISABLE_AUDIO=0`. **PASSES live 2026-08-15** (`kbps=58.8, peak_abs=4984`) after fixing the harness's suspended-AudioContext tone (headless Chrome publishes silence without `--autoplay-policy` + `resume()`). A controlled `red:true` run also passed, refuting #787's RED hypothesis — the incident narrows to the ADM playout leg, which this oracle deliberately cannot see (the WAV tap is pre-ADM) |
-| AUD-04 | The native mic speaks → the **web** peer hears it (RMS on the received track, not packet counters) | ⛔ | nothing — the reverse leg of #787, still unvalidated |
+| AUD-04 | The native mic speaks → the **web** peer hears it (RMS on the received track, not packet counters) | 🟡 | cockpit `AUD-N2W` — measured live 2026-08-15 (`rms 0.3528 over 4.0s decoded`, see the log below); the ADM playout leg (#812, open) is what remains unseen |
 | AUD-02 | Mute/unmute round-trips | 🤖 | cockpit `AUD-02` |
 | AUD-03 | Audio survives a device swap mid-call (AirPods connect) | 🟡 | cockpit `AUD-03` / `CHAOS-DEVICE` |
 
@@ -94,7 +94,7 @@ The strongest phase, hardened further by the 2026-08-14 session (#804 #806
 
 | ID | Journey | Coverage | Runs via |
 |---|---|---|---|
-| RC-01..04 | Click / drag-select / type / shortcuts land in the real target app | 🤖 | `scripts/rc-live-suite.sh` — 30 cases, host-side-effect oracles. **Current: 27/2/1** (fails: #811 horizontal scroll, case 30; skip: 2nd display). The cockpit's `RC-P1080` is a narrow smoke only |
+| RC-01..04 | Click / drag-select / type / shortcuts land in the real target app | 🤖 | `scripts/rc-live-suite.sh` — 32 cases (31/32 are the consent allow/deny cases), host-side-effect oracles. Last recorded live run 2026-08-15: **27/2/1** with both failures (#811, #820) since closed; the next run establishes the new baseline. The cockpit's `RC-P1080` is a narrow smoke only |
 | RC-05 | Control feels instant (<100ms goal) | 🟡 | `scripts/rc-live-suite.sh --press-to-photon` — exists, not run on a cadence |
 | RC-06 | Control lands at a scaled share tier | 🟡 | suite case + `RC-P1080` |
 | RC-07 | A web peer controls **my** window while I keep working — focus never stolen | 🤖 | suite case 27 |
@@ -179,14 +179,11 @@ look uncovered). The distance, in dependency order:
 
 ### 1. Make the covered half honestly green (product fixes)
 
-- **#820 — the post-reconnect control break.** The stale-disconnect revoke is
-  fixed (roster-verified, grace-confirmed — measured surviving 2 aftershocks
-  per run); the residue is (a) post-resume input refused
-  `reason=auth detail=no-active-request` with grants intact — something else
-  in the resume path invalidates session state — and (b) replayed ops' terminal
-  results never reaching the controller. Fixing this makes the RC suite
-  29/30 with only the second-display skip. *The last real product bug between
-  the suite and green.*
+- ~~**#820 — the post-reconnect control break.**~~ Closed 2026-08-15: the
+  stale-disconnect revoke was fixed first (roster-verified, grace-confirmed),
+  then the post-resume `no-active-request` refusal and the lost terminal
+  results. What is still owed is a **recorded** full live run of the 32-case
+  suite after the fix — the table above still carries the pre-fix 27/2/1.
 - **#787's remaining leg** — decode is proven fine (both RED arms, live vs
   prod); the silence is post-decode in the speaker plumbing (ADM playout
   ordering/retry/loudness). The 40-second `speak:web-nat` gate is the
@@ -217,12 +214,12 @@ look uncovered). The distance, in dependency order:
 2. **#813 JOIN-03** — the join link, including the hidden-app hot-mic ordering.
 3. **#814 JOIN-04** — leave & rejoin ×2 (pins the shipped #638/#722 classes;
    its display-share half must start RED against still-open #722).
-4. ~~**#815 CAM-05** — native camera on a web tile, frame-advance oracle.~~ Built: cockpit `CAM-N2W`. Live run still owed.
+4. ~~**#815 CAM-05** — native camera on a web tile, frame-advance oracle.~~ Built: cockpit `CAM-N2W`; #815 closed 2026-08-15. A recorded live run is still owed here.
 5. **#816 RES-04** — display sleep/wake at the notification boundary.
 6. **#817 UI-01..04** — drive the truncation oracles to real screenshots.
-7. **#819 RC-07** — native-as-controller on the existing test-peer rig.
-   Built: `RC-N2N`/`RC-N2W`, unit-gated, awaiting its first live run on the
-   TCC-granted Mac.
+7. ~~**#819 RC-07** — native-as-controller on the existing test-peer rig.~~
+   Built: `RC-N2N`/`RC-N2W`, unit-gated; #819 closed 2026-08-15. A recorded
+   live run on the TCC-granted Mac is still owed here.
 8. **#818 INST-03** — staging updater channel; until it exists, GET-IN stays a
    human phase and every promotion must say so out loud.
 

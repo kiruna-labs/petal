@@ -2,10 +2,50 @@
 
 These contracts must stay in lockstep across native, backend, and web-harness code. If one file changes, update the sibling files and the tests that pin the contract.
 
-The shared fixture is `contracts/petal-contracts.json`. It is read by:
+The shared fixture is `contracts/petal-contracts.json`. It is read by the
+Rust contract tests (`apps/desktop/src-tauri/src/rooms.rs` and the other
+modules named per section below), the browser-client test suite
+(`web-harness/tests/contracts.test.ts` plus the per-topic suites —
+`remoteControl`, `remoteControlGrantGate`, `displayNames`, `profileColor`,
+`aiChat`, `j`), the backend tests (`backend/test/privacy.ts`,
+`distribution.ts`, `hardening.ts`), and the remote-control harness preflight
+(`apps/desktop/scripts/remote-control-harness-preflight.mjs`). `grep -rl
+petal-contracts.json` is the authoritative reader list.
 
-- `apps/desktop/src-tauri/src/rooms.rs`
-- `web-harness/tests/contracts.test.ts`
+## Data-channel topics
+
+The fixture's `topics` key pins every LiveKit data-channel topic Petal uses:
+`petal.telepointer`, `petal.remote-control`,
+`petal.remote-control.clipboard-text`, `petal.viewer-demand`,
+`petal.pipeline-stats`, `petal.latency-probe`, `petal.draw`, `petal.ai-chat`.
+Each has a section below except the two diagnostics topics, documented here:
+
+- **`petal.latency-probe`** (`latencyProbeMessages`) — a peer-to-peer
+  data-channel RTT probe for the Network Cockpit, *not* glass-to-glass video
+  latency. `ping` carries `v: 1`, `kind`, `probeId`, `senderId`,
+  `sendTimeMs`; the receiver echoes `pong` with the same `probeId` /
+  `sendTimeMs` plus `receiverReceiveTimeMs` and `receiverSendTimeMs`, and the
+  original sender computes RTT and an NTP-style clock offset on its own clock.
+  Reliable delivery. Native: `apps/desktop/src-tauri/src/latency_probe.rs`;
+  web: `web-harness/src/trackNames.ts` (`LatencyProbeMessage`).
+- **`petal.pipeline-stats`** — cross-peer pipeline stage snapshots for the
+  Network Cockpit (`apps/desktop/src-tauri/src/pipeline_stats.rs`).
+
+## Shared-source scale metadata (`petalWindowScales`)
+
+Alongside `petalWindowKinds`, `petalWindowTitles`, `petalWindowUrls`, and
+`petalWindowZOrder`, a publisher's participant metadata carries
+`petalWindowScales`: `{ "<windowId>": <capture scale> }`, the ratio between
+the published pixel size and the source window's point size (e.g. `0.64` for
+a downscaled capture, `1.5` for a Retina-ish one). Receivers use it to map
+remote-control and telepointer coordinates back onto the source window, and
+a native receiver only offers Control for a share with a positive, finite
+scale entry (`0`, negative, or non-numeric values are ignored; a missing
+entry means "not controllable"). The fixture's `sourceScaleMetadata` pins
+the parsing vectors. Native: `transport/publisher.rs`
+(`shared_window_scale_from_metadata`); web: `web-harness/src/trackNames.ts`
+(`mergeSharedSourceMetadata` writes it, always `1` for canvas/display
+captures).
 
 ## Test Cockpit Scenarios and Journeys
 
@@ -45,7 +85,10 @@ Expected slug outputs from the shared fixture:
 | `UPPER lower 123` | `upper-lower-123` |
 
 User-facing room access codes are three lowercase letter groups:
-`abc-defg-hij` (`[a-z]{3}-[a-z]{4}-[a-z]{3}`). They may be pasted with or
+`abc-defg-hjk` (`[a-z]{3}-[a-z]{4}-[a-z]{3}`). Petal-generated codes draw from
+the 24-letter alphabet `abcdefghjkmnopqrstuvwxyz` (`i` and `l` excluded as
+easy to misread; `shared/logic/meetingCode.ts`); the parser still accepts
+hand-typed `i`/`l`. They may be pasted with or
 without hyphens and normalize to the hyphenated lowercase form. The internal
 credential is never shown to users; clients derive `room-<32 lowercase hex>`
 from the normalized access code and map that to `petal-room-<credential>`.
@@ -56,7 +99,10 @@ Expected credential vector:
 
 | Access code | Internal credential | LiveKit room |
 |---|---|---|
-| `abc-defg-hij` | `room-8535e99698b76ed8a9ee59b265f76050` | `petal-room-room-8535e99698b76ed8a9ee59b265f76050` |
+| `abc-defg-hjk` | `room-8535e993a1b76ed8a9ee59b265f53dfc` | `petal-room-room-8535e993a1b76ed8a9ee59b265f53dfc` |
+
+(This is the fixture's pinned `roomCredentials` vector; the tests on every
+side assert exactly these strings.)
 
 Files to change together:
 
@@ -339,7 +385,7 @@ Camera tracks:
   - `camera_track_name(identity)`
   - `camera_window_id(track_name)`
   - `window_id_for_track_name_any(name)`
-- Native camera publish path: `apps/desktop/src-tauri/src/session.rs`
+- Native camera publish path: `apps/desktop/src-tauri/src/camera_session.rs`
 - Native gallery camera subscription: `apps/desktop/src-tauri/src/gallery_bridge.rs`
 - Web producer: `web-harness/src/trackNames.ts`, used by `web-harness/src/main.ts`
 - Native diagnostics labels: `apps/desktop/src-tauri/src/diagnostics.rs`
@@ -356,7 +402,7 @@ Files to change together:
 
 - `apps/desktop/src-tauri/src/transport/publisher.rs`
 - `apps/desktop/src-tauri/src/transport/subscriber.rs`
-- `apps/desktop/src-tauri/src/session.rs`
+- `apps/desktop/src-tauri/src/camera_session.rs`
 - `apps/desktop/src-tauri/src/gallery_bridge.rs`
 - `apps/desktop/src-tauri/src/diagnostics.rs`
 - `web-harness/src/trackNames.ts`
@@ -566,6 +612,10 @@ Kinds:
   points.
 - `clear`: clears drawing state for the sender/window. `strokeId` is `null` and
   `points` is empty.
+- `text`: places a text annotation. Carries one extra field, `text` (the
+  annotation string), plus a single anchor point in `points`; pinned by the
+  fixture's `drawMessages` `text` vector (`"Hello Petal"`). Implemented by
+  `draw.rs` natively and `web-harness/src/draw.ts` (`DRAW_TYPES`) on the web.
 
 Files to change together:
 
@@ -707,7 +757,8 @@ Kinds and additive capability envelope:
 
 - `request` and `release`: the legacy shape remains common fields only.
 - `pointer`: adds `action` (`move`, `down`, `up`, or atomic `click`), `x`, `y`,
-  `button`, `buttons`, and `modifiers`.
+  `button`, `buttons`, `clickCount` (multi-click; the fixture's
+  `pointer-double-click` vector pins it), and `modifiers`.
 - `wheel`: adds `x`, `y`, `deltaX`, `deltaY`, `deltaMode`, and `modifiers`.
 - `key`: adds `action`, `key`, `code`, optional `location`, `repeat`, and
   `modifiers`.
@@ -716,10 +767,11 @@ Kinds and additive capability envelope:
   clipboard Paste does not use this kind; it uses the native-only clipboard
   stream described below.
 - `status`: host-to-controller grant/policy state.
-- `result`: the terminal disposition of one reliable discrete operation.
-  `applied` means an observed semantic target operation; `submitted` means the
-  host submitted input to the OS but did not observe the target application's
-  effect. A successful disposition cannot carry `failureCode`.
+- `result`: the terminal disposition of one reliable discrete operation,
+  carried in the `outcome` field. `applied` means an observed semantic target
+  operation; `submitted` means the host submitted input to the OS but did not
+  observe the target application's effect. A successful disposition cannot
+  carry `failureCode`. (Fixture vector: `result-applied-v2`.)
 
 `modifiers` is `{ "alt": boolean, "ctrl": boolean, "meta": boolean, "shift": boolean }`.
 
@@ -1127,11 +1179,10 @@ Canonical HTTPS invite links:
   `petal://join/<access-code>` on load, keeps an explicit Open Petal link for
   browsers that require a user gesture, offers `/api/download`, and offers a
   browser join URL carrying `?code=<access-code>`.
-- Browser join target is configured on the backend with `PETAL_WEB_JOIN_URL`,
-  treated as an origin/base only: any configured path is discarded before
-  adding `?code=`. Until a production browser client domain is finalized, the
-  fallback target is the existing deployed web-harness project URL shape with
-  the access code in `?code=`.
+- Browser join target is configured with `PETAL_WEB_JOIN_URL`, treated as an
+  origin/base only: any configured path is discarded before adding `?code=`.
+  The default is the production browser client, `https://meet.petal.live`
+  (`DEFAULT_WEB_JOIN_BASE_URL` in `web-harness/api/j.ts`).
 
 Native deep link (accepted compatibility vector, not the primary copied invite):
 

@@ -24,8 +24,7 @@ npm install   # first time only
 npm run dev
 ```
 
-Vite prints a local URL (port 5184 if launched via `.claude/launch.json`'s
-`petal-web-harness` configuration). The same dev-server process hosts the
+Vite prints a local URL. The same dev-server process hosts the
 token-minting endpoint (see below) — there is no second process/port.
 
 To run against a local `livekit-server --dev` (`ws://localhost:7880`,
@@ -38,11 +37,11 @@ LIVEKIT_URL=ws://localhost:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret
 
 ## Using it
 
-1. **Join screen:** enter your name and either a meeting code (`eng-sync`)
-   or a full pasted invite link — both `petal://join/<code>` (the native
-   app's invite format) and this client's own
+1. **Join screen:** enter your name and either an access code
+   (`abc-defg-hjk`) or a full pasted invite link — both `petal://join/<code>`
+   (the native app's invite format) and this client's own
    `https://<host>/?code=<code>` links parse correctly
-   (`src/joinInput.ts`). Unrecognized URL shapes get a clear inline error
+   (`shared/logic/joinInput.ts`). Unrecognized URL shapes get a clear inline error
    instead of silently joining a room literally named the URL. Or click
    **Create a new meeting** for a fresh generated code.
 2. **?code= auto-join:** opening `http://<host>/?code=<room>` prefills and
@@ -77,7 +76,8 @@ The join value is a capability credential, not just a human room name:
 humans; the hex suffix is the authorization boundary. A bare guessable label
 such as `design-review` is invalid for token minting.
 
-Both this client (`src/meetingCode.ts::livekitRoomName`) and the native app
+Both this client (`shared/logic/meetingCode.ts::livekitRoomName`, via
+`@petal/shared`) and the native app
 (`apps/desktop/src-tauri/src/rooms.rs::livekit_room_name_for`) map the full
 credential to the canonical LiveKit room name `petal-room-<credential>`.
 Typing or pasting the same full credential into the native app and this
@@ -90,10 +90,14 @@ prefix but append the required capability suffix.
 
 ## Token endpoint
 
-The browser asks `POST /api/token` with the human meeting code and identity,
+The browser asks `POST /api/token` with the room credential and identity,
 then connects with the returned `{ url, token, room }`. In deployed testing,
 set `VITE_PETAL_BACKEND_URL=https://app.petal.live` so the harness
-uses the real backend from `../backend`.
+uses the real backend from `../backend`. A production build also bakes
+`VITE_PETAL_POSTHOG_KEY` (product analytics; unset = off), `VITE_SENTRY_DSN`
+(error reporting — `scripts/deploy-web-harness.sh` refuses to deploy a bundle
+without one), and `VITE_USERDISPATCH_PUBLIC_KEY` (the in-app bug-report
+form); see `docs/RELEASING.md`.
 
 For local-only dev with no hosted backend, a Vite middleware
 (`server/tokenPlugin.ts`, wired in via `vite.config.ts`) implements the same
@@ -104,7 +108,7 @@ browser only receives the signed JWT and LiveKit URL.
 ## Wire-format contracts (must match the native app)
 
 All unit-tested in `tests/contracts.test.ts` (`npm test`, runs via
-`node --test` with Node's native TS type stripping):
+`node --import tsx --test tests/*.test.ts`):
 
 - **Window shares:** track name `petal-window-<window_id>` —
   `apps/desktop/src-tauri/src/transport/publisher.rs::track_name_for_window`,
@@ -154,13 +158,28 @@ checks). Test-only; never shipped in the real app.
 ## Files
 
 - `index.html` — join screen, meeting screen (topbar / tile grid / control
-  bar), dev drawer, toast.
-- `src/main.ts` — all client logic: LiveKit connect/publish/subscribe, tile
-  rendering, control bar, real media (screen/mic/webcam), synthetic modes,
-  telepointer sender, codec verification, session log.
-- `src/trackNames.ts` — track-name + telepointer wire-format contracts.
+  bar), dev drawer, toast, feedback dialog.
+- `api/j.ts` — the deployed serverless join-link interstitial
+  (`meet.petal.live/<label>/<code>`): Open Petal, platform downloads, Join in
+  browser, and the `petal://` handoff. `api/_lib/slug.ts` is its copy of the
+  slug contract.
+- `src/main.ts` — the entry point: wires the modules below together.
+- `src/homeScreen.ts`, `src/createJoinAction.ts`, `src/deepLink.ts` — join
+  screen, recents/favorites, `?code=` auto-join.
+- `src/connection.ts`, `src/controls.ts`, `src/tiles.ts` — LiveKit
+  connect/publish/subscribe, the control bar (mic/camera/share/draw/invite),
+  and the tile grid + spotlight layout.
+- `src/remoteControl*.ts`, `src/draw*.ts`, `src/telepointer*.ts`,
+  `src/aiChat*.ts` — the collaboration features' web halves.
+- `src/analytics.ts` — the PostHog allowlist pipe
+  (`docs/POSTHOG_EVENT_ALLOWLIST.md`).
+- `src/testPattern.ts`, `src/cockpit.ts` — the synthetic test-pattern share
+  and the Test Cockpit driver (`docs/TESTING.md`).
+- `src/trackNames.ts` — track-name + participant-metadata wire-format
+  contracts.
 - `src/toastMount.ts` — mounts the SHARED Svelte `<Toast>` component
   (`shared/ui/components/Toast.svelte`) into `#toast`.
+- `fidelity.html` — the standalone pixel-fidelity probe page.
 - **Shared package** — design tokens (`shared/ui/tokens.css`), presentational
   components (`shared/ui/components/`), and meeting-code / join-input /
   local-echo logic (`shared/logic/`) are the SINGLE SOURCE imported by both
@@ -172,10 +191,13 @@ checks). Test-only; never shipped in the real app.
 - `server/tokenPlugin.ts` — dev-server token endpoint (see above).
 - `tests/` — contract + join-input unit tests (`npm test`).
 
-## Verification status (2026-07-01, issue #3)
+## Verification status
 
-- `npm run build` (tsc strict gate, incl. tests project) and `npm test`
-  (11 tests) clean.
+The current gate is `npm run build` (`svelte-check`, `tsc -p tests`, `vite
+build`) plus `npm test` (~70 test files under `tests/`), both run by
+`scripts/ci-local.sh`. The original 2026-07-01 bring-up (issue #3) verified:
+
+- `npm run build` and `npm test` clean.
 - Verified live via Chrome DevTools MCP against a local `livekit-server`
   (`:7880`): join by code, `?code=` auto-join, pasted `petal://join/…`
   link, bad-URL inline error, two-participant room (remote share tile

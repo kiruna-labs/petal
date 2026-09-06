@@ -38,11 +38,17 @@ Roughly in order, each step failing the whole run:
 | Release script unit tests | `bump-version.mjs` / `publish-blob.mjs` pure logic |
 | Source provenance | The build came from the tree it claims |
 | Harness contracts | Process cleanup, capture preflight, and the live-suite instance guard — the test *harness itself* is tested |
-| Frontend | `svelte-check` + ~81 test files + a real static build (`apps/desktop`) |
-| Backend | `tsc --noEmit` + tests |
-| Rust | `cargo build` + `cargo test --lib` (~1000 tests), default-feature **and** cockpit-privileged |
+| Frontend | `svelte-check` + ~100 test files + a real static build (`apps/desktop`) |
+| Backend | `tsc --noEmit` + the five offline suites |
+| Rust | `cargo build` + `cargo test --lib` (~2000 `#[test]`s), default-feature **and** cockpit-privileged; `cargo build --examples`; the vendored `tauri-nspanel` tests |
+| Browser client | `web-harness` build + ~75 test files + the isolated-deploy build simulation |
+| Web no-black-frame | Pixel gate across a forced gap (`scripts/verify-no-black-frame.mjs`) |
 | Remote-control loopback | Check-only (no live app) |
+| Docs site | `site/` builds and its link validator passes |
 | PII/secrets scan | Nothing sensitive in the publishable tree |
+
+(`scripts/ci-local.sh` is the authority — around twenty `step`s at the time
+of writing; this table groups them.)
 
 There is also a **pre-push hook** (`scripts/git-hooks/pre-push`, installed
 automatically by `ci-local.sh`). Any push touching `apps/desktop/src-tauri/`,
@@ -121,7 +127,7 @@ states someone cared about. The rules below are all scar tissue.
 Only when you specifically need them, and each is documented in
 `docs/TESTING.md`:
 
-- `scripts/rc-live-suite.sh` — the 30-case remote-control matrix against a real
+- `scripts/rc-live-suite.sh` — the 32-case remote-control matrix against a real
   TextEdit window.
 - `scripts/verify-no-black-frame.mjs` / `-native.sh` — the hard product rule
   that a share must never flash black. These sample **rendered pixels**; an

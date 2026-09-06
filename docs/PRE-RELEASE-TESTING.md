@@ -17,22 +17,24 @@ Companions: `docs/TESTING.md` (tiers + every `PETAL_*` env var),
 
 ## Tier 0 — the automated gate (agent, no display)
 
-`scripts/ci-local.sh`. Sixteen steps: version lockstep, release-script unit
-tests, source provenance, three harness contracts, frontend check + tests +
-build, backend typecheck + tests, Rust default-feature **and**
-cockpit-privileged builds and lib tests, `vendor/tauri-nspanel` tests,
-web-harness build + tests + isolated-deploy simulation, the **web**
-no-black-frame pixel gate, and a remote-control loopback check.
+`scripts/ci-local.sh`. Around twenty steps (the script is the authority):
+version lockstep, release-script unit tests, source provenance, the harness
+contracts, frontend check + tests + build, backend typecheck + tests, Rust
+default-feature **and** cockpit-privileged builds and lib tests, `cargo build
+--examples`, `apps/desktop/vendor/tauri-nspanel` tests, the `scripts/probes/`
+clang syntax checks, web-harness build + tests + isolated-deploy simulation,
+the **web** no-black-frame pixel gate, a remote-control loopback check, the
+docs-site build, and the public-tree PII/secrets scan.
 
-**Proves:** nothing compiles broken, ~1600 Rust unit tests and ~630 web tests
-hold, the wire contracts stay in lockstep, and the *web* renderer does not go
-black across a forced gap.
+**Proves:** nothing compiles broken, ~2000 Rust unit tests and ~1400 web
+tests (desktop frontend + browser client) hold, the wire contracts stay in
+lockstep, and the *web* renderer does not go black across a forced gap.
 
 **Does NOT prove** (this is the part that matters):
 
 | Gap | Why |
 |---|---|
-| Native pixels | `scripts/verify-no-black-frame-native.sh` is **not invoked** by the gate. `ci-local.sh:106` only compile-checks the probes (`cargo build --locked --examples`); `:204` runs the *web* gate only. |
+| Native pixels | `scripts/verify-no-black-frame-native.sh` is **not invoked** by the gate. `ci-local.sh` only compile-checks the probes (`cargo build --locked --examples`) and runs the *web* gate. |
 | The updater's cross-volume fix | `install_across_a_real_volume_boundary` early-returns as a **pass** unless `PETAL_TEST_CROSS_VOLUME_DIR` is set. That variable appears nowhere in `ci-local.sh`, `docs/TESTING.md`, or CI. A silent skip reads as coverage. |
 | Anything on the wire | No LiveKit peer is involved. Encoder behaviour, SFU reaction to a size change, real decode — all untouched. |
 | That a helper is *called* | Many guards are source-regex or pure-helper tests. They prove a function is correct given inputs, not that anything calls it with the right ones from the real path. |

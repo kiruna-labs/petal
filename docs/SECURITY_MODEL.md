@@ -49,7 +49,7 @@ In rough order of blast radius if compromised:
 
 Boundaries, and what crosses each:
 
-1. **Client → Backend** (`/api/token`, `/api/rooms`, `/api/admin`,
+1. **Client → Backend** (`/api/token`, `/api/rooms/status`, `/api/admin`,
    `/api/ai-token`, `/api/gallery-token`). Caller-controlled fields are limited
    to `room`, `identity`, `displayName`, `name`, `open`; every grant field is
    fixed server-side (`docs/CONTRACTS.md` "Public LiveKit Token Grants").
@@ -116,9 +116,10 @@ Holds a valid access code (leaked invite, ex-employee, shoulder-surfed link).
   sequential; the host verifies room membership but not subscription to that
   specific track. Known gap (#30), requires SFU subscription state the SDK
   does not expose.
-- **Kick does not stick.** `POST /api/admin {kick}` removes the participant
-  from the SFU, but they can re-mint a token with the same code. Being fixed
-  under item 3 (deny list consulted at mint).
+- **Kick sticks.** `POST /api/admin {kick}` removes the participant from the
+  SFU *and* records the identity in room metadata; the token mint refuses it
+  afterwards (`backend/lib/handlers.ts`). Closed — kept here because the
+  earlier gap was widely cited.
 - **Can spoof telepointer/annotation identity** only within what the
   receiving client checks; identity is LiveKit-asserted, so impersonating
   another participant's identity requires the SFU's cooperation.
@@ -167,7 +168,8 @@ Runs as the same user, without admin. Out of scope per `SECURITY.md`
 
 - Rust and npm dependencies are inventoried in `sbom/` (CycloneDX) and
   checked by `cargo deny` / `cargo audit` / `npm audit`. The vendored `screencapturekit` fork is patched locally
-  (`apps/desktop/src-tauri/vendor/.../PETAL_PATCH.md`) and must be reviewed
+  (`apps/desktop/vendor/screencapturekit/PETAL_PATCH.md`; each of the five
+  vendored crates under `apps/desktop/vendor/` carries one) and must be reviewed
   by hand when upstream moves.
 - Release builds run in GitHub Actions with secrets injected at job time; the
   self-hosted runner holds no plaintext secrets on disk.
@@ -197,7 +199,7 @@ Runs as the same user, without admin. Out of scope per `SECURITY.md`
 |---|---|---|
 | No E2EE; SFU operator can read media | Accepted (documented in `SECURITY.md`) | — |
 | No per-topic data-channel publish ACL | Accepted until LiveKit exposes it | trust-model doc |
-| Control request not bound to viewing that track | Open, needs SFU subscription state | #30 |
+| Control request not bound to viewing that track | Open, needs SFU subscription state (#30 is closed; the gap is tracked in the trust-model doc) | `docs/remote-control-trust-model.md` |
 | Legacy macOS auto-grant of control | Accepted; user-controlled toggle | trust-model doc |
 | Per-instance (not global) rate limiting on Vercel | Open; needs a shared store (KV seam in place) | `backend/lib/ratelimit.ts` |
 | Unauthenticated room listing reveals names/occupancy | **Closed** — directory removed (410); `POST /api/rooms/status` is proof-of-possession | `backend/lib/handlers.ts` |
