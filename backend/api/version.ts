@@ -14,7 +14,7 @@
 // builder does not guarantee build-time vars are still readable from
 // `process.env` at request time for a zero-config function.
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { applyCors } from '../lib/http.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {

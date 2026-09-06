@@ -5,7 +5,7 @@
 // Replaces the public `GET /api/rooms` directory, which enumerated every
 // room's name and headcount to anyone (docs/CONTRACTS.md "Room status").
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../../lib/vercel.js';
 import { handleRoomStatus } from '../../lib/handlers.js';
 import { applyCors, clientRateLimitKey, sendApiError } from '../../lib/http.js';
 
