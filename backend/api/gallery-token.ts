@@ -6,7 +6,7 @@
 // endpoint cannot serve this (its hidden/grant clamp, #100, is intentional
 // and must stay).
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { handleGalleryToken } from '../lib/handlers.js';
 import { applyCors, clientRateLimitKey, sendApiError } from '../lib/http.js';
 

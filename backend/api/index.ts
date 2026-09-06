@@ -5,7 +5,7 @@
 // almost certainly looking for one of those, so just send them to the
 // marketing site rather than serving JSON or a bare 404.
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { applyCors } from '../lib/http.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {

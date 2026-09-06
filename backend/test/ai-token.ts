@@ -16,7 +16,7 @@
 
 import assert from 'node:assert/strict';
 import { AccessToken } from 'livekit-server-sdk';
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { credentialForAccessCode, livekitRoomName } from '../lib/slug.js';
 import type { RoomDiscoveryService, RoomMetadataService } from '../lib/livekit.js';
 import {
