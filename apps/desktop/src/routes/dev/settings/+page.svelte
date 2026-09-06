@@ -10,7 +10,7 @@
 
 <div class="harness">
   <h1>Petal — settings dev harness</h1>
-  <p class="intro">Settings panel, per DESIGN.md §9. Placeholder-pending-design (functional-but-plain). Dev-only route.</p>
+  <p class="intro">Settings panel — section index, one row primitive, two heading styles (#923). Dev-only route.</p>
 
   <div class="row">
     <div class="cell">
