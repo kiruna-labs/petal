@@ -371,7 +371,7 @@ jobs:
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload Windows release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-release-${{ github.run_id }}
           path: ${{ runner.temp }}/windows-release/*
@@ -762,7 +762,7 @@ jobs:
       # Blob. Everything above has already proven the secrets.
       - name: Upload release artifacts (dry run)
         if: ${{ !(github.event_name == 'push' || inputs.publish == true) }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: petal-release-dry-run-${{ steps.version.outputs.TAG }}-${{ github.run_id }}
           path: |
