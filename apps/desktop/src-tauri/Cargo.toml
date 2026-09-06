@@ -317,7 +317,7 @@ core-graphics = "0.24"
 # `-ObjC`/duplicate-Swift-symbol linker fight this codebase already fought
 # once (see transport/mod.rs's M0 blocker writeup). Verified this stays
 # link-clean with a real `cargo check --lib` before committing to it.
-system-configuration = "0.7.0"
+system-configuration = "0.8.0"
 
 # Receiver-side compositor (SPEC.md §4.4, compositor.rs + native_display.rs):
 # real, native-window-hosted decode-to-display. `native_display.rs`'s FFI is
