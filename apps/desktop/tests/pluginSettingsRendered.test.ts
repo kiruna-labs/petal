@@ -1,5 +1,5 @@
 // Settings → Plugins rows at the real 400px main-window width: every string
-// stays fully visible (CLAUDE.md "UI text must NEVER truncate"), the toggle
+// stays fully visible (project rule: UI text must never truncate), the toggle
 // persists to storage, and the permission disclosure lists plain copy.
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';

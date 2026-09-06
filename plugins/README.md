@@ -51,15 +51,16 @@ especially for development.
 
 - No tenant, team, or org exists. Rooms are unowned bearer capabilities, so
   plugins scope to a **person** or a **meeting**, never a team.
-- `internal/docs/COURSE_CORRECTION.md` §2.4: no dormant code. Every host
-  surface ships with a first-party consumer in the same milestone.
+- No dormant code (a standing project rule): every host surface ships with
+  a first-party consumer in the same milestone.
 - The capability file is one flat allowlist and `tauri.conf.json` has
   `csp: null`. Third-party code makes a real sandbox mandatory.
 - UI text must fit the 400 px main window. Native panel changes need a
   live-exercising test. Shared UI and logic go in `shared/`, never duplicated.
-- `internal/OPEN_SOURCING.md`: no hosted defaults baked into a plain clone.
-  The registry URL and public key are build-time configuration; unset means
-  the registry UI is hidden and sideloading still works.
+- No hosted defaults baked into a plain clone (same rule as the token
+  backend and updater, see `docs/SELF_HOSTING.md`). The registry URL and
+  public key are build-time configuration; unset means the registry UI is
+  hidden and sideloading still works.
 
 ---
 
