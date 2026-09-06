@@ -225,7 +225,7 @@ cpal = "0.15"
 # The Gemini Live socket. Pinned to the version already resolved transitively
 # via livekit so no second copy of tungstenite enters the tree; native-tls
 # matches reqwest's backend, avoiding a rustls CryptoProvider install.
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "native-tls"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "native-tls"] }
 futures-util = "0.3"
 # Promoted out of [dev-dependencies] (#905): `logging.rs`'s per-day log
 # rolling needs UTC date arithmetic (today's date string, parsing a
