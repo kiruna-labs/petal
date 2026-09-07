@@ -288,9 +288,10 @@ test('expanded gallery device selectors stay open and restore focus', { timeout:
         stageTransition: stage ? getComputedStyle(stage).transitionDuration : null
       };
     });
-    assert.deepEqual(reducedMotion, {
-      feedback: '0ms',
-      enter: '0ms',
+    const zeroTime = (value: string) => (value === '0ms' ? '0s' : value);
+    assert.deepEqual({ ...reducedMotion, feedback: zeroTime(reducedMotion.feedback), enter: zeroTime(reducedMotion.enter) }, {
+      feedback: '0s',
+      enter: '0s',
       distance: '0px',
       pressScale: '1',
       stageTransition: '0s'
