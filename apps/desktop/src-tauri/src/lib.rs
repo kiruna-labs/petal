@@ -1139,8 +1139,8 @@ pub fn run() {
             compositor::compositor_ai_chat_overlay_is_open,
             #[cfg(target_os = "macos")]
             draw::draw_send,
-            plugins::plugin_publish_data,
-            plugins::plugin_set_state,
+            plugins::bus::plugin_publish_data,
+            plugins::bus::plugin_set_state,
             #[cfg(target_os = "macos")]
             share_overlay::share_overlay_set_draw_active,
             #[cfg(target_os = "macos")]
@@ -1691,8 +1691,8 @@ pub fn run() {
             windows_compositor::compositor_toggle_debug_panel,
             windows_compositor::compositor_set_draw_active,
             draw::draw_send,
-            plugins::plugin_publish_data,
-            plugins::plugin_set_state,
+            plugins::bus::plugin_publish_data,
+            plugins::bus::plugin_set_state,
             windows_share_overlay::share_overlay_set_draw_active,
             windows_share_overlay::share_overlay_draw_active,
             windows_compositor::compositor_window_debug_stats,

@@ -585,7 +585,7 @@ mod tests {
         let f = fixture().plugin_data_event;
         assert_eq!(f.name, EVENT_NAME);
         let parsed = parse_topic("plugin/petal.reactions/emoji").unwrap();
-        let payload = br#"{"e":"👍","t":1788640000000}"#;
+        let payload = r#"{"e":"👍","t":1788640000000}"#.as_bytes();
         let event = event_for("plugin/petal.reactions/emoji", &parsed, "alex-1a2b", Some("Alex"), payload);
         let json = serde_json::to_value(&event).unwrap();
         let mut keys: Vec<String> = json.as_object().unwrap().keys().cloned().collect();

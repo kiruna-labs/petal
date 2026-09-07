@@ -10,4 +10,7 @@
 
 pub mod bus;
 
-pub use bus::{plugin_publish_data, plugin_set_state, start_receiver_for_room};
+// Commands are registered in lib.rs by their defining path (`plugins::bus::...`):
+// `tauri::generate_handler!` needs the macro-generated `__cmd__*` items, which
+// a `pub use` re-export would not carry.
+pub use bus::start_receiver_for_room;
