@@ -1798,7 +1798,12 @@ pub(crate) fn canonical_operation_fingerprint(
         );
         optional_string(&mut canonical, admission.share_instance_id.as_deref());
     }
-    format!("{:x}", Sha256::digest(canonical))
+    // sha2 0.11's digest array no longer implements `LowerHex`; hex-encode it
+    // byte by byte (same output as the old `{:x}` formatting).
+    Sha256::digest(canonical)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn fixed_point(value: f64) -> u16 {

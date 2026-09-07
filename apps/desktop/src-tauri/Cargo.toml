@@ -101,8 +101,8 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12.28", default-features = false, features = ["json", "native-tls"] }
-base64 = "0.22.1"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "native-tls"] }
+base64 = "0.23.1"
 log = "0.4"
 thiserror = "1"
 env_logger = "0.11"
@@ -159,11 +159,11 @@ webrtc-sys = "=0.3.35"
 livekit-api = "0.5"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 dotenvy = "0.15"
 # Test Cockpit MULTI-3 independently fingerprints the native presence roster
 # with the browser's SHA-256 canonicalization (#261). Already locked transitively.
-sha2 = "0.10"
+sha2 = "0.11"
 # Query-param encoding for compositor.rs's header webview URL (owner display
 # name / source window title, both arbitrary user/OS strings that can
 # contain spaces, em dashes, etc. -- share_border.rs's own hand-rolled `#`-only
