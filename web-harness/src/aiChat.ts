@@ -108,7 +108,7 @@ export function aiChatPublishOptions(): { reliable: boolean; topic: typeof AI_CH
   return { reliable: true, topic: AI_CHAT_TOPIC };
 }
 
-export function encodeAiChatMessage(message: AiChatMessage): Uint8Array {
+export function encodeAiChatMessage(message: AiChatMessage): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(JSON.stringify(message));
 }
 
