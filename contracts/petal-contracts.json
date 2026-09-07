@@ -317,7 +317,8 @@
     "pipelineStats": "petal.pipeline-stats",
     "latencyProbe": "petal.latency-probe",
     "draw": "petal.draw",
-    "aiChat": "petal.ai-chat"
+    "aiChat": "petal.ai-chat",
+    "pluginPrefix": "plugin/"
   },
   "telepointerFields": [
     "activity",
@@ -2371,5 +2372,92 @@
     "model-unavailable",
     "quota",
     "error"
-  ]
+  ],
+  "pluginTopicVectors": [
+    {
+      "topic": "plugin/petal.reactions",
+      "pluginId": "petal.reactions",
+      "sub": null
+    },
+    {
+      "topic": "plugin/petal.reactions/emoji",
+      "pluginId": "petal.reactions",
+      "sub": "emoji"
+    },
+    {
+      "topic": "plugin/acme.my-plugin/history-req",
+      "pluginId": "acme.my-plugin",
+      "sub": "history-req"
+    },
+    {
+      "topic": "plugin/Petal.Reactions/emoji",
+      "pluginId": null,
+      "sub": null
+    },
+    {
+      "topic": "plugin/reactions",
+      "pluginId": null,
+      "sub": null
+    },
+    {
+      "topic": "plugin/petal.reactions/a/b",
+      "pluginId": null,
+      "sub": null
+    },
+    {
+      "topic": "plugin/petal.reactions/",
+      "pluginId": null,
+      "sub": null
+    },
+    {
+      "topic": "plugin/petal.reactions/Emoji",
+      "pluginId": null,
+      "sub": null
+    },
+    {
+      "topic": "plugin/",
+      "pluginId": null,
+      "sub": null
+    },
+    {
+      "topic": "petal.telepointer",
+      "pluginId": null,
+      "sub": null
+    },
+    {
+      "topic": "plugins/petal.reactions",
+      "pluginId": null,
+      "sub": null
+    }
+  ],
+  "pluginDataEvent": {
+    "name": "plugin-data",
+    "fields": [
+      "payloadBase64",
+      "pluginId",
+      "senderIdentity",
+      "senderName",
+      "sub",
+      "topic"
+    ],
+    "example": {
+      "topic": "plugin/petal.reactions/emoji",
+      "pluginId": "petal.reactions",
+      "sub": "emoji",
+      "senderIdentity": "alex-1a2b",
+      "senderName": "Alex",
+      "payloadBase64": "eyJlIjoi8J+RjSIsInQiOjE3ODg2NDAwMDAwMDB9"
+    },
+    "rules": [
+      "senderIdentity and senderName come from the authenticated LiveKit participant, never from the payload",
+      "payloads larger than pluginLimits.maxPayloadBytes are dropped before parsing",
+      "a sender exceeding pluginLimits.inboundPerSenderPerSecond for one plugin is dropped for that plugin, other plugins unaffected"
+    ]
+  },
+  "pluginLimits": {
+    "maxPayloadBytes": 16384,
+    "lossyPerSecond": 30,
+    "reliablePerSecond": 10,
+    "inboundPerSenderPerSecond": 60
+  }
 }

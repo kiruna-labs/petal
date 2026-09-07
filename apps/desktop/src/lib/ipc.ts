@@ -67,6 +67,7 @@ export const COMMANDS = {
   currentRoom: 'current_room',
   debugModeSettings: 'debug_mode_settings',
   drawSend: 'draw_send',
+  pluginPublishData: 'plugin_publish_data',
   downloadAndInstallCompatibleUpdate: 'download_and_install_compatible_update',
   exportLogs: 'export_logs',
   forgetRoom: 'forget_room',
@@ -229,6 +230,7 @@ export const EVENTS = {
   hoverTabHide: 'hover-tab-hide',
   hoverTabUpdate: 'hover-tab-update',
   drawUpdate: 'draw-update',
+  pluginData: 'plugin-data',
   journalAppended: 'journal-appended',
   meetingRestorePillRequested: 'meeting-restore-pill-requested',
   micMuteChanged: 'mic-mute-changed',
@@ -959,6 +961,17 @@ export interface DrawDraft {
 }
 
 /** Mirrors `draw::DrawUpdate` (src-tauri/src/draw.rs). */
+/** Global `plugin-data` event (plugins::bus, contract `pluginDataEvent`):
+ * one inbound `plugin/<id>[/<sub>]` packet, sender stamped from LiveKit. */
+export interface PluginDataEvent {
+  topic: string;
+  pluginId: string;
+  sub: string | null;
+  senderIdentity: string;
+  senderName: string | null;
+  payloadBase64: string;
+}
+
 export interface DrawUpdate extends DrawDraft {
   drawerIdentity: string;
   drawerDisplayName?: string | null;
@@ -1389,6 +1402,13 @@ export interface CommandArgs {
   [COMMANDS.createRoom]: { name: string; open: boolean; displayName?: string | null };
   [COMMANDS.debugModeSettings]: Record<string, never>;
   [COMMANDS.drawSend]: { draft: DrawDraft };
+  [COMMANDS.pluginPublishData]: {
+    pluginId: string;
+    sub: string | null;
+    payloadBase64: string;
+    reliable: boolean;
+    destinationIdentities?: string[];
+  };
   [COMMANDS.downloadAndInstallCompatibleUpdate]: Record<string, never>;
   [COMMANDS.runLaunchUpdateCheck]: Record<string, never>;
   [COMMANDS.forgetRoom]: { idOrCode: string };
@@ -1543,6 +1563,7 @@ export interface CommandReturns {
   [COMMANDS.setDebugMode]: DebugModeSettings;
   [COMMANDS.setMainPillMode]: void;
   [COMMANDS.drawSend]: void;
+  [COMMANDS.pluginPublishData]: void;
   [COMMANDS.currentRoom]: string | null;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: {
     status: 'up-to-date' | 'installed';
@@ -1630,6 +1651,7 @@ export interface EventPayloads {
   [EVENTS.hoverTabHide]: void;
   [EVENTS.hoverTabUpdate]: HoverTabUpdate;
   [EVENTS.drawUpdate]: DrawUpdate;
+  [EVENTS.pluginData]: PluginDataEvent;
   [EVENTS.journalAppended]: JournalEntry;
   [EVENTS.meetingRestorePillRequested]: void;
   [EVENTS.micMuteChanged]: MicMuteChanged;

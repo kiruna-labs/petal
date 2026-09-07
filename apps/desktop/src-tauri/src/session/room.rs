@@ -814,6 +814,11 @@ pub async fn join_room(
     // LiveKit sender instead of trusting payload identity.
     crate::draw::start_receiver_for_room(app, room_connection.room(), room_generation.clone());
 
+    // Plugin data bus (plugins/README.md §2.6): one catch-all receiver for
+    // `plugin/*` topics, emitting a global `plugin-data` event the main
+    // webview's plugin host routes to the right sandboxed plugin frame.
+    crate::plugins::start_receiver_for_room(app, room_connection.room(), room_generation.clone());
+
     // AI chat (#657): start/stop requests, push-to-talk floor claims, and
     // remote session state. Every inbound message is authorized against the
     // per-kind matrix in `ai_chat::wire` before it can affect anything, and a

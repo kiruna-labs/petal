@@ -5,7 +5,10 @@
 // state report `unavailable` until the Rust data bus lands (I-3).
 // Design: plugins/README.md §2.3.
 
+import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { COMMANDS, type CommandArgs } from '$lib/ipc';
+import { bytesToBase64 } from '@petal/shared/plugin-host/topics';
 import type { Json, MeetingPhase, Participant } from '@petal/shared/plugin-host/api';
 import { bridgeFailure } from '@petal/shared/plugin-host/broker';
 import type { PluginHostAdapter } from '@petal/shared/plugin-host/host';
@@ -46,8 +49,16 @@ export function createTauriAdapter(deps: TauriAdapterDeps): PluginHostAdapter {
       participants: () => deps.participants(),
       room: () => ({ label: deps.roomLabel(), phase: deps.phase() }),
     },
-    async publishData() {
-      throw bridgeFailure('unavailable', 'meeting-wide plugin messages are not wired on this host yet (M2)');
+    async publishData(plugin, params) {
+      if (deps.phase() !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+      // Rust derives the topic from pluginId and re-checks size/rate (plugins::bus).
+      await invoke(COMMANDS.pluginPublishData, {
+        pluginId: plugin.manifest.id,
+        sub: params.sub,
+        payloadBase64: bytesToBase64(params.payload),
+        reliable: params.reliable,
+        destinationIdentities: params.to && params.to.length > 0 ? params.to : undefined
+      } satisfies CommandArgs[typeof COMMANDS.pluginPublishData]);
     },
     async setState() {
       throw bridgeFailure('unavailable', 'plugin state sharing is not wired on this host yet (M2)');

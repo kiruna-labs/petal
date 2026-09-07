@@ -12,6 +12,9 @@
   import { createPluginHost, type PluginHost } from '@petal/shared/plugin-host/host';
   import { hostCompatibility } from '@petal/shared/plugin-host/manifest';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { EVENTS, hasTauriBridge, type PluginDataEvent } from '$lib/ipc';
+  import { base64ToBytes } from '@petal/shared/plugin-host/topics';
   import { enabledPlugins } from './pluginCatalog';
   import { createTauriAdapter } from './tauriAdapter';
 
@@ -71,9 +74,39 @@
       }
       host.load(plugin, source);
     }
+    listenForPluginData();
+  }
+
+  // Inbound plugin packets (Rust plugins::bus already validated topic, size,
+  // sender, and rate). Resolve the sender from presence when known so the
+  // plugin sees speaking/mute state; otherwise a minimal participant.
+  let unlistenData: UnlistenFn | undefined;
+  let destroyed = false;
+  function listenForPluginData() {
+    if (!hasTauriBridge()) return;
+    listen<PluginDataEvent>(EVENTS.pluginData, (event) => {
+      const p = event.payload;
+      if (!host || !host.isLoaded(p.pluginId)) return;
+      const known = participants.find((x) => x.identity === p.senderIdentity);
+      const sender: Participant = known ?? {
+        identity: p.senderIdentity,
+        name: p.senderName ?? p.senderIdentity,
+        isLocal: false,
+        speaking: false,
+        micMuted: false
+      };
+      host.deliverData(p.pluginId, { sub: p.sub, sender, payload: base64ToBytes(p.payloadBase64) });
+    })
+      .then((un) => {
+        if (destroyed) un();
+        else unlistenData = un;
+      })
+      .catch(() => {});
   }
 
   onDestroy(() => {
+    destroyed = true;
+    unlistenData?.();
     host?.dispose();
     host = null;
   });

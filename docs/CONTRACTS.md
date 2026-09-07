@@ -17,7 +17,9 @@ petal-contracts.json` is the authoritative reader list.
 The fixture's `topics` key pins every LiveKit data-channel topic Petal uses:
 `petal.telepointer`, `petal.remote-control`,
 `petal.remote-control.clipboard-text`, `petal.viewer-demand`,
-`petal.pipeline-stats`, `petal.latency-probe`, `petal.draw`, `petal.ai-chat`.
+`petal.pipeline-stats`, `petal.latency-probe`, `petal.draw`, `petal.ai-chat`,
+plus the `plugin/` **prefix** (`topics.pluginPrefix`) reserved for the plugin
+bus (see "Plugin bus" under Data-Channel Wire Formats).
 Each has a section below except the two diagnostics topics, documented here:
 
 - **`petal.latency-probe`** (`latencyProbeMessages`) — a peer-to-peer
@@ -1073,6 +1075,41 @@ Files to change together:
 - `web-harness/src/trackNames.ts`
 - `web-harness/tests/contracts.test.ts`
 - `contracts/petal-contracts.json`
+
+### Plugin bus
+
+Plugins (plugins/README.md) never own a topic; they publish under a namespace
+the HOST derives from the plugin's manifest id:
+
+```
+plugin/<pluginId>            e.g. plugin/petal.reactions
+plugin/<pluginId>/<sub>      e.g. plugin/petal.reactions/emoji
+```
+
+`pluginId` matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` (at most 64 chars);
+`sub` matches `^[a-z0-9][a-z0-9-]{0,31}$`. Anything else under the prefix
+is dropped unparsed. `pluginTopicVectors` pins accept/reject cases on both
+sides (`web-harness/tests/pluginTopics.test.ts`,
+`apps/desktop/src-tauri/src/plugins/bus.rs` tests).
+
+**Payload** is opaque bytes (`maxPayloadBytes` in `pluginLimits`); the host
+does not parse it. Plugins typically JSON-encode.
+
+**Sender identity is stamped by the receiving host** from the authenticated
+LiveKit participant. A payload field claiming an identity is never read.
+Native emits one global Tauri event, `plugin-data` (`pluginDataEvent`:
+`topic`, `pluginId`, `sub`, `senderIdentity`, `senderName`, `payloadBase64`);
+the web client hands the same facts to its in-page plugin host directly.
+
+**Quotas** (`pluginLimits`, enforced outbound in the frontend broker AND
+in native `plugin_publish_data`, and inbound per `(sender, pluginId)` in both
+dispatchers): `lossyPerSecond` 30, `reliablePerSecond` 10,
+`inboundPerSenderPerSecond` 60, `maxPayloadBytes` 16384.
+
+Native: `apps/desktop/src-tauri/src/plugins/bus.rs`
+(`plugin_publish_data`, `start_receiver_for_room`). Web:
+`web-harness/src/dataTopics.ts` (prefix route) + `web-harness/src/plugins/`.
+Shared: `shared/plugin-host/topics.ts`, `shared/plugin-host/rateLimit.ts`.
 
 ### Pipeline Stats
 

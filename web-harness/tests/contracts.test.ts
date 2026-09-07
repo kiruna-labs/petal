@@ -120,6 +120,7 @@ const contractFixture = JSON.parse(
     latencyProbe: string;
     draw: string;
     aiChat: string;
+    pluginPrefix: string;
   };
   aiTracks: Array<{ windowId: number; trackName: string }>;
   aiChatMessages: Array<{

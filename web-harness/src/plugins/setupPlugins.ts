@@ -14,12 +14,16 @@ import { hostCompatibility } from '@petal/shared/plugin-host/manifest';
 import { isPluginEnabled, readEnabledOverrides, type InstalledPlugin } from '@petal/shared/plugin-host/settingsModel';
 import { badgeText, type ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
 import { createWebAdapter, participantFromLiveKit } from './webAdapter.ts';
+import { PLUGIN_LIMITS, createRateLimiter } from '@petal/shared/plugin-host/rateLimit';
+import { parsePluginTopic } from '@petal/shared/plugin-host/topics';
 
 export interface PluginsHook {
   host: PluginHost;
   installed: InstalledPlugin[];
   roomConnected(room: Room): void;
   roomDisconnected(): void;
+  /** Inbound `plugin/*` packet from the connection's topic dispatcher. */
+  onData(payload: Uint8Array, participant: LkParticipant | undefined, topic: string, senderIdentity: string | undefined): void;
 }
 
 declare const __PETAL_BUILD_INFO__: { version: string } | undefined;
@@ -165,5 +169,21 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     host.broadcast('meeting.phase', { label: dom.roomNameEl.textContent?.trim() ?? '', phase: 'disconnected' });
   }
 
-  return { host, installed, roomConnected, roomDisconnected };
+  // Inbound plugin packets: same guards as the native bus (plugins::bus) --
+  // well-formed topic, size cap, authenticated sender, per-(sender, plugin)
+  // rate limit -- then the host routes to the plugin's logic frame only.
+  const inbound = createRateLimiter({ perSecond: PLUGIN_LIMITS.inboundPerSenderPerSecond });
+  function onData(payload: Uint8Array, participant: LkParticipant | undefined, topic: string, senderIdentity: string | undefined): void {
+    const parsed = parsePluginTopic(topic);
+    if (!parsed) return;
+    if (payload.byteLength > PLUGIN_LIMITS.maxPayloadBytes) return;
+    const room = state.room;
+    const sender = participant ?? (senderIdentity && room ? room.remoteParticipants.get(senderIdentity) : undefined);
+    if (!sender) return; // no authenticated sender = nothing a plugin may trust
+    if (!inbound.tryTake(`${sender.identity}\u0000${parsed.pluginId}`)) return;
+    if (!host.isLoaded(parsed.pluginId)) return; // fallback suggestion trigger lands in I-6
+    host.deliverData(parsed.pluginId, { sub: parsed.sub, sender: participantFromLiveKit(sender, false), payload });
+  }
+
+  return { host, installed, roomConnected, roomDisconnected, onData };
 }

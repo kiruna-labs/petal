@@ -10,6 +10,7 @@ import { bridgeFailure, type LoadedPlugin } from '@petal/shared/plugin-host/brok
 import type { PluginHostAdapter } from '@petal/shared/plugin-host/host';
 import { PLUGIN_KV_STORAGE_PREFIX } from '@petal/shared/plugin-host/settingsModel';
 import type { FetchParams, FetchResponse } from '@petal/shared/plugin-host/protocol';
+import { pluginTopic } from '@petal/shared/plugin-host/topics';
 import { displayNameForParticipant } from '../tiles.ts';
 
 export interface WebAdapterDeps {
@@ -79,8 +80,16 @@ export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
       },
       room,
     },
-    async publishData(_plugin: LoadedPlugin) {
-      throw bridgeFailure('unavailable', 'meeting-wide plugin messages are not wired on this host yet (M2)');
+    async publishData(plugin: LoadedPlugin, params) {
+      const room = deps.room();
+      if (!room || room.state !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+      // Topic is derived from the plugin's own id here, never taken from the plugin.
+      const topic = pluginTopic(plugin.manifest.id, params.sub);
+      await room.localParticipant.publishData(params.payload, {
+        reliable: params.reliable,
+        topic,
+        destinationIdentities: params.to && params.to.length > 0 ? params.to : undefined,
+      });
     },
     async setState() {
       throw bridgeFailure('unavailable', 'plugin state sharing is not wired on this host yet (M2)');
