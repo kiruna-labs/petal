@@ -6,6 +6,7 @@ import { setupConnection } from '../src/connection.ts';
 import { internalCredentialForAccessCode } from '@petal/shared/logic/meetingCode';
 import { SensitiveStringRegistry } from '../src/sensitiveStrings.ts';
 import type { HarnessContext } from '../src/context.ts';
+import { REMOTE_CONTROL_TOPIC } from '../src/trackNames.ts';
 
 const ACCESS_CODE = 'abc-defg-hjk';
 const CREDENTIAL = internalCredentialForAccessCode(ACCESS_CODE);
@@ -143,10 +144,49 @@ function installBrowserGlobals(fetchImpl?: typeof fetch) {
   });
 }
 
+// The slice of RTCEngine the connection wiring touches: an EventEmitter with
+// `prependListener`. `emit` runs listeners in order, exactly like `events`.
+class FakeEngine {
+  readonly listeners = new Map<string, FakeHandler[]>();
+  on(event: string, handler: FakeHandler) {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), handler]);
+    return this;
+  }
+  prependListener(event: string, handler: FakeHandler) {
+    this.listeners.set(event, [handler, ...(this.listeners.get(event) ?? [])]);
+    return this;
+  }
+  emit(event: string, ...args: unknown[]) {
+    for (const handler of this.listeners.get(event) ?? []) handler(...args);
+  }
+}
+
 class FakeRoom {
   private handlers = new Map<string, FakeHandler[]>();
   canPlaybackAudio = true;
   remoteParticipants = new Map<string, unknown>();
+  readonly engine = new FakeEngine();
+
+  constructor() {
+    // livekit-client's Room registers its own `dataPacketReceived` listener in
+    // its constructor and emits `RoomEvent.DataReceived` synchronously from it,
+    // resolving the sender via `remoteParticipants.get(participantIdentity)` --
+    // `undefined` when that lookup misses.
+    this.engine.on('dataPacketReceived', (...args: unknown[]) => {
+      const packet = args[0] as {
+        participantIdentity: string;
+        value: { case: string; value: { payload: Uint8Array; topic?: string } };
+      };
+      if (packet.value.case !== 'user') return;
+      this.emit(
+        RoomEvent.DataReceived,
+        packet.value.value.payload,
+        this.remoteParticipants.get(packet.participantIdentity) as { identity: string } | undefined,
+        undefined,
+        packet.value.value.topic
+      );
+    });
+  }
 
   on(event: string, handler: FakeHandler) {
     this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
@@ -157,6 +197,14 @@ class FakeRoom {
 
   emit(event: string, ...args: unknown[]) {
     for (const handler of this.handlers.get(event) ?? []) handler(...args);
+  }
+
+  /** Deliver a user data packet the way the SFU hands it to the engine. */
+  deliverDataPacket(participantIdentity: string, topic: string, payload: Uint8Array) {
+    this.engine.emit('dataPacketReceived', {
+      participantIdentity,
+      value: { case: 'user', value: { payload, topic } }
+    });
   }
 }
 
@@ -605,6 +653,51 @@ test('#679: a new remote share tile fires an actionable "is sharing a window" to
       [{ message: 'Sam is sharing a window', dismissMs: 4000, actionLabel: 'Bring to front' }],
       'a republish of an already-open share must not re-fire the notice'
     );
+  } finally {
+    fakeDom.restore();
+  }
+});
+
+test('kiruna-labs/petal#2: a host packet arriving while the host is absent from remoteParticipants keeps its SFU-stamped sender identity', async () => {
+  installBrowserGlobals();
+  const fakeDom = installFakeDom();
+  try {
+    const topbarRight = fakeDom.document.createElement('div');
+    const { ctx, state } = makeConnectionContext(topbarRight);
+    const received: Array<string | undefined> = [];
+    ctx.cb.handleRemoteControlPayload = (_payload: Uint8Array, senderIdentity?: string) => {
+      received.push(senderIdentity);
+    };
+    const rooms: FakeRoom[] = [];
+    const createRoom = () => {
+      const room = new FakeRoom();
+      rooms.push(room);
+      return room as unknown as Room;
+    };
+
+    await setupConnection(ctx, createRoom).connectToMeeting(CREDENTIAL, 'web-riley');
+    if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+    const room = rooms[0]!;
+    const payload = new Uint8Array([0x7b]);
+
+    // Baseline: a participant the SDK knows resolves exactly as before.
+    room.remoteParticipants.set('native-host', { identity: 'native-host' });
+    room.deliverDataPacket('native-host', REMOTE_CONTROL_TOPIC, payload);
+
+    // The host's full reconnect: livekit-client deletes the map entry BY
+    // IDENTITY on the old session's late DISCONNECTED and only re-creates it
+    // on the next ParticipantUpdate. Every packet in that gap reaches
+    // `DataReceived` with `participant: undefined` -- measured live (run
+    // 33997561478): the `active` status carrying the grant token, so the
+    // controller's sender gate ignored it and control never came up.
+    room.remoteParticipants.delete('native-host');
+    room.deliverDataPacket('native-host', REMOTE_CONTROL_TOPIC, payload);
+
+    // A DataReceived with no engine capture behind it yields NO identity --
+    // never the previous packet's. Attribution may be absent, never wrong.
+    room.emit(RoomEvent.DataReceived, payload, undefined, undefined, REMOTE_CONTROL_TOPIC);
+
+    assert.deepEqual(received, ['native-host', 'native-host', undefined]);
   } finally {
     fakeDom.restore();
   }
