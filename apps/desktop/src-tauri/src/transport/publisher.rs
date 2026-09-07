@@ -1397,7 +1397,7 @@ impl RoomConnection<Arc<Room>> {
         plugin_id: &str,
         entry: Option<serde_json::Value>,
     ) -> Result<(), String> {
-        const TOTAL_BUDGET_BYTES: usize = 8192;
+        const TOTAL_BUDGET_BYTES: usize = crate::plugins::bus::PLUGINS_TOTAL_BYTES;
         let metadata = {
             let mut share_metadata = self.share_metadata.lock_unpoisoned();
             let mut next = share_metadata.plugins.clone();
