@@ -37,12 +37,14 @@
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",
     "@sveltejs/kit": "^2.70.3",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tauri-apps/cli": "^2",
     "playwright": "^1.62.1",
     "svelte": "^5.57.0",
     "svelte-check": "^4.7.6",
     "tsx": "^4.23.13",
-    "typescript": "~6.0.2"
+    "typescript": "~6.0.2",
+    "vite": "^8.2.2"
   },
   "allowScripts": {
     "esbuild@0.25.12": true,
