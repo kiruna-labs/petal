@@ -16,6 +16,7 @@ import { badgeText, type ToolbarButtonModel } from '@petal/shared/plugin-host/su
 import { createWebAdapter, participantFromLiveKit } from './webAdapter.ts';
 import { PLUGIN_LIMITS, createRateLimiter } from '@petal/shared/plugin-host/rateLimit';
 import { parsePluginTopic } from '@petal/shared/plugin-host/topics';
+import { diffPluginState, pluginsFromMetadata, type PluginAdverts } from '@petal/shared/plugin-host/metadata';
 
 export interface PluginsHook {
   host: PluginHost;
@@ -24,6 +25,8 @@ export interface PluginsHook {
   roomDisconnected(): void;
   /** Inbound `plugin/*` packet from the connection's topic dispatcher. */
   onData(payload: Uint8Array, participant: LkParticipant | undefined, topic: string, senderIdentity: string | undefined): void;
+  /** A participant's metadata changed; diff its `plugins` key into state.changed events. */
+  onMetadata(participant: LkParticipant): void;
 }
 
 declare const __PETAL_BUILD_INFO__: { version: string } | undefined;
@@ -147,25 +150,51 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     };
     const phase = () => host.broadcast('meeting.phase', adapter.meeting!.room());
     room.on(RoomEvent.ParticipantConnected, joined);
+    room.on(RoomEvent.ParticipantConnected, onMetadata);
     room.on(RoomEvent.ParticipantDisconnected, left);
+    room.on(RoomEvent.ParticipantDisconnected, forgetParticipant);
     room.on(RoomEvent.ParticipantNameChanged, (_name, p) => changed(p));
     room.on(RoomEvent.TrackMuted, (_pub, p) => changed(p));
     room.on(RoomEvent.TrackUnmuted, (_pub, p) => changed(p));
     room.on(RoomEvent.ActiveSpeakersChanged, speakers);
     room.on(RoomEvent.Reconnecting, phase);
     room.on(RoomEvent.Reconnected, phase);
+    // Late joiner: everyone already here advertised before we arrived.
+    for (const p of room.remoteParticipants.values()) onMetadata(p);
+    host.readvertise();
     unsubscribe = () => {
       room.off(RoomEvent.ParticipantConnected, joined);
+      room.off(RoomEvent.ParticipantConnected, onMetadata);
       room.off(RoomEvent.ParticipantDisconnected, left);
+      room.off(RoomEvent.ParticipantDisconnected, forgetParticipant);
       room.off(RoomEvent.ActiveSpeakersChanged, speakers);
       room.off(RoomEvent.Reconnecting, phase);
       room.off(RoomEvent.Reconnected, phase);
     };
     phase();
   }
+  // Other participants' `plugins` adverts, by identity (metadata.ts).
+  const advertsByIdentity = new Map<string, PluginAdverts>();
+  function applyAdverts(identity: string, next: PluginAdverts): void {
+    const previous = advertsByIdentity.get(identity) ?? {};
+    if (Object.keys(next).length === 0) advertsByIdentity.delete(identity);
+    else advertsByIdentity.set(identity, next);
+    for (const change of diffPluginState(previous, next)) {
+      if (host.isLoaded(change.pluginId)) host.emit(change.pluginId, 'state.changed', { identity, value: change.value });
+    }
+  }
+  function onMetadata(participant: LkParticipant): void {
+    if (state.room && participant === state.room.localParticipant) return;
+    applyAdverts(participant.identity, pluginsFromMetadata(participant.metadata));
+  }
+  function forgetParticipant(participant: LkParticipant): void {
+    applyAdverts(participant.identity, {});
+  }
+
   function roomDisconnected(): void {
     unsubscribe?.();
     unsubscribe = null;
+    for (const identity of [...advertsByIdentity.keys()]) applyAdverts(identity, {});
     host.broadcast('meeting.phase', { label: dom.roomNameEl.textContent?.trim() ?? '', phase: 'disconnected' });
   }
 
@@ -185,5 +214,5 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     host.deliverData(parsed.pluginId, { sub: parsed.sub, sender: participantFromLiveKit(sender, false), payload });
   }
 
-  return { host, installed, roomConnected, roomDisconnected, onData };
+  return { host, installed, roomConnected, roomDisconnected, onData, onMetadata };
 }

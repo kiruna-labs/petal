@@ -552,6 +552,7 @@ export function setupConnection(
     });
 
     newRoom.on(RoomEvent.ParticipantMetadataChanged, (_metadata, participant) => {
+      ctx.hook?.plugins?.onMetadata(participant);
       if (!('trackPublications' in participant)) return;
       cb.updateParticipantShareColorProfiles(participant as RemoteParticipant);
       cb.repositionRemoteDraw();

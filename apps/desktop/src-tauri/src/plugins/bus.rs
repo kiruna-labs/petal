@@ -149,6 +149,88 @@ impl RateLimiter {
     }
 }
 
+pub const STATE_EVENT_NAME: &str = "plugin-state-changed";
+pub const PLUGINS_METADATA_KEY: &str = "plugins";
+/// `pluginStateMetadata.limits` in the contract fixture.
+pub const PER_PLUGIN_STATE_BYTES: usize = 2048;
+pub const PLUGINS_TOTAL_BYTES: usize = 8192;
+const STATE_WRITES_PER_SECOND: f64 = 4.0;
+
+/// Strict `major.minor.patch` (mirrors `isReleaseVersion` in manifest.ts).
+pub fn is_release_version(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.bytes().all(|b| b.is_ascii_digit())
+                && (p.len() == 1 || !p.starts_with('0'))
+        })
+}
+
+fn is_source(value: &str) -> bool {
+    matches!(value, "builtin" | "registry" | "dev")
+}
+
+/// Validate one `plugins[<id>]` entry: `{ v: release version, src: builtin|registry|dev, state?: json <= 2 KB }`.
+/// Returns the cleaned entry (unknown keys dropped, null state removed).
+pub fn clean_plugin_entry(entry: &serde_json::Value) -> Option<serde_json::Value> {
+    let obj = entry.as_object()?;
+    let v = obj.get("v")?.as_str()?;
+    let src = obj.get("src")?.as_str()?;
+    if !is_release_version(v) || !is_source(src) {
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+    out.insert("v".into(), serde_json::Value::String(v.into()));
+    out.insert("src".into(), serde_json::Value::String(src.into()));
+    if let Some(state) = obj.get("state") {
+        if !state.is_null() && state.to_string().len() <= PER_PLUGIN_STATE_BYTES {
+            out.insert("state".into(), state.clone());
+        }
+    }
+    Some(serde_json::Value::Object(out))
+}
+
+/// Read and validate the `plugins` key of a participant-metadata blob.
+/// Malformed entries are dropped individually (LOCKSTEP with
+/// `pluginsFromMetadata` in shared/plugin-host/metadata.ts).
+pub fn plugins_from_metadata(metadata: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(metadata) else {
+        return out;
+    };
+    let Some(plugins) = root.get(PLUGINS_METADATA_KEY).and_then(|v| v.as_object()) else {
+        return out;
+    };
+    for (id, entry) in plugins {
+        if !is_plugin_id(id) {
+            continue;
+        }
+        if let Some(clean) = clean_plugin_entry(entry) {
+            out.insert(id.clone(), clean);
+        }
+    }
+    out
+}
+
+/// Payload of the global `plugin-state-changed` event (`pluginStateChangedEvent`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginStateChangedEvent {
+    pub identity: String,
+    pub plugins: serde_json::Map<String, serde_json::Value>,
+}
+
+fn emit_state(app: &AppHandle, identity: String, metadata: &str) {
+    let event = PluginStateChangedEvent {
+        identity,
+        plugins: plugins_from_metadata(metadata),
+    };
+    if let Err(e) = app.emit(STATE_EVENT_NAME, &event) {
+        log::debug!("plugins::bus: state emit failed: {e}");
+    }
+}
+
 /// Payload of the global `plugin-data` Tauri event (`pluginDataEvent` in the contract).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -187,6 +269,14 @@ pub fn start_receiver_for_room(app: &AppHandle, room: Arc<livekit::Room>, genera
     let mut events = room.subscribe();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        // Late joiner: everyone already in the room advertised before we
+        // subscribed, so seed the frontend's view from current metadata.
+        for (identity, participant) in room.remote_participants() {
+            let metadata = participant.metadata();
+            if !plugins_from_metadata(&metadata).is_empty() {
+                emit_state(&app, identity.to_string(), &metadata);
+            }
+        }
         let mut inbound = RateLimiter::new(INBOUND_PER_SENDER_PER_SECOND);
         let mut last_prune = Instant::now();
         while let Some(event) = events.recv().await {
@@ -194,14 +284,34 @@ pub fn start_receiver_for_room(app: &AppHandle, room: Arc<livekit::Room>, genera
                 log::debug!("plugins::bus: receiver exiting for stale room generation");
                 break;
             }
-            let livekit::RoomEvent::DataReceived {
-                payload,
-                topic,
-                participant,
-                ..
-            } = event
-            else {
-                continue;
+            let (payload, topic, participant) = match event {
+                livekit::RoomEvent::DataReceived {
+                    payload,
+                    topic,
+                    participant,
+                    ..
+                } => (payload, topic, participant),
+                livekit::RoomEvent::ParticipantMetadataChanged {
+                    participant,
+                    old_metadata,
+                    metadata,
+                } => {
+                    if matches!(participant, livekit::prelude::Participant::Local(_)) {
+                        continue;
+                    }
+                    if plugins_from_metadata(&old_metadata) != plugins_from_metadata(&metadata) {
+                        emit_state(&app, participant.identity().to_string(), &metadata);
+                    }
+                    continue;
+                }
+                livekit::RoomEvent::ParticipantConnected(participant) => {
+                    let metadata = participant.metadata();
+                    if !plugins_from_metadata(&metadata).is_empty() {
+                        emit_state(&app, participant.identity().to_string(), &metadata);
+                    }
+                    continue;
+                }
+                _ => continue,
             };
             let Some(topic) = topic.as_deref() else {
                 continue;
@@ -332,6 +442,48 @@ pub async fn plugin_publish_data(
         .map_err(|e| e.to_string())
 }
 
+fn state_limiter() -> &'static Mutex<RateLimiter> {
+    static LIMITER: OnceLock<Mutex<RateLimiter>> = OnceLock::new();
+    LIMITER.get_or_init(|| Mutex::new(RateLimiter::new(STATE_WRITES_PER_SECOND)))
+}
+
+/// Set or remove this participant's `plugins[<plugin_id>]` advertisement
+/// (plugins/README.md §2.5). The frontend host owns the entry's content; this
+/// re-validates its shape and the per-plugin state budget before merging it
+/// into `ShareMetadata` (the total budget is enforced there).
+#[tauri::command]
+pub async fn plugin_set_state(
+    app: AppHandle,
+    plugin_id: String,
+    entry: Option<serde_json::Value>,
+) -> Result<(), String> {
+    if !is_plugin_id(&plugin_id) {
+        return Err(format!("invalid plugin id: {plugin_id}"));
+    }
+    let clean = match entry {
+        None => None,
+        Some(value) => Some(
+            clean_plugin_entry(&value)
+                .ok_or_else(|| "entry must be { v: <release version>, src: builtin|registry|dev, state?: <json <= 2 KB> }".to_string())?,
+        ),
+    };
+    if !state_limiter()
+        .lock()
+        .map_err(|_| "limiter poisoned".to_string())?
+        .try_take(&plugin_id)
+    {
+        return Err(format!("plugin {plugin_id} exceeded its state publish quota"));
+    }
+    let state = app
+        .try_state::<SessionState>()
+        .ok_or_else(|| "session state is not available".to_string())?;
+    let (room_connection, _identity) = state
+        .inner()
+        .control_channel_snapshot()
+        .ok_or_else(|| "join a room before publishing plugin state".to_string())?;
+    room_connection.set_plugin_metadata_entry(&plugin_id, clean).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,11 +523,30 @@ mod tests {
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
+    struct StateMetadataFixture {
+        key: String,
+        metadata: String,
+        entries: serde_json::Map<String, serde_json::Value>,
+        limits: serde_json::Map<String, serde_json::Value>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StateEventFixture {
+        name: String,
+        fields: Vec<String>,
+        example: serde_json::Map<String, serde_json::Value>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct Fixture {
         topics: Topics,
         plugin_topic_vectors: Vec<TopicVector>,
         plugin_limits: Limits,
         plugin_data_event: DataEventFixture,
+        plugin_state_metadata: StateMetadataFixture,
+        plugin_state_changed_event: StateEventFixture,
     }
 
     fn fixture() -> Fixture {
@@ -458,6 +629,50 @@ mod tests {
         let many: Vec<String> = (0..MAX_DESTINATIONS + 1).map(|i| format!("p{i}")).collect();
         assert!(validate_publish("petal.reactions", None, "AQ==", &many).is_err());
         assert!(validate_publish("petal.reactions", None, "AQ==", &["".to_string()]).is_err());
+    }
+
+    #[test]
+    fn plugins_metadata_matches_the_contract_example() {
+        let f = fixture().plugin_state_metadata;
+        assert_eq!(PLUGINS_METADATA_KEY, f.key);
+        assert_eq!(plugins_from_metadata(&f.metadata), f.entries);
+        assert_eq!(f.limits["perPluginStateBytes"], PER_PLUGIN_STATE_BYTES);
+        assert_eq!(f.limits["totalBytes"], PLUGINS_TOTAL_BYTES);
+        assert!(plugins_from_metadata("not json").is_empty());
+        assert!(plugins_from_metadata(r#"{"plugins":[]}"#).is_empty());
+    }
+
+    #[test]
+    fn state_changed_event_matches_the_contract_example() {
+        let f = fixture();
+        assert_eq!(f.plugin_state_changed_event.name, STATE_EVENT_NAME);
+        let event = PluginStateChangedEvent {
+            identity: "alex-1a2b".into(),
+            plugins: plugins_from_metadata(&f.plugin_state_metadata.metadata),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        let mut keys: Vec<String> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, f.plugin_state_changed_event.fields);
+        assert_eq!(json, serde_json::Value::Object(f.plugin_state_changed_event.example));
+    }
+
+    #[test]
+    fn clean_plugin_entry_enforces_shape_and_state_budget() {
+        assert!(is_release_version("1.0.0"));
+        assert!(!is_release_version("1.0"));
+        assert!(!is_release_version("01.0.0"));
+        assert!(!is_release_version("1.0.0-beta"));
+        let ok = clean_plugin_entry(&serde_json::json!({"v":"1.0.0","src":"dev","state":{"a":1},"junk":true})).unwrap();
+        assert_eq!(ok, serde_json::json!({"v":"1.0.0","src":"dev","state":{"a":1}}));
+        let null_state = clean_plugin_entry(&serde_json::json!({"v":"1.0.0","src":"builtin","state":null})).unwrap();
+        assert_eq!(null_state, serde_json::json!({"v":"1.0.0","src":"builtin"}));
+        let big = "x".repeat(PER_PLUGIN_STATE_BYTES);
+        let too_big = clean_plugin_entry(&serde_json::json!({"v":"1.0.0","src":"builtin","state":big})).unwrap();
+        assert!(too_big.get("state").is_none(), "oversized state is dropped, not the whole entry");
+        assert!(clean_plugin_entry(&serde_json::json!({"v":"1.0","src":"builtin"})).is_none());
+        assert!(clean_plugin_entry(&serde_json::json!({"v":"1.0.0","src":"store"})).is_none());
+        assert!(clean_plugin_entry(&serde_json::json!("nope")).is_none());
     }
 
     #[test]

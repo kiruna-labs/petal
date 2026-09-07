@@ -6,9 +6,9 @@
   "description": "Fixture plugin used by the plugin-host tests.",
   "apiVersion": 1,
   "minHostVersion": "0.1.0",
-  "scope": "local",
+  "scope": "meeting",
   "entry": "plugin.js",
-  "permissions": ["meeting:read", "ui:toolbar-button", "ui:toast"],
+  "permissions": ["meeting:read", "state:write", "ui:toolbar-button", "ui:toast"],
   "contributes": {
     "toolbarButtons": [{ "id": "hello", "label": "Hello", "icon": "smile" }]
   },

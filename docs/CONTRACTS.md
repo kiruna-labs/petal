@@ -1106,10 +1106,31 @@ in native `plugin_publish_data`, and inbound per `(sender, pluginId)` in both
 dispatchers): `lossyPerSecond` 30, `reliablePerSecond` 10,
 `inboundPerSenderPerSecond` 60, `maxPayloadBytes` 16384.
 
+**Advertisement and shared state** ride participant metadata under the
+`plugins` key (`pluginStateMetadata`):
+
+```json
+"plugins": { "petal.chat": { "v": "1.2.0", "src": "registry", "state": { "unread": 3 } } }
+```
+
+Written by merging into the participant's existing blob (beside
+`petalWindowKinds`, `petalIdentityPaletteIndex`, ...), never replacing it.
+`v` is a strict release version, `src` is `builtin | registry | dev`, `state`
+is optional JSON at most `perPluginStateBytes` (2048); the whole object is at
+most `totalBytes` (8192). Malformed entries are dropped individually.
+Native emits `plugin-state-changed` (`pluginStateChangedEvent`: `identity`,
+`plugins`) whenever a remote participant's `plugins` map changes, on
+`ParticipantConnected`, and once per existing participant when the receiver
+starts; the web client diffs metadata in-page. Self-set metadata is a
+discovery signal for the install prompt (I-6) and a state channel for plugins
+that hold `state:write`; it is never an authorization boundary.
+
 Native: `apps/desktop/src-tauri/src/plugins/bus.rs`
-(`plugin_publish_data`, `start_receiver_for_room`). Web:
+(`plugin_publish_data`, `plugin_set_state`, `start_receiver_for_room`),
+`transport/publisher.rs` (`set_plugin_metadata_entry`). Web:
 `web-harness/src/dataTopics.ts` (prefix route) + `web-harness/src/plugins/`.
-Shared: `shared/plugin-host/topics.ts`, `shared/plugin-host/rateLimit.ts`.
+Shared: `shared/plugin-host/topics.ts`, `shared/plugin-host/metadata.ts`,
+`shared/plugin-host/rateLimit.ts`.
 
 ### Pipeline Stats
 

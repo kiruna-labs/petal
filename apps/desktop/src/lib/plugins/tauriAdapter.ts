@@ -9,6 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { COMMANDS, type CommandArgs } from '$lib/ipc';
 import { bytesToBase64 } from '@petal/shared/plugin-host/topics';
+import type { PluginAdverts } from '@petal/shared/plugin-host/metadata';
 import type { Json, MeetingPhase, Participant } from '@petal/shared/plugin-host/api';
 import { bridgeFailure } from '@petal/shared/plugin-host/broker';
 import type { PluginHostAdapter } from '@petal/shared/plugin-host/host';
@@ -20,6 +21,8 @@ export interface TauriAdapterDeps {
   roomLabel(): string;
   phase(): MeetingPhase;
   toast(text: string, variant: 'info' | 'degraded'): void;
+  /** Remote participants' `plugins` adverts, by identity (fed by plugin-state-changed). */
+  adverts(): ReadonlyMap<string, PluginAdverts>;
 }
 
 export function createTauriAdapter(deps: TauriAdapterDeps): PluginHostAdapter {
@@ -60,8 +63,18 @@ export function createTauriAdapter(deps: TauriAdapterDeps): PluginHostAdapter {
         destinationIdentities: params.to && params.to.length > 0 ? params.to : undefined
       } satisfies CommandArgs[typeof COMMANDS.pluginPublishData]);
     },
-    async setState() {
-      throw bridgeFailure('unavailable', 'plugin state sharing is not wired on this host yet (M2)');
+    async publishPluginEntry(pluginId, entry) {
+      if (deps.phase() !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+      // Rust merges into the participant's ShareMetadata and re-checks the budgets.
+      await invoke(COMMANDS.pluginSetState, { pluginId, entry } satisfies CommandArgs[typeof COMMANDS.pluginSetState]);
+    },
+    stateSnapshot(pluginId) {
+      const out: Record<string, Json> = {};
+      for (const [identity, adverts] of deps.adverts()) {
+        const state = adverts[pluginId]?.state;
+        if (state !== undefined) out[identity] = state;
+      }
+      return out;
     },
     storage: {
       async get(pluginId, key) {

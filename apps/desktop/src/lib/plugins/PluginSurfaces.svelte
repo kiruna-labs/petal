@@ -13,8 +13,9 @@
   import { hostCompatibility } from '@petal/shared/plugin-host/manifest';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { EVENTS, hasTauriBridge, type PluginDataEvent } from '$lib/ipc';
+  import { EVENTS, hasTauriBridge, type PluginDataEvent, type PluginStateChangedEvent } from '$lib/ipc';
   import { base64ToBytes } from '@petal/shared/plugin-host/topics';
+  import { diffPluginState, pluginsFromMetadata, type PluginAdverts } from '@petal/shared/plugin-host/metadata';
   import { enabledPlugins } from './pluginCatalog';
   import { createTauriAdapter } from './tauriAdapter';
 
@@ -58,7 +59,8 @@
         participants: () => participants,
         roomLabel: () => roomLabel,
         phase: () => phase,
-        toast: onToast
+        toast: onToast,
+        adverts: () => advertsByIdentity
       }),
       hostVersion: version,
       mounts: { logic: logicEl, overlay: overlayEl, popoverLayer: popoverEl },
@@ -80,10 +82,32 @@
   // Inbound plugin packets (Rust plugins::bus already validated topic, size,
   // sender, and rate). Resolve the sender from presence when known so the
   // plugin sees speaking/mute state; otherwise a minimal participant.
+  // Remote participants' `plugins` adverts (metadata.ts), fed by the Rust
+  // bus's plugin-state-changed event; diffed into per-plugin state.changed.
+  const advertsByIdentity = new Map<string, PluginAdverts>();
+  function applyAdverts(identity: string, next: PluginAdverts) {
+    const previous = advertsByIdentity.get(identity) ?? {};
+    if (Object.keys(next).length === 0) advertsByIdentity.delete(identity);
+    else advertsByIdentity.set(identity, next);
+    for (const change of diffPluginState(previous, next)) {
+      if (host?.isLoaded(change.pluginId)) host.emit(change.pluginId, 'state.changed', { identity, value: change.value });
+    }
+  }
+
   let unlistenData: UnlistenFn | undefined;
+  let unlistenState: UnlistenFn | undefined;
   let destroyed = false;
   function listenForPluginData() {
     if (!hasTauriBridge()) return;
+    listen<PluginStateChangedEvent>(EVENTS.pluginStateChanged, (event) => {
+      // Re-validate through the shared parser so both clients apply identical rules.
+      applyAdverts(event.payload.identity, pluginsFromMetadata(JSON.stringify({ plugins: event.payload.plugins })));
+    })
+      .then((un) => {
+        if (destroyed) un();
+        else unlistenState = un;
+      })
+      .catch(() => {});
     listen<PluginDataEvent>(EVENTS.pluginData, (event) => {
       const p = event.payload;
       if (!host || !host.isLoaded(p.pluginId)) return;
@@ -107,6 +131,7 @@
   onDestroy(() => {
     destroyed = true;
     unlistenData?.();
+    unlistenState?.();
     host?.dispose();
     host = null;
   });
@@ -126,13 +151,22 @@
         host.broadcast('meeting.participant-changed', p);
       }
     }
-    for (const [identity, p] of before) if (!after.has(identity)) host.broadcast('meeting.participant-left', p);
+    for (const [identity, p] of before) {
+      if (!after.has(identity)) {
+        host.broadcast('meeting.participant-left', p);
+        applyAdverts(identity, {});
+      }
+    }
     previous = next;
   });
 
+  let lastPhase: MeetingPhase | null = null;
   $effect(() => {
     const info = { label: roomLabel, phase };
     host?.broadcast('meeting.phase', info);
+    // Advertisements published before the room existed were refused; redo them now.
+    if (phase === 'connected' && lastPhase !== 'connected') host?.readvertise();
+    lastPhase = phase;
   });
 </script>
 

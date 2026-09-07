@@ -68,6 +68,7 @@ export const COMMANDS = {
   debugModeSettings: 'debug_mode_settings',
   drawSend: 'draw_send',
   pluginPublishData: 'plugin_publish_data',
+  pluginSetState: 'plugin_set_state',
   downloadAndInstallCompatibleUpdate: 'download_and_install_compatible_update',
   exportLogs: 'export_logs',
   forgetRoom: 'forget_room',
@@ -231,6 +232,7 @@ export const EVENTS = {
   hoverTabUpdate: 'hover-tab-update',
   drawUpdate: 'draw-update',
   pluginData: 'plugin-data',
+  pluginStateChanged: 'plugin-state-changed',
   journalAppended: 'journal-appended',
   meetingRestorePillRequested: 'meeting-restore-pill-requested',
   micMuteChanged: 'mic-mute-changed',
@@ -972,6 +974,21 @@ export interface PluginDataEvent {
   payloadBase64: string;
 }
 
+/** One plugin's advertisement in participant metadata (`plugins[<id>]`). */
+export interface PluginAdvertEntry {
+  v: string;
+  src: 'builtin' | 'registry' | 'dev';
+  state?: unknown;
+}
+
+/** Global `plugin-state-changed` event (plugins::bus, contract
+ * `pluginStateChangedEvent`): a remote participant's whole `plugins` map
+ * after a metadata change; empty object when it was removed. */
+export interface PluginStateChangedEvent {
+  identity: string;
+  plugins: Record<string, PluginAdvertEntry>;
+}
+
 export interface DrawUpdate extends DrawDraft {
   drawerIdentity: string;
   drawerDisplayName?: string | null;
@@ -1409,6 +1426,8 @@ export interface CommandArgs {
     reliable: boolean;
     destinationIdentities?: string[];
   };
+  /** `entry` null removes this plugin's advertisement (contract `pluginStateMetadata`). */
+  [COMMANDS.pluginSetState]: { pluginId: string; entry: PluginAdvertEntry | null };
   [COMMANDS.downloadAndInstallCompatibleUpdate]: Record<string, never>;
   [COMMANDS.runLaunchUpdateCheck]: Record<string, never>;
   [COMMANDS.forgetRoom]: { idOrCode: string };
@@ -1564,6 +1583,7 @@ export interface CommandReturns {
   [COMMANDS.setMainPillMode]: void;
   [COMMANDS.drawSend]: void;
   [COMMANDS.pluginPublishData]: void;
+  [COMMANDS.pluginSetState]: void;
   [COMMANDS.currentRoom]: string | null;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: {
     status: 'up-to-date' | 'installed';
@@ -1652,6 +1672,7 @@ export interface EventPayloads {
   [EVENTS.hoverTabUpdate]: HoverTabUpdate;
   [EVENTS.drawUpdate]: DrawUpdate;
   [EVENTS.pluginData]: PluginDataEvent;
+  [EVENTS.pluginStateChanged]: PluginStateChangedEvent;
   [EVENTS.journalAppended]: JournalEntry;
   [EVENTS.meetingRestorePillRequested]: void;
   [EVENTS.micMuteChanged]: MicMuteChanged;

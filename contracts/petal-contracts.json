@@ -2459,5 +2459,64 @@
     "lossyPerSecond": 30,
     "reliablePerSecond": 10,
     "inboundPerSenderPerSecond": 60
+  },
+  "pluginStateMetadata": {
+    "key": "plugins",
+    "metadata": "{\"petalIdentityPaletteIndex\":2,\"petalWindowKinds\":{\"42\":\"window\"},\"plugins\":{\"petal.reactions\":{\"v\":\"1.0.0\",\"src\":\"builtin\"},\"petal.chat\":{\"v\":\"1.2.0\",\"src\":\"registry\",\"state\":{\"unread\":3}},\"acme.dev-thing\":{\"v\":\"0.1.0\",\"src\":\"dev\"},\"Bad.Id\":{\"v\":\"1.0.0\",\"src\":\"builtin\"},\"petal.broken\":{\"v\":\"1.0\",\"src\":\"builtin\"},\"petal.unknown-src\":{\"v\":\"1.0.0\",\"src\":\"store\"}}}",
+    "entries": {
+      "petal.reactions": {
+        "v": "1.0.0",
+        "src": "builtin"
+      },
+      "petal.chat": {
+        "v": "1.2.0",
+        "src": "registry",
+        "state": {
+          "unread": 3
+        }
+      },
+      "acme.dev-thing": {
+        "v": "0.1.0",
+        "src": "dev"
+      }
+    },
+    "limits": {
+      "perPluginStateBytes": 2048,
+      "totalBytes": 8192
+    },
+    "rules": [
+      "written by merging into the participant's existing metadata; every other key is preserved",
+      "an entry needs a valid plugin id, a strict release version v, and src in builtin|registry|dev; malformed entries are dropped individually",
+      "state is optional JSON at most perPluginStateBytes; the whole plugins object is at most totalBytes",
+      "self-set metadata is a discovery signal only; data packets are still attributed to the authenticated LiveKit sender",
+      "the suggestion prompt (I-6) only considers src builtin|registry entries that also appear in the verified registry index"
+    ]
+  },
+  "pluginStateChangedEvent": {
+    "name": "plugin-state-changed",
+    "fields": [
+      "identity",
+      "plugins"
+    ],
+    "example": {
+      "identity": "alex-1a2b",
+      "plugins": {
+        "petal.reactions": {
+          "v": "1.0.0",
+          "src": "builtin"
+        },
+        "petal.chat": {
+          "v": "1.2.0",
+          "src": "registry",
+          "state": {
+            "unread": 3
+          }
+        },
+        "acme.dev-thing": {
+          "v": "0.1.0",
+          "src": "dev"
+        }
+      }
+    }
   }
 }

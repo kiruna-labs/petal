@@ -55,6 +55,17 @@ test('plugin frames are sandboxed, boot, draw buttons, toast, and route popover 
     });
     assert.deepEqual(frameCsp, { sandbox: 'allow-scripts', hasCsp: true });
 
+    // Advertisement + shared state: both meeting plugins advertise {v, src} on
+    // load; hello's activate() then sets state, which lands in the same entry.
+    await page.waitForFunction(() => (window as any).__probe.adverts.some((a: string) => a.includes('"greeted":true')));
+    const adverts = await page.evaluate(() => (window as any).__probe.adverts);
+    assert.ok(adverts.includes('petal.reactions={"v":"1.0.0","src":"builtin"}'), adverts.join('\n'));
+    assert.ok(adverts.includes('petal.test-hello={"v":"1.0.0","src":"builtin"}'), adverts.join('\n'));
+    assert.ok(adverts.includes('petal.test-hello={"v":"1.0.0","src":"builtin","state":{"greeted":true}}'), adverts.join('\n'));
+    // Incoming state for a peer reaches the plugin's state listener.
+    await page.evaluate(() => (window as any).__host.emit('petal.test-hello', 'state.changed', { identity: 'alex', value: { greeted: true } }));
+    await page.waitForFunction(() => (window as any).__probe.logs.some((l: string) => l.includes('state-changed alex {"greeted":true}')));
+
     // Host-drawn toolbar buttons exist for both plugins; clicking hello's toasts.
     assert.deepEqual(
       probe1.buttons.map((b: any) => `${b.pluginId}/${b.buttonId}/${b.label}`).sort(),

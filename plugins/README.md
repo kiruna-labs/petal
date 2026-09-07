@@ -469,7 +469,7 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-1 | M1 | shared/plugin-host, plugins/sdk, workspace, build-all, docs stub | seinfish | merged (kiruna-labs/petal#4, 2026-09-07) |
 | I-2 | M1 | adapters, surfaces, reactions (local), Settings section | seinfish | merged (kiruna-labs/petal#4); web plugins sheet deferred to I-10 |
 | I-3 | M2 | data bus (web + Rust), contracts | seinfish | implemented on feature/plugin-system-m2; live native↔web journey (`PLUGIN-N2W-REACT`) still to run |
-| I-4 | M2 | state + advertisement | unassigned | not started |
+| I-4 | M2 | state + advertisement | seinfish | implemented on feature/plugin-system-m2 |
 | I-5a | M3 | registry client | unassigned | not started |
 | I-5b | M3 | marketplace publisher + hosting (private repo) | unassigned | not started |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |

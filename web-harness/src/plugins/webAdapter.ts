@@ -11,6 +11,7 @@ import type { PluginHostAdapter } from '@petal/shared/plugin-host/host';
 import { PLUGIN_KV_STORAGE_PREFIX } from '@petal/shared/plugin-host/settingsModel';
 import type { FetchParams, FetchResponse } from '@petal/shared/plugin-host/protocol';
 import { pluginTopic } from '@petal/shared/plugin-host/topics';
+import { mergePluginMetadata, pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
 import { displayNameForParticipant } from '../tiles.ts';
 
 export interface WebAdapterDeps {
@@ -91,8 +92,28 @@ export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
         destinationIdentities: params.to && params.to.length > 0 ? params.to : undefined,
       });
     },
-    async setState() {
-      throw bridgeFailure('unavailable', 'plugin state sharing is not wired on this host yet (M2)');
+    async publishPluginEntry(pluginId, entry) {
+      const room = deps.room();
+      if (!room || room.state !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+      const local = room.localParticipant as { metadata?: string; setMetadata?: (metadata: string) => Promise<void> };
+      if (typeof local.setMetadata !== 'function') throw bridgeFailure('unavailable', 'metadata is not writable here');
+      let merged: string;
+      try {
+        merged = mergePluginMetadata(local.metadata, pluginId, entry);
+      } catch (e) {
+        throw bridgeFailure('invalid', (e as Error).message);
+      }
+      await local.setMetadata(merged);
+    },
+    stateSnapshot(pluginId) {
+      const room = deps.room();
+      const out: Record<string, Json> = {};
+      if (!room) return out;
+      for (const p of room.remoteParticipants.values()) {
+        const state = pluginsFromMetadata(p.metadata)[pluginId]?.state;
+        if (state !== undefined) out[p.identity] = state;
+      }
+      return out;
     },
     storage: {
       async get(pluginId, key) {

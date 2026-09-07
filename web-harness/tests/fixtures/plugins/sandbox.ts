@@ -20,6 +20,7 @@ const probe = {
   buttons: [] as ToolbarButtonModel[],
   publishes: [] as string[],
   errors: [] as string[],
+  adverts: [] as string[],
 };
 (window as unknown as { __probe: typeof probe }).__probe = probe;
 
@@ -32,7 +33,10 @@ const adapter: PluginHostAdapter = {
   async publishData(plugin, params) {
     probe.publishes.push(`${plugin.manifest.id}:${params.sub}:${new TextDecoder().decode(params.payload)}`);
   },
-  async setState() {},
+  async publishPluginEntry(pluginId, entry) {
+    probe.adverts.push(`${pluginId}=${JSON.stringify(entry)}`);
+  },
+  stateSnapshot: () => ({ alex: { greeted: false } }),
   storage: {
     async get() {
       return undefined;
