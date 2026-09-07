@@ -1,16 +1,16 @@
 // View models for the declarative surfaces the HOST draws on a plugin's
 // behalf (toolbar buttons today; header buttons in I-9). Both clients render
-// these models; the fit rules here are what keeps "UI text must never
-// truncate" true for text a third party wrote. Design: plugins/README.md §2.7.
+// these models. Labels are validated to MANIFEST_LIMITS.buttonLabelMaxLength
+// where they enter (manifest validator, broker `ui.setButton`) and are NEVER
+// clipped here -- "UI text must never truncate". Design: plugins/README.md §2.7.
 
 import type { ButtonPatch } from './api.ts';
 import type { LoadedPlugin } from './broker.ts';
-import { MANIFEST_LIMITS } from './manifest.ts';
 
 export interface ToolbarButtonModel {
   pluginId: string;
   buttonId: string;
-  /** Visible label, already clamped to the manifest limit. */
+  /** Visible label, exactly as declared or patched (validated at the boundary, never clipped). */
   label: string;
   icon: string;
   badge: number | null;
@@ -25,12 +25,6 @@ export function buttonKey(pluginId: string, buttonId: string): string {
   return `${pluginId}/${buttonId}`;
 }
 
-/** Clamp a label to the manifest limit; the validator already enforces it for manifests. */
-export function fitButtonLabel(label: string): string {
-  const trimmed = label.trim();
-  return trimmed.length <= MANIFEST_LIMITS.buttonLabelMaxLength ? trimmed : trimmed.slice(0, MANIFEST_LIMITS.buttonLabelMaxLength);
-}
-
 /** Badge text: 1..99 shown as-is, more as "99+", 0/null hidden. */
 export function badgeText(badge: number | null | undefined): string | null {
   if (badge === null || badge === undefined || !(badge > 0)) return null;
@@ -43,7 +37,7 @@ export function toolbarButtonModels(plugins: readonly LoadedPlugin[], patches: R
     if (!plugin.granted.includes('ui:toolbar-button')) continue;
     for (const button of plugin.manifest.contributes?.toolbarButtons ?? []) {
       const patch = patches.get(buttonKey(plugin.manifest.id, button.id)) ?? {};
-      const label = fitButtonLabel(patch.label ?? button.label);
+      const label = patch.label ?? button.label;
       out.push({
         pluginId: plugin.manifest.id,
         buttonId: button.id,

@@ -6,7 +6,7 @@
 
 import type { Json, Participant, RoomInfo, SharedWindow, ButtonPatch, LogLevel } from './api.ts';
 import type { Permission, PluginManifest, SurfaceKind } from './manifest.ts';
-import { HOST_API_VERSION } from './manifest.ts';
+import { HOST_API_VERSION, MANIFEST_LIMITS, isButtonLabel } from './manifest.ts';
 import { EVENT_PERMISSIONS, METHOD_PERMISSIONS, hasPermission, netFetchAllowed } from './permissions.ts';
 import {
   type BridgeErrorCode,
@@ -267,7 +267,13 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
         if (!declaredButton(plugin, buttonId)) throw new BridgeError('invalid', `no declared button "${buttonId}"`);
         const patch = isRecord(params.patch) ? params.patch : {};
         const clean: ButtonPatch = {};
-        if (typeof patch.label === 'string') clean.label = patch.label.slice(0, 14);
+        if (patch.label !== undefined) {
+          // Never clip: an over-long label is the plugin's bug, reported as such.
+          if (!isButtonLabel(patch.label)) {
+            throw new BridgeError('invalid', `label must be 1..${MANIFEST_LIMITS.buttonLabelMaxLength} chars (UI text must never truncate)`);
+          }
+          clean.label = patch.label;
+        }
         if (typeof patch.icon === 'string') clean.icon = patch.icon;
         if (patch.badge === null || (typeof patch.badge === 'number' && Number.isFinite(patch.badge))) clean.badge = patch.badge;
         if (typeof patch.disabled === 'boolean') clean.disabled = patch.disabled;

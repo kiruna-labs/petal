@@ -136,8 +136,10 @@ test('requests round-trip through the adapter; unknown sources are ignored', asy
   broker.handleMessage({ source: frame, data: req(2, 'ui.setButton', { buttonId: 'react', patch: { badge: 3, junk: 1 } }) });
   broker.handleMessage({ source: frame, data: req(3, 'ui.openSurface', { surfaceId: 'picker' }) });
   broker.handleMessage({ source: frame, data: req(4, 'log', { level: 'info', args: ['hi', 1] }) });
+  broker.handleMessage({ source: frame, data: req(5, 'ui.setButton', { buttonId: 'react', patch: { label: 'Fourteen chars' } }) });
   await tick();
   assert.ok(calls.includes('setButton:react:{"badge":3}'));
+  assert.ok(calls.includes('setButton:react:{"label":"Fourteen chars"}'), 'a label at the 14-char limit passes through whole');
   assert.ok(calls.includes('open:picker'));
   assert.ok(calls.includes('log:info:hi 1'));
 });
@@ -158,6 +160,20 @@ test('denied, invalid and rate-limited paths return typed errors and never reach
   broker.handleMessage({ source: frame, data: req(7, 'nosuch.method') });
   broker.handleMessage({ source: frame, data: { v: 99, kind: 'req' } });
   await tick();
+  {
+    // UI text must never truncate: an over-long (or empty) setButton label is
+    // rejected as invalid; the host never clips it and the adapter never sees it.
+    const { adapter: uiAdapter, calls: uiCalls } = makeAdapter();
+    const uiBroker = createPluginBroker({ adapter: uiAdapter, hostVersion: '0.10.0' });
+    const uiFrame = new FakeFrame();
+    uiBroker.attach(plugin(), uiFrame);
+    uiBroker.handleMessage({ source: uiFrame, data: req(1, 'ui.setButton', { buttonId: 'react', patch: { label: 'Fifteen chars!!' } }) });
+    uiBroker.handleMessage({ source: uiFrame, data: req(2, 'ui.setButton', { buttonId: 'react', patch: { label: '' } }) });
+    await tick();
+    const codes = uiFrame.responses().map((r) => (r.ok ? 'ok' : r.error.code));
+    assert.deepEqual(codes, ['invalid', 'invalid']);
+    assert.deepEqual(uiCalls.filter((c) => c.startsWith('setButton')), []);
+  }
 
   const byId = new Map(frame.responses().map((r) => [r.id, r]));
   assert.equal(byId.get(1)!.ok, false);

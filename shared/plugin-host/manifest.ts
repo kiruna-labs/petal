@@ -43,7 +43,7 @@ export const MANIFEST_LIMITS = {
   /** Must fit a 400 px Settings row beside a version chip and a toggle. */
   nameMaxLength: 24,
   descriptionMaxLength: 140,
-  /** Header/toolbar labels; longer labels collapse to icon-only anyway. */
+  /** Header/toolbar labels. Enforced for manifests AND `ui.setButton` patches; nothing downstream clips (UI text must never truncate). */
   buttonLabelMaxLength: 14,
   contributionIdMaxLength: 32,
   bundleMaxBytes: 2 * 1024 * 1024,
@@ -169,13 +169,18 @@ function checkContributionId(errors: string[], where: string, id: unknown, seen:
   seen.add(id);
 }
 
+/** A visible button label: 1..`buttonLabelMaxLength` chars. The same rule gates manifests and `ui.setButton` patches. */
+export function isButtonLabel(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MANIFEST_LIMITS.buttonLabelMaxLength;
+}
+
 function checkButton(errors: string[], where: string, button: unknown, seen: Set<string>): void {
   if (!isRecord(button)) {
     errors.push(`${where}: must be an object`);
     return;
   }
   checkContributionId(errors, where, button.id, seen);
-  if (typeof button.label !== 'string' || button.label.length === 0 || button.label.length > MANIFEST_LIMITS.buttonLabelMaxLength) {
+  if (!isButtonLabel(button.label)) {
     errors.push(`${where}: label must be 1..${MANIFEST_LIMITS.buttonLabelMaxLength} chars (UI text must never truncate)`);
   }
   if (typeof button.icon !== 'string' || !ICON_RE.test(button.icon)) {

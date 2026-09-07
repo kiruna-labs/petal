@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { LoadedPlugin } from '@petal/shared/plugin-host/broker';
 import type { PluginManifest } from '@petal/shared/plugin-host/manifest';
-import { badgeText, buttonKey, fitButtonLabel, placePopover, toolbarButtonModels } from '@petal/shared/plugin-host/surfaces';
+import { badgeText, buttonKey, placePopover, toolbarButtonModels } from '@petal/shared/plugin-host/surfaces';
 import {
   PLUGIN_ENABLED_STORAGE_KEY,
   PLUGIN_KV_STORAGE_PREFIX,
@@ -60,7 +60,10 @@ test('toolbar models come only from plugins holding ui:toolbar-button, with patc
   assert.equal(badgeText(models[0]!.badge), '99+');
   assert.equal(badgeText(0), null);
   assert.equal(badgeText(7), '7');
-  assert.equal(fitButtonLabel('  Way too long label here '), 'Way too long l');
+  // A patched label replaces the manifest label whole; nothing here clips it.
+  const patched = toolbarButtonModels([plugin], new Map([[buttonKey('petal.reactions', 'react'), { label: 'Reacted (14)!' }]]));
+  assert.equal(patched[0]!.label, 'Reacted (14)!');
+  assert.equal(patched[0]!.ariaLabel, 'Reacted (14)! (Reactions)');
 });
 
 test('placePopover prefers above the anchor and clamps to the viewport', () => {

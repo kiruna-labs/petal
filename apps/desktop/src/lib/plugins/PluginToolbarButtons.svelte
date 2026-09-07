@@ -2,7 +2,8 @@
   Host-drawn toolbar buttons for plugins (plugins/README.md §2.7). One
   .control-cell per button, matching Gallery's own cells (52px circle, 20px
   glyph, label underneath) so plugin buttons sit in the same row without
-  looking bolted on. Labels come pre-clamped from the shared button model.
+  looking bolted on. Labels arrive validated (<= 14 chars) from the shared
+  button model and are rendered whole -- never clipped.
 -->
 <script lang="ts">
   import { pluginIconSvg } from '@petal/shared/plugin-host/icons';
