@@ -201,7 +201,7 @@ sentry = { version = "0.48", default-features = false, features = ["panic", "bac
 # file sink, not a hand-rolled bridge. See logging.rs for the PII
 # allowlist+scrub `before_send`/`before_breadcrumb` hooks that sit between
 # this bridge and the network.
-sentry-log = "0.48"
+sentry-log = "0.49"
 # Crisp-mode still-image encode (#384 Phase 1 spike, crisp_still.rs). `image`
 # is ALREADY resolved in this workspace's dependency graph (pulled in
 # unconditionally by `arboard`, via `tauri-plugin-clipboard-manager`; see
