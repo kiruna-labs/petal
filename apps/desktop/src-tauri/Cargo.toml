@@ -104,7 +104,7 @@ serde_json = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "native-tls"] }
 base64 = "0.23.1"
 log = "0.4"
-thiserror = "1"
+thiserror = "2"
 env_logger = "0.11"
 # File-based logging sink for the real app binary (see src/logging.rs's
 # module doc comment for the full rationale): a GUI app launched via
