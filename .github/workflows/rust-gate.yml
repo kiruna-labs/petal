@@ -37,7 +37,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -95,7 +95,7 @@ jobs:
       # `+crt-static`, which is load-bearing for the MSVC link (#673).
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 

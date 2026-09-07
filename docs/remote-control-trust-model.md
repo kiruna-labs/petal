@@ -1,7 +1,9 @@
 # Remote control — trust model
 
-_Status of GitHub issue #30. This documents what the remote-control feature
-does and does not defend against, so the trade-offs are explicit rather than
+_The living trust model for remote control (it began as the status page for
+GitHub issue #30, which is now closed; the residual gaps below are tracked
+here, not in an issue). This documents what the remote-control feature does
+and does not defend against, so the trade-offs are explicit rather than
 implicit in the code._
 
 Remote control lets meeting participants drive the keyboard and mouse of a
@@ -111,9 +113,11 @@ enabled*.
   window/display mismatch, stopped/restarted share, partial envelope, or
   unknown target kind cannot reuse the grant. Legacy packets continue to use
   the historical `(windowId, controllerId)` key. Native and web-harness peers
-  currently retain a one-release compatibility window in which tokenless
-  legacy input is accepted with a warning; that window is intentionally not
-  the final enforcement state.
+  still retain a compatibility window in which tokenless legacy input is
+  accepted with a warning (`remote_control.rs`'s legacy tokenless JSON path;
+  `web-harness/src/remoteControl.ts`). It was meant to last one release and
+  has outlived that; no removal release has been set. When it is dropped,
+  record the version here.
 - **Terminal results do not overclaim delivery.** `applied` is reserved for an
   observed semantic target operation. Global OS submission without an observed
   application effect reports `submitted` — which is also what a window-share
@@ -204,7 +208,8 @@ enabled*.
   backend/protocol work (query the SFU's per-participant track-subscription
   list, or a signalling extension). The code flags this exact spot
   (`remote_control.rs`, the "local request gate accepted … strict viewer-only
-  authorization" log line). **This is the remaining open part of #30.**
+  authorization" log line). **This is the one gap #30 left open; it needs SFU
+  subscription state the SDK does not expose.**
 - **No per-topic publish ACL.** Backend tokens grant `canPublishData` globally
   (`backend/lib/livekit.ts`), so any participant can publish on the
   `petal.remote-control` topic. The entire defense therefore rests on the
@@ -254,7 +259,8 @@ per-track subscription state that the current LiveKit SDK does not expose.
   and releases held inputs (`revoke_all` + synthetic releases).
 - The remote-control local-loopback harness exercises acquisition/latency
   without a second Mac; the strict viewer-only and per-topic-ACL gaps above are
-  the parts that still need backend/live validation (#28, #30).
+  the parts that still need backend/live validation (both #28 and #30 are
+  closed; the gaps remain and are tracked in this document).
 - Rust and TypeScript contract tests pin legacy byte compatibility, the capable
   target/share fingerprint, unknown optional enum handling, result semantics,
   and the transport authority matrix. Portable fake-adapter tests exercise the
