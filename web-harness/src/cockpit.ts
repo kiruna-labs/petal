@@ -1,6 +1,6 @@
 import type { CockpitScenarioResult, CockpitStepResult, HarnessContext } from './context.ts';
 import { meetingCredentialFromInviteInput } from '@petal/shared/logic/meetingCode';
-import { COCKPIT_TOPIC, type CockpitReportMessage } from './trackNames.ts';
+import { COCKPIT_TOPIC, type CockpitCommandMessage, type CockpitReportMessage } from './trackNames.ts';
 import { cockpitOwnerFromSearch } from './cockpitShareTarget.ts';
 
 // ---------------------------------------------------------------------------
@@ -32,6 +32,27 @@ const RC_N2W_CONTROL_WAIT_MS = 90_000;
 const SOAK_DEFAULT_DURATION_MS = 10 * 60 * 1000;
 const SOAK_DEFAULT_HEARTBEAT_MS = 5_000;
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+/**
+ * #41: recognise the native engine's command on the shared `petal.cockpit`
+ * topic. Everything else on the topic (other peers' `CockpitReportMessage`s in
+ * a multi-peer scenario, malformed bytes) yields `null` and is ignored.
+ */
+export function parseCockpitCommandMessage(value: unknown): CockpitCommandMessage | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (record.v !== 1 || record.kind !== 'command' || record.command !== 'disconnect') return null;
+  if (record.target !== undefined && typeof record.target !== 'string') return null;
+  if (typeof record.sentAtMs !== 'number') return null;
+  return {
+    v: 1,
+    kind: 'command',
+    command: 'disconnect',
+    target: record.target as string | undefined,
+    sentAtMs: record.sentAtMs,
+  };
+}
 
 // #617: the SOAK heartbeat loop's cadence is injectable so tests can drive it
 // deterministically instead of asserting an exact heartbeat count derived
@@ -148,6 +169,51 @@ export function setupCockpit(
       detail,
       sentAtMs: Date.now(),
       ...fields,
+    });
+  }
+
+  // #41: the scenario this peer is (or was last) running, so the disconnect
+  // acknowledgement lands in the same journal thread as the scenario's steps.
+  let activeScenarioId: string | null = null;
+
+  async function disconnect(): Promise<void> {
+    const room = state.room;
+    if (!room) return;
+    await room.disconnect();
+  }
+
+  /**
+   * #41: act on a native engine `disconnect` command addressed to this peer.
+   * Acknowledges over the topic first (best-effort -- the engine's real
+   * evidence is this participant leaving the room), then disconnects, so the
+   * SFU drops this peer's publications immediately instead of holding them as
+   * a ghost share until the participant timeout after Chrome is killed.
+   * Resolves `true` only when a disconnect was actually performed.
+   */
+  async function handleCockpitCommand(payload: Uint8Array, senderIdentity?: string): Promise<boolean> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(decoder.decode(payload));
+    } catch {
+      return false;
+    }
+    const command = parseCockpitCommandMessage(parsed);
+    if (!command) return false;
+    if (command.target !== undefined && command.target !== reporterId()) return false;
+    if (!state.room) return false;
+    await reportStep(
+      activeScenarioId ?? 'teardown',
+      'disconnect',
+      true,
+      `disconnect requested by ${senderIdentity ?? 'unknown'}; leaving the room`
+    );
+    await disconnect();
+    return true;
+  }
+
+  function handleCockpitPayload(payload: Uint8Array, senderIdentity?: string): void {
+    void handleCockpitCommand(payload, senderIdentity).catch((err) => {
+      console.debug(`cockpit command failed: ${(err as Error).message ?? err}`);
     });
   }
 
@@ -578,6 +644,7 @@ export function setupCockpit(
   }
 
   async function runScenario(scenarioId: string, code: string | null): Promise<CockpitScenarioResult> {
+    activeScenarioId = scenarioId;
     const steps: CockpitStepResult[] = [];
     const record = async (step: CockpitStepResult & { fields?: ReportFields }) => {
       steps.push(step);
@@ -679,6 +746,7 @@ export function setupCockpit(
     join,
     sharePattern,
     runScenario,
+    disconnect,
     lastResult: null,
   };
 
@@ -690,5 +758,5 @@ export function setupCockpit(
     void runScenario(auto, code);
   }
 
-  return { maybeRunAutoScenario, runScenario };
+  return { maybeRunAutoScenario, runScenario, handleCockpitPayload, handleCockpitCommand };
 }

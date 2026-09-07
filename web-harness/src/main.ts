@@ -623,6 +623,9 @@ Object.assign(ctx.cb, {
 // ctx.cb.connectToMeeting/resolveIdentity/startTestPatternShare, all wired
 // above, so this must come after `setupConnection`/`setupControls`.
 const cockpit = setupCockpit(ctx, getPatternFrameCount);
+// #41: connection.ts routes inbound `petal.cockpit` data here so the native
+// engine can ask this peer to leave the room before it kills the browser.
+Object.assign(ctx.cb, { handleCockpitPayload: cockpit.handleCockpitPayload });
 
 // The layout picker installs itself into the topbar; do this after the layout
 // callbacks are wired (installLayoutPicker -> applyTileLayout).

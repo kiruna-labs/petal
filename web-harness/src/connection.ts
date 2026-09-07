@@ -16,6 +16,7 @@ import type { HarnessContext } from './context.ts';
 import { livekitRoomName } from '@petal/shared/logic/meetingCode';
 import {
   AI_CHAT_TOPIC,
+  COCKPIT_TOPIC,
   LATENCY_PROBE_TOPIC,
   PIPELINE_STATS_TOPIC,
   REMOTE_CONTROL_TOPIC,
@@ -584,6 +585,12 @@ export function setupConnection(
       }
       if (topic === AI_CHAT_TOPIC) {
         cb.handleAiChatPayload(payload, senderIdentity, topic);
+        return;
+      }
+      if (topic === COCKPIT_TOPIC) {
+        // #41: the native cockpit engine's `disconnect` command to this
+        // unattended peer (and other peers' reports, which the handler ignores).
+        cb.handleCockpitPayload(payload, senderIdentity);
         return;
       }
       cb.handleRemoteDrawPayload(payload, senderIdentity, topic);

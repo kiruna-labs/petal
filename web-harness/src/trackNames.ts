@@ -295,6 +295,24 @@ export interface CockpitReportMessage {
   receivedControlCount?: number;
 }
 
+/**
+ * #41: the ONE message the native test-cockpit engine sends TO an unattended
+ * web peer, on the same `petal.cockpit` topic the peer reports over. Today's
+ * only command is `disconnect`: leave the room gracefully (`room.disconnect()`)
+ * so the SFU drops the peer's publications at once instead of holding a ghost
+ * share for the ~25 s participant timeout after Chrome is killed. `kind:
+ * 'command'` is what separates it from a `CockpitReportMessage` (which the
+ * other web peers of a multi-peer scenario also receive on this topic); a
+ * `target` identity, when present, must equal the receiving peer's own.
+ */
+export interface CockpitCommandMessage {
+  v: 1;
+  kind: 'command';
+  command: 'disconnect';
+  target?: string;
+  sentAtMs: number;
+}
+
 export interface LatencyProbeMessage {
   v: 1;
   kind: 'ping' | 'pong';

@@ -344,6 +344,8 @@ export interface HarnessCockpitApi {
   join: (code: string) => Promise<void>;
   sharePattern: () => Promise<void>;
   runScenario: (scenarioId: string, code: string | null) => Promise<CockpitScenarioResult>;
+  /** #41: graceful `room.disconnect()`; what the engine's `disconnect` command drives. */
+  disconnect: () => Promise<void>;
   lastResult: CockpitScenarioResult | null;
 }
 
@@ -595,6 +597,9 @@ export interface HarnessCallbacks {
   renderDrawForWindow: (windowId: number, ownerIdentity?: string) => void;
   removeDrawForWindow: (windowId: number, ownerIdentity?: string) => void;
   removeDrawForParticipant: (identity: string) => void;
+  // test cockpit (#41): inbound `petal.cockpit` traffic -- the native engine's
+  // `disconnect` command to THIS peer, or other peers' reports (ignored).
+  handleCockpitPayload: (payload: Uint8Array, senderIdentity?: string) => void;
   // aiChat (#657). Sender identity for every inbound message comes from the
   // authenticated LiveKit participant, never the payload; see aiChat.ts.
   handleAiChatPayload: (payload: Uint8Array, senderIdentity?: string, topic?: string) => void;
