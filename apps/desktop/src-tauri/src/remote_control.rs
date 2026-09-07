@@ -3818,15 +3818,128 @@ fn send_status_to_controller(
         );
         return;
     };
+    publish_status_in_order(
+        StatusPublishTransport::Room(publisher),
+        local_identity,
+        status,
+    );
+}
+
+/// Where a host->controller status packet goes out. `Room` is the only
+/// production variant; `Test` lets a unit test stand a fake, latency-shaped
+/// transport behind the real publish path (kiruna-labs/petal#39).
+#[derive(Clone)]
+enum StatusPublishTransport {
+    Room(Arc<RoomConnection>),
+    #[cfg(test)]
+    Test(
+        Arc<
+            dyn Fn(
+                    RemoteControlMessage,
+                ) -> futures_util::future::BoxFuture<'static, Result<(), String>>
+                + Send
+                + Sync,
+        >,
+    ),
+}
+
+impl StatusPublishTransport {
+    async fn publish(&self, message: RemoteControlMessage) -> Result<(), String> {
+        match self {
+            Self::Room(room_connection) => publish_message(room_connection.clone(), message).await,
+            #[cfg(test)]
+            Self::Test(publish) => publish(message).await,
+        }
+    }
+}
+
+/// Stamp `seq` (`now_ms()`, at emission time -- docs/CONTRACTS.md) and queue
+/// the status on its controller's ordered publish lane.
+///
+/// kiruna-labs/petal#39: do NOT spawn one task per status here. During a
+/// reconnect every publish blocks and the tasks then complete in arbitrary
+/// order, so a `stopped` emitted 3ms before an `active` reached the controller
+/// AFTER it (run 33997561478) -- and the controller applies statuses in arrival
+/// order, so the stale `stopped` tears down the fresh grant.
+fn publish_status_in_order(
+    transport: StatusPublishTransport,
+    local_identity: &str,
+    status: &RemoteControlStatus,
+) {
     let message = status_packet_for(status, local_identity);
-    let summary = message_summary(&message);
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = publish_message(publisher, message).await {
+    enqueue_status_publish(
+        &status.controller_id,
+        StatusPublishJob { transport, message },
+    );
+}
+
+struct StatusPublishJob {
+    transport: StatusPublishTransport,
+    message: RemoteControlMessage,
+}
+
+type StatusPublishLanes = HashMap<String, tokio::sync::mpsc::UnboundedSender<StatusPublishJob>>;
+
+/// One ordered lane per controller identity: a lane is created on the first
+/// status to that controller and retires itself once idle, so a slow or failed
+/// publish to one controller never delays another controller's statuses.
+fn status_publish_lanes() -> &'static Mutex<StatusPublishLanes> {
+    static LANES: OnceLock<Mutex<StatusPublishLanes>> = OnceLock::new();
+    LANES.get_or_init(Mutex::default)
+}
+
+fn enqueue_status_publish(controller_id: &str, job: StatusPublishJob) {
+    // The send happens under the lane-registry lock on purpose: the drain task
+    // only retires a lane after re-checking for work under this same lock, so a
+    // job can never land in a channel whose receiver is about to be dropped.
+    let mut lanes = status_publish_lanes().lock_unpoisoned();
+    let sender = lanes.entry(controller_id.to_string()).or_insert_with(|| {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        tauri::async_runtime::spawn(drain_status_publish_lane(
+            controller_id.to_string(),
+            receiver,
+        ));
+        sender
+    });
+    if let Err(error) = sender.send(job) {
+        let summary = message_summary(&error.0.message);
+        log::warn!(
+            "remote-control: status publish lane for '{controller_id}' is gone; dropped {summary}"
+        );
+    }
+}
+
+async fn drain_status_publish_lane(
+    controller_id: String,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<StatusPublishJob>,
+) {
+    use tokio::sync::mpsc::error::TryRecvError;
+    loop {
+        let job = match receiver.try_recv() {
+            Ok(job) => job,
+            Err(TryRecvError::Disconnected) => return,
+            Err(TryRecvError::Empty) => {
+                // Idle: retire under the registry lock (see `enqueue_status_publish`).
+                let mut lanes = status_publish_lanes().lock_unpoisoned();
+                match receiver.try_recv() {
+                    Ok(job) => job,
+                    Err(_) => {
+                        lanes.remove(&controller_id);
+                        return;
+                    }
+                }
+            }
+        };
+        // Each publish is awaited to completion before the next one starts:
+        // that serialization IS the ordering guarantee. A failure is logged and
+        // the lane moves on -- it never blocks the statuses queued behind it.
+        let summary = message_summary(&job.message);
+        if let Err(e) = job.transport.publish(job.message).await {
             log::warn!("remote-control: status publish failed for {summary}: {e}");
         } else {
             log::info!("remote-control: published host status {summary}");
         }
-    });
+    }
 }
 
 fn resolve_task_still_authorized(message: &RemoteControlMessage) -> bool {
@@ -22266,5 +22379,74 @@ mod tests {
         let (_, _, max, success_count, _) = state.take_summary().unwrap();
         assert_eq!(max, LATENCY_SUMMARY_RING_CAPACITY as u64 * 2 - 1);
         assert_eq!(success_count, LATENCY_SUMMARY_RING_CAPACITY as u64 * 2);
+    }
+
+    /// kiruna-labs/petal#39: a `stopped` and an `active` emitted 3ms apart to
+    /// the same controller left the host REVERSED during a reconnect (run
+    /// 33997561478), because each status got its own spawned publish task and
+    /// the tasks completed in arbitrary order. The controller applies statuses
+    /// in arrival order, so the stale `stopped` would tear down the fresh
+    /// grant. This drives the real publish path with a transport whose latency
+    /// is inverted (the first status is slow, the second immediate) and
+    /// requires arrival order to equal emission order.
+    #[test]
+    fn host_statuses_to_one_controller_arrive_in_emission_order_under_inverted_latency() {
+        let controller_id = format!("controller-#39-{}", now_ms());
+        let (delivered_tx, delivered_rx) = mpsc::channel::<(String, u64)>();
+        let delivered_tx = Arc::new(Mutex::new(delivered_tx));
+        let transport =
+            StatusPublishTransport::Test(Arc::new(move |message: RemoteControlMessage| {
+                let delivered_tx = Arc::clone(&delivered_tx);
+                Box::pin(async move {
+                    // The reconnect-blocked publisher: the OLDER status is the one
+                    // that gets stuck, the later one sails through.
+                    if message.status.as_deref() == Some("stopped") {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                    delivered_tx
+                        .lock_unpoisoned()
+                        .send((message.status.unwrap_or_default(), message.seq))
+                        .map_err(|error| error.to_string())
+                })
+            }));
+
+        let stopped = RemoteControlStatus {
+            window_id: 154,
+            owner_identity: None,
+            controller_id: controller_id.clone(),
+            status: "stopped",
+            message: "Remote control stopped".to_string(),
+            grant_token: None,
+            reason: None,
+        };
+        let active = RemoteControlStatus {
+            window_id: 154,
+            owner_identity: None,
+            controller_id,
+            status: "active",
+            message: "Remote control active for shared window".to_string(),
+            grant_token: Some("grant-#39".to_string()),
+            reason: None,
+        };
+        publish_status_in_order(transport.clone(), "host", &stopped);
+        publish_status_in_order(transport, "host", &active);
+
+        let first = delivered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first status is published");
+        let second = delivered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("second status is published");
+        assert_eq!(
+            (first.0.as_str(), second.0.as_str()),
+            ("stopped", "active"),
+            "statuses must reach the controller in emission order; got {first:?} then {second:?}"
+        );
+        assert!(
+            first.1 <= second.1,
+            "seq is stamped at emission time and must not run backwards on the wire: {} then {}",
+            first.1,
+            second.1
+        );
     }
 }
