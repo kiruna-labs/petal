@@ -31,6 +31,7 @@ import { displayNameForParticipant } from './tiles.ts';
 import { commitLayoutModeTransition, layoutModeStateOf } from './tileLayout.ts';
 import { endAutoSpotlight } from '@petal/shared/logic/tileLayoutMode';
 import { sensitiveStringRegistry, type SensitiveStringRegistry } from './sensitiveStrings.ts';
+import { createSfuSenderIdentityResolver } from './sfuSenderIdentity.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
 import { startAudioReceiverTelemetry } from './audioReceiverTelemetry.ts';
 import {
@@ -450,6 +451,12 @@ export function setupConnection(
     state.room = newRoom;
     ctx.hook?.plugins?.roomConnected(newRoom);
     state.currentMeetingCode = meetingCode;
+    // kiruna-labs/petal#2: a peer's packets arrive with `participant`
+    // undefined for the whole gap between its full reconnect and the next
+    // ParticipantUpdate naming it. Keep the SFU-stamped identity instead of
+    // dropping every packet on the floor -- see sfuSenderIdentity.ts.
+    const sfuSender = createSfuSenderIdentityResolver();
+    sfuSender.attach(newRoom.engine);
 
     newRoom.on(RoomEvent.ConnectionStateChanged, (connectionState: ConnectionState) => {
       if (connectionState === ConnectionState.Connected) {
@@ -559,24 +566,28 @@ export function setupConnection(
     });
 
     newRoom.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+      // Drain on every packet (not only when `participant` is missing) so the
+      // captured identity can never be applied to a later packet.
+      const sfuSenderIdentity = sfuSender.take();
+      const senderIdentity = participant?.identity ?? sfuSenderIdentity;
       if (topic === REMOTE_CONTROL_TOPIC) {
-        cb.handleRemoteControlPayload(payload, participant?.identity);
+        cb.handleRemoteControlPayload(payload, senderIdentity);
         return;
       }
       if (topic === LATENCY_PROBE_TOPIC) {
-        cb.handleLatencyProbePayload(payload, participant?.identity);
+        cb.handleLatencyProbePayload(payload, senderIdentity);
         return;
       }
       if (topic === PIPELINE_STATS_TOPIC) {
-        cb.handlePipelineStatsPayload(payload, participant?.identity);
+        cb.handlePipelineStatsPayload(payload, senderIdentity);
         return;
       }
       if (topic === AI_CHAT_TOPIC) {
-        cb.handleAiChatPayload(payload, participant?.identity, topic);
+        cb.handleAiChatPayload(payload, senderIdentity, topic);
         return;
       }
-      cb.handleRemoteDrawPayload(payload, participant?.identity, topic);
-      cb.handleRemoteTelepointerPayload(payload, participant?.identity, topic);
+      cb.handleRemoteDrawPayload(payload, senderIdentity, topic);
+      cb.handleRemoteTelepointerPayload(payload, senderIdentity, topic);
     });
 
     if ((RoomEvent as Record<string, unknown>).ActiveSpeakersChanged) {
@@ -830,6 +841,8 @@ export function setupConnection(
           ctx.ui.setConnectingStatus?.('Connection hiccup — retrying…');
         },
       });
+      // `Room.connect()` recreates a closed engine; re-attach (idempotent).
+      sfuSender.attach(newRoom.engine);
       // #709: `ParticipantConnected` only fires for participants who join
       // AFTER us -- anyone already in the room when `connect()` resolves is
       // reachable via `remoteParticipants` but was never registered with the
