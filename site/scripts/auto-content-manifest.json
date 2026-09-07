@@ -3,17 +3,17 @@
 		"self-hosting": {
 			"source": "docs/SELF_HOSTING.md",
 			"dest": "site/src/content/docs/customizing/self-hosting.md",
-			"sha256": "3b5571b4bef0b7fdfd08365660b651a36468ce9b06745e1230f46f78958cbb08"
+			"sha256": "4bf6c28d734fed5e108bcacc2930f83270ecd77247788a19f4f0a9e05cef511a"
 		},
 		"backend-api": {
 			"source": "backend/README.md",
 			"dest": "site/src/content/docs/customizing/backend-api.md",
-			"sha256": "d9ef10c00f960420701f34cc950077070ab8fcff88e9066896bf2cd1161cb931"
+			"sha256": "a496f0402e65d2961110bfa20d835888fa4bbf69dca40f4e2decf77d419dab44"
 		},
 		"web-harness-fragment": {
 			"source": "web-harness/README.md",
 			"dest": "site/src/fragments/web-harness-readme.md",
-			"sha256": "59b9ee6042d1e783401b5400b544ae8b3e50bfe9c11ef4c44f995c24e36cfc0f"
+			"sha256": "d4bc0210ae7999a423f36e854430c476f17aa6ab46d7070b04b70b189eff2e45"
 		}
 	}
 }
