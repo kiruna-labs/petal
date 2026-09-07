@@ -181,9 +181,22 @@ function edgeCandidates(
   ];
 }
 
+/**
+ * Keep an edge's endpoints strictly inside its own segment. `local === 1`
+ * would encode as exactly the NEXT segment's start, and the Rust decoder
+ * (`hover_tab_side_offset`) then renders the tab on the adjacent edge -- a
+ * 44px jump for a 1px overshoot that also defeats the side hysteresis. The
+ * nudge must survive `normalizeHoverTabPosition`'s 1e-12 rounding after the
+ * divide by four AND land inside the Rust decoder's endpoint snap window
+ * (`HOVER_TAB_EDGE_ENDPOINT_EPSILON * 1000` = 1e-9), so it decodes as the
+ * edge's own endpoint rather than as a slight inset.
+ */
+const EDGE_ENDPOINT_EPSILON = 1e-9;
+
 function positionForCandidate(candidate: EdgeCandidate): number {
   const segment = candidate.side === 'top' ? 0 : candidate.side === 'right' ? 1 : candidate.side === 'bottom' ? 2 : 3;
-  return normalizeHoverTabPosition((segment + candidate.local) / PERIMETER_SEGMENTS);
+  const local = Math.min(1 - EDGE_ENDPOINT_EPSILON, Math.max(EDGE_ENDPOINT_EPSILON, candidate.local));
+  return normalizeHoverTabPosition((segment + local) / PERIMETER_SEGMENTS);
 }
 
 export interface HoverTabProjection {

@@ -48,7 +48,6 @@ export function buildShareOptionsMenuEntries(
   aiChatActive = false,
   displayLike = false,
   includePosition = false,
-  verticalOffset = 0.5,
   remoteControlAllowed = true,
   hoverTabSide: HoverTabSide = 'right'
 ): HoverTabMenuEntry[] {
@@ -62,7 +61,6 @@ export function buildShareOptionsMenuEntries(
     aiChatActive,
     displayLike,
     includePosition,
-    verticalOffset,
     remoteControlAllowed,
     hoverTabSide
   );

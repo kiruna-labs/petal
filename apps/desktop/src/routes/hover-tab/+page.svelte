@@ -78,7 +78,6 @@
   let menuPending = $state(false);
   let drawActive = $state(false);
   let perimeterPosition = $state(3 / 8);
-  let verticalOffset = $state(0.5);
   let tabX = $state(0);
   let tabY = $state(0);
   let dragGesture = $state<HoverTabGesture | null>(null);
@@ -257,9 +256,6 @@
     if (!dragGesture && Number.isFinite(update.perimeterPosition)) {
       perimeterPosition = ((update.perimeterPosition % 1) + 1) % 1;
     }
-    if (!dragGesture && Number.isFinite(update.verticalOffset)) {
-      verticalOffset = Math.min(1, Math.max(0, update.verticalOffset));
-    }
     visible = true;
     if (previousWindowId !== windowId) {
       shareControlMode = displayLike ? 'fullControl' : 'cursorPreserving';
@@ -404,9 +400,7 @@
     if (windowId !== null) {
       localPositionFence = { windowId, position: restored };
     }
-    const restoredEdge = hoverTabSideOffsetForPosition(restored);
-    side = restoredEdge.side;
-    verticalOffset = restoredEdge.offset;
+    side = hoverTabSideOffsetForPosition(restored).side;
     attachment = gesture.originalAttachment;
     if (windowId !== null && frame !== null) {
       void enqueueHoverTabDrag('cancel', windowId, frame, restored, gesture.dragToken).catch(() => {});
@@ -466,9 +460,7 @@
     if (windowId !== null) {
       localPositionFence = { windowId, position: moved.position };
     }
-    const projected = hoverTabSideOffsetForPosition(moved.position);
-    side = projected.side;
-    verticalOffset = projected.offset;
+    side = hoverTabSideOffsetForPosition(moved.position).side;
     if (moved.started) {
       const windowId = currentWindowId;
       const frame = currentFrame;
@@ -523,9 +515,7 @@
         // idempotent after backend rollback and prevents a frozen follower.
         perimeterPosition = restored;
         localPositionFence = { windowId, position: restored };
-        const restoredEdge = hoverTabSideOffsetForPosition(restored);
-        side = restoredEdge.side;
-        verticalOffset = restoredEdge.offset;
+        side = hoverTabSideOffsetForPosition(restored).side;
         attachment = gesture.originalAttachment;
         void enqueueHoverTabDrag('cancel', windowId, frame, restored, gesture.dragToken).catch(() => {});
       });
@@ -732,12 +722,10 @@
     const frame = currentFrame;
     const previousSide = side;
     const previousPosition = perimeterPosition;
-    const previousOffset = verticalOffset;
     const nextPosition = hoverTabPositionForSide(next);
     side = next;
     perimeterPosition = nextPosition;
     localPositionFence = { windowId, position: nextPosition }
-    verticalOffset = 0.5;
     menuPending = true;
     try {
       perimeterPosition = await enqueueHoverTabDrag(
@@ -750,7 +738,6 @@
       side = previousSide;
       perimeterPosition = previousPosition;
       localPositionFence = { windowId, position: previousPosition }
-      verticalOffset = previousOffset;
     } finally {
       menuPending = false;
     }
@@ -864,8 +851,9 @@
         aiChatEnabled,
         aiChatActive,
         displayLike,
-        false,
-        verticalOffset,
+        // The hover tab is the ONLY surface that offers the perimeter
+        // presets (Petal View's region window deliberately omits them).
+        true,
         shareRemoteControlAllowed,
         side
       );
@@ -884,6 +872,7 @@
         onDraw: (active) => void selectDraw(active),
         onAiChat: () => void onToggleAiChat(),
         onDebug: () => void openDebugCockpit(),
+        onPosition: (value) => void selectPosition(value as HoverTabPosition),
         onRemoteControlAllowed: (allowed) => void onSetShareRemoteControlAllowed(allowed)
       }, placement);
     } finally {
@@ -1233,6 +1222,16 @@
 
   .hover-tab-action:active:not(:disabled) {
     transform: scale(0.96);
+  }
+
+  /* `dragging` lives on the host (the gesture owns the whole tab), so the
+     action's feedback keys off it from there: grab cursor, brighter fill, and
+     NO press-scale -- the button keeps pointer capture for the entire drag and
+     would otherwise stay shrunk at :active until release. */
+  .hover-tab-host.dragging .hover-tab-action {
+    cursor: grabbing;
+    background: color-mix(in srgb, var(--text-primary, #f5f6f7) 24%, transparent);
+    transform: none;
   }
 
   .hover-tab-action:focus-visible {

@@ -7,7 +7,6 @@
 
 use crate::hover_core::{
     hover_tab_position_for_side_offset, hover_tab_side_offset, normalize_hover_tab_position,
-    snap_legacy_hover_tab_position,
     normalize_hover_tab_vertical_offset, HoverTabPosition, HoverTabSide,
     DEFAULT_HOVER_TAB_POSITION, DEFAULT_HOVER_TAB_SIDE, DEFAULT_HOVER_TAB_VERTICAL_OFFSET,
 };
@@ -120,14 +119,16 @@ impl SharePriorityStore {
                     let legacy_offset = json_f64(file.hover_tab_vertical_offset.as_ref())
                         .map(normalize_hover_tab_vertical_offset)
                         .unwrap_or(DEFAULT_HOVER_TAB_VERTICAL_OFFSET);
+                    // Only a perimeter position stamped with the current
+                    // version is trusted. No shipped build ever wrote the
+                    // interim eight-segment scalar (main persisted only
+                    // side + vertical offset), so an unversioned value can
+                    // only come from a dev build of unknown vintage -- fall
+                    // back to the side/offset pair every shipped build wrote
+                    // instead of guessing a model and relocating the tab.
                     let position = json_f64(file.hover_tab_perimeter_position.as_ref())
-                        .map(|position| {
-                            if file.hover_tab_perimeter_version == Some(HOVER_TAB_POSITION_VERSION) {
-                                normalize_hover_tab_position(position)
-                            } else {
-                                snap_legacy_hover_tab_position(position)
-                            }
-                        })
+                        .filter(|_| file.hover_tab_perimeter_version == Some(HOVER_TAB_POSITION_VERSION))
+                        .map(normalize_hover_tab_position)
                         .unwrap_or_else(|| {
                             hover_tab_position_for_side_offset(file.hover_tab_side, legacy_offset)
                         });
@@ -220,14 +221,6 @@ pub(crate) fn current_hover_tab_position() -> HoverTabPosition {
         .unwrap_or(DEFAULT_HOVER_TAB_POSITION)
 }
 
-pub(crate) fn current_hover_tab_side() -> HoverTabSide {
-    hover_tab_side_offset(current_hover_tab_position()).0
-}
-
-pub(crate) fn current_hover_tab_vertical_offset() -> f64 {
-    hover_tab_side_offset(current_hover_tab_position()).1
-}
-
 fn set_current(priority: SharePriority) -> Result<(), String> {
     let Some(store) = STORE.get() else {
         return Err("screen-share preference storage is not initialized".to_string());
@@ -247,13 +240,6 @@ pub(crate) fn preview_hover_tab_position(
 }
 
 /// Compatibility preview for callers that still express a right-edge offset.
-pub(crate) fn preview_hover_tab_vertical_offset(offset: f64) -> Result<f64, String> {
-    let side = current_hover_tab_side();
-    let position = hover_tab_position_for_side_offset(side, offset);
-    let position = preview_hover_tab_position(position)?;
-    Ok(hover_tab_side_offset(position).1)
-}
-
 /// Persist one complete normalized perimeter position while preserving the
 /// selected screen-share priority.
 pub(crate) fn commit_hover_tab_position(
@@ -266,12 +252,6 @@ pub(crate) fn commit_hover_tab_position(
 }
 
 /// Compatibility commit for callers that still express a right-edge offset.
-pub(crate) fn commit_hover_tab_vertical_offset(offset: f64) -> Result<f64, String> {
-    let side = current_hover_tab_side();
-    let position = commit_hover_tab_position(hover_tab_position_for_side_offset(side, offset))?;
-    Ok(hover_tab_side_offset(position).1)
-}
-
 fn atomically_replace_file(temporary: &Path, path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -504,6 +484,35 @@ mod tests {
         assert_eq!(store.hover_tab_position, committed);
         assert_eq!(store.committed_hover_tab_position, committed);
         let _ = std::fs::remove_file(blocker);
+    }
+
+    #[test]
+    fn an_unversioned_perimeter_position_falls_back_to_the_shipped_side_and_offset() {
+        // No shipped build ever wrote `hoverTabPerimeterPosition` without
+        // `hoverTabPerimeterVersion: 2`; main wrote side + vertical offset
+        // only. A bare scalar is therefore of unknown model and must not be
+        // interpreted (the old path relocated 4-segment values into corners).
+        let dir = scratch_dir("unversioned-position");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(PREFERENCES_FILE),
+            r#"{"priority":"automatic","hoverTabSide":"left","hoverTabVerticalOffset":0.25,"hoverTabPerimeterPosition":0.375}"#,
+        )
+        .unwrap();
+        let store = SharePriorityStore::load(&dir);
+        assert_eq!(
+            store.hover_tab_position,
+            hover_tab_position_for_side_offset(HoverTabSide::Left, 0.25)
+        );
+        // The same scalar WITH the version stamp is trusted as-is.
+        std::fs::write(
+            dir.join(PREFERENCES_FILE),
+            r#"{"priority":"automatic","hoverTabSide":"left","hoverTabVerticalOffset":0.25,"hoverTabPerimeterPosition":0.375,"hoverTabPerimeterVersion":2}"#,
+        )
+        .unwrap();
+        let store = SharePriorityStore::load(&dir);
+        assert_eq!(store.hover_tab_position, HoverTabPosition(0.375));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

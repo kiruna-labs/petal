@@ -98,7 +98,6 @@ export function buildHoverTabMenuEntries(
   aiChatActive = false,
   displayLike = false,
   includePosition = false,
-  _verticalOffset = 0.5,
   remoteControlAllowed = true,
   hoverTabSide: HoverTabSide = 'right'
 ): HoverTabMenuEntry[] {

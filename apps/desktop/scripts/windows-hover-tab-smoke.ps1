@@ -826,9 +826,20 @@ function Normalize-HoverTabSide([object]$Value) {
   }
 }
 
+# Perimeter model (mirrors apps/desktop/src-tauri/src/hover_core.rs): FOUR
+# straight-edge segments -- top, right, bottom, left -- each a quarter of the
+# scalar, with the tab's travel along an edge inset HOVER_TAB_CORNER_INSET (4
+# logical px at 40x40, scaled with the tab) from both corners. Right-centre is
+# 0.375. The retired eight-segment corner-arc model (right = 0.3125) is what
+# this script encoded before; Rust never persisted it.
+$script:HoverTabPerimeterSegments = 4.0
+$script:HoverTabCornerInset = 4.0
+$script:HoverTabEndpointEpsilon = 0.000000001
+$script:DefaultHoverTabPosition = 0.375
+
 function Normalize-HoverTabPosition([object]$Value) {
-  try { $position = [double]$Value } catch { return 0.3125 }
-  if ([double]::IsNaN($position) -or [double]::IsInfinity($position)) { return 0.3125 }
+  try { $position = [double]$Value } catch { return $script:DefaultHoverTabPosition }
+  if ([double]::IsNaN($position) -or [double]::IsInfinity($position)) { return $script:DefaultHoverTabPosition }
   $wrapped = $position % 1.0
   if ($wrapped -lt 0) { $wrapped += 1.0 }
   return $wrapped
@@ -839,18 +850,19 @@ function Get-HoverTabPositionForSide([string]$Side, [double]$Offset = 0.5) {
   $offset = if ([double]::IsNaN($Offset) -or [double]::IsInfinity($Offset)) { 0.5 } else { [Math]::Max(0.0, [Math]::Min(1.0, $Offset)) }
   $segment = switch ($side) {
     'top' { 0 }
-    'right' { 2 }
-    'bottom' { 4 }
-    'left' { 6 }
+    'right' { 1 }
+    'bottom' { 2 }
+    'left' { 3 }
   }
   $local = if ($side -eq 'bottom' -or $side -eq 'left') { 1.0 - $offset } else { $offset }
-  return Normalize-HoverTabPosition (($segment + $local) / 8.0)
+  $local = [Math]::Max($script:HoverTabEndpointEpsilon, [Math]::Min(1.0 - $script:HoverTabEndpointEpsilon, $local))
+  return Normalize-HoverTabPosition (($segment + $local) / $script:HoverTabPerimeterSegments)
 }
 
 function Get-ExpectedPerimeterFrame(
   $Target,
   $Tab,
-  [double]$Position = 0.3125,
+  [double]$Position = 0.375,
   $WorkArea = $null
 ) {
   if ($null -eq $Target -or $null -eq $Tab) { return $null }
@@ -863,37 +875,23 @@ function Get-ExpectedPerimeterFrame(
   $top = [double]$Target.y
   $right = $left + [double]$Target.width
   $bottom = $top + [double]$Target.height
-  $horizontalTravel = [Math]::Max(0.0, [double]$Target.width - $tabWidth)
-  $verticalTravel = [Math]::Max(0.0, [double]$Target.height - $tabHeight)
-  $scaled = $position * 8.0
-  $segment = [Math]::Min(7, [int][Math]::Floor($scaled))
+  # hover_core::hover_tab_perimeter_center, transliterated. The inset scales
+  # with the tab exactly as Rust scales it (tab / 40 logical).
+  $inset = $script:HoverTabCornerInset * ($tabWidth / 40.0)
+  $horizontalTravel = [Math]::Max(0.0, [double]$Target.width - $tabWidth - 2.0 * $inset)
+  $verticalTravel = [Math]::Max(0.0, [double]$Target.height - $tabHeight - 2.0 * $inset)
+  $scaled = $position * $script:HoverTabPerimeterSegments
+  $segment = [Math]::Min(3, [int][Math]::Floor($scaled))
   $local = [Math]::Max(0.0, [Math]::Min(1.0, $scaled - $segment))
-  $pi = [Math]::PI
+  # Endpoint snap (HOVER_TAB_EDGE_ENDPOINT_EPSILON * 1000): an encoder nudge
+  # of 1e-9 decodes as the edge's own end, not as a slight inset.
+  $snap = $script:HoverTabEndpointEpsilon * 1000.0
+  if ($local -le $snap) { $local = 0.0 } elseif ((1.0 - $local) -le $snap) { $local = 1.0 }
   switch ($segment) {
-    0 { $centerX = $left + $halfWidth + $horizontalTravel * $local; $centerY = $top - $halfHeight }
-    1 {
-      $angle = -$pi / 2.0 + $local * $pi / 2.0
-      $centerX = $right - $halfWidth + $tabWidth * [Math]::Cos($angle)
-      $centerY = $top + $halfHeight + $tabHeight * [Math]::Sin($angle)
-    }
-    2 { $centerX = $right + $halfWidth; $centerY = $top + $halfHeight + $verticalTravel * $local }
-    3 {
-      $angle = $local * $pi / 2.0
-      $centerX = $right - $halfWidth + $tabWidth * [Math]::Cos($angle)
-      $centerY = $bottom - $halfHeight + $tabHeight * [Math]::Sin($angle)
-    }
-    4 { $centerX = $right - $halfWidth - $horizontalTravel * $local; $centerY = $bottom + $halfHeight }
-    5 {
-      $angle = $pi / 2.0 + $local * $pi / 2.0
-      $centerX = $left + $halfWidth + $tabWidth * [Math]::Cos($angle)
-      $centerY = $bottom - $halfHeight + $tabHeight * [Math]::Sin($angle)
-    }
-    6 { $centerX = $left - $halfWidth; $centerY = $bottom - $halfHeight - $verticalTravel * $local }
-    default {
-      $angle = $pi + $local * $pi / 2.0
-      $centerX = $left + $halfWidth + $tabWidth * [Math]::Cos($angle)
-      $centerY = $top + $halfHeight + $tabHeight * [Math]::Sin($angle)
-    }
+    0 { $centerX = $left + $inset + $halfWidth + $horizontalTravel * $local; $centerY = $top - $halfHeight }
+    1 { $centerX = $right + $halfWidth; $centerY = $top + $inset + $halfHeight + $verticalTravel * $local }
+    2 { $centerX = $right - $inset - $halfWidth - $horizontalTravel * $local; $centerY = $bottom + $halfHeight }
+    default { $centerX = $left - $halfWidth; $centerY = $bottom - $inset - $halfHeight - $verticalTravel * $local }
   }
   $rawX = $centerX - $halfWidth
   $rawY = $centerY - $halfHeight

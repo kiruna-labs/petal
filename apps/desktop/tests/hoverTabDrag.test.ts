@@ -89,8 +89,27 @@ test('corner projection stops at one edge before switching to the next', () => {
 });
 
 test('both left corners use the bounded cardinal edge spans', () => {
-  assert.ok(Math.abs(projectHoverTabCenter(pointerForCenter(280, 224), sourceFrame) - 0) < 0.000001);
+  // Top-left: the corner is the left edge's clockwise END, which encodes just
+  // below 1 (never exactly 1, which would alias to the top edge's start and
+  // make Rust draw it on the top edge). Distance to the wrap point is what
+  // matters, not equality with 0.
+  const topLeft = projectHoverTabCenter(pointerForCenter(280, 224), sourceFrame);
+  assert.ok(Math.min(topLeft, 1 - topLeft) < 0.000001);
   assert.ok(Math.abs(projectHoverTabCenter(pointerForCenter(280, 476), sourceFrame) - 3 / 4) < 0.000001);
+});
+
+test('overshooting an edge span end stays on that edge instead of jumping to the next segment', () => {
+  // Dragging right along the TOP edge and overshooting its span by a pixel
+  // clamps local to 1. That must encode strictly inside the top segment:
+  // exactly 1/4 is the RIGHT edge's start, and Rust would place the panel at
+  // the right edge's top end -- a 44px diagonal jump for a 1px move.
+  const atEnd = projectHoverTabCenterWithSide(pointerForCenter(776, 180), sourceFrame, 'top');
+  const over = projectHoverTabCenterWithSide(pointerForCenter(777, 180), sourceFrame, 'top');
+  assert.ok(atEnd && over);
+  assert.equal(over.side, 'top');
+  assert.ok(over.position < 1 / 4, `must stay below the right segment start, got ${over.position}`);
+  assert.ok(1 / 4 - over.position < 0.000001);
+  assert.ok(Math.abs(over.position - atEnd.position) < 0.000001, 'the clamp is idempotent past the span');
 });
 
 test('corner hysteresis retains the current edge until the crossing is deliberate', () => {

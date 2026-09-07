@@ -484,9 +484,23 @@ pub(crate) fn reconcile_native_hover_tab(
         .try_state::<crate::session::SessionState>()
         .map(|state| state.shared_window_ids().contains(&attachment.token))
         .unwrap_or(false);
+    // `HoverTabUpdate.frame` is LOGICAL everywhere else (see the drag
+    // publisher above and the frontend's `currentFrame`); `source_frame` here
+    // is the physical DWM rect. Publishing it raw overwrote the route's frame
+    // with a wrong-scale rect on any non-100% DPI display, so the next
+    // pointer-down projected against it and the tab snapped to the wrong edge.
+    let logical_frame = WindowFrame {
+        x: (source_frame.x as f64 / scale).round() as i32,
+        y: (source_frame.y as f64 / scale).round() as i32,
+        width: (source_frame.width as f64 / scale).round() as i32,
+        height: (source_frame.height as f64 / scale).round() as i32,
+    };
+    if !valid_hover_tab_frame(logical_frame) {
+        return hide_native_hover_tab(attachment, "logical source geometry is invalid");
+    }
     let update = HoverTabUpdate {
         window_id: attachment.token,
-        frame: source_frame,
+        frame: logical_frame,
         source_owner_pid: Some(attachment.source_owner_pid),
         tab_x: presentation.rect.x,
         tab_y: presentation.rect.y,
@@ -498,6 +512,13 @@ pub(crate) fn reconcile_native_hover_tab(
         display_like: false,
         presentation_generation: generation,
     };
+    // This runs on every 250ms timer tick and location-change event. If the
+    // last published payload already says exactly this, do not publish again:
+    // each emit costs the webview a re-render plus an `aiChatSettings` IPC
+    // round trip, for no visible change.
+    if last_hover_update().is_some_and(|last| last.same_presentation_as(&update)) {
+        return true;
+    }
     if crate::hover_core::set_last_hover_update_if_generation(Some(update.clone()), generation) {
         let _ = tauri::Emitter::emit(app, "hover-tab-update", &update);
         true
@@ -872,21 +893,7 @@ fn rollback_drag_position(
     release_drag_activity_if_idle();
 }
 
-fn drag_session_for_command(
-    window_id: u32,
-    drag_token: Option<u64>,
-) -> Result<Option<crate::hover_core::HoverTabDragSession>, String> {
-    let active = crate::hover_core::active_hover_tab_drag(window_id);
-    match (active, drag_token) {
-        (Some(session), Some(token)) if session.drag_token == token => Ok(Some(session)),
-        (Some(_), _) => Err("hover-tab drag token is stale".to_string()),
-        (None, Some(_)) => Err("hover-tab drag is no longer active".to_string()),
-        (None, None) if crate::hover_core::any_hover_tab_drag_active() => {
-            Err("another hover-tab drag is already active".to_string())
-        }
-        (None, None) => Ok(None),
-    }
-}
+use crate::hover_core::drag_session_for_command;
 
 /// One phase-based drag bridge shared by the Windows route and its native
 /// position presets. The follower is frozen while this command owns movement;
@@ -935,8 +942,11 @@ pub fn hover_tab_drag(
         HoverTabDragPhase::Update => {
             let drag_token =
                 drag_token.ok_or_else(|| "hover-tab drag token is missing".to_string())?;
-            let session = drag_session_for_command(window_id, Some(drag_token))?
-                .expect("a tokened update must have an active session");
+            let Some(session) = drag_session_for_command(window_id, Some(drag_token))? else {
+                // Unreachable by construction (a tokened lookup never yields
+                // Ok(None)), but a command handler must never panic.
+                return Err("hover-tab drag is no longer active".to_string());
+            };
             if !drag_target_is_current(window_id) {
                 rollback_drag_position(
                     &app,

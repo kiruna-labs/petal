@@ -67,7 +67,7 @@ test('the per-share remote-control lock is offered on every platform, and only w
 
   // Reflects a denial rather than always claiming allowed.
   const denied = buildHoverTabMenuEntries(
-    'automatic', true, false, 'cursorPreserving', true, false, false, false, false, 0.5, false
+    'automatic', true, false, 'cursorPreserving', true, false, false, false, false, false
   );
   const deniedToggle = denied.find((entry) => entry.kind === 'remote-control-allowed');
   assert.equal(deniedToggle?.checked, false);
@@ -84,7 +84,6 @@ test('hover-only position entries offer all four exact border labels without lea
     false,
     false,
     true,
-    0.5,
     true,
     'bottom'
   );
