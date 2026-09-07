@@ -68,6 +68,11 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    ignore:
+      # Pinned by wry/tauri 2.11 (they still require the 0.38 windows-core
+      # line); a newer webview2-com brings a second `windows_core::Interface`
+      # into the graph and the Windows build fails. Lift when Tauri moves.
+      - dependency-name: webview2-com
     groups:
       cargo-non-major:
         update-types: [minor, patch]
