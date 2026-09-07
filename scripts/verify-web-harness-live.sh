@@ -220,7 +220,10 @@ else
     const fs = require("node:fs");
     process.stdout.write(fs.readFileSync(0, "utf8").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   ')"
-  JS_VERSION_PATTERN="version[[:space:]]*:[[:space:]]*\"$JS_ESCAPED_VERSION\""
+  # Any JS string delimiter: esbuild emitted version:"0.9.8", vite 8 (rolldown)
+  # emits version:`0.9.9` template literals -- the double-quote-only pattern
+  # failed the 0.9.9 release verify against a correct deploy.
+  JS_VERSION_PATTERN="version[[:space:]]*:[[:space:]]*[\"'\`]$JS_ESCAPED_VERSION[\"'\`]"
   check_body_contains "deployed JS bundle contains the updater release version (browser rendering is validated separately)" \
     "$BASE_URL/$JS_PATH" \
     "$JS_VERSION_PATTERN"
