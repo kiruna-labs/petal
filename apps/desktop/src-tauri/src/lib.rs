@@ -95,7 +95,7 @@ mod hover_tab;
 // OS calls inside.
 mod hover_core;
 // Atomic startup gate closing a real TOCTOU race in `tauri-plugin-single-
-// instance` 2.4.2's macOS backend (see the module doc comment); Windows's
+// instance` 2.4.4's macOS backend (see the module doc comment); Windows's
 // backend of that same plugin uses a real atomic `CreateMutexW`, so it isn't
 // exposed to this race and needs no equivalent. `cfg`-gated to macOS because
 // the module's mechanism (`flock`, `std::os::unix::net::UnixStream`) is

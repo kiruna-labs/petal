@@ -28,864 +28,6 @@
       "version": "1.10.1"
     },
     {
-      "bom-ref": "@esbuild/aix-ppc64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/aix-ppc64/-/aix-ppc64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "1e19b077a0889d9dddc29b864c5f1f246eb2a169ac4e813ebd8803e27cad655c5cbb5ba51e9510440075509f3e375026dcccf8fb1381ca84284997f80fe0a990"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/aix-ppc64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/aix-ppc64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/android-arm@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/android-arm/-/android-arm-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "549fac2af340fc613b09c69c73d0a16bb6e94bc9f2cd5bf48dd560c0d0da478803302ff64d345cdf7229f2aacd61472990e1d44f9399d1b51c34d55943d44b96"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/android-arm",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/android-arm@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/android-arm64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/android-arm64/-/android-arm64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "e800262c6ef3c03d59d79f6308a3ef03165de32fd54ced15929ad8cbedcdd85b49f3e0505855d4f8ec40448c00e3a739b5d0fd4ac28667fd6872a052fe000a1e"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/android-arm64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/android-arm64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/android-x64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/android-x64/-/android-x64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "e636dbfb68610c7c79a61611d81cbc193584ce7e88f54a91d752b07f6da229b36962bb26441d7c697ffd8af73971a6dc522013ff033e60867a486f503ba6bc92"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/android-x64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/android-x64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/darwin-arm64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "377ce5fa5c470a27e022570c50fe74d7a11291e4232e3ffde7d471c4d608b61220f82407227ba316e5de59b58c8274e8e1ca795d51ea14f9a9caef49eb90b562"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/darwin-arm64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/darwin-arm64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/darwin-x64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/darwin-x64/-/darwin-x64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "1d0f646b82b1db5a875f0b654d455b2893809e61b58a95e17564e635788fccf7d62a95ea01255c59d9dfd9b9cbef7c208cdac55c06b7c98bc149df69cdf108a4"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/darwin-x64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/darwin-x64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/freebsd-arm64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/freebsd-arm64/-/freebsd-arm64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "800d01c7be7dfbb26f7b4dcad52d2f90ebb92e0ffce5da2edc4b1e38651eb3c7e554e1b16e10c387f8996a87a4d7563c9adc8a3c6177bcff178679031009b37a"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/freebsd-arm64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/freebsd-arm64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/freebsd-x64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/freebsd-x64/-/freebsd-x64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "4c66cedba630db1b07cf1b5b5451845c1147d054403fb82d70f13b3f9c8fef01b2edc5cada83bb4723a12f934b8aa4e5061e3b5e1988517b867225c4a9815f05"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/freebsd-x64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/freebsd-x64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/linux-arm@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/linux-arm/-/linux-arm-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "94f0c6c82d493c3a2ef2419ccb06346082f35a58619d18dda1fdd495ca2a6264bd125f35f0b2df2497373d75e0647ac70802acfd9d92799b4326be4cae4c6d3b"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/linux-arm",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/linux-arm@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/linux-arm64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "f1bc17edaf05821220aeea5cc5be1a5266032e9f295f4eab1a1e47a834fb6c1fbc45d7a596cea61efac51c75b624038f6546e78d4a4a4cb83a102cb3bdab3601"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/linux-arm64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/linux-arm64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/linux-ia32@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/linux-ia32/-/linux-ia32-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "d32f4aadd5676cc336fef1bc29f5346f285437e1050a7cbdfbc836d36818a924953289dbb027cb8d43beac2722ee933458112dcfea0afcf2301e4cf193285aac"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/linux-ia32",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/linux-ia32@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/linux-loong64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/linux-loong64/-/linux-loong64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "87ffff2ebe5af6b89bfefd461aa5d51b38cbe1332f553bfeb350cfa3141dcfb97f018bfa2c34b1748c33c64acf5b8dfca145e20edc0cd74a3d3e6c12ffa67436"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/linux-loong64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/linux-loong64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/linux-mips64el@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/linux-mips64el/-/linux-mips64el-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "8b246b3353f3cbd1853032ec5e7d621d49b5f2784a9cd316b1c8e6a78fa1a5a7dc663aebd966d3fff776d316869635c30581ea45c97c1e7c5b5fab9a03f78657"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/linux-mips64el",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/linux-mips64el@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/linux-ppc64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/linux-ppc64/-/linux-ppc64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "f6678cfe5457c4c8b93d252a117442b558c46411b007b3ff0f8c93f141bf9b021dcded9a578568e94e600f7f91b281d72a41c27d2c592b3983b2c565463d5040"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/linux-ppc64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/linux-ppc64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/linux-riscv64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/linux-riscv64/-/linux-riscv64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "66beca478860294a560306f57f7a39ca04f4e0ccea56b18419718b9e3d796100c912b62efc11a0fb09859480ce749a743e607494bbf1148397660151add8d1d3"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/linux-riscv64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/linux-riscv64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/linux-s390x@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/linux-s390x/-/linux-s390x-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "32c2a770e7204cdbddb6221273f8d9b3f65ff1dd1c97fb77818597f09f6e6c19d53b0964eb9508104be004e4538a58e5a085a70732ece2a8733e425c8ad23322"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/linux-s390x",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/linux-s390x@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/linux-x64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "baa64c4cbaffcd1fde7788c81a7c122e468798f8ce8c9be79ba4d5562b406b4f122d2f59d1533cc08471ee059b241e7f279e18b883089c3aae5b262f40b66483"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/linux-x64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/linux-x64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/netbsd-arm64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/netbsd-arm64/-/netbsd-arm64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "c57c1c4eae0685133b27d03c1afe5ba1a9c78516bf43d28b5667325c709368ce3029f2295a475788ca20fcab27c73274035fa70fece879cbb3a8f9824720468e"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/netbsd-arm64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/netbsd-arm64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/netbsd-x64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/netbsd-x64/-/netbsd-x64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "2dde694e5ccfcb763019e7383ae1e1d5a095091bce5dd1fc0e04637c3cbfa2e995a2f9ae4b359f9d2260f95b5a901f429b483134ef41cd6923ea6b4ed4531791"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/netbsd-x64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/netbsd-x64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/openbsd-arm64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/openbsd-arm64/-/openbsd-arm64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "7c5f7a4fa2ac068fe991023de74140454f5aa463534a5646b2fd6364102570b2f530b8cb34858f0648f93654b3f1a03360a83e78daa49eb509db8401c9b791e4"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/openbsd-arm64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/openbsd-arm64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/openbsd-x64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/openbsd-x64/-/openbsd-x64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "319c975246478d0c54bf32bbacdf032774919ab56b91ef19c91bac1e53fe92ec2a4dc7d62f2a8c384dec49c3cfc9e21737f9832487c65ef70ca8281829e92843"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/openbsd-x64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/openbsd-x64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/openharmony-arm64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/openharmony-arm64/-/openharmony-arm64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "ae6d185aca94491ae39dc497180ed9bfbf0d6e7c385cbebf773af6d1ccab41fed999172ca2fa5c4417610f8dcdba4df2ed72285b63b1315bf0b91be4f577404a"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/openharmony-arm64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/openharmony-arm64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/sunos-x64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/sunos-x64/-/sunos-x64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "df0192083cae4c7414cedd2757b6e8703cbbdabda5237dd02f78240cd1a4a1ddb612c625d38b0c7f4a8b6fc96e34a4ce9a017f7831033f9045370a01287e38d7"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/sunos-x64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/sunos-x64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/win32-arm64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/win32-arm64/-/win32-arm64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "acc98baeeafae00efe0ca9674aec2a51d44ac9ddd413ba0f2599a7963a84a6d7ac28cf30c7d27c831e6ed3ef4fab47d0416f2fa9e29e6f035775f3b23fef01b2"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/win32-arm64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/win32-arm64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/win32-ia32@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/win32-ia32/-/win32-ia32-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "1e4aa79a606809b0b0c5428a34f062c62583182a50195b2b41f26854660b3d3e355d617c947b84e4de9685589ada7e28e502b9338b58af6d7cdbb7cd862e1bc9"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/win32-ia32",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/win32-ia32@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
-      "bom-ref": "@esbuild/win32-x64@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "6a5242d2e099a5316b48bd020838dc8257815cf9c2ac40214c120ba5e029eccfce160a2ab407ad7c1cd7d31334d0c52c5553e956394fb8c6d112a9d90976939c"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@esbuild/win32-x64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40esbuild/win32-x64@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
-    },
-    {
       "bom-ref": "@jridgewell/gen-mapping@0.3.13",
       "externalReferences": [
         {
@@ -1105,17 +247,17 @@
       "version": "1.46.6"
     },
     {
-      "bom-ref": "@rollup/rollup-android-arm-eabi@4.62.2",
+      "bom-ref": "@oxc-project/types@0.148.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-android-arm-eabi/-/rollup-android-arm-eabi-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@oxc-project/types/-/types-0.148.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ea8ed92d92be05e7a79190853435eaa5b8f0f5b0fa9ee5a89ef4bf970409a7b368555c66ea9dea13ba90e631ae063885b20bea8c3f26640539a16c5399b39e3a"
+          "content": "366e2cfe307ee05a45b0f8561840b887baf392c7ac9ad9cc5e89a8eab08c720fdbf332d0b8ece24609024b57f10c25ce94907fe90f28001399fce3fa4483e3f4"
         }
       ],
       "licenses": [
@@ -1125,30 +267,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-android-arm-eabi",
+      "name": "@oxc-project/types",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-android-arm-eabi@4.62.2",
+      "purl": "pkg:npm/%40oxc-project/types@0.148.0",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "0.148.0"
     },
     {
-      "bom-ref": "@rollup/rollup-android-arm64@4.62.2",
+      "bom-ref": "@rolldown/binding-android-arm-eabi@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-android-arm64/-/rollup-android-arm64-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "05a1fb0659420021e81f52e0b8e539e9422d19f5168ee8e53bae644bd2c0a1d56268de1bc0829dee8796fd91c9ff8963affecc22210d9cdcb71c9d335eff1993"
+          "content": "132a73827602c32558e0d0c72b31a63494f96fe5da404067887c6c31d78840b07fb5c0b366786aaf31e96456d7f626b1c7ee51881f1c6804c1b5fbd93fbcd5c5"
         }
       ],
       "licenses": [
@@ -1158,30 +300,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-android-arm64",
+      "name": "@rolldown/binding-android-arm-eabi",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-android-arm64@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-darwin-arm64@4.62.2",
+      "bom-ref": "@rolldown/binding-android-arm64@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-darwin-arm64/-/rollup-darwin-arm64-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "bf7f51082be3e077bcd88f6c16693e335559d0f2ccf6c7ec2d58a48dfc7685804d00b86bace4760f7263400e808656923a0711f91ceb298eded7e6d3e9250efc"
+          "content": "975ec713d1307966aa25986e52e34137f17333adb1c3e0c40959c9caf32cc67f2f2450062f2e507cb0e860072ba2790037c5712991decc3a6e9470cfc7de6f17"
         }
       ],
       "licenses": [
@@ -1191,30 +333,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-darwin-arm64",
+      "name": "@rolldown/binding-android-arm64",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-darwin-arm64@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm64@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-darwin-x64@4.62.2",
+      "bom-ref": "@rolldown/binding-darwin-arm64@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-darwin-x64/-/rollup-darwin-x64-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ca5d32dafab74b79477ae5e111db2ce9359f296f2f92e8c898ed76b67e19906ff8a2086bd3d2ef7589b64449558e891342252f0d41972c6b1878ba943022a918"
+          "content": "f040fc10b16f1d773a382113227e205ce6cf89a47a6dc90cfe2a57b5bce53d50d13017c41a308a80ef7417d62d7dda436ad571fd9430eda675bd431fffe4f733"
         }
       ],
       "licenses": [
@@ -1224,30 +366,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-darwin-x64",
+      "name": "@rolldown/binding-darwin-arm64",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-darwin-x64@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-freebsd-arm64@4.62.2",
+      "bom-ref": "@rolldown/binding-darwin-x64@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-freebsd-arm64/-/rollup-freebsd-arm64-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b53e29bede2a5c3faf1287b3ba90968be6b5174bef0e292c88773e3f1465613387d48ebf5f889df633f14cff8583ee78e5eb9a153d63255b38084747640535bf"
+          "content": "fd63eb8a98ed880219dad598edd7628ce453d148e0f3bc31596fea72815508a0165433e1b58d31afb0e3d0cdc6c8d1b3eb48c6c1312586ba3f9a417d753edd0d"
         }
       ],
       "licenses": [
@@ -1257,30 +399,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-freebsd-arm64",
+      "name": "@rolldown/binding-darwin-x64",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-freebsd-arm64@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-freebsd-x64@4.62.2",
+      "bom-ref": "@rolldown/binding-freebsd-x64@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-freebsd-x64/-/rollup-freebsd-x64-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ea7539176c025beaaf0818539f5a5d214ddbcec22817b114c2c0834718a5586a6b411eb2779d3c6271fdf8e2850b0a5f4bca6366a0d49a7080afb7b16b1d170a"
+          "content": "d780c8e0d72aa6f6c80b14a718bc773e6b43696a913ff2864866fa0be24b2d53de65197a74a7476dade91aca93defa5d4ea8446083c6d0c310f1cd3162aa09c4"
         }
       ],
       "licenses": [
@@ -1290,30 +432,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-freebsd-x64",
+      "name": "@rolldown/binding-freebsd-x64",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-freebsd-x64@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-arm-gnueabihf@4.62.2",
+      "bom-ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-arm-gnueabihf/-/rollup-linux-arm-gnueabihf-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9f51891cf3afa487e18b74e6ac27a1e92e9446df41142b74290137aaf7b1c8609300aa51e0b83e796bcd644aaeedea71c2eb3ff04953de169c604b9c9b8f5266"
+          "content": "6f1ad6211bc7590bdb2708be54889efe40c9990c5c344eb1c56c1976a17f1315408a0b4792fe785932d03dbf90b19767172d7c7e0ec93df5862f4447eafc0895"
         }
       ],
       "licenses": [
@@ -1323,30 +465,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-arm-gnueabihf",
+      "name": "@rolldown/binding-linux-arm-gnueabihf",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-arm-gnueabihf@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-arm-musleabihf@4.62.2",
+      "bom-ref": "@rolldown/binding-linux-arm64-gnu@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-arm-musleabihf/-/rollup-linux-arm-musleabihf-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "26a81f952f30101f945d5fef4b546945b89f18178de03e65cfc0fca0e15b159c38bde76f74e8021408df06620c756df22f5d17a504340266dea70e8c5eb84e9c"
+          "content": "b68398d810a1059caec54ece617e939f7f3d762e08cc0a8f4f271571c8b43bb1527c1ab3441dd1667f8ae48b3a00d7f8b6681177f2b5c994ec3535db917b272e"
         }
       ],
       "licenses": [
@@ -1356,30 +498,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-arm-musleabihf",
+      "name": "@rolldown/binding-linux-arm64-gnu",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-arm-musleabihf@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-arm64-gnu@4.62.2",
+      "bom-ref": "@rolldown/binding-linux-arm64-musl@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-arm64-gnu/-/rollup-linux-arm64-gnu-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c27149928816bcde239bf850445d9405a7949a4db48f9f83987be8c968a2d9bf07243cafcf5305d8e53feb29d7b76291eb7adb64b5a4169a32b6975cff206e48"
+          "content": "9402174c7fda88b44bc6c4e042f7e18e8e0ad72756229d34f95d2fa0eafd6de6fff599a4505ad221bd3775734546030dbe413aa06b05d748a843a52c23ebd2e5"
         }
       ],
       "licenses": [
@@ -1389,30 +531,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-arm64-gnu",
+      "name": "@rolldown/binding-linux-arm64-musl",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-arm64-gnu@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-arm64-musl@4.62.2",
+      "bom-ref": "@rolldown/binding-linux-ppc64-gnu@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-arm64-musl/-/rollup-linux-arm64-musl-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "1d5bb66e9d3386f27cc47115f7e514b3b4bdd1569d981498dcb70832fa336cfa3802e3060d6973df29872c764f5f8851ebb4ca4edf10a793c9e51060fe2f9131"
+          "content": "91d9f04b6f0f91e9e9fe664c4708d75d7c3143ba48b26f9b17dd7d2d42bddc13b285c2ecad529d3f6a7d7f1a623cd3c06cdb9c87cca942dd299b63f62d80801a"
         }
       ],
       "licenses": [
@@ -1422,30 +564,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-arm64-musl",
+      "name": "@rolldown/binding-linux-ppc64-gnu",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-arm64-musl@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-loong64-gnu@4.62.2",
+      "bom-ref": "@rolldown/binding-linux-s390x-gnu@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-loong64-gnu/-/rollup-linux-loong64-gnu-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "990aaa015f106a84a0afd2367ca0cb63604056f98a8d6a068aefdc4984289ec2efb6ac049f51384187e708e729e73a04a8d86c0d88a7d6cea3c7f5499abc6566"
+          "content": "e75e8e76cc8b76be44eb9a5a177c81179e6df267e6f7e826b42b0adf123b5ca5c84fb11f4651e1c4bf0afcd47a1eef01592805e7ed70ef89532f4fa7c5c73c43"
         }
       ],
       "licenses": [
@@ -1455,30 +597,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-loong64-gnu",
+      "name": "@rolldown/binding-linux-s390x-gnu",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-loong64-gnu@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-loong64-musl@4.62.2",
+      "bom-ref": "@rolldown/binding-linux-x64-gnu@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-loong64-musl/-/rollup-linux-loong64-musl-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "23128ba31090d885a2e9b4f66a4c835011ac388983281fac3e9e04b139b0150fdf330a422a6f2e2d24a03ff2b1fd061480a8ace92119e7f36586ea740c80343d"
+          "content": "afcff3f27ec615a611967df198fd42c72d071ff1cb334b8150f904b925447ca18303cf4cd05b194592514b07bfb498d1c7e7e91ff823a2b7e107cb6611b4852c"
         }
       ],
       "licenses": [
@@ -1488,30 +630,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-loong64-musl",
+      "name": "@rolldown/binding-linux-x64-gnu",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-loong64-musl@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-ppc64-gnu@4.62.2",
+      "bom-ref": "@rolldown/binding-linux-x64-musl@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-ppc64-gnu/-/rollup-linux-ppc64-gnu-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "324e616b64504a0c857e66182e40693e7524f03f05ae20717ac3b5bbd3bbe57d261e05cbd5441c1f922d97696ead62f6b63d11c55f5bf6d2608a969cd21458f4"
+          "content": "a40b04f22883c54835c41a9d86b4df838e405435698ab8f3d34b1b94460294634d70c9c36fe7bc6de420a88030e8bbdab97fc03ef831527c2b82e9ff61818187"
         }
       ],
       "licenses": [
@@ -1521,30 +663,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-ppc64-gnu",
+      "name": "@rolldown/binding-linux-x64-musl",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-ppc64-gnu@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-ppc64-musl@4.62.2",
+      "bom-ref": "@rolldown/binding-openharmony-arm64@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-ppc64-musl/-/rollup-linux-ppc64-musl-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "0a3bc49ea24bff4fd34374d75f738f209fe49817a596b59de217975261de2654e79b08caa52273a1e84b68be9793466730706ef5d66e1400cd3abb63178bfedb"
+          "content": "9537086269a741003c3abff60dab52ea84aa71d2c7bde9dd8d2fb32eef85c204e8ca758c45299076933ae5f4c03498084b89a36cc3a8e4a4f69674fd4806fdeb"
         }
       ],
       "licenses": [
@@ -1554,30 +696,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-ppc64-musl",
+      "name": "@rolldown/binding-openharmony-arm64",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-ppc64-musl@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-riscv64-gnu@4.62.2",
+      "bom-ref": "@rolldown/binding-win32-arm64-msvc@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-riscv64-gnu/-/rollup-linux-riscv64-gnu-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d528996f3c1d91a0d446c7b0fed48eae8a0a898cbb110193ea6f2e7dabc08bd344c906ffe95b88c455c02f57ea6b88997b783835b364e0fec9df6cf6b70e4c82"
+          "content": "7b71aedd6c5b364fd4a90871a94ed82183bef5906f58dcf753e87fa91168b2c70c1737513db5d849a4968129e496fd9fcf54e0cc14dcb62db3df973fee2aec1f"
         }
       ],
       "licenses": [
@@ -1587,30 +729,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-riscv64-gnu",
+      "name": "@rolldown/binding-win32-arm64-msvc",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-riscv64-gnu@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-riscv64-musl@4.62.2",
+      "bom-ref": "@rolldown/binding-win32-x64-msvc@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-riscv64-musl/-/rollup-linux-riscv64-musl-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9d0b6cd76cc9dcd411a04eae6258ce1fcf6feeccf32c3bc6d890ffbec5febc65d4f30fc0b751a8c13679ffba9e150f26ecbe79ae947c3a4ba09eea396e08f2d9"
+          "content": "5bf8e0e6aa114aa8ec12fd3e7598b87baf3b99c1ea995b94d0fe1f2baa92ff18deb56d8699cd56f23fffcf99c078d702f13b66d21578e888dc61eb95c1886e8b"
         }
       ],
       "licenses": [
@@ -1620,30 +762,30 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-riscv64-musl",
+      "name": "@rolldown/binding-win32-x64-msvc",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-riscv64-musl@4.62.2",
+      "purl": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
-      "bom-ref": "@rollup/rollup-linux-s390x-gnu@4.62.2",
+      "bom-ref": "@rolldown/pluginutils@1.0.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-s390x-gnu/-/rollup-linux-s390x-gnu-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "13dfe5974d7d8e13c8260a737d9a089011a1733fa428d815598458d33afdb2b05d3cf155a6f38a5bc55a24a51b78af9e657c9017d96d304f8a93a69f7de68f82"
+          "content": "da3f5b1ade4987c863faf3ed8333ed97bda3d324711c0cae9a8a3a4cd7c08ec2c1d3852da52bcf6cf703701331cfb9fef42601d1cd46c501716118368e29aa1b"
         }
       ],
       "licenses": [
@@ -1653,281 +795,17 @@
           }
         }
       ],
-      "name": "@rollup/rollup-linux-s390x-gnu",
+      "name": "@rolldown/pluginutils",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-s390x-gnu@4.62.2",
+      "purl": "pkg:npm/%40rolldown/pluginutils@1.0.1",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
-    },
-    {
-      "bom-ref": "@rollup/rollup-linux-x64-gnu@4.62.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-x64-gnu/-/rollup-linux-x64-gnu-4.62.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "e41ab147fa6c8637b2e758a58b2cd30f95e2dc437468b990da567796f79f555f5cf3606facba36ffa393e798a27e9581b9fb3a91dc166ee38a4bce350eb98af4"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@rollup/rollup-linux-x64-gnu",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-x64-gnu@4.62.2",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.62.2"
-    },
-    {
-      "bom-ref": "@rollup/rollup-linux-x64-musl@4.62.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-linux-x64-musl/-/rollup-linux-x64-musl-4.62.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "b8d37cdd7c50ad1021ff0d3fa6601f89b730c9be985ade203fe7699d028f549b21025a10efce628bc093f19088c641a0f68a55b2f0251a1162b529ba0f5263a6"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@rollup/rollup-linux-x64-musl",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40rollup/rollup-linux-x64-musl@4.62.2",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.62.2"
-    },
-    {
-      "bom-ref": "@rollup/rollup-openbsd-x64@4.62.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-openbsd-x64/-/rollup-openbsd-x64-4.62.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "b2b8c4231487dcb46724de931dccc31d642996a10c162009ad369bd26b14af287d93036990809fdc46baaba30dff6719c11154371e70fa1e87a62e10b874ba66"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@rollup/rollup-openbsd-x64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40rollup/rollup-openbsd-x64@4.62.2",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.62.2"
-    },
-    {
-      "bom-ref": "@rollup/rollup-openharmony-arm64@4.62.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-openharmony-arm64/-/rollup-openharmony-arm64-4.62.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "f213899f181bc8e6e70a6e4095103703ddf5c57d7dc6af344635532a024ebc4296a89aee3ff51fd7621b00e6838e31176117b0c072df985d1844874adcec0a58"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@rollup/rollup-openharmony-arm64",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40rollup/rollup-openharmony-arm64@4.62.2",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.62.2"
-    },
-    {
-      "bom-ref": "@rollup/rollup-win32-arm64-msvc@4.62.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-win32-arm64-msvc/-/rollup-win32-arm64-msvc-4.62.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "9a6178018d62d211bf6cb59472d52ae7d82d9a06922116b772efc0dc9151a7fb0234499ed9b8031220d2db63fd15b9c907c349345e233c98923f94474295130e"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@rollup/rollup-win32-arm64-msvc",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40rollup/rollup-win32-arm64-msvc@4.62.2",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.62.2"
-    },
-    {
-      "bom-ref": "@rollup/rollup-win32-ia32-msvc@4.62.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-win32-ia32-msvc/-/rollup-win32-ia32-msvc-4.62.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "0d982492773a8e11eb938e95db9bdb00cd33664c8fd2748390907cfdd4642d3c6fe3bd1d3a6583a86a04265ffd0347457d2ef21374443b0343c691f048b4add1"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@rollup/rollup-win32-ia32-msvc",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40rollup/rollup-win32-ia32-msvc@4.62.2",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.62.2"
-    },
-    {
-      "bom-ref": "@rollup/rollup-win32-x64-gnu@4.62.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-win32-x64-gnu/-/rollup-win32-x64-gnu-4.62.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "4fac6beae716485b68f9519a8c0f181f6e8b7691d1b8fe182c710a02d096bc90ce967996703655088d899a3afe2051c396ddb345a4c0284e2d7e34da58b80906"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@rollup/rollup-win32-x64-gnu",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40rollup/rollup-win32-x64-gnu@4.62.2",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.62.2"
-    },
-    {
-      "bom-ref": "@rollup/rollup-win32-x64-msvc@4.62.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@rollup/rollup-win32-x64-msvc/-/rollup-win32-x64-msvc-4.62.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "05fcc49c324eb7d4fc33df3dfe5037ec470981ab74d702d19e88b97507f7433387ee3ce9a930337436d57d196356be6bfa3ccaaa96c77b239f01a5f101dd0f00"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@rollup/rollup-win32-x64-msvc",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40rollup/rollup-win32-x64-msvc@4.62.2",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.62.2"
+      "version": "1.0.1"
     },
     {
       "bom-ref": "@sentry/browser@10.65.0",
@@ -2185,17 +1063,17 @@
       "version": "0.2.1"
     },
     {
-      "bom-ref": "@sveltejs/vite-plugin-svelte@5.1.1",
+      "bom-ref": "@sveltejs/vite-plugin-svelte@7.3.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sveltejs/vite-plugin-svelte/-/vite-plugin-svelte-5.1.1.tgz"
+          "url": "https://registry.npmjs.org/@sveltejs/vite-plugin-svelte/-/vite-plugin-svelte-7.3.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "6350acee185373e6b913d55aff1c0a9402686ab890c8763ee730600998383c558d610d6730df6c8cad73870d602baf43baa54ffbeb21b7fd46660d5a4709805d"
+          "content": "41b4682720fdd9ef51d2e7de4085911eb082d0e6dca92bff6810ddad032853eb32a5abf7703c79c32b5d43a18b7578c430eeb18eb5c6cdf914ca09e0f0932fd0"
         }
       ],
       "licenses": [
@@ -2212,23 +1090,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40sveltejs/vite-plugin-svelte@5.1.1",
+      "purl": "pkg:npm/%40sveltejs/vite-plugin-svelte@7.3.0",
       "scope": "optional",
       "type": "library",
-      "version": "5.1.1"
+      "version": "7.3.0"
     },
     {
-      "bom-ref": "@sveltejs/vite-plugin-svelte-inspector@4.0.1",
+      "bom-ref": "magic-string@1.2.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sveltejs/vite-plugin-svelte-inspector/-/vite-plugin-svelte-inspector-4.0.1.tgz"
+          "url": "https://registry.npmjs.org/magic-string/-/magic-string-1.2.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "27f3666f6436cbb99c936872097e1c9151dc479b6ed89f8cb41110aa90ebae010b676bafada41c2bf8a8095eb502a91d5c582b8a4b0e28871e0dc426aa71a157"
+          "content": "0696f45b64db2ca399eef2673949d5446ab758bda9f88495dbd33a8583cbd40142a72299a5daf9cad897a13492c5156183c616edfeb9fba81b1bc586e8f09afe"
         }
       ],
       "licenses": [
@@ -2238,17 +1116,17 @@
           }
         }
       ],
-      "name": "@sveltejs/vite-plugin-svelte-inspector",
+      "name": "magic-string",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40sveltejs/vite-plugin-svelte-inspector@4.0.1",
+      "purl": "pkg:npm/magic-string@1.2.3",
       "scope": "optional",
       "type": "library",
-      "version": "4.0.1"
+      "version": "1.2.3"
     },
     {
       "bom-ref": "@types/dom-mediacapture-record@1.0.22",
@@ -2628,39 +1506,6 @@
       "version": "2.1.1"
     },
     {
-      "bom-ref": "debug@4.4.3",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "446c305a7c10be455f6af295b76d8518bc3ec5849dcc04709b4aeee83853540dee994e6165cdbc57790ee2cb6062bcab4e52e9baf808f468a28e5b408cd6dca8"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "debug",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/debug@4.4.3",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.4.3"
-    },
-    {
       "bom-ref": "deepmerge@4.3.1",
       "externalReferences": [
         {
@@ -2692,6 +1537,39 @@
       "scope": "optional",
       "type": "library",
       "version": "4.3.1"
+    },
+    {
+      "bom-ref": "detect-libc@2.1.2",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "06d8f604e38ef37a375b21f9f5ef0c817b3111055c6ab9143a9118aee6c1d2eaf09cdd74c90dfae2bb22072535d67665a966199b4e62fe87fb8a8e26ce2841b5"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "detect-libc",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/detect-libc@2.1.2",
+      "scope": "optional",
+      "type": "library",
+      "version": "2.1.2"
     },
     {
       "bom-ref": "devalue@5.9.0",
@@ -2758,39 +1636,6 @@
       "scope": "optional",
       "type": "library",
       "version": "17.4.2"
-    },
-    {
-      "bom-ref": "esbuild@0.25.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/esbuild/-/esbuild-0.25.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "6db3c1618aed65b92de8eb3a1624cb093171beae2db7724a6a5975bd1c2c840ddf755cedb0b01ab45699a1b864042f3f06b3deb686b4a24b18a0a5e81b8af226"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "esbuild",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/esbuild@0.25.12",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.25.12"
     },
     {
       "bom-ref": "esm-env@1.2.2",
@@ -3012,37 +1857,400 @@
       "version": "6.2.3"
     },
     {
-      "bom-ref": "kleur@4.1.5",
+      "bom-ref": "lightningcss@1.33.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/kleur/-/kleur-4.1.5.tgz"
+          "url": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a3e34efbc5ab462404138ffb9f044984dd475a9566266e75d690475313cbb69d015084b3941a653916129937250a726f42adad2aefec825df156991ced95ae41"
+          "content": "5a4503ae88ee26cd3192019fdae756c5adf21814713edc54901efd8ba68264b46073b3ccf1f65ef53a2c7cf0dcbc4a5065bb850129c762644b04b51b98b38820"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "MIT"
+            "id": "MPL-2.0"
           }
         }
       ],
-      "name": "kleur",
+      "name": "lightningcss",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/kleur@4.1.5",
+      "purl": "pkg:npm/lightningcss@1.33.0",
       "scope": "optional",
       "type": "library",
-      "version": "4.1.5"
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-android-arm64@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-android-arm64/-/lightningcss-android-arm64-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "804a514da94a768b29e016fca96b5cda23a013949e2079694b5ba9f5b16adb003262197551d4ce6d88877bdf3310cf5242f4a8a906752100f424da60dcc979a6"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-android-arm64",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-android-arm64@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-darwin-arm64@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-darwin-arm64/-/lightningcss-darwin-arm64-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "49c89acfc79e9cd4ca9fd6f7b7bfb1af48a94e9f58c4a418e27a704379ab46e2f404054704bc99c687e168a04056dce6b5167fcd3ca8d3fb68e01d6e586fc38e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-darwin-arm64",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-darwin-arm64@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-darwin-x64@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-darwin-x64/-/lightningcss-darwin-x64-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "67950f031ceb8e558d3721b2ea2eb9709cf3be02790f74fac0cbecfa05a963d77ba9184036bc6a029e8b871220661584c35f117c94c6711c63b8b201afe9bc5d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-darwin-x64",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-darwin-x64@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-freebsd-x64@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-freebsd-x64/-/lightningcss-freebsd-x64-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "41033f4e2fe141a8c9c0263e4625ae099f6c76d23f5d093b9c32b9bc2f2491dc22c5ecce94382f0f1efe453f908cae857054f8329b2ea019c7228fcedd2b5146"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-freebsd-x64",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-freebsd-x64@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-linux-arm-gnueabihf@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-linux-arm-gnueabihf/-/lightningcss-linux-arm-gnueabihf-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "37b15505eea24b6e0c94ce91ff84414f11a14217991aceed890f54df652d17be4dccfe50ef158f46a2c108ac65450464deb6358c220f2f3c7b5b33a1b942112d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-linux-arm-gnueabihf",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-linux-arm-gnueabihf@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-linux-arm64-gnu@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-linux-arm64-gnu/-/lightningcss-linux-arm64-gnu-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "8f6bff8ad9b2e0794dc6573abe829762006a362d0d8362d2860e33ec6b9fa4482cd393fedacb815728bd23a607ab9ba8545c7d1138a7dde08484b5725c64272a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-linux-arm64-gnu",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-linux-arm64-gnu@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-linux-arm64-musl@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-linux-arm64-musl/-/lightningcss-linux-arm64-musl-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ca23b944e32e6108176c2eb4ca3654e4261215918a5cbd071404d7b7d987267d7ecd6e79a02b4c23d35f7158582cc1432fb815ee804fa27fc498c3068363afb5"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-linux-arm64-musl",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-linux-arm64-musl@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-linux-x64-gnu@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6abf89bbb2e670dd09a381692f88691726f0346f7fdc0fc1af9296da7da3c8e0e0dcc1195da0d800375e9a8352f810cd7cc80abf29492e3e12e6dc9101cb6e02"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-linux-x64-gnu",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-linux-x64-gnu@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-linux-x64-musl@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4588986e4a24c34b6b7caaaacdf179e658229f010fac3dce2437d3b89cc5b3530aea21670de9dacf57ea2cbb57e084c6dce92d2505ce7936b0d5ac2b0409593f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-linux-x64-musl",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-linux-x64-musl@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-win32-arm64-msvc@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-win32-arm64-msvc/-/lightningcss-win32-arm64-msvc-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d4af8c3df2d2155a69873a5d6df92195693ac01ad339b0734b64fa75bd743cd399811f46a15b005b3c0dcae8546186d3a76de3fb846b9dc7ee8d9e2e0335efc0"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-win32-arm64-msvc",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-win32-arm64-msvc@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
+    },
+    {
+      "bom-ref": "lightningcss-win32-x64-msvc@1.33.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lightningcss-win32-x64-msvc/-/lightningcss-win32-x64-msvc-1.33.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3a5108083c7f5e5d05a92a786ebcbccc59c2bc6a628371a5e200aabaf6301eea892840b5fa7f4d8039e216fa871a632fd5992a0c9ac3a8a292ca44c35fe7a1b8"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "lightningcss-win32-x64-msvc",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/lightningcss-win32-x64-msvc@1.33.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.33.0"
     },
     {
       "bom-ref": "livekit-client@2.20.0",
@@ -3330,39 +2538,6 @@
       "version": "1.2.0"
     },
     {
-      "bom-ref": "ms@2.1.3",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "e85973b9b4cb646dc9d9afcd542025784863ceae68c601f268253dc985ef70bb2fa1568726afece715c8ebf5d73fab73ed1f7100eb479d23bfb57b45dd645394"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "ms",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/ms@2.1.3",
-      "scope": "optional",
-      "type": "library",
-      "version": "2.1.3"
-    },
-    {
       "bom-ref": "nanoid@3.3.18",
       "externalReferences": [
         {
@@ -3394,6 +2569,39 @@
       "scope": "optional",
       "type": "library",
       "version": "3.3.18"
+    },
+    {
+      "bom-ref": "obug@2.1.4",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/obug/-/obug-2.1.4.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e1af8eb18bfd524b4e24a13e9750383ae7c381d445f4f89f5a3fad2671d4468fcff963b1a46e06cd414bf6a09a96659ab9aa3aa20886f90be70a8bf03e8c8058"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "obug",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/obug@2.1.4",
+      "scope": "optional",
+      "type": "library",
+      "version": "2.1.4"
     },
     {
       "bom-ref": "picocolors@1.1.1",
@@ -3429,17 +2637,17 @@
       "version": "1.1.1"
     },
     {
-      "bom-ref": "picomatch@4.0.4",
+      "bom-ref": "picomatch@4.0.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.4.tgz"
+          "url": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "40ff3c0402af31a9bfdcdc47eaf8f6a36d51e8c8f165401dea7970012fe99c6bcdf4854ba1c2c7c46608cc5860e9f510fb9b61e8fe1dbf8796f635f70d2223ec"
+          "content": "a9c26ef3c436216a89b030f9dbd24a31dc069bf76f2275b81ef427470887f49b62849bf318eb1c0ed1c4df1d6904a794393cac43c91598b9c9da426eef285c18"
         }
       ],
       "licenses": [
@@ -3456,23 +2664,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/picomatch@4.0.4",
+      "purl": "pkg:npm/picomatch@4.0.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.0.4"
+      "version": "4.0.7"
     },
     {
-      "bom-ref": "postcss@8.5.26",
+      "bom-ref": "postcss@8.5.28",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/postcss/-/postcss-8.5.26.tgz"
+          "url": "https://registry.npmjs.org/postcss/-/postcss-8.5.28.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "bbcd8def82c5cc6f1c6be743f29b8f9e99535e8187e1f4cfa551ae21bb77e86deabcd964bdf0f49440194b16a5cb7297f134bf2f503582c0849af2a605c55b91"
+          "content": "451bb3a83b6de58f61deabb3e615a12be4cf9ec995b3a5b0494e8b90931e6381ecb54103b984c6f1425275ac0c4739b302d57e284a06f0ddd0836a8bcb9bccfc"
         }
       ],
       "licenses": [
@@ -3489,10 +2697,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/postcss@8.5.26",
+      "purl": "pkg:npm/postcss@8.5.28",
       "scope": "optional",
       "type": "library",
-      "version": "8.5.26"
+      "version": "8.5.28"
     },
     {
       "bom-ref": "quick-lru@6.1.2",
@@ -3561,17 +2769,17 @@
       "version": "4.1.2"
     },
     {
-      "bom-ref": "rollup@4.62.2",
+      "bom-ref": "rolldown@1.2.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/rollup/-/rollup-4.62.2.tgz"
+          "url": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "4459eb5b89615c0decddea870d9bcdeb9e20f0e4e3cd17eaa4844961ccc2181e87ce985c915022fd0878b5b3d46d1b838bbb352e5bfc83f36ca4b92db58de04c"
+          "content": "83412d2ef0634d407b8e1c95d12fd30aea77bff5d2565e39bd42066ce194e103e2ca34de9c27b898ab85bd6f5f1206264b6168e36014b2c46636e33389776b8a"
         }
       ],
       "licenses": [
@@ -3581,17 +2789,17 @@
           }
         }
       ],
-      "name": "rollup",
+      "name": "rolldown",
       "properties": [
         {
           "name": "cdx:npm:package:development",
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/rollup@4.62.2",
+      "purl": "pkg:npm/rolldown@1.2.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.62.2"
+      "version": "1.2.7"
     },
     {
       "bom-ref": "rxjs@7.8.2",
@@ -4915,17 +4123,17 @@
       "version": "8.3.0"
     },
     {
-      "bom-ref": "vite@6.4.3",
+      "bom-ref": "vite@8.2.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/vite/-/vite-6.4.3.tgz"
+          "url": "https://registry.npmjs.org/vite/-/vite-8.2.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "3532a57108e500aecc950a326fa2e06aa1dcf2cb28fe9572509616330b378e0db5b93270fcb75da8814f70fa8fe8fce981b21c672288f39b051381c1ad00c0f0"
+          "content": "70528b57f3d18005252119b95a332327cea3adfb73a6a7201fe52cf834bc988dc20cd887df45a1af3f2e1cbdfe30e2cf020a9b30102a59d00702984e00cfb3fd"
         }
       ],
       "licenses": [
@@ -4942,10 +4150,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/vite@6.4.3",
+      "purl": "pkg:npm/vite@8.2.2",
       "scope": "optional",
       "type": "library",
-      "version": "6.4.3"
+      "version": "8.2.2"
     },
     {
       "bom-ref": "vitefu@1.1.3",
@@ -5047,7 +4255,7 @@
         "@sentry/browser@10.65.0",
         "@userdispatch/sdk@1.0.1",
         "livekit-client@2.20.0",
-        "@sveltejs/vite-plugin-svelte@5.1.1",
+        "@sveltejs/vite-plugin-svelte@7.3.0",
         "@types/node@26.1.0",
         "dotenv@17.4.2",
         "livekit-server-sdk@2.16.0",
@@ -5055,117 +4263,13 @@
         "svelte-check@4.7.4",
         "tsx@4.23.0",
         "typescript@6.0.3",
-        "vite@6.4.3"
+        "vite@8.2.2"
       ],
       "ref": "web-harness@0.9.8"
     },
     {
       "dependsOn": [],
       "ref": "@bufbuild/protobuf@1.10.1"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/aix-ppc64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/android-arm@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/android-arm64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/android-x64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/darwin-arm64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/darwin-x64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/freebsd-arm64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/freebsd-x64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/linux-arm@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/linux-arm64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/linux-ia32@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/linux-loong64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/linux-mips64el@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/linux-ppc64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/linux-riscv64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/linux-s390x@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/linux-x64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/netbsd-arm64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/netbsd-x64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/openbsd-arm64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/openbsd-x64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/openharmony-arm64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/sunos-x64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/win32-arm64@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/win32-ia32@0.25.12"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@esbuild/win32-x64@0.25.12"
     },
     {
       "dependsOn": [
@@ -5208,103 +4312,71 @@
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-android-arm-eabi@4.62.2"
+      "ref": "@oxc-project/types@0.148.0"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-android-arm64@4.62.2"
+      "ref": "@rolldown/binding-android-arm-eabi@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-darwin-arm64@4.62.2"
+      "ref": "@rolldown/binding-android-arm64@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-darwin-x64@4.62.2"
+      "ref": "@rolldown/binding-darwin-arm64@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-freebsd-arm64@4.62.2"
+      "ref": "@rolldown/binding-darwin-x64@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-freebsd-x64@4.62.2"
+      "ref": "@rolldown/binding-freebsd-x64@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-arm-gnueabihf@4.62.2"
+      "ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-arm-musleabihf@4.62.2"
+      "ref": "@rolldown/binding-linux-arm64-gnu@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-arm64-gnu@4.62.2"
+      "ref": "@rolldown/binding-linux-arm64-musl@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-arm64-musl@4.62.2"
+      "ref": "@rolldown/binding-linux-ppc64-gnu@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-loong64-gnu@4.62.2"
+      "ref": "@rolldown/binding-linux-s390x-gnu@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-loong64-musl@4.62.2"
+      "ref": "@rolldown/binding-linux-x64-gnu@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-ppc64-gnu@4.62.2"
+      "ref": "@rolldown/binding-linux-x64-musl@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-ppc64-musl@4.62.2"
+      "ref": "@rolldown/binding-openharmony-arm64@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-riscv64-gnu@4.62.2"
+      "ref": "@rolldown/binding-win32-arm64-msvc@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-riscv64-musl@4.62.2"
+      "ref": "@rolldown/binding-win32-x64-msvc@1.2.7"
     },
     {
       "dependsOn": [],
-      "ref": "@rollup/rollup-linux-s390x-gnu@4.62.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@rollup/rollup-linux-x64-gnu@4.62.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@rollup/rollup-linux-x64-musl@4.62.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@rollup/rollup-openbsd-x64@4.62.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@rollup/rollup-openharmony-arm64@4.62.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@rollup/rollup-win32-arm64-msvc@4.62.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@rollup/rollup-win32-ia32-msvc@4.62.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@rollup/rollup-win32-x64-gnu@4.62.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@rollup/rollup-win32-x64-msvc@4.62.2"
+      "ref": "@rolldown/pluginutils@1.0.1"
     },
     {
       "dependsOn": [
@@ -5367,24 +4439,19 @@
     {
       "dependsOn": [
         "svelte@5.56.8",
-        "vite@6.4.3",
-        "@sveltejs/vite-plugin-svelte-inspector@4.0.1",
-        "debug@4.4.3",
+        "vite@8.2.2",
         "deepmerge@4.3.1",
-        "kleur@4.1.5",
-        "magic-string@0.30.21",
+        "magic-string@1.2.3",
+        "obug@2.1.4",
         "vitefu@1.1.3"
       ],
-      "ref": "@sveltejs/vite-plugin-svelte@5.1.1"
+      "ref": "@sveltejs/vite-plugin-svelte@7.3.0"
     },
     {
       "dependsOn": [
-        "@sveltejs/vite-plugin-svelte@5.1.1",
-        "svelte@5.56.8",
-        "vite@6.4.3",
-        "debug@4.4.3"
+        "@jridgewell/sourcemap-codec@1.5.5"
       ],
-      "ref": "@sveltejs/vite-plugin-svelte-inspector@4.0.1"
+      "ref": "magic-string@1.2.3"
     },
     {
       "dependsOn": [],
@@ -5444,14 +4511,12 @@
       "ref": "clsx@2.1.1"
     },
     {
-      "dependsOn": [
-        "ms@2.1.3"
-      ],
-      "ref": "debug@4.4.3"
+      "dependsOn": [],
+      "ref": "deepmerge@4.3.1"
     },
     {
       "dependsOn": [],
-      "ref": "deepmerge@4.3.1"
+      "ref": "detect-libc@2.1.2"
     },
     {
       "dependsOn": [],
@@ -5460,37 +4525,6 @@
     {
       "dependsOn": [],
       "ref": "dotenv@17.4.2"
-    },
-    {
-      "dependsOn": [
-        "@esbuild/aix-ppc64@0.25.12",
-        "@esbuild/android-arm@0.25.12",
-        "@esbuild/android-arm64@0.25.12",
-        "@esbuild/android-x64@0.25.12",
-        "@esbuild/darwin-arm64@0.25.12",
-        "@esbuild/darwin-x64@0.25.12",
-        "@esbuild/freebsd-arm64@0.25.12",
-        "@esbuild/freebsd-x64@0.25.12",
-        "@esbuild/linux-arm@0.25.12",
-        "@esbuild/linux-arm64@0.25.12",
-        "@esbuild/linux-ia32@0.25.12",
-        "@esbuild/linux-loong64@0.25.12",
-        "@esbuild/linux-mips64el@0.25.12",
-        "@esbuild/linux-ppc64@0.25.12",
-        "@esbuild/linux-riscv64@0.25.12",
-        "@esbuild/linux-s390x@0.25.12",
-        "@esbuild/linux-x64@0.25.12",
-        "@esbuild/netbsd-arm64@0.25.12",
-        "@esbuild/netbsd-x64@0.25.12",
-        "@esbuild/openbsd-arm64@0.25.12",
-        "@esbuild/openbsd-x64@0.25.12",
-        "@esbuild/openharmony-arm64@0.25.12",
-        "@esbuild/sunos-x64@0.25.12",
-        "@esbuild/win32-arm64@0.25.12",
-        "@esbuild/win32-ia32@0.25.12",
-        "@esbuild/win32-x64@0.25.12"
-      ],
-      "ref": "esbuild@0.25.12"
     },
     {
       "dependsOn": [],
@@ -5508,7 +4542,7 @@
     },
     {
       "dependsOn": [
-        "picomatch@4.0.4"
+        "picomatch@4.0.7"
       ],
       "ref": "fdir@6.5.0"
     },
@@ -5527,8 +4561,65 @@
       "ref": "jose@6.2.3"
     },
     {
+      "dependsOn": [
+        "detect-libc@2.1.2",
+        "lightningcss-android-arm64@1.33.0",
+        "lightningcss-darwin-arm64@1.33.0",
+        "lightningcss-darwin-x64@1.33.0",
+        "lightningcss-freebsd-x64@1.33.0",
+        "lightningcss-linux-arm-gnueabihf@1.33.0",
+        "lightningcss-linux-arm64-gnu@1.33.0",
+        "lightningcss-linux-arm64-musl@1.33.0",
+        "lightningcss-linux-x64-gnu@1.33.0",
+        "lightningcss-linux-x64-musl@1.33.0",
+        "lightningcss-win32-arm64-msvc@1.33.0",
+        "lightningcss-win32-x64-msvc@1.33.0"
+      ],
+      "ref": "lightningcss@1.33.0"
+    },
+    {
       "dependsOn": [],
-      "ref": "kleur@4.1.5"
+      "ref": "lightningcss-android-arm64@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-darwin-arm64@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-darwin-x64@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-freebsd-x64@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-linux-arm-gnueabihf@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-linux-arm64-gnu@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-linux-arm64-musl@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-linux-x64-gnu@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-linux-x64-musl@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-win32-arm64-msvc@1.33.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lightningcss-win32-x64-msvc@1.33.0"
     },
     {
       "dependsOn": [
@@ -5588,11 +4679,11 @@
     },
     {
       "dependsOn": [],
-      "ref": "ms@2.1.3"
+      "ref": "nanoid@3.3.18"
     },
     {
       "dependsOn": [],
-      "ref": "nanoid@3.3.18"
+      "ref": "obug@2.1.4"
     },
     {
       "dependsOn": [],
@@ -5600,7 +4691,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "picomatch@4.0.4"
+      "ref": "picomatch@4.0.7"
     },
     {
       "dependsOn": [
@@ -5608,7 +4699,7 @@
         "picocolors@1.1.1",
         "source-map-js@1.2.1"
       ],
-      "ref": "postcss@8.5.26"
+      "ref": "postcss@8.5.28"
     },
     {
       "dependsOn": [],
@@ -5620,35 +4711,25 @@
     },
     {
       "dependsOn": [
-        "@types/estree@1.0.9",
-        "@rollup/rollup-android-arm-eabi@4.62.2",
-        "@rollup/rollup-android-arm64@4.62.2",
-        "@rollup/rollup-darwin-arm64@4.62.2",
-        "@rollup/rollup-darwin-x64@4.62.2",
-        "@rollup/rollup-freebsd-arm64@4.62.2",
-        "@rollup/rollup-freebsd-x64@4.62.2",
-        "@rollup/rollup-linux-arm-gnueabihf@4.62.2",
-        "@rollup/rollup-linux-arm-musleabihf@4.62.2",
-        "@rollup/rollup-linux-arm64-gnu@4.62.2",
-        "@rollup/rollup-linux-arm64-musl@4.62.2",
-        "@rollup/rollup-linux-loong64-gnu@4.62.2",
-        "@rollup/rollup-linux-loong64-musl@4.62.2",
-        "@rollup/rollup-linux-ppc64-gnu@4.62.2",
-        "@rollup/rollup-linux-ppc64-musl@4.62.2",
-        "@rollup/rollup-linux-riscv64-gnu@4.62.2",
-        "@rollup/rollup-linux-riscv64-musl@4.62.2",
-        "@rollup/rollup-linux-s390x-gnu@4.62.2",
-        "@rollup/rollup-linux-x64-gnu@4.62.2",
-        "@rollup/rollup-linux-x64-musl@4.62.2",
-        "@rollup/rollup-openbsd-x64@4.62.2",
-        "@rollup/rollup-openharmony-arm64@4.62.2",
-        "@rollup/rollup-win32-arm64-msvc@4.62.2",
-        "@rollup/rollup-win32-ia32-msvc@4.62.2",
-        "@rollup/rollup-win32-x64-gnu@4.62.2",
-        "@rollup/rollup-win32-x64-msvc@4.62.2",
-        "fsevents@2.3.3"
+        "@oxc-project/types@0.148.0",
+        "@rolldown/pluginutils@1.0.1",
+        "@rolldown/binding-android-arm-eabi@1.2.7",
+        "@rolldown/binding-android-arm64@1.2.7",
+        "@rolldown/binding-darwin-arm64@1.2.7",
+        "@rolldown/binding-darwin-x64@1.2.7",
+        "@rolldown/binding-freebsd-x64@1.2.7",
+        "@rolldown/binding-linux-arm-gnueabihf@1.2.7",
+        "@rolldown/binding-linux-arm64-gnu@1.2.7",
+        "@rolldown/binding-linux-arm64-musl@1.2.7",
+        "@rolldown/binding-linux-ppc64-gnu@1.2.7",
+        "@rolldown/binding-linux-s390x-gnu@1.2.7",
+        "@rolldown/binding-linux-x64-gnu@1.2.7",
+        "@rolldown/binding-linux-x64-musl@1.2.7",
+        "@rolldown/binding-openharmony-arm64@1.2.7",
+        "@rolldown/binding-win32-arm64-msvc@1.2.7",
+        "@rolldown/binding-win32-x64-msvc@1.2.7"
       ],
-      "ref": "rollup@4.62.2"
+      "ref": "rolldown@1.2.7"
     },
     {
       "dependsOn": [
@@ -5711,7 +4792,7 @@
     {
       "dependsOn": [
         "fdir@6.5.0",
-        "picomatch@4.0.4"
+        "picomatch@4.0.7"
       ],
       "ref": "tinyglobby@0.2.17"
     },
@@ -5883,19 +4964,18 @@
       "dependsOn": [
         "@types/node@26.1.0",
         "tsx@4.23.0",
-        "esbuild@0.25.12",
-        "fdir@6.5.0",
-        "picomatch@4.0.4",
-        "postcss@8.5.26",
-        "rollup@4.62.2",
+        "lightningcss@1.33.0",
+        "picomatch@4.0.7",
+        "postcss@8.5.28",
+        "rolldown@1.2.7",
         "tinyglobby@0.2.17",
         "fsevents@2.3.3"
       ],
-      "ref": "vite@6.4.3"
+      "ref": "vite@8.2.2"
     },
     {
       "dependsOn": [
-        "vite@6.4.3"
+        "vite@8.2.2"
       ],
       "ref": "vitefu@1.1.3"
     },
