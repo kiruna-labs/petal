@@ -26,9 +26,12 @@ trap 'rm -rf "$STAGE_DIR"' EXIT
 # there but skipped here is an unscanned publication.
 EXCLUDES=(
   ':!internal/**'
-  ':!**/CLAUDE.md'
-  ':!**/AGENTS.md'
-  ':!**/.claude/**'
+  # glob magic: in git's default pathspec mode `**` is not special and the
+  # literal `/` must match, so ':!**/CLAUDE.md' skips nested copies but
+  # re-admits the ROOT file. ':(exclude,glob)' matches every depth incl. root.
+  ':(exclude,glob)**/CLAUDE.md'
+  ':(exclude,glob)**/AGENTS.md'
+  ':(exclude,glob)**/.claude/**'
   # Third-party content we redistribute but did not author. Upstream changelogs
   # and lockfiles legitimately carry other people's contact details; they are
   # not this project's PII, and rewriting them would corrupt the vendored copy.
