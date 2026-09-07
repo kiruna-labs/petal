@@ -1,7 +1,8 @@
 # Writing a Petal plugin
 
-Status: the plugin system is under construction on `feature/plugin-system`.
-The design and current status live in [`plugins/README.md`](../plugins/README.md).
+Status: M1 (built-in plugins, sandboxed frames, toolbar buttons, popover and
+overlay surfaces) is in `main`. The design and milestone status live in
+[`plugins/README.md`](../plugins/README.md).
 This guide grows as milestones land; sections marked *(M1)* describe what
 exists once M1 merges.
 
@@ -56,7 +57,8 @@ toggles that surface for you.
 
 ## Manifest reference *(M1)*
 
-See `plugins/sdk/src/manifest.ts` for the authoritative TypeScript type and
+See `shared/plugin-host/manifest.ts` for the authoritative TypeScript type
+(re-exported by `@petal/plugin-sdk`) and
 `plugins/README.md` §2.2 for the annotated example and validation rules.
 
 ## Loading your plugin while developing *(M4)*
