@@ -1,9 +1,9 @@
 //! An atomic, OS-guaranteed single-instance gate, closing a real race in
-//! `tauri-plugin-single-instance` 2.4.2's macOS backend.
+//! `tauri-plugin-single-instance` 2.4.4's macOS backend.
 //!
 //! User-reported, 2026-08-11: six identical Petal Dock icons, all apparently
 //! running, on 0.8.5. Root cause, confirmed by reading the pinned dependency
-//! source directly (`tauri-plugin-single-instance-2.4.2/src/platform_impl/
+//! source directly (`tauri-plugin-single-instance-2.4.4/src/platform_impl/
 //! macos.rs`): that plugin decides "am I the singleton?" via
 //! `UnixStream::connect(socket)` -- `NotFound`/`ConnectionRefused` both mean
 //! "nobody's listening, I must be first," at which point the process
@@ -21,7 +21,7 @@
 //! Confirmed macOS-only: the plugin's Windows backend uses `CreateMutexW` +
 //! `GetLastError() == ERROR_ALREADY_EXISTS`, a real atomic OS primitive, so
 //! Windows is not exposed to this race. Confirmed still present in the latest
-//! published version (2.4.2) with no relevant upstream fix.
+//! published version (2.4.4) with no relevant upstream fix.
 //!
 //! The fix: acquire an OS-level `flock(2)` advisory lock BEFORE
 //! `tauri::Builder` (and therefore the plugin's racy `setup()`) ever runs.
@@ -132,7 +132,7 @@ pub fn acquire(path: &Path) -> io::Result<Acquire> {
     }
 }
 
-/// Reimplements the CLIENT half of `tauri-plugin-single-instance` 2.4.2's
+/// Reimplements the CLIENT half of `tauri-plugin-single-instance` 2.4.4's
 /// macOS wire protocol (`platform_impl/macos.rs`'s `notify_singleton` +
 /// `socket_path`) so a process that loses OUR `flock` gate can still hand off
 /// to the real primary and get its window activated -- exactly like an
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn notify_socket_id_transform_matches_the_plugin_exactly() {
-        // `tauri-plugin-single-instance` 2.4.2's macos.rs `socket_path`:
+        // `tauri-plugin-single-instance` 2.4.4's macos.rs `socket_path`:
         // `identifier.replace(['.', '-'], '_')`. Pinned verbatim so a future
         // edit here can't silently drift from what the plugin actually
         // listens on.
