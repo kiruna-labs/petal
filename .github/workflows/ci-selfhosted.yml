@@ -45,7 +45,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       PETAL_DISABLE_AUDIO: 1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # verify-deploy-freshness / provenance wrappers inspect history.
           fetch-depth: 0
@@ -77,7 +77,7 @@ jobs:
 
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ci-selfhosted-logs-${{ github.run_id }}
           path: ${{ runner.temp }}/*.log

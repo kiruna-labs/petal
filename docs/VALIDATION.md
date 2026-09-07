@@ -101,10 +101,10 @@ cannot prove. "L" = ladder layer above.
 | Test Cockpit (`cockpit.mjs`, `test_cockpit/`) | 5 | scenarios against **prod** SFU on one machine; native+headless-web, `SHARE-N2N` via second local binary (`target-peer/`); verdicts carry `evidenceBasis` (`HostEffect`/`ContentVerified` vs. weaker `WireShape`/`LivenessProxy`/`Scaffold`) | two-host effects; `RC-01..06` and `RES-04` are ⛔ Gap in `internal/docs/COCKPIT_TEST_MAP.md`; `RC-P1080` is a narrow smoke, not the 30-case matrix |
 | Quick prod cross-client check (fixed test room, TESTING.md) | 5 | manual native receiver + browser test-pattern sharer in a prod room | real user content; the browser share freezes when its tab is backgrounded (watchdog retires the window — a rig artifact, not a product bug) |
 | Manual cross-client test (TESTING.md) | 5 | two independently-permissioned real clients, real devices | repeatability; nothing records it |
-| `release-smoke.sh` | 5-gate | signed-artifact static assertions (team, rpath, baked backend URL) + human clean-TCC checklist + petal.log marker assertions | that markers came from *this* run — **on `main` at time of writing**; branch `claude/issue622-release-gates` fixes this (see below) |
+| `release-smoke.sh` | 5-gate | signed-artifact static assertions (team, rpath, baked backend URL) + human clean-TCC checklist + petal.log marker assertions with byte-offset run boundaries and the `MovingFrameLiveness` share-liveness latch (the #622 gates, merged) | that a human actually exercised each checklist item; the gates fail closed on missing evidence but cannot judge what they weren't asked to grep |
 | `verify-backend-live.sh` / `verify-web-harness-live.sh` | 5 | the **deployed** endpoints serve current behavior (catches "forgot to redeploy") | media |
 | Rosetta x86_64 tier (TESTING.md) | 3/4 | the x86_64 *code path* on one host; reproduced defect = real | Intel silicon/GPU/hardware encoders; representative timings |
-| `cross-machine-rc-suite.sh` | 6/7 | (by design) the 30-case suite with a genuinely separate SSH-reachable Mac, all four arch pairings, rejects Rosetta | **anything yet — never live-validated** (#79); requires the second Mac that will not exist |
+| `cross-machine-rc-suite.sh` | 6/7 | (by design) the 32-case suite with a genuinely separate SSH-reachable Mac, all four arch pairings, rejects Rosetta | **anything yet — never live-validated** (#79 is closed, but no run against a real second Mac was ever recorded); requires the second Mac that will not exist |
 | `web-harness/` | control | a browser peer with zero native code; the standard second peer for every tier | anything about our native pipeline — a defect here is not ours |
 
 ### Native clipboard validation boundary
@@ -185,7 +185,9 @@ operations; do not mix that UI Copy with Petal keyboard Paste.
   real cloud SFU. The only figure (187.2 ms avg, #179) is L4, stale (#613
   lists five pipeline-touching commits since), and 2× over the <100 ms target.
 - **The last pipeline stage.** `compositor::push_frame` takes no `frame_id`
-  (`compositor.rs:2934`), so no capture-side timestamp can be correlated with
+  (its signature in `compositor.rs` is `app, owner_identity, window_id,
+  cv_pixel_buffer, source_width, source_height`), so no capture-side
+  timestamp can be correlated with
   a compositor present. **Every latency figure ends before the screen and is
   therefore a lower bound.**
 - **`RES-04`** (display sleep) has no runnable scenario; **RC-01..06** are ⛔
@@ -225,21 +227,21 @@ it than the name says.
   markers are only as strong as what emits them (see Rule 6).
 - Rosetta tier covers the x86_64 code path, not Intel hardware.
 
-## Currently unvalidated (as of 2026-07-29)
+## Currently unvalidated (as of 2026-09-05)
 
 - Everything in Gap A.
-- **The #622 release-gate fixes themselves.** Branch
-  `claude/issue622-release-gates` (commit `51225e17`) makes `release-smoke.sh`
-  assert on evidence produced: a `MovingFrameLiveness` latch in
-  `session/share.rs` requiring **5 pushes carrying affirmative changed-content
-  evidence** (dirty rects or a changed snapshot hash — a frozen share cannot
-  satisfy it), byte-offset run boundaries so `--assert-log` only greps output
-  appended after the checklist invocation, `otool` failing closed, and
-  `update-testing-status.mjs` refusing to publish a status block without
-  completeness evidence. That branch defines what good looks like here — and
-  is itself **reviewed, not yet gated** at time of writing. Per Rule 3, its
-  gates have not been shown to work until each has been observed to fail on a
-  manufactured violation.
+- **The #622 release-gate fixes, as gates.** Commit `51225e17` (now on
+  `main`) makes `release-smoke.sh` assert on evidence produced: a
+  `MovingFrameLiveness` latch in `session/share.rs` requiring **5 pushes
+  carrying affirmative changed-content evidence** (dirty rects or a changed
+  snapshot hash — a frozen share cannot satisfy it), byte-offset run
+  boundaries so `--assert-log` only greps output appended after the checklist
+  invocation, `otool` failing closed, and `update-testing-status.mjs` refusing
+  to publish a status block without completeness evidence. Per Rule 3, a gate
+  is not shown to work until it has been observed to fail on a manufactured
+  violation; that negative test is recorded for the frozen-share case (the
+  liveness marker only fires after several changed frames) and not for the
+  others. #622 itself is still open.
 - The nightly loopback's runner status (whether a self-hosted Mac runner is
   currently registered) — unverified.
 - Whether `--text-primary`'s placeholder token and other Known-deviations
@@ -247,7 +249,9 @@ it than the name says.
 
 ## Update 2026-08-14 -- what the RC suite now proves, and the residue
 
-The 30-case suite is live again and CURRENT at **27 pass / 2 fail / 1 skip**
+The suite (30 cases then; 32 since the consent cases landed 2026-08-22) was
+live again at **27 pass / 2 fail / 1 skip** — the last recorded run; both
+failures (#811, #820) have since closed and no post-fix run has been recorded
 (details + defect table: TESTING.md's Live status log). What that number is
 and is not evidence of:
 

@@ -152,7 +152,8 @@ seq=50 reason=drag                       w=867.00  gesture=idle   <- drag yanks 
 the state it read did not survive the **window lifecycle**. A source republish
 retires the remote window and re-reveals it from the reuse pool mid-gesture,
 and a revealed `CompositorWindow` is built with
-`user_resize_active: AtomicBool::new(false)` (`compositor.rs:2014`) — so the
+`user_resize_active: AtomicBool::new(false)` (grep for it in `compositor.rs`;
+there are two construction sites) — so the
 gesture bit is gone and the guard correctly concludes "no gesture in progress"
 while the user's pointer is still down. When a guard looks right but behaves
 wrong here, **suspect retire/reveal before suspecting the guard's logic.**
@@ -181,8 +182,11 @@ sampler's *detection* rate; a 40ms gap-free sampler found the defect in
 - **Fonts are variable-weight subsets, not static weights.** The shipped
   `manrope-variable.woff2` is a single variable family declared with one
   `@font-face` at `font-weight: 200 800`. All four families
-  (Manrope, Albert Sans, JetBrains Mono, Fredoka) are SIL OFL-1.1; the license
-  text ships alongside them in `apps/desktop/src/assets/fonts/OFL.txt`.
+  (Manrope, Albert Sans, JetBrains Mono, Fredoka) are SIL OFL-1.1. Only
+  Manrope ships from `apps/desktop/src/assets/fonts/` (with its `OFL.txt`);
+  the other three come in as `@fontsource/*` npm packages (see
+  `apps/desktop/package.json`) imported from `src/routes/+layout.svelte`, and
+  carry their own license files.
 - **Camera-off meeting tiles intentionally center the participant name** (#137).
   This overrides the older canvas note that asked for a plain bottom-left chip
   only: camera-off tiles show a centered full name when it fits, otherwise the

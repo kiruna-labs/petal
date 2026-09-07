@@ -7,6 +7,12 @@ When someone shares a window, it appears on your desktop as a **real, movable,
 borderless native window** — not a tile locked in a meeting grid. Move it,
 stack it, keep it docked next to your editor while the call keeps going.
 
+![A teammate's shared code editor, rendered as its own native window on your desktop](docs/images/remote-window.png)
+
+**User docs:** [petal.live/docs](https://petal.live/docs/) — install,
+permissions, sharing, remote control, self-hosting. This README is for people
+who want to build or contribute.
+
 ## Status
 
 Petal is young. The macOS app is signed, notarized, and in daily use, but the
@@ -52,24 +58,35 @@ That's it. Petal is notarized, so macOS opens it without any Gatekeeper warnings
   your desktop that you can move, resize, and arrange freely.
 - **Share several windows at once** — from a hover pill on any window, a picker,
   or a global shortcut (`⌘⌃⇧S`). Each is its own hardware-encoded H.264 stream.
-- **Telepointers** — everyone's cursor shows live over the window they're
-  pointing at.
+- **Telepointers and drawing** — everyone's cursor shows live over the window
+  they're pointing at, and anyone can sketch on a shared window; strokes fade
+  after ten seconds.
 - **Remote control** — hand a teammate control of a shared window; their clicks
   and keystrokes are injected without stealing your focus. Requires Accessibility
-  permission, and stays off until you hand control over. See
+  permission, and by default every request raises a consent prompt on your
+  screen (**Ask me each time**; switch to **Allow automatically** or **Off** in
+  Settings). See
   [`docs/remote-control-trust-model.md`](docs/remote-control-trust-model.md).
+- **AI chat on a shared window** (opt-in) — anyone in the meeting can open a
+  live Gemini session about a window being shared: it sees the window, hears
+  the room over push-to-talk, and can act on the window only with the
+  sharer's explicit approval. Off by default; bring your own key or use the
+  hosted mint.
 - **Rooms & invites** — persistent named rooms, one-click join, and
   `petal://join/<code>` invite links with live presence.
 - **Audio** — mic with echo cancellation and noise suppression, real mute from
   the gallery, floating pill, or menu bar, and device hot-swap.
-- **Fits your workflow** — the gallery collapses into a floating pill, and a
-  menu-bar pill shows mic state, participant count, and one-click leave.
+- **Fits your workflow** — the gallery collapses into a floating pill
+  (`⌘⌃⇧P` brings it back), and a menu-bar pill shows mic state, participant
+  count, and one-click leave.
 - **Resilient** — reconnects across network changes and re-publishes your shares
   automatically.
 
 There's also a **browser client** (`web-harness/`, deployed at
 [meet.petal.live](https://meet.petal.live)) so people without the app can join
 from a browser by code or invite link.
+
+![The browser client in a meeting, with a desktop participant's shared window spotlighted and their telepointer over it](docs/images/web-meeting.png)
 
 ## Build from source
 
