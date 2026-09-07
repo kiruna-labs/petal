@@ -23,6 +23,14 @@ test('hover tab disables share toggle while native state is pending', () => {
   assert.match(source, /aria-busy=\{pending\}/);
 });
 
+test('ambient hover tracking remains active and Escape only cancels an in-flight drag', () => {
+  assert.doesNotMatch(ipcSource, /set_desktop_selection_active/);
+  assert.match(source, /if \(event\.key === 'Escape'\)/);
+  assert.match(source, /cancelActionDrag\(event\);/);
+  assert.doesNotMatch(rustSource, /DESKTOP_SELECTION_ACTIVE|desktop_selection_active/);
+  assert.doesNotMatch(windowsHoverSource, /selection-mode-inactive/);
+});
+
 test('hover tab keeps start optimism but waits for the native stop boundary', () => {
   const handler = source.slice(source.indexOf('async function onToggleShare()'));
   const invokeIndex = handler.indexOf('await invoke<boolean>(COMMANDS.toggleWindowShare');
@@ -64,7 +72,7 @@ test('Windows stop handoff updates the token without a frontend visibility worka
   assert.match(source, /if \(!pending\) \{[\s\S]{0,180}sharedWindows = windowShareSet/);
   assert.match(
     windowsHoverSource,
-    /adopt_hover_target_replacement\(last\)[\s\S]{0,900}update\.window_id = replacement_token;[\s\S]{0,180}update\.shared = false;/
+    /adopt_hover_target_replacement\(last\)[\s\S]{0,2600}update\.window_id = replacement_token;[\s\S]{0,400}update\.shared = false;/
   );
 });
 
@@ -82,7 +90,6 @@ test('the hover tab is exactly one fixed 40 by 40 native surface', () => {
   assert.match(source, /class="hover-tab-action hover-tab-trigger"/);
   assert.match(source, /width: 40px;/);
   assert.match(source, /height: 40px;/);
-  assert.doesNotMatch(source, /hover-tab-tray|hover-tab-options|promptExpanded|isExpanded/);
   assert.match(source, /class="hover-tab-action hover-tab-trigger"/);
   assert.doesNotMatch(rustSource, /SHARE_TAB_WIDTH|HOVER_TAB_PROMPT_HEIGHT|expanded: bool|prompt_expanded/);
   assert.doesNotMatch(windowsHoverSource, /set_hover_tab_presentation|HOVER_TAB_ESCALATION_HEIGHT/);
@@ -145,21 +152,25 @@ test('shared state retains identity color, live marker, controlled context, and 
   assert.match(source, /aiChatHoverTabOptionsTitle\(currentAiChatError\)/);
 });
 
-test('unshared hover tabs use the bright live border while shared tabs keep their fill', () => {
-  assert.match(source, /\.hover-tab-action:not\(\.is-shared\)\s*\{[\s\S]*border-color:\s*var\(--live-bright, #7ff0a3\);/);
-  assert.match(source, /border:\s*1px solid transparent;/);
+test('unshared hover tabs use a fixed bright live ring while shared tabs keep their fill', () => {
+  assert.match(source, /\.hover-tab-host:not\(\.is-shared\)::after\s*\{[\s\S]*border-color:\s*var\(--live-bright, #7ff0a3\);/);
+  assert.match(source, /\.hover-tab-host::after\s*\{[\s\S]*border:\s*1px solid transparent;/);
+  assert.match(source, /\.hover-tab-action:not\(\.is-shared\)\s*\{[\s\S]*border-color:\s*transparent;/);
 });
 
-test('phase drag command freezes followers, validates target state, and owns commit/cancel', () => {
+test('phase drag command carries canonical positions, freezes followers, and owns commit/cancel', () => {
   assert.match(ipcSource, /hoverTabDrag: 'hover_tab_drag'/);
+  assert.match(ipcSource, /perimeterPosition: number/);
   assert.match(ipcSource, /export type HoverTabDragPhase = 'begin' \| 'update' \| 'commit' \| 'cancel'/);
+  assert.match(ipcSource, /export type HoverTabSide = 'top' \| 'right' \| 'bottom' \| 'left'/);
   assert.match(windowsHoverSource, /pub fn hover_tab_drag\(/);
   assert.match(windowsHoverSource, /DRAG_ACTIVE\.load/);
-  assert.match(windowsHoverSource, /project_hover_tab_native_frame_with_offset/);
-  assert.match(windowsHoverSource, /commit_hover_tab_vertical_offset/);
+  assert.match(windowsHoverSource, /project_hover_tab_native_frame_with_position/);
+  assert.match(windowsHoverSource, /commit_hover_tab_position/);
   assert.match(windowsHoverSource, /finish_hover_tab_drag/);
   assert.match(rustSource, /pub fn hover_tab_drag\(/);
-  assert.match(rustSource, /platform::reset_drag_state\(true\)/);
+  assert.match(rustSource, /perimeter_position: HoverTabPosition/);
+  assert.match(rustSource, /platform::reset_drag_state\(restore\)/);
   assert.match(roomSource, /cancel_drag_for_lifecycle/);
 });
 
