@@ -269,7 +269,7 @@ windows-future = { version = "0.2.1", features = ["std"] }
 # WebView2 COM interface for disabling autofill (IsGeneralAutofillEnabled /
 # IsPasswordAutosaveEnabled). Already in Cargo.lock (0.38.2) via wry 0.55 --
 # a direct dep adds no new build surface, same reasoning as percent-encoding above.
-webview2-com = "0.38"
+webview2-com = "0.39"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = { version = "8.0.0", features = ["macos_15_0", "async"] }
