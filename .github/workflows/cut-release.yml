@@ -1,0 +1,152 @@
+# The release button. Run it from the Actions tab on `main` after merging what
+# you want shipped. It bumps the version across all nine lockstep fields,
+# commits that to `main`, tags it `vX.Y.Z` and pushes the tag -- and the tag
+# push starts release.yml, which is the entire pipeline: notary preflight, the
+# RexMundi end-to-end gate (Test Cockpit Quick + remote-control loopback), the
+# Windows installer, staged backend/web-harness deploys, the universal macOS
+# build (sign, notarize, staple, smoke), and only then promote + publish +
+# verify live. Nothing reaches users unless every gate passes.
+#
+# Needs the repository secret RELEASE_PUSH_TOKEN: a fine-grained personal
+# access token of a repo ADMIN, scoped to this repository, Contents:
+# read+write. Two reasons GITHUB_TOKEN cannot do this job: it cannot push to
+# the protected `main` (admins bypass the pull-request rule; the Actions token
+# is not an admin), and tags pushed with it do not trigger workflows, so
+# release.yml would never start.
+#
+# Versions are never reused: if a release run fails after publishing anything,
+# press the button again for the next patch. A run that fails BEFORE the tag
+# is pushed leaves nothing behind.
+name: Cut release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part of the version to bump (from tauri.conf.json on main)"
+        required: true
+        default: patch
+        type: choice
+        options: [patch, minor, major, explicit]
+      version:
+        description: "Only with bump=explicit: the exact version, e.g. 0.10.0 (no v)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Compute, bump and verify in the runner but push nothing (no commit, no tag, no release)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cut:
+    name: Bump, tag and hand off to release.yml
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Refuse to run off anything but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Cut release must be run from main (got ${{ github.ref }})"; exit 1
+
+      - name: Check the push token is configured
+        if: ${{ !inputs.dry_run }}
+        env:
+          TOKEN: ${{ secrets.RELEASE_PUSH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::RELEASE_PUSH_TOKEN is not set. Add a fine-grained PAT (repo admin, this repository, Contents: read+write) as a repository secret, or tick dry_run."; exit 1
+          fi
+
+      # The PAT is used for checkout so the later push carries admin bypass and
+      # the tag push triggers release.yml. Dry runs use the default token.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ inputs.dry_run && github.token || secrets.RELEASE_PUSH_TOKEN }}
+          persist-credentials: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Compute the next version
+        id: next
+        env:
+          BUMP: ${{ inputs.bump }}
+          EXPLICIT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          current="$(node -e 'console.log(JSON.parse(require("fs").readFileSync("apps/desktop/src-tauri/tauri.conf.json","utf8")).version)')"
+          [[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "::error::current version '$current' is not X.Y.Z"; exit 1; }
+          maj=${BASH_REMATCH[1]}; min=${BASH_REMATCH[2]}; pat=${BASH_REMATCH[3]}
+          case "$BUMP" in
+            patch) next="$maj.$min.$((pat+1))" ;;
+            minor) next="$maj.$((min+1)).0" ;;
+            major) next="$((maj+1)).0.0" ;;
+            explicit)
+              [[ "$EXPLICIT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bump=explicit needs version=X.Y.Z (got '$EXPLICIT')"; exit 1; }
+              next="$EXPLICIT" ;;
+          esac
+          # never reuse a version: the tag must not exist anywhere
+          if git ls-remote --exit-code --tags origin "refs/tags/v$next" >/dev/null 2>&1; then
+            echo "::error::tag v$next already exists -- versions are never rebuilt; pick the next one"; exit 1
+          fi
+          echo "current=$current next=$next"
+          echo "current=$current" >> "$GITHUB_OUTPUT"; echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Bump all nine lockstep fields and verify
+        run: |
+          set -euo pipefail
+          node scripts/bump-version.mjs "${{ steps.next.outputs.next }}"
+          node scripts/version-lockstep.mjs "${{ steps.next.outputs.next }}"
+          git status --short
+          # the bump touches exactly these files and nothing else
+          changed="$(git status --short | awk '{print $2}' | sort)"
+          expected="$(printf '%s\n' apps/desktop/package-lock.json apps/desktop/package.json apps/desktop/src-tauri/Cargo.lock apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/tauri.conf.json web-harness/package-lock.json web-harness/package.json | sort)"
+          [ "$changed" = "$expected" ] || { echo "::error::unexpected files changed by the bump"; diff <(echo "$expected") <(echo "$changed") || true; exit 1; }
+
+      - name: Commit and tag
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "release: bump version to ${{ steps.next.outputs.next }}" \
+                     -m "Cut from main@${{ github.sha }} by the Cut release workflow (run ${{ github.run_id }}, ${{ github.actor }})."
+          git tag -a "v${{ steps.next.outputs.next }}" -m "Petal ${{ steps.next.outputs.next }}"
+          git log -1 --format='%H %s'
+
+      - name: Dry run -- nothing pushed
+        if: ${{ inputs.dry_run }}
+        run: |
+          {
+            echo "### Cut release dry run"
+            echo "- would bump \`${{ steps.next.outputs.current }}\` -> \`${{ steps.next.outputs.next }}\` from main@\`${GITHUB_SHA::8}\`"
+            echo "- would push the bump commit to \`main\` and tag \`v${{ steps.next.outputs.next }}\`, which starts release.yml"
+            echo "- nothing was pushed"
+          } >> "$GITHUB_STEP_SUMMARY"
+          git show --stat HEAD | head -20
+
+      # Pushing the commit first and the tag second: if the tag push fails the
+      # bump is still on main and can be tagged by hand; the reverse order would
+      # leave a tag pointing at a commit that is not on main.
+      - name: Push the bump to main, then the tag (starts release.yml)
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main
+          git push origin "refs/tags/v${{ steps.next.outputs.next }}"
+          {
+            echo "### Release v${{ steps.next.outputs.next }} cut"
+            echo "- \`${{ steps.next.outputs.current }}\` -> \`${{ steps.next.outputs.next }}\` from main@\`${GITHUB_SHA::8}\`"
+            echo "- release.yml is now running on the tag push: https://github.com/${{ github.repository }}/actions/workflows/release.yml"
+          } >> "$GITHUB_STEP_SUMMARY"
