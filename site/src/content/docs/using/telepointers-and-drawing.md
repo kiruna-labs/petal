@@ -42,8 +42,13 @@ strokes live, in your identity color.
 
 - Strokes are ephemeral: each one stays fully visible for 10 seconds after
   its last point, then fades out over about a second. Nothing is stored.
-- Text annotations are supported on the wire and rendered by the browser
-  client; desktop clients render strokes.
+- You can also type on a shared window. With Draw mode on, hold the pointer
+  where you want the label and start typing: the text appears at that spot
+  in your identity color and is placed for everyone when you move the
+  pointer or start a stroke (**Esc** discards it). Text is limited to 256
+  characters per annotation and fades on the same schedule as a stroke.
+  Every client — desktop and browser — can both write and show text
+  annotations.
 - While the sharer's own Draw mode is active, the sharer's overlay captures
   the cursor so the strokes land on the shared window instead of clicking
   through into the app underneath. That is the one moment Petal changes how

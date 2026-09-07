@@ -24,10 +24,10 @@ ordinary, maximized, and top-aligned windows on either platform.
 
 Click the square (or press **Enter** or **Space** when it has focus) to
 perform the direct action: an unshared window starts sharing, a shared window
-stops sharing. The button is disabled while the request is pending. On
-Windows its tooltip reminds you that you can drag it to move it and
-right-click for options; on macOS the same hint is exposed to assistive
-technology.
+stops sharing. The button is disabled while the request is pending. Hover
+over it and a tooltip (a native one on macOS) names the action and reminds
+you that you can drag it to move it and right-click for options; the same
+hint is exposed to assistive technology.
 
 Once a window is shared, Petal draws a rounded border around it on your
 screen in your identity color, so you can tell at a glance which of your

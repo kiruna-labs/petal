@@ -74,11 +74,11 @@ so this section doesn't appear there.
   window's content and the room's voice to Google while a session is live.
   **Turn on AI chat** confirms; **Cancel** leaves it off. Turning it off
   again is immediate. See [AI chat](/docs/using/ai-chat/).
-- **Gemini API key (optional)** — appears once AI chat is on (or a key is
-  already saved). Bring your own key so AI chat bills your own Google account
-  (roughly 2–4¢ per minute). Free-tier keys may allow Google to use content
-  to improve their models. **Save** stores it on this machine; **Remove**
-  deletes it.
+- **Gemini API key** (tagged *optional*) — appears once AI chat is on (or a
+  key is already saved). Bring your own key so AI chat bills your own Google
+  account (roughly 2–4¢ per minute). Free-tier keys may allow Google to use
+  content to improve their models. **Save** stores it on this machine;
+  **Remove** deletes it.
 
 ## Diagnostics
 
