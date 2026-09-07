@@ -1432,6 +1432,25 @@ is unchanged -- only the FAIL classification got smarter. Re-run on a less-
 loaded machine (or CI) for a real PASS reading of this scenario's actual
 number.
 
+**Web-peer teardown is graceful, and the next scenario waits for the previous
+peer to be gone (#41).** Killing headless Chrome is not a LiveKit disconnect:
+the SFU keeps the dead peer's participant and `petal-window-*` publication
+until its ~25 s participant timeout, which used to leave a ghost share tile in
+the room for the first ~20 s of the following scenario. Each scenario's
+epilogue (`teardown_scenario_web_peers` in `test_cockpit/mod.rs`) now sends the
+peer a `{"kind":"command","command":"disconnect"}` message over the same
+`petal.cockpit` topic it reports on (`CockpitCommandMessage` in
+`web-harness/src/trackNames.ts`; the peer acknowledges with a `disconnect`
+step report, then calls `room.disconnect()`), waits up to 8 s for the
+participant to leave, and only then kills Chrome. Before the next scenario
+starts, `await_previous_peers_departed` blocks -- capped at 40 s, longer than
+the SFU timeout so even a kill-only fallback resolves -- until the previous
+web peers are absent from the room, from `transport::subscriber`'s tracked
+publications and from the compositor, logging the blocking reason
+(`test-cockpit: <ID> waiting for previous web peer(s) ...`). Evidence lands in
+the run's `web-peer-teardown` and `previous-peer-gate` records; a healthy run
+shows `departedGracefully: true` and a gate `waitedMs` well under a second.
+
 ## Signed Release Clean-TCC Smoke
 
 The release-only smoke scaffold is:

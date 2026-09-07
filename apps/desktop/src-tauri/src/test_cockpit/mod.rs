@@ -750,6 +750,15 @@ const ASSERT_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const TOKEN_REQUEST_INTERVAL: Duration = Duration::from_secs(3);
 const WEB_REPORT_TIMEOUT: Duration = Duration::from_secs(45);
+/// #41: how long the scenario epilogue gives a web peer to honour the graceful
+/// `disconnect` command before its Chrome is killed regardless.
+const WEB_PEER_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+/// #41: cap on the pre-scenario wait for the PREVIOUS scenario's web peers to
+/// be gone from the room, the receive state and the compositor. Deliberately
+/// longer than the SFU's ~25 s participant timeout, so even the kill-only
+/// fallback (a peer that never honoured the disconnect) resolves inside it.
+const PREVIOUS_PEER_DEPARTURE_TIMEOUT: Duration = Duration::from_secs(40);
+const PREVIOUS_PEER_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const NET_IMPAIR_SCRIPT_RELATIVE_PATH: &str = "scripts/net-impair.sh";
 const ARTIFACT_RETENTION_DAYS_ENV: &str = "PETAL_COCKPIT_ARTIFACT_RETENTION_DAYS";
 const ARTIFACT_RETENTION_RUNS_ENV: &str = "PETAL_COCKPIT_ARTIFACT_RETENTION_RUNS";
@@ -4132,12 +4141,355 @@ impl WebPeer {
 }
 
 impl Drop for WebPeer {
+    // Kill-only fallback. The graceful path is `teardown_scenario_web_peers`
+    // (#41): disconnect command -> bounded wait for the SFU to see the peer
+    // leave -> THEN this. Dropping a live peer without that step leaves its
+    // publication in the SFU until the ~25 s participant timeout.
     fn drop(&mut self) {
         if let Some(child) = &mut self.child {
             let _ = child.kill();
             let _ = child.wait();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// #41: graceful web-peer teardown + the previous-peer gate.
+//
+// Killing headless Chrome is not a LiveKit disconnect: the SFU keeps the dead
+// peer's participant and its `petal-window-*` publication alive until the
+// participant timeout (~25 s), so the next scenario starts with a ghost share
+// tile in the room (run 33997561478: SHARE-W2N-Q's window 116208 was still
+// published 20 s into DRAW-N). Two halves fix that:
+//   1. the epilogue sends the peer a `disconnect` command over the same
+//      `petal.cockpit` topic it reports on, waits (bounded) for the participant
+//      to leave, and only then kills Chrome;
+//   2. the next scenario does not start until the previous peers are absent
+//      from the room, from `transport::subscriber`'s tracked publications and
+//      from the compositor -- bounded, with the blocking reason logged.
+// ---------------------------------------------------------------------------
+
+/// Same topic `cockpit_topic.rs` receives on; kept as a local literal because
+/// that module is macOS-only. `cockpit_topic_constant_matches_receiver` pins it.
+const COCKPIT_TOPIC: &str = "petal.cockpit";
+
+fn cockpit_disconnect_command_payload(target: &str, sent_at_ms: u64) -> serde_json::Value {
+    serde_json::json!({
+        "v": 1,
+        "kind": "command",
+        "command": "disconnect",
+        "target": target,
+        "sentAtMs": sent_at_ms,
+    })
+}
+
+/// Web-harness peers identify as `web-<suffix>` (`resolveHarnessIdentity`);
+/// the cockpit itself and its native peers are `p-*`. Only web peers understand
+/// the disconnect command, and only they are torn down by this path.
+fn is_web_peer_identity(identity: &str) -> bool {
+    identity.starts_with("web-")
+}
+
+fn remote_participant_identities(app: &AppHandle) -> Vec<String> {
+    let Some(state) = app.try_state::<crate::session::SessionState>() else {
+        return Vec::new();
+    };
+    let Some((room_connection, _)) = state.control_channel_snapshot() else {
+        return Vec::new();
+    };
+    room_connection
+        .room()
+        .remote_participants()
+        .values()
+        .map(|participant| participant.identity().to_string())
+        .collect()
+}
+
+/// The web peers a scenario spawned, by LiveKit identity: every sender of a
+/// `petal.cockpit` report for `scenario` (the peer's own authenticated identity,
+/// journalled by `cockpit_topic.rs`), unioned with any `web-` participant still
+/// in the room (a peer that joined but never got a report out).
+fn web_peer_identities_for_scenario(app: &AppHandle, scenario: ScenarioSpec) -> Vec<String> {
+    let mut identities = Vec::new();
+    if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
+        for entry in diagnostics.journal() {
+            let Some(report) = parse_web_cockpit_report_line(&entry.message) else {
+                continue;
+            };
+            if report_matches_scenario(&report, scenario) {
+                identities.push(report.sender);
+            }
+        }
+    }
+    identities.extend(
+        remote_participant_identities(app)
+            .into_iter()
+            .filter(|identity| is_web_peer_identity(identity)),
+    );
+    normalized_roster(identities)
+}
+
+async fn publish_cockpit_disconnect(app: &AppHandle, targets: &[String]) -> Result<usize, String> {
+    let state = app
+        .try_state::<crate::session::SessionState>()
+        .ok_or("session state is unavailable")?;
+    let (room_connection, _) = state
+        .control_channel_snapshot()
+        .ok_or("not joined to the cockpit room")?;
+    let room = room_connection.room();
+    let sent_at_ms = unix_ms_from_system_time(SystemTime::now()).unwrap_or(0);
+    let mut sent = 0usize;
+    for target in targets {
+        let payload = serde_json::to_vec(&cockpit_disconnect_command_payload(target, sent_at_ms))
+            .map_err(|error| error.to_string())?;
+        let packet = livekit::DataPacket {
+            payload,
+            topic: Some(COCKPIT_TOPIC.to_string()),
+            reliable: true,
+            destination_identities: vec![livekit::prelude::ParticipantIdentity(target.clone())],
+        };
+        room.local_participant()
+            .publish_data(packet)
+            .await
+            .map_err(|error| format!("disconnect command to '{target}' failed: {error}"))?;
+        sent += 1;
+    }
+    Ok(sent)
+}
+
+/// Scenario epilogue: disconnect the scenario's web peers gracefully, bounded,
+/// then kill their Chrome processes. Returns the identities the NEXT scenario
+/// must wait on (`await_previous_peers_departed`).
+async fn teardown_scenario_web_peers(
+    app: &AppHandle,
+    scenario: ScenarioSpec,
+    writer: &mut ResultsWriter,
+    children: &mut RunChildren,
+) -> Vec<String> {
+    let peers = children.take_web_peers();
+    let identities = web_peer_identities_for_scenario(app, scenario);
+    let pids = peers.iter().filter_map(WebPeer::pid).collect::<Vec<_>>();
+    let started = Instant::now();
+    let mut disconnect_requested = 0usize;
+    let mut disconnect_error: Option<String> = None;
+    if !peers.is_empty() && !identities.is_empty() {
+        match publish_cockpit_disconnect(app, &identities).await {
+            Ok(sent) => disconnect_requested = sent,
+            Err(error) => disconnect_error = Some(error),
+        }
+        if disconnect_requested > 0 {
+            while started.elapsed() < WEB_PEER_DISCONNECT_TIMEOUT {
+                let present = remote_participant_identities(app);
+                if identities.iter().all(|identity| !present.contains(identity)) {
+                    break;
+                }
+                tokio::time::sleep(PREVIOUS_PEER_POLL_INTERVAL).await;
+            }
+        }
+    }
+    let lingering_at_kill = remote_participant_identities(app)
+        .into_iter()
+        .filter(|identity| identities.contains(identity))
+        .collect::<Vec<_>>();
+    let departed_gracefully = disconnect_requested > 0 && lingering_at_kill.is_empty();
+    let waited_ms = started.elapsed().as_millis() as u64;
+    // Kill (and reap) Chrome only now.
+    drop(peers);
+    if pids.is_empty() && identities.is_empty() {
+        return identities;
+    }
+    if departed_gracefully {
+        log::info!(
+            "test-cockpit: {} web peer(s) {identities:?} left the room within {waited_ms}ms of the disconnect command; killed chrome pid(s) {pids:?} (#41)",
+            scenario.id
+        );
+    } else {
+        log::warn!(
+            "test-cockpit: {} killed chrome pid(s) {pids:?} with web peer(s) {lingering_at_kill:?} still in the room after {waited_ms}ms (disconnect requested for {disconnect_requested} of {}; error: {}) -- the SFU will hold their publications until participant timeout; the next scenario waits for that (#41)",
+            scenario.id,
+            identities.len(),
+            disconnect_error.as_deref().unwrap_or("none")
+        );
+    }
+    let _ = writer.write(
+        "web-peer-teardown",
+        Some(scenario.id),
+        serde_json::json!({
+            "webPeerIdentities": identities,
+            "chromePids": pids,
+            "disconnectRequested": disconnect_requested,
+            "disconnectError": disconnect_error,
+            "departedGracefully": departed_gracefully,
+            "lingeringAtKill": lingering_at_kill,
+            "waitedMs": waited_ms,
+            "disconnectTimeoutMs": WEB_PEER_DISCONNECT_TIMEOUT.as_millis() as u64,
+        }),
+    );
+    identities
+}
+
+/// What the previous-peer gate looks at. Injected so the gate's ordering
+/// guarantee is unit-testable without a room, an SFU or a compositor.
+trait PreviousPeerProbe {
+    fn remote_identities(&mut self) -> Vec<String>;
+    /// `transport::subscriber`'s receive state: a decode loop still exists for
+    /// this owner's window(s), i.e. the SFU still holds the publication.
+    fn tracked_publication_windows(&mut self, identity: &str) -> Vec<u32>;
+    /// Compositor windows still open (or last-frame-held) for this owner.
+    fn compositor_windows(&mut self, identity: &str) -> Vec<u32>;
+}
+
+struct LivePreviousPeerProbe<'a>(&'a AppHandle);
+
+impl PreviousPeerProbe for LivePreviousPeerProbe<'_> {
+    fn remote_identities(&mut self) -> Vec<String> {
+        remote_participant_identities(self.0)
+    }
+
+    fn tracked_publication_windows(&mut self, identity: &str) -> Vec<u32> {
+        crate::transport::subscriber::tracked_window_publications()
+            .into_iter()
+            .filter(|tracked| tracked.owner_identity == identity)
+            .map(|tracked| tracked.window_id)
+            .collect()
+    }
+
+    fn compositor_windows(&mut self, identity: &str) -> Vec<u32> {
+        #[cfg(target_os = "macos")]
+        {
+            crate::compositor::window_ids_for_participant(identity)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = identity;
+            Vec::new()
+        }
+    }
+}
+
+/// Everything that still says a previous peer is around. Empty means the next
+/// scenario may start.
+fn previous_peer_blockers(pending: &[String], probe: &mut impl PreviousPeerProbe) -> Vec<String> {
+    if pending.is_empty() {
+        return Vec::new();
+    }
+    let present = probe.remote_identities();
+    let mut blockers = Vec::new();
+    for identity in pending {
+        if present.contains(identity) {
+            blockers.push(format!("'{identity}' is still a room participant"));
+        }
+        let tracked = probe.tracked_publication_windows(identity);
+        if !tracked.is_empty() {
+            blockers.push(format!(
+                "'{identity}' still has tracked window publication(s) {tracked:?}"
+            ));
+        }
+        let windows = probe.compositor_windows(identity);
+        if !windows.is_empty() {
+            blockers.push(format!("'{identity}' still has compositor window(s) {windows:?}"));
+        }
+    }
+    blockers
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviousPeerGateResult {
+    ready: bool,
+    timed_out: bool,
+    waited_ms: u64,
+    polls: u32,
+    /// The reasons found on the LAST poll: empty when `ready`.
+    blockers: Vec<String>,
+}
+
+async fn await_previous_peers_departed_with(
+    probe: &mut impl PreviousPeerProbe,
+    pending: &[String],
+    timeout: Duration,
+    poll: Duration,
+) -> PreviousPeerGateResult {
+    let started = Instant::now();
+    let mut polls = 0u32;
+    loop {
+        polls += 1;
+        let blockers = previous_peer_blockers(pending, probe);
+        if blockers.is_empty() {
+            return PreviousPeerGateResult {
+                ready: true,
+                timed_out: false,
+                waited_ms: started.elapsed().as_millis() as u64,
+                polls,
+                blockers,
+            };
+        }
+        if started.elapsed() >= timeout {
+            return PreviousPeerGateResult {
+                ready: false,
+                timed_out: true,
+                waited_ms: started.elapsed().as_millis() as u64,
+                polls,
+                blockers,
+            };
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// Pre-scenario gate (#41): block `next` until the previous scenario's web
+/// peers are gone from the room, the receive state and the compositor.
+/// Bounded by `PREVIOUS_PEER_DEPARTURE_TIMEOUT`; a timeout is logged with the
+/// blocking reason and recorded, then the scenario proceeds.
+async fn await_previous_peers_departed(
+    app: &AppHandle,
+    pending: &[String],
+    next: ScenarioSpec,
+    writer: &mut ResultsWriter,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let mut probe = LivePreviousPeerProbe(app);
+    let initial = previous_peer_blockers(pending, &mut probe);
+    if !initial.is_empty() {
+        log::info!(
+            "test-cockpit: {} waiting for previous web peer(s) to leave before starting: {initial:?} (#41, cap {}s)",
+            next.id,
+            PREVIOUS_PEER_DEPARTURE_TIMEOUT.as_secs()
+        );
+    }
+    let result = await_previous_peers_departed_with(
+        &mut probe,
+        pending,
+        PREVIOUS_PEER_DEPARTURE_TIMEOUT,
+        PREVIOUS_PEER_POLL_INTERVAL,
+    )
+    .await;
+    if result.ready {
+        log::info!(
+            "test-cockpit: {} previous web peer(s) {pending:?} gone after {}ms; starting (#41)",
+            next.id,
+            result.waited_ms
+        );
+    } else {
+        log::warn!(
+            "test-cockpit: {} starting after the {}ms cap although previous web peer(s) still linger: {:?} (#41 bounded fallback)",
+            next.id,
+            result.waited_ms,
+            result.blockers
+        );
+    }
+    let _ = writer.write(
+        "previous-peer-gate",
+        Some(next.id),
+        serde_json::json!({
+            "pendingIdentities": pending,
+            "initialBlockers": initial,
+            "result": result,
+            "timeoutMs": PREVIOUS_PEER_DEPARTURE_TIMEOUT.as_millis() as u64,
+        }),
+    );
 }
 
 fn chrome_path() -> PathBuf {
@@ -4350,6 +4702,14 @@ fn process_is_running(pid: u32) -> bool {
 struct RunChildren {
     web_peer_pids: Vec<u32>,
     native_peer_pids: Vec<u32>,
+    /// #41: the scenario's LIVE web peers. Every `run_*` hands its `WebPeer`
+    /// here instead of letting it drop at function exit, so the scenario-loop
+    /// epilogue (`teardown_scenario_web_peers`) can ask each peer to
+    /// `room.disconnect()` and wait for the SFU to see it leave BEFORE the
+    /// kill -- on every exit path, early INFRA-FAIL returns included. A bare
+    /// `WebPeer::drop` is kill-only and leaves a ghost publication in the SFU
+    /// for ~25 s into the next scenario.
+    web_peers: Vec<WebPeer>,
 }
 
 impl RunChildren {
@@ -4357,6 +4717,16 @@ impl RunChildren {
         if let Some(pid) = peer.pid() {
             self.web_peer_pids.push(pid);
         }
+    }
+
+    /// Take ownership of a spawned web peer for the epilogue's graceful teardown
+    /// (#41). Call after `record_web_peer` and the `web-peer` evidence write.
+    fn adopt_web_peer(&mut self, peer: WebPeer) {
+        self.web_peers.push(peer);
+    }
+
+    fn take_web_peers(&mut self) -> Vec<WebPeer> {
+        std::mem::take(&mut self.web_peers)
     }
 
     fn record_native_peer(&mut self, child: &Child) {
@@ -5627,6 +5997,7 @@ async fn run_chaos_device_scenario(
             "audioDeviceSwitchAvailable": switch_audio_available,
         }),
     );
+    children.adopt_web_peer(web_peer);
 
     let Some(report) = await_web_report(app, scenario, writer).await else {
         return infra_fail_outcome(
@@ -5936,6 +6307,7 @@ async fn run_remote_control_scaled_scenario(
             "cdp": true,
         }),
     );
+    children.adopt_web_peer(web_peer);
     // Chrome needs a moment to publish its debugging endpoint before the Node
     // driver performs its first /json request. The driver still reports a
     // useful infra failure if the endpoint never becomes available.
@@ -8022,6 +8394,7 @@ async fn run_remote_control_native_to_web_scenario(
         Some(scenario.id),
         serde_json::json!({ "mode": web_peer.mode, "url": web_peer.url, "pid": web_peer.pid() }),
     );
+    children.adopt_web_peer(web_peer);
 
     let Some((host_identity, host_window_id)) =
         await_remote_share_owner(app, Duration::from_secs(45)).await
@@ -8625,7 +8998,6 @@ async fn run_multi_peer_scenario(
 ) -> ScenarioOutcome {
     let labels = ["web-1", "web-2"];
     let expected = labels.len();
-    let mut peers = Vec::new();
     for label in labels.iter().copied() {
         let web_peer = match spawn_web_peer_labeled(scenario, access_code, &writer.dir, Some(label))
         {
@@ -8646,7 +9018,7 @@ async fn run_multi_peer_scenario(
                 "destructiveExecutionAttempted": false,
             }),
         );
-        peers.push(web_peer);
+        children.adopt_web_peer(web_peer);
     }
 
     let reports = await_distinct_web_reports(app, scenario, writer, expected).await;
@@ -8683,7 +9055,6 @@ async fn run_multi_peer_scenario(
         clock_calibration_ok: None,
         keyframe_storm_free: None,
     };
-    drop(peers);
     multi_peer_outcome_from_reports(scenario, &reports, expected, Some(&native))
 }
 
@@ -8733,6 +9104,7 @@ async fn run_soak_stall_watch_scenario(
             "liveMutationAttempted": false,
         }),
     );
+    children.adopt_web_peer(web_peer);
     if let Some(share) = native_share.as_ref() {
         record_window_screenshot_artifact(writer, scenario, "mid-scenario", share.window_id);
     }
@@ -9001,6 +9373,7 @@ async fn run_scenario(
         serde_json::json!({ "mode": web_peer.mode, "url": web_peer.url, "pid": web_peer.pid() }),
     );
     children.record_web_peer(&web_peer);
+    children.adopt_web_peer(web_peer);
     if let Some(share) = native_share.as_ref() {
         record_window_screenshot_artifact(writer, scenario, "mid-scenario", share.window_id);
     }
@@ -9262,6 +9635,9 @@ pub async fn start_test_cockpit(
         Some(access_code.clone())
     };
 
+    // #41: web peers the previous scenario spawned; the next scenario waits
+    // (bounded) until they are gone from the room, receive state and compositor.
+    let mut pending_departures: Vec<String> = Vec::new();
     if !access_code.is_empty() {
         for scenario in scenarios {
             if completed_count > 0 {
@@ -9294,6 +9670,8 @@ pub async fn start_test_cockpit(
                     results_dir: Some(results_dir_string.clone()),
                 },
             );
+            await_previous_peers_departed(&app, &pending_departures, scenario, &mut writer).await;
+            pending_departures.clear();
             let outcome = run_scenario(
                 &app,
                 scenario,
@@ -9303,6 +9681,10 @@ pub async fn start_test_cockpit(
                 &mut children,
             )
             .await;
+            // #41: graceful disconnect -> bounded wait -> kill, for every web
+            // peer the scenario adopted -- whichever path it returned by.
+            pending_departures =
+                teardown_scenario_web_peers(&app, scenario, &mut writer, &mut children).await;
             // #815 (review): CAM-N2W turns the camera ON through the real
             // product path; mirror it OFF on EVERY outcome path here, or the
             // synthetic camera keeps publishing through every later scenario.
@@ -9336,6 +9718,9 @@ pub async fn start_test_cockpit(
         }
     }
 
+    // Nothing should be left here (each scenario's epilogue drains its peers);
+    // a cancelled loop still must not leak a Chrome process.
+    drop(children.take_web_peers());
     let cleanup = cleanup_verifier(&app, &room_name, &children);
     let cleanup_passed = cleanup.passed;
     let _ = writer.write("cleanup", None, cleanup.payload);
@@ -9471,6 +9856,231 @@ pub fn capture_window_pixels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // #41: previous-peer gate + graceful web-peer teardown.
+    // -----------------------------------------------------------------------
+
+    /// A previous peer whose participant has already left the room but whose
+    /// window publication the receiver still tracks (the SFU ghost) for the
+    /// first `tracked_polls` probes, then vanishes everywhere.
+    struct GhostPublicationProbe {
+        identity: &'static str,
+        window_id: u32,
+        tracked_polls: u32,
+        polls: u32,
+        in_room_polls: u32,
+    }
+
+    impl PreviousPeerProbe for GhostPublicationProbe {
+        fn remote_identities(&mut self) -> Vec<String> {
+            self.polls += 1;
+            if self.polls <= self.in_room_polls {
+                vec![self.identity.to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn tracked_publication_windows(&mut self, identity: &str) -> Vec<u32> {
+            if identity == self.identity && self.polls <= self.tracked_polls {
+                vec![self.window_id]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn compositor_windows(&mut self, _identity: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn previous_peer_gate_blocks_while_a_publication_is_still_tracked() {
+        // Participant gone after the first poll, publication still tracked for
+        // three polls: the scenario must not start until the fourth.
+        let mut probe = GhostPublicationProbe {
+            identity: "web-ghost",
+            window_id: 116_208,
+            tracked_polls: 3,
+            polls: 0,
+            in_room_polls: 1,
+        };
+        let pending = vec!["web-ghost".to_string()];
+
+        let result = await_previous_peers_departed_with(
+            &mut probe,
+            &pending,
+            Duration::from_secs(10),
+            Duration::from_millis(5),
+        )
+        .await;
+
+        assert!(result.ready, "{result:?}");
+        assert!(!result.timed_out);
+        assert_eq!(result.polls, 4, "started only once the publication was untracked");
+        assert!(result.blockers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn previous_peer_gate_times_out_naming_the_lingering_publication() {
+        let mut probe = GhostPublicationProbe {
+            identity: "web-ghost",
+            window_id: 116_208,
+            tracked_polls: u32::MAX,
+            polls: 0,
+            in_room_polls: u32::MAX,
+        };
+        let pending = vec!["web-ghost".to_string()];
+
+        let result = await_previous_peers_departed_with(
+            &mut probe,
+            &pending,
+            Duration::from_millis(40),
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert!(!result.ready);
+        assert!(result.timed_out);
+        assert!(result.polls >= 2, "{result:?}");
+        assert!(result.waited_ms >= 40, "{result:?}");
+        let joined = result.blockers.join("\n");
+        assert!(joined.contains("'web-ghost' is still a room participant"), "{joined}");
+        assert!(joined.contains("116208"), "{joined}");
+    }
+
+    #[tokio::test]
+    async fn previous_peer_gate_is_immediate_with_nothing_pending() {
+        let mut probe = GhostPublicationProbe {
+            identity: "web-ghost",
+            window_id: 1,
+            tracked_polls: u32::MAX,
+            polls: 0,
+            in_room_polls: u32::MAX,
+        };
+
+        let result = await_previous_peers_departed_with(
+            &mut probe,
+            &[],
+            Duration::from_secs(10),
+            Duration::from_millis(5),
+        )
+        .await;
+
+        assert!(result.ready);
+        assert_eq!(result.polls, 1);
+        assert_eq!(probe.polls, 0, "an empty pending set never even probes the room");
+    }
+
+    struct StaticProbe {
+        present: Vec<String>,
+        tracked: Vec<(String, u32)>,
+        compositor: Vec<(String, u32)>,
+    }
+
+    impl PreviousPeerProbe for StaticProbe {
+        fn remote_identities(&mut self) -> Vec<String> {
+            self.present.clone()
+        }
+        fn tracked_publication_windows(&mut self, identity: &str) -> Vec<u32> {
+            self.tracked
+                .iter()
+                .filter(|(owner, _)| owner == identity)
+                .map(|(_, id)| *id)
+                .collect()
+        }
+        fn compositor_windows(&mut self, identity: &str) -> Vec<u32> {
+            self.compositor
+                .iter()
+                .filter(|(owner, _)| owner == identity)
+                .map(|(_, id)| *id)
+                .collect()
+        }
+    }
+
+    #[test]
+    fn previous_peer_blockers_report_each_surface_and_only_pending_identities() {
+        let mut probe = StaticProbe {
+            present: vec!["web-a".to_string(), "p-nativepeer-1".to_string()],
+            tracked: vec![("web-b".to_string(), 7)],
+            compositor: vec![("web-b".to_string(), 7), ("web-c".to_string(), 9)],
+        };
+        let pending = vec!["web-a".to_string(), "web-b".to_string()];
+
+        let blockers = previous_peer_blockers(&pending, &mut probe);
+
+        assert_eq!(
+            blockers,
+            vec![
+                "'web-a' is still a room participant".to_string(),
+                "'web-b' still has tracked window publication(s) [7]".to_string(),
+                "'web-b' still has compositor window(s) [7]".to_string(),
+            ]
+        );
+        // web-c's window and the native peer's presence are not this gate's
+        // business: only the previous scenario's web peers are pending.
+        assert!(previous_peer_blockers(&["web-zzz".to_string()], &mut probe).is_empty());
+    }
+
+    #[test]
+    fn web_peer_identity_classification() {
+        assert!(is_web_peer_identity("web-4f9a"));
+        assert!(!is_web_peer_identity("p-cockpit-abc"));
+        assert!(!is_web_peer_identity("p-nativepeer-abc"));
+        assert!(!is_web_peer_identity("p-rcn2nhost-abc"));
+        assert!(!is_web_peer_identity(""));
+    }
+
+    #[test]
+    fn cockpit_disconnect_command_is_a_targeted_v1_command_on_the_report_topic() {
+        let payload = cockpit_disconnect_command_payload("web-4f9a", 1_700_000_000_000);
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "v": 1,
+                "kind": "command",
+                "command": "disconnect",
+                "target": "web-4f9a",
+                "sentAtMs": 1_700_000_000_000u64,
+            })
+        );
+        // The command must never be mistaken for a scenario report by the
+        // engine's own report reader (no scenarioId/step/auto fields).
+        let as_report = WebCockpitReport {
+            sender: "p-cockpit-1".to_string(),
+            payload,
+        };
+        for scenario in [SCENARIO_TABLE[0], SCENARIO_TABLE[SCENARIO_TABLE.len() - 1]] {
+            assert!(!report_matches_scenario(&as_report, scenario));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cockpit_topic_constant_matches_receiver() {
+        assert_eq!(COCKPIT_TOPIC, crate::cockpit_topic::TOPIC);
+    }
+
+    #[test]
+    fn run_children_hands_adopted_web_peers_to_the_epilogue() {
+        let mut children = RunChildren::default();
+        // `child: None` is the default-browser mode: nothing to kill on drop.
+        let peer = WebPeer {
+            child: None,
+            mode: "default-browser",
+            url: "http://localhost/?auto=share-n2w-q".to_string(),
+        };
+        children.record_web_peer(&peer);
+        children.adopt_web_peer(peer);
+        assert_eq!(children.web_peers.len(), 1);
+
+        let taken = children.take_web_peers();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].mode, "default-browser");
+        assert!(children.web_peers.is_empty(), "taken once, gone from the run");
+        assert!(children.take_web_peers().is_empty());
+    }
 
     fn scratch_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
