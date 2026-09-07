@@ -67,7 +67,7 @@ jobs:
       # tracking issue; remove the entry when the issue closes.
       #   DRAW-N : kiruna-labs/petal#1 (draw stroke delivery not observed natively)
       #   30     : kiruna-labs/petal#2 (post-reconnect acquire: active w/o grant token)
-      E2E_QUARANTINE_COCKPIT: "DRAW-N"
+      E2E_QUARANTINE_COCKPIT: ""
       E2E_QUARANTINE_RC_CASES: "30"
     steps:
       - uses: actions/checkout@v7

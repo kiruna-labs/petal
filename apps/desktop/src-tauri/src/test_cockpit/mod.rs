@@ -54,6 +54,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::dev_test_pattern::{TEST_PATTERN_SOURCE_HEIGHT, TEST_PATTERN_SOURCE_WIDTH};
+use crate::sync_ext::MutexExt;
 use crate::test_cockpit_bridge::{CaptureWindowPixelsResult, PixelRect};
 
 // Native Test Client (test-peer) support for SHARE-01 / SHARE-N2N: the
@@ -157,6 +158,43 @@ fn verified_cockpit_frontend_provenance() -> Result<&'static str, String> {
 /// intentionally scoped to the cockpit feature module: production handback
 /// behavior must never be changed for normal shares.
 static COCKPIT_VISIBLE_SOURCE_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+
+/// The LiveKit identity this run's native peer joined with. Web peers get it
+/// as `&owner=` so DRAW-N/TELE draw on THIS machine's share tile, not on
+/// whichever share tile happens to be first in their DOM (#919: a killed
+/// previous peer's publication lingers on the SFU for ~25s and its tile
+/// won the `querySelector`, so the stroke targeted a window nobody here owns).
+static COCKPIT_NATIVE_IDENTITY: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_cockpit_native_identity(identity: &str) {
+    *COCKPIT_NATIVE_IDENTITY.lock_unpoisoned() = Some(identity.to_string());
+}
+
+fn cockpit_native_identity() -> Option<String> {
+    COCKPIT_NATIVE_IDENTITY.lock_unpoisoned().clone()
+}
+
+/// The `?auto=` URL a cockpit web peer is launched with. `native_owner` is
+/// the native peer's identity when known; the harness uses it to pick the
+/// share tile it draws on / points at / measures.
+fn web_peer_url(
+    harness_url: &str,
+    access_code: &str,
+    scenario_id: &str,
+    native_owner: Option<&str>,
+) -> String {
+    let mut url = format!(
+        "{}/?code={}&auto={}",
+        harness_url.trim_end_matches('/'),
+        access_code,
+        scenario_id.to_ascii_lowercase()
+    );
+    if let Some(owner) = native_owner.map(str::trim).filter(|owner| !owner.is_empty()) {
+        url.push_str("&owner=");
+        url.push_str(owner);
+    }
+    url
+}
 
 pub(crate) fn cockpit_source_requires_visible_handback(window_id: u32) -> bool {
     COCKPIT_VISIBLE_SOURCE_IDS
@@ -4201,11 +4239,11 @@ fn spawn_web_peer_labeled_with_cdp(
     label: Option<&str>,
     cdp_enabled: bool,
 ) -> Result<WebPeer, String> {
-    let url = format!(
-        "{}/?code={}&auto={}",
-        harness_url().trim_end_matches('/'),
+    let url = web_peer_url(
+        &harness_url(),
         access_code,
-        scenario.id.to_ascii_lowercase()
+        scenario.id,
+        cockpit_native_identity().as_deref(),
     );
     let chrome = chrome_path();
     if chrome.exists() {
@@ -4557,6 +4595,42 @@ fn web_report_outcome(scenario: ScenarioSpec, report: &WebCockpitReport) -> Scen
             passed,
             detail: format!("sender={} payload={}", report.sender, report.payload),
         }],
+    }
+}
+
+/// DRAW-N's native evidence: `draw.rs` journals `draw: delivered Begin stroke
+/// ... to own shared window <id> via sharer overlay` (then `End`) ONLY on the
+/// sharer-overlay path, i.e. when this machine owns the drawn-on window. When
+/// the scenario knows which window it shared, both lines must name it -- a
+/// stroke delivered to some other window we happen to own is not this
+/// scenario's stroke.
+fn draw_stroke_delivery_observed<I, S>(messages: I, native_share_window_id: Option<u32>) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let own_window = native_share_window_id.map(|id| format!(" to own shared window {id} "));
+    let names_our_window =
+        |message: &str| own_window.as_deref().is_none_or(|needle| message.contains(needle));
+    journal_messages_contain_pair(
+        messages
+            .into_iter()
+            .filter(|message| names_our_window(message.as_ref())),
+        "draw: delivered Begin stroke",
+        "draw: delivered End stroke",
+    )
+}
+
+/// The web peer reports the `windowId` it drew on. It must be the window this
+/// machine shared for the scenario; when the native share id is unknown
+/// there is nothing to compare against and the journal check stands alone.
+fn draw_target_matches_native_share(
+    web_window_id: Option<u64>,
+    native_share_window_id: Option<u32>,
+) -> bool {
+    match native_share_window_id {
+        Some(native) => web_window_id == Some(u64::from(native)),
+        None => true,
     }
 }
 
@@ -5105,6 +5179,7 @@ async fn assert_reported_scenario(
     app: &AppHandle,
     scenario: ScenarioSpec,
     report: &WebCockpitReport,
+    native_share_window_id: Option<u32>,
     writer: &mut ResultsWriter,
 ) -> ScenarioOutcome {
     match scenario.kind {
@@ -5434,10 +5509,9 @@ async fn assert_reported_scenario(
                 .try_state::<crate::diagnostics::DiagnosticsState>()
                 .map(|diagnostics| diagnostics.journal())
                 .unwrap_or_default();
-            let native_logged = journal_messages_contain_pair(
+            let native_logged = draw_stroke_delivery_observed(
                 journal.iter().map(|entry| entry.message.as_str()),
-                "draw: delivered Begin stroke",
-                "draw: delivered End stroke",
+                native_share_window_id,
             );
             let web_asserted = report_payload_bool(
                 &report.payload,
@@ -5447,8 +5521,12 @@ async fn assert_reported_scenario(
                     "beginEndDelivered",
                 ],
             );
+            let web_window_id = report.payload.get("windowId").and_then(serde_json::Value::as_u64);
+            let target_is_ours =
+                draw_target_matches_native_share(web_window_id, native_share_window_id);
             let mut outcome = web_report_outcome(scenario, report);
-            let passed = report_ok(&report.payload) && web_asserted && native_logged;
+            let passed =
+                report_ok(&report.payload) && web_asserted && native_logged && target_is_ours;
             outcome.verdict = if passed {
                 ScenarioVerdict::Pass
             } else {
@@ -5456,6 +5534,11 @@ async fn assert_reported_scenario(
             };
             outcome.message = if passed {
                 format!("{} PASS draw stroke delivery observed", scenario.id)
+            } else if !target_is_ours {
+                format!(
+                    "{} TEST-FAIL web peer drew on window {:?}, not this machine's share {:?}",
+                    scenario.id, web_window_id, native_share_window_id
+                )
             } else {
                 format!(
                     "{} TEST-FAIL draw stroke delivery was not observed",
@@ -5466,7 +5549,7 @@ async fn assert_reported_scenario(
                 name: "draw-stroke-delivery".to_string(),
                 passed,
                 detail: format!(
-                    "nativeLogged={native_logged} webAsserted={web_asserted}; native log evidence is required"
+                    "nativeLogged={native_logged} webAsserted={web_asserted} webWindowId={web_window_id:?} nativeWindowId={native_share_window_id:?}; native log evidence for OUR shared window is required"
                 ),
             });
             outcome
@@ -9007,7 +9090,14 @@ async fn run_scenario(
 
     let report = await_web_report(app, scenario, writer).await;
     let mut outcome = if let Some(report) = report {
-        assert_reported_scenario(app, scenario, &report, writer).await
+        assert_reported_scenario(
+            app,
+            scenario,
+            &report,
+            native_share.as_ref().map(|share| share.window_id),
+            writer,
+        )
+        .await
     } else if scenario.kind == ScenarioKind::WebToNativeShare {
         assert_web_to_native_video(app, scenario, writer).await
     } else {
@@ -9164,6 +9254,7 @@ pub async fn start_test_cockpit(
     let room_name = cockpit_room_name();
     assert_cockpit_room(&room_name)?;
     let native_identity = cockpit_identity();
+    set_cockpit_native_identity(&native_identity);
     let meta = RunMeta {
         run_id: run_id.clone(),
         selector: selector.clone(),
@@ -10481,6 +10572,50 @@ mod tests {
             "Begin stroke",
             "End stroke"
         ));
+    }
+
+    #[test]
+    fn draw_stroke_delivery_requires_our_window_when_the_share_id_is_known() {
+        // The real journal lines from draw.rs's format_stroke_delivery_log.
+        let ours = [
+            "draw: delivered Begin stroke 's' from 'web-1' to own shared window 53 via sharer overlay 'share_overlay_4'",
+            "draw: delivered End stroke 's' from 'web-1' to own shared window 53 via sharer overlay 'share_overlay_4'",
+        ];
+        assert!(draw_stroke_delivery_observed(ours, Some(53)));
+        assert!(draw_stroke_delivery_observed(ours, None));
+        // A stroke on a different window we own is not this scenario's stroke.
+        assert!(!draw_stroke_delivery_observed(ours, Some(116_208)));
+        // `window 5` must not match `window 53` by prefix.
+        assert!(!draw_stroke_delivery_observed(ours, Some(5)));
+        // #919's actual journal: nothing at all (the stroke went to a remote
+        // pointer overlay, which only logs at trace).
+        assert!(!draw_stroke_delivery_observed(Vec::<&str>::new(), Some(53)));
+    }
+
+    #[test]
+    fn draw_target_must_be_the_native_share_window() {
+        // #919: web drew on the lingering previous peer's window 116208 while
+        // the native share was window 53.
+        assert!(!draw_target_matches_native_share(Some(116_208), Some(53)));
+        assert!(draw_target_matches_native_share(Some(53), Some(53)));
+        assert!(!draw_target_matches_native_share(None, Some(53)));
+        assert!(draw_target_matches_native_share(Some(7), None));
+    }
+
+    #[test]
+    fn web_peer_url_names_the_native_owner_when_known() {
+        assert_eq!(
+            web_peer_url("https://meet.petal.live/", "abc-defg-hjk", "DRAW-N", Some("p-cockpit-1a")),
+            "https://meet.petal.live/?code=abc-defg-hjk&auto=draw-n&owner=p-cockpit-1a"
+        );
+        assert_eq!(
+            web_peer_url("http://localhost:5173", "abc-defg-hjk", "TELE", None),
+            "http://localhost:5173/?code=abc-defg-hjk&auto=tele"
+        );
+        assert_eq!(
+            web_peer_url("http://localhost:5173", "abc-defg-hjk", "TELE", Some("  ")),
+            "http://localhost:5173/?code=abc-defg-hjk&auto=tele"
+        );
     }
 
     #[test]
