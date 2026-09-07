@@ -195,7 +195,7 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 # the EXISTING `install_panic_hook()` -- NOT via Sentry's own auto-installed
 # `PanicIntegration` hook (`default_integrations: false` in logging.rs
 # disables that), so there is exactly one panic hook, not two competing ones.
-sentry = { version = "0.48", default-features = false, features = ["panic", "backtrace", "transport", "native-tls"] }
+sentry = { version = "0.49", default-features = false, features = ["panic", "backtrace", "transport", "native-tls"] }
 # Bridges `log::error!`/`log::warn!` into Sentry (events/breadcrumbs
 # respectively) -- chained as a second `fern` output alongside the existing
 # file sink, not a hand-rolled bridge. See logging.rs for the PII
@@ -244,7 +244,7 @@ tokio = { version = "1", features = ["test-util"] }
 parking_lot = "0.12"
 # Exercise the real client/scope/envelope path for the closed #550 diagnostics.
 # This only enables Sentry's in-memory TestTransport in test builds.
-sentry = { version = "0.48", default-features = false, features = ["test"] }
+sentry = { version = "0.49", default-features = false, features = ["test"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Native remote clipboard access: Unicode text, sequence numbers, and standard
