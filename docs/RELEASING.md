@@ -17,6 +17,31 @@ Both produce a DMG that opens on a stock Mac with no Gatekeeper warning.
 
 ---
 
+## The release button (default path)
+
+Merge what you want shipped to `main`, then run the **Cut release** workflow
+from the Actions tab (`.github/workflows/cut-release.yml`) with `bump` =
+`patch` / `minor` / `major` (or `explicit` + a version). It:
+
+1. bumps all nine lockstep fields on `main` with `scripts/bump-version.mjs`
+   and verifies them with `scripts/version-lockstep.mjs`;
+2. commits `release: bump version to X.Y.Z` to `main` and tags `vX.Y.Z`;
+3. pushes the tag, which starts `release.yml` -- the whole pipeline: notary
+   preflight, the self-hosted end-to-end gate (Test Cockpit Quick +
+   remote-control loopback on the Tart runner), the Windows installer, staged
+   backend + web-harness deploys, the universal macOS build (sign, notarize,
+   staple, smoke), then promote + publish + live verification. Nothing is
+   published unless every gate passes.
+
+Tick `dry_run` to compute and verify the bump without pushing anything.
+Versions are never reused: if a release fails after publishing anything, press
+the button again for the next patch. The button needs the repository secret
+`RELEASE_PUSH_TOKEN` (fine-grained PAT of a repo admin, this repository only,
+Contents: read + write) -- `GITHUB_TOKEN` can neither push to the protected
+`main` nor start workflows from a tag it pushed.
+
+The sections below describe the underlying pieces and the manual paths.
+
 ## Before you start: run the notarization preflight
 
 ```
