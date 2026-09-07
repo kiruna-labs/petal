@@ -23,27 +23,27 @@
     "release:smoke": "bash ../../scripts/release-smoke.sh"
   },
   "dependencies": {
-    "@fontsource/albert-sans": "^5.2.8",
-    "@fontsource/fredoka": "^5.2.10",
-    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/albert-sans": "^5.3.0",
+    "@fontsource/fredoka": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-clipboard-manager": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2",
     "@tauri-apps/plugin-updater": "^2",
     "@userdispatch/sdk": "^1.0.1",
-    "livekit-client": "^2.20.0"
+    "livekit-client": "^2.22.2"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",
-    "@sveltejs/kit": "^2.9.0",
+    "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tauri-apps/cli": "^2",
-    "playwright": "^1.61.1",
-    "svelte": "^5.0.0",
-    "svelte-check": "^4.0.0",
+    "playwright": "^1.62.1",
+    "svelte": "^5.57.0",
+    "svelte-check": "^4.7.6",
     "typescript": "~6.0.2",
-    "tsx": "^4.19.0",
+    "tsx": "^4.23.13",
     "vite": "^6.0.3"
   },
   "allowScripts": {
