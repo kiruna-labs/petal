@@ -1,4 +1,4 @@
-# Docs site (docs.petal.live / petal.live/docs) — gate on every PR, deploy on main.
+# Docs site (petal.live/docs, Vercel project petal-docs) — gate on every PR, deploy on main.
 #
 # The site is its own Vercel project (`petal-docs`), separate from the app. It
 # was previously deployed by hand, which is why the published docs drifted
@@ -21,6 +21,10 @@
 name: Docs site
 
 on:
+  # NOTE: if this check is ever made REQUIRED by branch protection, the paths
+  # filter must go (or add an inverse paths-ignore companion like
+  # rust-gate-skip.yml): a required check that never reports blocks every PR
+  # that does not touch the site.
   pull_request:
     paths:
       - 'site/**'
@@ -54,7 +58,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: site/package-lock.json
 
@@ -103,7 +107,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: site/package-lock.json
 
@@ -154,16 +158,27 @@ jobs:
           echo "### Docs site deployed" >> "$GITHUB_STEP_SUMMARY"
           echo "$(cat deploy-url.txt)" >> "$GITHUB_STEP_SUMMARY"
 
-      # Proves the deploy is actually serving this commit's content rather than
-      # reporting success on a stale build.
-      - name: Verify the live site
+      # Proves THIS deployment is live rather than reporting success on a stale
+      # build: the unique deployment URL in deploy-url.txt only exists once this
+      # run's upload is served. petal.live/docs is a proxy in front of the
+      # production alias and returned 200 before the deploy, so on its own it
+      # proves nothing. Deployment protection is on for the project, hence the
+      # bypass header (same shared secret release.yml uses for app/meet).
+      - name: Verify the deployment is live
         if: steps.token.outputs.present == 'true'
+        working-directory: site
+        env:
+          BYPASS: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: |
           set -euo pipefail
+          url="$(tr -d '[:space:]' < deploy-url.txt)"
+          case "$url" in https://*) ;; *) echo "::error::no deployment URL captured"; exit 1;; esac
+          hdr=(); [ -n "$BYPASS" ] && hdr=(-H "x-vercel-protection-bypass: $BYPASS")
           for i in $(seq 1 10); do
-            code="$(curl -s -o /dev/null -w '%{http_code}' https://petal.live/docs/)"
-            if [ "$code" = "200" ]; then echo "petal.live/docs -> 200"; exit 0; fi
-            echo "attempt $i: $code"; sleep 15
+            code="$(curl -s -o /dev/null -w '%{http_code}' ${hdr[@]+"${hdr[@]}"} "$url/docs/")"
+            if [ "$code" = "200" ]; then echo "$url/docs/ -> 200"; break; fi
+            echo "attempt $i: $url -> $code"; sleep 15
+            [ "$i" = 10 ] && { echo "::error::deployment $url never returned 200"; exit 1; }
           done
-          echo "::error::petal.live/docs did not return 200 after the deploy"
-          exit 1
+          code="$(curl -s -o /dev/null -w '%{http_code}' https://petal.live/docs/)"
+          echo "petal.live/docs -> $code (proxy; informational)"
