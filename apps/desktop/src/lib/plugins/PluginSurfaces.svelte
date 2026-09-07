@@ -7,7 +7,7 @@
   presence list into meeting.* plugin events.
 -->
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import type { MeetingPhase, Participant } from '@petal/shared/plugin-host/api';
   import { createPluginHost, type PluginHost } from '@petal/shared/plugin-host/host';
   import { hostCompatibility } from '@petal/shared/plugin-host/manifest';
@@ -19,7 +19,8 @@
     participants: Participant[];
     roomLabel: string;
     phase: MeetingPhase;
-    hostVersion: string;
+    /** The client's release version, or null until it is known. Plugins boot the moment it arrives. */
+    hostVersion: string | null;
     onToast: (text: string, variant: 'info' | 'degraded') => void;
     buttons?: ToolbarButtonModel[];
   }
@@ -35,7 +36,19 @@
     host?.activateButton(pluginId, buttonId, anchor);
   }
 
-  onMount(() => {
+  // Boot once, when the real host version is known. The route resolves
+  // `getVersion()` asynchronously, so on desktop the version arrives AFTER
+  // this component mounts; booting in onMount against a placeholder made
+  // `hostCompatibility` fail and skipped every built-in (PR #4 review).
+  let booted = false;
+  $effect(() => {
+    const version = hostVersion;
+    if (version === null || booted) return;
+    booted = true;
+    untrack(() => boot(version));
+  });
+
+  function boot(version: string) {
     host = createPluginHost({
       document,
       adapter: createTauriAdapter({
@@ -44,20 +57,21 @@
         phase: () => phase,
         toast: onToast
       }),
-      hostVersion,
+      hostVersion: version,
       mounts: { logic: logicEl, overlay: overlayEl, popoverLayer: popoverEl },
       onButtonsChanged: (next) => (buttons = next),
       warn: (message) => console.warn(message)
     });
     for (const { plugin, source } of enabledPlugins()) {
-      const compat = hostCompatibility(plugin.manifest, hostVersion);
-      if (!compat.ok && /^\d/.test(hostVersion)) {
+      const compat = hostCompatibility(plugin.manifest, version);
+      // Dev builds report a non-numeric version ("dev"); run built-ins anyway there.
+      if (!compat.ok && /^\d/.test(version)) {
         console.warn(`plugin ${plugin.manifest.id} skipped: ${compat.reason}`);
         continue;
       }
       host.load(plugin, source);
     }
-  });
+  }
 
   onDestroy(() => {
     host?.dispose();

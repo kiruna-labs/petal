@@ -613,7 +613,9 @@
   let pluginsRef = $state<PluginSurfaces | null>(null);
   const pluginToast = createLocalToast(3000);
   let pluginToastVariant = $state<'info' | 'degraded'>('info');
-  let pluginHostVersion = $state('0.0.0');
+  // null until Tauri answers: PluginSurfaces waits for the real version rather
+  // than judging plugin compatibility against a placeholder.
+  let pluginHostVersion = $state<string | null>(null);
   onMount(() => {
     void getVersion()
       .then((v) => (pluginHostVersion = v))
