@@ -10,84 +10,77 @@ that your teammates can move and resize independently on their own desktops.
 ![A shared TextEdit window on the sharer's Mac, with the identity-colored border and the hover tab on its right edge](../../../assets/screenshots/sharing-window.png)
 
 _A window you are sharing, seen on your own Mac: the rounded border and the
-square on the right edge are both in your identity color._
+hover tab are both in your identity color._
 
 ## Start sharing with the hover tab
 
-While you're in a meeting, move your cursor over any window you want to
-share. Petal shows one fixed 40×40 square on a vertical rail at the window's
-right edge. It sits just outside the window when the monitor's work area has
-room, and insets into the right edge when it doesn't, so it is reachable for
-ordinary, maximized, and top-aligned windows on either platform.
+During a meeting, move the pointer over an eligible window to reveal Petal's
+40×40 hover tab. Drag the tab along the window's top, right, bottom, or left
+edge. It stops just short of each corner; deliberately crossing an endpoint
+moves it to the adjacent edge. Click the tab (or press **Enter** or **Space**
+when it has focus) to perform the direct action: an unshared window starts
+sharing, and a shared window stops sharing. The button is disabled while the
+request is pending. Its tooltip and accessible name explain the action,
+dragging, and the right-click options menu.
 
 ![Close-up of the hover tab on a shared window's right edge](../../../assets/screenshots/hover-tab.png)
 
-Click the square (or press **Enter** or **Space** when it has focus) to
-perform the direct action: an unshared window starts sharing, a shared window
-stops sharing. The button is disabled while the request is pending. Hover
-over it and a tooltip (a native one on macOS) names the action and reminds
-you that you can drag it to move it and right-click for options; the same
-hint is exposed to assistive technology.
-
 Once a window is shared, Petal draws a rounded border around it on your
 screen in your identity color, so you can tell at a glance which of your
-windows are live. The square turns the same color and shows a live marker.
+windows are live. The tab turns the same color and shows a live marker.
 Teammates don't see your local indicator — on their machines, the shared
 window itself appears as its own window, with your name and color on its
 header (see [Viewing shared windows](/docs/using/viewing-shared-windows/)).
 
-On Windows, Petal asks once whether it may replace the system capture outline
-with this indicator. If Windows denies that request or the replacement cannot
-be made safe, sharing still starts with Windows' native yellow capture
-indicator instead.
+Windows keeps its native gold capture border for every active window capture,
+including elevated targets; Petal does not request administrator rights or
+replace that system indicator. If the custom indicator cannot be made safe,
+sharing still starts with the native system border.
 
 ### Move the hover tab
 
-The square is also a drag surface. Motion below 6px is still a normal
-Share/Stop click. Once movement reaches 6px, drag vertically to move the
-square along the window's right-edge rail; the button follows in real time
-and the click is suppressed. Release to commit the position. Petal stores one
-normalized position (`0` top, `0.5` center, `1` bottom), so it applies to
+The tab is also a drag surface. Motion below 6px remains a normal Share/Stop
+click. Once movement reaches 6px, drag it along the current window edge; it
+follows in real time and the click is suppressed. The tab stops just short of
+each corner, and deliberately crossing an endpoint moves it to the adjacent
+edge. Petal stores one normalized perimeter position, so placement applies to
 later windows and survives a restart.
 
 Press **Escape**, cancel the pointer gesture, or let pointer capture be lost
 to cancel instead of committing. A missing or malformed saved position safely
-returns to right-center. The square always stays exactly 40×40 and never
-becomes a free-floating control that covers content.
+returns to the default right-center position. The tab always stays exactly
+40×40 and never becomes a free-floating control that covers content.
 
 ### The options menu
 
-Right-click the square to open Petal's system-native sharing-options menu.
-When the square has focus, **Shift+F10** or the keyboard **Menu** key opens
-the same menu beside it. Opening the menu never starts or stops sharing. It
-contains:
+Right-click the tab to open Petal's system-native sharing-options menu. When
+the tab has focus, **Shift+F10** or the keyboard **Menu** key opens the same
+menu beside it. Opening the menu never starts or stops sharing. It contains:
 
 - **Screen sharing priority** — see below.
-- **Hover tab position** — **Top**, **Center**, **Bottom**: the
-  keyboard-accessible alternative to dragging.
+- **Hover tab position** — **Top**, **Right**, **Bottom**, and **Left** edge
+  presets, alongside the draggable perimeter placement.
 - **Remote control** (Windows only) — **Cursor-preserving (default)** or
   **Full control**, the per-share control mode described in
   [Remote control](/docs/using/remote-control/).
 - **Allow remote control** — a per-window lock, enabled only while the window
-  is shared. Unchecking it refuses control requests for this one window even
-  when your meeting-wide policy would allow them. Both gates must allow
-  control.
+  is shared. Both the per-window and meeting-wide gates must allow control.
 - **Draw on this shared window** / **Stop drawing on this window** — see
   [Telepointers and drawing](/docs/using/telepointers-and-drawing/). Only
   enabled while the window is shared.
-- **Start AI chat on this window** / **Stop AI chat on this window** —
-  appears only when [AI chat](/docs/using/ai-chat/) is turned on in Settings
-  and the window is currently shared.
-- **Debug** — opens the Network Cockpit, a diagnostics window with per-share
-  frame and latency stats.
+- **Start AI chat on this window** / **Stop AI chat on this window** — appears
+  only when [AI chat](/docs/using/ai-chat/) is turned on in Settings and the
+  window is currently shared.
+- **Debug** — opens the Network Cockpit with per-share frame and latency
+  statistics.
 
 ## Stop sharing
 
-For an ordinary shared window, click its right-edge square once. The action
-is always **Stop sharing** while it is live, including while Draw is active.
-To stop drawing without stopping the share, right-click the square and choose
-**Stop drawing on this window**. While Draw is active the tab stays reachable
-even after the pointer leaves the window.
+For an ordinary shared window, click its hover tab once. The action is always
+**Stop sharing** while it is live, including while Draw is active. To stop
+Draw without stopping the share, right-click the tab and choose **Stop drawing
+on this window** from the native menu. While Draw is active the tab stays
+reachable even after the pointer leaves the window.
 
 Stopping a share closes the window on every teammate's desktop.
 
@@ -97,10 +90,19 @@ The options menu offers four **Screen sharing priority** choices:
 **Automatic (recommended)**, **Responsive: smoother control**, **Sharp text:
 preserve detail**, and **Data saver: 15 fps, slower control**. Petal View
 exposes the same choices from its title-bar **Options** button. Picking one
-takes effect immediately for an active share when supported, and becomes the
-default for windows you share afterwards. Priority and hover-tab position are
-stored together in Petal's sharing-preferences file (they survive a
+takes effect immediately for an active share when supported, and also becomes
+the default for windows you share afterwards. Priority and hover-tab position
+are stored together in Petal's sharing-preferences file (they survive a
 [factory reset](/docs/using/troubleshooting/#factory-reset)).
+
+## Drawing on a shared window
+
+If you want to point something out visually on a window you're sharing, open
+the native options menu and choose **Draw on this shared window**. The entry is
+only enabled while the window is actually shared and reads **Stop drawing on
+this window** while drawing is active. The hover tab remains fixed; its primary
+click still means **Stop sharing**. Everyone viewing that window sees your
+strokes live.
 
 ## Petal View: share a region of your screen
 
@@ -109,14 +111,15 @@ screen to share a region instead of a whole window. Create one from the
 meeting bar's **More** menu (**Create Petal View**). The selector has
 persistent **Options**, Share/Stop, and Close controls in its title bar. Use
 **Options** for sharing priority, Draw, AI chat, and Debug; it deliberately
-has no hover-tab position entries. The right-edge hover square is blocked
-over the selector and through its hollow interior. The selector stays
-high-contrast while idle and switches to your identity color while shared.
+has no hover-tab position entries. The hover tab is blocked over the selector
+and through its hollow interior. The selector stays high-contrast while idle
+and switches to your identity color while shared.
 
-On Windows, an idle Petal View is visible to screen recorders, so you can
-record a demo of its controls. While it is actively shared, Windows excludes
-its frame and controls from capture so the selector never appears in its own
-shared video; it becomes recordable again after sharing stops.
+On Windows, an idle Petal View is visible to supported screen recorders such
+as OBS, so you can record a demo of its controls. While it is actively shared,
+Windows excludes its frame and controls from capture so the selector never
+appears in its own shared video; it becomes recordable again after sharing
+stops.
 
 ## Sharing from the window picker
 
