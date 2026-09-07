@@ -20,7 +20,7 @@ import type {
   HoverTabMenuEntry,
   HoverTabPosition
 } from './hoverTabMenu.ts';
-import type { SharePriority } from '../ipc.ts';
+import type { HoverTabSide, SharePriority } from '../ipc.ts';
 
 export {
   CONTROL_MODE_CHOICES,
@@ -49,7 +49,8 @@ export function buildShareOptionsMenuEntries(
   displayLike = false,
   includePosition = false,
   verticalOffset = 0.5,
-  remoteControlAllowed = true
+  remoteControlAllowed = true,
+  hoverTabSide: HoverTabSide = 'right'
 ): HoverTabMenuEntry[] {
   return buildHoverTabMenuEntries(
     currentPriority,
@@ -62,6 +63,7 @@ export function buildShareOptionsMenuEntries(
     displayLike,
     includePosition,
     verticalOffset,
-    remoteControlAllowed
+    remoteControlAllowed,
+    hoverTabSide
   );
 }

@@ -1,4 +1,4 @@
-//! Hover "share tab" — one fixed 40px right-edge rail button that follows the
+//! Hover "share tab" — one fixed 40px perimeter button that follows the
 //! current eligible window. Primary activation shares/stops directly; the
 //! native options menu owns secondary controls without changing geometry.
 //!
@@ -34,12 +34,15 @@ pub use crate::platform::cg::WindowFrame;
 // `super::`/`platform::` paths unchanged.
 pub(crate) use crate::hover_core::{
     autotest_share_color, current_hover_presentation, cursor_over_tab,
-    hover_tab_panel_logical_size, hover_tab_presentation, hover_tab_presentation_with_offset,
-    is_shared, last_hover_update, normalize_share_color, remember_share_color,
-    remembered_share_color, set_last_hover_update, share_color_or_default, with_share_state,
-    EnsureBorderResult, EnsureOverlayResult, HoverTabAttachment, HoverTabDragPhase,
-    HoverTabPresentation, HoverTabRect, HoverTabUpdate, MonitorBounds, ShareState,
-    ShareStateChanged, DEFAULT_HOVER_TAB_VERTICAL_OFFSET, DEFAULT_SHARE_COLOR,
+    hover_tab_panel_logical_size, hover_tab_position_for_side, hover_tab_position_for_side_offset,
+    hover_tab_presentation, hover_tab_presentation_with_offset,
+    hover_tab_presentation_with_position, hover_tab_presentation_with_side_offset,
+    hover_tab_side_offset, is_shared, last_hover_update, normalize_share_color,
+    remember_share_color, remembered_share_color, set_last_hover_update, share_color_or_default,
+    with_share_state, EnsureBorderResult, EnsureOverlayResult, HoverTabAttachment,
+    HoverTabDragPhase, HoverTabPosition, HoverTabPresentation, HoverTabRect, HoverTabSide,
+    HoverTabUpdate, MonitorBounds, ShareState, ShareStateChanged, DEFAULT_HOVER_TAB_POSITION,
+    DEFAULT_HOVER_TAB_SIDE, DEFAULT_HOVER_TAB_VERTICAL_OFFSET, DEFAULT_SHARE_COLOR,
     HOVER_TAB_COMPACT_HEIGHT, HOVER_TAB_COMPACT_WIDTH, HOVER_TAB_DRAG_THRESHOLD_PX,
     HOVER_TAB_LABEL, HOVER_TAB_WINDOW_TITLE,
 };
@@ -90,6 +93,8 @@ fn share_border_start_timing(surface: ShareStartSurface) -> ShareBorderStartTimi
 // impl moved to `hover_core.rs` — see the re-exports at the top of this file.)
 #[cfg(target_os = "macos")]
 static MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static MAC_DRAG_COMMAND_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(target_os = "macos")]
 static SHARE_TOGGLE_LOCKS: OnceLock<Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
@@ -345,20 +350,36 @@ fn invalidate_all_share_focus_attempts() {
 /// follow-up once the new pill-webview architecture's window-id story is
 /// understood.
 pub(crate) fn drag_nudge(app: &AppHandle, window_id: u32, frame: crate::platform::cg::WindowFrame) {
+    let _drag_guard = MAC_DRAG_COMMAND_LOCK.lock_unpoisoned();
+    if platform::drag_is_active() {
+        return;
+    }
+    if !crate::hover_core::valid_hover_tab_frame(frame) {
+        log::debug!("hover_tab: ignoring invalid source frame during drag nudge");
+        return;
+    }
     let Some(mut update) = last_hover_update() else {
         return;
     };
     if update.window_id != window_id {
         return;
     }
-    let presentation = platform::tab_position(app, &frame, window_id);
+    let Some(presentation) = platform::tab_position(app, &frame, window_id) else {
+        platform::hide_tab(app);
+        return;
+    };
     platform::note_drag_nudge();
-    position_tab(app, presentation);
+    let generation = position_tab(app, presentation);
     update.frame = frame;
     update.tab_x = presentation.rect.x;
     update.tab_y = presentation.rect.y;
+    update.perimeter_position = presentation.position;
+    update.side = presentation.side;
     update.attachment = presentation.attachment;
-    set_last_hover_update(Some(update.clone()));
+    update.presentation_generation = generation;
+    if !crate::hover_core::set_last_hover_update_if_generation(Some(update.clone()), generation) {
+        return;
+    }
     // The webview's inner UI does not need ~120Hz updates; emit at most every
     // 50ms (the panel FRAME moves every event regardless).
     if platform::emit_throttle_ok(50) {
@@ -953,7 +974,7 @@ fn reconcile_share_overlay(
 pub fn clear_share_state_on_leave(app: &AppHandle) {
     #[cfg(target_os = "macos")]
     {
-        platform::reset_drag_state(true);
+        reset_mac_drag_state_serialized(true);
         invalidate_all_share_focus_attempts();
     }
     let (border_ids, overlay_ids): (Vec<u32>, Vec<u32>) =
@@ -982,8 +1003,10 @@ pub fn clear_share_state_on_leave(app: &AppHandle) {
 pub fn clear_share_state_for_window(app: &AppHandle, window_id: u32) {
     #[cfg(target_os = "macos")]
     {
-        if last_hover_update().is_some_and(|update| update.window_id == window_id) {
-            platform::reset_drag_state(true);
+        if last_hover_update().is_some_and(|update| update.window_id == window_id)
+            || crate::hover_core::active_hover_tab_drag(window_id).is_some()
+        {
+            reset_mac_drag_state_serialized(true);
         }
         invalidate_share_focus_attempt(ShareFocusLifecycle::WindowCleared { window_id });
     }
@@ -1213,37 +1236,81 @@ pub fn set_hover_tab_tooltip(
 fn apply_mac_drag_position(
     app: &AppHandle,
     window_id: u32,
-    requested_frame: WindowFrame,
-    offset: f64,
-) -> Result<f64, String> {
+    _requested_frame: WindowFrame,
+    position: HoverTabPosition,
+    drag_token: Option<u64>,
+) -> Result<HoverTabPosition, String> {
     // Check before queueing AppKit work. A hide/target replacement may have
     // won the race with the phase check; scheduling the stale position first
     // could otherwise resurrect the singleton panel after hide.
     if !last_hover_update().is_some_and(|update| update.window_id == window_id) {
         return Err("hover-tab target changed during drag".to_string());
     }
+    let current_owner_pid = crate::platform::cg::owner_pid_for_window_id(window_id)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0);
+    if let Some(drag_token) = drag_token {
+        let session = crate::hover_core::active_hover_tab_drag_for_token(window_id, drag_token)
+            .ok_or_else(|| "hover-tab drag token is stale".to_string())?;
+        if current_owner_pid != session.source_owner_pid {
+            return Err("hover-tab target changed during drag".to_string());
+        }
+    } else if last_hover_update()
+        .and_then(|update| update.source_owner_pid)
+        .is_none_or(|owner_pid| Some(owner_pid) != current_owner_pid)
+    {
+        return Err("hover-tab target changed since menu opened".to_string());
+    }
     let source_frame = crate::platform::cg::frame_for_window_id(window_id)
         .ok_or_else(|| "hover-tab source frame is unavailable".to_string())?;
-    let offset = crate::hover_core::normalize_hover_tab_vertical_offset(offset);
-    let presentation = platform::tab_position_with_offset(app, &source_frame, window_id, offset);
-    position_tab(app, presentation);
+    if source_frame != _requested_frame {
+        return Err("hover-tab source frame changed during drag".to_string());
+    }
+    if !crate::hover_core::valid_hover_tab_frame(source_frame) {
+        return Err("hover-tab source frame is invalid".to_string());
+    }
+    let position = position.normalized();
+    let presentation =
+        platform::tab_position_with_position(app, &source_frame, window_id, position)
+            .ok_or_else(|| "hover-tab monitor work area is unavailable".to_string())?;
+    let generation = crate::hover_core::begin_hover_tab_presentation();
+    position_tab_with_generation_sync(app, presentation, generation)?;
+    let post_owner_pid = crate::platform::cg::owner_pid_for_window_id(window_id)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0);
+    let post_source_frame = crate::platform::cg::frame_for_window_id(window_id);
+    if !last_hover_update().is_some_and(|update| update.window_id == window_id)
+        || post_source_frame.is_none_or(|frame| !crate::hover_core::valid_hover_tab_frame(frame))
+        || post_source_frame != Some(source_frame)
+        || post_owner_pid != current_owner_pid
+        || drag_token.is_some_and(|token| {
+            crate::hover_core::active_hover_tab_drag_for_token(window_id, token).is_none()
+        })
+    {
+        return Err("hover-tab target changed during drag".to_string());
+    }
     let mut update =
         last_hover_update().ok_or_else(|| "hover-tab target is no longer presented".to_string())?;
     if update.window_id != window_id {
         return Err("hover-tab target changed during drag".to_string());
     }
-    update.frame = if source_frame.width > 0 && source_frame.height > 0 {
-        source_frame
-    } else {
-        requested_frame
-    };
+    if !crate::hover_core::valid_hover_tab_frame(source_frame) {
+        return Err("hover-tab source frame is invalid".to_string());
+    }
+    update.frame = source_frame;
+    let (side, vertical_offset) = crate::hover_core::hover_tab_side_offset(presentation.position);
     update.tab_x = presentation.rect.x;
     update.tab_y = presentation.rect.y;
+    update.perimeter_position = presentation.position;
+    update.side = side;
     update.attachment = presentation.attachment;
-    update.vertical_offset = offset;
-    set_last_hover_update(Some(update.clone()));
+    update.vertical_offset = vertical_offset;
+    update.presentation_generation = generation;
+    if !crate::hover_core::set_last_hover_update_if_generation(Some(update.clone()), generation) {
+        return Err("hover-tab presentation changed during drag".to_string());
+    }
     let _ = tauri::Emitter::emit(app, "hover-tab-update", &update);
-    Ok(offset)
+    Ok(presentation.position)
 }
 
 #[cfg(target_os = "macos")]
@@ -1251,15 +1318,43 @@ fn rollback_mac_drag_position(
     app: &AppHandle,
     window_id: u32,
     frame: WindowFrame,
-    restore_offset: f64,
+    restore_position: HoverTabPosition,
+    drag_token: Option<u64>,
 ) {
-    let _ = crate::share_priority::preview_hover_tab_vertical_offset(restore_offset);
-    let _ = apply_mac_drag_position(app, window_id, frame, restore_offset);
-    platform::reset_drag_state(false);
+    if let Some(token) = drag_token {
+        if crate::hover_core::active_hover_tab_drag_for_token(window_id, token).is_none() {
+            return;
+        }
+    }
+    let _ = crate::share_priority::preview_hover_tab_position(restore_position);
+    let _ = apply_mac_drag_position(app, window_id, frame, restore_position, drag_token);
+    if let Some(token) = drag_token {
+        let _ = crate::hover_core::finish_hover_tab_drag_for_token(window_id, token);
+    }
+    if !crate::hover_core::any_hover_tab_drag_active() {
+        platform::set_drag_active(false);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn drag_session_for_command(
+    window_id: u32,
+    drag_token: Option<u64>,
+) -> Result<Option<crate::hover_core::HoverTabDragSession>, String> {
+    let active = crate::hover_core::active_hover_tab_drag(window_id);
+    match (active, drag_token) {
+        (Some(session), Some(token)) if session.drag_token == token => Ok(Some(session)),
+        (Some(_), _) => Err("hover-tab drag token is stale".to_string()),
+        (None, Some(_)) => Err("hover-tab drag is no longer active".to_string()),
+        (None, None) if crate::hover_core::any_hover_tab_drag_active() => {
+            Err("another hover-tab drag is already active".to_string())
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 /// One phase-based drag bridge for the macOS nonactivating panel. The same
-/// command is used by Top/Center/Bottom native-menu presets.
+/// command is used by edge presets and pointer movement.
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub fn hover_tab_drag(
@@ -1267,112 +1362,205 @@ pub fn hover_tab_drag(
     phase: HoverTabDragPhase,
     window_id: u32,
     frame: WindowFrame,
-    vertical_offset: f64,
-) -> Result<f64, String> {
+    perimeter_position: HoverTabPosition,
+    drag_token: Option<u64>,
+) -> Result<HoverTabPosition, String> {
+    let _drag_guard = MAC_DRAG_COMMAND_LOCK.lock_unpoisoned();
     match phase {
         HoverTabDragPhase::Begin => {
+            let drag_token =
+                drag_token.ok_or_else(|| "hover-tab drag token is missing".to_string())?;
             if !last_hover_update().is_some_and(|update| update.window_id == window_id) {
                 return Err("hover-tab target is stale".to_string());
             }
-            let session = crate::hover_core::begin_hover_tab_drag(window_id)?;
+            let source_owner_pid = crate::platform::cg::owner_pid_for_window_id(window_id)
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid > 0)
+                .ok_or_else(|| "hover-tab source identity is unavailable".to_string())?;
+            let session = crate::hover_core::begin_hover_tab_drag(
+                window_id,
+                drag_token,
+                Some(source_owner_pid),
+            )?;
             platform::set_drag_active(true);
             log::debug!(
-                "hover_tab: drag began window={} generation={}",
+                "hover_tab: drag began window={} generation={} drag_token={}",
                 session.window_id,
-                session.generation
+                session.generation,
+                session.drag_token,
             );
-            Ok(session.original_offset)
+            Ok(session.original_position)
         }
         HoverTabDragPhase::Update => {
-            let session = crate::hover_core::active_hover_tab_drag(window_id)
-                .ok_or_else(|| "hover-tab drag is not active".to_string())?;
+            let drag_token =
+                drag_token.ok_or_else(|| "hover-tab drag token is missing".to_string())?;
+            let session = drag_session_for_command(window_id, Some(drag_token))?
+                .expect("a tokened update must have an active session");
             if !last_hover_update().is_some_and(|update| update.window_id == window_id) {
-                platform::reset_drag_state(true);
+                rollback_mac_drag_position(
+                    &app,
+                    window_id,
+                    frame,
+                    session.original_position,
+                    Some(drag_token),
+                );
                 return Err("hover-tab target changed during drag".to_string());
             }
-            let offset =
-                match crate::share_priority::preview_hover_tab_vertical_offset(vertical_offset) {
-                    Ok(offset) => offset,
+            let position =
+                match crate::share_priority::preview_hover_tab_position(perimeter_position) {
+                    Ok(position) => position,
                     Err(error) => {
-                        platform::reset_drag_state(true);
+                        rollback_mac_drag_position(
+                            &app,
+                            window_id,
+                            frame,
+                            session.original_position,
+                            Some(drag_token),
+                        );
                         return Err(error);
                     }
                 };
-            if let Err(error) = apply_mac_drag_position(&app, window_id, frame, offset) {
-                rollback_mac_drag_position(&app, window_id, frame, session.original_offset);
+            if let Err(error) =
+                apply_mac_drag_position(&app, window_id, frame, position, Some(drag_token))
+            {
+                rollback_mac_drag_position(
+                    &app,
+                    window_id,
+                    frame,
+                    session.original_position,
+                    Some(drag_token),
+                );
                 return Err(error);
             }
-            Ok(offset)
+            Ok(position)
         }
         HoverTabDragPhase::Commit => {
-            let active = crate::hover_core::active_hover_tab_drag(window_id);
-            let restore_offset = active
-                .map(|session| session.original_offset)
-                .unwrap_or_else(crate::share_priority::current_hover_tab_vertical_offset);
+            let active = drag_session_for_command(window_id, drag_token)?;
+            let restore_position = active
+                .map(|session| session.original_position)
+                .unwrap_or_else(crate::share_priority::current_hover_tab_position);
             if !last_hover_update().is_some_and(|update| update.window_id == window_id) {
-                let _ = crate::share_priority::preview_hover_tab_vertical_offset(restore_offset);
-                platform::reset_drag_state(false);
+                if let Some(session) = active {
+                    rollback_mac_drag_position(
+                        &app,
+                        window_id,
+                        frame,
+                        session.original_position,
+                        Some(session.drag_token),
+                    );
+                } else {
+                    let _ = crate::share_priority::preview_hover_tab_position(restore_position);
+                }
                 return Err("hover-tab target is stale".to_string());
             }
-            let offset =
-                match crate::share_priority::preview_hover_tab_vertical_offset(vertical_offset) {
-                    Ok(offset) => offset,
+            let position = if let Some(session) = active {
+                match crate::share_priority::preview_hover_tab_position(perimeter_position) {
+                    Ok(position) => position,
                     Err(error) => {
-                        platform::reset_drag_state(true);
+                        rollback_mac_drag_position(
+                            &app,
+                            window_id,
+                            frame,
+                            session.original_position,
+                            Some(session.drag_token),
+                        );
                         return Err(error);
                     }
-                };
-            if let Err(error) = apply_mac_drag_position(&app, window_id, frame, offset) {
-                rollback_mac_drag_position(&app, window_id, frame, restore_offset);
+                }
+            } else {
+                // No drag token means this is a native-menu preset, not a
+                // late pointer command. A tokened commit was rejected above.
+                perimeter_position.normalized()
+            };
+            if let Err(error) = apply_mac_drag_position(
+                &app,
+                window_id,
+                frame,
+                position,
+                active.map(|session| session.drag_token),
+            ) {
+                rollback_mac_drag_position(
+                    &app,
+                    window_id,
+                    frame,
+                    restore_position,
+                    active.map(|session| session.drag_token),
+                );
                 return Err(error);
             }
-            let committed = match crate::share_priority::commit_hover_tab_vertical_offset(offset) {
-                Ok(value) => value,
+            let committed = match crate::share_priority::commit_hover_tab_position(position) {
+                Ok(position) => position,
                 Err(error) => {
-                    rollback_mac_drag_position(&app, window_id, frame, restore_offset);
+                    rollback_mac_drag_position(
+                        &app,
+                        window_id,
+                        frame,
+                        restore_position,
+                        active.map(|session| session.drag_token),
+                    );
                     return Err(error);
                 }
             };
-            if active.is_some() {
-                let _ = crate::hover_core::finish_hover_tab_drag(window_id);
+            if let Some(session) = active {
+                let _ = crate::hover_core::finish_hover_tab_drag_for_token(
+                    window_id,
+                    session.drag_token,
+                );
+            }
+            if !crate::hover_core::any_hover_tab_drag_active() {
                 platform::set_drag_active(false);
             }
             Ok(committed)
         }
         HoverTabDragPhase::Cancel => {
-            let Some(session) = crate::hover_core::active_hover_tab_drag(window_id) else {
-                return Ok(crate::share_priority::current_hover_tab_vertical_offset());
+            let Some(session) = drag_session_for_command(window_id, drag_token)? else {
+                return Ok(crate::share_priority::current_hover_tab_position());
             };
-            let restored = match crate::share_priority::preview_hover_tab_vertical_offset(
-                session.original_offset,
+            let restored = match crate::share_priority::preview_hover_tab_position(
+                session.original_position,
             ) {
-                Ok(offset) => offset,
+                Ok(position) => position,
                 Err(error) => {
-                    platform::reset_drag_state(false);
+                    let _ = crate::hover_core::finish_hover_tab_drag_for_token(
+                        window_id,
+                        session.drag_token,
+                    );
+                    if !crate::hover_core::any_hover_tab_drag_active() {
+                        platform::set_drag_active(false);
+                    }
                     return Err(error);
                 }
             };
             let result = if last_hover_update().is_some_and(|update| update.window_id == window_id)
             {
-                apply_mac_drag_position(&app, window_id, frame, restored)
+                apply_mac_drag_position(&app, window_id, frame, restored, Some(session.drag_token))
             } else {
                 // The panel may already have been hidden or its target
                 // replaced. Restore the preference/session without queueing a
                 // stale AppKit move that could show it again.
                 Ok(restored)
             };
-            let _ = crate::hover_core::finish_hover_tab_drag(window_id);
-            platform::set_drag_active(false);
+            let _ =
+                crate::hover_core::finish_hover_tab_drag_for_token(window_id, session.drag_token);
+            if !crate::hover_core::any_hover_tab_drag_active() {
+                platform::set_drag_active(false);
+            }
             result.map(|_| restored)
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn reset_mac_drag_state_serialized(restore: bool) {
+    let _drag_guard = MAC_DRAG_COMMAND_LOCK.lock_unpoisoned();
+    platform::reset_drag_state(restore);
 }
 
 /// Room/source teardown must cancel an in-flight placement before the target
 /// is retired. This is a lifecycle hook, not a user-visible command.
 pub(crate) fn cancel_drag_for_lifecycle() {
     #[cfg(target_os = "macos")]
-    platform::reset_drag_state(true);
+    reset_mac_drag_state_serialized(true);
     #[cfg(target_os = "windows")]
     crate::windows_hover::cancel_drag_for_lifecycle();
 }
@@ -1488,10 +1676,12 @@ pub(crate) mod platform {
     pub use crate::hover_core::cursor_over_tab;
     pub(crate) use crate::hover_core::{
         current_hover_presentation, cursor_in_hover_tab_bridge,
-        hold_hover_tab_through_transient_miss, hover_hit_test_decision,
-        hover_tab_needs_reorder, hover_tab_presentation, hover_tab_presentation_with_offset,
-        is_own_chrome_title, same_hit, HoverHitTestDecision, HoverStackEntry, HoverTabAttachment,
-        HoverTabPresentation, HoverTabRect, HoverWindowSnapshot, MonitorBounds,
+        hold_hover_tab_through_transient_miss, hover_hit_test_decision, hover_tab_needs_reorder,
+        hover_tab_position_for_side_offset, hover_tab_presentation,
+        hover_tab_presentation_with_offset, hover_tab_presentation_with_position,
+        hover_tab_presentation_with_side_offset, hover_tab_side_offset, is_own_chrome_title,
+        same_hit, HoverHitTestDecision, HoverStackEntry, HoverTabAttachment, HoverTabPosition,
+        HoverTabPresentation, HoverTabRect, HoverTabSide, HoverWindowSnapshot, MonitorBounds,
         HOVER_TAB_BRIDGE_TOP_PADDING, HOVER_TAB_BRIDGE_WINDOW_OVERLAP, HOVER_TAB_CURSOR_SLOP_X,
         HOVER_TAB_CURSOR_SLOP_Y, HOVER_TAB_HIDE_GRACE_TICKS, ORDER_REASSERT_TICKS,
     };
@@ -1516,15 +1706,22 @@ pub(crate) mod platform {
         DRAG_ACTIVE.store(active, std::sync::atomic::Ordering::Release);
     }
 
+    pub(super) fn drag_is_active() -> bool {
+        DRAG_ACTIVE.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(super) fn reset_drag_state(
         restore: bool,
     ) -> Option<crate::hover_core::HoverTabDragSession> {
+        // Invalidate queued AppKit placement before releasing the drag token;
+        // otherwise a stale main-thread closure can still reveal/move the tab
+        // after lifecycle cancellation has restored the preview.
+        crate::hover_core::begin_hover_tab_presentation();
         let session = crate::hover_core::clear_hover_tab_drag();
         if restore {
             if let Some(session) = session {
-                let _ = crate::share_priority::preview_hover_tab_vertical_offset(
-                    session.original_offset,
-                );
+                let _ =
+                    crate::share_priority::preview_hover_tab_position(session.original_position);
             }
         }
         set_drag_active(false);
@@ -1758,8 +1955,18 @@ pub(crate) mod platform {
             if !same_hit(&hit, &last) {
                 match hit {
                     Some((frame, window_id)) => {
-                        let presentation = tab_position(app, &frame, window_id);
-                        crate::hover_tab::position_tab(app, presentation);
+                        let Some(presentation) = tab_position(app, &frame, window_id) else {
+                            log::warn!(
+                                "hover_tab: no monitor work area for window {window_id} -- hiding tab"
+                            );
+                            hide_tab(app);
+                            last = None;
+                            tab_rect = None;
+                            missed_tab_bridge_ticks = 0;
+                            shown = false;
+                            continue;
+                        };
+                        let generation = crate::hover_tab::position_tab(app, presentation);
                         order_hover_tab_above(app, window_id);
                         order_poll_tick = 0;
                         tab_rect = Some(presentation.rect);
@@ -1775,15 +1982,30 @@ pub(crate) mod platform {
                         let payload = super::HoverTabUpdate {
                             window_id,
                             frame,
+                            source_owner_pid: crate::platform::cg::owner_pid_for_window_id(
+                                window_id,
+                            )
+                            .and_then(|pid| u32::try_from(pid).ok())
+                            .filter(|pid| *pid > 0),
                             tab_x: presentation.rect.x,
                             tab_y: presentation.rect.y,
+                            perimeter_position: presentation.position,
+                            side: presentation.side,
                             attachment: presentation.attachment,
-                            vertical_offset:
-                                crate::share_priority::current_hover_tab_vertical_offset(),
+                            vertical_offset: crate::hover_core::hover_tab_side_offset(
+                                presentation.position,
+                            )
+                            .1,
                             shared: super::is_shared(app, window_id),
                             display_like: false,
+                            presentation_generation: generation,
                         };
-                        super::set_last_hover_update(Some(payload.clone()));
+                        if !crate::hover_core::set_last_hover_update_if_generation(
+                            Some(payload.clone()),
+                            generation,
+                        ) {
+                            continue;
+                        }
                         // ROOT CAUSE OF ISSUE #22 -- this MUST be a global
                         // `emit`, not `emit_to(HOVER_TAB_LABEL, ...)`.
                         // Verified in tauri 2.11's own source
@@ -2181,10 +2403,11 @@ pub(crate) mod platform {
         }
     }
 
-    fn hide_tab(app: &tauri::AppHandle) {
+    pub(super) fn hide_tab(app: &tauri::AppHandle) {
         // A hidden source is a cancellation boundary; do not commit a
-        // previewed position after the target has disappeared.
-        reset_drag_state(true);
+        // previewed position after the target has disappeared. Serialize it
+        // with command phases so an older AppKit move cannot win afterward.
+        super::reset_mac_drag_state_serialized(true);
         super::set_last_hover_update(None);
         crate::hover_tab::hide_tab_window(app);
         // Global `emit` -- same issue-#22 root cause as `hover-tab-update`
@@ -2193,17 +2416,19 @@ pub(crate) mod platform {
     }
 
     /// Compute the actual native panel rectangle in logical points. Every
-    /// target uses the same fixed right-edge square and shared offset.
+    /// target uses the same fixed 40x40 square and shared perimeter position.
+    /// Missing or invalid work-area data is a hard failure: an infinite
+    /// fallback would let a stale presentation bypass the fail-closed hide.
     pub(super) fn tab_position(
         app: &tauri::AppHandle,
         frame: &WindowFrame,
         window_id: u32,
-    ) -> HoverTabPresentation {
-        tab_position_with_offset(
+    ) -> Option<HoverTabPresentation> {
+        tab_position_with_position(
             app,
             frame,
             window_id,
-            crate::share_priority::current_hover_tab_vertical_offset(),
+            crate::share_priority::current_hover_tab_position(),
         )
     }
 
@@ -2212,52 +2437,96 @@ pub(crate) mod platform {
         frame: &WindowFrame,
         window_id: u32,
         vertical_offset: f64,
-    ) -> HoverTabPresentation {
-        let monitor = get_monitor_with_cursor(app);
-        let bounds = monitor
-            .as_ref()
-            .map(|m| {
-                let scale = m.scale_factor();
-                // Tauri's monitor work_area is backed by AppKit's
-                // NSScreen.visibleFrame on macOS, excluding the menu bar and
-                // Dock. Keep source-relative Top/Bottom inside that usable
-                // rectangle instead of the full display frame.
-                let work = m.work_area();
-                let pos = work.position;
-                let size = work.size;
-                MonitorBounds::new(
-                    pos.x as f64 / scale,
-                    pos.y as f64 / scale,
-                    (pos.x as f64 + size.width as f64) / scale,
-                    (pos.y as f64 + size.height as f64) / scale,
-                )
-            })
-            .unwrap_or(MonitorBounds::new(
-                f64::NEG_INFINITY,
-                0.0,
-                f64::INFINITY,
-                f64::INFINITY,
-            ));
-        hover_tab_presentation_with_offset(window_id, *frame, bounds, vertical_offset)
+    ) -> Option<HoverTabPresentation> {
+        tab_position_with_position(
+            app,
+            frame,
+            window_id,
+            super::hover_tab_position_for_side_offset(
+                super::DEFAULT_HOVER_TAB_SIDE,
+                vertical_offset,
+            ),
+        )
+    }
+
+    pub(super) fn tab_position_with_side_offset(
+        app: &tauri::AppHandle,
+        frame: &WindowFrame,
+        window_id: u32,
+        side: HoverTabSide,
+        vertical_offset: f64,
+    ) -> Option<HoverTabPresentation> {
+        tab_position_with_position(
+            app,
+            frame,
+            window_id,
+            super::hover_tab_position_for_side_offset(side, vertical_offset),
+        )
+    }
+
+    pub(super) fn tab_position_with_position(
+        app: &tauri::AppHandle,
+        frame: &WindowFrame,
+        window_id: u32,
+        position: HoverTabPosition,
+    ) -> Option<HoverTabPresentation> {
+        if !crate::hover_core::valid_hover_tab_frame(*frame) {
+            return None;
+        }
+        let monitor = get_monitor_with_cursor(app)?;
+        let scale = monitor.scale_factor();
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        // Tauri's monitor work_area is backed by AppKit's
+        // NSScreen.visibleFrame on macOS, excluding the menu bar and Dock.
+        // Keep the continuous perimeter inside that usable rectangle instead
+        // of using an unbounded fallback when monitor data is unavailable.
+        let work = monitor.work_area();
+        let pos = work.position;
+        let size = work.size;
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let bounds = MonitorBounds::new(
+            pos.x as f64 / scale,
+            pos.y as f64 / scale,
+            (pos.x as f64 + size.width as f64) / scale,
+            (pos.y as f64 + size.height as f64) / scale,
+        );
+        if !bounds.left.is_finite()
+            || !bounds.top.is_finite()
+            || !bounds.right.is_finite()
+            || !bounds.bottom.is_finite()
+            || bounds.right <= bounds.left
+            || bounds.bottom <= bounds.top
+        {
+            return None;
+        }
+        Some(super::hover_tab_presentation_with_position(
+            window_id, *frame, bounds, position,
+        ))
     }
 
     /// Find the Tauri `Monitor` containing the cursor's current position.
     /// Own minimal equivalent of takt's `overlay::get_monitor_with_cursor`.
     pub fn get_monitor_with_cursor(app: &tauri::AppHandle) -> Option<tauri::Monitor> {
         let (cx, cy) = get_cursor_position()?;
-        if let Ok(monitors) = app.available_monitors() {
-            for monitor in monitors {
-                let scale = monitor.scale_factor();
-                let mx = monitor.position().x as f64 / scale;
-                let my = monitor.position().y as f64 / scale;
-                let mw = monitor.size().width as f64 / scale;
-                let mh = monitor.size().height as f64 / scale;
-                if cx >= mx && cx < mx + mw && cy >= my && cy < my + mh {
-                    return Some(monitor);
-                }
+        let monitors = app.available_monitors().ok()?;
+        for monitor in monitors {
+            let scale = monitor.scale_factor();
+            if !scale.is_finite() || scale <= 0.0 {
+                continue;
+            }
+            let mx = monitor.position().x as f64 / scale;
+            let my = monitor.position().y as f64 / scale;
+            let mw = monitor.size().width as f64 / scale;
+            let mh = monitor.size().height as f64 / scale;
+            if mw > 0.0 && mh > 0.0 && cx >= mx && cx < mx + mw && cy >= my && cy < my + mh {
+                return Some(monitor);
             }
         }
-        app.primary_monitor().ok().flatten()
+        None
     }
 }
 
@@ -2297,10 +2566,20 @@ static HOVER_TAB_TRANSPARENCY_APPLIED: std::sync::atomic::AtomicBool =
 /// size is applied before the position so a stale queued move cannot paint at
 /// the wrong geometry.
 #[cfg(target_os = "macos")]
-fn position_tab(app: &AppHandle, presentation: HoverTabPresentation) {
+fn position_tab(app: &AppHandle, presentation: HoverTabPresentation) -> u64 {
+    let generation = crate::hover_core::begin_hover_tab_presentation();
+    position_tab_with_generation(app, presentation, generation);
+    generation
+}
+
+#[cfg(target_os = "macos")]
+fn position_tab_with_generation(
+    app: &AppHandle,
+    presentation: HoverTabPresentation,
+    generation: u64,
+) {
     use std::sync::atomic::Ordering;
     use tauri::Manager;
-    let generation = crate::hover_core::begin_hover_tab_presentation();
     let x = presentation.rect.x;
     let y = presentation.rect.y;
     if let Some(w) = app.get_webview_window(HOVER_TAB_LABEL) {
@@ -2318,11 +2597,56 @@ fn position_tab(app: &AppHandle, presentation: HoverTabPresentation) {
                     HOVER_TAB_TRANSPARENCY_APPLIED.store(true, Ordering::Relaxed);
                 }
                 refresh_hover_tab_layout(&w);
-                show_hover_tab_panel_if_hidden(&w);
+                if let Err(error) = show_hover_tab_panel_if_hidden(&w) {
+                    log::warn!("hover_tab: failed to show native panel: {error}");
+                    return;
+                }
                 refresh_hover_tab_layout(&w);
             },
         );
     }
+}
+
+/// Drag commands cannot commit a position until the AppKit turn has applied
+/// the native frame. Unlike the follower's fire-and-forget path, this helper
+/// reports dispatch and resize/move failures to the command for rollback.
+#[cfg(target_os = "macos")]
+fn position_tab_with_generation_sync(
+    app: &AppHandle,
+    presentation: HoverTabPresentation,
+    generation: u64,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc::sync_channel;
+    use std::time::Duration;
+    use tauri::Manager;
+
+    let window = app
+        .get_webview_window(HOVER_TAB_LABEL)
+        .ok_or_else(|| "hover-tab native panel is unavailable".to_string())?;
+    let (result_tx, result_rx) = sync_channel(1);
+    app.run_on_main_thread(move || {
+        let result = if crate::hover_core::hover_tab_presentation_generation() != generation {
+            Err("hover-tab presentation changed during drag".to_string())
+        } else {
+            apply_geometry(&window, presentation.rect).and_then(|()| {
+                if !HOVER_TAB_TRANSPARENCY_APPLIED.load(Ordering::Relaxed)
+                    && crate::webview_transparency::force_window_transparent(&window)
+                {
+                    HOVER_TAB_TRANSPARENCY_APPLIED.store(true, Ordering::Relaxed);
+                }
+                refresh_hover_tab_layout(&window);
+                show_hover_tab_panel_if_hidden(&window)?;
+                refresh_hover_tab_layout(&window);
+                Ok(())
+            })
+        };
+        let _ = result_tx.send(result);
+    })
+    .map_err(|error| format!("hover-tab native dispatch failed: {error}"))?;
+    result_rx
+        .recv_timeout(Duration::from_secs(1))
+        .map_err(|error| format!("hover-tab native placement timed out: {error}"))?
 }
 
 /// The `w.show()` suppression itself (#680 Rank 3), pulled out of
@@ -2331,16 +2655,17 @@ fn position_tab(app: &AppHandle, presentation: HoverTabPresentation) {
 /// call counts. `tauri::WebviewWindow` (below) is a pure passthrough, so
 /// production behavior is unchanged.
 #[cfg(target_os = "macos")]
-fn show_hover_tab_panel_if_hidden<W: HoverTabPanelHandle>(window: &W) {
+fn show_hover_tab_panel_if_hidden<W: HoverTabPanelHandle>(window: &W) -> Result<(), String> {
     if !window.hover_tab_panel_is_visible() {
-        window.hover_tab_panel_show();
+        window.hover_tab_panel_show()?;
     }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 trait HoverTabPanelHandle {
     fn hover_tab_panel_is_visible(&self) -> bool;
-    fn hover_tab_panel_show(&self);
+    fn hover_tab_panel_show(&self) -> Result<(), String>;
 }
 
 #[cfg(target_os = "macos")]
@@ -2349,8 +2674,8 @@ impl HoverTabPanelHandle for tauri::WebviewWindow {
         tauri::WebviewWindow::is_visible(self).unwrap_or(false)
     }
 
-    fn hover_tab_panel_show(&self) {
-        let _ = tauri::WebviewWindow::show(self);
+    fn hover_tab_panel_show(&self) -> Result<(), String> {
+        tauri::WebviewWindow::show(self).map_err(|error| error.to_string())
     }
 }
 
@@ -2451,10 +2776,10 @@ mod tests {
     // The compact tab dimensions live in `hover_core`, not in `hover_tab`'s
     // own `platform` module -- importing them from `platform` here does not
     // compile.
-    use super::{HOVER_TAB_COMPACT_HEIGHT, HOVER_TAB_COMPACT_WIDTH};
     #[cfg(target_os = "macos")]
     use super::HoverTabPanelHandle;
     use super::WindowFrame;
+    use super::{HOVER_TAB_COMPACT_HEIGHT, HOVER_TAB_COMPACT_WIDTH};
 
     #[test]
     fn lead_offset_is_proportional_capped_and_zero_at_rest() {
@@ -3742,9 +4067,10 @@ mod tests {
             self.visible.get()
         }
 
-        fn hover_tab_panel_show(&self) {
+        fn hover_tab_panel_show(&self) -> Result<(), String> {
             self.show_calls.set(self.show_calls.get() + 1);
             self.visible.set(true);
+            Ok(())
         }
     }
 

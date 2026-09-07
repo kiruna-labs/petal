@@ -17,11 +17,13 @@
   -ExerciseShare -LaunchSacrificial, the smoke checks Share->Stop->Share->Stop
   reuse separately in ordinary/outside and maximized/inset placement and
   selects a quality priority through the native menu. With -ExercisePosition,
-  it selects a Top/Center/Bottom placement preset and verifies the persisted
-  JSON offset plus resulting native geometry. With -ExerciseFollow, it first
-  proves the native tab-edge detector goes red after a deliberate tab offset,
-  then samples the source, Petal border, and tab every 8ms during continuous
-  movement. With -ExerciseOcclusion, it creates a private normal-band
+  it selects Along top/right/bottom/left border placement presets and verifies
+  each persisted centered perimeter position plus resulting native geometry.
+  With -ExerciseFollow, it first proves the native tab-edge detector goes red
+  after a deliberate tab offset, then samples the source, Petal border, and tab
+  every 8ms during continuous movement. Placement is loaded once per
+  observation; follow samples use the cached canonical perimeter value rather
+  than reading preferences from disk. With -ExerciseOcclusion, it creates a private normal-band
   occluder over the tab while the cursor stays on a visible source region,
   verifies occluder -> tab -> source order, and restores the tab. Shell-
   surface negative controls remain available.
@@ -814,23 +816,148 @@ function Add-Observation([string]$Name, $TargetFact, $TabFact, [hashtable]$Check
   })
 }
 
+function Normalize-HoverTabSide([object]$Value) {
+  switch ([string]$Value) {
+    'top' { return 'top' }
+    'right' { return 'right' }
+    'bottom' { return 'bottom' }
+    'left' { return 'left' }
+    default { return 'right' }
+  }
+}
+
+function Normalize-HoverTabPosition([object]$Value) {
+  try { $position = [double]$Value } catch { return 0.3125 }
+  if ([double]::IsNaN($position) -or [double]::IsInfinity($position)) { return 0.3125 }
+  $wrapped = $position % 1.0
+  if ($wrapped -lt 0) { $wrapped += 1.0 }
+  return $wrapped
+}
+
+function Get-HoverTabPositionForSide([string]$Side, [double]$Offset = 0.5) {
+  $side = Normalize-HoverTabSide $Side
+  $offset = if ([double]::IsNaN($Offset) -or [double]::IsInfinity($Offset)) { 0.5 } else { [Math]::Max(0.0, [Math]::Min(1.0, $Offset)) }
+  $segment = switch ($side) {
+    'top' { 0 }
+    'right' { 2 }
+    'bottom' { 4 }
+    'left' { 6 }
+  }
+  $local = if ($side -eq 'bottom' -or $side -eq 'left') { 1.0 - $offset } else { $offset }
+  return Normalize-HoverTabPosition (($segment + $local) / 8.0)
+}
+
+function Get-ExpectedPerimeterFrame(
+  $Target,
+  $Tab,
+  [double]$Position = 0.3125,
+  $WorkArea = $null
+) {
+  if ($null -eq $Target -or $null -eq $Tab) { return $null }
+  $position = Normalize-HoverTabPosition $Position
+  $tabWidth = Expected-Pixels 40 $Tab
+  $tabHeight = $tabWidth
+  $halfWidth = $tabWidth / 2.0
+  $halfHeight = $tabHeight / 2.0
+  $left = [double]$Target.x
+  $top = [double]$Target.y
+  $right = $left + [double]$Target.width
+  $bottom = $top + [double]$Target.height
+  $horizontalTravel = [Math]::Max(0.0, [double]$Target.width - $tabWidth)
+  $verticalTravel = [Math]::Max(0.0, [double]$Target.height - $tabHeight)
+  $scaled = $position * 8.0
+  $segment = [Math]::Min(7, [int][Math]::Floor($scaled))
+  $local = [Math]::Max(0.0, [Math]::Min(1.0, $scaled - $segment))
+  $pi = [Math]::PI
+  switch ($segment) {
+    0 { $centerX = $left + $halfWidth + $horizontalTravel * $local; $centerY = $top - $halfHeight }
+    1 {
+      $angle = -$pi / 2.0 + $local * $pi / 2.0
+      $centerX = $right - $halfWidth + $tabWidth * [Math]::Cos($angle)
+      $centerY = $top + $halfHeight + $tabHeight * [Math]::Sin($angle)
+    }
+    2 { $centerX = $right + $halfWidth; $centerY = $top + $halfHeight + $verticalTravel * $local }
+    3 {
+      $angle = $local * $pi / 2.0
+      $centerX = $right - $halfWidth + $tabWidth * [Math]::Cos($angle)
+      $centerY = $bottom - $halfHeight + $tabHeight * [Math]::Sin($angle)
+    }
+    4 { $centerX = $right - $halfWidth - $horizontalTravel * $local; $centerY = $bottom + $halfHeight }
+    5 {
+      $angle = $pi / 2.0 + $local * $pi / 2.0
+      $centerX = $left + $halfWidth + $tabWidth * [Math]::Cos($angle)
+      $centerY = $bottom - $halfHeight + $tabHeight * [Math]::Sin($angle)
+    }
+    6 { $centerX = $left - $halfWidth; $centerY = $bottom - $halfHeight - $verticalTravel * $local }
+    default {
+      $angle = $pi + $local * $pi / 2.0
+      $centerX = $left + $halfWidth + $tabWidth * [Math]::Cos($angle)
+      $centerY = $top + $halfHeight + $tabHeight * [Math]::Sin($angle)
+    }
+  }
+  $rawX = $centerX - $halfWidth
+  $rawY = $centerY - $halfHeight
+  if ($null -ne $WorkArea) {
+    $rawX = [Math]::Max([double]$WorkArea.Left, [Math]::Min($rawX, [double]$WorkArea.Right - $tabWidth))
+    $rawY = [Math]::Max([double]$WorkArea.Top, [Math]::Min($rawY, [double]$WorkArea.Bottom - $tabHeight))
+  }
+  return [pscustomobject]@{
+    x = [int][Math]::Round($rawX)
+    y = [int][Math]::Round($rawY)
+    width = $tabWidth
+    height = $tabHeight
+    position = $position
+  }
+}
+
+$script:hoverTabPlacementCache = $null
+
+function Get-CurrentHoverTabPlacement([switch]$Refresh) {
+  if (-not $Refresh -and $null -ne $script:hoverTabPlacementCache) {
+    return $script:hoverTabPlacementCache
+  }
+  $preferences = Read-SharePreferences
+  $sideProperty = if ($null -eq $preferences) { $null } else { $preferences.PSObject.Properties['hoverTabSide'] }
+  $offsetProperty = if ($null -eq $preferences) { $null } else { $preferences.PSObject.Properties['hoverTabVerticalOffset'] }
+  $positionProperty = if ($null -eq $preferences) { $null } else { $preferences.PSObject.Properties['hoverTabPerimeterPosition'] }
+  $side = if ($null -eq $sideProperty) { 'right' } else { Normalize-HoverTabSide $sideProperty.Value }
+  $offset = if ($null -eq $offsetProperty) { 0.5 } else { [double]$offsetProperty.Value }
+  $position = if ($null -ne $positionProperty) {
+    Normalize-HoverTabPosition $positionProperty.Value
+  } else {
+    Get-HoverTabPositionForSide $side $offset
+  }
+  $script:hoverTabPlacementCache = [pscustomobject]@{ position = $position }
+  return $script:hoverTabPlacementCache
+}
+
+function Get-FactHwnd($Fact) {
+  if ($null -eq $Fact -or [string]::IsNullOrWhiteSpace([string]$Fact.hwnd)) { return [IntPtr]::Zero }
+  try {
+    $text = [string]$Fact.hwnd
+    if ($text.StartsWith('0x', [StringComparison]::OrdinalIgnoreCase)) { $text = $text.Substring(2) }
+    return [IntPtr]([Convert]::ToInt64($text, 16))
+  } catch {
+    return [IntPtr]::Zero
+  }
+}
+
 function Check-UnifiedGeometry($Target, $Tab, [string]$Name) {
   $errors = [System.Collections.Generic.List[string]]::new()
-  if ($null -eq $Tab) { $errors.Add("${Name}: Hover Tab is not visible") }
+  if ($null -eq $Target) { $errors.Add("${Name}: target is not visible") }
+  elseif ($null -eq $Tab) { $errors.Add("${Name}: Hover Tab is not visible") }
   else {
+    $placement = Get-CurrentHoverTabPlacement -Refresh
+    $workArea = Get-WorkingArea (Get-FactHwnd $Target)
+    $expected = Get-ExpectedPerimeterFrame $Target $Tab $placement.position $workArea
     $expectedSize = Expected-Pixels 40 $Tab
     if ($Tab.width -ne $expectedSize -or $Tab.height -ne $expectedSize) {
-      $errors.Add("${Name}: expected ${expectedSize}x${expectedSize} right-center square at dpi $($Tab.dpi), observed $($Tab.width)x$($Tab.height)")
+      $errors.Add("${Name}: expected ${expectedSize}x${expectedSize} perimeter square at dpi $($Tab.dpi), observed $($Tab.width)x$($Tab.height)")
     }
-    $expectedCenterY = $Target.y + [int]($Target.height / 2)
-    $actualCenterY = $Tab.y + [int]($Tab.height / 2)
-    $centerTolerance = [Math]::Max(3, [int][Math]::Ceiling(3 * $Tab.dpi / 96.0))
-    if ([Math]::Abs($actualCenterY - $expectedCenterY) -gt $centerTolerance) {
-      $errors.Add("${Name}: vertical center moved by $([Math]::Abs($actualCenterY - $expectedCenterY))px")
-    }
-    $rightAligned = $Tab.x -ge $Target.x + $Target.width - $expectedSize - $centerTolerance -and $Tab.x -le $Target.x + $Target.width + $centerTolerance
-    if (-not $rightAligned) {
-      $errors.Add("${Name}: tab is not attached to the target's right edge")
+    $tolerance = [Math]::Max(3, [int][Math]::Ceiling(3 * $Tab.dpi / 96.0))
+    $edgeError = Get-FrameEdgeError $Tab $expected
+    if ($edgeError -gt $tolerance) {
+      $errors.Add("${Name}: tab is not at canonical perimeter position $($placement.position) (error ${edgeError}px)")
     }
   }
   return $errors
@@ -838,34 +965,24 @@ function Check-UnifiedGeometry($Target, $Tab, [string]$Name) {
 
 function Check-TabAttachment($Target, $Tab, [string]$ExpectedAttachment, [string]$Name) {
   $errors = [System.Collections.Generic.List[string]]::new()
-  if ($null -eq $Tab) { $errors.Add("${Name}: Hover Tab is not visible") }
+  if ($null -eq $Target) { $errors.Add("${Name}: target is not visible") }
+  elseif ($null -eq $Tab) { $errors.Add("${Name}: Hover Tab is not visible") }
   else {
-    $targetRight = $Target.x + $Target.width
-    $tolerance = [Math]::Max(3, [int][Math]::Ceiling(3 * $Tab.dpi / 96.0))
-    if ($ExpectedAttachment -eq 'outside') {
-      $offset = [Math]::Abs($Tab.x - $targetRight)
-      if ($offset -gt $tolerance) {
-        $errors.Add("${Name}: expected outside attachment at target right edge, observed tab-left offset ${offset}px")
-      }
-    } elseif ($ExpectedAttachment -eq 'inset') {
-      $offset = [Math]::Abs(($Tab.x + $Tab.width) - $targetRight)
-      if ($offset -gt $tolerance) {
-        $errors.Add("${Name}: expected inset attachment at target right edge, observed tab-right offset ${offset}px")
-      }
-    } else {
-      $errors.Add("${Name}: unsupported expected attachment '$ExpectedAttachment'")
+    $actual = Get-TabAttachment $Target $Tab
+    if ($actual -ne $ExpectedAttachment) {
+      $errors.Add("${Name}: expected $ExpectedAttachment perimeter attachment, observed $actual")
     }
   }
   return $errors
 }
 
 function Get-TabAttachment($Target, $Tab) {
-  if ($null -eq $Tab) { return 'unknown' }
-  $targetRight = $Target.x + $Target.width
-  $tolerance = [Math]::Max(3, [int][Math]::Ceiling(3 * $Tab.dpi / 96.0))
-  if ([Math]::Abs($Tab.x - $targetRight) -le $tolerance) { return 'outside' }
-  if ([Math]::Abs(($Tab.x + $Tab.width) - $targetRight) -le $tolerance) { return 'inset' }
-  return 'unknown'
+  if ($null -eq $Target -or $null -eq $Tab) { return 'unknown' }
+  $overlaps = $Tab.x -lt ($Target.x + $Target.width) -and
+    ($Tab.x + $Tab.width) -gt $Target.x -and
+    $Tab.y -lt ($Target.y + $Target.height) -and
+    ($Tab.y + $Tab.height) -gt $Target.y
+  return if ($overlaps) { 'inset' } else { 'outside' }
 }
 
 function Wait-ForNativeMenu([string]$Description) {
@@ -916,17 +1033,10 @@ function Select-NativeMenuEntry([int]$DownCount) {
   [PetalHoverTabSmoke]::PressVirtualKey(0x0D) | Out-Null # Enter
 }
 
-function Get-PositionGeometryError($Target, $Tab, [double]$Offset, $WorkArea = $null) {
+function Get-PositionGeometryError($Target, $Tab, [double]$Position, $WorkArea = $null) {
   if ($null -eq $Target -or $null -eq $Tab) { return [double]::PositiveInfinity }
-  $tabSize = Expected-Pixels 40 $Tab
-  $travel = [Math]::Max(0, $Target.height - $tabSize)
-  $expectedY = [int][Math]::Round($Target.y + $travel * $Offset)
-  # The native projection is source-relative, then clamped to rcWork. Match
-  # that second step so Bottom remains a valid expectation with a bottom taskbar.
-  if ($null -ne $WorkArea) {
-    $expectedY = [int][Math]::Max([int]$WorkArea.Top, [Math]::Min($expectedY, [int]$WorkArea.Bottom - $tabSize))
-  }
-  return [double][Math]::Abs($Tab.y - $expectedY)
+  $expected = Get-ExpectedPerimeterFrame $Target $Tab $Position $WorkArea
+  return Get-FrameEdgeError $Tab $expected
 }
 
 function Invoke-NativeQualityPreset($Target) {
@@ -962,52 +1072,58 @@ function Invoke-NativeQualityPreset($Target) {
 
 function Invoke-NativePositionPreset($Target, [IntPtr]$TargetHwnd, [string]$Preset = 'bottom') {
   $errors = [System.Collections.Generic.List[string]]::new()
-  $offsets = @{ top = 0.0; center = 0.5; bottom = 1.0 }
-  $downCounts = @{ top = 4; center = 5; bottom = 6 }
-  $offset = [double]$offsets[$Preset]
+  $side = Normalize-HoverTabSide $Preset
+  $downCounts = @{ top = 4; right = 5; bottom = 6; left = 7 }
+  $expectedPosition = Get-HoverTabPositionForSide $side 0.5
   $tabHwnd = [PetalHoverTabSmoke]::FindVisibleTitle('Hover Tab')
   $tab = Get-Fact $tabHwnd
   if ($null -eq $tab) {
-    [void]$errors.Add("native-position-preset: Hover Tab was not visible for '$Preset'")
+    [void]$errors.Add("native-position-preset: Hover Tab was not visible for '$side'")
   } else {
     $center = Center-Fact $tab
     if (-not [PetalHoverTabSmoke]::RightClickAt($center[0], $center[1])) {
-      [void]$errors.Add("native-position-preset: could not open the native menu for '$Preset'")
+      [void]$errors.Add("native-position-preset: could not open the native menu for '$side'")
     } else {
       try {
-        [void](Wait-ForNativeMenu "position '$Preset' native menu")
-        Select-NativeMenuEntry ([int]$downCounts[$Preset])
+        [void](Wait-ForNativeMenu "position '$side' native menu")
+        Select-NativeMenuEntry ([int]$downCounts[$side])
         Start-Sleep -Milliseconds 120
-        [void](Wait-ForSharePreference { param($value) [Math]::Abs([double]$value.hoverTabVerticalOffset - $offset) -lt 0.001 } "hover-tab '$Preset' position")
+        [void](Wait-ForSharePreference {
+          param($value)
+          $savedProperty = $value.PSObject.Properties['hoverTabPerimeterPosition']
+          $savedProperty -ne $null -and
+            [Math]::Abs((Normalize-HoverTabPosition $savedProperty.Value) - $expectedPosition) -lt 0.000001
+        } "hover-tab '$side' position")
       } catch {
         [void]$errors.Add("native-position-preset: $($_.Exception.Message)")
       }
     }
   }
   $preferences = Read-SharePreferences
+  $script:hoverTabPlacementCache = $null
   $updatedTarget = Get-Fact $TargetHwnd
   $updatedTab = Get-Fact $tabHwnd
   $workArea = Get-WorkingArea $TargetHwnd
   if ($null -ne $updatedTarget -and $null -ne $updatedTab) {
-    $geometryError = Get-PositionGeometryError $updatedTarget $updatedTab $offset $workArea
+    $geometryError = Get-PositionGeometryError $updatedTarget $updatedTab $expectedPosition $workArea
     $tolerance = [Math]::Max(3, [int][Math]::Ceiling(3 * $updatedTab.dpi / 96.0))
     if ($geometryError -gt $tolerance) {
-      [void]$errors.Add("native-position-preset: '$Preset' geometry error ${geometryError}px exceeded ${tolerance}px")
+      [void]$errors.Add("native-position-preset: '$side' perimeter geometry error ${geometryError}px exceeded ${tolerance}px")
     }
-    $workAreaErrors = @(Check-WorkAreaContainment $updatedTab (Get-WorkingArea $TargetHwnd) "native-position-preset '$Preset'")
+    $workAreaErrors = @(Check-WorkAreaContainment $updatedTab (Get-WorkingArea $TargetHwnd) "native-position-preset '$side'")
     foreach ($errorText in $workAreaErrors) { [void]$errors.Add([string]$errorText) }
   } else {
-    [void]$errors.Add("native-position-preset: target or tab disappeared after '$Preset'")
+    [void]$errors.Add("native-position-preset: target or tab disappeared after '$side'")
   }
-  Add-Observation "native-position-preset-$Preset" $updatedTarget $updatedTab @{
-    selected = $Preset
-    expectedOffset = $offset
-    persistedOffset = if ($null -eq $preferences) { $null } else { $preferences.hoverTabVerticalOffset }
+  Add-Observation "native-position-preset-$side" $updatedTarget $updatedTab @{
+    selected = $side
+    expectedPosition = $expectedPosition
+    persistedPosition = if ($null -eq $preferences -or $null -eq $preferences.PSObject.Properties['hoverTabPerimeterPosition']) { $null } else { Normalize-HoverTabPosition $preferences.hoverTabPerimeterPosition }
     preferencePath = Get-SharePreferencePath
-    geometryErrorPx = if ($null -eq $updatedTarget -or $null -eq $updatedTab) { $null } else { [math]::Round((Get-PositionGeometryError $updatedTarget $updatedTab $offset $workArea), 1) }
+    geometryErrorPx = if ($null -eq $updatedTarget -or $null -eq $updatedTab) { $null } else { [math]::Round((Get-PositionGeometryError $updatedTarget $updatedTab $expectedPosition $workArea), 1) }
     errors = @($errors)
   }
-  return [pscustomobject]@{ Target = $updatedTarget; Tab = $updatedTab; Preferences = $preferences; Errors = @($errors) }
+  return [pscustomobject]@{ Target = $updatedTarget; Tab = $updatedTab; Preferences = $preferences; Side = $side; Position = $expectedPosition; Errors = @($errors) }
 }
 
 function Get-ShareLogPath() {
@@ -1072,7 +1188,7 @@ function Invoke-ActiveShareMenuActions($Target, [IntPtr]$TargetHwnd) {
       $center = Center-Fact $tab
       if (-not [PetalHoverTabSmoke]::RightClickAt($center[0], $center[1])) { throw 'could not open Draw menu' }
       [void](Wait-ForNativeMenu 'active Draw menu')
-      Select-NativeMenuEntry 10 # priorities 0-3, positions 4-6, modes 7-8, Debug 9, Draw 10
+      Select-NativeMenuEntry 11 # priorities 0-3, positions 4-7, modes 8-9, Debug 10, Draw 11
       [void](Wait-ForShareLogPattern 'draw request applied.*active=(true|True)' 'Draw-on callback')
       $drawOn = $true
     } catch {
@@ -1084,7 +1200,7 @@ function Invoke-ActiveShareMenuActions($Target, [IntPtr]$TargetHwnd) {
       $center = Center-Fact $tab
       if (-not [PetalHoverTabSmoke]::RightClickAt($center[0], $center[1])) { throw 'could not reopen Draw menu' }
       [void](Wait-ForNativeMenu 'active Draw-off menu')
-      Select-NativeMenuEntry 10
+      Select-NativeMenuEntry 11
       [void](Wait-ForShareLogPattern 'draw request applied.*active=(false|False)' 'Draw-off callback')
       $drawOff = $true
     } catch {
@@ -1096,7 +1212,7 @@ function Invoke-ActiveShareMenuActions($Target, [IntPtr]$TargetHwnd) {
       $center = Center-Fact $tab
       if (-not [PetalHoverTabSmoke]::RightClickAt($center[0], $center[1])) { throw 'could not open control-mode menu' }
       [void](Wait-ForNativeMenu 'active full-control menu')
-      Select-NativeMenuEntry 8
+      Select-NativeMenuEntry 9
       [void](Wait-ForShareLogPattern 'share control mode changed.*mode=fullControl' 'Full-control callback')
       $controlFull = $true
 
@@ -1104,7 +1220,7 @@ function Invoke-ActiveShareMenuActions($Target, [IntPtr]$TargetHwnd) {
       $center = Center-Fact $tab
       if (-not [PetalHoverTabSmoke]::RightClickAt($center[0], $center[1])) { throw 'could not reopen control-mode menu' }
       [void](Wait-ForNativeMenu 'active cursor-preserving menu')
-      Select-NativeMenuEntry 7
+      Select-NativeMenuEntry 8
       [void](Wait-ForShareLogPattern 'share control mode changed.*mode=cursorPreserving' 'Cursor-preserving callback')
       $controlRestored = $true
     } catch {
@@ -1158,21 +1274,10 @@ function Get-FrameEdgeError($Actual, $Expected) {
 
 function Get-TabEdgeError($Target, $Tab) {
   if ($null -eq $Target -or $null -eq $Tab) { return [double]::PositiveInfinity }
-  $targetRight = $Target.x + $Target.width
-  $expectedSize = Expected-Pixels 40 $Tab
-  $expectedCenterY = $Target.y + [int]($Target.height / 2)
-  $actualCenterY = $Tab.y + [int]($Tab.height / 2)
-  $vertical = [Math]::Abs($actualCenterY - $expectedCenterY)
-  $size = [Math]::Max(
-    [Math]::Abs($Tab.width - $expectedSize),
-    [Math]::Abs($Tab.height - $expectedSize))
-  $outside = [Math]::Max(
-    [Math]::Abs($Tab.x - $targetRight),
-    [Math]::Max($vertical, $size))
-  $inset = [Math]::Max(
-    [Math]::Abs(($Tab.x + $Tab.width) - $targetRight),
-    [Math]::Max($vertical, $size))
-  return [double][Math]::Min($outside, $inset)
+  $current = Get-CurrentHoverTabPlacement
+  $workArea = Get-WorkingArea (Get-FactHwnd $Target)
+  $expected = Get-ExpectedPerimeterFrame $Target $Tab $current.position $workArea
+  return [double](Get-FrameEdgeError $Tab $expected)
 }
 
 function Get-FollowSnapshot([IntPtr]$TargetHwnd) {
@@ -1806,6 +1911,7 @@ $startedSacrificial = $false
 $qualityResult = $null
 $activeActionsResult = $null
 $positionResult = $null
+$positionResults = @()
 $occlusionResult = $null
 try {
   if ($LaunchSacrificial) {
@@ -2003,13 +2109,16 @@ try {
     }
     $target = Get-Fact $targetHwnd
     if ($null -ne $target) {
-      $center = Center-Fact $target
-      [void][PetalHoverTabSmoke]::MoveCursor($center[0], $center[1])
-      Start-Sleep -Milliseconds 180
-      $positionResult = Invoke-NativePositionPreset $target $targetHwnd 'bottom'
-      foreach ($errorText in $positionResult.Errors) { $failures.Add([string]$errorText) }
-      if ($null -ne $positionResult.Target) { $target = $positionResult.Target }
-      if ($null -ne $positionResult.Tab) { $tab = $positionResult.Tab }
+      foreach ($positionSide in @('top', 'right', 'bottom', 'left')) {
+        $center = Center-Fact $target
+        [void][PetalHoverTabSmoke]::MoveCursor($center[0], $center[1])
+        Start-Sleep -Milliseconds 180
+        $positionResult = Invoke-NativePositionPreset $target $targetHwnd $positionSide
+        $positionResults += $positionResult
+        foreach ($errorText in $positionResult.Errors) { $failures.Add([string]$errorText) }
+        if ($null -ne $positionResult.Target) { $target = $positionResult.Target }
+        if ($null -ne $positionResult.Tab) { $tab = $positionResult.Tab }
+      }
     } else {
       $failures.Add('native-position-preset: target disappeared before position exercise')
     }
@@ -2021,9 +2130,9 @@ try {
   $followTabErrors = @($followSamples | Where-Object { $null -ne $_.tabEdgeErrorPx } | ForEach-Object { [double]$_.tabEdgeErrorPx })
   $followBorderErrors = @($followSamples | Where-Object { $null -ne $_.borderEdgeErrorPx } | ForEach-Object { [double]$_.borderEdgeErrorPx })
   $evidence = [pscustomobject]@{
-    schema = 'petal.windows-hover-tab-smoke.v6'
+    schema = 'petal.windows-hover-tab-smoke.v7'
     observedAtUtc = [DateTime]::UtcNow.ToString('o')
-    mode = 'unified-right-edge-rail'
+    mode = 'unified-four-edge-hover-tab'
     petalDevProcessGate = [pscustomobject]@{
       status = 'passed'
       ownedPid = $petalPid
@@ -2034,9 +2143,11 @@ try {
     preferences = [pscustomobject]@{
       path = Get-SharePreferencePath
       priority = if ($null -eq $qualityResult -or $null -eq $qualityResult.Preferences) { $null } else { $qualityResult.Preferences.priority }
-      hoverTabVerticalOffset = if ($null -eq $positionResult -or $null -eq $positionResult.Preferences) { $null } else { $positionResult.Preferences.hoverTabVerticalOffset }
+      hoverTabPerimeterPosition = if ($null -eq $positionResult -or $null -eq $positionResult.Preferences -or $null -eq $positionResult.Preferences.PSObject.Properties['hoverTabPerimeterPosition']) { Normalize-HoverTabPosition (Get-CurrentHoverTabPlacement -Refresh).position } else { Normalize-HoverTabPosition $positionResult.Preferences.hoverTabPerimeterPosition }
       qualityRequested = ($null -ne $qualityResult)
-      positionRequested = ($null -ne $positionResult)
+      positionRequested = ($positionResults.Count -gt 0)
+      positionSidesVerified = @($positionResults | Where-Object { $_.Errors.Count -eq 0 } | ForEach-Object { $_.Side })
+      positionValuesVerified = @($positionResults | Where-Object { $_.Errors.Count -eq 0 } | ForEach-Object { $_.Position })
       activeShareActionsRequested = ($null -ne $activeActionsResult)
       activeShareActionsVerified = ($null -ne $activeActionsResult -and $activeActionsResult.Errors.Count -eq 0)
     }
@@ -2067,7 +2178,7 @@ try {
     Write-Error ("RED/FAIL: unified hover-tab contract has $($failures.Count) failure(s): " + ($failures -join '; '))
     exit 2
   }
-  Write-Output 'PASS: unified right-center hover-tab smoke.'
+  Write-Output 'PASS: unified four-edge hover-tab smoke.'
 } finally {
   if ($startedSacrificial -and -not $KeepSacrificial) {
     [PetalHoverTabSmoke]::StopSacrificialWindow()

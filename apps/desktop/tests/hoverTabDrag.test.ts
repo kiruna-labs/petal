@@ -9,83 +9,129 @@ import {
   cancelHoverTabGesture,
   clearHoverTabPreview,
   createHoverTabPreviewState,
+  createSerializedHoverTabCommandQueue,
+  hoverTabPositionForSide,
   isHoverTabDragging,
   moveHoverTabGesture,
   offerHoverTabPreview,
+  projectHoverTabCenter,
+  projectHoverTabCenterWithSide,
   settleHoverTabPreview,
   takeHoverTabPreview
 } from '../src/lib/hoverTabDrag.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const hoverTabSource = readFileSync(resolve(__dirname, '../src/routes/hover-tab/+page.svelte'), 'utf8');
+const geometryFixture = JSON.parse(
+  readFileSync(resolve(__dirname, 'fixtures/hover-tab-geometry.json'), 'utf8')
+) as {
+  frame: { x: number; y: number; width: number; height: number };
+  cases: Array<{ position: number; center: { x: number; y: number } }>;
+};
+const sourceFrame = geometryFixture.frame;
+const rightTab = { x: 800, y: 330 };
+
+function pointerForCenter(x: number, y: number) {
+  return { x, y };
+}
+
+test('invalid pointer or source frames fail closed instead of teleporting', () => {
+  assert.equal(projectHoverTabCenter({ x: Number.NaN, y: 100 }, sourceFrame), null);
+  assert.equal(projectHoverTabCenter({ x: 100, y: 100 }, { ...sourceFrame, width: 0 }), null);
+  assert.equal(projectHoverTabCenter({ x: 100, y: 100 }, { ...sourceFrame, height: -1 }), null);
+});
 
 test('hover-tab movement below six pixels stays a primary click', () => {
-  const gesture = beginHoverTabGesture(7, 10, 20, 0.5);
-  const moved = moveHoverTabGesture(gesture, 10 + HOVER_TAB_DRAG_THRESHOLD_PX - 0.01, 20, 300);
+  const gesture = beginHoverTabGesture(7, 820, 350, 3 / 8, rightTab.x, rightTab.y, sourceFrame);
+  const moved = moveHoverTabGesture(gesture, 820 + HOVER_TAB_DRAG_THRESHOLD_PX - 0.01, 350);
   assert.equal(moved.started, false);
-  assert.equal(moved.offset, null);
+  assert.equal(moved.position, null);
   assert.equal(isHoverTabDragging(moved.gesture), false);
 });
 
-test('hover-tab movement at the threshold starts a vertical drag and clamps its offset', () => {
-  const gesture = beginHoverTabGesture(7, 10, 20, 0.5);
-  const started = moveHoverTabGesture(gesture, 10, 20 + HOVER_TAB_DRAG_THRESHOLD_PX, 300);
+test('hover-tab movement at the threshold starts a drag and preserves the grab point', () => {
+  const gesture = beginHoverTabGesture(7, 820, 350, 3 / 8, rightTab.x, rightTab.y, sourceFrame);
+  const started = moveHoverTabGesture(gesture, 820, 350 + HOVER_TAB_DRAG_THRESHOLD_PX);
   assert.equal(started.started, true);
   assert.equal(started.gesture.phase, 'dragging');
   assert.equal(isHoverTabDragging(started.gesture), true);
-  assert.ok((started.offset ?? 0) > 0.5);
-
-  const top = moveHoverTabGesture(started.gesture, 10, -1000, 300);
-  const bottom = moveHoverTabGesture(started.gesture, 10, 1000, 300);
-  assert.equal(top.offset, 0);
-  assert.equal(bottom.offset, 1);
+  assert.ok((started.position ?? 0) > 3 / 8);
 });
 
-test('hover-tab drag preserves 1:1 movement when the native surface follows the pointer', () => {
-  const sourceHeight = 300;
-  const tabHeight = 40;
-  const travel = sourceHeight - tabHeight;
-  const pointerStartScreenY = 1000;
-  let screenGesture = beginHoverTabGesture(7, 200, pointerStartScreenY, 0.5);
-  let screenTabDelta = 0;
-
-  for (const pointerDelta of [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]) {
-    const moved = moveHoverTabGesture(
-      screenGesture,
-      200,
-      pointerStartScreenY + pointerDelta,
-      sourceHeight,
-      tabHeight
-    );
-    screenGesture = moved.gesture;
-    screenTabDelta = (moved.offset! - 0.5) * travel;
+test('shared geometry fixture matches the frontend perimeter projection', () => {
+  for (const { position, center } of geometryFixture.cases) {
+    const projected = projectHoverTabCenter(center, sourceFrame);
+    assert.notEqual(projected, null);
+    assert.ok(Math.abs(projected - position) < 0.000001);
   }
-
-  assert.ok(Math.abs(screenTabDelta - 100) < 0.000001);
-
-  // This is the feedback loop caused by clientY: once the native tab moves,
-  // each later local sample loses the tab's own displacement.
-  let localGesture = beginHoverTabGesture(7, 20, 20, 0.5);
-  let localTabDelta = 0;
-  for (const pointerDelta of [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]) {
-    const localPointerY = 20 + pointerDelta - localTabDelta;
-    const moved = moveHoverTabGesture(localGesture, 20, localPointerY, sourceHeight, tabHeight);
-    localGesture = moved.gesture;
-    localTabDelta = (moved.offset! - 0.5) * travel;
-  }
-
-  assert.ok(localTabDelta < 100);
 });
 
-test('the real hover-tab route measures movement in stable global screen coordinates', () => {
+test('the canonical perimeter reaches all four centered edges', () => {
+  assert.equal(hoverTabPositionForSide('top'), 1 / 8);
+  assert.equal(hoverTabPositionForSide('right'), 3 / 8);
+  assert.equal(hoverTabPositionForSide('bottom'), 5 / 8);
+  assert.equal(hoverTabPositionForSide('left'), 7 / 8);
+
+  assert.ok(Math.abs(projectHoverTabCenter(pointerForCenter(550, 180), sourceFrame) - 1 / 8) < 0.000001);
+  assert.ok(Math.abs(projectHoverTabCenter(pointerForCenter(820, 350), sourceFrame) - 3 / 8) < 0.000001);
+  assert.ok(Math.abs(projectHoverTabCenter(pointerForCenter(550, 520), sourceFrame) - 5 / 8) < 0.000001);
+  assert.ok(Math.abs(projectHoverTabCenter(pointerForCenter(280, 350), sourceFrame) - 7 / 8) < 0.000001);
+});
+
+test('corner projection stops at one edge before switching to the next', () => {
+  const beforeTopRight = projectHoverTabCenter(pointerForCenter(776, 180), sourceFrame);
+  const corner = projectHoverTabCenter(pointerForCenter(820, 224), sourceFrame);
+  const afterTopRight = projectHoverTabCenter(pointerForCenter(820, 240), sourceFrame);
+  assert.ok(Math.abs(beforeTopRight - 1 / 4) < 0.000001);
+  assert.ok(Math.abs(corner - 1 / 4) < 0.000001);
+  assert.ok(afterTopRight > corner);
+  assert.ok(afterTopRight < 3 / 8);
+});
+
+test('both left corners use the bounded cardinal edge spans', () => {
+  assert.ok(Math.abs(projectHoverTabCenter(pointerForCenter(280, 224), sourceFrame) - 0) < 0.000001);
+  assert.ok(Math.abs(projectHoverTabCenter(pointerForCenter(280, 476), sourceFrame) - 3 / 4) < 0.000001);
+});
+
+test('corner hysteresis retains the current edge until the crossing is deliberate', () => {
+  const near = projectHoverTabCenterWithSide(pointerForCenter(800, 202), sourceFrame, 'top');
+  const crossed = projectHoverTabCenterWithSide(pointerForCenter(800, 210), sourceFrame, 'top');
+  assert.equal(near?.side, 'top');
+  assert.equal(crossed?.side, 'right');
+});
+
+test('hover-tab drag follows absolute screen samples without a client-coordinate feedback loop', () => {
+  const gesture = beginHoverTabGesture(7, 820, 350, 3 / 8, rightTab.x, rightTab.y, sourceFrame);
+  let current = gesture;
+  for (const y of [360, 370, 380, 390, 400, 410, 420, 430, 440, 450]) {
+    const moved = moveHoverTabGesture(current, 820, y);
+    current = moved.gesture;
+    assert.ok(moved.position !== null);
+  }
+  const final = moveHoverTabGesture(current, 820, 450).position ?? 0;
+  assert.ok(Math.abs(final - (1 / 4 + 226 / (4 * 252))) < 0.000001);
+
+  // The pointer sample is global and remains tied to the original grab point;
+  // it does not subtract the native tab's latest displacement.
+  const localLike = moveHoverTabGesture(gesture, 820, 450).position ?? 0;
+  assert.equal(final, localLike);
+});
+
+test('the real hover-tab route uses canonical positions and global screen coordinates', () => {
   assert.match(
     hoverTabSource,
     /beginHoverTabGesture\(\s*event\.pointerId,\s*event\.screenX,\s*event\.screenY/
   );
   assert.match(
     hoverTabSource,
-    /moveHoverTabGesture\(\s*gesture,\s*event\.screenX,\s*event\.screenY/
+    /moveHoverTabGesture\(gesture,\s*event\.screenX,\s*event\.screenY/
   );
+  assert.match(hoverTabSource, /currentFrame/);
+  assert.match(hoverTabSource, /dragGesture\.sourceFrame = frame/);
+  assert.match(hoverTabSource, /dragGesture\.sourceFrame = frame;[\s\S]*attachment = update\.attachment/);
+  assert.match(hoverTabSource, /validWindowFrame\(frame\)/);
+  assert.match(hoverTabSource, /perimeterPosition/);
+  assert.match(hoverTabSource, /perimeterPosition: position/);
   assert.doesNotMatch(hoverTabSource, /beginHoverTabGesture\(\s*event\.pointerId,\s*event\.client/);
   assert.doesNotMatch(hoverTabSource, /moveHoverTabGesture\(\s*gesture,\s*event\.client/);
 });
@@ -106,6 +152,34 @@ test('the real hover-tab route captures pointers, throttles updates, and cancels
   assert.match(hoverTabSource, /class:dragging=\{isDragging\}/);
 });
 
+test('serialized native commands defer later work and isolate cancellation failures', async () => {
+  const calls: string[] = [];
+  let releaseFirst!: () => void;
+  const first = new Promise<number>((resolve) => {
+    releaseFirst = () => resolve(1);
+  });
+  const queue = createSerializedHoverTabCommandQueue<string, number>(async (command) => {
+    calls.push(command);
+    return command === 'first' ? first : 2;
+  });
+
+  const firstResult = queue('first');
+  const secondResult = queue('second');
+  await Promise.resolve();
+  assert.deepEqual(calls, ['first']);
+  releaseFirst();
+  assert.equal(await firstResult, 1);
+  assert.equal(await secondResult, 2);
+  assert.deepEqual(calls, ['first', 'second']);
+
+  const rejectingQueue = createSerializedHoverTabCommandQueue<string, number>(async (command) => {
+    if (command === 'cancel') throw new Error('stale cancellation');
+    return 3;
+  });
+  await assert.rejects(rejectingQueue('cancel'));
+  assert.equal(await rejectingQueue('commit'), 3);
+});
+
 test('latest hover-tab previews stay bounded and deliver only the newest sample', () => {
   const preview = createHoverTabPreviewState();
   assert.equal(offerHoverTabPreview(preview, 0.1), 0.1);
@@ -113,18 +187,16 @@ test('latest hover-tab previews stay bounded and deliver only the newest sample'
 
   assert.equal(offerHoverTabPreview(preview, 0.2), null);
   assert.equal(offerHoverTabPreview(preview, 0.8), null);
-  assert.equal(preview.pendingOffset, 0.8);
+  assert.equal(preview.pendingPosition, 0.8);
 
   const newest = settleHoverTabPreview(preview);
   assert.equal(newest, 0.8);
   assert.equal(preview.inFlight, false);
-  preview.pendingOffset = newest;
+  preview.pendingPosition = newest;
   assert.equal(offerHoverTabPreview(preview, takeHoverTabPreview(preview)!), 0.8);
   assert.equal(preview.inFlight, true);
 
-  // A terminal phase drops an unsent successor but lets the active command
-  // settle normally, so commit/cancel can remain behind it in the route queue.
-  assert.equal(offerHoverTabPreview(preview, 0.9), null);
+  assert.equal(offerHoverTabPreview(preview, 1.1), null);
   clearHoverTabPreview(preview);
   assert.equal(settleHoverTabPreview(preview), null);
   assert.equal(preview.inFlight, false);
@@ -141,10 +213,10 @@ test('the route keeps preview IPC latest-wins and terminal phases ordered', () =
   );
 });
 
-test('hover-tab gesture keeps pointer identity and uses source-relative travel', () => {
-  const gesture = beginHoverTabGesture(42, 100, 200, 0.25);
-  const moved = moveHoverTabGesture(gesture, 100, 330, 300, 40);
+test('hover-tab gesture keeps pointer identity and restores its original perimeter position', () => {
+  const gesture = beginHoverTabGesture(42, 820, 350, 0.25, rightTab.x, rightTab.y, sourceFrame);
+  const moved = moveHoverTabGesture(gesture, 820, 430);
   assert.equal(moved.gesture.pointerId, 42);
-  assert.equal(moved.offset, 0.75);
+  assert.ok(moved.position !== null);
   assert.equal(cancelHoverTabGesture(moved.gesture), 0.25);
 });

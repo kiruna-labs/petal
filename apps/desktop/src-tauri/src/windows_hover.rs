@@ -1,4 +1,4 @@
-//! Windows hover "share tab" — a fixed 40x40 right-edge rail button follows the
+//! Windows hover "share tab" — a fixed 40x40 perimeter button follows the
 //! current eligible window. Primary activation shares/stops directly; the
 //! native context menu owns secondary options.
 //!
@@ -23,9 +23,12 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::hover_core::{
     current_hover_presentation, hold_hover_tab_through_transient_miss,
-    hover_tab_panel_logical_size, hover_tab_presentation, hover_tab_presentation_with_offset,
-    last_hover_update, same_hit, set_last_hover_update, HoverTabAttachment, HoverTabDragPhase,
-    HoverTabPresentation, HoverTabRect, HoverTabUpdate, MonitorBounds, WindowFrame,
+    hover_tab_panel_logical_size, hover_tab_position_for_side_offset, hover_tab_presentation,
+    hover_tab_presentation_with_position, hover_tab_presentation_with_position_and_size,
+    hover_tab_presentation_with_side_offset, hover_tab_side_offset, last_hover_update, same_hit,
+    set_last_hover_update, valid_hover_tab_frame, HoverTabAttachment, HoverTabDragPhase,
+    HoverTabPosition, HoverTabPresentation, HoverTabRect, HoverTabSide, HoverTabUpdate,
+    MonitorBounds, WindowFrame, DEFAULT_HOVER_TAB_POSITION, DEFAULT_HOVER_TAB_SIDE,
     HOVER_TAB_LABEL,
 };
 use crate::platform::windows as w32;
@@ -44,6 +47,10 @@ static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 /// During a button drag the explicit drag command owns native placement; the
 /// event follower must not fight it with a concurrent source-frame reconcile.
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Serialize drag phases with lifecycle teardown. Without one lock, a
+/// cancellation can restore the preference while an older native placement is
+/// still in progress, allowing that placement to win after cancel.
+static DRAG_COMMAND_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// The only native follower registration for the Windows hover tab. The
 /// source and pill HWNDs stay raw so the event-driven tracker never needs to
@@ -52,6 +59,7 @@ static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) struct NativeHoverTabAttachment {
     pub(crate) token: u32,
     pub(crate) source_hwnd: isize,
+    pub(crate) source_owner_pid: u32,
     pub(crate) pill_hwnd: isize,
     pub(crate) generation: u64,
     /// Elevated sources cannot reliably host a medium-integrity tab in their
@@ -70,6 +78,8 @@ impl NativeHoverTabAttachment {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NativeHoverTabPlacement {
+    pub(crate) position: HoverTabPosition,
+    pub(crate) side: HoverTabSide,
     pub(crate) attachment: HoverTabAttachment,
     pub(crate) frame: WindowFrame,
 }
@@ -89,6 +99,75 @@ pub(crate) fn native_attachment_is_current(
     attachment.is_some_and(|current| current.token == token && current.generation == generation)
 }
 
+fn set_native_attachment_generation(token: u32, generation: u64) -> bool {
+    let mut current = NATIVE_HOVER_TAB_ATTACHMENT.lock_unpoisoned();
+    let Some(attachment) = current
+        .as_mut()
+        .filter(|attachment| attachment.token == token)
+    else {
+        return false;
+    };
+    attachment.generation = generation;
+    true
+}
+
+/// Check the native endpoints again immediately before publishing an
+/// attachment. Registry membership alone is not enough: Windows can destroy
+/// and reuse an HWND between enumeration and this handoff.
+fn native_window_owner_pid(hwnd: windows::Win32::Foundation::HWND) -> Option<u32> {
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut pid = 0_u32;
+    let _thread_id = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid))
+    };
+    (pid > 0).then_some(pid)
+}
+
+fn native_attachment_handles_are_live(attachment: NativeHoverTabAttachment) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindow, IsWindowVisible};
+
+    let source = HWND(attachment.source_hwnd as *mut core::ffi::c_void);
+    let pill = HWND(attachment.pill_hwnd as *mut core::ffi::c_void);
+    if source.0.is_null()
+        || pill.0.is_null()
+        || !unsafe { IsWindow(Some(source)) }.as_bool()
+        || !unsafe { IsWindow(Some(pill)) }.as_bool()
+        || !unsafe { IsWindowVisible(source) }.as_bool()
+        || native_window_owner_pid(source) != Some(attachment.source_owner_pid)
+    {
+        return false;
+    }
+    w32::visible_window_frame(source).is_some()
+        && w32::window_dpi_scale(source).is_some()
+        && w32::monitor_work_area_for_window(source).is_some()
+}
+
+/// Confirm the HWND accepted the exact physical frame requested. SetWindowPos
+/// can succeed while a destroyed/reused or DPI-transitioning window ignores
+/// part of the request, so never publish a logical update from that state.
+fn native_hover_tab_frame_matches(
+    attachment: NativeHoverTabAttachment,
+    expected: WindowFrame,
+) -> bool {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindowVisible};
+    let tab = HWND(attachment.pill_hwnd as *mut core::ffi::c_void);
+    if tab.0.is_null() || !unsafe { IsWindowVisible(tab) }.as_bool() {
+        return false;
+    }
+    let mut actual = RECT::default();
+    if unsafe { GetWindowRect(tab, &mut actual) }.is_err() {
+        return false;
+    }
+    actual.left == expected.x
+        && actual.top == expected.y
+        && actual.right - actual.left == expected.width
+        && actual.bottom - actual.top == expected.height
+}
+
 /// Project one DWM-visible source frame into the physical frame used by the
 /// native hover HWND. The calculation intentionally happens in physical
 /// pixels so the tab and share border can consume the identical source
@@ -98,11 +177,11 @@ pub(crate) fn project_hover_tab_native_frame(
     work_area: WindowFrame,
     scale: f64,
 ) -> Option<NativeHoverTabPlacement> {
-    project_hover_tab_native_frame_with_offset(
+    project_hover_tab_native_frame_with_position(
         source,
         work_area,
         scale,
-        crate::hover_core::DEFAULT_HOVER_TAB_VERTICAL_OFFSET,
+        DEFAULT_HOVER_TAB_POSITION,
     )
 }
 
@@ -111,6 +190,36 @@ pub(crate) fn project_hover_tab_native_frame_with_offset(
     work_area: WindowFrame,
     scale: f64,
     vertical_offset: f64,
+) -> Option<NativeHoverTabPlacement> {
+    project_hover_tab_native_frame_with_side_offset(
+        source,
+        work_area,
+        scale,
+        DEFAULT_HOVER_TAB_SIDE,
+        vertical_offset,
+    )
+}
+
+pub(crate) fn project_hover_tab_native_frame_with_side_offset(
+    source: WindowFrame,
+    work_area: WindowFrame,
+    scale: f64,
+    side: HoverTabSide,
+    vertical_offset: f64,
+) -> Option<NativeHoverTabPlacement> {
+    project_hover_tab_native_frame_with_position(
+        source,
+        work_area,
+        scale,
+        hover_tab_position_for_side_offset(side, vertical_offset),
+    )
+}
+
+pub(crate) fn project_hover_tab_native_frame_with_position(
+    source: WindowFrame,
+    work_area: WindowFrame,
+    scale: f64,
+    position: HoverTabPosition,
 ) -> Option<NativeHoverTabPlacement> {
     if !scale.is_finite()
         || scale <= 0.0
@@ -121,53 +230,34 @@ pub(crate) fn project_hover_tab_native_frame_with_offset(
     {
         return None;
     }
-    let tab_size_f = 40.0 * scale;
-    if !tab_size_f.is_finite() {
-        return None;
-    }
-    let tab_size = tab_size_f.round().max(1.0) as i64;
-    if tab_size <= 0
-        || i64::from(work_area.width) < tab_size
-        || i64::from(work_area.height) < tab_size
+    let tab_size = (40.0 * scale).round();
+    if !tab_size.is_finite()
+        || tab_size < 1.0
+        || (work_area.width as f64) < tab_size
+        || (work_area.height as f64) < tab_size
     {
         return None;
     }
-    let source_right = i64::from(source.x) + i64::from(source.width);
-    let work_area_left = i64::from(work_area.x);
-    let work_area_top = i64::from(work_area.y);
-    let work_area_right = work_area_left + i64::from(work_area.width);
-    let work_area_bottom = work_area_top + i64::from(work_area.height);
-    let outside = source_right >= work_area_left && source_right + tab_size <= work_area_right;
-    let raw_x = if outside {
-        source_right
-    } else {
-        source_right - tab_size
-    };
-    let max_x = work_area_right - tab_size;
-    let x = raw_x.clamp(work_area_left, max_x);
-    let travel = (i64::from(source.height) - tab_size).max(0) as f64;
-    let offset = crate::hover_core::normalize_hover_tab_vertical_offset(vertical_offset);
-    let raw_y = i64::from(source.y) + (travel * offset).round() as i64;
-    let max_y = work_area_bottom - tab_size;
-    let y = raw_y.clamp(work_area_top, max_y);
-    if x < work_area_left
-        || y < work_area_top
-        || x + tab_size > work_area_right
-        || y + tab_size > work_area_bottom
-    {
+    let left = work_area.x as f64;
+    let top = work_area.y as f64;
+    let right = left + work_area.width as f64;
+    let bottom = top + work_area.height as f64;
+    if !right.is_finite() || !bottom.is_finite() || right <= left || bottom <= top {
         return None;
     }
+    let bounds = MonitorBounds::new(left, top, right, bottom);
+    let presentation = hover_tab_presentation_with_position_and_size(
+        0, source, bounds, position, tab_size, tab_size,
+    );
     Some(NativeHoverTabPlacement {
-        attachment: if outside {
-            HoverTabAttachment::Outside
-        } else {
-            HoverTabAttachment::Inset
-        },
+        position: presentation.position,
+        side: presentation.side,
+        attachment: presentation.attachment,
         frame: WindowFrame {
-            x: i32::try_from(x).ok()?,
-            y: i32::try_from(y).ok()?,
-            width: i32::try_from(tab_size).ok()?,
-            height: i32::try_from(tab_size).ok()?,
+            x: presentation.rect.x.round() as i32,
+            y: presentation.rect.y.round() as i32,
+            width: presentation.rect.width.round() as i32,
+            height: presentation.rect.height.round() as i32,
         },
     })
 }
@@ -326,20 +416,26 @@ fn apply_native_hover_tab_placement(
 /// The attachment lock is held across the short SetWindowPos call so a hide
 /// or replacement cannot overtake a stale movement.
 pub(crate) fn reconcile_native_hover_tab(
+    app: Option<&AppHandle>,
     source_hwnd: isize,
     source_frame: Option<WindowFrame>,
 ) -> bool {
+    let _drag_guard = DRAG_COMMAND_LOCK.lock_unpoisoned();
     if DRAG_ACTIVE.load(Ordering::Acquire) {
         return false;
     }
+    let generation = crate::hover_core::hover_tab_presentation_generation();
     let current = NATIVE_HOVER_TAB_ATTACHMENT.lock_unpoisoned();
     let Some(attachment) = current.as_ref().copied() else {
         return false;
     };
     if attachment.source_hwnd != source_hwnd
-        || !native_attachment_is_current(Some(attachment), attachment.token, attachment.generation)
+        || !native_attachment_is_current(Some(attachment), attachment.token, generation)
     {
         return false;
+    }
+    if !native_attachment_handles_are_live(attachment) {
+        return hide_native_hover_tab(attachment, "native attachment identity is stale");
     }
     let Some(source_frame) = source_frame else {
         return hide_native_hover_tab(attachment, "source frame unavailable");
@@ -351,15 +447,63 @@ pub(crate) fn reconcile_native_hover_tab(
     let Some(work_area) = w32::monitor_work_area_for_window(source) else {
         return hide_native_hover_tab(attachment, "monitor work area unavailable");
     };
-    let Some(placement) = project_hover_tab_native_frame_with_offset(
-        source_frame,
-        work_area,
-        scale,
-        crate::share_priority::current_hover_tab_vertical_offset(),
-    ) else {
+    let position = crate::share_priority::current_hover_tab_position();
+    let Some(placement) =
+        project_hover_tab_native_frame_with_position(source_frame, work_area, scale, position)
+    else {
         return hide_native_hover_tab(attachment, "no safe work-area placement");
     };
-    apply_native_hover_tab_placement(attachment, placement)
+    if !apply_native_hover_tab_placement(attachment, placement) {
+        return false;
+    }
+    if !native_attachment_handles_are_live(attachment)
+        || !native_hover_tab_frame_matches(attachment, placement.frame)
+    {
+        let _ = hide_native_hover_tab(attachment, "native placement verification failed");
+        return false;
+    }
+    let Some(app) = app else {
+        return true;
+    };
+    let Some(presentation) = tab_position_with_position(
+        app,
+        &source_frame,
+        scale,
+        attachment.token,
+        placement.position,
+    ) else {
+        return hide_native_hover_tab(attachment, "logical placement unavailable");
+    };
+    let generation = crate::hover_core::hover_tab_presentation_generation();
+    if !native_attachment_is_current(Some(attachment), attachment.token, generation)
+        || !native_attachment_handles_are_live(attachment)
+    {
+        return false;
+    }
+    let shared = app
+        .try_state::<crate::session::SessionState>()
+        .map(|state| state.shared_window_ids().contains(&attachment.token))
+        .unwrap_or(false);
+    let update = HoverTabUpdate {
+        window_id: attachment.token,
+        frame: source_frame,
+        source_owner_pid: Some(attachment.source_owner_pid),
+        tab_x: presentation.rect.x,
+        tab_y: presentation.rect.y,
+        perimeter_position: presentation.position,
+        side: presentation.side,
+        attachment: presentation.attachment,
+        vertical_offset: crate::hover_core::hover_tab_side_offset(presentation.position).1,
+        shared,
+        display_like: false,
+        presentation_generation: generation,
+    };
+    if crate::hover_core::set_last_hover_update_if_generation(Some(update.clone()), generation) {
+        let _ = tauri::Emitter::emit(app, "hover-tab-update", &update);
+        true
+    } else {
+        false
+    }
 }
 
 /// Attach or replace the native follower registration for a discovered
@@ -379,6 +523,25 @@ pub(crate) fn attach_hover_tab_follower(
         return None;
     }
     let source = windows::Win32::Foundation::HWND(source_hwnd as *mut core::ffi::c_void);
+    let target = crate::windows_capture_target::resolve(token).ok()?;
+    if target.kind() != crate::windows_capture_target::TargetKind::Window
+        || target.raw_handle() as isize != source_hwnd
+        || target.owner_process_id() == 0
+    {
+        return None;
+    }
+    let source_owner_pid = target.owner_process_id();
+    let endpoints = NativeHoverTabAttachment {
+        token,
+        source_hwnd,
+        source_owner_pid,
+        pill_hwnd,
+        generation,
+        topmost_fallback: false,
+    };
+    if !native_attachment_handles_are_live(endpoints) {
+        return None;
+    }
     let topmost_fallback = match crate::windows_remote_control::window_integrity_exceeds_petal(
         source,
     ) {
@@ -395,11 +558,22 @@ pub(crate) fn attach_hover_tab_follower(
     let attachment = NativeHoverTabAttachment {
         token,
         source_hwnd,
+        source_owner_pid,
         pill_hwnd,
         generation,
         topmost_fallback,
     };
     *NATIVE_HOVER_TAB_ATTACHMENT.lock_unpoisoned() = Some(attachment);
+    if !native_attachment_handles_are_live(attachment) {
+        let mut current = NATIVE_HOVER_TAB_ATTACHMENT.lock_unpoisoned();
+        if current
+            .as_ref()
+            .is_some_and(|current| *current == attachment)
+        {
+            current.take();
+        }
+        return None;
+    }
     crate::windows_share_overlay::wake_tracker();
     Some(attachment)
 }
@@ -410,10 +584,24 @@ pub(crate) fn replace_hover_tab_follower_token(
 ) -> Option<NativeHoverTabAttachment> {
     let replacement = {
         let mut current = NATIVE_HOVER_TAB_ATTACHMENT.lock_unpoisoned();
+        let replacement_target = crate::windows_capture_target::resolve(replacement_token).ok()?;
         let updated = current
             .as_ref()
-            .and_then(|attachment| attachment.replace_token(retired_token, replacement_token));
+            .and_then(|attachment| attachment.replace_token(retired_token, replacement_token))
+            .filter(|attachment| {
+                replacement_target.kind() == crate::windows_capture_target::TargetKind::Window
+                    && replacement_target.raw_handle() as isize == attachment.source_hwnd
+                    && replacement_target.owner_process_id() > 0
+            })
+            .map(|attachment| NativeHoverTabAttachment {
+                source_owner_pid: replacement_target.owner_process_id(),
+                generation: crate::hover_core::begin_hover_tab_presentation(),
+                ..attachment
+            });
         if let Some(updated) = updated {
+            if !native_attachment_handles_are_live(updated) {
+                return None;
+            }
             *current = Some(updated);
         }
         updated
@@ -478,25 +666,58 @@ pub fn set_hover_tab_menu_open(open: bool) {
     );
 }
 
+fn release_drag_activity_if_idle() {
+    if !crate::hover_core::any_hover_tab_drag_active() {
+        DRAG_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
 fn reset_hover_tab_drag_state(restore: bool) -> Option<crate::hover_core::HoverTabDragSession> {
+    // Invalidate queued/native work before releasing the drag session. The
+    // follower and lifecycle paths share this epoch with drag payload writes.
+    crate::hover_core::begin_hover_tab_presentation();
     let session = crate::hover_core::clear_hover_tab_drag();
     if restore {
         if let Some(session) = session {
-            let _ =
-                crate::share_priority::preview_hover_tab_vertical_offset(session.original_offset);
+            let _ = crate::share_priority::preview_hover_tab_position(session.original_position);
         }
     }
-    DRAG_ACTIVE.store(false, Ordering::Release);
+    release_drag_activity_if_idle();
     session
 }
 
+fn reset_hover_tab_drag_state_serialized(
+    restore: bool,
+) -> Option<crate::hover_core::HoverTabDragSession> {
+    let _guard = DRAG_COMMAND_LOCK.lock_unpoisoned();
+    reset_hover_tab_drag_state(restore)
+}
+
 pub(crate) fn cancel_drag_for_lifecycle() {
-    reset_hover_tab_drag_state(true);
+    reset_hover_tab_drag_state_serialized(true);
 }
 
 fn drag_target_is_current(window_id: u32) -> bool {
-    last_hover_update().is_some_and(|update| update.window_id == window_id)
-        && native_hover_tab_attachment().is_some_and(|attachment| attachment.token == window_id)
+    let Some(update) = last_hover_update().filter(|update| update.window_id == window_id) else {
+        return false;
+    };
+    let Some(attachment) =
+        native_hover_tab_attachment().filter(|attachment| attachment.token == window_id)
+    else {
+        return false;
+    };
+    crate::windows_capture_target::resolve(window_id)
+        .ok()
+        .is_some_and(|target| {
+            target.kind() == crate::windows_capture_target::TargetKind::Window
+                && target.raw_handle() as isize == attachment.source_hwnd
+                && target.owner_process_id() == attachment.source_owner_pid
+                && native_window_owner_pid(windows::Win32::Foundation::HWND(
+                    attachment.source_hwnd as *mut core::ffi::c_void,
+                )) == Some(attachment.source_owner_pid)
+                && update.window_id == attachment.token
+                && attachment.generation == crate::hover_core::hover_tab_presentation_generation()
+        })
 }
 
 fn native_source_geometry(
@@ -512,11 +733,22 @@ fn native_source_geometry(
 fn update_drag_payload(
     app: &AppHandle,
     window_id: u32,
-    requested_frame: WindowFrame,
-    offset: f64,
+    _requested_frame: WindowFrame,
     geometry: (WindowFrame, f64, NativeHoverTabPlacement),
+    drag_token: Option<u64>,
+    generation: u64,
 ) -> Result<(), String> {
     let (source_frame, scale, placement) = geometry;
+    if !valid_hover_tab_frame(source_frame) || !scale.is_finite() || scale <= 0.0 {
+        return Err("hover-tab source geometry is invalid".to_string());
+    }
+    if !drag_target_is_current(window_id)
+        || drag_token.is_some_and(|token| {
+            crate::hover_core::active_hover_tab_drag_for_token(window_id, token).is_none()
+        })
+    {
+        return Err("hover-tab target changed during drag".to_string());
+    }
     let mut update =
         last_hover_update().ok_or_else(|| "hover-tab target is no longer presented".to_string())?;
     if update.window_id != window_id {
@@ -528,16 +760,28 @@ fn update_drag_payload(
         width: (source_frame.width as f64 / scale).round() as i32,
         height: (source_frame.height as f64 / scale).round() as i32,
     };
-    update.frame = if logical_frame.width > 0 && logical_frame.height > 0 {
-        logical_frame
-    } else {
-        requested_frame
-    };
+    if !valid_hover_tab_frame(logical_frame) {
+        return Err("hover-tab logical source geometry is invalid".to_string());
+    }
+    update.frame = logical_frame;
+    if !drag_target_is_current(window_id)
+        || drag_token.is_some_and(|token| {
+            crate::hover_core::active_hover_tab_drag_for_token(window_id, token).is_none()
+        })
+    {
+        return Err("hover-tab target changed during drag".to_string());
+    }
+    let (side, vertical_offset) = crate::hover_core::hover_tab_side_offset(placement.position);
     update.tab_x = placement.frame.x as f64 / scale;
     update.tab_y = placement.frame.y as f64 / scale;
+    update.perimeter_position = placement.position;
+    update.side = side;
     update.attachment = placement.attachment;
-    update.vertical_offset = offset;
-    set_last_hover_update(Some(update.clone()));
+    update.vertical_offset = vertical_offset;
+    update.presentation_generation = generation;
+    if !crate::hover_core::set_last_hover_update_if_generation(Some(update.clone()), generation) {
+        return Err("hover-tab presentation changed during drag".to_string());
+    }
     let _ = tauri::Emitter::emit(app, "hover-tab-update", &update);
     Ok(())
 }
@@ -546,8 +790,9 @@ fn apply_drag_position(
     app: &AppHandle,
     window_id: u32,
     requested_frame: WindowFrame,
-    offset: f64,
-) -> Result<f64, String> {
+    position: HoverTabPosition,
+    drag_token: Option<u64>,
+) -> Result<HoverTabPosition, String> {
     // Re-check immediately before the native write. The caller's phase check
     // can race a source hide/token replacement, especially on cancellation.
     if !drag_target_is_current(window_id) {
@@ -556,34 +801,91 @@ fn apply_drag_position(
     let attachment = native_hover_tab_attachment()
         .filter(|attachment| attachment.token == window_id)
         .ok_or_else(|| "hover-tab native target is stale".to_string())?;
+    if let Some(drag_token) = drag_token {
+        if crate::hover_core::active_hover_tab_drag_for_token(window_id, drag_token).is_none() {
+            return Err("hover-tab drag token is stale".to_string());
+        }
+    }
     let (source_frame, work_area, scale) = native_source_geometry(attachment)
         .ok_or_else(|| "hover-tab source geometry is unavailable".to_string())?;
+    let position = position.normalized();
     let placement =
-        project_hover_tab_native_frame_with_offset(source_frame, work_area, scale, offset)
+        project_hover_tab_native_frame_with_position(source_frame, work_area, scale, position)
             .ok_or_else(|| "hover-tab has no safe work-area placement".to_string())?;
-    if !apply_native_hover_tab_placement(attachment, placement) {
+    // Each native placement is a new presentation epoch. This makes a
+    // delayed payload from an earlier preview distinguishable even when the
+    // source and drag token are unchanged.
+    let generation = crate::hover_core::begin_hover_tab_presentation();
+    if !set_native_attachment_generation(window_id, generation) {
+        return Err("hover-tab native target is stale".to_string());
+    }
+    if !drag_target_is_current(window_id)
+        || drag_token.is_some_and(|token| {
+            crate::hover_core::active_hover_tab_drag_for_token(window_id, token).is_none()
+        })
+    {
+        let _ = hide_native_hover_tab(attachment, "drag target changed before placement");
+        return Err("hover-tab target changed during drag".to_string());
+    }
+    if !apply_native_hover_tab_placement(attachment, placement)
+        || !native_attachment_handles_are_live(attachment)
+        || !native_hover_tab_frame_matches(attachment, placement.frame)
+    {
         return Err("hover-tab native placement failed".to_string());
     }
-    let offset = crate::hover_core::normalize_hover_tab_vertical_offset(offset);
+    if !drag_target_is_current(window_id)
+        || drag_token.is_some_and(|token| {
+            crate::hover_core::active_hover_tab_drag_for_token(window_id, token).is_none()
+        })
+    {
+        let _ = hide_native_hover_tab(attachment, "drag target changed after placement");
+        return Err("hover-tab target changed during drag".to_string());
+    }
     update_drag_payload(
         app,
         window_id,
         requested_frame,
-        offset,
         (source_frame, scale, placement),
+        drag_token,
+        generation,
     )?;
-    Ok(offset)
+    Ok(placement.position)
 }
 
 fn rollback_drag_position(
     app: &AppHandle,
     window_id: u32,
     frame: WindowFrame,
-    restore_offset: f64,
+    restore_position: HoverTabPosition,
+    drag_token: Option<u64>,
 ) {
-    let _ = crate::share_priority::preview_hover_tab_vertical_offset(restore_offset);
-    let _ = apply_drag_position(app, window_id, frame, restore_offset);
-    reset_hover_tab_drag_state(false);
+    if let Some(token) = drag_token {
+        if crate::hover_core::active_hover_tab_drag_for_token(window_id, token).is_none() {
+            return;
+        }
+    }
+    let _ = crate::share_priority::preview_hover_tab_position(restore_position);
+    let _ = apply_drag_position(app, window_id, frame, restore_position, drag_token);
+    if let Some(token) = drag_token {
+        let _ = crate::hover_core::finish_hover_tab_drag_for_token(window_id, token);
+    }
+    release_drag_activity_if_idle();
+}
+
+fn drag_session_for_command(
+    window_id: u32,
+    drag_token: Option<u64>,
+) -> Result<Option<crate::hover_core::HoverTabDragSession>, String> {
+    let active = crate::hover_core::active_hover_tab_drag(window_id);
+    match (active, drag_token) {
+        (Some(session), Some(token)) if session.drag_token == token => Ok(Some(session)),
+        (Some(_), _) => Err("hover-tab drag token is stale".to_string()),
+        (None, Some(_)) => Err("hover-tab drag is no longer active".to_string()),
+        (None, None) if crate::hover_core::any_hover_tab_drag_active() => {
+            Err("another hover-tab drag is already active".to_string())
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 /// One phase-based drag bridge shared by the Windows route and its native
@@ -595,101 +897,183 @@ pub fn hover_tab_drag(
     phase: HoverTabDragPhase,
     window_id: u32,
     frame: WindowFrame,
-    vertical_offset: f64,
-) -> Result<f64, String> {
+    perimeter_position: HoverTabPosition,
+    drag_token: Option<u64>,
+) -> Result<HoverTabPosition, String> {
+    let _drag_guard = DRAG_COMMAND_LOCK.lock_unpoisoned();
     match phase {
         HoverTabDragPhase::Begin => {
+            let drag_token =
+                drag_token.ok_or_else(|| "hover-tab drag token is missing".to_string())?;
             if !drag_target_is_current(window_id) {
                 return Err("hover-tab target is stale".to_string());
             }
-            let session = crate::hover_core::begin_hover_tab_drag(window_id)?;
+            let source_owner_pid = crate::windows_capture_target::resolve(window_id)
+                .ok()
+                .filter(|target| target.kind() == crate::windows_capture_target::TargetKind::Window)
+                .map(|target| target.owner_process_id())
+                .filter(|pid| *pid > 0)
+                .ok_or_else(|| "hover-tab source identity is unavailable".to_string())?;
+            let session = crate::hover_core::begin_hover_tab_drag(
+                window_id,
+                drag_token,
+                Some(source_owner_pid),
+            )?;
+            if !set_native_attachment_generation(window_id, session.generation) {
+                let _ = crate::hover_core::finish_hover_tab_drag_for_token(window_id, drag_token);
+                return Err("hover-tab native target is stale".to_string());
+            }
             DRAG_ACTIVE.store(true, Ordering::Release);
             log::debug!(
-                "windows_hover: hover-tab drag began token={} generation={}",
+                "windows_hover: hover-tab drag began token={} generation={} drag_token={}",
                 session.window_id,
-                session.generation
+                session.generation,
+                session.drag_token,
             );
-            Ok(session.original_offset)
+            Ok(session.original_position)
         }
         HoverTabDragPhase::Update => {
-            let session = crate::hover_core::active_hover_tab_drag(window_id)
-                .ok_or_else(|| "hover-tab drag is not active".to_string())?;
+            let drag_token =
+                drag_token.ok_or_else(|| "hover-tab drag token is missing".to_string())?;
+            let session = drag_session_for_command(window_id, Some(drag_token))?
+                .expect("a tokened update must have an active session");
             if !drag_target_is_current(window_id) {
-                reset_hover_tab_drag_state(true);
+                rollback_drag_position(
+                    &app,
+                    window_id,
+                    frame,
+                    session.original_position,
+                    Some(drag_token),
+                );
                 return Err("hover-tab target changed during drag".to_string());
             }
-            let offset =
-                match crate::share_priority::preview_hover_tab_vertical_offset(vertical_offset) {
-                    Ok(offset) => offset,
+            let position =
+                match crate::share_priority::preview_hover_tab_position(perimeter_position) {
+                    Ok(position) => position,
                     Err(error) => {
-                        reset_hover_tab_drag_state(true);
+                        rollback_drag_position(
+                            &app,
+                            window_id,
+                            frame,
+                            session.original_position,
+                            Some(drag_token),
+                        );
                         return Err(error);
                     }
                 };
-            if let Err(error) = apply_drag_position(&app, window_id, frame, offset) {
-                rollback_drag_position(&app, window_id, frame, session.original_offset);
+            if let Err(error) =
+                apply_drag_position(&app, window_id, frame, position, Some(drag_token))
+            {
+                rollback_drag_position(
+                    &app,
+                    window_id,
+                    frame,
+                    session.original_position,
+                    Some(drag_token),
+                );
                 return Err(error);
             }
-            Ok(offset)
+            Ok(position)
         }
         HoverTabDragPhase::Commit => {
-            let active = crate::hover_core::active_hover_tab_drag(window_id);
-            let restore_offset = active
-                .map(|session| session.original_offset)
-                .unwrap_or_else(crate::share_priority::current_hover_tab_vertical_offset);
+            let active = drag_session_for_command(window_id, drag_token)?;
+            let restore_position = active
+                .map(|session| session.original_position)
+                .unwrap_or_else(crate::share_priority::current_hover_tab_position);
             if !drag_target_is_current(window_id) {
-                let _ = crate::share_priority::preview_hover_tab_vertical_offset(restore_offset);
-                reset_hover_tab_drag_state(false);
+                if let Some(token) = active.map(|session| session.drag_token) {
+                    rollback_drag_position(&app, window_id, frame, restore_position, Some(token));
+                } else {
+                    let _ = crate::share_priority::preview_hover_tab_position(restore_position);
+                    release_drag_activity_if_idle();
+                }
                 return Err("hover-tab target is stale".to_string());
             }
-            let offset =
-                match crate::share_priority::preview_hover_tab_vertical_offset(vertical_offset) {
-                    Ok(offset) => offset,
+            let position = if let Some(session) = active {
+                match crate::share_priority::preview_hover_tab_position(perimeter_position) {
+                    Ok(position) => position,
                     Err(error) => {
-                        reset_hover_tab_drag_state(true);
+                        rollback_drag_position(
+                            &app,
+                            window_id,
+                            frame,
+                            session.original_position,
+                            Some(session.drag_token),
+                        );
                         return Err(error);
                     }
-                };
-            if let Err(error) = apply_drag_position(&app, window_id, frame, offset) {
-                rollback_drag_position(&app, window_id, frame, restore_offset);
+                }
+            } else {
+                // No drag token means this is a native-menu preset, not a
+                // late pointer command. A tokened commit was rejected above.
+                perimeter_position.normalized()
+            };
+            if let Err(error) = apply_drag_position(
+                &app,
+                window_id,
+                frame,
+                position,
+                active.map(|session| session.drag_token),
+            ) {
+                rollback_drag_position(
+                    &app,
+                    window_id,
+                    frame,
+                    restore_position,
+                    active.map(|session| session.drag_token),
+                );
                 return Err(error);
             }
-            let committed = match crate::share_priority::commit_hover_tab_vertical_offset(offset) {
-                Ok(value) => value,
+            let committed = match crate::share_priority::commit_hover_tab_position(position) {
+                Ok(position) => position,
                 Err(error) => {
-                    rollback_drag_position(&app, window_id, frame, restore_offset);
+                    rollback_drag_position(
+                        &app,
+                        window_id,
+                        frame,
+                        restore_position,
+                        active.map(|session| session.drag_token),
+                    );
                     return Err(error);
                 }
             };
-            if active.is_some() {
-                let _ = crate::hover_core::finish_hover_tab_drag(window_id);
+            if let Some(session) = active {
+                let _ = crate::hover_core::finish_hover_tab_drag_for_token(
+                    window_id,
+                    session.drag_token,
+                );
             }
-            DRAG_ACTIVE.store(false, Ordering::Release);
+            release_drag_activity_if_idle();
             Ok(committed)
         }
         HoverTabDragPhase::Cancel => {
-            let Some(session) = crate::hover_core::active_hover_tab_drag(window_id) else {
-                return Ok(crate::share_priority::current_hover_tab_vertical_offset());
+            let Some(session) = drag_session_for_command(window_id, drag_token)? else {
+                return Ok(crate::share_priority::current_hover_tab_position());
             };
-            let restored = match crate::share_priority::preview_hover_tab_vertical_offset(
-                session.original_offset,
+            let restored = match crate::share_priority::preview_hover_tab_position(
+                session.original_position,
             ) {
-                Ok(offset) => offset,
+                Ok(position) => position,
                 Err(error) => {
-                    reset_hover_tab_drag_state(false);
+                    let _ = crate::hover_core::finish_hover_tab_drag_for_token(
+                        window_id,
+                        session.drag_token,
+                    );
+                    release_drag_activity_if_idle();
                     return Err(error);
                 }
             };
             let result = if drag_target_is_current(window_id) {
-                apply_drag_position(&app, window_id, frame, restored)
+                apply_drag_position(&app, window_id, frame, restored, Some(session.drag_token))
             } else {
                 // The native panel may already have been hidden or its token
                 // replaced. Restore the preference/session, but never move a
                 // stale HWND back onto the desktop.
                 Ok(restored)
             };
-            let _ = crate::hover_core::finish_hover_tab_drag(window_id);
-            DRAG_ACTIVE.store(false, Ordering::Release);
+            let _ =
+                crate::hover_core::finish_hover_tab_drag_for_token(window_id, session.drag_token);
+            release_drag_activity_if_idle();
             result.map(|_| restored)
         }
     }
@@ -855,11 +1239,16 @@ fn track_iteration(
                 let _ = attach_hover_tab_follower(app, replacement_token, source_hwnd, generation);
             }
         }
+        let replacement_generation = crate::hover_core::hover_tab_presentation_generation();
         let replacement_update = last_hover_update()
             .filter(|update| update.window_id == retired_token)
             .map(|mut update| {
                 update.window_id = replacement_token;
+                update.source_owner_pid = native_hover_tab_attachment()
+                    .filter(|attachment| attachment.token == replacement_token)
+                    .map(|attachment| attachment.source_owner_pid);
                 update.shared = false;
+                update.presentation_generation = replacement_generation;
                 update
             })
             .or_else(|| {
@@ -869,17 +1258,31 @@ fn track_iteration(
                     .map(|presentation| HoverTabUpdate {
                         window_id: replacement_token,
                         frame,
+                        source_owner_pid: native_hover_tab_attachment()
+                            .filter(|attachment| attachment.token == replacement_token)
+                            .map(|attachment| attachment.source_owner_pid),
                         tab_x: presentation.rect.x,
                         tab_y: presentation.rect.y,
+                        perimeter_position: presentation.position,
+                        side: presentation.side,
                         attachment: presentation.attachment,
-                        vertical_offset: crate::share_priority::current_hover_tab_vertical_offset(),
+                        vertical_offset: crate::hover_core::hover_tab_side_offset(
+                            presentation.position,
+                        )
+                        .1,
                         shared: false,
                         display_like: false,
+                        presentation_generation:
+                            crate::hover_core::hover_tab_presentation_generation(),
                     })
             });
         if let Some(update) = replacement_update {
-            set_last_hover_update(Some(update.clone()));
-            let _ = tauri::Emitter::emit(app, "hover-tab-update", &update);
+            if crate::hover_core::set_last_hover_update_if_generation(
+                Some(update.clone()),
+                replacement_generation,
+            ) {
+                let _ = tauri::Emitter::emit(app, "hover-tab-update", &update);
+            }
         } else {
             log::warn!(
                 "windows_hover: hover token {retired_token} replaced by {replacement_token} without a current presentation"
@@ -926,9 +1329,8 @@ fn track_iteration(
         let attachment = native_hover_tab_attachment();
         let elevated_attachment = attachment.filter(|attachment| attachment.topmost_fallback);
         let cursor_over_native_tab = elevated_attachment.is_some_and(|attachment| {
-            let tab = windows::Win32::Foundation::HWND(
-                attachment.pill_hwnd as *mut core::ffi::c_void,
-            );
+            let tab =
+                windows::Win32::Foundation::HWND(attachment.pill_hwnd as *mut core::ffi::c_void);
             w32::window_frame(tab).is_some_and(|frame| {
                 cp.0 >= frame.x as f64
                     && cp.0 < (frame.x + frame.width) as f64
@@ -1017,22 +1419,47 @@ fn track_iteration(
             // still needs a fresh native show/update.
             if !same_hit(&hit, last) || last_hover_update().is_none() {
                 *last = hit;
-                let presentation = tab_position(app, frame, scale, *window_id);
-                *last_tab_rect = Some(presentation.rect);
-                let generation = crate::hover_core::begin_hover_tab_presentation();
-                let source_hwnd = crate::windows_capture_target::resolve(*window_id)
-                    .ok()
-                    .map(|target| target.raw_handle() as isize);
-                if source_hwnd
-                    .and_then(|source_hwnd| {
-                        attach_hover_tab_follower(app, *window_id, source_hwnd, generation)
-                    })
-                    .is_none()
-                {
+                let Some(presentation) = tab_position(app, frame, scale, *window_id) else {
                     log::warn!(
-                        "windows_hover: could not attach native follower for token {}",
+                        "windows_hover: no safe monitor/frame geometry for window {}; hiding tab",
                         *window_id
                     );
+                    hide_pill(app, "invalid-placement-geometry");
+                    *last = None;
+                    *last_tab_rect = None;
+                    *missed_bridge_ticks = 0;
+                    return;
+                };
+                *last_tab_rect = Some(presentation.rect);
+                let generation = crate::hover_core::begin_hover_tab_presentation();
+                let Some(source_hwnd) = crate::windows_capture_target::resolve(*window_id)
+                    .ok()
+                    .map(|target| target.raw_handle() as isize)
+                else {
+                    log::warn!(
+                        "windows_hover: hover token {} disappeared before native attachment",
+                        *window_id
+                    );
+                    hide_pill(app, "target-disappeared-before-attach");
+                    *last = None;
+                    *last_tab_rect = None;
+                    *missed_bridge_ticks = 0;
+                    return;
+                };
+                if attach_hover_tab_follower(app, *window_id, source_hwnd, generation).is_none() {
+                    // Never publish a logical presentation while the native
+                    // attachment still points at a previous target. Hide and
+                    // retire that attachment instead of letting the route
+                    // advertise a surface that cannot receive input safely.
+                    log::warn!(
+                        "windows_hover: could not attach native follower for token {}; hiding tab",
+                        *window_id
+                    );
+                    hide_pill(app, "native-attachment-failed");
+                    *last = None;
+                    *last_tab_rect = None;
+                    *missed_bridge_ticks = 0;
+                    return;
                 }
                 let shared = app
                     .try_state::<crate::session::SessionState>()
@@ -1046,15 +1473,28 @@ fn track_iteration(
                 let payload = HoverTabUpdate {
                     window_id: *window_id,
                     frame: *frame,
+                    source_owner_pid: native_hover_tab_attachment()
+                        .filter(|attachment| attachment.token == *window_id)
+                        .map(|attachment| attachment.source_owner_pid),
                     tab_x: presentation.rect.x,
                     tab_y: presentation.rect.y,
+                    perimeter_position: presentation.position,
+                    side: presentation.side,
                     attachment: presentation.attachment,
-                    vertical_offset: crate::share_priority::current_hover_tab_vertical_offset(),
+                    vertical_offset: crate::hover_core::hover_tab_side_offset(
+                        presentation.position,
+                    )
+                    .1,
                     shared,
                     display_like,
+                    presentation_generation: generation,
                 };
-                set_last_hover_update(Some(payload.clone()));
-                let _ = tauri::Emitter::emit(app, "hover-tab-update", &payload);
+                if crate::hover_core::set_last_hover_update_if_generation(
+                    Some(payload.clone()),
+                    generation,
+                ) {
+                    let _ = tauri::Emitter::emit(app, "hover-tab-update", &payload);
+                }
             }
         }
         None => {
@@ -1100,10 +1540,7 @@ fn own_window_is_pill(app: &AppHandle, hwnd: windows::Win32::Foundation::HWND) -
         .is_some_and(|pill| pill == hwnd)
 }
 
-fn own_window_is_control_consent(
-    app: &AppHandle,
-    hwnd: windows::Win32::Foundation::HWND,
-) -> bool {
+fn own_window_is_control_consent(app: &AppHandle, hwnd: windows::Win32::Foundation::HWND) -> bool {
     app.get_webview_window(crate::control_consent::CONTROL_CONSENT_LABEL)
         .and_then(|window| window.hwnd().ok())
         .is_some_and(|consent| consent == hwnd)
@@ -1115,8 +1552,26 @@ fn tab_position(
     frame: &WindowFrame,
     scale: f64,
     window_id: u32,
-) -> HoverTabPresentation {
-    let offset = crate::share_priority::current_hover_tab_vertical_offset();
+) -> Option<HoverTabPresentation> {
+    tab_position_with_position(
+        app,
+        frame,
+        scale,
+        window_id,
+        crate::share_priority::current_hover_tab_position(),
+    )
+}
+
+fn tab_position_with_position(
+    app: &AppHandle,
+    frame: &WindowFrame,
+    scale: f64,
+    window_id: u32,
+    position: HoverTabPosition,
+) -> Option<HoverTabPresentation> {
+    if !valid_hover_tab_frame(*frame) || !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
     // The native follower is authoritative for Windows placement. Mirror its
     // physical rcWork projection into the logical event payload so bridge
     // hit-testing and the actual HWND never disagree near a taskbar edge.
@@ -1128,14 +1583,16 @@ fn tab_position(
             w32::monitor_work_area_for_window(source),
             w32::window_dpi_scale(source),
         ) {
-            if let Some(placement) = project_hover_tab_native_frame_with_offset(
+            if let Some(placement) = project_hover_tab_native_frame_with_position(
                 source_frame,
                 work_area,
                 native_scale,
-                offset,
+                position,
             ) {
-                return HoverTabPresentation {
+                return Some(HoverTabPresentation {
                     window_id,
+                    position: placement.position,
+                    side: placement.side,
                     attachment: placement.attachment,
                     rect: HoverTabRect {
                         x: placement.frame.x as f64 / native_scale,
@@ -1143,11 +1600,23 @@ fn tab_position(
                         width: placement.frame.width as f64 / native_scale,
                         height: placement.frame.height as f64 / native_scale,
                     },
-                };
+                });
             }
         }
     }
-    tab_position_with_offset(app, frame, scale, window_id, offset)
+    let monitor = cursor_monitor_logical_bounds(app, scale)?;
+    if !monitor.left.is_finite()
+        || !monitor.top.is_finite()
+        || !monitor.right.is_finite()
+        || !monitor.bottom.is_finite()
+        || monitor.right <= monitor.left
+        || monitor.bottom <= monitor.top
+    {
+        return None;
+    }
+    Some(hover_tab_presentation_with_position(
+        window_id, *frame, monitor, position,
+    ))
 }
 
 fn tab_position_with_offset(
@@ -1156,58 +1625,66 @@ fn tab_position_with_offset(
     scale: f64,
     window_id: u32,
     vertical_offset: f64,
-) -> HoverTabPresentation {
-    hover_tab_presentation_with_offset(
+) -> Option<HoverTabPresentation> {
+    tab_position_with_position(
+        app,
+        frame,
+        scale,
         window_id,
-        *frame,
-        cursor_monitor_logical_bounds(app, scale),
-        vertical_offset,
+        hover_tab_position_for_side_offset(DEFAULT_HOVER_TAB_SIDE, vertical_offset),
     )
 }
 
-fn cursor_monitor_logical_bounds(app: &AppHandle, scale: f64) -> MonitorBounds {
+fn tab_position_with_side_offset(
+    app: &AppHandle,
+    frame: &WindowFrame,
+    scale: f64,
+    window_id: u32,
+    side: HoverTabSide,
+    vertical_offset: f64,
+) -> Option<HoverTabPresentation> {
+    tab_position_with_position(
+        app,
+        frame,
+        scale,
+        window_id,
+        hover_tab_position_for_side_offset(side, vertical_offset),
+    )
+}
+
+fn cursor_monitor_logical_bounds(app: &AppHandle, scale: f64) -> Option<MonitorBounds> {
     let Some((cx, cy)) = w32::cursor_position() else {
-        return MonitorBounds::new(f64::NEG_INFINITY, 0.0, f64::INFINITY, f64::INFINITY);
+        return None;
     };
-    if let Ok(monitors) = app.available_monitors() {
-        for monitor in monitors {
-            let pos = monitor.position();
-            let size = monitor.size();
-            let (left, top, right, bottom) = (
-                pos.x as f64,
-                pos.y as f64,
-                pos.x as f64 + size.width as f64,
-                pos.y as f64 + size.height as f64,
-            );
-            if cx >= left && cx < right && cy >= top && cy < bottom {
-                return MonitorBounds::new(
-                    left / scale,
-                    top / scale,
-                    right / scale,
-                    bottom / scale,
-                );
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let monitors = app.available_monitors().ok()?;
+    for monitor in monitors {
+        let pos = monitor.position();
+        let size = monitor.size();
+        let (left, top, right, bottom) = (
+            pos.x as f64,
+            pos.y as f64,
+            pos.x as f64 + size.width as f64,
+            pos.y as f64 + size.height as f64,
+        );
+        if cx >= left && cx < right && cy >= top && cy < bottom {
+            let bounds =
+                MonitorBounds::new(left / scale, top / scale, right / scale, bottom / scale);
+            if bounds.left.is_finite()
+                && bounds.top.is_finite()
+                && bounds.right.is_finite()
+                && bounds.bottom.is_finite()
+                && bounds.right > bounds.left
+                && bounds.bottom > bounds.top
+            {
+                return Some(bounds);
             }
+            return None;
         }
     }
-    app.primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| {
-            let pos = m.position();
-            let size = m.size();
-            MonitorBounds::new(
-                pos.x as f64 / scale,
-                pos.y as f64 / scale,
-                (pos.x as f64 + size.width as f64) / scale,
-                (pos.y as f64 + size.height as f64) / scale,
-            )
-        })
-        .unwrap_or(MonitorBounds::new(
-            f64::NEG_INFINITY,
-            0.0,
-            f64::INFINITY,
-            f64::INFINITY,
-        ))
+    None
 }
 
 /// DPI scale of the monitor containing `point` (physical px), defaulting to
@@ -1294,9 +1771,10 @@ pub fn create_pill_window(app: &AppHandle) -> Result<(), String> {
 
 fn hide_pill(app: &AppHandle, _reason: &str) {
     // Source loss, room leave, and shutdown are cancellation boundaries for a
-    // drag. Restore the previous in-memory offset before clearing the target;
-    // never let a hidden/invalid source commit a preview.
-    reset_hover_tab_drag_state(true);
+    // drag. Restore the previous in-memory position before clearing the
+    // target; never let a hidden/invalid source commit a preview. Serialize
+    // this boundary with command phases so it cannot overtake a native move.
+    reset_hover_tab_drag_state_serialized(true);
     detach_hover_tab_follower();
     set_last_hover_update(None);
     let hide_generation = crate::hover_core::begin_hover_tab_presentation();
@@ -1586,6 +2064,102 @@ mod tests {
     }
 
     #[test]
+    fn native_follow_projects_all_four_sides_with_the_same_offset_axis() {
+        let source = WindowFrame {
+            x: 300,
+            y: 200,
+            width: 500,
+            height: 300,
+        };
+        let work_area = WindowFrame {
+            x: 0,
+            y: 0,
+            width: 1200,
+            height: 800,
+        };
+        let cases = [
+            (
+                HoverTabSide::Top,
+                WindowFrame {
+                    x: 530,
+                    y: 160,
+                    width: 40,
+                    height: 40,
+                },
+            ),
+            (
+                HoverTabSide::Right,
+                WindowFrame {
+                    x: 800,
+                    y: 330,
+                    width: 40,
+                    height: 40,
+                },
+            ),
+            (
+                HoverTabSide::Bottom,
+                WindowFrame {
+                    x: 530,
+                    y: 500,
+                    width: 40,
+                    height: 40,
+                },
+            ),
+            (
+                HoverTabSide::Left,
+                WindowFrame {
+                    x: 260,
+                    y: 330,
+                    width: 40,
+                    height: 40,
+                },
+            ),
+        ];
+        for (side, expected) in cases {
+            let placement =
+                project_hover_tab_native_frame_with_side_offset(source, work_area, 1.0, side, 0.5)
+                    .expect("all edge placements should fit");
+            assert_eq!(placement.side, side);
+            assert_eq!(placement.attachment, HoverTabAttachment::Outside);
+            assert_eq!(placement.frame, expected);
+        }
+    }
+
+    #[test]
+    fn native_follow_insets_all_four_sides_and_respects_negative_origins() {
+        let source = WindowFrame {
+            x: -1920,
+            y: -1080,
+            width: 1920,
+            height: 1080,
+        };
+        let work_area = WindowFrame {
+            x: -1920,
+            y: -1040,
+            width: 1920,
+            height: 1040,
+        };
+        for side in [
+            HoverTabSide::Top,
+            HoverTabSide::Right,
+            HoverTabSide::Bottom,
+            HoverTabSide::Left,
+        ] {
+            let placement =
+                project_hover_tab_native_frame_with_side_offset(source, work_area, 1.25, side, 0.5)
+                    .expect("a work-area-sized source should inset safely");
+            assert_eq!(placement.side, side);
+            assert_eq!(placement.attachment, HoverTabAttachment::Inset);
+            assert!(placement.frame.x >= work_area.x);
+            assert!(placement.frame.y >= work_area.y);
+            assert!(placement.frame.x + placement.frame.width <= work_area.x + work_area.width);
+            assert!(placement.frame.y + placement.frame.height <= work_area.y + work_area.height);
+            assert_eq!(placement.frame.width, 50);
+            assert_eq!(placement.frame.height, 50);
+        }
+    }
+
+    #[test]
     fn native_follow_rejects_a_work_area_smaller_than_the_scaled_tab() {
         assert!(project_hover_tab_native_frame(
             WindowFrame {
@@ -1666,11 +2240,11 @@ mod tests {
             .expect("center placement should fit");
         let bottom = project_hover_tab_native_frame_with_offset(source, work_area, 1.5, 1.0)
             .expect("bottom placement should fit");
-        assert_eq!(top.frame.y, 100);
+        assert_eq!(top.frame.y, 104);
         assert_eq!(center.frame.height, 50);
         assert_eq!(center.frame.y, 425);
         assert_eq!(bottom.frame.height, 60);
-        assert_eq!(bottom.frame.y, 740);
+        assert_eq!(bottom.frame.y, 734);
         for placement in [top, center, bottom] {
             assert!(placement.frame.y >= work_area.y);
             assert!(placement.frame.y + placement.frame.height <= work_area.y + work_area.height);
@@ -1681,14 +2255,14 @@ mod tests {
                 .frame
                 .y,
             430
-        );
-    }
+        );    }
 
     #[test]
     fn native_hover_attachment_rejects_detached_or_stale_generation_and_replaces_token() {
         let attachment = NativeHoverTabAttachment {
             token: 42,
             source_hwnd: 0x1234,
+            source_owner_pid: 99,
             pill_hwnd: 0x5678,
             generation: 9,
             topmost_fallback: true,
@@ -1702,6 +2276,7 @@ mod tests {
             .expect("matching token should preserve the follower attachment");
         assert_eq!(replacement.token, 43);
         assert_eq!(replacement.source_hwnd, attachment.source_hwnd);
+        assert_eq!(replacement.source_owner_pid, attachment.source_owner_pid);
         assert_eq!(replacement.pill_hwnd, attachment.pill_hwnd);
         assert_eq!(replacement.generation, attachment.generation);
         assert_eq!(replacement.topmost_fallback, attachment.topmost_fallback);
