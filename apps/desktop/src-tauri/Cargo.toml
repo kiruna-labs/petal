@@ -85,7 +85,7 @@ tauri-plugin-deep-link = "2"
 # with zero compile-time signal. Bump this deliberately, re-diff
 # `platform_impl/macos.rs` against `instance_lock.rs` by hand, and update the
 # pin together.
-tauri-plugin-single-instance = { version = "=2.4.2", features = ["deep-link"] }
+tauri-plugin-single-instance = { version = "=2.4.4", features = ["deep-link"] }
 # Silent auto-update (issue #103, the production plan "make it updatable"):
 # official Tauri updater. It fetches the signed updater manifest from the
 # backend (`plugins.updater.endpoints` in tauri.conf.json -> our Vercel
