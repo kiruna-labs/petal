@@ -159,7 +159,7 @@ webrtc-sys = "=0.3.35"
 livekit-api = "0.5"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 dotenvy = "0.15"
 # Test Cockpit MULTI-3 independently fingerprints the native presence roster
 # with the browser's SHA-256 canonicalization (#261). Already locked transitively.
