@@ -155,6 +155,10 @@ static OVERLAY_PASSIVE_DISABLED: LazyLock<Mutex<HashMap<u32, bool>>> =
 /// another move/resize/show call.
 static OVERLAY_PLACEMENT: LazyLock<Mutex<HashMap<u32, AppliedOverlayState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Serialize tracker placement with share teardown. The tracker snapshots
+/// several per-overlay maps before calling Win32; without one lifecycle lock,
+/// close/re-share could let a stale snapshot move a retired HWND.
+static OVERLAY_RECONCILE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 /// Ordinary windows use a Win32 owner when integrity permits it. Elevated or
 /// integrity-unknown sources use a passive unowned telepointer surface; WGC's
 /// system border remains their authoritative indicator.
@@ -818,7 +822,8 @@ fn post_tracker_reconcile() {
     }
 }
 
-fn reconcile_all_overlays() {
+fn reconcile_all_overlays(app: Option<&AppHandle>) {
+    let _lifecycle_guard = OVERLAY_RECONCILE_LOCK.lock_unpoisoned();
     let overlays = OVERLAY_HWNDS.lock_unpoisoned().clone();
     // Cache one DWM-visible source frame per native target for this reconcile.
     // The hover tab and a sharer border for the same token must never read or
@@ -893,8 +898,11 @@ fn reconcile_all_overlays() {
             }
             _ => None,
         };
-        let _ =
-            crate::windows_hover::reconcile_native_hover_tab(attachment.source_hwnd, source_frame);
+        let _ = crate::windows_hover::reconcile_native_hover_tab(
+            app,
+            attachment.source_hwnd,
+            source_frame,
+        );
     }
 }
 
@@ -1144,7 +1152,7 @@ unsafe extern "system" fn overlay_tracker_window_proc(
     windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-fn overlay_tracker_thread_main() {
+fn overlay_tracker_thread_main(app: AppHandle) {
     use windows::Win32::UI::WindowsAndMessaging::{
         DispatchMessageW, GetMessageW, KillTimer, SetTimer, TranslateMessage, MSG, WM_QUIT,
         WM_TIMER,
@@ -1172,7 +1180,7 @@ fn overlay_tracker_thread_main() {
     if timer == 0 {
         log::warn!("windows share overlay: reconciliation timer could not be armed");
     }
-    reconcile_all_overlays();
+    reconcile_all_overlays(Some(&app));
     let mut msg = MSG::default();
     loop {
         let result = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -1185,9 +1193,9 @@ fn overlay_tracker_thread_main() {
         }
         if msg.message == TRACKER_RECONCILE_MESSAGE {
             TRACKER_RECONCILE_QUEUED.store(false, Ordering::Release);
-            reconcile_all_overlays();
+            reconcile_all_overlays(Some(&app));
         } else if msg.message == WM_TIMER && msg.wParam.0 == TRACKER_RECONCILE_TIMER_ID {
-            reconcile_all_overlays();
+            reconcile_all_overlays(Some(&app));
         } else if msg.message == WM_QUIT {
             break;
         }
@@ -1207,14 +1215,17 @@ fn overlay_tracker_thread_main() {
 /// One dedicated WinEvent/message-pump thread keeps the sharer overlay glued
 /// to the source. Location events are immediate; the timer only reconciles
 /// missed events and monitor/display changes.
-fn ensure_tracker(_app: &AppHandle) {
+fn ensure_tracker(app: &AppHandle) {
     if TRACKER_STARTED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
         let spawned = std::thread::Builder::new()
             .name("petal-sharer-pointer-tracker".to_string())
-            .spawn(overlay_tracker_thread_main);
+            .spawn({
+                let app = app.clone();
+                move || overlay_tracker_thread_main(app)
+            });
         if spawned.is_err() {
             log::error!("windows share overlay: failed to spawn tracker thread");
             TRACKER_STARTED.store(false, Ordering::Release);
@@ -1501,6 +1512,7 @@ pub(crate) fn create_share_overlay(
 
 /// Tear down the sharer overlay for a locally shared window on share stop.
 pub(crate) fn close_share_overlay(app: &AppHandle, window_id: u32) {
+    let _lifecycle_guard = OVERLAY_RECONCILE_LOCK.lock_unpoisoned();
     OVERLAY_HWNDS.lock_unpoisoned().remove(&window_id);
     OVERLAY_DRAW_ACTIVE.lock_unpoisoned().remove(&window_id);
     OVERLAY_DRAW_TRANSITIONING
@@ -2408,7 +2420,7 @@ mod tests {
                 }
                 if message.message == TRACKER_RECONCILE_MESSAGE {
                     TRACKER_RECONCILE_QUEUED.store(false, Ordering::Release);
-                    reconcile_all_overlays();
+                    reconcile_all_overlays(None);
                     let _ = reconciled_tx.send(());
                 }
             }

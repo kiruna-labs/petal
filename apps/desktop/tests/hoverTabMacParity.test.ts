@@ -16,12 +16,15 @@ test('macOS hover-tab parity keeps drag placement on the native panel path', () 
   assert.match(hoverTabSource, /pub fn hover_tab_drag\(/);
   assert.match(hoverTabSource, /platform::set_drag_active\(true\)/);
   assert.match(hoverTabSource, /platform::set_drag_active\(false\)/);
-  assert.match(hoverTabSource, /platform::tab_position_with_offset/);
+  assert.match(hoverTabSource, /platform::tab_position_with_position/);
+  assert.match(hoverTabSource, /perimeter_position: HoverTabPosition/);
   assert.match(hoverTabSource, /work_area\(\)/);
   assert.match(hoverTabSource, /crate::platform::cg::frame_for_window_id/);
   assert.match(hoverTabSource, /crate::platform::on_main/);
-  assert.match(hoverTabSource, /reset_drag_state\(true\)/);
-  assert.match(coreSource, /DEFAULT_HOVER_TAB_VERTICAL_OFFSET/);
+  assert.match(hoverTabSource, /reset_mac_drag_state_serialized\(true\)/);
+  assert.match(coreSource, /DEFAULT_HOVER_TAB_POSITION/);
+  assert.match(coreSource, /hover_tab_presentation_with_position/);
+  assert.match(coreSource, /hover_tab_perimeter_center/);
   assert.match(coreSource, /HoverTabDragPhase/);
 });
 

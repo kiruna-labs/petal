@@ -1,11 +1,8 @@
 <!--
-  Fixed right-edge sharing rail. The native window is always 40x40; this
-  route owns one direct Share/Stop button and delegates secondary choices to
-  the shared OS-native menu.
-
-  The Rust side owns visibility and compact positioning. Passive presentation
-  never steals focus, while the focused button supports the keyboard menu
-  shortcuts without changing the native window geometry.
+  Four-sided hover sharing tab. The native window is always 40x40; this route
+  owns the direct Share/Stop action, drag gesture, and context-menu bridge.
+  Native tracking owns visibility and placement while the attached Pill keeps
+  the surface oriented to the current source-window edge.
 -->
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
@@ -24,6 +21,7 @@
     AiChatSettings,
     AiChatStartOutcome,
     AiChatStateEvent,
+    HoverTabSide,
     HoverTabUpdate,
     RemoteControlStatus,
     ShareControlModeChanged,
@@ -40,9 +38,12 @@
     beginHoverTabGesture,
     cancelHoverTabGesture,
     clearHoverTabPreview,
+    createSerializedHoverTabCommandQueue,
+    hoverTabPositionForSide,
+    hoverTabSideOffsetForPosition,
     createHoverTabPreviewState,
-    isHoverTabDragging,
     moveHoverTabGesture,
+    normalizeHoverTabPosition,
     offerHoverTabPreview,
     settleHoverTabPreview,
     takeHoverTabPreview,
@@ -56,6 +57,7 @@
 
   let visible = $state(false);
   let attachment = $state<HoverTabUpdate['attachment']>('outside');
+  let side = $state<HoverTabSide>('right');
   let actionButton = $state<HTMLButtonElement | undefined>(undefined);
   let currentWindowId = $state<number | null>(null);
   let currentFrame = $state<WindowFrame | null>(null);
@@ -75,12 +77,18 @@
   let shareControlMode = $state<'cursorPreserving' | 'fullControl'>('cursorPreserving');
   let menuPending = $state(false);
   let drawActive = $state(false);
-  let verticalOffset = $state(0.5);
+  let perimeterPosition = $state(3 / 8);
+  let tabX = $state(0);
+  let tabY = $state(0);
   let dragGesture = $state<HoverTabGesture | null>(null);
   let dragPreviewState: HoverTabPreviewState | null = null;
   let dragFrameRequest: number | undefined;
   let suppressNextClick = false;
-  let dragCommandQueue: Promise<unknown> = Promise.resolve();
+  let nextDragToken = 0;
+  let latestDragToken: number | null = null;
+  let dragTerminalPendingToken: number | null = null;
+  let latestPresentationGeneration = 0;
+  let localPositionFence: { windowId: number; position: number } | null = null;
   // Master switch for AI chat (#656, #736). Seeded on mount and re-read
   // on settings changes, because Settings lives in a DIFFERENT webview.
   let aiChatEnabled = $state(false);
@@ -112,14 +120,14 @@
           ? `A participant is controlling this window in ${shareControlMode === 'fullControl' ? 'full-control' : 'cursor-preserving'} mode.`
           : ''
   );
-  const isDragging = $derived(isHoverTabDragging(dragGesture));
+  const isDragging = $derived(dragGesture?.phase === 'dragging');
+  const dragAxis = $derived(side === 'top' || side === 'bottom' ? 'horizontally' : 'vertically');
   const shareActionAriaLabel = $derived(
-    `${shareActionLabel}. Drag vertically to move; right-click for options${shareActionContext ? `. ${shareActionContext}` : ''}`
+    `${shareActionLabel}. Drag ${dragAxis} to move; right-click for options${shareActionContext ? `. ${shareActionContext}` : ''}`
   );
   const shareActionTooltip = $derived(
-    `${shareActionLabel} — drag to move; right-click for options`
+    `${shareActionLabel} — drag ${dragAxis} to move; right-click for options`
   );
-
   // Native AppKit tooltips are more reliable than WKWebView's HTML `title`
   // tracking in the non-key panel. Keep the title as a fallback and mirror its
   // current text onto the real WKWebView without changing the panel geometry.
@@ -151,13 +159,48 @@
     }).catch(() => {});
   }
 
+  function normalizeHoverTabSide(value: unknown): HoverTabSide {
+    return value === 'top' || value === 'right' || value === 'bottom' || value === 'left'
+      ? value
+      : 'right';
+  }
+
+  function validWindowFrame(frame: WindowFrame): boolean {
+    return (
+      Number.isFinite(frame.x) &&
+      Number.isFinite(frame.y) &&
+      Number.isFinite(frame.width) &&
+      Number.isFinite(frame.height) &&
+      frame.width > 0 &&
+      frame.height > 0
+    );
+  }
+
   function applyUpdate(update: HoverTabUpdate) {
+    if (
+      !validWindowFrame(update.frame) ||
+      !Number.isFinite(update.perimeterPosition) ||
+      !Number.isFinite(update.tabX) ||
+      !Number.isFinite(update.tabY)
+    ) {
+      return;
+    }
+    const generation = update.presentationGeneration;
+    const numericGeneration =
+      typeof generation === 'number' && Number.isFinite(generation) ? generation : null;
+    if (numericGeneration !== null && numericGeneration < latestPresentationGeneration) return;
+    const previousGeneration = latestPresentationGeneration;
+    if (numericGeneration !== null) {
+      latestPresentationGeneration = Math.max(latestPresentationGeneration, numericGeneration);
+    }
     void refreshAiChatEnabled();
     const { windowId, frame, shared } = update;
     const previousDisplayLike = displayLike;
     const nextDisplayLike = update.displayLike;
     const previousWindowId = currentWindowId;
     if (previousWindowId !== windowId) {
+      localPositionFence = null;
+      dragTerminalPendingToken = null;
       if (dragGesture) cancelActionDrag();
       clearAiChatError();
     }
@@ -172,12 +215,46 @@
       stopDrawForWindow(previousWindowId);
       drawActive = false;
     }
+    // A native preview update for the same target can arrive while a pointer
+    // drag is in flight. The gesture owns the source frame and perimeter/side
+    // state until its terminal phase; attachment remains native truth because
+    // it depends on work-area clamping that the frontend cannot derive.
+    if (previousWindowId === windowId && dragGesture !== null) {
+      // Keep the source frame fresh for projection, but do not let a delayed
+      // native preview tear the gesture's position/attachment state.
+      if (validWindowFrame(frame) && dragGesture.phase === 'dragging') {
+        currentFrame = frame;
+        dragGesture.sourceFrame = frame;
+      }
+      attachment = update.attachment;
+      return;
+    }
+    if (previousWindowId === windowId) {
+      if (dragTerminalPendingToken !== null) return;
+      if (
+        localPositionFence &&
+        (numericGeneration === null || numericGeneration <= previousGeneration) &&
+        Math.abs(normalizeHoverTabPosition(update.perimeterPosition) - localPositionFence.position) > 1e-9
+      ) {
+        // A late update from an older native command may still be delivered
+        // after the commit promise settles. It may refresh the source frame,
+        // but it must not roll the UI back to the old perimeter position.
+        currentFrame = frame;
+        return;
+      }
+    }
+    if (numericGeneration !== null && numericGeneration > previousGeneration) {
+      localPositionFence = null;
+    }
+    side = normalizeHoverTabSide(update.side);
     displayLike = nextDisplayLike;
     currentWindowId = windowId;
     currentFrame = frame;
+    tabX = update.tabX;
+    tabY = update.tabY;
     attachment = update.attachment;
-    if (!dragGesture && Number.isFinite(update.verticalOffset)) {
-      verticalOffset = Math.min(1, Math.max(0, update.verticalOffset));
+    if (!dragGesture && Number.isFinite(update.perimeterPosition)) {
+      perimeterPosition = ((update.perimeterPosition % 1) + 1) % 1;
     }
     visible = true;
     if (previousWindowId !== windowId) {
@@ -204,23 +281,38 @@
   }
 
   type DragCommandPhase = 'begin' | 'update' | 'commit' | 'cancel';
+  type HoverTabDragCommand = {
+    phase: DragCommandPhase;
+    windowId: number;
+    frame: WindowFrame;
+    perimeterPosition: number;
+    dragToken?: number;
+  };
+  const enqueueHoverTabNative = createSerializedHoverTabCommandQueue<
+    HoverTabDragCommand,
+    number
+  >((args) => invoke<number>(COMMANDS.hoverTabDrag, args));
+
+  function allocateDragToken(): number {
+    nextDragToken = nextDragToken >= Number.MAX_SAFE_INTEGER ? 1 : nextDragToken + 1;
+    return nextDragToken;
+  }
 
   function enqueueHoverTabDrag(
     phase: DragCommandPhase,
     windowId: number,
     frame: WindowFrame,
-    offset: number
+    position: number,
+    dragToken?: number
   ): Promise<number> {
-    const next = dragCommandQueue.then(() =>
-      invoke<number>(COMMANDS.hoverTabDrag, {
-        phase,
-        windowId,
-        frame,
-        verticalOffset: offset
-      })
-    );
-    dragCommandQueue = next.catch(() => undefined);
-    return next;
+    const args = {
+      phase,
+      windowId,
+      frame,
+      perimeterPosition: position,
+      ...(dragToken === undefined ? {} : { dragToken })
+    };
+    return enqueueHoverTabNative(args);
   }
 
   function releasePointerCapture(pointerId: number) {
@@ -245,10 +337,10 @@
     const preview = dragPreviewState;
     if (!gesture || gesture.phase !== 'dragging' || !preview) return;
 
-    const requestedOffset = takeHoverTabPreview(preview);
-    if (requestedOffset === null) return;
-    const offset = offerHoverTabPreview(preview, requestedOffset);
-    if (offset === null) return;
+    const requestedPosition = takeHoverTabPreview(preview);
+    if (requestedPosition === null) return;
+    const position = offerHoverTabPreview(preview, requestedPosition);
+    if (position === null) return;
 
     const windowId = currentWindowId;
     const frame = currentFrame;
@@ -258,7 +350,7 @@
       return;
     }
 
-    void enqueueHoverTabDrag('update', windowId, frame, offset)
+    void enqueueHoverTabDrag('update', windowId, frame, position, gesture.dragToken)
       .catch(() => {
         if (dragGesture === gesture) cancelActionDrag();
       })
@@ -272,7 +364,7 @@
         ) {
           return;
         }
-        preview.pendingOffset = nextOffset;
+        preview.pendingPosition = nextOffset;
         scheduleDragUpdate();
       });
   }
@@ -282,10 +374,10 @@
     dragFrameRequest = requestAnimationFrame(flushDragUpdate);
   }
 
-  function queueDragPreview(offset: number) {
+  function queueDragPreview(position: number) {
     const preview = dragPreviewState;
     if (!preview) return;
-    preview.pendingOffset = offset;
+    preview.pendingPosition = position;
     if (!preview.inFlight) scheduleDragUpdate();
   }
 
@@ -304,9 +396,14 @@
 
     const restored = cancelHoverTabGesture(gesture);
     if (restored === null) return;
-    verticalOffset = restored;
+    perimeterPosition = restored;
+    if (windowId !== null) {
+      localPositionFence = { windowId, position: restored };
+    }
+    side = hoverTabSideOffsetForPosition(restored).side;
+    attachment = gesture.originalAttachment;
     if (windowId !== null && frame !== null) {
-      void enqueueHoverTabDrag('cancel', windowId, frame, restored).catch(() => {});
+      void enqueueHoverTabDrag('cancel', windowId, frame, restored, gesture.dragToken).catch(() => {});
     }
   }
 
@@ -324,14 +421,22 @@
     // pointer-up. Clear the one-shot guard when the next real gesture begins
     // so that missing compatibility events cannot eat the next Share/Stop.
     suppressNextClick = false;
+    latestDragToken = null;
+    dragTerminalPendingToken = null;
     clearDragAnimationFrame();
     dragPreviewState = createHoverTabPreviewState();
-    dragGesture = beginHoverTabGesture(
-      event.pointerId,
-      event.screenX,
-      event.screenY,
-      verticalOffset
-    );
+    dragGesture = {
+      ...beginHoverTabGesture(
+        event.pointerId,
+        event.screenX,
+        event.screenY,
+        perimeterPosition,
+        tabX,
+        tabY,
+        currentFrame
+      ),
+      originalAttachment: attachment
+    };
     try {
       actionButton?.setPointerCapture(event.pointerId);
     } catch {
@@ -342,25 +447,35 @@
   function onActionPointerMove(event: PointerEvent) {
     const gesture = dragGesture;
     if (!gesture || gesture.pointerId !== event.pointerId || currentFrame === null) return;
-    const moved = moveHoverTabGesture(
-      gesture,
-      event.screenX,
-      event.screenY,
-      currentFrame.height
-    );
-    if (moved.offset === null) return;
+    const moved = moveHoverTabGesture(gesture, event.screenX, event.screenY);
+    if (moved.position === null) return;
     event.preventDefault();
-    dragGesture = moved.gesture;
-    verticalOffset = moved.offset;
+    const nextGesture = moved.started
+      ? { ...moved.gesture, dragToken: allocateDragToken() }
+      : moved.gesture;
+    if (moved.started) latestDragToken = nextGesture.dragToken ?? null;
+    dragGesture = nextGesture;
+    perimeterPosition = moved.position;
+    const windowId = currentWindowId;
+    if (windowId !== null) {
+      localPositionFence = { windowId, position: moved.position };
+    }
+    side = hoverTabSideOffsetForPosition(moved.position).side;
     if (moved.started) {
       const windowId = currentWindowId;
       const frame = currentFrame;
       if (windowId === null || frame === null) return;
-      void enqueueHoverTabDrag('begin', windowId, frame, gesture.originalOffset).catch(() => {
-        if (dragGesture === moved.gesture) cancelActionDrag();
+      void enqueueHoverTabDrag(
+        'begin',
+        windowId,
+        frame,
+        gesture.originalPosition,
+        nextGesture.dragToken
+      ).catch(() => {
+        if (dragGesture === nextGesture) cancelActionDrag();
       });
     }
-    queueDragPreview(moved.offset);
+    queueDragPreview(moved.position);
   }
 
   function onActionPointerUp(event: PointerEvent) {
@@ -375,16 +490,34 @@
     event.preventDefault();
     const windowId = currentWindowId;
     const frame = currentFrame;
-    const committed = verticalOffset;
-    const restored = cancelHoverTabGesture(gesture) ?? 0.5;
+    const committed = perimeterPosition;
+    const restored = cancelHoverTabGesture(gesture) ?? 5 / 16;
     suppressNextClick = true;
     if (windowId !== null && frame !== null) {
-      void enqueueHoverTabDrag('commit', windowId, frame, committed).catch(() => {
+      dragTerminalPendingToken = gesture.dragToken ?? null;
+      localPositionFence = { windowId, position: committed };
+      void enqueueHoverTabDrag('commit', windowId, frame, committed, gesture.dragToken)
+        .then(() => {
+          if (dragTerminalPendingToken === gesture.dragToken) dragTerminalPendingToken = null;
+        })
+      .catch(() => {
+        // A replacement gesture may have started while the commit was in
+        // flight. Its token must remain authoritative; do not restore old UI
+        // state or enqueue an old cancel over the newer gesture.
+        if (
+          dragGesture !== null ||
+          currentWindowId !== windowId ||
+          latestDragToken !== gesture.dragToken
+        ) return;
+        dragTerminalPendingToken = null;
         // The native command may have failed before it could clear its drag
         // session (for example, an IPC interruption). A best-effort cancel is
         // idempotent after backend rollback and prevents a frozen follower.
-        verticalOffset = restored;
-        void enqueueHoverTabDrag('cancel', windowId, frame, restored).catch(() => {});
+        perimeterPosition = restored;
+        localPositionFence = { windowId, position: restored };
+        side = hoverTabSideOffsetForPosition(restored).side;
+        attachment = gesture.originalAttachment;
+        void enqueueHoverTabDrag('cancel', windowId, frame, restored, gesture.dragToken).catch(() => {});
       });
     }
   }
@@ -585,19 +718,26 @@
 
   async function selectPosition(next: HoverTabPosition) {
     if (menuPending || currentWindowId === null || currentFrame === null) return;
-    const previous = verticalOffset;
-    const nextOffset = next === 'top' ? 0 : next === 'bottom' ? 1 : 0.5;
-    verticalOffset = nextOffset;
+    const windowId = currentWindowId;
+    const frame = currentFrame;
+    const previousSide = side;
+    const previousPosition = perimeterPosition;
+    const nextPosition = hoverTabPositionForSide(next);
+    side = next;
+    perimeterPosition = nextPosition;
+    localPositionFence = { windowId, position: nextPosition }
     menuPending = true;
     try {
-      verticalOffset = await enqueueHoverTabDrag(
+      perimeterPosition = await enqueueHoverTabDrag(
         'commit',
-        currentWindowId,
-        currentFrame,
-        nextOffset
+        windowId,
+        frame,
+        nextPosition
       );
     } catch {
-      verticalOffset = previous;
+      side = previousSide;
+      perimeterPosition = previousPosition;
+      localPositionFence = { windowId, position: previousPosition }
     } finally {
       menuPending = false;
     }
@@ -711,9 +851,11 @@
         aiChatEnabled,
         aiChatActive,
         displayLike,
+        // The hover tab is the ONLY surface that offers the perimeter
+        // presets (Petal View's region window deliberately omits them).
         true,
-        verticalOffset,
-        shareRemoteControlAllowed
+        shareRemoteControlAllowed,
+        side
       );
       const placement = keyboardInvocation && actionButton
         ? (() => {
@@ -730,7 +872,7 @@
         onDraw: (active) => void selectDraw(active),
         onAiChat: () => void onToggleAiChat(),
         onDebug: () => void openDebugCockpit(),
-        onPosition: (value) => void selectPosition(value),
+        onPosition: (value) => void selectPosition(value as HoverTabPosition),
         onRemoteControlAllowed: (allowed) => void onSetShareRemoteControlAllowed(allowed)
       }, placement);
     } finally {
@@ -743,7 +885,8 @@
   }
 
   function onActionKeyDown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && dragGesture) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
       cancelActionDrag(event);
       return;
     }
@@ -758,13 +901,18 @@
   class="hover-tab-host"
   class:is-shared={isShared}
   class:inset={attachment === 'inset'}
+  class:side-top={side === 'top'}
+  class:side-right={side === 'right'}
+  class:side-bottom={side === 'bottom'}
+  class:side-left={side === 'left'}
+  class:dragging={isDragging}
   class:hidden={!visible}
   style:--share-tab-bg={sharedTabBackground}
   style:--share-tab-fg={sharedTabInk}
   role="group"
   aria-label="Window sharing controls"
 >
-  <Pill attach="right">
+  <Pill attach={side}>
     <div class="hover-tab-surface">
       <button
         bind:this={actionButton}
@@ -772,7 +920,6 @@
         class="hover-tab-action hover-tab-trigger"
         class:is-shared={isShared}
         class:pending
-        class:dragging={isDragging}
         onclick={onToggleShare}
         oncontextmenu={onActionContextMenu}
         onkeydown={onActionKeyDown}
@@ -816,6 +963,8 @@
   }
 
   .hover-tab-host {
+    --hover-tab-shadow: 8px 0 20px -12px rgba(0, 0, 0, 0.72);
+    --hover-tab-source-highlight: inset -1px 0 0 rgba(255, 255, 255, 0.09);
     width: 40px;
     height: 40px;
     display: flex;
@@ -828,6 +977,55 @@
 
   .hover-tab-host.hidden {
     visibility: hidden;
+  }
+
+  /* Keep the live ring on the fixed 40px host instead of the transformed
+     button. A pressed button is rasterized at a fractional size, which can
+     make a 1px curved border look fuller than it does at rest. */
+  .hover-tab-host::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    border: 1px solid transparent;
+    border-radius: 0 12px 12px 0;
+    pointer-events: none;
+  }
+
+  .hover-tab-host:not(.is-shared)::after {
+    border-color: var(--live-bright, #7ff0a3);
+  }
+
+  .hover-tab-host.side-top:not(.inset)::after {
+    border-radius: 12px 12px 0 0;
+  }
+
+  .hover-tab-host.side-top.inset::after {
+    border-radius: 0 0 12px 12px;
+  }
+
+  .hover-tab-host.side-right:not(.inset)::after {
+    border-radius: 0 12px 12px 0;
+  }
+
+  .hover-tab-host.side-right.inset::after {
+    border-radius: 12px 0 0 12px;
+  }
+
+  .hover-tab-host.side-bottom:not(.inset)::after {
+    border-radius: 0 0 12px 12px;
+  }
+
+  .hover-tab-host.side-bottom.inset::after {
+    border-radius: 12px 12px 0 0;
+  }
+
+  .hover-tab-host.side-left:not(.inset)::after {
+    border-radius: 12px 0 0 12px;
+  }
+
+  .hover-tab-host.side-left.inset::after {
+    border-radius: 0 12px 12px 0;
   }
 
   .hover-tab-host :global(.pill.attach) {
@@ -843,14 +1041,84 @@
     overflow: hidden;
     box-shadow:
       inset 0 0 0 1px rgba(255, 255, 255, 0.2),
-      inset 1px 0 0 rgba(255, 255, 255, 0.09),
-      inset -1px 0 0 rgba(255, 255, 255, 0.09),
-      inset 0 1px 0 rgba(255, 255, 255, 0.07),
-      0 8px 20px -12px rgba(0, 0, 0, 0.72);
+      var(--hover-tab-source-highlight),
+      var(--hover-tab-shadow);
+  }
+
+  .hover-tab-host.side-top:not(.inset) {
+    --hover-tab-shadow: 0 -8px 20px -12px rgba(0, 0, 0, 0.72);
+    --hover-tab-source-highlight: inset 0 -1px 0 rgba(255, 255, 255, 0.09);
+  }
+
+  .hover-tab-host.side-top.inset {
+    --hover-tab-shadow: 0 8px 20px -12px rgba(0, 0, 0, 0.72);
+    --hover-tab-source-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  }
+
+  .hover-tab-host.side-right:not(.inset) {
+    --hover-tab-shadow: 8px 0 20px -12px rgba(0, 0, 0, 0.72);
+    --hover-tab-source-highlight: inset -1px 0 0 rgba(255, 255, 255, 0.09);
+  }
+
+  .hover-tab-host.side-right.inset {
+    --hover-tab-shadow: -8px 0 20px -12px rgba(0, 0, 0, 0.72);
+    --hover-tab-source-highlight: inset 1px 0 0 rgba(255, 255, 255, 0.09);
+  }
+
+  .hover-tab-host.side-bottom:not(.inset) {
+    --hover-tab-shadow: 0 8px 20px -12px rgba(0, 0, 0, 0.72);
+    --hover-tab-source-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  }
+
+  .hover-tab-host.side-bottom.inset {
+    --hover-tab-shadow: 0 -8px 20px -12px rgba(0, 0, 0, 0.72);
+    --hover-tab-source-highlight: inset 0 -1px 0 rgba(255, 255, 255, 0.09);
+  }
+
+  .hover-tab-host.side-left:not(.inset) {
+    --hover-tab-shadow: -8px 0 20px -12px rgba(0, 0, 0, 0.72);
+    --hover-tab-source-highlight: inset 1px 0 0 rgba(255, 255, 255, 0.09);
+  }
+
+  .hover-tab-host.side-left.inset {
+    --hover-tab-shadow: 8px 0 20px -12px rgba(0, 0, 0, 0.72);
+    --hover-tab-source-highlight: inset -1px 0 0 rgba(255, 255, 255, 0.09);
   }
 
   .hover-tab-host.inset :global(.pill.attach-right) {
     border-radius: 12px 0 0 12px;
+  }
+
+  .hover-tab-host.side-top:not(.inset) :global(.pill.attach) {
+    border-radius: 12px 12px 0 0;
+  }
+
+  .hover-tab-host.side-top.inset :global(.pill.attach) {
+    border-radius: 0 0 12px 12px;
+  }
+
+  .hover-tab-host.side-right:not(.inset) :global(.pill.attach) {
+    border-radius: 0 12px 12px 0;
+  }
+
+  .hover-tab-host.side-right.inset :global(.pill.attach) {
+    border-radius: 12px 0 0 12px;
+  }
+
+  .hover-tab-host.side-bottom:not(.inset) :global(.pill.attach) {
+    border-radius: 0 0 12px 12px;
+  }
+
+  .hover-tab-host.side-bottom.inset :global(.pill.attach) {
+    border-radius: 12px 12px 0 0;
+  }
+
+  .hover-tab-host.side-left:not(.inset) :global(.pill.attach) {
+    border-radius: 12px 0 0 12px;
+  }
+
+  .hover-tab-host.side-left.inset :global(.pill.attach) {
+    border-radius: 0 12px 12px 0;
   }
 
   .hover-tab-host.is-shared :global(.pill.attach) {
@@ -858,10 +1126,8 @@
     color: var(--share-tab-fg);
     box-shadow:
       inset 0 0 0 1px color-mix(in srgb, var(--share-tab-fg) 24%, transparent),
-      inset 1px 0 0 color-mix(in srgb, var(--share-tab-fg) 18%, transparent),
-      inset -1px 0 0 color-mix(in srgb, var(--share-tab-fg) 18%, transparent),
-      inset 0 1px 0 rgba(255, 255, 255, 0.22),
-      0 8px 20px -12px rgba(0, 0, 0, 0.72);
+      var(--hover-tab-source-highlight),
+      var(--hover-tab-shadow);
   }
 
   .hover-tab-surface {
@@ -881,12 +1147,12 @@
     justify-content: center;
     flex: 0 0 40px;
     width: 40px;
-    height: 40px;
     min-width: 40px;
+    height: 40px;
     padding: 0;
     box-sizing: border-box;
     border: 1px solid transparent;
-    border-radius: 0 10px 10px 0;
+    border-radius: 0 12px 12px 0;
     background: color-mix(in srgb, var(--text-primary, #f5f6f7) 10%, transparent);
     color: var(--text-primary, #f5f6f7);
     cursor: pointer;
@@ -897,7 +1163,39 @@
   }
 
   .hover-tab-host.inset .hover-tab-action {
-    border-radius: 10px 0 0 10px;
+    border-radius: 12px 0 0 12px;
+  }
+
+  .hover-tab-host.side-top:not(.inset) .hover-tab-action {
+    border-radius: 12px 12px 0 0;
+  }
+
+  .hover-tab-host.side-top.inset .hover-tab-action {
+    border-radius: 0 0 12px 12px;
+  }
+
+  .hover-tab-host.side-right:not(.inset) .hover-tab-action {
+    border-radius: 0 12px 12px 0;
+  }
+
+  .hover-tab-host.side-right.inset .hover-tab-action {
+    border-radius: 12px 0 0 12px;
+  }
+
+  .hover-tab-host.side-bottom:not(.inset) .hover-tab-action {
+    border-radius: 0 0 12px 12px;
+  }
+
+  .hover-tab-host.side-bottom.inset .hover-tab-action {
+    border-radius: 12px 12px 0 0;
+  }
+
+  .hover-tab-host.side-left:not(.inset) .hover-tab-action {
+    border-radius: 12px 0 0 12px;
+  }
+
+  .hover-tab-host.side-left.inset .hover-tab-action {
+    border-radius: 0 12px 12px 0;
   }
 
   .hover-tab-action:hover:not(:disabled) {
@@ -915,7 +1213,7 @@
   }
 
   .hover-tab-action:not(.is-shared) {
-    border-color: var(--live-bright, #7ff0a3);
+    border-color: transparent;
   }
 
   .hover-tab-action.pending {
@@ -926,7 +1224,11 @@
     transform: scale(0.96);
   }
 
-  .hover-tab-action.dragging {
+  /* `dragging` lives on the host (the gesture owns the whole tab), so the
+     action's feedback keys off it from there: grab cursor, brighter fill, and
+     NO press-scale -- the button keeps pointer capture for the entire drag and
+     would otherwise stay shrunk at :active until release. */
+  .hover-tab-host.dragging .hover-tab-action {
     cursor: grabbing;
     background: color-mix(in srgb, var(--text-primary, #f5f6f7) 24%, transparent);
     transform: none;
@@ -952,6 +1254,16 @@
     border-radius: 50%;
     background: currentColor;
     box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 18%, transparent);
+  }
+
+  .hover-tab-host.side-top .hover-tab-live-dot {
+    top: 7px;
+    bottom: auto;
+  }
+
+  .hover-tab-host.side-left .hover-tab-live-dot {
+    left: 7px;
+    right: auto;
   }
 
   @media (prefers-reduced-motion: reduce) {

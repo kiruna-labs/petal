@@ -67,13 +67,13 @@ test('the per-share remote-control lock is offered on every platform, and only w
 
   // Reflects a denial rather than always claiming allowed.
   const denied = buildHoverTabMenuEntries(
-    'automatic', true, false, 'cursorPreserving', true, false, false, false, false, 0.5, false
+    'automatic', true, false, 'cursorPreserving', true, false, false, false, false, false
   );
   const deniedToggle = denied.find((entry) => entry.kind === 'remote-control-allowed');
   assert.equal(deniedToggle?.checked, false);
 });
 
-test('hover-only position entries offer Top, Center, and Bottom without leaking into Petal View', () => {
+test('hover-only position entries offer all four exact border labels without leaking into Petal View', () => {
   const hoverEntries = buildShareOptionsMenuEntries(
     'automatic',
     true,
@@ -84,14 +84,20 @@ test('hover-only position entries offer Top, Center, and Bottom without leaking 
     false,
     false,
     true,
-    0.5
+    true,
+    'bottom'
   );
   const positions = hoverEntries.filter((entry) => entry.kind === 'position');
   assert.deepEqual(
     positions.map((entry) => entry.value),
     HOVER_TAB_POSITION_CHOICES.map((choice) => choice.value)
   );
-  assert.equal(positions.find((entry) => entry.value === 'center')?.checked, true);
+  assert.deepEqual(
+    positions.map((entry) => entry.text),
+    ['Along top border', 'Along right border', 'Along bottom border', 'Along left border']
+  );
+  assert.equal(positions.find((entry) => entry.value === 'bottom')?.checked, true);
+  assert.equal(positions.filter((entry) => entry.checked).length, 1);
   assert.ok(hoverEntries.some((entry) => entry.kind === 'section-label' && entry.text === HOVER_TAB_POSITION_SECTION_LABEL));
 
   const regionEntries = buildShareOptionsMenuEntries('automatic', true);
@@ -110,7 +116,7 @@ test('native menu dispatch invokes each enabled action and blocks disabled ones'
   };
   const entries: ShareOptionsMenuEntry[] = [
     { kind: 'priority', id: 'p', text: 'Priority', value: 'sharpText', checked: false },
-    { kind: 'position', id: 'top', text: 'Top', value: 'top', checked: false },
+    { kind: 'position', id: 'top', text: 'Along top border', value: 'top', checked: false },
     { kind: 'control-mode', id: 'c', text: 'Control', value: 'fullControl', checked: false, enabled: true },
     { kind: 'control-mode', id: 'disabled-c', text: 'Control', value: 'cursorPreserving', checked: false, enabled: false },
     { kind: 'annotation', id: 'draw', text: 'Draw', enabled: true, checked: false },
@@ -162,6 +168,10 @@ test('the fixed tab exposes native options only through pointer and keyboard con
   assert.match(hoverTabSource, /getCurrentWindow\(\)/);
   assert.doesNotMatch(hoverTabSource, /class="hover-tab-options"|class="hover-tab-tray"/);
   assert.match(hoverTabSource, /class="hover-tab-action hover-tab-trigger"/);
+  assert.match(hoverTabSource, /class:side-top/);
+  assert.match(hoverTabSource, /class:side-right/);
+  assert.match(hoverTabSource, /class:side-bottom/);
+  assert.match(hoverTabSource, /class:side-left/);
   assert.match(regionSource, /popupShareOptionsMenu\(entries,/);
 });
 
@@ -237,6 +247,6 @@ test('the fixed CSS prevents copy or transparent overflow from changing the nati
   assert.match(insetPillRule, /border-radius: 12px 0 0 12px;/);
   assert.match(buttonRule, /width: 40px;/);
   assert.match(buttonRule, /height: 40px;/);
-  assert.match(buttonRule, /border-radius: 0 10px 10px 0;/);
-  assert.match(insetButtonRule, /border-radius: 10px 0 0 10px;/);
+  assert.match(buttonRule, /border-radius: 0 12px 12px 0;/);
+  assert.match(insetButtonRule, /border-radius: 12px 0 0 12px;/);
 });

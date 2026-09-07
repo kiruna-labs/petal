@@ -21,10 +21,9 @@
     /** Larger collapsed meeting pill. Kept as real layout metrics rather
      * than transform scaling so native window measurement follows it. */
     scale?: 'normal' | 'large';
-    /** Right-edge hover-tab shell. The native tab grows inward from the
-     * window's right-center edge; omitting the prop keeps the classic capsule
-     * contract used by meeting chrome and toasts. */
-    attach?: 'right';
+    /** Edge-attached hover-tab shell; omitting the prop keeps the classic
+     * capsule contract used by meeting chrome and toasts. */
+    attach?: 'top' | 'right' | 'bottom' | 'left';
     children?: Snippet;
   }
 
@@ -46,6 +45,9 @@
   class:large={scale === 'large'}
   class:attach={attach !== undefined}
   class:attach-right={attach === 'right'}
+  class:attach-bottom={attach === 'bottom'}
+  class:attach-left={attach === 'left'}
+  class:attach-top={attach === 'top'}
 >
   {@render children?.()}
 </div>
@@ -104,9 +106,10 @@
     padding-bottom: 9px;
   }
 
-  /* Right-edge hover-tab shell: dark surface, compact geometry, and a
-     visible ring. The hover route supplies the fixed trigger/tray layout.
-     Keep these colors literal for the existing contrast/ui-consistency gate. */
+  /* Edge-attached hover-tab shell: dark surface, compact geometry, and a
+     visible ring. The highlight sits on the source-facing edge while the
+     soft shadow falls away from the source, so all four cardinal states read
+     correctly before the route adds its attachment-specific refinements. */
   .pill.attach {
     height: 100%;
     width: 100%;
@@ -116,19 +119,31 @@
     border-radius: 12px 12px 0 0;
     box-shadow:
       inset 0 0 0 1px rgba(255, 255, 255, 0.2),
-      inset 1px 0 0 rgba(255, 255, 255, 0.09),
-      inset -1px 0 0 rgba(255, 255, 255, 0.09),
-      inset 0 1px 0 rgba(255, 255, 255, 0.07),
-      0 5px 16px rgba(0, 0, 0, 0.3);
+      inset 0 -1px 0 rgba(255, 255, 255, 0.09),
+      0 -5px 16px rgba(0, 0, 0, 0.3);
   }
 
   .pill.attach-right {
     border-radius: 12px 0 0 12px;
     box-shadow:
       inset 0 0 0 1px rgba(255, 255, 255, 0.2),
-      inset 1px 0 0 rgba(255, 255, 255, 0.09),
       inset -1px 0 0 rgba(255, 255, 255, 0.09),
-      inset -1px 0 0 rgba(255, 255, 255, 0.07),
+      5px 0 16px rgba(0, 0, 0, 0.3);
+  }
+
+  .pill.attach-bottom {
+    border-radius: 0 0 12px 12px;
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.2),
+      inset 0 1px 0 rgba(255, 255, 255, 0.09),
+      0 5px 16px rgba(0, 0, 0, 0.3);
+  }
+
+  .pill.attach-left {
+    border-radius: 0 12px 12px 0;
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.2),
+      inset 1px 0 0 rgba(255, 255, 255, 0.09),
       -5px 0 16px rgba(0, 0, 0, 0.3);
   }
 </style>

@@ -54,7 +54,7 @@ jobs:
     name: Docs site build + gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
@@ -103,7 +103,7 @@ jobs:
       VERCEL_PROJECT_ID: prj_aQL1lpBarc1P0x726ufrS9eX6IF2
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
