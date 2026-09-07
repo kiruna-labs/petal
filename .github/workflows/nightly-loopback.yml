@@ -68,13 +68,9 @@ jobs:
       #   DRAW-N : kiruna-labs/petal#1 (draw stroke delivery not observed natively)
       #   30     : kiruna-labs/petal#2 (post-reconnect acquire: active w/o grant token)
       # DRAW-N stays quarantined until the web-harness half of PR #38 is DEPLOYED to
-
       # meet.petal.live: the Cockpit's web peers load production, so the fix cannot
-
       # take effect in this gate before the next release promotes it. Remove DRAW-N
-
       # once a post-deploy run shows it PASS (issue #1).
-
       E2E_QUARANTINE_COCKPIT: "DRAW-N"
       E2E_QUARANTINE_RC_CASES: "30"
     steps:
