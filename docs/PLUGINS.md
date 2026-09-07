@@ -55,6 +55,28 @@ surface)` runs; talk to your logic frame over `surface.channel` /
 manifest; clicks arrive via `petal.ui.onAction` and a button with `opens`
 toggles that surface for you.
 
+## Talking to the rest of the meeting *(M2)*
+
+A `meeting`-scoped plugin with `data:publish` sends and receives messages on
+its own namespace:
+
+```ts
+petal.data.publish('emoji', { e: '👍' }, { reliable: false });   // topic plugin/<your id>/emoji
+petal.data.on('emoji', (msg) => console.log(msg.sender.name, msg.json()));
+```
+
+Petal derives the topic from your manifest id, stamps `msg.sender` from the
+authenticated LiveKit participant (never from the payload), caps payloads at
+16 KB, and rate-limits both directions. Objects are JSON-encoded for you;
+pass a `Uint8Array` for raw bytes. `to: [identity]` targets specific peers.
+
+With `state:write`, `petal.state.set(value)` publishes a small (≤ 2 KB) value
+in your participant metadata that everyone with your plugin can read via
+`petal.state.get(identity)` and `petal.state.on(...)`. It survives late joins
+(it is state, not a stream), so use it for "what am I currently doing", not
+for events. Petal also uses this metadata to tell peers you are running the
+plugin, which is what powers the install prompt in M3.
+
 ## Manifest reference *(M1)*
 
 See `shared/plugin-host/manifest.ts` for the authoritative TypeScript type
