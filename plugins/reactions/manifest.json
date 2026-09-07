@@ -1,0 +1,20 @@
+{
+  "manifestVersion": 1,
+  "id": "petal.reactions",
+  "version": "1.0.0",
+  "name": "Reactions",
+  "description": "React with an emoji that floats up over the meeting for everyone.",
+  "apiVersion": 1,
+  "minHostVersion": "0.9.7",
+  "scope": "meeting",
+  "entry": "plugin.js",
+  "permissions": ["meeting:read", "data:publish", "ui:toolbar-button", "ui:popover", "ui:overlay"],
+  "contributes": {
+    "toolbarButtons": [{ "id": "react", "label": "React", "icon": "smile", "opens": "popover:picker" }],
+    "surfaces": {
+      "overlay": { "id": "fx" },
+      "popover": { "id": "picker", "width": 296, "height": 64 }
+    }
+  },
+  "native": null
+}

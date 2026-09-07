@@ -104,6 +104,10 @@
      * MeetingChrome slots its large↔small view switcher here (issue #1) so it
      * genuinely sits top-right of the gallery instead of floating over it. */
     topbarAction?: Snippet;
+    /** Plugin toolbar buttons (plugins/README.md §2.7): the route renders
+     * host-drawn `.control-cell`s here so plugin actions sit in the same row
+     * as the built-in controls, before More. Undefined = no plugins. */
+    pluginActions?: Snippet;
     /** Opens the feedback/bug-report dialog (#786). The route passes this
      * ONLY when the build carries a UserDispatch public key
      * (`isFeedbackEnabled()`); absent → the topbar cell never renders. */
@@ -138,6 +142,7 @@
     /** Mirrors the open menu kind for the matching caret's aria-expanded. */
     deviceMenuKind = null,
     topbarAction,
+    pluginActions,
     onReportBug
   }: Props = $props();
 
@@ -823,6 +828,7 @@
           aria-hidden="true"
         >{inviteTooltip}</span>
       </div>
+      {@render pluginActions?.()}
       <div class="control-cell">
         <ControlButton
           icon="more"

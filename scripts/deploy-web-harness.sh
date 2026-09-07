@@ -96,6 +96,12 @@ if [ ! -d "$STAGE/shared" ] || [ -L "$STAGE/shared" ]; then
   echo "FATAL: $STAGE/shared is missing or still a symlink -- rsync -L did not dereference it" >&2
   exit 1
 fi
+# Same for the built-in plugin sources (`@petal/plugins`, plugins/README.md).
+# `--exclude node_modules` above already drops plugins/node_modules.
+if [ ! -d "$STAGE/plugins" ] || [ -L "$STAGE/plugins" ] || [ ! -f "$STAGE/plugins/reactions/plugin.js" ]; then
+  echo "FATAL: $STAGE/plugins is missing, still a symlink, or lacks the built-in plugin sources" >&2
+  exit 1
+fi
 
 COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 

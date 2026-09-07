@@ -179,6 +179,15 @@ step "Rust: default-feature + cockpit-privileged build and lib tests (apps/deskt
   printf '\033[1;32mRust verification complete: default-feature and cockpit-privileged builds and lib tests passed.\033[0m\n'
 )
 
+# Plugin system (plugins/README.md): the SDK + first-party plugin workspace.
+# The host runtime in shared/plugin-host is covered by web-harness's tests
+# (tests/plugin*.test.ts, below); this step checks the workspace itself:
+# SDK typecheck and the bundle packer's own tests.
+if [ -f plugins/package.json ]; then
+  step "plugins: workspace install + SDK typecheck + packer tests"
+  ( cd plugins && npm ci && npx tsc --noEmit -p sdk/tsconfig.json && npm test )
+fi
+
 if [ -f web-harness/package.json ]; then
   step "web-harness: build + tests"
   ( cd web-harness && npm ci && npm run build && npm test )

@@ -50,6 +50,7 @@
   effect in the script block.
 -->
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import { onDestroy } from 'svelte';
   import { attachVideoStream } from '$lib/videoAttachment';
   import Gallery, { type GalleryParticipant } from './Gallery.svelte';
@@ -121,6 +122,8 @@
     onInviteLinkCopy?: () => void | Promise<void>;
     onOpenNetwork?: () => void | Promise<void>;
     onRenameRoom?: (displayName: string | null) => void | Promise<void>;
+    /** Pass-through to Gallery's plugin toolbar slot (plugins/README.md §2.7). */
+    pluginActions?: Snippet;
     /** Pass-through to Gallery's topbar bug-report cell (#786). Undefined on a
      * build with no UserDispatch key, which is what removes the cell. */
     onReportBug?: () => void;
@@ -167,6 +170,7 @@
     onOpenNetwork,
     onRenameRoom,
     onReportBug,
+    pluginActions,
     frameless = false,
     pillHost,
     localVideoStream = null,
@@ -760,6 +764,7 @@
       {onRenameRoom}
       {onReportBug}
       {frameless}
+      {pluginActions}
       onOpenDeviceMenu={(kind, el) => openDeviceMenu(kind, el)}
       deviceMenuKind={deviceMenu}
       topbarAction={viewSwitcher}

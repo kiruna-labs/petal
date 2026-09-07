@@ -1,0 +1,12 @@
+{
+  "name": "@petal/plugin-sdk",
+  "version": "0.1.0",
+  "description": "Types and helpers for writing Petal plugins.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./vite": "./vite.lib.ts"
+  },
+  "files": ["src", "vite.lib.ts", "README.md"]
+}
