@@ -48,20 +48,26 @@ This is required to complete setup.
 
 ## Granting a permission
 
-When Petal asks for a permission, click its action button (for example,
-**Allow Microphone**). macOS shows its own system prompt — approve it there.
+Petal asks for the permissions one at a time, in order. Click the current
+row's action button — **Set up Screen Recording**, **Allow Microphone**,
+**Allow Camera**, **Allow Accessibility** — and macOS shows its own system
+prompt; approve it there.
 
 macOS only picks up a fresh Screen Recording or Accessibility grant after
 the app restarts, so when you grant one of these during setup, Petal
 restarts itself automatically (you'll briefly see a "Relaunching Petal"
-notice). If the automatic restart doesn't go through, setup shows a
-**Relaunch now** button instead.
+notice). If the automatic restart doesn't go through, a **Relaunch
+required** notice appears with a **Relaunch now** button.
 
 ## If you denied a permission by accident
 
 During setup, a denied permission row shows an **Open System Settings**
-button, and a **Recheck permissions** button appears below the checklist —
-grant the permission in System Settings, then click it to pick up the change.
+button — grant the permission there, then come back. A **Recheck
+permissions** button appears below the checklist once Screen Recording is
+granted and another row is still denied; the Accessibility row has its own
+**Recheck Accessibility** button, and if Accessibility still looks off after
+you enabled Petal, the row walks you through removing the stale Petal entry
+from the Accessibility list and restarting.
 
 After setup, open **Settings** inside Petal and go to the **Permissions**
 section. Any permission that's currently off shows as needing attention,
