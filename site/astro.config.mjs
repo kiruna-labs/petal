@@ -29,10 +29,10 @@ export default defineConfig({
 			// see src/styles/custom.css.
 			favicon: '/favicon.svg',
 			customCss: ['./src/styles/custom.css'],
-			// No GitHub social link or "Edit this page" — the repo is private,
-			// so both would 404 for every public reader. Do not add them back
-			// without first making the repo public, which requires the owner's
-			// explicit double confirmation (see CLAUDE.md).
+			// No GitHub social link or "Edit this page" yet. The source is public
+			// at github.com/kiruna-labs/petal (this site lives under `site/`), so
+			// both can be added; point `editLink.baseUrl` at that repo's
+			// `site/` tree when doing so.
 			sidebar: [
 				{
 					label: 'Getting Started',
@@ -59,7 +59,12 @@ export default defineConfig({
 							label: 'Viewing shared windows',
 							slug: 'using/viewing-shared-windows',
 						},
+						{
+							label: 'Telepointers and drawing',
+							slug: 'using/telepointers-and-drawing',
+						},
 						{ label: 'Remote control', slug: 'using/remote-control' },
+						{ label: 'AI chat', slug: 'using/ai-chat' },
 						{
 							label: 'Cameras and audio',
 							slug: 'using/cameras-and-audio',

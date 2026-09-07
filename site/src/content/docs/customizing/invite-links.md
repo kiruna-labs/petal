@@ -53,8 +53,10 @@ explicitly rejected if you try to pass it through the same paths.
 
 ## Web invite link (`https://meet.petal.live/...`)
 
-This is the link Petal's own "Copy invite link" button generates, and it's
-the right default for anything you don't control the audience of (a calendar
+This is the link Petal itself generates — from the access-code chip on a
+room in the desktop app's room list, the meeting bar's **Invite** button, and
+the browser client's **Invite** control — and it's the right default for
+anything you don't control the audience of (a calendar
 invite, a public-ish channel, a link a bot posts) because it works whether or
 not the recipient has Petal installed.
 

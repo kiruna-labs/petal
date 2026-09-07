@@ -20,25 +20,27 @@ indicator until the connection recovers.
 ## Switching devices mid-meeting
 
 Open **Settings > Devices** to change your camera, microphone, or speaker.
+The arrows beside **Mic** and **Camera** in the meeting bar open the same
+device pickers without leaving the meeting.
 
 - **Microphone and speaker** changes apply immediately if you're currently in
   a meeting — the dropdown reports "Switched microphone" or "Switched
   speaker" once the swap succeeds. If you're not in a meeting, the choice is
   saved for later and the dropdown reports "Saved — applies when you join a
   room."
-- **Camera** selection in Settings only drives the live preview shown right
-  there in Settings, using whichever cameras macOS reports once Camera
-  permission is granted. The camera actually published in a meeting is
-  always the system default camera (usually the built-in one) — picking a
-  different camera in Settings does not change which camera other
-  participants see, and the choice isn't saved between visits to Settings.
-  This is a real limitation of the current version, not a hidden setting
-  you're missing.
+- **Camera** works the same way: switching cameras mid-meeting restarts your
+  camera publish on the new device ("Switched camera"), and the choice is
+  remembered across launches. If the saved camera isn't connected when you
+  join, Petal falls back to the default camera and tells you ("Camera not
+  found, using default"). The preview in Settings follows the same
+  selection.
+- On Windows, **Camera resolution** and **Camera frame rate** pickers sit
+  under the camera choice; modes the camera doesn't support are greyed out.
 
-If your microphone shows "isn't active in this meeting" after a switch,
-check that Microphone permission is granted under **Settings >
-Permissions** — a device swap can't hot-swap a track that was never
-publishing in the first place.
+If the microphone dropdown reports "Saved — microphone isn't active in this
+meeting (check mic permission)" after a switch, check that Microphone
+permission is granted under **Settings > Permissions** — a device swap
+can't hot-swap a track that was never publishing in the first place.
 
 ## No devices found
 

@@ -1,4 +1,4 @@
-# Petal Docs (docs.petal.live)
+# Petal Docs (petal.live/docs)
 
 Astro Starlight site for **using and self-hosting Petal** — install, permissions,
 meetings, sharing, remote control, self-hosting, and the backend API. This is
