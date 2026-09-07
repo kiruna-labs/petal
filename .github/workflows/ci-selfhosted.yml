@@ -45,7 +45,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       PETAL_DISABLE_AUDIO: 1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # verify-deploy-freshness / provenance wrappers inspect history.
           fetch-depth: 0

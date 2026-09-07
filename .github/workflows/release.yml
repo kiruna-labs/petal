@@ -139,7 +139,7 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           sparse-checkout: scripts/ci
@@ -223,7 +223,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       PETAL_BACKEND_URL: https://app.petal.live
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
@@ -396,7 +396,7 @@ jobs:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           # verify-deploy-freshness.sh needs origin/main + full ancestry.
@@ -543,7 +543,7 @@ jobs:
       # flow reads it via option_env! at build time — see transport/token.rs).
       PETAL_BACKEND_URL: https://app.petal.live
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           # `git tag -l --format='%(contents)'` below needs the pushed tag's

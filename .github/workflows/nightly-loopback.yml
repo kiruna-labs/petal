@@ -70,7 +70,7 @@ jobs:
       E2E_QUARANTINE_COCKPIT: "DRAW-N"
       E2E_QUARANTINE_RC_CASES: "30"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 
