@@ -1,6 +1,7 @@
 import type { CockpitScenarioResult, CockpitStepResult, HarnessContext } from './context.ts';
 import { meetingCredentialFromInviteInput } from '@petal/shared/logic/meetingCode';
 import { COCKPIT_TOPIC, type CockpitCommandMessage, type CockpitReportMessage } from './trackNames.ts';
+import { cockpitOwnerFromSearch } from './cockpitShareTarget.ts';
 
 // ---------------------------------------------------------------------------
 // Test-cockpit Phase 0 walking skeleton (#254): SHARE-W2N-Q end-to-end,
@@ -257,15 +258,32 @@ export function setupCockpit(
     await cb.startTestPatternShare();
   }
 
-  async function waitForRemoteShareVideo(): Promise<HTMLVideoElement> {
-    const deadline = Date.now() + REMOTE_SHARE_WAIT_MS;
+  // #919: when the native cockpit named itself (`&owner=`), only ITS share
+  // tile counts -- a lingering previous peer's tile can be first in the DOM.
+  async function waitForRemoteShareVideo(ownerIdentity?: string): Promise<HTMLVideoElement> {
+    const waitMs = cockpitParamMs(['remoteShareWaitMs'], REMOTE_SHARE_WAIT_MS);
+    const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       const videos = Array.from(document.querySelectorAll<HTMLVideoElement>('.share-tile video'));
-      const video = videos.find((candidate) => candidate.videoWidth > 0 && candidate.videoHeight > 0);
+      const video = videos.find(
+        (candidate) =>
+          candidate.videoWidth > 0 &&
+          candidate.videoHeight > 0 &&
+          (!ownerIdentity || shareVideoOwner(candidate) === ownerIdentity)
+      );
       if (video) return video;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    throw new Error(`no remote share video became visible within ${REMOTE_SHARE_WAIT_MS}ms`);
+    const scope = ownerIdentity ? ` for owner ${ownerIdentity}` : '';
+    throw new Error(`no remote share video${scope} became visible within ${waitMs}ms`);
+  }
+
+  function shareVideoOwner(video: HTMLVideoElement): string | undefined {
+    return video.closest?.<HTMLDivElement>('.share-tile')?.dataset.owner?.trim();
+  }
+
+  function cockpitOwnerParam(): string | undefined {
+    return cockpitOwnerFromSearch(typeof location === 'undefined' ? '' : location.search);
   }
 
   async function rosterFingerprint(participantIds: string[]): Promise<string> {
@@ -410,7 +428,7 @@ export function setupCockpit(
         return { step: 'sharePattern', ok: true, detail: 'test-pattern publish started' };
       }
       case 'SHARE-N2W-Q': {
-        const video = await waitForRemoteShareVideo();
+        const video = await waitForRemoteShareVideo(cockpitOwnerParam());
         const stats = await measureVideoFrames(video);
         const tile = video.closest<HTMLDivElement>('.share-tile');
         const demandWidth = Number(tile?.dataset.viewerDemandPixelWidth ?? 0);
@@ -542,8 +560,9 @@ export function setupCockpit(
         if (typeof cb.publishCockpitDrawStroke !== 'function') {
           throw new CockpitInfraError('web harness is missing publishCockpitDrawStroke callback');
         }
-        await waitForRemoteShareVideo();
-        const { windowId } = await cb.publishCockpitDrawStroke();
+        const drawOwner = cockpitOwnerParam();
+        await waitForRemoteShareVideo(drawOwner);
+        const { windowId } = await cb.publishCockpitDrawStroke(drawOwner);
         return {
           step: 'drawStroke',
           ok: true,
@@ -555,8 +574,9 @@ export function setupCockpit(
         if (typeof cb.publishCockpitTelepointer !== 'function') {
           throw new CockpitInfraError('web harness is missing publishCockpitTelepointer callback');
         }
-        await waitForRemoteShareVideo();
-        const { windowId } = await cb.publishCockpitTelepointer();
+        const teleOwner = cockpitOwnerParam();
+        await waitForRemoteShareVideo(teleOwner);
+        const { windowId } = await cb.publishCockpitTelepointer(teleOwner);
         return {
           step: 'telepointer',
           ok: true,

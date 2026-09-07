@@ -24,8 +24,8 @@ function cockpitContext(
     startCockpitAudioTone?: () => Promise<{ trackName: string }>;
     measureCockpitRemoteAudio?: HarnessContext['cb']['measureCockpitRemoteAudio'];
     measureCockpitRemoteCamera?: HarnessContext['cb']['measureCockpitRemoteCamera'];
-    publishCockpitDrawStroke?: () => Promise<{ windowId: number }>;
-    publishCockpitTelepointer?: () => Promise<{ windowId: number }>;
+    publishCockpitDrawStroke?: (ownerIdentity?: string) => Promise<{ windowId: number }>;
+    publishCockpitTelepointer?: (ownerIdentity?: string) => Promise<{ windowId: number }>;
     remoteParticipantCount?: number;
     remoteParticipantIds?: string[];
     localIdentity?: string;
@@ -432,6 +432,98 @@ test('runScenario: DRAW-N publishes a draw stroke for the remote share window', 
   const done = published.find((message) => message.step === 'done');
   assert.equal(done?.strokeDelivered, true);
   assert.equal(done?.windowId, 456);
+});
+
+// #919: two share tiles are live -- a killed previous peer's (first in the
+// DOM) and the native cockpit's. With `&owner=` naming the native peer, the
+// stroke must go to the native tile; the lingering ghost must never be chosen.
+async function withGhostAndNativeShareVideos<T>(
+  fn: () => Promise<T>,
+  options: { nativeLive: boolean } = { nativeLive: true }
+): Promise<T> {
+  const originalDocument = globalThis.document;
+  const ghostTile = { dataset: { owner: 'web-ghost', windowId: '116208' } };
+  const nativeTile = { dataset: { owner: 'native-1', windowId: '53' } };
+  const ghostVideo = { videoWidth: 960, videoHeight: 600, closest: () => ghostTile };
+  const nativeVideo = {
+    videoWidth: options.nativeLive ? 960 : 0,
+    videoHeight: options.nativeLive ? 600 : 0,
+    closest: () => nativeTile,
+  };
+  const fakeDocument = {
+    querySelectorAll: (selector: string) =>
+      selector === '.share-tile video'
+        ? [ghostVideo, nativeVideo]
+        : selector === '.share-tile[data-owner][data-window-id]'
+          ? [ghostTile, nativeTile]
+          : [],
+  } as unknown as Document;
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: fakeDocument });
+  try {
+    return await fn();
+  } finally {
+    Object.defineProperty(globalThis, 'document', { configurable: true, value: originalDocument });
+  }
+}
+
+test('runScenario: DRAW-N hands the native owner from ?owner= to the stroke publisher (#919)', async () => {
+  const owners: Array<string | undefined> = [];
+  const { ctx, published } = cockpitContext({
+    hasRoomInitially: false,
+    publishCockpitDrawStroke: async (ownerIdentity?: string) => {
+      owners.push(ownerIdentity);
+      return { windowId: 53 };
+    },
+  });
+  const cockpit = setupCockpit(ctx, advancingFrameCounter());
+  const result = await withLocationSearch('?code=abc-defg-hjk&auto=draw-n&owner=native-1', () =>
+    withGhostAndNativeShareVideos(() => cockpit.runScenario('DRAW-N', 'abc-defg-hjk'))
+  );
+
+  assert.equal(result.classification, 'PASS');
+  assert.deepEqual(owners, ['native-1']);
+  const done = published.find((message) => message.step === 'done');
+  assert.equal(done?.strokeDelivered, true);
+  assert.equal(done?.windowId, 53);
+});
+
+test('runScenario: DRAW-N does not accept a lingering peer\'s live video as the native share (#919)', async () => {
+  const calls: string[] = [];
+  const { ctx } = cockpitContext({
+    hasRoomInitially: false,
+    publishCockpitDrawStroke: async () => {
+      calls.push('draw');
+      return { windowId: 116208 };
+    },
+  });
+  const cockpit = setupCockpit(ctx, advancingFrameCounter());
+  // Only the ghost's video is live; the wait is bounded so the test stays fast.
+  const result = await withLocationSearch('?code=abc-defg-hjk&auto=draw-n&owner=native-1&remoteShareWaitMs=150', () =>
+    withGhostAndNativeShareVideos(() => cockpit.runScenario('DRAW-N', 'abc-defg-hjk'), { nativeLive: false })
+  );
+
+  assert.notEqual(result.classification, 'PASS');
+  assert.deepEqual(calls, [], 'the stroke publisher must not run against the wrong tile');
+  const failing = result.steps.find((step) => !step.ok);
+  assert.match(String(failing?.detail), /no remote share video for owner native-1/);
+});
+
+test('runScenario: TELE hands the native owner from ?owner= to the telepointer publisher (#919)', async () => {
+  const owners: Array<string | undefined> = [];
+  const { ctx } = cockpitContext({
+    hasRoomInitially: false,
+    publishCockpitTelepointer: async (ownerIdentity?: string) => {
+      owners.push(ownerIdentity);
+      return { windowId: 53 };
+    },
+  });
+  const cockpit = setupCockpit(ctx, advancingFrameCounter());
+  const result = await withLocationSearch('?code=abc-defg-hjk&auto=tele&owner=native-1', () =>
+    withGhostAndNativeShareVideos(() => cockpit.runScenario('TELE', 'abc-defg-hjk'))
+  );
+
+  assert.equal(result.classification, 'PASS');
+  assert.deepEqual(owners, ['native-1']);
 });
 
 test('runScenario: TELE publishes a telepointer movement for the remote share window', async () => {

@@ -1402,7 +1402,10 @@ What it does:
   receives and journals it; verdict consumption is not part of that topic.
 - The `__petalHarness.cockpitAutoScenario` namespace is URL-triggered and
   self-driving via `?auto=<scenarioId>&code=<accessCode>`, reporting results
-  over the `petal.cockpit` LiveKit data topic. The separate
+  over the `petal.cockpit` LiveKit data topic. The Rust engine also appends
+  `&owner=<native LiveKit identity>`; DRAW-N/TELE/SHARE-N2W-Q act only on
+  that peer's share tile (#919: a killed previous peer's share lingers on
+  the SFU for ~25s, and its tile used to win "first share tile"). The separate
   `__petalHarness.remoteControl` namespace is CDP-driven and imperative
   (click/drag/type automation), reporting results over raw script stdout.
 - `apps/desktop/scripts/cockpit.mjs` is now only a dev wrapper around the Rust

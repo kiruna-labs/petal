@@ -700,8 +700,10 @@ export interface HarnessCallbacks {
     publisher: string;
     detail: string;
   }>;
-  publishCockpitTelepointer: () => Promise<{ windowId: number }>;
-  publishCockpitDrawStroke: () => Promise<{ windowId: number }>;
+  /** #919: `ownerIdentity` is the native cockpit's identity (`&owner=`);
+   * the target must be ITS share tile, not the first tile in the DOM. */
+  publishCockpitTelepointer: (ownerIdentity?: string) => Promise<{ windowId: number }>;
+  publishCockpitDrawStroke: (ownerIdentity?: string) => Promise<{ windowId: number }>;
 }
 
 export interface HarnessContext {

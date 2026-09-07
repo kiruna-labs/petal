@@ -1,3 +1,4 @@
+import { cockpitShareTileMissingDetail, selectCockpitShareTile } from './cockpitShareTarget.ts';
 import type { HarnessContext } from './context.ts';
 import { drawPublishOptions, MAX_DRAW_TEXT_CHARS } from './draw.ts';
 import { DRAW_TOPIC, identityPaletteIndexFromMetadata, type DrawMessage, type DrawPoint } from './trackNames.ts';
@@ -274,12 +275,17 @@ export function setupDrawSender(ctx: HarnessContext) {
     });
   }
 
-  async function publishCockpitDrawStroke(): Promise<{ windowId: number }> {
+  // #919: `ownerIdentity` is the native cockpit's identity from `&owner=`;
+  // the stroke must land on ITS window, never on whichever share tile is first.
+  async function publishCockpitDrawStroke(ownerIdentity?: string): Promise<{ windowId: number }> {
     const room = state.room;
     const drawerIdentity = room?.localParticipant.identity.trim();
     if (!room || !drawerIdentity) throw new Error('draw requires an active room');
-    const tile = dom.tilesEl.querySelector<HTMLDivElement>('.share-tile[data-owner][data-window-id]');
-    if (!tile) throw new Error('draw requires a remote share tile');
+    const tiles = Array.from(
+      dom.tilesEl.querySelectorAll<HTMLDivElement>('.share-tile[data-owner][data-window-id]')
+    );
+    const tile = selectCockpitShareTile(tiles, ownerIdentity);
+    if (!tile) throw new Error(cockpitShareTileMissingDetail('draw', tiles, ownerIdentity));
     const target = drawTargetFromTile(tile);
     if (!target) throw new Error('draw target could not be resolved from remote share tile');
     const begin = builder.begin(target, { x: 0.25, y: 0.25 });
