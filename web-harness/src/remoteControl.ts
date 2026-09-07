@@ -144,7 +144,7 @@ export function fixedPointCoordinateKey(x: number, y: number): string {
  * whenever the message has no grant token to fingerprint: the 27-byte frame
  * cannot carry a v2 admission envelope or a real grant token.
  */
-export function encodeRemoteControlHotPath(message: RemoteControlMessage): Uint8Array | null {
+export function encodeRemoteControlHotPath(message: RemoteControlMessage): Uint8Array<ArrayBuffer> | null {
   const isPointerMove = message.kind === 'pointer' && message.action === 'move';
   const isWheel = message.kind === 'wheel';
   if ((!isPointerMove && !isWheel) || (isWheel && isV2DiscreteAttempt(message))) return null;
