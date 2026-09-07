@@ -2777,36 +2777,6 @@
       "version": "0.2.0"
     },
     {
-      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#core-graphics@0.24.0",
-      "description": "Bindings to Core Graphics for macOS",
-      "externalReferences": [
-        {
-          "type": "website",
-          "url": "https://github.com/servo/core-foundation-rs"
-        },
-        {
-          "type": "vcs",
-          "url": "https://github.com/servo/core-foundation-rs"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "fa95a34622365fa5bbf40b20b75dba8dfa8c94c734aea8ac9a5ca38af14316f1"
-        }
-      ],
-      "licenses": [
-        {
-          "expression": "MIT OR Apache-2.0"
-        }
-      ],
-      "name": "core-graphics",
-      "purl": "pkg:cargo/core-graphics@0.24.0",
-      "scope": "required",
-      "type": "library",
-      "version": "0.24.0"
-    },
-    {
       "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#core-graphics@0.25.0",
       "description": "Bindings to Core Graphics for macOS",
       "externalReferences": [
@@ -21420,7 +21390,7 @@
         "registry+https://github.com/rust-lang/crates.io-index#clap@4.6.6",
         "registry+https://github.com/rust-lang/crates.io-index#clipboard-win@5.4.1",
         "registry+https://github.com/rust-lang/crates.io-index#core-foundation@0.10.1",
-        "registry+https://github.com/rust-lang/crates.io-index#core-graphics@0.24.0",
+        "registry+https://github.com/rust-lang/crates.io-index#core-graphics@0.25.0",
         "registry+https://github.com/rust-lang/crates.io-index#cpal@0.15.3",
         "registry+https://github.com/rust-lang/crates.io-index#dotenvy@0.15.7",
         "registry+https://github.com/rust-lang/crates.io-index#env_filter@2.0.0",
@@ -22195,16 +22165,6 @@
         "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.189"
       ],
       "ref": "registry+https://github.com/rust-lang/crates.io-index#core-graphics-types@0.2.0"
-    },
-    {
-      "dependsOn": [
-        "registry+https://github.com/rust-lang/crates.io-index#bitflags@2.13.0",
-        "registry+https://github.com/rust-lang/crates.io-index#core-foundation@0.10.1",
-        "registry+https://github.com/rust-lang/crates.io-index#core-graphics-types@0.2.0",
-        "registry+https://github.com/rust-lang/crates.io-index#foreign-types@0.5.0",
-        "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.189"
-      ],
-      "ref": "registry+https://github.com/rust-lang/crates.io-index#core-graphics@0.24.0"
     },
     {
       "dependsOn": [
