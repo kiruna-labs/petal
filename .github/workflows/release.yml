@@ -139,7 +139,7 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           sparse-checkout: scripts/ci
@@ -223,7 +223,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       PETAL_BACKEND_URL: https://app.petal.live
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
@@ -254,7 +254,7 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -371,7 +371,7 @@ jobs:
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Upload Windows release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-release-${{ github.run_id }}
           path: ${{ runner.temp }}/windows-release/*
@@ -396,13 +396,13 @@ jobs:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           # verify-deploy-freshness.sh needs origin/main + full ancestry.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -543,7 +543,7 @@ jobs:
       # flow reads it via option_env! at build time — see transport/token.rs).
       PETAL_BACKEND_URL: https://app.petal.live
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           # `git tag -l --format='%(contents)'` below needs the pushed tag's
@@ -596,7 +596,7 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -735,7 +735,7 @@ jobs:
         run: bash scripts/release-smoke.sh --static-only
 
       - name: Download Windows release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: windows-release-${{ github.run_id }}
           path: ${{ runner.temp }}/windows-release
@@ -762,7 +762,7 @@ jobs:
       # Blob. Everything above has already proven the secrets.
       - name: Upload release artifacts (dry run)
         if: ${{ !(github.event_name == 'push' || inputs.publish == true) }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: petal-release-dry-run-${{ steps.version.outputs.TAG }}-${{ github.run_id }}
           path: |

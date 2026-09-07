@@ -36,11 +36,19 @@ done
 #
 # internal/  — history, planning docs, the design bundle, operator scripts
 # CLAUDE.md / AGENTS.md / .claude/ — agent-facing operating instructions
+# Root-anchored: removed only at the top level, because a nested directory of
+# the same name could be legitimate source (e.g. an `internal` module).
 EXCLUDE_PATHS=(
   'internal'
+)
+
+# Removed at ANY depth. Agent-facing files are not a top-level-only concern:
+# `apps/desktop/.claude/` reached a proposed publication because this list was
+# once matched against the export root alone.
+EXCLUDE_NAMES=(
+  '.claude'
   'CLAUDE.md'
   'AGENTS.md'
-  '.claude'
 )
 
 fail() { printf '\033[1;31m%s\033[0m\n' "$1" >&2; exit 1; }
@@ -64,6 +72,13 @@ for path in "${EXCLUDE_PATHS[@]}"; do
   fi
 done
 
+for name in "${EXCLUDE_NAMES[@]}"; do
+  while IFS= read -r hit; do
+    rm -rf "$hit"
+    echo "  removed ${hit#"$OUT"/}"
+  done < <(find "${OUT:?}" -name "$name" -mindepth 1 -prune)
+done
+
 echo
 echo "=== Verification ==="
 
@@ -71,7 +86,11 @@ echo "=== Verification ==="
 for path in "${EXCLUDE_PATHS[@]}"; do
   [[ -e "$OUT/$path" ]] && fail "FAIL: $path is still present in the export"
 done
-ok "  no excluded paths present"
+for name in "${EXCLUDE_NAMES[@]}"; do
+  survivor="$(find "${OUT:?}" -name "$name" -mindepth 1 -print -quit)"
+  [[ -n "$survivor" ]] && fail "FAIL: ${survivor#"$OUT"/} is still present in the export"
+done
+ok "  no excluded paths present, at any depth"
 
 # 2. Required legal files are present.
 for required in LICENSE NOTICE THIRD_PARTY_NOTICES.md TRADEMARKS.md \
