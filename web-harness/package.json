@@ -15,18 +15,18 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
-    "@types/node": "^26.1.0",
+    "@types/node": "^26.4.1",
     "dotenv": "^17.4.2",
-    "livekit-server-sdk": "^2.16.0",
-    "svelte": "^5.0.0",
-    "svelte-check": "^4.0.0",
-    "tsx": "^4.19.0",
+    "livekit-server-sdk": "^2.18.0",
+    "svelte": "^5.57.0",
+    "svelte-check": "^4.7.6",
+    "tsx": "^4.23.13",
     "typescript": "~6.0.2",
     "vite": "^8.2.2"
   },
   "dependencies": {
-    "@sentry/browser": "^10.65.0",
+    "@sentry/browser": "^10.73.0",
     "@userdispatch/sdk": "1.0.1",
-    "livekit-client": "^2.20.0"
+    "livekit-client": "^2.22.2"
   }
 }
