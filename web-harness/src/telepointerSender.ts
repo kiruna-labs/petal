@@ -1,3 +1,4 @@
+import { cockpitShareTileMissingDetail, selectCockpitShareTile } from './cockpitShareTarget.ts';
 import type { Room } from 'livekit-client';
 import { normalizedPointInContainedMedia } from './remoteControl.ts';
 import { TELEPOINTER_TOPIC, type TelepointerMessage } from './trackNames.ts';
@@ -33,11 +34,16 @@ export interface HoverTelepointerTileLike {
   getBoundingClientRect: HTMLDivElement['getBoundingClientRect'];
 }
 
-function cockpitRemoteShareTile(): HoverTelepointerTileLike | null {
-  for (const tile of Array.from(document.querySelectorAll<HTMLElement>('.share-tile[data-owner][data-window-id]'))) {
-    if (hoverTelepointerTargetFromTile(tile)) return tile;
-  }
-  return null;
+// #919: `ownerIdentity` (the native cockpit's `&owner=`) selects THAT peer's
+// share tile; a lingering previous peer's tile may be first in the DOM.
+function cockpitRemoteShareTile(ownerIdentity?: string): {
+  tile: HoverTelepointerTileLike | null;
+  candidates: HoverTelepointerTileLike[];
+} {
+  const candidates = Array.from(
+    document.querySelectorAll<HTMLElement>('.share-tile[data-owner][data-window-id]')
+  ).filter((tile) => hoverTelepointerTargetFromTile(tile) !== null);
+  return { tile: selectCockpitShareTile(candidates, ownerIdentity), candidates };
 }
 
 export function telepointerPublishOptions(): { reliable: boolean; topic: typeof TELEPOINTER_TOPIC } {
@@ -96,11 +102,11 @@ export function createTelepointerSender({ windowId, getRoom }: TelepointerSender
     room.localParticipant.publishData(bytes, telepointerPublishOptions()).catch(() => {});
   }
 
-  async function publishCockpitTelepointer(): Promise<{ windowId: number }> {
+  async function publishCockpitTelepointer(ownerIdentity?: string): Promise<{ windowId: number }> {
     const room = getRoom();
     if (!room) throw new Error('telepointer requires an active room');
-    const tile = cockpitRemoteShareTile();
-    if (!tile) throw new Error('telepointer requires a remote share tile with owner and window id');
+    const { tile, candidates } = cockpitRemoteShareTile(ownerIdentity);
+    if (!tile) throw new Error(cockpitShareTileMissingDetail('telepointer', candidates, ownerIdentity));
     const target = hoverTelepointerTargetFromTile(tile);
     if (!target) throw new Error('telepointer remote share tile did not expose a valid window id');
     const msg = telepointerMessage(target.windowId, room.localParticipant.identity, { x: 0.42, y: 0.58 }, true);
