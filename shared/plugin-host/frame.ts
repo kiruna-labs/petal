@@ -4,9 +4,22 @@
 // forbids every network fetch, and a srcdoc containing the frame runtime
 // followed by the plugin's own module. Design: plugins/README.md §2.3.
 //
-// Desktop note: Tauri's IPC init scripts are injected into the main frame
-// only, and the IPC endpoint rejects the `null` origin a sandboxed frame has,
-// so `__TAURI_INTERNALS__` is undefined inside. A rendered test asserts this.
+// What this file does NOT stop (#37): a frame navigating ITSELF
+// (`location.assign`, `<a href>`, `<meta http-equiv=refresh>`). A document's
+// own CSP cannot forbid that, so the boundary is closed from OUTSIDE the
+// frame, in two places that must both stay in place:
+//   - the embedder's `frame-src 'none'` (apps/desktop/src-tauri/
+//     tauri.conf.json `security.csp`, web-harness/vercel.json headers), and
+//   - host.ts's second-`load` gate, which unloads the plugin and stops
+//     posting to a frame that left its srcdoc.
+//
+// Desktop note: Tauri's IPC init scripts are injected into the main frame only
+// and the IPC endpoint rejects the `null` origin a sandboxed frame has, so
+// `__TAURI_INTERNALS__` should be undefined inside. The rendered sandbox test
+// checks the frame sees no such globals, but it runs in Chromium, where there
+// is no Tauri to leak -- that is evidence about the host page's globals, NOT
+// proof about WKWebView. Nothing automated covers WKWebView today; verifying
+// it needs a live desktop run (#37).
 
 import { FRAME_RUNTIME_SOURCE } from './frameRuntime.ts';
 

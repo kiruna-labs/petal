@@ -10,6 +10,10 @@ const definition = {
     // `plugins` metadata; peers with the plugin see state.changed.
     petal.state.set({ greeted: true }).catch((e) => petal.log.warn('state.set failed', e.message));
     petal.state.on((identity, value) => petal.log.info('state-changed', identity, JSON.stringify(value)));
+    // Positive control for the #37 self-navigation test: an UNCOMPROMISED
+    // plugin keeps receiving meeting events, which is how that test knows a
+    // broadcast really happened before asserting the navigated frame got none.
+    petal.meeting.on('participant-joined', (p) => petal.log.info('participant-joined', p.name));
     // Sandbox probe for the rendered/e2e tests: none of these may exist.
     const leaks = ['__TAURI_INTERNALS__', '__TAURI__', 'ipc'].filter((k) => k in globalThis);
     petal.log.info('sandbox-probe', JSON.stringify({ leaks, origin: String(globalThis.origin) }));

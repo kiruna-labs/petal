@@ -6,7 +6,7 @@
 
 import type { Json, Participant, RoomInfo, SharedWindow, ButtonPatch, LogLevel } from './api.ts';
 import type { Permission, PluginManifest, SurfaceKind } from './manifest.ts';
-import { HOST_API_VERSION, MANIFEST_LIMITS, isButtonLabel } from './manifest.ts';
+import { HOST_API_VERSION, MANIFEST_LIMITS, isButtonLabel, isIconName } from './manifest.ts';
 import { EVENT_PERMISSIONS, METHOD_PERMISSIONS, hasPermission, netFetchAllowed } from './permissions.ts';
 import {
   type BridgeErrorCode,
@@ -321,7 +321,13 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
           }
           clean.label = patch.label;
         }
-        if (typeof patch.icon === 'string') clean.icon = patch.icon;
+        if (patch.icon !== undefined) {
+          // Same rule as the manifest (isIconName), and REFUSED rather than
+          // dropped or substituted: a patch is the one path an icon reaches
+          // host chrome without passing validateManifest (#37).
+          if (!isIconName(patch.icon)) throw new BridgeError('invalid', 'icon must be a lowercase icon name');
+          clean.icon = patch.icon;
+        }
         if (patch.badge === null || (typeof patch.badge === 'number' && Number.isFinite(patch.badge))) clean.badge = patch.badge;
         if (typeof patch.disabled === 'boolean') clean.disabled = patch.disabled;
         take('ui', id);

@@ -115,6 +115,8 @@ interface LoadedEntry {
   /** The logic frame's runtime sent `ready`. */
   ready?: boolean;
   readyTimer?: ReturnType<typeof setTimeout>;
+  /** Removes the logic frame's `load` listener (the navigation gate). */
+  detachLoad?: () => void;
 }
 
 const FRAME_READY_TIMEOUT_MS = 5000;
@@ -245,19 +247,55 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
   }
   win.addEventListener('message', onMessage);
 
-  /** Attach once the srcdoc has loaded so the runtime's listener exists before `init` is posted. */
-  function attachWhenLoaded(frame: HTMLIFrameElement, attach: () => void): () => void {
-    let done = false;
+  /**
+   * Attach once the srcdoc has loaded (so the runtime's listener exists before
+   * `init` is posted), and treat a SECOND load as compromise.
+   *
+   * A plugin frame can navigate ITSELF: `sandbox="allow-scripts"` and the
+   * srcdoc `<meta>` CSP stop fetch/XHR and top navigation, but no policy a
+   * document sets on itself can stop `location.assign()`, an `<a href>`, or a
+   * `<meta http-equiv=refresh>` (#37). The navigated document keeps the same
+   * window, so without this gate the broker would go on posting meeting events
+   * -- participant names and identities -- into whatever now owns the frame.
+   * Plugin frames are built from srcdoc and are never reparented, so `load`
+   * fires exactly once; a second one means the frame left its srcdoc.
+   *
+   * The embedder's `frame-src 'none'` (apps/desktop/src-tauri/tauri.conf.json,
+   * web-harness/vercel.json) blocks the navigation outright, but only where
+   * that config is actually deployed. This gate does not depend on deployment
+   * config and it acts one `load` late, so keep both.
+   */
+  function attachWhenLoaded(frame: HTMLIFrameElement, attach: () => void, onNavigatedAway: () => void): () => void {
+    let loads = 0;
+    let stopped = false;
     const run = () => {
-      if (done) return;
-      done = true;
-      attach();
+      if (stopped) return;
+      loads += 1;
+      if (loads === 1) {
+        attach();
+        return;
+      }
+      stopped = true;
+      onNavigatedAway();
     };
-    frame.addEventListener('load', run, { once: true });
+    frame.addEventListener('load', run);
     return () => {
-      done = true;
+      stopped = true;
       frame.removeEventListener('load', run);
     };
+  }
+
+  /** A plugin frame left its sandboxed srcdoc: cut it off, then unload the plugin (#37). */
+  function frameNavigatedAway(pluginId: string, which: string): void {
+    if (!entries.has(pluginId)) return;
+    // Detach BEFORE unload: unload's teardown still emits to the plugin's
+    // frames, and nothing may be posted to a navigated window.
+    broker.detachPlugin(pluginId);
+    warn(
+      `plugin ${pluginId}: ${which} navigated away from its sandboxed document; ` +
+        'unloading the plugin and sending it nothing further',
+    );
+    unload(pluginId);
   }
 
   function load(plugin: LoadedPlugin, source: string): void {
@@ -285,13 +323,17 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
       }
     }, FRAME_READY_TIMEOUT_MS);
     entry.readyTimer = readyTimer;
-    attachWhenLoaded(frame, () => {
-      if (!frame.contentWindow || entries.get(id) !== entry) return;
-      entry.loaded = true;
-      broker.attach(plugin, frame.contentWindow);
-      const overlay = plugin.manifest.contributes?.surfaces?.overlay;
-      if (overlay && plugin.granted.includes('ui:overlay')) openSurface(id, overlay.id, null);
-    });
+    entry.detachLoad = attachWhenLoaded(
+      frame,
+      () => {
+        if (!frame.contentWindow || entries.get(id) !== entry) return;
+        entry.loaded = true;
+        broker.attach(plugin, frame.contentWindow);
+        const overlay = plugin.manifest.contributes?.surfaces?.overlay;
+        if (overlay && plugin.granted.includes('ui:overlay')) openSurface(id, overlay.id, null);
+      },
+      () => frameNavigatedAway(id, 'logic frame'),
+    );
     mounts.logic.appendChild(frame);
     notifyButtons();
   }
@@ -302,6 +344,7 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     for (const surfaceId of [...entry.surfaces.keys()]) closeSurface(pluginId, surfaceId);
     broker.detachPlugin(pluginId);
     if (entry.readyTimer) clearTimeout(entry.readyTimer);
+    entry.detachLoad?.();
     entry.frame.remove();
     entries.delete(pluginId);
     if (entry.advert) adapter.publishPluginEntry(pluginId, null).catch(() => {});
@@ -347,11 +390,15 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     const instance: SurfaceInstance = { kind: declared.kind, id: surfaceId, frame, container: null, cleanup: [] };
     entry.surfaces.set(surfaceId, instance);
 
-    const detachLoad = attachWhenLoaded(frame, () => {
-      if (!frame.contentWindow || entry.surfaces.get(surfaceId) !== instance) return;
-      broker.attach(entry.plugin, frame.contentWindow, { surface: { id: surfaceId, kind: declared.kind }, port: channel.port2 });
-      broker.emitLogic(pluginId, 'ui.surface-opened', { surfaceId, kind: declared.kind }, [channel.port1]);
-    });
+    const detachLoad = attachWhenLoaded(
+      frame,
+      () => {
+        if (!frame.contentWindow || entry.surfaces.get(surfaceId) !== instance) return;
+        broker.attach(entry.plugin, frame.contentWindow, { surface: { id: surfaceId, kind: declared.kind }, port: channel.port2 });
+        broker.emitLogic(pluginId, 'ui.surface-opened', { surfaceId, kind: declared.kind }, [channel.port1]);
+      },
+      () => frameNavigatedAway(pluginId, `${declared.kind} surface frame`),
+    );
     instance.cleanup.push(detachLoad);
 
     if (declared.kind === 'overlay') {
