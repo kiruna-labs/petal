@@ -540,6 +540,31 @@ pub async fn plugin_set_state(
     room_connection.set_plugin_metadata_entry(&plugin_id, clean).await
 }
 
+/// Frontend plugin-host diagnostics -> the file log. The host runs in the
+/// main webview, whose console nobody can see in a shipped build; frame
+/// lifecycle (ready/activated/error) and broker denials are exactly the
+/// signals a "plugin does nothing" report needs (plugins/README.md §5).
+/// Bounded and rate-limited so a chatty plugin cannot flood the log.
+#[tauri::command]
+pub fn plugin_host_log(level: String, line: String) -> Result<(), String> {
+    static LIMITER: OnceLock<Mutex<RateLimiter>> = OnceLock::new();
+    let limiter = LIMITER.get_or_init(|| Mutex::new(RateLimiter::new(20.0)));
+    if !limiter.lock().map_err(|_| "limiter poisoned".to_string())?.try_take("host") {
+        return Ok(());
+    }
+    let mut text: String = line.chars().take(1000).collect();
+    if text.len() < line.len() {
+        text.push('…');
+    }
+    match level.as_str() {
+        "error" => log::error!("plugins(host): {text}"),
+        "warn" => log::warn!("plugins(host): {text}"),
+        "debug" => log::debug!("plugins(host): {text}"),
+        _ => log::info!("plugins(host): {text}"),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

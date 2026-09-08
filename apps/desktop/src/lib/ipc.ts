@@ -69,6 +69,7 @@ export const COMMANDS = {
   drawSend: 'draw_send',
   pluginPublishData: 'plugin_publish_data',
   pluginSetState: 'plugin_set_state',
+  pluginHostLog: 'plugin_host_log',
   pluginStateSnapshot: 'plugin_state_snapshot',
   downloadAndInstallCompatibleUpdate: 'download_and_install_compatible_update',
   exportLogs: 'export_logs',
@@ -1438,6 +1439,8 @@ export interface CommandArgs {
   };
   /** `entry` null removes this plugin's advertisement (contract `pluginStateMetadata`). */
   [COMMANDS.pluginSetState]: { pluginId: string; entry: PluginAdvertEntry | null };
+  /** Plugin-host diagnostics into the Rust file log (bounded, rate-limited). */
+  [COMMANDS.pluginHostLog]: { level: 'debug' | 'info' | 'warn' | 'error'; line: string };
   /** Returns `PluginStateChangedEvent[]`: every remote participant's current `plugins` adverts. */
   [COMMANDS.pluginStateSnapshot]: Record<string, never>;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: Record<string, never>;
@@ -1604,6 +1607,7 @@ export interface CommandReturns {
   [COMMANDS.drawSend]: void;
   [COMMANDS.pluginPublishData]: void;
   [COMMANDS.pluginSetState]: void;
+  [COMMANDS.pluginHostLog]: void;
   [COMMANDS.currentRoom]: string | null;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: {
     status: 'up-to-date' | 'installed';

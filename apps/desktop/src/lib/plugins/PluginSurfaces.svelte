@@ -18,7 +18,7 @@
   import { base64ToBytes } from '@petal/shared/plugin-host/topics';
   import { pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
   import { enabledPlugins } from './pluginCatalog';
-  import { createTauriAdapter } from './tauriAdapter';
+  import { createTauriAdapter, hostLog } from './tauriAdapter';
   import PluginContextMenu from './PluginContextMenu.svelte';
   import { PLUGIN_MENU_DISABLE, pluginDisabledToast, type PluginMenuTarget } from '@petal/shared/plugin-host/provenance';
   import { writeEnabledOverride } from '@petal/shared/plugin-host/settingsModel';
@@ -59,6 +59,7 @@
     if (!plugin) return;
     writeEnabledOverride(browserStorage(), pluginId, false);
     host?.unload(pluginId);
+    hostLog('info', `plugin ${pluginId} turned off from the plugin menu`);
     onToast(pluginDisabledToast(plugin.manifest.name), 'info');
   }
 
@@ -83,7 +84,9 @@
     host = createPluginHost({
       document,
       adapter: createTauriAdapter({
-        participants: () => participants,
+        // $state proxies cannot be structured-cloned into a plugin frame
+        // (DataCloneError); hand the host plain snapshots.
+        participants: () => $state.snapshot(participants) as Participant[],
         roomLabel: () => roomLabel,
         phase: () => phase,
         toast: onToast
@@ -92,7 +95,10 @@
       mounts: { logic: logicEl, overlay: overlayEl, popoverLayer: popoverEl },
       onButtonsChanged: (next) => (buttons = next),
       onPluginMenu: (pluginId, at) => openMenu(pluginId, at),
-      warn: (message) => console.warn(message)
+      warn: (message) => {
+        console.warn(message);
+        hostLog('warn', message);
+      }
     });
     for (const { plugin, source } of enabledPlugins()) {
       const compat = hostCompatibility(plugin.manifest, version);
@@ -104,6 +110,7 @@
       host.load(plugin, source);
     }
     listenForPluginData();
+    hostLog('info', `host booted (Petal ${version}); loaded plugins: ${host.loaded().map((p) => p.manifest.id).join(', ') || 'none'}`);
   }
 
   // Inbound plugin packets (Rust plugins::bus already validated topic, size,
@@ -171,7 +178,7 @@
   // track `participants`; the previous list is plain state.
   let previous: Participant[] = [];
   $effect(() => {
-    const next = participants;
+    const next = $state.snapshot(participants) as Participant[];
     if (!host) return;
     const before = new Map(previous.map((p) => [p.identity, p]));
     const after = new Map(next.map((p) => [p.identity, p]));
