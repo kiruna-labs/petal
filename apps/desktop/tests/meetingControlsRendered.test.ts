@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { chromium } from 'playwright';
+import { chromium, type Page } from 'playwright';
 import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { build } from 'vite';
 
@@ -13,6 +13,59 @@ const fixtureRoot = new URL('./fixtures/', import.meta.url);
 
 function fixturePath(name: string): string {
   return fileURLToPath(new URL(name, fixtureRoot));
+}
+
+/**
+ * #75: wait for the control's own transitions to LAND before measuring them.
+ * A style change only starts its transition once it reaches a rendered frame,
+ * and this page routinely stalls 150ms+ right after a click (menu mount +
+ * relayout), so a fixed `waitForTimeout(160)` read `aria-expanded='true'` with
+ * the pre-transition background still resolved -- reporting the open control as
+ * `rgba(0, 0, 0, 0)` while the product was styling it correctly. Two rAF hops
+ * get the pending change onto a frame; then every finite running animation in
+ * the measured subtrees is awaited, bounded, so a genuinely missing transition
+ * still fails the assertion instead of hanging.
+ */
+async function settleMotion(page: Page, selectors: string[], timeoutMs = 2_000): Promise<void> {
+  // Evaluated as a source string on purpose: tsx transpiles an inline page
+  // function with `keepNames`, which injects a `__name` helper that does not
+  // exist in the page and throws `ReferenceError: __name is not defined`.
+  await page.evaluate(`(async () => {
+    const measured = ${JSON.stringify(selectors)};
+    const deadline = Date.now() + ${timeoutMs};
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const running = () => measured
+      .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+      .flatMap((element) => element.getAnimations({ subtree: true }))
+      .filter((animation) => animation.playState === 'running'
+        && animation.effect?.getComputedTiming().iterations !== Infinity);
+    await frame();
+    await frame();
+    while (Date.now() < deadline) {
+      const pending = running();
+      if (pending.length === 0) return;
+      await Promise.race([
+        Promise.allSettled(pending.map((animation) => animation.finished)),
+        new Promise((resolve) => setTimeout(resolve, Math.max(0, deadline - Date.now())))
+      ]);
+      await frame();
+    }
+  })()`);
+}
+
+/**
+ * #75: poll a browser-side reading until it reaches the expected state instead
+ * of sleeping a guessed interval past it. Returns the last sample either way,
+ * so the caller's assertion still reports the real value on timeout.
+ */
+async function pollUntil<T>(read: () => Promise<T>, settled: (value: T) => boolean, timeoutMs = 2_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let value = await read();
+  while (!settled(value) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    value = await read();
+  }
+  return value;
 }
 
 test('expanded gallery device selectors stay open and restore focus', { timeout: 30_000 }, async () => {
@@ -94,17 +147,31 @@ test('expanded gallery device selectors stay open and restore focus', { timeout:
       regressionFailures.push('mic options segment is highlighted at rest');
     }
     await micPrimary.hover();
-    await page.waitForTimeout(160);
+    await settleMotion(page, ['.meeting-split']);
     const hoverBackground = await micPrimary.evaluate((element) => getComputedStyle(element).backgroundColor);
     assert.notEqual(hoverBackground, 'rgba(0, 0, 0, 0)');
     await page.mouse.move(0, 0);
     await page.setViewportSize({ width: 520, height: 360 });
     await page.waitForTimeout(100);
     await mic.click();
-    await page.waitForTimeout(160);
+    await page.locator('.devices-menu.placed').waitFor({ timeout: 2_000 });
+    // #75: park the pointer off the trigger before measuring the open state.
+    // `:hover` and `[aria-expanded='true']` both paint --fill-bright, so a
+    // reading taken with the pointer still on the chevron cannot tell an open
+    // control from a merely hovered one -- it would pass even if the open-state
+    // rule were deleted. Measured with hover gone, only the open state can
+    // satisfy it.
+    await page.mouse.move(0, 0);
+    await settleMotion(page, ['.meeting-split', '.devices-menu']);
     const openBackground = await mic.evaluate((element) => getComputedStyle(element).backgroundColor);
     assert.notEqual(openBackground, 'rgba(0, 0, 0, 0)');
-    await page.locator('.devices-menu.placed').waitFor({ timeout: 2_000 });
+    assert.equal(openBackground, hoverBackground);
+    // The flipped chevron is open-only -- hover never rotates it -- so this is
+    // the reading that genuinely separates open from closed.
+    assert.notEqual(
+      await mic.locator('svg').evaluate((element) => getComputedStyle(element).transform),
+      'none'
+    );
     assert.equal(await mic.getAttribute('aria-expanded'), 'true');
     assert.equal(await camera.getAttribute('aria-expanded'), 'false');
     assert.equal(await page.locator('.devices-menu.placed').count(), 1);
@@ -189,11 +256,17 @@ test('expanded gallery device selectors stay open and restore focus', { timeout:
     });
     await deviceRow.hover();
     await page.mouse.wheel(0, 180);
-    await page.waitForTimeout(50);
-    const atFormerInnerBoundary = await readDeviceScroll();
+    // #75: a wheel lands on a later frame than the call that dispatched it, so
+    // a fixed 50ms sleep sampled a scroll that had not been applied yet and
+    // read "the wheel was trapped" for a picker that scrolls fine. Poll for the
+    // scroll to land; the assertions below still fail on the last sample if it
+    // never does.
+    const atFormerInnerBoundary = await pollUntil(readDeviceScroll, (scroll) => scroll.pickerTop > 0);
     await page.mouse.wheel(0, 120);
-    await page.waitForTimeout(50);
-    const afterRowWheel = await readDeviceScroll();
+    const afterRowWheel = await pollUntil(
+      readDeviceScroll,
+      (scroll) => scroll.pickerTop > atFormerInnerBoundary.pickerTop
+    );
     assert.equal(atFormerInnerBoundary.listTop, atFormerInnerBoundary.listMax);
     assert.ok(
       afterRowWheel.pickerTop > atFormerInnerBoundary.pickerTop,
