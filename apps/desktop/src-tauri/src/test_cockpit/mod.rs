@@ -196,6 +196,43 @@ fn web_peer_url(
     url
 }
 
+/// Vercel deployment-protection bypass for a STAGED web-harness deployment
+/// (#42). The release e2e gate points the web peers at the deployment it is
+/// about to promote, and that deployment sits behind deployment protection.
+/// Headless Chrome cannot set a request header, so the secret rides the FIRST
+/// navigation as Vercel's documented query form and is exchanged for a
+/// `_vercel_jwt` cookie that covers every later request from that profile.
+///
+/// NEVER put the result in `WebPeer.url`: that string is written into
+/// `run.jsonl` and uploaded as a CI artifact. Only Chrome's argv gets it.
+fn bypass_query_suffix(secret: &str) -> Option<String> {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "&x-vercel-protection-bypass={secret}&x-vercel-set-bypass-cookie=true"
+    ))
+}
+
+/// Pure half of `web_peer_navigation_url`, so the "no secret means byte-
+/// identical URL" property is testable without touching process env.
+fn apply_bypass_query(url: &str, secret: Option<&str>) -> String {
+    match secret.and_then(bypass_query_suffix) {
+        Some(suffix) => format!("{url}{suffix}"),
+        None => url.to_string(),
+    }
+}
+
+/// The URL actually handed to the browser. Identical to `url` unless
+/// `PETAL_VERCEL_BYPASS_SECRET` is set (release e2e gate only).
+fn web_peer_navigation_url(url: &str) -> String {
+    apply_bypass_query(
+        url,
+        std::env::var("PETAL_VERCEL_BYPASS_SECRET").ok().as_deref(),
+    )
+}
+
 pub(crate) fn cockpit_source_requires_visible_handback(window_id: u32) -> bool {
     COCKPIT_VISIBLE_SOURCE_IDS
         .get()
@@ -4662,7 +4699,9 @@ fn spawn_web_peer_labeled_with_cdp(
             ])
             .args(cdp_enabled.then_some("--remote-debugging-port=9222"))
             .arg(format!("--user-data-dir={}", user_data.display()))
-            .arg(&url)
+            // #42: the navigation URL may carry the staged-deployment bypass
+            // secret; `url` (recorded below and in run.jsonl) never does.
+            .arg(web_peer_navigation_url(&url))
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(err))
             .spawn()
@@ -4688,9 +4727,12 @@ fn spawn_web_peer_labeled_with_cdp(
                 .to_string(),
         );
     }
-    let status = Command::new("open").arg(&url).status().map_err(|e| {
-        format!("INFRA-FAIL: Google Chrome missing and default-browser fallback failed: {e}")
-    })?;
+    let status = Command::new("open")
+        .arg(web_peer_navigation_url(&url))
+        .status()
+        .map_err(|e| {
+            format!("INFRA-FAIL: Google Chrome missing and default-browser fallback failed: {e}")
+        })?;
     if status.success() {
         Ok(WebPeer {
             child: None,
@@ -11226,6 +11268,41 @@ mod tests {
             web_peer_url("http://localhost:5173", "abc-defg-hjk", "TELE", Some("  ")),
             "http://localhost:5173/?code=abc-defg-hjk&auto=tele"
         );
+    }
+
+    // #42: the staged-deployment bypass must reach Chrome's argv and NOTHING
+    // else. `web_peer_url` -- the string recorded in run.jsonl and uploaded as
+    // a CI artifact -- must stay secret-free, and an unset/blank secret must
+    // leave the navigation URL byte-identical to it.
+    #[test]
+    fn bypass_query_suffix_is_appended_only_for_a_real_secret() {
+        assert_eq!(bypass_query_suffix(""), None);
+        assert_eq!(bypass_query_suffix("   "), None);
+        assert_eq!(
+            bypass_query_suffix("  s3cr3t  ").as_deref(),
+            Some("&x-vercel-protection-bypass=s3cr3t&x-vercel-set-bypass-cookie=true")
+        );
+    }
+
+    #[test]
+    fn web_peer_url_never_carries_the_bypass_secret() {
+        let recorded = web_peer_url(
+            "https://web-harness-abc123.vercel.app",
+            "abc-defg-hjk",
+            "DRAW-N",
+            Some("p-cockpit-1a"),
+        );
+        assert!(!recorded.contains("x-vercel-protection-bypass"));
+        // No secret configured -> the browser gets exactly what is recorded.
+        assert_eq!(apply_bypass_query(&recorded, None), recorded);
+        assert_eq!(apply_bypass_query(&recorded, Some("  ")), recorded);
+        let navigated = apply_bypass_query(&recorded, Some("s3cr3t"));
+        // The scenario's own query survives ahead of the bypass params, so the
+        // harness still reads ?code/&auto/&owner on the first navigation.
+        assert!(navigated.starts_with(
+            "https://web-harness-abc123.vercel.app/?code=abc-defg-hjk&auto=draw-n&owner=p-cockpit-1a&"
+        ));
+        assert!(navigated.ends_with("&x-vercel-set-bypass-cookie=true"));
     }
 
     #[test]

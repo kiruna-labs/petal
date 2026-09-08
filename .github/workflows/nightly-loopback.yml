@@ -6,6 +6,13 @@ name: Nightly Remote-Control Loopback
 # (E2E_QUARANTINE_*) so a known, tracked failure is reported LOUDLY but does
 # not block a release -- while any new failure does.
 #
+# TWO TIERS, TWO WEB TARGETS. The loopback tier is hermetic: local
+# livekit-server plus a local vite web-harness built from THIS checkout, so it
+# already exercises the web source the release is about to ship. The Test
+# Cockpit tier talks to a real deployment over https, and which one is an
+# input (#42) -- production for a dispatch run, the staged pre-promotion
+# deployments when release.yml's `e2e-gate` passes them.
+#
 # SECURITY: never attach this to `pull_request`. It runs on the self-hosted
 # Tart runner; a third-party PR would execute on that machine. Manual
 # dispatch and the maintainer-only `v*` tag push are the only triggers.
@@ -19,13 +26,48 @@ on:
   # schedule trigger at that point:
   #   schedule:
   #     - cron: "17 10 * * *"
+  # TARGETING (#42). Both callers share this workflow, and they want different
+  # web targets, so it is an input with a PRODUCTION default:
+  #   * manual/nightly dispatch -> the defaults below, i.e. the live domains.
+  #     That is the point of a nightly: it observes drift between what is
+  #     deployed and what `main` says should be deployed.
+  #   * release.yml's `e2e-gate` -> the STAGED deployment URLs `deploy-web`
+  #     just created, so the gate tests the web build this release is about
+  #     to promote instead of the previous one.
+  # A staged deployment sits behind Vercel deployment protection; see
+  # `vercel_bypass_secret` below.
   workflow_dispatch:
+    inputs:
+      harness_url:
+        description: "web-harness origin the Test Cockpit's web peers load (default: production meet.petal.live)"
+        required: false
+        default: "https://meet.petal.live"
+        type: string
+      backend_url:
+        description: "Petal backend the Test Cockpit's native peer mints tokens from (default: production app.petal.live)"
+        required: false
+        default: "https://app.petal.live"
+        type: string
   workflow_call:
     inputs:
       ref:
         description: "Git ref to check out (release.yml passes the release tag); defaults to the caller's ref"
         required: false
         type: string
+      harness_url:
+        description: "web-harness origin the Test Cockpit's web peers load (default: production meet.petal.live)"
+        required: false
+        default: "https://meet.petal.live"
+        type: string
+      backend_url:
+        description: "Petal backend the Test Cockpit's native peer mints tokens from (default: production app.petal.live)"
+        required: false
+        default: "https://app.petal.live"
+        type: string
+    secrets:
+      vercel_bypass_secret:
+        description: "Vercel Protection Bypass for Automation secret, required ONLY when harness_url/backend_url point at a protected staged deployment. Empty for production targets."
+        required: false
 
 concurrency:
   group: nightly-loopback-${{ github.ref }}
@@ -112,6 +154,17 @@ jobs:
         # setup marker/TCC grants are present; Full/Soak chaos scenarios that
         # need sudo net impairment, multiple displays, or test-peer TCC grants
         # must skip here until the runner is provisioned for those capabilities.
+        #
+        # #42: the web target is an input, not a constant. Step-level env (not
+        # job-level) so a staged URL cannot leak into the loopback tier below,
+        # which is deliberately hermetic (local LiveKit + local vite harness).
+        # PETAL_VERCEL_BYPASS_SECRET is a GitHub secret: Actions masks it in
+        # the log, and the scrub step at the end of this job removes it from
+        # the uploaded artifacts, which masking does NOT cover.
+        env:
+          COCKPIT_HARNESS_URL: ${{ inputs.harness_url || 'https://meet.petal.live' }}
+          COCKPIT_BACKEND_URL: ${{ inputs.backend_url || 'https://app.petal.live' }}
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret }}
         shell: bash
         run: |
           set -euo pipefail
@@ -125,10 +178,14 @@ jobs:
 
           echo "==> Run QA-featured Test Cockpit Quick tier"
           CRASH_MARK="$RUNNER_TEMP/cockpit-start.mark"; touch "$CRASH_MARK"
-          # The Cockpit runs against PROD (backend-minted tokens, web peer from
-          # meet.petal.live). The job-level LIVEKIT_* vars exist for the local
-          # loopback tier below and must not leak in here: with LIVEKIT_URL set
-          # the app dials that (localhost:7880, refused -- first VM run, #916).
+          # The Cockpit runs against a REAL deployment (backend-minted tokens,
+          # web peer served over https) -- production by default, the staged
+          # pre-promotion deployments when release.yml passes them (#42). The
+          # job-level LIVEKIT_* vars exist for the local loopback tier below
+          # and must not leak in here: with LIVEKIT_URL set the app dials that
+          # (localhost:7880, refused -- first VM run, #916).
+          echo "cockpit web target: $COCKPIT_HARNESS_URL"
+          echo "cockpit backend target: $COCKPIT_BACKEND_URL"
           set +e
           # PETAL_BACKEND_URL is read at RUNTIME first (transport/token.rs);
           # an EMPTY value means "no backend" (the loopback tier's setting), so
@@ -148,10 +205,18 @@ jobs:
             bash apps/desktop/scripts/build-cockpit-primary.sh
           build_exit=$?
           if [ "$build_exit" -ne 0 ]; then echo "::error::build-cockpit-primary.sh failed ($build_exit)"; exit "$build_exit"; fi
+          # PETAL_WEB_HARNESS_URL_MATCH is unset here for the same reason as
+          # LIVEKIT_*: the job-level value (localhost:5185) belongs to the
+          # loopback tier, and it would make the cockpit-drive CDP lookup hunt
+          # for a tab that does not exist in this tier. Unset, the engine
+          # derives the needle from PETAL_HARNESS_URL's host, which is right
+          # for both a production and a staged target.
           env -u LIVEKIT_URL -u LIVEKIT_API_KEY -u LIVEKIT_API_SECRET \
               -u PETAL_AUTOTEST_ROOM -u PETAL_AUTOTEST_IDENTITY -u PETAL_AUTOTEST_NAME \
               -u PETAL_AUTOTEST_FRESH_ROOM -u PETAL_ACCESSORY_UI \
-            PETAL_BACKEND_URL=https://app.petal.live PETAL_DISABLE_AUDIO=1 RUST_LOG=info \
+              -u PETAL_WEB_HARNESS_URL_MATCH \
+            PETAL_BACKEND_URL="$COCKPIT_BACKEND_URL" PETAL_HARNESS_URL="$COCKPIT_HARNESS_URL" \
+            PETAL_DISABLE_AUDIO=1 RUST_LOG=info \
             apps/desktop/src-tauri/target/debug/desktop --test-case=quick
           engine_exit=$?
           set -e
@@ -381,6 +446,47 @@ jobs:
             exit 1
           fi
           echo "==> Live e2e gate passed" | tee -a "$HARNESS_LOG"
+
+      # #42: Actions masks a secret in the LOG; it does not touch uploaded
+      # ARTIFACTS. The bypass secret reaches Chrome's argv (and therefore
+      # could reach a crash dump or a verbose browser log), so scrub the whole
+      # artifact tree before it leaves the runner. No-op when unset.
+      - name: Scrub the deployment-protection bypass secret from artifacts
+        if: always()
+        env:
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PETAL_VERCEL_BYPASS_SECRET:-}" ]; then
+            echo "no bypass secret in play; nothing to scrub"
+            exit 0
+          fi
+          python3 - "$RUNNER_TEMP/petal-cockpit" "$RUNNER_TEMP/petal-nightly-loopback" <<'PY'
+          import os, sys
+          needle = os.environ["PETAL_VERCEL_BYPASS_SECRET"].strip().encode()
+          if not needle:
+              sys.exit(0)
+          scrubbed = 0
+          for root_dir in sys.argv[1:]:
+              for root, _dirs, files in os.walk(root_dir):
+                  for name in files:
+                      path = os.path.join(root, name)
+                      try:
+                          data = open(path, "rb").read()
+                      except OSError:
+                          continue
+                      if needle not in data:
+                          continue
+                      try:
+                          open(path, "wb").write(data.replace(needle, b"<redacted>"))
+                      except OSError:
+                          # Never print the path's contents; the name is enough.
+                          print(f"::error::could not scrub {path}")
+                          sys.exit(1)
+                      scrubbed += 1
+          print(f"scrubbed the bypass secret from {scrubbed} artifact file(s)")
+          PY
 
       - name: Upload live loopback artifacts
         if: always()
