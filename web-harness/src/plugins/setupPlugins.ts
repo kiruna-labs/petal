@@ -33,6 +33,14 @@ export interface PluginsHook {
 
 declare const __PETAL_BUILD_INFO__: { version: string } | undefined;
 
+/**
+ * How many times a session re-advertises after seeing its own metadata come
+ * back without a loaded meeting plugin's entry. Event-driven, so it cannot
+ * free-spin, but an entry that can NEVER land (permissions, size) would
+ * otherwise redo the write on every echo for the whole meeting.
+ */
+const MAX_ADVERT_RECONCILE_ATTEMPTS = 5;
+
 function hostVersion(): string {
   try {
     return typeof __PETAL_BUILD_INFO__ !== 'undefined' && __PETAL_BUILD_INFO__?.version ? __PETAL_BUILD_INFO__.version : '0.0.0';
@@ -234,6 +242,8 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
   let unsubscribe: (() => void) | null = null;
   function roomConnected(room: Room): void {
     roomDisconnected();
+    /** Re-advertisement budget for this connection; see MAX_ADVERT_RECONCILE_ATTEMPTS. */
+    let reconcileAttempts = 0;
     const joined = (p: LkParticipant) => host.broadcast('meeting.participant-joined', participantFromLiveKit(p, false));
     const left = (p: LkParticipant) => host.broadcast('meeting.participant-left', participantFromLiveKit(p, false));
     const changed = (p: LkParticipant) => host.broadcast('meeting.participant-changed', participantFromLiveKit(p, p === room.localParticipant));
@@ -260,23 +270,43 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     // them after a full reconnect too, when metadata may need re-asserting.
     const seedAndReadvertise = () => {
       for (const p of room.remoteParticipants.values()) onMetadata(p);
+      // A fresh (re)connect is a new session for the reconcile budget below.
+      reconcileAttempts = 0;
       host.readvertise();
     };
     room.on(RoomEvent.Connected, seedAndReadvertise);
     room.on(RoomEvent.Reconnected, seedAndReadvertise);
     if (room.state === 'connected') seedAndReadvertise();
-    // Whole-blob participant metadata is last-writer-wins across ALL local
-    // writers, not just ours: connection.ts's palette-index merge right after
-    // connect reads a blob that has not echoed our `plugins` key yet and
-    // overwrites it (seen live: the key was gone every time after connect).
-    // Reconcile whenever OUR metadata comes back without an entry for a
-    // loaded meeting plugin; debounced so a burst of writes causes one redo.
+    // Safety net, not the mechanism: since #73 every local metadata write goes
+    // through participantMetadata.ts, which merges against the last locally-
+    // known blob and re-applies our keys on the echo, so a concurrent writer
+    // (the palette-index merge right after connect used to eat this key every
+    // time) can no longer drop the advert. This still covers a `plugins` key
+    // that goes missing for some OTHER reason -- a server-side metadata
+    // update, a reconnect that came back with an older blob. Debounced so a
+    // burst of echoes causes one redo, and BOUNDED: a key that can never land
+    // (a permissions problem, a size cap) would otherwise re-advertise on
+    // every echo for the rest of the meeting.
     let reconcileTimer: ReturnType<typeof setTimeout> | null = null;
     const reconcileOwnAdverts = (_metadata: string | undefined, participant: LkParticipant) => {
       if (participant !== room.localParticipant || reconcileTimer) return;
       const adverts = pluginsFromMetadata(participant.metadata);
       const missing = host.loaded().some((p) => p.manifest.scope === 'meeting' && !adverts[p.manifest.id]);
-      if (!missing) return;
+      if (!missing) {
+        reconcileAttempts = 0;
+        return;
+      }
+      if (reconcileAttempts >= MAX_ADVERT_RECONCILE_ATTEMPTS) {
+        if (reconcileAttempts === MAX_ADVERT_RECONCILE_ATTEMPTS) {
+          reconcileAttempts += 1;
+          ui.logEvent(
+            `plugin adverts still missing from our metadata after ${MAX_ADVERT_RECONCILE_ATTEMPTS} re-advertisements; giving up until the next reconnect`,
+            'warn',
+          );
+        }
+        return;
+      }
+      reconcileAttempts += 1;
       reconcileTimer = setTimeout(() => {
         reconcileTimer = null;
         host.readvertise();
