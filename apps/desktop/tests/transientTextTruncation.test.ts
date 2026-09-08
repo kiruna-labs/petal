@@ -259,6 +259,56 @@ async function launchRenderedTestBrowser(profileDir: string) {
   };
 }
 
+type RenderedTestBrowser = Awaited<ReturnType<typeof launchRenderedTestBrowser>>;
+
+/**
+ * #75: motion is a transient state, so reading it once at a guessed offset
+ * races the transition it is checking. `spotlight hero swap should be visibly
+ * in motion` passed alone and failed inside the full suite for exactly that
+ * reason -- under parallel load the single sample landed outside the window.
+ *
+ * Latch it in the page instead: arm a per-frame sampler, then click in the
+ * same evaluation so nothing can slip between arming and the gesture. Every
+ * rendered frame is inspected, so no scheduler delay can step over the motion,
+ * while a layout change that genuinely never animates leaves the latch false
+ * and still fails the assertion. Sampling stops as soon as motion is seen.
+ */
+function armMotionLatchAndClick(selector: string, motionExpression: string): string {
+  return `(() => {
+    window.__petalMotionSeen = false;
+    const stopAt = Date.now() + 5000;
+    const tick = () => {
+      if (${motionExpression}) {
+        window.__petalMotionSeen = true;
+        return;
+      }
+      if (Date.now() < stopAt) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    document.querySelector(${JSON.stringify(selector)})?.click();
+  })()`;
+}
+
+/** Bounded wait for the latch armed above; returns false if motion never came. */
+async function waitForMotionLatch(
+  browser: RenderedTestBrowser,
+  sessionId: string,
+  timeoutMs = 3_000
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if ((await browser.evaluate(sessionId, `window.__petalMotionSeen === true`)) === true) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolvePoll) => setTimeout(resolvePoll, 20));
+  }
+}
+
+const ANY_RUNNING_ANIMATION = `document.getAnimations().some((animation) => animation.playState === 'running')`;
+const ANY_TILE_OFF_REST = `Array.from(document.querySelectorAll('.tile-wrap')).some((tile) => {
+      const style = getComputedStyle(tile);
+      return style.transform !== 'none' || style.opacity !== '1';
+    })`;
+
 test('desktop transient toasts wrap copied invite links instead of truncating', () => {
   const toastMessageStyles = cssBlock(toastSource, '.message');
   const pillAutoHeightStyles = cssBlock(pillSource, '.pill.auto-height');
@@ -655,7 +705,7 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     })`);
     assert.deepEqual(paintedVideoState, { ready: true, visible: true });
 
-    await browser.evaluate(sessionId, `document.querySelector('.layout-toggle')?.click()`);
+    await browser.evaluate(sessionId, armMotionLatchAndClick('.layout-toggle', ANY_RUNNING_ANIMATION));
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 60));
     const gridToSpotlightVideoState = await browser.evaluate(sessionId, `(() => {
       const prior = Object.values(window.__galleryVideoNodes ?? {});
@@ -676,12 +726,15 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     );
     const midGridToSpotlight = await browser.evaluate(sessionId, `({
       count: document.querySelectorAll('.tile-wrap').length,
-      spotlight: !!document.querySelector('.tiles.spotlight'),
-      moving: document.getAnimations().some((animation) => animation.playState === 'running')
+      spotlight: !!document.querySelector('.tiles.spotlight')
     })`);
     assert.equal(midGridToSpotlight.count, 3);
     assert.equal(midGridToSpotlight.spotlight, true);
-    assert.equal(midGridToSpotlight.moving, true, 'grid → spotlight should be visibly in motion');
+    assert.equal(
+      await waitForMotionLatch(browser, sessionId),
+      true,
+      'grid → spotlight should be visibly in motion'
+    );
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 280));
 
     const settledSpotlight = await browser.evaluate(sessionId, `({
@@ -715,7 +768,7 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
 
     // Selecting a different hero while the spotlight branch stays mounted
     // exercises the keyed hero block and the hero↔rail FLIP pair.
-    await browser.evaluate(sessionId, `document.querySelector('.spotlight-thumb')?.click()`);
+    await browser.evaluate(sessionId, armMotionLatchAndClick('.spotlight-thumb', ANY_TILE_OFF_REST));
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 60));
     const heroSwapVideoState = await browser.evaluate(sessionId, `(() => {
       const prior = Object.values(window.__galleryVideoNodes ?? {});
@@ -734,10 +787,7 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
       { priorConnected: 3, reused: 3, streamPreserved: true, ready: 3, visible: 3 },
       `spotlight hero swap replaced or blanked painted camera video elements: ${JSON.stringify(heroSwapVideoState)}`
     );
-    const midHeroSwap = await browser.evaluate(sessionId, `Array.from(document.querySelectorAll('.tile-wrap')).some((tile) => {
-      const style = getComputedStyle(tile);
-      return style.transform !== 'none' || style.opacity !== '1';
-    })`);
+    const midHeroSwap = await waitForMotionLatch(browser, sessionId);
     assert.equal(midHeroSwap, true, 'spotlight hero swap should be visibly in motion');
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 280));
     assert.deepEqual(
