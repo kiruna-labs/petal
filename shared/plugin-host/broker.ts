@@ -113,7 +113,7 @@ const SUB_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const KEY_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 const CONTRIB_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
-class BridgeError extends Error {
+export class BridgeError extends Error {
   readonly code: BridgeErrorCode;
   constructor(code: BridgeErrorCode, message: string) {
     super(message);
@@ -123,35 +123,105 @@ class BridgeError extends Error {
 
 const ERROR_CODES: readonly BridgeErrorCode[] = ['denied', 'rate-limited', 'invalid', 'unavailable', 'internal'];
 
+/** Depth at which the manual walk gives up, so a cycle terminates. */
+const MAX_CLONE_DEPTH = 32;
+
+/**
+ * `ArrayBuffer.prototype.byteLength`'s getter needs the [[ArrayBufferData]]
+ * internal slot, so calling it is a brand check that survives a realm
+ * boundary -- `instanceof ArrayBuffer` is false for a buffer from an iframe,
+ * which used to get copied field-by-field into `{}`. It rejects
+ * SharedArrayBuffer and plain objects, both of which must NOT pass through.
+ */
+const arrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength')?.get;
+
+function isArrayBufferAnyRealm(value: object): boolean {
+  if (value instanceof ArrayBuffer) return true;
+  if (!arrayBufferByteLength) return false;
+  try {
+    arrayBufferByteLength.call(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Deep-copy a payload into plain data that structured clone accepts. Hosts
  * hand the broker whatever their state layer holds -- on the desktop that is
  * a Svelte 5 `$state` Proxy, which postMessage rejects with DataCloneError
- * (seen live: `init` never reached any frame). Typed arrays, ArrayBuffers,
- * and MessagePorts pass through untouched; anything else becomes plain
- * objects/arrays/primitives. Functions and symbols are dropped.
+ * (seen live: `init` never reached any frame).
+ *
+ * The platform's own `structuredClone` runs first: it keeps `Error.message`,
+ * `RegExp.source`, `Blob`/`File`/`ImageData` and cycles, all of which the
+ * manual walk below flattens, and on the web path (already-plain payloads) it
+ * replaces the walk outright. It throws only on values `postMessage` would
+ * reject anyway -- Proxy, function, MessagePort -- and that throw is the
+ * fallback's cue. Typed arrays, ArrayBuffers and MessagePorts pass through the
+ * fallback untouched; anything else becomes plain objects/arrays/primitives.
+ * Functions and symbols are dropped. Past `MAX_CLONE_DEPTH` the fallback
+ * throws rather than returning `undefined`: truncation is never silent (#74).
  */
 export function toCloneable(value: unknown, depth = 0): unknown {
+  if (depth === 0 && typeof value === 'object' && value !== null && typeof structuredClone === 'function') {
+    try {
+      return structuredClone(value);
+    } catch {
+      // Not cloneable as-is (Proxy/function/MessagePort): walk it by hand.
+    }
+  }
+  return cloneWalk(value, depth);
+}
+
+function cloneWalk(value: unknown, depth: number): unknown {
   if (value === null || typeof value !== 'object') {
     return typeof value === 'function' || typeof value === 'symbol' ? undefined : value;
   }
-  if (depth > 32) return undefined;
-  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+  // Loud, not lossy: a 40-deep object used to come back `undefined` from here,
+  // and a cycle used to end as a truncated stub. The cap still exists so a
+  // cycle terminates instead of overflowing the stack -- it just says so now.
+  if (depth > MAX_CLONE_DEPTH) {
+    throw new BridgeError(
+      'invalid',
+      `payload nests deeper than ${MAX_CLONE_DEPTH} levels (too deep, or a cycle a Proxy kept structuredClone from resolving)`,
+    );
+  }
+  // Both of these see through a Proxy, and both are cheap. Order matters: the
+  // plain-object/Proxy case is the hot one (a Svelte `$state` tree is nothing
+  // else), so it must not pay for the exotic brand checks below.
+  if (ArrayBuffer.isView(value)) return value;
+  if (Array.isArray(value)) return value.map((v) => cloneWalk(v, depth + 1));
+  const proto = Object.getPrototypeOf(value);
+  if (proto === Object.prototype || proto === null) return keyCopy(value as Record<string, unknown>, depth);
+  if (isArrayBufferAnyRealm(value)) return value;
   if (typeof MessagePort !== 'undefined' && value instanceof MessagePort) return value;
-  if (Array.isArray(value)) return value.map((v) => toCloneable(v, depth + 1));
   if (value instanceof Date) return new Date(value.getTime());
-  if (value instanceof Map) return new Map([...value.entries()].map(([k, v]) => [toCloneable(k, depth + 1), toCloneable(v, depth + 1)]));
-  if (value instanceof Set) return new Set([...value].map((v) => toCloneable(v, depth + 1)));
+  if (value instanceof Map) return new Map([...value.entries()].map(([k, v]) => [cloneWalk(k, depth + 1), cloneWalk(v, depth + 1)]));
+  if (value instanceof Set) return new Set([...value].map((v) => cloneWalk(v, depth + 1)));
+  // An exotic neighbour of the Proxy that forced this walk (Error, RegExp,
+  // Blob, a cross-realm Date) keeps its state in internal slots a key copy
+  // would flatten to `{}`; it is usually cloneable on its own, so ask.
+  if (typeof structuredClone === 'function') {
+    try {
+      return structuredClone(value);
+    } catch {
+      // Itself proxy-bearing or unshareable: fall through to the key copy.
+    }
+  }
+  return keyCopy(value as Record<string, unknown>, depth);
+}
+
+function keyCopy(value: Record<string, unknown>, depth: number): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(value as Record<string, unknown>)) {
-    const raw = (value as Record<string, unknown>)[key];
+  for (const key of Object.keys(value)) {
+    const raw = value[key];
     if (typeof raw === 'function' || typeof raw === 'symbol') continue;
     // defineProperty, not assignment: `Object.keys` returns an own `__proto__`
     // (JSON.parse produces one), and `out.__proto__ = ...` would hit
     // Object.prototype's setter -- dropping the key and mutating the copy's
     // prototype instead of copying it, which structured clone never does.
     Object.defineProperty(out, key, {
-      value: toCloneable(raw, depth + 1), // undefined values are kept, as structured clone does
+      value: cloneWalk(raw, depth + 1), // undefined values are kept, as structured clone does
       enumerable: true,
       writable: true,
       configurable: true
