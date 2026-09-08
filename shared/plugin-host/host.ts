@@ -96,6 +96,8 @@ interface LoadedEntry {
   surfaces: Map<string, SurfaceInstance>;
   /** Current advertisement for meeting-scoped plugins; null for local ones (never advertised). */
   advert: PluginAdvert | null;
+  /** The logic frame fired `load` (init was posted). */
+  loaded?: boolean;
   /** The logic frame's runtime sent `ready`. */
   ready?: boolean;
   readyTimer?: ReturnType<typeof setTimeout>;
@@ -262,12 +264,18 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     // A frame whose scripts never run is silent, not erroring. Surface that.
     const readyTimer = setTimeout(() => {
       if (entries.get(id) === entry && !entry.ready) {
-        warn(`plugin ${id}: logic frame did not report ready within ${FRAME_READY_TIMEOUT_MS} ms (frame scripts blocked or bridge unreachable?)`);
+        warn(
+          `plugin ${id}: logic frame did not report ready within ${FRAME_READY_TIMEOUT_MS} ms ` +
+            (entry.loaded
+              ? '(frame loaded and init was posted; its scripts did not run or frame->host postMessage is blocked)'
+              : '(frame never fired load; srcdoc blocked?)'),
+        );
       }
     }, FRAME_READY_TIMEOUT_MS);
     entry.readyTimer = readyTimer;
     attachWhenLoaded(frame, () => {
       if (!frame.contentWindow || entries.get(id) !== entry) return;
+      entry.loaded = true;
       broker.attach(plugin, frame.contentWindow);
       const overlay = plugin.manifest.contributes?.surfaces?.overlay;
       if (overlay && plugin.granted.includes('ui:overlay')) openSurface(id, overlay.id, null);

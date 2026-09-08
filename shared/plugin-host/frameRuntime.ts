@@ -31,7 +31,11 @@ export const FRAME_RUNTIME_SOURCE = String.raw`
   var decoder = new TextDecoder();
 
   function send(env, transfer) {
-    window.parent.postMessage(env, hostOrigin || '*', transfer || []);
+    // Always '*': this frame exists only because the host page created it
+    // (srcdoc, no URL), so the parent is the host by construction. Naming
+    // the origin would fail on hosts with a non-http scheme (Tauri's
+    // tauri://localhost), where WebKit does not match custom-scheme origins.
+    window.parent.postMessage(env, '*', transfer || []);
   }
   function request(method, params) {
     return new Promise(function (resolve, reject) {
@@ -260,7 +264,7 @@ export const FRAME_RUNTIME_SOURCE = String.raw`
     if (env.kind !== 'evt') return;
     if (env.event === 'init') {
       if (init) return;
-      hostOrigin = event.origin && event.origin !== 'null' ? event.origin : '*';
+      hostOrigin = event.origin || null;
       if (event.ports && event.ports[0]) surfacePort = event.ports[0];
       applyInit(env.payload || {});
       if (init.surface) {
