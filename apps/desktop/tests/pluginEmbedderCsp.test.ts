@@ -11,7 +11,11 @@
 //     script-src would reach inside every plugin frame and block the inline
 //     runtime and plugin module -- i.e. plugins would stop running on desktop
 //     while every test that renders them in Chromium still passed.
-// Behaviour inside a real WKWebView is not covered by any automated test.
+// Behaviour inside a real WKWebView is covered by the Test Cockpit's
+// PLUGIN-BOOT scenario (src-tauri/src/test_cockpit/plugin_boot.rs), which runs
+// on the self-hosted Mac in nightly-loopback.yml and requires the built-in
+// Reactions plugin's srcdoc frame to report ready under whatever policy the
+// two fields below produce. It is a live gate, not something this file can run.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';

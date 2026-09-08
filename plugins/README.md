@@ -152,6 +152,16 @@ re-verified on every load; no persistent bundle cache. KV in `localStorage`,
   depends on deployment config and the second acts one `load` late.
   `web-harness/tests/pluginSelfNavigation.test.ts` drives a real escape
   attempt in a browser and checks what the attacker page received.
+- CSP3 exempts `about:srcdoc` from `frame-src` matching, so `frame-src 'none'`
+  is meant to refuse the self-navigation without refusing the frame itself.
+  That is proven in Chromium by the test above and in **WKWebView** by the Test
+  Cockpit's `PLUGIN-BOOT` scenario, which loads the real built-in through the
+  real host in a real webview of the shipped binary and requires
+  `plugins(host): plugin petal.reactions frame ready` in the host journal
+  (`apps/desktop/src-tauri/src/test_cockpit/plugin_boot.rs`). It runs on the
+  self-hosted Mac in `nightly-loopback.yml`, which is also the release e2e gate.
+  Its `plugin-boot-preflight` record names the policy that was in force, so a
+  pass says which CSP it passed under.
 - Why an iframe and not a hidden Tauri webview per plugin: a second
   `WebviewUrl::App` webview shares the `tauri://localhost` origin with the app
   (shared storage), needs a capability entry, costs tens of MB each, and has
@@ -159,7 +169,10 @@ re-verified on every load; no persistent bundle cache. KV in `localStorage`,
   init scripts are main-frame only and IPC rejects the `null` origin. The
   rendered sandbox test checks a frame sees no such globals, but it runs in
   Chromium, where there is no Tauri to leak: that is evidence about the host
-  page, not proof about WKWebView, which nothing automated covers today (#37).
+  page, not proof about WKWebView (#37). What WKWebView IS covered for is
+  narrower and separate: `PLUGIN-BOOT` proves the frame boots there at all
+  (see the CSP bullet above); no automated test inspects a frame's globals
+  inside WKWebView.
 - UI surfaces that need pixels (panel, popover, overlay) are additional
   sandboxed iframes of the same bundle, wired to the logic frame through a
   host-brokered `MessageChannel`. Button-only surfaces (toolbar button, header
