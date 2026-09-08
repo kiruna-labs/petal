@@ -107,7 +107,10 @@ What live mode validates:
 Threshold env:
   PETAL_REMOTE_CONTROL_ACQUIRE_TIMEOUT_MS (default 7000)
   PETAL_REMOTE_CONTROL_STATUS_TIMEOUT_MS (default acquire timeout)
-  PETAL_REMOTE_CONTROL_INPUT_BUDGET_MS (default 500; enforced only for named target observations)
+  PETAL_RC_OBSERVATION_BUDGET_MS (default 500; per-observation latency budget, retried once
+    before it fails a case whose correctness passed -- see #45. The self-hosted Tart runner
+    sets 620 in .github/workflows/nightly-loopback.yml; bare metal keeps 500)
+  PETAL_REMOTE_CONTROL_INPUT_BUDGET_MS (legacy name for the above)
   PETAL_REMOTE_CONTROL_PHOTON_SAMPLES (default 20 per input kind)
   PETAL_REMOTE_CONTROL_PHOTON_WARMUP_SAMPLES (default 2 per input kind)
   PETAL_REMOTE_CONTROL_PHOTON_TIMEOUT_MS (default 2000 per sample)

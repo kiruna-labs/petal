@@ -30,6 +30,7 @@ import {
 } from './trackNames.ts';
 import { IDENTITY_COLOR_PALETTE, windowIdFromTrackName } from './telepointer.ts';
 import { HARNESS_COLOR_STORAGE_KEY, HARNESS_ROOM_STORAGE_KEY } from './constants.ts';
+import { localParticipantMetadata } from './participantMetadata.ts';
 import { displayNameFromInput, inviteLinkForCredential, tokenRequestBody } from './controls.ts';
 import { displayNameForParticipant } from './tiles.ts';
 import { createTopicDispatcher } from './dataTopics.ts';
@@ -113,13 +114,6 @@ function localStoredPaletteIndex(): number | null {
   return Number.isInteger(index) && index >= 0 && index < IDENTITY_COLOR_PALETTE.length ? index : null;
 }
 
-async function setLocalParticipantMetadata(participant: unknown, metadata: string): Promise<void> {
-  const setter = (participant as { setMetadata?: (metadata: string) => Promise<void> }).setMetadata;
-  if (typeof setter === 'function') {
-    await setter.call(participant, metadata);
-  }
-}
-
 export function setupConnection(
   ctx: HarnessContext,
   createRoom: RoomFactory = (options) => new Room(options),
@@ -168,6 +162,7 @@ export function setupConnection(
     setShareControl,
     showActionableToast,
   } = ctx.ui;
+  localParticipantMetadata.setLogger((line, kind) => logEvent(line, kind));
 
   let audioPlaybackPrompt: HTMLButtonElement | null = null;
   const audioReceiverTelemetryCleanup = new Map<RemoteTrack, () => void>();
@@ -271,6 +266,7 @@ export function setupConnection(
     shareBtn.textContent = 'Share test pattern';
     micCheckbox.disabled = true;
     state.room = null;
+    localParticipantMetadata.detach();
     ctx.hook?.plugins?.roomDisconnected();
     state.sharing = false;
     state.screenSharing = false;
@@ -477,6 +473,9 @@ export function setupConnection(
     const metadataWorker = cb.ensureFrameMetadataWorker();
     const newRoom = createRoom(metadataWorker ? { frameMetadata: { worker: metadataWorker } } : undefined);
     state.room = newRoom;
+    // #73: one owner for every local metadata write, attached before the
+    // plugin host's connect-time advert can reach it.
+    localParticipantMetadata.attach(newRoom.localParticipant ?? null);
     ctx.hook?.plugins?.roomConnected(newRoom);
     state.currentMeetingCode = meetingCode;
     // kiruna-labs/petal#2: a peer's packets arrive with `participant`
@@ -514,6 +513,9 @@ export function setupConnection(
 
     newRoom.on(RoomEvent.Reconnected, () => {
       logEvent('reconnected successfully', 'ok');
+      // A full reconnect can come back with metadata that predates our
+      // writes; re-assert the keys we own (bounded inside the owner).
+      if (newRoom.localParticipant) localParticipantMetadata.onEcho(newRoom.localParticipant.metadata);
       reconnectRecovered();
     });
 
@@ -558,6 +560,9 @@ export function setupConnection(
     });
 
     newRoom.on(RoomEvent.ParticipantMetadataChanged, (_metadata, participant) => {
+      // Our own echo re-bases the owner's blob (#73): keys another writer
+      // dropped get re-applied, keys we never wrote are adopted as-is.
+      if (participant === newRoom.localParticipant) localParticipantMetadata.onEcho(participant.metadata);
       ctx.hook?.plugins?.onMetadata(participant);
       if (!('trackPublications' in participant)) return;
       cb.updateParticipantShareColorProfiles(participant as RemoteParticipant);
@@ -770,6 +775,7 @@ export function setupConnection(
       shareBtn.disabled = true;
       micCheckbox.disabled = true;
       state.room = null;
+      localParticipantMetadata.detach();
       ctx.hook?.plugins?.roomDisconnected();
       ctx.hook.pipelineStats?.resetSession();
       cb.stopViewerDemandHeartbeat();
@@ -868,10 +874,12 @@ export function setupConnection(
         registry.registerReportingValue(displayNameForParticipant(participant));
       });
       if (newRoom.localParticipant) {
-        await setLocalParticipantMetadata(
-          newRoom.localParticipant,
-          mergeIdentityPaletteIndexMetadata(newRoom.localParticipant.metadata, localStoredPaletteIndex())
-        ).catch((err) => logEvent(`identity color metadata publish failed: ${(err as Error).message ?? err}`, 'warn'));
+        // Re-base on the join response (token metadata) before writing, and
+        // re-apply anything already written while `connect()` was in flight.
+        localParticipantMetadata.onEcho(newRoom.localParticipant.metadata);
+        await localParticipantMetadata
+          .update((current) => mergeIdentityPaletteIndexMetadata(current, localStoredPaletteIndex()))
+          .catch((err) => logEvent(`identity color metadata publish failed: ${(err as Error).message ?? err}`, 'warn'));
       }
       setConnState('connected', 'connected');
       syncAddressBar(meetingCode);

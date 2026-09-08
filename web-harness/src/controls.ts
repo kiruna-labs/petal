@@ -33,6 +33,7 @@ import {
   HARNESS_NAME_STORAGE_KEY,
 } from './constants.ts';
 import { participantDisplayName } from './tiles.ts';
+import { localParticipantMetadata } from './participantMetadata.ts';
 import { audioReceiverTelemetryFromStatsReport } from './audioReceiverTelemetry.ts';
 import { framesDecodedFromStatsReport } from './cameraDecodeHealth.ts';
 import {
@@ -419,9 +420,8 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       // Same metadata the real-screen path publishes: without the kind+scale
       // entry the native receiver never offers remote control for this share
       // (#819 review -- RC-N2W preflighted itself into refusing every run).
-      await setLocalParticipantMetadata(
-        state.room.localParticipant,
-        mergeSharedSourceMetadata(state.room.localParticipant.metadata, ctx.windowId, 'window')
+      await localParticipantMetadata.update((current) =>
+        mergeSharedSourceMetadata(current, ctx.windowId, 'window')
       );
       cb.syncHarnessHook();
       void cb.verifyH264Negotiated(state.localVideoTrack, `test-pattern share (window_id=${ctx.windowId})`);
@@ -1453,9 +1453,8 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
             degradationPreference: 'maintain-resolution',
             frameMetadata: { timestamp: true, frameId: true },
           });
-          await setLocalParticipantMetadata(
-            state.room.localParticipant,
-            mergeSharedSourceMetadata(state.room.localParticipant.metadata, windowId, 'display', {
+          await localParticipantMetadata.update((current) =>
+            mergeSharedSourceMetadata(current, windowId, 'display', {
               // A browser cannot inject OS input: advertise this share as
               // NOT controllable so native receivers hide the affordance
               // instead of offering a button that always times out.
@@ -1524,9 +1523,8 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
           removePresentationSourceHost();
         }
         try {
-          await setLocalParticipantMetadata(
-            state.room.localParticipant,
-            mergeSharedSourceMetadata(state.room.localParticipant.metadata, ctx.windowId, null)
+          await localParticipantMetadata.update((current) =>
+            mergeSharedSourceMetadata(current, ctx.windowId, null)
           );
         } catch {
           // best-effort: the publication is already gone, a stale scale entry
@@ -1658,10 +1656,9 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       track.mediaStreamTrack.stop();
     }
     if (state.room && endedId !== null) {
-      await setLocalParticipantMetadata(
-        state.room.localParticipant,
-        mergeSharedSourceMetadata(state.room.localParticipant.metadata, endedId, null)
-      ).catch(() => {});
+      await localParticipantMetadata
+        .update((current) => mergeSharedSourceMetadata(current, endedId, null))
+        .catch(() => {});
     }
     setShareControl(false);
     setScreenShareState('not sharing', false);
@@ -1685,11 +1682,4 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     measureCockpitRemoteAudio,
     measureCockpitRemoteCamera,
   };
-}
-
-async function setLocalParticipantMetadata(participant: unknown, metadata: string): Promise<void> {
-  const setter = (participant as { setMetadata?: (metadata: string) => Promise<void> }).setMetadata;
-  if (typeof setter === 'function') {
-    await setter.call(participant, metadata);
-  }
 }

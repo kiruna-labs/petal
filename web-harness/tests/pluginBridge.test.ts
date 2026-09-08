@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 
 import { createPluginBroker, toCloneable, type HostAdapter, type LoadedPlugin } from '@petal/shared/plugin-host/broker';
 import type { PluginManifest } from '@petal/shared/plugin-host/manifest';
@@ -277,4 +278,69 @@ test('toCloneable keeps binary payloads intact and drops functions', () => {
   assert.equal(out.a, bytes, 'same Uint8Array instance');
   assert.ok(!('f' in out));
   assert.deepEqual(out.nested, { x: [1, { y: 2 }] });
+});
+
+test('toCloneable round-trips Error and RegExp instead of flattening them to {}', () => {
+  // The manual walk copies own enumerable keys, and both of these keep their
+  // state in internal slots -- they used to arrive as `{}` (#74).
+  const err = toCloneable(new Error('boom')) as Error;
+  assert.ok(err instanceof Error);
+  assert.equal(err.message, 'boom');
+  const re = toCloneable(/ab+/g) as RegExp;
+  assert.ok(re instanceof RegExp);
+  assert.equal(re.source, 'ab+');
+  assert.equal(re.flags, 'g');
+});
+
+test('toCloneable keeps Error and RegExp fidelity on the Proxy fallback path too', () => {
+  // A Proxy anywhere in the payload sends the whole value down the manual
+  // walk; its exotic neighbours must not be flattened as collateral.
+  const out = toCloneable({
+    err: new Error('nested boom'),
+    re: /x\d+/i,
+    when: new Date(1_700_000_000_000),
+    proxy: new Proxy({ a: 1 }, {}),
+  }) as { err: Error; re: RegExp; when: Date; proxy: unknown };
+  assert.ok(out.err instanceof Error);
+  assert.equal(out.err.message, 'nested boom');
+  assert.equal(out.re.source, 'x\\d+');
+  assert.equal(out.re.flags, 'i');
+  assert.equal(out.when.getTime(), 1_700_000_000_000);
+  assert.deepEqual(out.proxy, { a: 1 });
+});
+
+test('toCloneable passes a cross-realm ArrayBuffer through instead of copying it field-by-field', () => {
+  // `instanceof ArrayBuffer` is false across a realm boundary, so the buffer
+  // used to fall into the plain-object branch and arrive as `{}`.
+  const foreign = vm.runInNewContext('new ArrayBuffer(8)') as ArrayBuffer;
+  assert.equal(foreign instanceof ArrayBuffer, false, 'precondition: cross-realm buffer');
+  // The function forces the manual walk, which is where the guard lives.
+  const out = toCloneable({ buf: foreign, f: () => 1 }) as Record<string, unknown>;
+  assert.equal(out.buf, foreign, 'same buffer instance, not a field-by-field copy');
+});
+
+test('toCloneable raises on depth overflow rather than truncating to undefined', () => {
+  // 40 deep, with a function so the platform clone declines and the walk runs.
+  let deep: Record<string, unknown> = { bottom: true, f: () => 1 };
+  for (let i = 0; i < 40; i += 1) deep = { next: deep };
+  assert.throws(
+    () => toCloneable(deep),
+    (e: unknown) => e instanceof Error && (e as { code?: string }).code === 'invalid' && /nests deeper than 32/.test(e.message),
+  );
+});
+
+test('toCloneable terminates on a cycle', () => {
+  // A plain cycle is something structuredClone resolves outright...
+  const plain: Record<string, unknown> = { a: 1 };
+  plain.self = plain;
+  const cloned = toCloneable(plain) as Record<string, unknown>;
+  assert.equal(cloned.self, cloned, 'cycle preserved, not truncated');
+  // ...and one the manual walk has to handle ends as an error, not a stack
+  // overflow and not a silently truncated stub.
+  const walked: Record<string, unknown> = { f: () => 1 };
+  walked.self = walked;
+  assert.throws(
+    () => toCloneable(walked),
+    (e: unknown) => e instanceof Error && (e as { code?: string }).code === 'invalid' && /cycle/.test(e.message),
+  );
 });

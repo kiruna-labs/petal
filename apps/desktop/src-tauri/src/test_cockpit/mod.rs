@@ -4903,8 +4903,17 @@ fn normalized_roster(mut identities: Vec<String>) -> Vec<String> {
 }
 
 fn roster_fingerprint(identities: &[String]) -> String {
+    use std::fmt::Write as _;
     let canonical = serde_json::to_vec(identities).expect("string roster always serializes");
-    format!("{:x}", Sha256::digest(canonical))
+    // sha2 0.11 returns hybrid-array's `Array`, which -- unlike 0.10's
+    // `GenericArray` -- does not implement `LowerHex`, so `{:x}` no longer
+    // compiles. Write the bytes out directly: the web peer compares this
+    // against its own hex, and `roster_fingerprint.len() == 64` is asserted,
+    // so the STRING has to stay byte-identical to what 0.10 produced.
+    Sha256::digest(canonical).iter().fold(String::with_capacity(64), |mut acc, byte| {
+        let _ = write!(acc, "{byte:02x}");
+        acc
+    })
 }
 
 fn parse_web_cockpit_report_line(message: &str) -> Option<WebCockpitReport> {
@@ -9825,7 +9834,7 @@ pub async fn start_test_cockpit(
                 if let Some(state) = app.try_state::<crate::session::SessionState>() {
                     let _control = state.lock_camera_control().await;
                     state.set_camera_intent(false);
-                    crate::camera_session::stop_camera_publish(app, &state).await;
+                    crate::camera_session::stop_camera_publish(&app, &state).await;
                     log::info!(
                         "test-cockpit: {} stopped the native camera publish (scenario epilogue)",
                         scenario.id

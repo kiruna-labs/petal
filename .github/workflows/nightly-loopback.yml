@@ -103,6 +103,18 @@ jobs:
       PETAL_AUTOTEST_IDENTITY: native-autotest
       PETAL_AUTOTEST_NAME: Native Autotest
       PETAL_WEB_HARNESS_URL_MATCH: localhost:5185
+      # #45: target-observation latency allowance for THIS runner only. The
+      # observation path (TextEdit driven through AppleEvents/Accessibility)
+      # runs measurably slower inside the Tart guest than on bare metal, so the
+      # 500ms default sat right on top of the guest's healthy distribution:
+      # runs 34078048040 and 34081151407 measured a healthy p95 of 460.3ms and
+      # 459.3ms. 620ms is that measurement plus ~35% headroom -- deliberately
+      # NOT wide enough to swallow those runs' 605.3ms/699.2ms outliers, which
+      # the scenario's one retry handles instead. A systemic slowdown moves the
+      # median and still fails the gate, and every sample (rescued outliers
+      # included) is reported in SUMMARY.targetObservationLatency.
+      # Bare metal keeps the 500ms default; do not raise this globally.
+      PETAL_RC_OBSERVATION_BUDGET_MS: "620"
       # QUARANTINE (release gate). Comma-separated. A listed failure is
       # printed as a ::warning "QUARANTINED" -- never counted as a pass -- and
       # does not fail the gate; anything NOT listed does. Every entry needs a

@@ -1943,6 +1943,46 @@ mod tests {
         format!("http://{addr}/")
     }
 
+    /// Like `spawn_fake_server`, but serves ONE fixed response to as many
+    /// attempts as arrive, and records WHEN each request was read.
+    ///
+    /// #87: the attempt count is the real retry guarantee, and the interval
+    /// BETWEEN two recorded attempts is the real backoff guarantee. Neither
+    /// is the total wall-clock time of `send_with_retry`, which is what the
+    /// old `elapsed >= RETRY_BACKOFF` lower bound measured -- that number
+    /// conflates "the code skipped the retry" with "this machine was fast",
+    /// and it flaked in CI at 754.583us.
+    ///
+    /// A timestamp is pushed only once the request bytes have been read, so
+    /// a snapshot taken after `send_with_retry` returns can never be missing
+    /// an attempt the client already made.
+    fn spawn_counting_server(
+        response: &'static str,
+    ) -> (String, std::sync::Arc<Mutex<Vec<Instant>>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&requests);
+        std::thread::spawn(move || {
+            // Generously more than `MAX_SEND_RETRIES + 1` so an over-retrying
+            // regression is COUNTED (and fails the assert) rather than being
+            // masked by the listener going away mid-run.
+            for _ in 0..16 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                recorder.lock_unpoisoned().push(Instant::now());
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}/"), requests)
+    }
+
     fn closed_port_url() -> String {
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
@@ -1973,9 +2013,25 @@ mod tests {
 
     #[tokio::test]
     async fn send_with_retry_gives_up_after_max_retries_within_a_bounded_time() {
-        let url = closed_port_url();
+        // #87: this used to point at a closed port and assert
+        // `elapsed >= RETRY_BACKOFF`, inferring "a backoff must have
+        // happened" from the total wall clock. That inference is not sound in
+        // either direction -- it cannot tell "the retry was skipped" from
+        // "this endpoint answered cheaply", and it failed CI at 754.583us
+        // (far too fast for even one 500ms backoff, i.e. no retry ran at all,
+        // which the assertion message then blamed on backing off too little).
+        // Observe the guarantee at the endpoint instead: a persistently
+        // transient server must see exactly one initial attempt plus
+        // `MAX_SEND_RETRIES` retries, spaced by at least `RETRY_BACKOFF`.
+        // Do NOT reintroduce a lower bound on the TOTAL elapsed time.
+        let (url, requests) =
+            spawn_counting_server("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
         let client = reqwest::Client::builder()
             .timeout(SEND_TIMEOUT)
+            // The test only means anything if the request reaches the server
+            // this test started; a proxy in the environment would otherwise
+            // answer for it.
+            .no_proxy()
             .build()
             .unwrap();
         let body = json!({"event": "test"});
@@ -1989,15 +2045,58 @@ mod tests {
             .await
             .expect("send_with_retry must terminate, never wedge the worker");
         let elapsed = start.elapsed();
-        assert!(result.is_err(), "a fully refused connection must end in failure");
-        assert!(
-            elapsed >= RETRY_BACKOFF,
-            "must actually back off before the retry: {elapsed:?}"
+        assert_eq!(
+            result,
+            Err(SendOutcome::Http5xx),
+            "a persistently failing transient endpoint must end in failure"
         );
+        let attempts = requests.lock_unpoisoned().clone();
+        assert_eq!(
+            attempts.len(),
+            (MAX_SEND_RETRIES + 1) as usize,
+            "a transient failure must be retried exactly {MAX_SEND_RETRIES} time(s) on top \
+             of the initial attempt -- no fewer (the retry is gone), no more (the loop is \
+             unbounded): {attempts:?}"
+        );
+        // Safe where the old lower bound was not: this brackets exactly the
+        // interval that CONTAINS the backoff sleep (server read of attempt N
+        // -> server read of attempt N+1), so it cannot be satisfied or
+        // defeated by how fast the rest of the call happens to run.
+        for pair in attempts.windows(2) {
+            let gap = pair[1].duration_since(pair[0]);
+            assert!(
+                gap >= RETRY_BACKOFF,
+                "consecutive attempts must be spaced by at least RETRY_BACKOFF \
+                 ({RETRY_BACKOFF:?}), not hammered back-to-back: {gap:?}"
+            );
+        }
         assert!(
             elapsed < worst_case + Duration::from_secs(1),
             "retry must stay bounded by {MAX_SEND_RETRIES} extra attempt(s) \
              (worst case {worst_case:?}), never loop: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_fails_and_terminates() {
+        // Keeps the transport-error arm of the same guarantee covered now
+        // that the test above uses a real listener: with nothing listening,
+        // `send_with_retry` must end in a bounded failure, never wedge the
+        // worker. Bounded from above only -- see #87.
+        let url = closed_port_url();
+        let client = reqwest::Client::builder()
+            .timeout(SEND_TIMEOUT)
+            .no_proxy()
+            .build()
+            .unwrap();
+        let body = json!({"event": "test"});
+        let worst_case = SEND_TIMEOUT * (MAX_SEND_RETRIES + 1) + RETRY_BACKOFF * MAX_SEND_RETRIES;
+        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body))
+            .await
+            .expect("send_with_retry must terminate, never wedge the worker");
+        assert!(
+            result.is_err(),
+            "a fully refused connection must end in failure: {result:?}"
         );
     }
 

@@ -17,6 +17,7 @@ const webPhotonDecoderPath = path.join(repoRoot, 'web-harness/src/remoteControlP
 const webPhotonTestPath = path.join(repoRoot, 'web-harness/tests/remoteControlPhoton.test.ts');
 const localLoopbackPath = path.join(desktopDir, 'scripts/remote-control-local-loopback.mjs');
 const liveScenarioPath = path.join(desktopDir, 'scripts/remote-control-scenario.mjs');
+const observationPolicyPath = path.join(desktopDir, 'scripts/remote-control-observation.mjs');
 const photonSentinelPath = path.join(desktopDir, 'scripts/remote-control-photon-sentinel.swift');
 const photonMetricsPath = path.join(desktopDir, 'scripts/remote-control-photon-metrics.mjs');
 
@@ -235,9 +236,21 @@ requireMarkers(localLoopbackPath, [
 ]);
 requireMarkers(liveScenarioPath, [
   'PETAL_REMOTE_CONTROL_INPUT_BUDGET_MS',
+  'PETAL_RC_OBSERVATION_BUDGET_MS',
   'targetObservationLatencyMs',
+  'targetObservationSamplesMs',
   'caseDurationMs',
   'measureTargetObservation'
+]);
+// #45: the retry/budget policy is a separate module so it can be unit-tested
+// (scripts/test-remote-control-observation.mjs). Pin its contract here too, or
+// the scenario could keep the marker names above while the policy behind them
+// silently reverts to one-sample-decides.
+requireMarkers(observationPolicyPath, [
+  'PETAL_RC_OBSERVATION_BUDGET_MS',
+  'MAX_OBSERVATION_ATTEMPTS',
+  'measureObservationWithRetry',
+  'summarizeObservationLatency'
 ]);
 requireMarkers(webPhotonDecoderPath, [
   'decodePhotonSentinelFrame',
