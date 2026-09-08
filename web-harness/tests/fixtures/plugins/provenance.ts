@@ -25,6 +25,9 @@ const adapter: PluginHostAdapter = {
     room: () => ({ label: 'Provenance room', phase: 'connected' }),
   },
   async publishData() {},
+  // Required by PluginHostAdapter; this fixture measures host-drawn chrome
+  // only and joins no room, so advertising is a no-op here.
+  async publishPluginEntry() {},
   storage: {
     async get() {
       return undefined;
