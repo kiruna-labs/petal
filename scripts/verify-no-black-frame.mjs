@@ -133,12 +133,24 @@ async function runGapTrial({ withHold, shippedCss }) {
       canvas.height = 200;
       const context = canvas.getContext('2d');
       let tick = 0;
+      const BAR_WIDTH = 40;
       const paint = () => {
         tick += 1;
         context.fillStyle = '#ffffff';
         context.fillRect(0, 0, canvas.width, canvas.height);
         context.fillStyle = '#ff2d55';
-        context.fillRect((tick * 7) % canvas.width, 0, 40, canvas.height);
+        // The bar MOVES, but only inside the middle half of the canvas, so the
+        // SAME amount of red survives however the tile crops the video -- every
+        // painted frame therefore has the same mean luma. That is what lets the
+        // held-frame check below compare a sample taken before the gap against
+        // the frame captured during it with a tight tolerance. Sweeping the
+        // full width instead let the bar be partly cropped away, which swung
+        // the source's own luma between 214 and 253 -- the check then passed or
+        // failed on which animation phase each sample happened to catch
+        // (measured ~1 pass in 3, and it had gone unnoticed because the gate
+        // itself could not start: see the esbuild lookup above, #93).
+        const travel = Math.floor(canvas.width / 2) - BAR_WIDTH;
+        context.fillRect(Math.floor(canvas.width / 4) + ((tick * 7) % travel), 0, BAR_WIDTH, canvas.height);
       };
       paint();
       window.__paintTimer = setInterval(paint, 33);
