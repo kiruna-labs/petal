@@ -76,6 +76,7 @@ updates:
       # windows-core #58). Lift both when the Tauri stack moves.
       - dependency-name: webview2-com
       - dependency-name: windows-core
+      - dependency-name: windows
     groups:
       cargo-non-major:
         update-types: [minor, patch]

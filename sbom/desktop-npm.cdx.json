@@ -3944,17 +3944,17 @@
       "version": "4.0.7"
     },
     {
-      "bom-ref": "playwright@1.62.1",
+      "bom-ref": "playwright@1.63.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/playwright/-/playwright-1.62.1.tgz"
+          "url": "https://registry.npmjs.org/playwright/-/playwright-1.63.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d0cf8bdcb003f3f9e6e79e0b3a56bd032c748f4b66159d0505ca10ec5d55b951e933f5e9882f11703cc1401f16e7e840f0bdb64c7c442f3785fb659c533bdc2e"
+          "content": "fbbce204b89d4b835a34276de7b4940d3fb062699de5f9a241e8d489cfe46fe62c61208fc8e384f6c79bccc8cd990aec9cda4326a778587bd5ffc95f29f50352"
         }
       ],
       "licenses": [
@@ -3971,23 +3971,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/playwright@1.62.1",
+      "purl": "pkg:npm/playwright@1.63.0",
       "scope": "optional",
       "type": "library",
-      "version": "1.62.1"
+      "version": "1.63.0"
     },
     {
-      "bom-ref": "playwright-core@1.62.1",
+      "bom-ref": "playwright-core@1.63.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.62.1.tgz"
+          "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.63.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c0f612c0404963d187ada2125eacaab71d276b42e93b75c45fb8cd0e19ed6dec7bb73512ee42e766c3a516bb85241e078bfae10cc8d71aa1dec0367af2761957"
+          "content": "ad80ac045fcce478d4721e766dbb5538d1058efe97bbcb26f21ef674d951e5bcc81357ef0bf6f182ca7392349f53e3307843263ccf0a25e6c6ea79f2c68e660a"
         }
       ],
       "licenses": [
@@ -4004,43 +4004,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/playwright-core@1.62.1",
+      "purl": "pkg:npm/playwright-core@1.63.0",
       "scope": "optional",
       "type": "library",
-      "version": "1.62.1"
-    },
-    {
-      "bom-ref": "fsevents@2.3.2",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.2.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "c62a8c411e3101e1d3b81f6e5a6f9f1517083a02813223813fe7978b24fb8ec8150aad5b915ca0b74d28012a3007b11db6938769a3e02adf35d8ff5a6fe0c328"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "fsevents",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/fsevents@2.3.2",
-      "scope": "optional",
-      "type": "library",
-      "version": "2.3.2"
+      "version": "1.63.0"
     },
     {
       "bom-ref": "postcss@8.5.26",
@@ -4750,7 +4717,7 @@
         "@sveltejs/kit@2.70.3",
         "@sveltejs/vite-plugin-svelte@7.3.0",
         "@tauri-apps/cli@2.11.4",
-        "playwright@1.62.1",
+        "playwright@1.63.0",
         "svelte@5.57.0",
         "svelte-check@4.7.6",
         "tsx@4.23.13",
@@ -5380,18 +5347,13 @@
     },
     {
       "dependsOn": [
-        "playwright-core@1.62.1",
-        "fsevents@2.3.2"
+        "playwright-core@1.63.0"
       ],
-      "ref": "playwright@1.62.1"
+      "ref": "playwright@1.63.0"
     },
     {
       "dependsOn": [],
-      "ref": "playwright-core@1.62.1"
-    },
-    {
-      "dependsOn": [],
-      "ref": "fsevents@2.3.2"
+      "ref": "playwright-core@1.63.0"
     },
     {
       "dependsOn": [

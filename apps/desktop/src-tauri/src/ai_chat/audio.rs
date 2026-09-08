@@ -270,7 +270,7 @@ fn open_output() -> Option<Playback> {
     let device = host.default_output_device()?;
     let config = device.default_output_config().ok()?;
     let channels = config.channels() as usize;
-    let device_rate = config.sample_rate().0;
+    let device_rate = config.sample_rate();
 
     let queue = Arc::new(Mutex::new(std::collections::VecDeque::<f32>::new()));
     let playing = Arc::new(AtomicBool::new(false));
@@ -279,7 +279,8 @@ fn open_output() -> Option<Playback> {
     let cb_playing = playing.clone();
     let stream = device
         .build_output_stream(
-            &config.config(),
+            // cpal 0.18 takes the stream config BY VALUE.
+            config.config(),
             move |out: &mut [f32], _| {
                 let mut q = match cb_queue.lock() {
                     Ok(q) => q,
@@ -402,10 +403,10 @@ pub fn start_local_microphone_capture() {
         return;
     };
     let channels = config.channels() as usize;
-    let mut resampler = Resampler::new(config.sample_rate().0, UPLINK_RATE);
+    let mut resampler = Resampler::new(config.sample_rate(), UPLINK_RATE);
 
     let stream = device.build_input_stream(
-        &config.config(),
+        config.config(),
         move |input: &[f32], _| {
             let mono = downmix_to_mono(input, channels);
             let resampled = resampler.process(&mono);
