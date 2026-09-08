@@ -39,8 +39,14 @@
   import { displayBuildVersion } from '$lib/buildInfo';
   import { platformKey } from '$lib/platform';
   import { stripNativeTooltipTitles } from '$lib/data/suppressNativeTooltips';
-  import { COMMANDS, hasTauriBridge, type BuildInfo } from '$lib/ipc';
+  import { COMMANDS, EVENTS, hasTauriBridge, type BuildInfo, type ResilienceEvent } from '$lib/ipc';
   import { checkForUpdate } from '$lib/updater';
+  import {
+    startUpdateScheduler,
+    type BackgroundCheckOutcome,
+    type BackgroundCheckReason
+  } from '$lib/updateScheduler';
+  import { listen } from '@tauri-apps/api/event';
   import { session } from '$lib/stores/session.svelte';
 
   let { children } = $props();
@@ -108,14 +114,41 @@
     // mount this same root layout but must never re-trigger it; hard
     // navigations of the main webview (deep-link meeting join) are absorbed by
     // the Rust once-per-process latch in run_launch_update_check.
+    // #90: the launch check alone left a Petal that is never quit permanently
+    // on whatever version it started with. The scheduler keeps checking for the
+    // life of the process; it lives in the main window only, alongside the
+    // launch check, for the same reason (one checker per process).
+    let stopUpdateScheduler: (() => void) | null = null;
     if (!isOverlayRoute && hasTauriBridge() && getCurrentWindow().label === 'main') {
       void runUpdateCheck('launch', { force: true });
+      const scheduler = startUpdateScheduler({
+        runCheck: runBackgroundUpdateCheck,
+        // Fast, synchronous "would this land on a meeting?" signal. The main
+        // webview stays on /meeting for the whole meeting (pill mode included),
+        // and runBackgroundUpdateCheck re-checks the authoritative session
+        // state before anything is surfaced.
+        isBusy: () => isMeetingRoute
+      });
+      // The OS-level network signals Petal already has: resilience.rs's
+      // SCDynamicStore watcher (primary interface changed) and the SDK's own
+      // reconnect. Both mean "the network just came back" far more precisely
+      // than the webview's `online` event, which the scheduler also listens to.
+      const unResilience = listen<ResilienceEvent>(EVENTS.resilienceEvent, (event) => {
+        if (event.payload.kind === 'networkChanged' || event.payload.kind === 'reconnected') {
+          scheduler.notifyNetworkChange();
+        }
+      });
+      stopUpdateScheduler = () => {
+        scheduler.stop();
+        unResilience.then((un) => un()).catch(() => {});
+      };
     }
     if (!isOverlayRoute) void syncSentryEnabled();
     void reportFrontendReady();
 
     return () => {
       if (petalWindow.__petalNavigate === navigate) delete petalWindow.__petalNavigate;
+      stopUpdateScheduler?.();
     };
   });
 
@@ -203,10 +236,13 @@
     }
   }
   let updateCheckInFlight: Promise<unknown> | null = null;
+  // Route-bounce throttle for the main-menu check. The background polling
+  // cadence is a different number and lives in $lib/updateScheduler
+  // (UPDATE_CHECK_INTERVAL_MS, 6h).
   const UPDATE_CHECK_THROTTLE_MS = 30 * 60 * 1000; // 30 min
 
   function runUpdateCheck(
-    reason: 'launch' | 'main-menu',
+    reason: 'launch' | 'main-menu' | BackgroundCheckReason,
     opts: { force?: boolean } = {}
   ): Promise<unknown> | null {
     if (isOverlayRoute) return null;
@@ -226,6 +262,34 @@
     });
     updateCheckInFlight = check;
     return check;
+  }
+
+  /**
+   * #90: a background availability check, with the meeting guard the timer
+   * itself cannot make. An update banner appearing over a live share would be
+   * worse than the bug this fixes, so the check is DEFERRED (not dropped) --
+   * the scheduler retries it on its next heartbeat and it lands once the
+   * meeting is over.
+   *
+   * The route is the fast signal; `current_room` is the authority (it is the
+   * same state camera_session.rs reads as `is_in_room`), so a meeting that
+   * somehow outlives the meeting route still suppresses the prompt.
+   */
+  async function runBackgroundUpdateCheck(
+    reason: BackgroundCheckReason
+  ): Promise<BackgroundCheckOutcome> {
+    if (isOverlayRoute || isMeetingRoute) return 'deferred';
+    if (hasTauriBridge()) {
+      try {
+        const room = await invoke<string | null>(COMMANDS.currentRoom);
+        if (room) return 'deferred';
+      } catch {
+        // No session state to consult (command unavailable): fall through
+        // rather than pinning the scheduler on a permanent deferral.
+      }
+    }
+    await runUpdateCheck(reason);
+    return 'checked';
   }
 
   $effect(() => {

@@ -1,6 +1,10 @@
 // Silent auto-update (issue #103, the production plan "make it updatable").
 //
-// On app startup the frontend calls `checkForUpdate()` once. It asks
+// On app startup the frontend calls `checkForUpdate()` once, and thereafter
+// `$lib/updateScheduler` keeps calling it every 6 hours -- plus on wake from
+// sleep and on network reconnect -- for the whole life of the process. Before
+// that, a Petal left running for days learned about a release only when it was
+// restarted (#90). Either way the check asks
 // the Rust updater command to hit `plugins.updater.endpoints`
 // (tauri.release.conf.json -> our Vercel `/api/updater`, which serves the
 // CI-published `latest.json` from Vercel Blob; the committed tauri.conf.json
@@ -17,6 +21,11 @@
 //   - Passive checks never download or install. A user must click Restart now
 //     before the app stages the replacement bundle, so an ordinary quit/reopen
 //     cannot silently apply a previously found update (#113).
+//   - Background (scheduler-driven) checks are QUIET: they never paint the
+//     "Updating Petal…" progress toast and never raise a failure toast, so an
+//     offline laptop is not nagged every interval. Only an update that is
+//     genuinely available surfaces, and only the user's own Settings /
+//     main-menu checks report progress and failures (#90).
 //
 // There is intentionally no dialog/prompt here -- updater activity is surfaced
 // through the existing in-webview ToastHost and otherwise stays quiet.
@@ -31,6 +40,7 @@ import {
   markUpdateRelaunching
 } from '$lib/stores/updateStatus.svelte';
 import { friendlyUpdateErrorMessage } from '$lib/data/updaterErrors';
+import { isQuietUpdateCheckReason, type UpdateCheckReason } from '$lib/updateScheduler';
 
 export interface UpdateResult {
   status: 'up-to-date' | 'available' | 'installed' | 'unavailable' | 'error';
@@ -70,9 +80,13 @@ function updateErrorMessage(err: unknown): string {
  *
  * @param opts.skipRelaunch  legacy no-op kept for older callers; checks are
  *   always non-installing now.
+ * @param opts.reason  who asked. `launch` takes the once-per-process Rust
+ *   latch; `periodic`/`wake`/`network` come from `$lib/updateScheduler` and
+ *   are quiet (no progress toast, no failure toast); `main-menu`/`manual`
+ *   behave exactly as they always have.
  */
 export async function checkForUpdate(
-  opts: { skipRelaunch?: boolean; reason?: 'launch' | 'main-menu' | 'manual' } = {}
+  opts: { skipRelaunch?: boolean; reason?: UpdateCheckReason } = {}
 ): Promise<UpdateResult> {
   // No updater host outside a bundled Tauri app. Bail quietly so the browser
   // preview / dev server never logs a scary error.
@@ -80,6 +94,8 @@ export async function checkForUpdate(
     clearUpdateStatus();
     return { status: 'unavailable' };
   }
+
+  const quiet = isQuietUpdateCheckReason(opts.reason);
 
   try {
     // The passive launch check is once-per-process: the Rust command latches
@@ -112,7 +128,10 @@ export async function checkForUpdate(
 
     await logUpdaterStep('info', `check start (${opts.reason ?? 'manual'})`);
 
-    markUpdateDownloading();
+    // A background poll must not paint the non-dismissible "Updating Petal…"
+    // toast over an idle app every interval -- it is not what the user asked
+    // for and it is not even accurate (nothing downloads on a check).
+    if (!quiet) markUpdateDownloading();
     await logUpdaterStep('info', 'checking availability');
     const result = await invoke<{ status: 'up-to-date' | 'available'; version: string | null }>(
       COMMANDS.checkCompatibleUpdateAvailable,
@@ -139,7 +158,11 @@ export async function checkForUpdate(
     // so a verbose error can never break the toast layout.
     const rawMessage = updateErrorMessage(err);
     const friendlyMessage = friendlyUpdateErrorMessage(rawMessage);
-    markUpdateFailed(friendlyMessage);
+    // Quiet (scheduler-driven) checks stay in petal.log only: a laptop that is
+    // offline for a week would otherwise raise a failure toast every interval,
+    // which is nagging, not observability (#90). A user-initiated check still
+    // reports the failure -- that is #43's whole point.
+    if (!quiet) markUpdateFailed(friendlyMessage);
     await logUpdaterStep('error', `failed: ${rawMessage}`);
     return { status: 'error', error: friendlyMessage };
   }
