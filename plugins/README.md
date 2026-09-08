@@ -564,7 +564,7 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-4 | M2 | state + advertisement | seinfish | merged (kiruna-labs/petal#55); post-merge fixes in #70 |
 | I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | merged (kiruna-labs/petal#71) |
 | I-5a | M3 | registry client | seinfish | implemented on feature/plugin-system-m3 (desktop install/enable/remove UI; web loads registry installs in I-6) |
-| I-5b | M3 | marketplace publisher + hosting (private repo) | unassigned | not started |
+| I-5b | M3 | marketplace publisher + hosting (private repo) | seinfish | publisher, keygen, signer, vendored contracts + drift guard done 2026-09-08 (private repo); hosting project/domain and review tooling still to do |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |
 | I-7 | M3 | chat plugin | unassigned | not started |
 | I-8 | M4 | webhook notifier + net fetch | unassigned | not started |
