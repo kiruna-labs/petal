@@ -157,6 +157,9 @@ test('denied, invalid and rate-limited paths return typed errors and never reach
   broker.handleMessage({ source: frame, data: req(3, 'ui.openSurface', { surfaceId: 'nope' }) }); // undeclared surface
   broker.handleMessage({ source: frame, data: req(4, 'data.publish', { payload: 'not bytes' }) });
   broker.handleMessage({ source: frame, data: req(5, 'data.publish', { payload: new Uint8Array(20000), reliable: true }) });
+  // A SharedArrayBuffer-backed view is rejected at the boundary rather than
+  // handed to a transport that only accepts ArrayBuffer-backed bytes.
+  broker.handleMessage({ source: frame, data: req(8, 'data.publish', { payload: new Uint8Array(new SharedArrayBuffer(4)), reliable: true }) });
   broker.handleMessage({ source: frame, data: req(6, 'net.fetch', { url: 'https://evil.com/' }) });
   broker.handleMessage({ source: frame, data: req(7, 'nosuch.method') });
   broker.handleMessage({ source: frame, data: { v: 99, kind: 'req' } });
@@ -184,6 +187,8 @@ test('denied, invalid and rate-limited paths return typed errors and never reach
   assert.match((byId.get(5) as { error: { message: string } }).error.message, /exceeds 16384 bytes/);
   assert.equal((byId.get(6) as { error: { code: string } }).error.code, 'denied');
   assert.equal((byId.get(7) as { error: { code: string } }).error.code, 'invalid');
+  assert.equal((byId.get(8) as { error: { code: string } }).error.code, 'invalid');
+  assert.match((byId.get(8) as { error: { message: string } }).error.message, /SharedArrayBuffer/);
   assert.deepEqual(calls, [], 'adapter never touched');
   assert.equal(warns.filter((w) => /storage.get denied/.test(w)).length, 1, 'denial logged once per method');
   assert.equal(warns.filter((w) => /malformed envelope/.test(w)).length, 1);
