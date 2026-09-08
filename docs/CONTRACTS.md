@@ -1106,6 +1106,15 @@ in native `plugin_publish_data`, and inbound per `(sender, pluginId)` in both
 dispatchers): `lossyPerSecond` 30, `reliablePerSecond` 10,
 `inboundPerSenderPerSecond` 60, `maxPayloadBytes` 16384.
 
+Shared state has its own quotas: `statePerSecond` 2 (the rate a plugin sees,
+enforced by the broker), `stateMaxBytes` 2048 per plugin and
+`stateTotalMaxBytes` 8192 across every plugin's entry. The byte budgets are
+re-checked where the metadata is actually merged (native
+`set_plugin_metadata_entry`, web `mergePluginMetadata`), so a write can be
+refused after the broker allowed it -- the host rolls its cached
+advertisement back when that happens. `plugin_set_state`'s own limiter is a
+backstop at twice `statePerSecond`, not a second quota.
+
 **Advertisement and shared state** ride participant metadata under the
 `plugins` key (`pluginStateMetadata`):
 
