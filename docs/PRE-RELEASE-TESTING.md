@@ -69,15 +69,18 @@ python3 -c "import json;[print(o['payload']['scenarioId'],o['payload']['verdict'
   for l in open('${D}run.jsonl') if (o:=json.loads(l)).get('kind')=='scenario-verdict']"
 ```
 
-Expected green: `SHARE-N2W-Q`, `SHARE-W2N-Q` (29–31fps), `DRAW-N`, `CAM`
-(~19–22fps), `AUD`, `TELE`.
+Expected green: `PLUGIN-BOOT`, `SHARE-N2W-Q`, `SHARE-W2N-Q` (29–31fps),
+`DRAW-N`, `CAM` (~19–22fps), `AUD`, `TELE`.
 
 ⚠️ The runbook's own recipe starts with a bare `pkill -f "target/debug/desktop"`.
 **Do not run that line** on a shared machine — it kills other sessions' live
 instances. Use the instance guard.
 
 **Proves:** media flows both directions at real frame rates, camera publishes,
-audio decodes to audible PCM, telepointer and drawing round-trip.
+audio decodes to audible PCM, telepointer and drawing round-trip, and plugin
+`srcdoc` frames really boot inside WKWebView under the embedder CSP this build
+ships (`PLUGIN-BOOT`; its run.jsonl `plugin-boot-preflight` record names the
+exact policy that was in force).
 **Does not prove:** anything about a *second native peer*, device changes,
 update installs, or window-level input scoping.
 

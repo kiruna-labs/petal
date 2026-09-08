@@ -189,6 +189,10 @@
   },
   "testCockpitScenarios": [
     {
+      "id": "PLUGIN-BOOT",
+      "tier": "quick"
+    },
+    {
       "id": "SHARE-N2W-Q",
       "tier": "quick"
     },

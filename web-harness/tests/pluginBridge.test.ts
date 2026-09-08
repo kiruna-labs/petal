@@ -179,6 +179,31 @@ test('denied, invalid and rate-limited paths return typed errors and never reach
     assert.deepEqual(codes, ['invalid', 'invalid']);
     assert.deepEqual(uiCalls.filter((c) => c.startsWith('setButton')), []);
   }
+  {
+    // #37: a patch is the one path an icon reaches host chrome without going
+    // through validateManifest, and it used to take any string. Same rule as
+    // the manifest (isIconName), and REFUSED rather than substituted.
+    const { adapter: iconAdapter, calls: iconCalls } = makeAdapter();
+    const iconBroker = createPluginBroker({ adapter: iconAdapter, hostVersion: '0.10.0' });
+    const iconFrame = new FakeFrame();
+    iconBroker.attach(plugin(), iconFrame);
+    for (const [id, icon] of [
+      [1, '<svg onload=alert(1)>'],
+      [2, 'constructor'.toUpperCase()],
+      [3, '__proto__'],
+      [4, ''],
+      [5, 42],
+    ] as const) {
+      iconBroker.handleMessage({ source: iconFrame, data: req(id, 'ui.setButton', { buttonId: 'react', patch: { icon } }) });
+    }
+    iconBroker.handleMessage({ source: iconFrame, data: req(6, 'ui.setButton', { buttonId: 'react', patch: { icon: 'smile' } }) });
+    await tick();
+    assert.deepEqual(
+      iconFrame.responses().map((r) => (r.ok ? 'ok' : r.error.code)),
+      ['invalid', 'invalid', 'invalid', 'invalid', 'invalid', 'ok'],
+    );
+    assert.deepEqual(iconCalls.filter((c) => c.startsWith('setButton')), ['setButton:react:{"icon":"smile"}']);
+  }
 
   const byId = new Map(frame.responses().map((r) => [r.id, r]));
   assert.equal(byId.get(1)!.ok, false);

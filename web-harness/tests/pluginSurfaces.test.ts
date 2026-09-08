@@ -124,4 +124,11 @@ test('plugin icons are a closed set with a safe fallback', () => {
   assert.ok(PLUGIN_ICON_NAMES.includes('smile'));
   assert.match(pluginIconSvg('smile', 20), /^<svg width="20"/);
   assert.equal(pluginIconSvg('<img onerror=x>'), pluginIconSvg('puzzle'));
+  // #37: the lookup used to be a bare `ICONS[name]`, so an inherited key
+  // resolved to an Object.prototype value and was inlined into this markup.
+  const puzzle = pluginIconSvg('puzzle');
+  for (const inherited of ['constructor', '__proto__', 'toString', 'valueOf', 'hasOwnProperty']) {
+    assert.equal(pluginIconSvg(inherited), puzzle, `${inherited} must not reach a prototype value`);
+  }
+  assert.ok(!pluginIconSvg('constructor').includes('native code'));
 });

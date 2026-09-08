@@ -9,6 +9,12 @@
       "maxDuration": 10
     }
   },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [{ "key": "Content-Security-Policy", "value": "frame-src 'none'" }]
+    }
+  ],
   "rewrites": [
     { "source": "/fidelity", "destination": "/fidelity.html" },
     { "source": "/:label/:code", "destination": "/api/j?label=:label&code=:code" },

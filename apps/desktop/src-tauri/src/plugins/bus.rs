@@ -549,9 +549,6 @@ pub async fn plugin_set_state(
 pub fn plugin_host_log(level: String, line: String) -> Result<(), String> {
     static LIMITER: OnceLock<Mutex<RateLimiter>> = OnceLock::new();
     let limiter = LIMITER.get_or_init(|| Mutex::new(RateLimiter::new(20.0)));
-    if !limiter.lock().map_err(|_| "limiter poisoned".to_string())?.try_take("host") {
-        return Ok(());
-    }
     // Plugin-controlled text: newlines would produce continuation lines with no
     // `plugins(host):` prefix, letting a plugin forge log lines from other
     // components. Flatten first, then truncate.
@@ -563,6 +560,14 @@ pub fn plugin_host_log(level: String, line: String) -> Result<(), String> {
     if text.len() < flattened.len() {
         text.push('…');
     }
+    // The QA journal is recorded BEFORE the rate limit, and the file log after:
+    // a burst that costs a log line must not also cost the Test Cockpit its
+    // evidence. The journal has its own (much smaller) bound.
+    #[cfg(feature = "cockpit-privileged")]
+    journal::record(&text);
+    if !limiter.lock().map_err(|_| "limiter poisoned".to_string())?.try_take("host") {
+        return Ok(());
+    }
     match level.as_str() {
         "error" => log::error!("plugins(host): {text}"),
         "warn" => log::warn!("plugins(host): {text}"),
@@ -570,6 +575,54 @@ pub fn plugin_host_log(level: String, line: String) -> Result<(), String> {
         _ => log::info!("plugins(host): {text}"),
     }
     Ok(())
+}
+
+/// Test Cockpit only: a bounded, in-process copy of the host diagnostics
+/// above, so PLUGIN-BOOT can assert on the SHIPPED signal
+/// (`plugin <id> frame ready`) instead of grepping petal.log for it. Compiled
+/// out of every customer build with the rest of `cockpit-privileged`.
+#[cfg(feature = "cockpit-privileged")]
+pub mod journal {
+    use std::collections::VecDeque;
+    use std::sync::{Mutex, OnceLock};
+
+    use crate::sync_ext::MutexExt;
+
+    const CAPACITY: usize = 256;
+
+    fn lines() -> &'static Mutex<VecDeque<String>> {
+        static LINES: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+        LINES.get_or_init(|| Mutex::new(VecDeque::new()))
+    }
+
+    /// Drop everything recorded so far. A `frame ready` left over from an
+    /// earlier scenario (or an earlier attempt in the same one) must never be
+    /// able to satisfy a later probe.
+    pub fn arm() {
+        lines().lock_unpoisoned().clear();
+    }
+
+    pub(super) fn record(line: &str) {
+        let mut guard = lines().lock_unpoisoned();
+        if guard.len() >= CAPACITY {
+            guard.pop_front();
+        }
+        guard.push_back(line.to_string());
+    }
+
+    pub fn snapshot() -> Vec<String> {
+        lines().lock_unpoisoned().iter().cloned().collect()
+    }
+}
+
+/// The plugin id in `apps/desktop/src/lib/plugins/tauriAdapter.ts`'s ready
+/// diagnostic, or `None` for any other line. The exact wording is pinned on
+/// the TypeScript side by `apps/desktop/tests/pluginHostReadyLog.test.ts`; if
+/// that test fails, this parser is what it is protecting.
+#[cfg(feature = "cockpit-privileged")]
+pub fn plugin_frame_ready_id(line: &str) -> Option<&str> {
+    let id = line.strip_prefix("plugin ")?.strip_suffix(" frame ready")?;
+    is_plugin_id(id).then_some(id)
 }
 
 #[cfg(test)]
