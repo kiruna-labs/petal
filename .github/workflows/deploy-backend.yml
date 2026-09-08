@@ -1,0 +1,93 @@
+# Deploy the backend to PRODUCTION (app.petal.live), by hand.
+#
+# Why this exists: `release.yml` STAGES the backend (`--prod --skip-domain`)
+# and only promotes it in the `release` job, AFTER the e2e gate. So a backend
+# change the gate itself depends on -- the staged-origin CORS allowance added
+# in #100 is the first -- cannot reach production through a release. It has to
+# be live first, or the gate fails and the release never gets far enough to
+# promote the thing that would have fixed it.
+#
+# Deliberately manual: this takes app.petal.live immediately, with no build or
+# e2e gate in front of it. Use it for backend-only changes that a release
+# depends on, and prefer letting a normal release promote everything else.
+#
+# Runs on CI credentials (the org VERCEL_TOKEN), never a developer's local
+# `vercel` login.
+name: Deploy backend (production)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this is being deployed outside a release (recorded in the run summary)"
+        required: true
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy backend to app.petal.live
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Refuse to deploy from anything but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Deploy backend must run from main (got ${{ github.ref }})"; exit 1
+
+      - name: Check the token is configured
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::error::VERCEL_TOKEN is not available to this repository."; exit 1
+          fi
+
+      - name: Backend typecheck + tests
+        working-directory: backend
+        run: npm ci && npm run typecheck && npm test
+
+      - name: Deploy to production
+        working-directory: backend
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_HUx56nXbsbsz2jLQAtSu9AUa
+          VERCEL_PROJECT_ID: prj_oi8RLddPbTrKSalKvix1GEgdti1W
+        run: |
+          set -euo pipefail
+          npx --yes vercel@59 pull --yes --environment=production --token "$VERCEL_TOKEN"
+          URL="$(npx --yes vercel@59 deploy --prod --yes --token "$VERCEL_TOKEN" -e "PETAL_DEPLOY_COMMIT=${GITHUB_SHA}")"
+          echo "deployed: $URL"
+          echo "DEPLOY_URL=$URL" >> "$GITHUB_ENV"
+
+      # The deploy is only useful if the live host actually serves it, so prove
+      # that rather than trusting the CLI's exit code.
+      - name: Verify the live backend serves this commit
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 12); do
+            body="$(curl -sS --max-time 20 https://app.petal.live/api/version || true)"
+            if [[ "$body" == *"$GITHUB_SHA"* ]]; then echo "app.petal.live serves $GITHUB_SHA"; break; fi
+            echo "attempt $i: $body"; sleep 10
+            [ "$i" = 12 ] && { echo "::error::app.petal.live is not serving $GITHUB_SHA"; exit 1; }
+          done
+          bash scripts/verify-backend-live.sh
+
+      - name: Record why
+        run: |
+          {
+            echo "### Backend deployed to production"
+            echo "- commit: \`${GITHUB_SHA}\`"
+            echo "- reason: ${{ inputs.reason }}"
+            echo "- deployment: ${DEPLOY_URL:-unknown}"
+          } >> "$GITHUB_STEP_SUMMARY"
