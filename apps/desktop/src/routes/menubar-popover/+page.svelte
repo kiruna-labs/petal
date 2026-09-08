@@ -319,8 +319,16 @@
     }
   }
 
-  function onOpenSettings() {
-    void openMainRoute('/settings');
+  // Own window, never openMainRoute('/settings'): routing the main webview
+  // away from /meeting/<room> runs that route's onDestroy while the user is
+  // still joined (same reason Open Petal above is show-only).
+  async function onOpenSettings() {
+    if (!hasTauri) return;
+    try {
+      await invoke(COMMANDS.openSettingsWindow);
+    } catch (e) {
+      console.error('open_settings_window failed', e);
+    }
   }
 
   async function onActivateRemoteWindow(windowId: number, ownerIdentity: string) {

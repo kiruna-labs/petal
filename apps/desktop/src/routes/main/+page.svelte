@@ -29,7 +29,7 @@
   } from '@tauri-apps/api/window';
   import MainMenu from '$lib/components/MainMenu.svelte';
   import Button from '$lib/components/Button.svelte';
-  import { session } from '$lib/stores/session.svelte';
+  import { session, startSessionSync } from '$lib/stores/session.svelte';
   import {
     listRooms,
     createRoom,
@@ -455,6 +455,13 @@
 
   const deliverAutotestJoinResult = onceAutotestJoinResult(handleAutotestJoinResult);
 
+
+  // Cross-window session sync (Settings has its own window now). Scoped to
+  // this route's lifetime: `startSessionSync` refcounts one native listener
+  // and the disposer returned here releases it on destroy, so no listener
+  // outlives the surface that wanted it.
+  onMount(() => startSessionSync());
+
   onMount(async () => {
     routeActive = true;
     if (!session.onboardingComplete) {
@@ -650,8 +657,19 @@
     }
   }
 
-  function handleOpenSettings() {
-    goto('/settings');
+  // Settings opens in its own window (settings_window.rs) so the main
+  // webview is never navigated away from wherever it is. Browser preview has
+  // no native windows, so it falls back to the in-page route.
+  async function handleOpenSettings() {
+    if (!hasTauri) {
+      goto('/settings');
+      return;
+    }
+    try {
+      await invoke(COMMANDS.openSettingsWindow);
+    } catch (e) {
+      console.error('open_settings_window failed', e);
+    }
   }
 
   function toggleFavoriteRoom(name: string) {
