@@ -21,7 +21,7 @@
 
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 
@@ -45,7 +45,29 @@ try {
 // Bundle the REAL module rather than reimplementing its logic in the fixture.
 const workDir = mkdtempSync(join(tmpdir(), 'flicker627-'));
 const bundlePath = join(workDir, 'holdLastFrame.js');
-const esbuildBin = resolve(repoRoot, 'web-harness/node_modules/esbuild/bin/esbuild');
+// esbuild is NOT a direct dependency of any package here -- it arrives nested
+// under whichever tool pulls it in, and npm hoists it wherever it likes. The
+// hardcoded `web-harness/node_modules/esbuild` this used to assume does not
+// exist after a clean `npm ci` (vite 8 is rolldown-based), so this gate died
+// with a raw spawnSync ENOENT -- invisible while an earlier ci-local.sh stage
+// was failing ahead of it (#93). Look where it actually lands, and say so.
+const esbuildBin = (() => {
+  const candidates = [
+    process.env.PETAL_ESBUILD_BIN,
+    resolve(repoRoot, 'web-harness/node_modules/esbuild/bin/esbuild'),
+    resolve(repoRoot, 'web-harness/node_modules/tsx/node_modules/esbuild/bin/esbuild'),
+    resolve(repoRoot, 'apps/desktop/node_modules/esbuild/bin/esbuild'),
+    resolve(repoRoot, 'node_modules/esbuild/bin/esbuild'),
+  ].filter(Boolean);
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) {
+    console.error(
+      `Requires esbuild to bundle web-harness/src/holdLastFrame.ts. Install web-harness or apps/desktop dependencies, or set PETAL_ESBUILD_BIN. Looked in:\n  ${candidates.join('\n  ')}`
+    );
+    process.exit(2);
+  }
+  return found;
+})();
 execFileSync(
   esbuildBin,
   [
@@ -111,12 +133,24 @@ async function runGapTrial({ withHold, shippedCss }) {
       canvas.height = 200;
       const context = canvas.getContext('2d');
       let tick = 0;
+      const BAR_WIDTH = 40;
       const paint = () => {
         tick += 1;
         context.fillStyle = '#ffffff';
         context.fillRect(0, 0, canvas.width, canvas.height);
         context.fillStyle = '#ff2d55';
-        context.fillRect((tick * 7) % canvas.width, 0, 40, canvas.height);
+        // The bar MOVES, but only inside the middle half of the canvas, so the
+        // SAME amount of red survives however the tile crops the video -- every
+        // painted frame therefore has the same mean luma. That is what lets the
+        // held-frame check below compare a sample taken before the gap against
+        // the frame captured during it with a tight tolerance. Sweeping the
+        // full width instead let the bar be partly cropped away, which swung
+        // the source's own luma between 214 and 253 -- the check then passed or
+        // failed on which animation phase each sample happened to catch
+        // (measured ~1 pass in 3, and it had gone unnoticed because the gate
+        // itself could not start: see the esbuild lookup above, #93).
+        const travel = Math.floor(canvas.width / 2) - BAR_WIDTH;
+        context.fillRect(Math.floor(canvas.width / 4) + ((tick * 7) % travel), 0, BAR_WIDTH, canvas.height);
       };
       paint();
       window.__paintTimer = setInterval(paint, 33);

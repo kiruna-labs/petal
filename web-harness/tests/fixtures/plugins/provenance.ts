@@ -5,12 +5,12 @@
 // "· plugin" caption must stay fully visible there, so the test measures the
 // rendered box instead of reading CSS (kiruna-labs/petal#71 review, finding 1).
 import '../../../src/fonts.css';
-import '../../../../shared/ui/tokens.css';
-import '../../../../shared/ui/plugin-provenance.css';
-import { createPluginHost } from '../../../../shared/plugin-host/host.ts';
-import type { PluginHostAdapter } from '../../../../shared/plugin-host/host.ts';
-import type { LoadedPlugin, PluginSource } from '../../../../shared/plugin-host/broker.ts';
-import { MANIFEST_LIMITS, validateManifest } from '../../../../shared/plugin-host/manifest.ts';
+import '@petal/shared/ui/tokens.css';
+import '@petal/shared/ui/plugin-provenance.css';
+import { createPluginHost } from '@petal/shared/plugin-host/host.ts';
+import type { PluginHostAdapter } from '@petal/shared/plugin-host/host.ts';
+import type { LoadedPlugin, PluginSource } from '@petal/shared/plugin-host/broker.ts';
+import { MANIFEST_LIMITS, validateManifest } from '@petal/shared/plugin-host/manifest.ts';
 
 /** A plugin that does nothing: this fixture only measures HOST-drawn chrome. */
 const INERT_SOURCE = 'export default { activate() {} };';

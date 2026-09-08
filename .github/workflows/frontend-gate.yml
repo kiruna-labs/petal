@@ -135,7 +135,9 @@ jobs:
   web-harness:
     name: Web-harness build + tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The isolated-deploy simulation runs `npm run build` a second time against
+    # a staged copy, so this job is roughly twice the work it was.
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: web-harness
@@ -149,11 +151,25 @@ jobs:
 
       - run: npm ci
 
-      # `npm run build` here is three gates in one -- `svelte-check && tsc -p
-      # tests && vite build` -- and all three have to run. #77 is why: the vite
-      # build was failing, which stopped the chain before a SECOND type error
-      # behind it was ever reported.
+      # `npm run build` here is four gates in one -- `check-package-escapes &&
+      # svelte-check && tsc -p tests && vite build` -- and all of them have to
+      # run. #77 is why: the vite build was failing, which stopped the chain
+      # before a SECOND type error behind it was ever reported.
       - run: npm run build
+
+      # #93: the build above runs inside the full checkout, where
+      # web-harness/shared's symlink to ../shared resolves either way. It
+      # cannot catch "does the ISOLATED deploy build still work" -- the thing
+      # that broke silently for days in #662, and again on `main` when a test
+      # fixture reached shared/ by a relative path that walks out of the
+      # package. `scripts/ci-local.sh` was the ONLY thing running this stage
+      # and it runs on nobody's PR. --build-only needs no Vercel CLI, auth or
+      # network: it is rsync + npm + the same `npm run build` as above, run
+      # against a staged, self-contained copy, so it is portable to
+      # ubuntu-latest (rsync is present on the runner image).
+      - name: Isolated-deploy build simulation (#662, #93)
+        working-directory: .
+        run: scripts/deploy-web-harness.sh --build-only
 
       # Three of web-harness's own tests reach across the repo for their
       # browser: pluginProvenanceRendered, pluginSandboxRendered and

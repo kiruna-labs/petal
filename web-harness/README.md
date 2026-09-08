@@ -193,9 +193,16 @@ checks). Test-only; never shipped in the real app.
 
 ## Verification status
 
-The current gate is `npm run build` (`svelte-check`, `tsc -p tests`, `vite
-build`) plus `npm test` (~70 test files under `tests/`), both run by
-`scripts/ci-local.sh`. The original 2026-07-01 bring-up (issue #3) verified:
+The current gate is `npm run build` (`scripts/check-package-escapes.mjs`,
+`svelte-check`, `tsc -p tests`, `vite build`) plus `npm test` (~70 test files
+under `tests/`), both run by `scripts/ci-local.sh` and by
+`.github/workflows/frontend-gate.yml` on every PR. The escape check runs first
+and is cheap: it refuses any relative import that walks out of this package,
+because the deploy stages `web-harness/` alone (#662) and such an import
+resolves to nothing there — #93 is the one that made `ci-local.sh` red on
+`main`. Import `shared/` through the `@petal/shared` alias instead.
+
+The original 2026-07-01 bring-up (issue #3) verified:
 
 - `npm run build` and `npm test` clean.
 - Verified live via Chrome DevTools MCP against a local `livekit-server`
