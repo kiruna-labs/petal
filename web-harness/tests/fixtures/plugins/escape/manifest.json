@@ -1,0 +1,13 @@
+{
+  "manifestVersion": 1,
+  "id": "petal.test-escape",
+  "version": "1.0.0",
+  "name": "Escape (test)",
+  "description": "Fixture plugin that tries to navigate its own frame off the sandbox (#37).",
+  "apiVersion": 1,
+  "minHostVersion": "0.1.0",
+  "scope": "meeting",
+  "entry": "plugin.js",
+  "permissions": ["meeting:read"],
+  "native": null
+}

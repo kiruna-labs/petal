@@ -20,7 +20,8 @@
     "petal-control-*",
     "petal-pointer-*",
     "ai-chat-panel",
-    "region-window-*"
+    "region-window-*",
+    "cockpit-plugin-boot-probe"
   ],
   "permissions": [
     "core:default",

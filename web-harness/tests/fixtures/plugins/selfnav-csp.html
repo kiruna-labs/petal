@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- The policy the desktop app (tauri.conf.json) and meet.petal.live (vercel.json) ship. -->
+    <meta http-equiv="Content-Security-Policy" content="frame-src 'none'" />
+    <title>plugin self-navigation (embedder frame-src 'none')</title>
+    <style>
+      html, body { margin: 0; background: #0d0f12; color: #f5f6f7; font: 14px system-ui; }
+      #overlay, #popovers { position: fixed; inset: 0; pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <div id="logic" hidden></div>
+    <div id="overlay"></div>
+    <div id="popovers"></div>
+    <script type="module" src="./selfnav.ts"></script>
+  </body>
+</html>

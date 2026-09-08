@@ -53,8 +53,10 @@ especially for development.
   plugins scope to a **person** or a **meeting**, never a team.
 - No dormant code (a standing project rule): every host surface ships with
   a first-party consumer in the same milestone.
-- The capability file is one flat allowlist and `tauri.conf.json` has
-  `csp: null`. Third-party code makes a real sandbox mandatory.
+- The capability file is one flat allowlist. `tauri.conf.json` shipped
+  `csp: null` until #37; it now carries exactly one directive,
+  `frame-src 'none'` (see 2.3). Third-party code makes a real sandbox
+  mandatory.
 - UI text must fit the 400 px main window. Native panel changes need a
   live-exercising test. Shared UI and logic go in `shared/`, never duplicated.
 - No hosted defaults baked into a plain clone (same rule as the token
@@ -140,12 +142,37 @@ re-verified on every load; no persistent bundle cache. KV in `localStorage`,
   origin with its own `<meta>` CSP:
   `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`.
   `connect-src 'none'` means all network goes through `petal.net.fetch`.
+- A document's own CSP cannot stop that document navigating ITSELF, so the
+  frame's `<meta>` policy is not the whole boundary (#37). Two things outside
+  the frame close it: the EMBEDDER's `frame-src 'none'`
+  (`apps/desktop/src-tauri/tauri.conf.json`, `web-harness/vercel.json`), which
+  refuses the navigation, and the host's second-`load` gate
+  (`shared/plugin-host/host.ts`), which unloads a plugin whose frame left its
+  srcdoc so no further envelope is posted into it. Both, because the first
+  depends on deployment config and the second acts one `load` late.
+  `web-harness/tests/pluginSelfNavigation.test.ts` drives a real escape
+  attempt in a browser and checks what the attacker page received.
+- CSP3 exempts `about:srcdoc` from `frame-src` matching, so `frame-src 'none'`
+  is meant to refuse the self-navigation without refusing the frame itself.
+  That is proven in Chromium by the test above and in **WKWebView** by the Test
+  Cockpit's `PLUGIN-BOOT` scenario, which loads the real built-in through the
+  real host in a real webview of the shipped binary and requires
+  `plugins(host): plugin petal.reactions frame ready` in the host journal
+  (`apps/desktop/src-tauri/src/test_cockpit/plugin_boot.rs`). It runs on the
+  self-hosted Mac in `nightly-loopback.yml`, which is also the release e2e gate.
+  Its `plugin-boot-preflight` record names the policy that was in force, so a
+  pass says which CSP it passed under.
 - Why an iframe and not a hidden Tauri webview per plugin: a second
   `WebviewUrl::App` webview shares the `tauri://localhost` origin with the app
   (shared storage), needs a capability entry, costs tens of MB each, and has
   no browser equivalent. One iframe is one code path for both clients. Tauri
-  init scripts are main-frame only and IPC rejects the `null` origin; a
-  rendered test asserts `__TAURI_INTERNALS__` is undefined inside a frame.
+  init scripts are main-frame only and IPC rejects the `null` origin. The
+  rendered sandbox test checks a frame sees no such globals, but it runs in
+  Chromium, where there is no Tauri to leak: that is evidence about the host
+  page, not proof about WKWebView (#37). What WKWebView IS covered for is
+  narrower and separate: `PLUGIN-BOOT` proves the frame boots there at all
+  (see the CSP bullet above); no automated test inspects a frame's globals
+  inside WKWebView.
 - UI surfaces that need pixels (panel, popover, overlay) are additional
   sandboxed iframes of the same bundle, wired to the logic frame through a
   host-brokered `MessageChannel`. Button-only surfaces (toolbar button, header
@@ -164,10 +191,14 @@ re-verified on every load; no persistent bundle cache. KV in `localStorage`,
   feature. Rust independently re-checks the two dangerous ones: the
   `plugin_net_fetch` host allowlist and the `plugin_publish_data` own-topic
   prefix.
-- `csp: null` today means srcdoc frames get only their own `<meta>` policy.
-  App-level CSP tightening (M5) moves desktop frames to a `petal-plugin://`
-  URI scheme served from the installed bundle. The loader is an interface so
-  that swap stays local.
+- The app-level CSP is deliberately one directive. A srcdoc frame INHERITS
+  its embedder's policy, so anything beyond `frame-src` would also apply
+  inside every plugin frame -- which is why the desktop also sets
+  `dangerousDisableAssetCspModification: ["script-src", "style-src"]`:
+  Tauri would otherwise inject a nonce/hash `script-src`, and the plugin's
+  inline runtime and module would be blocked. Further tightening (M5) moves
+  desktop frames to a `petal-plugin://` URI scheme served from the installed
+  bundle. The loader is an interface so that swap stays local.
 
 ### 2.4 The SDK
 
@@ -496,8 +527,10 @@ Definition of done and the usual labels.
 
 - Windows parity: M1 to M4 add no native windows; I-9 edits both
   compositors; I-11 needs a Windows twin or an explicit macOS gate.
-- CSP inheritance: srcdoc frames inherit a future app CSP, so I-12 lands the
-  scheme loader in the same PR as any `csp` value.
+- CSP inheritance: srcdoc frames inherit the app CSP. #37 added a `csp` value
+  without the scheme loader only because it is `frame-src` alone, which is
+  inert inside a plugin frame; any directive that is not, still needs I-12's
+  scheme loader in the same PR.
 - Data-channel abuse: limits enforced outbound in the broker and inbound in
   both dispatchers; chat history uses direct destinations.
 - Metadata churn: coalesce `state.set` to two writes per second.

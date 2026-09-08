@@ -20,7 +20,10 @@ export const PLUGIN_ICON_NAMES: readonly string[] = Object.keys(ICONS);
 
 /** Inline SVG for a known icon name; unknown names fall back to the puzzle piece. */
 export function pluginIconSvg(name: string, size = 20): string {
-  const body = ICONS[name] ?? ICONS.puzzle!;
+  // Object.hasOwn, not `ICONS[name]`: a plain object literal inherits
+  // Object.prototype, so 'constructor'/'__proto__'/'toString' would resolve to
+  // prototype values and be inlined into this SVG as markup (#37).
+  const body = Object.hasOwn(ICONS, name) ? ICONS[name]! : ICONS.puzzle!;
   return (
     `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
     `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`

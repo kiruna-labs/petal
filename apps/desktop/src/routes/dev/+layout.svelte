@@ -11,6 +11,7 @@
     { path: '/dev/menubar-popover', label: 'Menubar popover' },
     { path: '/dev/network-cockpit', label: 'Network cockpit' },
     { path: '/dev/onboarding', label: 'Onboarding' },
+    { path: '/dev/plugin-boot', label: 'Plugin boot' },
     { path: '/dev/secondary', label: 'Secondary surfaces' },
     { path: '/dev/settings', label: 'Settings' },
     { path: '/dev/telepointer', label: 'Telepointer' },

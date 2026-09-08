@@ -96,6 +96,37 @@ control characters, and bidi overrides/isolates are refused by
 them. Petal also clamps a declared popover `width`/`height` to a floor, so
 its caption always has room.
 
+## What the sandbox actually enforces *(M1)*
+
+Your plugin runs in an `<iframe sandbox="allow-scripts">` built from srcdoc, so
+it has an opaque origin, no `allow-same-origin`, no popups, no forms, and no
+top-level navigation. Its own `<meta>` CSP is `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`,
+which is what "no network" means in practice: `fetch`, `XMLHttpRequest`,
+`EventSource`, and `WebSocket` have nowhere to go, and every request you are
+allowed to make goes through
+`petal.net.fetch`, which the host re-checks against the hosts your manifest
+declared.
+
+Two things that CSP does not cover are enforced from outside the frame:
+
+- **A frame navigating itself.** No policy a document sets on itself can stop
+  `location.assign()`, an `<a href>`, or a `<meta http-equiv=refresh>`, and the
+  window survives the navigation. Petal's embedder therefore sends
+  `frame-src 'none'` (the desktop webview's CSP and a response header on
+  meet.petal.live), which refuses the navigation; and the host treats a second
+  `load` event on a plugin frame as compromise -- it unloads the plugin at once
+  and posts nothing further into that window. If your plugin needs to send a
+  user somewhere, ask Petal, do not navigate.
+- **`RTCPeerConnection`.** CSP has no directive for it. It is not brokered and
+  not part of the plugin API; a plugin that opens one is out of policy and
+  subject to removal from the registry.
+
+Anything Petal draws for you is validated wherever it arrives, not only in the
+manifest: a `ui.setButton` patch carries the same rules a manifest does, so an
+`icon` that is not a lowercase icon name is rejected as `invalid` rather than
+quietly replaced (the icon set lives in `shared/plugin-host/icons.ts`; a
+well-formed name Petal does not know draws the generic puzzle glyph).
+
 ## Manifest reference *(M1)*
 
 See `shared/plugin-host/manifest.ts` for the authoritative TypeScript type
