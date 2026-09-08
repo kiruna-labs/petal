@@ -8,7 +8,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "svelte-check --tsconfig ./tsconfig.json && tsc -p tests && vite build",
+    "build": "node scripts/check-package-escapes.mjs && svelte-check --tsconfig ./tsconfig.json && tsc -p tests && vite build",
     "preview": "vite preview",
     "test": "node --import tsx --test tests/*.test.ts",
     "verify:browser": "node ../scripts/verify-web-harness-browser.mjs"

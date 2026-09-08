@@ -4,10 +4,10 @@
 // host, (c) the sandbox leaked no Tauri/host globals, (d) a toolbar button
 // was drawn and works, (e) the reactions popover opens and a pick reaches
 // the overlay frame.
-import { createPluginHost } from '../../../shared/plugin-host/host.ts';
-import { validateManifest } from '../../../shared/plugin-host/manifest.ts';
-import type { PluginHostAdapter } from '../../../shared/plugin-host/host.ts';
-import type { ToolbarButtonModel } from '../../../shared/plugin-host/surfaces.ts';
+import { createPluginHost } from '@petal/shared/plugin-host/host.ts';
+import { validateManifest } from '@petal/shared/plugin-host/manifest.ts';
+import type { PluginHostAdapter } from '@petal/shared/plugin-host/host.ts';
+import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces.ts';
 import helloManifestText from './hello/manifest.json?raw';
 import helloSource from './hello/plugin.js?raw';
 import reactionsManifestText from '../../../plugins/reactions/manifest.json?raw';
