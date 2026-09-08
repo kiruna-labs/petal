@@ -123,6 +123,43 @@ class BridgeError extends Error {
 
 const ERROR_CODES: readonly BridgeErrorCode[] = ['denied', 'rate-limited', 'invalid', 'unavailable', 'internal'];
 
+/**
+ * Deep-copy a payload into plain data that structured clone accepts. Hosts
+ * hand the broker whatever their state layer holds -- on the desktop that is
+ * a Svelte 5 `$state` Proxy, which postMessage rejects with DataCloneError
+ * (seen live: `init` never reached any frame). Typed arrays, ArrayBuffers,
+ * and MessagePorts pass through untouched; anything else becomes plain
+ * objects/arrays/primitives. Functions and symbols are dropped.
+ */
+export function toCloneable(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value !== 'object') {
+    return typeof value === 'function' || typeof value === 'symbol' ? undefined : value;
+  }
+  if (depth > 32) return undefined;
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return value;
+  if (typeof MessagePort !== 'undefined' && value instanceof MessagePort) return value;
+  if (Array.isArray(value)) return value.map((v) => toCloneable(v, depth + 1));
+  if (value instanceof Date) return new Date(value.getTime());
+  if (value instanceof Map) return new Map([...value.entries()].map(([k, v]) => [toCloneable(k, depth + 1), toCloneable(v, depth + 1)]));
+  if (value instanceof Set) return new Set([...value].map((v) => toCloneable(v, depth + 1)));
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    const raw = (value as Record<string, unknown>)[key];
+    if (typeof raw === 'function' || typeof raw === 'symbol') continue;
+    // defineProperty, not assignment: `Object.keys` returns an own `__proto__`
+    // (JSON.parse produces one), and `out.__proto__ = ...` would hit
+    // Object.prototype's setter -- dropping the key and mutating the copy's
+    // prototype instead of copying it, which structured clone never does.
+    Object.defineProperty(out, key, {
+      value: toCloneable(raw, depth + 1), // undefined values are kept, as structured clone does
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
+  }
+  return out;
+}
+
 /** Adapters may throw `{ code, message }` to pick the error a plugin sees; anything else is 'internal'. */
 function adapterError(e: unknown): BridgeError {
   if (typeof e === 'object' && e !== null) {
@@ -166,7 +203,7 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
   function post(frame: FrameWindow, env: Envelope, transfer?: Transferable[]): void {
     try {
       // Sandboxed frames have an opaque origin; '*' is the only target that reaches them.
-      frame.postMessage(env, '*', transfer);
+      frame.postMessage(toCloneable(env) as Envelope, '*', transfer);
     } catch (e) {
       warn(`plugin broker: postMessage failed: ${String(e)}`);
     }

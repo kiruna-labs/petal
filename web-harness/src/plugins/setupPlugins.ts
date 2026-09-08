@@ -173,7 +173,28 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     room.on(RoomEvent.Connected, seedAndReadvertise);
     room.on(RoomEvent.Reconnected, seedAndReadvertise);
     if (room.state === 'connected') seedAndReadvertise();
+    // Whole-blob participant metadata is last-writer-wins across ALL local
+    // writers, not just ours: connection.ts's palette-index merge right after
+    // connect reads a blob that has not echoed our `plugins` key yet and
+    // overwrites it (seen live: the key was gone every time after connect).
+    // Reconcile whenever OUR metadata comes back without an entry for a
+    // loaded meeting plugin; debounced so a burst of writes causes one redo.
+    let reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+    const reconcileOwnAdverts = (_metadata: string | undefined, participant: LkParticipant) => {
+      if (participant !== room.localParticipant || reconcileTimer) return;
+      const adverts = pluginsFromMetadata(participant.metadata);
+      const missing = host.loaded().some((p) => p.manifest.scope === 'meeting' && !adverts[p.manifest.id]);
+      if (!missing) return;
+      reconcileTimer = setTimeout(() => {
+        reconcileTimer = null;
+        host.readvertise();
+      }, 250);
+    };
+    room.on(RoomEvent.ParticipantMetadataChanged, reconcileOwnAdverts);
     unsubscribe = () => {
+      if (reconcileTimer) clearTimeout(reconcileTimer);
+      reconcileTimer = null;
+      room.off(RoomEvent.ParticipantMetadataChanged, reconcileOwnAdverts);
       room.off(RoomEvent.ParticipantConnected, joined);
       room.off(RoomEvent.ParticipantConnected, onMetadata);
       room.off(RoomEvent.ParticipantDisconnected, left);
