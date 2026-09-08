@@ -121,6 +121,7 @@
     inviteTooltip?: string;
     onInviteLinkCopy?: () => void | Promise<void>;
     onOpenNetwork?: () => void | Promise<void>;
+    onOpenSettings?: () => void | Promise<void>;
     onRenameRoom?: (displayName: string | null) => void | Promise<void>;
     /** Pass-through to Gallery's plugin toolbar slot (plugins/README.md §2.7). */
     pluginActions?: Snippet;
@@ -168,6 +169,7 @@
     inviteTooltip = 'Copy invite link',
     onInviteLinkCopy,
     onOpenNetwork,
+    onOpenSettings,
     onRenameRoom,
     onReportBug,
     pluginActions,
@@ -761,6 +763,7 @@
       {inviteTooltip}
       {onInviteLinkCopy}
       {onOpenNetwork}
+      {onOpenSettings}
       {onRenameRoom}
       {onReportBug}
       {frameless}

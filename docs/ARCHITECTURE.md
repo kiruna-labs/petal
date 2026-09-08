@@ -260,6 +260,7 @@ Windows), `updater.rs` (Mach-O guard on macOS, NSIS PE guard on Windows),
 | `petal-control-*` | Windows transparent `WebviewWindow` sibling | authenticated remote-control input surface for a remote share |
 | `petal-pointer-*` | macOS/Windows transparent `WebviewWindow` sibling | remote telepointer/Draw overlay keyed by `(owner_identity, window_id)` |
 | `network-cockpit` | macOS/Windows `WebviewWindow` | diagnostics cockpit |
+| `settings` | macOS/Windows `WebviewWindow` | Settings singleton, opened from home, the menubar popover, and the in-meeting More menu; never routed inside the main window |
 | `window-picker` | macOS/Windows `WebviewWindow` | window picker surface |
 | `ai-chat-panel` | macOS `NSPanel`; Windows `WebviewWindow` | AI-chat panel singleton |
 | `dev-telepointer` | macOS/Windows `WebviewWindow` when enabled | dev-only telepointer harness |
@@ -350,7 +351,10 @@ full ~180-command list):
   `region-view-options-changed`, `region-control-state-changed`,
   `region-warning`, `telepointer-update`, `draw-update`, `presence-update`,
   `room-updated`, `resilience-event`, `room-left`, `mic-mute-changed`,
-  `camera-publish-state`, `desktop-windows-changed`, `debug-mode-changed`,
+  `camera-publish-state`, `camera-intent-changed` (the camera INTENT edge --
+  emitted before the device is acquired and after it is released, so the
+  Settings window's preview can yield the shared camera), `session-changed`,
+  `desktop-windows-changed`, `debug-mode-changed`,
   `remote-control-status`, `control-consent-requested` (typed
   ordinary-control or full-control-escalation prompt),
   `share-control-mode-changed`, `meeting-restore-pill-requested`,
@@ -411,7 +415,7 @@ tests on both sides. See **`docs/CONTRACTS.md`** before changing any of them.
 
 `/` (onboarding gate) · `/onboarding` · `/main` (menu) · `/meeting/[room]`
 (in-meeting; its logic lives in `lib/meeting/*.svelte.ts` rune controllers,
-#137) · `/settings` · plus native-surface routes (`/menubar-popover`,
+#137) · plus native-surface routes (`/settings`, `/menubar-popover`,
 `/hover-tab`, `/share-border`, `/share-notice`, `/control-consent`,
 `/compositor/*` — `surface`, `control`, `pointer`, `ai-chat` —
 `/ai-chat-panel`, `/window-picker`, `/network-cockpit`, `/region-window`) and
