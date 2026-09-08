@@ -788,7 +788,24 @@ frame presentation scheduling. It uses `requestVideoFrameCallback`'s
 physical-panel photodiode measurement.
 
 `.github/workflows/nightly-loopback.yml` runs that `--live` path on a nightly
-schedule plus `workflow_dispatch`. It intentionally targets only
+schedule plus `workflow_dispatch`, and `release.yml` calls the same workflow as
+its pre-publish `e2e-gate`. The workflow has two tiers with two different web
+targets (#42):
+
+- The **loopback tier** is hermetic — local `livekit-server` plus a local vite
+  web-harness built from the checked-out ref — so it already exercises the web
+  source the release is about to ship. It is unaffected by the targeting inputs.
+- The **Test Cockpit tier** talks to a real https deployment. Which one is the
+  `harness_url` / `backend_url` input pair, defaulting to production
+  (`meet.petal.live` / `app.petal.live`). A manual or nightly dispatch keeps
+  those defaults on purpose — that run exists to observe drift between what is
+  deployed and what `main` says should be deployed. `release.yml` overrides
+  them with the STAGED deployment URLs that its `deploy-web` job just created,
+  so the gate tests the web build this release is about to promote rather than
+  the previous one, and passes the bypass secret described in the
+  `PETAL_VERCEL_BYPASS_SECRET` row below.
+
+It intentionally targets only
 `runs-on: [self-hosted, macOS]`: the repo owner must register a real logged-in
 Mac runner with that label, Chrome installed, `livekit-server` on `PATH`, and
 Screen Recording/Accessibility grants already approved for the launched Petal
@@ -1302,12 +1319,29 @@ subsequent cockpit work:
   `svelte.config.js` strips `routes/dev/**` from a normal `npm run build`, so
   without this env var the SHARE-N2W-Q native test-pattern window
   (`WebviewUrl` = `dev/test-pattern.html`) 404s to the SPA fallback and the
-  shared window renders frozen/static content (delivered <1fps). Any cockpit
+  shared window renders frozen/static content (delivered <1fps), and
+  PLUGIN-BOOT's `dev/plugin-boot.html` is missing from the asset table
+  entirely (it reports that as INFRA-FAIL rather than as a plugin verdict). Any cockpit
   build -- `cargo build`/`tauri dev`/`tauri build` -- must run its frontend
   build as `PETAL_INCLUDE_DEV_ROUTES=1 npm run build` so
   `build/dev/test-pattern.html` is emitted and embedded. (For a raw
   `cargo build` after changing that route, also re-embed with a
   `touch src-tauri/build.rs`.)
+- **PLUGIN-BOOT is the only scenario that loads a plugin.** It exists because
+  nothing else did: the engine joins its room from Rust
+  (`session::join_room`) and never navigates the main webview to the meeting
+  route, so `PluginSurfaces` never mounted and a whole Quick run contained
+  zero `plugins(host):` lines -- including the host's own "srcdoc blocked?"
+  canary, whose silence therefore proved nothing (#559/#561). The scenario
+  opens `dev/plugin-boot.html` in its own webview window of the QA binary,
+  which serves pages through Tauri's asset protocol with the configured CSP
+  attached, and requires `plugins(host): plugin petal.reactions frame ready`
+  in the host journal -- a line only the frame's own executed scripts can
+  produce. Its `plugin-boot-preflight` run.jsonl record names the embedder
+  policy that was in force, and a probe page that never mounted is INFRA-FAIL,
+  not a verdict about WebKit. It also records (never gates on) whether a
+  sandboxed srcdoc frame's cross-origin self-navigation raised a `frame-src`
+  `securitypolicyviolation`.
 - **SHARE-N2W-Q is a delivered-LIVENESS gate, not a 30fps gate.** It shares
   Petal's OWN WKWebView test-pattern window; macOS throttles self-captured
   WebView content (JS timers + the SCK raw stream), so it delivers via
@@ -2346,8 +2380,9 @@ still rejects translated execution for release evidence, and that stays true.
 | `PETAL_RC_SENTINEL_CLICK_DELAY_MS`, `PETAL_RC_BURST_*` (`CADENCES`, `DRAIN_MS`, `MIN_CLICKS`, `SECONDS`, `SETTLE_MS`) | `apps/desktop/scripts/remote-control-scenario.mjs` | Rapid-click-burst mode tuning. |
 | `PETAL_ACCEPTANCE_416_TRIALS` / `_ACCESS_CODE` / `_LOG` | `apps/desktop/scripts` (#416 acceptance rig) | Trial count, room, and log path for the #416 resize-fight acceptance sampler. |
 | `PETAL_BUILD_DATE`, `PETAL_GIT_COMMIT`, `PETAL_RELEASE_BUNDLE_ID` | `build.rs` / `lib.rs` | Build-time bakes shown in Settings → Updates and used by the release identity checks. |
-| `PETAL_BACKEND_URL` | `apps/desktop/scripts/cockpit.mjs`, `test_cockpit` engine | Prod backend to mint tokens against; default `https://app.petal.live`. |
-| `PETAL_HARNESS_URL` | `apps/desktop/scripts/cockpit.mjs`, `test_cockpit` engine | web-harness origin the headless Chrome peer navigates to; default `https://meet.petal.live`. |
+| `PETAL_BACKEND_URL` | `apps/desktop/scripts/cockpit.mjs`, `test_cockpit` engine | Backend to mint tokens against; default `https://app.petal.live`. The release e2e gate points it at the STAGED backend deployment (#42). |
+| `PETAL_HARNESS_URL` | `apps/desktop/scripts/cockpit.mjs`, `test_cockpit` engine | web-harness origin the headless Chrome peer navigates to; default `https://meet.petal.live`. The release e2e gate points it at the STAGED web-harness deployment (#42). |
+| `PETAL_VERCEL_BYPASS_SECRET` | `transport/backend_http.rs`, `test_cockpit` engine | Vercel "Protection Bypass for Automation" secret, used ONLY when `PETAL_BACKEND_URL`/`PETAL_HARNESS_URL` point at a protected staged deployment. The Rust backend client sends it as the `x-vercel-protection-bypass` header; the Chrome web peer cannot set a header, so it rides the first navigation as `&x-vercel-protection-bypass=…&x-vercel-set-bypass-cookie=true` and is exchanged for a `_vercel_jwt` cookie. Unset in every normal build, and never recorded in `run.jsonl` (`WebPeer.url` keeps the plain URL). |
 | `PETAL_CHROME_BIN` | `apps/desktop/scripts/cockpit.mjs`, `scripts/verify-no-black-frame.mjs`, `scripts/verify-web-harness-browser.mjs`, `scripts/verify-speaker-playout.sh`, `test_cockpit/mod.rs`, the browser-driven `apps/desktop/tests/*.test.ts` | Path to the branded Google Chrome binary to launch headless; default `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`. |
 | `PETAL_COCKPIT_ARTIFACT_RETENTION_DAYS` | `test_cockpit` engine | Max age for pruning video/audio artifacts referenced by `run.jsonl`; default `14`. Structured `run.jsonl` and `scorecard.json` are never pruned. |
 | `PETAL_COCKPIT_ARTIFACT_RETENTION_RUNS` | `test_cockpit` engine | Minimum recent runs per scenario whose video/audio artifacts are retained even if older than the age cutoff; default `20`. |
@@ -2391,7 +2426,7 @@ still rejects translated execution for release evidence, and that stays true.
 | `PETAL_REMOTE_CONTROL_DIRECT_DRAG` | `apps/desktop/src-tauri/src/remote_control.rs` | Opt-in switch (`1`) letting a single direct-injection route own an entire remote-control drag gesture (down/move/up) instead of the default AX replay path. **Measured ineffective — stays OFF, see below (#446).** |
 | `PETAL_REMOTE_CONTROL_DIRECT_CLICK` | `apps/desktop/src-tauri/src/remote_control.rs` | Opt-in switch (`1`) sending left-button remote-control clicks via direct SkyLight event posting instead of the default semantic-click replay (#369). **Measured ineffective — stays OFF, see below (#446).** |
 | `PETAL_REMOTE_CONTROL_CDP_JSON` | remote-control scenario | Chrome DevTools `/json` endpoint; default `http://127.0.0.1:9222/json`. |
-| `PETAL_WEB_HARNESS_URL_MATCH` | remote-control scenario | URL substring used to find the web-harness Chrome tab; cockpit-drive derives the host from `PETAL_HARNESS_URL` (default `meet.petal.live`), while standalone runs retain their script default. |
+| `PETAL_WEB_HARNESS_URL_MATCH` | remote-control scenario | URL substring used to find the web-harness Chrome tab; cockpit-drive derives the host from `PETAL_HARNESS_URL` (default `meet.petal.live`), while standalone runs retain their script default. Leave it UNSET for a cockpit run so the needle follows `PETAL_HARNESS_URL` — `nightly-loopback.yml` sets it for its loopback tier only and explicitly `env -u`s it for the Cockpit tier (#42). |
 | `PETAL_REMOTE_CONTROL_ACQUIRE_TIMEOUT_MS` | remote-control loopback/scenario | Max time for controller-side request/first-input publish metrics; default `7000`. |
 | `PETAL_REMOTE_CONTROL_STATUS_TIMEOUT_MS` | remote-control loopback/scenario | Max time for native-host active status to return over the data channel; defaults to acquire timeout. |
 | `PETAL_RC_OBSERVATION_BUDGET_MS` | remote-control loopback/scenario | Per-target-observation latency budget in ms; default `500` (bare metal). Runner-aware knob added by #45: the self-hosted Tart runner sets `620` in `.github/workflows/nightly-loopback.yml`, justified by that guest's measured healthy p95 of ~460 ms. Correctness is asserted separately with its own wider timeout (3x the budget), and an observation that exceeds the budget is retried once against a re-armed target before it fails the case &mdash; both samples land in the `RESULT` line and in `SUMMARY.targetObservationLatency`. Raise it for a slow runner, never globally. |

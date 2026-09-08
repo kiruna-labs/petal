@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>leak</title>
+  </head>
+  <body>
+    <!--
+      Stands in for the attacker's page in the #37 rendered test. It is served
+      from a DIFFERENT origin than the fixture host page, and it reports two
+      things back to the host page: the query string it was navigated with
+      (what already leaked) and every postMessage the host keeps sending it
+      afterwards (what must never arrive).
+    -->
+    <script>
+      function tell(kind, detail) {
+        try {
+          parent.postMessage({ __leak: kind, detail: String(detail) }, '*');
+        } catch (e) {
+          /* nothing to do */
+        }
+      }
+      tell('landed', location.search);
+      addEventListener('message', function (event) {
+        var detail;
+        try {
+          detail = JSON.stringify(event.data);
+        } catch (e) {
+          detail = String(event.data);
+        }
+        tell('received', detail);
+      });
+    </script>
+  </body>
+</html>
