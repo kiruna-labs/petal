@@ -559,6 +559,18 @@
     window.open('/region-window', `petal-region-${Date.now()}`, 'width=640,height=400');
   }
 
+  // Settings in its own window (settings_window.rs): this route is never
+  // navigated away, so the meeting -- camera, pill geometry -- is untouched.
+  async function openSettingsWindow() {
+    if (!hasTauri) return;
+    try {
+      await invoke(COMMANDS.openSettingsWindow);
+    } catch (e) {
+      console.error('open_settings_window failed', e);
+      showShareToast("Couldn't open Settings. Relaunch Petal and try again.");
+    }
+  }
+
   async function openNetworkCockpit() {
     try {
       await invoke(COMMANDS.openNetworkCockpitWindow);
@@ -673,6 +685,7 @@
         {inviteTooltip}
         onInviteLinkCopy={copyInviteLink}
         onOpenNetwork={openNetworkCockpit}
+        onOpenSettings={openSettingsWindow}
         onRenameRoom={meeting.handleRenameRoom}
         onReportBug={feedbackEnabled ? () => (feedbackOpen = true) : undefined}
         {pluginActions}

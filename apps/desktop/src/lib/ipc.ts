@@ -65,6 +65,7 @@ export const COMMANDS = {
   compositorWindowDebugStats: 'compositor_window_debug_stats',
   createRoom: 'create_room',
   currentRoom: 'current_room',
+  setDisplayName: 'set_display_name',
   debugModeSettings: 'debug_mode_settings',
   drawSend: 'draw_send',
   pluginPublishData: 'plugin_publish_data',
@@ -101,6 +102,7 @@ export const COMMANDS = {
   openMainRoute: 'open_main_route',
   showMainWindow: 'show_main_window',
   openNetworkCockpitWindow: 'open_network_cockpit_window',
+  openSettingsWindow: 'open_settings_window',
   openRegionWindow: 'open_region_window',
   regionPlacementActive: 'region_placement_active',
   regionShareState: 'region_share_state',
@@ -269,6 +271,14 @@ export const EVENTS = {
   shareStateChanged: 'share-state-changed',
   shareControlModeChanged: 'share-control-mode-changed',
   sharePickerChanged: 'share-picker-changed',
+  /**
+   * The frontend session store (name/color/devices/policies) changed in
+   * SOME webview. Settings runs in its own window, so every other webview's
+   * in-memory copy of the store would otherwise stay stale until reload.
+   * Payload is the full snapshot plus the emitting webview's id, so the
+   * emitter can ignore its own echo.
+   */
+  sessionChanged: 'session-changed',
   sharePickerOpened: 'share-picker-opened',
   sharePickerVisibilityChanged: 'share-picker-visibility-changed',
   telepointerUpdate: 'telepointer-update',
@@ -1456,6 +1466,7 @@ export interface CommandArgs {
     remoteControlPolicy?: RemoteControlPolicy;
   };
   [COMMANDS.openMainRoute]: { route: string };
+  [COMMANDS.setDisplayName]: { name: string };
   [COMMANDS.openTestCockpitResultsFolder]: { path: string };
   [COMMANDS.openWindowPickerWindow]: { color?: string };
   [COMMANDS.toggleWindowPickerWindow]: Record<string, never>;
@@ -1713,6 +1724,7 @@ export interface EventPayloads {
   [EVENTS.shareStateChanged]: ShareStateChanged;
   [EVENTS.shareControlModeChanged]: ShareControlModeChanged;
   [EVENTS.sharePickerChanged]: void;
+  [EVENTS.sessionChanged]: { origin: string; session: Record<string, unknown> };
   [EVENTS.sharePickerOpened]: void;
   [EVENTS.sharePickerVisibilityChanged]: { open: boolean };
   [EVENTS.telepointerUpdate]: TelepointerUpdate;

@@ -20,8 +20,9 @@
 // a stand-in.
 import { browser } from '$app/environment';
 import { invoke } from '@tauri-apps/api/core';
+import { emit, listen } from '@tauri-apps/api/event';
 import type { IdentityColor } from '$lib/components/Avatar.svelte';
-import { COMMANDS, hasTauriBridge, type RemoteControlPolicy } from '$lib/ipc';
+import { COMMANDS, EVENTS, hasTauriBridge, type RemoteControlPolicy } from '$lib/ipc';
 import { migrateRemoteControlPolicy } from '$lib/remoteControlPolicy';
 import { STORAGE_KEYS } from '$lib/data/storageKeys';
 
@@ -147,17 +148,65 @@ if (browser && !initial.participantId) {
 }
 persist(session);
 
+// Cross-window sync. Settings lives in its own Tauri window, and this store
+// is a per-webview in-memory copy seeded once from localStorage -- so a name,
+// device, or policy edited in the Settings window would never reach the
+// meeting or home window's copy until reload. Every updater below commits
+// through `commit`, which persists AND broadcasts the snapshot to every
+// other webview; each webview applies what it receives and ignores its own
+// echo (Tauri `emit` delivers to the emitter too). The Rust-mirrored fields
+// (remote-control policy, Sentry) are still invoked only by the window that
+// made the change, so the native side sees exactly one call.
+//
+// `$state.snapshot` at the boundary: the proxy itself cannot be cloned.
+const WEBVIEW_ID = newParticipantId();
+
+function commit(state: StoredSession) {
+  persist(state);
+  if (browser && hasTauriBridge()) {
+    void emit(EVENTS.sessionChanged, {
+      origin: WEBVIEW_ID,
+      session: $state.snapshot(state)
+    }).catch(() => {});
+  }
+}
+
+if (browser && hasTauriBridge()) {
+  void listen<{ origin: string; session: Record<string, unknown> }>(
+    EVENTS.sessionChanged,
+    (event) => {
+      if (!event.payload || event.payload.origin === WEBVIEW_ID) return;
+      const incoming = event.payload.session;
+      if (!incoming || typeof incoming !== 'object') return;
+      // Never let another webview rewrite THIS one's participant id: it is
+      // the live LiveKit identity of a joined meeting.
+      const participantId = session.participantId;
+      Object.assign(session, { ...defaults, ...incoming });
+      if (participantId) session.participantId = participantId;
+      persist(session);
+    }
+  ).catch(() => {});
+}
+
 export function completeOnboarding(name: string, identity: IdentityColor) {
   session.onboardingComplete = true;
   session.name = name;
   session.identity = identity;
-  persist(session);
+  commit(session);
 }
 
 export function updateIdentity(name: string, identity: IdentityColor) {
+  const renamed = session.name !== name;
   session.name = name;
   session.identity = identity;
-  persist(session);
+  commit(session);
+  if (renamed && browser && hasTauriBridge()) {
+    // The meeting roster shows the LiveKit participant name fixed at
+    // join_room, not this store -- rename the live participant too (a no-op
+    // when not joined). Only the window that made the change invokes; the
+    // other webviews receive it through `commit`'s broadcast.
+    void invoke(COMMANDS.setDisplayName, { name }).catch(() => {});
+  }
 }
 
 export function updateAudioDevices(
@@ -168,19 +217,19 @@ export function updateAudioDevices(
   if (micDeviceId !== undefined) session.micDeviceId = micDeviceId;
   if (speakerDeviceId !== undefined) session.speakerDeviceId = speakerDeviceId;
   if (cameraDeviceId !== undefined) session.cameraDeviceId = cameraDeviceId;
-  persist(session);
+  commit(session);
 }
 
 export function updateCameraMode(
   mode: { width: number; height: number; frameRate: number } | null
 ) {
   session.cameraMode = mode;
-  persist(session);
+  commit(session);
 }
 
 export function updateRemoteControlPolicy(policy: RemoteControlPolicy) {
   session.remoteControlPolicy = policy;
-  persist(session);
+  commit(session);
   if (browser && hasTauriBridge()) {
     // Sets BOTH the live meeting gate and the default it restores to.
     void invoke(COMMANDS.setRemoteControlPolicy, { policy }).catch(() => {});
@@ -189,7 +238,7 @@ export function updateRemoteControlPolicy(policy: RemoteControlPolicy) {
 
 export function updateSentryEnabled(enabled: boolean) {
   session.sentryEnabled = enabled;
-  persist(session);
+  commit(session);
   if (browser && hasTauriBridge()) {
     void invoke(COMMANDS.setSentryEnabled, { enabled }).catch(() => {});
   }
@@ -204,11 +253,11 @@ export function updateSentryEnabled(enabled: boolean) {
  */
 export function updateLocalEchoEnabled(enabled: boolean) {
   session.localEchoEnabled = enabled;
-  persist(session);
+  commit(session);
 }
 
 /** Dev/debug escape hatch — not exposed in any real UI. */
 export function resetOnboarding() {
   Object.assign(session, { ...defaults, participantId: newParticipantId() });
-  persist(session);
+  commit(session);
 }

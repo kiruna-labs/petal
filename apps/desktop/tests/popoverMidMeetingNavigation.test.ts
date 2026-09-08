@@ -24,6 +24,26 @@ const popoverSource = readFileSync(
   new URL('../src/routes/menubar-popover/+page.svelte', import.meta.url),
   'utf8'
 );
+const mainPageSource = readFileSync(
+  new URL('../src/routes/main/+page.svelte', import.meta.url),
+  'utf8'
+);
+const galleryPageSource = readFileSync(
+  new URL('../src/lib/components/Gallery.svelte', import.meta.url),
+  'utf8'
+);
+const sessionStoreSource = readFileSync(
+  new URL('../src/lib/stores/session.svelte.ts', import.meta.url),
+  'utf8'
+);
+const settingsComponentSource = readFileSync(
+  new URL('../src/lib/components/Settings.svelte', import.meta.url),
+  'utf8'
+);
+const presenceSource = readFileSync(
+  new URL('../src-tauri/src/presence.rs', import.meta.url),
+  'utf8'
+);
 
 function shippedNavigationSnippet(route: string): string {
   const template = rustSource.match(
@@ -41,9 +61,9 @@ test('native route requests prefer the shipped SvelteKit hook', () => {
     location: { assign: (route: string) => assigned.push(route) }
   };
 
-  new Function('window', shippedNavigationSnippet('/settings'))(fakeWindow);
+  new Function('window', shippedNavigationSnippet('/main'))(fakeWindow);
 
-  assert.deepEqual(navigated, ['/settings']);
+  assert.deepEqual(navigated, ['/main']);
   assert.deepEqual(assigned, []);
 });
 
@@ -112,27 +132,84 @@ test('meeting session derives stillJoined from leave intent and phase', () => {
   assert.match(accessor, /meetingPhase/);
 });
 
-test('Settings Back returns to a currently joined meeting', () => {
-  const handleBack = settingsSource.match(
-    /async function handleBack\(\)\s*\{([\s\S]*?)\n\s*\}/
-  )?.[1];
-  assert.ok(handleBack, 'could not locate Settings handleBack');
-  // Read the room at CLICK time. A mount-time snapshot sends Back into a room
-  // the user left while Settings was open, and join_room's publish carryover
-  // then silently re-enables their camera.
-  assert.match(
-    handleBack,
-    /await currentJoinedRoom\(\)/,
-    'handleBack must re-read the current room, not use a mount-time snapshot'
+test('Settings is its own window and never routes the main webview', () => {
+  // Settings used to be an in-window route reached by navigating the main
+  // webview, which tore down a live /meeting/<room> route. Now every entry
+  // point opens the dedicated `settings` window, and the route closes only
+  // itself.
+  assert.doesNotMatch(
+    rustSource,
+    /route == "\/settings"/,
+    'main_window.rs must not allow routing the main webview to /settings'
   );
-  assert.match(handleBack, /`\/meeting\/\$\{encodeURIComponent\(room\)\}`/);
-  assert.match(settingsSource, /invoke<string \| null>\(COMMANDS\.currentRoom\)/);
-  // No module-level snapshot may survive: it is what goes stale.
+  assert.match(settingsSource, /getCurrentWindow\(\)\.close\(\)/);
   assert.doesNotMatch(
     settingsSource,
-    /let joinedRoom = \$state/,
-    'Settings must not cache the joined room in component state'
+    /goto\(`\/meeting\//,
+    'the Settings route must not navigate to a meeting'
   );
+  assert.doesNotMatch(settingsSource, /COMMANDS\.openMainRoute/);
+
+  const onOpenSettings = popoverSource.slice(
+    popoverSource.indexOf('async function onOpenSettings()'),
+    popoverSource.indexOf('async function onActivateRemoteWindow')
+  );
+  assert.match(onOpenSettings, /invoke\(COMMANDS\.openSettingsWindow\)/);
+  assert.doesNotMatch(onOpenSettings, /openMainRoute\('\/settings'\)/);
+
+  const handleOpenSettings = mainPageSource.match(
+    /async function handleOpenSettings\(\)\s*\{([\s\S]*?)\n  \}\n/
+  )?.[1];
+  assert.ok(handleOpenSettings, 'could not locate main handleOpenSettings');
+  assert.match(handleOpenSettings, /invoke\(COMMANDS\.openSettingsWindow\)/);
+
+  // In-meeting entry: the Gallery "More" menu, gated on the prop so the
+  // /dev harnesses that omit it render no dead row.
+  assert.match(galleryPageSource, /\{#if onOpenSettings\}/);
+  assert.match(meetingSource, /onOpenSettings=\{openSettingsWindow\}/);
+  assert.match(meetingSource, /invoke\(COMMANDS\.openSettingsWindow\)/);
+});
+
+test('session store edits reach the other webviews', () => {
+  // Each Tauri window holds its own in-memory copy of the store. Every
+  // updater must commit (persist + broadcast), the listener must ignore its
+  // own echo, and the snapshot must cross the event boundary as a plain
+  // object -- a $state proxy cannot be structured-cloned.
+  assert.match(sessionStoreSource, /function commit\(state: StoredSession\)/);
+  assert.match(sessionStoreSource, /emit\(EVENTS\.sessionChanged/);
+  assert.match(sessionStoreSource, /session: \$state\.snapshot\(state\)/);
+  assert.match(sessionStoreSource, /event\.payload\.origin === WEBVIEW_ID\) return/);
+  const updaters = sessionStoreSource.split('export function completeOnboarding')[1];
+  assert.doesNotMatch(
+    updaters,
+    /^\s*persist\(session\);/m,
+    'every store updater must go through commit(), not a bare persist()'
+  );
+  // The meeting roster shows the LiveKit participant name fixed at join, so
+  // a rename must also reach the native side (once, from the renaming window).
+  const updateIdentity = sessionStoreSource.match(
+    /export function updateIdentity\([\s\S]*?\n\}/
+  )?.[0];
+  assert.ok(updateIdentity, 'could not locate updateIdentity');
+  assert.match(updateIdentity, /invoke\(COMMANDS\.setDisplayName, \{ name \}\)/);
+  assert.match(presenceSource, /RoomEvent::ParticipantNameChanged/);
+});
+
+test('Settings never previews the camera while the meeting camera is on', () => {
+  // Settings is its own window now, so its getUserMedia preview competes
+  // with the meeting's publish for the device. acquirePreview must consult
+  // the native publish snapshot first and the publish-state event must
+  // release a live preview.
+  const acquire = settingsComponentSource.match(
+    /async function acquirePreview\(deviceId: string\) \{([\s\S]*?)\n  \}\n/
+  )?.[1];
+  assert.ok(acquire, 'could not locate acquirePreview');
+  const gateIndex = acquire.indexOf('await meetingCameraActive()');
+  const mediaIndex = acquire.indexOf('getUserMedia(constraints)');
+  assert.ok(gateIndex >= 0, 'acquirePreview must check the meeting camera state');
+  assert.ok(mediaIndex > gateIndex, 'the meeting-camera gate must run before getUserMedia');
+  assert.match(settingsComponentSource, /invoke<CameraPublishStateSnapshot>\(COMMANDS\.cameraPublishState\)/);
+  assert.match(settingsComponentSource, /listen<CameraPublishState>\(EVENTS\.cameraPublishState/);
 });
 
 test('layout remounts the page when only a route param changes', () => {

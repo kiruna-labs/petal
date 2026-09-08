@@ -470,6 +470,23 @@ impl SessionState {
             .map(|j| j.presence.snapshot())
             .unwrap_or_default()
     }
+
+    /// The joined room's LiveKit handle, presence roster, and durable room
+    /// name -- everything a mid-meeting display-name change needs (see
+    /// `commands::set_display_name`). Clones only, so the caller never holds
+    /// the session mutex across the LiveKit round trip. None when not joined.
+    pub(crate) fn joined_room_for_rename(
+        &self,
+    ) -> Option<(Arc<livekit::Room>, Arc<crate::presence::PresenceState>, String)> {
+        let guard = self.inner.lock_unpoisoned();
+        guard.joined.as_ref().map(|j| {
+            (
+                j.room_connection.room(),
+                j.presence.clone(),
+                j.room_record.name.clone(),
+            )
+        })
+    }
 }
 
 /// Join a real, durable room (SPEC.md §4.6) by its human-readable name:

@@ -1,19 +1,24 @@
 <!--
-  Real Settings screen (task brief item 3), reached from MainMenu's new
-  settings icon button. Renders the existing `Settings` component as-is —
-  no internals touched — with the current frontend-only session identity
+  Real Settings screen, rendered in its OWN Tauri window (`settings`, see
+  src-tauri/src/settings_window.rs) opened from the home profile menu, the
+  menubar popover, and the in-meeting "More" menu. Renders the existing
+  `Settings` component with the current frontend-only session identity
   (name/color) bound so edits here persist the same way onboarding's
-  IdentitySetup does (see src/lib/stores/session.svelte.ts).
+  IdentitySetup does (see src/lib/stores/session.svelte.ts, which also
+  broadcasts every change to the other webviews).
 
-  Mic/speaker device lists are real native enumeration now (issue #28);
+  Being a separate window is the point: the old in-window route had to be
+  reached by navigating the main webview, which tore down a live meeting
+  route (#782). Closing this window closes it -- nothing here ever routes the
+  main webview anywhere.
+
+  Mic/speaker device lists are real native enumeration (issue #28);
   Settings.svelte loads them via `list_audio_devices`, while this route
-  supplies and persists the selected IDs. A simple "Back" affordance returns
-  to the joined meeting when present, or `/main` otherwise, since Settings has
-  no built-in close/back control of its own.
+  supplies and persists the selected IDs.
 -->
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { invoke } from '@tauri-apps/api/core';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount } from 'svelte';
   import Settings from '$lib/components/Settings.svelte';
   import type { PermissionStatus } from '$lib/components/PermissionRow.svelte';
@@ -31,7 +36,7 @@
     checkAccessibility,
     type AuthStatus
   } from '$lib/data/permissions';
-  import { COMMANDS, hasTauriBridge } from '$lib/ipc';
+  import { hasTauriBridge } from '$lib/ipc';
 
   const displayName = $derived(session.name || 'Guest');
   const hasTauri = hasTauriBridge();
@@ -56,19 +61,6 @@
     return undecided; // not-determined
   }
 
-  // #782: read the room at CLICK time, never a mount-time snapshot. Leaving
-  // from the menubar popover while Settings is open would otherwise send Back
-  // to a room the user just left -- and `join_room`'s publish carryover would
-  // silently re-enable their camera on the way in.
-  async function currentJoinedRoom(): Promise<string | null> {
-    if (!hasTauri) return null;
-    try {
-      return await invoke<string | null>(COMMANDS.currentRoom);
-    } catch {
-      return null;
-    }
-  }
-
   onMount(async () => {
     try {
       const [screen, mic, cam, accessibility] = await Promise.all([
@@ -89,9 +81,14 @@
     }
   });
 
-  async function handleBack() {
-    const room = await currentJoinedRoom();
-    goto(room ? `/meeting/${encodeURIComponent(room)}` : '/main');
+  // Close THIS window only. Browser preview has no native window, so it
+  // falls back to the home route.
+  function closeWindow() {
+    if (hasTauri) {
+      void getCurrentWindow().close();
+    } else {
+      goto('/main');
+    }
   }
 
   function handleNameChange(name: string) {
@@ -104,17 +101,9 @@
 </script>
 
 <main>
-  <div class="back-row">
-    <button type="button" class="back" onclick={handleBack}>
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M15 18l-6-6 6-6"></path>
-      </svg>
-      Back
-    </button>
-  </div>
-
   <Settings
     frameless
+    onClose={closeWindow}
     userName={displayName}
     identity={session.identity}
     screenRecordingStatus={screenStatus}
@@ -147,45 +136,5 @@
     /* The panel IS the window (frameless Settings) — match its surface so
        there's no visible outer frame. */
     background: var(--bg-base-2);
-  }
-
-  .back-row {
-    position: absolute;
-    top: 5px;
-    right: 8px;
-    z-index: 3;
-    padding: 0;
-  }
-
-  .back {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-height: 40px;
-    padding: 6px 10px 6px 6px;
-    border-radius: var(--radius-pill);
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font: 500 12.5px var(--font-ui);
-    cursor: pointer;
-    transition:
-      background-color var(--motion-fast) var(--ease-standard),
-      color var(--motion-fast) var(--ease-standard),
-      transform var(--motion-fast) var(--ease-standard);
-  }
-
-  .back:hover {
-    background: var(--fill-base);
-    color: var(--text-strong);
-  }
-
-  .back:focus-visible {
-    outline: var(--focus-ring-width) solid var(--focus-ring);
-    outline-offset: var(--focus-ring-offset);
-  }
-
-  .back:active {
-    transform: scale(var(--press-scale, 0.96));
   }
 </style>

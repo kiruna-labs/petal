@@ -274,6 +274,19 @@ impl SessionState {
             .unwrap_or_default()
     }
 
+    /// Same contract as the macOS session's `joined_room_for_rename`.
+    fn joined_room_for_rename(
+        &self,
+    ) -> Option<(Arc<livekit::Room>, Arc<crate::presence::PresenceState>, String)> {
+        self.joined.lock_unpoisoned().as_ref().map(|joined| {
+            (
+                joined.room_connection.room(),
+                joined.presence.clone(),
+                joined.room_record.name.clone(),
+            )
+        })
+    }
+
     pub(crate) fn remote_control_allowed(&self) -> bool {
         self.remote_control_policy().allows_requests()
     }
@@ -2645,6 +2658,31 @@ pub fn room_presence(
     state: tauri::State<'_, SessionState>,
 ) -> Vec<crate::presence::PresentParticipant> {
     state.presence_snapshot()
+}
+
+/// Mid-meeting display-name change from the Settings window. Renames the
+/// LiveKit local participant (so every peer's roster follows via
+/// `ParticipantNameChanged`) and rewrites this process's own roster entry,
+/// which `join_room` seeds once and no RoomEvent ever refreshes. No-op when
+/// not joined: the next `join_room` carries the new name itself. Empty names
+/// fall back to the same "Guest" the frontend uses at join time.
+#[tauri::command]
+pub async fn set_display_name(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SessionState>,
+    name: String,
+) -> Result<(), String> {
+    let Some((room, presence, room_name)) = state.joined_room_for_rename() else {
+        return Ok(());
+    };
+    let name = name.trim();
+    let display = if name.is_empty() { "Guest" } else { name }.to_string();
+    room.local_participant()
+        .set_name(display.clone())
+        .await
+        .map_err(|e| format!("set_name failed: {e}"))?;
+    crate::presence::set_local_name(&app, &presence, &room_name, &display);
+    Ok(())
 }
 
 #[tauri::command]
