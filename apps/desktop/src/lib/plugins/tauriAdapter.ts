@@ -7,7 +7,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { COMMANDS, type CommandArgs } from '$lib/ipc';
+import { COMMANDS, hasTauriBridge, type CommandArgs } from '$lib/ipc';
 import { bytesToBase64 } from '@petal/shared/plugin-host/topics';
 import type { Json, MeetingPhase, Participant } from '@petal/shared/plugin-host/api';
 import { bridgeFailure } from '@petal/shared/plugin-host/broker';
@@ -20,6 +20,12 @@ export interface TauriAdapterDeps {
   roomLabel(): string;
   phase(): MeetingPhase;
   toast(text: string, variant: 'info' | 'degraded'): void;
+}
+
+/** Mirror a host diagnostic into the Rust file log (`plugins(host): ...` in petal.log). Fire-and-forget. */
+export function hostLog(level: 'debug' | 'info' | 'warn' | 'error', line: string): void {
+  if (!hasTauriBridge()) return;
+  invoke(COMMANDS.pluginHostLog, { level, line } satisfies CommandArgs[typeof COMMANDS.pluginHostLog]).catch(() => {});
 }
 
 export function createTauriAdapter(deps: TauriAdapterDeps): PluginHostAdapter {
@@ -97,10 +103,19 @@ export function createTauriAdapter(deps: TauriAdapterDeps): PluginHostAdapter {
       if (level === 'error') console.error(line);
       else if (level === 'warn') console.warn(line);
       else console.info(line);
+      hostLog(level, line);
     },
     onFrameEvent(pluginId, event, payload) {
       if (event === 'error') {
-        console.error(`[plugin ${pluginId}] failed to start:`, (payload as { message?: string } | undefined)?.message);
+        // `message` is plugin-controlled and this path, unlike `log`, is not
+        // rate-limited by the broker -- bound it here so an arbitrarily long
+        // string never crosses the IPC boundary (Rust truncates only after).
+        const raw = (payload as { message?: string } | undefined)?.message ?? 'unknown error';
+        const message = raw.length > 500 ? `${raw.slice(0, 500)}\u2026` : raw;
+        console.error(`[plugin ${pluginId}] failed to start:`, message);
+        hostLog('error', `plugin ${pluginId} frame error: ${message}`);
+      } else if (event === 'ready' || event === 'activated') {
+        hostLog('info', `plugin ${pluginId} frame ${event}`);
       }
     },
   };

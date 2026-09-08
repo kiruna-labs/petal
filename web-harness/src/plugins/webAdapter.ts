@@ -45,6 +45,9 @@ function phaseOf(room: Room | null): MeetingPhase {
   }
 }
 
+/** Upper bound on waiting for a metadata write's server echo before the next queued write may proceed. */
+const METADATA_ECHO_WAIT_MS = 1000;
+
 export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
   let metadataWrites: Promise<void> = Promise.resolve();
   const storage = deps.storage ?? (typeof localStorage === 'undefined' ? undefined : localStorage);
@@ -112,7 +115,16 @@ export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
         } catch (e) {
           throw bridgeFailure('invalid', (e as Error).message);
         }
-        await local.setMetadata(merged);
+        // livekit-client resolves setMetadata only when the server echo
+        // matches what we sent. A write superseded by ANOTHER local writer
+        // (e.g. the palette-index merge right after connect) never echoes and
+        // would hold this queue for livekit's full ~5 s timeout; setupPlugins
+        // reconciles the dropped key, so release the queue after a short
+        // bound instead of waiting that out. The write itself is not lost.
+        await Promise.race([
+          local.setMetadata(merged),
+          new Promise<void>((resolveRace) => setTimeout(resolveRace, METADATA_ECHO_WAIT_MS)),
+        ]);
       };
       const next = metadataWrites.then(run, run);
       metadataWrites = next.catch(() => {});

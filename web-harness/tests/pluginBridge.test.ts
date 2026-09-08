@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createPluginBroker, type HostAdapter, type LoadedPlugin } from '@petal/shared/plugin-host/broker';
+import { createPluginBroker, toCloneable, type HostAdapter, type LoadedPlugin } from '@petal/shared/plugin-host/broker';
 import type { PluginManifest } from '@petal/shared/plugin-host/manifest';
 import { PROTOCOL_VERSION, type Envelope } from '@petal/shared/plugin-host/protocol';
 
 class FakeFrame {
   sent: Envelope[] = [];
-  postMessage(message: unknown): void {
-    this.sent.push(message as Envelope);
+  postMessage(message: unknown, _origin?: string, transfer?: Transferable[]): void {
+    // Behave like the real thing: structured-clone the payload (throws DataCloneError on proxies/functions).
+    this.sent.push(structuredClone(message, transfer ? { transfer } : undefined) as Envelope);
   }
   last(): Envelope {
     return this.sent[this.sent.length - 1]!;
@@ -232,4 +233,43 @@ test('frame lifecycle events reach the adapter', () => {
   broker.handleMessage({ source: frame, data: { v: 1, kind: 'evt', event: 'ready', payload: {} } });
   broker.handleMessage({ source: frame, data: { v: 1, kind: 'evt', event: 'error', payload: { message: 'boom' } } });
   assert.deepEqual(calls, ['frame:ready', 'frame:error']);
+});
+
+test('payloads from a reactive proxy still reach the frame (DataCloneError seen live on desktop)', () => {
+  const { adapter } = makeAdapter();
+  // Svelte 5 $state hands out Proxies; structuredClone rejects them.
+  const proxied = new Proxy([{ identity: 'me', name: 'Me', isLocal: true, speaking: false, micMuted: false }], {});
+  assert.throws(() => structuredClone(proxied), 'precondition: a bare Proxy is not cloneable');
+  adapter.meeting!.participants = () => proxied;
+  const warns: string[] = [];
+  const broker = createPluginBroker({ adapter, hostVersion: '0.10.0', warn: (m) => warns.push(m) });
+  const frame = new FakeFrame();
+  broker.attach(plugin(), frame);
+  assert.deepEqual(warns, []);
+  const init = frame.last() as { event: string; payload: { meeting: { participants: unknown[] } } };
+  assert.equal(init.event, 'init');
+  assert.equal(init.payload.meeting.participants.length, 1);
+  broker.broadcast('meeting.participant-joined', new Proxy({ identity: 'alex' }, {}));
+  assert.equal((frame.last() as { event: string }).event, 'meeting.participant-joined');
+  assert.deepEqual(warns, []);
+});
+
+test('toCloneable copies an own __proto__ key without touching the copy\'s prototype', () => {
+  // JSON.parse produces an own, enumerable `__proto__`; plain assignment would
+  // hit Object.prototype's setter, silently dropping the key and re-pointing
+  // the copy's prototype. structuredClone keeps it as data, so we must too.
+  const source = JSON.parse('{"a":1,"__proto__":{"polluted":true}}') as Record<string, unknown>;
+  const out = toCloneable(source) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(out).sort(), ['__proto__', 'a']);
+  assert.equal(Object.getPrototypeOf(out), Object.prototype);
+  assert.equal((Object.prototype as Record<string, unknown>).polluted, undefined);
+  assert.deepEqual(out.__proto__, { polluted: true });
+});
+
+test('toCloneable keeps binary payloads intact and drops functions', () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const out = toCloneable({ a: bytes, f: () => 1, n: 1, nested: new Proxy({ x: [1, { y: 2 }] }, {}) }) as Record<string, unknown>;
+  assert.equal(out.a, bytes, 'same Uint8Array instance');
+  assert.ok(!('f' in out));
+  assert.deepEqual(out.nested, { x: [1, { y: 2 }] });
 });

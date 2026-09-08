@@ -1146,6 +1146,7 @@ pub fn run() {
             draw::draw_send,
             plugins::bus::plugin_publish_data,
             plugins::bus::plugin_set_state,
+            plugins::bus::plugin_host_log,
             plugins::bus::plugin_state_snapshot,
             #[cfg(target_os = "macos")]
             share_overlay::share_overlay_set_draw_active,
@@ -1701,6 +1702,7 @@ pub fn run() {
             draw::draw_send,
             plugins::bus::plugin_publish_data,
             plugins::bus::plugin_set_state,
+            plugins::bus::plugin_host_log,
             plugins::bus::plugin_state_snapshot,
             windows_share_overlay::share_overlay_set_draw_active,
             windows_share_overlay::share_overlay_draw_active,

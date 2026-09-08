@@ -96,7 +96,14 @@ interface LoadedEntry {
   surfaces: Map<string, SurfaceInstance>;
   /** Current advertisement for meeting-scoped plugins; null for local ones (never advertised). */
   advert: PluginAdvert | null;
+  /** The logic frame fired `load` (init was posted). */
+  loaded?: boolean;
+  /** The logic frame's runtime sent `ready`. */
+  ready?: boolean;
+  readyTimer?: ReturnType<typeof setTimeout>;
 }
+
+const FRAME_READY_TIMEOUT_MS = 5000;
 
 const POPOVER_DEFAULT = { width: 280, height: 200 };
 
@@ -188,6 +195,10 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
         }
       },
       onFrameEvent(pluginId, event, payload) {
+        if (event === 'ready') {
+          const entry = entries.get(pluginId);
+          if (entry) entry.ready = true;
+        }
         if (event === 'dismiss') {
           const surfaceId = (payload as { surfaceId?: unknown } | undefined)?.surfaceId;
           const surface = typeof surfaceId === 'string' ? entries.get(pluginId)?.surfaces.get(surfaceId) : undefined;
@@ -250,8 +261,21 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     };
     entries.set(id, entry);
     void publishAdvert(entry);
+    // A frame whose scripts never run is silent, not erroring. Surface that.
+    const readyTimer = setTimeout(() => {
+      if (entries.get(id) === entry && !entry.ready) {
+        warn(
+          `plugin ${id}: logic frame did not report ready within ${FRAME_READY_TIMEOUT_MS} ms ` +
+            (entry.loaded
+              ? '(frame loaded and init was posted; its scripts did not run or frame->host postMessage is blocked)'
+              : '(frame never fired load; srcdoc blocked?)'),
+        );
+      }
+    }, FRAME_READY_TIMEOUT_MS);
+    entry.readyTimer = readyTimer;
     attachWhenLoaded(frame, () => {
       if (!frame.contentWindow || entries.get(id) !== entry) return;
+      entry.loaded = true;
       broker.attach(plugin, frame.contentWindow);
       const overlay = plugin.manifest.contributes?.surfaces?.overlay;
       if (overlay && plugin.granted.includes('ui:overlay')) openSurface(id, overlay.id, null);
@@ -265,6 +289,7 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     if (!entry) return;
     for (const surfaceId of [...entry.surfaces.keys()]) closeSurface(pluginId, surfaceId);
     broker.detachPlugin(pluginId);
+    if (entry.readyTimer) clearTimeout(entry.readyTimer);
     entry.frame.remove();
     entries.delete(pluginId);
     if (entry.advert) adapter.publishPluginEntry(pluginId, null).catch(() => {});
