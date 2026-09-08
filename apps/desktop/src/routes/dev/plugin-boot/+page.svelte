@@ -25,7 +25,8 @@
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
   import PluginSurfaces from '$lib/plugins/PluginSurfaces.svelte';
   import { hostLog } from '$lib/plugins/tauriAdapter';
-  import { installedPlugins, type CatalogEntry } from '$lib/plugins/pluginCatalog';
+  import { installedPlugins } from '$lib/plugins/pluginCatalog';
+  import type { CatalogEntry } from '$lib/plugins/pluginCatalog';
 
   /** Kept byte-identical with `plugin_boot::PROBE_MOUNTED_LINE`. */
   const PROBE_MOUNTED_LINE = 'plugin-boot probe: page mounted';
