@@ -318,6 +318,12 @@ pub fn payload_wid(data: &[u8]) -> Option<u32> {
 
 type SlsRegisterNotifyFn =
     unsafe extern "C" fn(i32, *const c_void, u32, *mut c_void) -> i32;
+/// `SLSRemoveConnectionNotifyProc(cid, proc, event, ctx)`. FOUR parameters,
+/// same shape as the register — verified against the SkyLight prologue on
+/// macOS 26.5, which moves x0..x3 into callee-saved registers exactly like
+/// `SLSRegisterConnectionNotifyProc` does (the same disassembly discipline
+/// that fixed `SLSFindWindowAndOwner`'s arity above; #88).
+type SlsRemoveNotifyFn = SlsRegisterNotifyFn;
 type SlsRequestNotificationsFn = unsafe extern "C" fn(i32, *const u32, i32) -> i32;
 
 extern "C" {
@@ -334,6 +340,36 @@ static LIFECYCLE_EVENTS_SEEN: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static FIRST_EVENT_LOGGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// #88: the WindowServer notification stream is ROOM-SCOPED. Registration is
+/// what macOS bills to the Screen Recording grant ("Petal has accessed your
+/// screen ... N times"), and the registry it feeds is itself idle-gated, so
+/// an always-on registration is pure user-visible privacy cost for zero
+/// product value. Off by default; `set_enabled(true)` on room join.
+static STREAM_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Events that arrived while disabled and were dropped before touching any
+/// Screen-Recording-gated API. Non-zero means WindowServer is still
+/// delivering after an unregister — the signature the #88 regression guards.
+static SUPPRESSED_WHILE_IDLE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// Gated CoreGraphics reads (`CGWindowListCreateDescriptionFromArray`) this
+/// callback has performed. The #88 seam: a test drives the REAL callback and
+/// asserts this does not move while idle.
+static GATED_CG_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether the notification stream is currently registered/allowed to work.
+pub fn stream_enabled() -> bool {
+    STREAM_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// Count of gated CG reads driven by SLS events (see [`GATED_CG_READS`]).
+pub fn gated_cg_reads() -> u64 {
+    GATED_CG_READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// Count of events dropped because the stream was disabled.
+pub fn suppressed_while_idle() -> u64 {
+    SUPPRESSED_WHILE_IDLE.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 pub fn sls_events_seen() -> u64 {
     EVENTS_SEEN.load(std::sync::atomic::Ordering::Relaxed)
@@ -359,6 +395,14 @@ extern "C" fn sls_notify_callback(
     len: usize,
     _ctx: *mut c_void,
 ) {
+    // #88: hard guard. `SLSRemoveConnectionNotifyProc` is the primary stop,
+    // but a delivery already in flight (or a future macOS that ignores the
+    // remove) must still never reach the gated CG read below while the app is
+    // out of a room. Drop it before any counter or API touch.
+    if !STREAM_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        SUPPRESSED_WHILE_IDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
     EVENTS_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if !FIRST_EVENT_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         log::info!("winsrv: SLS event stream LIVE (first code {code})");
@@ -383,6 +427,7 @@ extern "C" fn sls_notify_callback(
                 // per-window-class shadow-like margin vs CG, and published
                 // frames place the pill/border (#416-class sensitivity), so
                 // SLS serves as trigger, never as frame truth.
+                GATED_CG_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if let Some((x, y, w, h)) = crate::platform::cg::frame_for_window_id_raw(wid) {
                     if let Some(reg) = crate::window_registry::global() {
                         reg.update_window_frame(wid, x, y, w, h);
@@ -419,19 +464,80 @@ pub(crate) fn sls_send_disposition(err: i32) -> SlsSendDisposition {
     }
 }
 
-static SUBSCRIBE_TX: OnceLock<std::sync::mpsc::Sender<Vec<u32>>> = OnceLock::new();
+/// Control messages for the `winsrv-sls` thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SlsControl {
+    /// Converge the per-window 806/807 subscription set.
+    Subscribe(Vec<u32>),
+    /// Register (join) / unregister (leave) the connection notify procs.
+    Enable(bool),
+}
+
+/// What the thread must do about registration for a wanted state. Pure so the
+/// #88 lifecycle is unit-testable without a WindowServer connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamAction {
+    Register,
+    Unregister,
+    Nothing,
+}
+
+pub(crate) fn stream_action(registered: bool, want_enabled: bool) -> StreamAction {
+    match (registered, want_enabled) {
+        (false, true) => StreamAction::Register,
+        (true, false) => StreamAction::Unregister,
+        _ => StreamAction::Nothing,
+    }
+}
+
+static CONTROL_TX: OnceLock<std::sync::mpsc::Sender<SlsControl>> = OnceLock::new();
 
 /// Converge the per-window subscription set (ingest thread, on set change —
 /// yabai's re-send-the-full-list pattern; the thread dedupes).
 pub fn subscribe_windows(wids: Vec<u32>) {
-    if let Some(tx) = SUBSCRIBE_TX.get() {
-        let _ = tx.send(wids);
+    if let Some(tx) = CONTROL_TX.get() {
+        let _ = tx.send(SlsControl::Subscribe(wids));
     }
 }
 
-/// Start the winsrv-sls event thread (idempotent). Registration without
-/// Screen Recording silently yields no events — callers judge the tier by
-/// [`sls_events_live`], never by this returning.
+/// Room-membership gate for the whole T0 event feed (#88).
+///
+/// Registration — not delivery volume — is what attributes Petal to the
+/// Screen Recording grant while nothing is being shared, and every consumer
+/// of these events (the registry sweep, the hover pill, share borders) is
+/// already idle-gated. Enabling flips the in-process guard FIRST so a
+/// delivery racing the unregister can never run the gated CG read.
+pub fn set_enabled(enabled: bool) {
+    let was = STREAM_ENABLED.swap(enabled, std::sync::atomic::Ordering::SeqCst);
+    if was && !enabled {
+        // Delivery is the ONLY honest health signal (§9.5 / §9.14), so it must
+        // not survive an unregister: a second meeting whose re-registration
+        // silently failed would otherwise demote the sweep on meeting one's
+        // evidence. Reset, and let the ingest loop re-run its move canary.
+        EVENTS_SEEN.store(0, std::sync::atomic::Ordering::Relaxed);
+        MOVE_EVENTS_SEEN.store(0, std::sync::atomic::Ordering::Relaxed);
+        LIFECYCLE_EVENTS_SEEN.store(0, std::sync::atomic::Ordering::Relaxed);
+        FIRST_EVENT_LOGGED.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(tx) = CONTROL_TX.get() {
+        let _ = tx.send(SlsControl::Enable(enabled));
+    }
+    if was != enabled {
+        log::info!(
+            "winsrv: SLS event stream {} (room membership)",
+            if enabled { "ENABLED" } else { "DISABLED" }
+        );
+    }
+}
+
+/// Start the winsrv-sls control thread (idempotent).
+///
+/// #88: this NO LONGER registers anything by itself. The thread parks on its
+/// control channel until [`set_enabled(true)`] arrives on a room join, and
+/// unregisters again on leave, so an idle Petal holds no WindowServer
+/// notification registration at all. Registration without Screen Recording
+/// silently yields no events — callers judge the tier by [`sls_events_live`],
+/// never by this returning.
 pub fn start_event_stream() {
     static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -447,32 +553,101 @@ pub fn start_event_stream() {
         "SLSRequestNotificationsForWindows",
         SlsRequestNotificationsFn
     );
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u32>>();
-    let _ = SUBSCRIBE_TX.set(tx);
+    let (tx, rx) = std::sync::mpsc::channel::<SlsControl>();
+    let _ = CONTROL_TX.set(tx);
     std::thread::Builder::new()
         .name("winsrv-sls".into())
         .spawn(move || unsafe {
-            for code in [
-                SLS_EVENT_DESTROYED,
-                SLS_EVENT_MOVED,
-                SLS_EVENT_RESIZED,
-                SLS_EVENT_CREATED,
-            ] {
-                let err = register(
-                    cid,
-                    sls_notify_callback as *const c_void,
-                    code,
-                    std::ptr::null_mut(),
+            let remove = dlsym_fn!("SLSRemoveConnectionNotifyProc", SlsRemoveNotifyFn);
+            if remove.is_none() {
+                // Not fatal: the in-process guard in `sls_notify_callback`
+                // still keeps idle Petal off every gated API. But WindowServer
+                // would keep delivering, so say so once (#88).
+                log::info!(
+                    "winsrv: SLSRemoveConnectionNotifyProc unavailable -- SLS registration cannot be released on room exit; the idle guard still blocks all gated reads"
                 );
-                if err != 0 {
-                    log::info!("winsrv: SLS register code {code} err={err}");
-                }
             }
+            let mut registered = false;
             let mut subscribed: Vec<u32> = Vec::new();
             'sub: loop {
                 // Bounded slices (§9.14.4 lesson: CFRunLoopRun would starve
-                // the subscription channel forever once sources exist).
-                while let Ok(mut wids) = rx.try_recv() {
+                // the control channel forever once sources exist).
+                while let Ok(msg) = rx.try_recv() {
+                    let mut wids = match msg {
+                        SlsControl::Enable(want) => {
+                            match stream_action(registered, want) {
+                                StreamAction::Register => {
+                                    for code in [
+                                        SLS_EVENT_DESTROYED,
+                                        SLS_EVENT_MOVED,
+                                        SLS_EVENT_RESIZED,
+                                        SLS_EVENT_CREATED,
+                                    ] {
+                                        let err = register(
+                                            cid,
+                                            sls_notify_callback as *const c_void,
+                                            code,
+                                            std::ptr::null_mut(),
+                                        );
+                                        if err != 0 {
+                                            log::info!(
+                                                "winsrv: SLS register code {code} err={err}"
+                                            );
+                                        }
+                                    }
+                                    registered = true;
+                                    log::info!("winsrv: SLS notify procs registered (in room)");
+                                }
+                                StreamAction::Unregister => {
+                                    // Drop the per-window subscription first,
+                                    // then the procs themselves.
+                                    if let Some(request) = request {
+                                        // Aligned, non-null, zero-length --
+                                        // never hand a C API a null it might
+                                        // deref regardless of the count.
+                                        let empty: [u32; 0] = [];
+                                        let _ = request(cid, empty.as_ptr(), 0);
+                                    }
+                                    subscribed.clear();
+                                    if let Some(remove) = remove {
+                                        for code in [
+                                            SLS_EVENT_DESTROYED,
+                                            SLS_EVENT_MOVED,
+                                            SLS_EVENT_RESIZED,
+                                            SLS_EVENT_CREATED,
+                                        ] {
+                                            let err = remove(
+                                                cid,
+                                                sls_notify_callback as *const c_void,
+                                                code,
+                                                std::ptr::null_mut(),
+                                            );
+                                            if err != 0 {
+                                                log::info!(
+                                                    "winsrv: SLS remove code {code} err={err}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    registered = false;
+                                    log::info!(
+                                        "winsrv: SLS notify procs released (left room) -- idle Petal holds no window-server notification registration (#88)"
+                                    );
+                                }
+                                StreamAction::Nothing => {}
+                            }
+                            continue;
+                        }
+                        SlsControl::Subscribe(wids) => wids,
+                    };
+                    // A subscription push that arrives while disabled is
+                    // dropped: subscribing is itself a screen-gated act, and
+                    // the set would otherwise outlive the meeting (the exact
+                    // #88 leak -- the old code only ever pushed a NON-empty
+                    // set from the in-room branch and never took it back).
+                    if !registered {
+                        continue;
+                    }
                     wids.sort_unstable();
                     wids.dedup();
                     if wids != subscribed {
@@ -530,6 +705,105 @@ pub fn start_event_stream() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These tests drive PROCESS-GLOBAL statics (`STREAM_ENABLED` and the
+    /// event counters), so they must not interleave with each other.
+    static IDLE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// #88: the pure registration lifecycle. Enabling twice must not
+    /// re-register (a duplicate notify proc is a duplicate delivery), and
+    /// disabling when never registered must not attempt a remove.
+    #[test]
+    fn stream_action_registers_and_releases_exactly_once() {
+        assert_eq!(stream_action(false, true), StreamAction::Register);
+        assert_eq!(stream_action(true, true), StreamAction::Nothing);
+        assert_eq!(stream_action(true, false), StreamAction::Unregister);
+        assert_eq!(stream_action(false, false), StreamAction::Nothing);
+    }
+
+    /// #88 REGRESSION (pixels-equivalent for this class: count the real
+    /// gated calls, not an event-level proxy).
+    ///
+    /// Drives the ACTUAL WindowServer callback — not a pure helper it
+    /// delegates to — across an idle period, and asserts it performs ZERO
+    /// Screen-Recording-gated CoreGraphics reads. A 806 (MOVED) event is the
+    /// one that used to run `CGWindowListCreateDescriptionFromArray` per
+    /// drag step, forever, for every window that was on screen at the last
+    /// in-room sweep. Before the fix this counter moved while out of a room;
+    /// that is the "Petal has accessed your screen 110521 times" report.
+    #[test]
+    fn idle_sls_events_perform_no_gated_screen_reads() {
+        let _guard = IDLE_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let payload = 12345u32.to_le_bytes();
+
+        // Out of a room: the production entry point the ingest loop calls.
+        crate::window_registry::ingest::apply_room_membership(false);
+        assert!(!stream_enabled(), "leaving a room must disarm the SLS stream");
+
+        let before_reads = gated_cg_reads();
+        let before_suppressed = suppressed_while_idle();
+        for _ in 0..500 {
+            sls_notify_callback(
+                SLS_EVENT_MOVED,
+                payload.as_ptr() as *const c_void,
+                payload.len(),
+                std::ptr::null_mut(),
+            );
+            sls_notify_callback(
+                SLS_EVENT_RESIZED,
+                payload.as_ptr() as *const c_void,
+                payload.len(),
+                std::ptr::null_mut(),
+            );
+            sls_notify_callback(SLS_EVENT_CREATED, std::ptr::null(), 0, std::ptr::null_mut());
+        }
+        assert_eq!(
+            gated_cg_reads(),
+            before_reads,
+            "idle Petal must make ZERO Screen-Recording-gated CG reads from SLS events (#88)"
+        );
+        assert_eq!(
+            suppressed_while_idle() - before_suppressed,
+            1500,
+            "every idle delivery must be dropped by the guard, not silently counted elsewhere"
+        );
+
+        // In a room the same event MUST still drive the targeted refresh --
+        // the fix must not turn the feature off, only scope it.
+        crate::window_registry::ingest::apply_room_membership(true);
+        assert!(stream_enabled(), "joining a room must arm the SLS stream");
+        let armed_before = gated_cg_reads();
+        sls_notify_callback(
+            SLS_EVENT_MOVED,
+            payload.as_ptr() as *const c_void,
+            payload.len(),
+            std::ptr::null_mut(),
+        );
+        assert_eq!(
+            gated_cg_reads(),
+            armed_before + 1,
+            "an in-room move event must still refresh the window frame"
+        );
+
+        // Leave the process disarmed for any other test in this binary.
+        crate::window_registry::ingest::apply_room_membership(false);
+    }
+
+    /// #88: a lifecycle event carries no window id and never touched CG, but
+    /// it must still be dropped while idle -- it is a delivery, and every
+    /// delivery is a screen access macOS bills to the user.
+    #[test]
+    fn idle_lifecycle_events_are_dropped_before_marking_dirty() {
+        let _guard = IDLE_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        crate::window_registry::ingest::apply_room_membership(false);
+        let before = sls_events_seen();
+        sls_notify_callback(SLS_EVENT_DESTROYED, std::ptr::null(), 0, std::ptr::null_mut());
+        assert_eq!(
+            sls_events_seen(),
+            before,
+            "an idle delivery must not even count as a live T0 event (#88)"
+        );
+    }
 
     /// Regression guard for the 0.9.7 telepointer crash (SIGSEGV inside
     /// `SLSFindWindowAndOwner + 212`): the FFI declaration was missing the

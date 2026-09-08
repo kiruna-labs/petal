@@ -785,9 +785,13 @@ pub mod ingest {
                     crate::platform::ax_observer::start();
                 }
                 crate::platform::gesture_tap::start(&app);
-                // T0 event stream (#748): registration is grant-independent;
-                // DELIVERY needs Screen Recording (§9.5). Health is judged by
-                // sls_events_live() (first real event), never registration.
+                // T0 event stream (#748): starts PARKED. #88: registering the
+                // WindowServer notify procs is what macOS bills to the Screen
+                // Recording grant, so the stream is armed on room join and
+                // released on leave (see `apply_room_membership`), never at
+                // launch. DELIVERY needs Screen Recording (§9.5); health is
+                // judged by sls_events_live() (first real event), never
+                // registration.
                 crate::platform::sls::start_event_stream();
                 let mut sls_reported = false;
                 let mut sls_moves_reported = false;
@@ -802,7 +806,15 @@ pub mod ingest {
                         .unwrap_or(false);
                     if in_room != was_in_room {
                         was_in_room = in_room;
-                        crate::platform::gesture_tap::set_enabled(in_room);
+                        apply_room_membership(in_room);
+                        // #88: the SLS registration is now per-meeting, and
+                        // its delivery counters reset with it -- so the move
+                        // canary below must re-run for each meeting or
+                        // `sls_moves_live()` would never come back and the
+                        // sweep would stay at the 10Hz poll forever.
+                        if in_room {
+                            nudge_fired = false;
+                        }
                     }
                     if !in_room {
                         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -925,6 +937,19 @@ pub mod ingest {
                 }
             })
             .ok();
+    }
+
+    /// Every effect of crossing the in-room boundary, in one place (#88).
+    ///
+    /// Both feeds are TCC-gated OS registrations and every consumer of them is
+    /// idle-gated, so an idle Petal must hold NEITHER. Do not re-arm the SLS
+    /// stream at launch: an always-on registration is what macOS bills to the
+    /// Screen Recording grant ("accessed your screen N times", #88).
+    /// Extracted so the transition is testable through the real function the
+    /// ingest loop calls, not just the helpers underneath it.
+    pub(crate) fn apply_room_membership(in_room: bool) {
+        crate::platform::gesture_tap::set_enabled(in_room);
+        crate::platform::sls::set_enabled(in_room);
     }
 
     /// One CG sweep -> registry snapshot. Needs window NAMES (to classify own
