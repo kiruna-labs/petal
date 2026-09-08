@@ -123,7 +123,14 @@ export interface DataMessagePayload {
 
 export interface PublishParams {
   sub: string | null;
-  payload: Uint8Array;
+  /**
+   * Backed by a real ArrayBuffer, never a SharedArrayBuffer: the broker checks
+   * this at the boundary (`isArrayBufferBacked`). livekit-client 2.22 narrowed
+   * `publishData` to `Uint8Array<ArrayBuffer>`, and a SharedArrayBuffer-backed
+   * view cannot reach us anyway -- structured clone refuses to transfer one
+   * without cross-origin isolation, which a sandboxed plugin frame never has.
+   */
+  payload: Uint8Array<ArrayBuffer>;
   reliable: boolean;
   to?: string[];
 }

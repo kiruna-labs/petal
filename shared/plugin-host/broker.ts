@@ -160,6 +160,15 @@ export function toCloneable(value: unknown, depth = 0): unknown {
   return out;
 }
 
+/**
+ * Narrows to the ArrayBuffer-backed view transports require. A real runtime
+ * check, not a cast: a SharedArrayBuffer-backed view would be rejected rather
+ * than silently handed to a publisher that cannot accept it.
+ */
+function isArrayBufferBacked(value: Uint8Array): value is Uint8Array<ArrayBuffer> {
+  return value.buffer instanceof ArrayBuffer;
+}
+
 /** Adapters may throw `{ code, message }` to pick the error a plugin sees; anything else is 'internal'. */
 function adapterError(e: unknown): BridgeError {
   if (typeof e === 'object' && e !== null) {
@@ -257,6 +266,7 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
       case 'data.publish': {
         const payload = params.payload;
         if (!(payload instanceof Uint8Array)) throw new BridgeError('invalid', 'payload must be bytes');
+        if (!isArrayBufferBacked(payload)) throw new BridgeError('invalid', 'payload must not be backed by a SharedArrayBuffer');
         if (payload.byteLength > PLUGIN_LIMITS.maxPayloadBytes) {
           throw new BridgeError('invalid', `payload exceeds ${PLUGIN_LIMITS.maxPayloadBytes} bytes`);
         }
