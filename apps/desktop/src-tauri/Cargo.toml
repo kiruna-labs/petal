@@ -221,7 +221,7 @@ image = { version = "0.25", default-features = false, features = ["png", "webp",
 # tap, and AI audio must be independent of meeting mute state. cpal covers both
 # directions, so no second audio layer is pulled in. Whether this coexists with
 # the ADM in-process is #654 Q3/Q5.
-cpal = "0.15"
+cpal = "0.18"
 # The Gemini Live socket. Pinned to the version already resolved transitively
 # via livekit so no second copy of tungstenite enters the tree; native-tls
 # matches reqwest's backend, avoiding a rustls CryptoProvider install.
