@@ -69,6 +69,7 @@ export const COMMANDS = {
   drawSend: 'draw_send',
   pluginPublishData: 'plugin_publish_data',
   pluginSetState: 'plugin_set_state',
+  pluginStateSnapshot: 'plugin_state_snapshot',
   downloadAndInstallCompatibleUpdate: 'download_and_install_compatible_update',
   exportLogs: 'export_logs',
   forgetRoom: 'forget_room',
@@ -962,7 +963,6 @@ export interface DrawDraft {
   text?: string;
 }
 
-/** Mirrors `draw::DrawUpdate` (src-tauri/src/draw.rs). */
 /** Global `plugin-data` event (plugins::bus, contract `pluginDataEvent`):
  * one inbound `plugin/<id>[/<sub>]` packet, sender stamped from LiveKit. */
 export interface PluginDataEvent {
@@ -1428,6 +1428,8 @@ export interface CommandArgs {
   };
   /** `entry` null removes this plugin's advertisement (contract `pluginStateMetadata`). */
   [COMMANDS.pluginSetState]: { pluginId: string; entry: PluginAdvertEntry | null };
+  /** Returns `PluginStateChangedEvent[]`: every remote participant's current `plugins` adverts. */
+  [COMMANDS.pluginStateSnapshot]: Record<string, never>;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: Record<string, never>;
   [COMMANDS.runLaunchUpdateCheck]: Record<string, never>;
   [COMMANDS.forgetRoom]: { idOrCode: string };

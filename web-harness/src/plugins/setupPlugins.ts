@@ -16,7 +16,7 @@ import { badgeText, type ToolbarButtonModel } from '@petal/shared/plugin-host/su
 import { createWebAdapter, participantFromLiveKit } from './webAdapter.ts';
 import { PLUGIN_LIMITS, createRateLimiter } from '@petal/shared/plugin-host/rateLimit';
 import { parsePluginTopic } from '@petal/shared/plugin-host/topics';
-import { diffPluginState, pluginsFromMetadata, type PluginAdverts } from '@petal/shared/plugin-host/metadata';
+import { pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
 
 export interface PluginsHook {
   host: PluginHost;
@@ -159,9 +159,20 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     room.on(RoomEvent.ActiveSpeakersChanged, speakers);
     room.on(RoomEvent.Reconnecting, phase);
     room.on(RoomEvent.Reconnected, phase);
-    // Late joiner: everyone already here advertised before we arrived.
-    for (const p of room.remoteParticipants.values()) onMetadata(p);
-    host.readvertise();
+    // Advertising and the late-joiner seed both need a CONNECTED room, and
+    // this runs BEFORE `connect()` is awaited (connection.ts hands the Room
+    // over first so these listeners exist for the very first event). A
+    // publish now is refused as 'unavailable' and `remoteParticipants` is
+    // still empty -- and livekit-client emits no ParticipantConnected for
+    // peers present in the join response -- so do both on Connected. Redo
+    // them after a full reconnect too, when metadata may need re-asserting.
+    const seedAndReadvertise = () => {
+      for (const p of room.remoteParticipants.values()) onMetadata(p);
+      host.readvertise();
+    };
+    room.on(RoomEvent.Connected, seedAndReadvertise);
+    room.on(RoomEvent.Reconnected, seedAndReadvertise);
+    if (room.state === 'connected') seedAndReadvertise();
     unsubscribe = () => {
       room.off(RoomEvent.ParticipantConnected, joined);
       room.off(RoomEvent.ParticipantConnected, onMetadata);
@@ -170,31 +181,25 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
       room.off(RoomEvent.ActiveSpeakersChanged, speakers);
       room.off(RoomEvent.Reconnecting, phase);
       room.off(RoomEvent.Reconnected, phase);
+      room.off(RoomEvent.Connected, seedAndReadvertise);
+      room.off(RoomEvent.Reconnected, seedAndReadvertise);
     };
     phase();
   }
-  // Other participants' `plugins` adverts, by identity (metadata.ts).
-  const advertsByIdentity = new Map<string, PluginAdverts>();
-  function applyAdverts(identity: string, next: PluginAdverts): void {
-    const previous = advertsByIdentity.get(identity) ?? {};
-    if (Object.keys(next).length === 0) advertsByIdentity.delete(identity);
-    else advertsByIdentity.set(identity, next);
-    for (const change of diffPluginState(previous, next)) {
-      if (host.isLoaded(change.pluginId)) host.emit(change.pluginId, 'state.changed', { identity, value: change.value });
-    }
-  }
+  // Other participants' `plugins` adverts (metadata.ts) are owned by the
+  // shared host; this file only feeds it from LiveKit participant events.
   function onMetadata(participant: LkParticipant): void {
     if (state.room && participant === state.room.localParticipant) return;
-    applyAdverts(participant.identity, pluginsFromMetadata(participant.metadata));
+    host.applyRemoteAdverts(participant.identity, pluginsFromMetadata(participant.metadata));
   }
   function forgetParticipant(participant: LkParticipant): void {
-    applyAdverts(participant.identity, {});
+    host.forgetParticipant(participant.identity);
   }
 
   function roomDisconnected(): void {
     unsubscribe?.();
     unsubscribe = null;
-    for (const identity of [...advertsByIdentity.keys()]) applyAdverts(identity, {});
+    host.clearRemoteAdverts();
     host.broadcast('meeting.phase', { label: dom.roomNameEl.textContent?.trim() ?? '', phase: 'disconnected' });
   }
 

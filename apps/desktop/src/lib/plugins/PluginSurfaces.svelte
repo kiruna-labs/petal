@@ -12,10 +12,11 @@
   import { createPluginHost, type PluginHost } from '@petal/shared/plugin-host/host';
   import { hostCompatibility } from '@petal/shared/plugin-host/manifest';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
+  import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { EVENTS, hasTauriBridge, type PluginDataEvent, type PluginStateChangedEvent } from '$lib/ipc';
+  import { COMMANDS, EVENTS, hasTauriBridge, type PluginDataEvent, type PluginStateChangedEvent } from '$lib/ipc';
   import { base64ToBytes } from '@petal/shared/plugin-host/topics';
-  import { diffPluginState, pluginsFromMetadata, type PluginAdverts } from '@petal/shared/plugin-host/metadata';
+  import { pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
   import { enabledPlugins } from './pluginCatalog';
   import { createTauriAdapter } from './tauriAdapter';
 
@@ -59,8 +60,7 @@
         participants: () => participants,
         roomLabel: () => roomLabel,
         phase: () => phase,
-        toast: onToast,
-        adverts: () => advertsByIdentity
+        toast: onToast
       }),
       hostVersion: version,
       mounts: { logic: logicEl, overlay: overlayEl, popoverLayer: popoverEl },
@@ -82,16 +82,11 @@
   // Inbound plugin packets (Rust plugins::bus already validated topic, size,
   // sender, and rate). Resolve the sender from presence when known so the
   // plugin sees speaking/mute state; otherwise a minimal participant.
-  // Remote participants' `plugins` adverts (metadata.ts), fed by the Rust
-  // bus's plugin-state-changed event; diffed into per-plugin state.changed.
-  const advertsByIdentity = new Map<string, PluginAdverts>();
-  function applyAdverts(identity: string, next: PluginAdverts) {
-    const previous = advertsByIdentity.get(identity) ?? {};
-    if (Object.keys(next).length === 0) advertsByIdentity.delete(identity);
-    else advertsByIdentity.set(identity, next);
-    for (const change of diffPluginState(previous, next)) {
-      if (host?.isLoaded(change.pluginId)) host.emit(change.pluginId, 'state.changed', { identity, value: change.value });
-    }
+  // Remote participants' `plugins` adverts (metadata.ts) are owned by the
+  // shared host; this component only feeds it from the Rust bus's events.
+  function applyAdverts(identity: string, plugins: PluginStateChangedEvent['plugins']) {
+    // Re-validate through the shared parser so both clients apply identical rules.
+    host?.applyRemoteAdverts(identity, pluginsFromMetadata(JSON.stringify({ plugins })));
   }
 
   let unlistenData: UnlistenFn | undefined;
@@ -100,12 +95,21 @@
   function listenForPluginData() {
     if (!hasTauriBridge()) return;
     listen<PluginStateChangedEvent>(EVENTS.pluginStateChanged, (event) => {
-      // Re-validate through the shared parser so both clients apply identical rules.
-      applyAdverts(event.payload.identity, pluginsFromMetadata(JSON.stringify({ plugins: event.payload.plugins })));
+      applyAdverts(event.payload.identity, event.payload.plugins);
     })
       .then((un) => {
         if (destroyed) un();
         else unlistenState = un;
+        // The Rust receiver's seed events fired once, at join. A host that
+        // boots later (the version arrives after join) or re-mounts (the
+        // route's canonical-name goto) never saw them, and the presence list
+        // carries no metadata -- so pull the current view explicitly, AFTER
+        // the listener exists so nothing can slip between the two.
+        invoke<PluginStateChangedEvent[]>(COMMANDS.pluginStateSnapshot)
+          .then((snapshot) => {
+            for (const entry of snapshot) applyAdverts(entry.identity, entry.plugins);
+          })
+          .catch(() => {});
       })
       .catch(() => {});
     listen<PluginDataEvent>(EVENTS.pluginData, (event) => {
@@ -154,7 +158,7 @@
     for (const [identity, p] of before) {
       if (!after.has(identity)) {
         host.broadcast('meeting.participant-left', p);
-        applyAdverts(identity, {});
+        host.forgetParticipant(identity);
       }
     }
     previous = next;

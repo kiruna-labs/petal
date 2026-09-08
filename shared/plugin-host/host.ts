@@ -10,13 +10,16 @@ import type { ButtonPatch, Json, Participant } from './api.ts';
 import { createPluginBroker, type HostAdapter, type LoadedPlugin, type PluginBroker } from './broker.ts';
 import { createPluginFrame } from './frame.ts';
 import type { SurfaceContribution, SurfaceKind } from './manifest.ts';
-import { PLUGIN_STATE_LIMITS, type PluginAdvert } from './metadata.ts';
+import { PLUGIN_STATE_LIMITS, diffPluginState, type PluginAdvert, type PluginAdverts } from './metadata.ts';
 import { jsonByteLength } from './rateLimit.ts';
 import type { HostEvent } from './protocol.ts';
 import { buttonKey, placePopover, toolbarButtonModels, type ToolbarButtonModel } from './surfaces.ts';
 import { installDismissibleLayer, type DismissibleLayerCleanup } from '../ui/dismissibleLayer.ts';
 
-export type PluginHostAdapter = Omit<HostAdapter, 'ui' | 'setState'> & {
+// `stateSnapshot` is omitted on purpose: the HOST owns the per-identity remote
+// advert map (applyRemoteAdverts/forgetParticipant) and serves the broker's
+// `init.state` from it, so a client cannot supply a second, divergent source.
+export type PluginHostAdapter = Omit<HostAdapter, 'ui' | 'setState' | 'stateSnapshot'> & {
   toast(pluginId: string, text: string, variant: 'info' | 'degraded'): void;
   /**
    * Write (or remove, with null) this participant's `plugins[pluginId]`
@@ -60,6 +63,17 @@ export interface PluginHost {
   closeSurface(pluginId: string, surfaceId: string): void;
   /** Re-publish every loaded meeting plugin's advertisement (call after (re)connecting to a room). */
   readvertise(): void;
+  /**
+   * A remote participant's `plugins` adverts arrived or changed. The host owns
+   * the per-identity map for BOTH clients: it diffs into per-plugin
+   * `state.changed` events and feeds the broker's `init.state` snapshot, so
+   * the delete-on-empty rule and the isLoaded guard live in one place.
+   */
+  applyRemoteAdverts(identity: string, adverts: PluginAdverts): void;
+  /** A remote participant left: drop its adverts (each loaded plugin sees `state.changed` with null). */
+  forgetParticipant(identity: string): void;
+  /** The room was left: drop every remote advert. */
+  clearRemoteAdverts(): void;
   /** Convenience passthroughs the client calls from its own event sources. */
   emit(pluginId: string, event: HostEvent, payload?: unknown): void;
   broadcast(event: HostEvent, payload?: unknown): void;
@@ -117,14 +131,38 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
   function publishAdvert(entry: LoadedEntry): Promise<void> {
     if (!entry.advert) return Promise.resolve();
     return adapter.publishPluginEntry(entry.plugin.manifest.id, entry.advert).catch((e: unknown) => {
-      // Expected before a room exists; readvertise() runs once connected.
-      warn(`plugin ${entry.plugin.manifest.id}: advertisement not published yet: ${String((e as { message?: string })?.message ?? e)}`);
+      // 'unavailable' means no room yet. Both clients boot their plugins
+      // before joining, so this is the NORMAL first outcome for every
+      // meeting-scoped plugin and readvertise() covers the connect edge; a
+      // warning here landed in the visible session log on every launch.
+      if ((e as { code?: unknown })?.code === 'unavailable') return;
+      warn(`plugin ${entry.plugin.manifest.id}: advertisement not published: ${String((e as { message?: string })?.message ?? e)}`);
     });
+  }
+
+  // Remote participants' `plugins` adverts, by identity (metadata.ts).
+  const remoteAdverts = new Map<string, PluginAdverts>();
+  function applyRemoteAdverts(identity: string, next: PluginAdverts): void {
+    const previous = remoteAdverts.get(identity) ?? {};
+    if (Object.keys(next).length === 0) remoteAdverts.delete(identity);
+    else remoteAdverts.set(identity, next);
+    for (const change of diffPluginState(previous, next)) {
+      if (entries.has(change.pluginId)) broker.emit(change.pluginId, 'state.changed', { identity, value: change.value });
+    }
+  }
+  function stateSnapshot(pluginId: string): Record<string, Json> {
+    const out: Record<string, Json> = {};
+    for (const [identity, adverts] of remoteAdverts) {
+      const state = adverts[pluginId]?.state;
+      if (state !== undefined) out[identity] = state;
+    }
+    return out;
   }
 
   const broker = createPluginBroker({
     adapter: {
       ...adapter,
+      stateSnapshot,
       async setState(plugin, value) {
         const entry = entries.get(plugin.manifest.id);
         if (!entry || !entry.advert) {
@@ -135,8 +173,19 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
         }
         const next: PluginAdvert = { v: entry.advert.v, src: entry.advert.src };
         if (value !== null) next.state = value as Json;
+        // Optimistic, but ROLLED BACK on rejection: the adapter (Rust or the
+        // web merge) also enforces the 8 KB total budget this side cannot see.
+        // Caching a rejected entry meant every later readvertise() replayed
+        // it, failed again, and the plugin's {v, src} advert stayed dropped
+        // for the rest of the session.
+        const previous = entry.advert;
         entry.advert = next;
-        await adapter.publishPluginEntry(plugin.manifest.id, next);
+        try {
+          await adapter.publishPluginEntry(plugin.manifest.id, next);
+        } catch (e) {
+          entry.advert = previous;
+          throw e;
+        }
       },
       onFrameEvent(pluginId, event, payload) {
         if (event === 'dismiss') {
@@ -362,6 +411,11 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     closeSurface,
     readvertise() {
       for (const entry of entries.values()) void publishAdvert(entry);
+    },
+    applyRemoteAdverts,
+    forgetParticipant: (identity) => applyRemoteAdverts(identity, {}),
+    clearRemoteAdverts() {
+      for (const identity of [...remoteAdverts.keys()]) applyRemoteAdverts(identity, {});
     },
     emit: (pluginId, event, payload) => broker.emit(pluginId, event, payload),
     broadcast: (event, payload) => broker.broadcast(event, payload),

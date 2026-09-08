@@ -2458,7 +2458,10 @@
     "maxPayloadBytes": 16384,
     "lossyPerSecond": 30,
     "reliablePerSecond": 10,
-    "inboundPerSenderPerSecond": 60
+    "inboundPerSenderPerSecond": 60,
+    "statePerSecond": 2,
+    "stateMaxBytes": 2048,
+    "stateTotalMaxBytes": 8192
   },
   "pluginStateMetadata": {
     "key": "plugins",

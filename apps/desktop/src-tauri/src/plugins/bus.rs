@@ -7,6 +7,7 @@
 //! LiveKit participant; payload contents are never trusted for identity.
 
 use std::collections::HashMap;
+use crate::sync_ext::MutexExt;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -154,7 +155,14 @@ pub const PLUGINS_METADATA_KEY: &str = "plugins";
 /// `pluginStateMetadata.limits` in the contract fixture.
 pub const PER_PLUGIN_STATE_BYTES: usize = 2048;
 pub const PLUGINS_TOTAL_BYTES: usize = 8192;
-const STATE_WRITES_PER_SECOND: f64 = 4.0;
+/// The shared broker (`PLUGIN_LIMITS.statePerSecond`, contract
+/// `pluginLimits.statePerSecond`) is the quota plugins actually see. This
+/// command-side limiter is a BACKSTOP against a bypassed broker, so it sits at
+/// exactly twice the client quota: never rejecting a burst the broker allowed
+/// because of clock skew, still bounding a misbehaving frontend. The
+/// relationship is asserted against the contract fixture in tests.
+const STATE_BACKSTOP_MULTIPLIER: f64 = 2.0;
+const STATE_WRITES_PER_SECOND: f64 = 2.0 * STATE_BACKSTOP_MULTIPLIER;
 
 /// Strict `major.minor.patch` (mirrors `isReleaseVersion` in manifest.ts).
 pub fn is_release_version(value: &str) -> bool {
@@ -221,14 +229,48 @@ pub struct PluginStateChangedEvent {
     pub plugins: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Latest known `plugins` adverts per remote identity for the CURRENT room.
+/// The receiver's seed `plugin-state-changed` events are one-shot and Tauri
+/// does not replay events to listeners registered later -- a webview that
+/// boots after join (host version arrives late) or re-mounts (the route's
+/// canonical-name `goto`) would otherwise see `{}` until each peer's next
+/// metadata write. `plugin_state_snapshot` serves this map on demand.
+static REMOTE_ADVERTS: OnceLock<Mutex<HashMap<String, serde_json::Map<String, serde_json::Value>>>> =
+    OnceLock::new();
+
+fn remote_adverts() -> &'static Mutex<HashMap<String, serde_json::Map<String, serde_json::Value>>> {
+    REMOTE_ADVERTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn emit_state(app: &AppHandle, identity: String, metadata: &str) {
-    let event = PluginStateChangedEvent {
-        identity,
-        plugins: plugins_from_metadata(metadata),
-    };
+    let plugins = plugins_from_metadata(metadata);
+    {
+        let mut known = remote_adverts().lock_unpoisoned();
+        if plugins.is_empty() {
+            known.remove(&identity);
+        } else {
+            known.insert(identity.clone(), plugins.clone());
+        }
+    }
+    let event = PluginStateChangedEvent { identity, plugins };
     if let Err(e) = app.emit(STATE_EVENT_NAME, &event) {
         log::debug!("plugins::bus: state emit failed: {e}");
     }
+}
+
+/// Every remote participant's current `plugins` adverts (see `REMOTE_ADVERTS`).
+/// The main webview pulls this when its plugin host boots and applies each
+/// entry exactly as it applies a live `plugin-state-changed` event.
+#[tauri::command]
+pub fn plugin_state_snapshot() -> Vec<PluginStateChangedEvent> {
+    remote_adverts()
+        .lock_unpoisoned()
+        .iter()
+        .map(|(identity, plugins)| PluginStateChangedEvent {
+            identity: identity.clone(),
+            plugins: plugins.clone(),
+        })
+        .collect()
 }
 
 /// Payload of the global `plugin-data` Tauri event (`pluginDataEvent` in the contract).
@@ -269,6 +311,9 @@ pub fn start_receiver_for_room(app: &AppHandle, room: Arc<livekit::Room>, genera
     let mut events = room.subscribe();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        // A new room connection: whatever the previous room's peers advertised
+        // is gone with them.
+        remote_adverts().lock_unpoisoned().clear();
         // Late joiner: everyone already in the room advertised before we
         // subscribed, so seed the frontend's view from current metadata.
         for (identity, participant) in room.remote_participants() {
@@ -308,6 +353,17 @@ pub fn start_receiver_for_room(app: &AppHandle, room: Arc<livekit::Room>, genera
                     let metadata = participant.metadata();
                     if !plugins_from_metadata(&metadata).is_empty() {
                         emit_state(&app, participant.identity().to_string(), &metadata);
+                    }
+                    continue;
+                }
+                livekit::RoomEvent::ParticipantDisconnected(participant) => {
+                    // Empty adverts: drops the identity from the snapshot map
+                    // and lets the frontend emit `state.changed(null)`.
+                    if remote_adverts()
+                        .lock_unpoisoned()
+                        .contains_key(participant.identity().as_str())
+                    {
+                        emit_state(&app, participant.identity().to_string(), "");
                     }
                     continue;
                 }
@@ -505,6 +561,9 @@ mod tests {
         lossy_per_second: f64,
         reliable_per_second: f64,
         inbound_per_sender_per_second: f64,
+        state_per_second: f64,
+        state_max_bytes: usize,
+        state_total_max_bytes: usize,
     }
 
     #[derive(Deserialize)]
@@ -578,6 +637,13 @@ mod tests {
         assert_eq!(LOSSY_PER_SECOND, l.lossy_per_second);
         assert_eq!(RELIABLE_PER_SECOND, l.reliable_per_second);
         assert_eq!(INBOUND_PER_SENDER_PER_SECOND, l.inbound_per_sender_per_second);
+        assert_eq!(PER_PLUGIN_STATE_BYTES, l.state_max_bytes);
+        assert_eq!(PLUGINS_TOTAL_BYTES, l.state_total_max_bytes);
+        assert_eq!(
+            STATE_WRITES_PER_SECOND,
+            l.state_per_second * STATE_BACKSTOP_MULTIPLIER,
+            "the command-side state limiter is a backstop at exactly 2x the broker quota"
+        );
     }
 
     #[test]

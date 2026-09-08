@@ -1379,14 +1379,6 @@ impl RoomConnection<Arc<Room>> {
         }
     }
 
-    /// Publish `petalWindowZOrder` (#875): the sharer's currently-shared
-    /// window ids, front-to-back. Merges non-destructively with the rest of
-    /// `ShareMetadata` via `encode_window_metadata`, and republishes only
-    /// when the order actually changed -- `stage_shared_window_order` does
-    /// the comparison so an unrelated reshuffle of unshared windows (or a
-    /// repeated identical poll) never triggers a `set_metadata` round trip.
-    /// Returns whether it actually published (useful for tests/logging; the
-    /// caller does not need to react to it).
     /// Set or remove (`None`) this participant's `plugins[<plugin_id>]`
     /// advertisement, merging non-destructively with the rest of
     /// `ShareMetadata` via `encode_window_metadata`. The caller
@@ -1425,6 +1417,14 @@ impl RoomConnection<Arc<Room>> {
             .map_err(|e| format!("failed to publish plugin metadata: {e}"))
     }
 
+    /// Publish `petalWindowZOrder` (#875): the sharer's currently-shared
+    /// window ids, front-to-back. Merges non-destructively with the rest of
+    /// `ShareMetadata` via `encode_window_metadata`, and republishes only
+    /// when the order actually changed -- `stage_shared_window_order` does
+    /// the comparison so an unrelated reshuffle of unshared windows (or a
+    /// repeated identical poll) never triggers a `set_metadata` round trip.
+    /// Returns whether it actually published (useful for tests/logging; the
+    /// caller does not need to react to it).
     pub async fn set_shared_window_order(&self, order: Vec<u32>) -> bool {
         let metadata = {
             let mut share_metadata = self.share_metadata.lock_unpoisoned();

@@ -26,6 +26,7 @@ import {
   isAiTrackName,
   mergeIdentityPaletteIndexMetadata,
   trackNameForCamera,
+  VIEWER_DEMAND_TOPIC,
 } from './trackNames.ts';
 import { IDENTITY_COLOR_PALETTE, windowIdFromTrackName } from './telepointer.ts';
 import { HARNESS_COLOR_STORAGE_KEY, HARNESS_ROOM_STORAGE_KEY } from './constants.ts';
@@ -142,6 +143,11 @@ export function setupConnection(
   topics.onPrefix(PLUGIN_TOPIC_PREFIX, (payload, participant, topic, senderIdentity) =>
     ctx.hook?.plugins?.onData(payload, participant, topic, senderIdentity),
   );
+  // `petal.viewer-demand` is the heartbeat VIEWERS send to a sharer; this web
+  // client only sends it (viewerDemand.ts) and never consumed it, and the old
+  // fall-through swallowed it silently. Register a no-op so a web SHARER does
+  // not get an "unhandled data topic" warning from every native viewer.
+  topics.on(VIEWER_DEMAND_TOPIC, () => {});
   const { dom, state, cb } = ctx;
   const { shareBtn, micCheckbox, cameraTrackNameDisplay, displayNameInput } = dom;
   const {

@@ -11,7 +11,7 @@ import type { PluginHostAdapter } from '@petal/shared/plugin-host/host';
 import { PLUGIN_KV_STORAGE_PREFIX } from '@petal/shared/plugin-host/settingsModel';
 import type { FetchParams, FetchResponse } from '@petal/shared/plugin-host/protocol';
 import { pluginTopic } from '@petal/shared/plugin-host/topics';
-import { mergePluginMetadata, pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
+import { mergePluginMetadata } from '@petal/shared/plugin-host/metadata';
 import { displayNameForParticipant } from '../tiles.ts';
 
 export interface WebAdapterDeps {
@@ -46,6 +46,7 @@ function phaseOf(room: Room | null): MeetingPhase {
 }
 
 export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
+  let metadataWrites: Promise<void> = Promise.resolve();
   const storage = deps.storage ?? (typeof localStorage === 'undefined' ? undefined : localStorage);
 
   function kvKey(pluginId: string): string {
@@ -92,28 +93,30 @@ export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
         destinationIdentities: params.to && params.to.length > 0 ? params.to : undefined,
       });
     },
-    async publishPluginEntry(pluginId, entry) {
-      const room = deps.room();
-      if (!room || room.state !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
-      const local = room.localParticipant as { metadata?: string; setMetadata?: (metadata: string) => Promise<void> };
-      if (typeof local.setMetadata !== 'function') throw bridgeFailure('unavailable', 'metadata is not writable here');
-      let merged: string;
-      try {
-        merged = mergePluginMetadata(local.metadata, pluginId, entry);
-      } catch (e) {
-        throw bridgeFailure('invalid', (e as Error).message);
-      }
-      await local.setMetadata(merged);
-    },
-    stateSnapshot(pluginId) {
-      const room = deps.room();
-      const out: Record<string, Json> = {};
-      if (!room) return out;
-      for (const p of room.remoteParticipants.values()) {
-        const state = pluginsFromMetadata(p.metadata)[pluginId]?.state;
-        if (state !== undefined) out[p.identity] = state;
-      }
-      return out;
+    publishPluginEntry(pluginId, entry) {
+      // Read-modify-write on `localParticipant.metadata`, which livekit-client
+      // only updates after the SERVER echo. Two plugin writes in flight would
+      // both merge from the same stale base and the later echo would drop
+      // the earlier key, so plugin writes are chained: each waits for the
+      // previous one's echo before it reads. (Other metadata writers -- share
+      // start/stop, the palette index -- have the same shape and are outside
+      // this adapter's reach.)
+      const run = async () => {
+        const room = deps.room();
+        if (!room || room.state !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+        const local = room.localParticipant as { metadata?: string; setMetadata?: (metadata: string) => Promise<void> };
+        if (typeof local.setMetadata !== 'function') throw bridgeFailure('unavailable', 'metadata is not writable here');
+        let merged: string;
+        try {
+          merged = mergePluginMetadata(local.metadata, pluginId, entry);
+        } catch (e) {
+          throw bridgeFailure('invalid', (e as Error).message);
+        }
+        await local.setMetadata(merged);
+      };
+      const next = metadataWrites.then(run, run);
+      metadataWrites = next.catch(() => {});
+      return next;
     },
     storage: {
       async get(pluginId, key) {
