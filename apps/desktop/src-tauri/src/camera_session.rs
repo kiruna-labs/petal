@@ -690,6 +690,12 @@ pub(crate) fn emit_camera_publish_state(
 /// the bounded self-heal loop (`CAMERA_HEAL_RETRY_BACKOFF`) is what makes it
 /// converge, and this event is what makes the preview yield in time for it.
 pub(crate) fn emit_camera_intent(app: &tauri::AppHandle, intended: bool) {
+    // Timestamped so one live run measures the margin that matters (#76): the
+    // gap between this line and the `start_camera_publish` that follows is the
+    // window a Settings preview has to release the device. If the first
+    // acquisition then succeeds, the preview yielded in time; if it fails and
+    // only the self-heal retry recovers, it did not.
+    log::info!("session: camera-intent intended={intended}");
     if let Err(error) = tauri::Emitter::emit(app, "camera-intent-changed", CameraIntentEvent {
         intended,
     }) {
