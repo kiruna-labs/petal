@@ -13,6 +13,7 @@ import type { FetchParams, FetchResponse } from '@petal/shared/plugin-host/proto
 import { pluginTopic } from '@petal/shared/plugin-host/topics';
 import { mergePluginMetadata } from '@petal/shared/plugin-host/metadata';
 import { displayNameForParticipant } from '../tiles.ts';
+import { MetadataMergeError, localParticipantMetadata, type MetadataOwner } from '../participantMetadata.ts';
 
 export interface WebAdapterDeps {
   room(): Room | null;
@@ -20,6 +21,8 @@ export interface WebAdapterDeps {
   toast(text: string): void;
   log(line: string, kind?: 'info' | 'ok' | 'warn' | 'error'): void;
   storage?: Storage;
+  /** #73: the one owner of this peer's participant metadata. Injectable for tests. */
+  metadata?: MetadataOwner;
 }
 
 export function participantFromLiveKit(p: LkParticipant, isLocal: boolean): Participant {
@@ -45,11 +48,8 @@ function phaseOf(room: Room | null): MeetingPhase {
   }
 }
 
-/** Upper bound on waiting for a metadata write's server echo before the next queued write may proceed. */
-const METADATA_ECHO_WAIT_MS = 1000;
-
 export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
-  let metadataWrites: Promise<void> = Promise.resolve();
+  const metadata = deps.metadata ?? localParticipantMetadata;
   const storage = deps.storage ?? (typeof localStorage === 'undefined' ? undefined : localStorage);
 
   function kvKey(pluginId: string): string {
@@ -96,39 +96,26 @@ export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
         destinationIdentities: params.to && params.to.length > 0 ? params.to : undefined,
       });
     },
-    publishPluginEntry(pluginId, entry) {
-      // Read-modify-write on `localParticipant.metadata`, which livekit-client
-      // only updates after the SERVER echo. Two plugin writes in flight would
-      // both merge from the same stale base and the later echo would drop
-      // the earlier key, so plugin writes are chained: each waits for the
-      // previous one's echo before it reads. (Other metadata writers -- share
-      // start/stop, the palette index -- have the same shape and are outside
-      // this adapter's reach.)
-      const run = async () => {
-        const room = deps.room();
-        if (!room || room.state !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
-        const local = room.localParticipant as { metadata?: string; setMetadata?: (metadata: string) => Promise<void> };
-        if (typeof local.setMetadata !== 'function') throw bridgeFailure('unavailable', 'metadata is not writable here');
-        let merged: string;
-        try {
-          merged = mergePluginMetadata(local.metadata, pluginId, entry);
-        } catch (e) {
-          throw bridgeFailure('invalid', (e as Error).message);
-        }
-        // livekit-client resolves setMetadata only when the server echo
-        // matches what we sent. A write superseded by ANOTHER local writer
-        // (e.g. the palette-index merge right after connect) never echoes and
-        // would hold this queue for livekit's full ~5 s timeout; setupPlugins
-        // reconciles the dropped key, so release the queue after a short
-        // bound instead of waiting that out. The write itself is not lost.
-        await Promise.race([
-          local.setMetadata(merged),
-          new Promise<void>((resolveRace) => setTimeout(resolveRace, METADATA_ECHO_WAIT_MS)),
-        ]);
-      };
-      const next = metadataWrites.then(run, run);
-      metadataWrites = next.catch(() => {});
-      return next;
+    async publishPluginEntry(pluginId, entry) {
+      // #73: the `plugins` key is merged by the metadata owner, against the
+      // last LOCALLY-known blob rather than `localParticipant.metadata` (which
+      // livekit-client only updates on the server echo). That is what makes a
+      // concurrent write from another writer -- share start/stop, the
+      // palette index at connect -- unable to drop this key: they merge from
+      // the same locally-known base, in a single queue, and the owner
+      // re-applies its keys if an echo does come back without them.
+      const room = deps.room();
+      if (!room || room.state !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+      const local = room.localParticipant as { setMetadata?: (metadata: string) => Promise<void> };
+      if (typeof local.setMetadata !== 'function') throw bridgeFailure('unavailable', 'metadata is not writable here');
+      try {
+        await metadata.update((current) => mergePluginMetadata(current, pluginId, entry));
+      } catch (e) {
+        // Only the merge itself reports a bad request; a transport failure is
+        // not the plugin's fault and keeps its own error.
+        if (e instanceof MetadataMergeError) throw bridgeFailure('invalid', e.message);
+        throw e;
+      }
     },
     storage: {
       async get(pluginId, key) {
