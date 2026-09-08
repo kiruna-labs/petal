@@ -435,7 +435,15 @@ Definition of done and the usual labels.
 - Browser e2e: `scripts/verify-web-harness-browser.mjs` loads a fixture
   plugin by sideload URL and asserts the frame has no Tauri internals and no
   network.
-- Desktop live: `PLUGIN-N2W-REACT` journey in the test cockpit.
+- Desktop live: `PLUGIN-N2W-REACT` journey in the test cockpit (to automate).
+  Until then, the manual recipe that found two real desktop-only bugs
+  (DataCloneError on `$state` proxies; the palette write clobbering the
+  `plugins` metadata key): start `web-harness` with
+  `VITE_PETAL_BACKEND_URL=https://app.petal.live npx vite --port 5173`,
+  launch the desktop with `PETAL_BACKEND_URL=https://app.petal.live npm run
+  dev:clean`, join a meeting on both, then
+  `node web-harness/tests/fixtures/plugins/live-peer.mjs <access-code> send|wait|debug`
+  and read `plugins(host):` lines in `~/Library/Logs/Petal/petal.log*`.
 - `scripts/ci-local.sh` gains plugin build, plugin tests, and the browser
   plugin check.
 
@@ -468,7 +476,7 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 |---|---|---|---|---|
 | I-1 | M1 | shared/plugin-host, plugins/sdk, workspace, build-all, docs stub | seinfish | merged (kiruna-labs/petal#4, 2026-09-07) |
 | I-2 | M1 | adapters, surfaces, reactions (local), Settings section | seinfish | merged (kiruna-labs/petal#4); web plugins sheet deferred to I-10 |
-| I-3 | M2 | data bus (web + Rust), contracts | seinfish | implemented on feature/plugin-system-m2; live native↔web journey (`PLUGIN-N2W-REACT`) still to run |
+| I-3 | M2 | data bus (web + Rust), contracts | seinfish | implemented on feature/plugin-system-m2; live native↔web Reactions smoke passed both directions 2026-09-08 (`web-harness/tests/fixtures/plugins/live-peer.mjs`); cockpit journey `PLUGIN-N2W-REACT` still to automate |
 | I-4 | M2 | state + advertisement | seinfish | implemented on feature/plugin-system-m2 |
 | I-5a | M3 | registry client | unassigned | not started |
 | I-5b | M3 | marketplace publisher + hosting (private repo) | unassigned | not started |
