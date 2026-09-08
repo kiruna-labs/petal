@@ -71,6 +71,13 @@ export const COMMANDS = {
   pluginPublishData: 'plugin_publish_data',
   pluginSetState: 'plugin_set_state',
   pluginHostLog: 'plugin_host_log',
+  pluginRegistryStatus: 'plugin_registry_status',
+  pluginRegistryIndex: 'plugin_registry_index',
+  pluginInstallFromRegistry: 'plugin_install_from_registry',
+  pluginListInstalled: 'plugin_list_installed',
+  pluginSetInstalledEnabled: 'plugin_set_installed_enabled',
+  pluginUninstall: 'plugin_uninstall',
+  pluginReadBundle: 'plugin_read_bundle',
   pluginStateSnapshot: 'plugin_state_snapshot',
   downloadAndInstallCompatibleUpdate: 'download_and_install_compatible_update',
   exportLogs: 'export_logs',
@@ -1014,6 +1021,45 @@ export interface PluginDataEvent {
   payloadBase64: string;
 }
 
+/** Installed-plugin record from the Rust store (plugins::store, `plugins.json`). */
+export interface PluginInstalledRecord {
+  version: string;
+  enabled: boolean;
+  source: 'registry' | 'dev';
+  grantedPermissions: string[];
+  installedAtMs: number;
+  sha256?: string | null;
+}
+
+/** The verified registry index as served by plugins::registry (contract: contracts/plugin-registry/). */
+export interface PluginRegistryVerifiedIndex {
+  index: {
+    schemaVersion: number;
+    generatedAt: string;
+    plugins: Array<{
+      id: string;
+      name: string;
+      description: string;
+      publisher: string;
+      latest: string;
+      versions: Array<{
+        version: string;
+        minHostVersion: string;
+        apiVersion: number;
+        permissions: string[];
+        bundleUrl: string;
+        sigUrl: string;
+        sha256: string;
+        size: number;
+        verified: boolean;
+        scan: { tool: string; reportSha256: string; at: string } | null;
+      }>;
+    }>;
+  };
+  trustedComment: string;
+  registryUrl: string;
+}
+
 /** One plugin's advertisement in participant metadata (`plugins[<id>]`). */
 export interface PluginAdvertEntry {
   v: string;
@@ -1470,6 +1516,13 @@ export interface CommandArgs {
   [COMMANDS.pluginSetState]: { pluginId: string; entry: PluginAdvertEntry | null };
   /** Plugin-host diagnostics into the Rust file log (bounded, rate-limited). */
   [COMMANDS.pluginHostLog]: { level: 'debug' | 'info' | 'warn' | 'error'; line: string };
+  [COMMANDS.pluginRegistryStatus]: Record<string, never>;
+  [COMMANDS.pluginRegistryIndex]: Record<string, never>;
+  [COMMANDS.pluginInstallFromRegistry]: { pluginId: string; version: string };
+  [COMMANDS.pluginListInstalled]: Record<string, never>;
+  [COMMANDS.pluginSetInstalledEnabled]: { pluginId: string; enabled: boolean };
+  [COMMANDS.pluginUninstall]: { pluginId: string };
+  [COMMANDS.pluginReadBundle]: { pluginId: string };
   /** Returns `PluginStateChangedEvent[]`: every remote participant's current `plugins` adverts. */
   [COMMANDS.pluginStateSnapshot]: Record<string, never>;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: Record<string, never>;
@@ -1638,6 +1691,13 @@ export interface CommandReturns {
   [COMMANDS.pluginPublishData]: void;
   [COMMANDS.pluginSetState]: void;
   [COMMANDS.pluginHostLog]: void;
+  [COMMANDS.pluginRegistryStatus]: { configured: boolean; url: string | null };
+  [COMMANDS.pluginRegistryIndex]: PluginRegistryVerifiedIndex;
+  [COMMANDS.pluginInstallFromRegistry]: PluginInstalledRecord;
+  [COMMANDS.pluginListInstalled]: { plugins: Record<string, PluginInstalledRecord> };
+  [COMMANDS.pluginSetInstalledEnabled]: void;
+  [COMMANDS.pluginUninstall]: void;
+  [COMMANDS.pluginReadBundle]: string;
   [COMMANDS.currentRoom]: string | null;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: {
     status: 'up-to-date' | 'installed';

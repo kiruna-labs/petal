@@ -25,7 +25,7 @@
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
   import PluginSurfaces from '$lib/plugins/PluginSurfaces.svelte';
   import { hostLog } from '$lib/plugins/tauriAdapter';
-  import { installedPlugins } from '$lib/plugins/pluginCatalog';
+  import { installedPlugins, type CatalogEntry } from '$lib/plugins/pluginCatalog';
 
   /** Kept byte-identical with `plugin_boot::PROBE_MOUNTED_LINE`. */
   const PROBE_MOUNTED_LINE = 'plugin-boot probe: page mounted';
@@ -46,7 +46,9 @@
     { identity: 'plugin-boot-probe', name: 'Plugin boot probe', isLocal: true, speaking: false, micMuted: true }
   ];
 
-  const catalog = installedPlugins((message) => hostLog('warn', `plugin-boot probe: ${message}`));
+  // Async since I-5a: registry installs come from the Rust store. The
+  // mounted line (which the cockpit waits for) is logged once it is known.
+  let catalog = $state<CatalogEntry[]>([]);
 
   /**
    * The NEGATIVE direction, and the only half a page can observe about its
@@ -91,7 +93,10 @@
   }
 
   onMount(() => {
-    hostLog('info', `${PROBE_MOUNTED_LINE}; catalog=[${catalog.map((p) => p.manifest.id).join(', ') || 'empty'}]`);
+    void installedPlugins((message) => hostLog('warn', `plugin-boot probe: ${message}`)).then((entries) => {
+      catalog = entries;
+      hostLog('info', `${PROBE_MOUNTED_LINE}; catalog=[${catalog.map((p) => p.manifest.id).join(', ') || 'empty'}]`);
+    });
     // A non-numeric version still boots built-ins (PluginSurfaces skips the
     // compatibility gate for it), so a denied `getVersion` degrades the
     // evidence rather than voiding the probe.

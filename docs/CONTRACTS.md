@@ -1224,6 +1224,21 @@ Files to change together:
 - `web-harness/tests/contracts.test.ts`
 - `contracts/petal-contracts.json`
 
+## Plugin registry
+
+`contracts/plugin-registry/` pins the registry that the desktop
+(`apps/desktop/src-tauri/src/plugins/registry.rs`, `minisign-verify`) and the
+web client (`shared/plugin-host/registry.ts` + `minisign.ts`, primitives bound
+in `web-harness/src/plugins/minisign.ts`) both install from: a sample
+`index.json` and `bundle.json` signed with a throwaway test key (`test.pub`).
+Verify chain on both sides: minisign(index) → `sha256(bundle) == entry.sha256`
+and `size` → minisign(bundle) → bundle manifest id/version == entry → manifest
+validates → `minHostVersion`/`apiVersion` fit the host. Entries with
+`verified: false` are listed but never installable. The private marketplace
+repository vendors this directory byte-for-byte; regenerate with
+`node contracts/plugin-registry/gen-fixtures.mjs`. Tests:
+`web-harness/tests/pluginRegistry.test.ts`, `plugins::registry` tests.
+
 ## Invite Links and Join Vectors
 
 Canonical HTTPS invite links:

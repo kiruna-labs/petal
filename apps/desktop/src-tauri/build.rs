@@ -92,6 +92,25 @@ fn main() {
         None => {}
     }
 
+    // Bake the plugin registry (plugins/README.md §2.9): URL + minisign public
+    // key. No hosted default, same rule as the backend URL: absent means this
+    // build has no registry (Settings hides "Get plugins"; sideloading still
+    // works). Both must be set together; a lone half is ignored with a warning.
+    println!("cargo:rerun-if-env-changed=PETAL_PLUGIN_REGISTRY_URL");
+    println!("cargo:rerun-if-env-changed=PETAL_PLUGIN_REGISTRY_PUBKEY");
+    let registry_url = std::env::var("PETAL_PLUGIN_REGISTRY_URL").ok().filter(|v| !v.trim().is_empty());
+    let registry_key = std::env::var("PETAL_PLUGIN_REGISTRY_PUBKEY").ok().filter(|v| !v.trim().is_empty());
+    match (registry_url, registry_key) {
+        (Some(url), Some(key)) => {
+            println!("cargo:rustc-env=PETAL_PLUGIN_REGISTRY_URL={}", url.trim().trim_end_matches('/'));
+            println!("cargo:rustc-env=PETAL_PLUGIN_REGISTRY_PUBKEY={}", key.trim());
+        }
+        (None, None) => {}
+        _ => println!(
+            "cargo:warning=PETAL_PLUGIN_REGISTRY_URL and PETAL_PLUGIN_REGISTRY_PUBKEY must be set together; plugin registry disabled"
+        ),
+    }
+
     // Bake the Sentry DSN (#281) so `option_env!("PETAL_SENTRY_DSN")` in
     // logging.rs resolves it with no runtime env -- required because a
     // notarized `.app` launched via `open`/Dock/Spotlight has no shell env

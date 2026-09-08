@@ -1147,6 +1147,13 @@ pub fn run() {
             plugins::bus::plugin_publish_data,
             plugins::bus::plugin_set_state,
             plugins::bus::plugin_host_log,
+            plugins::registry::plugin_registry_status,
+            plugins::registry::plugin_registry_index,
+            plugins::registry::plugin_install_from_registry,
+            plugins::registry::plugin_list_installed,
+            plugins::registry::plugin_set_installed_enabled,
+            plugins::registry::plugin_uninstall,
+            plugins::registry::plugin_read_bundle,
             plugins::bus::plugin_state_snapshot,
             #[cfg(target_os = "macos")]
             share_overlay::share_overlay_set_draw_active,
@@ -1284,6 +1291,7 @@ pub fn run() {
             // Debug-mode setting (#669): cross-platform, unlike AI chat below
             // -- the Debug button it gates exists on both compositors.
             debug_settings::initialize(&app_data_dir);
+            plugins::store::initialize(&app_data_dir);
             analytics::init(&app_data_dir);
             // AI chat settings (#656): master switch + optional user Gemini
             // key. Loaded here so the very first hover-tab render knows whether
@@ -1583,6 +1591,7 @@ pub fn run() {
             // Debug-mode setting (#669): same cross-platform init as macOS
             // above, before `app_data_dir` is moved into `RoomsState::load`.
             debug_settings::initialize(&app_data_dir);
+            plugins::store::initialize(&app_data_dir);
             analytics::init(&app_data_dir);
             // AI chat settings (#656): master switch + optional user Gemini
             // key. Loaded here so the very first hover-tab render knows whether
@@ -1703,6 +1712,13 @@ pub fn run() {
             plugins::bus::plugin_publish_data,
             plugins::bus::plugin_set_state,
             plugins::bus::plugin_host_log,
+            plugins::registry::plugin_registry_status,
+            plugins::registry::plugin_registry_index,
+            plugins::registry::plugin_install_from_registry,
+            plugins::registry::plugin_list_installed,
+            plugins::registry::plugin_set_installed_enabled,
+            plugins::registry::plugin_uninstall,
+            plugins::registry::plugin_read_bundle,
             plugins::bus::plugin_state_snapshot,
             windows_share_overlay::share_overlay_set_draw_active,
             windows_share_overlay::share_overlay_draw_active,

@@ -371,8 +371,14 @@ repository.
   `_PUBKEY` (web). Forks point at their own registry.
 - Verify chain in both clients: minisign(index), sha256 match,
   minisign(bundle), manifest id and version equal the index entry, manifest
-  validates, `minHostVersion` satisfied. Rust uses `minisign-verify`
-  (already a dependency); web uses `shared/plugin-host/minisign.ts`.
+  validates, `minHostVersion` satisfied. Rust uses `minisign-verify`; the
+  shared TypeScript keeps the minisign format and algorithm dependency-free
+  (`shared/plugin-host/minisign.ts`, `registry.ts`) with the Ed25519 /
+  BLAKE2b / SHA-256 primitives injected by the web client
+  (`web-harness/src/plugins/minisign.ts`, `@noble/*`), so `shared/` still has
+  no npm dependency. The contract fixtures are signed by the JS signer and
+  verified by the Rust crate in tests, which pins the two implementations to
+  each other.
 - `plugins/build-all.mjs` emits the deterministic `bundle.json` the publisher
   consumes, so a third-party developer only ever produces `bundle.json`.
 - Update check on meeting join at most once per day; re-consent only when
@@ -556,8 +562,8 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-2 | M1 | adapters, surfaces, reactions (local), Settings section | seinfish | merged (kiruna-labs/petal#4); web plugins sheet deferred to I-10 |
 | I-3 | M2 | data bus (web + Rust), contracts | seinfish | merged (kiruna-labs/petal#55); live native↔web Reactions smoke passed both directions 2026-09-08 (`web-harness/tests/fixtures/plugins/live-peer.mjs`); cockpit journey `PLUGIN-N2W-REACT` still to automate |
 | I-4 | M2 | state + advertisement | seinfish | merged (kiruna-labs/petal#55); post-merge fixes in #70 |
-| I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | implemented on feature/plugin-provenance (stacked on #70) |
-| I-5a | M3 | registry client | unassigned | not started |
+| I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | merged (kiruna-labs/petal#71) |
+| I-5a | M3 | registry client | seinfish | implemented on feature/plugin-system-m3 (desktop install/enable/remove UI; web loads registry installs in I-6) |
 | I-5b | M3 | marketplace publisher + hosting (private repo) | unassigned | not started |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |
 | I-7 | M3 | chat plugin | unassigned | not started |

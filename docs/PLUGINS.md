@@ -141,6 +141,11 @@ automatically.
 
 ## Publishing *(M3)*
 
-Submit the `bundle.json`. Publishing to the official registry is handled by
-the core team and requires the plugin to pass review; the app only installs
-bundles whose signature verifies against the registry key it was built with.
+Submit the `bundle.json` produced by `node plugins/build-all.mjs <dir>`.
+Publishing to the official registry is handled by the core team and requires
+the plugin to pass review; until then a listing shows as "Awaiting review"
+and cannot be installed. Petal installs only bundles whose signature verifies
+against the registry key it was built with, whose sha256 and size match the
+signed index, and whose manifest id/version match the listing. Users install
+from Settings → Plugins → Get plugins after seeing your permissions in plain
+words, and can remove or turn off your plugin there at any time.

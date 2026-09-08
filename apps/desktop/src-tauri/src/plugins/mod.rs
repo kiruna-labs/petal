@@ -1,5 +1,8 @@
 //! Host-side Rust surface of the plugin system (plugins/README.md).
 //!
+//! M3 adds the registry client (`registry`, `store`): fetch + verify the signed
+//! index, install verified bundles, keep installed state on disk.
+//!
 //! M2 scope: the data bus -- one catch-all receiver for `plugin/*` topics that
 //! emits a single global `plugin-data` event, a `plugin_publish_data` command,
 //! and the `plugins` participant-metadata key (advertisement + shared state:
@@ -9,6 +12,8 @@
 //! rate limits, so a bug in the frontend cannot flood the room.
 
 pub mod bus;
+pub mod registry;
+pub mod store;
 
 // Commands are registered in lib.rs by their defining path (`plugins::bus::...`):
 // `tauri::generate_handler!` needs the macro-generated `__cmd__*` items, which
