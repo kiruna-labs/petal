@@ -17,7 +17,6 @@ export const FRAME_RUNTIME_SOURCE = String.raw`
 (function petalFrameRuntime() {
   'use strict';
   var PROTOCOL = 1;
-  var hostOrigin = null;
   var nextId = 1;
   var pending = new Map();
   var listeners = new Map();
@@ -264,7 +263,6 @@ export const FRAME_RUNTIME_SOURCE = String.raw`
     if (env.kind !== 'evt') return;
     if (env.event === 'init') {
       if (init) return;
-      hostOrigin = event.origin || null;
       if (event.ports && event.ports[0]) surfacePort = event.ports[0];
       applyInit(env.payload || {});
       if (init.surface) {

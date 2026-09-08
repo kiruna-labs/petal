@@ -107,7 +107,11 @@ export function createTauriAdapter(deps: TauriAdapterDeps): PluginHostAdapter {
     },
     onFrameEvent(pluginId, event, payload) {
       if (event === 'error') {
-        const message = (payload as { message?: string } | undefined)?.message ?? 'unknown error';
+        // `message` is plugin-controlled and this path, unlike `log`, is not
+        // rate-limited by the broker -- bound it here so an arbitrarily long
+        // string never crosses the IPC boundary (Rust truncates only after).
+        const raw = (payload as { message?: string } | undefined)?.message ?? 'unknown error';
+        const message = raw.length > 500 ? `${raw.slice(0, 500)}\u2026` : raw;
         console.error(`[plugin ${pluginId}] failed to start:`, message);
         hostLog('error', `plugin ${pluginId} frame error: ${message}`);
       } else if (event === 'ready' || event === 'activated') {

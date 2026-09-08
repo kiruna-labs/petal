@@ -146,7 +146,16 @@ export function toCloneable(value: unknown, depth = 0): unknown {
   for (const key of Object.keys(value as Record<string, unknown>)) {
     const raw = (value as Record<string, unknown>)[key];
     if (typeof raw === 'function' || typeof raw === 'symbol') continue;
-    out[key] = toCloneable(raw, depth + 1); // undefined values are kept, as structured clone does
+    // defineProperty, not assignment: `Object.keys` returns an own `__proto__`
+    // (JSON.parse produces one), and `out.__proto__ = ...` would hit
+    // Object.prototype's setter -- dropping the key and mutating the copy's
+    // prototype instead of copying it, which structured clone never does.
+    Object.defineProperty(out, key, {
+      value: toCloneable(raw, depth + 1), // undefined values are kept, as structured clone does
+      enumerable: true,
+      writable: true,
+      configurable: true
+    });
   }
   return out;
 }
