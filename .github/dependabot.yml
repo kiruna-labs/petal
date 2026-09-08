@@ -68,6 +68,14 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    ignore:
+      # Both are pinned by the wry/tauri 2.11 stack, which still requires the
+      # 0.61 windows-core line. Bumping either one puts a SECOND
+      # `windows_core::Interface` in the graph and the Windows build fails
+      # with "expected trait / found trait" (webview2-com #50,
+      # windows-core #58). Lift both when the Tauri stack moves.
+      - dependency-name: webview2-com
+      - dependency-name: windows-core
     groups:
       cargo-non-major:
         update-types: [minor, patch]

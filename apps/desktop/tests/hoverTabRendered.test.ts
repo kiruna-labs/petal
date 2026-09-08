@@ -18,7 +18,7 @@ interface CornerRadii {
 }
 
 interface HoverTabMeasurement {
-  host: { width: number; height: number; scrollWidth: number; scrollHeight: number };
+  host: { width: number; height: number; scrollWidth: number; scrollHeight: number; liveRingColor: string; liveRingRadii: CornerRadii };
   pill: { width: number; height: number; scrollWidth: number; scrollHeight: number; radii: CornerRadii };
   button: { width: number; height: number; borderColor: string; ariaLabel: string | null; title: string | null; ariaBusy: string | null; ariaKeyshortcuts: string | null; nativeTooltipAllowed: boolean; radii: CornerRadii };
   actionCount: number;
@@ -70,12 +70,13 @@ test('rendered hover-tab fixture stays fixed and separates primary action from t
         const host = document.querySelector<HTMLElement>('.hover-tab-host')!;
         const pill = document.querySelector<HTMLElement>('.pill')!;
         const button = document.querySelector<HTMLButtonElement>('.hover-tab-action')!;
+        const hostStyle = getComputedStyle(host, '::after');
         const pillStyle = getComputedStyle(pill);
         const buttonStyle = getComputedStyle(button);
         const rect = button.getBoundingClientRect();
         const fixture = (window as any).hoverTabFixture;
         return {
-          host: { width: host.clientWidth, height: host.clientHeight, scrollWidth: host.scrollWidth, scrollHeight: host.scrollHeight },
+          host: { width: host.clientWidth, height: host.clientHeight, scrollWidth: host.scrollWidth, scrollHeight: host.scrollHeight, liveRingColor: hostStyle.borderTopColor, liveRingRadii: { topLeft: hostStyle.borderTopLeftRadius, topRight: hostStyle.borderTopRightRadius, bottomRight: hostStyle.borderBottomRightRadius, bottomLeft: hostStyle.borderBottomLeftRadius } },
           pill: { width: pill.getBoundingClientRect().width, height: pill.getBoundingClientRect().height, scrollWidth: pill.scrollWidth, scrollHeight: pill.scrollHeight, radii: { topLeft: pillStyle.borderTopLeftRadius, topRight: pillStyle.borderTopRightRadius, bottomRight: pillStyle.borderBottomRightRadius, bottomLeft: pillStyle.borderBottomLeftRadius } },
           button: { width: rect.width, height: rect.height, borderColor: buttonStyle.borderTopColor, ariaLabel: button.getAttribute('aria-label'), title: button.getAttribute('title'), ariaBusy: button.getAttribute('aria-busy'), ariaKeyshortcuts: button.getAttribute('aria-keyshortcuts'), nativeTooltipAllowed: button.hasAttribute('data-allow-native-tooltip'), radii: { topLeft: buttonStyle.borderTopLeftRadius, topRight: buttonStyle.borderTopRightRadius, bottomRight: buttonStyle.borderBottomRightRadius, bottomLeft: buttonStyle.borderBottomLeftRadius } },
           actionCount: fixture.getShareClicks(),
@@ -85,23 +86,24 @@ test('rendered hover-tab fixture stays fixed and separates primary action from t
       });
 
       const outsidePillRadii = { topLeft: '0px', topRight: '12px', bottomRight: '12px', bottomLeft: '0px' };
-      const outsideButtonRadii = { topLeft: '0px', topRight: '10px', bottomRight: '10px', bottomLeft: '0px' };
+      const outsideButtonRadii = { topLeft: '0px', topRight: '12px', bottomRight: '12px', bottomLeft: '0px' };
+      const outsideRingRadii = outsideButtonRadii;
       const insetPillRadii = { topLeft: '12px', topRight: '0px', bottomRight: '0px', bottomLeft: '12px' };
-      const insetButtonRadii = { topLeft: '10px', topRight: '0px', bottomRight: '0px', bottomLeft: '10px' };
+      const insetButtonRadii = { topLeft: '12px', topRight: '0px', bottomRight: '0px', bottomLeft: '12px' };
 
       const initial = await measure();
-      assert.deepEqual(initial.host, { width: 40, height: 40, scrollWidth: 40, scrollHeight: 40 });
+      assert.deepEqual(initial.host, { width: 40, height: 40, scrollWidth: 40, scrollHeight: 40, liveRingColor: 'rgb(127, 240, 163)', liveRingRadii: outsideRingRadii });
       assert.equal(initial.pill.width, 40);
       assert.equal(initial.pill.height, 40);
       assert.deepEqual(initial.pill.radii, outsidePillRadii);
       assert.equal(initial.button.width, 40);
       assert.equal(initial.button.height, 40);
-      assert.equal(initial.button.borderColor, 'rgb(127, 240, 163)');
+      assert.equal(initial.button.borderColor, 'rgba(0, 0, 0, 0)');
       assert.deepEqual(initial.button.radii, outsideButtonRadii);
-      assert.equal(initial.button.ariaLabel, 'Share this window. Drag vertically to move; right-click for options');
+      assert.equal(initial.button.ariaLabel, 'Share this window. Drag around the window border to move; right-click for options');
       assert.equal(
         initial.button.title,
-        nativeTooltipExpected ? 'Share this window — drag to move; right-click for options' : null
+        nativeTooltipExpected ? 'Share this window — drag around the window border to move; right-click for options' : null
       );
       assert.equal(initial.button.nativeTooltipAllowed, nativeTooltipExpected);
       assert.equal(initial.button.ariaBusy, 'false');
@@ -134,20 +136,63 @@ test('rendered hover-tab fixture stays fixed and separates primary action from t
       await page.evaluate(() => (window as any).hoverTabFixture.setInset(false));
       await page.waitForFunction(() => document.querySelector<HTMLElement>('.hover-tab-host')?.classList.contains('inset') === false);
 
+      const edgeRadii = {
+        top: {
+          outside: { pill: { topLeft: '12px', topRight: '12px', bottomRight: '0px', bottomLeft: '0px' }, button: { topLeft: '12px', topRight: '12px', bottomRight: '0px', bottomLeft: '0px' } },
+          inset: { pill: { topLeft: '0px', topRight: '0px', bottomRight: '12px', bottomLeft: '12px' }, button: { topLeft: '0px', topRight: '0px', bottomRight: '12px', bottomLeft: '12px' } }
+        },
+        right: { outside: { pill: outsidePillRadii, button: outsideButtonRadii }, inset: { pill: insetPillRadii, button: insetButtonRadii } },
+        bottom: {
+          outside: { pill: { topLeft: '0px', topRight: '0px', bottomRight: '12px', bottomLeft: '12px' }, button: { topLeft: '0px', topRight: '0px', bottomRight: '12px', bottomLeft: '12px' } },
+          inset: { pill: { topLeft: '12px', topRight: '12px', bottomRight: '0px', bottomLeft: '0px' }, button: { topLeft: '12px', topRight: '12px', bottomRight: '0px', bottomLeft: '0px' } }
+        },
+        left: {
+          outside: { pill: { topLeft: '12px', topRight: '0px', bottomRight: '0px', bottomLeft: '12px' }, button: { topLeft: '12px', topRight: '0px', bottomRight: '0px', bottomLeft: '12px' } },
+          inset: { pill: { topLeft: '0px', topRight: '12px', bottomRight: '12px', bottomLeft: '0px' }, button: { topLeft: '0px', topRight: '12px', bottomRight: '12px', bottomLeft: '0px' } }
+        }
+      } as const;
+      for (const [edge, expected] of Object.entries(edgeRadii)) {
+        await page.evaluate((value) => (window as any).hoverTabFixture.setSide(value), edge);
+        await page.waitForFunction((value) => document.querySelector<HTMLElement>('.hover-tab-host')?.classList.contains(`side-${value}`) === true, edge);
+        let edgeState = await measure();
+        assert.deepEqual(edgeState.pill.radii, expected.outside.pill);
+        assert.deepEqual(edgeState.button.radii, expected.outside.button);
+        assert.deepEqual(edgeState.host.liveRingRadii, expected.outside.button);
+        assert.match(edgeState.button.ariaLabel ?? '', /Drag around the window border/);
+        await page.evaluate(() => (window as any).hoverTabFixture.setInset(true));
+        await page.waitForFunction(() => document.querySelector<HTMLElement>('.hover-tab-host')?.classList.contains('inset') === true);
+        edgeState = await measure();
+        assert.deepEqual(edgeState.pill.radii, expected.inset.pill);
+        assert.deepEqual(edgeState.button.radii, expected.inset.button);
+        assert.deepEqual(edgeState.host.liveRingRadii, expected.inset.button);
+        await page.evaluate(() => (window as any).hoverTabFixture.setInset(false));
+        await page.waitForFunction(() => document.querySelector<HTMLElement>('.hover-tab-host')?.classList.contains('inset') === false);
+      }
+      await page.evaluate(() => (window as any).hoverTabFixture.setSide('right'));
+      await page.waitForFunction(() => document.querySelector<HTMLElement>('.hover-tab-host')?.classList.contains('side-right') === true);
+
       const action = page.locator('.hover-tab-action');
-      await action.click();
+      await action.hover();
+      await page.mouse.down();
+      const pressed = await measure();
+      assert.equal(pressed.host.width, 40);
+      assert.equal(pressed.host.height, 40);
+      assert.equal(pressed.host.liveRingColor, initial.host.liveRingColor, 'the live ring stays fixed while the action presses');
+      assert.ok(pressed.button.width < initial.button.width, 'the action keeps its press scale');
+      await page.mouse.up();
       await page.waitForFunction(() => (window as any).hoverTabFixture.getShared() === true);
       let state = await measure();
       assert.equal(state.actionCount, 1);
       assert.equal(state.menuCount, 0);
-      assert.equal(state.button.ariaLabel, 'Stop sharing. Drag vertically to move; right-click for options');
+      assert.equal(state.button.ariaLabel, 'Stop sharing. Drag around the window border to move; right-click for options');
       assert.equal(
         state.button.title,
-        nativeTooltipExpected ? 'Stop sharing — drag to move; right-click for options' : null
+        nativeTooltipExpected ? 'Stop sharing — drag around the window border to move; right-click for options' : null
       );
       assert.equal(state.button.nativeTooltipAllowed, nativeTooltipExpected);
       assert.equal(state.shared, true);
-      assert.notEqual(state.button.borderColor, initial.button.borderColor, 'shared tabs do not use the unshared live border');
+      assert.equal(state.button.borderColor, initial.button.borderColor, 'the button border stays transparent while shared');
+      assert.equal(state.host.liveRingColor, 'rgba(0, 0, 0, 0)', 'shared tabs hide the unshared live ring');
       assert.equal(state.host.width, 40);
       assert.equal(state.host.height, 40);
       assert.deepEqual(state.button.radii, outsideButtonRadii);
@@ -157,8 +202,9 @@ test('rendered hover-tab fixture stays fixed and separates primary action from t
       await page.waitForFunction(() => (window as any).hoverTabFixture.getShared() === false);
       state = await measure();
       assert.equal(state.actionCount, 2);
-      assert.equal(state.button.ariaLabel, 'Share this window. Drag vertically to move; right-click for options');
-      assert.equal(state.button.borderColor, initial.button.borderColor, 'unshared tabs use the bright live border');
+      assert.equal(state.button.ariaLabel, 'Share this window. Drag around the window border to move; right-click for options');
+      assert.equal(state.button.borderColor, initial.button.borderColor, 'the button keeps a transparent layout border while the fixed host owns the live ring');
+      assert.equal(state.host.liveRingColor, 'rgb(127, 240, 163)', 'unshared tabs restore the fixed live ring');
       assert.equal(state.host.width, 40);
       assert.equal(state.host.height, 40);
 
@@ -206,8 +252,8 @@ test('rendered hover-tab fixture stays fixed and separates primary action from t
       assert.equal(state.host.height, 40);
 
       await page.evaluate(() => (window as any).hoverTabFixture.setShared(true));
-      await page.waitForFunction(() => document.querySelector<HTMLButtonElement>('.hover-tab-action')?.getAttribute('aria-label') === 'Stop sharing. Drag vertically to move; right-click for options');
-      assert.equal((await measure()).button.ariaLabel, 'Stop sharing. Drag vertically to move; right-click for options');
+      await page.waitForFunction(() => document.querySelector<HTMLButtonElement>('.hover-tab-action')?.getAttribute('aria-label') === 'Stop sharing. Drag around the window border to move; right-click for options');
+      assert.equal((await measure()).button.ariaLabel, 'Stop sharing. Drag around the window border to move; right-click for options');
       await page.close();
     }
   } finally {

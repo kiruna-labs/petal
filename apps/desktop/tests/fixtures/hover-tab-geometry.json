@@ -1,0 +1,14 @@
+{
+  "frame": { "x": 300, "y": 200, "width": 500, "height": 300 },
+  "monitor": { "left": 0, "top": 0, "right": 1200, "bottom": 800 },
+  "cases": [
+    { "position": 0.0, "center": { "x": 324, "y": 180 } },
+    { "position": 0.125, "center": { "x": 550, "y": 180 } },
+    { "position": 0.25, "center": { "x": 820, "y": 224 } },
+    { "position": 0.375, "center": { "x": 820, "y": 350 } },
+    { "position": 0.5, "center": { "x": 776, "y": 520 } },
+    { "position": 0.625, "center": { "x": 550, "y": 520 } },
+    { "position": 0.75, "center": { "x": 280, "y": 476 } },
+    { "position": 0.875, "center": { "x": 280, "y": 350 } }
+  ]
+}

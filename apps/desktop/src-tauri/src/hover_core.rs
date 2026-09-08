@@ -33,16 +33,22 @@ pub use crate::platform::cg::WindowFrame;
 // =============================================================================
 
 /// Payload for the `hover-tab-update` event.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HoverTabUpdate {
     pub window_id: u32,
     pub frame: WindowFrame,
+    /// Native owner identity used to reject menu/drag commands after a
+    /// window-id reuse. Optional for compatibility with older event payloads.
+    pub source_owner_pid: Option<u32>,
     pub tab_x: f64,
     pub tab_y: f64,
+    pub perimeter_position: HoverTabPosition,
+    pub side: HoverTabSide,
     pub attachment: HoverTabAttachment,
-    /// The app-wide normalized vertical position used for this presentation.
-    /// `0` is the source top, `0.5` is center, and `1` is the source bottom.
+    /// Compatibility edge offset derived from `perimeter_position`. On the
+    /// bottom and left edges it retains the legacy top-to-bottom/left-to-right
+    /// direction; the complete perimeter scalar is authoritative.
     pub vertical_offset: f64,
     /// Whether this window is currently in the shared set — lets the pill
     /// render the correct share/unshare label immediately on hover, without
@@ -52,6 +58,22 @@ pub struct HoverTabUpdate {
     /// shares, false for ordinary HWND shares. Petal View regions are blocked
     /// from hover targeting and use their own title-bar controls.
     pub display_like: bool,
+    /// Monotonic presentation epoch. Delayed native events from an older
+    /// target or placement must not overwrite a newer frontend projection.
+    pub presentation_generation: u64,
+}
+
+impl HoverTabUpdate {
+    /// Same window, geometry, side, attachment and share flag -- the fields a
+    /// subscriber can see. The generation counter is deliberately ignored:
+    /// it changes on every reconcile pass even when nothing moved, which is
+    /// exactly the redundant publish this exists to suppress.
+    #[cfg_attr(not(windows), allow(dead_code))] // only the Windows reconcile path publishes on a timer
+    pub(crate) fn same_presentation_as(&self, other: &Self) -> bool {
+        let mut mine = self.clone();
+        mine.presentation_generation = other.presentation_generation;
+        mine == *other
+    }
 }
 
 /// Visible share-state transition emitted at the capture lifecycle boundary.
@@ -78,15 +100,63 @@ pub const HOVER_TAB_WINDOW_TITLE: &str = "Hover Tab";
 /// not pass the frontend's resolved local identity color.
 pub(crate) const DEFAULT_SHARE_COLOR: &str = "#f06cc9"; // --id-plum
 
-/// The hover tab is a fixed 40x40 right-edge rail button. Its native panel
-/// uses this size too; hiding DOM content alone is unsafe because transparent
-/// webview pixels still intercept clicks.
+/// The hover tab is a fixed 40x40 edge button. Its native panel uses this
+/// size too; hiding DOM content alone is unsafe because transparent webview
+/// pixels still intercept clicks.
 pub const HOVER_TAB_COMPACT_WIDTH: f64 = 40.0;
 pub const HOVER_TAB_COMPACT_HEIGHT: f64 = 40.0;
 /// The legacy/default rail position: centered on the source window.
 pub const DEFAULT_HOVER_TAB_VERTICAL_OFFSET: f64 = 0.5;
-/// Motion beyond this distance changes a primary click into a drag.
-pub const HOVER_TAB_DRAG_THRESHOLD_PX: f64 = 6.0;
+/// The canonical perimeter has four cardinal segments. Corners are deliberate
+/// transition gaps rather than draggable arcs; the scalar is normalized to
+/// `[0, 1)`.
+pub const HOVER_TAB_PERIMETER_SEGMENTS: f64 = 4.0;
+pub const HOVER_TAB_PERIMETER_SEGMENT: f64 = 1.0 / HOVER_TAB_PERIMETER_SEGMENTS;
+pub const HOVER_TAB_CORNER_INSET: f64 = 4.0;
+const HOVER_TAB_EDGE_ENDPOINT_EPSILON: f64 = 1e-12;
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+#[serde(transparent)]
+pub struct HoverTabPosition(pub f64);
+
+impl HoverTabPosition {
+    pub const fn new(value: f64) -> Self {
+        Self(value)
+    }
+
+    pub fn normalized(self) -> Self {
+        normalize_hover_tab_position(self.0)
+    }
+
+    pub const fn value(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for HoverTabPosition {
+    fn default() -> Self {
+        DEFAULT_HOVER_TAB_POSITION
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HoverTabSide {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+impl Default for HoverTabSide {
+    fn default() -> Self {
+        Self::Right
+    }
+}
+
+pub const DEFAULT_HOVER_TAB_SIDE: HoverTabSide = HoverTabSide::Right;
+/// The centered point on the default right edge, expressed on the perimeter.
+pub const DEFAULT_HOVER_TAB_POSITION: HoverTabPosition = HoverTabPosition(3.0 / 8.0);
 
 pub(crate) const HOVER_TAB_CURSOR_SLOP_X: f64 = 8.0;
 pub(crate) const HOVER_TAB_CURSOR_SLOP_Y: f64 = 8.0;
@@ -116,8 +186,15 @@ pub enum HoverTabDragPhase {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct HoverTabDragSession {
     pub(crate) window_id: u32,
-    pub(crate) original_offset: f64,
+    pub(crate) original_position: HoverTabPosition,
+    /// Native owner identity captured at pointer-down. Platform adapters use
+    /// this alongside the logical token to reject a reused native window id.
+    pub(crate) source_owner_pid: Option<u32>,
     pub(crate) generation: u64,
+    /// Client-issued identity for one pointer gesture. Window ids are stable
+    /// across a gesture, so this token prevents a late terminal command from
+    /// cancelling or committing a newer gesture on the same target.
+    pub(crate) drag_token: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -159,12 +236,21 @@ impl HoverTabRect {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HoverTabPresentation {
     pub window_id: u32,
+    pub position: HoverTabPosition,
+    pub side: HoverTabSide,
     pub attachment: HoverTabAttachment,
     pub rect: HoverTabRect,
 }
 
 pub(crate) const fn hover_tab_panel_logical_size() -> (f64, f64) {
     (HOVER_TAB_COMPACT_WIDTH, HOVER_TAB_COMPACT_HEIGHT)
+}
+
+/// Native placement must never derive geometry from a transient or malformed
+/// source frame. Coordinates may be negative on a virtual desktop, but the
+/// extents must be strictly positive.
+pub(crate) fn valid_hover_tab_frame(frame: WindowFrame) -> bool {
+    frame.width > 0 && frame.height > 0
 }
 
 fn clamp_origin(origin: f64, min: f64, max: f64) -> f64 {
@@ -175,8 +261,8 @@ fn clamp_origin(origin: f64, min: f64, max: f64) -> f64 {
     }
 }
 
-/// Clamp persisted or previewed rail positions. Non-finite values fail safe
-/// to the legacy center rather than poisoning native geometry.
+/// Clamp a legacy edge offset. Non-finite values fail safe to center rather
+/// than poisoning native geometry.
 pub fn normalize_hover_tab_vertical_offset(offset: f64) -> f64 {
     if offset.is_finite() {
         offset.clamp(0.0, 1.0)
@@ -185,60 +271,215 @@ pub fn normalize_hover_tab_vertical_offset(offset: f64) -> f64 {
     }
 }
 
-/// Map a normalized rail position to the source-relative top-left of the
-/// fixed square. The available travel is the source height minus the tab
-/// height, so Top/Bottom keep the whole 40px surface inside the source span
-/// before the monitor/work-area clamp is applied.
-pub fn hover_tab_vertical_origin(frame: WindowFrame, height: f64, offset: f64) -> f64 {
-    let travel = (frame.height as f64 - height).max(0.0);
-    frame.y as f64 + travel * normalize_hover_tab_vertical_offset(offset)
+/// Normalize a point on the closed perimeter. `1` wraps to `0`, so dragging
+/// across the top-left corner is continuous in both directions.
+pub fn normalize_hover_tab_position(position: f64) -> HoverTabPosition {
+    if position.is_finite() {
+        HoverTabPosition(position.rem_euclid(1.0))
+    } else {
+        DEFAULT_HOVER_TAB_POSITION
+    }
 }
 
-/// Pure, monitor-bounded layout for the fixed right-edge button at a supplied
-/// normalized vertical position. The tab sits outside a target when the
-/// adjacent 40px slot fits; otherwise it is inset into the target's right
-/// edge. No presentation state changes its geometry.
+/// Convert a side-plus-offset representation into the canonical cardinal
+/// perimeter scalar. Bottom and left retain the old visual direction so their
+/// persisted offsets remain intuitive.
+pub fn hover_tab_position_for_side_offset(side: HoverTabSide, offset: f64) -> HoverTabPosition {
+    let side_index = match side {
+        HoverTabSide::Top => 0.0,
+        HoverTabSide::Right => 1.0,
+        HoverTabSide::Bottom => 2.0,
+        HoverTabSide::Left => 3.0,
+    };
+    let offset = normalize_hover_tab_vertical_offset(offset);
+    let local = match side {
+        HoverTabSide::Bottom | HoverTabSide::Left => 1.0 - offset,
+        HoverTabSide::Top | HoverTabSide::Right => offset,
+    }
+    .clamp(
+        HOVER_TAB_EDGE_ENDPOINT_EPSILON,
+        1.0 - HOVER_TAB_EDGE_ENDPOINT_EPSILON,
+    );
+    normalize_hover_tab_position((side_index + local) * HOVER_TAB_PERIMETER_SEGMENT)
+}
+
+/// Return the cardinal side and legacy-compatible offset for a position. At a
+/// boundary the following side wins, making side changes deterministic.
+pub fn hover_tab_side_offset(position: HoverTabPosition) -> (HoverTabSide, f64) {
+    let scaled =
+        normalize_hover_tab_position(position.value()).value() * HOVER_TAB_PERIMETER_SEGMENTS;
+    let segment = scaled.floor().min(HOVER_TAB_PERIMETER_SEGMENTS - 1.0) as u8;
+    let local = (scaled - f64::from(segment)).clamp(0.0, 1.0);
+    match segment {
+        0 => (HoverTabSide::Top, local),
+        1 => (HoverTabSide::Right, local),
+        2 => (HoverTabSide::Bottom, 1.0 - local),
+        _ => (HoverTabSide::Left, 1.0 - local),
+    }
+}
+
+/// Map a normalized perimeter point to the center of a cardinal edge. The
+/// usable span excludes a small corner inset, so the tab never rests in a
+/// diagonal corner position.
+fn hover_tab_perimeter_center(
+    frame: WindowFrame,
+    position: HoverTabPosition,
+    tab_width: f64,
+    tab_height: f64,
+) -> (f64, f64) {
+    let left = frame.x as f64;
+    let top = frame.y as f64;
+    let right = left + frame.width as f64;
+    let bottom = top + frame.height as f64;
+    let scale = (tab_width / HOVER_TAB_COMPACT_WIDTH).max(tab_height / HOVER_TAB_COMPACT_HEIGHT);
+    let inset = HOVER_TAB_CORNER_INSET * scale;
+    let scaled = position.normalized().value() * HOVER_TAB_PERIMETER_SEGMENTS;
+    let segment = scaled.floor().min(HOVER_TAB_PERIMETER_SEGMENTS - 1.0) as u8;
+    let raw_local = (scaled - f64::from(segment)).clamp(0.0, 1.0);
+    let local = if raw_local <= HOVER_TAB_EDGE_ENDPOINT_EPSILON * 1000.0 {
+        0.0
+    } else if 1.0 - raw_local <= HOVER_TAB_EDGE_ENDPOINT_EPSILON * 1000.0 {
+        1.0
+    } else {
+        raw_local
+    };
+    let horizontal_travel = (right - left - tab_width - 2.0 * inset).max(0.0);
+    let vertical_travel = (bottom - top - tab_height - 2.0 * inset).max(0.0);
+    match segment {
+        0 => (
+            left + inset + tab_width / 2.0 + horizontal_travel * local,
+            top - tab_height / 2.0,
+        ),
+        1 => (
+            right + tab_width / 2.0,
+            top + inset + tab_height / 2.0 + vertical_travel * local,
+        ),
+        2 => (
+            right - inset - tab_width / 2.0 - horizontal_travel * local,
+            bottom + tab_height / 2.0,
+        ),
+        _ => (
+            left - tab_width / 2.0,
+            bottom - inset - tab_height / 2.0 - vertical_travel * local,
+        ),
+    }
+}
+
+/// Pure, monitor-bounded layout for a complete perimeter position. Clamping
+/// the resulting rectangle (rather than snapping its side) keeps the native
+/// and frontend projections aligned when a menu bar, dock, or taskbar blocks
+/// one side of the work area. Attachment describes whether work-area
+/// containment forced that rectangle inward.
+pub fn hover_tab_presentation_with_position_and_size(
+    window_id: u32,
+    frame: WindowFrame,
+    monitor: MonitorBounds,
+    position: HoverTabPosition,
+    width: f64,
+    height: f64,
+) -> HoverTabPresentation {
+    let width = if width.is_finite() && width > 0.0 {
+        width
+    } else {
+        HOVER_TAB_COMPACT_WIDTH
+    };
+    let height = if height.is_finite() && height > 0.0 {
+        height
+    } else {
+        HOVER_TAB_COMPACT_HEIGHT
+    };
+    let position = position.normalized();
+    let (center_x, center_y) = hover_tab_perimeter_center(frame, position, width, height);
+    let raw = HoverTabRect {
+        x: center_x - width / 2.0,
+        y: center_y - height / 2.0,
+        width,
+        height,
+    };
+    let rect = HoverTabRect {
+        x: clamp_origin(
+            raw.x,
+            monitor.left,
+            (monitor.right - width).max(monitor.left),
+        ),
+        y: clamp_origin(
+            raw.y,
+            monitor.top,
+            (monitor.bottom - height).max(monitor.top),
+        ),
+        width,
+        height,
+    };
+    let (side, _) = hover_tab_side_offset(position);
+    // `Inset` means the work area pushed the tab back INTO the window across
+    // the edge it hangs off -- that is the only clamp the frontend mirrors
+    // (radii/shadow flip along the side axis). A clamp along the edge's own
+    // length (a right-edge tab nudged up by the taskbar) leaves the tab
+    // physically outside the window and must stay `Outside`.
+    let clamped = |actual: f64, wanted: f64| (actual - wanted).abs() > f64::EPSILON;
+    let pushed_across_edge = match side {
+        HoverTabSide::Top | HoverTabSide::Bottom => clamped(rect.y, raw.y),
+        HoverTabSide::Left | HoverTabSide::Right => clamped(rect.x, raw.x),
+    };
+    let attachment = if pushed_across_edge {
+        HoverTabAttachment::Inset
+    } else {
+        HoverTabAttachment::Outside
+    };
+    HoverTabPresentation {
+        window_id,
+        position,
+        side,
+        attachment,
+        rect,
+    }
+}
+
+pub fn hover_tab_presentation_with_position(
+    window_id: u32,
+    frame: WindowFrame,
+    monitor: MonitorBounds,
+    position: HoverTabPosition,
+) -> HoverTabPresentation {
+    hover_tab_presentation_with_position_and_size(
+        window_id,
+        frame,
+        monitor,
+        position,
+        HOVER_TAB_COMPACT_WIDTH,
+        HOVER_TAB_COMPACT_HEIGHT,
+    )
+}
+
+pub fn hover_tab_presentation_with_side_offset(
+    window_id: u32,
+    frame: WindowFrame,
+    monitor: MonitorBounds,
+    side: HoverTabSide,
+    offset: f64,
+) -> HoverTabPresentation {
+    hover_tab_presentation_with_position(
+        window_id,
+        frame,
+        monitor,
+        hover_tab_position_for_side_offset(side, offset),
+    )
+}
+
+/// Right-edge compatibility façade retained for existing callers.
 pub fn hover_tab_presentation_with_offset(
     window_id: u32,
     frame: WindowFrame,
     monitor: MonitorBounds,
     vertical_offset: f64,
 ) -> HoverTabPresentation {
-    let width = HOVER_TAB_COMPACT_WIDTH;
-    let height = HOVER_TAB_COMPACT_HEIGHT;
-    let frame_right = frame.x as f64 + frame.width as f64;
-    let outside = frame_right >= monitor.left && frame_right + width <= monitor.right;
-    let attachment = if outside {
-        HoverTabAttachment::Outside
-    } else {
-        HoverTabAttachment::Inset
-    };
-    let raw_x = if outside {
-        frame_right
-    } else {
-        frame_right - width
-    };
-    let x = clamp_origin(
-        raw_x,
-        monitor.left,
-        (monitor.right - width).max(monitor.left),
-    );
-    let raw_y = hover_tab_vertical_origin(frame, height, vertical_offset);
-    let y = clamp_origin(
-        raw_y,
-        monitor.top,
-        (monitor.bottom - height).max(monitor.top),
-    );
-    HoverTabPresentation {
+    hover_tab_presentation_with_side_offset(
         window_id,
-        attachment,
-        rect: HoverTabRect {
-            x,
-            y,
-            width,
-            height,
-        },
-    }
+        frame,
+        monitor,
+        DEFAULT_HOVER_TAB_SIDE,
+        vertical_offset,
+    )
 }
 
 /// Center-compatible façade retained for existing callers and fixtures.
@@ -247,7 +488,7 @@ pub fn hover_tab_presentation(
     frame: WindowFrame,
     monitor: MonitorBounds,
 ) -> HoverTabPresentation {
-    hover_tab_presentation_with_offset(window_id, frame, monitor, DEFAULT_HOVER_TAB_VERTICAL_OFFSET)
+    hover_tab_presentation_with_position(window_id, frame, monitor, DEFAULT_HOVER_TAB_POSITION)
 }
 
 // =============================================================================
@@ -347,6 +588,10 @@ static LAST_HOVER_UPDATE: Mutex<Option<HoverTabUpdate>> = Mutex::new(None);
 static CURRENT_HOVER_PRESENTATION: Mutex<Option<HoverTabPresentation>> = Mutex::new(None);
 static LAST_SHARE_COLOR: Mutex<Option<String>> = Mutex::new(None);
 static HOVER_TAB_PRESENTATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Serializes generation reads with payload publication. The atomic is useful
+/// for cheap queued-closure checks; this lock closes the final check/write
+/// window for native payload mutation.
+static HOVER_TAB_PRESENTATION_LOCK: Mutex<()> = Mutex::new(());
 static HOVER_TAB_DRAG_SESSION: Mutex<Option<HoverTabDragSession>> = Mutex::new(None);
 
 pub(crate) fn with_share_state<R>(f: impl FnOnce(&mut ShareState) -> R) -> R {
@@ -368,9 +613,11 @@ pub(crate) fn is_shared(app: &AppHandle, window_id: u32) -> bool {
     with_share_state(|s| s.shared.contains(&window_id))
 }
 
-pub(crate) fn set_last_hover_update(update: Option<HoverTabUpdate>) {
+fn set_last_hover_update_unlocked(update: Option<HoverTabUpdate>) {
     let presentation = update.as_ref().map(|update| HoverTabPresentation {
         window_id: update.window_id,
+        position: update.perimeter_position,
+        side: update.side,
         attachment: update.attachment,
         rect: HoverTabRect {
             x: update.tab_x,
@@ -381,6 +628,26 @@ pub(crate) fn set_last_hover_update(update: Option<HoverTabUpdate>) {
     });
     *CURRENT_HOVER_PRESENTATION.lock_unpoisoned() = presentation;
     *LAST_HOVER_UPDATE.lock_unpoisoned() = update;
+}
+
+pub(crate) fn set_last_hover_update(update: Option<HoverTabUpdate>) {
+    let _guard = HOVER_TAB_PRESENTATION_LOCK.lock_unpoisoned();
+    set_last_hover_update_unlocked(update);
+}
+
+/// Publish a payload only while its native presentation epoch is still
+/// current. This closes the check-then-write window around delayed platform
+/// callbacks and lifecycle teardown.
+pub(crate) fn set_last_hover_update_if_generation(
+    update: Option<HoverTabUpdate>,
+    generation: u64,
+) -> bool {
+    let _guard = HOVER_TAB_PRESENTATION_LOCK.lock_unpoisoned();
+    if HOVER_TAB_PRESENTATION_GENERATION.load(Ordering::Acquire) != generation {
+        return false;
+    }
+    set_last_hover_update_unlocked(update);
+    true
 }
 
 pub(crate) fn current_hover_presentation() -> Option<HoverTabPresentation> {
@@ -395,6 +662,7 @@ pub(crate) fn last_hover_update() -> Option<HoverTabUpdate> {
 /// check this value before mutating or revealing the singleton panel, because
 /// a hide or a newer target can overtake an older main-thread dispatch.
 pub(crate) fn begin_hover_tab_presentation() -> u64 {
+    let _guard = HOVER_TAB_PRESENTATION_LOCK.lock_unpoisoned();
     HOVER_TAB_PRESENTATION_GENERATION
         .fetch_add(1, Ordering::AcqRel)
         .wrapping_add(1)
@@ -407,15 +675,37 @@ pub(crate) fn hover_tab_presentation_generation() -> u64 {
 /// Begin one drag against the currently presented target. Incrementing the
 /// native presentation generation invalidates queued placement from before the
 /// gesture; platform adapters still validate the target/token before moving.
-pub(crate) fn begin_hover_tab_drag(window_id: u32) -> Result<HoverTabDragSession, String> {
+pub(crate) fn begin_hover_tab_drag(
+    window_id: u32,
+    drag_token: u64,
+    source_owner_pid: Option<u32>,
+) -> Result<HoverTabDragSession, String> {
+    // Read the current presentation before taking the drag lock. Payload
+    // publication takes presentation -> payload locks, so retaining the
+    // reverse payload -> drag -> presentation order here would deadlock.
+    let presented_update = LAST_HOVER_UPDATE.lock_unpoisoned().clone();
     let mut guard = HOVER_TAB_DRAG_SESSION.lock_unpoisoned();
+    let mut superseded_original_position = None;
     if let Some(active) = *guard {
-        if active.window_id == window_id {
+        if active.window_id == window_id && active.drag_token == drag_token {
             return Ok(active);
         }
-        return Err("another hover-tab drag is already active".to_string());
+        if active.window_id != window_id {
+            return Err("another hover-tab drag is already active".to_string());
+        }
+        // Same window, different token: one hover-tab webview owns one
+        // gesture at a time, so the older session is orphaned (the webview
+        // reloaded mid-drag and its token counter restarted, or its Cancel
+        // was lost). Adopt it rather than refusing forever: keep the ORIGINAL
+        // pre-drag position so a later cancel still restores what the user
+        // started from, and re-token under the live gesture.
+        log::warn!(
+            "hover_core: superseding orphaned hover-tab drag window={window_id} old_token={} new_token={drag_token}",
+            active.drag_token
+        );
+        superseded_original_position = Some(active.original_position);
     }
-    let Some(update) = LAST_HOVER_UPDATE.lock_unpoisoned().clone() else {
+    let Some(update) = presented_update else {
         return Err("hover-tab target is no longer presented".to_string());
     };
     if update.window_id != window_id {
@@ -423,11 +713,34 @@ pub(crate) fn begin_hover_tab_drag(window_id: u32) -> Result<HoverTabDragSession
     }
     let session = HoverTabDragSession {
         window_id,
-        original_offset: crate::share_priority::current_hover_tab_vertical_offset(),
+        original_position: superseded_original_position
+            .unwrap_or_else(crate::share_priority::current_hover_tab_position),
+        source_owner_pid,
         generation: begin_hover_tab_presentation(),
+        drag_token,
     };
     *guard = Some(session);
     Ok(session)
+}
+
+/// Resolve the session a phase command (Update/Cancel/Commit) may act on.
+/// `Ok(None)` is only ever returned for an UNTOKENED command with no drag in
+/// flight (a native-menu preset); a tokened lookup either matches or errs.
+/// Shared by both platform adapters so the token policy cannot drift.
+pub(crate) fn drag_session_for_command(
+    window_id: u32,
+    drag_token: Option<u64>,
+) -> Result<Option<HoverTabDragSession>, String> {
+    let active = active_hover_tab_drag(window_id);
+    match (active, drag_token) {
+        (Some(session), Some(token)) if session.drag_token == token => Ok(Some(session)),
+        (Some(_), _) => Err("hover-tab drag token is stale".to_string()),
+        (None, Some(_)) => Err("hover-tab drag is no longer active".to_string()),
+        (None, None) if any_hover_tab_drag_active() => {
+            Err("another hover-tab drag is already active".to_string())
+        }
+        (None, None) => Ok(None),
+    }
 }
 
 pub(crate) fn active_hover_tab_drag(window_id: u32) -> Option<HoverTabDragSession> {
@@ -438,11 +751,25 @@ pub(crate) fn active_hover_tab_drag(window_id: u32) -> Option<HoverTabDragSessio
         .filter(|session| session.window_id == window_id)
 }
 
-pub(crate) fn finish_hover_tab_drag(window_id: u32) -> Option<HoverTabDragSession> {
+pub(crate) fn active_hover_tab_drag_for_token(
+    window_id: u32,
+    drag_token: u64,
+) -> Option<HoverTabDragSession> {
+    active_hover_tab_drag(window_id).filter(|session| session.drag_token == drag_token)
+}
+
+pub(crate) fn any_hover_tab_drag_active() -> bool {
+    HOVER_TAB_DRAG_SESSION.lock_unpoisoned().is_some()
+}
+
+pub(crate) fn finish_hover_tab_drag_for_token(
+    window_id: u32,
+    drag_token: u64,
+) -> Option<HoverTabDragSession> {
     let mut guard = HOVER_TAB_DRAG_SESSION.lock_unpoisoned();
     if guard
         .as_ref()
-        .is_some_and(|session| session.window_id == window_id)
+        .is_some_and(|session| session.window_id == window_id && session.drag_token == drag_token)
     {
         guard.take()
     } else {
@@ -730,6 +1057,160 @@ pub(crate) fn share_color_or_default(color: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that touch the process-global drag session/presentation.
+    static HOVER_TAB_DRAG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn presented(window_id: u32) {
+        set_last_hover_update(Some(HoverTabUpdate {
+            window_id,
+            frame: WindowFrame {
+                x: 100,
+                y: 100,
+                width: 640,
+                height: 480,
+            },
+            source_owner_pid: Some(4242),
+            tab_x: 0.0,
+            tab_y: 0.0,
+            perimeter_position: DEFAULT_HOVER_TAB_POSITION,
+            side: HoverTabSide::Right,
+            attachment: HoverTabAttachment::Outside,
+            vertical_offset: 0.5,
+            shared: false,
+            display_like: false,
+            presentation_generation: 0,
+        }));
+    }
+
+    #[test]
+    fn same_window_begin_with_a_new_token_supersedes_the_orphaned_session() {
+        let _guard = HOVER_TAB_DRAG_TEST_LOCK.lock_unpoisoned();
+        clear_hover_tab_drag();
+        presented(7);
+        let first = begin_hover_tab_drag(7, 11, Some(4242)).expect("first begin");
+        // The webview reloaded mid-drag: its token counter restarted and no
+        // Cancel ever arrived. The next gesture must not be refused forever.
+        let second = begin_hover_tab_drag(7, 1, Some(4242)).expect("superseding begin");
+        assert_eq!(second.drag_token, 1);
+        assert_eq!(
+            second.original_position, first.original_position,
+            "a later cancel must restore what the user started from, not the mid-drag preview"
+        );
+        assert_eq!(active_hover_tab_drag(7).map(|s| s.drag_token), Some(1));
+        // A different window is still refused while a drag is in flight.
+        assert!(begin_hover_tab_drag(8, 2, Some(4242)).is_err());
+        clear_hover_tab_drag();
+    }
+
+    #[test]
+    fn drag_session_for_command_policy_is_shared_and_never_yields_none_for_a_token() {
+        let _guard = HOVER_TAB_DRAG_TEST_LOCK.lock_unpoisoned();
+        clear_hover_tab_drag();
+        presented(9);
+        assert_eq!(
+            drag_session_for_command(9, None).unwrap(),
+            None,
+            "untokened preset, idle"
+        );
+        assert!(
+            drag_session_for_command(9, Some(5)).is_err(),
+            "tokened, no drag"
+        );
+        let session = begin_hover_tab_drag(9, 5, None).unwrap();
+        assert_eq!(drag_session_for_command(9, Some(5)).unwrap(), Some(session));
+        assert!(drag_session_for_command(9, Some(6)).is_err(), "stale token");
+        assert!(
+            drag_session_for_command(9, None).is_err(),
+            "untokened during a drag"
+        );
+        clear_hover_tab_drag();
+    }
+
+    #[test]
+    fn attachment_is_inset_only_when_clamped_across_the_tab_edge() {
+        let frame = WindowFrame {
+            x: 300,
+            y: 200,
+            width: 500,
+            height: 700,
+        };
+        // 1200x800 work area: the window's bottom (900) hangs 100px below it.
+        let monitor = MonitorBounds::new(0.0, 0.0, 1200.0, 800.0);
+        // Right edge, bottom end: the taskbar clamps Y only. The tab is still
+        // physically outside the window's right edge -> Outside.
+        let bottom_right = hover_tab_presentation_with_position(
+            42,
+            frame,
+            monitor,
+            hover_tab_position_for_side_offset(HoverTabSide::Right, 1.0),
+        );
+        assert_eq!(bottom_right.side, HoverTabSide::Right);
+        assert_eq!(bottom_right.attachment, HoverTabAttachment::Outside);
+        // Right edge on a window flush with the work area's right side: the
+        // X clamp pushes the tab back INTO the window -> Inset.
+        let flush = WindowFrame {
+            x: 700,
+            y: 200,
+            width: 500,
+            height: 300,
+        };
+        let pushed = hover_tab_presentation_with_position(
+            42,
+            flush,
+            monitor,
+            hover_tab_position_for_side_offset(HoverTabSide::Right, 0.5),
+        );
+        assert_eq!(pushed.attachment, HoverTabAttachment::Inset);
+        // Top edge on a window flush with the top: the Y clamp is across the
+        // edge -> Inset; an X-only clamp on a top tab would not be.
+        let top = WindowFrame {
+            x: 300,
+            y: 0,
+            width: 500,
+            height: 300,
+        };
+        let top_pushed = hover_tab_presentation_with_position(
+            42,
+            top,
+            monitor,
+            hover_tab_position_for_side_offset(HoverTabSide::Top, 0.5),
+        );
+        assert_eq!(top_pushed.attachment, HoverTabAttachment::Inset);
+    }
+
+    #[test]
+    fn same_presentation_ignores_only_the_generation_counter() {
+        let base = HoverTabUpdate {
+            window_id: 1,
+            frame: WindowFrame {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            source_owner_pid: None,
+            tab_x: 10.0,
+            tab_y: 20.0,
+            perimeter_position: DEFAULT_HOVER_TAB_POSITION,
+            side: HoverTabSide::Right,
+            attachment: HoverTabAttachment::Outside,
+            vertical_offset: 0.5,
+            shared: false,
+            display_like: false,
+            presentation_generation: 3,
+        };
+        let mut bumped = base.clone();
+        bumped.presentation_generation = 4;
+        assert!(base.same_presentation_as(&bumped));
+        let mut moved = bumped.clone();
+        moved.tab_y = 21.0;
+        assert!(!base.same_presentation_as(&moved));
+        let mut shared = bumped.clone();
+        shared.shared = true;
+        assert!(!base.same_presentation_as(&shared));
+    }
 
     #[test]
     fn compact_panel_is_the_only_native_size() {
@@ -739,7 +1220,29 @@ mod tests {
     }
 
     #[test]
-    fn attachment_serializes_as_outside_or_inset() {
+    fn invalid_source_frames_are_rejected_before_native_geometry() {
+        assert!(!valid_hover_tab_frame(WindowFrame {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 100,
+        }));
+        assert!(!valid_hover_tab_frame(WindowFrame {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: -1,
+        }));
+        assert!(valid_hover_tab_frame(WindowFrame {
+            x: i32::MIN,
+            y: i32::MIN,
+            width: 1,
+            height: 1,
+        }));
+    }
+
+    #[test]
+    fn attachment_and_side_serialize_as_wire_strings() {
         assert_eq!(
             serde_json::to_value(HoverTabAttachment::Outside).unwrap(),
             "outside"
@@ -748,6 +1251,13 @@ mod tests {
             serde_json::to_value(HoverTabAttachment::Inset).unwrap(),
             "inset"
         );
+        assert_eq!(serde_json::to_value(HoverTabSide::Top).unwrap(), "top");
+        assert_eq!(serde_json::to_value(HoverTabSide::Right).unwrap(), "right");
+        assert_eq!(
+            serde_json::to_value(HoverTabSide::Bottom).unwrap(),
+            "bottom"
+        );
+        assert_eq!(serde_json::to_value(HoverTabSide::Left).unwrap(), "left");
     }
 
     #[test]
@@ -784,10 +1294,244 @@ mod tests {
         let top = hover_tab_presentation_with_offset(7, frame, monitor, 0.0);
         let center = hover_tab_presentation_with_offset(7, frame, monitor, 0.5);
         let bottom = hover_tab_presentation_with_offset(7, frame, monitor, 1.0);
-        assert_eq!(top.rect.y, 100.0);
+        assert_eq!(top.rect.y, 104.0);
         assert_eq!(center.rect.y, 230.0);
-        assert_eq!(bottom.rect.y, 360.0);
+        assert_eq!(bottom.rect.y, 356.0);
         assert!(top.rect.y < center.rect.y && center.rect.y < bottom.rect.y);
+    }
+
+    #[test]
+    fn all_four_sides_share_one_normalized_edge_offset() {
+        let frame = WindowFrame {
+            x: 300,
+            y: 200,
+            width: 500,
+            height: 300,
+        };
+        let monitor = MonitorBounds::new(0.0, 0.0, 1200.0, 800.0);
+
+        let top =
+            hover_tab_presentation_with_side_offset(7, frame, monitor, HoverTabSide::Top, 0.0);
+        let right =
+            hover_tab_presentation_with_side_offset(7, frame, monitor, HoverTabSide::Right, 1.0);
+        let bottom =
+            hover_tab_presentation_with_side_offset(7, frame, monitor, HoverTabSide::Bottom, 1.0);
+        let left =
+            hover_tab_presentation_with_side_offset(7, frame, monitor, HoverTabSide::Left, 0.0);
+
+        assert_eq!(top.side, HoverTabSide::Top);
+        assert_eq!(
+            top.rect,
+            HoverTabRect {
+                x: 304.0,
+                y: 160.0,
+                width: 40.0,
+                height: 40.0
+            }
+        );
+        assert_eq!(right.side, HoverTabSide::Right);
+        assert_eq!(
+            right.rect,
+            HoverTabRect {
+                x: 800.0,
+                y: 456.0,
+                width: 40.0,
+                height: 40.0
+            }
+        );
+        assert_eq!(bottom.side, HoverTabSide::Bottom);
+        assert_eq!(
+            bottom.rect,
+            HoverTabRect {
+                x: 756.0,
+                y: 500.0,
+                width: 40.0,
+                height: 40.0
+            }
+        );
+        assert_eq!(left.side, HoverTabSide::Left);
+        assert_eq!(
+            left.rect,
+            HoverTabRect {
+                x: 260.0,
+                y: 204.0,
+                width: 40.0,
+                height: 40.0
+            }
+        );
+        for presentation in [top, right, bottom, left] {
+            assert_eq!(presentation.attachment, HoverTabAttachment::Outside);
+        }
+    }
+
+    #[test]
+    fn shared_geometry_fixture_matches_native_perimeter_centers() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            frame: WindowFrame,
+            monitor: MonitorFixture,
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct MonitorFixture {
+            left: f64,
+            top: f64,
+            right: f64,
+            bottom: f64,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            position: f64,
+            center: Center,
+        }
+        #[derive(serde::Deserialize)]
+        struct Center {
+            x: f64,
+            y: f64,
+        }
+
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("../../tests/fixtures/hover-tab-geometry.json"))
+                .unwrap();
+        let monitor = MonitorBounds::new(
+            fixture.monitor.left,
+            fixture.monitor.top,
+            fixture.monitor.right,
+            fixture.monitor.bottom,
+        );
+        for case in fixture.cases {
+            let presentation = hover_tab_presentation_with_position(
+                7,
+                fixture.frame,
+                monitor,
+                HoverTabPosition(case.position),
+            );
+            assert!((presentation.rect.x + 20.0 - case.center.x).abs() < 1e-9);
+            assert!((presentation.rect.y + 20.0 - case.center.y).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn cardinal_perimeter_stops_and_changes_side_at_all_four_corners() {
+        let frame = WindowFrame {
+            x: 300,
+            y: 200,
+            width: 500,
+            height: 300,
+        };
+        let monitor = MonitorBounds::new(0.0, 0.0, 1200.0, 800.0);
+        let epsilon = 1e-7;
+        for (boundary, before_side, after_side) in [
+            (1.0 / 4.0, HoverTabSide::Top, HoverTabSide::Right),
+            (1.0 / 2.0, HoverTabSide::Right, HoverTabSide::Bottom),
+            (3.0 / 4.0, HoverTabSide::Bottom, HoverTabSide::Left),
+            (0.0, HoverTabSide::Left, HoverTabSide::Top),
+        ] {
+            let before_position = if boundary == 0.0 {
+                1.0 - epsilon
+            } else {
+                boundary - epsilon
+            };
+            let after_position = boundary + epsilon;
+            let before = hover_tab_presentation_with_position(
+                7,
+                frame,
+                monitor,
+                HoverTabPosition(before_position),
+            );
+            let after = hover_tab_presentation_with_position(
+                7,
+                frame,
+                monitor,
+                HoverTabPosition(after_position),
+            );
+            assert_eq!(before.side, before_side);
+            assert_eq!(after.side, after_side);
+            assert!(before.rect.x.is_finite() && after.rect.x.is_finite());
+            assert!(before.rect.y.is_finite() && after.rect.y.is_finite());
+        }
+    }
+
+    #[test]
+    fn cardinal_edges_remain_outside_when_work_area_has_room() {
+        let frame = WindowFrame {
+            x: 300,
+            y: 200,
+            width: 500,
+            height: 300,
+        };
+        let monitor = MonitorBounds::new(0.0, 0.0, 1200.0, 800.0);
+        for position in [
+            0.0,
+            1.0 / 8.0,
+            1.0 / 4.0,
+            3.0 / 8.0,
+            1.0 / 2.0,
+            5.0 / 8.0,
+            3.0 / 4.0,
+            7.0 / 8.0,
+        ] {
+            let presentation =
+                hover_tab_presentation_with_position(7, frame, monitor, HoverTabPosition(position));
+            assert_eq!(presentation.attachment, HoverTabAttachment::Outside);
+        }
+    }
+
+    #[test]
+    fn canonical_position_preserves_legacy_edge_directions() {
+        let frame = WindowFrame {
+            x: 300,
+            y: 200,
+            width: 500,
+            height: 300,
+        };
+        let monitor = MonitorBounds::new(0.0, 0.0, 1200.0, 800.0);
+        assert_eq!(
+            hover_tab_presentation_with_side_offset(7, frame, monitor, HoverTabSide::Bottom, 1.0)
+                .rect
+                .x,
+            756.0
+        );
+        assert_eq!(
+            hover_tab_presentation_with_side_offset(7, frame, monitor, HoverTabSide::Left, 0.0)
+                .rect
+                .y,
+            204.0
+        );
+        assert_eq!(
+            hover_tab_side_offset(HoverTabPosition(4.0 / 8.0)),
+            (HoverTabSide::Bottom, 1.0)
+        );
+        assert_eq!(
+            hover_tab_side_offset(HoverTabPosition(6.0 / 8.0)),
+            (HoverTabSide::Left, 1.0)
+        );
+    }
+
+    #[test]
+    fn each_side_insets_when_its_adjacent_work_area_slot_does_not_fit() {
+        let frame = WindowFrame {
+            x: 0,
+            y: 0,
+            width: 1200,
+            height: 800,
+        };
+        let monitor = MonitorBounds::new(0.0, 0.0, 1200.0, 800.0);
+        for side in [
+            HoverTabSide::Top,
+            HoverTabSide::Right,
+            HoverTabSide::Bottom,
+            HoverTabSide::Left,
+        ] {
+            let presentation =
+                hover_tab_presentation_with_side_offset(7, frame, monitor, side, 0.5);
+            assert_eq!(presentation.side, side);
+            assert_eq!(presentation.attachment, HoverTabAttachment::Inset);
+            assert!(presentation.rect.x >= monitor.left);
+            assert!(presentation.rect.y >= monitor.top);
+            assert!(presentation.rect.right() <= monitor.right);
+            assert!(presentation.rect.bottom() <= monitor.bottom);
+        }
     }
 
     #[test]

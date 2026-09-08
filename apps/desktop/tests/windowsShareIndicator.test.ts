@@ -182,6 +182,10 @@ test('the existing sharer overlay is the single local Petal indicator and is fai
   assert.match(pointerSource, /pointer-events:\s*none/);
   assert.match(pointerSource, /sharerSurface && page\.url\.searchParams\.get\('shareBorder'\)/);
   assert.match(sessionSource, /request_borderless_access\(\)/);
+  assert.match(
+    sessionSource,
+    /let borderless_access = if is_region_share \|\| target\.kind\(\) == TargetKind::Display/
+  );
   assert.match(sessionSource, /acquire_selector_capture_exclusion\(&app, token\)/);
   assert.match(sessionSource, /create_share_overlay\(/);
   assert.match(sessionSource, /close_share_overlay\(&app, token\)/);
@@ -315,7 +319,9 @@ test('the hover-tab smoke is a gated native red-capable positive-control loop', 
   assert.match(hoverTabSmoke, /8ms/);
   assert.match(hoverTabSmoke, /detectorWentRed/);
   assert.match(hoverTabSmoke, /pickerDecision/);
-  assert.match(hoverTabSmoke, /expected .*right-center square/);
+  assert.match(hoverTabSmoke, /Normalize-HoverTabSide/);
+  assert.match(hoverTabSmoke, /Get-ExpectedPerimeterFrame/);
+  assert.match(hoverTabSmoke, /unified-four-edge-hover-tab/);
   assert.match(hoverTabSmoke, /40x40 tab after dwell/);
   assert.match(hoverTabSmoke, /Right-click opens the native/);
   assert.match(hoverTabSmoke, /RightClickAt/);
@@ -348,7 +354,8 @@ test('the hover-tab smoke is a gated native red-capable positive-control loop', 
   assert.match(hoverTabSmoke, /Invoke-OcclusionExercise/);
   assert.match(hoverTabSmoke, /Invoke-NativeQualityPreset/);
   assert.match(hoverTabSmoke, /Invoke-NativePositionPreset/);
-  assert.match(hoverTabSmoke, /hoverTabVerticalOffset/);
+  assert.match(hoverTabSmoke, /hoverTabPerimeterPosition/);
+  assert.match(hoverTabSmoke, /cached canonical perimeter value/);
   assert.match(hoverTabSmoke, /Select-NativeMenuEntry/);
   assert.match(hoverTabSmoke, /share-priority: saved/);
   assert.match(hoverTabSmoke, /Invoke-ActiveShareMenuActions/);

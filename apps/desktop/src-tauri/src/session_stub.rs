@@ -499,10 +499,7 @@ impl SessionState {
     pub(crate) fn active_window_control_envelope(
         &self,
         window_id: u32,
-    ) -> Option<(
-        crate::remote_control_core::RemoteControlTargetKind,
-        String,
-    )> {
+    ) -> Option<(crate::remote_control_core::RemoteControlTargetKind, String)> {
         let joined = self.joined.lock_unpoisoned();
         let share = joined
             .as_ref()?
@@ -1081,7 +1078,15 @@ pub(crate) async fn start_share_token(
     // WGC startup. Supported browser targets are inspected by the cancellable
     // background refresh after the share is established.
     let source_url: Option<String> = None;
-    let borderless_access = crate::windows_screen_capture::request_borderless_access().await;
+    // Window capture always keeps the native WGC gold border, including for
+    // elevated targets. Petal must not request borderless consent merely to
+    // replace a system indicator; custom compositor chrome remains available
+    // for drawing/telepointer state but is never the capture-indicator authority.
+    let borderless_access = if is_region_share || target.kind() == TargetKind::Display {
+        crate::windows_screen_capture::request_borderless_access().await
+    } else {
+        crate::windows_screen_capture::BorderlessAccess::Denied
+    };
     let kind = if is_region_share {
         SharedSourceKind::DisplayRegion
     } else {
@@ -1752,6 +1757,13 @@ async fn stop_share(
     pump.abort();
     if let Some(url_refresh) = url_refresh {
         url_refresh.abort();
+    }
+    // Cancel hover placement before retiring the source. This releases the
+    // follower's drag freeze and restores the committed position before any
+    // replacement token can be published.
+    #[cfg(target_os = "windows")]
+    if crate::hover_core::active_hover_tab_drag(token).is_some() {
+        crate::windows_hover::cancel_drag_for_lifecycle();
     }
     // Retire input authority before either teardown await. A replay task may
     // already be queued; the Windows adapter re-resolves this opaque token

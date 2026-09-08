@@ -80,8 +80,8 @@ Roughly `platform → capture/transport → session → chrome → diagnostics`.
   - Camera publish start/stop lives beside it in the top-level
     `camera_session.rs` (every camera Tauri command).
 - **Native chrome / UI surfaces** — `hover_core.rs` (the cross-platform
-  hover-tab policy: the fixed 40×40 rail geometry, 6px drag threshold,
-  vertical-offset presets, share-state model) + `hover_tab.rs` (the macOS
+  hover-tab policy: fixed 40×40 perimeter geometry, 6px drag threshold,
+  cardinal-edge placement, and share-state model) + `hover_tab.rs` (the macOS
   `NSPanel` adapter: native-options hold and cursor tracker; Windows uses
   `windows_hover.rs`), `share_border.rs` (macOS identity border on a shared
   window), `share_overlay.rs` / `share_notice.rs` (the sharer-side overlay
@@ -157,9 +157,10 @@ and overlay surfaces described below.
   `SWP_NOACTIVATE`; the route owns typed ordinary/escalation queueing and
   fail-closed timeout handling.
 - `windows_share_overlay.rs` — the single Windows WinEvent/message-pump
-  follower for the local sharer border, sharer telepointer, and idle hover tab.
-  It reads one DWM-visible physical source frame per reconcile; the border uses
-  that full frame while the tab applies the persisted/previewed normalized rail
+  follower for the local sharer border, sharer telepointer, and ambient hover
+  tab. It reads one DWM-visible physical source
+  frame per reconcile; the border uses that full frame while the selection
+  surface applies the persisted/previewed normalized rail
   offset and projects into the current monitor `rcWork`, hiding fail-closed if
   no safe scaled 40×40 rectangle or native placement exists. Ordinary sources
   use a non-topmost tab inserted immediately above the source, so unrelated
@@ -248,7 +249,7 @@ Windows), `updater.rs` (Mach-O guard on macOS, NSIS PE guard on Windows),
 | Label | Platform/kind | Purpose |
 |---|---|---|
 | `main` | macOS/Windows `WebviewWindow` | the SPA: onboarding, `/main`, `/meeting/[room]`, `/settings` |
-| `hover-tab` | macOS `NSPanel`; Windows non-topmost `WebviewWindow` | fixed 40×40 right-edge Share/Stop rail; Windows inserts it immediately above the source so unrelated foreground windows occlude it naturally; pointer drag and native Top/Center/Bottom presets change one global vertical offset; right-click and keyboard shortcuts open the native options menu |
+| `hover-tab` | macOS `NSPanel`; Windows non-topmost `WebviewWindow` | fixed 40×40 perimeter Share/Stop surface; Windows inserts it immediately above the source so unrelated foreground windows occlude it naturally; pointer drag and native Top/Right/Bottom/Left presets select one global perimeter position; right-click and keyboard shortcuts open the native options menu |
 | `share-border` | macOS `NSPanel` | macOS identity border drawn around a window you're sharing |
 | `share-notice` | macOS/Windows `WebviewWindow` | the sharer-side "you are sharing" notice |
 | `control-consent` | macOS `NSPanel`; Windows `WebviewWindow` | the queued, non-activating remote-control consent prompt (ordinary control and full-control escalation) |
@@ -277,26 +278,22 @@ and pointer webviews, and the local sharer overlay. See
 `docs/WINDOWS_NATIVE_SURFACE_AUDIT.md` for the per-surface policy
 matrix and ranked follow-ups.
 
-### Hover-tab rail policy
+### Ambient hover-tab policy
 
-The hover tab is a single native 40×40 surface. Its horizontal attachment remains
-at the source window's right edge: it uses the outside slot when the platform
-work area permits it and otherwise insets into the right edge. A normalized
-vertical offset (`0` top, `0.5` center, `1` bottom) is shared by Windows and
-macOS, stored in `share-preferences.json`, and applied source-relatively before
-platform work-area clamping. Pointer motion below 6px remains Share/Stop;
-movement at or above the threshold enters a drag, freezes the follower,
-previews through the native adapter, and commits only on pointer-up.
-Escape, pointer cancellation, lost capture, source loss, and room leave restore
-the prior offset. On Windows the hover tab is never globally topmost: each
-native placement uses the source's normal/topmost z-order band and inserts the
-tab immediately above that source, so a foreground window covering the tab
-naturally occludes it. Accepted foreground/top-level reorder events queue the
-coalesced tracker to reconcile this adjacency; the tab's own reorder event is
-ignored. Anchor or placement failure hides the tab fail-closed.
-Top/Center/Bottom are keyboard-accessible entries in the existing system-native
-menu; Petal View's label-addressed Options menu does not include hover-tab
-placement entries.
+During a meeting, eligible windows expose an ambient fixed 40×40 Share/Stop tab
+at the source window's edge. The tab can be dragged along the top, right,
+bottom, or left edge. Each edge stops a few pixels before its corners; crossing
+that endpoint deliberately changes to the adjacent edge, preventing diagonal
+corner positions and corner chatter. The native Windows/macOS trackers own
+visibility, target identity, z-order, and source-frame reconciliation.
+
+The tab's primary click directly shares or stops the hovered window. Right-click,
+**Shift+F10**, and the keyboard **Menu** key open the existing native sharing-
+options menu. The separate window picker and Petal View controls remain
+unchanged. Invalid geometry, stale window identities, delayed callbacks, room
+leave, and failed drag commits fail closed without resurrecting an old tab.
+Legacy perimeter preferences are migrated deterministically to the current
+four-edge representation; unrelated preferences are preserved.
 
 **Pushing data into a compositor child webview (header/pointer overlays):** use
 `webview.eval("window.__petalX(<json>)")`, NOT the Tauri event bus — `emit`/

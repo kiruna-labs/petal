@@ -167,6 +167,7 @@
   let unlistenCameraPublishState: UnlistenFn | undefined;
   let unlistenRestorePill: UnlistenFn | undefined;
   let unlistenSharePicker: UnlistenFn | undefined;
+  let unlistenShareState: UnlistenFn | undefined;
   let unlistenSharePickerVisibility: UnlistenFn | undefined;
   let unlistenDrawUpdate: UnlistenFn | undefined;
   let unlistenAiChatRefused: UnlistenFn | undefined;
@@ -291,6 +292,10 @@
       unlistenSharePicker = await listen(EVENTS.sharePickerChanged, () => {
         void refreshShareState();
       });
+      unlistenShareState = await listen<{ windowId: number; shared: boolean }>(
+        EVENTS.shareStateChanged,
+        () => void refreshShareState()
+      );
       unlistenSharePickerVisibility = await listen<{ open: boolean }>(
         EVENTS.sharePickerVisibilityChanged,
         (event) => {
@@ -348,6 +353,7 @@
   onDestroy(() => {
     if (elapsedTimer) clearInterval(elapsedTimer);
     unlistenSharePicker?.();
+    unlistenShareState?.();
     unlistenSharePickerVisibility?.();
     unlistenMicMute?.();
     unlistenCameraPublishState?.();
@@ -367,7 +373,9 @@
     else releaseSelfViewPreview();
     meeting.dispose();
     pill.dispose();
-    if (hasTauri) void pill.restoreHomeWindow();
+    if (hasTauri) {
+      void pill.restoreHomeWindow();
+    }
   });
 
   function releaseSelfViewPreview() {

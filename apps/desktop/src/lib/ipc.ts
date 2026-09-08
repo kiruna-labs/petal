@@ -856,16 +856,26 @@ export interface FeedbackDiagnostics {
   byteCount: number;
 }
 
+/** Mirrors `hover_core::HoverTabSide` (src-tauri/src/hover_core.rs). */
+export type HoverTabSide = 'top' | 'right' | 'bottom' | 'left';
+
 /** Mirrors `hover_core::HoverTabUpdate` (src-tauri/src/hover_core.rs). */
 export interface HoverTabUpdate {
   windowId: number;
   frame: WindowFrame;
+  /** Native owner identity used to fence menu/drag commands across reuse. */
+  sourceOwnerPid?: number;
   tabX: number;
   tabY: number;
+  /** Canonical clockwise position on the rounded perimeter, normalized to [0, 1). */
+  perimeterPosition: number;
+  side: HoverTabSide;
   attachment: 'outside' | 'inset';
   verticalOffset: number;
   shared: boolean;
   displayLike: boolean;
+  /** Monotonic native presentation epoch used to reject delayed events. */
+  presentationGeneration?: number;
 }
 
 /** Mirrors `hover_core::HoverTabDragPhase` (closed native drag vocabulary). */
@@ -1507,6 +1517,14 @@ export interface CommandArgs {
   [COMMANDS.shareNoticePresent]: { height: number };
   [COMMANDS.shareOverlaySetDrawActive]: { windowId: number; active: boolean };
   [COMMANDS.setHoverTabMenuOpen]: { open: boolean };
+  [COMMANDS.hoverTabDrag]: {
+    phase: HoverTabDragPhase;
+    windowId: number;
+    frame: WindowFrame;
+    perimeterPosition: number;
+    /** Client-issued identity for one pointer gesture; omitted for menu presets. */
+    dragToken?: number;
+  };
   [COMMANDS.regionPlacementActive]: { windowLabel: string };
   [COMMANDS.regionShareState]: { windowLabel: string };
   [COMMANDS.syncRegionWindowFrame]: { windowLabel: string };
@@ -1603,6 +1621,7 @@ export interface CommandReturns {
   [COMMANDS.getTestCockpitArtifactDataUrl]: string;
   [COMMANDS.getTestCockpitRun]: TestCockpitRunDetail;
   [COMMANDS.hoverTabPageMounted]: HoverTabUpdate | null;
+  [COMMANDS.hoverTabDrag]: number;
   [COMMANDS.openRegionWindow]: string;
   [COMMANDS.joinRoom]: RoomRecord;
   [COMMANDS.listAudioDevices]: AudioDeviceLists;

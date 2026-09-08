@@ -1,4 +1,4 @@
-import type { SharePriority } from '../ipc.ts';
+import type { HoverTabSide, SharePriority } from '../ipc.ts';
 import {
   AI_CHAT_MENU_ITEM_ID,
   AI_CHAT_MENU_ITEM_LABEL,
@@ -23,14 +23,15 @@ export const HOVER_TAB_POSITION_SECTION_LABEL = 'Hover tab position';
 export const HOVER_TAB_POSITION_CHOICES: ReadonlyArray<{
   value: HoverTabPosition;
   label: string;
-  offset: number;
 }> = [
-  { value: 'top', label: 'Top', offset: 0 },
-  { value: 'center', label: 'Center', offset: 0.5 },
-  { value: 'bottom', label: 'Bottom', offset: 1 }
+  { value: 'top', label: 'Along top border' },
+  { value: 'right', label: 'Along right border' },
+  { value: 'bottom', label: 'Along bottom border' },
+  { value: 'left', label: 'Along left border' }
 ];
 
-export type HoverTabPosition = 'top' | 'center' | 'bottom';
+/** Compatibility alias for callers that used the original position name. */
+export type HoverTabPosition = HoverTabSide;
 
 export const CONTROL_MODE_SECTION_LABEL = 'Remote control';
 
@@ -83,9 +84,8 @@ export function controlModeMenuItemId(value: ControlMode): string {
   return `control-mode-${value}`;
 }
 
-function positionIsChecked(position: HoverTabPosition, offset: number): boolean {
-  const choice = HOVER_TAB_POSITION_CHOICES.find(({ value }) => value === position);
-  return choice !== undefined && Math.abs(offset - choice.offset) < 0.001;
+function positionIsChecked(position: HoverTabPosition, side: HoverTabSide): boolean {
+  return position === side;
 }
 
 export function buildHoverTabMenuEntries(
@@ -98,8 +98,8 @@ export function buildHoverTabMenuEntries(
   aiChatActive = false,
   displayLike = false,
   includePosition = false,
-  verticalOffset = 0.5,
-  remoteControlAllowed = true
+  remoteControlAllowed = true,
+  hoverTabSide: HoverTabSide = 'right'
 ): HoverTabMenuEntry[] {
   const entries: HoverTabMenuEntry[] = [
     { kind: 'section-label', text: QUALITY_PRIORITY_SECTION_LABEL },
@@ -124,7 +124,7 @@ export function buildHoverTabMenuEntries(
           id: positionMenuItemId(value),
           text: label,
           value,
-          checked: positionIsChecked(value, verticalOffset)
+          checked: positionIsChecked(value, hoverTabSide)
         })
       )
     );
