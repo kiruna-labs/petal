@@ -21,7 +21,7 @@
 
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 
@@ -45,7 +45,29 @@ try {
 // Bundle the REAL module rather than reimplementing its logic in the fixture.
 const workDir = mkdtempSync(join(tmpdir(), 'flicker627-'));
 const bundlePath = join(workDir, 'holdLastFrame.js');
-const esbuildBin = resolve(repoRoot, 'web-harness/node_modules/esbuild/bin/esbuild');
+// esbuild is NOT a direct dependency of any package here -- it arrives nested
+// under whichever tool pulls it in, and npm hoists it wherever it likes. The
+// hardcoded `web-harness/node_modules/esbuild` this used to assume does not
+// exist after a clean `npm ci` (vite 8 is rolldown-based), so this gate died
+// with a raw spawnSync ENOENT -- invisible while an earlier ci-local.sh stage
+// was failing ahead of it (#93). Look where it actually lands, and say so.
+const esbuildBin = (() => {
+  const candidates = [
+    process.env.PETAL_ESBUILD_BIN,
+    resolve(repoRoot, 'web-harness/node_modules/esbuild/bin/esbuild'),
+    resolve(repoRoot, 'web-harness/node_modules/tsx/node_modules/esbuild/bin/esbuild'),
+    resolve(repoRoot, 'apps/desktop/node_modules/esbuild/bin/esbuild'),
+    resolve(repoRoot, 'node_modules/esbuild/bin/esbuild'),
+  ].filter(Boolean);
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) {
+    console.error(
+      `Requires esbuild to bundle web-harness/src/holdLastFrame.ts. Install web-harness or apps/desktop dependencies, or set PETAL_ESBUILD_BIN. Looked in:\n  ${candidates.join('\n  ')}`
+    );
+    process.exit(2);
+  }
+  return found;
+})();
 execFileSync(
   esbuildBin,
   [
