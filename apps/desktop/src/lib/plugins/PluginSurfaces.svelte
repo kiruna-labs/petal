@@ -57,7 +57,9 @@
     host = createPluginHost({
       document,
       adapter: createTauriAdapter({
-        participants: () => participants,
+        // $state proxies cannot be structured-cloned into a plugin frame
+        // (DataCloneError); hand the host plain snapshots.
+        participants: () => $state.snapshot(participants) as Participant[],
         roomLabel: () => roomLabel,
         phase: () => phase,
         toast: onToast
@@ -148,7 +150,7 @@
   // track `participants`; the previous list is plain state.
   let previous: Participant[] = [];
   $effect(() => {
-    const next = participants;
+    const next = $state.snapshot(participants) as Participant[];
     if (!host) return;
     const before = new Map(previous.map((p) => [p.identity, p]));
     const after = new Map(next.map((p) => [p.identity, p]));
