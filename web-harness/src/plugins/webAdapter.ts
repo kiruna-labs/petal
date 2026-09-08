@@ -10,6 +10,8 @@ import { bridgeFailure, type LoadedPlugin } from '@petal/shared/plugin-host/brok
 import type { PluginHostAdapter } from '@petal/shared/plugin-host/host';
 import { PLUGIN_KV_STORAGE_PREFIX } from '@petal/shared/plugin-host/settingsModel';
 import type { FetchParams, FetchResponse } from '@petal/shared/plugin-host/protocol';
+import { pluginTopic } from '@petal/shared/plugin-host/topics';
+import { mergePluginMetadata } from '@petal/shared/plugin-host/metadata';
 import { displayNameForParticipant } from '../tiles.ts';
 
 export interface WebAdapterDeps {
@@ -44,6 +46,7 @@ function phaseOf(room: Room | null): MeetingPhase {
 }
 
 export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
+  let metadataWrites: Promise<void> = Promise.resolve();
   const storage = deps.storage ?? (typeof localStorage === 'undefined' ? undefined : localStorage);
 
   function kvKey(pluginId: string): string {
@@ -79,11 +82,41 @@ export function createWebAdapter(deps: WebAdapterDeps): PluginHostAdapter {
       },
       room,
     },
-    async publishData(_plugin: LoadedPlugin) {
-      throw bridgeFailure('unavailable', 'meeting-wide plugin messages are not wired on this host yet (M2)');
+    async publishData(plugin: LoadedPlugin, params) {
+      const room = deps.room();
+      if (!room || room.state !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+      // Topic is derived from the plugin's own id here, never taken from the plugin.
+      const topic = pluginTopic(plugin.manifest.id, params.sub);
+      await room.localParticipant.publishData(params.payload, {
+        reliable: params.reliable,
+        topic,
+        destinationIdentities: params.to && params.to.length > 0 ? params.to : undefined,
+      });
     },
-    async setState() {
-      throw bridgeFailure('unavailable', 'plugin state sharing is not wired on this host yet (M2)');
+    publishPluginEntry(pluginId, entry) {
+      // Read-modify-write on `localParticipant.metadata`, which livekit-client
+      // only updates after the SERVER echo. Two plugin writes in flight would
+      // both merge from the same stale base and the later echo would drop
+      // the earlier key, so plugin writes are chained: each waits for the
+      // previous one's echo before it reads. (Other metadata writers -- share
+      // start/stop, the palette index -- have the same shape and are outside
+      // this adapter's reach.)
+      const run = async () => {
+        const room = deps.room();
+        if (!room || room.state !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+        const local = room.localParticipant as { metadata?: string; setMetadata?: (metadata: string) => Promise<void> };
+        if (typeof local.setMetadata !== 'function') throw bridgeFailure('unavailable', 'metadata is not writable here');
+        let merged: string;
+        try {
+          merged = mergePluginMetadata(local.metadata, pluginId, entry);
+        } catch (e) {
+          throw bridgeFailure('invalid', (e as Error).message);
+        }
+        await local.setMetadata(merged);
+      };
+      const next = metadataWrites.then(run, run);
+      metadataWrites = next.catch(() => {});
+      return next;
     },
     storage: {
       async get(pluginId, key) {

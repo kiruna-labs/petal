@@ -17,18 +17,23 @@ import { livekitRoomName } from '@petal/shared/logic/meetingCode';
 import {
   AI_CHAT_TOPIC,
   COCKPIT_TOPIC,
+  DRAW_TOPIC,
   LATENCY_PROBE_TOPIC,
   PIPELINE_STATS_TOPIC,
   REMOTE_CONTROL_TOPIC,
+  TELEPOINTER_TOPIC,
   cameraWindowId,
   isAiTrackName,
   mergeIdentityPaletteIndexMetadata,
   trackNameForCamera,
+  VIEWER_DEMAND_TOPIC,
 } from './trackNames.ts';
 import { IDENTITY_COLOR_PALETTE, windowIdFromTrackName } from './telepointer.ts';
 import { HARNESS_COLOR_STORAGE_KEY, HARNESS_ROOM_STORAGE_KEY } from './constants.ts';
 import { displayNameFromInput, inviteLinkForCredential, tokenRequestBody } from './controls.ts';
 import { displayNameForParticipant } from './tiles.ts';
+import { createTopicDispatcher } from './dataTopics.ts';
+import { PLUGIN_TOPIC_PREFIX } from '@petal/shared/plugin-host/topics';
 import { commitLayoutModeTransition, layoutModeStateOf } from './tileLayout.ts';
 import { endAutoSpotlight } from '@petal/shared/logic/tileLayoutMode';
 import { sensitiveStringRegistry, type SensitiveStringRegistry } from './sensitiveStrings.ts';
@@ -121,6 +126,28 @@ export function setupConnection(
   registry: SensitiveStringRegistry = sensitiveStringRegistry,
   feedbackReport?: FeedbackReportController
 ) {
+  // Topic -> handler registry (dataTopics.ts). Exact topics for the built-in
+  // features; the `plugin/` prefix hands every plugin packet to the plugin
+  // host (plugins/README.md §2.6). Sender identity may come from the SFU
+  // fallback, so handlers receive it alongside the participant object.
+  const topics = createTopicDispatcher((topic) => ctx.ui.logEvent(`unhandled data topic ${topic}`, 'warn'));
+  topics.on(REMOTE_CONTROL_TOPIC, (payload, _p, _t, senderIdentity) => cb.handleRemoteControlPayload(payload, senderIdentity));
+  topics.on(LATENCY_PROBE_TOPIC, (payload, _p, _t, senderIdentity) => cb.handleLatencyProbePayload(payload, senderIdentity));
+  topics.on(PIPELINE_STATS_TOPIC, (payload, _p, _t, senderIdentity) => cb.handlePipelineStatsPayload(payload, senderIdentity));
+  topics.on(AI_CHAT_TOPIC, (payload, _p, topic, senderIdentity) => cb.handleAiChatPayload(payload, senderIdentity, topic));
+  // #41: the native cockpit engine's `disconnect` command to this unattended
+  // peer (and other peers' reports, which the handler ignores).
+  topics.on(COCKPIT_TOPIC, (payload, _p, _t, senderIdentity) => cb.handleCockpitPayload(payload, senderIdentity));
+  topics.on(DRAW_TOPIC, (payload, _p, topic, senderIdentity) => cb.handleRemoteDrawPayload(payload, senderIdentity, topic));
+  topics.on(TELEPOINTER_TOPIC, (payload, _p, topic, senderIdentity) => cb.handleRemoteTelepointerPayload(payload, senderIdentity, topic));
+  topics.onPrefix(PLUGIN_TOPIC_PREFIX, (payload, participant, topic, senderIdentity) =>
+    ctx.hook?.plugins?.onData(payload, participant, topic, senderIdentity),
+  );
+  // `petal.viewer-demand` is the heartbeat VIEWERS send to a sharer; this web
+  // client only sends it (viewerDemand.ts) and never consumed it, and the old
+  // fall-through swallowed it silently. Register a no-op so a web SHARER does
+  // not get an "unhandled data topic" warning from every native viewer.
+  topics.on(VIEWER_DEMAND_TOPIC, () => {});
   const { dom, state, cb } = ctx;
   const { shareBtn, micCheckbox, cameraTrackNameDisplay, displayNameInput } = dom;
   const {
@@ -531,6 +558,7 @@ export function setupConnection(
     });
 
     newRoom.on(RoomEvent.ParticipantMetadataChanged, (_metadata, participant) => {
+      ctx.hook?.plugins?.onMetadata(participant);
       if (!('trackPublications' in participant)) return;
       cb.updateParticipantShareColorProfiles(participant as RemoteParticipant);
       cb.repositionRemoteDraw();
@@ -571,30 +599,7 @@ export function setupConnection(
       // captured identity can never be applied to a later packet.
       const sfuSenderIdentity = sfuSender.take();
       const senderIdentity = participant?.identity ?? sfuSenderIdentity;
-      if (topic === REMOTE_CONTROL_TOPIC) {
-        cb.handleRemoteControlPayload(payload, senderIdentity);
-        return;
-      }
-      if (topic === LATENCY_PROBE_TOPIC) {
-        cb.handleLatencyProbePayload(payload, senderIdentity);
-        return;
-      }
-      if (topic === PIPELINE_STATS_TOPIC) {
-        cb.handlePipelineStatsPayload(payload, senderIdentity);
-        return;
-      }
-      if (topic === AI_CHAT_TOPIC) {
-        cb.handleAiChatPayload(payload, senderIdentity, topic);
-        return;
-      }
-      if (topic === COCKPIT_TOPIC) {
-        // #41: the native cockpit engine's `disconnect` command to this
-        // unattended peer (and other peers' reports, which the handler ignores).
-        cb.handleCockpitPayload(payload, senderIdentity);
-        return;
-      }
-      cb.handleRemoteDrawPayload(payload, senderIdentity, topic);
-      cb.handleRemoteTelepointerPayload(payload, senderIdentity, topic);
+      topics.dispatch(payload, participant, topic, senderIdentity);
     });
 
     if ((RoomEvent as Record<string, unknown>).ActiveSpeakersChanged) {

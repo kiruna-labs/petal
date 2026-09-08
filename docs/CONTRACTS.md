@@ -17,7 +17,9 @@ petal-contracts.json` is the authoritative reader list.
 The fixture's `topics` key pins every LiveKit data-channel topic Petal uses:
 `petal.telepointer`, `petal.remote-control`,
 `petal.remote-control.clipboard-text`, `petal.viewer-demand`,
-`petal.pipeline-stats`, `petal.latency-probe`, `petal.draw`, `petal.ai-chat`.
+`petal.pipeline-stats`, `petal.latency-probe`, `petal.draw`, `petal.ai-chat`,
+plus the `plugin/` **prefix** (`topics.pluginPrefix`) reserved for the plugin
+bus (see "Plugin bus" under Data-Channel Wire Formats).
 Each has a section below except the two diagnostics topics, documented here:
 
 - **`petal.latency-probe`** (`latencyProbeMessages`) — a peer-to-peer
@@ -1073,6 +1075,71 @@ Files to change together:
 - `web-harness/src/trackNames.ts`
 - `web-harness/tests/contracts.test.ts`
 - `contracts/petal-contracts.json`
+
+### Plugin bus
+
+Plugins (plugins/README.md) never own a topic; they publish under a namespace
+the HOST derives from the plugin's manifest id:
+
+```
+plugin/<pluginId>            e.g. plugin/petal.reactions
+plugin/<pluginId>/<sub>      e.g. plugin/petal.reactions/emoji
+```
+
+`pluginId` matches `^[a-z0-9]+(\.[a-z0-9-]+)+$` (at most 64 chars);
+`sub` matches `^[a-z0-9][a-z0-9-]{0,31}$`. Anything else under the prefix
+is dropped unparsed. `pluginTopicVectors` pins accept/reject cases on both
+sides (`web-harness/tests/pluginTopics.test.ts`,
+`apps/desktop/src-tauri/src/plugins/bus.rs` tests).
+
+**Payload** is opaque bytes (`maxPayloadBytes` in `pluginLimits`); the host
+does not parse it. Plugins typically JSON-encode.
+
+**Sender identity is stamped by the receiving host** from the authenticated
+LiveKit participant. A payload field claiming an identity is never read.
+Native emits one global Tauri event, `plugin-data` (`pluginDataEvent`:
+`topic`, `pluginId`, `sub`, `senderIdentity`, `senderName`, `payloadBase64`);
+the web client hands the same facts to its in-page plugin host directly.
+
+**Quotas** (`pluginLimits`, enforced outbound in the frontend broker AND
+in native `plugin_publish_data`, and inbound per `(sender, pluginId)` in both
+dispatchers): `lossyPerSecond` 30, `reliablePerSecond` 10,
+`inboundPerSenderPerSecond` 60, `maxPayloadBytes` 16384.
+
+Shared state has its own quotas: `statePerSecond` 2 (the rate a plugin sees,
+enforced by the broker), `stateMaxBytes` 2048 per plugin and
+`stateTotalMaxBytes` 8192 across every plugin's entry. The byte budgets are
+re-checked where the metadata is actually merged (native
+`set_plugin_metadata_entry`, web `mergePluginMetadata`), so a write can be
+refused after the broker allowed it -- the host rolls its cached
+advertisement back when that happens. `plugin_set_state`'s own limiter is a
+backstop at twice `statePerSecond`, not a second quota.
+
+**Advertisement and shared state** ride participant metadata under the
+`plugins` key (`pluginStateMetadata`):
+
+```json
+"plugins": { "petal.chat": { "v": "1.2.0", "src": "registry", "state": { "unread": 3 } } }
+```
+
+Written by merging into the participant's existing blob (beside
+`petalWindowKinds`, `petalIdentityPaletteIndex`, ...), never replacing it.
+`v` is a strict release version, `src` is `builtin | registry | dev`, `state`
+is optional JSON at most `perPluginStateBytes` (2048); the whole object is at
+most `totalBytes` (8192). Malformed entries are dropped individually.
+Native emits `plugin-state-changed` (`pluginStateChangedEvent`: `identity`,
+`plugins`) whenever a remote participant's `plugins` map changes, on
+`ParticipantConnected`, and once per existing participant when the receiver
+starts; the web client diffs metadata in-page. Self-set metadata is a
+discovery signal for the install prompt (I-6) and a state channel for plugins
+that hold `state:write`; it is never an authorization boundary.
+
+Native: `apps/desktop/src-tauri/src/plugins/bus.rs`
+(`plugin_publish_data`, `plugin_set_state`, `start_receiver_for_room`),
+`transport/publisher.rs` (`set_plugin_metadata_entry`). Web:
+`web-harness/src/dataTopics.ts` (prefix route) + `web-harness/src/plugins/`.
+Shared: `shared/plugin-host/topics.ts`, `shared/plugin-host/metadata.ts`,
+`shared/plugin-host/rateLimit.ts`.
 
 ### Pipeline Stats
 

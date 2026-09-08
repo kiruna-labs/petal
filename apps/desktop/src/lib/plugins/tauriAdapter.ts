@@ -2,10 +2,13 @@
 // plugins. M1 scope: meeting snapshot from the route's presence, storage in
 // localStorage (moves to a Rust-owned file with the registry in I-5a),
 // clipboard via the Tauri clipboard plugin, toast via the route. Publish and
-// state report `unavailable` until the Rust data bus lands (I-3).
-// Design: plugins/README.md §2.3.
+// state go through the Rust data bus (plugins::bus, M2); remote adverts live
+// in the shared host, not here. Design: plugins/README.md §2.3.
 
+import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { COMMANDS, type CommandArgs } from '$lib/ipc';
+import { bytesToBase64 } from '@petal/shared/plugin-host/topics';
 import type { Json, MeetingPhase, Participant } from '@petal/shared/plugin-host/api';
 import { bridgeFailure } from '@petal/shared/plugin-host/broker';
 import type { PluginHostAdapter } from '@petal/shared/plugin-host/host';
@@ -46,11 +49,21 @@ export function createTauriAdapter(deps: TauriAdapterDeps): PluginHostAdapter {
       participants: () => deps.participants(),
       room: () => ({ label: deps.roomLabel(), phase: deps.phase() }),
     },
-    async publishData() {
-      throw bridgeFailure('unavailable', 'meeting-wide plugin messages are not wired on this host yet (M2)');
+    async publishData(plugin, params) {
+      if (deps.phase() !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+      // Rust derives the topic from pluginId and re-checks size/rate (plugins::bus).
+      await invoke(COMMANDS.pluginPublishData, {
+        pluginId: plugin.manifest.id,
+        sub: params.sub,
+        payloadBase64: bytesToBase64(params.payload),
+        reliable: params.reliable,
+        destinationIdentities: params.to && params.to.length > 0 ? params.to : undefined
+      } satisfies CommandArgs[typeof COMMANDS.pluginPublishData]);
     },
-    async setState() {
-      throw bridgeFailure('unavailable', 'plugin state sharing is not wired on this host yet (M2)');
+    async publishPluginEntry(pluginId, entry) {
+      if (deps.phase() !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+      // Rust merges into the participant's ShareMetadata and re-checks the budgets.
+      await invoke(COMMANDS.pluginSetState, { pluginId, entry } satisfies CommandArgs[typeof COMMANDS.pluginSetState]);
     },
     storage: {
       async get(pluginId, key) {

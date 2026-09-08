@@ -13,3 +13,5 @@ export * from './surfaces.ts';
 export * from './settingsModel.ts';
 export * from './icons.ts';
 export * from './host.ts';
+export * from './topics.ts';
+export * from './metadata.ts';

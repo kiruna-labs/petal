@@ -222,9 +222,12 @@ packet for an uninstalled id goes through the same gate as a fallback.
 - **Web:** the if/else dispatcher in `web-harness/src/connection.ts` becomes
   `web-harness/src/dataTopics.ts` with `registerTopic`, `registerTopicPrefix('plugin/')`,
   and `dispatch`. Existing topics register exactly; behavior is unchanged.
-- **Rust:** the eight `start_receiver_for_room` calls in `session/room.rs`
-  move into a table in `data_receivers.rs`, plus a ninth entry
-  `plugins::bus::start_receiver_for_room`. It strips the `plugin/` prefix,
+- **Rust:** `plugins::bus::start_receiver_for_room` joins the existing
+  `start_receiver_for_room` calls in `session/room.rs` as a ninth receiver.
+  (The plan's `data_receivers.rs` table refactor was dropped while
+  implementing I-3: it moved eight working call sites with cfg gates and a
+  `DiagnosticsState` dependency for no behavior change, against the
+  one-root-cause-per-PR rule. Revisit only if a tenth receiver appears.) It strips the `plugin/` prefix,
   parses `<id>[/<sub>]`, rate-limits per `(sender, pluginId)`, and emits a
   global `plugin-data` event `{topic, pluginId, sub, senderIdentity, senderName, payloadBase64}`.
   Payload identity fields are never read; the sender is always the
@@ -463,10 +466,10 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 
 | Issue | Milestone | Scope | Owner | State |
 |---|---|---|---|---|
-| I-1 | M1 | shared/plugin-host, plugins/sdk, workspace, build-all, docs stub | seinfish | done on branch (2026-09-05) |
-| I-2 | M1 | adapters, surfaces, reactions (local), Settings section | seinfish | done on branch (2026-09-05); web plugins sheet deferred to I-10 |
-| I-3 | M2 | data bus (web + Rust), contracts | unassigned | not started |
-| I-4 | M2 | state + advertisement | unassigned | not started |
+| I-1 | M1 | shared/plugin-host, plugins/sdk, workspace, build-all, docs stub | seinfish | merged (kiruna-labs/petal#4, 2026-09-07) |
+| I-2 | M1 | adapters, surfaces, reactions (local), Settings section | seinfish | merged (kiruna-labs/petal#4); web plugins sheet deferred to I-10 |
+| I-3 | M2 | data bus (web + Rust), contracts | seinfish | implemented on feature/plugin-system-m2; live native↔web journey (`PLUGIN-N2W-REACT`) still to run |
+| I-4 | M2 | state + advertisement | seinfish | implemented on feature/plugin-system-m2 |
 | I-5a | M3 | registry client | unassigned | not started |
 | I-5b | M3 | marketplace publisher + hosting (private repo) | unassigned | not started |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |

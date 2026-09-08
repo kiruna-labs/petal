@@ -2125,6 +2125,10 @@ pub async fn join_room_command(
         generation.clone(),
     );
     crate::draw::start_receiver_for_room(&app, room_connection.room().clone(), generation.clone());
+    // Plugin data bus (plugins/README.md §2.6), Windows parity with
+    // session/room.rs: without this the bus is send-only here -- publishes go
+    // out but no `plugin-data` / `plugin-state-changed` event ever arrives.
+    crate::plugins::start_receiver_for_room(&app, room_connection.room().clone(), generation.clone());
     crate::remote_control::start_receiver_for_room(
         &app,
         room_connection.room().clone(),

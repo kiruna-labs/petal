@@ -20,7 +20,15 @@ const probe = {
   buttons: [] as ToolbarButtonModel[],
   publishes: [] as string[],
   errors: [] as string[],
+  adverts: [] as string[],
+  advertRejections: [] as string[],
 };
+// Simulates the budget only the CLIENT side can enforce (the 8 KB `plugins`
+// total in Rust / mergePluginMetadata): reject any state-bearing entry while
+// set. The host must roll its cached advert back so a later readvertise
+// republishes the last ACCEPTED entry, not the rejected one.
+const control = { rejectStateAdverts: true };
+(window as unknown as { __control: typeof control }).__control = control;
 (window as unknown as { __probe: typeof probe }).__probe = probe;
 
 const adapter: PluginHostAdapter = {
@@ -32,7 +40,13 @@ const adapter: PluginHostAdapter = {
   async publishData(plugin, params) {
     probe.publishes.push(`${plugin.manifest.id}:${params.sub}:${new TextDecoder().decode(params.payload)}`);
   },
-  async setState() {},
+  async publishPluginEntry(pluginId, entry) {
+    probe.adverts.push(`${pluginId}=${JSON.stringify(entry)}`);
+    if (control.rejectStateAdverts && entry && entry.state !== undefined) {
+      probe.advertRejections.push(`${pluginId}=${JSON.stringify(entry)}`);
+      throw Object.assign(new Error('plugins metadata exceeds 8192 bytes'), { code: 'invalid' });
+    }
+  },
   storage: {
     async get() {
       return undefined;

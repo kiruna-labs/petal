@@ -55,6 +55,49 @@ test('plugin frames are sandboxed, boot, draw buttons, toast, and route popover 
     });
     assert.deepEqual(frameCsp, { sandbox: 'allow-scripts', hasCsp: true });
 
+    // Advertisement + shared state: both meeting plugins advertise {v, src} on
+    // load; hello's activate() then sets state, which lands in the same entry.
+    await page.waitForFunction(() => (window as any).__probe.adverts.some((a: string) => a.includes('"greeted":true')));
+    const adverts = await page.evaluate(() => (window as any).__probe.adverts);
+    assert.ok(adverts.includes('petal.reactions={"v":"1.0.0","src":"builtin"}'), adverts.join('\n'));
+    assert.ok(adverts.includes('petal.test-hello={"v":"1.0.0","src":"builtin"}'), adverts.join('\n'));
+    assert.ok(adverts.includes('petal.test-hello={"v":"1.0.0","src":"builtin","state":{"greeted":true}}'), adverts.join('\n'));
+
+    // A REJECTED state write (the adapter-side total budget the plugin API
+    // cannot see) must be rolled back, not cached: the fixture refused the
+    // state-bearing entry above, so the next readvertise has to republish the
+    // last accepted {v, src}. Caching the rejected entry made every later
+    // readvertise replay it, so the plugin stayed unadvertised to peers.
+    await page.waitForFunction(() => (window as any).__probe.advertRejections.length > 0);
+    await page.waitForFunction(() => (window as any).__probe.logs.some((l: string) => l.includes('state.set failed')));
+    const republished = await page.evaluate(() => {
+      const probe = (window as any).__probe;
+      (window as any).__control.rejectStateAdverts = false;
+      const before = probe.adverts.length;
+      (window as any).__host.readvertise();
+      return probe.adverts.slice(before);
+    });
+    assert.ok(
+      republished.includes('petal.test-hello={"v":"1.0.0","src":"builtin"}'),
+      `readvertise must republish the rolled-back advert, got: ${republished.join('\n')}`
+    );
+    assert.ok(
+      !republished.some((a: string) => a.includes('"greeted":true')),
+      `the rejected entry must not be replayed, got: ${republished.join('\n')}`
+    );
+
+    // Incoming state for a peer: the HOST owns the remote-advert map, diffs it
+    // into state.changed, and serves it as the broker's init.state snapshot.
+    await page.evaluate(() =>
+      (window as any).__host.applyRemoteAdverts('alex', { 'petal.test-hello': { v: '1.0.0', src: 'builtin', state: { greeted: true } } })
+    );
+    await page.waitForFunction(() => (window as any).__probe.logs.some((l: string) => l.includes('state-changed alex {"greeted":true}')));
+    // ...and dropping the participant clears it: diffPluginState reports the
+    // removed state as `undefined`, which frameRuntime deletes from the
+    // plugin's snapshot.
+    await page.evaluate(() => (window as any).__host.forgetParticipant('alex'));
+    await page.waitForFunction(() => (window as any).__probe.logs.some((l: string) => l.includes('state-changed alex undefined')));
+
     // Host-drawn toolbar buttons exist for both plugins; clicking hello's toasts.
     assert.deepEqual(
       probe1.buttons.map((b: any) => `${b.pluginId}/${b.buttonId}/${b.label}`).sort(),

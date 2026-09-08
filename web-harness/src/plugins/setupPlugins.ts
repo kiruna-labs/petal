@@ -14,12 +14,19 @@ import { hostCompatibility } from '@petal/shared/plugin-host/manifest';
 import { isPluginEnabled, readEnabledOverrides, type InstalledPlugin } from '@petal/shared/plugin-host/settingsModel';
 import { badgeText, type ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
 import { createWebAdapter, participantFromLiveKit } from './webAdapter.ts';
+import { PLUGIN_LIMITS, createRateLimiter } from '@petal/shared/plugin-host/rateLimit';
+import { parsePluginTopic } from '@petal/shared/plugin-host/topics';
+import { pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
 
 export interface PluginsHook {
   host: PluginHost;
   installed: InstalledPlugin[];
   roomConnected(room: Room): void;
   roomDisconnected(): void;
+  /** Inbound `plugin/*` packet from the connection's topic dispatcher. */
+  onData(payload: Uint8Array, participant: LkParticipant | undefined, topic: string, senderIdentity: string | undefined): void;
+  /** A participant's metadata changed; diff its `plugins` key into state.changed events. */
+  onMetadata(participant: LkParticipant): void;
 }
 
 declare const __PETAL_BUILD_INFO__: { version: string } | undefined;
@@ -143,27 +150,74 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     };
     const phase = () => host.broadcast('meeting.phase', adapter.meeting!.room());
     room.on(RoomEvent.ParticipantConnected, joined);
+    room.on(RoomEvent.ParticipantConnected, onMetadata);
     room.on(RoomEvent.ParticipantDisconnected, left);
+    room.on(RoomEvent.ParticipantDisconnected, forgetParticipant);
     room.on(RoomEvent.ParticipantNameChanged, (_name, p) => changed(p));
     room.on(RoomEvent.TrackMuted, (_pub, p) => changed(p));
     room.on(RoomEvent.TrackUnmuted, (_pub, p) => changed(p));
     room.on(RoomEvent.ActiveSpeakersChanged, speakers);
     room.on(RoomEvent.Reconnecting, phase);
     room.on(RoomEvent.Reconnected, phase);
+    // Advertising and the late-joiner seed both need a CONNECTED room, and
+    // this runs BEFORE `connect()` is awaited (connection.ts hands the Room
+    // over first so these listeners exist for the very first event). A
+    // publish now is refused as 'unavailable' and `remoteParticipants` is
+    // still empty -- and livekit-client emits no ParticipantConnected for
+    // peers present in the join response -- so do both on Connected. Redo
+    // them after a full reconnect too, when metadata may need re-asserting.
+    const seedAndReadvertise = () => {
+      for (const p of room.remoteParticipants.values()) onMetadata(p);
+      host.readvertise();
+    };
+    room.on(RoomEvent.Connected, seedAndReadvertise);
+    room.on(RoomEvent.Reconnected, seedAndReadvertise);
+    if (room.state === 'connected') seedAndReadvertise();
     unsubscribe = () => {
       room.off(RoomEvent.ParticipantConnected, joined);
+      room.off(RoomEvent.ParticipantConnected, onMetadata);
       room.off(RoomEvent.ParticipantDisconnected, left);
+      room.off(RoomEvent.ParticipantDisconnected, forgetParticipant);
       room.off(RoomEvent.ActiveSpeakersChanged, speakers);
       room.off(RoomEvent.Reconnecting, phase);
       room.off(RoomEvent.Reconnected, phase);
+      room.off(RoomEvent.Connected, seedAndReadvertise);
+      room.off(RoomEvent.Reconnected, seedAndReadvertise);
     };
     phase();
   }
+  // Other participants' `plugins` adverts (metadata.ts) are owned by the
+  // shared host; this file only feeds it from LiveKit participant events.
+  function onMetadata(participant: LkParticipant): void {
+    if (state.room && participant === state.room.localParticipant) return;
+    host.applyRemoteAdverts(participant.identity, pluginsFromMetadata(participant.metadata));
+  }
+  function forgetParticipant(participant: LkParticipant): void {
+    host.forgetParticipant(participant.identity);
+  }
+
   function roomDisconnected(): void {
     unsubscribe?.();
     unsubscribe = null;
+    host.clearRemoteAdverts();
     host.broadcast('meeting.phase', { label: dom.roomNameEl.textContent?.trim() ?? '', phase: 'disconnected' });
   }
 
-  return { host, installed, roomConnected, roomDisconnected };
+  // Inbound plugin packets: same guards as the native bus (plugins::bus) --
+  // well-formed topic, size cap, authenticated sender, per-(sender, plugin)
+  // rate limit -- then the host routes to the plugin's logic frame only.
+  const inbound = createRateLimiter({ perSecond: PLUGIN_LIMITS.inboundPerSenderPerSecond });
+  function onData(payload: Uint8Array, participant: LkParticipant | undefined, topic: string, senderIdentity: string | undefined): void {
+    const parsed = parsePluginTopic(topic);
+    if (!parsed) return;
+    if (payload.byteLength > PLUGIN_LIMITS.maxPayloadBytes) return;
+    const room = state.room;
+    const sender = participant ?? (senderIdentity && room ? room.remoteParticipants.get(senderIdentity) : undefined);
+    if (!sender) return; // no authenticated sender = nothing a plugin may trust
+    if (!inbound.tryTake(`${sender.identity}\u0000${parsed.pluginId}`)) return;
+    if (!host.isLoaded(parsed.pluginId)) return; // fallback suggestion trigger lands in I-6
+    host.deliverData(parsed.pluginId, { sub: parsed.sub, sender: participantFromLiveKit(sender, false), payload });
+  }
+
+  return { host, installed, roomConnected, roomDisconnected, onData, onMetadata };
 }

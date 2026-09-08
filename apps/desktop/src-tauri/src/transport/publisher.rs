@@ -1379,6 +1379,44 @@ impl RoomConnection<Arc<Room>> {
         }
     }
 
+    /// Set or remove (`None`) this participant's `plugins[<plugin_id>]`
+    /// advertisement, merging non-destructively with the rest of
+    /// `ShareMetadata` via `encode_window_metadata`. The caller
+    /// (`plugins::bus::plugin_set_state`) has validated the entry's shape;
+    /// this enforces the total budget so the metadata blob stays small.
+    pub async fn set_plugin_metadata_entry(
+        &self,
+        plugin_id: &str,
+        entry: Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        const TOTAL_BUDGET_BYTES: usize = crate::plugins::bus::PLUGINS_TOTAL_BYTES;
+        let metadata = {
+            let mut share_metadata = self.share_metadata.lock_unpoisoned();
+            let mut next = share_metadata.plugins.clone();
+            match entry {
+                Some(value) => {
+                    next.insert(plugin_id.to_string(), value);
+                }
+                None => {
+                    next.remove(plugin_id);
+                }
+            }
+            let bytes = serde_json::Value::Object(next.clone()).to_string().len();
+            if bytes > TOTAL_BUDGET_BYTES {
+                return Err(format!(
+                    "plugins metadata would be {bytes} bytes; the limit is {TOTAL_BUDGET_BYTES}"
+                ));
+            }
+            share_metadata.plugins = next;
+            encode_window_metadata(&share_metadata)
+        };
+        self.room
+            .local_participant()
+            .set_metadata(metadata)
+            .await
+            .map_err(|e| format!("failed to publish plugin metadata: {e}"))
+    }
+
     /// Publish `petalWindowZOrder` (#875): the sharer's currently-shared
     /// window ids, front-to-back. Merges non-destructively with the rest of
     /// `ShareMetadata` via `encode_window_metadata`, and republishes only
@@ -2242,6 +2280,8 @@ pub const PETAL_IDENTITY_PALETTE_INDEX_METADATA_KEY: &str = "petalIdentityPalett
 /// frontmost), as a JSON array. Older sharers omit this key entirely --
 /// receivers must treat absence as "no rank data," not as "empty order."
 pub const PETAL_WINDOW_Z_ORDER_METADATA_KEY: &str = "petalWindowZOrder";
+/// Plugin advertisements (plugins/README.md §2.5): `{ "<pluginId>": { "v", "src", "state"? } }`.
+pub const PETAL_PLUGINS_METADATA_KEY: &str = "plugins";
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2286,6 +2326,11 @@ struct ShareMetadata {
     /// ordered snapshot of "what's shared, in what stacking order," refreshed
     /// externally (see `telepointer.rs`'s sender loop) whenever it changes.
     window_order: Vec<u32>,
+    /// Plugin advertisements (plugins/README.md §2.5, contract
+    /// `pluginStateMetadata`): `plugins[<pluginId>] = {v, src, state?}`.
+    /// Owned by the main webview's plugin host via `plugin_set_state`; this
+    /// struct only carries it so every metadata rewrite preserves it.
+    plugins: serde_json::Map<String, serde_json::Value>,
 }
 
 fn region_descriptor(window_id: u32) -> Option<SharedRegionDescriptor> {
@@ -2486,6 +2531,12 @@ fn encode_window_metadata(metadata: &ShareMetadata) -> String {
         PETAL_WINDOW_Z_ORDER_METADATA_KEY.to_string(),
         serde_json::Value::Array(encoded_window_order),
     );
+    if !metadata.plugins.is_empty() {
+        root.insert(
+            PETAL_PLUGINS_METADATA_KEY.to_string(),
+            serde_json::Value::Object(metadata.plugins.clone()),
+        );
+    }
     serde_json::Value::Object(root).to_string()
 }
 
@@ -3354,6 +3405,31 @@ mod track_name_tests {
         );
         let c = camera_window_id("petal-camera-other");
         assert_ne!(a, c, "different names should (practically) not collide");
+    }
+
+    #[test]
+    fn plugins_metadata_key_is_carried_only_when_non_empty() {
+        let mut metadata = ShareMetadata::default();
+        metadata.titles.insert(7, "Terminal".to_string());
+        let encoded = encode_window_metadata(&metadata);
+        let root: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert!(root.get(PETAL_PLUGINS_METADATA_KEY).is_none(), "empty plugins map is omitted");
+
+        metadata.plugins.insert(
+            "petal.reactions".to_string(),
+            serde_json::json!({ "v": "1.0.0", "src": "builtin" }),
+        );
+        let encoded = encode_window_metadata(&metadata);
+        let root: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            root[PETAL_PLUGINS_METADATA_KEY]["petal.reactions"]["src"],
+            serde_json::Value::String("builtin".into())
+        );
+        assert_eq!(
+            shared_window_title_from_metadata(&encoded, 7).as_deref(),
+            Some("Terminal"),
+            "other keys still round-trip beside plugins"
+        );
     }
 
     #[test]

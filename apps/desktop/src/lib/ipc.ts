@@ -67,6 +67,9 @@ export const COMMANDS = {
   currentRoom: 'current_room',
   debugModeSettings: 'debug_mode_settings',
   drawSend: 'draw_send',
+  pluginPublishData: 'plugin_publish_data',
+  pluginSetState: 'plugin_set_state',
+  pluginStateSnapshot: 'plugin_state_snapshot',
   downloadAndInstallCompatibleUpdate: 'download_and_install_compatible_update',
   exportLogs: 'export_logs',
   forgetRoom: 'forget_room',
@@ -229,6 +232,8 @@ export const EVENTS = {
   hoverTabHide: 'hover-tab-hide',
   hoverTabUpdate: 'hover-tab-update',
   drawUpdate: 'draw-update',
+  pluginData: 'plugin-data',
+  pluginStateChanged: 'plugin-state-changed',
   journalAppended: 'journal-appended',
   meetingRestorePillRequested: 'meeting-restore-pill-requested',
   micMuteChanged: 'mic-mute-changed',
@@ -968,7 +973,32 @@ export interface DrawDraft {
   text?: string;
 }
 
-/** Mirrors `draw::DrawUpdate` (src-tauri/src/draw.rs). */
+/** Global `plugin-data` event (plugins::bus, contract `pluginDataEvent`):
+ * one inbound `plugin/<id>[/<sub>]` packet, sender stamped from LiveKit. */
+export interface PluginDataEvent {
+  topic: string;
+  pluginId: string;
+  sub: string | null;
+  senderIdentity: string;
+  senderName: string | null;
+  payloadBase64: string;
+}
+
+/** One plugin's advertisement in participant metadata (`plugins[<id>]`). */
+export interface PluginAdvertEntry {
+  v: string;
+  src: 'builtin' | 'registry' | 'dev';
+  state?: unknown;
+}
+
+/** Global `plugin-state-changed` event (plugins::bus, contract
+ * `pluginStateChangedEvent`): a remote participant's whole `plugins` map
+ * after a metadata change; empty object when it was removed. */
+export interface PluginStateChangedEvent {
+  identity: string;
+  plugins: Record<string, PluginAdvertEntry>;
+}
+
 export interface DrawUpdate extends DrawDraft {
   drawerIdentity: string;
   drawerDisplayName?: string | null;
@@ -1399,6 +1429,17 @@ export interface CommandArgs {
   [COMMANDS.createRoom]: { name: string; open: boolean; displayName?: string | null };
   [COMMANDS.debugModeSettings]: Record<string, never>;
   [COMMANDS.drawSend]: { draft: DrawDraft };
+  [COMMANDS.pluginPublishData]: {
+    pluginId: string;
+    sub: string | null;
+    payloadBase64: string;
+    reliable: boolean;
+    destinationIdentities?: string[];
+  };
+  /** `entry` null removes this plugin's advertisement (contract `pluginStateMetadata`). */
+  [COMMANDS.pluginSetState]: { pluginId: string; entry: PluginAdvertEntry | null };
+  /** Returns `PluginStateChangedEvent[]`: every remote participant's current `plugins` adverts. */
+  [COMMANDS.pluginStateSnapshot]: Record<string, never>;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: Record<string, never>;
   [COMMANDS.runLaunchUpdateCheck]: Record<string, never>;
   [COMMANDS.forgetRoom]: { idOrCode: string };
@@ -1561,6 +1602,8 @@ export interface CommandReturns {
   [COMMANDS.setDebugMode]: DebugModeSettings;
   [COMMANDS.setMainPillMode]: void;
   [COMMANDS.drawSend]: void;
+  [COMMANDS.pluginPublishData]: void;
+  [COMMANDS.pluginSetState]: void;
   [COMMANDS.currentRoom]: string | null;
   [COMMANDS.downloadAndInstallCompatibleUpdate]: {
     status: 'up-to-date' | 'installed';
@@ -1649,6 +1692,8 @@ export interface EventPayloads {
   [EVENTS.hoverTabHide]: void;
   [EVENTS.hoverTabUpdate]: HoverTabUpdate;
   [EVENTS.drawUpdate]: DrawUpdate;
+  [EVENTS.pluginData]: PluginDataEvent;
+  [EVENTS.pluginStateChanged]: PluginStateChangedEvent;
   [EVENTS.journalAppended]: JournalEntry;
   [EVENTS.meetingRestorePillRequested]: void;
   [EVENTS.micMuteChanged]: MicMuteChanged;
