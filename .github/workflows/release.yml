@@ -877,11 +877,27 @@ jobs:
 
       # Full post-release check: manifest version == this release, download
       # redirect names this DMG, deployed web bundle carries this version.
+      #
+      # RETRY, do not "fix" this back into a single call. The publisher has just
+      # replaced latest.json and promoted the web deploys; the Blob CDN and the
+      # Vercel edge can serve the previous copies for a minute or two. A single
+      # early read has now reported a false failure on a correctly published
+      # release three times (0.9.7, 0.9.9, and 0.9.11 -- the loop was added
+      # after the first and silently lost when this job was restructured for
+      # the staged-deploy gate in #42).
       - name: Verify published release end-to-end
         if: ${{ github.event_name == 'push' || inputs.publish == true }}
         env:
           PETAL_EXPECTED_VERSION: ${{ steps.version.outputs.VERSION }}
-        run: bash scripts/verify-web-harness-live.sh
+        run: |
+          for attempt in $(seq 1 10); do
+            if bash scripts/verify-web-harness-live.sh; then
+              echo "published release verified end-to-end on attempt $attempt"; exit 0
+            fi
+            echo "attempt $attempt/10 failed -- waiting 30 s for the CDN to serve the new manifest"
+            sleep 30
+          done
+          echo "::error::published release did not verify end-to-end within 5 min"; exit 1
 
       - name: Summary
         env:
