@@ -60,6 +60,12 @@ masked a second type error behind it (#77) all sat on `main` unnoticed, and
 reviewers kept having to re-run against `main` to tell their own regressions
 from the existing ones.
 
+One wrinkle worth knowing about both gates: `paths` and `paths-ignore` are only
+mutually exclusive when a PR's changed files fall entirely on one side of the
+list. A PR that touches both a gated path and an ungated one runs *both*
+workflows, so the same check name reports twice — once as a fast "not
+applicable" and once for real.
+
 **Why the frontend gate's macOS half is not always-on.** `ci.yml` is
 `workflow_dispatch`-only on purpose — GitHub's macOS runners bill at 10x — so
 the frontend gate runs entirely on `ubuntu-latest`, and the repo's single
