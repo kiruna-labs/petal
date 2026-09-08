@@ -1,0 +1,178 @@
+# Frontend verification gate for PRs that can affect the TypeScript/Svelte half
+# of the product (issue #75, item 3 of its definition of done).
+#
+# rust-gate.yml was the only `pull_request` gate that mattered, and its `paths:`
+# filter covers apps/desktop/src-tauri, contracts and backend only. NOTHING
+# gated apps/desktop/src, apps/desktop/tests, web-harness, shared or plugins,
+# and three separate breakages sat on `main` unnoticed because of it: two red
+# desktop tests (#75) and a web-harness `npm run build` failure that in turn
+# masked a second type error behind it (#77). Reviewers on #70/#71/#72 each had
+# to stop and re-run against `main` to work out whether a failure was their own
+# regression or an existing one -- exactly the condition under which a real
+# regression gets waved through as "already broken."
+#
+# COST: every job here runs on `ubuntu-latest` (1x billing). ci.yml's COST NOTE
+# keeps the full CI workflow manual-only because GitHub's macOS runners bill at
+# 10x, and that still holds -- this gate deliberately adds NO always-on macOS
+# job, and does not use the single self-hosted Tart VM either (it serves the
+# release e2e gate; a per-PR job would queue behind releases). What that leaves
+# uncovered is written down in docs/TESTING.md, "What the PR gates cover".
+name: Frontend PR Gate
+
+on:
+  pull_request:
+    # KEEP THIS LIST IDENTICAL to frontend-gate-skip.yml's `paths-ignore`.
+    paths:
+      - ".github/workflows/frontend-gate.yml"
+      - "apps/desktop/src/**"
+      - "apps/desktop/tests/**"
+      - "apps/desktop/scripts/**"
+      - "apps/desktop/static/**"
+      - "apps/desktop/package.json"
+      - "apps/desktop/package-lock.json"
+      - "apps/desktop/svelte.config.js"
+      - "apps/desktop/vite.config.js"
+      - "apps/desktop/tsconfig.json"
+      - "shared/**"
+      - "web-harness/**"
+      - "plugins/**"
+
+concurrency:
+  group: frontend-pr-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: Desktop frontend build + tests
+    runs-on: ubuntu-latest
+    # Measured ~4min locally for check + build + test; the #724 pattern wants a
+    # loud backstop, not a target.
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run check
+
+      # `npm run build` is REQUIRED BEFORE the tests, not merely alongside them:
+      # the rendered tests read generated assets out of build/, and without it
+      # ~30 of them fail on missing files -- a harness error that looks exactly
+      # like a product regression. Do not reorder these steps.
+      - run: npm run build
+
+      # The rendered tests drive playwright's chromium-headless-shell over a CDP
+      # pipe. `pretest` already runs a plain `playwright install`, but on Linux
+      # the browser also needs its shared libraries, which is what `--with-deps`
+      # installs. With the browser already present `pretest` is then a no-op.
+      # The test helpers resolve `chrome-headless-shell-linux64` out of the
+      # playwright cache on their own, so no PETAL_CHROME_BIN is needed.
+      - name: Install Chromium headless shell + Linux deps
+        run: npx playwright install --with-deps chromium-headless-shell
+
+      # This gate runs `npm test`'s stages by hand so it can exclude ONE
+      # macOS-only test (below). That means the two can drift, which is how
+      # compositor_probe stayed broken for weeks with every gate green (#594,
+      # #635). Fail loudly instead: if `npm test` changes, this workflow must
+      # change with it.
+      - name: Lockstep -- the test steps below must still match `npm test`
+        run: |
+          EXPECTED="node --import tsx --test tests/*.test.ts && node --test scripts/test-remote-control-harness-preflight.mjs scripts/test-remote-control-exit-accounting.mjs scripts/test-process-lease-ledger.mjs scripts/test-remote-control-share-readiness.mjs && node scripts/check-panel-close.mjs && echo 'panel-close check passed'"
+          ACTUAL="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).scripts.test")"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::apps/desktop's \`npm test\` script changed; update the steps in .github/workflows/frontend-gate.yml to match, then update this literal."
+            echo "expected: $EXPECTED"
+            echo "actual:   $ACTUAL"
+            exit 1
+          fi
+          echo "OK: npm test is unchanged; the steps below cover it."
+
+      - name: Frontend suite (tests/*.test.ts)
+        run: node --import tsx --test tests/*.test.ts
+
+      # `scripts/test-process-lease-ledger.mjs`'s "SIGTERM to the runner tears
+      # down its whole spawned group" is the ONE part of `npm test` that is
+      # genuinely macOS-only, and it is excluded here by name.
+      #
+      # Why (measured, not assumed): the ledger decides a leased process is gone
+      # by reading `ps -p <pid> -o pgid=,comm=`. A freshly killed child is a
+      # zombie until its parent reaps it, and the two platforms report a zombie
+      # differently -- macOS `comm` is `<defunct>`, Linux procps still prints
+      # the original `sh` with its original pgid. So on macOS the ledger sees
+      # the process as gone and logs CLEANED; on Linux it sees a live-looking
+      # `sh` and logs ORPHANED / "survived SIGKILL". That is the harness's
+      # aliveness oracle, not a product behaviour, and the harness it guards
+      # (remote-control-scenario.mjs) only ever runs on macOS.
+      #
+      # If the test name changes, this filter stops matching and the test RUNS
+      # -- i.e. it fails loudly rather than silently going uncovered.
+      # macOS coverage of it is unchanged: scripts/ci-local.sh and the
+      # self-hosted mac gate still run the whole file.
+      - name: Harness script suites (minus the macOS-only lease-ledger case)
+        run: >
+          node --test
+          --test-skip-pattern='tears down its whole spawned group'
+          scripts/test-remote-control-harness-preflight.mjs
+          scripts/test-remote-control-exit-accounting.mjs
+          scripts/test-process-lease-ledger.mjs
+          scripts/test-remote-control-share-readiness.mjs
+
+      - name: Panel-close lint
+        run: node scripts/check-panel-close.mjs
+
+  web-harness:
+    name: Web-harness build + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web-harness
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-harness/package-lock.json
+
+      - run: npm ci
+
+      # `npm run build` here is three gates in one -- `svelte-check && tsc -p
+      # tests && vite build` -- and all three have to run. #77 is why: the vite
+      # build was failing, which stopped the chain before a SECOND type error
+      # behind it was ever reported.
+      - run: npm run build
+
+      - run: npm test
+
+  plugins:
+    name: Plugins typecheck + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: plugins
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugins/package-lock.json
+
+      - run: npm ci
+
+      - run: npx tsc --noEmit -p sdk/tsconfig.json
+
+      - run: npm test

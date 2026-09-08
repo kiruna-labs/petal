@@ -42,6 +42,43 @@ about Windows correctness. That gap is covered only by the `windows` job in
 `rust-gate.yml` described above (or by a real Windows `cargo build`/`cargo
 test --lib`), not by anything `ci-local.sh` runs locally.
 
+### What the PR gates cover
+
+Two `pull_request` workflows gate every PR, and between them they always report
+their check names (each has an inverse `paths-ignore` companion, so a PR that
+touches none of a gate's paths still gets a green "not applicable" result rather
+than hanging on "Expected — waiting for status"):
+
+| Workflow | Runner | Paths | What it runs |
+|---|---|---|---|
+| `rust-gate.yml` / `rust-gate-skip.yml` | `macos-26` + `windows-latest` | `apps/desktop/src-tauri/**`, `contracts/**`, `backend/**`, `scripts/ci-local.sh`, the two CI workflow files | `cargo build --locked`, `cargo build --examples`, `cargo test --lib`, the #99 no-CLT-rpath assertion |
+| `frontend-gate.yml` / `frontend-gate-skip.yml` | `ubuntu-latest` | `apps/desktop/`'s `src/`, `tests/`, `scripts/`, `static/` + its build config, `shared/**`, `web-harness/**`, `plugins/**` | desktop `npm run check` + `npm run build` + the `tests/*.test.ts` suite and harness script suites; web-harness `npm run build` (all three of `svelte-check`, `tsc -p tests`, `vite build`) + `npm test`; plugins `tsc --noEmit` + `npm test` |
+
+The frontend gate exists because for a long time nothing gated the TypeScript
+half at all: two red desktop tests (#75) and a web-harness build failure that
+masked a second type error behind it (#77) all sat on `main` unnoticed, and
+reviewers kept having to re-run against `main` to tell their own regressions
+from the existing ones.
+
+**Why the frontend gate's macOS half is not always-on.** `ci.yml` is
+`workflow_dispatch`-only on purpose — GitHub's macOS runners bill at 10x — so
+the frontend gate runs entirely on `ubuntu-latest`, and the repo's single
+self-hosted Tart VM is left to the release e2e gate rather than queued behind
+per-PR work. The desktop suite was measured on Linux before being put there:
+all 764 `tests/*.test.ts` cases pass, rendered Chromium tests included
+(playwright resolves `chrome-headless-shell-linux64` itself; the workflow only
+adds `playwright install --with-deps` for the shared libraries). Exactly one
+case is excluded by name, `test-process-lease-ledger.mjs`'s "SIGTERM to the
+runner tears down its whole spawned group": the ledger decides a process is
+gone by reading `ps -o comm=`, and a zombie reports as `<defunct>` on macOS but
+keeps its original `sh` and pgid under Linux procps, so the Linux run logs
+ORPHANED where macOS logs CLEANED. That is the harness's aliveness oracle, and
+the harness it guards only runs on macOS; `scripts/ci-local.sh` and the
+self-hosted mac gate still run the whole file. What `ubuntu-latest` therefore
+does *not* cover on every PR is the macOS-only live tier — the remote-control
+Swift sentinel preflight, the Test Cockpit flows, and the native pixel gates —
+which stay in `ci.yml` (manual) and `ci-selfhosted.yml`.
+
 ### Windows live matrix
 
 Automated Windows Rust/contract tests pin capability composition, keyboard
