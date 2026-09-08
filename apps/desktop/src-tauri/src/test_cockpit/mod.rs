@@ -208,6 +208,12 @@ fn web_peer_url(
 /// navigation as Vercel's documented query form and is exchanged for a
 /// `_vercel_jwt` cookie that covers every later request from that profile.
 ///
+/// Verified live against a protected staged deployment (2026-09-08): the 307
+/// this produces PRESERVES the rest of the query, so `?code`/`&auto`/`&owner`
+/// survive ahead of the bypass params and the ordering below is fine. What the
+/// cookie does NOT buy is the peer's CROSS-ORIGIN call to the backend -- see
+/// `scripts/verify-web-peer-origin.sh`.
+///
 /// NEVER put the result in `WebPeer.url`: that string is written into
 /// `run.jsonl` and uploaded as a CI artifact. Only Chrome's argv gets it.
 fn bypass_query_suffix(secret: &str) -> Option<String> {
@@ -236,6 +242,192 @@ fn web_peer_navigation_url(url: &str) -> String {
         url,
         std::env::var("PETAL_VERCEL_BYPASS_SECRET").ok().as_deref(),
     )
+}
+
+/// Strips the bypass secret out of any string before it is logged or written to
+/// `run.jsonl`. Both sinks leave the runner: the log is uploaded as CI output
+/// and `run.jsonl` as an artifact. `bypass_query_suffix` guarantees the secret
+/// only ever appears as the value of `x-vercel-protection-bypass`, so redacting
+/// that one parameter is sufficient and does not depend on reading the env var
+/// back (which a later `env::remove_var` would defeat).
+fn redact_bypass_secret(text: &str) -> String {
+    let needle = "x-vercel-protection-bypass=";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(needle) {
+        let (head, tail) = rest.split_at(at + needle.len());
+        out.push_str(head);
+        out.push_str("<redacted>");
+        rest = match tail.find(['&', '#']) {
+            Some(end) => &tail[end..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What the web peer's FIRST navigation actually does, resolved over HTTP
+/// before Chrome is launched (#42 follow-up).
+///
+/// v0.9.10's gate reported six INFRA-FAILs whose only evidence was an empty web
+/// peer list -- "Chrome started and never joined" is the same observation for a
+/// deployment that refused the request, a bypass that was rejected, and a peer
+/// that loaded fine and failed later. This records which one it was: the final
+/// URL and status after redirects, with the secret redacted.
+#[derive(Debug, Clone, serde::Serialize)]
+struct WebPeerNavigationProbe {
+    /// Final URL after redirects, bypass secret redacted.
+    final_url: String,
+    /// Final HTTP status, or `None` when the request never completed.
+    status: Option<u16>,
+    /// Number of redirects followed.
+    redirects: usize,
+    /// Set when the navigation ended somewhere that cannot serve the harness.
+    problem: Option<String>,
+    /// Transport-level failure text, when the request could not be made.
+    error: Option<String>,
+}
+
+/// Vercel's deployment protection answers an unauthorized request with a 30x to
+/// this host; landing there means the bypass did not take.
+const VERCEL_SSO_HOST: &str = "vercel.com";
+const WEB_PEER_PROBE_MAX_REDIRECTS: usize = 5;
+
+/// Follows redirects by hand rather than through `reqwest`'s redirect policy:
+/// the bypass hands back a `_vercel_jwt` cookie on the 307 and the very next
+/// hop is refused without it, and this crate's `reqwest` is built without the
+/// `cookies` feature. A client that dropped the cookie would report a false
+/// "protection refused the peer" for a bypass that actually works.
+async fn probe_web_peer_navigation(navigation_url: &str) -> WebPeerNavigationProbe {
+    let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return WebPeerNavigationProbe {
+                final_url: redact_bypass_secret(navigation_url),
+                status: None,
+                redirects: 0,
+                problem: None,
+                error: Some(error.to_string()),
+            }
+        }
+    };
+    let mut url = navigation_url.to_string();
+    let mut cookies: Vec<String> = Vec::new();
+    for redirects in 0..=WEB_PEER_PROBE_MAX_REDIRECTS {
+        let mut request = client.get(&url);
+        if !cookies.is_empty() {
+            request = request.header(reqwest::header::COOKIE, cookies.join("; "));
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                return WebPeerNavigationProbe {
+                    final_url: redact_bypass_secret(&url),
+                    status: None,
+                    redirects,
+                    problem: None,
+                    error: Some(error.to_string()),
+                }
+            }
+        };
+        let status = response.status();
+        for value in response.headers().get_all(reqwest::header::SET_COOKIE) {
+            if let Ok(value) = value.to_str() {
+                if let Some(pair) = value.split(';').next() {
+                    cookies.push(pair.trim().to_string());
+                }
+            }
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        match location.filter(|_| status.is_redirection()) {
+            Some(location) if redirects < WEB_PEER_PROBE_MAX_REDIRECTS => {
+                url = match response.url().join(&location) {
+                    Ok(resolved) => resolved.to_string(),
+                    Err(_) => location,
+                };
+            }
+            _ => {
+                let host = reqwest::Url::parse(&url)
+                    .ok()
+                    .and_then(|parsed| parsed.host_str().map(str::to_string))
+                    .unwrap_or_default();
+                let problem = if host == VERCEL_SSO_HOST || host.ends_with(".vercel.com") {
+                    Some(
+                        "deployment protection was NOT bypassed: the navigation ended on Vercel's \
+                         SSO login, so the web peer never loaded the harness"
+                            .to_string(),
+                    )
+                } else if !status.is_success() {
+                    Some(format!("the harness origin answered HTTP {status}"))
+                } else {
+                    None
+                };
+                return WebPeerNavigationProbe {
+                    final_url: redact_bypass_secret(&url),
+                    status: Some(status.as_u16()),
+                    redirects,
+                    problem,
+                    error: None,
+                };
+            }
+        }
+    }
+    WebPeerNavigationProbe {
+        final_url: redact_bypass_secret(&url),
+        status: None,
+        redirects: WEB_PEER_PROBE_MAX_REDIRECTS,
+        problem: Some("navigation exceeded the redirect budget".to_string()),
+        error: None,
+    }
+}
+
+/// Probes the navigation the next `spawn_web_peer` will perform and journals the
+/// outcome. Logged for every scenario, not just failures: "the peer loaded the
+/// page and still never joined" is the fact that points at the peer's own
+/// startup (a refused token mint, say) instead of at the deployment.
+async fn record_web_peer_navigation(
+    scenario: ScenarioSpec,
+    access_code: &str,
+    writer: &mut ResultsWriter,
+) {
+    let url = web_peer_url(
+        &harness_url(),
+        access_code,
+        scenario.id,
+        cockpit_native_identity().as_deref(),
+    );
+    let probe = probe_web_peer_navigation(&web_peer_navigation_url(&url)).await;
+    match (&probe.problem, &probe.error) {
+        (Some(problem), _) => log::warn!(
+            "test-cockpit: {} web peer navigation problem: {problem} (final {} after {} redirect(s), status {:?})",
+            scenario.id,
+            probe.final_url,
+            probe.redirects,
+            probe.status
+        ),
+        (None, Some(error)) => log::warn!(
+            "test-cockpit: {} web peer navigation could not be probed: {error} (url {})",
+            scenario.id,
+            probe.final_url
+        ),
+        (None, None) => log::info!(
+            "test-cockpit: {} web peer navigation OK: HTTP {:?} at {} after {} redirect(s)",
+            scenario.id,
+            probe.status,
+            probe.final_url,
+            probe.redirects
+        ),
+    }
+    let _ = writer.write("web-peer-navigation", Some(scenario.id), &probe);
 }
 
 pub(crate) fn cockpit_source_requires_visible_handback(window_id: u32) -> bool {
@@ -4716,6 +4908,12 @@ fn spawn_web_peer_labeled_with_cdp(
                 "--autoplay-policy=no-user-gesture-required",
                 "--no-first-run",
                 "--no-default-browser-check",
+                // Without this the captured chrome-<ID>.log holds nothing but
+                // Google-updater noise. With it, the renderer's console lands
+                // in the artifact -- which is where the ONLY evidence of
+                // v0.9.10's failure lived ("blocked by CORS policy" on the web
+                // peer's token request). The job's scrub step covers the log.
+                "--enable-logging=stderr",
             ])
             .args(cdp_enabled.then_some("--remote-debugging-port=9222"))
             .arg(format!("--user-data-dir={}", user_data.display()))
@@ -5153,11 +5351,33 @@ async fn assert_web_to_native_video(
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 
+    // A missing track is only a PRODUCT failure if there was a peer to publish
+    // it. When no web peer ever reported and none is in the room, the scenario
+    // never got its other half -- infrastructure, not Petal. v0.9.10 shipped
+    // this backwards: SHARE-W2N-Q read TEST-FAIL while its five siblings, which
+    // classify a missing report as INFRA-FAIL, all read infra for the very same
+    // cause -- one misclassified verdict pointing at a phantom product bug.
+    let peers = web_peer_identities_for_scenario(app, scenario);
+    if peers.is_empty() {
+        return ScenarioOutcome {
+            scenario_id: scenario.id.to_string(),
+            verdict: ScenarioVerdict::InfraFail,
+            message: format!(
+                "{} INFRA-FAIL no web peer ever joined the room or reported, so there was nothing to publish a petal-window-* track (see the web-peer-navigation record and chrome-{}.log)",
+                scenario.id, scenario.id
+            ),
+            delivered_fps: last_fps,
+            delivered_width: last_width,
+            delivered_height: last_height,
+            assertions,
+        };
+    }
+
     ScenarioOutcome {
         scenario_id: scenario.id.to_string(),
         verdict: ScenarioVerdict::TestFail,
         message: format!(
-            "{} TEST-FAIL no active recv petal-window-* track above fps>{FPS_THRESHOLD} within {:?}",
+            "{} TEST-FAIL web peer(s) {peers:?} were present but no active recv petal-window-* track above fps>{FPS_THRESHOLD} within {:?}",
             scenario.id, ASSERT_TIMEOUT
         ),
         delivered_fps: last_fps,
@@ -6135,6 +6355,7 @@ async fn run_chaos_device_scenario(
         }),
     );
 
+    record_web_peer_navigation(scenario, access_code, writer).await;
     let web_peer = match spawn_web_peer(scenario, access_code, &writer.dir) {
         Ok(peer) => peer,
         Err(error) => return infra_fail_outcome(scenario, error),
@@ -11492,6 +11713,40 @@ mod tests {
             "https://web-harness-abc123.vercel.app/?code=abc-defg-hjk&auto=draw-n&owner=p-cockpit-1a&"
         ));
         assert!(navigated.ends_with("&x-vercel-set-bypass-cookie=true"));
+    }
+
+    // The navigation probe's own record leaves the runner twice (a log line and
+    // a run.jsonl entry), so its redaction is load-bearing, not cosmetic.
+    #[test]
+    fn navigation_records_redact_the_bypass_secret() {
+        let recorded = web_peer_url(
+            "https://web-harness-abc123.vercel.app",
+            "abc-defg-hjk",
+            "CAM",
+            None,
+        );
+        let navigated = apply_bypass_query(&recorded, Some("s3cr3t"));
+        let redacted = redact_bypass_secret(&navigated);
+
+        assert!(!redacted.contains("s3cr3t"));
+        assert_eq!(
+            redacted,
+            "https://web-harness-abc123.vercel.app/?code=abc-defg-hjk&auto=cam\
+             &x-vercel-protection-bypass=<redacted>&x-vercel-set-bypass-cookie=true"
+        );
+        // A URL that never carried the secret is passed through untouched, so a
+        // production-target run's evidence reads exactly as it always has.
+        assert_eq!(redact_bypass_secret(&recorded), recorded);
+        // Trailing position (no following `&`) must redact to the end.
+        assert_eq!(
+            redact_bypass_secret("https://h/?a=1&x-vercel-protection-bypass=s3cr3t"),
+            "https://h/?a=1&x-vercel-protection-bypass=<redacted>"
+        );
+        // ...and a fragment terminates the value just as `&` does.
+        assert_eq!(
+            redact_bypass_secret("https://h/?x-vercel-protection-bypass=s3cr3t#frag"),
+            "https://h/?x-vercel-protection-bypass=<redacted>#frag"
+        );
     }
 
     #[test]
