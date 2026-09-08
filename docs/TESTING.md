@@ -804,6 +804,26 @@ targets (#42):
   so the gate tests the web build this release is about to promote rather than
   the previous one, and passes the bypass secret described in the
   `PETAL_VERCEL_BYPASS_SECRET` row below.
+- The bypass only covers what the **browser navigates to**. A web peer's first
+  act after loading is a **cross-origin** token mint against the backend baked
+  into that harness build (`VITE_PETAL_BACKEND_URL` in
+  `web-harness/vercel.json`), and `backend/lib/http.ts` answers an unrecognised
+  browser `Origin` with a bare 403 — no `Access-Control-Allow-Origin`. The peer
+  then cannot join, and a peer that never joined has no room to report its own
+  failure over, so the engine sees silence and can only say INFRA-FAIL. That is
+  how v0.9.10's gate failed six scenarios with no explanation. The allowlist now
+  covers our own staged `web-harness-*-kiruna-labs.vercel.app` origins, and
+  `deploy-web` runs `scripts/verify-web-peer-origin.sh` to prove the LIVE
+  backend accepts the staged origin before the gate is queued — that check also
+  catches the ordering trap, since `backend/` deploys separately from git and a
+  merged allowance that was never `vercel --prod`-ed changes nothing.
+- Each scenario now records a `web-peer-navigation` line in `run.jsonl` (final
+  URL after redirects, HTTP status, redirect count, bypass secret redacted) and
+  Chrome runs with `--enable-logging=stderr`, so the per-scenario
+  `chrome-<ID>.log` artifact carries the renderer console. Between them,
+  "protection refused the peer", "the deployment 404s" and "the peer loaded and
+  failed later" are three distinguishable observations instead of one empty
+  peer list.
 
 It intentionally targets only
 `runs-on: [self-hosted, macOS]`: the repo owner must register a real logged-in

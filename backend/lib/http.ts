@@ -23,9 +23,32 @@ function configuredAllowedOrigins(): Set<string> {
   return new Set(origins);
 }
 
+// The release e2e gate (#42) points the Test Cockpit's web peers at the STAGED
+// web-harness deployment, whose Vercel-issued origin changes every release, and
+// those peers mint room tokens here -- so a staged origin is a first-class
+// browser caller that no static allowlist can name in advance.
+//
+// v0.9.10's gate proved the gap: all six web-peer scenarios reported INFRA-FAIL
+// because every token request was refused below with 403 "origin not allowed"
+// (browser console: "blocked by CORS policy ... No 'Access-Control-Allow-Origin'
+// header"). Nothing client-side can work around a server-side 403, so the
+// allowance has to live here.
+//
+// Only Vercel serves `*.vercel.app`, and only our own `web-harness` project
+// under the `kiruna-labs` team is issued this shape -- narrower than the
+// localhost allowance directly below, which anyone can satisfy.
+const PETAL_STAGED_HARNESS_ORIGIN =
+  /^https:\/\/web-harness-[a-z0-9][a-z0-9-]*-kiruna-labs\.vercel\.app$/;
+
 function isAllowedOrigin(origin: string): boolean {
   if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  if (PETAL_STAGED_HARNESS_ORIGIN.test(origin)) return true;
   return configuredAllowedOrigins().has(origin);
+}
+
+/** Test seam: the exact predicate `applyCors` gates on. */
+export function isAllowedOriginForTest(origin: string): boolean {
+  return isAllowedOrigin(origin);
 }
 
 // Every rate-limit bucket in this codebase (including the ai-token minting
