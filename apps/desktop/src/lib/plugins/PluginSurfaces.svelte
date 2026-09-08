@@ -18,7 +18,7 @@
   import { base64ToBytes } from '@petal/shared/plugin-host/topics';
   import { pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
   import { enabledPlugins } from './pluginCatalog';
-  import { createTauriAdapter } from './tauriAdapter';
+  import { createTauriAdapter, hostLog } from './tauriAdapter';
 
   interface Props {
     participants: Participant[];
@@ -65,7 +65,10 @@
       hostVersion: version,
       mounts: { logic: logicEl, overlay: overlayEl, popoverLayer: popoverEl },
       onButtonsChanged: (next) => (buttons = next),
-      warn: (message) => console.warn(message)
+      warn: (message) => {
+        console.warn(message);
+        hostLog('warn', message);
+      }
     });
     for (const { plugin, source } of enabledPlugins()) {
       const compat = hostCompatibility(plugin.manifest, version);
@@ -77,6 +80,7 @@
       host.load(plugin, source);
     }
     listenForPluginData();
+    hostLog('info', `host booted (Petal ${version}); loaded plugins: ${host.loaded().map((p) => p.manifest.id).join(', ') || 'none'}`);
   }
 
   // Inbound plugin packets (Rust plugins::bus already validated topic, size,
