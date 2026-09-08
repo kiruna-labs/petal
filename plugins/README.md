@@ -208,6 +208,14 @@ manifest type, and the frame-side bridge. The `petal` object handed to
   8 KB total.
 - Nothing is installed "meeting-wide"; there is no server state to hold it.
   Propagation is the peer prompt below.
+- **Delivery is confined to participants who have the plugin installed and
+  enabled** (owner decision, 2026-09-08, confirmed on the shipped Reactions
+  behavior). A `plugin/<id>` packet arriving at a host with no loaded plugin
+  for that id is dropped silently. Built-ins are not special-cased: turning
+  one off means the same thing as not having it. What closes the gap is the
+  discovery prompt (I-6), and optionally sender-side feedback ("2 of 4 can
+  see this") built on the `plugins` metadata adverts. Revisit only if real
+  usage shows people surprised that a reaction did not reach someone.
 
 **Suggestion rule** (`shared/plugin-host/suggest.ts`): on a peer metadata
 change, for each advertised id whose `src` is `registry` or `builtin`, that is
