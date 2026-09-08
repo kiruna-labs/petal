@@ -94,6 +94,7 @@
     hasTauriBridge,
     type AiChatSettings,
     type BuildInfo,
+    type CameraIntentChanged,
     type CameraPublishState,
     type CameraPublishStateSnapshot,
     type CockpitJourney,
@@ -928,9 +929,20 @@
   // Settings runs in its own window, so a preview here competes with the
   // meeting's camera publish for the same device (on Windows the native
   // capture is a single client; on macOS a second getUserMedia knocked the
-  // published track out). Accepted limitation: no preview while the meeting
-  // camera is on or still trying to come on. Seeded from the native snapshot
-  // on every acquire and kept live by the publish-state event below.
+  // published track out). The meeting always wins: no preview while the
+  // meeting camera is on or still trying to come on.
+  //
+  // Both edges are event-driven. `camera-intent-changed` fires BEFORE the
+  // native side acquires the device, which is the only signal that lets the
+  // preview yield in time -- `camera-publish-state` only ever reports a
+  // terminal outcome, so on its own the preview kept the camera right through
+  // the publish attempt and the publish failed (PR #72 review). Delivery is
+  // still asynchronous, so the immediate native attempt can lose the race;
+  // the native self-heal loop's backed-off retry is what then succeeds,
+  // against a preview that has by then let go.
+  //
+  // Seeded from the native snapshot on every acquire, so a Settings window
+  // opened mid-publish starts in the right state without waiting for an edge.
   let meetingCameraOn = $state(false);
   const MEETING_CAMERA_REASON = 'preview stays off while your camera is on in a meeting';
 
@@ -1122,30 +1134,48 @@
     }
   }
 
+  // One handler for both native edges. `active` true releases the device
+  // immediately; false re-acquires through `acquirePreview`, which re-reads
+  // the native snapshot -- so a stale or racing "off" while a publish is
+  // still retrying leaves the camera alone.
+  function applyMeetingCameraState(active: boolean) {
+    if (active) {
+      if (meetingCameraOn) return;
+      meetingCameraOn = true;
+      stopPreview();
+      previewError = MEETING_CAMERA_REASON;
+      return;
+    }
+    if (!meetingCameraOn) return;
+    void acquirePreview(cameraValue);
+  }
+
   $effect(() => {
-    // Follow the meeting camera live: release the preview the moment the
-    // meeting camera comes on, and re-acquire (through the same snapshot
-    // gate, so a publish still retrying keeps the device) when it goes off.
+    // Follow the meeting camera live. The INTENT event is the one that
+    // matters for contention: it is emitted before the device is acquired,
+    // so the preview can be gone before the publish attempt runs. The
+    // publish-state event stays as the belt to that suspenders -- it is what
+    // reports a terminal failure that cleared the intent.
     if (!hasTauri) return;
-    let unlisten: UnlistenFn | null = null;
+    let unlistenIntent: UnlistenFn | null = null;
+    let unlistenPublish: UnlistenFn | null = null;
     let cancelled = false;
-    listen<CameraPublishState>(EVENTS.cameraPublishState, (event) => {
-      if (event.payload.publishing) {
-        if (!meetingCameraOn) {
-          meetingCameraOn = true;
-          stopPreview();
-          previewError = MEETING_CAMERA_REASON;
-        }
-      } else if (meetingCameraOn) {
-        void acquirePreview(cameraValue);
-      }
+    listen<CameraIntentChanged>(EVENTS.cameraIntentChanged, (event) => {
+      applyMeetingCameraState(event.payload.intended);
     }).then((fn) => {
       if (cancelled) fn();
-      else unlisten = fn;
+      else unlistenIntent = fn;
+    });
+    listen<CameraPublishState>(EVENTS.cameraPublishState, (event) => {
+      applyMeetingCameraState(event.payload.publishing);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenPublish = fn;
     });
     return () => {
       cancelled = true;
-      unlisten?.();
+      unlistenIntent?.();
+      unlistenPublish?.();
     };
   });
 

@@ -29,7 +29,7 @@
   } from '@tauri-apps/api/window';
   import MainMenu from '$lib/components/MainMenu.svelte';
   import Button from '$lib/components/Button.svelte';
-  import { session } from '$lib/stores/session.svelte';
+  import { session, startSessionSync } from '$lib/stores/session.svelte';
   import {
     listRooms,
     createRoom,
@@ -454,6 +454,13 @@
   }
 
   const deliverAutotestJoinResult = onceAutotestJoinResult(handleAutotestJoinResult);
+
+
+  // Cross-window session sync (Settings has its own window now). Scoped to
+  // this route's lifetime: `startSessionSync` refcounts one native listener
+  // and the disposer returned here releases it on destroy, so no listener
+  // outlives the surface that wanted it.
+  onMount(() => startSessionSync());
 
   onMount(async () => {
     routeActive = true;

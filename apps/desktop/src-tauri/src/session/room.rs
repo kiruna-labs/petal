@@ -1255,6 +1255,10 @@ fn spawn_local_publish_reconcile(app: &tauri::AppHandle, room_id: String) {
 
         if plan.camera_on && !state.camera_publishing() {
             state.set_camera_intent(true);
+            // Same contract as the manual toggle: announce the intent before
+            // the reconcile reaches for the device, so a Settings preview
+            // yields it (see `camera_session::emit_camera_intent`).
+            crate::camera_session::emit_camera_intent(&app, true);
             let camera_app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let Some(state) = tauri::Manager::try_state::<SessionState>(&camera_app) else {
@@ -1424,7 +1428,7 @@ async fn cleanup_left_room(
     // AVCaptureSession (and its green camera light) is
     // ours to stop, not LiveKit's -- closing the room alone would keep the
     // camera capturing into a dead track.
-    stop_camera_publish(state).await;
+    stop_camera_publish(app, state).await;
 
     let (joined, mic, playout) = {
         let mut guard = state.inner.lock_unpoisoned();

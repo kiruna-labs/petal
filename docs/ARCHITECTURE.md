@@ -351,7 +351,10 @@ full ~180-command list):
   `region-view-options-changed`, `region-control-state-changed`,
   `region-warning`, `telepointer-update`, `draw-update`, `presence-update`,
   `room-updated`, `resilience-event`, `room-left`, `mic-mute-changed`,
-  `camera-publish-state`, `desktop-windows-changed`, `debug-mode-changed`,
+  `camera-publish-state`, `camera-intent-changed` (the camera INTENT edge --
+  emitted before the device is acquired and after it is released, so the
+  Settings window's preview can yield the shared camera), `session-changed`,
+  `desktop-windows-changed`, `debug-mode-changed`,
   `remote-control-status`, `control-consent-requested` (typed
   ordinary-control or full-control-escalation prompt),
   `share-control-mode-changed`, `meeting-restore-pill-requested`,

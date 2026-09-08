@@ -2596,7 +2596,7 @@ async fn leave_room_inner(
     // leave_room can't see an in-flight camera (start awaits its first
     // frame), which is exactly why the generation check in
     // `camera_session::start_camera_publish_with_device` exists.
-    crate::camera_session::stop_camera_publish(state).await;
+    crate::camera_session::stop_camera_publish(app, state).await;
     let joined = state.joined.lock_unpoisoned().take();
     let Some(mut joined) = joined else {
         return;

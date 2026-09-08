@@ -234,6 +234,20 @@ pub(crate) struct CameraPublishStateEvent {
     pub error: Option<String>,
 }
 
+/// Payload of the `camera-intent-changed` event: the user's camera INTENT,
+/// announced at the two moments the physical device changes hands -- `true`
+/// BEFORE the meeting tries to acquire it, `false` AFTER it has been
+/// released. `camera-publish-state` cannot carry this: it fires only at a
+/// terminal publish OUTCOME, and every surface reads its `publishing: false`
+/// as "the camera is off". The Settings window runs in its own webview and
+/// its getUserMedia preview owns the same device, so it needs the intent
+/// EDGE, not the outcome (PR #72 review).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CameraIntentEvent {
+    pub intended: bool,
+}
+
 /// Result of `start_camera_publish_command`. `published: false` means the
 /// immediate attempt failed but the bounded self-heal loop is retrying in
 /// the background; the terminal outcome arrives as a `camera-publish-state`
@@ -597,6 +611,7 @@ fn start_camera_loss_monitor(
             };
             teardown_active_camera(camera, false).await;
             state.set_camera_intent(false);
+            emit_camera_intent(&app, false);
             emit_camera_publish_state(&app, false, Some(error));
             break;
         }
@@ -629,15 +644,26 @@ async fn teardown_active_camera(camera: ActiveCamera, abort_loss_monitor: bool) 
 
 /// Stop the published webcam, releasing the camera (light off) and
 /// unpublishing the track. Idempotent no-op when not publishing.
-pub(crate) async fn stop_camera_publish(state: &crate::session::SessionState) {
-    let Some(camera) = state.take_active_camera() else {
-        return;
-    };
-    log::info!("session: stop_camera_publish begin");
-    teardown_active_camera(camera, true).await;
-    #[cfg(target_os = "windows")]
-    crate::camera_self_view::clear();
-    log::info!("session: stop_camera_publish done (camera released)");
+pub(crate) async fn stop_camera_publish(
+    app: &tauri::AppHandle,
+    state: &crate::session::SessionState,
+) {
+    if let Some(camera) = state.take_active_camera() {
+        log::info!("session: stop_camera_publish begin");
+        teardown_active_camera(camera, true).await;
+        #[cfg(target_os = "windows")]
+        crate::camera_self_view::clear();
+        log::info!("session: stop_camera_publish done (camera released)");
+    }
+    // The device is free NOW -- announced even when there was nothing to
+    // release, so a stop that lands while the first publish attempt is still
+    // in flight (nothing acquired yet, the self-heal loop just cancels
+    // silently) still tells a waiting preview it may come back. Report the
+    // intent as it stands rather than a blanket `false`: a live device switch
+    // stops the old capture with the intent still ON, and a preview that
+    // grabbed the camera in that gap would be holding it when the new
+    // capture starts.
+    emit_camera_intent(app, state.camera_intent());
 }
 
 pub(crate) fn emit_camera_publish_state(
@@ -651,6 +677,23 @@ pub(crate) fn emit_camera_publish_state(
         CameraPublishStateEvent { publishing, error },
     ) {
         log::warn!("session: failed to emit camera-publish-state: {error}");
+    }
+}
+
+/// Broadcast the user's camera intent (see [`CameraIntentEvent`]). Emitted
+/// BEFORE the device is acquired on the way on and AFTER it is released on
+/// the way off, so a second webview holding the same camera can yield and
+/// come back.
+///
+/// Delivery is asynchronous: a preview may not have let go by the time the
+/// immediate publish attempt runs. That attempt can still lose the race --
+/// the bounded self-heal loop (`CAMERA_HEAL_RETRY_BACKOFF`) is what makes it
+/// converge, and this event is what makes the preview yield in time for it.
+pub(crate) fn emit_camera_intent(app: &tauri::AppHandle, intended: bool) {
+    if let Err(error) = tauri::Emitter::emit(app, "camera-intent-changed", CameraIntentEvent {
+        intended,
+    }) {
+        log::warn!("session: failed to emit camera-intent-changed: {error}");
     }
 }
 
@@ -777,6 +820,9 @@ pub(crate) async fn ensure_camera_published(
                 // room must not receive a stale terminal error.
                 return;
             }
+            // Intent was cleared with the retries exhausted and nothing
+            // acquired -- the device is free for a Settings preview again.
+            emit_camera_intent(app, false);
             CameraPublishStateEvent {
                 publishing: false,
                 error: Some(error),
@@ -935,7 +981,7 @@ pub async fn set_camera_prefs(
         });
     }
 
-    stop_camera_publish(&state).await;
+    stop_camera_publish(&app, &state).await;
     match start_camera_publish_with_device(
         &app,
         &state,
@@ -952,6 +998,7 @@ pub async fn set_camera_prefs(
         }),
         Err(error) => {
             state.set_camera_intent(false);
+            emit_camera_intent(&app, false);
             emit_camera_publish_state(&app, false, Some(error.clone()));
             Ok(crate::transport::camera::AppliedCameraDevice {
                 applied: false,
@@ -1013,7 +1060,7 @@ pub async fn set_camera_device(
         });
     }
 
-    stop_camera_publish(&state).await;
+    stop_camera_publish(&app, &state).await;
     match start_camera_publish_with_device(
         &app,
         &state,
@@ -1040,6 +1087,7 @@ pub async fn set_camera_device(
                 crate::analytics::DeviceChange::Failed,
             );
             state.set_camera_intent(false);
+            emit_camera_intent(&app, false);
             emit_camera_publish_state(&app, false, Some(error.clone()));
             Ok(crate::transport::camera::AppliedCameraDevice {
                 applied: false,
@@ -1064,6 +1112,9 @@ pub async fn start_camera_publish_command(
 ) -> Result<StartCameraPublishResult, String> {
     let _control = state.lock_camera_control().await;
     state.set_camera_intent(true);
+    // Announce the intent BEFORE acquiring: the Settings window's preview
+    // holds the same physical device and has to let go for this to succeed.
+    emit_camera_intent(&app, true);
     match start_camera_publish_with_device(
         &app,
         &state,
@@ -1077,6 +1128,7 @@ pub async fn start_camera_publish_command(
             // Not retryable — there is no room to publish into. Intent is
             // cleared so a later join doesn't surprise-start the camera.
             state.set_camera_intent(false);
+            emit_camera_intent(&app, false);
             Err(error)
         }
         Err(error) => {
@@ -1102,11 +1154,12 @@ pub async fn start_camera_publish_command(
 /// attempt).
 #[tauri::command]
 pub async fn stop_camera_publish_command(
+    app: tauri::AppHandle,
     state: tauri::State<'_, crate::session::SessionState>,
 ) -> Result<(), ()> {
     let _control = state.lock_camera_control().await;
     state.set_camera_intent(false);
-    stop_camera_publish(&state).await;
+    stop_camera_publish(&app, &state).await;
     Ok(())
 }
 

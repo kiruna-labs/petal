@@ -9783,7 +9783,7 @@ pub async fn start_test_cockpit(
                 if let Some(state) = app.try_state::<crate::session::SessionState>() {
                     let _control = state.lock_camera_control().await;
                     state.set_camera_intent(false);
-                    crate::camera_session::stop_camera_publish(&state).await;
+                    crate::camera_session::stop_camera_publish(app, &state).await;
                     log::info!(
                         "test-cockpit: {} stopped the native camera publish (scenario epilogue)",
                         scenario.id

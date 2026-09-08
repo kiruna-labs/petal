@@ -24,6 +24,7 @@
   import type { PermissionStatus } from '$lib/components/PermissionRow.svelte';
   import {
     session,
+    startSessionSync,
     updateIdentity,
     updateRemoteControlPolicy,
     updateLocalEchoEnabled,
@@ -60,6 +61,13 @@
     if (auth === 'denied' || auth === 'restricted') return 'denied';
     return undecided; // not-determined
   }
+
+
+  // Cross-window session sync (Settings has its own window now). Scoped to
+  // this route's lifetime: `startSessionSync` refcounts one native listener
+  // and the disposer returned here releases it on destroy, so no listener
+  // outlives the surface that wanted it.
+  onMount(() => startSessionSync());
 
   onMount(async () => {
     try {

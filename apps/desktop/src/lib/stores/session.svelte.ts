@@ -20,7 +20,7 @@
 // a stand-in.
 import { browser } from '$app/environment';
 import { invoke } from '@tauri-apps/api/core';
-import { emit, listen } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { IdentityColor } from '$lib/components/Avatar.svelte';
 import { COMMANDS, EVENTS, hasTauriBridge, type RemoteControlPolicy } from '$lib/ipc';
 import { migrateRemoteControlPolicy } from '$lib/remoteControlPolicy';
@@ -153,13 +153,26 @@ persist(session);
 // device, or policy edited in the Settings window would never reach the
 // meeting or home window's copy until reload. Every updater below commits
 // through `commit`, which persists AND broadcasts the snapshot to every
-// other webview; each webview applies what it receives and ignores its own
-// echo (Tauri `emit` delivers to the emitter too). The Rust-mirrored fields
-// (remote-control policy, Sentry) are still invoked only by the window that
-// made the change, so the native side sees exactly one call.
+// other webview; a subscribed webview applies what it receives and ignores
+// its own echo (Tauri `emit` delivers to the emitter too). The Rust-mirrored
+// fields (remote-control policy, Sentry) are still invoked only by the window
+// that made the change, so the native side sees exactly one call.
 //
 // `$state.snapshot` at the boundary: the proxy itself cannot be cloned.
+//
+// RECEIVING is opt-in and lifecycle-scoped (`startSessionSync`), never a
+// module-level `listen` at import time: this module is imported by every
+// short-lived surface webview (region selector, hover tab, compositor
+// overlays, window picker) and a listener registered by an import has no
+// owner and no teardown. That leak is observable -- tests/uiConsistency.ts's
+// region-selector probe counts live `plugin:event|listen` registrations after
+// unmount and fails on a survivor.
 const WEBVIEW_ID = newParticipantId();
+
+interface SessionChangedPayload {
+  origin: string;
+  session: Record<string, unknown>;
+}
 
 function commit(state: StoredSession) {
   persist(state);
@@ -171,21 +184,52 @@ function commit(state: StoredSession) {
   }
 }
 
-if (browser && hasTauriBridge()) {
-  void listen<{ origin: string; session: Record<string, unknown> }>(
-    EVENTS.sessionChanged,
-    (event) => {
+function applyIncoming(payload: SessionChangedPayload) {
+  const incoming = payload.session;
+  if (!incoming || typeof incoming !== 'object') return;
+  // Never let another webview rewrite THIS one's participant id: it is
+  // the live LiveKit identity of a joined meeting.
+  const participantId = session.participantId;
+  Object.assign(session, { ...defaults, ...incoming });
+  if (participantId) session.participantId = participantId;
+  persist(session);
+}
+
+let syncSubscribers = 0;
+let syncListener: Promise<UnlistenFn | null> | null = null;
+
+/**
+ * Subscribe THIS webview to session changes made in another window, for as
+ * long as the returned disposer is not called. Refcounted: the single native
+ * listener is registered on the first subscriber and unlistened when the last
+ * one releases it, so nothing survives a route/component teardown.
+ *
+ * Call it only from the long-lived surfaces that display session state the
+ * Settings window can edit (home, meeting, Settings itself). Short-lived
+ * webviews are deliberately left out -- they read the store once at load,
+ * exactly as they did before Settings became its own window.
+ */
+export function startSessionSync(): () => void {
+  if (!browser || !hasTauriBridge()) return () => {};
+  syncSubscribers += 1;
+  if (syncSubscribers === 1) {
+    syncListener = listen<SessionChangedPayload>(EVENTS.sessionChanged, (event) => {
       if (!event.payload || event.payload.origin === WEBVIEW_ID) return;
-      const incoming = event.payload.session;
-      if (!incoming || typeof incoming !== 'object') return;
-      // Never let another webview rewrite THIS one's participant id: it is
-      // the live LiveKit identity of a joined meeting.
-      const participantId = session.participantId;
-      Object.assign(session, { ...defaults, ...incoming });
-      if (participantId) session.participantId = participantId;
-      persist(session);
-    }
-  ).catch(() => {});
+      applyIncoming(event.payload);
+    }).catch(() => null);
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    syncSubscribers -= 1;
+    if (syncSubscribers > 0) return;
+    const pending = syncListener;
+    syncListener = null;
+    // The registration may still be in flight; unlisten once it lands so a
+    // subscribe/dispose pair faster than the IPC round trip still cleans up.
+    void pending?.then((unlisten) => unlisten?.()).catch(() => {});
+  };
 }
 
 export function completeOnboarding(name: string, identity: IdentityColor) {

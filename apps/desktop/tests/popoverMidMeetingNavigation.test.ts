@@ -44,6 +44,10 @@ const presenceSource = readFileSync(
   new URL('../src-tauri/src/presence.rs', import.meta.url),
   'utf8'
 );
+const cameraSessionSource = readFileSync(
+  new URL('../src-tauri/src/camera_session.rs', import.meta.url),
+  'utf8'
+);
 
 function shippedNavigationSnippet(route: string): string {
   const template = rustSource.match(
@@ -195,6 +199,36 @@ test('session store edits reach the other webviews', () => {
   assert.match(presenceSource, /RoomEvent::ParticipantNameChanged/);
 });
 
+test('the session store registers no listener at import time', () => {
+  // This module is imported by every short-lived surface webview (region
+  // selector, hover tab, compositor overlays, window picker). A module-level
+  // `listen` has no owner and no teardown, and uiConsistency's region probe
+  // fails on the survivor ('selector native listeners survived teardown').
+  const listenCalls = [...sessionStoreSource.matchAll(/\blisten</g)];
+  assert.equal(listenCalls.length, 1, 'the store must register exactly one listener, lazily');
+  const sync = sessionStoreSource.match(
+    /export function startSessionSync\(\): \(\) => void \{[\s\S]*?\n\}/
+  )?.[0];
+  assert.ok(sync, 'could not locate startSessionSync');
+  assert.ok(sync.includes('listen<'), 'the only listen() must live inside startSessionSync');
+  // Refcounted registration + a disposer that unlistens even when the
+  // registration is still in flight.
+  assert.match(sync, /syncSubscribers \+= 1/);
+  assert.match(sync, /unlisten\?\.\(\)/);
+  // ...and the surfaces that want it own its lifetime.
+  for (const [label, source] of [
+    ['main', mainPageSource],
+    ['meeting', meetingSource],
+    ['settings', settingsSource]
+  ] as const) {
+    assert.match(
+      source,
+      /onMount\(\(\) => startSessionSync\(\)\)/,
+      `${label} must scope the session sync to its own lifetime`
+    );
+  }
+});
+
 test('Settings never previews the camera while the meeting camera is on', () => {
   // Settings is its own window now, so its getUserMedia preview competes
   // with the meeting's publish for the device. acquirePreview must consult
@@ -210,6 +244,40 @@ test('Settings never previews the camera while the meeting camera is on', () => 
   assert.ok(mediaIndex > gateIndex, 'the meeting-camera gate must run before getUserMedia');
   assert.match(settingsComponentSource, /invoke<CameraPublishStateSnapshot>\(COMMANDS\.cameraPublishState\)/);
   assert.match(settingsComponentSource, /listen<CameraPublishState>\(EVENTS\.cameraPublishState/);
+});
+
+test('turning the meeting camera ON releases the Settings preview before the device is acquired', () => {
+  // The contention is only guarded in one direction by the publish-state
+  // event: every emitter of it reports either `false` or a terminal
+  // self-heal outcome, so with the preview live, turning the meeting camera
+  // ON had no signal to release the device before the publish attempt --
+  // the publish failed and the preview never yielded. `camera-intent-changed`
+  // is that missing intent-time signal.
+  const startCommand = cameraSessionSource.match(
+    /pub async fn start_camera_publish_command\([\s\S]*?\n\}\n/
+  )?.[0];
+  assert.ok(startCommand, 'could not locate start_camera_publish_command');
+  const intentIndex = startCommand.indexOf('emit_camera_intent(&app, true)');
+  const acquireIndex = startCommand.indexOf('start_camera_publish_with_device(');
+  assert.ok(intentIndex >= 0, 'the start command must announce the camera intent');
+  assert.ok(
+    acquireIndex > intentIndex,
+    'the intent must be announced BEFORE the device is acquired'
+  );
+  // The device is only free again once the capture has been torn down, and
+  // the intent reported there is the live one -- a device switch stops the
+  // old capture with the intent still ON.
+  const stopPublish = cameraSessionSource.match(
+    /pub\(crate\) async fn stop_camera_publish\([\s\S]*?\n\}\n/
+  )?.[0];
+  assert.ok(stopPublish, 'could not locate stop_camera_publish');
+  assert.match(stopPublish, /emit_camera_intent\(app, state\.camera_intent\(\)\)/);
+  // Settings releases on the intent edge, not only on a publish outcome.
+  assert.match(
+    settingsComponentSource,
+    /listen<CameraIntentChanged>\(EVENTS\.cameraIntentChanged/
+  );
+  assert.match(settingsComponentSource, /function applyMeetingCameraState\(active: boolean\)/);
 });
 
 test('layout remounts the page when only a route param changes', () => {

@@ -46,7 +46,7 @@
   import Toast from '@petal/shared/ui/components/Toast.svelte';
   import type { ControlIcon } from '$lib/components/ControlButton.svelte';
   import { toastTransition } from '$lib/motion';
-  import { session } from '$lib/stores/session.svelte';
+  import { session, startSessionSync } from '$lib/stores/session.svelte';
   import { toastHostState } from '$lib/stores/toastHost.svelte';
   import { cameraPreviewConstraints } from '$lib/data/cameraConstraints';
   import { identityColorCss, identityInkCss } from '$lib/data/identityColor';
@@ -266,6 +266,13 @@
   const elapsed = $derived(
     `${Math.floor(elapsedSecs / 60)}:${String(elapsedSecs % 60).padStart(2, '0')}`
   );
+
+
+  // Cross-window session sync (Settings has its own window now). Scoped to
+  // this route's lifetime: `startSessionSync` refcounts one native listener
+  // and the disposer returned here releases it on destroy, so no listener
+  // outlives the surface that wanted it.
+  onMount(() => startSessionSync());
 
   onMount(async () => {
     elapsedTimer = setInterval(() => (elapsedSecs += 1), 1000);

@@ -215,6 +215,15 @@ export const EVENTS = {
   autotestJoinResult: 'autotest-join-result',
   cameraPublishState: 'camera-publish-state',
   /**
+   * The user's camera INTENT changed: `true` before the meeting acquires the
+   * physical device, `false` after it has been released. Distinct from
+   * `cameraPublishState`, which reports a terminal publish OUTCOME and whose
+   * `publishing: false` every surface reads as "the camera is off" -- there
+   * is no moment in it at which a second webview holding the same camera is
+   * told to let go. The Settings window's preview needs exactly that edge.
+   */
+  cameraIntentChanged: 'camera-intent-changed',
+  /**
    * Debug mode (#669) changed, from `set_debug_mode`. The belt half of
    * "ask AND listen" -- an already-open remote-window surface webview reads
    * `COMMANDS.debugModeSettings` once on mount, then updates live from this
@@ -743,6 +752,16 @@ export interface MicMuteChanged {
 export interface CameraPublishState {
   publishing: boolean;
   error: string | null;
+}
+
+/**
+ * Mirrors native `CameraIntentEvent`. `intended: true` arrives BEFORE the
+ * native camera capture is started, so another webview previewing the same
+ * device has a chance to release it; `intended: false` arrives after the
+ * device has been released.
+ */
+export interface CameraIntentChanged {
+  intended: boolean;
 }
 
 /** Mirrors native `StartCameraPublishResult`. `published: true` means capture
@@ -1698,6 +1717,7 @@ export interface EventPayloads {
   [EVENTS.aiChatRefused]: AiChatRefusedEvent;
   [EVENTS.autotestJoinResult]: AutotestJoinResult;
   [EVENTS.cameraPublishState]: CameraPublishState;
+  [EVENTS.cameraIntentChanged]: CameraIntentChanged;
   [EVENTS.debugModeChanged]: DebugModeSettings;
   [EVENTS.desktopWindowsChanged]: void;
   [EVENTS.hoverTabHide]: void;
