@@ -46,6 +46,10 @@ pub fn for_scenario(id: &str) -> EvidenceBasis {
         // tier apart (#819 review; falling through printed both as Scaffold).
         "RC-N2N" => EvidenceBasis::HostEffect,
         "RC-N2W" => EvidenceBasis::WireShape,
+        // The oracle reads the host's own plugin journal for a named plugin id
+        // that only the frame's executed scripts can put there -- a host-side
+        // effect, not a proxy for one.
+        "PLUGIN-BOOT" => EvidenceBasis::HostEffect,
         _ => EvidenceBasis::Scaffold,
     }
 }

@@ -191,6 +191,16 @@ export function isButtonLabel(value: unknown): value is string {
   return isPrintableDisplayText(value) && value.length > 0 && value.length <= MANIFEST_LIMITS.buttonLabelMaxLength;
 }
 
+/**
+ * An icon NAME (icons.ts), not markup. One rule for both entry points a name
+ * can arrive through: a manifest's `contributes` and a live `ui.setButton`
+ * patch. The broker used to take any string for a patch, so a plugin could
+ * hand the host chrome something no manifest could declare (#37).
+ */
+export function isIconName(value: unknown): value is string {
+  return typeof value === 'string' && ICON_RE.test(value);
+}
+
 function checkButton(errors: string[], where: string, button: unknown, seen: Set<string>): void {
   if (!isRecord(button)) {
     errors.push(`${where}: must be an object`);
@@ -202,7 +212,7 @@ function checkButton(errors: string[], where: string, button: unknown, seen: Set
       `${where}: label must be 1..${MANIFEST_LIMITS.buttonLabelMaxLength} printable chars, no line breaks or bidi overrides (UI text must never truncate)`,
     );
   }
-  if (typeof button.icon !== 'string' || !ICON_RE.test(button.icon)) {
+  if (!isIconName(button.icon)) {
     errors.push(`${where}: icon must be a lowercase icon name`);
   }
 }

@@ -1319,12 +1319,29 @@ subsequent cockpit work:
   `svelte.config.js` strips `routes/dev/**` from a normal `npm run build`, so
   without this env var the SHARE-N2W-Q native test-pattern window
   (`WebviewUrl` = `dev/test-pattern.html`) 404s to the SPA fallback and the
-  shared window renders frozen/static content (delivered <1fps). Any cockpit
+  shared window renders frozen/static content (delivered <1fps), and
+  PLUGIN-BOOT's `dev/plugin-boot.html` is missing from the asset table
+  entirely (it reports that as INFRA-FAIL rather than as a plugin verdict). Any cockpit
   build -- `cargo build`/`tauri dev`/`tauri build` -- must run its frontend
   build as `PETAL_INCLUDE_DEV_ROUTES=1 npm run build` so
   `build/dev/test-pattern.html` is emitted and embedded. (For a raw
   `cargo build` after changing that route, also re-embed with a
   `touch src-tauri/build.rs`.)
+- **PLUGIN-BOOT is the only scenario that loads a plugin.** It exists because
+  nothing else did: the engine joins its room from Rust
+  (`session::join_room`) and never navigates the main webview to the meeting
+  route, so `PluginSurfaces` never mounted and a whole Quick run contained
+  zero `plugins(host):` lines -- including the host's own "srcdoc blocked?"
+  canary, whose silence therefore proved nothing (#559/#561). The scenario
+  opens `dev/plugin-boot.html` in its own webview window of the QA binary,
+  which serves pages through Tauri's asset protocol with the configured CSP
+  attached, and requires `plugins(host): plugin petal.reactions frame ready`
+  in the host journal -- a line only the frame's own executed scripts can
+  produce. Its `plugin-boot-preflight` run.jsonl record names the embedder
+  policy that was in force, and a probe page that never mounted is INFRA-FAIL,
+  not a verdict about WebKit. It also records (never gates on) whether a
+  sandboxed srcdoc frame's cross-origin self-navigation raised a `frame-src`
+  `securitypolicyviolation`.
 - **SHARE-N2W-Q is a delivered-LIVENESS gate, not a 30fps gate.** It shares
   Petal's OWN WKWebView test-pattern window; macOS throttles self-captured
   WebView content (JS timers + the SCK raw stream), so it delivers via
