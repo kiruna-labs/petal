@@ -552,8 +552,15 @@ pub fn plugin_host_log(level: String, line: String) -> Result<(), String> {
     if !limiter.lock().map_err(|_| "limiter poisoned".to_string())?.try_take("host") {
         return Ok(());
     }
-    let mut text: String = line.chars().take(1000).collect();
-    if text.len() < line.len() {
+    // Plugin-controlled text: newlines would produce continuation lines with no
+    // `plugins(host):` prefix, letting a plugin forge log lines from other
+    // components. Flatten first, then truncate.
+    let flattened: String = line
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let mut text: String = flattened.chars().take(1000).collect();
+    if text.len() < flattened.len() {
         text.push('…');
     }
     match level.as_str() {
@@ -567,6 +574,24 @@ pub fn plugin_host_log(level: String, line: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn host_log_text_is_flattened_and_truncated() {
+        // Plugin-controlled text must not be able to forge a log line: newlines
+        // become spaces before the 1000-char cap is applied.
+        let forged = "boom\nplugins(host): totally legitimate";
+        let flattened: String = forged
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .collect();
+        assert!(!flattened.contains('\n'));
+        assert_eq!(flattened, "boom plugins(host): totally legitimate");
+
+        let long: String = "x".repeat(1500);
+        let capped: String = long.chars().take(1000).collect();
+        assert_eq!(capped.chars().count(), 1000);
+        assert!(capped.chars().count() < long.chars().count());
+    }
     use super::*;
     use serde::Deserialize;
     use std::time::Duration;

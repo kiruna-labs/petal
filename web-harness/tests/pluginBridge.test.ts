@@ -254,6 +254,18 @@ test('payloads from a reactive proxy still reach the frame (DataCloneError seen 
   assert.deepEqual(warns, []);
 });
 
+test('toCloneable copies an own __proto__ key without touching the copy\'s prototype', () => {
+  // JSON.parse produces an own, enumerable `__proto__`; plain assignment would
+  // hit Object.prototype's setter, silently dropping the key and re-pointing
+  // the copy's prototype. structuredClone keeps it as data, so we must too.
+  const source = JSON.parse('{"a":1,"__proto__":{"polluted":true}}') as Record<string, unknown>;
+  const out = toCloneable(source) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(out).sort(), ['__proto__', 'a']);
+  assert.equal(Object.getPrototypeOf(out), Object.prototype);
+  assert.equal((Object.prototype as Record<string, unknown>).polluted, undefined);
+  assert.deepEqual(out.__proto__, { polluted: true });
+});
+
 test('toCloneable keeps binary payloads intact and drops functions', () => {
   const bytes = new Uint8Array([1, 2, 3]);
   const out = toCloneable({ a: bytes, f: () => 1, n: 1, nested: new Proxy({ x: [1, { y: 2 }] }, {}) }) as Record<string, unknown>;
