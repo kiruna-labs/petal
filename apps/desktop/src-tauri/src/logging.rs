@@ -123,7 +123,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use zip::write::FileOptions;
+use zip::write::SimpleFileOptions;
 
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_ROTATED_LOG_FILES: usize = 5;
@@ -2484,7 +2484,9 @@ fn build_zip_bytes(readme: &[u8], entries: &[(String, String)]) -> Result<Vec<u8
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut zip = zip::ZipWriter::new(cursor);
-        let options = FileOptions::default()
+        // zip 4 made `FileOptions` generic over its extended-data type;
+        // `SimpleFileOptions` is the plain `FileOptions<'static, ()>` alias.
+        let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .unix_permissions(0o600);
 
@@ -3694,48 +3696,57 @@ fn init_sentry() {
         }
     };
 
-    let guard = sentry::init(sentry::ClientOptions {
-        dsn: Some(dsn),
-        release: Some(env!("CARGO_PKG_VERSION").into()),
-        environment: Some(if cfg!(debug_assertions) {
-            "development".into()
-        } else {
-            "production".into()
-        }),
-        // Sampling/cost config, pinned explicitly (#281 point 9) rather than
-        // left to defaults: no performance-tracing product is used (avoids
-        // an unrelated PII surface -- transaction names can carry arbitrary
-        // app data), errors are fully sampled, and the breadcrumb ring
-        // buffer is capped well below the library default of 100.
-        traces_sample_rate: 0.0,
-        sample_rate: 1.0,
-        max_breadcrumbs: 50,
-        // Exactly one panic hook, and one ObjC uncaught-exception hook (no
-        // second competing chain, #281 point 5): `default_integrations:
-        // false` disables Sentry's own auto-installed `PanicIntegration`
-        // (which would otherwise call `std::panic::set_hook` itself).
-        // `install_panic_hook()`/`objc_exception`'s handler below instead
-        // call `sentry_panic`'s event-building logic directly and forward
-        // through `sentry::capture_event`, from EXISTING hooks this module
-        // already owned before #281.
-        default_integrations: false,
-        // Allowlist-first PII policy (#281 point 8): never forward a raw
-        // free-text log/panic/exception message verbatim off this machine.
-        // Both hooks reuse `redact_for_export()` -- the SAME function the
-        // manual "Export logs" path already calls -- as a scrub backstop,
-        // and additionally strip every event field this policy has no fixed
-        // allowlist entry for. See `scrub_event_for_sentry()`.
-        before_send: Some(std::sync::Arc::new(scrub_event_for_sentry)),
-        before_breadcrumb: Some(std::sync::Arc::new(scrub_breadcrumb_for_sentry)),
-        // The separate structured-Logs/Metrics Sentry products are not used
-        // (the `logs` cargo feature isn't even enabled, so these fields are
-        // already inert) -- set explicitly so the intent doesn't silently
-        // depend on a feature flag never flipping.
-        enable_logs: false,
-        enable_metrics: false,
-        shutdown_timeout: SENTRY_FLUSH_TIMEOUT,
-        ..Default::default()
+    // sentry 0.49 made `ClientOptions` #[non_exhaustive] (no struct literal
+    // from outside the crate) and replaced the `sample_rate` /
+    // `traces_sample_rate` fields with sampling STRATEGIES. The two builder
+    // methods below set exactly those strategies, so the pins keep their
+    // original meaning: `traces_sample_rate(0.0)` stores an explicit
+    // fixed-rate-zero strategy (deliberately distinct from leaving tracing
+    // unset) and `sample_rate(1.0)` an explicit full-sampling one.
+    //
+    // Sampling/cost config, pinned explicitly (#281 point 9) rather than
+    // left to defaults: no performance-tracing product is used (avoids an
+    // unrelated PII surface -- transaction names can carry arbitrary app
+    // data), errors are fully sampled, and the breadcrumb ring buffer is
+    // capped well below the library default of 100.
+    let mut options = sentry::ClientOptions::default()
+        .sample_rate(1.0)
+        .traces_sample_rate(0.0);
+    options.dsn = Some(dsn);
+    options.release = Some(env!("CARGO_PKG_VERSION").into());
+    options.environment = Some(if cfg!(debug_assertions) {
+        "development".into()
+    } else {
+        "production".into()
     });
+    options.max_breadcrumbs = 50;
+    // Exactly one panic hook, and one ObjC uncaught-exception hook (no
+    // second competing chain, #281 point 5): `default_integrations: false`
+    // disables Sentry's own auto-installed `PanicIntegration` (which would
+    // otherwise call `std::panic::set_hook` itself).
+    // `install_panic_hook()`/`objc_exception`'s handler below instead call
+    // `sentry_panic`'s event-building logic directly and forward through
+    // `sentry::capture_event`, from EXISTING hooks this module already
+    // owned before #281.
+    options.default_integrations = false;
+    // Allowlist-first PII policy (#281 point 8): never forward a raw
+    // free-text log/panic/exception message verbatim off this machine. Both
+    // hooks reuse `redact_for_export()` -- the SAME function the manual
+    // "Export logs" path already calls -- as a scrub backstop, and
+    // additionally strip every event field this policy has no fixed
+    // allowlist entry for. See `scrub_event_for_sentry()`.
+    options.before_send = Some(std::sync::Arc::new(scrub_event_for_sentry));
+    options.before_breadcrumb = Some(std::sync::Arc::new(scrub_breadcrumb_for_sentry));
+    // The separate structured-Logs/Metrics Sentry products are not used. The
+    // `enable_logs` / `enable_metrics` options that used to pin this are
+    // DEPRECATED in sentry 0.49 (metrics is a no-op; logs now only gates
+    // automatic capture by integrations), so setting them would just warn.
+    // The intent is enforced structurally instead: the `logs` cargo feature
+    // is not enabled, `default_integrations = false` above means no
+    // integration is installed to capture anything automatically, and this
+    // module never calls the manual log/metric APIs.
+    options.shutdown_timeout = SENTRY_FLUSH_TIMEOUT;
+    let guard = sentry::init(options);
 
     if !guard.is_enabled() {
         eprintln!(
@@ -6257,13 +6268,14 @@ mod tests {
     fn sentry_breadcrumb_storm_suppression_preserves_prior_ring_context() {
         use sentry::protocol::{Breadcrumb, Event};
 
-        let options = sentry::ClientOptions {
-            max_breadcrumbs: 50,
-            before_breadcrumb: Some(std::sync::Arc::new(scrub_breadcrumb_for_sentry)),
-            before_send: Some(std::sync::Arc::new(scrub_event_for_sentry)),
-            default_integrations: false,
-            ..Default::default()
-        };
+        // `ClientOptions` is #[non_exhaustive] since sentry 0.49: build from
+        // Default and assign, rather than a struct literal.
+        let mut options = sentry::ClientOptions::default();
+        options.max_breadcrumbs = 50;
+        options.before_breadcrumb = Some(std::sync::Arc::new(scrub_breadcrumb_for_sentry));
+        options.before_send = Some(std::sync::Arc::new(scrub_event_for_sentry));
+        options.default_integrations = false;
+        let options = options;
         let envelopes = sentry::test::with_captured_envelopes_options(
             || {
                 let _guard = SENTRY_ENABLED_TEST_LOCK
@@ -6816,14 +6828,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         set_sentry_enabled(true);
-        let options = sentry::ClientOptions {
-            release: Some(env!("CARGO_PKG_VERSION").into()),
-            environment: Some("private-environment".into()),
-            server_name: Some("Alice-MacBook.local".into()),
-            default_integrations: false,
-            before_send: Some(std::sync::Arc::new(scrub_event_for_sentry)),
-            ..Default::default()
-        };
+        let mut options = sentry::ClientOptions::default();
+        options.release = Some(env!("CARGO_PKG_VERSION").into());
+        options.environment = Some("private-environment".into());
+        options.server_name = Some("Alice-MacBook.local".into());
+        options.default_integrations = false;
+        options.before_send = Some(std::sync::Arc::new(scrub_event_for_sentry));
+        let options = options;
         let envelopes = sentry::test::with_captured_envelopes_options(
             || {
                 *SENTRY_DIAGNOSTIC_RATE_LIMITER
