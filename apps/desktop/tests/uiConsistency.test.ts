@@ -475,6 +475,21 @@ const MACOS_WKWEVIEW_UA =
   '(KHTML, like Gecko) Version/17.4 Safari/605.1.15';
 const VIEWPORT = { width: 400, height: 800 };
 
+/** #95: the region placement probe's full state, read from several sampling points. */
+const PLACEMENT_PROBE_STATE = `(() => {
+        const probe = window.__regionIpcProbe;
+        return {
+          placementSettled: probe?.placementSettled ?? false,
+          earlyClickThroughRequests: probe?.earlyClickThroughRequests ?? 0,
+          appliedIgnoreStates: probe?.appliedIgnoreStates ?? [],
+          clickThroughRequests: probe?.clickThroughRequests ?? [],
+          placementSettlementLabels: probe?.placementSettlementLabels ?? [],
+          commandHistory: probe?.commandHistory ?? [],
+          routePlacementActive: document.querySelector('.window-container')?.getAttribute('data-placement-active'),
+          routePlacementPending: document.querySelector('.window-container')?.getAttribute('data-placement-settlement-pending')
+        };
+      })()`;
+
 const desktopRoot = new URL('..', import.meta.url);
 const fixtureRoot = new URL('./fixtures/', import.meta.url);
 
@@ -564,6 +579,33 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
     }
   );
   return settled;
+}
+
+/**
+ * #95: read a browser-side state until it matches what the assertion below
+ * expects, instead of sleeping a guessed interval and sampling once. Returns
+ * the last sample either way, so a state that never arrives still fails the
+ * caller's assertion with the real value that was observed -- same shape as
+ * #75's `pollUntil`, against this file's CDP browser.
+ *
+ * Only use it where the expected state is NOT already true before the step
+ * being measured; otherwise the first sample can return stale state and the
+ * assertion is weakened rather than stabilised.
+ */
+async function pollProbe<T>(
+  browser: RenderedTestBrowser,
+  sessionId: string,
+  expression: string,
+  settled: (value: T) => boolean,
+  timeoutMs = 5_000
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let value = (await browser.evaluate(sessionId, expression)) as T;
+  while (!settled(value) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    value = (await browser.evaluate(sessionId, expression)) as T;
+  }
+  return value;
 }
 
 async function removeTempPath(path: string): Promise<void> {
@@ -1102,19 +1144,53 @@ test('region selector renders tokenized chrome and keeps long titles inside both
         assert.equal(measurement.colorScheme, 'dark', `${scenario.name}/${background} color scheme`);
       }
 
-      await browser.evaluate(sessionId, `document.querySelector('[data-region-share-control]')?.click()`);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      const pendingControl = (await browser.evaluate(
+      // #95: the pending state exists only for the fixture's 120ms native
+      // toggle delay, so reading it once at a fixed 20ms offset is a bet that
+      // the sample lands inside that window. Under load it can land after the
+      // toggle already resolved and report a control that was never disabled.
+      // Latch the first pending frame in the page, armed in the same
+      // evaluation as the click so nothing can slip between the two. A control
+      // that never goes disabled leaves the latch null and still fails the
+      // assertions below, with the real reading.
+      await browser.evaluate(
         sessionId,
         `(() => {
-          const share = document.querySelector('[data-region-share-control]');
-          return {
-            disabled: share instanceof HTMLButtonElement ? share.disabled : null,
-            busy: share?.getAttribute('aria-busy') ?? null,
-            invocations: window.__regionIpcProbe?.shareInvocations ?? 0
+          window.__regionPendingLatch = null;
+          const stopAt = Date.now() + 5000;
+          const tick = () => {
+            const share = document.querySelector('[data-region-share-control]');
+            const disabled = share instanceof HTMLButtonElement ? share.disabled : null;
+            if (disabled === true) {
+              window.__regionPendingLatch = {
+                disabled,
+                busy: share?.getAttribute('aria-busy') ?? null,
+                invocations: window.__regionIpcProbe?.shareInvocations ?? 0
+              };
+              return;
+            }
+            if (Date.now() < stopAt) requestAnimationFrame(tick);
           };
+          requestAnimationFrame(tick);
+          document.querySelector('[data-region-share-control]')?.click();
         })()`
-      )) as { disabled: boolean | null; busy: string | null; invocations: number };
+      );
+      const pendingControl = await pollProbe<{
+        disabled: boolean | null;
+        busy: string | null;
+        invocations: number;
+      }>(
+        browser,
+        sessionId,
+        `(window.__regionPendingLatch ?? {
+          disabled: (() => {
+            const share = document.querySelector('[data-region-share-control]');
+            return share instanceof HTMLButtonElement ? share.disabled : null;
+          })(),
+          busy: document.querySelector('[data-region-share-control]')?.getAttribute('aria-busy') ?? null,
+          invocations: window.__regionIpcProbe?.shareInvocations ?? 0
+        })`,
+        (state) => state.disabled === true
+      );
       assert.equal(pendingControl.disabled, true, `${scenario.name} Share control was not disabled while native toggle was pending`);
       assert.equal(pendingControl.busy, 'true', `${scenario.name} Share control did not expose aria-busy while pending`);
       assert.equal(pendingControl.invocations, 1, `${scenario.name} pending Share did not invoke native toggle exactly once`);
@@ -1192,6 +1268,9 @@ test('region selector renders tokenized chrome and keeps long titles inside both
       assert.equal(sharedControl.shareBusy, 'false', `${scenario.name} active Share remained busy`);
       assert.equal(sharedControl.shareInvocations, 1, `${scenario.name} direct Share did not use the native toggle exactly once`);
       await browser.evaluate(sessionId, `document.querySelector('[data-region-share-control]')?.click()`);
+      // #95: nothing after this sleep asserts a share state -- the compact
+      // measurements below accept either label -- so it is a settling pause,
+      // not a sample of a transient state, and load cannot flip its outcome.
       await new Promise((resolve) => setTimeout(resolve, 80));
 
       await browser.call(
@@ -1358,6 +1437,9 @@ test('region selector renders tokenized chrome and keeps long titles inside both
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.ok(probeRendered, 'region IPC probe fixture did not render before the deadline');
+    // #95: an observation WINDOW, not a sample offset. Every assertion below is
+    // an absence (no overlapping poll batches, no stale applies), so a loaded
+    // machine only means more polls observed under the same rule.
     await browser.evaluate(
       probeSessionId,
       'new Promise((resolve) => setTimeout(resolve, 650))'
@@ -1442,11 +1524,17 @@ test('region selector renders tokenized chrome and keeps long titles inside both
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.ok(eventProbeRendered, 'region event probe fixture did not render before the deadline');
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    const initialEventState = (await browser.evaluate(
+    // #95: the first applied ignore-state needs the route's 50ms poll tick plus
+    // the fixture's 5ms native delay, so a fixed 180ms sample is a bet on that
+    // arriving on time. Wait for the first transition to land instead; the
+    // assertion stays exact, so a route that applies the WRONG initial state
+    // stops the poll on that value and still fails.
+    const initialEventState = await pollProbe<boolean[]>(
+      browser,
       eventSessionId,
-      'window.__regionIpcProbe.appliedIgnoreStates'
-    )) as boolean[];
+      'window.__regionIpcProbe.appliedIgnoreStates',
+      (states) => states.length >= 1
+    );
     assert.deepEqual(initialEventState, [true], 'event probe did not establish the initial center state');
     // Wait for each ignore-state transition to actually land before driving
     // the next geometry event. A fixed sleep raced the applier: the states are
@@ -1537,6 +1625,10 @@ test('region selector renders tokenized chrome and keeps long titles inside both
 
     const callsBeforeUnmount = eventDriven.pollCalls;
     await browser.evaluate(eventSessionId, 'window.__unmountRegion?.()');
+    // #95: a fixed wait is the RIGHT instrument here -- every assertion below
+    // is an absence (no further polls, no surviving listeners), so a slower
+    // machine only widens the observation window and makes the check stricter.
+    // Do not convert this to a poll; there is no arrival to wait for.
     await new Promise((resolve) => setTimeout(resolve, 180));
     const afterUnmount = (await browser.evaluate(
       eventSessionId,
@@ -1598,6 +1690,9 @@ test('region selector renders tokenized chrome and keeps long titles inside both
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.ok(placementRendered, 'region placement probe fixture did not render before the deadline');
+    // #95: absence assertions again -- placement must NOT settle and must NOT
+    // request click-through before its event. Load only lengthens the window
+    // in which a violation could show up, so the fixed wait stays.
     await new Promise((resolve) => setTimeout(resolve, 180));
     const beforePlacementSettlement = (await browser.evaluate(
       placementSessionId,
@@ -1631,22 +1726,13 @@ test('region selector renders tokenized chrome and keeps long titles inside both
       placementSessionId,
       `window.__regionIpcProbe.settlePlacement('region-window-999')`
     );
+    // #95: absence again -- a stale selector label must not settle this route
+    // or enable click-through. Nothing arrives to poll for, and a longer wait
+    // under load only gives a wrong route more time to misbehave.
     await new Promise((resolve) => setTimeout(resolve, 120));
     const afterStalePlacementEvent = (await browser.evaluate(
       placementSessionId,
-      `(() => {
-        const probe = window.__regionIpcProbe;
-        return {
-          placementSettled: probe?.placementSettled ?? false,
-          earlyClickThroughRequests: probe?.earlyClickThroughRequests ?? 0,
-          appliedIgnoreStates: probe?.appliedIgnoreStates ?? [],
-          clickThroughRequests: probe?.clickThroughRequests ?? [],
-          placementSettlementLabels: probe?.placementSettlementLabels ?? [],
-          commandHistory: probe?.commandHistory ?? [],
-          routePlacementActive: document.querySelector('.window-container')?.getAttribute('data-placement-active'),
-          routePlacementPending: document.querySelector('.window-container')?.getAttribute('data-placement-settlement-pending')
-        };
-      })()`
+      PLACEMENT_PROBE_STATE
     )) as {
       placementSettled: boolean;
       earlyClickThroughRequests: number;
@@ -1670,7 +1756,21 @@ test('region selector renders tokenized chrome and keeps long titles inside both
       placementSessionId,
       `window.__regionIpcProbe.settlePlacement()`
     );
-    const afterSettlementBeforeMouseup = (await browser.evaluate(
+    // #95: this read has no wait at all -- it relies on the settlement's Svelte
+    // effect having flushed to the DOM before the next CDP round trip. That is
+    // a scheduling bet like any other, so poll for the pending attribute the
+    // assertions below expect. It is false before settlement and stays true
+    // until the mouseup released further down, so an early sample cannot
+    // satisfy the predicate and a route that never marks the settlement
+    // pending still fails on its real last reading.
+    const afterSettlementBeforeMouseup = await pollProbe<{
+      placementSettled: boolean;
+      earlyClickThroughRequests: number;
+      clickThroughRequests: Array<{ applied: boolean; beforePlacementSettlement: boolean }>;
+      routePlacementActive: string | null;
+      routePlacementPending: string | null;
+    }>(
+      browser,
       placementSessionId,
       `(() => ({
         placementSettled: window.__regionIpcProbe.placementSettled,
@@ -1678,14 +1778,9 @@ test('region selector renders tokenized chrome and keeps long titles inside both
         clickThroughRequests: window.__regionIpcProbe.clickThroughRequests,
         routePlacementActive: document.querySelector('.window-container')?.getAttribute('data-placement-active'),
         routePlacementPending: document.querySelector('.window-container')?.getAttribute('data-placement-settlement-pending')
-      }))()`
-    )) as {
-      placementSettled: boolean;
-      earlyClickThroughRequests: number;
-      clickThroughRequests: Array<{ applied: boolean; beforePlacementSettlement: boolean }>;
-      routePlacementActive: string | null;
-      routePlacementPending: string | null;
-    };
+      }))()`,
+      (state) => state.routePlacementPending === 'true'
+    );
     assert.equal(afterSettlementBeforeMouseup.placementSettled, true);
     assert.equal(afterSettlementBeforeMouseup.earlyClickThroughRequests, 0);
     assert.equal(afterSettlementBeforeMouseup.routePlacementActive, 'false');
@@ -1698,23 +1793,16 @@ test('region selector renders tokenized chrome and keeps long titles inside both
       placementSessionId,
       `window.__regionIpcProbe.releasePlacement()`
     );
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    const afterPlacementSettlement = (await browser.evaluate(
-      placementSessionId,
-      `(() => {
-        const probe = window.__regionIpcProbe;
-        return {
-          placementSettled: probe?.placementSettled ?? false,
-          earlyClickThroughRequests: probe?.earlyClickThroughRequests ?? 0,
-          appliedIgnoreStates: probe?.appliedIgnoreStates ?? [],
-          clickThroughRequests: probe?.clickThroughRequests ?? [],
-          placementSettlementLabels: probe?.placementSettlementLabels ?? [],
-          commandHistory: probe?.commandHistory ?? [],
-          routePlacementActive: document.querySelector('.window-container')?.getAttribute('data-placement-active'),
-          routePlacementPending: document.querySelector('.window-container')?.getAttribute('data-placement-settlement-pending')
-        };
-      })()`
-    )) as {
+    // #95: restoring dynamic click-through takes the route's next 50ms poll
+    // tick, a native cursor query and the fixture's 5ms setter delay -- roughly
+    // three poll ticks. The old fixed 180ms sleep bet on all of that arriving
+    // on time, and under full-suite load the bet lost: the run reported
+    // "placement never restored dynamic click-through after settlement" for a
+    // route that restores it correctly. Poll for the restore instead. The
+    // sample is still the real probe state, so a route that genuinely never
+    // restores click-through fails on exactly the same assertion, with the
+    // same message and the same payload.
+    const afterPlacementSettlement = await pollProbe<{
       placementSettled: boolean;
       earlyClickThroughRequests: number;
       appliedIgnoreStates: boolean[];
@@ -1723,7 +1811,12 @@ test('region selector renders tokenized chrome and keeps long titles inside both
       commandHistory: string[];
       routePlacementActive: string | null;
       routePlacementPending: string | null;
-    };
+    }>(
+      browser,
+      placementSessionId,
+      PLACEMENT_PROBE_STATE,
+      (state) => state.appliedIgnoreStates.includes(true)
+    );
     assert.equal(afterPlacementSettlement.placementSettled, true, 'placement settlement event was not observed');
     assert.equal(
       afterPlacementSettlement.earlyClickThroughRequests,
