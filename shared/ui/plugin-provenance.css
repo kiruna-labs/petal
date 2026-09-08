@@ -17,7 +17,11 @@
   background: var(--surface, #17191d);
   color: var(--text-muted);
   box-shadow: var(--shadow-inset-hairline, inset 0 0 0 1px rgba(255, 255, 255, 0.12));
-  pointer-events: none;
+  /* Hit-tested on purpose: this element carries the `title`, and a
+     `pointer-events: none` badge produces no tooltip at all. It sits inside
+     the <button>, so a click on it still activates the button
+     (kiruna-labs/petal#71 review, finding 2). */
+  pointer-events: auto;
 }
 
 .plugin-provenance svg {
@@ -32,19 +36,26 @@
   overflow: hidden;
 }
 
+/* The caption is the host's own words on a box the PLUGIN sized, so it wraps
+   instead of clipping: `white-space: nowrap` plus the popover's
+   `overflow: hidden` hid it entirely at a declared width of 100 px. The
+   declared width is also clamped (surfaces.ts `popoverContentSize`), and
+   host.ts grows the popover when the caption takes a second line -- all three
+   together are what make "UI text must never truncate" true here. */
 .petal-plugin-caption {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 22px;
-  padding: 0 10px;
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 3px 10px;
   box-sizing: border-box;
   background: var(--popover-bg, var(--surface, #17191d));
   color: var(--text-dim, var(--text-muted));
-  font: 700 10px / 1 var(--font-ui, system-ui, sans-serif);
+  font: 700 10px / 1.2 var(--font-ui, system-ui, sans-serif);
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   cursor: context-menu;
   user-select: none;
   -webkit-user-select: none;
@@ -52,6 +63,10 @@
 
 .petal-plugin-caption svg {
   flex: 0 0 auto;
+}
+
+.petal-plugin-caption span {
+  min-width: 0;
 }
 
 .plugin-menu {

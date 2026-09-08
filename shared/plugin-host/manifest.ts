@@ -169,9 +169,26 @@ function checkContributionId(errors: string[], where: string, id: unknown, seen:
   seen.add(id);
 }
 
-/** A visible button label: 1..`buttonLabelMaxLength` chars. The same rule gates manifests and `ui.setButton` patches. */
+/**
+ * Characters a plugin may never put in text the host draws next to its OWN
+ * words: C0/C1 controls and newlines (which forge extra lines), and the bidi
+ * overrides/isolates (which reorder what is already on screen -- U+202E turns
+ * `Petal<RLO> nigulp` into `PETALNIGULP ·`, swallowing the host's "plugin").
+ * Provenance is the whole point of this chrome, so these are REFUSED at the
+ * boundary, never sanitized: a sanitized string still occupies pixels it was
+ * given under a claim that turned out to be false (same call as PR #4's
+ * label blocker). ZWJ/ZWNJ stay legal -- real names and emoji need them.
+ */
+const UNSAFE_DISPLAY_RE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
+
+/** True when `value` is a string a user can read exactly as written. */
+export function isPrintableDisplayText(value: unknown): value is string {
+  return typeof value === 'string' && !UNSAFE_DISPLAY_RE.test(value);
+}
+
+/** A visible button label: 1..`buttonLabelMaxLength` printable chars. The same rule gates manifests and `ui.setButton` patches. */
 export function isButtonLabel(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= MANIFEST_LIMITS.buttonLabelMaxLength;
+  return isPrintableDisplayText(value) && value.length > 0 && value.length <= MANIFEST_LIMITS.buttonLabelMaxLength;
 }
 
 function checkButton(errors: string[], where: string, button: unknown, seen: Set<string>): void {
@@ -181,7 +198,9 @@ function checkButton(errors: string[], where: string, button: unknown, seen: Set
   }
   checkContributionId(errors, where, button.id, seen);
   if (!isButtonLabel(button.label)) {
-    errors.push(`${where}: label must be 1..${MANIFEST_LIMITS.buttonLabelMaxLength} chars (UI text must never truncate)`);
+    errors.push(
+      `${where}: label must be 1..${MANIFEST_LIMITS.buttonLabelMaxLength} printable chars, no line breaks or bidi overrides (UI text must never truncate)`,
+    );
   }
   if (typeof button.icon !== 'string' || !ICON_RE.test(button.icon)) {
     errors.push(`${where}: icon must be a lowercase icon name`);
@@ -204,6 +223,10 @@ export function validateManifest(input: unknown): ManifestValidation {
   if (!isReleaseVersion(input.version)) errors.push('version must be strict major.minor.patch');
   if (typeof input.name !== 'string' || input.name.trim().length === 0 || input.name.length > MANIFEST_LIMITS.nameMaxLength) {
     errors.push(`name must be 1..${MANIFEST_LIMITS.nameMaxLength} chars`);
+  } else if (!isPrintableDisplayText(input.name)) {
+    // The name is drawn beside the host's own "plugin" caption; a bidi
+    // override or a newline there hides which side of the UI is Petal.
+    errors.push('name must be printable text: no line breaks, control characters, or bidi overrides');
   }
   if (typeof input.description !== 'string' || input.description.length > MANIFEST_LIMITS.descriptionMaxLength) {
     errors.push(`description must be a string of at most ${MANIFEST_LIMITS.descriptionMaxLength} chars`);

@@ -5,12 +5,16 @@
 // clipped here -- "UI text must never truncate". Design: plugins/README.md §2.7.
 
 import type { ButtonPatch } from './api.ts';
-import type { LoadedPlugin } from './broker.ts';
+import type { LoadedPlugin, PluginSource } from './broker.ts';
+import type { SurfaceContribution } from './manifest.ts';
+import { pluginCaption } from './provenance.ts';
 
 export interface ToolbarButtonModel {
   pluginId: string;
   /** Manifest name, for the provenance badge tooltip and the right-click menu heading. */
   pluginName: string;
+  /** Where the HOST loaded this plugin from. Plugin-authored text cannot claim it. */
+  pluginSource: PluginSource;
   buttonId: string;
   /** Visible label, exactly as declared or patched (validated at the boundary, never clipped). */
   label: string;
@@ -43,17 +47,45 @@ export function toolbarButtonModels(plugins: readonly LoadedPlugin[], patches: R
       out.push({
         pluginId: plugin.manifest.id,
         pluginName: plugin.manifest.name,
+        pluginSource: plugin.source,
         buttonId: button.id,
         label,
         icon: patch.icon ?? button.icon,
         badge: patch.badge ?? null,
         disabled: patch.disabled ?? false,
         opens: button.opens ?? null,
-        ariaLabel: `${label} (${plugin.manifest.name})`,
+        ariaLabel: `${label} (${pluginCaption(plugin.manifest.name, plugin.source)})`,
       });
     }
   }
   return out;
+}
+
+/**
+ * Popover geometry. `width`/`height` in a manifest are plugin-authored and
+ * `validateManifest` accepts ANY positive number, so they are CLAMPED here:
+ * the host draws its own provenance caption on this box, and a plugin that
+ * declares `width: 100` must not be able to push the host's "· plugin" out
+ * of view (UI text must never truncate -- kiruna-labs/petal#71, finding 1).
+ * The floor is deliberately generous: the caption also wraps, so the two
+ * together survive the longest name a manifest may declare.
+ */
+export const POPOVER_SIZE = {
+  defaultWidth: 280,
+  defaultHeight: 200,
+  minWidth: 200,
+  minHeight: 64,
+} as const;
+
+/** Height of one caption line (plugin-provenance.css `.petal-plugin-caption`). */
+export const POPOVER_CAPTION_HEIGHT = 22;
+
+/** The content box the plugin's frame gets, after clamping what it declared. */
+export function popoverContentSize(spec: Pick<SurfaceContribution, 'width' | 'height'>): { width: number; height: number } {
+  return {
+    width: Math.max(spec.width ?? POPOVER_SIZE.defaultWidth, POPOVER_SIZE.minWidth),
+    height: Math.max(spec.height ?? POPOVER_SIZE.defaultHeight, POPOVER_SIZE.minHeight),
+  };
 }
 
 export interface PopoverPlacement {

@@ -18,7 +18,7 @@
 
   let { target, onSelect, onClose }: Props = $props();
 
-  const model = $derived(pluginMenuModel(target.name));
+  const model = $derived(pluginMenuModel(target.name, target.source));
   let menuEl = $state<HTMLElement | null>(null);
   let left = $state(0);
   let top = $state(0);

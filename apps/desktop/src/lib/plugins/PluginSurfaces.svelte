@@ -50,7 +50,7 @@
   export function openMenu(pluginId: string, at: { x: number; y: number }) {
     const plugin = host?.loaded().find((p) => p.manifest.id === pluginId);
     if (!plugin) return;
-    menu = { pluginId, name: plugin.manifest.name, x: at.x, y: at.y };
+    menu = { pluginId, name: plugin.manifest.name, source: plugin.source, x: at.x, y: at.y };
   }
 
   /** Turn a plugin off now and remember it; Settings → Plugins turns it back on. */
@@ -60,7 +60,8 @@
     writeEnabledOverride(browserStorage(), pluginId, false);
     host?.unload(pluginId);
     hostLog('info', `plugin ${pluginId} turned off from the plugin menu`);
-    onToast(pluginDisabledToast(plugin.manifest.name), 'info');
+    // 'settings': the desktop really has Settings -> Plugins (Settings.svelte).
+    onToast(pluginDisabledToast(plugin.manifest.name, 'settings'), 'info');
   }
 
   function onMenuSelect(itemId: string, pluginId: string) {

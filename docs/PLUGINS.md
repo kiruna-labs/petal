@@ -80,11 +80,21 @@ plugin, which is what powers the install prompt in M3.
 ## How users see your plugin
 
 Every control Petal draws for you carries a small puzzle badge whose tooltip
-is your plugin's name, and your popovers get a caption ("<name> · plugin").
+names your plugin AND where Petal loaded it from ("<name> · built-in plugin",
+"· installed plugin", "· dev plugin"); your popovers get the same line as a
+caption. The source is Petal's own record, not something a manifest can
+claim, so a sideloaded plugin can never present itself as a built-in one.
 Right-clicking either offers "Turn off <name>", which unloads your plugin
-immediately; users turn it back on in Settings → Plugins. Design your
-plugin so that being switched off mid-meeting is harmless: keep anything
-worth keeping in `petal.storage`, and expect `activate` to run again later.
+immediately; on desktop users turn it back on in Settings → Plugins, and in
+the browser the plugin comes back on the next page load. Design your plugin
+so that being switched off mid-meeting is harmless: keep anything worth
+keeping in `petal.storage`, and expect `activate` to run again later.
+
+Your `name` and every button `label` must be printable text: line breaks,
+control characters, and bidi overrides/isolates are refused by
+`validateManifest`, because they can rearrange the words Petal draws around
+them. Petal also clamps a declared popover `width`/`height` to a floor, so
+its caption always has room.
 
 ## Manifest reference *(M1)*
 

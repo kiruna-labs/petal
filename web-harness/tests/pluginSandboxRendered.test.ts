@@ -125,13 +125,20 @@ test('plugin frames are sandboxed, boot, draw buttons, toast, and route popover 
     // Provenance: the popover carries a caption naming the plugin, and
     // right-clicking it asks the host for the plugin menu.
     const caption = page.locator('.petal-plugin-popover .petal-plugin-caption');
-    assert.equal((await caption.textContent())?.trim(), 'Reactions · plugin');
-    assert.equal(await caption.getAttribute('title'), 'Reactions plugin');
+    // The source comes from the HOST's record (LoadedPlugin.source), not the manifest.
+    assert.equal((await caption.textContent())?.trim(), 'Reactions · built-in plugin');
+    assert.equal(await caption.getAttribute('title'), 'Reactions · built-in plugin');
     await caption.click({ button: 'right' });
     const menus = await page.evaluate(() => (window as any).__probe.menus);
     assert.equal(menus.length, 1);
     assert.match(menus[0], /^petal\.reactions@\d+,\d+$/);
-    assert.equal(await page.evaluate(() => (window as any).__probe.buttons.find((b: any) => b.pluginId === 'petal.reactions').pluginName), 'Reactions');
+    assert.deepEqual(
+      await page.evaluate(() => {
+        const b = (window as any).__probe.buttons.find((x: any) => x.pluginId === 'petal.reactions');
+        return { pluginName: b.pluginName, pluginSource: b.pluginSource };
+      }),
+      { pluginName: 'Reactions', pluginSource: 'builtin' },
+    );
 
     // Escape closes the popover.
     await page.keyboard.press('Escape');

@@ -14,7 +14,6 @@ import { hostCompatibility } from '@petal/shared/plugin-host/manifest';
 import { isPluginEnabled, readEnabledOverrides, type InstalledPlugin } from '@petal/shared/plugin-host/settingsModel';
 import { badgeText, type ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
 import { PLUGIN_MENU_DISABLE, pluginDisabledToast, pluginMenuModel, pluginProvenanceTitle } from '@petal/shared/plugin-host/provenance';
-import { writeEnabledOverride } from '@petal/shared/plugin-host/settingsModel';
 import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
 import { createWebAdapter, participantFromLiveKit } from './webAdapter.ts';
 import { PLUGIN_LIMITS, createRateLimiter } from '@petal/shared/plugin-host/rateLimit';
@@ -109,7 +108,11 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
       const btn = cell.querySelector('button')!;
       btn.setAttribute('aria-label', button.ariaLabel);
       btn.disabled = button.disabled;
-      cell.querySelector<HTMLElement>('.plugin-provenance')!.title = pluginProvenanceTitle(button.pluginName);
+      // On the badge AND the button: the badge is what a user points at, and
+      // it must stay hit-tested to produce a tooltip at all (#71 finding 2).
+      const provenanceTitle = pluginProvenanceTitle(button.pluginName, button.pluginSource);
+      btn.title = provenanceTitle;
+      cell.querySelector<HTMLElement>('.plugin-provenance')!.title = provenanceTitle;
       if (button.opens) btn.setAttribute('aria-haspopup', 'dialog');
       cell.querySelector('.plugin-control-icon')!.innerHTML = pluginIconSvg(button.icon, 20);
       const badge = cell.querySelector<HTMLElement>('.plugin-control-badge')!;
@@ -147,7 +150,7 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     closePluginMenu();
     const plugin = host.loaded().find((p) => p.manifest.id === pluginId);
     if (!plugin) return;
-    const model = pluginMenuModel(plugin.manifest.name);
+    const model = pluginMenuModel(plugin.manifest.name, plugin.source);
     const menu = doc.createElement('div');
     menu.className = 'plugin-menu';
     menu.setAttribute('role', 'menu');
@@ -194,14 +197,21 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     };
   }
 
-  /** Turn a plugin off now and remember it; the (future) plugins sheet turns it back on. */
+  /**
+   * Turn a plugin off for THIS page. Deliberately not persisted: this client
+   * has no plugins sheet yet (I-10), so a remembered "off" would be a one-way
+   * door whose only exit is clearing localStorage -- and the desktop's
+   * "Settings → Plugins" toast points at UI that does not exist here
+   * (kiruna-labs/petal#71 review, finding 4). The toast says what is actually
+   * true here instead. When I-10 lands, persist with `writeEnabledOverride`
+   * and switch the copy to 'settings'.
+   */
   function disablePlugin(pluginId: string): void {
     const plugin = host.loaded().find((p) => p.manifest.id === pluginId);
     if (!plugin) return;
-    writeEnabledOverride(typeof localStorage === 'undefined' ? undefined : localStorage, pluginId, false);
     host.unload(pluginId);
-    ui.logEvent(`plugin ${pluginId} turned off from the plugin menu`);
-    ui.showToast(pluginDisabledToast(plugin.manifest.name));
+    ui.logEvent(`plugin ${pluginId} turned off from the plugin menu (this page only)`);
+    ui.showToast(pluginDisabledToast(plugin.manifest.name, 'reload'));
   }
 
   const installed = builtinPlugins((message) => ui.logEvent(message, 'error'));

@@ -4,6 +4,11 @@
   glyph, label underneath) so plugin buttons sit in the same row without
   looking bolted on. Labels arrive validated (<= 14 chars) from the shared
   button model and are rendered whole -- never clipped.
+
+  The provenance title sits on BOTH the badge and the button: the badge is
+  what a user points at, the button is the rest of the target. Do not put
+  `pointer-events: none` back on the badge -- a non-hit-tested element shows
+  no tooltip at all (kiruna-labs/petal#71 review, finding 2).
 -->
 <script lang="ts">
   import { pluginIconSvg } from '@petal/shared/plugin-host/icons';
@@ -41,6 +46,7 @@
       type="button"
       class="plugin-button"
       aria-label={button.ariaLabel}
+      title={pluginProvenanceTitle(button.pluginName, button.pluginSource)}
       aria-haspopup={button.opens ? 'dialog' : undefined}
       disabled={button.disabled}
       onclick={(event) => onActivate(button.pluginId, button.buttonId, event.currentTarget)}
@@ -49,7 +55,9 @@
       {#if badgeText(button.badge) !== null}
         <span class="badge">{badgeText(button.badge)}</span>
       {/if}
-      <span class="plugin-provenance" title={pluginProvenanceTitle(button.pluginName)} aria-hidden="true">{@html pluginIconSvg('puzzle', 10)}</span>
+      <span class="plugin-provenance" title={pluginProvenanceTitle(button.pluginName, button.pluginSource)} aria-hidden="true"
+        >{@html pluginIconSvg('puzzle', 10)}</span
+      >
     </button>
     <span class="meeting-control-label">{button.label}</span>
   </div>

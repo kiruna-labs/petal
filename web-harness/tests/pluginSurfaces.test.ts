@@ -54,7 +54,9 @@ test('toolbar models come only from plugins holding ui:toolbar-button, with patc
   const patches = new Map([[buttonKey('petal.reactions', 'react'), { badge: 120, disabled: true }]]);
   const models = toolbarButtonModels([plugin, { ...plugin, granted: ['meeting:read'] }], patches);
   assert.equal(models.length, 1);
-  assert.equal(models[0]!.ariaLabel, 'React (Reactions)');
+  // Provenance reaches a screen reader here: the badge that carries it
+  // visually is aria-hidden.
+  assert.equal(models[0]!.ariaLabel, 'React (Reactions · built-in plugin)');
   assert.equal(models[0]!.opens, 'popover:picker');
   assert.equal(models[0]!.disabled, true);
   assert.equal(badgeText(models[0]!.badge), '99+');
@@ -63,7 +65,7 @@ test('toolbar models come only from plugins holding ui:toolbar-button, with patc
   // A patched label replaces the manifest label whole; nothing here clips it.
   const patched = toolbarButtonModels([plugin], new Map([[buttonKey('petal.reactions', 'react'), { label: 'Reacted (14)!' }]]));
   assert.equal(patched[0]!.label, 'Reacted (14)!');
-  assert.equal(patched[0]!.ariaLabel, 'Reacted (14)! (Reactions)');
+  assert.equal(patched[0]!.ariaLabel, 'Reacted (14)! (Reactions · built-in plugin)');
 });
 
 test('placePopover prefers above the anchor and clamps to the viewport', () => {

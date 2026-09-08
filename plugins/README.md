@@ -261,16 +261,41 @@ packet for an uninstalled id goes through the same gate as a fallback.
 | Settings | new "Plugins" section in `Settings.svelte`: installed list, permissions, enable/disable, Remove, "Get plugins", Developer mode with sideload path or URL | Plugins sheet from the home-screen menu | `settingsModel.ts` |
 
 **Provenance and one-click off (added after M2, owner request):** every
-host-drawn plugin control carries a small puzzle badge whose tooltip names
-the plugin ("Reactions plugin"), plugin popovers carry a caption ("Reactions
-· plugin"), and right-clicking either opens a plugin menu with "Turn off
-<name>". Turning a plugin off unloads it immediately and records the choice;
-Settings → Plugins turns it back on. Shared model and copy:
+host-drawn plugin control carries a small puzzle badge, plugin popovers carry
+a caption, and both say the same line: "<name> · <source> plugin"
+("Reactions · built-in plugin"). Right-clicking either opens a plugin menu
+with "Turn off <name>". Shared model and copy:
 `shared/plugin-host/provenance.ts`; shared styles:
 `shared/ui/plugin-provenance.css` (imported by both clients); desktop menu
 `apps/desktop/src/lib/plugins/PluginContextMenu.svelte`, web menu in
 `setupPlugins.ts`. Users must always be able to tell what is Petal and what
 is a plugin, and get rid of a plugin without hunting through Settings.
+
+Three rules keep that answerable, all of them settled by review on
+kiruna-labs/petal#71 — do not undo them piecemeal:
+
+1. **The source is the HOST's record** (`LoadedPlugin.source`), never
+   manifest text. Every displayed string built from `manifest.name` alone
+   leaves a sideloaded "Reactions" indistinguishable from the built-in one.
+   `manifest.name` and button labels are additionally refused if they carry
+   C0/C1 controls, newlines, or bidi overrides/isolates
+   (`isPrintableDisplayText`) — refused, not sanitized.
+2. **A plugin never sizes the host's own caption away.** `validateManifest`
+   accepts any positive popover `width`, so `popoverContentSize`
+   (`shared/plugin-host/surfaces.ts`) clamps it, the caption wraps, and
+   `host.ts` grows the popover when it takes a second line. Measured by
+   `web-harness/tests/pluginProvenanceRendered.test.ts` in a real browser
+   with the real font — reading the CSS cannot tell "fits" from "clipped".
+3. **The badge must be hit-tested.** It carries the `title`; a
+   `pointer-events: none` badge produces no tooltip at all, and asserting
+   `getAttribute('title')` cannot see the difference.
+   `apps/desktop/tests/pluginToolbarRendered.test.ts` hit-tests instead.
+
+Turning a plugin off unloads it immediately. Where it comes back differs by
+client and the toast says which: the desktop records the choice and Settings
+→ Plugins turns it back on; the browser client has no plugins sheet yet
+(I-10), so "off" lasts for that page and the toast says to reload. Never
+point that toast at UI a client does not have.
 
 The chat panel is an in-window drawer in wave one. A detached native panel
 (pattern `ai_chat/panel.rs`) is M5 and carries its own live-exercising test.
