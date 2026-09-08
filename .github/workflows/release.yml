@@ -25,12 +25,16 @@
 # E2E GATE (post-0.9.7): 0.9.7 shipped a telepointer SIGSEGV no hosted CI could
 # see -- it only fires with a real window share on a real WindowServer. Job
 # `e2e-gate` now runs .github/workflows/nightly-loopback.yml (Test Cockpit
-# Quick tier against prod + the 32-case remote-control loopback, plus process
-# survival, crash-report and SLS hit-test evidence checks) on the self-hosted
-# Tart runner at the release tag, and `release` refuses to start until it is
-# green. `e2e-watchdog` turns "no runner picked it up" into a loud failure
-# instead of a silently queued release. `skip_e2e` (manual dispatch only) is
-# the emergency bypass and is stamped into the run summary.
+# Quick tier + the 32-case remote-control loopback, plus process survival,
+# crash-report and SLS hit-test evidence checks) on the self-hosted Tart
+# runner at the release tag, and `release` refuses to start until it is
+# green. Since #42 the Cockpit tier runs against the STAGED backend and
+# web-harness deployments from `deploy-web` -- the web build this release is
+# about to promote -- not against the currently-live one.
+#
+# `e2e-watchdog` turns "no runner picked it up" into a loud failure instead of
+# a silently queued release. `skip_e2e` (manual dispatch only) is the
+# emergency bypass and is stamped into the run summary.
 #
 # RUNNER: macos-26 is REQUIRED, not incidental. `apple-metal` 0.8.8 (a hard,
 # transitive dep of our vendored `screencapturekit`) has a Swift bridge that uses
@@ -41,12 +45,19 @@
 # follow-up if a cheaper runner is ever wanted: pin apple-metal below 0.8.8 in
 # vendor/screencapturekit/Cargo.toml — we don't use Metal ourselves.)
 #
-# PIPELINE (#916): four jobs. `windows-release` and `deploy-web` run in
-# parallel; `release` (macOS) waits for both.
+# PIPELINE (#916, reordered by #42):
+#   notary-preflight -> { windows-release, deploy-web }
+#   deploy-web       -> { e2e-gate, e2e-watchdog }
+#   { windows-release, deploy-web, e2e-gate, e2e-watchdog } -> release
+# `windows-release` still runs fully in parallel with the whole web+gate
+# chain, so the ordering change costs only `deploy-web`'s own duration
+# (single-digit minutes; hard-capped by its 20-minute timeout) and only when
+# the e2e gate is the critical path.
 #   deploy-web       stages backend/ + web-harness/ on Vercel as PRODUCTION
 #                    deployments WITHOUT assigning the domains
 #                    (`--prod --skip-domain`), verifies them through the
 #                    deployment-protection bypass header, exports both URLs.
+#   e2e-gate         runs the live gate against THOSE staged URLs (#42).
 #   release          builds/signs/notarizes, then -- publish runs only --
 #                    `vercel promote`s the two staged deployments so
 #                    app.petal.live / meet.petal.live serve this commit,
@@ -164,12 +175,34 @@ jobs:
   # The gate tests a debug build of the tagged commit, not the notarized DMG
   # (the Test Cockpit is compiled only into the QA build). Same commit, same
   # code paths, different binary -- an accepted trade for the first version.
+  # STAGED, NOT PRODUCTION (#42). The gate needs `deploy-web` first: it points
+  # the Test Cockpit's web peers and its token minting at the deployments this
+  # release is ABOUT TO PROMOTE, not at whatever is currently live. Before
+  # this, a web-harness fix could not pass the gate until a LATER release had
+  # already promoted it (PR #38 / issue #1 sat quarantined for a full release
+  # cycle), the gate only ever tested the previous web build, and a web
+  # regression introduced by this very release was caught only after publish.
+  #
+  # The staged deployments sit behind Vercel deployment protection and
+  # headless Chrome cannot set a request header, so the secret is passed as a
+  # `workflow_call` SECRET (masked in logs; the gate also scrubs it from its
+  # artifacts) and rides the first navigation as Vercel's documented
+  # `?x-vercel-protection-bypass=...&x-vercel-set-bypass-cookie=true` query
+  # form, which exchanges it for a `_vercel_jwt` cookie.
+  #
+  # `|| 'https://...'` is not decoration: a DRY RUN without VERCEL_TOKEN
+  # leaves `deploy-web`'s outputs empty (it warns and skips the staging), and
+  # the gate must then fall back to production exactly as it did before.
   e2e-gate:
-    needs: notary-preflight
+    needs: [notary-preflight, deploy-web]
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_e2e) }}
     uses: ./.github/workflows/nightly-loopback.yml
     with:
       ref: ${{ github.event.inputs.tag || github.ref }}
+      harness_url: ${{ needs.deploy-web.outputs.web-url || 'https://meet.petal.live' }}
+      backend_url: ${{ needs.deploy-web.outputs.backend-url || 'https://app.petal.live' }}
+    secrets:
+      vercel_bypass_secret: ${{ needs.deploy-web.outputs.web-url && secrets.VERCEL_AUTOMATION_BYPASS_SECRET || '' }}
 
   # The self-hosted runner is ON-DEMAND (scripts/runner/tart/ephemeral-runner.sh
   # clones a guest only once a job is queued), so "runner offline" looks like a
@@ -178,8 +211,12 @@ jobs:
   # E2E_QUEUE_BUDGET_MIN, so a release never silently hangs on RexMundi being
   # down. Once the gate is picked up the watchdog exits 0 and the gate's own
   # result decides.
+  # `needs` must MATCH e2e-gate's (#42). The budget below counts wall-clock
+  # from when this job starts, so if the watchdog began at notary-preflight
+  # while the gate waited on deploy-web, the deploy would eat the queue budget
+  # and a healthy release would fail on a runner that was never late.
   e2e-watchdog:
-    needs: notary-preflight
+    needs: [notary-preflight, deploy-web]
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_e2e) }}
     name: E2E gate queue watchdog
     runs-on: ubuntu-latest

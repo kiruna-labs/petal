@@ -28,14 +28,42 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(test)]
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Trim a `PETAL_VERCEL_BYPASS_SECRET` value, treating blank as unset (#42).
+/// Kept separate from `client()` so the policy is unit-testable: `client()`
+/// memoises a `OnceLock` and can only be built once per process.
+fn sanitize_bypass_secret(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Vercel deployment-protection bypass header (#42).
+///
+/// The release e2e gate points `PETAL_BACKEND_URL` at the STAGED backend
+/// deployment it is about to promote, which sits behind deployment
+/// protection. Unset in every normal build, so production traffic is
+/// unchanged. The header is marked sensitive so it never renders in a
+/// `reqwest` debug dump.
+fn bypass_headers() -> Option<reqwest::header::HeaderMap> {
+    let raw = std::env::var("PETAL_VERCEL_BYPASS_SECRET").ok()?;
+    let secret = sanitize_bypass_secret(&raw)?;
+    let mut value = reqwest::header::HeaderValue::from_str(secret).ok()?;
+    value.set_sensitive(true);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-vercel-protection-bypass", value);
+    Some(headers)
+}
+
 /// A process-wide reused `reqwest::Client`. Cloning a `reqwest::Client` is
 /// cheap (it's an `Arc` internally) and shares the underlying connection pool,
 /// unlike the previous `reqwest::Client::new()`-per-request pattern.
 pub fn client() -> reqwest::Client {
     CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
+            let mut builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
+            if let Some(headers) = bypass_headers() {
+                builder = builder.default_headers(headers);
+            }
+            builder
                 .build()
                 .expect("backend HTTP client configuration is valid")
         })
@@ -214,6 +242,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
+
+    // #42: a blank or absent PETAL_VERCEL_BYPASS_SECRET must add no header at
+    // all -- production traffic keeps exactly the headers it has today.
+    #[test]
+    fn blank_bypass_secret_is_treated_as_unset() {
+        assert_eq!(sanitize_bypass_secret(""), None);
+        assert_eq!(sanitize_bypass_secret("   \n"), None);
+        assert_eq!(sanitize_bypass_secret("  s3cr3t \n"), Some("s3cr3t"));
+    }
 
     /// Bounded `TcpListener::accept()` (#724). A plain blocking `accept()`
     /// (or the `read()` on the stream it returns) can hang forever if the

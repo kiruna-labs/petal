@@ -27,11 +27,45 @@ from the Actions tab (`.github/workflows/cut-release.yml`) with `bump` =
    and verifies them with `scripts/version-lockstep.mjs`;
 2. commits `release: bump version to X.Y.Z` to `main` and tags `vX.Y.Z`;
 3. pushes the tag, which starts `release.yml` -- the whole pipeline: notary
-   preflight, the self-hosted end-to-end gate (Test Cockpit Quick +
-   remote-control loopback on the Tart runner), the Windows installer, staged
-   backend + web-harness deploys, the universal macOS build (sign, notarize,
-   staple, smoke), then promote + publish + live verification. Nothing is
-   published unless every gate passes.
+   preflight, the Windows installer, staged backend + web-harness deploys, the
+   self-hosted end-to-end gate (Test Cockpit Quick + remote-control loopback on
+   the Tart runner) **against those staged deployments**, the universal macOS
+   build (sign, notarize, staple, smoke), then promote + publish + live
+   verification. Nothing is published unless every gate passes.
+
+The job order matters and is not arbitrary (#42):
+
+```
+notary-preflight ──┬──> windows-release ─────────────────────────────┐
+                   │                                                 │
+                   └──> deploy-web ──┬──> e2e-gate ──────────────────┤──> release
+                                     └──> e2e-watchdog ──────────────┘
+```
+
+`deploy-web` stages backend/ and web-harness/ as production-target Vercel
+deployments that do **not** hold the domains yet, and `e2e-gate` runs against
+those staged URLs rather than against `app.petal.live` / `meet.petal.live`.
+That is what makes a web-side fix verifiable in the same release that ships it:
+before this ordering the gate could only ever see the *previous* web build, so
+a web-harness fix had to be quarantined for a whole release cycle and a web
+regression introduced by the release itself was caught only after publish.
+
+The staged deployments sit behind Vercel deployment protection, so `release.yml`
+hands the gate the `VERCEL_AUTOMATION_BYPASS_SECRET` as a `workflow_call`
+secret; the native peer sends it as the `x-vercel-protection-bypass` header and
+the headless-Chrome web peer (which cannot set headers) carries it on its first
+navigation as `&x-vercel-protection-bypass=…&x-vercel-set-bypass-cookie=true`,
+exchanging it for a `_vercel_jwt` cookie. The gate scrubs the value from its
+uploaded artifacts; Actions masking only covers the log.
+
+`windows-release` still runs in parallel with the whole deploy+gate chain, so
+the ordering costs only `deploy-web`'s own duration (single-digit minutes,
+hard-capped by its 20-minute timeout), and only when the e2e gate is the
+critical path. A dry run without `VERCEL_TOKEN` skips the staging, leaves
+`deploy-web`'s outputs empty, and the gate falls back to production exactly as
+it did before. A manual `workflow_dispatch` of `nightly-loopback.yml` also
+still targets production by default -- that run exists to observe drift
+between what is deployed and what `main` says should be deployed.
 
 Tick `dry_run` to compute and verify the bump without pushing anything.
 Versions are never reused: if a release fails after publishing anything, press
