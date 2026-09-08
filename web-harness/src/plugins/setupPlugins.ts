@@ -13,6 +13,9 @@ import { pluginIconSvg } from '@petal/shared/plugin-host/icons';
 import { hostCompatibility } from '@petal/shared/plugin-host/manifest';
 import { isPluginEnabled, readEnabledOverrides, type InstalledPlugin } from '@petal/shared/plugin-host/settingsModel';
 import { badgeText, type ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
+import { PLUGIN_MENU_DISABLE, pluginDisabledToast, pluginMenuModel, pluginProvenanceTitle } from '@petal/shared/plugin-host/provenance';
+import { writeEnabledOverride } from '@petal/shared/plugin-host/settingsModel';
+import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
 import { createWebAdapter, participantFromLiveKit } from './webAdapter.ts';
 import { PLUGIN_LIMITS, createRateLimiter } from '@petal/shared/plugin-host/rateLimit';
 import { parsePluginTopic } from '@petal/shared/plugin-host/topics';
@@ -87,7 +90,16 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
         const badge = doc.createElement('span');
         badge.className = 'plugin-control-badge';
         badge.hidden = true;
-        btn.append(icon, badge);
+        const provenance = doc.createElement('span');
+        provenance.className = 'plugin-provenance';
+        provenance.setAttribute('aria-hidden', 'true');
+        provenance.innerHTML = pluginIconSvg('puzzle', 10);
+        btn.append(icon, badge, provenance);
+        cell.addEventListener('contextmenu', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openPluginMenu(button.pluginId, { x: event.clientX, y: event.clientY });
+        });
         const label = doc.createElement('span');
         label.className = 'meeting-control-label';
         cell.append(btn, label);
@@ -97,6 +109,7 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
       const btn = cell.querySelector('button')!;
       btn.setAttribute('aria-label', button.ariaLabel);
       btn.disabled = button.disabled;
+      cell.querySelector<HTMLElement>('.plugin-provenance')!.title = pluginProvenanceTitle(button.pluginName);
       if (button.opens) btn.setAttribute('aria-haspopup', 'dialog');
       cell.querySelector('.plugin-control-icon')!.innerHTML = pluginIconSvg(button.icon, 20);
       const badge = cell.querySelector<HTMLElement>('.plugin-control-badge')!;
@@ -119,8 +132,77 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     hostVersion: hostVersion(),
     mounts: { logic, overlay, popoverLayer },
     onButtonsChanged: renderButtons,
+    onPluginMenu: (pluginId, at) => openPluginMenu(pluginId, at),
     warn: (message) => ui.logEvent(message, 'warn'),
   });
+
+  // Plugin menu: right-click on a plugin control or popover caption. Same
+  // model and classes as the desktop's PluginContextMenu.svelte.
+  let openMenuCleanup: (() => void) | null = null;
+  function closePluginMenu(): void {
+    openMenuCleanup?.();
+    openMenuCleanup = null;
+  }
+  function openPluginMenu(pluginId: string, at: { x: number; y: number }): void {
+    closePluginMenu();
+    const plugin = host.loaded().find((p) => p.manifest.id === pluginId);
+    if (!plugin) return;
+    const model = pluginMenuModel(plugin.manifest.name);
+    const menu = doc.createElement('div');
+    menu.className = 'plugin-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', model.heading);
+    const label = doc.createElement('div');
+    label.className = 'plugin-menu-label';
+    label.innerHTML = pluginIconSvg('puzzle', 12);
+    const labelText = doc.createElement('span');
+    labelText.textContent = model.heading;
+    label.appendChild(labelText);
+    menu.appendChild(label);
+    for (const item of model.items) {
+      const row = doc.createElement('button');
+      row.type = 'button';
+      row.className = 'plugin-menu-row';
+      row.setAttribute('role', 'menuitem');
+      row.textContent = item.label;
+      row.addEventListener('click', () => {
+        closePluginMenu();
+        if (item.id === PLUGIN_MENU_DISABLE) disablePlugin(pluginId);
+      });
+      menu.appendChild(row);
+    }
+    doc.body.appendChild(menu);
+    const rect = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(at.x, window.innerWidth - rect.width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(at.y, window.innerHeight - rect.height - 8))}px`;
+    menu.querySelector<HTMLElement>('button')?.focus();
+    const dismiss = installDismissibleLayer({
+      isOpen: () => menu.isConnected,
+      getInsideNodes: () => [menu],
+      getPopupNodes: () => [menu],
+      onDismiss: closePluginMenu,
+      document: doc,
+    });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closePluginMenu();
+    };
+    doc.addEventListener('keydown', onKey);
+    openMenuCleanup = () => {
+      dismiss();
+      doc.removeEventListener('keydown', onKey);
+      menu.remove();
+    };
+  }
+
+  /** Turn a plugin off now and remember it; the (future) plugins sheet turns it back on. */
+  function disablePlugin(pluginId: string): void {
+    const plugin = host.loaded().find((p) => p.manifest.id === pluginId);
+    if (!plugin) return;
+    writeEnabledOverride(typeof localStorage === 'undefined' ? undefined : localStorage, pluginId, false);
+    host.unload(pluginId);
+    ui.logEvent(`plugin ${pluginId} turned off from the plugin menu`);
+    ui.showToast(pluginDisabledToast(plugin.manifest.name));
+  }
 
   const installed = builtinPlugins((message) => ui.logEvent(message, 'error'));
   const overrides = readEnabledOverrides(typeof localStorage === 'undefined' ? undefined : localStorage);

@@ -14,6 +14,8 @@ import { PLUGIN_STATE_LIMITS, diffPluginState, type PluginAdvert, type PluginAdv
 import { jsonByteLength } from './rateLimit.ts';
 import type { HostEvent } from './protocol.ts';
 import { buttonKey, placePopover, toolbarButtonModels, type ToolbarButtonModel } from './surfaces.ts';
+import { pluginIconSvg } from './icons.ts';
+import { pluginCaption, pluginProvenanceTitle } from './provenance.ts';
 import { installDismissibleLayer, type DismissibleLayerCleanup } from '../ui/dismissibleLayer.ts';
 
 // `stateSnapshot` is omitted on purpose: the HOST owns the per-identity remote
@@ -45,6 +47,11 @@ export interface PluginHostOptions {
   hostVersion: string;
   mounts: PluginHostMounts;
   onButtonsChanged?: (buttons: ToolbarButtonModel[]) => void;
+  /**
+   * The user right-clicked a host-drawn plugin surface (today: a popover's
+   * caption). The client renders its plugin menu at `at` (viewport px).
+   */
+  onPluginMenu?: (pluginId: string, at: { x: number; y: number }) => void;
   warn?: (message: string) => void;
   now?: () => number;
 }
@@ -99,6 +106,8 @@ interface LoadedEntry {
 }
 
 const POPOVER_DEFAULT = { width: 280, height: 200 };
+/** Height of the provenance caption rendered above every plugin popover (plugin-provenance.css). */
+const POPOVER_CAPTION_HEIGHT = 22;
 
 export function createPluginHost(opts: PluginHostOptions): PluginHost {
   const { document: doc, adapter, mounts } = opts;
@@ -334,7 +343,10 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     container.setAttribute('aria-label', `${entry.plugin.manifest.name}`);
     container.style.position = 'fixed';
     container.style.zIndex = '40';
-    const size = { width: declared.spec.width ?? POPOVER_DEFAULT.width, height: declared.spec.height ?? POPOVER_DEFAULT.height };
+    const size = {
+      width: declared.spec.width ?? POPOVER_DEFAULT.width,
+      height: (declared.spec.height ?? POPOVER_DEFAULT.height) + POPOVER_CAPTION_HEIGHT,
+    };
     const viewport = { width: win.innerWidth, height: win.innerHeight };
     const anchorRect = anchor?.getBoundingClientRect() ?? {
       left: viewport.width / 2,
@@ -347,8 +359,24 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     container.style.top = `${placed.top}px`;
     container.style.width = `${placed.width}px`;
     container.style.height = `${placed.height}px`;
+    // Provenance caption: says which plugin this is, and is the right-click
+    // target for the plugin menu (events inside the sandboxed frame never
+    // reach the host, so the caption is the one host-owned strip).
+    const caption = doc.createElement('div');
+    caption.className = 'petal-plugin-caption';
+    caption.title = pluginProvenanceTitle(entry.plugin.manifest.name);
+    caption.innerHTML = pluginIconSvg('puzzle', 12);
+    const captionText = doc.createElement('span');
+    captionText.textContent = pluginCaption(entry.plugin.manifest.name);
+    caption.appendChild(captionText);
+    caption.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      opts.onPluginMenu?.(pluginId, { x: event.clientX, y: event.clientY });
+    });
+    container.appendChild(caption);
     frame.style.width = '100%';
-    frame.style.height = '100%';
+    frame.style.height = `calc(100% - ${POPOVER_CAPTION_HEIGHT}px)`;
     frame.style.display = 'block';
     container.appendChild(frame);
     instance.container = container;

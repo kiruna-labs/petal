@@ -9,6 +9,8 @@ import type { LoadedPlugin } from './broker.ts';
 
 export interface ToolbarButtonModel {
   pluginId: string;
+  /** Manifest name, for the provenance badge tooltip and the right-click menu heading. */
+  pluginName: string;
   buttonId: string;
   /** Visible label, exactly as declared or patched (validated at the boundary, never clipped). */
   label: string;
@@ -40,6 +42,7 @@ export function toolbarButtonModels(plugins: readonly LoadedPlugin[], patches: R
       const label = patch.label ?? button.label;
       out.push({
         pluginId: plugin.manifest.id,
+        pluginName: plugin.manifest.name,
         buttonId: button.id,
         label,
         icon: patch.icon ?? button.icon,

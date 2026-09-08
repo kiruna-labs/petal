@@ -252,6 +252,18 @@ packet for an uninstalled id goes through the same gate as a fallback.
 | Toast | existing toast host | existing shared toast | `Toast.svelte` |
 | Settings | new "Plugins" section in `Settings.svelte`: installed list, permissions, enable/disable, Remove, "Get plugins", Developer mode with sideload path or URL | Plugins sheet from the home-screen menu | `settingsModel.ts` |
 
+**Provenance and one-click off (added after M2, owner request):** every
+host-drawn plugin control carries a small puzzle badge whose tooltip names
+the plugin ("Reactions plugin"), plugin popovers carry a caption ("Reactions
+· plugin"), and right-clicking either opens a plugin menu with "Turn off
+<name>". Turning a plugin off unloads it immediately and records the choice;
+Settings → Plugins turns it back on. Shared model and copy:
+`shared/plugin-host/provenance.ts`; shared styles:
+`shared/ui/plugin-provenance.css` (imported by both clients); desktop menu
+`apps/desktop/src/lib/plugins/PluginContextMenu.svelte`, web menu in
+`setupPlugins.ts`. Users must always be able to tell what is Petal and what
+is a plugin, and get rid of a plugin without hunting through Settings.
+
 The chat panel is an in-window drawer in wave one. A detached native panel
 (pattern `ai_chat/panel.rs`) is M5 and carries its own live-exercising test.
 
@@ -469,7 +481,8 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-1 | M1 | shared/plugin-host, plugins/sdk, workspace, build-all, docs stub | seinfish | merged (kiruna-labs/petal#4, 2026-09-07) |
 | I-2 | M1 | adapters, surfaces, reactions (local), Settings section | seinfish | merged (kiruna-labs/petal#4); web plugins sheet deferred to I-10 |
 | I-3 | M2 | data bus (web + Rust), contracts | seinfish | implemented on feature/plugin-system-m2; live native↔web journey (`PLUGIN-N2W-REACT`) still to run |
-| I-4 | M2 | state + advertisement | seinfish | implemented on feature/plugin-system-m2 |
+| I-4 | M2 | state + advertisement | seinfish | merged (kiruna-labs/petal#55); post-merge fixes in #70 |
+| I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | implemented on feature/plugin-provenance |
 | I-5a | M3 | registry client | unassigned | not started |
 | I-5b | M3 | marketplace publisher + hosting (private repo) | unassigned | not started |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |

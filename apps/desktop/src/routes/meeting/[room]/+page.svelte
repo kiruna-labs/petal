@@ -633,7 +633,11 @@
 </script>
 
 {#snippet pluginActions()}
-  <PluginToolbarButtons buttons={pluginButtons} onActivate={(p, b, el) => pluginsRef?.activate(p, b, el)} />
+  <PluginToolbarButtons
+    buttons={pluginButtons}
+    onActivate={(p, b, el) => pluginsRef?.activate(p, b, el)}
+    onMenu={(p, at) => pluginsRef?.openMenu(p, at)}
+  />
 {/snippet}
 
 <main class:pill={!pill.expanded}>

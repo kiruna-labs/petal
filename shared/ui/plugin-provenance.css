@@ -1,0 +1,111 @@
+/* Plugin provenance (plugins/README.md §2.7): every host-drawn plugin
+   control carries a small puzzle badge, plugin popovers carry a caption,
+   and right-click opens the plugin menu. Imported by BOTH clients
+   (apps/desktop/src/styles/app.css, web-harness/src/style.css); never
+   duplicate these rules per client. Colors are tokens only. */
+
+.plugin-provenance {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--surface, #17191d);
+  color: var(--text-muted);
+  box-shadow: var(--shadow-inset-hairline, inset 0 0 0 1px rgba(255, 255, 255, 0.12));
+  pointer-events: none;
+}
+
+.plugin-provenance svg {
+  width: 10px;
+  height: 10px;
+}
+
+.petal-plugin-popover {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-popover, 14px);
+  overflow: hidden;
+}
+
+.petal-plugin-caption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  background: var(--popover-bg, var(--surface, #17191d));
+  color: var(--text-dim, var(--text-muted));
+  font: 700 10px / 1 var(--font-ui, system-ui, sans-serif);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: context-menu;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.petal-plugin-caption svg {
+  flex: 0 0 auto;
+}
+
+.plugin-menu {
+  position: fixed;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 188px;
+  max-width: min(280px, calc(100vw - 16px));
+  box-sizing: border-box;
+  padding: 6px;
+  border: 1px solid var(--hairline-strong, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-popover, 14px);
+  background: var(--popover-bg, var(--surface, #17191d));
+  box-shadow: var(--shadow-panel, 0 12px 32px rgba(0, 0, 0, 0.35));
+}
+
+.plugin-menu-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 4px;
+  color: var(--text-dim, var(--text-muted));
+  font: 700 10px / 1.1 var(--font-ui, system-ui, sans-serif);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.plugin-menu-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 40px;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-chip, 6px);
+  background: transparent;
+  color: var(--text-strong, var(--text-primary));
+  font: 600 var(--text-micro, 12px) / 1.2 var(--font-ui, system-ui, sans-serif);
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.plugin-menu-row:hover,
+.plugin-menu-row:focus-visible {
+  background: var(--fill-strong, rgba(255, 255, 255, 0.1));
+  color: var(--text-primary);
+}
+
+.plugin-menu-row:focus-visible {
+  outline: var(--focus-ring-width, 2px) solid var(--focus-ring, #6e8bff);
+  outline-offset: -2px;
+}

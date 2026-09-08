@@ -77,6 +77,15 @@ in your participant metadata that everyone with your plugin can read via
 for events. Petal also uses this metadata to tell peers you are running the
 plugin, which is what powers the install prompt in M3.
 
+## How users see your plugin
+
+Every control Petal draws for you carries a small puzzle badge whose tooltip
+is your plugin's name, and your popovers get a caption ("<name> · plugin").
+Right-clicking either offers "Turn off <name>", which unloads your plugin
+immediately; users turn it back on in Settings → Plugins. Design your
+plugin so that being switched off mid-meeting is harmless: keep anything
+worth keeping in `petal.storage`, and expect `activate` to run again later.
+
 ## Manifest reference *(M1)*
 
 See `shared/plugin-host/manifest.ts` for the authoritative TypeScript type
