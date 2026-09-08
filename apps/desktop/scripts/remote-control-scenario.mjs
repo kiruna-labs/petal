@@ -16,6 +16,12 @@ import {
 } from './remote-control-gestures.mjs';
 import { summarizePhotonSamples } from './remote-control-photon-metrics.mjs';
 import { noResultSummary, suiteExitCode } from './remote-control-exit.mjs';
+import {
+  correctnessTimeoutMs,
+  measureObservationWithRetry,
+  resolveObservationBudgetMs,
+  summarizeObservationLatency,
+} from './remote-control-observation.mjs';
 import { ProcessLeaseLedger, psIdentity } from './process-lease-ledger.mjs';
 import {
   INPUT_ONLY_SCOPE_LINES,
@@ -74,7 +80,16 @@ const acquisitionTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_ACQUIRE_TIM
 const statusTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_STATUS_TIMEOUT_MS || acquisitionTimeoutMs);
 const shareReadyTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_SHARE_READY_TIMEOUT_MS || 8000);
 const caseSettleMs = Number(process.env.PETAL_REMOTE_CONTROL_CASE_SETTLE_MS || 500);
-const inputBudgetMs = Number(process.env.PETAL_REMOTE_CONTROL_INPUT_BUDGET_MS || 500);
+// #45: the target-observation budget is RUNNER-AWARE, not one global number.
+// Bare metal keeps the 500ms default; the self-hosted Tart guest sets
+// PETAL_RC_OBSERVATION_BUDGET_MS in .github/workflows/nightly-loopback.yml
+// because its AppleEvents/AX observation path genuinely runs slower under
+// virtualization. PETAL_REMOTE_CONTROL_INPUT_BUDGET_MS is the legacy name and
+// is still honored. Correctness has its OWN, wider timeout -- never the budget
+// -- so "slow but correct" can no longer be reported as "never happened".
+const observationBudget = resolveObservationBudgetMs(process.env);
+const inputBudgetMs = observationBudget.budgetMs;
+const observationCorrectnessTimeoutMs = correctnessTimeoutMs(inputBudgetMs);
 const photonSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_SAMPLES || 20);
 const photonWarmupSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_WARMUP_SAMPLES || 2);
 const photonSampleTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_TIMEOUT_MS || 2000);
@@ -1634,25 +1649,34 @@ function summarizeElapsedTimeVsLatency(photonSamples) {
   };
 }
 
-async function measureTargetObservation(label, action, observe) {
-  const started = performance.now();
-  await action();
-  await observe();
-  const targetObservationLatencyMs = roundMs(performance.now() - started);
-  if (targetObservationLatencyMs > inputBudgetMs) {
-    throw new Error(
-      `${label} target observation took ${targetObservationLatencyMs}ms, exceeding ${inputBudgetMs}ms input budget`
-    );
-  }
-  return { targetObservation: label, targetObservationLatencyMs };
+// `prepare(attempt)` runs OUTSIDE the timed region and must re-arm the target
+// for that attempt (fresh marker, clipboard reset, cleared document). Retrying
+// without re-arming would just re-read attempt 1's own result and clock ~0ms.
+// Policy, retry loop and scorecard live in remote-control-observation.mjs.
+function measureTargetObservation(label, prepare) {
+  return measureObservationWithRetry({
+    label,
+    prepare,
+    budgetMs: inputBudgetMs,
+    onRetry: ({ attempt, sampleMs }) => {
+      console.log(
+        `# OBSERVATION-RETRY ${label}: attempt ${attempt} took ${sampleMs}ms > ${inputBudgetMs}ms budget;`
+        + ` correctness passed, re-arming for one more sample (#45)`
+      );
+    },
+  });
 }
 
-function measureDocumentInput(ctx, label, body, fragment) {
-  return measureTargetObservation(
-    label,
-    () => send(ctx, body),
-    () => assertDocumentIncludes(fragment, inputBudgetMs)
-  );
+// `prepare(attempt)` returns { fragment, body }: the harness expression to
+// send and the document fragment that proves it landed.
+function measureDocumentInput(ctx, label, prepare) {
+  return measureTargetObservation(label, async (attempt) => {
+    const { fragment, body } = await prepare(attempt);
+    return {
+      action: () => send(ctx, body),
+      observe: () => assertDocumentIncludes(fragment, observationCorrectnessTimeoutMs),
+    };
+  });
 }
 
 async function decodedPhotonFrame(ctx) {
@@ -2195,12 +2219,18 @@ const CASES = [
     features: 'pointer,text',
     sequence: 'left click -> text',
     run: async (ctx) => {
-      const marker = ` L${Date.now()} `;
       const measurement = await measureDocumentInput(
         ctx,
         'click-plus-text marker visible in TextEdit',
-        `api.click({ target, x: 0.18, y: 0.28, button: 0 }); api.text({ target, text: ${JSON.stringify(marker)} }); return true;`,
-        marker
+        // A per-attempt marker is the re-arm: the retry cannot pass by
+        // re-reading attempt 1's text (#45).
+        (attempt) => {
+          const marker = ` L${Date.now()}-${attempt} `;
+          return {
+            fragment: marker,
+            body: `api.click({ target, x: 0.18, y: 0.28, button: 0 }); api.text({ target, text: ${JSON.stringify(marker)} }); return true;`,
+          };
+        }
       );
       return pass('text landed after the click command; click effect itself still needs a sentinel', measurement);
     },
@@ -2292,12 +2322,13 @@ const CASES = [
     features: 'text',
     sequence: 'text',
     run: async (ctx) => {
-      const marker = ` Typed-${Date.now()} `;
       const measurement = await measureDocumentInput(
         ctx,
         'typed marker visible in TextEdit',
-        `api.text({ target, text: ${JSON.stringify(marker)} }); return true;`,
-        marker
+        (attempt) => {
+          const marker = ` Typed-${Date.now()}-${attempt} `;
+          return { fragment: marker, body: `api.text({ target, text: ${JSON.stringify(marker)} }); return true;` };
+        }
       );
       return pass('TextEdit document contains typed marker', measurement);
     },
@@ -2308,13 +2339,19 @@ const CASES = [
     features: 'keyboard/shortcut',
     sequence: 'Cmd+A Cmd+C',
     run: async (ctx) => {
-      const text = `copy-${Date.now()}`;
-      setTextEditDocument(text);
-      writeClipboard('not-the-selection');
       const measurement = await measureTargetObservation(
         'clipboard equals selected TextEdit document',
-        () => send(ctx, `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdA)} }); api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdC)} }); return true;`),
-        () => waitUntil('clipboard equals selection', () => readClipboard() === text, inputBudgetMs)
+        // Re-arm per attempt: a fresh document AND a clipboard that does NOT
+        // already hold it, or the retry would observe attempt 1's copy (#45).
+        (attempt) => {
+          const text = `copy-${Date.now()}-${attempt}`;
+          setTextEditDocument(text);
+          writeClipboard('not-the-selection');
+          return {
+            action: () => send(ctx, `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdA)} }); api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdC)} }); return true;`),
+            observe: () => waitUntil('clipboard equals selection', () => readClipboard() === text, observationCorrectnessTimeoutMs),
+          };
+        }
       );
       return pass('clipboard equals selected TextEdit document', measurement);
     },
@@ -2325,13 +2362,14 @@ const CASES = [
     features: 'keyboard/shortcut',
     sequence: 'Cmd+V',
     run: async (ctx) => {
-      const marker = `paste-${Date.now()}`;
-      writeClipboard(marker);
       const measurement = await measureDocumentInput(
         ctx,
         'pasted marker visible in TextEdit',
-        `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdV)} }); return true;`,
-        marker
+        (attempt) => {
+          const marker = `paste-${Date.now()}-${attempt}`;
+          writeClipboard(marker);
+          return { fragment: marker, body: `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdV)} }); return true;` };
+        }
       );
       return pass('TextEdit document gained clipboard marker', measurement);
     },
@@ -2358,13 +2396,17 @@ const CASES = [
     features: 'keyboard/modifiers',
     sequence: 'Cmd+C',
     run: async (ctx) => {
-      const text = `cmd-${Date.now()}`;
-      setTextEditDocument(text);
-      writeClipboard('not-cmd');
       const measurement = await measureTargetObservation(
         'Cmd+C result visible in clipboard',
-        () => send(ctx, `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdA)} }); api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdC)} }); return true;`),
-        () => waitUntil('Cmd+C clipboard', () => readClipboard() === text, inputBudgetMs)
+        (attempt) => {
+          const text = `cmd-${Date.now()}-${attempt}`;
+          setTextEditDocument(text);
+          writeClipboard('not-cmd');
+          return {
+            action: () => send(ctx, `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdA)} }); api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdC)} }); return true;`),
+            observe: () => waitUntil('Cmd+C clipboard', () => readClipboard() === text, observationCorrectnessTimeoutMs),
+          };
+        }
       );
       const metric = await published(ctx, `m.kind === 'key' && m.code === 'KeyC' && m.modifiers?.meta === true`);
       return pass(`Cmd modifier observed through clipboard and metric seq=${metric.seq}`, measurement);
@@ -2379,8 +2421,13 @@ const CASES = [
       const measurement = await measureDocumentInput(
         ctx,
         'uppercase A visible in TextEdit',
-        `api.key({ target, key: 'A', code: 'KeyA', modifiers: { shift: true } }); return true;`,
-        'A'
+        // 'A' is not a unique marker, so this case re-arms by CLEARING the
+        // document (the reset line deliberately contains no uppercase A);
+        // otherwise a retry would observe attempt 1's character (#45).
+        (attempt) => {
+          setTextEditDocument(`case 14 shift modifier attempt ${attempt}\n`);
+          return { fragment: 'A', body: `api.key({ target, key: 'A', code: 'KeyA', modifiers: { shift: true } }); return true;` };
+        }
       );
       const metric = await published(ctx, `m.kind === 'key' && m.code === 'KeyA' && m.modifiers?.shift === true`);
       return pass(`Shift modifier produced uppercase A and metric seq=${metric.seq}`, measurement);
@@ -2502,12 +2549,16 @@ const CASES = [
     features: 'pointer/coordinates',
     sequence: 'out-of-range click -> text',
     run: async (ctx) => {
-      const marker = ` Clamp-${Date.now()} `;
       const measurement = await measureDocumentInput(
         ctx,
         'post-clamp text marker visible in TextEdit',
-        `api.click({ target, x: -5, y: 5, button: 0 }); api.text({ target, text: ${JSON.stringify(marker)} }); return true;`,
-        marker
+        (attempt) => {
+          const marker = ` Clamp-${Date.now()}-${attempt} `;
+          return {
+            fragment: marker,
+            body: `api.click({ target, x: -5, y: 5, button: 0 }); api.text({ target, text: ${JSON.stringify(marker)} }); return true;`,
+          };
+        }
       );
       // #808: same stale shape as case 5 -- `api.click()` publishes
       // `action: 'click'`, never `down`. The clamp assertion itself is the
@@ -2850,6 +2901,10 @@ async function runCase(ctx, testCase) {
     caseDurationMs: 0,
     targetObservation: null,
     targetObservationLatencyMs: null,
+    // #45: every sample, not just the accepted one. A budget failure and a
+    // retried pass both show their full attempt history here.
+    targetObservationSamplesMs: null,
+    targetObservationAttempts: null,
   };
   try {
     ctx.target = testCase.target === 'sentinel' ? ctx.sentinelTarget : ctx.textTarget;
@@ -2879,9 +2934,19 @@ async function runCase(ctx, testCase) {
     result.detail = outcome.detail;
     result.targetObservation = outcome.targetObservation ?? null;
     result.targetObservationLatencyMs = outcome.targetObservationLatencyMs ?? null;
+    result.targetObservationSamplesMs = outcome.targetObservationSamplesMs ?? null;
+    result.targetObservationAttempts = outcome.targetObservationAttempts ?? null;
   } catch (error) {
     result.status = 'fail';
     result.detail = error.message;
+    // A budget failure carries its samples on the error so the RESULT line
+    // still reports BOTH attempts rather than only the message (#45).
+    if (error.observation) {
+      result.targetObservation = error.observation.targetObservation ?? null;
+      result.targetObservationLatencyMs = error.observation.targetObservationLatencyMs ?? null;
+      result.targetObservationSamplesMs = error.observation.targetObservationSamplesMs ?? null;
+      result.targetObservationAttempts = error.observation.targetObservationAttempts ?? null;
+    }
     result.forensics = await captureCaseFailureForensics(ctx.client, testCase.id);
   } finally {
     try {
@@ -3079,11 +3144,14 @@ try {
       results.push(result);
     }
 
-    const measuredTargetLatencies = results
-      .map((result) => result.targetObservationLatencyMs)
-      .filter((value) => Number.isFinite(value))
-      .sort((a, b) => a - b);
-    const p95Index = Math.max(0, Math.ceil(measuredTargetLatencies.length * 0.95) - 1);
+    // #45 scorecard: feed EVERY sample into the distribution, including the
+    // over-budget ones a retry rescued. A creeping regression has to stay
+    // visible in a run where no case failed.
+    const measuredTargetLatencies = results.flatMap((result) => {
+      if (Array.isArray(result.targetObservationSamplesMs)) return result.targetObservationSamplesMs;
+      return Number.isFinite(result.targetObservationLatencyMs) ? [result.targetObservationLatencyMs] : [];
+    }).filter((value) => Number.isFinite(value));
+    const retriedObservations = results.filter((result) => (result.targetObservationAttempts ?? 1) > 1).length;
     // #580: a host-side tokenless drop means the packet never reached any
     // injection route. It is never expected in a healthy run -- once control
     // is released the host has no session at all and returns before the token
@@ -3103,12 +3171,12 @@ try {
       tokenlessDrops,
       mode: inputOnlyMode ? 'input-only' : 'numbered',
       shareReadiness: shareReadinessMode(inputOnlyMode),
-      targetObservationLatency: {
+      targetObservationLatency: summarizeObservationLatency({
+        samplesMs: measuredTargetLatencies,
         budgetMs: inputBudgetMs,
-        samples: measuredTargetLatencies.length,
-        maxMs: measuredTargetLatencies.at(-1) ?? null,
-        p95Ms: measuredTargetLatencies[p95Index] ?? null,
-      },
+        budgetSource: observationBudget.source,
+        retriedObservations,
+      }),
     };
     console.log(`SUMMARY ${JSON.stringify(summary)}`);
     if (tokenlessDrops > 0) {
