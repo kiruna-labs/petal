@@ -11,6 +11,7 @@
    no plum as generic chrome (that's reserved for the native main-menu hero). */
 
 @import '@petal/shared/ui/tokens.css';
+@import '@petal/shared/ui/plugin-provenance.css';
 @import '@petal/shared/ui/meeting-controls.css';
 @import './fonts.css';
 

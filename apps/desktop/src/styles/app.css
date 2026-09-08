@@ -7,6 +7,7 @@
 
 @import '@petal/shared/ui/tokens.css';
 @import '@petal/shared/ui/meeting-controls.css';
+@import '@petal/shared/ui/plugin-provenance.css';
 @import './fonts.css';
 
 *,

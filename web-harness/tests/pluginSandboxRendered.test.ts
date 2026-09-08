@@ -122,6 +122,24 @@ test('plugin frames are sandboxed, boot, draw buttons, toast, and route popover 
     assert.equal(await overlay.locator('.r .e').first().textContent(), '👍');
     assert.equal(await overlay.locator('.r .n').first().textContent(), 'Me', 'sender first name from the host, not the payload');
 
+    // Provenance: the popover carries a caption naming the plugin, and
+    // right-clicking it asks the host for the plugin menu.
+    const caption = page.locator('.petal-plugin-popover .petal-plugin-caption');
+    // The source comes from the HOST's record (LoadedPlugin.source), not the manifest.
+    assert.equal((await caption.textContent())?.trim(), 'Reactions · built-in plugin');
+    assert.equal(await caption.getAttribute('title'), 'Reactions · built-in plugin');
+    await caption.click({ button: 'right' });
+    const menus = await page.evaluate(() => (window as any).__probe.menus);
+    assert.equal(menus.length, 1);
+    assert.match(menus[0], /^petal\.reactions@\d+,\d+$/);
+    assert.deepEqual(
+      await page.evaluate(() => {
+        const b = (window as any).__probe.buttons.find((x: any) => x.pluginId === 'petal.reactions');
+        return { pluginName: b.pluginName, pluginSource: b.pluginSource };
+      }),
+      { pluginName: 'Reactions', pluginSource: 'builtin' },
+    );
+
     // Escape closes the popover.
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => document.querySelector('iframe.petal-plugin-surface-popover') === null);
