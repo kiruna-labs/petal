@@ -154,6 +154,23 @@ jobs:
       # behind it was ever reported.
       - run: npm run build
 
+      # Three of web-harness's own tests reach across the repo for their
+      # browser: pluginProvenanceRendered, pluginSandboxRendered and
+      # popupDismissalRendered all do
+      #   createRequire(...)(resolve(repoRoot, 'apps/desktop/node_modules/playwright'))
+      # at module load (#71). Without apps/desktop's install they do not merely
+      # skip -- the whole test FILE fails with "Cannot find module", which is
+      # exactly what this gate's own first run reported (3 failures, PR #83).
+      # ci.yml's web-harness job has the same gap and has not been run since
+      # those tests landed.
+      - name: Install apps/desktop deps (web-harness rendered tests require its playwright)
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Install Chromium headless shell + Linux deps
+        working-directory: apps/desktop
+        run: npx playwright install --with-deps chromium-headless-shell
+
       - run: npm test
 
   plugins:
