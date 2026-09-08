@@ -63,6 +63,16 @@ jobs:
       # for weeks with every gate green (#594, #635) -- this workflow's own
       # PR-triggered runs are the ones most likely to catch a break the moment
       # it lands, so it must not be the one gate left out.
+      # The Test Cockpit lives behind `cockpit-privileged` and the release e2e
+      # gate builds it, but nothing here did -- so two compile errors reached
+      # `main` unnoticed (a changed `stop_camera_publish` signature and sha2
+      # 0.11 dropping `LowerHex`), and the first thing to notice was a release
+      # gate that could not build its own harness. `check` is enough to catch
+      # that class and costs a fraction of a full build.
+      - name: cargo check (cockpit-privileged)
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --features cockpit-privileged --locked
+
       - name: cargo build (examples)
         working-directory: apps/desktop/src-tauri
         run: cargo build --examples --locked
