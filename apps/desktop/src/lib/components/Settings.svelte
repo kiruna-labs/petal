@@ -44,6 +44,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import Button from './Button.svelte';
+  import CloseButton from './CloseButton.svelte';
   import Switch from '@petal/shared/ui/components/Switch.svelte';
   import {
     REMOTE_CONTROL_POLICY_DESCRIPTION,
@@ -93,6 +94,9 @@
     hasTauriBridge,
     type AiChatSettings,
     type BuildInfo,
+    type CameraIntentChanged,
+    type CameraPublishState,
+    type CameraPublishStateSnapshot,
     type CockpitJourney,
     type CockpitStatus,
     type DebugModeSettings,
@@ -153,6 +157,10 @@
      * fixed-size floating card). Default false preserves the card look for
      * the /dev/* harnesses. */
     frameless?: boolean;
+    /** Standalone Settings window: renders a close affordance in the header
+     * (same slot pattern as NetworkCockpit's standalone mode). Omitted for
+     * the in-window card look. */
+    onClose?: () => void;
   }
 
   let {
@@ -177,7 +185,8 @@
     sentryEnabled = true,
     onSentryEnabledChange,
     onOpenSettings,
-    frameless = false
+    frameless = false,
+    onClose
   }: Props = $props();
 
   // Browser camera ids are retained only for best-effort preview acquisition;
@@ -917,6 +926,35 @@
   let previewVideo = $state<HTMLVideoElement | null>(null);
   let previewStream = $state<MediaStream | null>(null);
   let previewError = $state<string | null>(null);
+  // Settings runs in its own window, so a preview here competes with the
+  // meeting's camera publish for the same device (on Windows the native
+  // capture is a single client; on macOS a second getUserMedia knocked the
+  // published track out). The meeting always wins: no preview while the
+  // meeting camera is on or still trying to come on.
+  //
+  // Both edges are event-driven. `camera-intent-changed` fires BEFORE the
+  // native side acquires the device, which is the only signal that lets the
+  // preview yield in time -- `camera-publish-state` only ever reports a
+  // terminal outcome, so on its own the preview kept the camera right through
+  // the publish attempt and the publish failed (PR #72 review). Delivery is
+  // still asynchronous, so the immediate native attempt can lose the race;
+  // the native self-heal loop's backed-off retry is what then succeeds,
+  // against a preview that has by then let go.
+  //
+  // Seeded from the native snapshot on every acquire, so a Settings window
+  // opened mid-publish starts in the right state without waiting for an edge.
+  let meetingCameraOn = $state(false);
+  const MEETING_CAMERA_REASON = 'preview stays off while your camera is on in a meeting';
+
+  async function meetingCameraActive(): Promise<boolean> {
+    if (!hasTauri) return false;
+    try {
+      const snapshot = await invoke<CameraPublishStateSnapshot>(COMMANDS.cameraPublishState);
+      return snapshot.publishing || snapshot.intended;
+    } catch {
+      return false;
+    }
+  }
   let acquiredCameraId = $state<string | null>(null);
   let previewRequestId = 0;
 
@@ -1001,6 +1039,13 @@
     const requestId = previewRequestId;
     acquiredCameraId = deviceId;
     previewError = null;
+    if (await meetingCameraActive()) {
+      if (requestId !== previewRequestId) return;
+      meetingCameraOn = true;
+      previewError = MEETING_CAMERA_REASON;
+      return;
+    }
+    meetingCameraOn = false;
     // Gate on the app-level TCC status BEFORE touching getUserMedia
     // (issue #8): 'not-determined' triggers the real OS prompt inside
     // ensureCameraAccess; 'denied'/'restricted' short-circuits to the
@@ -1088,6 +1133,51 @@
             : 'camera unavailable';
     }
   }
+
+  // One handler for both native edges. `active` true releases the device
+  // immediately; false re-acquires through `acquirePreview`, which re-reads
+  // the native snapshot -- so a stale or racing "off" while a publish is
+  // still retrying leaves the camera alone.
+  function applyMeetingCameraState(active: boolean) {
+    if (active) {
+      if (meetingCameraOn) return;
+      meetingCameraOn = true;
+      stopPreview();
+      previewError = MEETING_CAMERA_REASON;
+      return;
+    }
+    if (!meetingCameraOn) return;
+    void acquirePreview(cameraValue);
+  }
+
+  $effect(() => {
+    // Follow the meeting camera live. The INTENT event is the one that
+    // matters for contention: it is emitted before the device is acquired,
+    // so the preview can be gone before the publish attempt runs. The
+    // publish-state event stays as the belt to that suspenders -- it is what
+    // reports a terminal failure that cleared the intent.
+    if (!hasTauri) return;
+    let unlistenIntent: UnlistenFn | null = null;
+    let unlistenPublish: UnlistenFn | null = null;
+    let cancelled = false;
+    listen<CameraIntentChanged>(EVENTS.cameraIntentChanged, (event) => {
+      applyMeetingCameraState(event.payload.intended);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenIntent = fn;
+    });
+    listen<CameraPublishState>(EVENTS.cameraPublishState, (event) => {
+      applyMeetingCameraState(event.payload.publishing);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlistenPublish = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlistenIntent?.();
+      unlistenPublish?.();
+    };
+  });
 
   $effect(() => {
     // Initial mount only. Device switches call `handleCameraSelect` directly;
@@ -1258,6 +1348,11 @@
 <div class="settings" class:frameless>
   <div class="settings-header" data-tauri-drag-region>
     <span class="title" data-tauri-drag-region>Settings</span>
+    {#if onClose}
+      <div class="close-slot">
+        <CloseButton onclick={() => onClose?.()} />
+      </div>
+    {/if}
   </div>
 
   <!-- #923: one chip per section, in DOM order. Jumps scroll the body; the
@@ -1311,7 +1406,7 @@
                   <path d="M2 7a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z"></path>
                   <path d="M16 10l5-3v10l-5-3"></path>
                 </svg>
-                <span class="preview-label">Camera preview unavailable</span>
+                <span class="preview-label">{meetingCameraOn ? 'Camera in use by your meeting' : 'Camera preview unavailable'}</span>
                 {#if previewError}
                   <span class="preview-reason">{previewError}</span>
                 {/if}
@@ -1984,6 +2079,13 @@
     padding: 0 18px;
     border-bottom: 1px solid var(--hairline);
     flex-shrink: 0;
+  }
+
+  .close-slot {
+    margin-left: auto;
+    margin-right: -10px;
+    display: flex;
+    align-items: center;
   }
 
   .title {

@@ -27,7 +27,7 @@ test('updateSentryEnabled persists the new value and syncs it to Rust via invoke
   // Updates the in-memory rune state.
   assert.match(fnBody, /session\.sentryEnabled = enabled;/);
   // Persists to localStorage, same as every other session mutator.
-  assert.match(fnBody, /persist\(session\);/);
+  assert.match(fnBody, /commit\(session\);/);
   // Calls the real Rust command, gated by hasTauriBridge() like
   // updateRemoteControlDefault's setRemoteControlAllowed call, with the
   // right command name and arg shape.

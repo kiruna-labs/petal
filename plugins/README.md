@@ -208,6 +208,14 @@ manifest type, and the frame-side bridge. The `petal` object handed to
   8 KB total.
 - Nothing is installed "meeting-wide"; there is no server state to hold it.
   Propagation is the peer prompt below.
+- **Delivery is confined to participants who have the plugin installed and
+  enabled** (owner decision, 2026-09-08, confirmed on the shipped Reactions
+  behavior). A `plugin/<id>` packet arriving at a host with no loaded plugin
+  for that id is dropped silently. Built-ins are not special-cased: turning
+  one off means the same thing as not having it. What closes the gap is the
+  discovery prompt (I-6), and optionally sender-side feedback ("2 of 4 can
+  see this") built on the `plugins` metadata adverts. Revisit only if real
+  usage shows people surprised that a reaction did not reach someone.
 
 **Suggestion rule** (`shared/plugin-host/suggest.ts`): on a peer metadata
 change, for each advertised id whose `src` is `registry` or `builtin`, that is
@@ -251,6 +259,43 @@ packet for an uninstalled id goes through the same gate as a fallback.
 | Header button | `RemoteWindowHeader.svelte` reserved slot, fed by `window.__petalPluginHeaderButtons` from Rust; click invokes `plugin_header_action` | `remoteWindowHeader.ts`, click goes to the broker | button model, label fit (14 chars, icon-only under 520 px) |
 | Toast | existing toast host | existing shared toast | `Toast.svelte` |
 | Settings | new "Plugins" section in `Settings.svelte`: installed list, permissions, enable/disable, Remove, "Get plugins", Developer mode with sideload path or URL | Plugins sheet from the home-screen menu | `settingsModel.ts` |
+
+**Provenance and one-click off (added after M2, owner request):** every
+host-drawn plugin control carries a small puzzle badge, plugin popovers carry
+a caption, and both say the same line: "<name> · <source> plugin"
+("Reactions · built-in plugin"). Right-clicking either opens a plugin menu
+with "Turn off <name>". Shared model and copy:
+`shared/plugin-host/provenance.ts`; shared styles:
+`shared/ui/plugin-provenance.css` (imported by both clients); desktop menu
+`apps/desktop/src/lib/plugins/PluginContextMenu.svelte`, web menu in
+`setupPlugins.ts`. Users must always be able to tell what is Petal and what
+is a plugin, and get rid of a plugin without hunting through Settings.
+
+Three rules keep that answerable, all of them settled by review on
+kiruna-labs/petal#71 — do not undo them piecemeal:
+
+1. **The source is the HOST's record** (`LoadedPlugin.source`), never
+   manifest text. Every displayed string built from `manifest.name` alone
+   leaves a sideloaded "Reactions" indistinguishable from the built-in one.
+   `manifest.name` and button labels are additionally refused if they carry
+   C0/C1 controls, newlines, or bidi overrides/isolates
+   (`isPrintableDisplayText`) — refused, not sanitized.
+2. **A plugin never sizes the host's own caption away.** `validateManifest`
+   accepts any positive popover `width`, so `popoverContentSize`
+   (`shared/plugin-host/surfaces.ts`) clamps it, the caption wraps, and
+   `host.ts` grows the popover when it takes a second line. Measured by
+   `web-harness/tests/pluginProvenanceRendered.test.ts` in a real browser
+   with the real font — reading the CSS cannot tell "fits" from "clipped".
+3. **The badge must be hit-tested.** It carries the `title`; a
+   `pointer-events: none` badge produces no tooltip at all, and asserting
+   `getAttribute('title')` cannot see the difference.
+   `apps/desktop/tests/pluginToolbarRendered.test.ts` hit-tests instead.
+
+Turning a plugin off unloads it immediately. Where it comes back differs by
+client and the toast says which: the desktop records the choice and Settings
+→ Plugins turns it back on; the browser client has no plugins sheet yet
+(I-10), so "off" lasts for that page and the toast says to reload. Never
+point that toast at UI a client does not have.
 
 The chat panel is an in-window drawer in wave one. A detached native panel
 (pattern `ai_chat/panel.rs`) is M5 and carries its own live-exercising test.
@@ -476,8 +521,9 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 |---|---|---|---|---|
 | I-1 | M1 | shared/plugin-host, plugins/sdk, workspace, build-all, docs stub | seinfish | merged (kiruna-labs/petal#4, 2026-09-07) |
 | I-2 | M1 | adapters, surfaces, reactions (local), Settings section | seinfish | merged (kiruna-labs/petal#4); web plugins sheet deferred to I-10 |
-| I-3 | M2 | data bus (web + Rust), contracts | seinfish | implemented on feature/plugin-system-m2; live native↔web Reactions smoke passed both directions 2026-09-08 (`web-harness/tests/fixtures/plugins/live-peer.mjs`); cockpit journey `PLUGIN-N2W-REACT` still to automate |
-| I-4 | M2 | state + advertisement | seinfish | implemented on feature/plugin-system-m2 |
+| I-3 | M2 | data bus (web + Rust), contracts | seinfish | merged (kiruna-labs/petal#55); live native↔web Reactions smoke passed both directions 2026-09-08 (`web-harness/tests/fixtures/plugins/live-peer.mjs`); cockpit journey `PLUGIN-N2W-REACT` still to automate |
+| I-4 | M2 | state + advertisement | seinfish | merged (kiruna-labs/petal#55); post-merge fixes in #70 |
+| I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | implemented on feature/plugin-provenance (stacked on #70) |
 | I-5a | M3 | registry client | unassigned | not started |
 | I-5b | M3 | marketplace publisher + hosting (private repo) | unassigned | not started |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |

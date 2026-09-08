@@ -22,6 +22,7 @@ const probe = {
   errors: [] as string[],
   adverts: [] as string[],
   advertRejections: [] as string[],
+  menus: [] as string[],
 };
 // Simulates the budget only the CLIENT side can enforce (the 8 KB `plugins`
 // total in Rust / mergePluginMetadata): reject any state-bearing entry while
@@ -78,6 +79,9 @@ const host = createPluginHost({
     logic: document.getElementById('logic')!,
     overlay: document.getElementById('overlay')!,
     popoverLayer: document.getElementById('popovers')!,
+  },
+  onPluginMenu(pluginId, at) {
+    probe.menus.push(`${pluginId}@${Math.round(at.x)},${Math.round(at.y)}`);
   },
   onButtonsChanged(buttons) {
     probe.buttons = buttons;

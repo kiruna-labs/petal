@@ -50,7 +50,7 @@ test('updateLocalEchoEnabled persists the new value without inventing a wire/nat
   assert.ok(fnMatch, 'updateLocalEchoEnabled must be exported from session.svelte.ts');
   const fnBody = fnMatch[0];
   assert.match(fnBody, /session\.localEchoEnabled = enabled;/);
-  assert.match(fnBody, /persist\(session\);/);
+  assert.match(fnBody, /commit\(session\);/);
   // This is a local-rendering-only toggle (no Rust/native counterpart, no
   // wire message) -- unlike updateRemoteControlDefault/updateSentryEnabled,
   // it must NOT invoke() into the Tauri bridge.

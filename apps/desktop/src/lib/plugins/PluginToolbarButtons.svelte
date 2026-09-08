@@ -4,25 +4,49 @@
   glyph, label underneath) so plugin buttons sit in the same row without
   looking bolted on. Labels arrive validated (<= 14 chars) from the shared
   button model and are rendered whole -- never clipped.
+
+  The provenance title sits on BOTH the badge and the button: the badge is
+  what a user points at, the button is the rest of the target. Do not put
+  `pointer-events: none` back on the badge -- a non-hit-tested element shows
+  no tooltip at all (kiruna-labs/petal#71 review, finding 2).
 -->
 <script lang="ts">
   import { pluginIconSvg } from '@petal/shared/plugin-host/icons';
+  import { pluginProvenanceTitle } from '@petal/shared/plugin-host/provenance';
   import { badgeText, type ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
 
   interface Props {
     buttons: ToolbarButtonModel[];
     onActivate: (pluginId: string, buttonId: string, anchor: HTMLElement) => void;
+    /** Right-click on a plugin control: open the plugin menu at viewport coordinates. */
+    onMenu?: (pluginId: string, at: { x: number; y: number }) => void;
   }
 
-  let { buttons, onActivate }: Props = $props();
+  let { buttons, onActivate, onMenu }: Props = $props();
+
+  function contextMenu(event: MouseEvent, pluginId: string) {
+    if (!onMenu) return;
+    // Claim the right-click before the app-wide editing menu (a window-level
+    // bubble listener in ContextMenu.svelte) sees it.
+    event.preventDefault();
+    event.stopPropagation();
+    onMenu(pluginId, { x: event.clientX, y: event.clientY });
+  }
 </script>
 
 {#each buttons as button (button.pluginId + '/' + button.buttonId)}
-  <div class="control-cell plugin-cell" data-plugin={button.pluginId} data-button={button.buttonId}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="control-cell plugin-cell"
+    data-plugin={button.pluginId}
+    data-button={button.buttonId}
+    oncontextmenu={(event) => contextMenu(event, button.pluginId)}
+  >
     <button
       type="button"
       class="plugin-button"
       aria-label={button.ariaLabel}
+      title={pluginProvenanceTitle(button.pluginName, button.pluginSource)}
       aria-haspopup={button.opens ? 'dialog' : undefined}
       disabled={button.disabled}
       onclick={(event) => onActivate(button.pluginId, button.buttonId, event.currentTarget)}
@@ -31,6 +55,9 @@
       {#if badgeText(button.badge) !== null}
         <span class="badge">{badgeText(button.badge)}</span>
       {/if}
+      <span class="plugin-provenance" title={pluginProvenanceTitle(button.pluginName, button.pluginSource)} aria-hidden="true"
+        >{@html pluginIconSvg('puzzle', 10)}</span
+      >
     </button>
     <span class="meeting-control-label">{button.label}</span>
   </div>

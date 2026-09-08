@@ -19,6 +19,10 @@
   import { pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
   import { enabledPlugins } from './pluginCatalog';
   import { createTauriAdapter, hostLog } from './tauriAdapter';
+  import PluginContextMenu from './PluginContextMenu.svelte';
+  import { PLUGIN_MENU_DISABLE, pluginDisabledToast, type PluginMenuTarget } from '@petal/shared/plugin-host/provenance';
+  import { writeEnabledOverride } from '@petal/shared/plugin-host/settingsModel';
+  import { browserStorage } from '$lib/data/storageKeys';
 
   interface Props {
     participants: Participant[];
@@ -39,6 +43,30 @@
 
   export function activate(pluginId: string, buttonId: string, anchor: HTMLElement) {
     host?.activateButton(pluginId, buttonId, anchor);
+  }
+
+  // Plugin menu (right-click on a plugin control or popover caption).
+  let menu = $state<PluginMenuTarget | null>(null);
+  export function openMenu(pluginId: string, at: { x: number; y: number }) {
+    const plugin = host?.loaded().find((p) => p.manifest.id === pluginId);
+    if (!plugin) return;
+    menu = { pluginId, name: plugin.manifest.name, source: plugin.source, x: at.x, y: at.y };
+  }
+
+  /** Turn a plugin off now and remember it; Settings → Plugins turns it back on. */
+  export function disablePlugin(pluginId: string) {
+    const plugin = host?.loaded().find((p) => p.manifest.id === pluginId);
+    if (!plugin) return;
+    writeEnabledOverride(browserStorage(), pluginId, false);
+    host?.unload(pluginId);
+    hostLog('info', `plugin ${pluginId} turned off from the plugin menu`);
+    // 'settings': the desktop really has Settings -> Plugins (Settings.svelte).
+    onToast(pluginDisabledToast(plugin.manifest.name, 'settings'), 'info');
+  }
+
+  function onMenuSelect(itemId: string, pluginId: string) {
+    menu = null;
+    if (itemId === PLUGIN_MENU_DISABLE) disablePlugin(pluginId);
   }
 
   // Boot once, when the real host version is known. The route resolves
@@ -67,6 +95,7 @@
       hostVersion: version,
       mounts: { logic: logicEl, overlay: overlayEl, popoverLayer: popoverEl },
       onButtonsChanged: (next) => (buttons = next),
+      onPluginMenu: (pluginId, at) => openMenu(pluginId, at),
       warn: (message) => {
         console.warn(message);
         hostLog('warn', message);
@@ -181,6 +210,9 @@
 </script>
 
 <div class="plugin-logic" bind:this={logicEl} hidden aria-hidden="true"></div>
+{#if menu}
+  <PluginContextMenu target={menu} onSelect={onMenuSelect} onClose={() => (menu = null)} />
+{/if}
 <div class="plugin-overlay" bind:this={overlayEl}></div>
 <div class="plugin-popover-layer" bind:this={popoverEl}></div>
 

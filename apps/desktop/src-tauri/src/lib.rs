@@ -127,6 +127,7 @@ mod main_window;
 mod meeting_core;
 mod menubar;
 mod network_cockpit;
+mod settings_window;
 // `pub` (not just crate-private) so `examples/compositor_probe.rs` -- a
 // separate crate-root binary linking against `desktop_lib`, same as
 // `capture`/`transport`/`window_source` already are for their own probes --
@@ -266,6 +267,7 @@ use menubar::{get_menubar_state, set_mic_muted, toggle_menubar_mic};
 #[cfg(target_os = "macos")]
 use menubar::{hide_menubar_popover, resize_menubar_popover};
 use network_cockpit::open_network_cockpit_window;
+use settings_window::open_settings_window;
 use rooms::{
     create_room, forget_room, list_room_occupancy, list_rooms, rename_room, reset_local_rooms,
 };
@@ -1011,6 +1013,7 @@ pub fn run() {
             control_consent::control_consent_present,
             control_consent::control_consent_dismiss,
             open_network_cockpit_window,
+            open_settings_window,
             region_window::open_region_window,
             region_window::close_region_window,
             region_window::region_placement_active,
@@ -1093,6 +1096,8 @@ pub fn run() {
             session::remote_control_allowed,
             #[cfg(target_os = "macos")]
             session::set_remote_control_allowed,
+            #[cfg(target_os = "macos")]
+            session::set_display_name,
             session::remote_control_policy,
             session::set_remote_control_policy,
             session::set_share_remote_control_allowed,
@@ -1650,6 +1655,7 @@ pub fn run() {
             session::room_presence,
             session::remote_control_allowed,
             session::set_remote_control_allowed,
+            session::set_display_name,
             session::remote_control_policy,
             session::set_remote_control_policy,
             session::set_share_remote_control_allowed,
@@ -1671,6 +1677,7 @@ pub fn run() {
             region_window::region_ai_chat_stop,
             region_window::toggle_region_share,
             open_network_cockpit_window,
+            open_settings_window,
             transport::audio::list_audio_devices,
             transport::audio::set_audio_devices,
             camera_session::list_camera_devices,

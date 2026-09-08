@@ -6,6 +6,7 @@
     "main",
     "menubar-popover",
     "network-cockpit",
+    "settings",
     "control-consent",
     "window-picker",
     "hover-tab",

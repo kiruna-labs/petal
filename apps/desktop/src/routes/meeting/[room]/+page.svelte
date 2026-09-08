@@ -46,7 +46,7 @@
   import Toast from '@petal/shared/ui/components/Toast.svelte';
   import type { ControlIcon } from '$lib/components/ControlButton.svelte';
   import { toastTransition } from '$lib/motion';
-  import { session } from '$lib/stores/session.svelte';
+  import { session, startSessionSync } from '$lib/stores/session.svelte';
   import { toastHostState } from '$lib/stores/toastHost.svelte';
   import { cameraPreviewConstraints } from '$lib/data/cameraConstraints';
   import { identityColorCss, identityInkCss } from '$lib/data/identityColor';
@@ -266,6 +266,13 @@
   const elapsed = $derived(
     `${Math.floor(elapsedSecs / 60)}:${String(elapsedSecs % 60).padStart(2, '0')}`
   );
+
+
+  // Cross-window session sync (Settings has its own window now). Scoped to
+  // this route's lifetime: `startSessionSync` refcounts one native listener
+  // and the disposer returned here releases it on destroy, so no listener
+  // outlives the surface that wanted it.
+  onMount(() => startSessionSync());
 
   onMount(async () => {
     elapsedTimer = setInterval(() => (elapsedSecs += 1), 1000);
@@ -559,6 +566,18 @@
     window.open('/region-window', `petal-region-${Date.now()}`, 'width=640,height=400');
   }
 
+  // Settings in its own window (settings_window.rs): this route is never
+  // navigated away, so the meeting -- camera, pill geometry -- is untouched.
+  async function openSettingsWindow() {
+    if (!hasTauri) return;
+    try {
+      await invoke(COMMANDS.openSettingsWindow);
+    } catch (e) {
+      console.error('open_settings_window failed', e);
+      showShareToast("Couldn't open Settings. Relaunch Petal and try again.");
+    }
+  }
+
   async function openNetworkCockpit() {
     try {
       await invoke(COMMANDS.openNetworkCockpitWindow);
@@ -633,7 +652,11 @@
 </script>
 
 {#snippet pluginActions()}
-  <PluginToolbarButtons buttons={pluginButtons} onActivate={(p, b, el) => pluginsRef?.activate(p, b, el)} />
+  <PluginToolbarButtons
+    buttons={pluginButtons}
+    onActivate={(p, b, el) => pluginsRef?.activate(p, b, el)}
+    onMenu={(p, at) => pluginsRef?.openMenu(p, at)}
+  />
 {/snippet}
 
 <main class:pill={!pill.expanded}>
@@ -673,6 +696,7 @@
         {inviteTooltip}
         onInviteLinkCopy={copyInviteLink}
         onOpenNetwork={openNetworkCockpit}
+        onOpenSettings={openSettingsWindow}
         onRenameRoom={meeting.handleRenameRoom}
         onReportBug={feedbackEnabled ? () => (feedbackOpen = true) : undefined}
         {pluginActions}

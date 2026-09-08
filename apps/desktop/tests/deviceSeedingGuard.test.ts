@@ -60,7 +60,7 @@ test('camera_session.rs no-ops set_camera_device/set_camera_prefs when the reque
       `${name} must early-return via camera_request_is_unchanged before stop_camera_publish`
     );
     const noopIndex = body.indexOf('camera_request_is_unchanged(');
-    const stopIndex = body.indexOf('stop_camera_publish(&state).await;');
+    const stopIndex = body.indexOf('stop_camera_publish(&app, &state).await;');
     assert.ok(
       noopIndex >= 0 && stopIndex >= 0 && noopIndex < stopIndex,
       `${name}: the no-op check must run BEFORE stop_camera_publish, not after`

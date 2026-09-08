@@ -105,6 +105,42 @@ fn apply_speaking(
     changed
 }
 
+fn apply_name(participants: &mut [PresentParticipant], identity: &str, name: &str) -> bool {
+    let Some(participant) = participants
+        .iter_mut()
+        .find(|participant| participant.identity == identity)
+    else {
+        return false;
+    };
+    if participant.name == name {
+        return false;
+    }
+    participant.name = name.to_string();
+    true
+}
+
+/// Rename this process's OWN roster entry after a mid-meeting display-name
+/// change (Settings window) and push the roster. The LiveKit-side rename
+/// (`LocalParticipant::set_name`) is the caller's job; this keeps the local
+/// entry -- seeded from `join_room`'s `local_name`, never from a RoomEvent
+/// -- honest without waiting for the server's `ParticipantNameChanged` echo.
+pub fn set_local_name(
+    app: &AppHandle,
+    presence: &PresenceState,
+    room_display_name: &str,
+    name: &str,
+) {
+    let mut roster = presence.snapshot();
+    let Some(local) = roster.iter().find(|participant| participant.is_local) else {
+        return;
+    };
+    let identity = local.identity.clone();
+    if apply_name(&mut roster, &identity, name) {
+        presence.set(roster.clone());
+        emit_presence(app, room_display_name, roster);
+    }
+}
+
 fn apply_mic_muted(
     participants: &mut [PresentParticipant],
     identity: &str,
@@ -293,6 +329,18 @@ pub fn start_for_room(
                         emit_presence(&app, &room_display_name, roster);
                     }
                 }
+                livekit::RoomEvent::ParticipantNameChanged {
+                    participant, name, ..
+                } => {
+                    // Fires for remote renames AND as the server's echo of our
+                    // own `set_name` (see `set_local_name`); apply_name is
+                    // idempotent so the echo is a no-op.
+                    let mut roster = presence.snapshot();
+                    if apply_name(&mut roster, &participant.identity().to_string(), &name) {
+                        presence.set(roster.clone());
+                        emit_presence(&app, &room_display_name, roster);
+                    }
+                }
                 livekit::RoomEvent::ParticipantDisconnected(p) => {
                     let identity = p.identity().to_string();
                     let name = p.name();
@@ -358,6 +406,27 @@ fn emit_presence(app: &AppHandle, room_name: &str, participants: Vec<PresentPart
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn participant(identity: &str, name: &str, is_local: bool) -> PresentParticipant {
+        PresentParticipant {
+            identity: identity.to_string(),
+            name: name.to_string(),
+            is_local,
+            speaking: false,
+            mic_muted: true,
+        }
+    }
+
+    #[test]
+    fn apply_name_renames_only_the_matching_identity() {
+        let mut roster = vec![participant("me", "Max", true), participant("u2", "Ada", false)];
+        assert!(apply_name(&mut roster, "me", "Maxine"));
+        assert_eq!(roster[0].name, "Maxine");
+        assert_eq!(roster[1].name, "Ada");
+        // Idempotent: the server's echo of our own rename changes nothing.
+        assert!(!apply_name(&mut roster, "me", "Maxine"));
+        assert!(!apply_name(&mut roster, "missing", "x"));
+    }
 
     #[test]
     fn snapshot_starts_empty() {

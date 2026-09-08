@@ -65,6 +65,7 @@ export const COMMANDS = {
   compositorWindowDebugStats: 'compositor_window_debug_stats',
   createRoom: 'create_room',
   currentRoom: 'current_room',
+  setDisplayName: 'set_display_name',
   debugModeSettings: 'debug_mode_settings',
   drawSend: 'draw_send',
   pluginPublishData: 'plugin_publish_data',
@@ -102,6 +103,7 @@ export const COMMANDS = {
   openMainRoute: 'open_main_route',
   showMainWindow: 'show_main_window',
   openNetworkCockpitWindow: 'open_network_cockpit_window',
+  openSettingsWindow: 'open_settings_window',
   openRegionWindow: 'open_region_window',
   regionPlacementActive: 'region_placement_active',
   regionShareState: 'region_share_state',
@@ -214,6 +216,15 @@ export const EVENTS = {
   autotestJoinResult: 'autotest-join-result',
   cameraPublishState: 'camera-publish-state',
   /**
+   * The user's camera INTENT changed: `true` before the meeting acquires the
+   * physical device, `false` after it has been released. Distinct from
+   * `cameraPublishState`, which reports a terminal publish OUTCOME and whose
+   * `publishing: false` every surface reads as "the camera is off" -- there
+   * is no moment in it at which a second webview holding the same camera is
+   * told to let go. The Settings window's preview needs exactly that edge.
+   */
+  cameraIntentChanged: 'camera-intent-changed',
+  /**
    * Debug mode (#669) changed, from `set_debug_mode`. The belt half of
    * "ask AND listen" -- an already-open remote-window surface webview reads
    * `COMMANDS.debugModeSettings` once on mount, then updates live from this
@@ -270,6 +281,14 @@ export const EVENTS = {
   shareStateChanged: 'share-state-changed',
   shareControlModeChanged: 'share-control-mode-changed',
   sharePickerChanged: 'share-picker-changed',
+  /**
+   * The frontend session store (name/color/devices/policies) changed in
+   * SOME webview. Settings runs in its own window, so every other webview's
+   * in-memory copy of the store would otherwise stay stale until reload.
+   * Payload is the full snapshot plus the emitting webview's id, so the
+   * emitter can ignore its own echo.
+   */
+  sessionChanged: 'session-changed',
   sharePickerOpened: 'share-picker-opened',
   sharePickerVisibilityChanged: 'share-picker-visibility-changed',
   telepointerUpdate: 'telepointer-update',
@@ -734,6 +753,16 @@ export interface MicMuteChanged {
 export interface CameraPublishState {
   publishing: boolean;
   error: string | null;
+}
+
+/**
+ * Mirrors native `CameraIntentEvent`. `intended: true` arrives BEFORE the
+ * native camera capture is started, so another webview previewing the same
+ * device has a chance to release it; `intended: false` arrives after the
+ * device has been released.
+ */
+export interface CameraIntentChanged {
+  intended: boolean;
 }
 
 /** Mirrors native `StartCameraPublishResult`. `published: true` means capture
@@ -1459,6 +1488,7 @@ export interface CommandArgs {
     remoteControlPolicy?: RemoteControlPolicy;
   };
   [COMMANDS.openMainRoute]: { route: string };
+  [COMMANDS.setDisplayName]: { name: string };
   [COMMANDS.openTestCockpitResultsFolder]: { path: string };
   [COMMANDS.openWindowPickerWindow]: { color?: string };
   [COMMANDS.toggleWindowPickerWindow]: Record<string, never>;
@@ -1691,6 +1721,7 @@ export interface EventPayloads {
   [EVENTS.aiChatRefused]: AiChatRefusedEvent;
   [EVENTS.autotestJoinResult]: AutotestJoinResult;
   [EVENTS.cameraPublishState]: CameraPublishState;
+  [EVENTS.cameraIntentChanged]: CameraIntentChanged;
   [EVENTS.debugModeChanged]: DebugModeSettings;
   [EVENTS.desktopWindowsChanged]: void;
   [EVENTS.hoverTabHide]: void;
@@ -1717,6 +1748,7 @@ export interface EventPayloads {
   [EVENTS.shareStateChanged]: ShareStateChanged;
   [EVENTS.shareControlModeChanged]: ShareControlModeChanged;
   [EVENTS.sharePickerChanged]: void;
+  [EVENTS.sessionChanged]: { origin: string; session: Record<string, unknown> };
   [EVENTS.sharePickerOpened]: void;
   [EVENTS.sharePickerVisibilityChanged]: { open: boolean };
   [EVENTS.telepointerUpdate]: TelepointerUpdate;

@@ -28,9 +28,12 @@ pub async fn show_main_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// `/settings` is deliberately NOT here: Settings lives in its own window now
+/// (`settings_window.rs`), and navigating the main webview to it from a live
+/// meeting tears the meeting route down (#782).
 fn allowed_route(route: &str) -> Option<String> {
     let route = route.trim();
-    if route == "/main" || route == "/settings" {
+    if route == "/main" {
         Some(route.to_string())
     } else if let Some(room) = route.strip_prefix("/meeting/") {
         if room.is_empty() || room.contains('?') || room.contains('#') {
@@ -96,7 +99,6 @@ mod tests {
     fn allows_expected_app_routes() {
         assert_eq!(allowed_route("/main"), Some("/main".to_string()));
         assert_eq!(allowed_route(" /main "), Some("/main".to_string()));
-        assert_eq!(allowed_route("/settings"), Some("/settings".to_string()));
         assert_eq!(
             allowed_route("/meeting/webtest"),
             Some("/meeting/webtest".to_string())
@@ -110,16 +112,18 @@ mod tests {
         assert_eq!(allowed_route("/meeting/webtest?x=1"), None);
         assert_eq!(allowed_route("/meeting/webtest#hash"), None);
         assert_eq!(allowed_route("/network-cockpit"), None);
+        // Settings has its own window; the main webview must never be routed there.
+        assert_eq!(allowed_route("/settings"), None);
         assert_eq!(allowed_route("javascript:alert(1)"), None);
     }
 
     #[test]
     fn navigation_prefers_spa_hook_and_keeps_cold_start_fallback() {
-        let js = navigate_js("/settings");
+        let js = navigate_js("/main");
         assert!(js.contains("__petalNavigate"));
         assert!(js.contains("location.assign"));
-        assert!(js.contains("const route = \"/settings\";"));
-        assert!(!js.contains("const route = /settings;"));
+        assert!(js.contains("const route = \"/main\";"));
+        assert!(!js.contains("const route = /main;"));
     }
 
     #[test]

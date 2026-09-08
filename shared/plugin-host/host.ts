@@ -13,7 +13,16 @@ import type { SurfaceContribution, SurfaceKind } from './manifest.ts';
 import { PLUGIN_STATE_LIMITS, diffPluginState, type PluginAdvert, type PluginAdverts } from './metadata.ts';
 import { jsonByteLength } from './rateLimit.ts';
 import type { HostEvent } from './protocol.ts';
-import { buttonKey, placePopover, toolbarButtonModels, type ToolbarButtonModel } from './surfaces.ts';
+import {
+  POPOVER_CAPTION_HEIGHT,
+  buttonKey,
+  placePopover,
+  popoverContentSize,
+  toolbarButtonModels,
+  type ToolbarButtonModel,
+} from './surfaces.ts';
+import { pluginIconSvg } from './icons.ts';
+import { pluginCaption, pluginProvenanceTitle } from './provenance.ts';
 import { installDismissibleLayer, type DismissibleLayerCleanup } from '../ui/dismissibleLayer.ts';
 
 // `stateSnapshot` is omitted on purpose: the HOST owns the per-identity remote
@@ -45,6 +54,11 @@ export interface PluginHostOptions {
   hostVersion: string;
   mounts: PluginHostMounts;
   onButtonsChanged?: (buttons: ToolbarButtonModel[]) => void;
+  /**
+   * The user right-clicked a host-drawn plugin surface (today: a popover's
+   * caption). The client renders its plugin menu at `at` (viewport px).
+   */
+  onPluginMenu?: (pluginId: string, at: { x: number; y: number }) => void;
   warn?: (message: string) => void;
   now?: () => number;
 }
@@ -104,8 +118,6 @@ interface LoadedEntry {
 }
 
 const FRAME_READY_TIMEOUT_MS = 5000;
-
-const POPOVER_DEFAULT = { width: 280, height: 200 };
 
 export function createPluginHost(opts: PluginHostOptions): PluginHost {
   const { document: doc, adapter, mounts } = opts;
@@ -359,7 +371,11 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     container.setAttribute('aria-label', `${entry.plugin.manifest.name}`);
     container.style.position = 'fixed';
     container.style.zIndex = '40';
-    const size = { width: declared.spec.width ?? POPOVER_DEFAULT.width, height: declared.spec.height ?? POPOVER_DEFAULT.height };
+    // The plugin's declared size is CLAMPED (surfaces.ts): the host draws its
+    // own provenance caption on this box, and a hostile `width` must not be
+    // able to clip it away.
+    const content = popoverContentSize(declared.spec);
+    const size = { width: content.width, height: content.height + POPOVER_CAPTION_HEIGHT };
     const viewport = { width: win.innerWidth, height: win.innerHeight };
     const anchorRect = anchor?.getBoundingClientRect() ?? {
       left: viewport.width / 2,
@@ -372,12 +388,42 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     container.style.top = `${placed.top}px`;
     container.style.width = `${placed.width}px`;
     container.style.height = `${placed.height}px`;
+    // Provenance caption: says which plugin this is, and is the right-click
+    // target for the plugin menu (events inside the sandboxed frame never
+    // reach the host, so the caption is the one host-owned strip).
+    const caption = doc.createElement('div');
+    caption.className = 'petal-plugin-caption';
+    caption.title = pluginProvenanceTitle(entry.plugin.manifest.name, entry.plugin.source);
+    caption.innerHTML = pluginIconSvg('puzzle', 12);
+    const captionText = doc.createElement('span');
+    captionText.textContent = pluginCaption(entry.plugin.manifest.name, entry.plugin.source);
+    caption.appendChild(captionText);
+    caption.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      opts.onPluginMenu?.(pluginId, { x: event.clientX, y: event.clientY });
+    });
+    container.appendChild(caption);
     frame.style.width = '100%';
-    frame.style.height = '100%';
+    // Flex, not `calc(100% - caption)`: a long name wraps the caption onto a
+    // second line and the frame yields the space instead of the caption
+    // being clipped.
+    frame.style.flex = '1 1 auto';
+    frame.style.minHeight = '0';
     frame.style.display = 'block';
     container.appendChild(frame);
     instance.container = container;
     mounts.popoverLayer.appendChild(container);
+    // Now that it is laid out, give a wrapped caption its extra line(s) back:
+    // the frame keeps the height the plugin asked for and the caption is
+    // never the thing that loses. Re-place so the taller box still fits.
+    const captionHeight = Math.ceil(caption.getBoundingClientRect().height);
+    if (captionHeight > POPOVER_CAPTION_HEIGHT) {
+      const grown = placePopover(anchorRect, { width: content.width, height: content.height + captionHeight }, viewport);
+      container.style.left = `${grown.left}px`;
+      container.style.top = `${grown.top}px`;
+      container.style.height = `${grown.height}px`;
+    }
 
     const dismiss: DismissibleLayerCleanup = installDismissibleLayer({
       isOpen: () => entry.surfaces.get(surfaceId) === instance,
