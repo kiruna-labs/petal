@@ -1101,6 +1101,47 @@ async fn query_room_occupancy(rooms: Vec<RoomRecord>) -> Vec<RoomOccupancy> {
 /// in local order; a room the backend omitted (not live, or closed and the
 /// code we hold is wrong) keeps `available: true` with no status fields so
 /// the UI renders it as empty rather than errored.
+/// #120 step 3: remembers the occupancy each room card last displayed, so the
+/// log carries one line per CHANGE rather than one per poll. The poll runs
+/// every 10 s per room; a line per poll would be exactly the no-information
+/// family #108 was filed about.
+static LAST_LOGGED_OCCUPANCY: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, usize>>,
+> = std::sync::OnceLock::new();
+
+/// Pure renderer for that line, so the change rule is asserted rather than
+/// assumed. `None` previous means this room has not been seen since launch --
+/// worth one line, because a later `4 -> 5` is uninterpretable without the
+/// value it started from.
+///
+/// The room is named by its PUBLIC id -- the same token
+/// `POST /api/rooms/status` answers with -- so a field report can be checked
+/// against the SFU directly. Not the display name: those are not unique
+/// (#121) and are user-authored text.
+fn occupancy_change_line(public_id: &str, previous: Option<usize>, next: usize) -> Option<String> {
+    match previous {
+        Some(previous) if previous == next => None,
+        Some(previous) => Some(format!(
+            "rooms: occupancy {public_id} {previous} -> {next}"
+        )),
+        None => Some(format!("rooms: occupancy {public_id} unknown -> {next}")),
+    }
+}
+
+/// Emits the line when the value actually moved, and records the new value.
+fn log_occupancy_change(public_id: &str, next: usize) {
+    let Ok(mut seen) = LAST_LOGGED_OCCUPANCY
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+    else {
+        return;
+    };
+    if let Some(line) = occupancy_change_line(public_id, seen.get(public_id).copied(), next) {
+        log::info!("{line}");
+        seen.insert(public_id.to_string(), next);
+    }
+}
+
 fn merge_room_status(rooms: Vec<RoomRecord>, backend: BackendRoomsResponse) -> Vec<RoomOccupancy> {
     let mut out = Vec::with_capacity(rooms.len());
     for room in rooms {
@@ -1116,6 +1157,9 @@ fn merge_room_status(rooms: Vec<RoomRecord>, backend: BackendRoomsResponse) -> V
             .rooms
             .iter()
             .find(|candidate| candidate.id == public_id);
+        if let Some(active) = active {
+            log_occupancy_change(&public_id, active.occupancy);
+        }
         out.push(RoomOccupancy {
             room_name,
             livekit_room,
@@ -2132,6 +2176,57 @@ mod tests {
         assert_eq!(rows[1].name, None);
         assert_eq!(rows[1].occupancy, None);
         assert!(rows[1].available, "an omitted room renders empty, not errored");
+    }
+
+    // #120 step 3: the card's number must reach the log, but only when it
+    // MOVES. The poll runs every 10 s per room, so a line per poll would be
+    // the same no-information family #108 was filed about.
+    #[test]
+    fn occupancy_line_is_emitted_only_when_the_number_changes() {
+        assert_eq!(
+            occupancy_change_line("room_abc", Some(4), 5).as_deref(),
+            Some("rooms: occupancy room_abc 4 -> 5")
+        );
+        assert_eq!(
+            occupancy_change_line("room_abc", Some(5), 4).as_deref(),
+            Some("rooms: occupancy room_abc 5 -> 4"),
+            "a drop is as interesting as a rise"
+        );
+        assert_eq!(
+            occupancy_change_line("room_abc", Some(4), 4),
+            None,
+            "an unchanged poll must emit nothing at all"
+        );
+    }
+
+    // A first sighting is worth one line: a later `4 -> 5` cannot be read
+    // without knowing the value the room started from.
+    #[test]
+    fn occupancy_line_reports_a_first_sighting_as_unknown() {
+        assert_eq!(
+            occupancy_change_line("room_abc", None, 3).as_deref(),
+            Some("rooms: occupancy room_abc unknown -> 3")
+        );
+        assert_eq!(
+            occupancy_change_line("room_abc", None, 0).as_deref(),
+            Some("rooms: occupancy room_abc unknown -> 0"),
+            "an empty room is a real first observation, not an absent one"
+        );
+    }
+
+    // The line names the room by the public id the backend answered with, so a
+    // field report can be checked against the SFU. Display names are not
+    // unique (#121) and are user-authored text.
+    #[test]
+    fn occupancy_line_names_the_room_by_public_id_not_display_name() {
+        let record = labelled_status_record("a", "room-8535e993a1b76ed8a9ee59b265f53dfc", "Standup");
+        let public_id = public_room_id_for_livekit_room(&livekit_room_name(&record));
+        let line = occupancy_change_line(&public_id, Some(1), 2).expect("a change must emit");
+        assert!(line.contains(&public_id), "{line}");
+        assert!(
+            !line.contains("Standup"),
+            "the display name must not reach the log: {line}"
+        );
     }
 
     fn labelled_status_record(id: &str, credential: &str, display_name: &str) -> RoomRecord {
