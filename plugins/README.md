@@ -46,6 +46,14 @@ especially for development.
    Everything that *runs* the marketplace (signing, publishing, hosting,
    vetting, storefront) lives in a separate private repository owned by the
    core team. This repo contains no marketplace server code.
+8. **Plugin source lives in its own public repo** (owner, 2026-09-09):
+   `kiruna-labs/petal-plugins`. This repo keeps the host runtime, the SDK
+   (published to npm as `@petal/plugin-sdk`), the contracts, and the
+   **vendored, signed `bundle.json`** of each built-in; it stops carrying
+   plugin source. Our own plugins live in the plugins repo as source.
+   Community plugins are **pointer files** (author repo, subdirectory,
+   commit SHA), built and signed by our CI from the pinned commit; a prebuilt
+   bundle is never accepted. Details in §2.13.
 
 ### Constraints that shaped the design
 
@@ -73,8 +81,9 @@ especially for development.
 | Path | What |
 |---|---|
 | `plugins/sdk/` | `@petal/plugin-sdk`: manifest types, `definePlugin`, the frame-side bridge, a Vite lib-build template |
-| `plugins/<id>/` | one first-party plugin each: `manifest.json`, `src/`, `tests/`, `dist/plugin.js` (built) |
-| `plugins/build-all.mjs` | builds every plugin and emits a deterministic `bundle.json` per plugin |
+| `plugins/<id>/` | one first-party plugin each: `manifest.json`, `plugin.js`, `tests/` — **until I-5c**, when source moves to the plugins repo and this becomes `plugins/builtins/<id>/bundle.json(.minisig)`, the vendored signed artifact |
+| `plugins/build-all.mjs` | builds every plugin and emits a deterministic `bundle.json` per plugin (moves to the plugins repo in I-5c) |
+| `kiruna-labs/petal-plugins` (separate public repo, from I-5c) | source of our own plugins, pointer files for community plugins, the build-and-sign CI that produces every registry bundle |
 | `shared/plugin-host/` | host runtime shared by both clients: manifest validation, permissions, protocol, frame loader, rate limits, suggestion logic, settings model |
 | `apps/desktop/src/lib/plugins/` | Tauri `HostAdapter` and Svelte surfaces |
 | `web-harness/src/plugins/` | browser `HostAdapter` and DOM surfaces |
@@ -374,7 +383,8 @@ repository.
   validates, `minHostVersion` satisfied. Rust uses `minisign-verify`
   (already a dependency); web uses `shared/plugin-host/minisign.ts`.
 - `plugins/build-all.mjs` emits the deterministic `bundle.json` the publisher
-  consumes, so a third-party developer only ever produces `bundle.json`.
+  consumes. Bundles are produced only by the plugins repo's CI from pinned
+  source (§2.13); the publisher never signs a bundle it did not build.
 - Update check on meeting join at most once per day; re-consent only when
   permissions grew.
 
@@ -423,6 +433,15 @@ would be fragile. Third-party plugins use `@petal/plugin-sdk` + Vite and
 produce the same single-file shape. `build-all.mjs` still packs built-ins
 into `bundle.json` for registry publishing.
 
+**Built-ins after I-5c.** Once plugin source moves to the plugins repo, the
+clients import the vendored `plugins/builtins/<id>/bundle.json` instead of a
+`plugin.js`: the very artifact the registry serves, signed with the registry
+key, so a built-in is a preinstalled registry plugin and can later be updated
+from the registry with no special path. A built-in bump is a PR here that
+replaces the vendored bundle and its signature; a test verifies every vendored
+bundle against the baked public key (fixture key in tests) so an unsigned or
+tampered vendored bundle cannot ship.
+
 **M1 storage note:** the enabled map and per-plugin KV live in
 `localStorage` on both clients for now (`shared/plugin-host/settingsModel.ts`
 keys, cleared by factory reset). The desktop moves installed bundles and KV
@@ -447,6 +466,44 @@ to the Rust-owned files described in §2.2 with the registry client (I-5a).
   recommended: it gives sandboxed code a room credential.
 
 ---
+
+### 2.13 Where plugin source lives (owner decision, 2026-09-09)
+
+Three homes, one artifact:
+
+| Repo | Holds | Why |
+|---|---|---|
+| `kiruna-labs/petal` (this repo) | host runtime, `@petal/plugin-sdk` source (published to npm, versioned with `apiVersion`), `contracts/plugin-registry/`, this design doc, vendored built-in bundles | the SDK is the contract with the host and mirrors `shared/plugin-host/api.ts`; splitting them would make every API change a two-repo event |
+| `kiruna-labs/petal-plugins` (public) | source of our own plugins (`plugins/<id>/`), community pointer files (`community/<id>/plugin.json`), `build-all`, the build CI, the public catalog of what is in the registry | the core repo shrinks; plugin contributors never build the app; curation is public and auditable |
+| `seinfish/petal-marketplace` (private) | signing key custody, publisher, hosting, scanner, storefront | only key custody and hosting stay private |
+
+**Our plugins** are source in the plugins repo, depending on the published
+SDK like any third party. A change to Reactions is a plugins-repo PR, then a
+bump PR here that replaces the vendored bundle. Chat (I-7) is the first plugin
+written there.
+
+**Community plugins are pointers, not merged source** (the Zed extensions
+model): `community/<id>/plugin.json` = `{repo, subdir, commit}`.
+- `commit` is a **full SHA**, never a branch or tag; a version bump is a PR
+  that changes the SHA, and review is the diff between the two commits.
+- The plugins repo's CI checks out that exact commit, builds it in an
+  isolated job with **no secrets**, and emits the deterministic
+  `bundle.json`. The publisher signs only what that job produced; a
+  submitted prebuilt bundle is refused. Every registry artifact is therefore
+  reproducible from public source.
+- Each community repo is **forked under `kiruna-labs`** at the pinned SHA
+  when first accepted, so an upstream deletion or history rewrite cannot
+  change or remove what we ship.
+- New entries and bumps are published `verified: false` until a core-team
+  member has read the diff; `verified: true` is a second, reviewed PR.
+- Build inputs from the author's repo (dependencies, scripts) run only in
+  that sandboxed job. Lockfiles are required; the build job has no network
+  beyond the registry the lockfile pins.
+
+Alternatives considered: merging community source into our repo (we become
+the maintainer of every orphaned plugin; contribution friction) and bundle-only
+submission, the M3 plan until now (reviewing built output with no link back to
+source; weakest for security).
 
 ## 3. Milestones
 
@@ -476,9 +533,17 @@ Definition of done and the usual labels.
 - I-5b (marketplace repo) Publisher, hosting, vendored contracts with drift
   test, key runbook. DoD: publish the reactions bundle to a staging origin
   and install it through I-5a.
+- I-5c Plugin source repo split (§2.13): create `kiruna-labs/petal-plugins`
+  with build-all, CI, and the wave-one plugin sources moved from here;
+  publish `@petal/plugin-sdk` to npm; vendor signed built-in bundles under
+  `plugins/builtins/` and switch `builtins.ts` to them; community pointer
+  format and CI documented in that repo's README. DoD: both clients boot
+  built-ins from vendored bundles; a test fails on an unsigned or tampered
+  vendored bundle; `docs/PLUGINS.md` describes the source-based submission.
 - I-6 Suggestion toast and consent sheet. DoD: rendered tests; sideload
   never prompts.
-- I-7 `plugins/chat`. DoD: native-to-web chat journey; drawer text-fit tests.
+- I-7 `plugins/chat`, written in the plugins repo. DoD: native-to-web chat
+  journey; drawer text-fit tests.
 
 **M4 — Local plugins, developer mode**
 - I-8 `plugins/webhook-notifier`, `plugin_net_fetch`, `net:fetch:user-urls`,
@@ -540,9 +605,16 @@ Definition of done and the usual labels.
   drift test pins an upstream commit so a schema change is a deliberate
   two-PR event.
 - Feature branch vs trunk rule: never hold more than one milestone unmerged.
+- Community build supply chain: a pointer entry runs the author's build in
+  our CI. Mitigations in §2.13: isolated job, no secrets, lockfiles pinned,
+  signing separated from building, forked source, `verified: false` until
+  read. Never let the build job and the signing key share a runner.
+- Three-repo drift: the SDK is the second coupling after the registry
+  schema. Publish it with `apiVersion` in its major version and let the
+  plugins repo pin it, so an API change is again a deliberate two-PR event.
 
-Open for later: built-ins updatable from the registry (recommended, M5);
-whether the web client needs the Plugins sheet on the home screen.
+Open for later: whether the web client needs the Plugins sheet on the home
+screen.
 
 ---
 
@@ -559,8 +631,9 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | implemented on feature/plugin-provenance (stacked on #70) |
 | I-5a | M3 | registry client | unassigned | not started |
 | I-5b | M3 | marketplace publisher + hosting (private repo) | unassigned | not started |
+| I-5c | M3 | plugin source repo split (`kiruna-labs/petal-plugins`), SDK on npm, vendored built-in bundles, community pointer model | unassigned | decided 2026-09-09 (§2.13); not started; do after I-5a merges and before I-7 |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |
-| I-7 | M3 | chat plugin | unassigned | not started |
+| I-7 | M3 | chat plugin (first plugin written in the plugins repo) | unassigned | not started |
 | I-8 | M4 | webhook notifier + net fetch | unassigned | not started |
 | I-9 | M4 | window-link + header slot, native button removed | unassigned | not started |
 | I-10 | M4 | developer mode | unassigned | not started |
