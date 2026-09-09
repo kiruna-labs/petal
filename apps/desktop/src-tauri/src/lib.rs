@@ -856,6 +856,14 @@ pub fn run() {
         "petal: app startup begin (log file: {})",
         log_path.display()
     );
+
+    // #104: raise the soft RLIMIT_NOFILE toward the hard limit BEFORE the Tauri
+    // builder, any webview, or the LiveKit runtime exists -- all of them
+    // allocate descriptors against whatever limit is in force when they start.
+    // macOS hands a Finder/Dock-launched app a soft limit of 256 against an
+    // unlimited hard limit; a field log showed that table filling during a long
+    // meeting and staying full for 20 hours. Headroom, not a leak fix.
+    platform::fd::log_startup_descriptor_limits();
     #[cfg(target_os = "macos")]
     log_startup_signing_state();
 
@@ -1523,6 +1531,14 @@ pub fn run() {
         "petal: app startup begin on unsupported native-media platform (log file: {})",
         log_path.display()
     );
+
+    // #104: raise the soft RLIMIT_NOFILE toward the hard limit BEFORE the Tauri
+    // builder, any webview, or the LiveKit runtime exists -- all of them
+    // allocate descriptors against whatever limit is in force when they start.
+    // macOS hands a Finder/Dock-launched app a soft limit of 256 against an
+    // unlimited hard limit; a field log showed that table filling during a long
+    // meeting and staying full for 20 hours. Headroom, not a leak fix.
+    platform::fd::log_startup_descriptor_limits();
 
     // Windows: declare per-monitor-v2 DPI awareness up front so
     // `GetWindowRect`/`EnumDisplayMonitors`/WGC report physical pixels,
