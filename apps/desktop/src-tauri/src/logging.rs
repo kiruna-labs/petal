@@ -116,7 +116,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -250,6 +250,17 @@ pub enum SentryDiagnosticEvent {
     MemoryPressure(MemoryPressureDiagnostic),
     DecoderAllocationFailed(DecoderAllocationFailedDiagnostic),
     BrowserUrlExtractionFailed(BrowserUrlExtractionFailedDiagnostic),
+    DescriptorPressure(DescriptorPressureDiagnostic),
+}
+
+/// Emitted (rate-limited) when open file descriptors cross a high-water
+/// fraction of the soft `RLIMIT_NOFILE`, or when Petal's own IO fails with
+/// `EMFILE`/`ENFILE` (#104). In the #104 field log this condition ran for 20 of
+/// a 29-hour meeting and reached us only because libwebrtc happened to print
+/// 38,062 errors into the log -- there was no Sentry signal at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescriptorPressureDiagnostic {
+    pub stage: DescriptorPressureStageTag,
 }
 
 /// Emitted (rate-limited) when the OS memory-pressure level transitions to
@@ -419,6 +430,12 @@ diagnostic_enum!(InstallDestinationClassTag { Applications => "applications", Us
 // purpose -- it must never read as an explanation.
 diagnostic_enum!(VanishedSessionCrashReportTag { Found => "found", NotFound => "not_found", Unverified => "unverified", NotApplicable => "not_applicable" });
 diagnostic_enum!(PressureLevelTag { Warn => "warn", Critical => "critical", NotApplicable => "not_applicable" });
+/// #104: how far descriptor pressure has gone. `high_water` is the sampler
+/// crossing 80% of the soft `RLIMIT_NOFILE`; `exhausted` is an allocation that
+/// has already failed with `EMFILE`/`ENFILE`. Two stages, not a level, because
+/// the second is observed from a different place (any failing IO) than the
+/// first (the in-room sampler).
+diagnostic_enum!(DescriptorPressureStageTag { HighWater => "high_water", Exhausted => "exhausted", NotApplicable => "not_applicable" });
 /// Mirrors `browser_url::UrlExtraction::cause()`'s string set exactly (minus
 /// "ok"/"unsupported", which are never logged as a failure) -- keep the two
 /// in sync by hand; there is no shared source because `browser_url` must not
@@ -435,7 +452,7 @@ diagnostic_enum!(BrowserUrlExtractionCauseTag {
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 15] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 16] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -451,6 +468,7 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 15] = [
     "memory-pressure",
     "decoder-allocation-failed",
     "browser-url-extraction-failed",
+    "descriptor-pressure",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -482,6 +500,7 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "crash_report_status",
     "pressure_level",
     "browser_url_extraction_cause",
+    "descriptor_pressure_stage",
     "dedup_count_bucket",
 ];
 
@@ -511,6 +530,7 @@ const WINDOW_SERVER_RESTART_DETECTED_MESSAGE_TAGS: &[&str] = &["session_role"];
 const MEMORY_PRESSURE_MESSAGE_TAGS: &[&str] = &["pressure_level"];
 const DECODER_ALLOCATION_FAILED_MESSAGE_TAGS: &[&str] = &["session_role"];
 const BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS: &[&str] = &["browser_url_extraction_cause"];
+const DESCRIPTOR_PRESSURE_MESSAGE_TAGS: &[&str] = &["descriptor_pressure_stage"];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
     "camera_direction",
@@ -550,6 +570,7 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "memory-pressure" => Some(MEMORY_PRESSURE_MESSAGE_TAGS),
         "decoder-allocation-failed" => Some(DECODER_ALLOCATION_FAILED_MESSAGE_TAGS),
         "browser-url-extraction-failed" => Some(BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS),
+        "descriptor-pressure" => Some(DESCRIPTOR_PRESSURE_MESSAGE_TAGS),
         _ => None,
     }
 }
@@ -875,6 +896,7 @@ impl SentryDiagnosticEvent {
             Self::MemoryPressure(_) => "memory-pressure",
             Self::DecoderAllocationFailed(_) => "decoder-allocation-failed",
             Self::BrowserUrlExtractionFailed(_) => "browser-url-extraction-failed",
+            Self::DescriptorPressure(_) => "descriptor-pressure",
         }
     }
 }
@@ -925,6 +947,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::CameraHealth(value) => {
             insert("session_role", value.role.tag());
@@ -951,6 +974,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::CameraSizeMismatchRecovery(value) => {
             insert("session_role", value.role.tag());
@@ -977,6 +1001,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::PlayoutDeviceRepointed(value) => {
             insert("session_role", value.role.tag());
@@ -1003,6 +1028,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::RepublishStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1029,6 +1055,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::PublishDropStreak(value) => {
             insert("session_role", value.role.tag());
@@ -1055,6 +1082,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::WatchdogRepeatStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1081,6 +1109,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::UpdateInstallFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1107,6 +1136,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::ShareOverlayCursorCaptureCleared(value) => {
             insert("session_role", value.role.tag());
@@ -1133,6 +1163,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerPortDead(value) => {
             insert("session_role", value.role.tag());
@@ -1159,6 +1190,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::PreviousSessionVanished(value) => {
             insert("session_role", "not_applicable");
@@ -1185,6 +1217,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", value.crash_report.tag());
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerRestartDetected(value) => {
             insert("session_role", value.role.tag());
@@ -1211,6 +1244,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::MemoryPressure(value) => {
             insert("session_role", "not_applicable");
@@ -1237,6 +1271,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", value.level.tag());
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::DecoderAllocationFailed(value) => {
             insert("session_role", value.role.tag());
@@ -1263,6 +1298,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::BrowserUrlExtractionFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1289,6 +1325,34 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", value.cause.tag());
+            insert("descriptor_pressure_stage", "not_applicable");
+        }
+        SentryDiagnosticEvent::DescriptorPressure(value) => {
+            insert("session_role", "not_applicable");
+            insert("source_selection", "not_applicable");
+            insert("capture_geometry", "not_applicable");
+            insert("configured_geometry", "not_applicable");
+            insert("pixel_format", "not_applicable");
+            insert("scale_bucket", "not_applicable");
+            insert("encoder_implementation", "not_applicable");
+            insert("stage_code", "not_applicable");
+            insert("camera_direction", "not_applicable");
+            insert("capture_cadence", "not_applicable");
+            insert("encode_cadence", "not_applicable");
+            insert("queue_backpressure", "not_applicable");
+            insert("decoder_render_health", "not_applicable");
+            insert("recovery_action", "not_applicable");
+            insert("playout_transition", "not_applicable");
+            insert("storm_scope", "not_applicable");
+            insert("install_failure_stage", "not_applicable");
+            insert("install_failure_kind", "not_applicable");
+            insert("install_volume_boundary", "not_applicable");
+            insert("install_destination_class", "not_applicable");
+            insert("overlay_clear_reason", "not_applicable");
+            insert("crash_report_status", "not_applicable");
+            insert("pressure_level", "not_applicable");
+            insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", value.stage.tag());
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
@@ -1759,38 +1823,100 @@ fn resolve_log_filter(raw_rust_log: Option<&str>) -> ResolvedLogFilter {
     }
 }
 
-/// How long a single native-WebRTC log message may keep repeating verbatim
-/// before `RepeatSuppressingLog` re-emits it (as a rolled-up summary,
-/// counting how many times it fired in that window) rather than staying
-/// silent forever. Bounds volume to at most one line per target per this
-/// interval instead of one line per occurrence.
+/// How long a single native-WebRTC log *site* may keep firing before
+/// `RepeatSuppressingLog` re-emits it (as a rolled-up summary, counting how
+/// many times it fired in that window) rather than staying silent forever.
+/// Bounds volume to at most one line per site per this interval instead of
+/// one line per occurrence.
 const NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Identifies a repeating streak: target AND level AND message text must
-/// all match for two records to count as "the same repeat" (#905 review
-/// finding: keying on message text alone would conflate identical text
-/// from two different targets or levels into one streak, and misattribute
-/// the eventual rollup to whichever record happened to trigger it).
-#[derive(Clone, PartialEq, Eq)]
+/// Ceiling on how many distinct `(target, level, file:line)` streaks are
+/// tracked at once (#108). Native WebRTC's log sites are a small fixed set
+/// -- a real field log used eleven -- so this is far above the working set;
+/// it exists only so a pathological build can never grow this map without
+/// bound. On overflow the least-recently-seen streak is evicted, after its
+/// pending rollup is emitted.
+const NATIVE_WEBRTC_REPEAT_MAX_TRACKED: usize = 128;
+
+/// Extracts native WebRTC's own `file:line` site from a log message (#108).
+///
+/// `RTC_LOG` records reach this logger with the site already inlined into
+/// the message text, e.g.
+/// `"(RTCVideoEncoderH264.mm:614): Encoder frame rate setting 30 is larger
+/// than the maximal allowed frame rate 13."`. The parenthesised prefix is
+/// the stable part; the trailing prose is not, because it interpolates live
+/// values.
+///
+/// That distinction is the whole bug this function exists for. #905 keyed
+/// repeat-suppression on the FULL message, which suppresses only *verbatim*
+/// consecutive repeats -- and the two numbers in that encoder warning flap
+/// constantly, so a real 611-second field log carried 2,076 of these lines
+/// drawn from just 40 distinct texts. Keying on the site collapses all 40.
+///
+/// Returns the whole message when there is no parenthesised prefix, so a
+/// message without a site still gets the old exact-text behaviour.
+fn native_webrtc_signature(message: &str) -> &str {
+    let Some(rest) = message.strip_prefix('(') else {
+        return message;
+    };
+    match rest.find("):") {
+        Some(end) => &rest[..end],
+        None => message,
+    }
+}
+
+/// Identifies a repeating streak: target AND level AND log SITE must all
+/// match for two records to count as "the same repeat" (#905 review
+/// finding: keying on message text alone would conflate identical text from
+/// two different targets or levels into one streak, and misattribute the
+/// eventual rollup to whichever record happened to trigger it; #108: the
+/// site, not the text, is what makes a streak).
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct NativeWebrtcRepeatKey {
     target: String,
     level: log::Level,
-    message: String,
+    signature: String,
 }
 
 struct NativeWebrtcRepeatState {
-    key: NativeWebrtcRepeatKey,
+    /// Occurrences suppressed since the last line emitted for this key.
     repeat_count: u64,
+    /// How many times the message TEXT changed within this site's streak
+    /// (#108). Reported in the rollup so a reader can still tell a site
+    /// that is repeating one fixed complaint from one whose interpolated
+    /// values are moving -- which is the only information the varying text
+    /// carried. A counter rather than a set of seen texts: a message that
+    /// interpolates an unbounded value (an ssrc, a port) must not be able
+    /// to grow this state without bound.
+    text_changes: u64,
+    /// Most recent full message text at this site, quoted verbatim in the
+    /// rollup so the summary line is still self-explanatory.
+    last_message: String,
     last_emitted: Instant,
+    last_seen: Instant,
 }
 
-/// Collapses IDENTICAL, CONSECUTIVE native-WebRTC log lines (#905): the
-/// `RTCVideoEncoderH264.mm:614` frame-rate warning alone was 610,617 lines /
-/// 34.5% of a real 263 MB field log, always the exact same text repeated
-/// per-frame. The existing `NOISY_THIRD_PARTY_CRATES` denylist (this
-/// module's `resolve_log_filter`) already pins this target at `warn`, and
-/// this line IS a warn -- a level filter cannot help here, only
-/// repeat-suppression can.
+impl NativeWebrtcRepeatState {
+    /// The rolled-up summary line for this streak. Keeps `#905`'s
+    /// `repeated {n}x` wording, which existing assertions key on.
+    fn rollup(&self, now: Instant) -> String {
+        let window_s = now.duration_since(self.last_emitted).as_secs();
+        let count = self.repeat_count;
+        let changes = self.text_changes;
+        format!(
+            "{} [repeated {count}x in the last {window_s}s from this site ({changes} text change(s)), #108]",
+            self.last_message
+        )
+    }
+}
+
+/// Rate-limits native-WebRTC log lines PER LOG SITE (#905, refined by #108).
+///
+/// The `NOISY_THIRD_PARTY_CRATES` denylist (this module's
+/// `resolve_log_filter`) already pins this target at `warn`, and the worst
+/// offender IS a warn: a level filter cannot help here, only rate-limiting
+/// can. #905 added exact-text consecutive collapsing, which the encoder
+/// warning's flapping numbers defeat -- see `native_webrtc_signature`.
 ///
 /// Wraps the OUTERMOST logger (before `SentryLogger`, before fern's own
 /// `Dispatch`) rather than living inside `DailyLogSink`, for two reasons:
@@ -1799,35 +1925,41 @@ struct NativeWebrtcRepeatState {
 /// match twice), and stdout should benefit from the suppression too, not
 /// just the file.
 ///
-/// On a repeat: suppressed entirely, neither forwarded nor formatted,
-/// unless `NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL` has elapsed since the
-/// last emitted line for this target, in which case ONE summary line
-/// (carrying the repeat count) is emitted and the window resets. On a
-/// change of message (or the very first occurrence): the new message is
-/// always forwarded immediately, and if the PRIOR message had any
-/// suppressed repeats not yet reported, a rollup for it is emitted first so
-/// a streak's tail is never silently dropped.
-struct RepeatSuppressingLog<L: log::Log> {
+/// Behaviour, per `(target, level, site)`:
+/// - the FIRST occurrence is always forwarded verbatim, never dropped;
+/// - subsequent occurrences within `NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL`
+///   are suppressed and counted;
+/// - once that interval has elapsed, ONE rollup line is emitted carrying
+///   the latest text, the suppressed count, and how many times the text
+///   changed, and the window resets.
+///
+/// Sites are tracked in a map rather than a single slot so two interleaving
+/// sites do not flush each other on every alternation (which is what made
+/// #905's single-slot design emit 389 rollups in one 611-second log). A
+/// streak that goes quiet is swept -- its rollup emitted and its entry
+/// dropped -- once it has been unseen for a full interval, so a tail is
+/// never held indefinitely waiting for a `flush()` that may not come.
+pub(crate) struct RepeatSuppressingLog<L: log::Log> {
     inner: L,
-    state: Mutex<Option<NativeWebrtcRepeatState>>,
+    state: Mutex<HashMap<NativeWebrtcRepeatKey, NativeWebrtcRepeatState>>,
 }
 
 impl<L: log::Log> RepeatSuppressingLog<L> {
-    fn new(inner: L) -> Self {
+    pub(crate) fn new(inner: L) -> Self {
         RepeatSuppressingLog {
             inner,
-            state: Mutex::new(None),
+            state: Mutex::new(HashMap::new()),
         }
     }
 
     /// Re-emits `message` at `target`/`level` through `self.inner` -- used
-    /// only for the synthetic "repeated Nx" summary lines. Takes target and
-    /// level directly (not a borrowed `&log::Record`) because a rollup can
-    /// be emitted well after the record that started the streak is gone
-    /// (e.g. at `flush()`, or for the PRIOR streak when the message just
-    /// changed) -- there is no live record to borrow location metadata
-    /// from at that point, so this only carries target/level, not
-    /// module_path/file/line (unused by this module's line format anyway).
+    /// only for the synthetic rollup lines. Takes target and level directly
+    /// (not a borrowed `&log::Record`) because a rollup can be emitted well
+    /// after the record that started the streak is gone (e.g. at `flush()`,
+    /// or when a quiet streak is swept) -- there is no live record to
+    /// borrow location metadata from at that point, so this only carries
+    /// target/level, not module_path/file/line (unused by this module's
+    /// line format anyway).
     fn emit(&self, target: &str, level: log::Level, message: &str) {
         // Must stay ONE statement: the `Record` built below borrows the
         // `format_args!` temporary, which only lives to the end of the
@@ -1841,6 +1973,98 @@ impl<L: log::Log> RepeatSuppressingLog<L> {
                 .build(),
         );
     }
+
+    /// The real body of `log()`, with the clock injected so tests can drive
+    /// the summary interval without sleeping.
+    pub(crate) fn log_at(&self, record: &log::Record, now: Instant) {
+        let target = record.target();
+        let is_native_webrtc = target == NATIVE_WEBRTC_LOG_TARGET
+            || target.starts_with(NATIVE_WEBRTC_LOG_TARGET_PREFIX);
+        if !is_native_webrtc {
+            self.inner.log(record);
+            return;
+        }
+        let message = record.args().to_string();
+        let key = NativeWebrtcRepeatKey {
+            target: target.to_string(),
+            level: record.level(),
+            signature: native_webrtc_signature(&message).to_string(),
+        };
+        // Rollups are collected under the lock and emitted after it is
+        // released: `self.inner.log` must never run while this mutex is
+        // held.
+        let mut pending: Vec<(String, log::Level, String)> = Vec::new();
+        let forward_now;
+        {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            // Sweep streaks that have gone quiet, so their tail is reported
+            // promptly instead of waiting for a `flush()`.
+            guard.retain(|other, state| {
+                if *other == key || now.duration_since(state.last_seen) < NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL {
+                    return true;
+                }
+                if state.repeat_count > 0 {
+                    pending.push((other.target.clone(), other.level, state.rollup(now)));
+                }
+                false
+            });
+            match guard.get_mut(&key) {
+                Some(state) => {
+                    state.repeat_count += 1;
+                    state.last_seen = now;
+                    if state.last_message != message {
+                        state.text_changes += 1;
+                        state.last_message = message.clone();
+                    }
+                    if now.duration_since(state.last_emitted)
+                        >= NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL
+                    {
+                        pending.push((key.target.clone(), key.level, state.rollup(now)));
+                        state.repeat_count = 0;
+                        state.text_changes = 0;
+                        state.last_emitted = now;
+                    }
+                    forward_now = false;
+                }
+                None => {
+                    if guard.len() >= NATIVE_WEBRTC_REPEAT_MAX_TRACKED {
+                        if let Some(evicted) = guard
+                            .iter()
+                            .min_by_key(|(_, state)| state.last_seen)
+                            .map(|(k, _)| k.clone())
+                        {
+                            if let Some(state) = guard.remove(&evicted) {
+                                if state.repeat_count > 0 {
+                                    pending.push((
+                                        evicted.target.clone(),
+                                        evicted.level,
+                                        state.rollup(now),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    guard.insert(
+                        key.clone(),
+                        NativeWebrtcRepeatState {
+                            repeat_count: 0,
+                            text_changes: 0,
+                            last_message: message.clone(),
+                            last_emitted: now,
+                            last_seen: now,
+                        },
+                    );
+                    forward_now = true;
+                }
+            }
+        }
+        for (target, level, message) in pending {
+            self.emit(&target, level, &message);
+        }
+        if forward_now {
+            self.inner.log(record);
+        }
+    }
 }
 
 impl<L: log::Log> log::Log for RepeatSuppressingLog<L> {
@@ -1849,97 +2073,31 @@ impl<L: log::Log> log::Log for RepeatSuppressingLog<L> {
     }
 
     fn log(&self, record: &log::Record) {
-        let target = record.target();
-        let is_native_webrtc =
-            target == NATIVE_WEBRTC_LOG_TARGET || target.starts_with(NATIVE_WEBRTC_LOG_TARGET_PREFIX);
-        if !is_native_webrtc {
-            self.inner.log(record);
-            return;
-        }
-        let key = NativeWebrtcRepeatKey {
-            target: target.to_string(),
-            level: record.level(),
-            message: record.args().to_string(),
-        };
-        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_mut() {
-            Some(state) if state.key == key => {
-                state.repeat_count += 1;
-                if state.last_emitted.elapsed() >= NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL {
-                    let count = state.repeat_count;
-                    state.repeat_count = 0;
-                    state.last_emitted = Instant::now();
-                    let NativeWebrtcRepeatKey { target, level, message } = key;
-                    drop(guard);
-                    self.emit(
-                        &target,
-                        level,
-                        &format!(
-                            "{message} [repeated {count}x in the last {}s, #905]",
-                            NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL.as_secs()
-                        ),
-                    );
-                }
-                // Otherwise: suppressed. Neither forwarded nor formatted.
-            }
-            Some(state) => {
-                // The message just changed (or target/level did) -- flush a
-                // rollup of the PRIOR key's suppressed repeats (if any),
-                // using the PRIOR key's own target/level, not the new
-                // record's, so the rollup isn't misattributed.
-                let prior = (state.repeat_count > 0)
-                    .then(|| (state.key.clone(), state.repeat_count));
-                state.key = key;
-                state.repeat_count = 0;
-                state.last_emitted = Instant::now();
-                drop(guard);
-                if let Some((prior_key, prior_count)) = prior {
-                    self.emit(
-                        &prior_key.target,
-                        prior_key.level,
-                        &format!(
-                            "{} [repeated {prior_count}x more before changing]",
-                            prior_key.message
-                        ),
-                    );
-                }
-                self.inner.log(record);
-            }
-            None => {
-                *guard = Some(NativeWebrtcRepeatState {
-                    key,
-                    repeat_count: 0,
-                    last_emitted: Instant::now(),
-                });
-                drop(guard);
-                self.inner.log(record);
-            }
-        }
+        self.log_at(record, Instant::now());
     }
 
     fn flush(&self) {
         // #905 review (Finding 6): a streak still accumulating suppressed
         // repeats when the process shuts down would otherwise lose that
         // count entirely -- nothing else would ever trigger its rollup.
-        // Emits (and resets the counter, not the whole tracked key) rather
-        // than `take()`-ing the state outright, so this stays correct even
-        // if `flush()` is called more than once.
-        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(state) = guard.as_mut() {
-            if state.repeat_count > 0 {
-                let key = state.key.clone();
-                let count = state.repeat_count;
+        // Resets the counters rather than clearing the map, so this stays
+        // correct even if `flush()` is called more than once.
+        let now = Instant::now();
+        let mut pending: Vec<(String, log::Level, String)> = Vec::new();
+        {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            for (key, state) in guard.iter_mut() {
+                if state.repeat_count == 0 {
+                    continue;
+                }
+                pending.push((key.target.clone(), key.level, state.rollup(now)));
                 state.repeat_count = 0;
-                state.last_emitted = Instant::now();
-                drop(guard);
-                self.emit(
-                    &key.target,
-                    key.level,
-                    &format!("{} [repeated {count}x more, flushed]", key.message),
-                );
-                self.inner.flush();
-                return;
+                state.text_changes = 0;
+                state.last_emitted = now;
             }
+        }
+        for (target, level, message) in pending {
+            self.emit(&target, level, &message);
         }
         self.inner.flush();
     }
@@ -4577,6 +4735,9 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
             value,
             "denied" | "timeout" | "ambiguous" | "no-match" | "spawn" | "failed" | "not_applicable"
         ),
+        "descriptor_pressure_stage" => {
+            matches!(value, "high_water" | "exhausted" | "not_applicable")
+        }
         "capture_cadence" | "encode_cadence" => matches!(
             value,
             "healthy" | "reduced" | "severe" | "stalled" | "unknown" | "not_applicable"
@@ -6410,6 +6571,25 @@ mod tests {
         );
     }
 
+    /// `log_via` with the clock injected, so a test can cross
+    /// `NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL` without sleeping for it.
+    fn log_via_at(
+        wrapped: &RepeatSuppressingLog<RecordingLog>,
+        target: &str,
+        level: log::Level,
+        msg: &str,
+        now: Instant,
+    ) {
+        wrapped.log_at(
+            &log::Record::builder()
+                .args(format_args!("{msg}"))
+                .level(level)
+                .target(target)
+                .build(),
+            now,
+        );
+    }
+
     #[test]
     fn repeat_suppressing_log_collapses_identical_consecutive_native_webrtc_lines() {
         let recorder = RecordingLog::new();
@@ -6430,29 +6610,156 @@ mod tests {
     }
 
     #[test]
-    fn repeat_suppressing_log_flushes_a_rollup_when_the_message_changes() {
+    fn native_webrtc_signature_keys_on_the_log_site_not_the_interpolated_text() {
+        // #108: the numbers in this warning flap; the site does not.
+        assert_eq!(
+            native_webrtc_signature(
+                "(RTCVideoEncoderH264.mm:614): Encoder frame rate setting 30 is larger than the maximal allowed frame rate 13."
+            ),
+            "RTCVideoEncoderH264.mm:614"
+        );
+        assert_eq!(
+            native_webrtc_signature(
+                "(RTCVideoEncoderH264.mm:614): Encoder frame rate setting 29 is larger than the maximal allowed frame rate 7."
+            ),
+            "RTCVideoEncoderH264.mm:614"
+        );
+        // Two different sites must never share a streak.
+        assert_ne!(
+            native_webrtc_signature("(rtcp_receiver.cc:296): Timeout"),
+            native_webrtc_signature("(rtcp_receiver.cc:298): Timeout")
+        );
+        // No parenthesised site -> fall back to the whole message, i.e.
+        // exactly #905's exact-text behaviour.
+        assert_eq!(native_webrtc_signature("no site here"), "no site here");
+        assert_eq!(native_webrtc_signature("(unterminated"), "(unterminated");
+    }
+
+    #[test]
+    fn repeat_suppressing_log_collapses_varying_text_from_one_site() {
+        // The #108 defect in one test: #905 keyed on the full message, so
+        // the encoder warning's flapping numbers produced a fresh forwarded
+        // line on every value change. Keying on the site collapses them.
         let recorder = RecordingLog::new();
         let lines = recorder.lines.clone();
         let wrapped = RepeatSuppressingLog::new(recorder);
+        let site = "(RTCVideoEncoderH264.mm:614)";
 
-        log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
-        log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
-        log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
-        log_via(&wrapped, "libwebrtc", log::Level::Warn, "B");
+        for max in [13, 7, 13, 7, 13, 7, 13, 7] {
+            log_via(
+                &wrapped,
+                "libwebrtc",
+                log::Level::Warn,
+                &format!("{site}: Encoder frame rate setting 30 is larger than the maximal allowed frame rate {max}."),
+            );
+        }
 
         let recorded = lines.lock().unwrap();
         assert_eq!(
             recorded.len(),
-            3,
-            "expected: first A, a rollup of A's suppressed repeats, then B: {recorded:?}"
+            1,
+            "all eight occurrences share one log site and must collapse to the first line: {recorded:?}"
         );
-        assert_eq!(recorded[0], "A");
+        assert!(recorded[0].contains("frame rate 13."));
+    }
+
+    #[test]
+    fn repeat_suppressing_log_emits_a_rollup_once_the_interval_elapses() {
+        let recorder = RecordingLog::new();
+        let lines = recorder.lines.clone();
+        let wrapped = RepeatSuppressingLog::new(recorder);
+        let base = Instant::now();
+        let site = "(RTCVideoEncoderH264.mm:614)";
+
+        // 60 occurrences over 59s: under the 30s summary interval nothing
+        // but the first line is emitted; the occurrence that crosses the
+        // interval carries the rollup.
+        for i in 0..60u64 {
+            log_via_at(
+                &wrapped,
+                "libwebrtc",
+                log::Level::Warn,
+                &format!("{site}: Encoder frame rate setting {} is larger than the maximal allowed frame rate 13.", 20 + i % 11),
+                base + Duration::from_secs(i),
+            );
+        }
+
+        let recorded = lines.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "60 occurrences over 59s must produce the first line plus exactly one 30s rollup: {recorded:?}"
+        );
         assert!(
-            recorded[1].contains('A') && recorded[1].contains("repeated 2x"),
-            "the tail of a streak must not be silently dropped when the message changes: {:?}",
+            recorded[1].contains("repeated 30x"),
+            "the rollup must carry the suppressed count: {:?}",
             recorded[1]
         );
-        assert_eq!(recorded[2], "B");
+        assert!(
+            recorded[1].contains("text change(s)"),
+            "the rollup must report that the interpolated values moved: {:?}",
+            recorded[1]
+        );
+    }
+
+    #[test]
+    fn repeat_suppressing_log_does_not_let_two_sites_flush_each_other() {
+        // #905's single-slot design emitted a rollup on every alternation
+        // between two active sites -- 389 of them in one 611s field log.
+        // Per-site tracking must not do that.
+        let recorder = RecordingLog::new();
+        let lines = recorder.lines.clone();
+        let wrapped = RepeatSuppressingLog::new(recorder);
+        let base = Instant::now();
+
+        for i in 0..40u64 {
+            let site = if i % 2 == 0 {
+                "(RTCVideoEncoderH264.mm:614)"
+            } else {
+                "(rtcp_receiver.cc:296)"
+            };
+            log_via_at(
+                &wrapped,
+                "libwebrtc",
+                log::Level::Warn,
+                &format!("{site}: something happened"),
+                base + Duration::from_millis(i * 100),
+            );
+        }
+
+        let recorded = lines.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "two interleaving sites must produce one first line each, not a rollup per alternation: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn repeat_suppressing_log_sweeps_a_quiet_streak_instead_of_holding_its_tail() {
+        // A site that stops firing must still report its suppressed tail
+        // without waiting for a `flush()` that may never come.
+        let recorder = RecordingLog::new();
+        let lines = recorder.lines.clone();
+        let wrapped = RepeatSuppressingLog::new(recorder);
+        let base = Instant::now();
+
+        log_via_at(&wrapped, "libwebrtc", log::Level::Warn, "(a.cc:1): x", base);
+        log_via_at(&wrapped, "libwebrtc", log::Level::Warn, "(a.cc:1): x", base + Duration::from_secs(1));
+        log_via_at(&wrapped, "libwebrtc", log::Level::Warn, "(a.cc:1): x", base + Duration::from_secs(2));
+        // `a.cc:1` goes quiet; a different site keeps firing past the
+        // interval, which is what triggers the sweep.
+        log_via_at(&wrapped, "libwebrtc", log::Level::Warn, "(b.cc:9): y", base + Duration::from_secs(40));
+
+        let recorded = lines.lock().unwrap();
+        assert_eq!(recorded.len(), 3, "expected: first a.cc, a.cc's swept rollup, first b.cc: {recorded:?}");
+        assert!(recorded[0].contains("(a.cc:1)"));
+        assert!(
+            recorded[1].contains("(a.cc:1)") && recorded[1].contains("repeated 2x"),
+            "a quiet streak's tail must be swept out, attributed to its own site: {:?}",
+            recorded[1]
+        );
+        assert!(recorded[2].contains("(b.cc:9)"));
     }
 
     #[test]
@@ -6501,8 +6808,8 @@ mod tests {
         log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
         log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
         log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
-        // No message change and no summary interval elapsed -- without an
-        // explicit flush, the 2 suppressed repeats would never be reported.
+        // No summary interval elapsed -- without an explicit flush, the 2
+        // suppressed repeats would never be reported.
         wrapped.flush();
 
         let recorded = lines.lock().unwrap();
@@ -6512,6 +6819,31 @@ mod tests {
             recorded[1].contains('A') && recorded[1].contains("repeated 2x"),
             "flush must report the pending suppressed count instead of silently dropping it: {:?}",
             recorded[1]
+        );
+    }
+
+    #[test]
+    fn repeat_suppressing_log_bounds_the_number_of_tracked_sites() {
+        // A pathological build emitting an unbounded set of sites must not
+        // grow this map forever; the least-recently-seen entry is evicted
+        // (with its rollup) instead.
+        let recorder = RecordingLog::new();
+        let wrapped = RepeatSuppressingLog::new(recorder);
+        let base = Instant::now();
+
+        for i in 0..(NATIVE_WEBRTC_REPEAT_MAX_TRACKED * 3) {
+            log_via_at(
+                &wrapped,
+                "libwebrtc",
+                log::Level::Warn,
+                &format!("(gen.cc:{i}): unique"),
+                base + Duration::from_millis(i as u64),
+            );
+        }
+
+        assert!(
+            wrapped.state.lock().unwrap().len() <= NATIVE_WEBRTC_REPEAT_MAX_TRACKED,
+            "tracked-site map must stay bounded"
         );
     }
 
@@ -7690,6 +8022,47 @@ mod tests {
     /// `valid_sentry_diagnostic_event` cannot catch this: it is fail-closed on
     /// tag count and fail-open on an absent message. Loop over the names so a
     /// class added later fails here instead of shipping untitled.
+    /// #104's descriptor diagnostic is only useful if it SURVIVES
+    /// `before_send` -- a rejected diagnostic is dropped silently, so a
+    /// forgotten `DIAGNOSTIC_TAGS` entry or `valid_diagnostic_tag` arm would
+    /// mean the field never sees a single exhaustion event. Round-trip both
+    /// stages.
+    #[test]
+    fn descriptor_pressure_diagnostic_survives_before_send_with_a_real_title() {
+        for stage in [
+            DescriptorPressureStageTag::HighWater,
+            DescriptorPressureStageTag::Exhausted,
+        ] {
+            let event = build_sentry_diagnostic_event(
+                SentryDiagnosticEvent::DescriptorPressure(DescriptorPressureDiagnostic { stage }),
+                "1",
+            );
+            assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+            assert_eq!(event.fingerprint.as_ref(), ["descriptor-pressure"]);
+            assert_eq!(
+                event.tags.get("descriptor_pressure_stage").map(String::as_str),
+                Some(stage.tag())
+            );
+            assert!(
+                event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message
+                        == format!(
+                            "diagnostic: descriptor-pressure descriptor_pressure_stage={}",
+                            stage.tag()
+                        )),
+                "descriptor-pressure must ship with a title naming its stage: {:?}",
+                event.message
+            );
+            assert!(
+                valid_sentry_diagnostic_event(&event),
+                "descriptor-pressure ({}) must pass before_send",
+                stage.tag()
+            );
+        }
+    }
+
     #[test]
     fn every_diagnostic_event_name_has_message_tags() {
         for name in DIAGNOSTIC_EVENT_NAMES {

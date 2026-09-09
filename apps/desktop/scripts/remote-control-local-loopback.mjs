@@ -6,6 +6,10 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { NO_RESULT_EXIT_CODE, noResultSummary } from './remote-control-exit.mjs';
 import { INPUT_ONLY_SCOPE_LINES } from './remote-control-share-readiness.mjs';
+// #102: a wedged live run used to hold the only self-hosted runner until a
+// human noticed. Both the bound and the evidence it captures live here.
+import { captureWedgeEvidence } from './harness-wedge-evidence.mjs';
+import { RUN_TIMEOUT_ENV, runTimeoutMs } from './harness-timeouts.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const preflightPath = path.join(scriptDir, 'remote-control-harness-preflight.mjs');
@@ -115,6 +119,12 @@ Threshold env:
   PETAL_REMOTE_CONTROL_PHOTON_WARMUP_SAMPLES (default 2 per input kind)
   PETAL_REMOTE_CONTROL_PHOTON_TIMEOUT_MS (default 2000 per sample)
   PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS (default 250)
+
+Wedge bounds (#102):
+  PETAL_AUTOTEST_COMMAND_TIMEOUT_MS (default 60000; per autotest-socket command)
+  ${RUN_TIMEOUT_ENV} (default 900000; whole --live run)
+  PETAL_WEDGE_EVIDENCE_DIR (where a timeout writes its sample backtrace and log tail)
+  PETAL_DEV_LOG (app log whose tail is captured beside the backtrace)
 `);
 }
 
@@ -234,11 +244,18 @@ let childStdout = '';
 let childStderr = '';
 child.stdout.setEncoding('utf8');
 child.stderr.setEncoding('utf8');
+// #102: forward the child's output AS IT ARRIVES, as well as capturing it for
+// the RESULT/SUMMARY parsing below. It used to be accumulated and printed only
+// after the child closed, so a run that never closed printed nothing at all --
+// the 81-minute wedge's harness log ends at the `==> Live loopback` header and
+// does not even name the case it hung on.
 child.stdout.on('data', (chunk) => {
   childStdout += chunk;
+  process.stdout.write(chunk);
 });
 child.stderr.on('data', (chunk) => {
   childStderr += chunk;
+  process.stderr.write(chunk);
 });
 
 let forwardedSignal = null;
@@ -254,10 +271,47 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   });
 }
 
+// #102: the outermost bound. The per-command socket timeout in
+// `autotest-socket.mjs` catches a wedged APP; this catches everything else --
+// a scenario stuck on CDP, on a sentinel, or anywhere that never touches the
+// autotest socket at all. Without it the only limit was GitHub's 6h default,
+// and one wedge held the single self-hosted VM for 81 minutes.
+const RUN_TIMEOUT_MS = runTimeoutMs();
+const GRACE_AFTER_SIGTERM_MS = 15_000;
+let timedOut = false;
+const runTimer = setTimeout(() => {
+  timedOut = true;
+  const reason = `the remote-control scenario did not finish within ${RUN_TIMEOUT_MS}ms (#102)`;
+  console.log(`# TIMEOUT: ${reason}`);
+  // Evidence BEFORE teardown -- a backtrace of a process we already killed
+  // says nothing about why it was stuck.
+  try {
+    captureWedgeEvidence(reason);
+  } catch {
+    // Never let evidence capture stop the teardown that frees the runner.
+  }
+  try {
+    child.kill('SIGTERM');
+  } catch {
+    // Already gone.
+  }
+  const killTimer = setTimeout(() => {
+    console.log('# TIMEOUT: scenario ignored SIGTERM; sending SIGKILL');
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }, GRACE_AFTER_SIGTERM_MS);
+  killTimer.unref?.();
+}, RUN_TIMEOUT_MS);
+runTimer.unref?.();
+
 const result = await new Promise((resolve) => {
   child.once('error', (error) => resolve({ error, status: null, signalCode: null }));
   child.once('close', (status, signalCode) => resolve({ error: null, status, signalCode }));
 });
+clearTimeout(runTimer);
 
 if (result.error) {
   throw result.error;
@@ -268,7 +322,7 @@ for (const stream of [childStdout, childStderr]) {
   if (!stream) continue;
   for (const line of stream.split(/\r?\n/)) {
     if (!line) continue;
-    console.log(line);
+    // Already echoed live above (#102); this pass only parses.
     if (line.startsWith('RESULT ')) {
       JSON.parse(line.slice('RESULT '.length));
       parsedResults += 1;
@@ -286,6 +340,12 @@ if (result.status !== 0 && parsedResults > 0 && parsedSummary) {
   console.log(
     `# parsed remote-control suite before failure: total=${parsedSummary.total} pass=${parsedSummary.pass} fail=${parsedSummary.fail} skip=${parsedSummary.skip}`
   );
+}
+if (timedOut) {
+  console.log(
+    `# NO RESULT: the remote-control scenario was killed after exceeding ${RUN_TIMEOUT_MS}ms; see the wedge evidence above (#102)`
+  );
+  process.exit(NO_RESULT_EXIT_CODE);
 }
 if (forwardedSignal || result.signalCode) {
   console.log(

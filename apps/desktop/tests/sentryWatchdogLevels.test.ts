@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 // Quality watchdogs must not `log::error!` — that opens a Sentry issue per
-// sample. Crash/join-hard-fail `error!`s stay. Locked against the 2026-08-17
-// Sentry-vs-PostHog split (docs/POSTHOG_EVENT_ALLOWLIST.md).
+// sample. Crash/join-hard-fail `error!`s stay, and so does #104's rate-limited
+// file-descriptor exhaustion alert (see the allowlist in the first test).
+// Locked against the 2026-08-17 Sentry-vs-PostHog split
+// (docs/POSTHOG_EVENT_ALLOWLIST.md).
 
 const desktop = join(dirname(fileURLToPath(import.meta.url)), '..');
 const root = join(desktop, 'src-tauri', 'src');
@@ -23,7 +25,26 @@ test('video stall and display-drop watchdogs log at warn, not error', () => {
     diagnostics,
     /log::warn!\(\s*"diagnostics: receiver display enqueue drop rate/
   );
-  assert.doesNotMatch(diagnostics, /log::error!\(\s*"diagnostics:/);
+  // The rule is about per-sample QUALITY watchdogs: an `error!` on a sampled
+  // health metric opens a Sentry issue per sample. It was a blanket ban until
+  // #104, which needs the opposite for a categorically different signal --
+  // file-descriptor exhaustion is not a quality degradation but a process-wide
+  // allocation failure that never self-recovers, and warn/info would leave it
+  // as a breadcrumb Sentry evicts (the exact gap that made #104 invisible for
+  // 20 hours). So this is now an ALLOWLIST rather than a ban: any NEW
+  // `log::error!("diagnostics: ...` still fails here.
+  const diagnosticErrors = [
+    ...diagnostics.matchAll(/log::error!\(\s*"diagnostics: ([^"\\]*)/g),
+  ].map((match) => match[1]);
+  assert.deepEqual(
+    diagnosticErrors.filter((message) => !message.startsWith('file-descriptor')),
+    [],
+    'a new diagnostics error! would open a Sentry issue per sample -- use warn!'
+  );
+  // ...and the allowed exception must keep the rate limit that earns it.
+  assert.match(diagnostics, /log::error!\(\s*"diagnostics: file-descriptor pressure/);
+  assert.match(diagnostics, /log::error!\(\s*"diagnostics: file-descriptor EXHAUSTION/);
+  assert.match(diagnostics, /const DESCRIPTOR_ALERT_REWARN_INTERVAL/);
 });
 
 test('remote-audio EnteredAlarm logs at warn, not error', () => {
