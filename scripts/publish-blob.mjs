@@ -378,8 +378,12 @@ async function verifyFeedbackKey(distDir) {
   if (!dir?.isDirectory()) {
     throw new Error(
       `${gateName}: frontend build output not found at ${distDir}. This gate reads the built ` +
-        'frontend, not the binary (Tauri compresses embedded assets). Set FRONTEND_DIST_DIR to ' +
-        "the desktop app's build output."
+        'frontend, not the binary (Tauri compresses embedded assets, so no frontend string ' +
+        'survives there as plaintext). If this is the release workflow: the build runs inside ' +
+        "run-with-source-provenance.sh's isolated materialized HEAD, which is DELETED when the " +
+        'step exits, so the build step must copy its dist back to ' +
+        '$PETAL_PROVENANCE_OUTPUT_ROOT/apps/desktop/build the way CARGO_TARGET_DIR already ' +
+        'writes there. v0.9.14 failed here for exactly that reason.'
     );
   }
 
