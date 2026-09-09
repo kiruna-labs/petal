@@ -314,6 +314,10 @@ pub struct CameraHealthDiagnostic {
     pub encode_cadence: CadenceBucket,
     pub queue_backpressure: QueueBackpressureBucket,
     pub decoder_render: DecoderRenderHealth,
+    /// #126: which condition produced `capture_cadence: Stalled` on the
+    /// receive side. `NotApplicable` for every publish-side event and for any
+    /// receive cadence that is not `Stalled`.
+    pub stall_cause: CameraStallCauseTag,
 }
 
 /// Emitted once per episode when a camera whose frames no longer match the
@@ -411,6 +415,7 @@ diagnostic_enum!(OverlayClearReasonTag { NoPublication => "no_publication", Reti
 diagnostic_enum!(CadenceBucket { Healthy => "healthy", Reduced => "reduced", Severe => "severe", Stalled => "stalled", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(QueueBackpressureBucket { None => "none", Low => "low", High => "high", Saturated => "saturated", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(DecoderRenderHealth { Healthy => "healthy", DecoderDegraded => "decoder_degraded", RenderDegraded => "render_degraded", BothDegraded => "both_degraded", Unknown => "unknown", NotApplicable => "not_applicable" });
+diagnostic_enum!(CameraStallCauseTag { StreamPaused => "stream_paused", DecodeStale => "decode_stale", DecodeZero => "decode_zero", NotApplicable => "not_applicable" });
 diagnostic_enum!(CameraRecoveryActionTag { Reanchor => "reanchor", Letterbox => "letterbox", NotApplicable => "not_applicable" });
 diagnostic_enum!(PlayoutTransitionTag { Repointed => "repointed", Unavailable => "unavailable", NotApplicable => "not_applicable" });
 diagnostic_enum!(StormScopeTag {
@@ -489,6 +494,7 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "encode_cadence",
     "queue_backpressure",
     "decoder_render_health",
+    "stall_cause",
     "recovery_action",
     "playout_transition",
     "storm_scope",
@@ -521,6 +527,7 @@ const CAMERA_HEALTH_MESSAGE_TAGS: &[&str] = &[
     "encode_cadence",
     "queue_backpressure",
     "decoder_render_health",
+    "stall_cause",
 ];
 
 const SHARE_OVERLAY_CURSOR_CAPTURE_MESSAGE_TAGS: &[&str] = &["session_role", "overlay_clear_reason"];
@@ -573,6 +580,25 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "descriptor-pressure" => Some(DESCRIPTOR_PRESSURE_MESSAGE_TAGS),
         _ => None,
     }
+}
+
+/// The ONE definition of a diagnostic's Sentry group key, derived purely from
+/// closed-enum tag values so `valid_sentry_diagnostic_event` can recompute and
+/// compare it. `camera-health` appends `camera_direction`: the publish-side and
+/// receive-side arms are unrelated failures that shared one fingerprint, so the
+/// group's title rendered whichever event arrived last and described neither
+/// (#126). Every other event keeps the bare event name.
+fn diagnostic_fingerprint(tags: &sentry::protocol::Map<String, String>) -> Vec<String> {
+    let Some(event_name) = tags.get("event_name") else {
+        return Vec::new();
+    };
+    let mut fingerprint = vec![event_name.clone()];
+    if event_name == "camera-health" {
+        if let Some(direction) = tags.get("camera_direction") {
+            fingerprint.push(direction.clone());
+        }
+    }
+    fingerprint
 }
 
 /// The ONE definition of a diagnostic's title, derived purely from closed-enum
@@ -936,6 +962,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -963,6 +990,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", value.encode_cadence.tag());
             insert("queue_backpressure", value.queue_backpressure.tag());
             insert("decoder_render_health", value.decoder_render.tag());
+            insert("stall_cause", value.stall_cause.tag());
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -990,6 +1018,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", value.action.tag());
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1017,6 +1046,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", value.transition.tag());
             insert("storm_scope", "not_applicable");
@@ -1044,6 +1074,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", value.scope.tag());
@@ -1071,6 +1102,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", value.scope.tag());
@@ -1098,6 +1130,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", value.scope.tag());
@@ -1125,6 +1158,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1152,6 +1186,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("install_failure_stage", "not_applicable");
@@ -1179,6 +1214,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1206,6 +1242,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1233,6 +1270,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1260,6 +1298,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1287,6 +1326,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1314,6 +1354,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1341,6 +1382,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1357,10 +1399,15 @@ fn build_sentry_diagnostic_event(
     }
     insert("dedup_count_bucket", dedup_count_bucket);
     let message = diagnostic_message(&tags);
+    let fingerprint = diagnostic_fingerprint(&tags);
+    debug_assert_eq!(
+        fingerprint.first().map(String::as_str),
+        Some(diagnostic.event_name())
+    );
     sentry::protocol::Event {
         message,
         tags,
-        fingerprint: Cow::Owned(vec![diagnostic.event_name().into()]),
+        fingerprint: Cow::Owned(fingerprint.into_iter().map(Cow::Owned).collect()),
         ..Default::default()
     }
 }
@@ -1378,8 +1425,13 @@ pub fn set_sentry_enabled(enabled: bool) {
 /// buckets. It rejects every value outside the small schema before it reaches
 /// the existing Sentry event constructor.
 #[tauri::command]
-pub fn record_camera_receive_health(cadence: String, decoder_render: String) -> bool {
-    let Some(event) = camera_receive_health_diagnostic(&cadence, &decoder_render) else {
+pub fn record_camera_receive_health(
+    cadence: String,
+    decoder_render: String,
+    stall_cause: String,
+) -> bool {
+    let Some(event) = camera_receive_health_diagnostic(&cadence, &decoder_render, &stall_cause)
+    else {
         return false;
     };
     capture_sentry_diagnostic(event)
@@ -1388,6 +1440,7 @@ pub fn record_camera_receive_health(cadence: String, decoder_render: String) -> 
 fn camera_receive_health_diagnostic(
     cadence: &str,
     decoder_render: &str,
+    stall_cause: &str,
 ) -> Option<SentryDiagnosticEvent> {
     let capture_cadence = match cadence {
         "reduced" => CadenceBucket::Reduced,
@@ -1395,18 +1448,39 @@ fn camera_receive_health_diagnostic(
         "stalled" => CadenceBucket::Stalled,
         _ => return None,
     };
+    // #126: a subscription paused by the SFU degrades the NETWORK, not the
+    // decoder, so `not_applicable` is a legitimate receive-side value now.
     let decoder_render = match decoder_render {
         "decoder_degraded" => DecoderRenderHealth::DecoderDegraded,
+        "not_applicable" => DecoderRenderHealth::NotApplicable,
         _ => return None,
     };
-    Some(SentryDiagnosticEvent::CameraHealth(CameraHealthDiagnostic {
-        role: DiagnosticRole::Receiver,
-        direction: CameraDirection::Receive,
-        capture_cadence,
-        encode_cadence: CadenceBucket::NotApplicable,
-        queue_backpressure: QueueBackpressureBucket::NotApplicable,
-        decoder_render,
-    }))
+    let stall_cause = match stall_cause {
+        "stream_paused" => CameraStallCauseTag::StreamPaused,
+        "decode_stale" => CameraStallCauseTag::DecodeStale,
+        "decode_zero" => CameraStallCauseTag::DecodeZero,
+        "not_applicable" => CameraStallCauseTag::NotApplicable,
+        _ => return None,
+    };
+    // A cause only means something for a stalled interval, and a stalled
+    // interval always has one -- reject the two contradictory combinations
+    // rather than shipping an event that says nothing or says too much.
+    if (capture_cadence == CadenceBucket::Stalled)
+        != (stall_cause != CameraStallCauseTag::NotApplicable)
+    {
+        return None;
+    }
+    Some(SentryDiagnosticEvent::CameraHealth(
+        CameraHealthDiagnostic {
+            role: DiagnosticRole::Receiver,
+            direction: CameraDirection::Receive,
+            capture_cadence,
+            encode_cadence: CadenceBucket::NotApplicable,
+            queue_backpressure: QueueBackpressureBucket::NotApplicable,
+            decoder_render,
+            stall_cause,
+        },
+    ))
 }
 
 /// Resolve the platform log DIRECTORY, creating it if needed:
@@ -4606,14 +4680,18 @@ fn scrub_event_for_sentry(
 }
 
 fn valid_sentry_diagnostic_event(event: &sentry::protocol::Event<'_>) -> bool {
-    let event_name = event.tags.get("event_name").map(String::as_str);
+    let expected_fingerprint = diagnostic_fingerprint(&event.tags);
     if event.tags.len() != DIAGNOSTIC_TAGS.len()
         || event
             .tags
             .keys()
             .any(|key| !DIAGNOSTIC_TAGS.contains(&key.as_str()))
-        || event.fingerprint.len() != 1
-        || event.fingerprint.first().map(|value| value.as_ref()) != event_name
+        || expected_fingerprint.is_empty()
+        || event
+            .fingerprint
+            .iter()
+            .map(|value| value.as_ref())
+            .ne(expected_fingerprint.iter().map(String::as_str))
         || event
             .release
             .as_deref()
@@ -4754,6 +4832,12 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
                 | "both_degraded"
                 | "unknown"
                 | "not_applicable"
+        ),
+        // #126: the closed discriminator that separates an SFU pause from a
+        // confirmed decode stall from a not-yet-stale zero decode rate.
+        "stall_cause" => matches!(
+            value,
+            "stream_paused" | "decode_stale" | "decode_zero" | "not_applicable"
         ),
         "dedup_count_bucket" => matches!(value, "1" | "2_9" | "10_99" | "100_plus"),
         _ => false,
@@ -7819,13 +7903,14 @@ mod tests {
             encode_cadence: CadenceBucket::NotApplicable,
             queue_backpressure: QueueBackpressureBucket::NotApplicable,
             decoder_render: DecoderRenderHealth::DecoderDegraded,
+            stall_cause: CameraStallCauseTag::NotApplicable,
         })
     }
 
     #[test]
     fn camera_receive_ipc_accepts_only_closed_unhealthy_buckets() {
         let Some(SentryDiagnosticEvent::CameraHealth(event)) =
-            camera_receive_health_diagnostic("severe", "decoder_degraded")
+            camera_receive_health_diagnostic("severe", "decoder_degraded", "not_applicable")
         else {
             panic!("valid receive health buckets must construct an event");
         };
@@ -7835,6 +7920,7 @@ mod tests {
         assert_eq!(event.encode_cadence, CadenceBucket::NotApplicable);
         assert_eq!(event.queue_backpressure, QueueBackpressureBucket::NotApplicable);
         assert_eq!(event.decoder_render, DecoderRenderHealth::DecoderDegraded);
+        assert_eq!(event.stall_cause, CameraStallCauseTag::NotApplicable);
 
         for forbidden in [
             "healthy",
@@ -7844,14 +7930,132 @@ mod tests {
             "https://example.test/private",
         ] {
             assert!(
-                camera_receive_health_diagnostic(forbidden, "decoder_degraded").is_none(),
+                camera_receive_health_diagnostic(forbidden, "decoder_degraded", "not_applicable")
+                    .is_none(),
                 "cadence must reject {forbidden:?}"
             );
             assert!(
-                camera_receive_health_diagnostic("severe", forbidden).is_none(),
+                camera_receive_health_diagnostic("severe", forbidden, "not_applicable").is_none(),
                 "decoder/render must reject {forbidden:?}"
             );
+            assert!(
+                camera_receive_health_diagnostic("stalled", "decoder_degraded", forbidden)
+                    .is_none(),
+                "stall cause must reject {forbidden:?}"
+            );
         }
+    }
+
+    /// #126: the three conditions behind `cadence: stalled` must arrive as
+    /// three DIFFERENT events. Every accepted stall cause has to round-trip
+    /// through the tag allowlist and the validator that `before_send` runs --
+    /// a `stall_cause` missing from `DIAGNOSTIC_TAGS` or `valid_diagnostic_tag`
+    /// would drop the whole event silently, which is worse than the ambiguity
+    /// it was added to fix.
+    #[test]
+    fn camera_receive_stall_causes_round_trip_the_tag_allowlist() {
+        let _guard = SENTRY_ENABLED_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set_sentry_enabled(true);
+
+        let cases = [
+            (
+                "stream_paused",
+                "not_applicable",
+                CameraStallCauseTag::StreamPaused,
+            ),
+            (
+                "decode_stale",
+                "decoder_degraded",
+                CameraStallCauseTag::DecodeStale,
+            ),
+            (
+                "decode_zero",
+                "decoder_degraded",
+                CameraStallCauseTag::DecodeZero,
+            ),
+        ];
+        let mut messages = Vec::new();
+        for (cause, decoder_render, expected) in cases {
+            let diagnostic = camera_receive_health_diagnostic("stalled", decoder_render, cause)
+                .unwrap_or_else(|| panic!("stall cause {cause:?} must be accepted"));
+            let SentryDiagnosticEvent::CameraHealth(value) = diagnostic else {
+                panic!("receive health must build a camera-health diagnostic");
+            };
+            assert_eq!(value.stall_cause, expected);
+            assert_eq!(value.capture_cadence, CadenceBucket::Stalled);
+
+            let event = build_sentry_diagnostic_event(diagnostic, "1");
+            assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+            assert_eq!(
+                event.tags.get("stall_cause").map(String::as_str),
+                Some(cause),
+                "the stall cause must reach Sentry as its own tag"
+            );
+            assert_eq!(
+                event.tags.get("decoder_render_health").map(String::as_str),
+                Some(decoder_render)
+            );
+            assert!(
+                valid_sentry_diagnostic_event(&event),
+                "stall cause {cause:?} must survive before_send, not be dropped silently"
+            );
+            let message = event
+                .message
+                .as_deref()
+                .expect("camera-health must be titled, not <unlabeled event>")
+                .to_string();
+            assert!(message.contains(&format!("stall_cause={cause}")));
+            let scrubbed = scrub_event_for_sentry(event)
+                .expect("a valid camera-health diagnostic must survive before_send");
+            assert_eq!(scrubbed.message.as_deref(), Some(message.as_str()));
+            messages.push(message);
+        }
+        messages.sort();
+        messages.dedup();
+        assert_eq!(
+            messages.len(),
+            3,
+            "the three stall causes must produce three DISTINCT titles (#126)"
+        );
+
+        // A cause without a stall, and a stall without a cause, are both
+        // contradictions -- neither may reach Sentry.
+        assert!(
+            camera_receive_health_diagnostic("severe", "decoder_degraded", "decode_zero").is_none(),
+            "a non-stalled cadence must not carry a stall cause"
+        );
+        assert!(
+            camera_receive_health_diagnostic("stalled", "decoder_degraded", "not_applicable")
+                .is_none(),
+            "a stalled cadence must name which condition produced it"
+        );
+    }
+
+    /// #126: publish-side and receive-side `camera-health` shared one
+    /// fingerprint, so the Sentry group's title rendered whichever arm arrived
+    /// last and described neither. They must group separately now.
+    #[test]
+    fn camera_health_fingerprints_split_by_direction() {
+        let receive = build_sentry_diagnostic_event(sample_camera_health_diagnostic(), "1");
+        let publish = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::CameraHealth(CameraHealthDiagnostic {
+                role: DiagnosticRole::Sharer,
+                direction: CameraDirection::Publish,
+                capture_cadence: CadenceBucket::Severe,
+                encode_cadence: CadenceBucket::Severe,
+                queue_backpressure: QueueBackpressureBucket::Saturated,
+                decoder_render: DecoderRenderHealth::NotApplicable,
+                stall_cause: CameraStallCauseTag::NotApplicable,
+            }),
+            "1",
+        );
+        assert_eq!(receive.fingerprint.as_ref(), ["camera-health", "receive"]);
+        assert_eq!(publish.fingerprint.as_ref(), ["camera-health", "publish"]);
+        assert_ne!(receive.fingerprint, publish.fingerprint);
+        assert!(valid_sentry_diagnostic_event(&receive));
+        assert!(valid_sentry_diagnostic_event(&publish));
     }
 
     #[test]
@@ -7889,7 +8093,8 @@ mod tests {
         assert!(camera_message.contains("camera-health"));
         assert_ne!(capture_message, camera_message);
         assert_eq!(capture.fingerprint.as_ref(), ["capture-layout-invalid"]);
-        assert_eq!(camera.fingerprint.as_ref(), ["camera-health"]);
+        // #126: camera-health groups per direction, not per event name.
+        assert_eq!(camera.fingerprint.as_ref(), ["camera-health", "receive"]);
     }
 
     /// #867's playout re-point diagnostic is only useful if it actually

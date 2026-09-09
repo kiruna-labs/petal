@@ -36,11 +36,25 @@ export interface CameraDecodeHealth {
 
 /** Closed, privacy-safe buckets accepted by the native Sentry bridge. */
 export type CameraReceiveCadence = 'reduced' | 'severe' | 'stalled';
-export type CameraReceiveDecoderRender = 'decoder_degraded';
+export type CameraReceiveDecoderRender = 'decoder_degraded' | 'not_applicable';
+
+/**
+ * #126: `cadence: 'stalled'` is reachable from three unrelated conditions --
+ * an SFU-paused subscription, a confirmed 30s decode stall, and a zero decode
+ * rate that is not yet stale. Without this discriminator every receive-side
+ * `camera-health` event is byte-identical and none of them can be acted on.
+ * Closed enum only: no identity, no counts, no timestamps, no free text.
+ */
+export type CameraReceiveStallCause =
+  | 'stream_paused'
+  | 'decode_stale'
+  | 'decode_zero'
+  | 'not_applicable';
 
 export interface CameraReceiveHealthSignal {
   cadence: CameraReceiveCadence;
   decoderRender: CameraReceiveDecoderRender;
+  stallCause: CameraReceiveStallCause;
 }
 
 /**
@@ -58,13 +72,23 @@ export function classifyCameraReceiveHealth(
   // particular, do not let a stale UI state turn a stats-read failure into a
   // false `stalled` quality signal.
   if (decodedFps === null || !Number.isFinite(decodedFps) || decodedFps < 0) return null;
-  if (streamPaused || stale) {
-    return { cadence: 'stalled', decoderRender: 'decoder_degraded' };
+  // #126: an SFU pause is checked FIRST and outranks staleness -- a paused
+  // subscription is why decode progress stopped, so it is the cause to report.
+  // It is a network degradation, not a decoder fault: never `decoder_degraded`.
+  if (streamPaused) {
+    return { cadence: 'stalled', decoderRender: 'not_applicable', stallCause: 'stream_paused' };
+  }
+  if (stale) {
+    return { cadence: 'stalled', decoderRender: 'decoder_degraded', stallCause: 'decode_stale' };
   }
   if (decodedFps >= 24) return null;
-  if (decodedFps >= 10) return { cadence: 'reduced', decoderRender: 'decoder_degraded' };
-  if (decodedFps > 0) return { cadence: 'severe', decoderRender: 'decoder_degraded' };
-  return { cadence: 'stalled', decoderRender: 'decoder_degraded' };
+  if (decodedFps >= 10) {
+    return { cadence: 'reduced', decoderRender: 'decoder_degraded', stallCause: 'not_applicable' };
+  }
+  if (decodedFps > 0) {
+    return { cadence: 'severe', decoderRender: 'decoder_degraded', stallCause: 'not_applicable' };
+  }
+  return { cadence: 'stalled', decoderRender: 'decoder_degraded', stallCause: 'decode_zero' };
 }
 
 export function nextCameraDecodeHealthState(

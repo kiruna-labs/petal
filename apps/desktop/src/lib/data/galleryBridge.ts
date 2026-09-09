@@ -293,7 +293,8 @@ export async function connectGalleryBridge(
           // of widening the diagnostic model with one.
           void invoke<boolean>(COMMANDS.recordCameraReceiveHealth, {
             cadence: signal.cadence,
-            decoderRender: signal.decoderRender
+            decoderRender: signal.decoderRender,
+            stallCause: signal.stallCause
           }).catch(() => {});
         }
       }
