@@ -335,7 +335,12 @@ wire PostHog into the backend. The browser client emits the same events
 git). Local and `scripts/deploy-web-harness.sh --build-only` stay keyless.
 
 **In-app bug reports (#292/#786) — `VITE_USERDISPATCH_PUBLIC_KEY` build var.**
-Set alongside `PETAL_SENTRY_DSN`, and for the same reason: the value is baked
+CI passes this from the `VITE_USERDISPATCH_PUBLIC_KEY` repository secret at
+both build sites in `release.yml`, and `scripts/publish-blob.mjs`'s
+"UserDispatch feedback key gate" refuses to publish a build missing it on
+either slice. Both were added after every release through 0.9.11 shipped with
+the feature silently compiled off. For a LOCAL release build you still pass it
+by hand, set alongside `PETAL_SENTRY_DSN`, and for the same reason: the value is baked
 in at build time, so a release built without it ships with the feature
 compiled off — no bug-report button in the meeting topbar (`Gallery.svelte`),
 no trigger on the home screen (`MainMenu.svelte`), and the
