@@ -170,7 +170,11 @@ struct WindowServerIdStore {
 /// (the machine does not reboot -- the session restarts) and different
 /// after any reboot, which is exactly the discriminator the regression
 /// check needs.
-fn current_boot_time_epoch() -> Option<i64> {
+///
+/// `pub(crate)` because `logging.rs`'s previous-session classifier consumes
+/// the same signal to tell "the machine rebooted" from "we died" (#105) --
+/// one reader of `kern.boottime`, not two.
+pub(crate) fn current_boot_time_epoch() -> Option<i64> {
     let mut tv = libc::timeval {
         tv_sec: 0,
         tv_usec: 0,
