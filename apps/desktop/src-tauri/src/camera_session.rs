@@ -14,8 +14,8 @@ use serde::Serialize;
 use tauri::Manager;
 
 use crate::logging::{
-    CadenceBucket, CameraDirection, CameraHealthDiagnostic, DecoderRenderHealth, DiagnosticRole,
-    QueueBackpressureBucket, SentryDiagnosticEvent,
+    CadenceBucket, CameraDirection, CameraHealthDiagnostic, CameraStallCauseTag,
+    DecoderRenderHealth, DiagnosticRole, QueueBackpressureBucket, SentryDiagnosticEvent,
 };
 use crate::room_generation::RoomGeneration;
 use crate::sync_ext::MutexExt;
@@ -211,6 +211,9 @@ fn unhealthy_camera_publish_diagnostic(
             encode_cadence,
             queue_backpressure,
             decoder_render: DecoderRenderHealth::NotApplicable,
+            // #126: receive-side only -- a publish interval has no
+            // subscription to pause and no decoder to stall.
+            stall_cause: CameraStallCauseTag::NotApplicable,
         },
     ))
 }
@@ -1509,6 +1512,7 @@ mod tests {
                     encode_cadence: CadenceBucket::Severe,
                     queue_backpressure: QueueBackpressureBucket::Saturated,
                     decoder_render: DecoderRenderHealth::NotApplicable,
+                    stall_cause: CameraStallCauseTag::NotApplicable,
                 }
             ))
         );

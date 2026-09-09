@@ -126,35 +126,69 @@ test('classifyCameraReceiveHealth emits only confirmed unhealthy buckets', () =>
       fps: 10,
       paused: false,
       stale: false,
-      expected: { cadence: 'reduced', decoderRender: 'decoder_degraded' }
+      expected: {
+        cadence: 'reduced',
+        decoderRender: 'decoder_degraded',
+        stallCause: 'not_applicable'
+      }
     },
     {
       name: 'severe',
       fps: 1,
       paused: false,
       stale: false,
-      expected: { cadence: 'severe', decoderRender: 'decoder_degraded' }
+      expected: {
+        cadence: 'severe',
+        decoderRender: 'decoder_degraded',
+        stallCause: 'not_applicable'
+      }
     },
+    // #126: the three rows below all read `cadence: 'stalled'` and are three
+    // unrelated faults. `stallCause` is the only thing separating them; if it
+    // ever collapses back to one value these rows go red together.
     {
-      name: 'zero',
+      name: 'zero decode rate, not yet stale',
       fps: 0,
       paused: false,
       stale: false,
-      expected: { cadence: 'stalled', decoderRender: 'decoder_degraded' }
+      expected: {
+        cadence: 'stalled',
+        decoderRender: 'decoder_degraded',
+        stallCause: 'decode_zero'
+      }
     },
     {
-      name: 'paused',
+      name: 'paused by the SFU (network, not decoder)',
       fps: 30,
       paused: true,
       stale: false,
-      expected: { cadence: 'stalled', decoderRender: 'decoder_degraded' }
+      expected: {
+        cadence: 'stalled',
+        decoderRender: 'not_applicable',
+        stallCause: 'stream_paused'
+      }
     },
     {
-      name: 'stale',
+      name: 'paused and stale -- the pause is why decode stopped',
+      fps: 0,
+      paused: true,
+      stale: true,
+      expected: {
+        cadence: 'stalled',
+        decoderRender: 'not_applicable',
+        stallCause: 'stream_paused'
+      }
+    },
+    {
+      name: 'confirmed 30s decode stall',
       fps: 30,
       paused: false,
       stale: true,
-      expected: { cadence: 'stalled', decoderRender: 'decoder_degraded' }
+      expected: {
+        cadence: 'stalled',
+        decoderRender: 'decoder_degraded',
+        stallCause: 'decode_stale'
+      }
     }
   ];
 
@@ -165,6 +199,36 @@ test('classifyCameraReceiveHealth emits only confirmed unhealthy buckets', () =>
       vector.name
     );
   }
+});
+
+// #126: 1,002 receive-side `camera-health` events were byte-identical because
+// three conditions shared one output. This asserts the property that made them
+// unactionable is gone -- the three stalled conditions must not collapse onto
+// one signal again, whatever the individual field values become.
+test('the three stalled conditions stay distinguishable from one another', () => {
+  const streamPaused = classifyCameraReceiveHealth(0, true, false);
+  const decodeStale = classifyCameraReceiveHealth(30, false, true);
+  const decodeZero = classifyCameraReceiveHealth(0, false, false);
+
+  for (const signal of [streamPaused, decodeStale, decodeZero]) {
+    assert.ok(signal, 'each stalled condition must emit a signal');
+    assert.equal(signal?.cadence, 'stalled', 'all three still read cadence=stalled');
+  }
+
+  const distinct = new Set(
+    [streamPaused, decodeStale, decodeZero].map((signal) => JSON.stringify(signal))
+  );
+  assert.equal(
+    distinct.size,
+    3,
+    'an SFU pause, a confirmed decode stall, and a zero decode rate must not ' +
+      'produce identical events (#126)'
+  );
+
+  // A track the SFU paused has a healthy decoder; reporting a decoder fault
+  // for it is what sent triage after the wrong subsystem.
+  assert.equal(streamPaused?.decoderRender, 'not_applicable');
+  assert.equal(decodeStale?.decoderRender, 'decoder_degraded');
 });
 
 test('missing stats stay unavailable through the periodic health composition', () => {

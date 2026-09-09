@@ -1500,7 +1500,9 @@ export interface CommandArgs {
   };
   [COMMANDS.recordCameraReceiveHealth]: {
     cadence: 'reduced' | 'severe' | 'stalled';
-    decoderRender: 'decoder_degraded';
+    decoderRender: 'decoder_degraded' | 'not_applicable';
+    // #126: which of the three conditions produced `cadence: 'stalled'`.
+    stallCause: 'stream_paused' | 'decode_stale' | 'decode_zero' | 'not_applicable';
   };
   [COMMANDS.remoteControlRevoke]: { windowId: number; controllerId: string };
   [COMMANDS.remoteControlRequestTimedOut]: { windowId: number; ownerIdentity?: string };
