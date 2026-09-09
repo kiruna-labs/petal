@@ -116,7 +116,7 @@ function isAllowedEmail(match, line, matchStart) {
 	// colon. This kept `scripts/ci-local.sh` red on main: a test that asserts
 	// credentialed URLs are REFUSED was reported as a leak
 	// (web-harness/tests/pluginPermissions.test.ts). Narrow on purpose -- a
-	// real address preceded by a colon in prose ("contact: a@b.com") still
+	// real address preceded by a colon in ordinary prose still
 	// reports, because that has no `//` scheme prefix before it.
 	const before = line.slice(0, matchStart);
 	return /:\/\/[^\s/@]*:[^\s/@]*$/.test(before);
