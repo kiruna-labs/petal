@@ -369,16 +369,22 @@ repository.
 - Build config `PETAL_PLUGIN_REGISTRY_URL` and `PETAL_PLUGIN_REGISTRY_PUBKEY`
   (desktop, through `build.rs`) and `VITE_PETAL_PLUGIN_REGISTRY_URL` and
   `_PUBKEY` (web). Forks point at their own registry.
-- Verify chain in both clients: minisign(index), sha256 match,
-  minisign(bundle), manifest id and version equal the index entry, manifest
-  validates, `minHostVersion` satisfied. Rust uses `minisign-verify`; the
-  shared TypeScript keeps the minisign format and algorithm dependency-free
-  (`shared/plugin-host/minisign.ts`, `registry.ts`) with the Ed25519 /
-  BLAKE2b / SHA-256 primitives injected by the web client
-  (`web-harness/src/plugins/minisign.ts`, `@noble/*`), so `shared/` still has
-  no npm dependency. The contract fixtures are signed by the JS signer and
-  verified by the Rust crate in tests, which pins the two implementations to
-  each other.
+- Verify chain (desktop, Rust `plugins::registry`): minisign(index) →
+  anti-rollback (`generatedAt` and the signature's `timestamp:` may never go
+  backwards for a registry; persisted in `plugins.json`) → sha256 + size →
+  minisign(bundle) → manifest id/version equal the index entry → grant = index
+  permissions ∩ manifest permissions, known permissions only → stored bundle
+  re-hashed on every read. **The public key is compile-time only**
+  (`option_env!`); a runtime URL override exists in debug builds only and
+  must still verify under the baked key. Registry HTTP uses its own client:
+  no redirects, no default headers, body streamed and cut at the cap.
+  `shared/plugin-host/registry.ts` is the index MODEL (shape validation,
+  installability, updates) consumed by the desktop Settings browser on top of
+  the Rust-verified index; the two validators are pinned to each other by
+  `contracts/plugin-registry/invalid-index-cases.json`. The web client gets
+  its own signature verifier together with its install path (I-6), so no
+  unused crypto ships before then. The contract fixtures are produced by the
+  marketplace signer and verified by the Rust crate in tests.
 - `plugins/build-all.mjs` emits the deterministic `bundle.json` the publisher
   consumes, so a third-party developer only ever produces `bundle.json`.
 - Update check on meeting join at most once per day; re-consent only when

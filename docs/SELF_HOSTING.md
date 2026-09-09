@@ -216,8 +216,12 @@ npm run tauri build
 Generate the keypair with `minisign -G` (keep it separate from your updater
 key so a compromise of one does not reach the other) and publish
 `index.json`, `index.json.minisig`, and `plugins/<id>/<version>/bundle.json`
-(+ `.minisig`) at that URL. The desktop verifies the index signature, each
-bundle's sha256 and signature, and the bundle manifest before anything runs.
+(+ `.minisig`) at that URL. The desktop verifies the index signature, refuses an index
+older than the last one it accepted, checks each bundle's sha256, size and
+signature and its manifest, and re-hashes stored bundles on every load. The
+public key is compiled in and cannot be changed at runtime; only debug builds
+accept a runtime `PETAL_PLUGIN_REGISTRY_URL` override, which must still be
+signed by the baked key.
 The browser client uses `VITE_PETAL_PLUGIN_REGISTRY_URL` and
 `VITE_PETAL_PLUGIN_REGISTRY_PUBKEY` at its build time.
 

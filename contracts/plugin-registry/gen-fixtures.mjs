@@ -19,7 +19,7 @@ const { blake2b } = await load('@noble/hashes/blake2.js');
 ed.hashes.sha512 = sha512;
 const { packBundle } = await import(pathToFileURL(resolve(repoRoot, 'plugins/build-all.mjs')).href);
 
-// --- minisign primitives (mirror shared/plugin-host/minisign.ts; kept inline so this
+// --- minisign primitives (same format the Rust `minisign-verify` crate reads; kept inline so this
 // script has no TS dependency) ---
 const b64 = (bytes) => Buffer.from(bytes).toString('base64');
 function signMinisign(secretKey, keyId, data, trustedComment) {

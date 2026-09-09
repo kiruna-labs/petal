@@ -33,11 +33,24 @@ pub struct InstalledRecord {
     pub sha256: Option<String>,
 }
 
+/// The newest registry index this install has accepted (anti-rollback, review #3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrySeen {
+    pub url: String,
+    /// `generatedAt` of the index, as unix milliseconds.
+    pub generated_at_ms: u64,
+    /// `timestamp:` from the index signature's trusted comment, unix seconds.
+    pub signed_at_s: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledState {
     #[serde(default)]
     pub plugins: BTreeMap<String, InstalledRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_seen: Option<RegistrySeen>,
 }
 
 struct Store {
@@ -65,7 +78,10 @@ pub fn initialize(app_data_dir: &Path) {
 fn read_state(path: &Path) -> InstalledState {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            log::warn!("plugins::store: {} unreadable ({e}); starting empty", path.display());
+            log::warn!(
+                "plugins::store: {} unreadable ({e}); starting empty",
+                path.display()
+            );
             InstalledState::default()
         }),
         Err(_) => InstalledState::default(),
@@ -94,7 +110,8 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
     let _ = std::fs::remove_file(&tmp);
     {
         use std::io::Write;
-        let mut file = owner_only_file(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        let mut file =
+            owner_only_file(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
         file.write_all(contents)
             .and_then(|_| file.sync_all())
             .map_err(|e| format!("write {}: {e}", tmp.display()))?;
@@ -116,7 +133,11 @@ fn owner_only_file(path: &Path) -> std::io::Result<std::fs::File> {
     }
     #[cfg(not(unix))]
     {
-        OpenOptions::new().write(true).create(true).truncate(true).open(path)
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
     }
 }
 
@@ -181,7 +202,9 @@ pub fn uninstall(id: &str) -> Result<(), String> {
     })
 }
 
-/// The stored bundle text for an installed plugin (the frontend re-validates the manifest before booting it).
+/// The stored bundle text for an installed plugin, re-hashed against the sha256 recorded at
+/// install (review #5: anything that can write one file under the plugins directory must not
+/// get code execution). The frontend additionally re-validates the manifest before booting it.
 pub fn read_bundle(id: &str) -> Result<String, String> {
     with_store(|s| {
         let record = s
@@ -190,8 +213,40 @@ pub fn read_bundle(id: &str) -> Result<String, String> {
             .get(id)
             .ok_or_else(|| format!("plugin {id} is not installed"))?;
         let path = version_dir(&s.dir, id, &record.version)?.join(BUNDLE_FILE);
-        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        match &record.sha256 {
+            Some(expected) if super::sha256_hex(&bytes) != *expected => {
+                return Err(format!(
+                    "stored bundle for {id} does not match the sha256 recorded at install; refusing to load it"
+                ));
+            }
+            None if record.source != "dev" => {
+                return Err(format!(
+                    "installed record for {id} has no sha256; refusing to load it"
+                ));
+            }
+            _ => {}
+        }
+        String::from_utf8(bytes).map_err(|_| format!("stored bundle for {id} is not UTF-8"))
     })
+}
+
+pub fn registry_seen() -> Result<Option<RegistrySeen>, String> {
+    with_store(|s| Ok(s.state.registry_seen.clone()))
+}
+
+pub fn record_registry_seen(seen: RegistrySeen) -> Result<(), String> {
+    with_store(|s| {
+        s.state.registry_seen = Some(seen);
+        persist(s)
+    })
+}
+
+/// Every test that touches the process-global store (here and in `registry`) holds this.
+#[cfg(test)]
+pub(crate) fn test_lock() -> &'static Mutex<()> {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    &TEST_LOCK
 }
 
 #[cfg(test)]
@@ -219,14 +274,14 @@ mod tests {
         dir
     }
 
-    fn record(version: &str) -> InstalledRecord {
+    fn record_for(version: &str, bundle: &[u8]) -> InstalledRecord {
         InstalledRecord {
             version: version.into(),
             enabled: true,
             source: "registry".into(),
             granted_permissions: vec!["meeting:read".into()],
             installed_at_ms: 1,
-            sha256: None,
+            sha256: Some(super::super::sha256_hex(bundle)),
         }
     }
 
@@ -243,10 +298,10 @@ mod tests {
 
     #[test]
     fn install_persists_and_survives_reload_and_upgrade_removes_old_dir() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
         let dir = temp_dir();
         initialize_for_tests(&dir);
-        install("petal.x", record("1.0.0"), b"{\"v\":1}").unwrap();
+        install("petal.x", record_for("1.0.0", b"{\"v\":1}"), b"{\"v\":1}").unwrap();
         assert_eq!(read_bundle("petal.x").unwrap(), "{\"v\":1}");
         assert!(dir.join("petal.x/1.0.0/bundle.json").exists());
 
@@ -254,8 +309,11 @@ mod tests {
         initialize_for_tests(&dir);
         assert_eq!(list().unwrap().plugins["petal.x"].version, "1.0.0");
 
-        install("petal.x", record("1.1.0"), b"{\"v\":2}").unwrap();
-        assert!(!dir.join("petal.x/1.0.0").exists(), "old version dir removed");
+        install("petal.x", record_for("1.1.0", b"{\"v\":2}"), b"{\"v\":2}").unwrap();
+        assert!(
+            !dir.join("petal.x/1.0.0").exists(),
+            "old version dir removed"
+        );
         assert_eq!(read_bundle("petal.x").unwrap(), "{\"v\":2}");
 
         set_enabled("petal.x", false).unwrap();
@@ -269,8 +327,44 @@ mod tests {
     }
 
     #[test]
+    fn read_bundle_refuses_a_tampered_or_unhashed_bundle() {
+        let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let dir = temp_dir();
+        initialize_for_tests(&dir);
+        install("petal.t", record_for("1.0.0", b"{\"ok\":1}"), b"{\"ok\":1}").unwrap();
+        assert!(read_bundle("petal.t").is_ok());
+        // Someone rewrites the file on disk: the recorded sha256 no longer matches.
+        std::fs::write(dir.join("petal.t/1.0.0/bundle.json"), b"{\"evil\":1}").unwrap();
+        let err = read_bundle("petal.t").unwrap_err();
+        assert!(err.contains("does not match the sha256"), "{err}");
+        // A registry record without a hash is never trusted.
+        let mut unhashed = record_for("1.0.0", b"x");
+        unhashed.sha256 = None;
+        install("petal.u", unhashed, b"x").unwrap();
+        assert!(read_bundle("petal.u").unwrap_err().contains("no sha256"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn registry_seen_round_trips() {
+        let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let dir = temp_dir();
+        initialize_for_tests(&dir);
+        assert_eq!(registry_seen().unwrap(), None);
+        let seen = RegistrySeen {
+            url: "https://r.test".into(),
+            generated_at_ms: 5,
+            signed_at_s: 6,
+        };
+        record_registry_seen(seen.clone()).unwrap();
+        initialize_for_tests(&dir);
+        assert_eq!(registry_seen().unwrap(), Some(seen));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn corrupt_state_file_starts_empty() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = test_lock().lock().unwrap_or_else(|p| p.into_inner());
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(STATE_FILE), b"not json").unwrap();
@@ -278,6 +372,4 @@ mod tests {
         assert!(list().unwrap().plugins.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 }

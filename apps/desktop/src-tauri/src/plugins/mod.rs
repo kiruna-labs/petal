@@ -19,3 +19,14 @@ pub mod store;
 // `tauri::generate_handler!` needs the macro-generated `__cmd__*` items, which
 // a `pub use` re-export would not carry.
 pub use bus::start_receiver_for_room;
+
+/// Lowercase hex SHA-256, shared by the registry verify chain and the store's re-hash on read.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for b in digest.iter() {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}

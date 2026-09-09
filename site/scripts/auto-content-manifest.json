@@ -3,7 +3,7 @@
 		"self-hosting": {
 			"source": "docs/SELF_HOSTING.md",
 			"dest": "site/src/content/docs/customizing/self-hosting.md",
-			"sha256": "5871f9423c0e1ab5955e00e45f68e747730becdf12fc83f5b5418f23c5831ad7"
+			"sha256": "eb6ed18149ce44ff6eaa50b2b3526e4b20d8ab37da1778f9c23d8beb0cc93011"
 		},
 		"backend-api": {
 			"source": "backend/README.md",

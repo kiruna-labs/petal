@@ -2,27 +2,37 @@
 // plus signed `bundle.json` files at stable versioned paths. Pinned by
 // contracts/plugin-registry/ (a test keypair's public half, a signed sample
 // index and bundle) which the marketplace publisher vendors byte-for-byte.
-// The desktop mirrors this in Rust (plugins/registry.rs); both clients apply
-// the same verify chain:
 //
-//   minisign(index) -> entry.sha256 == sha256(bundle bytes) -> minisign(bundle)
-//   -> bundle.manifest.id/version == entry -> manifest validates
-//   -> minHostVersion/apiVersion fit this host
-//
-// Crypto is injected (`RegistryCrypto`) so this stays dependency-free like the
-// rest of shared/; the web client binds @noble/* in web-harness/src/plugins/minisign.ts.
+// This module is the index MODEL: shape validation and "what can this host
+// install" -- consumed by the desktop's Settings browser on top of the index
+// the Rust client (plugins/registry.rs) fetched and signature-verified. The
+// two validators are pinned to each other by
+// contracts/plugin-registry/invalid-index-cases.json, which both must reject
+// case by case. Signature verification and download live only where the
+// bytes are fetched (Rust today; the web client gets its own verifier with
+// the install prompt in I-6, so no unused crypto ships before then).
 
-import { HOST_API_VERSION, compareVersions, hostCompatibility, isPermission, isPluginId, isReleaseVersion, validateManifest, type Permission, type PluginManifest } from './manifest.ts';
-import type { MinisignVerdict } from './minisign.ts';
+import { HOST_API_VERSION, compareVersions, hostCompatibility, isPermission, isPluginId, isReleaseVersion, type Permission } from './manifest.ts';
 
-export interface RegistryCrypto {
-  verifyMinisign(publicKeyText: string, signatureText: string, data: Uint8Array): MinisignVerdict;
-  sha256Hex(data: Uint8Array): string;
-}
 
 export const REGISTRY_SCHEMA_VERSION = 1;
 export const REGISTRY_INDEX_PATH = 'index.json';
 export const REGISTRY_BUNDLE_MAX_BYTES = 2 * 1024 * 1024;
+/** No registry existed before this; an older generatedAt is a replayed or forged index. */
+export const REGISTRY_EPOCH_ISO = '2026-01-01T00:00:00.000Z';
+const RFC3339_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+
+export function isAcceptableGeneratedAt(value: string): boolean {
+  if (!RFC3339_RE.test(value)) return false;
+  const ms = Date.parse(value);
+  return !Number.isNaN(ms) && ms >= Date.parse(REGISTRY_EPOCH_ISO);
+}
+
+/** Anti-rollback: an index is acceptable only if it is not older than the last one accepted. */
+export function isNotRolledBack(previous: { generatedAtMs: number; signedAtS: number } | null, next: { generatedAtMs: number; signedAtS: number }): boolean {
+  if (!previous) return true;
+  return next.generatedAtMs >= previous.generatedAtMs && next.signedAtS >= previous.signedAtS;
+}
 
 export interface RegistryScan {
   tool: string;
@@ -70,7 +80,7 @@ export function isRegistryUrl(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   try {
     const u = new URL(value);
-    const local = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+    const local = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
     return u.protocol === 'https:' || (u.protocol === 'http:' && local);
   } catch {
     return false;
@@ -94,7 +104,9 @@ export function parseRegistryIndex(text: string): RegistryParse {
   }
   if (!isRecord(raw)) return { ok: false, errors: ['index must be an object'] };
   if (raw.schemaVersion !== REGISTRY_SCHEMA_VERSION) errors.push(`schemaVersion must be ${REGISTRY_SCHEMA_VERSION}`);
-  if (typeof raw.generatedAt !== 'string' || Number.isNaN(Date.parse(raw.generatedAt))) errors.push('generatedAt must be an ISO date');
+  if (typeof raw.generatedAt !== 'string' || !isAcceptableGeneratedAt(raw.generatedAt)) {
+    errors.push(`generatedAt must be an RFC 3339 date on or after ${REGISTRY_EPOCH_ISO}`);
+  }
   if (!Array.isArray(raw.plugins)) return { ok: false, errors: [...errors, 'plugins must be an array'] };
   const plugins: RegistryPlugin[] = [];
   const seenIds = new Set<string>();
@@ -119,7 +131,9 @@ export function parseRegistryIndex(text: string): RegistryParse {
       if (typeof v.version === 'string') seenVersions.add(v.version);
       if (!isReleaseVersion(v.minHostVersion)) errors.push(`${vw}: bad minHostVersion`);
       if (typeof v.apiVersion !== 'number' || !Number.isInteger(v.apiVersion) || v.apiVersion < 1) errors.push(`${vw}: bad apiVersion`);
-      if (!Array.isArray(v.permissions) || !v.permissions.every(isPermission)) errors.push(`${vw}: permissions must be known permission strings`);
+      if (!Array.isArray(v.permissions) || !v.permissions.every(isPermission) || new Set(v.permissions).size !== v.permissions.length) {
+        errors.push(`${vw}: permissions must be known, unique permission strings`);
+      }
       if (!isRegistryUrl(v.bundleUrl)) errors.push(`${vw}: bundleUrl must be https`);
       if (!isRegistryUrl(v.sigUrl)) errors.push(`${vw}: sigUrl must be https`);
       if (typeof v.sha256 !== 'string' || !SHA256_RE.test(v.sha256)) errors.push(`${vw}: sha256 must be 64 lowercase hex chars`);
@@ -148,48 +162,6 @@ export function parseRegistryIndex(text: string): RegistryParse {
   });
   if (errors.length) return { ok: false, errors };
   return { ok: true, index: { schemaVersion: REGISTRY_SCHEMA_VERSION, generatedAt: String(raw.generatedAt), plugins } };
-}
-
-export type VerifiedIndex = { ok: true; index: RegistryIndex; trustedComment: string } | { ok: false; reason: string };
-
-/** Step 1 of the chain: the index signature, then its shape. */
-export function verifyRegistryIndex(crypto: RegistryCrypto, indexText: string, signatureText: string, publicKeyText: string): VerifiedIndex {
-  const sig = crypto.verifyMinisign(publicKeyText, signatureText, new TextEncoder().encode(indexText));
-  if (!sig.ok) return { ok: false, reason: `index signature: ${sig.reason}` };
-  const parsed = parseRegistryIndex(indexText);
-  if (!parsed.ok) return { ok: false, reason: `index invalid: ${parsed.errors[0]}` };
-  return { ok: true, index: parsed.index, trustedComment: sig.trustedComment };
-}
-
-export type VerifiedBundle = { ok: true; manifest: PluginManifest; source: string } | { ok: false; reason: string };
-
-/** Steps 2-5 of the chain for one downloaded bundle. */
-export function verifyRegistryBundle(
-  crypto: RegistryCrypto,
-  bundleBytes: Uint8Array,
-  signatureText: string,
-  publicKeyText: string,
-  expected: { id: string; entry: RegistryVersion },
-): VerifiedBundle {
-  if (bundleBytes.byteLength !== expected.entry.size) return { ok: false, reason: `bundle is ${bundleBytes.byteLength} bytes, index says ${expected.entry.size}` };
-  if (crypto.sha256Hex(bundleBytes) !== expected.entry.sha256) return { ok: false, reason: 'bundle sha256 does not match the index' };
-  const sig = crypto.verifyMinisign(publicKeyText, signatureText, bundleBytes);
-  if (!sig.ok) return { ok: false, reason: `bundle signature: ${sig.reason}` };
-  let raw: unknown;
-  try {
-    raw = JSON.parse(new TextDecoder().decode(bundleBytes));
-  } catch {
-    return { ok: false, reason: 'bundle is not JSON' };
-  }
-  if (!isRecord(raw) || !isRecord(raw.files)) return { ok: false, reason: 'bundle must be {manifest, files}' };
-  const validated = validateManifest(raw.manifest);
-  if (!validated.ok) return { ok: false, reason: `bundle manifest invalid: ${validated.errors[0]}` };
-  const manifest = validated.manifest;
-  if (manifest.id !== expected.id) return { ok: false, reason: `bundle is for ${manifest.id}, expected ${expected.id}` };
-  if (manifest.version !== expected.entry.version) return { ok: false, reason: `bundle is version ${manifest.version}, expected ${expected.entry.version}` };
-  const source = (raw.files as Record<string, unknown>)[manifest.entry];
-  if (typeof source !== 'string' || source.length === 0) return { ok: false, reason: `bundle lacks its entry file ${manifest.entry}` };
-  return { ok: true, manifest, source };
 }
 
 /** The newest version this host can install from the UI: verified, compatible. */

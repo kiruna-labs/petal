@@ -26,3 +26,10 @@ two-repo event.
 description, publisher, latest, versions: [{ version, minHostVersion,
 apiVersion, permissions, bundleUrl, sigUrl, sha256, size, verified, scan }] }] }`.
 Entries with `verified: false` are listed but not installable from the UI.
+
+`invalid-index-cases.json` lists mutations of the sample index that BOTH
+implementations must reject (`web-harness/tests/pluginRegistry.test.ts` and
+the Rust `plugins::registry` tests iterate the same file), so the validation
+rules cannot drift apart silently. `generatedAt` must parse as RFC 3339 and
+fall on or after 2026-01-01; a client refuses an index whose `generatedAt` or
+signature `timestamp:` is older than the last one it accepted (anti-rollback).

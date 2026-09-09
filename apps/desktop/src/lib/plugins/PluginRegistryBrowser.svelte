@@ -11,11 +11,9 @@
   import { invoke } from '@tauri-apps/api/core';
   import Button from '$lib/components/Button.svelte';
   import { COMMANDS, hasTauriBridge, type CommandArgs, type CommandReturns, type PluginRegistryVerifiedIndex } from '$lib/ipc';
-  import { hostCompatibility, compareVersions } from '@petal/shared/plugin-host/manifest';
+  import { compareVersions } from '@petal/shared/plugin-host/manifest';
+  import { installableVersion, parseRegistryIndex, type RegistryIndex, type RegistryPlugin, type RegistryVersion } from '@petal/shared/plugin-host/registry';
   import { permissionLabel } from '@petal/shared/plugin-host/settingsModel';
-
-  type RegistryPlugin = PluginRegistryVerifiedIndex['index']['plugins'][number];
-  type RegistryVersion = RegistryPlugin['versions'][number];
 
   interface Props {
     /** Ids already installed (built-in or registry), keyed to their version. */
@@ -28,25 +26,18 @@
 
   let configured = $state<boolean | null>(null);
   let registryUrl = $state<string | null>(null);
-  let index = $state<PluginRegistryVerifiedIndex | null>(null);
+  /** The Rust-verified index, re-validated through the shared model (defense in depth + one set of rules). */
+  let index = $state<RegistryIndex | null>(null);
   let loadError = $state<string | null>(null);
   let expanded = $state<string | null>(null);
   let busy = $state<string | null>(null);
   let rowError = $state<Record<string, string>>({});
 
-  function installable(plugin: RegistryPlugin): RegistryVersion | null {
-    if (!hostVersion) return null;
-    const ok = plugin.versions
-      .filter((v) => v.verified && hostCompatibility({ apiVersion: v.apiVersion, minHostVersion: v.minHostVersion }, hostVersion).ok)
-      .sort((a, b) => compareVersions(b.version, a.version));
-    return ok[0] ?? null;
-  }
-
   type Row = { plugin: RegistryPlugin; version: RegistryVersion | null; state: 'installable' | 'update' | 'installed' | 'unverified' | 'incompatible' };
   const rows = $derived.by((): Row[] => {
     if (!index) return [];
-    return index.index.plugins.map((plugin) => {
-      const version = installable(plugin);
+    return index.plugins.map((plugin) => {
+      const version = hostVersion ? installableVersion(plugin, hostVersion) : null;
       const current = installed[plugin.id];
       let state: Row['state'];
       if (!plugin.versions.some((v) => v.verified)) state = 'unverified';
@@ -68,7 +59,10 @@
       configured = status.configured;
       registryUrl = status.url;
       if (!status.configured) return;
-      index = await invoke<PluginRegistryVerifiedIndex>(COMMANDS.pluginRegistryIndex);
+      const verified = await invoke<PluginRegistryVerifiedIndex>(COMMANDS.pluginRegistryIndex);
+      const parsed = parseRegistryIndex(JSON.stringify(verified.index));
+      if (!parsed.ok) throw new Error(`registry index rejected: ${parsed.errors[0]}`);
+      index = parsed.index;
       loadError = null;
     } catch (e) {
       loadError = String((e as Error)?.message ?? e);

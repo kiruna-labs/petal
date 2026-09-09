@@ -9,7 +9,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { builtinPlugins } from '@petal/shared/plugin-host/builtins';
 import type { LoadedPlugin } from '@petal/shared/plugin-host/broker';
-import { validateManifest } from '@petal/shared/plugin-host/manifest';
+import { compareVersions, isPermission, validateManifest, type Permission } from '@petal/shared/plugin-host/manifest';
 import { isPluginEnabled, readEnabledOverrides, type InstalledPlugin } from '@petal/shared/plugin-host/settingsModel';
 import { browserStorage } from '$lib/data/storageKeys';
 import { COMMANDS, hasTauriBridge, type CommandArgs, type CommandReturns } from '$lib/ipc';
@@ -17,7 +17,8 @@ import { COMMANDS, hasTauriBridge, type CommandArgs, type CommandReturns } from 
 export interface CatalogEntry extends InstalledPlugin {
   /** Store record fields for registry installs; undefined for built-ins. */
   installedVersion?: string;
-  grantedPermissions?: string[];
+  /** Known permissions the signed index granted AND the manifest asks for (Rust computed the intersection; re-checked here). */
+  grantedPermissions?: Permission[];
 }
 
 /** Registry installs from the Rust store, each bundle re-validated. Empty outside Tauri. */
@@ -47,7 +48,7 @@ export async function registryInstalledPlugins(warn: (message: string) => void =
         enabledByDefault: record.enabled,
         source_js: source,
         installedVersion: record.version,
-        grantedPermissions: record.grantedPermissions,
+        grantedPermissions: record.grantedPermissions.filter(isPermission).filter((p) => manifest.permissions.includes(p)),
       });
     } catch (e) {
       warn(`plugins: installed plugin ${id} is unusable and was skipped: ${String((e as Error).message ?? e)}`);
@@ -59,9 +60,18 @@ export async function registryInstalledPlugins(warn: (message: string) => void =
 export async function installedPlugins(warn: (message: string) => void = (m) => console.warn(m)): Promise<CatalogEntry[]> {
   const builtins: CatalogEntry[] = builtinPlugins(warn);
   const registry = await registryInstalledPlugins(warn);
-  // A registry install of a built-in's id (a newer version) replaces the built-in.
-  const registryIds = new Set(registry.map((p) => p.manifest.id));
-  return [...builtins.filter((b) => !registryIds.has(b.manifest.id)), ...registry];
+  // A registry install of a built-in's id replaces the built-in only when it is NEWER;
+  // the registry key must not be able to swap in an older copy of shipped functionality.
+  const registryById = new Map(registry.map((p) => [p.manifest.id, p]));
+  const superseded = new Set<string>();
+  for (const b of builtins) {
+    const r = registryById.get(b.manifest.id);
+    if (r && compareVersions(r.manifest.version, b.manifest.version) > 0) superseded.add(b.manifest.id);
+  }
+  return [
+    ...builtins.filter((b) => !superseded.has(b.manifest.id)),
+    ...registry.filter((r) => superseded.has(r.manifest.id) || !builtins.some((b) => b.manifest.id === r.manifest.id)),
+  ];
 }
 
 export async function enabledPlugins(): Promise<{ plugin: LoadedPlugin; source: string }[]> {
@@ -69,7 +79,7 @@ export async function enabledPlugins(): Promise<{ plugin: LoadedPlugin; source: 
   return (await installedPlugins())
     .filter((p) => isPluginEnabled(p, overrides))
     .map((p) => ({
-      plugin: { manifest: p.manifest, granted: (p.grantedPermissions as LoadedPlugin['granted']) ?? p.manifest.permissions, source: p.source },
+      plugin: { manifest: p.manifest, granted: p.grantedPermissions ?? p.manifest.permissions, source: p.source },
       source: p.source_js,
     }));
 }
