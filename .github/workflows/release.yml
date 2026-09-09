@@ -701,6 +701,14 @@ jobs:
       # committed tauri.conf.json ships NO updater endpoint/pubkey (open-source
       # builds must not phone home). Only this overlay injects the official
       # app.petal.live feed + minisign pubkey + createUpdaterArtifacts.
+      # The frontend dist is copied back to the workspace at the end: this
+      # build runs inside run-with-source-provenance.sh's ISOLATED materialized
+      # HEAD, which is deleted when the step exits (its own EXIT trap). The
+      # feedback-key gate reads that dist -- it cannot read the binary, because
+      # Tauri compresses the frontend it embeds -- so without the copy the
+      # artifact it must inspect no longer exists by publish time. v0.9.14 died
+      # exactly there. CARGO_TARGET_DIR already uses the same output root for
+      # the same reason.
       - name: Build (universal, signed, notarized)
         working-directory: apps/desktop
         env:
@@ -739,7 +747,7 @@ jobs:
           esac
           unset NOTARY_API_ISSUER NOTARY_API_KEY NOTARY_API_KEY_PATH NOTARY_APPLE_ID NOTARY_APPLE_PASSWORD
           ../../scripts/run-with-source-provenance.sh --require-clean bash -c \
-            'npm ci && CARGO_TARGET_DIR="$PETAL_PROVENANCE_OUTPUT_ROOT/apps/desktop/src-tauri/target" npx tauri build --config src-tauri/tauri.release.conf.json --target universal-apple-darwin --bundles app dmg updater'
+            'npm ci && CARGO_TARGET_DIR="$PETAL_PROVENANCE_OUTPUT_ROOT/apps/desktop/src-tauri/target" npx tauri build --config src-tauri/tauri.release.conf.json --target universal-apple-darwin --bundles app dmg updater && rm -rf "$PETAL_PROVENANCE_OUTPUT_ROOT/apps/desktop/build" && cp -R build "$PETAL_PROVENANCE_OUTPUT_ROOT/apps/desktop/build" && test -f "$PETAL_PROVENANCE_OUTPUT_ROOT/apps/desktop/build/index.html"'
 
       # tauri notarizes + staples the .app but never touches the DMG it packs
       # it into (the same gap docs/RELEASING.md's local recipe closes by hand):
