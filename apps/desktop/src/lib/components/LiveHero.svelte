@@ -15,6 +15,7 @@
     bg #34C759, ink #06280f, shadow 0 6px 22px -6px rgba(52,199,89,.6).
 -->
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import type { IdentityColor } from './Avatar.svelte';
 
   interface RoomParticipant {
@@ -26,10 +27,13 @@
   interface Props {
     roomName: string;
     participants?: RoomParticipant[];
+    /** Canonical letter code (#123): shown under the name, never on hover. */
+    accessCode?: string | null;
     onJoin?: () => void;
+    onCopyInvite?: () => boolean | void | Promise<boolean | void>;
   }
 
-  let { roomName, participants = [], onJoin }: Props = $props();
+  let { roomName, participants = [], accessCode = null, onJoin, onCopyInvite }: Props = $props();
 
   const visibleParticipants = $derived(participants.slice(0, 4));
   const overflowCount = $derived(Math.max(0, participants.length - visibleParticipants.length));
@@ -38,6 +42,23 @@
       ? 'No participants listed'
       : `${participants.map((p) => p.name).join(', ')} in this room`
   );
+
+  let copiedAccessCode = $state(false);
+  let accessCodeCopyTimer: ReturnType<typeof setTimeout> | undefined;
+  async function copyAccessCode(event: MouseEvent) {
+    event.stopPropagation();
+    clearTimeout(accessCodeCopyTimer);
+    const copied = await onCopyInvite?.();
+    if (copied === false) return;
+    copiedAccessCode = true;
+    accessCodeCopyTimer = setTimeout(() => {
+      copiedAccessCode = false;
+    }, 1400);
+  }
+
+  onDestroy(() => {
+    clearTimeout(accessCodeCopyTimer);
+  });
 
   function initials(name: string): string {
     const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -51,6 +72,25 @@
   <div class="bloom" aria-hidden="true"></div>
   <span class="eyebrow"><span class="dot" aria-hidden="true"></span>LIVE NOW</span>
   <span class="title" title={roomName}>{roomName}</span>
+  {#if accessCode}
+    <div class="code-line">
+      {#if onCopyInvite}
+        <button
+          type="button"
+          class="room-access-code"
+          class:copied={copiedAccessCode}
+          aria-label={copiedAccessCode ? `Invite link copied for ${roomName}, room ID ${accessCode}` : `Room ID ${accessCode}, click to copy invite`}
+          data-testid="hero-access-code"
+          onclick={copyAccessCode}
+        >{accessCode}</button>
+      {:else}
+        <span class="room-access-code" aria-label={`Room ID ${accessCode}`} data-testid="hero-access-code">{accessCode}</span>
+      {/if}
+      {#if copiedAccessCode}
+        <span class="room-access-code-status" role="status" aria-live="polite">Copied</span>
+      {/if}
+    </div>
+  {/if}
   <div class="actions">
     {#if participants.length > 0}
       <div class="faces" role="img" aria-label={participantSummary}>
@@ -69,7 +109,10 @@
 <style>
   .hero {
     position: relative;
-    height: 152px;
+    /* #123: min-height, not height -- the hero now carries a room-ID line
+       under the name, and a fixed height + `overflow: hidden` would clip
+       user-facing text (a wrapped long room name already risked it). */
+    min-height: 152px;
     padding: 20px 22px;
     display: flex;
     flex-direction: column;
@@ -90,6 +133,7 @@
 
   .eyebrow,
   .title,
+  .code-line,
   .actions {
     position: relative;
   }
@@ -123,6 +167,53 @@
     overflow-wrap: anywhere;
     text-wrap: pretty;
     white-space: normal;
+  }
+
+  /* #123: the hero's room ID is always visible and never ellipsized. */
+  .code-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    min-width: 0;
+  }
+
+  .room-access-code {
+    display: inline-flex;
+    align-items: center;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    text-align: left;
+    width: max-content;
+    max-width: 100%;
+    color: var(--live-soft);
+    font: 600 10.5px var(--font-mono);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    flex-shrink: 0;
+    overflow: visible;
+    cursor: default;
+  }
+
+  button.room-access-code {
+    cursor: pointer;
+  }
+
+  .room-access-code:hover,
+  .room-access-code.copied {
+    color: var(--live-bright);
+  }
+
+  .room-access-code:focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+  }
+
+  .room-access-code-status {
+    color: var(--live-bright);
+    font: 700 10px var(--font-display);
+    white-space: nowrap;
   }
 
   .actions {

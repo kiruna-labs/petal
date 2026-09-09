@@ -327,7 +327,9 @@
     <LiveHero
       roomName={displayNameForRoom(liveRoom.name)}
       participants={liveRoom.participants}
+      accessCode={roomAccessCodesByName[liveRoom.name] ?? null}
       onJoin={onJoinLive}
+      onCopyInvite={onCopyRoomLink ? () => onCopyRoomLink(liveRoom.name) : undefined}
     />
   {:else}
     <section class="hero-quiet">
