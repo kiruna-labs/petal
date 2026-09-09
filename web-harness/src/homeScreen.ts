@@ -365,10 +365,21 @@ export function setupHomeScreen(options: HomeScreenOptions): HomeScreenApi {
       const code = document.createElement('span');
       code.className = 'recent-room__code';
       code.textContent = roomLabel;
+      // #123: the room ID is always visible in the list, not only inside the
+      // copy button's tooltip/aria-label. Never truncate it. A legacy record
+      // with no derivable code renders no ID element at all (same as the
+      // desktop row) rather than the copy control's "not available" wording.
+      const idElements: HTMLSpanElement[] = [];
+      if (roomId) {
+        const id = document.createElement('span');
+        id.className = 'recent-room__id';
+        id.textContent = roomId;
+        idElements.push(id);
+      }
       const meta = document.createElement('span');
       meta.className = 'recent-room__meta';
       meta.textContent = favorite ? `favorite, ${formatRecentTime(roomRecord.lastJoinedAt)}` : formatRecentTime(roomRecord.lastJoinedAt);
-      roomButton.append(code, meta);
+      roomButton.append(code, ...idElements, meta);
       row.append(roomButton, copy, star);
       recentRoomsEl.appendChild(row);
     });

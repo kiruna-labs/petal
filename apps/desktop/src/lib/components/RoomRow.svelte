@@ -458,8 +458,11 @@
     white-space: normal;
   }
 
-  /* The code is a hover/focus disclosure, but never ellipsized: people must
-     be able to read and verify every character before copying it. */
+  /* #123: the room ID is ALWAYS visible -- never a hover/focus disclosure.
+     Do not re-add `opacity: 0` or a `.room-row-shell:hover` reveal here: an
+     invisible-but-hit-testable code silently copied an invite from what
+     looked like empty space, and a room's ID is how people identify the row.
+     Never ellipsized either: every character must be readable before copying. */
   .room-access-code {
     display: inline-flex;
     align-items: center;
@@ -479,18 +482,11 @@
     white-space: nowrap;
     flex-shrink: 0;
     overflow: visible;
-    opacity: 0;
     cursor: default;
-    transition: opacity var(--motion-fast) var(--ease-standard);
   }
 
   button.room-access-code {
     cursor: pointer;
-  }
-
-  .room-row-shell:hover .room-access-code,
-  .room-row-shell:has(:focus-visible) .room-access-code {
-    opacity: 1;
   }
 
   .room-access-code:hover,
