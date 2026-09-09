@@ -12,6 +12,7 @@ pub mod osascript;
 #[cfg(target_os = "macos")]
 pub mod sls;
 pub mod cg;
+pub mod fd;
 pub mod mem;
 pub mod power;
 #[cfg(target_os = "windows")]

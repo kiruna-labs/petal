@@ -6979,6 +6979,92 @@ where
     }
 }
 
+/// How often the quality evaluator proves it is still alive when nothing
+/// is changing (#108). A no-op evaluation carries no information on its
+/// own, but total silence would make "the evaluator stopped running" and
+/// "the evaluator has nothing to do" indistinguishable, so one heartbeat
+/// per this interval survives, carrying the count of what it stood in for.
+const QUALITY_DECISION_HEARTBEAT_US: u64 = 60_000_000;
+
+/// A window whose quality evaluator has not emitted a line for this long is
+/// dropped from `QUALITY_DECISION_LOG` (#108). Bounds the registry over a
+/// long-running process without needing a teardown hook in share removal.
+const QUALITY_DECISION_THROTTLE_IDLE_US: u64 = 600_000_000;
+
+/// Per-window throttle for the quality-decision line (#108).
+///
+/// `apply_quality` used to log its decision on EVERY evaluation. In a real
+/// 611-second field log that produced 609 lines -- 10.4% of the whole file
+/// -- every one of them byte-identical apart from the timestamp, and every
+/// one reporting `already_at_target=true`, i.e. a decision that changed
+/// nothing.
+///
+/// A line survives when it says something: the decision actually changes
+/// the share (`already_at_target == false`), or the decision text differs
+/// from the last one logged for this window, or the heartbeat interval has
+/// elapsed. A suppressed run is never silently dropped -- the next line
+/// carries how many no-op evaluations it stood in for, so the evaluator's
+/// rate is still recoverable from the log.
+#[derive(Debug, Default)]
+pub(crate) struct QualityDecisionLogThrottle {
+    last_line: Option<String>,
+    last_emitted_us: u64,
+    suppressed: u64,
+}
+
+impl QualityDecisionLogThrottle {
+    /// Returns the line to log, or `None` to suppress this evaluation.
+    pub(crate) fn observe(
+        &mut self,
+        line: String,
+        already_at_target: bool,
+        now_us: u64,
+    ) -> Option<String> {
+        let changed = self.last_line.as_deref() != Some(line.as_str());
+        // `last_emitted_us` starts at 0, so the very first evaluation for a
+        // window always emits.
+        let heartbeat_due =
+            now_us.saturating_sub(self.last_emitted_us) >= QUALITY_DECISION_HEARTBEAT_US;
+        if already_at_target && !changed && !heartbeat_due {
+            self.suppressed += 1;
+            return None;
+        }
+        let suppressed = std::mem::replace(&mut self.suppressed, 0);
+        self.last_line = Some(line.clone());
+        self.last_emitted_us = now_us;
+        Some(if suppressed == 0 {
+            line
+        } else {
+            format!("{line} [{suppressed} identical no-op evaluation(s) suppressed since the previous line, #108]")
+        })
+    }
+}
+
+static QUALITY_DECISION_LOG: OnceLock<Mutex<HashMap<u32, QualityDecisionLogThrottle>>> =
+    OnceLock::new();
+
+/// Applies the #108 throttle for `window_id` and returns the line to log,
+/// if any. Sweeps windows that have gone quiet so the registry stays
+/// bounded without a teardown hook in the share-removal path.
+fn throttled_quality_decision_line(
+    window_id: u32,
+    line: String,
+    already_at_target: bool,
+    now_us: u64,
+) -> Option<String> {
+    let mut guard = QUALITY_DECISION_LOG
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock_unpoisoned();
+    guard.retain(|id, throttle| {
+        *id == window_id
+            || now_us.saturating_sub(throttle.last_emitted_us) < QUALITY_DECISION_THROTTLE_IDLE_US
+    });
+    guard
+        .entry(window_id)
+        .or_default()
+        .observe(line, already_at_target, now_us)
+}
+
 fn quality_change_requires_republish(
     current_width: u32,
     current_height: u32,
@@ -7069,9 +7155,20 @@ async fn apply_quality(state: &SessionState, window_id: u32, quality: ShareQuali
         )
     };
 
-    log::info!(
-        "session: window {window_id} quality decision requested={quality:?} target={target_quality:?} current={current_quality:?} receiver_demand_cap={demand_long_edge:?} already_at_target={already_at_quality}"
-    );
+    // #108: this used to log unconditionally, which made a decision that
+    // changed nothing (`already_at_target=true`) 10.4% of a real field log.
+    // The throttle emits on change, on a real decision, or on a heartbeat,
+    // and carries the suppressed count so the rate is still recoverable.
+    if let Some(line) = throttled_quality_decision_line(
+        window_id,
+        format!(
+            "session: window {window_id} quality decision requested={quality:?} target={target_quality:?} current={current_quality:?} receiver_demand_cap={demand_long_edge:?} already_at_target={already_at_quality}"
+        ),
+        already_at_quality,
+        now_us(),
+    ) {
+        log::info!("{line}");
+    }
     if already_at_quality {
         return;
     }
@@ -8160,6 +8257,249 @@ async fn republish_window_for_resolution(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- #108: log-volume regression gate ---------------------------------
+
+    /// Sink that records what a `RepeatSuppressingLog` actually let through.
+    struct GateSink(Arc<Mutex<Vec<String>>>);
+
+    impl log::Log for GateSink {
+        fn enabled(&self, _metadata: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            self.0.lock_unpoisoned().push(record.args().to_string());
+        }
+        fn flush(&self) {}
+    }
+
+    /// Collapses a line to the signature the gate counts by: the libwebrtc
+    /// log site, or the leading fixed words of a Petal line.
+    fn gate_signature(line: &str) -> String {
+        if let Some(rest) = line.strip_prefix('(') {
+            if let Some(end) = rest.find("):") {
+                return rest[..end].to_string();
+            }
+        }
+        line.split_whitespace().take(4).collect::<Vec<_>>().join(" ")
+    }
+
+    /// No single message signature may exceed this share of a meeting's log
+    /// lines (#108). The three families this issue fixed were 35.4%, 24.7%
+    /// and 10.4% of a real 611-second field log; together, 70.5%.
+    const MAX_SIGNATURE_SHARE: f64 = 0.10;
+
+    /// Replays a representative in-meeting workload through the real
+    /// throttles and asserts no one signature dominates the log (#108).
+    ///
+    /// The rates are measured, not invented: they are this issue's own
+    /// field capture, a 5,862-line / 611-second file from 0.9.11 in which
+    /// `RTCVideoEncoderH264.mm:614` fired 2,076 times (from just 40
+    /// distinct texts), the no-image-buffer streak flapped 724 times, and
+    /// `apply_quality` logged 609 byte-identical no-op decisions. The
+    /// remaining 1,729 lines of that file are real signal this issue does
+    /// not touch, so they are carried in as a constant background.
+    ///
+    /// The point of the gate is the NEXT one of these: a per-frame line
+    /// that slips past a level filter must not be able to become a third
+    /// of the log again without a test going red.
+    #[test]
+    fn no_single_signature_dominates_a_representative_meeting_minute() {
+        const WINDOW_S: u64 = 611;
+        const REAL_BACKGROUND_LINES: usize = 1_729;
+
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let suppressor = crate::logging::RepeatSuppressingLog::new(GateSink(recorded.clone()));
+        let base = Instant::now();
+        let emit = |target: &str, msg: &str, at: Instant| {
+            suppressor.log_at(
+                &log::Record::builder()
+                    .args(format_args!("{msg}"))
+                    .level(log::Level::Warn)
+                    .target(target)
+                    .build(),
+                at,
+            );
+        };
+
+        // Family 1: the encoder warning, 2,076 occurrences whose two
+        // interpolated numbers flap across 40 distinct texts.
+        for i in 0..2_076u64 {
+            emit(
+                "libwebrtc",
+                &format!(
+                    "(RTCVideoEncoderH264.mm:614): Encoder frame rate setting {} is larger than the maximal allowed frame rate {}.",
+                    25 + i % 5,
+                    if i % 2 == 0 { 13 } else { 7 }
+                ),
+                base + Duration::from_micros(i * WINDOW_S * 1_000_000 / 2_076),
+            );
+        }
+        // The other native-WebRTC sites that appeared in the same file.
+        for i in 0..300u64 {
+            emit(
+                "libwebrtc",
+                &format!("(rtcp_receiver.cc:{}): Timeout: no RTCP RR", 296 + i % 3),
+                base + Duration::from_micros(i * WINDOW_S * 1_000_000 / 300),
+            );
+        }
+        log::Log::flush(&suppressor);
+
+        // Family 2: 724 no-image-buffer flaps, mean 0.22s, ~2 samples each.
+        let mut capture_lines = 0usize;
+        let mut streaks = crate::capture::NoBufferStreakLog::default();
+        for i in 0..724u64 {
+            let start = i * WINDOW_S * 1_000_000 / 724;
+            capture_lines += streaks.on_no_buffer_sample(start).len();
+            capture_lines += streaks.on_no_buffer_sample(start + 110_000).len();
+            capture_lines += streaks.on_image_buffer(start + 220_000).len();
+        }
+        capture_lines += streaks.on_stop(WINDOW_S * 1_000_000).len();
+
+        // Family 3: 609 quality evaluations, none of which changed anything.
+        let mut quality_lines = 0usize;
+        let mut quality = QualityDecisionLogThrottle::default();
+        for i in 0..609u64 {
+            if quality
+                .observe(
+                    "session: window 1073741828 quality decision requested=Full target=Full current=Full receiver_demand_cap=Some(2560) already_at_target=true".to_string(),
+                    true,
+                    i * WINDOW_S * 1_000_000 / 609,
+                )
+                .is_some()
+            {
+                quality_lines += 1;
+            }
+        }
+
+        let webrtc_lines = recorded.lock_unpoisoned().clone();
+        let total = webrtc_lines.len() + capture_lines + quality_lines + REAL_BACKGROUND_LINES;
+
+        let mut per_signature: HashMap<String, usize> = HashMap::new();
+        for line in &webrtc_lines {
+            *per_signature.entry(gate_signature(line)).or_default() += 1;
+        }
+        per_signature.insert("capture-diag no-image-buffer".to_string(), capture_lines);
+        per_signature.insert("session quality decision".to_string(), quality_lines);
+
+        let (worst_signature, worst_count) = per_signature
+            .iter()
+            .max_by_key(|(_, count)| **count)
+            .map(|(s, c)| (s.clone(), *c))
+            .expect("at least one signature");
+        let share = worst_count as f64 / total as f64;
+        assert!(
+            share <= MAX_SIGNATURE_SHARE,
+            "no single log signature may exceed {:.0}% of a meeting's lines (#108); \
+             '{worst_signature}' was {worst_count}/{total} = {:.1}%",
+            MAX_SIGNATURE_SHARE * 100.0,
+            share * 100.0
+        );
+
+        // The same workload before this issue produced 4,133 lines from
+        // these three families alone. Assert the collapse, so a regression
+        // that merely stays under the share cap by inflating everything
+        // else still fails.
+        let family_lines = webrtc_lines.len() + capture_lines + quality_lines;
+        assert!(
+            family_lines < 200,
+            "the three families were 4,133 lines in the field capture; expected a two-orders-of-magnitude collapse, got {family_lines}"
+        );
+
+        // Suppression must not become silence -- each family has to leave a
+        // counted record behind.
+        assert!(!webrtc_lines.is_empty(), "the encoder warning must still be visible");
+        assert!(capture_lines > 0, "the no-image-buffer episode must still be visible");
+        assert!(quality_lines > 0, "the quality evaluator must still prove it is alive");
+    }
+
+    // -- #108: quality-decision line throttle -----------------------------
+
+    fn quality_line(target: &str, already: bool) -> String {
+        format!(
+            "session: window 1073741828 quality decision requested=Full target={target} current=Full receiver_demand_cap=Some(2560) already_at_target={already}"
+        )
+    }
+
+    #[test]
+    fn quality_decision_throttle_always_logs_the_first_evaluation() {
+        let mut throttle = QualityDecisionLogThrottle::default();
+        assert!(
+            throttle.observe(quality_line("Full", true), true, 0).is_some(),
+            "the first evaluation for a window must never be suppressed"
+        );
+    }
+
+    #[test]
+    fn quality_decision_throttle_suppresses_identical_no_op_evaluations() {
+        // The #108 defect: 609 byte-identical `already_at_target=true`
+        // lines in a 611-second field log, one per second, every one of
+        // them a decision that changed nothing.
+        let mut throttle = QualityDecisionLogThrottle::default();
+        let mut emitted = 0usize;
+        for i in 0..611u64 {
+            if throttle
+                .observe(quality_line("Full", true), true, i * 1_000_000)
+                .is_some()
+            {
+                emitted += 1;
+            }
+        }
+        assert!(
+            emitted <= 12,
+            "611 identical no-op evaluations over 611s must collapse to the first line plus ~1 heartbeat/minute, got {emitted}"
+        );
+        assert!(emitted >= 10, "the heartbeat must still prove the evaluator is alive, got {emitted}");
+    }
+
+    #[test]
+    fn quality_decision_throttle_never_suppresses_a_real_decision() {
+        // `already_at_target == false` means the evaluator is about to
+        // change the share. That line is the whole point of this log.
+        let mut throttle = QualityDecisionLogThrottle::default();
+        throttle.observe(quality_line("Full", true), true, 0);
+        for i in 1..10u64 {
+            assert!(
+                throttle
+                    .observe(quality_line("Reduced", false), false, i * 1_000)
+                    .is_some(),
+                "a decision that changes the share must always be logged"
+            );
+        }
+    }
+
+    #[test]
+    fn quality_decision_throttle_logs_a_changed_no_op_line() {
+        // Still `already_at_target=true`, but a different demand cap: the
+        // state moved, so the line carries information again.
+        let mut throttle = QualityDecisionLogThrottle::default();
+        throttle.observe(quality_line("Full", true), true, 0);
+        assert!(throttle.observe(quality_line("Full", true), true, 1_000).is_none());
+        assert!(
+            throttle
+                .observe(quality_line("DataSaver", true), true, 2_000)
+                .is_some(),
+            "a no-op whose text differs from the last logged one must still be logged"
+        );
+    }
+
+    #[test]
+    fn quality_decision_throttle_reports_what_it_suppressed() {
+        // Suppression must never mean the evaluator's rate is unrecoverable
+        // from the log.
+        let mut throttle = QualityDecisionLogThrottle::default();
+        throttle.observe(quality_line("Full", true), true, 0);
+        for i in 1..30u64 {
+            throttle.observe(quality_line("Full", true), true, i * 1_000_000);
+        }
+        let line = throttle
+            .observe(quality_line("Full", true), true, 61_000_000)
+            .expect("the heartbeat is due");
+        assert!(
+            line.contains("29 identical no-op evaluation(s) suppressed"),
+            "the heartbeat must carry the suppressed count: {line}"
+        );
+    }
 
     #[test]
     fn share_memory_mark_line_reports_the_footprint_the_buffers_and_the_pool_ceiling() {

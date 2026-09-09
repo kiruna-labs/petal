@@ -769,29 +769,222 @@ fn display_drop_rewarn_allowed(
 /// #884: cadence of the in-room memory-curve log line, in ~1s poll ticks.
 const MEMORY_LOG_EVERY_N_TICKS: u32 = 60;
 
-/// #884: one line per minute while in a room -- own phys footprint plus the
-/// OS memory-pressure level -- so a field log carries a memory CURVE.
+/// #884/#104/#106: one line per minute while in a room -- own phys footprint,
+/// live receiver pixel buffers, the OS memory-pressure level, and open file
+/// descriptors against the limit in force -- so a field log carries a memory
+/// CURVE and a descriptor CURVE.
 ///
-/// #106: `live_pixel_buffers` rides this line too. It was already sampled
-/// into `StatsSample` (below) and had no path to a log, so it appeared ZERO
-/// times across eight field logs. Note what it does and does not cover: it
-/// counts only `native_display::OwnedCVPixelBuffer`, i.e. RECEIVER-side
-/// decode output. It is blind to ScreenCaptureKit and VideoToolbox buffers,
-/// so on a sender-side spike its job is to rule the receiver class out, not
-/// to attribute the sender.
+/// #104 added the two descriptor fields. Their absence is exactly why that
+/// issue could not name its leaker: 38,062 `Too many open files` errors over
+/// 19.5 hours produced a binary cliff and no rising signal, so the ACCUMULATION
+/// RATE -- the one number that identifies which allocation is responsible --
+/// was unrecoverable from the log.
+///
+/// #106 added `live_pixel_buffers`. It was already sampled into `StatsSample`
+/// (below) and had no path to a log, so it appeared ZERO times across eight
+/// field logs. Note what it does and does not cover: it counts only
+/// `native_display::OwnedCVPixelBuffer`, i.e. RECEIVER-side decode output. It
+/// is blind to ScreenCaptureKit and VideoToolbox buffers, so on a sender-side
+/// spike its job is to rule the receiver class out, not to attribute the
+/// sender.
+///
+/// All of them ride this one line rather than new ones so the per-minute
+/// cadence, and the log volume, stay unchanged.
 fn log_in_room_memory_curve() {
-    let footprint_mb = crate::platform::mem::process_footprint_bytes_throttled()
+    let limits = crate::platform::fd::descriptor_limits();
+    log::info!(
+        "{}",
+        memory_curve_line(
+            crate::platform::mem::process_footprint_bytes_throttled(),
+            crate::platform::mem::live_pixel_buffer_count(),
+            crate::platform::mem::memory_pressure_level(),
+            crate::platform::fd::open_descriptor_count(),
+            limits.map(|limits| limits.soft),
+        )
+    );
+}
+
+/// Pure renderer for the curve line, so the fields a field log depends on are
+/// asserted rather than assumed. Every value is `Option`: absence must read as
+/// `unknown`, never as a fabricated `0` (`platform::mem`'s house rule).
+fn memory_curve_line(
+    footprint_bytes: Option<u64>,
+    live_pixel_buffers: Option<u32>,
+    pressure_level: Option<u32>,
+    fd_open: Option<u64>,
+    fd_soft_limit: Option<u64>,
+) -> String {
+    let footprint_mb = footprint_bytes
         .map(|bytes| format!("{:.0}", bytes as f64 / (1024.0 * 1024.0)))
         .unwrap_or_else(|| "unknown".into());
-    let live_pixel_buffers = crate::platform::mem::live_pixel_buffer_count()
+    // #106: `n/a` rather than `unknown` -- the counter is macOS-only, so its
+    // absence on Windows is a platform fact, not a failed read.
+    let live_pixel_buffers = live_pixel_buffers
         .map(|count| count.to_string())
         .unwrap_or_else(|| "n/a".into());
-    let pressure = crate::platform::mem::memory_pressure_level()
+    let pressure = pressure_level
         .map(|level| level.to_string())
         .unwrap_or_else(|| "unknown".into());
-    log::info!(
-        "diagnostics: memory curve -- phys_footprint_mb={footprint_mb} live_pixel_buffers={live_pixel_buffers} os_pressure_level={pressure}"
+    let fd_open = fd_open
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let fd_soft_limit = fd_soft_limit
+        .map(|limit| limit.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    format!(
+        "diagnostics: memory curve -- phys_footprint_mb={footprint_mb} \
+         live_pixel_buffers={live_pixel_buffers} os_pressure_level={pressure} \
+         fd_open={fd_open} fd_soft_limit={fd_soft_limit}"
+    )
+}
+
+/// #104: how often a SUSTAINED descriptor-pressure episode may re-warn. The
+/// field condition ran for 20 hours; at one sample per second an unlimited
+/// detector would have been its own log storm (the exact failure #104 was
+/// filed alongside), while a fire-once detector would have shown a single
+/// value and no curve. Ten minutes gives ~120 readings across a 20-hour
+/// episode.
+const DESCRIPTOR_ALERT_REWARN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(600);
+
+/// #104: live state of the descriptor-pressure detector. `in_episode` carries
+/// the hysteresis (see `platform::fd::below_clear_water`); `last_alerted`
+/// carries the rate limit.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DescriptorPressureEpisode {
+    in_episode: bool,
+    last_alerted: Option<std::time::Instant>,
+}
+
+/// Which kind of descriptor alert a reading produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DescriptorAlert {
+    /// The first crossing of a new episode.
+    Opened,
+    /// A still-elevated reading, past the re-warn interval.
+    Sustained,
+}
+
+/// Pure decision: given a reading, should this alert -- and does the episode
+/// open, continue or close? Mutates only the caller's episode state and takes
+/// `now` as an argument, so the rate limiting and the hysteresis are both
+/// testable without sleeping or touching the process descriptor table.
+fn descriptor_pressure_step(
+    episode: &mut DescriptorPressureEpisode,
+    open: u64,
+    soft_limit: u64,
+    now: std::time::Instant,
+) -> Option<DescriptorAlert> {
+    if crate::platform::fd::at_high_water(open, soft_limit) {
+        let opened = !episode.in_episode;
+        episode.in_episode = true;
+        let allowed = match episode.last_alerted {
+            None => true,
+            Some(last) => {
+                now.saturating_duration_since(last) >= DESCRIPTOR_ALERT_REWARN_INTERVAL
+            }
+        };
+        if !allowed {
+            return None;
+        }
+        episode.last_alerted = Some(now);
+        return Some(if opened {
+            DescriptorAlert::Opened
+        } else {
+            DescriptorAlert::Sustained
+        });
+    }
+    // Below the high-water mark. Only a reading below the LOWER clear mark ends
+    // the episode -- a reading between the two marks leaves it open, which is
+    // what stops an oscillating value from re-opening (and re-alerting on) a
+    // fresh episode every few seconds.
+    if episode.in_episode && crate::platform::fd::below_clear_water(open, soft_limit) {
+        episode.in_episode = false;
+        // A genuinely new episode is worth an immediate alert; only a
+        // CONTINUING one is rate limited.
+        episode.last_alerted = None;
+    }
+    None
+}
+
+/// #104: sample open descriptors against the limit in force and, on crossing
+/// the high-water mark, emit one rate-limited `[ERROR]` line plus a Sentry
+/// diagnostic. Runs on the same ~1s tick as the memory-pressure watch.
+fn observe_descriptor_pressure(episode: &mut DescriptorPressureEpisode) {
+    let (Some(open), Some(limits)) = (
+        crate::platform::fd::open_descriptor_count(),
+        crate::platform::fd::descriptor_limits(),
+    ) else {
+        return;
+    };
+    let Some(alert) =
+        descriptor_pressure_step(episode, open, limits.soft, std::time::Instant::now())
+    else {
+        return;
+    };
+    let phase = match alert {
+        DescriptorAlert::Opened => "crossed",
+        DescriptorAlert::Sustained => "still above",
+    };
+    log::error!(
+        "diagnostics: file-descriptor pressure -- fd_open={open} fd_soft_limit={} \
+         ({phase} the 80% high-water mark). Once the table fills, socket and file \
+         creation fail process-wide and the session does not recover until teardown \
+         (#104)",
+        limits.soft
     );
+    crate::logging::capture_sentry_diagnostic(crate::logging::SentryDiagnosticEvent::
+        DescriptorPressure(crate::logging::DescriptorPressureDiagnostic {
+            stage: crate::logging::DescriptorPressureStageTag::HighWater,
+        }));
+}
+
+/// #104: the process-wide "we already hit the wall" alarm, kept separate from
+/// the in-room sampler above because an `EMFILE` can surface from any IO on any
+/// thread, in or out of a meeting.
+static DESCRIPTOR_EXHAUSTION_ALARM: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::time::Instant>>,
+> = std::sync::OnceLock::new();
+
+/// Report an `io::Error` from any Petal IO path; if it is descriptor
+/// exhaustion, emit one rate-limited `[ERROR]` line and a Sentry diagnostic.
+///
+/// #104's field log showed Petal's own state-file writes failing with
+/// `os error 24` while the app went on reporting a healthy share. Anything
+/// other than `EMFILE`/`ENFILE` is ignored, so call sites can hand over every
+/// error unconditionally.
+pub fn note_descriptor_exhaustion_io_error(context: &str, error: &std::io::Error) {
+    if !crate::platform::fd::is_descriptor_exhaustion(error) {
+        return;
+    }
+    let now = std::time::Instant::now();
+    {
+        let mut last = DESCRIPTOR_EXHAUSTION_ALARM
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last
+            .is_some_and(|last| now.saturating_duration_since(last) < DESCRIPTOR_ALERT_REWARN_INTERVAL)
+        {
+            return;
+        }
+        *last = Some(now);
+    }
+    let fd_open = crate::platform::fd::open_descriptor_count()
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    let fd_soft_limit = crate::platform::fd::descriptor_limits()
+        .map(|limits| limits.soft.to_string())
+        .unwrap_or_else(|| "unknown".into());
+    log::error!(
+        "diagnostics: file-descriptor EXHAUSTION -- {context} failed with {error}; \
+         fd_open={fd_open} fd_soft_limit={fd_soft_limit}. Socket and file creation are \
+         failing process-wide (#104)"
+    );
+    crate::logging::capture_sentry_diagnostic(crate::logging::SentryDiagnosticEvent::
+        DescriptorPressure(crate::logging::DescriptorPressureDiagnostic {
+            stage: crate::logging::DescriptorPressureStageTag::Exhausted,
+        }));
 }
 
 /// #884: pure decision over one pressure reading -- report only genuine
@@ -2793,6 +2986,10 @@ pub fn start_for_room(
             // teardown chain and captures a rate-limited Sentry diagnostic.
             let mut memory_tick = 0u32;
             let mut last_pressure_level: Option<u32> = None;
+            // #104: descriptor high-water watch, on the same tick. One
+            // `proc_pidinfo` sizing call plus one `getrlimit` per second --
+            // the same order of cost as the pressure sysctl beside it.
+            let mut descriptor_episode = DescriptorPressureEpisode::default();
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
                 if state.shared.generation.load(Ordering::SeqCst) != my_gen {
@@ -2807,6 +3004,7 @@ pub fn start_for_room(
                     log_in_room_memory_curve();
                 }
                 observe_memory_pressure_transition(&mut last_pressure_level);
+                observe_descriptor_pressure(&mut descriptor_episode);
 
                 let (sample, mut tracks) = collect_tick(&room, &mut prev_bytes, dt_ms).await;
                 state.apply_track_overlays(&mut tracks, sample.rtt_ms);
@@ -4274,6 +4472,197 @@ mod tests {
     #[test]
     fn display_drop_rewarn_allowed_with_no_prior_warning() {
         assert!(display_drop_rewarn_allowed(None, std::time::Instant::now()));
+    }
+
+    // ---- #104: file-descriptor curve + pressure detector ----
+
+    /// The whole point of #104's instrumentation is that a FIELD LOG carries
+    /// the two new fields. Assert the rendered line, not just the helpers
+    /// behind it -- a sampler that computed the numbers and dropped them from
+    /// the format string would leave the next occurrence exactly as invisible
+    /// as this one was.
+    #[test]
+    fn memory_curve_line_carries_the_descriptor_fields() {
+        let line = memory_curve_line(
+            Some(354 * 1024 * 1024),
+            Some(12),
+            Some(1),
+            Some(214),
+            Some(10_240),
+        );
+        assert_eq!(
+            line,
+            "diagnostics: memory curve -- phys_footprint_mb=354 live_pixel_buffers=12 \
+             os_pressure_level=1 fd_open=214 fd_soft_limit=10240"
+        );
+        // The pre-#104 fields must survive verbatim: field-log greps and the
+        // #884 memory-curve work both depend on them.
+        assert!(line.contains("phys_footprint_mb=354"));
+        assert!(line.contains("os_pressure_level=1"));
+        // #106's field rides the same line; it appeared zero times in eight
+        // field logs precisely because nothing rendered it.
+        assert!(line.contains("live_pixel_buffers=12"));
+    }
+
+    /// Absence must read as `unknown`, never as a fabricated `0` -- a `0`
+    /// descriptor count would look like a healthy process.
+    #[test]
+    fn memory_curve_line_reports_absence_honestly() {
+        let line = memory_curve_line(None, None, None, None, None);
+        assert_eq!(
+            line,
+            "diagnostics: memory curve -- phys_footprint_mb=unknown live_pixel_buffers=n/a \
+             os_pressure_level=unknown fd_open=unknown fd_soft_limit=unknown"
+        );
+        assert!(!line.contains("fd_open=0"));
+        // #106: the pixel-buffer counter is macOS-only, so absence is `n/a`
+        // (a platform fact) rather than `0` (a claim the receiver holds none).
+        assert!(!line.contains("live_pixel_buffers=0"));
+    }
+
+    #[test]
+    fn descriptor_pressure_opens_an_episode_on_the_first_crossing() {
+        let mut episode = DescriptorPressureEpisode::default();
+        let now = std::time::Instant::now();
+        // 80% of 256 is 204.8; 205 crosses.
+        assert_eq!(
+            descriptor_pressure_step(&mut episode, 205, 256, now),
+            Some(DescriptorAlert::Opened)
+        );
+        assert!(episode.in_episode);
+        // A quiet reading must produce nothing at all.
+        let mut quiet = DescriptorPressureEpisode::default();
+        assert_eq!(descriptor_pressure_step(&mut quiet, 100, 256, now), None);
+        assert!(!quiet.in_episode);
+    }
+
+    /// #104 ran for 20 HOURS at one sample per second. Without rate limiting
+    /// the detector would have emitted ~72,000 lines -- becoming the log storm
+    /// it exists to report.
+    #[test]
+    fn descriptor_pressure_rate_limits_a_sustained_episode() {
+        let mut episode = DescriptorPressureEpisode::default();
+        let start = std::time::Instant::now();
+        assert_eq!(
+            descriptor_pressure_step(&mut episode, 250, 256, start),
+            Some(DescriptorAlert::Opened)
+        );
+        // Every one-second sample inside the window is silent.
+        for second in 1..=120 {
+            let now = start + std::time::Duration::from_secs(second);
+            assert_eq!(
+                descriptor_pressure_step(&mut episode, 250, 256, now),
+                None,
+                "a sustained episode must stay silent {second}s in"
+            );
+        }
+        // ...and it re-warns exactly once the interval has elapsed, so the log
+        // carries a CURVE rather than a single value.
+        let later = start + DESCRIPTOR_ALERT_REWARN_INTERVAL;
+        assert_eq!(
+            descriptor_pressure_step(&mut episode, 250, 256, later),
+            Some(DescriptorAlert::Sustained)
+        );
+    }
+
+    /// Hysteresis: a reading between the clear mark (70%) and the high-water
+    /// mark (80%) must neither alert nor close the episode. Without the gap an
+    /// oscillating count re-opens a "new" episode every few seconds, and every
+    /// re-open bypasses the rate limit by design.
+    #[test]
+    fn descriptor_pressure_does_not_re_open_while_oscillating() {
+        let mut episode = DescriptorPressureEpisode::default();
+        let start = std::time::Instant::now();
+        assert!(descriptor_pressure_step(&mut episode, 250, 256, start).is_some());
+        for second in 1..=60 {
+            let now = start + std::time::Duration::from_secs(second);
+            // 190/256 = 74%: below high water, above the clear mark.
+            assert_eq!(descriptor_pressure_step(&mut episode, 190, 256, now), None);
+            assert!(episode.in_episode, "the episode must stay open at 74%");
+            // Back above the mark: still the same episode, still rate limited.
+            assert_eq!(descriptor_pressure_step(&mut episode, 250, 256, now), None);
+        }
+    }
+
+    /// A genuinely NEW episode, after real recovery, must alert immediately
+    /// rather than inherit the previous episode's rate-limit timer.
+    #[test]
+    fn descriptor_pressure_re_alerts_after_a_real_recovery() {
+        let mut episode = DescriptorPressureEpisode::default();
+        let start = std::time::Instant::now();
+        assert!(descriptor_pressure_step(&mut episode, 250, 256, start).is_some());
+        // 100/256 = 39%: below the clear mark, so the episode ends.
+        let recovered = start + std::time::Duration::from_secs(5);
+        assert_eq!(
+            descriptor_pressure_step(&mut episode, 100, 256, recovered),
+            None
+        );
+        assert!(!episode.in_episode);
+        // Well inside the re-warn interval, but this is a fresh episode.
+        let relapse = start + std::time::Duration::from_secs(10);
+        assert_eq!(
+            descriptor_pressure_step(&mut episode, 250, 256, relapse),
+            Some(DescriptorAlert::Opened)
+        );
+    }
+
+    /// The gauge the detector reads must respond to real descriptors. An
+    /// assertion on the threshold arithmetic alone would pass even if the
+    /// sampler were wired to a constant.
+    #[test]
+    fn descriptor_pressure_fires_on_a_real_descriptor_increase() {
+        let Some(baseline) = crate::platform::fd::open_descriptor_count() else {
+            return;
+        };
+        const EXTRA: u64 = 200;
+        let mut held = Vec::with_capacity(EXTRA as usize);
+        for _ in 0..EXTRA {
+            held.push(
+                std::fs::File::open(crate::platform::fd::NULL_DEVICE)
+                    .expect("open the null device"),
+            );
+        }
+        let raised =
+            crate::platform::fd::open_descriptor_count().expect("count while holding descriptors");
+        // Treat the raised count as the whole budget: it is trivially at 100%
+        // of it, and the baseline is below 80% of it as long as the process
+        // was not already using more than 4x EXTRA descriptors -- asserted
+        // rather than assumed, so a future Petal that starts up much fatter
+        // fails loudly here instead of silently skipping the check.
+        let soft = raised;
+        assert!(
+            baseline < soft * 80 / 100,
+            "baseline {baseline} is too close to {soft} for this test to mean anything; \
+             raise EXTRA (currently {EXTRA})"
+        );
+        let mut episode = DescriptorPressureEpisode::default();
+        let now = std::time::Instant::now();
+        assert_eq!(
+            descriptor_pressure_step(&mut episode, baseline, soft, now),
+            None,
+            "baseline {baseline} must sit below 80% of {soft}"
+        );
+        assert_eq!(
+            descriptor_pressure_step(&mut episode, raised, soft, now),
+            Some(DescriptorAlert::Opened),
+            "holding {EXTRA} extra descriptors ({baseline} -> {raised}) must cross 80% of {soft}"
+        );
+        drop(held);
+    }
+
+    /// The `EMFILE` backstop must ignore everything else -- call sites hand it
+    /// every error unconditionally, so a false positive would fire the alarm on
+    /// an ordinary missing file.
+    #[test]
+    fn descriptor_exhaustion_hook_ignores_unrelated_io_errors() {
+        note_descriptor_exhaustion_io_error(
+            "test: not a descriptor problem",
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        note_descriptor_exhaustion_io_error(
+            "test: not a descriptor problem",
+            &std::io::Error::other("no os error at all"),
+        );
     }
 
     // #878 Phase 2 item 2 / #882 review: enqueue backoff decision
