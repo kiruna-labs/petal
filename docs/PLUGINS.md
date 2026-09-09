@@ -141,6 +141,14 @@ automatically.
 
 ## Publishing *(M3)*
 
-Submit the `bundle.json`. Publishing to the official registry is handled by
-the core team and requires the plugin to pass review; the app only installs
-bundles whose signature verifies against the registry key it was built with.
+Publishing is source-based. Open a PR to `kiruna-labs/petal-plugins` adding
+`community/<your id>/plugin.json` that points at your repository, the
+subdirectory holding `manifest.json`, and the exact commit SHA to publish.
+Our CI builds that commit in an isolated job and produces the `bundle.json`
+that gets signed; you never upload a bundle yourself, and a prebuilt one is
+not accepted. New listings and version bumps appear as "Awaiting review"
+until a core-team member has read the change, and only then become
+installable. The app installs only bundles whose signature verifies against
+the registry key it was built with, whose sha256 and size match the signed
+index, and whose manifest id/version match the listing. Keep a lockfile in
+your repo: the build job has no network beyond what the lockfile pins.

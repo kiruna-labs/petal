@@ -252,7 +252,13 @@ pub async fn download_and_install_compatible_update<R: Runtime>(
 
     verify_update_archive_architecture(&bytes).map_err(|e| {
         log::error!("updater: architecture guard rejected update {version}: {e}");
-        format!("update is incompatible with this Mac: {e}")
+        // #116: this said "this Mac" on every platform, so a Windows user was
+        // told their PC was a Mac. Name the device the user is actually on.
+        #[cfg(target_os = "windows")]
+        let device = "this PC";
+        #[cfg(not(target_os = "windows"))]
+        let device = "this Mac";
+        format!("update is incompatible with {device}: {e}")
     })?;
 
     #[cfg(target_os = "macos")]
@@ -836,12 +842,11 @@ fn filesystem_is_read_only(path: &Path) -> bool {
 fn verify_update_archive_architecture(bytes: &[u8]) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        // Windows updates are NSIS installers, not macOS .app bundles, so
-        // verify the staged executable's PE machine type instead of the Mach-O
-        // path below. tauri-plugin-updater already picks the manifest entry by
-        // target (`windows-x86_64` etc.); this mirrors the macOS guard as
-        // defense in depth against a wrong-arch installer.
-        return verify_windows_installer_architecture(bytes);
+        // Windows updates are NSIS installers, not macOS .app bundles, so the
+        // Mach-O path below does not apply. See
+        // `verify_windows_installer_archive` for why the installer's own PE
+        // machine type is NOT an architecture check (#116).
+        return verify_windows_installer_archive(bytes);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -852,22 +857,30 @@ fn verify_update_archive_architecture(bytes: &[u8]) -> Result<(), String> {
                 std::env::consts::ARCH
             )
         })?;
-        let found = app_bundle_macho_architectures(bytes)?;
-        let found_labels = arch_labels(&found);
-        if found.contains(&running) {
-            log::info!(
-                "updater: architecture guard accepted update; running={} bundle={}",
-                running.as_str(),
-                found_labels
-            );
-            Ok(())
-        } else {
-            Err(format!(
-                "running architecture {} not present in staged app bundle ({})",
-                running.as_str(),
-                found_labels
-            ))
-        }
+        verify_macos_archive_supports(bytes, running)
+    }
+}
+
+/// The macOS policy, split from the host-arch lookup so a test can pin BOTH
+/// directions on one machine: the universal tarball must be accepted whether
+/// the running Mac is arm64 or x86_64 (#116, definition of done).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn verify_macos_archive_supports(bytes: &[u8], running: CpuArch) -> Result<(), String> {
+    let found = app_bundle_macho_architectures(bytes)?;
+    let found_labels = arch_labels(&found);
+    if found.contains(&running) {
+        log::info!(
+            "updater: architecture guard accepted update; running={} bundle={}",
+            running.as_str(),
+            found_labels
+        );
+        Ok(())
+    } else {
+        Err(format!(
+            "running architecture {} not present in staged app bundle ({})",
+            running.as_str(),
+            found_labels
+        ))
     }
 }
 
@@ -928,34 +941,32 @@ fn app_bundle_macho_architectures(bytes: &[u8]) -> Result<BTreeSet<CpuArch>, Str
     ))
 }
 
-/// Windows: verify a staged update archive is a PE executable for the running
-/// architecture. The archive is the NSIS installer; its machine type comes
-/// from the PE header (DOS header `e_lfanew` -> "PE\0\0" -> 2-byte machine).
-#[cfg(target_os = "windows")]
-fn verify_windows_installer_architecture(bytes: &[u8]) -> Result<(), String> {
-    let machine =
-        pe_machine_type(bytes).ok_or_else(|| "update archive is not a PE executable".to_string())?;
-    let expected = match std::env::consts::ARCH {
-        "x86_64" => 0x8664,
-        "x86" => 0x014c,
-        "aarch64" => 0xaa64,
-        other => return Err(format!("unsupported running architecture {other}")),
-    };
-    if machine == expected {
-        log::info!(
-            "updater: architecture guard accepted update; running={} pe_machine=0x{machine:04x}",
-            std::env::consts::ARCH
-        );
-        Ok(())
-    } else {
-        Err(format!(
-            "update archive machine 0x{machine:04x} does not match running architecture {}",
-            std::env::consts::ARCH
-        ))
-    }
+/// Windows: verify a staged update archive is a Windows executable at all.
+///
+/// #116: do NOT compare the archive's PE machine type to the host. The archive
+/// is the NSIS installer STUB, and an NSIS stub is a 32-bit i386 PE (0x014c)
+/// by design whatever bitness of payload it installs -- requiring 0x8664
+/// rejected every Windows update. The release pipeline's artifact gate made
+/// the identical stub-vs-payload mistake and was fixed in #916 by reading the
+/// app .exe instead; that fix never reached this client guard. Reading the
+/// payload here would mean decompressing the NSIS body, and it buys nothing:
+/// the updater manifest keys artifacts by target and tauri verifies a minisign
+/// signature over the archive before installing.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn verify_windows_installer_archive(bytes: &[u8]) -> Result<(), String> {
+    let machine = pe_machine_type(bytes)
+        .ok_or_else(|| "update archive is not a Windows executable".to_string())?;
+    log::info!(
+        "updater: installer guard accepted update; running={} installer_pe_machine=0x{machine:04x} (an NSIS stub is 0x014c whatever it installs)",
+        std::env::consts::ARCH
+    );
+    Ok(())
 }
 
-#[cfg(target_os = "windows")]
+/// The archive's machine type comes from the PE header (DOS header
+/// `e_lfanew` -> "PE\0\0" -> 2-byte machine). Used only to prove the archive
+/// is a PE at all -- see `verify_windows_installer_archive`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn pe_machine_type(bytes: &[u8]) -> Option<u16> {
     if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
         return None;
@@ -1586,18 +1597,21 @@ mod tests {
         assert_eq!(arches, BTreeSet::from([CpuArch::Arm64, CpuArch::X86_64]));
     }
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn pe_machine_type_reads_amd64_header() {
+    /// A minimal PE image: DOS header, `e_lfanew` -> "PE\0\0" -> machine.
+    fn pe_stub(machine: u16) -> Vec<u8> {
         let mut bytes = vec![0u8; 0x60];
         bytes[0..2].copy_from_slice(b"MZ");
         bytes[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
         bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
-        bytes[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
-        assert_eq!(pe_machine_type(&bytes), Some(0x8664));
+        bytes[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
+        bytes
     }
 
-    #[cfg(target_os = "windows")]
+    #[test]
+    fn pe_machine_type_reads_amd64_header() {
+        assert_eq!(pe_machine_type(&pe_stub(0x8664)), Some(0x8664));
+    }
+
     #[test]
     fn pe_machine_type_rejects_non_pe() {
         assert_eq!(pe_machine_type(b"not an executable"), None);
@@ -1605,5 +1619,63 @@ mod tests {
         let mut truncated = vec![0u8; 0x40];
         truncated[0..2].copy_from_slice(b"MZ");
         assert_eq!(pe_machine_type(&truncated), None);
+    }
+
+    /// #116, the POLICY rather than the parser. The two tests above pinned the
+    /// header reader and stayed green for the whole time the guard rejected
+    /// every Windows update. Every real `Petal_<v>_windows_x86_64-setup.exe` is
+    /// an NSIS stub whose PE machine is i386 0x014c whatever it installs, so
+    /// that is the shape the guard must ACCEPT on a 64-bit host. Against the
+    /// old policy (machine must equal the host arch) this fails with
+    /// "update archive machine 0x014c does not match running architecture".
+    #[test]
+    fn accepts_the_32_bit_nsis_installer_stub_that_windows_releases_actually_ship() {
+        verify_windows_installer_archive(&pe_stub(0x014c))
+            .expect("a 32-bit NSIS stub is what every Windows update archive is");
+    }
+
+    /// The stub's machine type is not evidence either way, so a 64-bit stub is
+    /// equally fine -- the guard must not become a reversed arch check.
+    #[test]
+    fn accepts_an_amd64_installer_stub_as_well() {
+        verify_windows_installer_archive(&pe_stub(0x8664)).unwrap();
+        verify_windows_installer_archive(&pe_stub(0xaa64)).unwrap();
+    }
+
+    /// What is left of the guard: the archive must still be a Windows
+    /// executable, and the failure must not blame the architecture.
+    #[test]
+    fn rejects_an_update_archive_that_is_not_a_windows_executable() {
+        let err = verify_windows_installer_archive(b"<html>404 not found</html>")
+            .expect_err("a non-PE archive must not be handed to the installer");
+        assert!(err.contains("not a Windows executable"), "{err}");
+        assert!(
+            !err.contains("architecture"),
+            "the guard must no longer claim an architecture mismatch: {err}"
+        );
+    }
+
+    /// The mirror-image case (#116 definition of done): the shipped macOS
+    /// artifact is ONE universal tarball, and it must be accepted on an Apple
+    /// Silicon Mac and on an Intel Mac alike. Parameterised on the running
+    /// arch so both directions are proven on whichever host runs the suite.
+    #[test]
+    fn universal_macos_tarball_is_accepted_on_both_running_architectures() {
+        let archive = test_update_archive(&fat_be(&[CPU_TYPE_X86_64, CPU_TYPE_ARM64]));
+        verify_macos_archive_supports(&archive, CpuArch::Arm64)
+            .expect("the universal tarball must install on Apple Silicon");
+        verify_macos_archive_supports(&archive, CpuArch::X86_64)
+            .expect("the universal tarball must install on Intel");
+    }
+
+    /// ...while a genuinely wrong-arch macOS tarball is still refused, so the
+    /// macOS guard has not been loosened into a no-op.
+    #[test]
+    fn an_arm64_only_macos_tarball_is_still_refused_on_intel() {
+        let archive = test_update_archive(&thin_le(CPU_TYPE_ARM64));
+        verify_macos_archive_supports(&archive, CpuArch::Arm64).unwrap();
+        let err = verify_macos_archive_supports(&archive, CpuArch::X86_64)
+            .expect_err("an arm64-only bundle cannot run on Intel");
+        assert!(err.contains("x86_64"), "{err}");
     }
 }

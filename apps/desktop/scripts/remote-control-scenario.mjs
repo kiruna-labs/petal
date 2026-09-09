@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -23,6 +22,9 @@ import {
   summarizeObservationLatency,
 } from './remote-control-observation.mjs';
 import { ProcessLeaseLedger, psIdentity } from './process-lease-ledger.mjs';
+// #102: the autotest socket client lives in its own module so its per-command
+// timeout can be tested against a server that never answers.
+import { connectSocket } from './autotest-socket.mjs';
 import {
   INPUT_ONLY_SCOPE_LINES,
   inputOnlyPassBarVerdict,
@@ -148,43 +150,6 @@ if (!socketPath) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function connectSocket(file) {
-  const socket = net.createConnection(file);
-  socket.setEncoding('utf8');
-  let buffer = '';
-  let pending;
-  socket.on('data', (chunk) => {
-    buffer += chunk;
-    let idx;
-    while ((idx = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 1);
-      if (!line.trim()) continue;
-      pending?.resolve(JSON.parse(line));
-      pending = undefined;
-    }
-  });
-  socket.on('error', (error) => {
-    pending?.reject(error);
-    pending = undefined;
-  });
-  return {
-    send(command) {
-      return new Promise((resolve, reject) => {
-        if (pending) {
-          reject(new Error('autotest socket only supports one in-flight command'));
-          return;
-        }
-        pending = { resolve, reject };
-        socket.write(`${JSON.stringify(command)}\n`);
-      });
-    },
-    close() {
-      socket.end();
-    },
-  };
 }
 
 async function command(client, payload) {
