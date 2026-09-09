@@ -3356,6 +3356,12 @@ async fn start_capture_for_share(
     let capture_heartbeat_last_us = Arc::new(AtomicU64::new(now_us()));
     let capture_heartbeat_frames = Arc::new(AtomicU64::new(0));
     let capture_heartbeat_last_frame_count = Arc::new(AtomicU64::new(0));
+    // #106: wall time of this capture's first delivered frame, and a
+    // once-only latch for the post-settle memory mark below. Declared here,
+    // OUTSIDE the attempt loop, so a first-frame retry does not restart the
+    // settle clock or re-arm a mark that already fired.
+    let capture_first_frame_us = Arc::new(AtomicU64::new(0));
+    let settle_memory_mark_done = Arc::new(AtomicBool::new(false));
     let capture_attempt_generation = Arc::new(AtomicU64::new(0));
     let capture_source_name = match &capture_source {
         ShareCaptureSource::DirectWindowId => "direct-window-id",
@@ -3476,6 +3482,8 @@ async fn start_capture_for_share(
             let capture_heartbeat_last_us_cb = capture_heartbeat_last_us.clone();
             let capture_heartbeat_frames_cb = capture_heartbeat_frames.clone();
             let capture_heartbeat_last_frame_count_cb = capture_heartbeat_last_frame_count.clone();
+            let capture_first_frame_us_cb = capture_first_frame_us.clone();
+            let settle_memory_mark_done_cb = settle_memory_mark_done.clone();
             let size_tx_cb = size_tx.clone();
             let capture_error_tx_cb = capture_error_tx.clone();
             let diagnostics_cb = diagnostics.clone();
@@ -3502,6 +3510,29 @@ async fn start_capture_for_share(
                         "session: window {window_id} capture heartbeat -- captured {captured} frame(s), last seq {}, approx {:.1}fps",
                         frame.sequence,
                         rate
+                    );
+                }
+                // #106: the post-settle memory mark. Ridden on the capture
+                // callback rather than a timer task so it can only fire while
+                // this capture is genuinely still delivering frames -- a
+                // spawned sleep would happily report a footprint for a share
+                // that stopped 20s ago.
+                let _ = capture_first_frame_us_cb.compare_exchange(
+                    0,
+                    capture_wall_time_us,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+                let first_frame_us = capture_first_frame_us_cb.load(Ordering::Relaxed);
+                if first_frame_us != 0
+                    && capture_wall_time_us.saturating_sub(first_frame_us)
+                        >= SHARE_MEMORY_SETTLE_MARK_US
+                    && !settle_memory_mark_done_cb.swap(true, Ordering::Relaxed)
+                {
+                    log_share_memory_mark(
+                        window_id,
+                        "settled_30s",
+                        Some((frame.width, frame.height)),
                     );
                 }
                 // Capture-freeze diagnostics (#capture-freeze): explain a frozen
@@ -3936,6 +3967,7 @@ async fn start_capture_for_share(
     log::info!(
         "session: {reason}(window {window_id}) first frame received ({width}x{height}, scale {source_scale:.2})"
     );
+    log_share_memory_mark(window_id, "first_frame", Some((width, height)));
 
     let layout_gate = capture.layout_gate();
     Ok(StartedShareCapture {
@@ -3950,6 +3982,77 @@ async fn start_capture_for_share(
         layout_gate,
         capture_error_rx,
     })
+}
+
+/// #106: how long after a share's first frame the post-settle memory mark
+/// fires. 30s is past SCK stream warm-up, the simulcast ladder settling and
+/// the first keyframe burst, so a footprint still elevated here is held
+/// rather than transient.
+const SHARE_MEMORY_SETTLE_MARK_US: u64 = 30_000_000;
+
+/// #106: one UNTHROTTLED footprint sample at a named point in a share's
+/// lifecycle.
+///
+/// Why this exists: the whole 1492 -> 3074 MB climb in the reported field
+/// capture happened between two once-a-minute curve samples, and the
+/// finer-grained `capture-diag mem=` values are up to 5s stale (see
+/// `platform::mem::process_footprint_bytes_throttled`), so nothing in the
+/// log could date a single step. These marks read the syscall directly at
+/// the moment named by `stage`.
+///
+/// `petal_frame_pool_ceiling_mb` is the arithmetic ceiling of Petal's OWN
+/// frame buffers at this resolution -- ~47 MB at 2560x1440. It is on the
+/// line so the next field log answers "was that Petal's pools?" without a
+/// code read: a step an order of magnitude above the ceiling is coming from
+/// ScreenCaptureKit/VideoToolbox/libwebrtc, not from us.
+fn share_memory_mark_line(
+    window_id: u32,
+    stage: &str,
+    source: Option<(u32, u32)>,
+    footprint_bytes: Option<u64>,
+    live_pixel_buffers: Option<u32>,
+) -> String {
+    let footprint_mb = match footprint_bytes {
+        Some(bytes) => format!("{}", bytes / (1024 * 1024)),
+        None => "unknown".to_string(),
+    };
+    let buffers = match live_pixel_buffers {
+        Some(count) => count.to_string(),
+        None => "n/a".to_string(),
+    };
+    let (source_str, ceiling_str) = match source {
+        Some((width, height)) => (
+            format!("{width}x{height}"),
+            crate::platform::mem::frame_pool_ceiling(
+                width,
+                height,
+                crate::capture::CAPTURE_BUFFER_POOL_LIMIT as u32,
+                crate::transport::publisher::I420_BUFFER_POOL_LIMIT as u32,
+                crate::capture::CAPTURE_QUEUE_DEPTH,
+            )
+            .total_mb()
+            .to_string(),
+        ),
+        None => ("n/a".to_string(), "n/a".to_string()),
+    };
+    format!(
+        "session: share memory mark -- window={window_id} stage={stage} \
+phys_footprint_mb={footprint_mb} live_pixel_buffers={buffers} source={source_str} \
+petal_frame_pool_ceiling_mb={ceiling_str}"
+    )
+}
+
+fn log_share_memory_mark(window_id: u32, stage: &str, source: Option<(u32, u32)>) {
+    log::info!(
+        "{}",
+        share_memory_mark_line(
+            window_id,
+            stage,
+            source,
+            crate::platform::mem::process_footprint_bytes_now(),
+            crate::platform::mem::live_pixel_buffer_count(),
+        )
+    );
 }
 
 async fn start_share_with_capture_source(
@@ -3969,6 +4072,7 @@ async fn start_share_with_capture_source(
     // note on `leave_room`; the begin log itself previously also sat after
     // the permission check, hiding permission-refused attempts).
     log::info!("session: start_share(window {window_id}) begin");
+    log_share_memory_mark(window_id, "start_begin", None);
     let analytics_source = match &capture_source {
         ShareCaptureSource::DirectWindowId => crate::analytics::ShareStartedSource::Window,
         ShareCaptureSource::DirectDisplayId => crate::analytics::ShareStartedSource::Display,
@@ -4317,6 +4421,7 @@ async fn start_share_with_capture_source(
         );
     }
     log::info!("session: start_share(window {window_id}) publish succeeded");
+    log_share_memory_mark(window_id, "publish_succeeded", Some((width, height)));
 
     let published = Arc::new(Mutex::new(Arc::new(published)));
     let republish_intent = Arc::new(RepublishCoordinator::default());
@@ -8394,6 +8499,69 @@ mod tests {
             line.contains("29 identical no-op evaluation(s) suppressed"),
             "the heartbeat must carry the suppressed count: {line}"
         );
+    }
+
+    #[test]
+    fn share_memory_mark_line_reports_the_footprint_the_buffers_and_the_pool_ceiling() {
+        // #106: the whole point of this line is that a field log can date a
+        // memory step AND immediately say whether Petal's own pools could
+        // account for it. Both facts must be on the line.
+        let line = share_memory_mark_line(
+            1073741828,
+            "first_frame",
+            Some((2560, 1440)),
+            Some(3_074 * 1024 * 1024),
+            Some(0),
+        );
+        assert_eq!(
+            line,
+            "session: share memory mark -- window=1073741828 stage=first_frame \
+phys_footprint_mb=3074 live_pixel_buffers=0 source=2560x1440 \
+petal_frame_pool_ceiling_mb=47"
+        );
+    }
+
+    #[test]
+    fn share_memory_mark_line_says_unknown_rather_than_inventing_a_number() {
+        // The other direction: an absent probe must read as absent, not as
+        // zero -- a plausible-looking 0 MB would be worse than no line.
+        let line = share_memory_mark_line(7, "start_begin", None, None, None);
+        assert_eq!(
+            line,
+            "session: share memory mark -- window=7 stage=start_begin \
+phys_footprint_mb=unknown live_pixel_buffers=n/a source=n/a \
+petal_frame_pool_ceiling_mb=n/a"
+        );
+    }
+
+    #[test]
+    fn share_memory_mark_ceiling_tracks_the_real_pool_constants_and_the_resolution() {
+        // Guards the wiring, not the arithmetic (that is tested in
+        // platform::mem): the ceiling on this line must come from the live
+        // pool constants and the frame's real size, so it moves if either
+        // does.
+        let expected_2560 = crate::platform::mem::frame_pool_ceiling(
+            2560,
+            1440,
+            crate::capture::CAPTURE_BUFFER_POOL_LIMIT as u32,
+            crate::transport::publisher::I420_BUFFER_POOL_LIMIT as u32,
+            crate::capture::CAPTURE_QUEUE_DEPTH,
+        )
+        .total_mb();
+        assert!(share_memory_mark_line(1, "s", Some((2560, 1440)), Some(0), Some(0))
+            .contains(&format!("petal_frame_pool_ceiling_mb={expected_2560}")));
+
+        let expected_5k = crate::platform::mem::frame_pool_ceiling(
+            5120,
+            2880,
+            crate::capture::CAPTURE_BUFFER_POOL_LIMIT as u32,
+            crate::transport::publisher::I420_BUFFER_POOL_LIMIT as u32,
+            crate::capture::CAPTURE_QUEUE_DEPTH,
+        )
+        .total_mb();
+        assert!(expected_5k > expected_2560, "a 5K source must report a larger ceiling");
+        assert!(share_memory_mark_line(1, "s", Some((5120, 2880)), Some(0), Some(0))
+            .contains(&format!("petal_frame_pool_ceiling_mb={expected_5k}")));
     }
 
     #[test]

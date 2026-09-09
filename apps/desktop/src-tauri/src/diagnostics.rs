@@ -769,22 +769,34 @@ fn display_drop_rewarn_allowed(
 /// #884: cadence of the in-room memory-curve log line, in ~1s poll ticks.
 const MEMORY_LOG_EVERY_N_TICKS: u32 = 60;
 
-/// #884/#104: one line per minute while in a room -- own phys footprint, the
-/// OS memory-pressure level, and open file descriptors against the limit in
-/// force -- so a field log carries a memory CURVE and a descriptor CURVE.
+/// #884/#104/#106: one line per minute while in a room -- own phys footprint,
+/// live receiver pixel buffers, the OS memory-pressure level, and open file
+/// descriptors against the limit in force -- so a field log carries a memory
+/// CURVE and a descriptor CURVE.
 ///
 /// #104 added the two descriptor fields. Their absence is exactly why that
 /// issue could not name its leaker: 38,062 `Too many open files` errors over
 /// 19.5 hours produced a binary cliff and no rising signal, so the ACCUMULATION
 /// RATE -- the one number that identifies which allocation is responsible --
-/// was unrecoverable from the log. They ride this line rather than a new one so
-/// the per-minute cadence, and the log volume, stay unchanged.
+/// was unrecoverable from the log.
+///
+/// #106 added `live_pixel_buffers`. It was already sampled into `StatsSample`
+/// (below) and had no path to a log, so it appeared ZERO times across eight
+/// field logs. Note what it does and does not cover: it counts only
+/// `native_display::OwnedCVPixelBuffer`, i.e. RECEIVER-side decode output. It
+/// is blind to ScreenCaptureKit and VideoToolbox buffers, so on a sender-side
+/// spike its job is to rule the receiver class out, not to attribute the
+/// sender.
+///
+/// All of them ride this one line rather than new ones so the per-minute
+/// cadence, and the log volume, stay unchanged.
 fn log_in_room_memory_curve() {
     let limits = crate::platform::fd::descriptor_limits();
     log::info!(
         "{}",
         memory_curve_line(
             crate::platform::mem::process_footprint_bytes_throttled(),
+            crate::platform::mem::live_pixel_buffer_count(),
             crate::platform::mem::memory_pressure_level(),
             crate::platform::fd::open_descriptor_count(),
             limits.map(|limits| limits.soft),
@@ -797,6 +809,7 @@ fn log_in_room_memory_curve() {
 /// `unknown`, never as a fabricated `0` (`platform::mem`'s house rule).
 fn memory_curve_line(
     footprint_bytes: Option<u64>,
+    live_pixel_buffers: Option<u32>,
     pressure_level: Option<u32>,
     fd_open: Option<u64>,
     fd_soft_limit: Option<u64>,
@@ -804,6 +817,11 @@ fn memory_curve_line(
     let footprint_mb = footprint_bytes
         .map(|bytes| format!("{:.0}", bytes as f64 / (1024.0 * 1024.0)))
         .unwrap_or_else(|| "unknown".into());
+    // #106: `n/a` rather than `unknown` -- the counter is macOS-only, so its
+    // absence on Windows is a platform fact, not a failed read.
+    let live_pixel_buffers = live_pixel_buffers
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "n/a".into());
     let pressure = pressure_level
         .map(|level| level.to_string())
         .unwrap_or_else(|| "unknown".into());
@@ -815,7 +833,8 @@ fn memory_curve_line(
         .unwrap_or_else(|| "unknown".into());
     format!(
         "diagnostics: memory curve -- phys_footprint_mb={footprint_mb} \
-         os_pressure_level={pressure} fd_open={fd_open} fd_soft_limit={fd_soft_limit}"
+         live_pixel_buffers={live_pixel_buffers} os_pressure_level={pressure} \
+         fd_open={fd_open} fd_soft_limit={fd_soft_limit}"
     )
 }
 
@@ -4464,29 +4483,41 @@ mod tests {
     /// as this one was.
     #[test]
     fn memory_curve_line_carries_the_descriptor_fields() {
-        let line = memory_curve_line(Some(354 * 1024 * 1024), Some(1), Some(214), Some(10_240));
+        let line = memory_curve_line(
+            Some(354 * 1024 * 1024),
+            Some(12),
+            Some(1),
+            Some(214),
+            Some(10_240),
+        );
         assert_eq!(
             line,
-            "diagnostics: memory curve -- phys_footprint_mb=354 os_pressure_level=1 \
-             fd_open=214 fd_soft_limit=10240"
+            "diagnostics: memory curve -- phys_footprint_mb=354 live_pixel_buffers=12 \
+             os_pressure_level=1 fd_open=214 fd_soft_limit=10240"
         );
         // The pre-#104 fields must survive verbatim: field-log greps and the
         // #884 memory-curve work both depend on them.
         assert!(line.contains("phys_footprint_mb=354"));
         assert!(line.contains("os_pressure_level=1"));
+        // #106's field rides the same line; it appeared zero times in eight
+        // field logs precisely because nothing rendered it.
+        assert!(line.contains("live_pixel_buffers=12"));
     }
 
     /// Absence must read as `unknown`, never as a fabricated `0` -- a `0`
     /// descriptor count would look like a healthy process.
     #[test]
     fn memory_curve_line_reports_absence_honestly() {
-        let line = memory_curve_line(None, None, None, None);
+        let line = memory_curve_line(None, None, None, None, None);
         assert_eq!(
             line,
-            "diagnostics: memory curve -- phys_footprint_mb=unknown os_pressure_level=unknown \
-             fd_open=unknown fd_soft_limit=unknown"
+            "diagnostics: memory curve -- phys_footprint_mb=unknown live_pixel_buffers=n/a \
+             os_pressure_level=unknown fd_open=unknown fd_soft_limit=unknown"
         );
         assert!(!line.contains("fd_open=0"));
+        // #106: the pixel-buffer counter is macOS-only, so absence is `n/a`
+        // (a platform fact) rather than `0` (a claim the receiver holds none).
+        assert!(!line.contains("live_pixel_buffers=0"));
     }
 
     #[test]

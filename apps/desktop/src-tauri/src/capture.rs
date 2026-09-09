@@ -41,7 +41,7 @@ use crate::video_color::{
     ColorPrimaries, MatrixCoefficients, PixelRange, TransferFunction, VideoColorProfile,
 };
 
-const CAPTURE_BUFFER_POOL_LIMIT: usize = 3;
+pub(crate) const CAPTURE_BUFFER_POOL_LIMIT: usize = 3;
 const FMT_NV12_VIDEO_RANGE: u32 = 0x3432_3076; // '420v'
 /// The only layout-integrity detail that crosses the capture/session boundary.
 pub(crate) const CAPTURE_LAYOUT_INVALID: &str = "capture-layout-invalid";
@@ -2482,7 +2482,7 @@ fn sanitize_capture_fps(fps: u32) -> u32 {
 /// jitter without allowing the old depth-8 stale-frame reservoir. #285 made
 /// depth 3 the measured latency-mode starting point; dropped-frame validation
 /// remains part of #290's live matrix.
-const CAPTURE_QUEUE_DEPTH: u32 = 3;
+pub(crate) const CAPTURE_QUEUE_DEPTH: u32 = 3;
 
 fn stream_configuration(
     width: u32,
