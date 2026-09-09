@@ -170,7 +170,11 @@ struct WindowServerIdStore {
 /// (the machine does not reboot -- the session restarts) and different
 /// after any reboot, which is exactly the discriminator the regression
 /// check needs.
-fn current_boot_time_epoch() -> Option<i64> {
+///
+/// `pub(crate)` because `logging.rs`'s previous-session classifier consumes
+/// the same signal to tell "the machine rebooted" from "we died" (#105) --
+/// one reader of `kern.boottime`, not two.
+pub(crate) fn current_boot_time_epoch() -> Option<i64> {
     let mut tv = libc::timeval {
         tv_sec: 0,
         tv_usec: 0,
@@ -249,8 +253,10 @@ fn persist_window_server_id_to_path(
     boot_time_epoch: Option<i64>,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("creating {}: {error}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            note_descriptor_exhaustion(&error);
+            format!("creating {}: {error}", parent.display())
+        })?;
     }
     let json = serde_json::to_string_pretty(&WindowServerIdFile {
         highest_window_id,
@@ -258,15 +264,32 @@ fn persist_window_server_id_to_path(
     })
     .map_err(|error| error.to_string())?;
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, json)
-        .map_err(|error| format!("writing {}: {error}", temporary.display()))?;
+    std::fs::write(&temporary, json).map_err(|error| {
+        note_descriptor_exhaustion(&error);
+        format!("writing {}: {error}", temporary.display())
+    })?;
     std::fs::rename(&temporary, path).map_err(|error| {
+        note_descriptor_exhaustion(&error);
         format!(
             "renaming {} to {}: {error}",
             temporary.display(),
             path.display()
         )
     })
+}
+
+/// #104: this function's errors are stringified for the caller, which loses the
+/// `io::Error` -- and the ONE Petal-side symptom in the #104 field log was
+/// exactly this persist failing with `os error 24` (`EMFILE`) while the app went
+/// on reporting a healthy share. Report the raw error here, where it still
+/// exists, so a process-wide descriptor exhaustion is named as such instead of
+/// reading like a window-server-id bug. Ignores every other error; rate limited
+/// inside `diagnostics`.
+fn note_descriptor_exhaustion(error: &std::io::Error) {
+    crate::diagnostics::note_descriptor_exhaustion_io_error(
+        "webview_transparency: window-server-id persist",
+        error,
+    );
 }
 
 static WINDOW_SERVER_ID_STORE: OnceLock<Mutex<WindowServerIdStore>> = OnceLock::new();
