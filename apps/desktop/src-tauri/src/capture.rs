@@ -41,7 +41,7 @@ use crate::video_color::{
     ColorPrimaries, MatrixCoefficients, PixelRange, TransferFunction, VideoColorProfile,
 };
 
-const CAPTURE_BUFFER_POOL_LIMIT: usize = 3;
+pub(crate) const CAPTURE_BUFFER_POOL_LIMIT: usize = 3;
 const FMT_NV12_VIDEO_RANGE: u32 = 0x3432_3076; // '420v'
 /// The only layout-integrity detail that crosses the capture/session boundary.
 pub(crate) const CAPTURE_LAYOUT_INVALID: &str = "capture-layout-invalid";
@@ -423,10 +423,212 @@ pub struct WindowCapture {
     configured_state: Arc<Mutex<ConfiguredCaptureState>>,
     /// #905 review (Finding 6): a no-image-buffer streak still active when
     /// capture stops would otherwise never get its EXIT log line (nothing
-    /// ever supplies a real buffer again to trigger it) -- `stop()` reads
-    /// these to emit a final summary instead of silently losing the count.
-    no_buffer_streak_start_us: Arc<AtomicU64>,
-    no_buffer_streak_samples: Arc<AtomicU64>,
+    /// ever supplies a real buffer again to trigger it) -- `stop()` asks
+    /// this for a final summary instead of silently losing the count.
+    /// #108 folded the flap suppression into the same state machine; see
+    /// `NoBufferStreakLog`.
+    no_buffer_log: Arc<Mutex<NoBufferStreakLog>>,
+}
+
+
+/// A no-image-buffer streak shorter than this is a "flap" (#108): the
+/// source stopped drawing for an instant and resumed. Sized from the field
+/// log that motivated the issue -- of 724 streaks in 611 seconds, 630 were
+/// under 0.5s and the mean was 0.22s.
+const NO_BUFFER_SHORT_STREAK_MAX_US: u64 = 500_000;
+
+/// How many consecutive short streaks before per-streak logging stops and
+/// the periodic rollup takes over (#108). The first few transitions of an
+/// episode stay loud -- the diagnostic value is in the transition, not the
+/// repetition.
+const NO_BUFFER_FLAP_SUPPRESS_THRESHOLD: u64 = 3;
+
+/// While flapping, one rollup line is emitted at most this often (#108), so
+/// a source that flaps for an entire meeting still leaves a bounded,
+/// counted record of it rather than either 1.2 lines/second or silence.
+const NO_BUFFER_FLAP_SUMMARY_INTERVAL_US: u64 = 60_000_000;
+
+/// What `NoBufferStreakLog` decided should be logged for one transition.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum NoBufferLogAction {
+    /// A streak began and is loud enough to report.
+    StreakStart,
+    /// A streak ended and its start was reported, so its end is too.
+    StreakEnd { duration_s: f64, samples: u64 },
+    /// A periodic (or pattern-broken) rollup of streaks whose own
+    /// start/end pairs were suppressed.
+    FlapSummary {
+        flaps: u64,
+        samples: u64,
+        window_s: f64,
+        longest_s: f64,
+    },
+}
+
+/// Decides what a stream's no-image-buffer transitions should log (#108).
+///
+/// `capture-diag: ... SCK sample with NO image buffer status=Some(Idle)` is
+/// NORMAL ScreenCaptureKit behaviour -- it means the source is alive and
+/// simply not drawing -- so it carries no information per occurrence, only
+/// per transition. #905 already cut the per-sample heartbeat down to one
+/// line at streak start and one at streak end. What it did not anticipate
+/// is a source that ALTERNATES: a real field log carried 724 start/end
+/// pairs in 611 seconds, 1,448 lines and 24.7% of the whole file, because
+/// each flap is a fresh streak.
+///
+/// So this counts streaks, not only samples within one. After
+/// `NO_BUFFER_FLAP_SUPPRESS_THRESHOLD` consecutive short streaks, the
+/// per-streak lines stop and one rollup is emitted per
+/// `NO_BUFFER_FLAP_SUMMARY_INTERVAL_US` carrying the suppressed flap count,
+/// their total idle samples, and the longest of them. The rollup is also
+/// emitted immediately when the pattern BREAKS (a streak long enough not to
+/// be a flap), which is the transition a reader debugging a stalled share
+/// actually cares about. This mirrors `session/share.rs`'s
+/// `pull_flap_count` suppression for the capture-pull path.
+///
+/// Pure state machine: every method takes the clock as an argument and
+/// returns what to log, so the whole policy is testable without a live
+/// ScreenCaptureKit stream. The caller renders the text (it holds the
+/// window id and the SCK status fields) and does nothing else.
+#[derive(Debug, Default)]
+pub(crate) struct NoBufferStreakLog {
+    /// `now_us` of the current streak's first sample; `None` when not in
+    /// one. An `Option` rather than a 0 sentinel deliberately: a streak
+    /// beginning at `now_us == 0` is unreachable in production (the clock
+    /// is a real monotonic microsecond count) but trivially reachable in a
+    /// test, and a sentinel that a test can collide with is a sentinel that
+    /// makes the test lie rather than the code correct.
+    streak_start_us: Option<u64>,
+    samples_this_streak: u64,
+    /// Whether the current streak's START was reported -- if it was, its
+    /// END is reported too, so a start line is never left dangling.
+    current_streak_reported: bool,
+    consecutive_short_streaks: u64,
+    suppressed_flaps: u64,
+    suppressed_samples: u64,
+    suppressed_longest_us: u64,
+    /// `now_us` of the last line this tracker asked for, of any kind.
+    last_line_us: u64,
+}
+
+impl NoBufferStreakLog {
+    /// One SCK sample arrived with no image buffer.
+    pub(crate) fn on_no_buffer_sample(&mut self, now_us: u64) -> Vec<NoBufferLogAction> {
+        self.samples_this_streak += 1;
+        if self.streak_start_us.is_some() {
+            // Mid-streak: #905 already established that the samples inside
+            // one streak are rolled up at its end, not logged individually.
+            return Vec::new();
+        }
+        self.streak_start_us = Some(now_us);
+        self.samples_this_streak = 1;
+        if self.consecutive_short_streaks >= NO_BUFFER_FLAP_SUPPRESS_THRESHOLD {
+            self.current_streak_reported = false;
+            return Vec::new();
+        }
+        self.current_streak_reported = true;
+        self.last_line_us = now_us;
+        vec![NoBufferLogAction::StreakStart]
+    }
+
+    /// A sample arrived WITH an image buffer, ending any open streak.
+    pub(crate) fn on_image_buffer(&mut self, now_us: u64) -> Vec<NoBufferLogAction> {
+        let Some(start) = self.streak_start_us.take() else {
+            return Vec::new();
+        };
+        let samples = std::mem::replace(&mut self.samples_this_streak, 0);
+        let duration_us = now_us.saturating_sub(start);
+        let was_short = duration_us < NO_BUFFER_SHORT_STREAK_MAX_US;
+        if was_short {
+            self.consecutive_short_streaks += 1;
+        } else {
+            self.consecutive_short_streaks = 0;
+        }
+        if std::mem::replace(&mut self.current_streak_reported, false) {
+            self.last_line_us = now_us;
+            return vec![NoBufferLogAction::StreakEnd {
+                duration_s: duration_us as f64 / 1_000_000.0,
+                samples,
+            }];
+        }
+        self.suppressed_flaps += 1;
+        self.suppressed_samples += samples;
+        self.suppressed_longest_us = self.suppressed_longest_us.max(duration_us);
+        // Report immediately when the flapping pattern breaks (this streak
+        // was a real idle episode, not a flap), otherwise at most once per
+        // summary interval.
+        let due = !was_short
+            || now_us.saturating_sub(self.last_line_us) >= NO_BUFFER_FLAP_SUMMARY_INTERVAL_US;
+        if due {
+            let action = self.take_flap_summary(now_us);
+            self.last_line_us = now_us;
+            return vec![action];
+        }
+        Vec::new()
+    }
+
+    /// Capture is stopping: flush an open streak and any pending rollup so
+    /// neither is silently lost (#905 review Finding 6, extended for #108).
+    pub(crate) fn on_stop(&mut self, now_us: u64) -> Vec<NoBufferLogAction> {
+        let mut actions = Vec::new();
+        if let Some(start) = self.streak_start_us.take() {
+            let samples = std::mem::replace(&mut self.samples_this_streak, 0);
+            let duration_us = now_us.saturating_sub(start);
+            if std::mem::replace(&mut self.current_streak_reported, false) {
+                actions.push(NoBufferLogAction::StreakEnd {
+                    duration_s: duration_us as f64 / 1_000_000.0,
+                    samples,
+                });
+            } else {
+                self.suppressed_flaps += 1;
+                self.suppressed_samples += samples;
+                self.suppressed_longest_us = self.suppressed_longest_us.max(duration_us);
+            }
+        }
+        if self.suppressed_flaps > 0 {
+            actions.push(self.take_flap_summary(now_us));
+        }
+        self.last_line_us = now_us;
+        actions
+    }
+
+    fn take_flap_summary(&mut self, now_us: u64) -> NoBufferLogAction {
+        let action = NoBufferLogAction::FlapSummary {
+            flaps: self.suppressed_flaps,
+            samples: self.suppressed_samples,
+            window_s: now_us.saturating_sub(self.last_line_us) as f64 / 1_000_000.0,
+            longest_s: self.suppressed_longest_us as f64 / 1_000_000.0,
+        };
+        self.suppressed_flaps = 0;
+        self.suppressed_samples = 0;
+        self.suppressed_longest_us = 0;
+        action
+    }
+}
+
+
+/// Renders a `NoBufferStreakLog` decision to the log (#108). Split out so
+/// the three call sites (stream handler no-buffer branch, stream handler
+/// image-buffer branch, `stop()`) all emit the same text for the same
+/// decision. `StreakStart` is handled by the stream handler itself, which
+/// has the SCK status fields this function does not.
+pub(crate) fn log_no_buffer_action(window_id: u32, action: NoBufferLogAction) {
+    match action {
+        NoBufferLogAction::StreakStart => log::info!(
+            "capture-diag: window {window_id} SCK sample with NO image buffer (stream alive, source not drawing) -- streak start"
+        ),
+        NoBufferLogAction::StreakEnd { duration_s, samples } => log::info!(
+            "capture-diag: window {window_id} NO-image-buffer streak ended after {duration_s:.1}s ({samples} samples)"
+        ),
+        NoBufferLogAction::FlapSummary {
+            flaps,
+            samples,
+            window_s,
+            longest_s,
+        } => log::info!(
+            "capture-diag: window {window_id} source idle/drawing flapping -- {flaps} short NO-image-buffer streak(s) suppressed in the last {window_s:.0}s ({samples} idle samples, longest {longest_s:.1}s); stream alive, this is normal SCK 'nothing changed' behaviour (#108)"
+        ),
+    }
 }
 
 #[derive(Clone)]
@@ -1150,15 +1352,14 @@ impl WindowCapture {
         // sending only "nothing changed" frames is visible in the log rather
         // than looking identical to a dead stream.
         let no_buffer_frames = Arc::new(AtomicU64::new(0));
-        // #905: 0 means "not currently in a no-image-buffer streak". Holds
-        // the `now_us()` timestamp of the streak's first sample otherwise --
-        // used to log on STATE CHANGE (streak start/end) plus a rolled-up
-        // count, instead of the old ~1/sec-per-stream heartbeat, which alone
-        // produced 277,633 lines (24.5%) of a real 263 MB field log.
-        let no_buffer_streak_start_us = Arc::new(AtomicU64::new(0));
-        let no_buffer_streak_samples = Arc::new(AtomicU64::new(0));
-        let no_buffer_streak_start_us_for_handler = no_buffer_streak_start_us.clone();
-        let no_buffer_streak_samples_for_handler = no_buffer_streak_samples.clone();
+        // #905/#108: decides what a no-image-buffer transition logs. State
+        // changes (streak start/end) plus rolled-up counts replaced the old
+        // ~1/sec-per-stream heartbeat (277,633 lines / 24.5% of a real
+        // 263 MB field log); #108 added flap suppression on top, because a
+        // source that alternates drawing/idle produced 724 start/end pairs
+        // in 611 seconds. See `NoBufferStreakLog`.
+        let no_buffer_log = Arc::new(Mutex::new(NoBufferStreakLog::default()));
+        let no_buffer_log_for_handler = no_buffer_log.clone();
         let source_layout_for_handler = source_layout.clone();
         let configured_state_for_handler = configured_state.clone();
         let source_rect_for_handler = source_rect.clone();
@@ -1206,31 +1407,30 @@ impl WindowCapture {
                     // rolled-up sample count) is logged below, at the first
                     // sample that has a real image buffer again.
                     let count = no_buffer_frames.fetch_add(1, Ordering::Relaxed) + 1;
-                    no_buffer_streak_samples_for_handler.fetch_add(1, Ordering::Relaxed);
                     if let Some(diagnostics) = &diagnostics_for_handler {
                         diagnostics.record_no_buffer();
                     }
                     let now = crate::time_util::now_us();
-                    if no_buffer_streak_start_us_for_handler
-                        .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed)
-                        .is_ok()
-                    {
-                        log::info!(
-                            "capture-diag: window {window_id} SCK sample with NO image buffer status={:?} dirty_rects={} (stream alive, source not drawing) -- streak start [{count} such frames total this stream]",
-                            frame_status,
-                            dirty_rect_count
-                        );
+                    let actions = no_buffer_log_for_handler
+                        .lock_unpoisoned()
+                        .on_no_buffer_sample(now);
+                    for action in actions {
+                        match action {
+                            NoBufferLogAction::StreakStart => log::info!(
+                                "capture-diag: window {window_id} SCK sample with NO image buffer status={:?} dirty_rects={} (stream alive, source not drawing) -- streak start [{count} such frames total this stream]",
+                                frame_status,
+                                dirty_rect_count
+                            ),
+                            other => log_no_buffer_action(window_id, other),
+                        }
                     }
                     return;
                 };
-                let streak_start = no_buffer_streak_start_us_for_handler.swap(0, Ordering::Relaxed);
-                if streak_start != 0 {
-                    let samples = no_buffer_streak_samples_for_handler.swap(0, Ordering::Relaxed);
-                    let duration_s =
-                        crate::time_util::now_us().saturating_sub(streak_start) as f64 / 1_000_000.0;
-                    log::info!(
-                        "capture-diag: window {window_id} NO-image-buffer streak ended after {duration_s:.1}s ({samples} samples)"
-                    );
+                let actions = no_buffer_log_for_handler
+                    .lock_unpoisoned()
+                    .on_image_buffer(crate::time_util::now_us());
+                for action in actions {
+                    log_no_buffer_action(window_id, action);
                 }
                 let frame_info = sample.frame_info();
                 let configured_state = *configured_state_for_handler.lock_unpoisoned();
@@ -1364,8 +1564,7 @@ impl WindowCapture {
             layout_gate,
             layout_error,
             configured_state,
-            no_buffer_streak_start_us,
-            no_buffer_streak_samples,
+            no_buffer_log,
         })
     }
 
@@ -1379,15 +1578,18 @@ impl WindowCapture {
         // ends mid-streak (a common real shape: hide/close while the
         // source isn't drawing) never gets an EXIT line and its sample
         // count is silently lost.
-        let streak_start = self.no_buffer_streak_start_us.swap(0, Ordering::Relaxed);
-        if streak_start != 0 {
-            let samples = self.no_buffer_streak_samples.swap(0, Ordering::Relaxed);
-            let duration_s =
-                crate::time_util::now_us().saturating_sub(streak_start) as f64 / 1_000_000.0;
-            log::info!(
-                "capture-diag: window {} NO-image-buffer streak ended after {duration_s:.1}s ({samples} samples) -- capture stopped mid-streak",
-                self.window_id
-            );
+        let actions = self
+            .no_buffer_log
+            .lock_unpoisoned()
+            .on_stop(crate::time_util::now_us());
+        for action in actions {
+            match action {
+                NoBufferLogAction::StreakEnd { duration_s, samples } => log::info!(
+                    "capture-diag: window {} NO-image-buffer streak ended after {duration_s:.1}s ({samples} samples) -- capture stopped mid-streak",
+                    self.window_id
+                ),
+                other => log_no_buffer_action(self.window_id, other),
+            }
         }
         self.stream
             .stop_capture()
@@ -2280,7 +2482,7 @@ fn sanitize_capture_fps(fps: u32) -> u32 {
 /// jitter without allowing the old depth-8 stale-frame reservoir. #285 made
 /// depth 3 the measured latency-mode starting point; dropped-frame validation
 /// remains part of #290's live matrix.
-const CAPTURE_QUEUE_DEPTH: u32 = 3;
+pub(crate) const CAPTURE_QUEUE_DEPTH: u32 = 3;
 
 fn stream_configuration(
     width: u32,
@@ -2564,6 +2766,151 @@ fn cap_capture_size_to_long_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- #108: no-image-buffer flap suppression ---------------------------
+
+    fn flap_summary_of(actions: &[NoBufferLogAction]) -> Option<(u64, u64)> {
+        actions.iter().find_map(|a| match a {
+            NoBufferLogAction::FlapSummary { flaps, samples, .. } => Some((*flaps, *samples)),
+            _ => None,
+        })
+    }
+
+    /// Drives one complete streak: `samples` idle samples spanning
+    /// `duration_us`, then one sample with a real image buffer. Returns
+    /// every action the tracker asked for across the whole streak.
+    fn run_streak(
+        tracker: &mut NoBufferStreakLog,
+        start_us: u64,
+        duration_us: u64,
+        samples: u64,
+    ) -> Vec<NoBufferLogAction> {
+        let mut actions = Vec::new();
+        for i in 0..samples {
+            actions.extend(tracker.on_no_buffer_sample(start_us + i));
+        }
+        actions.extend(tracker.on_image_buffer(start_us + duration_us));
+        actions
+    }
+
+    #[test]
+    fn no_buffer_streak_logs_the_first_transitions_loudly() {
+        // The diagnostic value is in the transition. The first streaks of
+        // an episode must keep their full start/end pair.
+        let mut tracker = NoBufferStreakLog::default();
+        let actions = run_streak(&mut tracker, 0, 100_000, 3);
+        assert_eq!(
+            actions,
+            vec![
+                NoBufferLogAction::StreakStart,
+                NoBufferLogAction::StreakEnd {
+                    duration_s: 0.1,
+                    samples: 3
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn no_buffer_streak_does_not_log_per_sample_inside_one_streak() {
+        // #905's invariant, re-asserted here so #108's rework cannot lose it.
+        let mut tracker = NoBufferStreakLog::default();
+        let mut actions = Vec::new();
+        for i in 0..500 {
+            actions.extend(tracker.on_no_buffer_sample(i));
+        }
+        assert_eq!(actions, vec![NoBufferLogAction::StreakStart]);
+    }
+
+    #[test]
+    fn no_buffer_streak_suppresses_flapping_after_the_threshold() {
+        // The #108 defect: a source alternating drawing/idle produced 724
+        // start/end pairs in 611 seconds because each flap is a new streak.
+        let mut tracker = NoBufferStreakLog::default();
+        let mut emitted = 0usize;
+        // 600 flaps at 1/second, each 100ms long -- the shape of the real
+        // field log (mean streak 0.22s, 1.2 streaks/second).
+        for i in 0..600u64 {
+            emitted += run_streak(&mut tracker, i * 1_000_000, 100_000, 3).len();
+        }
+        assert!(
+            emitted <= 20,
+            "600 flaps over 600s must collapse to the loud head plus ~1 rollup/minute, got {emitted} lines"
+        );
+        assert!(
+            emitted >= 8,
+            "the loud head and the periodic rollups must both survive, got {emitted} lines"
+        );
+    }
+
+    #[test]
+    fn no_buffer_flap_summary_carries_the_suppressed_counts() {
+        // Suppression must never mean silence: the rollup has to say how
+        // many flaps and idle samples it stood in for.
+        let mut tracker = NoBufferStreakLog::default();
+        for i in 0..10u64 {
+            run_streak(&mut tracker, i * 1_000_000, 100_000, 4);
+        }
+        // Cross the summary interval.
+        let actions = run_streak(&mut tracker, 70_000_000, 100_000, 4);
+        let (flaps, samples) =
+            flap_summary_of(&actions).expect("a rollup is due once the interval elapses");
+        assert_eq!(
+            flaps, 8,
+            "the first 3 streaks were logged loudly; the remaining 8 were suppressed"
+        );
+        assert_eq!(samples, 32, "4 idle samples per suppressed flap");
+    }
+
+    #[test]
+    fn no_buffer_streak_reports_immediately_when_the_flapping_pattern_breaks() {
+        // A genuinely long idle episode after a run of flaps is exactly the
+        // transition someone debugging a stalled share is looking for; it
+        // must not wait for the next heartbeat.
+        let mut tracker = NoBufferStreakLog::default();
+        for i in 0..10u64 {
+            run_streak(&mut tracker, i * 1_000_000, 100_000, 2);
+        }
+        let actions = run_streak(&mut tracker, 20_000_000, 5_000_000, 200);
+        assert!(
+            flap_summary_of(&actions).is_some(),
+            "a 5s streak breaks the flap pattern and must flush the rollup at once: {actions:?}"
+        );
+        // ... and the NEXT streak is loud again, because the consecutive
+        // short-streak run was reset.
+        let after = run_streak(&mut tracker, 40_000_000, 100_000, 2);
+        assert!(
+            after.contains(&NoBufferLogAction::StreakStart),
+            "the first streak after the pattern broke must be loud again: {after:?}"
+        );
+    }
+
+    #[test]
+    fn no_buffer_streak_flushes_an_open_streak_and_a_pending_rollup_on_stop() {
+        // #905 review Finding 6, extended: a share that ends mid-streak
+        // while flapping must lose neither the open streak nor the
+        // suppressed count.
+        let mut tracker = NoBufferStreakLog::default();
+        for i in 0..10u64 {
+            run_streak(&mut tracker, i * 1_000_000, 100_000, 2);
+        }
+        tracker.on_no_buffer_sample(20_000_000);
+        tracker.on_no_buffer_sample(20_100_000);
+        let actions = tracker.on_stop(20_200_000);
+        let (flaps, _) = flap_summary_of(&actions)
+            .expect("the suppressed flap count must survive teardown: {actions:?}");
+        assert_eq!(
+            flaps, 8,
+            "7 suppressed mid-run flaps plus the open one being torn down"
+        );
+    }
+
+    #[test]
+    fn no_buffer_streak_end_is_silent_when_no_streak_is_open() {
+        let mut tracker = NoBufferStreakLog::default();
+        assert!(tracker.on_image_buffer(1_000).is_empty());
+        assert!(tracker.on_stop(2_000).is_empty());
+    }
 
     #[test]
     fn region_fence_stamps_only_dimension_proven_frames() {
