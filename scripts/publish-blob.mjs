@@ -33,7 +33,7 @@
 // Run with NODE_PATH pointing at a node_modules that has @vercel/blob.
 
 import { put, list } from '@vercel/blob';
-import { readFile, readdir, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, readdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
@@ -343,21 +343,83 @@ async function verifyPosthogKey(bundleDir) {
 // anything from inside the app, which is how we ended up asking for logs by
 // hand.
 //
-// Unlike Sentry/PostHog this is a Vite bake read by the WEBVIEW, not a Rust
-// `option_env!`; Tauri embeds the built frontend into the binary's asset table,
-// so the key is present per-slice the same way and the same check applies.
-// The value is a PUBLIC `pk_` key by design (it ships readable inside the
-// bundle), so the fallback pattern is safe to state literally here.
-async function verifyFeedbackKey(bundleDir) {
-  await verifyValueBakedInAllSlices(bundleDir, {
-    gateName: 'UserDispatch feedback key gate',
-    expectedValue: process.env.VITE_USERDISPATCH_PUBLIC_KEY?.trim() || null,
-    fallbackPattern: /pk_[A-Za-z0-9_-]{8,}/,
-    remediation:
-      'This build was compiled without VITE_USERDISPATCH_PUBLIC_KEY set for that slice, so in-app ' +
-      'feedback is compiled out and no bug-report trigger ships. Rebuild with ' +
-      'VITE_USERDISPATCH_PUBLIC_KEY=pk_<public key> set for BOTH targets (see docs/RELEASING.md).',
-  });
+// This gate does NOT scan the Mach-O slices, and must not be "fixed" to.
+// Sentry/PostHog are Rust `option_env!` string literals, so they sit in the
+// binary as plaintext and are searchable per slice. This one is a Vite bake
+// read by the WEBVIEW, and Tauri COMPRESSES the frontend it embeds -- so no
+// frontend string survives as plaintext in the binary and a slice scan can
+// only ever report a miss.
+//
+// Measured on the shipped 0.9.11 universal binary: `people in the room` and
+// `Create/Join` are both present in apps/desktop/build and both ABSENT from
+// `strings` over Contents/MacOS/desktop. (`petal-window-` looks like a
+// counter-example but is a Rust track-name literal, not the frontend.) An
+// earlier version of this gate asserted the opposite as an untested premise
+// and refused two consecutive releases -- v0.9.12 and v0.9.13 -- on a
+// condition no correct build could satisfy.
+//
+// So verify the artifact that IS embedded: the frontend build output, after
+// `tauri build` has run its beforeBuildCommand. That proves the value reached
+// the assets the binary embeds. The value is a PUBLIC `pk_` key by design (it
+// ships readable inside the bundle), so the pattern is safe to state here.
+async function verifyFeedbackKey(distDir) {
+  const gateName = 'UserDispatch feedback key gate';
+  const expected = process.env.VITE_USERDISPATCH_PUBLIC_KEY?.trim() || null;
+  const remediation =
+    'in-app feedback is compiled out and no bug-report trigger ships. Rebuild with ' +
+    'VITE_USERDISPATCH_PUBLIC_KEY=pk_<public key> set (see docs/RELEASING.md).';
+
+  let dir;
+  try {
+    dir = await stat(distDir);
+  } catch {
+    dir = null;
+  }
+  if (!dir?.isDirectory()) {
+    throw new Error(
+      `${gateName}: frontend build output not found at ${distDir}. This gate reads the built ` +
+        'frontend, not the binary (Tauri compresses embedded assets). Set FRONTEND_DIST_DIR to ' +
+        "the desktop app's build output."
+    );
+  }
+
+  const files = [];
+  const walk = async (at) => {
+    for (const entry of await readdir(at, { withFileTypes: true })) {
+      const full = path.join(at, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (/\.(js|mjs|cjs|html|json|css)$/.test(entry.name)) files.push(full);
+    }
+  };
+  await walk(distDir);
+
+  let hits = 0;
+  let sawPattern = false;
+  for (const file of files) {
+    const text = await readFile(file, 'utf8').catch(() => '');
+    if (expected && text.includes(expected)) hits += 1;
+    if (/pk_[A-Za-z0-9_-]{8,}/.test(text)) sawPattern = true;
+  }
+
+  if (expected) {
+    if (hits === 0) {
+      throw new Error(
+        `${gateName}: refusing to publish desktop; the expected value is in none of the ` +
+          `${files.length} built frontend file(s) under ${distDir}. ${remediation}`
+      );
+    }
+    console.log(`  ${gateName}: OK (expected value present in ${hits}/${files.length} built file(s))`);
+    return;
+  }
+
+  if (!sawPattern) {
+    throw new Error(
+      `${gateName}: refusing to publish desktop; no pk_ key in any of the ${files.length} ` +
+        `built frontend file(s) under ${distDir}, and VITE_USERDISPATCH_PUBLIC_KEY was not ` +
+        `exported here to check against. ${remediation}`
+    );
+  }
+  console.log(`  ${gateName}: OK (a pk_ key is present; export VITE_USERDISPATCH_PUBLIC_KEY for an exact check)`);
 }
 
 // NEW gate (#874): PETAL_BACKEND_URL previously had no publish-time check at
@@ -588,7 +650,7 @@ await verifyEntitlements(bundleDir);
 await verifyCleanTarball(tarPath);
 await verifySentryDsn(bundleDir);
 await verifyPosthogKey(bundleDir);
-await verifyFeedbackKey(bundleDir);
+await verifyFeedbackKey(process.env.FRONTEND_DIST_DIR || path.join(bundleDir, '..', '..', '..', '..', '..', 'build'));
 await verifyBackendUrl(bundleDir);
 await verifyStapledInsideTarball(bundleDir, tarPath);
 await verifyNotDowngrade(version);

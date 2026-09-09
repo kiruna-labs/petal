@@ -802,10 +802,15 @@ jobs:
           BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
           PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
           PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+          VITE_USERDISPATCH_PUBLIC_KEY: ${{ secrets.VITE_USERDISPATCH_PUBLIC_KEY }}
           VERSION: ${{ steps.version.outputs.VERSION }}
           TAG: ${{ steps.version.outputs.TAG }}
           TAG_ANNOTATION: ${{ steps.version.outputs.TAG_ANNOTATION }}
           BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle
+          # The feedback key is a Vite bake, and Tauri COMPRESSES the frontend it
+          # embeds -- so it is unfindable in the Mach-O slices and its gate reads
+          # the BUILT FRONTEND instead. This is tauri.conf.json's frontendDist.
+          FRONTEND_DIST_DIR: ${{ github.workspace }}/apps/desktop/build
           WINDOWS_BUNDLE_DIR: ${{ runner.temp }}/windows-release
         run: bash scripts/ci/run-publisher.sh
 
@@ -884,6 +889,10 @@ jobs:
           TAG_ANNOTATION: ${{ steps.version.outputs.TAG_ANNOTATION }}
           # Absolute so the publisher (run from a scratch dir) still finds it.
           BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle
+          # The feedback key is a Vite bake, and Tauri COMPRESSES the frontend it
+          # embeds -- so it is unfindable in the Mach-O slices and its gate reads
+          # the BUILT FRONTEND instead. This is tauri.conf.json's frontendDist.
+          FRONTEND_DIST_DIR: ${{ github.workspace }}/apps/desktop/build
           WINDOWS_BUNDLE_DIR: ${{ runner.temp }}/windows-release
           PETAL_VERIFY_DEPLOY_FRESHNESS_SCRIPT: ${{ github.workspace }}/scripts/verify-deploy-freshness.sh
         run: bash scripts/ci/run-publisher.sh
