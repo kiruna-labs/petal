@@ -22,6 +22,17 @@
   ];
 
   const manyRooms = Array.from({ length: 15 }, (_, index) => `room-${index + 1}`);
+
+  // #123: room IDs are always visible, so the dev harness has to carry them
+  // or this route no longer shows what the real main menu shows.
+  const sampleAccessCodes: Record<string, string> = {
+    'eng-sync': 'kip-vera-mol',
+    'design-review': 'tob-suna-rix',
+    standup: 'vel-mara-dun',
+    ...Object.fromEntries(
+      manyRooms.map((room, index) => [room, `r${'abcdefghijklmno'[index]}x-room-${'abc'[index % 3]}${'de'[index % 2]}z`])
+    )
+  };
 </script>
 
 <div class="harness">
@@ -35,6 +46,8 @@
         userIdentity="plum"
         liveRoom={{ name: 'eng-sync', participants: engSyncParticipants }}
         emptyRooms={['design-review', 'standup']}
+        roomAccessCodesByName={sampleAccessCodes}
+        onCopyRoomLink={(room) => console.log('copy invite', room)}
         onJoinLive={() => console.log('join eng-sync')}
         onOpenSettings={() => console.log('open settings')}
         onQuit={() => console.log('quit')}
@@ -47,6 +60,8 @@
         userName="Jordan Kim"
         userIdentity="plum"
         emptyRooms={['eng-sync', 'design-review', 'standup']}
+        roomAccessCodesByName={sampleAccessCodes}
+        onCopyRoomLink={(room) => console.log('copy invite', room)}
       />
       <span class="caption">No live room — all rows neutral/empty</span>
     </div>
@@ -57,6 +72,8 @@
           userName="Jordan Kim"
           userIdentity="plum"
           emptyRooms={manyRooms}
+          roomAccessCodesByName={sampleAccessCodes}
+          onCopyRoomLink={(room) => console.log('copy invite', room)}
           onCreateMeeting={(name, displayName) => console.log('create meeting', name, displayName)}
           onJoinByCode={(name) => console.log('join by code', name)}
           frameless

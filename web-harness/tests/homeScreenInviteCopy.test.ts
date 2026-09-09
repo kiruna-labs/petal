@@ -120,6 +120,30 @@ test('recent-room list renders a copy-invite control beside favorite', () => {
   assert.match(styleSource, /\.recent-room:hover \.recent-room__copy,[\s\S]*\.recent-room__copy\.copied\s*{[\s\S]*opacity:\s*1;/);
 });
 
+// #123: the room ID used to exist only inside the copy button's aria-label /
+// tooltip, so the list showed no ID at all. It is now a real, always-visible
+// text node in the row -- and never ellipsized.
+test('recent-room list renders the room ID as always-visible text', () => {
+  assert.match(homeScreenSource, /id\.className = 'recent-room__id'/);
+  assert.match(homeScreenSource, /id\.textContent = roomId;/);
+  assert.match(homeScreenSource, /roomButton\.append\(code, \.\.\.idElements, meta\)/);
+  // A record with no derivable code shows no ID line, never the copy
+  // control's "not available" placeholder text.
+  assert.match(homeScreenSource, /if \(roomId\) \{[\s\S]*?idElements\.push\(id\);/);
+
+  const idBlock = styleSource.match(/\.recent-room__id\s*{([^}]*)}/);
+  assert.ok(idBlock, '.recent-room__id needs its own style block');
+  assert.doesNotMatch(idBlock[1], /opacity:\s*0/, 'the room ID must not be a hover disclosure');
+  assert.match(idBlock[1], /overflow:\s*visible;/);
+  assert.match(idBlock[1], /white-space:\s*nowrap;/);
+  assert.doesNotMatch(idBlock[1], /text-overflow:\s*ellipsis/);
+  assert.doesNotMatch(
+    styleSource,
+    /\.recent-room:hover \.recent-room__id|\.recent-room:focus-within \.recent-room__id/,
+    'no hover/focus reveal rule may gate the room ID'
+  );
+});
+
 // Regression test for a real production incident (2026-07-07): the
 // credential -> access-code map is one-way and lives only for one page load.
 // Rejoining a room via the recent-rooms list passes the internal credential

@@ -737,15 +737,15 @@
     <h2>LiveHero — promoted live-room banner</h2>
     <div class="row">
       <div class="cell">
-        <div class="hero-frame"><LiveHero roomName="eng-sync" participants={heroParticipants} onJoin={() => {}} /></div>
-        <span class="caption">5 participants (4 faces + overflow)</span>
+        <div class="hero-frame"><LiveHero roomName="eng-sync" participants={heroParticipants} accessCode="kip-vera-mol" onJoin={() => {}} onCopyInvite={() => {}} /></div>
+        <span class="caption">5 participants (4 faces + overflow) — room ID always visible, click to copy (#123)</span>
       </div>
       <div class="cell">
-        <div class="hero-frame"><LiveHero roomName="design-review" participants={[]} onJoin={() => {}} /></div>
+        <div class="hero-frame"><LiveHero roomName="design-review" participants={[]} accessCode="tob-suna-rix" onJoin={() => {}} /></div>
         <span class="caption">no participants</span>
       </div>
       <div class="cell">
-        <div class="hero-frame"><LiveHero roomName="very-long-room-name-that-wraps-here" participants={heroParticipants.slice(0, 2)} onJoin={() => {}} /></div>
+        <div class="hero-frame"><LiveHero roomName="very-long-room-name-that-wraps-here" participants={heroParticipants.slice(0, 2)} accessCode="vel-mara-dun" onJoin={() => {}} /></div>
         <span class="caption">long name — full text, no truncation</span>
       </div>
     </div>
