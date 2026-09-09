@@ -6,7 +6,7 @@
 
 import { timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { TokenVerifier } from 'livekit-server-sdk';
+import { ParticipantInfo_State, TokenVerifier, type ParticipantInfo } from 'livekit-server-sdk';
 import {
   credentialForAccessCode,
   generateRoomCredential,
@@ -925,11 +925,16 @@ export function roomDiscoveryView(
 }
 
 // ONE upstream RPC per refresh, shared by every caller for ROOMS_LIST_CACHE_MS.
-// `listRooms` already reports `numParticipants` (hidden participants -- the
-// `-gallery` bridges -- excluded by LiveKit), so discovery no longer fans a
-// `listParticipants` out per room: that made one unauthenticated GET cost
-// N+1 upstream calls and grow with the number of live rooms (the #708
-// per-room isolation existed only to survive that fan-out's partial failures).
+// `numParticipants` is the ROOM-LEVEL count and it COUNTS HIDDEN participants
+// (#120, measured 2026-09-09 on livekit-server 1.13.2 AND on the hosted
+// LiveKit Cloud deployment: 1 visible peer + 1 hidden `-gallery` bridge reads
+// 2). Every desktop user opens such a bridge, so this number is N + k, not N.
+// It is still the room list's number -- `handleListRooms` is server-side
+// tooling and keeps it -- but `handleRoomStatus`, whose answer reaches the
+// user as "N people in the room", refines it per room with `listParticipants`
+// (see `cachedVisibleOccupancy`). That fan-out is bounded by the caller's
+// presented credentials (<= ROOM_STATUS_MAX_ROOMS), which is what made the
+// old unauthenticated-GET fan-out over every live room unacceptable (#708).
 interface RoomsListCacheEntry {
   at: number;
   rooms: CachedRoomEntry[];
@@ -948,6 +953,128 @@ let roomsListInFlight: Promise<CachedRoomEntry[]> | null = null;
 export function resetRoomsListCacheForTest(): void {
   roomsListCache.delete(PRODUCTION_ROOMS_LIST_CACHE_KEY);
   roomsListInFlight = null;
+  participantsCache.delete(PRODUCTION_ROOMS_LIST_CACHE_KEY);
+  participantsInFlight.delete(PRODUCTION_ROOMS_LIST_CACHE_KEY);
+}
+
+// #120: the count a human reads off the room card. `numParticipants` counts
+// every LiveKit participant including hidden ones, and every desktop user
+// brings a hidden `-gallery` bridge, so the room-level number is N + k. Count
+// the people instead.
+//
+// The `-gallery` suffix check and the `hidden` permission check are
+// deliberately both here: they are the same participant today, but a hidden
+// participant from any other source is not a person either, and the suffix
+// still holds if a server ever stops populating `permission`.
+//
+// The DISCONNECTED filter is NOT the ghost fix. A peer that drops without
+// disconnecting stays `ACTIVE` for the SFU's ~20-30 s reconnect grace and is
+// counted for that whole window -- accepted, see docs/CONTRACTS.md. This only
+// drops the SDK's terminal state.
+export function visibleParticipantCount(participants: ParticipantInfo[]): number {
+  return participants.filter(
+    (p) =>
+      !p.permission?.hidden &&
+      !p.identity.endsWith(GALLERY_IDENTITY_SUFFIX) &&
+      p.state !== ParticipantInfo_State.DISCONNECTED
+  ).length;
+}
+
+interface ParticipantsCacheEntry {
+  at: number;
+  count: number;
+}
+// Same keying discipline as roomsListCache: an injected test service never
+// shares cached counts with production, and concurrent misses for one room
+// coalesce onto a single upstream call.
+const participantsCache = new WeakMap<object, Map<string, ParticipantsCacheEntry>>();
+const participantsInFlight = new WeakMap<object, Map<string, Promise<number>>>();
+const PARTICIPANTS_CACHE_MAX_ROOMS = 512;
+
+function perServiceMap<T>(store: WeakMap<object, Map<string, T>>, key: object): Map<string, T> {
+  const existing = store.get(key);
+  if (existing) return existing;
+  const created = new Map<string, T>();
+  store.set(key, created);
+  return created;
+}
+
+// Entries are keyed by room, so a long-lived instance would otherwise
+// accumulate one per room it has ever answered for. Expired first, then
+// oldest-inserted (Map preserves insertion order).
+function pruneParticipantsCache(cache: Map<string, ParticipantsCacheEntry>, nowMs: number): void {
+  if (cache.size <= PARTICIPANTS_CACHE_MAX_ROOMS) return;
+  for (const [room, entry] of cache) {
+    if (nowMs - entry.at >= ROOMS_LIST_CACHE_MS) cache.delete(room);
+  }
+  while (cache.size > PARTICIPANTS_CACHE_MAX_ROOMS) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
+
+async function cachedVisibleOccupancy(
+  service: RoomDiscoveryService,
+  cacheKey: object,
+  livekitRoom: string,
+  nowMs: number
+): Promise<number> {
+  const cache = perServiceMap(participantsCache, cacheKey);
+  const cached = cache.get(livekitRoom);
+  if (cached && nowMs - cached.at < ROOMS_LIST_CACHE_MS && nowMs >= cached.at) {
+    return cached.count;
+  }
+  const inFlight = perServiceMap(participantsInFlight, cacheKey);
+  const existing = inFlight.get(livekitRoom);
+  if (existing) return existing;
+  const pending = withLiveKitRetry(() => service.listParticipants(livekitRoom))
+    .then((participants) => {
+      const count = visibleParticipantCount(participants);
+      cache.set(livekitRoom, { at: nowMs, count });
+      pruneParticipantsCache(cache, nowMs);
+      return count;
+    })
+    .finally(() => {
+      inFlight.delete(livekitRoom);
+    });
+  inFlight.set(livekitRoom, pending);
+  return pending;
+}
+
+// Replaces each presented room's room-level `numParticipants` with its count
+// of visible, connected participants. Bounded by the caller's presented set
+// (<= ROOM_STATUS_MAX_ROOMS) intersected with the rooms the list already says
+// are non-empty, so an empty or unknown credential costs nothing extra.
+async function withVisibleOccupancy(
+  matched: CachedRoomEntry[],
+  context: RoomStatusContext,
+  nowMs: number
+): Promise<RoomView[]> {
+  // `numParticipants === 0` needs no RPC: nothing this function could learn
+  // would raise the count, and a hidden-only room reports >= 1 here, so the
+  // gate never skips a room whose visible count it would have lowered.
+  const live = matched.filter((e) => e.view.occupancy > 0);
+  if (live.length === 0) return matched.map((e) => e.view);
+  const service: RoomDiscoveryService = context.service ?? roomService(loadLiveKitEnv());
+  const cacheKey: object = context.service ?? PRODUCTION_ROOMS_LIST_CACHE_KEY;
+  const settled = await Promise.allSettled(
+    live.map((entry) => cachedVisibleOccupancy(service, cacheKey, entry.livekitRoom, nowMs))
+  );
+  const refined = new Map<string, number>();
+  live.forEach((entry, index) => {
+    const result = settled[index]!;
+    // One room's failure never fails the batch and never reads as 0: it falls
+    // back to the room list's number, which is the pre-#120 behaviour and
+    // still the best available answer for that room. This is #708's per-room
+    // isolation, back where a per-room call actually exists again.
+    if (result.status === 'fulfilled') refined.set(entry.livekitRoom, result.value);
+  });
+  // Never mutate `e.view` -- it is the cached object handleListRooms returns.
+  return matched.map((entry) => {
+    const count = refined.get(entry.livekitRoom);
+    return count === undefined ? entry.view : { ...entry.view, occupancy: count };
+  });
 }
 
 async function cachedRoomEntries(context: RequestContext, nowMs: number): Promise<CachedRoomEntry[]> {
@@ -1007,6 +1134,12 @@ export interface RoomStatusRequest {
   rooms: RoomStatusRequestEntry[];
 }
 
+// The status seam needs BOTH RPCs: `listRooms` for the shared room list and
+// metadata, `listParticipants` for the per-room visible count (#120).
+export interface RoomStatusContext extends RequestContext {
+  service?: RoomListingService & RoomDiscoveryService;
+}
+
 /**
  * `POST /api/rooms/status { rooms: [{ room, accessCode? }] }` ->
  * `{ rooms: [{ id, name, open, occupancy }] }` for ONLY the rooms whose
@@ -1016,10 +1149,15 @@ export interface RoomStatusRequest {
  * additionally omitted unless `accessCode` hashes to its credential, the same
  * rule `handleToken` applies at mint. One cached `listRooms` RPC serves every
  * caller (see `cachedRoomEntries`); the rooms rate-limit bucket is charged.
+ *
+ * `occupancy` is the number of VISIBLE, connected participants, counted with
+ * one cached `listParticipants` per presented non-empty room (#120) -- NOT
+ * `numParticipants`, which counts the hidden `-gallery` bridge every desktop
+ * user opens and so reads N + k.
  */
 export async function handleRoomStatus(
   body: Partial<RoomStatusRequest> | null | undefined,
-  context: RequestContext = {}
+  context: RoomStatusContext = {}
 ): Promise<{ rooms: RoomView[] }> {
   if (!body || !Array.isArray(body.rooms)) {
     throw new HttpError(400, 'rooms must be an array');
@@ -1045,7 +1183,7 @@ export async function handleRoomStatus(
   await enforceRoomsRateLimit(context.rateLimitKey, nowMs);
   if (requested.size === 0) return { rooms: [] };
   const entries = await cachedRoomEntries(context, nowMs);
-  const rooms: RoomView[] = [];
+  const matched: CachedRoomEntry[] = [];
   for (const entry of entries) {
     const asked = requested.get(entry.livekitRoom);
     if (!asked) continue;
@@ -1053,9 +1191,10 @@ export async function handleRoomStatus(
       const proven = asked.accessCode ? credentialForAccessCode(asked.accessCode) : null;
       if (!proven || proven !== asked.credential) continue;
     }
-    rooms.push(entry.view);
+    matched.push(entry);
   }
-  return { rooms };
+  if (matched.length === 0) return { rooms: [] };
+  return { rooms: await withVisibleOccupancy(matched, context, nowMs) };
 }
 
 export async function handleCreateRoom(

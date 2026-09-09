@@ -912,6 +912,19 @@ input[type='text']:disabled {
   color: var(--text-strong);
 }
 
+/* #123: the room ID is always visible -- no hover disclosure, and never
+   ellipsized: people must be able to read every character before copying. */
+.recent-room__id {
+  min-width: 0;
+  width: max-content;
+  max-width: 100%;
+  overflow: visible;
+  white-space: nowrap;
+  font: 600 10px var(--font-mono);
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+
 .recent-room__meta {
   color: var(--text-faint);
   font: 500 10.5px / 1.25 var(--font-mono);

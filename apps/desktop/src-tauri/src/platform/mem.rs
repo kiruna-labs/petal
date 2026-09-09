@@ -245,12 +245,46 @@ fn throttled_read(
     value
 }
 
+/// Unconditional read that also REFRESHES the throttle cache.
+///
+/// #106: every `mem=` value in `capture-diag` comes from
+/// `process_footprint_bytes_throttled`, so it can be up to
+/// `FOOTPRINT_THROTTLE_INTERVAL` (5s) old. Reading a field log naively puts
+/// each step of a memory climb up to 5s later than it happened -- in the
+/// #106 capture the 1492MB value printed beside `start_share ... first
+/// frame` had actually been sampled ~4s BEFORE that share started. Callers
+/// marking a specific moment (share start, first frame, publish) must use
+/// this instead, and because it writes the cache the next throttled reader
+/// within the window reports this fresh value rather than an older one.
+pub fn process_footprint_bytes_now() -> Option<u64> {
+    forced_read(footprint_cache(), Instant::now(), process_footprint_bytes)
+}
+
+/// Read `probe` unconditionally and store it as the throttle cache's newest
+/// entry. Split out from the `pub` entry point above for the same reason
+/// `throttled_read` is: so tests drive a private cache and a call-counting
+/// probe instead of the process-wide static.
+fn forced_read(
+    cache: &Mutex<Option<(Instant, Option<u64>)>>,
+    now: Instant,
+    probe: impl FnOnce() -> Option<u64>,
+) -> Option<u64> {
+    let value = probe();
+    let mut guard = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some((now, value));
+    value
+}
+
 /// Throttled `process_footprint_bytes()`. `capture-diag` (`session/
 /// share.rs`) reads this roughly once per second; the underlying syscall is
 /// cheap but there is no reason to pay it more than once per
 /// `FOOTPRINT_THROTTLE_INTERVAL` (5s) -- this caches the last reading behind
 /// a timestamp check so repeated calls inside the window are a plain load,
 /// not a fresh `task_info`/`GetProcessMemoryInfo` call.
+///
+/// The cost is temporal aliasing: a value read here is anywhere from 0 to 5s
+/// old, so it CANNOT date a step in a memory curve. Use
+/// `process_footprint_bytes_now` for anything that has to say when (#106).
 pub fn process_footprint_bytes_throttled() -> Option<u64> {
     throttled_read(
         footprint_cache(),
@@ -258,6 +292,66 @@ pub fn process_footprint_bytes_throttled() -> Option<u64> {
         FOOTPRINT_THROTTLE_INTERVAL,
         process_footprint_bytes,
     )
+}
+
+/// Bytes one NV12 (`420v`) frame of `width`x`height` occupies: a full-size
+/// luma plane plus a half-resolution interleaved chroma plane, each
+/// dimension rounded up so an odd dimension still forms whole chroma blocks.
+/// Shared by every pool below because the capture, publish-copy and SCK
+/// queue paths all hold 4:2:0 frames of the same shape (I420's three planes
+/// total the same bytes as NV12's two).
+pub fn nv12_frame_bytes(width: u32, height: u32) -> u64 {
+    let luma = u64::from(width) * u64::from(height);
+    let chroma = u64::from(width.div_ceil(2)) * 2 * u64::from(height.div_ceil(2));
+    luma + chroma
+}
+
+/// The most bytes Petal's OWN frame buffers can hold for one share at a
+/// given source resolution (#106).
+///
+/// Deliberately a ceiling, not a measurement: each pool is a fixed frame
+/// COUNT, so multiplying by the frame size is the largest it can ever be.
+/// Logged at share start so a field log carries the number instead of
+/// requiring someone to re-derive it from three constants in two modules --
+/// and so a spike far above this total is visibly NOT Petal's own pools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FramePoolCeiling {
+    /// `capture::CAPTURE_BUFFER_POOL_LIMIT` NV12 plane-copy buffers.
+    pub capture_copy_bytes: u64,
+    /// `transport::publisher::I420_BUFFER_POOL_LIMIT` I420 publish buffers.
+    pub i420_publish_bytes: u64,
+    /// `capture::CAPTURE_QUEUE_DEPTH` IOSurfaces SCK may hand us at once.
+    pub sck_queue_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl FramePoolCeiling {
+    pub fn total_mb(&self) -> u64 {
+        self.total_bytes / (1024 * 1024)
+    }
+}
+
+/// Compute [`FramePoolCeiling`]. Frame counts are passed in rather than
+/// re-declared here so the constants keep exactly one definition each in the
+/// modules that own them (`capture`, `transport::publisher`) -- two notions
+/// of "how deep is the pool" is how they drift apart.
+pub fn frame_pool_ceiling(
+    width: u32,
+    height: u32,
+    capture_copy_frames: u32,
+    i420_publish_frames: u32,
+    sck_queue_frames: u32,
+) -> FramePoolCeiling {
+    let frame = nv12_frame_bytes(width, height);
+    let capture_copy_bytes = frame * u64::from(capture_copy_frames);
+    let i420_publish_bytes = frame * u64::from(i420_publish_frames);
+    let sck_queue_bytes = frame * u64::from(sck_queue_frames);
+    FramePoolCeiling {
+        capture_copy_bytes,
+        i420_publish_bytes,
+        sck_queue_bytes,
+        total_bytes: capture_copy_bytes + i420_publish_bytes + sck_queue_bytes,
+    }
 }
 
 /// Global counter of this app's own live (constructed, not yet dropped)
@@ -357,6 +451,82 @@ mod tests {
             "once the interval elapses the probe must run again"
         );
         assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn forced_read_reinvokes_the_probe_inside_the_throttle_window_and_refreshes_the_cache() {
+        // #106: a lifecycle mark must report NOW, and must leave the cache
+        // holding NOW so the next throttled `capture-diag` line does not
+        // print a value older than the mark it follows.
+        let cache: Mutex<Option<(Instant, Option<u64>)>> = Mutex::new(None);
+        let interval = Duration::from_secs(5);
+        let t0 = Instant::now();
+
+        assert_eq!(throttled_read(&cache, t0, interval, || Some(100)), Some(100));
+
+        let one_second_later = t0 + Duration::from_secs(1);
+        assert_eq!(
+            throttled_read(&cache, one_second_later, interval, || Some(900)),
+            Some(100),
+            "throttled read inside the window must still return the stale value"
+        );
+        assert_eq!(
+            forced_read(&cache, one_second_later, || Some(900)),
+            Some(900),
+            "a forced read inside the window must re-invoke the probe"
+        );
+        assert_eq!(
+            throttled_read(&cache, t0 + Duration::from_secs(2), interval, || Some(
+                7_777
+            )),
+            Some(900),
+            "the forced read must have refreshed the cache with its own value"
+        );
+    }
+
+    #[test]
+    fn nv12_frame_bytes_matches_the_three_halves_shape_and_rounds_odd_dimensions_up() {
+        assert_eq!(nv12_frame_bytes(2560, 1440), 5_529_600);
+        assert_eq!(nv12_frame_bytes(1920, 1080), 3_110_400);
+        // Odd dimensions round each chroma dimension up rather than
+        // truncating a partial block away.
+        assert_eq!(nv12_frame_bytes(3, 3), 9 + 4 * 2);
+        assert_eq!(nv12_frame_bytes(0, 0), 0);
+    }
+
+    #[test]
+    fn frame_pool_ceiling_scales_with_pixels_and_stays_far_under_the_106_step() {
+        // #106's field capture stepped ~1064 MB at once while sharing a
+        // 2560x1440 display. Petal's own pools are fixed FRAME COUNTS (3/3/3),
+        // so their ceiling at that resolution is ~47 MB -- under 5% of one
+        // step. This test is the arithmetic half of that claim; if a pool
+        // limit is ever raised, this fails and the claim gets re-checked.
+        let ceiling = frame_pool_ceiling(2560, 1440, 3, 3, 3);
+        assert_eq!(ceiling.capture_copy_bytes, 3 * 5_529_600);
+        assert_eq!(ceiling.i420_publish_bytes, 3 * 5_529_600);
+        assert_eq!(ceiling.sck_queue_bytes, 3 * 5_529_600);
+        assert_eq!(ceiling.total_bytes, 9 * 5_529_600);
+        assert_eq!(ceiling.total_mb(), 47);
+        assert!(
+            ceiling.total_bytes < 64 * 1024 * 1024,
+            "2560x1440 pool ceiling {} bytes is no longer a small fraction of a 1 GB step",
+            ceiling.total_bytes
+        );
+
+        // 5K, the largest single display Petal can be pointed at today: still
+        // bounded, and exactly linear in pixel count rather than growing by
+        // some implicit multiple of the source resolution.
+        let five_k = frame_pool_ceiling(5120, 2880, 3, 3, 3);
+        assert_eq!(five_k.total_bytes, 4 * ceiling.total_bytes);
+        assert!(five_k.total_bytes < 256 * 1024 * 1024);
+
+        // Both directions: a deeper pool must report MORE, so the ceiling
+        // cannot silently stay flat if someone raises a limit.
+        assert!(
+            frame_pool_ceiling(2560, 1440, 8, 3, 3).total_bytes > ceiling.total_bytes,
+            "raising a pool limit must raise the reported ceiling"
+        );
+        assert_eq!(frame_pool_ceiling(2560, 1440, 0, 0, 0).total_bytes, 0);
     }
 
     #[test]
