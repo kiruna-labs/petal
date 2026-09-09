@@ -80,7 +80,7 @@ use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 
 use crate::capture::{CaptureBufferPool, CapturedFrame, CapturedFramePayload};
 
-const I420_BUFFER_POOL_LIMIT: usize = 3;
+pub(crate) const I420_BUFFER_POOL_LIMIT: usize = 3;
 /// A captured window's size must stay at ONE value for this long before the
 /// sender re-anchors the published size to it (one encoder recreation per
 /// resize gesture). Shorter than this and a slow drag would re-create the
@@ -4154,19 +4154,35 @@ mod track_name_tests {
         assert!(!rung_is_starved(0, 0));
     }
 
+    /// A lower rung that IS funded and delivering -- #907's actual field
+    /// case (`q` funded at ~2.58Mbps of its 2.8125Mbps ceiling over a
+    /// 2.58Mbps link). This is the premise the guard was built on.
+    const FUNDED_LOWER: LowerRungActivity = LowerRungActivity {
+        funded: true,
+        delivering: true,
+    };
+    /// #107's field case: `rid=q target=0kbps encoded=0x0 fps=0.0` in all
+    /// 122 samples of the session.
+    const DARK_LOWER: LowerRungActivity = LowerRungActivity {
+        funded: false,
+        delivering: false,
+    };
+
     #[test]
     fn starvation_guard_throttles_only_after_sustained_starvation() {
         let mut state = RungFundingState::Funded;
         let mut count = 0u32;
         // Two starved samples: not yet enough (trigger is 3).
         for _ in 0..2 {
-            let (next_count, _, next_state) = rung_starvation_next_state(state, true, count, 0);
+            let (next_count, _, next_state) =
+                rung_starvation_next_state(state, true, true, count, 0);
             count = next_count;
             state = next_state;
         }
         assert_eq!(state, RungFundingState::Funded);
         // A healthy sample in between resets the streak entirely.
-        let (reset_count, _, reset_state) = rung_starvation_next_state(state, false, count, 0);
+        let (reset_count, _, reset_state) =
+            rung_starvation_next_state(state, false, true, count, 0);
         assert_eq!(reset_state, RungFundingState::Funded);
         assert_eq!(reset_count, 0);
 
@@ -4174,7 +4190,8 @@ mod track_name_tests {
         let mut state = RungFundingState::Funded;
         let mut count = 0u32;
         for _ in 0..RUNG_STARVATION_GUARD_TRIGGER_SAMPLES {
-            let (next_count, _, next_state) = rung_starvation_next_state(state, true, count, 0);
+            let (next_count, _, next_state) =
+                rung_starvation_next_state(state, true, true, count, 0);
             count = next_count;
             state = next_state;
         }
@@ -4188,7 +4205,7 @@ mod track_name_tests {
         // probe interval before noticing -- the very next sample already
         // proves it.
         let (count, failures, state) =
-            rung_starvation_next_state(RungFundingState::Throttled, false, 3, 1);
+            rung_starvation_next_state(RungFundingState::Throttled, false, true, 3, 1);
         assert_eq!(state, RungFundingState::Funded);
         assert_eq!(count, 0);
         assert_eq!(failures, 0);
@@ -4199,7 +4216,8 @@ mod track_name_tests {
         let mut state = RungFundingState::Throttled;
         let mut count = 0u32;
         for _ in 0..RUNG_STARVATION_GUARD_PROBE_BASE_SAMPLES {
-            let (next_count, _, next_state) = rung_starvation_next_state(state, true, count, 0);
+            let (next_count, _, next_state) =
+                rung_starvation_next_state(state, true, true, count, 0);
             count = next_count;
             state = next_state;
         }
@@ -4208,13 +4226,13 @@ mod track_name_tests {
         // Still starved once probed: back to Throttled, one more failure
         // recorded.
         let (_, failures, still_starved) =
-            rung_starvation_next_state(RungFundingState::Probing, true, 0, 0);
+            rung_starvation_next_state(RungFundingState::Probing, true, true, 0, 0);
         assert_eq!(still_starved, RungFundingState::Throttled);
         assert_eq!(failures, 1);
 
         // Healthy once probed: recovers to Funded immediately, failures reset.
         let (_, failures, recovered) =
-            rung_starvation_next_state(RungFundingState::Probing, false, 0, 2);
+            rung_starvation_next_state(RungFundingState::Probing, false, true, 0, 2);
         assert_eq!(recovered, RungFundingState::Funded);
         assert_eq!(failures, 0);
     }
@@ -4242,30 +4260,132 @@ mod track_name_tests {
 
         // #907 review (Gemini, "the sender guard has no failure cap"): after
         // `RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP` failed probes in a row,
-        // the guard gives up rather than probing forever. Drives the
-        // `Probing` arm directly (independent of the `Throttled` interval
-        // wait between attempts, which `starvation_guard_reprobes_after_the_probe_interval_then_decides`
+        // the guard stops probing on the fast schedule rather than probing
+        // every 30s forever. Drives the `Probing` arm directly (independent
+        // of the `Throttled` interval wait between attempts, which
+        // `starvation_guard_reprobes_after_the_probe_interval_then_decides`
         // already covers) to isolate the escalation itself.
         let mut failures = 0u32;
         let mut last_state = RungFundingState::Probing;
         for _ in 0..RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP {
             let (_, next_failures, next_state) =
-                rung_starvation_next_state(RungFundingState::Probing, true, 0, failures);
+                rung_starvation_next_state(RungFundingState::Probing, true, true, 0, failures);
             failures = next_failures;
             last_state = next_state;
         }
         assert_eq!(last_state, RungFundingState::GivenUp);
         assert_eq!(failures, RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP);
 
-        // GivenUp never probes again on its own, but still recognizes an
-        // external recovery.
-        let (_, _, still_given_up) =
-            rung_starvation_next_state(RungFundingState::GivenUp, true, 0, failures);
-        assert_eq!(still_given_up, RungFundingState::GivenUp);
+        // GivenUp still recognizes an external recovery on the very next
+        // sample.
         let (_, reset_failures, recovered) =
-            rung_starvation_next_state(RungFundingState::GivenUp, false, 0, failures);
+            rung_starvation_next_state(RungFundingState::GivenUp, false, true, 0, failures);
         assert_eq!(recovered, RungFundingState::Funded);
         assert_eq!(reset_failures, 0);
+    }
+
+    #[test]
+    fn given_up_is_not_absorbing_and_reprobes_on_the_slow_cadence() {
+        // #107: `GivenUp` used to be terminal -- a real session sat in it at
+        // 50kbps for the last six minutes of its publish. "Give up" must
+        // mean "probe rarely", never "never probe again".
+        let mut state = RungFundingState::GivenUp;
+        let mut count = 0u32;
+        let failures = RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP;
+
+        // It holds for the full slow interval and does NOT probe early...
+        for sample in 1..RUNG_STARVATION_GUARD_GIVEN_UP_PROBE_SAMPLES {
+            let (next_count, next_failures, next_state) =
+                rung_starvation_next_state(state, true, true, count, failures);
+            count = next_count;
+            state = next_state;
+            assert_eq!(
+                state,
+                RungFundingState::GivenUp,
+                "sample {sample} must still be holding, not probing"
+            );
+            assert_eq!(next_failures, failures, "the failure count must not drift while holding");
+        }
+        // ...and then probes of its own initiative.
+        let (_, _, probing) = rung_starvation_next_state(state, true, true, count, failures);
+        assert_eq!(probing, RungFundingState::Probing);
+
+        // A failed slow probe returns to GivenUp (it does NOT fall back to
+        // the fast 30s schedule), so the cost stays bounded at one probe per
+        // ~300s no matter how long the publish runs.
+        let (_, more_failures, back_to_given_up) =
+            rung_starvation_next_state(RungFundingState::Probing, true, true, 0, failures);
+        assert_eq!(back_to_given_up, RungFundingState::GivenUp);
+        assert!(more_failures > failures, "failures keep accumulating, saturating");
+
+        // A SUCCESSFUL slow probe fully recovers, failures reset to zero.
+        let (_, reset, recovered) =
+            rung_starvation_next_state(RungFundingState::Probing, false, true, 0, failures);
+        assert_eq!(recovered, RungFundingState::Funded);
+        assert_eq!(reset, 0);
+    }
+
+    #[test]
+    fn the_premise_check_overrides_every_state() {
+        // #107 step 2: with no rung worth protecting, throttling is pure
+        // loss. The machine must refuse to enter `Throttled` AND must leave
+        // any throttled state immediately if the lower rung goes dark.
+        for state in [
+            RungFundingState::Funded,
+            RungFundingState::Throttled,
+            RungFundingState::Probing,
+            RungFundingState::GivenUp,
+        ] {
+            let (count, failures, next) = rung_starvation_next_state(state, true, false, 2, 3);
+            assert_eq!(
+                next,
+                RungFundingState::Funded,
+                "{state:?} must restore the configured ceiling when nothing is worth protecting"
+            );
+            assert_eq!(count, 0);
+            assert_eq!(failures, 0);
+        }
+    }
+
+    #[test]
+    fn lower_rung_activity_reads_funding_and_delivery_from_the_same_poll() {
+        let guarded = "h";
+        // #107 field case: `q` flat zero on every axis, all session.
+        let dark = [
+            RungSample { rid: "h".into(), target_bitrate_bps: 681_000.0, frames_per_second: 1.0 },
+            RungSample { rid: "q".into(), target_bitrate_bps: 0.0, frames_per_second: 0.0 },
+        ];
+        assert_eq!(lower_rung_activity(&dark, guarded), DARK_LOWER);
+        assert!(!lower_rung_activity(&dark, guarded).worth_protecting());
+
+        // #907 field case: `q` funded and delivering.
+        let funded = [
+            RungSample { rid: "h".into(), target_bitrate_bps: 288_000.0, frames_per_second: 4.0 },
+            RungSample { rid: "q".into(), target_bitrate_bps: 2_580_000.0, frames_per_second: 30.0 },
+        ];
+        assert!(lower_rung_activity(&funded, guarded).worth_protecting());
+
+        // Funded but not yet delivering a frame still counts -- it is being
+        // allocated bandwidth, which is the contention the guard exists to
+        // relieve.
+        let funded_only = [
+            RungSample { rid: "h".into(), target_bitrate_bps: 288_000.0, frames_per_second: 0.0 },
+            RungSample { rid: "q".into(), target_bitrate_bps: 900_000.0, frames_per_second: 0.0 },
+        ];
+        assert_eq!(
+            lower_rung_activity(&funded_only, guarded),
+            LowerRungActivity { funded: true, delivering: false }
+        );
+        assert!(lower_rung_activity(&funded_only, guarded).worth_protecting());
+
+        // The guarded rung's own numbers are never mistaken for a lower
+        // rung's.
+        let only_top = [RungSample {
+            rid: "h".into(),
+            target_bitrate_bps: 3_000_000.0,
+            frames_per_second: 30.0,
+        }];
+        assert_eq!(lower_rung_activity(&only_top, guarded), DARK_LOWER);
     }
 
     #[test]
@@ -4290,17 +4410,25 @@ mod track_name_tests {
 
     #[test]
     fn starvation_guard_observe_reports_a_transition_only_once() {
-        let mut guard = RungStarvationGuard {
-            rid: "h".to_string(),
-            state: RungFundingState::Funded,
-            consecutive_samples: 0,
-            consecutive_probe_failures: 0,
-        };
+        let mut guard = RungStarvationGuard::for_rid("h", 2).expect("two layers must be guarded");
         let configured_bitrate_bps = 8_000_000u64;
-        assert_eq!(guard.observe(288_000, configured_bitrate_bps), None, "sample 1: not yet sustained");
-        assert_eq!(guard.observe(288_000, configured_bitrate_bps), None, "sample 2: not yet sustained");
+        let starved = |fps: f64| RungSample {
+            rid: "h".into(),
+            target_bitrate_bps: 288_000.0,
+            frames_per_second: fps,
+        };
         assert_eq!(
-            guard.observe(288_000, configured_bitrate_bps),
+            guard.observe(&starved(30.0), FUNDED_LOWER, configured_bitrate_bps).state_change,
+            None,
+            "sample 1: not yet sustained"
+        );
+        assert_eq!(
+            guard.observe(&starved(30.0), FUNDED_LOWER, configured_bitrate_bps).state_change,
+            None,
+            "sample 2: not yet sustained"
+        );
+        assert_eq!(
+            guard.observe(&starved(30.0), FUNDED_LOWER, configured_bitrate_bps).state_change,
             Some(RungFundingState::Throttled),
             "sample 3: sustained -- transitions and reports it"
         );
@@ -4309,7 +4437,290 @@ mod track_name_tests {
             (RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS, 30.0)
         );
         // No further transition until the probe interval elapses.
-        assert_eq!(guard.observe(50_000, configured_bitrate_bps), None);
+        let throttled = RungSample {
+            rid: "h".into(),
+            target_bitrate_bps: 50_000.0,
+            frames_per_second: 30.0,
+        };
+        assert_eq!(
+            guard.observe(&throttled, FUNDED_LOWER, configured_bitrate_bps).state_change,
+            None
+        );
+    }
+
+    #[test]
+    fn delivery_degradation_is_reported_once_per_episode_and_distinguishes_funded_from_unfunded() {
+        // #107 step 3: the guard used to read `target_bitrate` (FUNDING) and
+        // never `frames_per_second` (DELIVERY), so a rung funded at 42kbps
+        // and delivering 0fps was indistinguishable from a healthy one.
+        let mut guard = RungStarvationGuard::for_rid("h", 2).expect("two layers must be guarded");
+        let configured = 3_000_000u64;
+        // Funded well above the 25% fraction, but delivering nothing.
+        let funded_but_dead = RungSample {
+            rid: "h".into(),
+            target_bitrate_bps: 2_400_000.0,
+            frames_per_second: 0.0,
+        };
+        assert_eq!(
+            guard.observe(&funded_but_dead, FUNDED_LOWER, configured).delivery_change,
+            None
+        );
+        assert_eq!(
+            guard.observe(&funded_but_dead, FUNDED_LOWER, configured).delivery_change,
+            None
+        );
+        assert_eq!(
+            guard.observe(&funded_but_dead, FUNDED_LOWER, configured).delivery_change,
+            Some(RungDelivery::DegradedFunded),
+            "3 sustained samples: reported, and reported as FUNDED-but-not-delivering"
+        );
+        assert_eq!(
+            guard.observe(&funded_but_dead, FUNDED_LOWER, configured).delivery_change,
+            None,
+            "an episode is reported once, never per sample (#905)"
+        );
+        // Recovery is reported exactly once too.
+        let healthy = RungSample {
+            rid: "h".into(),
+            target_bitrate_bps: 2_400_000.0,
+            frames_per_second: 29.0,
+        };
+        assert_eq!(
+            guard.observe(&healthy, FUNDED_LOWER, configured).delivery_change,
+            Some(RungDelivery::Healthy)
+        );
+        assert_eq!(guard.observe(&healthy, FUNDED_LOWER, configured).delivery_change, None);
+
+        // The unfunded flavour is a DIFFERENT condition with its own report.
+        let starved_and_dead = RungSample {
+            rid: "h".into(),
+            target_bitrate_bps: 42_000.0,
+            frames_per_second: 0.0,
+        };
+        let mut last = None;
+        for _ in 0..RUNG_STARVATION_GUARD_TRIGGER_SAMPLES {
+            last = guard
+                .observe(&starved_and_dead, FUNDED_LOWER, configured)
+                .delivery_change;
+        }
+        assert_eq!(last, Some(RungDelivery::DegradedUnfunded));
+    }
+
+    // ---- #107: the real observation -> decision -> apply chain ------------
+
+    /// Drives `apply_rung_starvation_guard_sample` -- the SAME function
+    /// production calls -- with a scripted stats poll, recording every
+    /// `set_publishing_layer_parameters` the guard would issue. Only the
+    /// libwebrtc poll and the SDK setter are substituted; the premise check,
+    /// the state machine, the ceiling arithmetic and the ordering between
+    /// them are all the production ones.
+    struct GuardHarness {
+        guard: RungStarvationGuard,
+        configured: (String, u64, f64),
+        applied: Vec<(String, u64, f64)>,
+    }
+
+    impl GuardHarness {
+        fn new(configured_bitrate_bps: u64) -> Self {
+            Self {
+                guard: RungStarvationGuard::for_rid("h", 2).expect("two layers must be guarded"),
+                configured: ("h".to_string(), configured_bitrate_bps, 30.0),
+                applied: Vec::new(),
+            }
+        }
+
+        /// One 5s poll: the guarded top rung plus one lower rung.
+        fn poll(&mut self, top: (f64, f64), lower: (f64, f64)) {
+            let samples = vec![
+                RungSample {
+                    rid: "h".to_string(),
+                    target_bitrate_bps: top.0,
+                    frames_per_second: top.1,
+                },
+                RungSample {
+                    rid: "q".to_string(),
+                    target_bitrate_bps: lower.0,
+                    frames_per_second: lower.1,
+                },
+            ];
+            let applied = &mut self.applied;
+            let mut apply = |rid: &str, max_bitrate: u64, max_framerate: f64| {
+                applied.push((rid.to_string(), max_bitrate, max_framerate));
+                "Ok(())".to_string()
+            };
+            apply_rung_starvation_guard_sample(
+                &mut self.guard,
+                &samples,
+                Some(&self.configured),
+                &mut apply,
+            );
+        }
+
+        fn poll_n(&mut self, n: u32, top: (f64, f64), lower: (f64, f64)) {
+            for _ in 0..n {
+                self.poll(top, lower);
+            }
+        }
+
+        fn ceilings(&self) -> Vec<u64> {
+            self.applied.iter().map(|(_, bitrate, _)| *bitrate).collect()
+        }
+    }
+
+    #[test]
+    fn guard_chain_still_throttles_the_original_907_case_with_a_funded_lower_rung() {
+        // #907's field case: 1080p TwoRung, the lower rung funded at
+        // ~2.58Mbps of its own 2.8125Mbps ceiling over a 2.58Mbps link, the
+        // top rung starved to 288kbps of 3Mbps. This is the case the guard
+        // exists for and it must NOT regress.
+        let mut harness = GuardHarness::new(3_000_000);
+        harness.poll_n(
+            RUNG_STARVATION_GUARD_TRIGGER_SAMPLES,
+            (288_000.0, 4.0),
+            (2_580_000.0, 30.0),
+        );
+        assert_eq!(harness.guard.state, RungFundingState::Throttled);
+        assert_eq!(
+            harness.ceilings(),
+            vec![RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS],
+            "exactly one throttle write, at the 50kbps floor"
+        );
+    }
+
+    #[test]
+    fn guard_chain_refuses_to_throttle_when_no_lower_rung_is_funded_or_demanded() {
+        // #107's field trajectory, replayed: `rid=h` starved at 681kbps of a
+        // configured 3000kbps ceiling, `rid=q` at `target=0kbps
+        // encoded=0x0 fps=0.0` in every sample, receiver demand naming only
+        // the 2560-wide top rung. Pre-fix this throttled at 15:02:54 and
+        // never recovered.
+        let mut harness = GuardHarness::new(3_000_000);
+        harness.poll_n(20, (681_000.0, 1.0), (0.0, 0.0));
+        assert_eq!(
+            harness.guard.state,
+            RungFundingState::Funded,
+            "with nothing to protect the guard must leave the only demanded rung alone"
+        );
+        assert!(
+            harness.applied.is_empty(),
+            "no ceiling write at all: {:?}",
+            harness.applied
+        );
+        // ...but the degradation is NOT silent.
+        assert!(harness.guard.consecutive_low_fps_samples >= RUNG_STARVATION_GUARD_TRIGGER_SAMPLES);
+        assert_eq!(harness.guard.reported_delivery, RungDelivery::DegradedUnfunded);
+        assert!(harness.guard.reported_premise_refusal);
+    }
+
+    #[test]
+    fn guard_chain_recovers_from_given_up_when_funding_returns() {
+        // Full #107 trajectory with a funded lower rung: throttle, three
+        // failed probes, give up -- then prove the publish is NOT stuck
+        // there. Both recovery routes are exercised: the slow self-initiated
+        // re-probe, and an externally-restored allocation.
+        let mut harness = GuardHarness::new(3_000_000);
+        let starved_top = (681_000.0, 1.0);
+        let funded_lower = (2_580_000.0, 30.0);
+
+        harness.poll_n(RUNG_STARVATION_GUARD_TRIGGER_SAMPLES, starved_top, funded_lower);
+        assert_eq!(harness.guard.state, RungFundingState::Throttled);
+
+        // Three failed probes on the 30s/60s/120s schedule.
+        for failures in 0..RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP {
+            let interval = rung_starvation_probe_interval_samples(failures);
+            harness.poll_n(interval, starved_top, funded_lower); // -> Probing
+            harness.poll(starved_top, funded_lower); // probe fails
+        }
+        assert_eq!(harness.guard.state, RungFundingState::GivenUp);
+        assert_eq!(
+            *harness.ceilings().last().expect("a ceiling write"),
+            RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS
+        );
+
+        // Pre-#107 this is where the publish ended: pinned at 50kbps for
+        // good. Now it holds for the slow interval and then probes itself.
+        let writes_before = harness.applied.len();
+        harness.poll_n(
+            RUNG_STARVATION_GUARD_GIVEN_UP_PROBE_SAMPLES - 1,
+            starved_top,
+            funded_lower,
+        );
+        assert_eq!(
+            harness.applied.len(),
+            writes_before,
+            "the slow cadence must not probe early"
+        );
+        harness.poll(starved_top, funded_lower);
+        assert_eq!(harness.guard.state, RungFundingState::Probing);
+        assert_eq!(
+            *harness.ceilings().last().expect("a ceiling write"),
+            3_000_000,
+            "a probe restores the full configured ceiling"
+        );
+
+        // Funding has recovered by the time the probe lands.
+        harness.poll((2_600_000.0, 29.0), funded_lower);
+        assert_eq!(harness.guard.state, RungFundingState::Funded);
+        assert_eq!(harness.guard.consecutive_probe_failures, 0);
+        assert_eq!(
+            *harness.ceilings().last().expect("a ceiling write"),
+            3_000_000,
+            "the configured ceiling is restored without a republish or focus switch"
+        );
+    }
+
+    #[test]
+    fn guard_chain_recovers_from_given_up_when_the_lower_rung_goes_dark() {
+        // The other condition change #107 names: the subscriber that made
+        // the lower rung worth protecting leaves. The premise stops holding,
+        // so the ceiling must come back immediately -- no probe interval.
+        let mut harness = GuardHarness::new(3_000_000);
+        let starved_top = (681_000.0, 1.0);
+        let funded_lower = (2_580_000.0, 30.0);
+        harness.poll_n(RUNG_STARVATION_GUARD_TRIGGER_SAMPLES, starved_top, funded_lower);
+        for failures in 0..RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP {
+            harness.poll_n(
+                rung_starvation_probe_interval_samples(failures),
+                starved_top,
+                funded_lower,
+            );
+            harness.poll(starved_top, funded_lower);
+        }
+        assert_eq!(harness.guard.state, RungFundingState::GivenUp);
+
+        harness.poll(starved_top, (0.0, 0.0));
+        assert_eq!(harness.guard.state, RungFundingState::Funded);
+        assert_eq!(
+            *harness.ceilings().last().expect("a ceiling write"),
+            3_000_000
+        );
+    }
+
+    #[test]
+    fn guard_chain_ignores_a_poll_that_never_mentions_the_guarded_rid() {
+        // Defensive: a stats poll that only carries the lower rung must not
+        // be read as "the top rung is starved at 0kbps".
+        let mut harness = GuardHarness::new(3_000_000);
+        let samples = vec![RungSample {
+            rid: "q".to_string(),
+            target_bitrate_bps: 0.0,
+            frames_per_second: 0.0,
+        }];
+        for _ in 0..10 {
+            let applied = &mut harness.applied;
+            let mut apply = |rid: &str, max_bitrate: u64, max_framerate: f64| {
+                applied.push((rid.to_string(), max_bitrate, max_framerate));
+                "Ok(())".to_string()
+            };
+            apply_rung_starvation_guard_sample(
+                &mut harness.guard,
+                &samples,
+                Some(&harness.configured),
+                &mut apply,
+            );
+        }
+        assert_eq!(harness.guard.state, RungFundingState::Funded);
+        assert!(harness.applied.is_empty());
     }
 
     #[test]
@@ -6875,15 +7286,41 @@ const RUNG_STARVATION_GUARD_PROBE_BASE_SAMPLES: u32 = 6;
 /// Exponential backoff cap for repeated probe failures (~120s), matching
 /// `transport::subscriber::STARVATION_PROBE_MAX`.
 const RUNG_STARVATION_GUARD_PROBE_MAX_SAMPLES: u32 = 24;
-/// Consecutive failed probes before giving up on restoring this rung for the
-/// rest of this publish's lifetime (a republish/reconnect creates a fresh
-/// `PublishedTrack` and a fresh guard with clean state) -- matches
-/// `transport::subscriber::STARVATION_PROBE_FAILURE_CAP`.
+/// Consecutive failed probes before the guard stops probing on the fast
+/// 30s/60s/120s schedule and drops to the slow `GivenUp` cadence below --
+/// matches `transport::subscriber::STARVATION_PROBE_FAILURE_CAP`.
 const RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP: u32 = 3;
+/// Re-probe interval once the guard has given up on the fast schedule, in
+/// samples at the 5s poll cadence (~300s). #107: `GivenUp` used to be
+/// ABSORBING -- a real 0.9.11 session entered it at 15:06:39 and pinned the
+/// top rung at 50kbps for the remaining six minutes of the publish with no
+/// path back. The number is taken from that trajectory, not picked round:
+/// the incident's post-give-up tail ran ~6min, so a 300s cadence is the
+/// LONGEST interval that still guarantees at least one recovery attempt
+/// inside a dead window of the observed length (it would have probed at
+/// ~15:11:39). Cost is bounded and tiny -- one 5s sample at the configured
+/// ceiling per 300s, i.e. 1.7% of samples, against the alternative of a
+/// permanent ~98% bitrate cut on the only rung anyone is watching.
+const RUNG_STARVATION_GUARD_GIVEN_UP_PROBE_SAMPLES: u32 = 60;
 /// Live ceiling applied to a throttled rung. Not literally 0: a nonzero
 /// floor keeps the encoding "throttled but not degenerate" for whatever
 /// brief window it takes libwebrtc to actually stop spending bitrate on it.
 const RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS: u64 = 50_000;
+/// Delivered-fps floor below which a rung is not usefully rendering anything,
+/// however it is being funded (#107 step 3: the guard read `target_bitrate`
+/// -- FUNDING -- and never `frames_per_second` -- DELIVERY, so a rung funded
+/// at 42kbps and delivering 0fps looked identical to a healthy one). Chosen
+/// from the field trajectory: across the 75 post-give-up samples the top rung
+/// never once exceeded 2.0fps (59 samples at 0.0, 15 at 1.0, 1 at 2.0) while
+/// capture ran a healthy 29.4fps. 3.0 sits above every observed degraded
+/// sample and an order of magnitude below healthy capture.
+const RUNG_DELIVERY_DEGRADED_FPS: f64 = 3.0;
+/// A rung counts as funded when the allocator grants it any nonzero bitrate
+/// at all. Deliberately not a fraction of its ceiling: this is the
+/// "does anything at all want this rung" question (#107 step 2), and the
+/// field case answered it with a flat `target=0kbps` on `rid=q` in all 122
+/// samples of the session.
+const RUNG_FUNDED_MIN_BITRATE_BPS: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RungFundingState {
@@ -6898,13 +7335,85 @@ enum RungFundingState {
     /// Ceiling was just restored to its configured value for exactly one
     /// sample interval, to test whether funding has recovered.
     Probing,
-    /// Gave up after `RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP` failed
-    /// probes: stays throttled and stops actively re-probing for the rest of
-    /// this publish's lifetime. Still re-evaluated every sample so an
-    /// EXTERNAL change (e.g. a quality switch that legitimately restores
-    /// funding) is still recognized -- this guard just never initiates
-    /// another probe of its own from here.
+    /// Gave up on the fast probe schedule after
+    /// `RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP` failed probes: stays
+    /// throttled and re-probes only on the slow
+    /// `RUNG_STARVATION_GUARD_GIVEN_UP_PROBE_SAMPLES` (~300s) cadence.
+    ///
+    /// #107: this state used to be ABSORBING -- once entered, nothing but a
+    /// focus/quality switch or a republish could leave it, and a real
+    /// session sat here at 50kbps for its final six minutes. "Give up" now
+    /// means "probe rarely", never "never probe again". It is also still
+    /// re-evaluated every sample, so an external change (a quality switch, a
+    /// new subscriber, a recovered bandwidth estimate) is recognized
+    /// immediately without waiting out the slow interval.
     GivenUp,
+}
+
+/// Whether this sample's OTHER rungs give the guard anything to protect
+/// (#107 step 2). The guard's whole premise is "throttle the starved top
+/// rung so it stops competing with the funded lower rung for bandwidth" --
+/// if there is no such lower rung, throttling the top rung protects nothing
+/// and strictly reduces what the only viewer receives.
+///
+/// Both signals are read from the SAME outbound-rtp stats poll that feeds
+/// the guard, so no cross-module plumbing is needed to answer it:
+///
+/// * `funded` -- some other rung has a nonzero allocator-granted
+///   `target_bitrate`. The SFU only allocates to a rung something is
+///   subscribed to, so publisher-side funding is the honest proxy for
+///   demand available at this point in the code.
+/// * `delivering` -- some other rung reports nonzero `frames_per_second`.
+///
+/// `frame_width`/`frame_height` are deliberately NOT used: they latch at the
+/// last encoded size and would keep a long-idle rung looking alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct LowerRungActivity {
+    funded: bool,
+    delivering: bool,
+}
+
+impl LowerRungActivity {
+    /// Is there a lower rung whose bandwidth is worth protecting? Field case
+    /// (#107): `rid=q` read `target=0kbps encoded=0x0 fps=0.0` in all 122
+    /// samples -> `false`, so the top rung's ceiling must be left alone.
+    /// Original case (#907): `q` was funded at ~2.58Mbps of its 2.8125Mbps
+    /// ceiling over a 2.58Mbps link -> `true`, so the throttle still fires.
+    fn worth_protecting(self) -> bool {
+        self.funded || self.delivering
+    }
+}
+
+/// One rung's numbers from a single outbound-rtp stats poll. The guard reads
+/// FUNDING (`target_bitrate_bps`) and DELIVERY (`frames_per_second`)
+/// together -- #107 step 3 -- and reads every OTHER rung's sample too, so it
+/// can check its own premise before acting.
+#[derive(Debug, Clone, PartialEq)]
+struct RungSample {
+    rid: String,
+    target_bitrate_bps: f64,
+    frames_per_second: f64,
+}
+
+impl RungSample {
+    fn is_funded(&self) -> bool {
+        self.target_bitrate_bps >= RUNG_FUNDED_MIN_BITRATE_BPS
+    }
+
+    fn is_delivering(&self) -> bool {
+        self.frames_per_second > 0.0
+    }
+}
+
+/// Summarize every rung EXCEPT `guarded_rid` from one poll's samples.
+fn lower_rung_activity(samples: &[RungSample], guarded_rid: &str) -> LowerRungActivity {
+    samples
+        .iter()
+        .filter(|sample| sample.rid != guarded_rid)
+        .fold(LowerRungActivity::default(), |acc, sample| LowerRungActivity {
+            funded: acc.funded || sample.is_funded(),
+            delivering: acc.delivering || sample.is_delivering(),
+        })
 }
 
 /// Is this one sample starved, relative to the rung's CURRENT configured
@@ -6929,16 +7438,33 @@ fn rung_starvation_probe_interval_samples(consecutive_probe_failures: u32) -> u3
 
 /// One hysteresis step of the starvation guard's state machine. Pure and
 /// unit-testable without a live encoder: takes the current state, whether
-/// THIS sample was starved, and the running consecutive-sample and
+/// THIS sample was starved, whether any OTHER rung is worth protecting
+/// (#107 -- the guard's premise), and the running consecutive-sample and
 /// consecutive-probe-failure counts; returns the next counts and next state.
 /// The caller applies the live SDK call only on an actual state change (see
-/// `log_window_share_encoder_stats`).
+/// `apply_rung_starvation_guard_sample`).
+///
+/// `lower_rung_worth_protecting == false` is a hard override in EVERY state:
+/// with nothing to protect, throttling the top rung is pure loss, so the
+/// machine both refuses to enter `Throttled` and leaves it (and `GivenUp`)
+/// immediately if the lower rung goes dark mid-throttle. That second
+/// direction is also a real recovery route -- a subscriber dropping off the
+/// low rung is exactly the kind of condition change #107 requires the guard
+/// to notice.
 fn rung_starvation_next_state(
     current: RungFundingState,
     sample_starved: bool,
+    lower_rung_worth_protecting: bool,
     consecutive_samples: u32,
     consecutive_probe_failures: u32,
 ) -> (u32, u32, RungFundingState) {
+    if !lower_rung_worth_protecting {
+        // #107: the premise does not hold. Restore (or keep) the configured
+        // ceiling regardless of how starved this rung looks -- the starvation
+        // is real, but throttling is not the answer to it when the only rung
+        // with demand is the one being throttled.
+        return (0, 0, RungFundingState::Funded);
+    }
     match current {
         RungFundingState::Funded => {
             if sample_starved {
@@ -6973,7 +7499,7 @@ fn rung_starvation_next_state(
         // trigger threshold, since the probe itself IS the fresh evidence.
         RungFundingState::Probing => {
             if sample_starved {
-                let failures = consecutive_probe_failures + 1;
+                let failures = consecutive_probe_failures.saturating_add(1);
                 if failures >= RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP {
                     (0, failures, RungFundingState::GivenUp)
                 } else {
@@ -6984,15 +7510,41 @@ fn rung_starvation_next_state(
             }
         }
         RungFundingState::GivenUp => {
-            // Still recognize an external recovery (e.g. a quality switch),
-            // but never initiate another probe of our own from here.
+            // Still recognize an external recovery (e.g. a quality switch)
+            // on the very next sample...
             if !sample_starved {
-                (0, 0, RungFundingState::Funded)
+                return (0, 0, RungFundingState::Funded);
+            }
+            // ...and, #107, keep probing on our OWN initiative on the slow
+            // ~300s cadence. This state is no longer absorbing: a link that
+            // recovers ten minutes in is not punished for the rest of the
+            // meeting.
+            let count = consecutive_samples + 1;
+            if count >= RUNG_STARVATION_GUARD_GIVEN_UP_PROBE_SAMPLES {
+                (0, consecutive_probe_failures, RungFundingState::Probing)
             } else {
-                (0, consecutive_probe_failures, RungFundingState::GivenUp)
+                (count, consecutive_probe_failures, RungFundingState::GivenUp)
             }
         }
     }
+}
+
+/// How a rung's delivery looks this sample, independent of how it is funded
+/// (#107 step 3). "Funded but delivering ~0fps" is its own condition with
+/// its own log line -- it is NOT the same failure as "unfunded", and the
+/// pre-#107 guard could not tell them apart because it only ever read
+/// `target_bitrate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RungDelivery {
+    /// Delivering at or above `RUNG_DELIVERY_DEGRADED_FPS`.
+    Healthy,
+    /// Sustained near-zero delivered fps while the allocator is starving this
+    /// rung.
+    DegradedUnfunded,
+    /// Sustained near-zero delivered fps even though the allocator IS funding
+    /// this rung at or above the starvation fraction of its ceiling. Points
+    /// at the media path (encoder clamp, transport), not at allocation.
+    DegradedFunded,
 }
 
 /// Guard state for the one rung this track's guard protects (the ladder's
@@ -7004,6 +7556,31 @@ struct RungStarvationGuard {
     state: RungFundingState,
     consecutive_samples: u32,
     consecutive_probe_failures: u32,
+    /// Consecutive samples this rung delivered below
+    /// `RUNG_DELIVERY_DEGRADED_FPS` (#107 step 3).
+    consecutive_low_fps_samples: u32,
+    /// Delivery condition last REPORTED, so a degradation episode logs once
+    /// on entry and once on recovery -- never per sample (#905).
+    reported_delivery: RungDelivery,
+    /// Whether the "starved but nothing to protect" refusal has already been
+    /// reported for the current episode (#107 step 2), same once-per-episode
+    /// rule.
+    reported_premise_refusal: bool,
+}
+
+/// What one observed sample asks the caller to do. `state_change` is
+/// `Some` only when the guard's funding state actually changed THIS sample,
+/// so the caller knows exactly when to touch the live sender (#907 step 7:
+/// one line per state change, never per frame/sample).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct RungObservation {
+    state_change: Option<RungFundingState>,
+    /// `Some` when the delivery condition changed this sample -- one warn on
+    /// entering a degraded episode, one on leaving it.
+    delivery_change: Option<RungDelivery>,
+    /// True on the sample where the guard first refuses to throttle because
+    /// no other rung is worth protecting (#107).
+    premise_refused: bool,
 }
 
 impl RungStarvationGuard {
@@ -7011,6 +7588,11 @@ impl RungStarvationGuard {
     /// non-simulcast (single-layer) publish has no other rung to fall back
     /// to, so throttling its only layer would meaningfully degrade the whole
     /// share for no offsetting benefit (no lower rung to free capacity for).
+    ///
+    /// #107 generalizes this same reasoning to RUNTIME: a two-layer publish
+    /// whose second layer nobody is subscribed to is, for the purposes of
+    /// this guard, exactly as unprotectable as a single-layer one -- see
+    /// `LowerRungActivity`.
     fn for_rid(rid: &str, layer_count: usize) -> Option<Self> {
         if layer_count < 2 {
             return None;
@@ -7020,30 +7602,77 @@ impl RungStarvationGuard {
             state: RungFundingState::Funded,
             consecutive_samples: 0,
             consecutive_probe_failures: 0,
+            consecutive_low_fps_samples: 0,
+            reported_delivery: RungDelivery::Healthy,
+            reported_premise_refusal: false,
         })
     }
 
-    /// Apply one new sample for this guard's rid, given the rid's CURRENT
+    /// Apply one new poll's worth of samples, given this rid's CURRENT
     /// configured ceiling (looked up fresh by the caller every poll -- see
-    /// `log_window_share_encoder_stats`). Returns `Some(new_state)` only
-    /// when the state actually changed THIS sample, so the caller knows
-    /// exactly when to touch the live sender (and to log the transition --
-    /// #907 step 7: one line per state change, never per frame/sample).
-    fn observe(&mut self, target_bitrate_bps: u64, configured_bitrate_bps: u64) -> Option<RungFundingState> {
-        let starved = rung_is_starved(target_bitrate_bps, configured_bitrate_bps);
+    /// `log_window_share_encoder_stats`). `lower` summarizes every OTHER
+    /// rung from the SAME poll, which is what lets the guard check its own
+    /// premise before acting (#107).
+    fn observe(
+        &mut self,
+        sample: &RungSample,
+        lower: LowerRungActivity,
+        configured_bitrate_bps: u64,
+    ) -> RungObservation {
+        let starved = rung_is_starved(sample.target_bitrate_bps as u64, configured_bitrate_bps);
+        let protectable = lower.worth_protecting();
+
+        let mut observation = RungObservation::default();
+
+        // -- premise (#107 step 2) ---------------------------------------
+        if starved && !protectable {
+            if !self.reported_premise_refusal {
+                self.reported_premise_refusal = true;
+                observation.premise_refused = true;
+            }
+        } else {
+            self.reported_premise_refusal = false;
+        }
+
+        // -- funding state machine ---------------------------------------
         let (count, failures, next_state) = rung_starvation_next_state(
             self.state,
             starved,
+            protectable,
             self.consecutive_samples,
             self.consecutive_probe_failures,
         );
         self.consecutive_samples = count;
         self.consecutive_probe_failures = failures;
-        if next_state == self.state {
-            return None;
+        if next_state != self.state {
+            self.state = next_state;
+            observation.state_change = Some(next_state);
         }
-        self.state = next_state;
-        Some(next_state)
+
+        // -- delivery (#107 step 3) --------------------------------------
+        // Deliberately evaluated AFTER the funding machine and independently
+        // of it: a rung can be perfectly funded and still deliver nothing,
+        // which is precisely the case the pre-#107 guard could not see.
+        if sample.frames_per_second < RUNG_DELIVERY_DEGRADED_FPS {
+            self.consecutive_low_fps_samples = self.consecutive_low_fps_samples.saturating_add(1);
+        } else {
+            self.consecutive_low_fps_samples = 0;
+        }
+        let delivery = if self.consecutive_low_fps_samples >= RUNG_STARVATION_GUARD_TRIGGER_SAMPLES {
+            if starved {
+                RungDelivery::DegradedUnfunded
+            } else {
+                RungDelivery::DegradedFunded
+            }
+        } else {
+            RungDelivery::Healthy
+        };
+        if delivery != self.reported_delivery {
+            self.reported_delivery = delivery;
+            observation.delivery_change = Some(delivery);
+        }
+
+        observation
     }
 
     /// The live `(max_bitrate, max_framerate)` this guard's rid should carry
@@ -7066,6 +7695,116 @@ impl RungStarvationGuard {
                 (RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS, configured_framerate)
             }
         }
+    }
+}
+
+/// One full guard tick: observe this poll's samples, apply the resulting
+/// ceiling change to the live sender, log the transition. Production
+/// (`log_window_share_encoder_stats`) and tests drive THIS function, so a
+/// test exercises the real observation -> decision -> layer-parameter chain
+/// and not merely the pure state machine underneath it; only the libwebrtc
+/// stats poll and the SDK setter are substituted (the same effect-injection
+/// shape as `log_encoder_once_with`).
+///
+/// `apply` receives `(rid, max_bitrate, max_framerate)` and returns whatever
+/// the SDK call reported, for the log line.
+fn apply_rung_starvation_guard_sample(
+    guard: &mut RungStarvationGuard,
+    samples: &[RungSample],
+    configured_top: Option<&(String, u64, f64)>,
+    apply: &mut dyn FnMut(&str, u64, f64) -> String,
+) {
+    let Some(sample) = samples.iter().find(|sample| sample.rid == guard.rid) else {
+        return;
+    };
+    let Some((_, configured_bitrate_bps, configured_framerate)) = configured_top else {
+        return;
+    };
+    let lower = lower_rung_activity(samples, &guard.rid);
+    let observation = guard.observe(sample, lower, *configured_bitrate_bps);
+
+    if observation.premise_refused {
+        log::warn!(
+            "publisher: window-share top rung rid={} is starved (target {:.0}kbps < {:.0}% of its configured {}kbps ceiling) but NOT throttling it: no other rung is funded or delivering (lower rungs funded={} delivering={}), so throttling would protect nothing and would degrade the only rung with demand -- reporting the link as degraded instead (#107)",
+            guard.rid,
+            sample.target_bitrate_bps / 1000.0,
+            RUNG_STARVATION_GUARD_FRACTION * 100.0,
+            configured_bitrate_bps / 1000,
+            lower.funded,
+            lower.delivering,
+        );
+    }
+
+    if let Some(new_state) = observation.state_change {
+        let (max_bitrate, max_framerate) =
+            RungStarvationGuard::live_parameters_for(new_state, *configured_bitrate_bps, *configured_framerate);
+        let result = apply(&guard.rid, max_bitrate, max_framerate);
+        match new_state {
+            RungFundingState::Throttled => log::warn!(
+                "publisher: window-share top rung rid={} sustained-starved (target {:.0}kbps < {:.0}% of its configured {}kbps ceiling for {} samples) -- throttling its ceiling to {}kbps so it stops competing with the funded lower rung for bandwidth (this does NOT stop the rung -- see module doc comment); will re-probe in ~{}s (#907) [set_publishing_layer_parameters: {}]",
+                guard.rid,
+                sample.target_bitrate_bps / 1000.0,
+                RUNG_STARVATION_GUARD_FRACTION * 100.0,
+                configured_bitrate_bps / 1000,
+                RUNG_STARVATION_GUARD_TRIGGER_SAMPLES,
+                max_bitrate / 1000,
+                rung_starvation_probe_interval_samples(guard.consecutive_probe_failures) * 5,
+                result
+            ),
+            RungFundingState::Probing => log::warn!(
+                "publisher: window-share top rung rid={} restoring configured {}kbps ceiling for one sample to probe whether funding recovered (probe attempt {}, fast-schedule cap {}) (#907/#107) [set_publishing_layer_parameters: {}]",
+                guard.rid,
+                configured_bitrate_bps / 1000,
+                guard.consecutive_probe_failures + 1,
+                RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP,
+                result
+            ),
+            RungFundingState::Funded => log::warn!(
+                "publisher: window-share top rung rid={} restored to its configured {}kbps ceiling (target {:.0}kbps, lower rungs funded={} delivering={}) (#907/#107) [set_publishing_layer_parameters: {}]",
+                guard.rid,
+                configured_bitrate_bps / 1000,
+                sample.target_bitrate_bps / 1000.0,
+                lower.funded,
+                lower.delivering,
+                result
+            ),
+            RungFundingState::GivenUp => log::warn!(
+                "publisher: window-share top rung rid={} gave up after {} failed recovery probes -- throttled to {}kbps, will keep re-probing every ~{}s (#907/#107: this state is NOT terminal) [set_publishing_layer_parameters: {}]",
+                guard.rid,
+                RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP,
+                max_bitrate / 1000,
+                RUNG_STARVATION_GUARD_GIVEN_UP_PROBE_SAMPLES * 5,
+                result
+            ),
+        }
+    }
+
+    match observation.delivery_change {
+        Some(RungDelivery::DegradedUnfunded) => log::warn!(
+            "publisher: window-share DEGRADED -- top rung rid={} has delivered {:.1}fps (below {:.1}) for {} consecutive samples and is UNFUNDED (target {:.0}kbps of a configured {}kbps ceiling); the share is still published but a viewer is seeing next to nothing (#107)",
+            guard.rid,
+            sample.frames_per_second,
+            RUNG_DELIVERY_DEGRADED_FPS,
+            guard.consecutive_low_fps_samples,
+            sample.target_bitrate_bps / 1000.0,
+            configured_bitrate_bps / 1000,
+        ),
+        Some(RungDelivery::DegradedFunded) => log::warn!(
+            "publisher: window-share DEGRADED -- top rung rid={} is FUNDED at {:.0}kbps (of a configured {}kbps ceiling) yet has delivered only {:.1}fps (below {:.1}) for {} consecutive samples; funding is not the constraint here -- suspect the encoder or the transport, not the allocator (#107)",
+            guard.rid,
+            sample.target_bitrate_bps / 1000.0,
+            configured_bitrate_bps / 1000,
+            sample.frames_per_second,
+            RUNG_DELIVERY_DEGRADED_FPS,
+            guard.consecutive_low_fps_samples,
+        ),
+        Some(RungDelivery::Healthy) => log::warn!(
+            "publisher: window-share recovered -- top rung rid={} is delivering {:.1}fps again (target {:.0}kbps) (#107)",
+            guard.rid,
+            sample.frames_per_second,
+            sample.target_bitrate_bps / 1000.0,
+        ),
+        None => {}
     }
 }
 
@@ -7153,6 +7892,10 @@ async fn log_window_share_encoder_stats(
         let current_height = published_height.load(std::sync::atomic::Ordering::Relaxed);
         let current_top = current_top_rid_parameters(current_quality, current_width, current_height, ladder);
 
+        // #107: collect EVERY video rung's sample from this one poll BEFORE
+        // deciding anything. The guard's premise is about the OTHER rungs,
+        // so it cannot be checked from inside a per-rid loop.
+        let mut samples: Vec<RungSample> = Vec::new();
         for stat in &stats {
             let livekit::webrtc::stats::RtcStats::OutboundRtp(outbound) = stat else {
                 continue;
@@ -7177,62 +7920,27 @@ async fn log_window_share_encoder_stats(
                 o.quality_limitation_reason,
                 o.frames_encoded,
             );
-
-            let Some(guard) = guard.as_mut() else { continue };
-            if o.rid != guard.rid {
-                continue;
-            }
-            let Some((_, configured_bitrate_bps, configured_framerate)) = &current_top else {
-                continue;
-            };
-            let Some(new_state) = guard.observe(o.target_bitrate as u64, *configured_bitrate_bps) else {
-                continue;
-            };
-            let (max_bitrate, max_framerate) =
-                RungStarvationGuard::live_parameters_for(new_state, *configured_bitrate_bps, *configured_framerate);
-            let result = track.set_publishing_layer_parameters(&[
-                livekit::prelude::PublishingLayerParameters {
-                    rid: guard.rid.clone(),
-                    max_bitrate,
-                    max_framerate,
-                },
-            ]);
-            match new_state {
-                RungFundingState::Throttled => log::warn!(
-                    "publisher: window-share top rung rid={} sustained-starved (target {:.0}kbps < {:.0}% of its configured {}kbps ceiling for {} samples) -- throttling its ceiling to {}kbps so it stops competing with the funded lower rung for bandwidth (this does NOT stop the rung -- see module doc comment); will re-probe in ~{}s (#907) [set_publishing_layer_parameters: {:?}]",
-                    guard.rid,
-                    o.target_bitrate / 1000.0,
-                    RUNG_STARVATION_GUARD_FRACTION * 100.0,
-                    configured_bitrate_bps / 1000,
-                    RUNG_STARVATION_GUARD_TRIGGER_SAMPLES,
-                    max_bitrate / 1000,
-                    rung_starvation_probe_interval_samples(guard.consecutive_probe_failures) * 5,
-                    result
-                ),
-                RungFundingState::Probing => log::warn!(
-                    "publisher: window-share top rung rid={} restoring configured {}kbps ceiling for one sample to probe whether funding recovered (probe attempt {} of {}) (#907) [set_publishing_layer_parameters: {:?}]",
-                    guard.rid,
-                    configured_bitrate_bps / 1000,
-                    guard.consecutive_probe_failures + 1,
-                    RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP,
-                    result
-                ),
-                RungFundingState::Funded => log::warn!(
-                    "publisher: window-share top rung rid={} funding recovered (target {:.0}kbps) -- staying at its configured {}kbps ceiling (#907) [set_publishing_layer_parameters: {:?}]",
-                    guard.rid,
-                    o.target_bitrate / 1000.0,
-                    configured_bitrate_bps / 1000,
-                    result
-                ),
-                RungFundingState::GivenUp => log::warn!(
-                    "publisher: window-share top rung rid={} gave up after {} failed recovery probes -- staying throttled at {}kbps for the rest of this publish (a focus/quality switch or republish resets this) (#907) [set_publishing_layer_parameters: {:?}]",
-                    guard.rid,
-                    RUNG_STARVATION_GUARD_PROBE_FAILURE_CAP,
-                    max_bitrate / 1000,
-                    result
-                ),
-            }
+            samples.push(RungSample {
+                rid: o.rid.clone(),
+                target_bitrate_bps: o.target_bitrate,
+                frames_per_second: o.frames_per_second,
+            });
         }
+
+        let Some(guard) = guard.as_mut() else { continue };
+        let mut apply = |rid: &str, max_bitrate: u64, max_framerate: f64| {
+            format!(
+                "{:?}",
+                track.set_publishing_layer_parameters(&[
+                    livekit::prelude::PublishingLayerParameters {
+                        rid: rid.to_string(),
+                        max_bitrate,
+                        max_framerate,
+                    },
+                ])
+            )
+        };
+        apply_rung_starvation_guard_sample(guard, &samples, current_top.as_ref(), &mut apply);
     }
 }
 

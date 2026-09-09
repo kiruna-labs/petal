@@ -146,12 +146,19 @@ export type RoomAdminService = Pick<RoomServiceClient, 'deleteRoom' | 'removePar
   updateRoomMetadata(room: string, metadata: string): Promise<Room>;
 };
 export type RoomDiscoveryService = Pick<RoomServiceClient, 'listParticipants'>;
-// Seam for room DISCOVERY (`handleListRooms`). ONE RPC: `listRooms` already
-// carries `numParticipants` per room (hidden participants excluded), so the
-// per-room `listParticipants` fan-out this used to require is gone -- it made
-// the cost of an unauthenticated GET scale with the number of live rooms and
-// was the backend's cheapest DoS. Mirrors
-// `CreateRoomContext.service`'s injection pattern for tests (#708).
+// Seam for the room LIST (`handleListRooms`, and the cached list behind
+// `handleRoomStatus`). ONE RPC: `listRooms` carries `numParticipants` per
+// room, so the list itself never fans out. Mirrors `CreateRoomContext.
+// service`'s injection pattern for tests (#708).
+//
+// `numParticipants` COUNTS HIDDEN participants -- measured 2026-09-09 on
+// livekit-server 1.13.2 and on the hosted LiveKit Cloud deployment (#120);
+// this comment used to claim the opposite. Since every desktop user opens a
+// hidden `-gallery` bridge, it reads N + k and must not be shown to a user as
+// a headcount. `handleRoomStatus` refines it with `listParticipants` for the
+// rooms the caller presented -- a fan-out bounded by that caller's <= 64
+// credentials, unlike the unauthenticated GET over every live room that #708
+// removed.
 export type RoomListingService = Pick<RoomServiceClient, 'listRooms'>;
 
 // The metadata we stash on a LiveKit room so discovery can show a human name

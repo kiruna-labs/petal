@@ -252,10 +252,29 @@ prove which rooms it may ask about.
 - Native sends every local record's credential plus its access code when
   held (the local `open` flag is only an initial value; the server's wins).
   Web-harness does not call this endpoint.
-- Status is ONE `listRooms` RPC (occupancy is its `numParticipants`, hidden
-  `-gallery` bridges excluded by LiveKit) shared by every caller and cached
-  per instance for `ROOMS_LIST_CACHE_MS` (3s), then filtered to the presented
-  set; the 60/min per-source rooms bucket is still charged on cache hits.
+- Status is ONE `listRooms` RPC shared by every caller and cached per instance
+  for `ROOMS_LIST_CACHE_MS` (3s), then filtered to the presented set; the
+  60/min per-source rooms bucket is still charged on cache hits.
+- `occupancy` is the count of **visible, connected** participants, from one
+  `listParticipants` per presented room whose room-level count is non-zero,
+  cached the same 3s and coalesced per room. It is NOT `numParticipants`:
+  that field **counts hidden participants** (measured 2026-09-09 on both
+  livekit-server 1.13.2 and the hosted LiveKit Cloud deployment — one visible
+  peer plus one hidden `-gallery` bridge reads 2), and every desktop user
+  opens such a bridge, so `numParticipants` is N + k for k desktop users
+  (#120). A room whose `listParticipants` fails falls back to
+  `numParticipants` for that room alone and never fails the batch.
+  `GET`-style server-side tooling (`handleListRooms`) still reports the raw
+  `numParticipants`.
+- **Accepted lag.** A participant that drops without disconnecting stays
+  `ACTIVE` in `listParticipants` for the SFU's reconnect grace (~20–30s
+  measured) and is counted for that whole window; the `DISCONNECTED` filter
+  does not shorten it, and shortening it server-side would break real
+  reconnects. `numParticipants` also lags `listParticipants` by a few
+  seconds, and a room the room list still reports as empty is deliberately
+  not fanned out to, so the FIRST person to join can read 0 for a beat.
+  Worst case the card trails a leave by grace + 3s cache + the desktop's 10s
+  poll. No client-side heuristic compensates for any of this.
 
 `POST /api/rooms` (create/stamp) stays unauthenticated: the web join-link
 flow creates rooms before any LiveKit identity exists. What bounds abuse:

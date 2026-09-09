@@ -28,11 +28,11 @@ been verified and what has not.
 
 ## Download
 
-**For macOS** [![Download Petal for macOS](https://img.shields.io/badge/Download-Petal_for_macOS-1f1f1f?style=for-the-badge&logo=apple&logoColor=white)](https://app.petal.live/api/download?platform=macos)
+[![Download Petal for macOS](https://img.shields.io/badge/Download-Petal_for_macOS-1f1f1f?style=for-the-badge&logo=apple&logoColor=white)](https://app.petal.live/api/download?platform=macos)
 
 Always serves the latest signed, notarized universal build.
 
-**For Windows x86-64** [![Download Petal for Windows](https://img.shields.io/badge/Download-Petal_for_Windows-1f1f1f?style=for-the-badge&logo=windows&logoColor=white)](https://app.petal.live/api/download?platform=windows)
+[![Download Petal for Windows](https://img.shields.io/badge/Download-Petal_for_Windows-1f1f1f?style=for-the-badge&logo=windows&logoColor=white)](https://app.petal.live/api/download?platform=windows)
 
 The Windows installer is currently unsigned for Authenticode and may trigger
 SmartScreen. Its automatic updates still use Tauri's updater signature.

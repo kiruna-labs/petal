@@ -88,6 +88,15 @@ jobs:
     # on PATH, and Accessibility/Screen Recording grants already approved for
     # the Petal dev binary and the terminal/runner service that launches it.
     runs-on: [self-hosted, macOS]
+    # #102: there was NO job timeout at all, so GitHub's 6-hour default applied
+    # and one wedged run held the single self-hosted Tart VM for 81 minutes with
+    # a release e2e gate queued behind it -- which then failed that release's
+    # queue watchdog and cost a version number. Healthy runs of this job take
+    # 6-12 minutes (observed across the last twelve: 5.9, 6.8, 6.9, 7.0, 7.4,
+    # 9.0, 9.0, 9.2, 9.3, 9.4, 11.9), so 45 leaves roughly 4x headroom -- enough
+    # for a cold runner that has to rebuild the Rust app -- while capping the
+    # worst case at under an hour instead of six.
+    timeout-minutes: 45
     env:
       # Match .github/workflows/ci.yml's desktop Rust build recipe.
       RUSTFLAGS: ""
@@ -290,6 +299,17 @@ jobs:
       - name: Run live loopback harness
         if: ${{ !cancelled() }}
         shell: bash
+        # #102: the step-level half of the bound. The job cap above frees the
+        # runner; this one fails the STEP that wedged, so the failure names
+        # itself instead of arriving as an opaque cancelled job. The harness's
+        # own PETAL_HARNESS_RUN_TIMEOUT_MS (15m) should fire first and capture
+        # a backtrace; this is the backstop for a wedge outside the harness.
+        timeout-minutes: 25
+        env:
+          # Land wedge evidence (a `sample` backtrace of the desktop process
+          # plus the tail of the app log) in the directory this job uploads.
+          PETAL_WEDGE_EVIDENCE_DIR: ${{ runner.temp }}/petal-nightly-loopback
+          PETAL_DEV_LOG: ${{ runner.temp }}/petal-nightly-loopback/petal-dev.log
         run: |
           set -euo pipefail
 

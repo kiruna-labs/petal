@@ -316,6 +316,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
           PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+          # Read by the WEBVIEW, so it must be a Vite VITE_ var, not a Rust
+          # option_env! bake. Without it `isFeedbackEnabled()` is false and the
+          # feature is compiled out entirely -- no trigger anywhere, SDK never
+          # imported. That is how every shipped build through 0.9.11 went out.
+          VITE_USERDISPATCH_PUBLIC_KEY: ${{ secrets.VITE_USERDISPATCH_PUBLIC_KEY }}
         run: >-
           npm run tauri build --
           --config src-tauri/tauri.release.conf.json
@@ -717,6 +722,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
           PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+          # See the Windows build step: absent, the feedback feature is
+          # compiled out and no bug-report trigger ships.
+          VITE_USERDISPATCH_PUBLIC_KEY: ${{ secrets.VITE_USERDISPATCH_PUBLIC_KEY }}
         run: |
           set -euo pipefail
           unset APPLE_ID APPLE_PASSWORD APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_PATH
@@ -794,10 +802,15 @@ jobs:
           BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
           PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
           PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+          VITE_USERDISPATCH_PUBLIC_KEY: ${{ secrets.VITE_USERDISPATCH_PUBLIC_KEY }}
           VERSION: ${{ steps.version.outputs.VERSION }}
           TAG: ${{ steps.version.outputs.TAG }}
           TAG_ANNOTATION: ${{ steps.version.outputs.TAG_ANNOTATION }}
           BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle
+          # The feedback key is a Vite bake, and Tauri COMPRESSES the frontend it
+          # embeds -- so it is unfindable in the Mach-O slices and its gate reads
+          # the BUILT FRONTEND instead. This is tauri.conf.json's frontendDist.
+          FRONTEND_DIST_DIR: ${{ github.workspace }}/apps/desktop/build
           WINDOWS_BUNDLE_DIR: ${{ runner.temp }}/windows-release
         run: bash scripts/ci/run-publisher.sh
 
@@ -860,17 +873,26 @@ jobs:
         if: ${{ github.event_name == 'push' || inputs.publish == true }}
         env:
           BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-          # The publisher verifies both values are baked into BOTH slices; on
-          # x86_64 the compiler splits them across instructions, which is only
-          # checkable by reconstruction against the expected value. Without
-          # these the first 0.9.5 publish refused at the PostHog gate (#916).
+          # The publisher verifies all THREE values are baked into BOTH slices;
+          # on x86_64 the compiler splits them across instructions, which is
+          # only checkable by reconstruction against the expected value.
+          # Without these the first 0.9.5 publish refused at the PostHog gate
+          # (#916) and v0.9.12 refused at the feedback gate -- the same defect
+          # twice, because a gate was added without adding its value HERE.
+          # Adding a fourth gate to publish-blob.mjs means adding its secret to
+          # this list in the same commit.
           PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
           PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+          VITE_USERDISPATCH_PUBLIC_KEY: ${{ secrets.VITE_USERDISPATCH_PUBLIC_KEY }}
           VERSION: ${{ steps.version.outputs.VERSION }}
           TAG: ${{ steps.version.outputs.TAG }}
           TAG_ANNOTATION: ${{ steps.version.outputs.TAG_ANNOTATION }}
           # Absolute so the publisher (run from a scratch dir) still finds it.
           BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle
+          # The feedback key is a Vite bake, and Tauri COMPRESSES the frontend it
+          # embeds -- so it is unfindable in the Mach-O slices and its gate reads
+          # the BUILT FRONTEND instead. This is tauri.conf.json's frontendDist.
+          FRONTEND_DIST_DIR: ${{ github.workspace }}/apps/desktop/build
           WINDOWS_BUNDLE_DIR: ${{ runner.temp }}/windows-release
           PETAL_VERIFY_DEPLOY_FRESHNESS_SCRIPT: ${{ github.workspace }}/scripts/verify-deploy-freshness.sh
         run: bash scripts/ci/run-publisher.sh

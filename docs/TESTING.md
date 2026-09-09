@@ -260,6 +260,12 @@ LIVEKIT_URL=ws://localhost:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret
 
 `npm run test:local` runs `test/local.ts` against `livekit-server --dev`, and verifies slug lockstep, JWT grants, LiveKit admin create/list/delete, and room-directory behavior.
 
+```sh
+node scripts/verify-occupancy-hidden.mjs
+```
+
+`scripts/verify-occupancy-hidden.mjs` starts its own `livekit-server` on a scratch port and answers the one question mocks cannot: does the room card's `occupancy` count PEOPLE? It joins real peers through Playwright — a visible participant, that participant's hidden `-gallery` bridge minted through `/api/gallery-token`'s real trust anchor, and a second human — and asserts `handleRoomStatus` against a real `RoomServiceClient`: `1 visible → 1`, `1 visible + 1 hidden → 1`, `2 visible + 1 hidden → 2`, `hidden only → 0` (#120: `numParticipants` counts hidden participants, so this used to read one higher per desktop user). Needs `livekit-server` on PATH plus `npm ci` in `backend/`, `apps/desktop/` and `web-harness/`; exits 2 if a prerequisite is missing. It is NOT in `scripts/ci-local.sh` — it starts a server and a browser. The ~20–30s ghost window after an ungraceful drop is documented in `docs/CONTRACTS.md`, deliberately not asserted.
+
 **`npm test` only proves the SOURCE is correct — it never touches the live deployment.** Real incident (2026-07-05): the invite-link route (then `backend/api/j.ts`, now `web-harness/api/j.ts`) and a round of copy edits to the join/download pages were correct on `main` and passed `npm test`, but the live backend still served the OLD build because it was never redeployed (`vercel --prod` is a separate, manual step from `git push`). Unit tests against the handler functions cannot catch "forgot to redeploy" — only hitting the actual production URL can.
 
 **After every `cd backend && vercel --prod` deploy, run:**

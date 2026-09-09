@@ -116,7 +116,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -250,6 +250,17 @@ pub enum SentryDiagnosticEvent {
     MemoryPressure(MemoryPressureDiagnostic),
     DecoderAllocationFailed(DecoderAllocationFailedDiagnostic),
     BrowserUrlExtractionFailed(BrowserUrlExtractionFailedDiagnostic),
+    DescriptorPressure(DescriptorPressureDiagnostic),
+}
+
+/// Emitted (rate-limited) when open file descriptors cross a high-water
+/// fraction of the soft `RLIMIT_NOFILE`, or when Petal's own IO fails with
+/// `EMFILE`/`ENFILE` (#104). In the #104 field log this condition ran for 20 of
+/// a 29-hour meeting and reached us only because libwebrtc happened to print
+/// 38,062 errors into the log -- there was no Sentry signal at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescriptorPressureDiagnostic {
+    pub stage: DescriptorPressureStageTag,
 }
 
 /// Emitted (rate-limited) when the OS memory-pressure level transitions to
@@ -303,6 +314,10 @@ pub struct CameraHealthDiagnostic {
     pub encode_cadence: CadenceBucket,
     pub queue_backpressure: QueueBackpressureBucket,
     pub decoder_render: DecoderRenderHealth,
+    /// #126: which condition produced `capture_cadence: Stalled` on the
+    /// receive side. `NotApplicable` for every publish-side event and for any
+    /// receive cadence that is not `Stalled`.
+    pub stall_cause: CameraStallCauseTag,
 }
 
 /// Emitted once per episode when a camera whose frames no longer match the
@@ -400,6 +415,7 @@ diagnostic_enum!(OverlayClearReasonTag { NoPublication => "no_publication", Reti
 diagnostic_enum!(CadenceBucket { Healthy => "healthy", Reduced => "reduced", Severe => "severe", Stalled => "stalled", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(QueueBackpressureBucket { None => "none", Low => "low", High => "high", Saturated => "saturated", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(DecoderRenderHealth { Healthy => "healthy", DecoderDegraded => "decoder_degraded", RenderDegraded => "render_degraded", BothDegraded => "both_degraded", Unknown => "unknown", NotApplicable => "not_applicable" });
+diagnostic_enum!(CameraStallCauseTag { StreamPaused => "stream_paused", DecodeStale => "decode_stale", DecodeZero => "decode_zero", NotApplicable => "not_applicable" });
 diagnostic_enum!(CameraRecoveryActionTag { Reanchor => "reanchor", Letterbox => "letterbox", NotApplicable => "not_applicable" });
 diagnostic_enum!(PlayoutTransitionTag { Repointed => "repointed", Unavailable => "unavailable", NotApplicable => "not_applicable" });
 diagnostic_enum!(StormScopeTag {
@@ -414,8 +430,17 @@ diagnostic_enum!(InstallFailureStageTag { Resolve => "resolve", Stage => "stage"
 diagnostic_enum!(InstallFailureKindTag { CrossDevice => "cross_device", PermissionDenied => "permission_denied", ReadOnly => "read_only", NoSpace => "no_space", NotFound => "not_found", Other => "other", NotApplicable => "not_applicable" });
 diagnostic_enum!(InstallVolumeBoundaryTag { SameVolume => "same_volume", CrossVolume => "cross_volume", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(InstallDestinationClassTag { Applications => "applications", UserApplications => "user_applications", DiskImage => "disk_image", RemovableVolume => "removable_volume", Other => "other", NotApplicable => "not_applicable" });
-diagnostic_enum!(VanishedSessionCrashReportTag { Found => "found", NotFound => "not_found", NotApplicable => "not_applicable" });
+// `Unverified` (#105): a `desktop-*.ips` exists in the scan window but
+// could NOT be attributed to the dead session. Distinct from `Found` on
+// purpose -- it must never read as an explanation.
+diagnostic_enum!(VanishedSessionCrashReportTag { Found => "found", NotFound => "not_found", Unverified => "unverified", NotApplicable => "not_applicable" });
 diagnostic_enum!(PressureLevelTag { Warn => "warn", Critical => "critical", NotApplicable => "not_applicable" });
+/// #104: how far descriptor pressure has gone. `high_water` is the sampler
+/// crossing 80% of the soft `RLIMIT_NOFILE`; `exhausted` is an allocation that
+/// has already failed with `EMFILE`/`ENFILE`. Two stages, not a level, because
+/// the second is observed from a different place (any failing IO) than the
+/// first (the in-room sampler).
+diagnostic_enum!(DescriptorPressureStageTag { HighWater => "high_water", Exhausted => "exhausted", NotApplicable => "not_applicable" });
 /// Mirrors `browser_url::UrlExtraction::cause()`'s string set exactly (minus
 /// "ok"/"unsupported", which are never logged as a failure) -- keep the two
 /// in sync by hand; there is no shared source because `browser_url` must not
@@ -432,7 +457,7 @@ diagnostic_enum!(BrowserUrlExtractionCauseTag {
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 15] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 16] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -448,6 +473,7 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 15] = [
     "memory-pressure",
     "decoder-allocation-failed",
     "browser-url-extraction-failed",
+    "descriptor-pressure",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -468,6 +494,7 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "encode_cadence",
     "queue_backpressure",
     "decoder_render_health",
+    "stall_cause",
     "recovery_action",
     "playout_transition",
     "storm_scope",
@@ -479,6 +506,7 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "crash_report_status",
     "pressure_level",
     "browser_url_extraction_cause",
+    "descriptor_pressure_stage",
     "dedup_count_bucket",
 ];
 
@@ -499,6 +527,7 @@ const CAMERA_HEALTH_MESSAGE_TAGS: &[&str] = &[
     "encode_cadence",
     "queue_backpressure",
     "decoder_render_health",
+    "stall_cause",
 ];
 
 const SHARE_OVERLAY_CURSOR_CAPTURE_MESSAGE_TAGS: &[&str] = &["session_role", "overlay_clear_reason"];
@@ -508,6 +537,7 @@ const WINDOW_SERVER_RESTART_DETECTED_MESSAGE_TAGS: &[&str] = &["session_role"];
 const MEMORY_PRESSURE_MESSAGE_TAGS: &[&str] = &["pressure_level"];
 const DECODER_ALLOCATION_FAILED_MESSAGE_TAGS: &[&str] = &["session_role"];
 const BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS: &[&str] = &["browser_url_extraction_cause"];
+const DESCRIPTOR_PRESSURE_MESSAGE_TAGS: &[&str] = &["descriptor_pressure_stage"];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
     "camera_direction",
@@ -547,8 +577,28 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "memory-pressure" => Some(MEMORY_PRESSURE_MESSAGE_TAGS),
         "decoder-allocation-failed" => Some(DECODER_ALLOCATION_FAILED_MESSAGE_TAGS),
         "browser-url-extraction-failed" => Some(BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS),
+        "descriptor-pressure" => Some(DESCRIPTOR_PRESSURE_MESSAGE_TAGS),
         _ => None,
     }
+}
+
+/// The ONE definition of a diagnostic's Sentry group key, derived purely from
+/// closed-enum tag values so `valid_sentry_diagnostic_event` can recompute and
+/// compare it. `camera-health` appends `camera_direction`: the publish-side and
+/// receive-side arms are unrelated failures that shared one fingerprint, so the
+/// group's title rendered whichever event arrived last and described neither
+/// (#126). Every other event keeps the bare event name.
+fn diagnostic_fingerprint(tags: &sentry::protocol::Map<String, String>) -> Vec<String> {
+    let Some(event_name) = tags.get("event_name") else {
+        return Vec::new();
+    };
+    let mut fingerprint = vec![event_name.clone()];
+    if event_name == "camera-health" {
+        if let Some(direction) = tags.get("camera_direction") {
+            fingerprint.push(direction.clone());
+        }
+    }
+    fingerprint
 }
 
 /// The ONE definition of a diagnostic's title, derived purely from closed-enum
@@ -872,6 +922,7 @@ impl SentryDiagnosticEvent {
             Self::MemoryPressure(_) => "memory-pressure",
             Self::DecoderAllocationFailed(_) => "decoder-allocation-failed",
             Self::BrowserUrlExtractionFailed(_) => "browser-url-extraction-failed",
+            Self::DescriptorPressure(_) => "descriptor-pressure",
         }
     }
 }
@@ -911,6 +962,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -922,6 +974,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::CameraHealth(value) => {
             insert("session_role", value.role.tag());
@@ -937,6 +990,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", value.encode_cadence.tag());
             insert("queue_backpressure", value.queue_backpressure.tag());
             insert("decoder_render_health", value.decoder_render.tag());
+            insert("stall_cause", value.stall_cause.tag());
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -948,6 +1002,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::CameraSizeMismatchRecovery(value) => {
             insert("session_role", value.role.tag());
@@ -963,6 +1018,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", value.action.tag());
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -974,6 +1030,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::PlayoutDeviceRepointed(value) => {
             insert("session_role", value.role.tag());
@@ -989,6 +1046,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", value.transition.tag());
             insert("storm_scope", "not_applicable");
@@ -1000,6 +1058,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::RepublishStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1015,6 +1074,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", value.scope.tag());
@@ -1026,6 +1086,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::PublishDropStreak(value) => {
             insert("session_role", value.role.tag());
@@ -1041,6 +1102,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", value.scope.tag());
@@ -1052,6 +1114,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::WatchdogRepeatStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1067,6 +1130,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", value.scope.tag());
@@ -1078,6 +1142,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::UpdateInstallFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1093,6 +1158,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1104,6 +1170,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::ShareOverlayCursorCaptureCleared(value) => {
             insert("session_role", value.role.tag());
@@ -1119,6 +1186,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("install_failure_stage", "not_applicable");
@@ -1130,6 +1198,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerPortDead(value) => {
             insert("session_role", value.role.tag());
@@ -1145,6 +1214,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1156,6 +1226,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::PreviousSessionVanished(value) => {
             insert("session_role", "not_applicable");
@@ -1171,6 +1242,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1182,6 +1254,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", value.crash_report.tag());
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerRestartDetected(value) => {
             insert("session_role", value.role.tag());
@@ -1197,6 +1270,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1208,6 +1282,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::MemoryPressure(value) => {
             insert("session_role", "not_applicable");
@@ -1223,6 +1298,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1234,6 +1310,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", value.level.tag());
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::DecoderAllocationFailed(value) => {
             insert("session_role", value.role.tag());
@@ -1249,6 +1326,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1260,6 +1338,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::BrowserUrlExtractionFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1275,6 +1354,7 @@ fn build_sentry_diagnostic_event(
             insert("encode_cadence", "not_applicable");
             insert("queue_backpressure", "not_applicable");
             insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
             insert("recovery_action", "not_applicable");
             insert("playout_transition", "not_applicable");
             insert("storm_scope", "not_applicable");
@@ -1286,14 +1366,48 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", value.cause.tag());
+            insert("descriptor_pressure_stage", "not_applicable");
+        }
+        SentryDiagnosticEvent::DescriptorPressure(value) => {
+            insert("session_role", "not_applicable");
+            insert("source_selection", "not_applicable");
+            insert("capture_geometry", "not_applicable");
+            insert("configured_geometry", "not_applicable");
+            insert("pixel_format", "not_applicable");
+            insert("scale_bucket", "not_applicable");
+            insert("encoder_implementation", "not_applicable");
+            insert("stage_code", "not_applicable");
+            insert("camera_direction", "not_applicable");
+            insert("capture_cadence", "not_applicable");
+            insert("encode_cadence", "not_applicable");
+            insert("queue_backpressure", "not_applicable");
+            insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
+            insert("recovery_action", "not_applicable");
+            insert("playout_transition", "not_applicable");
+            insert("storm_scope", "not_applicable");
+            insert("install_failure_stage", "not_applicable");
+            insert("install_failure_kind", "not_applicable");
+            insert("install_volume_boundary", "not_applicable");
+            insert("install_destination_class", "not_applicable");
+            insert("overlay_clear_reason", "not_applicable");
+            insert("crash_report_status", "not_applicable");
+            insert("pressure_level", "not_applicable");
+            insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", value.stage.tag());
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
     let message = diagnostic_message(&tags);
+    let fingerprint = diagnostic_fingerprint(&tags);
+    debug_assert_eq!(
+        fingerprint.first().map(String::as_str),
+        Some(diagnostic.event_name())
+    );
     sentry::protocol::Event {
         message,
         tags,
-        fingerprint: Cow::Owned(vec![diagnostic.event_name().into()]),
+        fingerprint: Cow::Owned(fingerprint.into_iter().map(Cow::Owned).collect()),
         ..Default::default()
     }
 }
@@ -1311,8 +1425,13 @@ pub fn set_sentry_enabled(enabled: bool) {
 /// buckets. It rejects every value outside the small schema before it reaches
 /// the existing Sentry event constructor.
 #[tauri::command]
-pub fn record_camera_receive_health(cadence: String, decoder_render: String) -> bool {
-    let Some(event) = camera_receive_health_diagnostic(&cadence, &decoder_render) else {
+pub fn record_camera_receive_health(
+    cadence: String,
+    decoder_render: String,
+    stall_cause: String,
+) -> bool {
+    let Some(event) = camera_receive_health_diagnostic(&cadence, &decoder_render, &stall_cause)
+    else {
         return false;
     };
     capture_sentry_diagnostic(event)
@@ -1321,6 +1440,7 @@ pub fn record_camera_receive_health(cadence: String, decoder_render: String) -> 
 fn camera_receive_health_diagnostic(
     cadence: &str,
     decoder_render: &str,
+    stall_cause: &str,
 ) -> Option<SentryDiagnosticEvent> {
     let capture_cadence = match cadence {
         "reduced" => CadenceBucket::Reduced,
@@ -1328,18 +1448,39 @@ fn camera_receive_health_diagnostic(
         "stalled" => CadenceBucket::Stalled,
         _ => return None,
     };
+    // #126: a subscription paused by the SFU degrades the NETWORK, not the
+    // decoder, so `not_applicable` is a legitimate receive-side value now.
     let decoder_render = match decoder_render {
         "decoder_degraded" => DecoderRenderHealth::DecoderDegraded,
+        "not_applicable" => DecoderRenderHealth::NotApplicable,
         _ => return None,
     };
-    Some(SentryDiagnosticEvent::CameraHealth(CameraHealthDiagnostic {
-        role: DiagnosticRole::Receiver,
-        direction: CameraDirection::Receive,
-        capture_cadence,
-        encode_cadence: CadenceBucket::NotApplicable,
-        queue_backpressure: QueueBackpressureBucket::NotApplicable,
-        decoder_render,
-    }))
+    let stall_cause = match stall_cause {
+        "stream_paused" => CameraStallCauseTag::StreamPaused,
+        "decode_stale" => CameraStallCauseTag::DecodeStale,
+        "decode_zero" => CameraStallCauseTag::DecodeZero,
+        "not_applicable" => CameraStallCauseTag::NotApplicable,
+        _ => return None,
+    };
+    // A cause only means something for a stalled interval, and a stalled
+    // interval always has one -- reject the two contradictory combinations
+    // rather than shipping an event that says nothing or says too much.
+    if (capture_cadence == CadenceBucket::Stalled)
+        != (stall_cause != CameraStallCauseTag::NotApplicable)
+    {
+        return None;
+    }
+    Some(SentryDiagnosticEvent::CameraHealth(
+        CameraHealthDiagnostic {
+            role: DiagnosticRole::Receiver,
+            direction: CameraDirection::Receive,
+            capture_cadence,
+            encode_cadence: CadenceBucket::NotApplicable,
+            queue_backpressure: QueueBackpressureBucket::NotApplicable,
+            decoder_render,
+            stall_cause,
+        },
+    ))
 }
 
 /// Resolve the platform log DIRECTORY, creating it if needed:
@@ -1476,9 +1617,9 @@ fn is_any_log_file_name(name: &str) -> bool {
 /// attribute, unaffected by compression).
 ///
 /// This is NOT the same as `resolve_log_path()` (today's path, which may
-/// not exist yet). It exists because the two previous-session detectors
-/// (`report_previous_crashes` via `previous_log_mtime`,
-/// `report_vanished_previous_session` via `read_log_tail_lines`) must keep
+/// not exist yet). It exists because the previous-session classifier
+/// (`analyze_previous_session`, fed by `read_log_tail_lines` and, only as a
+/// fallback threshold, this file's mtime) must keep
 /// resolving the real most-recently-written file across a UTC date
 /// boundary -- pointing them at a hardcoded `petal.log.<today>` would find
 /// nothing on the first launch of a new day and silently go quiet (#905
@@ -1756,38 +1897,100 @@ fn resolve_log_filter(raw_rust_log: Option<&str>) -> ResolvedLogFilter {
     }
 }
 
-/// How long a single native-WebRTC log message may keep repeating verbatim
-/// before `RepeatSuppressingLog` re-emits it (as a rolled-up summary,
-/// counting how many times it fired in that window) rather than staying
-/// silent forever. Bounds volume to at most one line per target per this
-/// interval instead of one line per occurrence.
+/// How long a single native-WebRTC log *site* may keep firing before
+/// `RepeatSuppressingLog` re-emits it (as a rolled-up summary, counting how
+/// many times it fired in that window) rather than staying silent forever.
+/// Bounds volume to at most one line per site per this interval instead of
+/// one line per occurrence.
 const NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Identifies a repeating streak: target AND level AND message text must
-/// all match for two records to count as "the same repeat" (#905 review
-/// finding: keying on message text alone would conflate identical text
-/// from two different targets or levels into one streak, and misattribute
-/// the eventual rollup to whichever record happened to trigger it).
-#[derive(Clone, PartialEq, Eq)]
+/// Ceiling on how many distinct `(target, level, file:line)` streaks are
+/// tracked at once (#108). Native WebRTC's log sites are a small fixed set
+/// -- a real field log used eleven -- so this is far above the working set;
+/// it exists only so a pathological build can never grow this map without
+/// bound. On overflow the least-recently-seen streak is evicted, after its
+/// pending rollup is emitted.
+const NATIVE_WEBRTC_REPEAT_MAX_TRACKED: usize = 128;
+
+/// Extracts native WebRTC's own `file:line` site from a log message (#108).
+///
+/// `RTC_LOG` records reach this logger with the site already inlined into
+/// the message text, e.g.
+/// `"(RTCVideoEncoderH264.mm:614): Encoder frame rate setting 30 is larger
+/// than the maximal allowed frame rate 13."`. The parenthesised prefix is
+/// the stable part; the trailing prose is not, because it interpolates live
+/// values.
+///
+/// That distinction is the whole bug this function exists for. #905 keyed
+/// repeat-suppression on the FULL message, which suppresses only *verbatim*
+/// consecutive repeats -- and the two numbers in that encoder warning flap
+/// constantly, so a real 611-second field log carried 2,076 of these lines
+/// drawn from just 40 distinct texts. Keying on the site collapses all 40.
+///
+/// Returns the whole message when there is no parenthesised prefix, so a
+/// message without a site still gets the old exact-text behaviour.
+fn native_webrtc_signature(message: &str) -> &str {
+    let Some(rest) = message.strip_prefix('(') else {
+        return message;
+    };
+    match rest.find("):") {
+        Some(end) => &rest[..end],
+        None => message,
+    }
+}
+
+/// Identifies a repeating streak: target AND level AND log SITE must all
+/// match for two records to count as "the same repeat" (#905 review
+/// finding: keying on message text alone would conflate identical text from
+/// two different targets or levels into one streak, and misattribute the
+/// eventual rollup to whichever record happened to trigger it; #108: the
+/// site, not the text, is what makes a streak).
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct NativeWebrtcRepeatKey {
     target: String,
     level: log::Level,
-    message: String,
+    signature: String,
 }
 
 struct NativeWebrtcRepeatState {
-    key: NativeWebrtcRepeatKey,
+    /// Occurrences suppressed since the last line emitted for this key.
     repeat_count: u64,
+    /// How many times the message TEXT changed within this site's streak
+    /// (#108). Reported in the rollup so a reader can still tell a site
+    /// that is repeating one fixed complaint from one whose interpolated
+    /// values are moving -- which is the only information the varying text
+    /// carried. A counter rather than a set of seen texts: a message that
+    /// interpolates an unbounded value (an ssrc, a port) must not be able
+    /// to grow this state without bound.
+    text_changes: u64,
+    /// Most recent full message text at this site, quoted verbatim in the
+    /// rollup so the summary line is still self-explanatory.
+    last_message: String,
     last_emitted: Instant,
+    last_seen: Instant,
 }
 
-/// Collapses IDENTICAL, CONSECUTIVE native-WebRTC log lines (#905): the
-/// `RTCVideoEncoderH264.mm:614` frame-rate warning alone was 610,617 lines /
-/// 34.5% of a real 263 MB field log, always the exact same text repeated
-/// per-frame. The existing `NOISY_THIRD_PARTY_CRATES` denylist (this
-/// module's `resolve_log_filter`) already pins this target at `warn`, and
-/// this line IS a warn -- a level filter cannot help here, only
-/// repeat-suppression can.
+impl NativeWebrtcRepeatState {
+    /// The rolled-up summary line for this streak. Keeps `#905`'s
+    /// `repeated {n}x` wording, which existing assertions key on.
+    fn rollup(&self, now: Instant) -> String {
+        let window_s = now.duration_since(self.last_emitted).as_secs();
+        let count = self.repeat_count;
+        let changes = self.text_changes;
+        format!(
+            "{} [repeated {count}x in the last {window_s}s from this site ({changes} text change(s)), #108]",
+            self.last_message
+        )
+    }
+}
+
+/// Rate-limits native-WebRTC log lines PER LOG SITE (#905, refined by #108).
+///
+/// The `NOISY_THIRD_PARTY_CRATES` denylist (this module's
+/// `resolve_log_filter`) already pins this target at `warn`, and the worst
+/// offender IS a warn: a level filter cannot help here, only rate-limiting
+/// can. #905 added exact-text consecutive collapsing, which the encoder
+/// warning's flapping numbers defeat -- see `native_webrtc_signature`.
 ///
 /// Wraps the OUTERMOST logger (before `SentryLogger`, before fern's own
 /// `Dispatch`) rather than living inside `DailyLogSink`, for two reasons:
@@ -1796,35 +1999,41 @@ struct NativeWebrtcRepeatState {
 /// match twice), and stdout should benefit from the suppression too, not
 /// just the file.
 ///
-/// On a repeat: suppressed entirely, neither forwarded nor formatted,
-/// unless `NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL` has elapsed since the
-/// last emitted line for this target, in which case ONE summary line
-/// (carrying the repeat count) is emitted and the window resets. On a
-/// change of message (or the very first occurrence): the new message is
-/// always forwarded immediately, and if the PRIOR message had any
-/// suppressed repeats not yet reported, a rollup for it is emitted first so
-/// a streak's tail is never silently dropped.
-struct RepeatSuppressingLog<L: log::Log> {
+/// Behaviour, per `(target, level, site)`:
+/// - the FIRST occurrence is always forwarded verbatim, never dropped;
+/// - subsequent occurrences within `NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL`
+///   are suppressed and counted;
+/// - once that interval has elapsed, ONE rollup line is emitted carrying
+///   the latest text, the suppressed count, and how many times the text
+///   changed, and the window resets.
+///
+/// Sites are tracked in a map rather than a single slot so two interleaving
+/// sites do not flush each other on every alternation (which is what made
+/// #905's single-slot design emit 389 rollups in one 611-second log). A
+/// streak that goes quiet is swept -- its rollup emitted and its entry
+/// dropped -- once it has been unseen for a full interval, so a tail is
+/// never held indefinitely waiting for a `flush()` that may not come.
+pub(crate) struct RepeatSuppressingLog<L: log::Log> {
     inner: L,
-    state: Mutex<Option<NativeWebrtcRepeatState>>,
+    state: Mutex<HashMap<NativeWebrtcRepeatKey, NativeWebrtcRepeatState>>,
 }
 
 impl<L: log::Log> RepeatSuppressingLog<L> {
-    fn new(inner: L) -> Self {
+    pub(crate) fn new(inner: L) -> Self {
         RepeatSuppressingLog {
             inner,
-            state: Mutex::new(None),
+            state: Mutex::new(HashMap::new()),
         }
     }
 
     /// Re-emits `message` at `target`/`level` through `self.inner` -- used
-    /// only for the synthetic "repeated Nx" summary lines. Takes target and
-    /// level directly (not a borrowed `&log::Record`) because a rollup can
-    /// be emitted well after the record that started the streak is gone
-    /// (e.g. at `flush()`, or for the PRIOR streak when the message just
-    /// changed) -- there is no live record to borrow location metadata
-    /// from at that point, so this only carries target/level, not
-    /// module_path/file/line (unused by this module's line format anyway).
+    /// only for the synthetic rollup lines. Takes target and level directly
+    /// (not a borrowed `&log::Record`) because a rollup can be emitted well
+    /// after the record that started the streak is gone (e.g. at `flush()`,
+    /// or when a quiet streak is swept) -- there is no live record to
+    /// borrow location metadata from at that point, so this only carries
+    /// target/level, not module_path/file/line (unused by this module's
+    /// line format anyway).
     fn emit(&self, target: &str, level: log::Level, message: &str) {
         // Must stay ONE statement: the `Record` built below borrows the
         // `format_args!` temporary, which only lives to the end of the
@@ -1838,6 +2047,98 @@ impl<L: log::Log> RepeatSuppressingLog<L> {
                 .build(),
         );
     }
+
+    /// The real body of `log()`, with the clock injected so tests can drive
+    /// the summary interval without sleeping.
+    pub(crate) fn log_at(&self, record: &log::Record, now: Instant) {
+        let target = record.target();
+        let is_native_webrtc = target == NATIVE_WEBRTC_LOG_TARGET
+            || target.starts_with(NATIVE_WEBRTC_LOG_TARGET_PREFIX);
+        if !is_native_webrtc {
+            self.inner.log(record);
+            return;
+        }
+        let message = record.args().to_string();
+        let key = NativeWebrtcRepeatKey {
+            target: target.to_string(),
+            level: record.level(),
+            signature: native_webrtc_signature(&message).to_string(),
+        };
+        // Rollups are collected under the lock and emitted after it is
+        // released: `self.inner.log` must never run while this mutex is
+        // held.
+        let mut pending: Vec<(String, log::Level, String)> = Vec::new();
+        let forward_now;
+        {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            // Sweep streaks that have gone quiet, so their tail is reported
+            // promptly instead of waiting for a `flush()`.
+            guard.retain(|other, state| {
+                if *other == key || now.duration_since(state.last_seen) < NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL {
+                    return true;
+                }
+                if state.repeat_count > 0 {
+                    pending.push((other.target.clone(), other.level, state.rollup(now)));
+                }
+                false
+            });
+            match guard.get_mut(&key) {
+                Some(state) => {
+                    state.repeat_count += 1;
+                    state.last_seen = now;
+                    if state.last_message != message {
+                        state.text_changes += 1;
+                        state.last_message = message.clone();
+                    }
+                    if now.duration_since(state.last_emitted)
+                        >= NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL
+                    {
+                        pending.push((key.target.clone(), key.level, state.rollup(now)));
+                        state.repeat_count = 0;
+                        state.text_changes = 0;
+                        state.last_emitted = now;
+                    }
+                    forward_now = false;
+                }
+                None => {
+                    if guard.len() >= NATIVE_WEBRTC_REPEAT_MAX_TRACKED {
+                        if let Some(evicted) = guard
+                            .iter()
+                            .min_by_key(|(_, state)| state.last_seen)
+                            .map(|(k, _)| k.clone())
+                        {
+                            if let Some(state) = guard.remove(&evicted) {
+                                if state.repeat_count > 0 {
+                                    pending.push((
+                                        evicted.target.clone(),
+                                        evicted.level,
+                                        state.rollup(now),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    guard.insert(
+                        key.clone(),
+                        NativeWebrtcRepeatState {
+                            repeat_count: 0,
+                            text_changes: 0,
+                            last_message: message.clone(),
+                            last_emitted: now,
+                            last_seen: now,
+                        },
+                    );
+                    forward_now = true;
+                }
+            }
+        }
+        for (target, level, message) in pending {
+            self.emit(&target, level, &message);
+        }
+        if forward_now {
+            self.inner.log(record);
+        }
+    }
 }
 
 impl<L: log::Log> log::Log for RepeatSuppressingLog<L> {
@@ -1846,97 +2147,31 @@ impl<L: log::Log> log::Log for RepeatSuppressingLog<L> {
     }
 
     fn log(&self, record: &log::Record) {
-        let target = record.target();
-        let is_native_webrtc =
-            target == NATIVE_WEBRTC_LOG_TARGET || target.starts_with(NATIVE_WEBRTC_LOG_TARGET_PREFIX);
-        if !is_native_webrtc {
-            self.inner.log(record);
-            return;
-        }
-        let key = NativeWebrtcRepeatKey {
-            target: target.to_string(),
-            level: record.level(),
-            message: record.args().to_string(),
-        };
-        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_mut() {
-            Some(state) if state.key == key => {
-                state.repeat_count += 1;
-                if state.last_emitted.elapsed() >= NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL {
-                    let count = state.repeat_count;
-                    state.repeat_count = 0;
-                    state.last_emitted = Instant::now();
-                    let NativeWebrtcRepeatKey { target, level, message } = key;
-                    drop(guard);
-                    self.emit(
-                        &target,
-                        level,
-                        &format!(
-                            "{message} [repeated {count}x in the last {}s, #905]",
-                            NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL.as_secs()
-                        ),
-                    );
-                }
-                // Otherwise: suppressed. Neither forwarded nor formatted.
-            }
-            Some(state) => {
-                // The message just changed (or target/level did) -- flush a
-                // rollup of the PRIOR key's suppressed repeats (if any),
-                // using the PRIOR key's own target/level, not the new
-                // record's, so the rollup isn't misattributed.
-                let prior = (state.repeat_count > 0)
-                    .then(|| (state.key.clone(), state.repeat_count));
-                state.key = key;
-                state.repeat_count = 0;
-                state.last_emitted = Instant::now();
-                drop(guard);
-                if let Some((prior_key, prior_count)) = prior {
-                    self.emit(
-                        &prior_key.target,
-                        prior_key.level,
-                        &format!(
-                            "{} [repeated {prior_count}x more before changing]",
-                            prior_key.message
-                        ),
-                    );
-                }
-                self.inner.log(record);
-            }
-            None => {
-                *guard = Some(NativeWebrtcRepeatState {
-                    key,
-                    repeat_count: 0,
-                    last_emitted: Instant::now(),
-                });
-                drop(guard);
-                self.inner.log(record);
-            }
-        }
+        self.log_at(record, Instant::now());
     }
 
     fn flush(&self) {
         // #905 review (Finding 6): a streak still accumulating suppressed
         // repeats when the process shuts down would otherwise lose that
         // count entirely -- nothing else would ever trigger its rollup.
-        // Emits (and resets the counter, not the whole tracked key) rather
-        // than `take()`-ing the state outright, so this stays correct even
-        // if `flush()` is called more than once.
-        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(state) = guard.as_mut() {
-            if state.repeat_count > 0 {
-                let key = state.key.clone();
-                let count = state.repeat_count;
+        // Resets the counters rather than clearing the map, so this stays
+        // correct even if `flush()` is called more than once.
+        let now = Instant::now();
+        let mut pending: Vec<(String, log::Level, String)> = Vec::new();
+        {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            for (key, state) in guard.iter_mut() {
+                if state.repeat_count == 0 {
+                    continue;
+                }
+                pending.push((key.target.clone(), key.level, state.rollup(now)));
                 state.repeat_count = 0;
-                state.last_emitted = Instant::now();
-                drop(guard);
-                self.emit(
-                    &key.target,
-                    key.level,
-                    &format!("{} [repeated {count}x more, flushed]", key.message),
-                );
-                self.inner.flush();
-                return;
+                state.text_changes = 0;
+                state.last_emitted = now;
             }
+        }
+        for (target, level, message) in pending {
+            self.emit(&target, level, &message);
         }
         self.inner.flush();
     }
@@ -1974,18 +2209,26 @@ pub fn init() -> PathBuf {
     // (#905 trap; see `resolve_current_or_latest_log_file`'s doc comment).
     let previous_log_path = resolve_current_or_latest_log_file(&log_dir);
 
-    // Capture the PREVIOUS run's log file mtime BEFORE the sweep below can
-    // touch it -- the cheapest available proxy for "when the previous
-    // session last logged anything," used after the sink is live to flag
-    // DiagnosticReports crash files newer than that (i.e. crashes that
-    // happened after the previous session went quiet). If there is no
-    // previous log at all, fall back to the last 24h.
+    // Captured BEFORE the sweep below can touch it, and used ONLY as the
+    // fallback threshold for the crash scan when the previous session's
+    // log tail yields no parseable timestamp of its own. mtime is a
+    // filesystem attribute, not a statement about when that session
+    // stopped writing.
+    //
+    // #105: there is deliberately NO `now - 24h` fallback here any more.
+    // A blind 24-hour window at a 13:26 launch reaches back to the
+    // previous day's 13:26, which is exactly how a stale `.ips` got blamed
+    // on a session that was still logging after it -- and that false
+    // positive then silenced a real vanish. No previous log means no
+    // previous session on record, and nothing is attributed to it.
     let previous_log_mtime = previous_log_path
         .as_deref()
-        .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60)
-        });
+        .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+
+    // Must be read BEFORE this session overwrites it below: what the
+    // PREVIOUS session recorded about itself (pid, executable, boot time),
+    // the only thing on disk that can tie a `desktop-*.ips` to it (#105).
+    let previous_session_identity = load_session_identity(&log_dir);
 
     // Must read BEFORE the gzip/prune sweep below: this is the previous
     // session's own content, still sitting there uncompressed at this point
@@ -2141,8 +2384,18 @@ pub fn init() -> PathBuf {
         log::warn!("logging: {warning}");
     }
 
-    let crash_report_found = report_previous_crashes(previous_log_mtime);
-    report_vanished_previous_session(&previous_log_tail, crash_report_found);
+    report_previous_session(&analyze_previous_session(&PreviousSessionInputs {
+        tail: &previous_log_tail,
+        previous_log_mtime,
+        recorded_identity: previous_session_identity,
+        crash_report_dir: crash_report_dir(),
+        current_boot_time: current_boot_time_epoch(),
+        current_executable: current_executable_path(),
+    }));
+    // Written AFTER the previous record has been consumed above, so the
+    // next startup can match a crash report's pid/procPath against this
+    // session (#105).
+    persist_session_identity(&log_dir, &current_session_identity());
     log_startup_hardware();
 
     log_path
@@ -3371,28 +3624,6 @@ fn fnv1a32(bytes: &[u8]) -> u32 {
     hash
 }
 
-/// Issue #13 (startup crash detection): scan `~/Library/Logs/
-/// DiagnosticReports/` for `desktop-*.ips` crash reports newer than
-/// `threshold` (the previous petal.log's mtime, or 24h ago if none) and log a
-/// loud error-level pointer per file, so a previous session's silent SIGABRT
-/// is visible at the top of the next session's log instead of only in a
-/// directory nobody looks at. Cheap and non-fatal: any IO error just means no
-/// report (crash detection must never itself break startup).
-fn report_previous_crashes(threshold: std::time::SystemTime) -> bool {
-    let Some(home) = dirs_home() else {
-        return false;
-    };
-    let dir = home.join("Library").join("Logs").join("DiagnosticReports");
-    let reports = crash_reports_since(&dir, threshold);
-    for path in &reports {
-        log::error!(
-            "previous session appears to have CRASHED (see {}) -- crash report is newer than the previous petal.log",
-            path.display()
-        );
-    }
-    !reports.is_empty()
-}
-
 /// Most recent bytes of the previous `petal.log` considered when checking
 /// for a vanished session (#878) -- bounded so a huge pre-rotation log never
 /// costs an unbounded read at startup. Read from the END of the file (tail),
@@ -3448,19 +3679,420 @@ fn read_log_tail_lines(path: &Path, max_lines: usize) -> Vec<String> {
     lines[skip..].to_vec()
 }
 
-/// Verdict for whether the previous session (as recorded in its own log
-/// tail) ended cleanly or vanished mid-meeting (#878).
+// ---------------------------------------------------------------------------
+// Previous-session classification: #13 (startup crash detection), #878
+// (vanished-session detection), #105 (crash-report ATTRIBUTION).
+//
+// #105, from a real user's log: "the .ips is newer than the previous
+// petal.log's mtime" was treated as proof that the .ips described the
+// previous session. It is not. One report attributed to the wrong session
+// then flipped the vanish verdict from a WARN + Sentry event to an INFO
+// line, so a genuine silent death was reported as explained. Two rules come
+// out of that and must not be relaxed:
+//   1. Timing alone never attributes a report -- identity does (pid, or
+//      procPath), and the report must post-date the session's last log line.
+//   2. An unattributed report NEVER silences the vanish signal.
+// ---------------------------------------------------------------------------
+
+/// How the previous session ended, as far as its own log and the machine's
+/// boot lineage can tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VanishedSessionVerdict {
-    /// No join at all, or a join followed by a real shutdown marker.
+enum PreviousSessionOutcome {
+    /// No in-meeting evidence in the tail at all, or a real shutdown marker
+    /// after the last of it.
     CleanShutdown,
-    /// Joined a room with no later shutdown marker, and no crash report
-    /// covers the gap -- the case this detector exists for.
-    VanishedNoCrashReport,
-    /// Joined a room with no later shutdown marker, but a crash report DOES
-    /// cover the gap -- `report_previous_crashes` already explains this one;
-    /// distinguished here only so the two cases don't look identical.
-    VanishedWithCrashReport,
+    /// In-meeting with no shutdown marker, but `kern.boottime` says the
+    /// machine rebooted within minutes of the last log line: the session
+    /// went down with the machine, which is not a crash (#105 -- the
+    /// signal `webview_transparency.rs` already computed and nothing here
+    /// consumed).
+    WentDownWithTheMachine,
+    /// In-meeting, no shutdown marker, and nothing explains the gap.
+    Vanished,
+}
+
+/// Whether a `desktop-*.ips` could be tied to the previous session (#105).
+///
+/// The point of this type is that "a crash report exists" and "the previous
+/// session crashed" are DIFFERENT claims. They used to be one `bool`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CrashAttribution {
+    /// No previous session on record (first-ever launch, unreadable log
+    /// dir): there is nothing to attribute a report TO, so no scan runs.
+    /// Never scan a blind window and assert a crash from it -- the removed
+    /// `now - 24h` fallback is exactly how a report from the previous day
+    /// got blamed on a session that outlived it.
+    NotScanned,
+    /// Scanned, nothing newer than the previous session's last log line.
+    NoReport,
+    /// A report exists but could not be tied to the previous session.
+    /// `reason` is the specific failing check, and it is stated in the log
+    /// line: an ambiguous verdict must read as ambiguous.
+    Unattributed { path: PathBuf, reason: String },
+    /// A report that passes every ordering and identity check.
+    Attributed { path: PathBuf, evidence: String },
+}
+
+/// Verdict for the previous session, produced once at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviousSessionReport {
+    outcome: PreviousSessionOutcome,
+    crash: CrashAttribution,
+    /// The last thing the previous session logged before the gap was
+    /// `screens did sleep` with no matching wake. The machine was asleep
+    /// across the gap, so a sleep-time termination cannot be told apart
+    /// from an in-use crash -- say so rather than picking one.
+    display_slept: bool,
+    rebooted_at: Option<std::time::SystemTime>,
+}
+
+/// What the previous session recorded about ITSELF, assembled from its own
+/// log tail plus the identity file it wrote at startup. This is what a
+/// crash report has to match to be believed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PreviousSessionIdentity {
+    last_log_line: Option<std::time::SystemTime>,
+    started: Option<std::time::SystemTime>,
+    pid: Option<u32>,
+    executable: Option<String>,
+}
+
+/// Written at every startup, read by the NEXT startup: the only way to say
+/// "that `.ips` names pid 1234, and the session that just died WAS pid
+/// 1234." Nothing else on disk records it (the `flock` instance lock holds
+/// no content, and the log tail scrolls the startup lines away on a long
+/// session).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionIdentityRecord {
+    pid: u32,
+    #[serde(default)]
+    executable: Option<String>,
+    #[serde(default)]
+    started_unix: Option<u64>,
+    /// `kern.boottime`, so the next startup can tell "the machine rebooted"
+    /// from "we died" without waiting for `webview_transparency`'s store,
+    /// which initializes far later in `setup()`.
+    #[serde(default)]
+    boot_time_epoch: Option<i64>,
+}
+
+const SESSION_IDENTITY_FILE: &str = "last-session.json";
+
+fn session_identity_path(log_dir: &Path) -> PathBuf {
+    log_dir.join(SESSION_IDENTITY_FILE)
+}
+
+/// Best-effort: a missing/corrupt file just means "no recorded identity",
+/// which degrades attribution to the procPath check, never to a guess.
+fn load_session_identity(log_dir: &Path) -> Option<SessionIdentityRecord> {
+    let text = std::fs::read_to_string(session_identity_path(log_dir)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Write-then-rename so a kill mid-write can never leave a half-written
+/// record that the next startup would read as a different pid.
+fn persist_session_identity(log_dir: &Path, record: &SessionIdentityRecord) {
+    let Ok(json) = serde_json::to_string(record) else {
+        return;
+    };
+    let path = session_identity_path(log_dir);
+    let temporary = path.with_extension("json.tmp");
+    if std::fs::write(&temporary, json).is_ok() {
+        let _ = std::fs::rename(&temporary, &path);
+    }
+}
+
+fn current_executable_path() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+fn current_session_identity() -> SessionIdentityRecord {
+    SessionIdentityRecord {
+        pid: std::process::id(),
+        executable: current_executable_path(),
+        started_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs()),
+        boot_time_epoch: current_boot_time_epoch(),
+    }
+}
+
+/// `kern.boottime`, via the one implementation that already reads it
+/// (`webview_transparency`, macOS-only) -- #105 asked for that signal to
+/// reach this classifier rather than being computed twice.
+#[cfg(target_os = "macos")]
+fn current_boot_time_epoch() -> Option<i64> {
+    crate::webview_transparency::current_boot_time_epoch()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_boot_time_epoch() -> Option<i64> {
+    None
+}
+
+fn crash_report_dir() -> Option<PathBuf> {
+    dirs_home().map(|home| home.join("Library").join("Logs").join("DiagnosticReports"))
+}
+
+/// Parse a `petal.log` line's own leading UTC timestamp (the shape
+/// `chrono_like_timestamp` writes). This is the CONTENT threshold #105
+/// replaced the file mtime with: the mtime of a rotated/gzipped file, and
+/// above all the removed 24h fallback, say nothing about when the session
+/// actually stopped writing.
+fn log_line_timestamp(line: &str) -> Option<std::time::SystemTime> {
+    let stamp = line.get(..23)?;
+    let naive = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S%.3f").ok()?;
+    Some(naive.and_utc().into())
+}
+
+fn last_log_line_timestamp(lines: &[String]) -> Option<std::time::SystemTime> {
+    lines.iter().rev().find_map(|line| log_line_timestamp(line))
+}
+
+/// Lines that mark a session's own start IN the log. The previous log file
+/// routinely holds SEVERAL sessions (#905's per-day files, plus same-day
+/// relaunches), and only the last of them is "the previous session" --
+/// classifying the whole tail made one real death get reported twice, 13
+/// seconds apart, in the #105 field log. `logging: file sink initialized
+/// at` is this module's own line (#866's lesson: a detector keyed to
+/// another module's wording can silently stop matching); `petal: app
+/// startup begin` is `lib.rs`'s, kept as a second marker.
+const SESSION_START_MARKERS: &[&str] = &[
+    "logging: file sink initialized at",
+    "petal: app startup begin",
+];
+
+/// The slice of `tail` belonging to the most recent session in it, marker
+/// line included (its timestamp is that session's start).
+fn previous_session_segment(tail: &[String]) -> &[String] {
+    match tail
+        .iter()
+        .rposition(|line| SESSION_START_MARKERS.iter().any(|m| line.contains(m)))
+    {
+        Some(index) => &tail[index..],
+        None => tail,
+    }
+}
+
+fn session_start_timestamp(segment: &[String]) -> Option<std::time::SystemTime> {
+    let first = segment.first()?;
+    if !SESSION_START_MARKERS.iter().any(|m| first.contains(m)) {
+        return None;
+    }
+    log_line_timestamp(first)
+}
+
+/// Facts read out of a `desktop-*.ips`. A modern macOS crash report is two
+/// JSON documents: a one-line header (`timestamp` WITH its UTC offset --
+/// which is why the filename's local-time stamp must never be compared
+/// against this log's UTC timestamps) and a body carrying `pid`/`procPath`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CrashReportFacts {
+    crashed_at: Option<std::time::SystemTime>,
+    pid: Option<u32>,
+    proc_path: Option<String>,
+}
+
+/// Bounded: a crash report is normally a few hundred KB, and this runs on
+/// the startup path.
+const CRASH_REPORT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Bounded: a machine with a directory full of reports must not turn
+/// startup into a parse loop.
+const MAX_CRASH_REPORTS_EXAMINED: usize = 8;
+/// A crash report may be stamped a hair before the last line the dying
+/// process managed to flush; only that much tolerance, no more.
+const CRASH_REPORT_ORDERING_SKEW: Duration = Duration::from_secs(5);
+/// How close to the previous session's last log line a reboot has to be
+/// before "the machine went down and took the session with it" is a claim
+/// worth making rather than a guess.
+const REBOOT_ATTRIBUTION_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+fn parse_ips_timestamp(raw: &str) -> Option<std::time::SystemTime> {
+    let raw = raw.trim();
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f %z",
+        "%Y-%m-%d %H:%M:%S %z",
+        "%Y-%m-%d %H:%M:%S%.f",
+    ] {
+        if let Ok(parsed) = chrono::DateTime::parse_from_str(raw, format) {
+            return Some(parsed.with_timezone(&chrono::Utc).into());
+        }
+    }
+    None
+}
+
+/// Pure core of `read_crash_report_facts`, so the two-JSON-document shape
+/// is testable without a real `.ips` on disk.
+fn crash_report_facts_from_text(text: &str) -> CrashReportFacts {
+    let mut facts = CrashReportFacts::default();
+    let (header, body) = match text.split_once('\n') {
+        Some((header, body)) => (header, body),
+        None => (text, ""),
+    };
+    if let Ok(header) = serde_json::from_str::<serde_json::Value>(header.trim()) {
+        facts.crashed_at = header
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(parse_ips_timestamp);
+    }
+    if let Ok(body) = serde_json::from_str::<serde_json::Value>(body.trim()) {
+        facts.pid = body
+            .get("pid")
+            .and_then(|v| v.as_u64())
+            .and_then(|pid| u32::try_from(pid).ok());
+        facts.proc_path = body
+            .get("procPath")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if facts.crashed_at.is_none() {
+            facts.crashed_at = body
+                .get("captureTime")
+                .and_then(|v| v.as_str())
+                .and_then(parse_ips_timestamp);
+        }
+    }
+    facts
+}
+
+fn read_crash_report_facts(path: &Path) -> CrashReportFacts {
+    let Ok(file) = File::open(path) else {
+        return CrashReportFacts::default();
+    };
+    let mut text = String::new();
+    if std::io::Read::take(file, CRASH_REPORT_MAX_BYTES)
+        .read_to_string(&mut text)
+        .is_err()
+    {
+        return CrashReportFacts::default();
+    }
+    crash_report_facts_from_text(&text)
+}
+
+/// macOS redacts `procPath` for some reports (`/Users/USER/...`, `*`
+/// segments). A redacted path proves nothing either way, so it must not be
+/// read as a mismatch.
+fn proc_path_is_redacted(path: &str) -> bool {
+    path.contains('*') || path.contains("/USER/")
+}
+
+fn format_utc(time: std::time::SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Utc> = time.into();
+    datetime.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+}
+
+fn format_gap(gap: Duration) -> String {
+    let seconds = gap.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// The attribution rule (#105). `Ok(evidence)` = this report describes the
+/// previous session; `Err(reason)` = it does not, or cannot be shown to.
+///
+/// Ordering first (a crash cannot precede the log lines it prevented from
+/// being written, nor predate the session's own start), then IDENTITY --
+/// and identity is what actually attributes. Timing alone never does: every
+/// #105 false positive was a report that merely happened to be newer than
+/// something.
+fn attribute_crash_report(
+    facts: &CrashReportFacts,
+    session: &PreviousSessionIdentity,
+) -> Result<String, String> {
+    let Some(crashed_at) = facts.crashed_at else {
+        return Err("its header carries no parseable timestamp".to_string());
+    };
+    let mut gap = None;
+    if let Some(last_line) = session.last_log_line {
+        if crashed_at + CRASH_REPORT_ORDERING_SKEW < last_line {
+            return Err(format!(
+                "it is dated {}, BEFORE the previous session's last log line at {} -- that session was still logging afterwards",
+                format_utc(crashed_at),
+                format_utc(last_line)
+            ));
+        }
+        gap = crashed_at.duration_since(last_line).ok();
+    }
+    if let Some(started) = session.started {
+        if crashed_at < started {
+            return Err(format!(
+                "it is dated {}, before the previous session even started at {}",
+                format_utc(crashed_at),
+                format_utc(started)
+            ));
+        }
+    }
+    let when = match gap {
+        Some(gap) => format!(
+            "dated {} ({} after the previous session's last log line)",
+            format_utc(crashed_at),
+            format_gap(gap)
+        ),
+        None => format!("dated {}", format_utc(crashed_at)),
+    };
+    match (session.pid, facts.pid) {
+        (Some(expected), Some(found)) if expected != found => {
+            return Err(format!(
+                "it reports pid {found}, but the previous session was pid {expected}"
+            ));
+        }
+        (Some(expected), Some(_)) => {
+            return Ok(format!(
+                "pid {expected} matches the previous session, {when}"
+            ));
+        }
+        _ => {}
+    }
+    match (session.executable.as_deref(), facts.proc_path.as_deref()) {
+        (Some(expected), Some(found)) if proc_path_is_redacted(found) => Err(format!(
+            "its procPath is redacted by macOS ({found}) and it carries no pid to match against the previous session (pid {:?}, executable {expected})",
+            session.pid
+        )),
+        (Some(expected), Some(found)) if found == expected => {
+            Ok(format!("procPath {found} is this app's executable, {when}"))
+        }
+        (Some(expected), Some(found)) => Err(format!(
+            "its procPath is {found}, not this app's executable {expected}"
+        )),
+        _ => Err(
+            "it carries no pid or procPath that can be matched against the previous session"
+                .to_string(),
+        ),
+    }
+}
+
+/// Did the machine reboot in the minutes around the previous session's last
+/// log line? Both boot times must be known and different, and the boot has
+/// to land close enough to the gap to be the explanation -- a reboot hours
+/// after we went quiet explains nothing, and is reported as the unexplained
+/// gap it is.
+fn machine_rebooted_into_this_session(
+    previous_boot: Option<i64>,
+    current_boot: Option<i64>,
+    last_log_line: Option<std::time::SystemTime>,
+) -> Option<std::time::SystemTime> {
+    let (previous_boot, current_boot) = (previous_boot?, current_boot?);
+    if previous_boot == current_boot || current_boot <= 0 {
+        return None;
+    }
+    let boot_at = std::time::UNIX_EPOCH + Duration::from_secs(current_boot as u64);
+    let last_log_line = last_log_line?;
+    let within_window = match boot_at.duration_since(last_log_line) {
+        Ok(after) => after <= REBOOT_ATTRIBUTION_WINDOW,
+        // Booted before the last log line: impossible for the session that
+        // wrote it under a DIFFERENT boot, so this is a clock or state
+        // anomaly, not evidence.
+        Err(_) => false,
+    };
+    within_window.then_some(boot_at)
 }
 
 const VANISHED_SESSION_SHUTDOWN_MARKERS: &[&str] =
@@ -3486,64 +4118,256 @@ const VANISHED_SESSION_ACTIVITY_MARKERS: &[&str] = &[
     "camera publish health",
 ];
 
-/// Pure decision over one log tail: did the previous session's LAST
-/// evidence of being in a meeting (a join line, or a periodic in-meeting
-/// health line) have a shutdown marker after it? Isolated from any real
-/// file so the fixture shapes (clean shutdown, truncated in-room, long
-/// meeting whose join scrolled out of the tail, in-room-with-crash) are
-/// unit-testable without touching disk (#878, tail fix per #882 review).
-fn detect_vanished_session(lines: &[String], crash_report_found: bool) -> VanishedSessionVerdict {
-    let Some(last_activity_index) = lines.iter().rposition(|line| {
+/// `resilience.rs`'s display sleep/wake markers -- the ONLY thing in the
+/// data that tells a machine that went to sleep from a process that died
+/// (#105). A wake line after a sleep line means the session survived it.
+const DISPLAY_SLEEP_MARKER: &str = "screens did sleep";
+const DISPLAY_WAKE_MARKER: &str = "screens did wake";
+
+/// Pure decision over one session's log segment plus everything known
+/// about the machine: did it end cleanly, go down with the machine, or
+/// vanish?
+fn classify_previous_session(
+    segment: &[String],
+    crash: CrashAttribution,
+    rebooted_at: Option<std::time::SystemTime>,
+) -> PreviousSessionReport {
+    let Some(last_activity_index) = segment.iter().rposition(|line| {
         VANISHED_SESSION_ACTIVITY_MARKERS
             .iter()
             .any(|marker| line.contains(marker))
     }) else {
-        return VanishedSessionVerdict::CleanShutdown;
+        return PreviousSessionReport {
+            outcome: PreviousSessionOutcome::CleanShutdown,
+            crash,
+            display_slept: false,
+            rebooted_at: None,
+        };
     };
-    let shut_down = lines[last_activity_index + 1..]
-        .iter()
-        .any(|line| VANISHED_SESSION_SHUTDOWN_MARKERS.iter().any(|marker| line.contains(marker)));
+    let after = &segment[last_activity_index + 1..];
+    let shut_down = after.iter().any(|line| {
+        VANISHED_SESSION_SHUTDOWN_MARKERS
+            .iter()
+            .any(|marker| line.contains(marker))
+    });
     if shut_down {
-        VanishedSessionVerdict::CleanShutdown
-    } else if crash_report_found {
-        VanishedSessionVerdict::VanishedWithCrashReport
+        return PreviousSessionReport {
+            outcome: PreviousSessionOutcome::CleanShutdown,
+            crash,
+            display_slept: false,
+            rebooted_at: None,
+        };
+    }
+    let display_slept = match after
+        .iter()
+        .rposition(|line| line.contains(DISPLAY_SLEEP_MARKER))
+    {
+        Some(slept_index) => !after[slept_index + 1..]
+            .iter()
+            .any(|line| line.contains(DISPLAY_WAKE_MARKER)),
+        None => false,
+    };
+    let outcome = if rebooted_at.is_some() {
+        PreviousSessionOutcome::WentDownWithTheMachine
     } else {
-        VanishedSessionVerdict::VanishedNoCrashReport
+        PreviousSessionOutcome::Vanished
+    };
+    PreviousSessionReport {
+        outcome,
+        crash,
+        display_slept,
+        rebooted_at,
     }
 }
 
-/// Sibling to `report_previous_crashes`: a vanished session with NO crash
-/// report is a stronger signal than a `.ips` gap alone, since it means the
-/// process disappeared without even the OS's own crash reporter catching it
-/// (#878's field cases -- WindowServer death takes Petal down with it,
-/// leaving no `desktop-*.ips` at all).
-fn report_vanished_previous_session(previous_log_tail: &[String], crash_report_found: bool) {
-    match detect_vanished_session(previous_log_tail, crash_report_found) {
-        VanishedSessionVerdict::CleanShutdown => {}
-        VanishedSessionVerdict::VanishedNoCrashReport => {
-            log::warn!(
-                "previous session VANISHED mid-meeting (no shutdown marker, no crash report) -- see #878"
-            );
-            capture_sentry_diagnostic(SentryDiagnosticEvent::PreviousSessionVanished(
-                PreviousSessionVanishedDiagnostic {
-                    crash_report: VanishedSessionCrashReportTag::NotFound,
-                },
-            ));
+/// Everything the classifier needs, gathered by the caller so the whole
+/// decision -- crash scan included -- is one testable call against real
+/// files rather than a chain of globals.
+struct PreviousSessionInputs<'a> {
+    /// Tail of the previous log file, possibly spanning several sessions.
+    tail: &'a [String],
+    /// Only a fallback for the scan threshold, and only when the tail
+    /// yields no parseable timestamp: mtime is a filesystem attribute, not
+    /// a statement about when the session stopped writing.
+    previous_log_mtime: Option<std::time::SystemTime>,
+    recorded_identity: Option<SessionIdentityRecord>,
+    crash_report_dir: Option<PathBuf>,
+    current_boot_time: Option<i64>,
+    current_executable: Option<String>,
+}
+
+/// Scan for, and try to attribute, a crash report for the previous session.
+fn attribute_previous_crash_report(
+    dir: &Path,
+    session: &PreviousSessionIdentity,
+    threshold: std::time::SystemTime,
+) -> CrashAttribution {
+    let reports = crash_reports_since(dir, threshold);
+    let mut rejected: Option<(PathBuf, String)> = None;
+    for path in reports.into_iter().take(MAX_CRASH_REPORTS_EXAMINED) {
+        let facts = read_crash_report_facts(&path);
+        match attribute_crash_report(&facts, session) {
+            Ok(evidence) => return CrashAttribution::Attributed { path, evidence },
+            Err(reason) => rejected = Some((path, reason)),
         }
-        VanishedSessionVerdict::VanishedWithCrashReport => {
-            // Distinguishable from the no-report case: `report_previous_crashes`
-            // already logged the loud error-level pointer to the .ips file, so
-            // this is informational, not a fresh alarm.
-            log::info!(
-                "previous session ended mid-meeting, but a crash report was found for the same window -- not a silent vanish, see #878"
-            );
-        }
+    }
+    match rejected {
+        Some((path, reason)) => CrashAttribution::Unattributed { path, reason },
+        None => CrashAttribution::NoReport,
     }
 }
 
-/// Pure, unit-testable core of `report_previous_crashes`: every
-/// `desktop-*.ips` file directly inside `dir` whose modification time is
-/// strictly newer than `threshold`, sorted by path for deterministic output.
+fn analyze_previous_session(inputs: &PreviousSessionInputs<'_>) -> PreviousSessionReport {
+    let segment = previous_session_segment(inputs.tail);
+    let last_log_line = last_log_line_timestamp(segment);
+    let recorded_start = inputs
+        .recorded_identity
+        .as_ref()
+        .and_then(|record| record.started_unix)
+        .map(|secs| std::time::UNIX_EPOCH + Duration::from_secs(secs));
+    let session = PreviousSessionIdentity {
+        last_log_line,
+        started: session_start_timestamp(segment).or(recorded_start),
+        pid: inputs.recorded_identity.as_ref().map(|record| record.pid),
+        executable: inputs
+            .recorded_identity
+            .as_ref()
+            .and_then(|record| record.executable.clone())
+            .or_else(|| inputs.current_executable.clone()),
+    };
+
+    // No previous session on record at all -> nothing to attribute to, so
+    // nothing is scanned. This is where the `now - 24h` fallback used to
+    // be (#105 mechanism 1): a blind 24-hour window at a 13:26 launch
+    // reaches back to the previous day's 13:26 and will happily "find" a
+    // crash for a session that never existed.
+    let threshold = last_log_line.or(inputs.previous_log_mtime);
+    let crash = match (inputs.crash_report_dir.as_deref(), threshold) {
+        (Some(dir), Some(threshold)) => attribute_previous_crash_report(dir, &session, threshold),
+        _ => CrashAttribution::NotScanned,
+    };
+
+    let rebooted_at = machine_rebooted_into_this_session(
+        inputs
+            .recorded_identity
+            .as_ref()
+            .and_then(|record| record.boot_time_epoch),
+        inputs.current_boot_time,
+        last_log_line,
+    );
+
+    classify_previous_session(segment, crash, rebooted_at)
+}
+
+/// The crash-report statement, or `None` when there is nothing to say.
+/// ERROR is reserved for an ATTRIBUTED report: `sentry_log`'s default
+/// filter turns an error into a Sentry event, and #105 is the story of a
+/// wrong one.
+fn crash_report_log_line(report: &PreviousSessionReport) -> Option<(log::Level, String)> {
+    match &report.crash {
+        CrashAttribution::NotScanned | CrashAttribution::NoReport => None,
+        CrashAttribution::Attributed { path, evidence } => Some((
+            log::Level::Error,
+            format!(
+                "previous session appears to have CRASHED (see {}) -- attributed to it: {evidence} (#105)",
+                path.display()
+            ),
+        )),
+        CrashAttribution::Unattributed { path, reason } => Some((
+            log::Level::Warn,
+            format!(
+                "found a crash report ({}) but could NOT attribute it to the previous session: {reason} -- cause UNKNOWN, not claiming a crash (#105)",
+                path.display()
+            ),
+        )),
+    }
+}
+
+/// The session-outcome statement. An unattributed report never downgrades
+/// a vanish: that suppression is the second half of #105.
+fn previous_session_log_line(report: &PreviousSessionReport) -> Option<(log::Level, String)> {
+    let sleep_note = if report.display_slept {
+        " -- the last marker before the gap was display sleep, so a sleep-time termination cannot be distinguished from an in-use crash here"
+    } else {
+        ""
+    };
+    match report.outcome {
+        PreviousSessionOutcome::CleanShutdown => None,
+        PreviousSessionOutcome::WentDownWithTheMachine => Some((
+            log::Level::Info,
+            format!(
+                "previous session ended mid-meeting, and the machine rebooted at {} -- it went down with the machine, not a crash (#105)",
+                report
+                    .rebooted_at
+                    .map(format_utc)
+                    .unwrap_or_else(|| "an unknown time".to_string())
+            ),
+        )),
+        PreviousSessionOutcome::Vanished => match &report.crash {
+            CrashAttribution::Attributed { path, .. } => Some((
+                log::Level::Info,
+                format!(
+                    "previous session ended mid-meeting and an attributed crash report ({}) explains it -- see the CRASHED line above{sleep_note}",
+                    path.display()
+                ),
+            )),
+            CrashAttribution::Unattributed { .. } => Some((
+                log::Level::Warn,
+                format!(
+                    "previous session VANISHED mid-meeting (no shutdown marker; a crash report exists but is NOT attributable to this session, so it explains nothing){sleep_note} -- see #878/#105"
+                ),
+            )),
+            CrashAttribution::NoReport => Some((
+                log::Level::Warn,
+                format!(
+                    "previous session VANISHED mid-meeting (no shutdown marker, no crash report){sleep_note} -- see #878"
+                ),
+            )),
+            CrashAttribution::NotScanned => Some((
+                log::Level::Warn,
+                format!(
+                    "previous session VANISHED mid-meeting (no shutdown marker; no crash report was scanned for -- nothing on record identifies the previous session){sleep_note} -- see #878"
+                ),
+            )),
+        },
+    }
+}
+
+/// The Sentry diagnostic, if this verdict warrants one. Only an ATTRIBUTED
+/// report suppresses it -- and only because the ERROR line above already
+/// ships its own event for that case.
+fn previous_session_sentry_event(report: &PreviousSessionReport) -> Option<SentryDiagnosticEvent> {
+    if report.outcome != PreviousSessionOutcome::Vanished {
+        return None;
+    }
+    let crash_report = match &report.crash {
+        CrashAttribution::Attributed { .. } => return None,
+        CrashAttribution::Unattributed { .. } => VanishedSessionCrashReportTag::Unverified,
+        CrashAttribution::NoReport => VanishedSessionCrashReportTag::NotFound,
+        CrashAttribution::NotScanned => VanishedSessionCrashReportTag::NotApplicable,
+    };
+    Some(SentryDiagnosticEvent::PreviousSessionVanished(
+        PreviousSessionVanishedDiagnostic { crash_report },
+    ))
+}
+
+fn report_previous_session(report: &PreviousSessionReport) {
+    if let Some((level, message)) = crash_report_log_line(report) {
+        log::log!(level, "{message}");
+    }
+    if let Some((level, message)) = previous_session_log_line(report) {
+        log::log!(level, "{message}");
+    }
+    if let Some(event) = previous_session_sentry_event(report) {
+        capture_sentry_diagnostic(event);
+    }
+}
+
+/// Cheap first pass of the crash scan: every `desktop-*.ips` file directly
+/// inside `dir` whose modification time is strictly newer than `threshold`,
+/// sorted by path for deterministic output. This is a FILTER, never an
+/// attribution -- a surviving file still has to pass
+/// `attribute_crash_report` before anything is claimed about it (#105).
 /// Keep this glob coupled to the Cargo crate/binary name `desktop`; if the
 /// crate is renamed, update this crash-report scan in the same change.
 /// IO errors (missing dir, unreadable entries) yield an empty/partial list
@@ -3856,14 +4680,18 @@ fn scrub_event_for_sentry(
 }
 
 fn valid_sentry_diagnostic_event(event: &sentry::protocol::Event<'_>) -> bool {
-    let event_name = event.tags.get("event_name").map(String::as_str);
+    let expected_fingerprint = diagnostic_fingerprint(&event.tags);
     if event.tags.len() != DIAGNOSTIC_TAGS.len()
         || event
             .tags
             .keys()
             .any(|key| !DIAGNOSTIC_TAGS.contains(&key.as_str()))
-        || event.fingerprint.len() != 1
-        || event.fingerprint.first().map(|value| value.as_ref()) != event_name
+        || expected_fingerprint.is_empty()
+        || event
+            .fingerprint
+            .iter()
+            .map(|value| value.as_ref())
+            .ne(expected_fingerprint.iter().map(String::as_str))
         || event
             .release
             .as_deref()
@@ -3976,12 +4804,18 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
             value,
             "no_publication" | "retired" | "hide_pending" | "not_applicable"
         ),
-        "crash_report_status" => matches!(value, "found" | "not_found" | "not_applicable"),
+        "crash_report_status" => matches!(
+            value,
+            "found" | "not_found" | "unverified" | "not_applicable"
+        ),
         "pressure_level" => matches!(value, "warn" | "critical" | "not_applicable"),
         "browser_url_extraction_cause" => matches!(
             value,
             "denied" | "timeout" | "ambiguous" | "no-match" | "spawn" | "failed" | "not_applicable"
         ),
+        "descriptor_pressure_stage" => {
+            matches!(value, "high_water" | "exhausted" | "not_applicable")
+        }
         "capture_cadence" | "encode_cadence" => matches!(
             value,
             "healthy" | "reduced" | "severe" | "stalled" | "unknown" | "not_applicable"
@@ -3998,6 +4832,12 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
                 | "both_degraded"
                 | "unknown"
                 | "not_applicable"
+        ),
+        // #126: the closed discriminator that separates an SFU pause from a
+        // confirmed decode stall from a not-yet-stale zero decode rate.
+        "stall_cause" => matches!(
+            value,
+            "stream_paused" | "decode_stale" | "decode_zero" | "not_applicable"
         ),
         "dedup_count_bucket" => matches!(value, "1" | "2_9" | "10_99" | "100_plus"),
         _ => false,
@@ -4835,75 +5675,502 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn vanished_session_verdict(lines: &[&str], crash_report_found: bool) -> VanishedSessionVerdict {
-        let owned: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
-        detect_vanished_session(&owned, crash_report_found)
+    // ---------------------------------------------------------------------
+    // Previous-session classification (#13 / #878 / #105).
+    //
+    // These drive the REAL startup classifier -- `analyze_previous_session`,
+    // the single call `init()` makes -- against real fixture files on disk,
+    // not just the pure tail helper underneath it. Every case asserts the
+    // log LEVEL that would be emitted and whether the Sentry diagnostic
+    // fires, because #105 was precisely a case where the verdict changed
+    // level (WARN -> INFO) and dropped its event.
+    // ---------------------------------------------------------------------
+
+    /// The previous session's own last log line, in the exact shape
+    /// `chrono_like_timestamp()` writes (UTC).
+    const FIELD_SESSION_START: &str =
+        "2026-09-08 15:07:46.352 [INFO] [desktop_lib] petal: app startup begin (log file: x)";
+    const FIELD_LAST_LINE: &str =
+        "2026-09-09 01:45:02.279 [WARN] [libwebrtc] (basic_port_allocator.cc:955): Discarding candidate";
+    const FIELD_IN_MEETING: &str =
+        "2026-09-09 01:44:31.010 [INFO] [desktop_lib::session::share] compositor feed: window 4 receiver frame health";
+
+    fn owned(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A realistic two-JSON-document `.ips`: one-line header carrying
+    /// `timestamp` WITH its UTC offset, then the pretty-printed body
+    /// carrying `pid`/`procPath`.
+    fn write_ips(
+        dir: &std::path::Path,
+        name: &str,
+        timestamp: &str,
+        pid: u32,
+        proc_path: &str,
+    ) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"app_name\":\"desktop\",\"timestamp\":\"{timestamp}\",\"name\":\"desktop\"}}\n{{\n  \"pid\" : {pid},\n  \"procName\" : \"desktop\",\n  \"procPath\" : \"{proc_path}\"\n}}\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    const FIELD_EXECUTABLE: &str = "/Applications/Petal.app/Contents/MacOS/Petal";
+
+    fn field_identity(pid: u32) -> SessionIdentityRecord {
+        SessionIdentityRecord {
+            pid,
+            executable: Some(FIELD_EXECUTABLE.to_string()),
+            started_unix: None,
+            boot_time_epoch: Some(1_787_686_278),
+        }
+    }
+
+    fn analyze_fixture(
+        tail: &[&str],
+        identity: Option<SessionIdentityRecord>,
+        crash_dir: Option<&std::path::Path>,
+        current_boot: Option<i64>,
+    ) -> PreviousSessionReport {
+        let tail = owned(tail);
+        analyze_previous_session(&PreviousSessionInputs {
+            tail: &tail,
+            previous_log_mtime: None,
+            recorded_identity: identity,
+            crash_report_dir: crash_dir.map(|d| d.to_path_buf()),
+            current_boot_time: current_boot,
+            current_executable: Some(FIELD_EXECUTABLE.to_string()),
+        })
+    }
+
+    fn emitted_levels(
+        report: &PreviousSessionReport,
+    ) -> (Option<log::Level>, Option<log::Level>, bool) {
+        (
+            crash_report_log_line(report).map(|(level, _)| level),
+            previous_session_log_line(report).map(|(level, _)| level),
+            previous_session_sentry_event(report).is_some(),
+        )
+    }
+
+    #[test]
+    fn crash_report_facts_come_from_both_json_documents() {
+        let facts = crash_report_facts_from_text(
+            "{\"app_name\":\"desktop\",\"timestamp\":\"2026-09-08 20:45:25.00 -0600\"}\n{\n  \"pid\" : 4242,\n  \"procPath\" : \"/Applications/Petal.app/Contents/MacOS/Petal\"\n}\n",
+        );
+        assert_eq!(facts.pid, Some(4242));
+        assert_eq!(
+            facts.proc_path.as_deref(),
+            Some("/Applications/Petal.app/Contents/MacOS/Petal")
+        );
+        assert_eq!(
+            facts.crashed_at,
+            parse_ips_timestamp("2026-09-09 02:45:25 +0000"),
+            "the header timestamp must be read WITH its UTC offset"
+        );
+    }
+
+    #[test]
+    fn ips_timestamps_are_offset_aware_not_wall_clock() {
+        // The `.ips` FILENAME stamp is local time and this log's timestamps
+        // are UTC, so comparing the two directly is a six-hour error on a
+        // US machine. The header's offset is the only sound source (#105).
+        let mountain = parse_ips_timestamp("2026-09-08 20:45:25.00 -0600").unwrap();
+        let utc = parse_ips_timestamp("2026-09-08 20:45:25.00 +0000").unwrap();
+        assert!(mountain > utc);
+        assert_eq!(
+            mountain.duration_since(utc).unwrap(),
+            Duration::from_secs(6 * 3600)
+        );
+    }
+
+    #[test]
+    fn stale_crash_report_does_not_explain_the_death_and_the_vanish_still_warns() {
+        // THE #105 FIELD CASE. The report's mtime is newer than the log
+        // file's (it is written now), so the cheap scan finds it -- but its
+        // own header says it was written while the previous session was
+        // still logging. Before the fix that report was announced as a
+        // crash at ERROR and flipped the vanish verdict to INFO with no
+        // Sentry event; both halves must be gone.
+        let dir = temp_dir("prev-session-stale-ips");
+        let report_path = write_ips(
+            &dir,
+            "desktop-2026-09-08-204525.ips",
+            "2026-09-08 20:45:25.00 +0000",
+            4242,
+            FIELD_EXECUTABLE,
+        );
+
+        let report = analyze_fixture(
+            &[FIELD_SESSION_START, FIELD_IN_MEETING, FIELD_LAST_LINE],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+
+        match &report.crash {
+            CrashAttribution::Unattributed { path, reason } => {
+                assert_eq!(path, &report_path);
+                assert!(
+                    reason.contains("BEFORE the previous session's last log line"),
+                    "the log line must say WHY it was not believed: {reason}"
+                );
+            }
+            other => {
+                panic!("a report predating the last log line must not be attributed: {other:?}")
+            }
+        }
+        assert_eq!(report.outcome, PreviousSessionOutcome::Vanished);
+        assert_eq!(
+            emitted_levels(&report),
+            (Some(log::Level::Warn), Some(log::Level::Warn), true),
+            "an unattributable report must never claim a crash at ERROR, and must never \
+             silence the vanish WARN + Sentry event"
+        );
+        assert_eq!(
+            previous_session_sentry_event(&report),
+            Some(SentryDiagnosticEvent::PreviousSessionVanished(
+                PreviousSessionVanishedDiagnostic {
+                    crash_report: VanishedSessionCrashReportTag::Unverified,
+                }
+            ))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crash_report_for_a_different_pid_is_rejected_and_the_vanish_still_warns() {
+        let dir = temp_dir("prev-session-other-pid");
+        write_ips(
+            &dir,
+            "desktop-2026-09-09-024525.ips",
+            // Newer than the previous session's last log line -- passes
+            // every ORDERING check, and is still not ours.
+            "2026-09-09 02:45:25.00 +0000",
+            9999,
+            FIELD_EXECUTABLE,
+        );
+
+        let report = analyze_fixture(
+            &[FIELD_SESSION_START, FIELD_IN_MEETING, FIELD_LAST_LINE],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+
+        match &report.crash {
+            CrashAttribution::Unattributed { reason, .. } => assert!(
+                reason.contains("pid 9999") && reason.contains("pid 4242"),
+                "{reason}"
+            ),
+            other => panic!("another process's report must not be attributed: {other:?}"),
+        }
+        assert_eq!(
+            emitted_levels(&report),
+            (Some(log::Level::Warn), Some(log::Level::Warn), true)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crash_report_matching_pid_and_ordering_is_attributed() {
+        let dir = temp_dir("prev-session-real-crash");
+        write_ips(
+            &dir,
+            "desktop-2026-09-09-024525.ips",
+            "2026-09-09 02:45:25.00 +0000",
+            4242,
+            FIELD_EXECUTABLE,
+        );
+
+        let report = analyze_fixture(
+            &[FIELD_SESSION_START, FIELD_IN_MEETING, FIELD_LAST_LINE],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+
+        match &report.crash {
+            CrashAttribution::Attributed { evidence, .. } => {
+                assert!(evidence.contains("pid 4242"), "{evidence}");
+                assert!(
+                    evidence.contains("1h00m after"),
+                    "the silence between the last log line and the report is part of the \
+                     claim, not hidden: {evidence}"
+                );
+            }
+            other => panic!("a pid-matched, correctly ordered report must attribute: {other:?}"),
+        }
+        // The ERROR line already ships its own Sentry event, so this one
+        // case may report at INFO -- the ONLY case that may.
+        assert_eq!(
+            emitted_levels(&report),
+            (Some(log::Level::Error), Some(log::Level::Info), false)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vanished_session_with_no_crash_report_warns_and_reports() {
+        let dir = temp_dir("prev-session-no-report");
+        let report = analyze_fixture(
+            &[FIELD_SESSION_START, FIELD_IN_MEETING, FIELD_LAST_LINE],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+        assert_eq!(report.crash, CrashAttribution::NoReport);
+        assert_eq!(report.outcome, PreviousSessionOutcome::Vanished);
+        assert_eq!(
+            emitted_levels(&report),
+            (None, Some(log::Level::Warn), true)
+        );
+        assert_eq!(
+            previous_session_sentry_event(&report),
+            Some(SentryDiagnosticEvent::PreviousSessionVanished(
+                PreviousSessionVanishedDiagnostic {
+                    crash_report: VanishedSessionCrashReportTag::NotFound,
+                }
+            ))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_previous_session_on_record_never_attributes_a_crash() {
+        // The removed 24h fallback used to scan a blind window here and
+        // could "find" a crash with nothing to attribute it to.
+        let dir = temp_dir("prev-session-first-launch");
+        write_ips(
+            &dir,
+            "desktop-2026-09-09-024525.ips",
+            "2026-09-09 02:45:25.00 +0000",
+            4242,
+            FIELD_EXECUTABLE,
+        );
+        let report = analyze_fixture(&[], None, Some(&dir), None);
+        assert_eq!(report.crash, CrashAttribution::NotScanned);
+        assert_eq!(report.outcome, PreviousSessionOutcome::CleanShutdown);
+        assert_eq!(emitted_levels(&report), (None, None, false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reboot_is_reported_as_a_reboot_not_a_vanish() {
+        // #105 plan point 5: `kern.boottime` already distinguished this and
+        // nothing in the classifier consumed it. Boot time is 2 minutes
+        // after the previous session's last log line.
+        let dir = temp_dir("prev-session-reboot");
+        let last_line = log_line_timestamp(FIELD_LAST_LINE).unwrap();
+        let boot_epoch = last_line
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 120;
+
+        let report = analyze_fixture(
+            &[FIELD_SESSION_START, FIELD_IN_MEETING, FIELD_LAST_LINE],
+            Some(field_identity(4242)),
+            Some(&dir),
+            Some(boot_epoch),
+        );
+        assert_eq!(
+            report.outcome,
+            PreviousSessionOutcome::WentDownWithTheMachine
+        );
+        assert_eq!(
+            emitted_levels(&report),
+            (None, Some(log::Level::Info), false)
+        );
+        assert!(previous_session_log_line(&report)
+            .unwrap()
+            .1
+            .contains("went down with the machine"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reboot_hours_after_the_gap_explains_nothing() {
+        let dir = temp_dir("prev-session-late-reboot");
+        let last_line = log_line_timestamp(FIELD_LAST_LINE).unwrap();
+        let boot_epoch = last_line
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 6 * 3600;
+
+        let report = analyze_fixture(
+            &[FIELD_SESSION_START, FIELD_IN_MEETING, FIELD_LAST_LINE],
+            Some(field_identity(4242)),
+            Some(&dir),
+            Some(boot_epoch),
+        );
+        assert_eq!(
+            report.outcome,
+            PreviousSessionOutcome::Vanished,
+            "a reboot long after we went quiet is not what killed us"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn display_sleep_before_the_gap_is_reported_as_ambiguous() {
+        // Sleep leaves a positive marker (`resilience: screens did sleep`)
+        // and its absence is what rules sleep OUT in the #105 field case.
+        // When it IS present with no matching wake, say the gap is
+        // ambiguous rather than asserting a crash.
+        let dir = temp_dir("prev-session-slept");
+        let report = analyze_fixture(
+            &[
+                FIELD_SESSION_START,
+                FIELD_IN_MEETING,
+                "2026-09-09 01:45:00.000 [INFO] [desktop_lib::resilience] resilience: screens did sleep -- pausing compositor display enqueue",
+                FIELD_LAST_LINE,
+            ],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+        assert!(report.display_slept);
+        assert_eq!(report.outcome, PreviousSessionOutcome::Vanished);
+        let (_, level, sentry) = emitted_levels(&report);
+        assert_eq!(level, Some(log::Level::Warn));
+        assert!(
+            sentry,
+            "a sleep-shaped gap is still a vanish, just an ambiguous one"
+        );
+        assert!(previous_session_log_line(&report)
+            .unwrap()
+            .1
+            .contains("cannot be distinguished"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_wake_after_the_sleep_marker_is_not_a_sleep_gap() {
+        let dir = temp_dir("prev-session-woke");
+        let report = analyze_fixture(
+            &[
+                FIELD_SESSION_START,
+                FIELD_IN_MEETING,
+                "2026-09-09 01:20:00.000 [INFO] [desktop_lib::resilience] resilience: screens did sleep -- pausing compositor display enqueue",
+                "2026-09-09 01:40:00.000 [INFO] [desktop_lib::resilience] resilience: screens did wake -- resuming compositor display enqueue",
+                FIELD_LAST_LINE,
+            ],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+        assert!(!report.display_slept);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_last_session_in_the_tail_is_classified() {
+        // Field shape from #105: the same death was reported twice, 13
+        // seconds apart, because the second startup re-read a tail that
+        // still contained the DEAD session's in-meeting lines. Everything
+        // before the last startup marker belongs to a session that was
+        // already classified.
+        let dir = temp_dir("prev-session-two-sessions");
+        let report = analyze_fixture(
+            &[
+                FIELD_SESSION_START,
+                FIELD_IN_MEETING,
+                FIELD_LAST_LINE,
+                "2026-09-09 13:26:14.174 [INFO] [desktop_lib::logging] logging: file sink initialized at /x",
+                "2026-09-09 13:26:14.205 [INFO] [desktop_lib] petal: app startup begin (log file: x)",
+                "2026-09-09 13:26:20.000 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.11",
+            ],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+        assert_eq!(report.outcome, PreviousSessionOutcome::CleanShutdown);
+        assert_eq!(emitted_levels(&report), (None, None, false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_redacted_proc_path_is_not_treated_as_a_match() {
+        let session = PreviousSessionIdentity {
+            last_log_line: log_line_timestamp(FIELD_LAST_LINE),
+            started: log_line_timestamp(FIELD_SESSION_START),
+            pid: None,
+            executable: Some(FIELD_EXECUTABLE.to_string()),
+        };
+        let facts = CrashReportFacts {
+            crashed_at: parse_ips_timestamp("2026-09-09 02:45:25 +0000"),
+            pid: None,
+            proc_path: Some("/Users/USER/Library/*/desktop".to_string()),
+        };
+        let reason = attribute_crash_report(&facts, &session).unwrap_err();
+        assert!(reason.contains("redacted"), "{reason}");
+    }
+
+    #[test]
+    fn session_identity_round_trips_through_the_log_dir() {
+        let dir = temp_dir("session-identity");
+        assert_eq!(load_session_identity(&dir), None);
+        let record = field_identity(4242);
+        persist_session_identity(&dir, &record);
+        assert_eq!(load_session_identity(&dir), Some(record));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn classify(lines: &[&str]) -> PreviousSessionOutcome {
+        classify_previous_session(&owned(lines), CrashAttribution::NoReport, None).outcome
     }
 
     #[test]
     fn vanished_session_clean_shutdown_via_left_room() {
-        let lines = [
-            "session: joined room ops",
-            "some other activity",
-            "session: left room ops",
-        ];
         assert_eq!(
-            vanished_session_verdict(&lines, false),
-            VanishedSessionVerdict::CleanShutdown
+            classify(&[
+                "session: joined room ops",
+                "some other activity",
+                "session: left room ops",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
         );
     }
 
     #[test]
     fn vanished_session_clean_shutdown_via_quit_app() {
-        let lines = ["session: joined room ops", "quit: quit_app invoked"];
         assert_eq!(
-            vanished_session_verdict(&lines, false),
-            VanishedSessionVerdict::CleanShutdown
+            classify(&["session: joined room ops", "quit: quit_app invoked"]),
+            PreviousSessionOutcome::CleanShutdown
         );
     }
 
     #[test]
     fn vanished_session_clean_shutdown_via_journal_loop_stopped() {
-        let lines = ["session: joined room ops", "event journal loop stopped"];
         assert_eq!(
-            vanished_session_verdict(&lines, false),
-            VanishedSessionVerdict::CleanShutdown
+            classify(&["session: joined room ops", "event journal loop stopped"]),
+            PreviousSessionOutcome::CleanShutdown
         );
     }
 
     #[test]
     fn vanished_session_no_join_is_clean() {
-        let lines = ["app started", "nothing happened"];
         assert_eq!(
-            vanished_session_verdict(&lines, false),
-            VanishedSessionVerdict::CleanShutdown
+            classify(&["app started", "nothing happened"]),
+            PreviousSessionOutcome::CleanShutdown
         );
     }
 
     #[test]
     fn vanished_session_truncated_in_room_with_no_crash_report() {
-        let lines = [
-            "session: joined room ops",
-            "camera publish health -- capture_fps=30.0",
-        ];
         assert_eq!(
-            vanished_session_verdict(&lines, false),
-            VanishedSessionVerdict::VanishedNoCrashReport
-        );
-    }
-
-    #[test]
-    fn vanished_session_truncated_in_room_with_crash_report_is_distinguishable() {
-        let lines = [
-            "session: joined room ops",
-            "camera publish health -- capture_fps=30.0",
-        ];
-        let with_report = vanished_session_verdict(&lines, true);
-        let without_report = vanished_session_verdict(&lines, false);
-        assert_eq!(with_report, VanishedSessionVerdict::VanishedWithCrashReport);
-        assert_ne!(
-            with_report, without_report,
-            "the crash-report and no-crash-report verdicts must differ"
+            classify(&[
+                "session: joined room ops",
+                "camera publish health -- capture_fps=30.0",
+            ]),
+            PreviousSessionOutcome::Vanished
         );
     }
 
@@ -4911,14 +6178,13 @@ mod tests {
     fn vanished_session_uses_the_last_join_not_the_first() {
         // Two joins: the first was left cleanly, the second (most recent)
         // was not -- the verdict must track the LAST join.
-        let lines = [
-            "session: joined room ops",
-            "session: left room ops",
-            "session: joined room ops",
-        ];
         assert_eq!(
-            vanished_session_verdict(&lines, false),
-            VanishedSessionVerdict::VanishedNoCrashReport
+            classify(&[
+                "session: joined room ops",
+                "session: left room ops",
+                "session: joined room ops",
+            ]),
+            PreviousSessionOutcome::Vanished
         );
     }
 
@@ -4928,14 +6194,13 @@ mod tests {
         // the 300-line tail; the periodic in-meeting health lines are then
         // the only evidence. Two of the three #878 field deaths look exactly
         // like this fixture -- the join-only detector verdicted them clean.
-        let lines = [
-            "compositor feed: window 1073741830 receiver frame health from 'peer' -- frames=100 compositor_fps=2.0 gap_since_last_frame_ms=1374 pixbufs=0",
-            "session: camera publish health -- captured=120 pushed=118 dropped_push=1 overwritten_latest=2 capture_fps=30.0 encode_fps=29.4",
-            "compositor feed: window 1073741830 receiver frame health from 'peer' -- frames=103 compositor_fps=0.3 gap_since_last_frame_ms=6431 pixbufs=0",
-        ];
         assert_eq!(
-            vanished_session_verdict(&lines, false),
-            VanishedSessionVerdict::VanishedNoCrashReport
+            classify(&[
+                "compositor feed: window 1073741830 receiver frame health from 'peer' -- frames=100 compositor_fps=2.0 gap_since_last_frame_ms=1374 pixbufs=0",
+                "session: camera publish health -- captured=120 pushed=118 dropped_push=1 overwritten_latest=2 capture_fps=30.0 encode_fps=29.4",
+                "compositor feed: window 1073741830 receiver frame health from 'peer' -- frames=103 compositor_fps=0.3 gap_since_last_frame_ms=6431 pixbufs=0",
+            ]),
+            PreviousSessionOutcome::Vanished
         );
     }
 
@@ -4943,14 +6208,13 @@ mod tests {
     fn vanished_session_clean_when_activity_precedes_a_leave_and_quit() {
         // In-meeting activity followed by a real leave + quit is a clean
         // shutdown even with the join line long out of the tail.
-        let lines = [
-            "compositor feed: window 42 receiver frame health from 'peer' -- frames=1 compositor_fps=30.0 gap_since_last_frame_ms=33 pixbufs=1",
-            "session: left room 'ops' via user",
-            "quit: quit_app command -- exiting(0)",
-        ];
         assert_eq!(
-            vanished_session_verdict(&lines, false),
-            VanishedSessionVerdict::CleanShutdown
+            classify(&[
+                "compositor feed: window 42 receiver frame health from 'peer' -- frames=1 compositor_fps=30.0 gap_since_last_frame_ms=33 pixbufs=1",
+                "session: left room 'ops' via user",
+                "quit: quit_app command -- exiting(0)",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
         );
     }
 
@@ -5323,11 +6587,13 @@ mod tests {
 
         let tail = read_log_tail_lines(&resolved, VANISHED_SESSION_TAIL_LINES);
         assert_eq!(tail, vec!["session: joined room 'ops'".to_string()]);
+        let report = classify_previous_session(&tail, CrashAttribution::NoReport, None);
         assert_eq!(
-            detect_vanished_session(&tail, false),
-            VanishedSessionVerdict::VanishedNoCrashReport,
+            report.outcome,
+            PreviousSessionOutcome::Vanished,
             "a join with no shutdown marker on yesterday's file must still be detected as vanished"
         );
+        assert!(previous_session_sentry_event(&report).is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5389,6 +6655,25 @@ mod tests {
         );
     }
 
+    /// `log_via` with the clock injected, so a test can cross
+    /// `NATIVE_WEBRTC_REPEAT_SUMMARY_INTERVAL` without sleeping for it.
+    fn log_via_at(
+        wrapped: &RepeatSuppressingLog<RecordingLog>,
+        target: &str,
+        level: log::Level,
+        msg: &str,
+        now: Instant,
+    ) {
+        wrapped.log_at(
+            &log::Record::builder()
+                .args(format_args!("{msg}"))
+                .level(level)
+                .target(target)
+                .build(),
+            now,
+        );
+    }
+
     #[test]
     fn repeat_suppressing_log_collapses_identical_consecutive_native_webrtc_lines() {
         let recorder = RecordingLog::new();
@@ -5409,29 +6694,156 @@ mod tests {
     }
 
     #[test]
-    fn repeat_suppressing_log_flushes_a_rollup_when_the_message_changes() {
+    fn native_webrtc_signature_keys_on_the_log_site_not_the_interpolated_text() {
+        // #108: the numbers in this warning flap; the site does not.
+        assert_eq!(
+            native_webrtc_signature(
+                "(RTCVideoEncoderH264.mm:614): Encoder frame rate setting 30 is larger than the maximal allowed frame rate 13."
+            ),
+            "RTCVideoEncoderH264.mm:614"
+        );
+        assert_eq!(
+            native_webrtc_signature(
+                "(RTCVideoEncoderH264.mm:614): Encoder frame rate setting 29 is larger than the maximal allowed frame rate 7."
+            ),
+            "RTCVideoEncoderH264.mm:614"
+        );
+        // Two different sites must never share a streak.
+        assert_ne!(
+            native_webrtc_signature("(rtcp_receiver.cc:296): Timeout"),
+            native_webrtc_signature("(rtcp_receiver.cc:298): Timeout")
+        );
+        // No parenthesised site -> fall back to the whole message, i.e.
+        // exactly #905's exact-text behaviour.
+        assert_eq!(native_webrtc_signature("no site here"), "no site here");
+        assert_eq!(native_webrtc_signature("(unterminated"), "(unterminated");
+    }
+
+    #[test]
+    fn repeat_suppressing_log_collapses_varying_text_from_one_site() {
+        // The #108 defect in one test: #905 keyed on the full message, so
+        // the encoder warning's flapping numbers produced a fresh forwarded
+        // line on every value change. Keying on the site collapses them.
         let recorder = RecordingLog::new();
         let lines = recorder.lines.clone();
         let wrapped = RepeatSuppressingLog::new(recorder);
+        let site = "(RTCVideoEncoderH264.mm:614)";
 
-        log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
-        log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
-        log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
-        log_via(&wrapped, "libwebrtc", log::Level::Warn, "B");
+        for max in [13, 7, 13, 7, 13, 7, 13, 7] {
+            log_via(
+                &wrapped,
+                "libwebrtc",
+                log::Level::Warn,
+                &format!("{site}: Encoder frame rate setting 30 is larger than the maximal allowed frame rate {max}."),
+            );
+        }
 
         let recorded = lines.lock().unwrap();
         assert_eq!(
             recorded.len(),
-            3,
-            "expected: first A, a rollup of A's suppressed repeats, then B: {recorded:?}"
+            1,
+            "all eight occurrences share one log site and must collapse to the first line: {recorded:?}"
         );
-        assert_eq!(recorded[0], "A");
+        assert!(recorded[0].contains("frame rate 13."));
+    }
+
+    #[test]
+    fn repeat_suppressing_log_emits_a_rollup_once_the_interval_elapses() {
+        let recorder = RecordingLog::new();
+        let lines = recorder.lines.clone();
+        let wrapped = RepeatSuppressingLog::new(recorder);
+        let base = Instant::now();
+        let site = "(RTCVideoEncoderH264.mm:614)";
+
+        // 60 occurrences over 59s: under the 30s summary interval nothing
+        // but the first line is emitted; the occurrence that crosses the
+        // interval carries the rollup.
+        for i in 0..60u64 {
+            log_via_at(
+                &wrapped,
+                "libwebrtc",
+                log::Level::Warn,
+                &format!("{site}: Encoder frame rate setting {} is larger than the maximal allowed frame rate 13.", 20 + i % 11),
+                base + Duration::from_secs(i),
+            );
+        }
+
+        let recorded = lines.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "60 occurrences over 59s must produce the first line plus exactly one 30s rollup: {recorded:?}"
+        );
         assert!(
-            recorded[1].contains('A') && recorded[1].contains("repeated 2x"),
-            "the tail of a streak must not be silently dropped when the message changes: {:?}",
+            recorded[1].contains("repeated 30x"),
+            "the rollup must carry the suppressed count: {:?}",
             recorded[1]
         );
-        assert_eq!(recorded[2], "B");
+        assert!(
+            recorded[1].contains("text change(s)"),
+            "the rollup must report that the interpolated values moved: {:?}",
+            recorded[1]
+        );
+    }
+
+    #[test]
+    fn repeat_suppressing_log_does_not_let_two_sites_flush_each_other() {
+        // #905's single-slot design emitted a rollup on every alternation
+        // between two active sites -- 389 of them in one 611s field log.
+        // Per-site tracking must not do that.
+        let recorder = RecordingLog::new();
+        let lines = recorder.lines.clone();
+        let wrapped = RepeatSuppressingLog::new(recorder);
+        let base = Instant::now();
+
+        for i in 0..40u64 {
+            let site = if i % 2 == 0 {
+                "(RTCVideoEncoderH264.mm:614)"
+            } else {
+                "(rtcp_receiver.cc:296)"
+            };
+            log_via_at(
+                &wrapped,
+                "libwebrtc",
+                log::Level::Warn,
+                &format!("{site}: something happened"),
+                base + Duration::from_millis(i * 100),
+            );
+        }
+
+        let recorded = lines.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "two interleaving sites must produce one first line each, not a rollup per alternation: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn repeat_suppressing_log_sweeps_a_quiet_streak_instead_of_holding_its_tail() {
+        // A site that stops firing must still report its suppressed tail
+        // without waiting for a `flush()` that may never come.
+        let recorder = RecordingLog::new();
+        let lines = recorder.lines.clone();
+        let wrapped = RepeatSuppressingLog::new(recorder);
+        let base = Instant::now();
+
+        log_via_at(&wrapped, "libwebrtc", log::Level::Warn, "(a.cc:1): x", base);
+        log_via_at(&wrapped, "libwebrtc", log::Level::Warn, "(a.cc:1): x", base + Duration::from_secs(1));
+        log_via_at(&wrapped, "libwebrtc", log::Level::Warn, "(a.cc:1): x", base + Duration::from_secs(2));
+        // `a.cc:1` goes quiet; a different site keeps firing past the
+        // interval, which is what triggers the sweep.
+        log_via_at(&wrapped, "libwebrtc", log::Level::Warn, "(b.cc:9): y", base + Duration::from_secs(40));
+
+        let recorded = lines.lock().unwrap();
+        assert_eq!(recorded.len(), 3, "expected: first a.cc, a.cc's swept rollup, first b.cc: {recorded:?}");
+        assert!(recorded[0].contains("(a.cc:1)"));
+        assert!(
+            recorded[1].contains("(a.cc:1)") && recorded[1].contains("repeated 2x"),
+            "a quiet streak's tail must be swept out, attributed to its own site: {:?}",
+            recorded[1]
+        );
+        assert!(recorded[2].contains("(b.cc:9)"));
     }
 
     #[test]
@@ -5480,8 +6892,8 @@ mod tests {
         log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
         log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
         log_via(&wrapped, "libwebrtc", log::Level::Warn, "A");
-        // No message change and no summary interval elapsed -- without an
-        // explicit flush, the 2 suppressed repeats would never be reported.
+        // No summary interval elapsed -- without an explicit flush, the 2
+        // suppressed repeats would never be reported.
         wrapped.flush();
 
         let recorded = lines.lock().unwrap();
@@ -5491,6 +6903,31 @@ mod tests {
             recorded[1].contains('A') && recorded[1].contains("repeated 2x"),
             "flush must report the pending suppressed count instead of silently dropping it: {:?}",
             recorded[1]
+        );
+    }
+
+    #[test]
+    fn repeat_suppressing_log_bounds_the_number_of_tracked_sites() {
+        // A pathological build emitting an unbounded set of sites must not
+        // grow this map forever; the least-recently-seen entry is evicted
+        // (with its rollup) instead.
+        let recorder = RecordingLog::new();
+        let wrapped = RepeatSuppressingLog::new(recorder);
+        let base = Instant::now();
+
+        for i in 0..(NATIVE_WEBRTC_REPEAT_MAX_TRACKED * 3) {
+            log_via_at(
+                &wrapped,
+                "libwebrtc",
+                log::Level::Warn,
+                &format!("(gen.cc:{i}): unique"),
+                base + Duration::from_millis(i as u64),
+            );
+        }
+
+        assert!(
+            wrapped.state.lock().unwrap().len() <= NATIVE_WEBRTC_REPEAT_MAX_TRACKED,
+            "tracked-site map must stay bounded"
         );
     }
 
@@ -6466,13 +7903,14 @@ mod tests {
             encode_cadence: CadenceBucket::NotApplicable,
             queue_backpressure: QueueBackpressureBucket::NotApplicable,
             decoder_render: DecoderRenderHealth::DecoderDegraded,
+            stall_cause: CameraStallCauseTag::NotApplicable,
         })
     }
 
     #[test]
     fn camera_receive_ipc_accepts_only_closed_unhealthy_buckets() {
         let Some(SentryDiagnosticEvent::CameraHealth(event)) =
-            camera_receive_health_diagnostic("severe", "decoder_degraded")
+            camera_receive_health_diagnostic("severe", "decoder_degraded", "not_applicable")
         else {
             panic!("valid receive health buckets must construct an event");
         };
@@ -6482,6 +7920,7 @@ mod tests {
         assert_eq!(event.encode_cadence, CadenceBucket::NotApplicable);
         assert_eq!(event.queue_backpressure, QueueBackpressureBucket::NotApplicable);
         assert_eq!(event.decoder_render, DecoderRenderHealth::DecoderDegraded);
+        assert_eq!(event.stall_cause, CameraStallCauseTag::NotApplicable);
 
         for forbidden in [
             "healthy",
@@ -6491,14 +7930,132 @@ mod tests {
             "https://example.test/private",
         ] {
             assert!(
-                camera_receive_health_diagnostic(forbidden, "decoder_degraded").is_none(),
+                camera_receive_health_diagnostic(forbidden, "decoder_degraded", "not_applicable")
+                    .is_none(),
                 "cadence must reject {forbidden:?}"
             );
             assert!(
-                camera_receive_health_diagnostic("severe", forbidden).is_none(),
+                camera_receive_health_diagnostic("severe", forbidden, "not_applicable").is_none(),
                 "decoder/render must reject {forbidden:?}"
             );
+            assert!(
+                camera_receive_health_diagnostic("stalled", "decoder_degraded", forbidden)
+                    .is_none(),
+                "stall cause must reject {forbidden:?}"
+            );
         }
+    }
+
+    /// #126: the three conditions behind `cadence: stalled` must arrive as
+    /// three DIFFERENT events. Every accepted stall cause has to round-trip
+    /// through the tag allowlist and the validator that `before_send` runs --
+    /// a `stall_cause` missing from `DIAGNOSTIC_TAGS` or `valid_diagnostic_tag`
+    /// would drop the whole event silently, which is worse than the ambiguity
+    /// it was added to fix.
+    #[test]
+    fn camera_receive_stall_causes_round_trip_the_tag_allowlist() {
+        let _guard = SENTRY_ENABLED_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set_sentry_enabled(true);
+
+        let cases = [
+            (
+                "stream_paused",
+                "not_applicable",
+                CameraStallCauseTag::StreamPaused,
+            ),
+            (
+                "decode_stale",
+                "decoder_degraded",
+                CameraStallCauseTag::DecodeStale,
+            ),
+            (
+                "decode_zero",
+                "decoder_degraded",
+                CameraStallCauseTag::DecodeZero,
+            ),
+        ];
+        let mut messages = Vec::new();
+        for (cause, decoder_render, expected) in cases {
+            let diagnostic = camera_receive_health_diagnostic("stalled", decoder_render, cause)
+                .unwrap_or_else(|| panic!("stall cause {cause:?} must be accepted"));
+            let SentryDiagnosticEvent::CameraHealth(value) = diagnostic else {
+                panic!("receive health must build a camera-health diagnostic");
+            };
+            assert_eq!(value.stall_cause, expected);
+            assert_eq!(value.capture_cadence, CadenceBucket::Stalled);
+
+            let event = build_sentry_diagnostic_event(diagnostic, "1");
+            assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+            assert_eq!(
+                event.tags.get("stall_cause").map(String::as_str),
+                Some(cause),
+                "the stall cause must reach Sentry as its own tag"
+            );
+            assert_eq!(
+                event.tags.get("decoder_render_health").map(String::as_str),
+                Some(decoder_render)
+            );
+            assert!(
+                valid_sentry_diagnostic_event(&event),
+                "stall cause {cause:?} must survive before_send, not be dropped silently"
+            );
+            let message = event
+                .message
+                .as_deref()
+                .expect("camera-health must be titled, not <unlabeled event>")
+                .to_string();
+            assert!(message.contains(&format!("stall_cause={cause}")));
+            let scrubbed = scrub_event_for_sentry(event)
+                .expect("a valid camera-health diagnostic must survive before_send");
+            assert_eq!(scrubbed.message.as_deref(), Some(message.as_str()));
+            messages.push(message);
+        }
+        messages.sort();
+        messages.dedup();
+        assert_eq!(
+            messages.len(),
+            3,
+            "the three stall causes must produce three DISTINCT titles (#126)"
+        );
+
+        // A cause without a stall, and a stall without a cause, are both
+        // contradictions -- neither may reach Sentry.
+        assert!(
+            camera_receive_health_diagnostic("severe", "decoder_degraded", "decode_zero").is_none(),
+            "a non-stalled cadence must not carry a stall cause"
+        );
+        assert!(
+            camera_receive_health_diagnostic("stalled", "decoder_degraded", "not_applicable")
+                .is_none(),
+            "a stalled cadence must name which condition produced it"
+        );
+    }
+
+    /// #126: publish-side and receive-side `camera-health` shared one
+    /// fingerprint, so the Sentry group's title rendered whichever arm arrived
+    /// last and described neither. They must group separately now.
+    #[test]
+    fn camera_health_fingerprints_split_by_direction() {
+        let receive = build_sentry_diagnostic_event(sample_camera_health_diagnostic(), "1");
+        let publish = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::CameraHealth(CameraHealthDiagnostic {
+                role: DiagnosticRole::Sharer,
+                direction: CameraDirection::Publish,
+                capture_cadence: CadenceBucket::Severe,
+                encode_cadence: CadenceBucket::Severe,
+                queue_backpressure: QueueBackpressureBucket::Saturated,
+                decoder_render: DecoderRenderHealth::NotApplicable,
+                stall_cause: CameraStallCauseTag::NotApplicable,
+            }),
+            "1",
+        );
+        assert_eq!(receive.fingerprint.as_ref(), ["camera-health", "receive"]);
+        assert_eq!(publish.fingerprint.as_ref(), ["camera-health", "publish"]);
+        assert_ne!(receive.fingerprint, publish.fingerprint);
+        assert!(valid_sentry_diagnostic_event(&receive));
+        assert!(valid_sentry_diagnostic_event(&publish));
     }
 
     #[test]
@@ -6536,7 +8093,8 @@ mod tests {
         assert!(camera_message.contains("camera-health"));
         assert_ne!(capture_message, camera_message);
         assert_eq!(capture.fingerprint.as_ref(), ["capture-layout-invalid"]);
-        assert_eq!(camera.fingerprint.as_ref(), ["camera-health"]);
+        // #126: camera-health groups per direction, not per event name.
+        assert_eq!(camera.fingerprint.as_ref(), ["camera-health", "receive"]);
     }
 
     /// #867's playout re-point diagnostic is only useful if it actually
@@ -6669,6 +8227,47 @@ mod tests {
     /// `valid_sentry_diagnostic_event` cannot catch this: it is fail-closed on
     /// tag count and fail-open on an absent message. Loop over the names so a
     /// class added later fails here instead of shipping untitled.
+    /// #104's descriptor diagnostic is only useful if it SURVIVES
+    /// `before_send` -- a rejected diagnostic is dropped silently, so a
+    /// forgotten `DIAGNOSTIC_TAGS` entry or `valid_diagnostic_tag` arm would
+    /// mean the field never sees a single exhaustion event. Round-trip both
+    /// stages.
+    #[test]
+    fn descriptor_pressure_diagnostic_survives_before_send_with_a_real_title() {
+        for stage in [
+            DescriptorPressureStageTag::HighWater,
+            DescriptorPressureStageTag::Exhausted,
+        ] {
+            let event = build_sentry_diagnostic_event(
+                SentryDiagnosticEvent::DescriptorPressure(DescriptorPressureDiagnostic { stage }),
+                "1",
+            );
+            assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+            assert_eq!(event.fingerprint.as_ref(), ["descriptor-pressure"]);
+            assert_eq!(
+                event.tags.get("descriptor_pressure_stage").map(String::as_str),
+                Some(stage.tag())
+            );
+            assert!(
+                event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message
+                        == format!(
+                            "diagnostic: descriptor-pressure descriptor_pressure_stage={}",
+                            stage.tag()
+                        )),
+                "descriptor-pressure must ship with a title naming its stage: {:?}",
+                event.message
+            );
+            assert!(
+                valid_sentry_diagnostic_event(&event),
+                "descriptor-pressure ({}) must pass before_send",
+                stage.tag()
+            );
+        }
+    }
+
     #[test]
     fn every_diagnostic_event_name_has_message_tags() {
         for name in DIAGNOSTIC_EVENT_NAMES {
