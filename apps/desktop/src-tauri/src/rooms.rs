@@ -1107,14 +1107,15 @@ fn merge_room_status(rooms: Vec<RoomRecord>, backend: BackendRoomsResponse) -> V
         let room_name = room.name.clone();
         let livekit_room = livekit_room_name(&room);
         let public_id = public_room_id_for_livekit_room(&livekit_room);
-        let active = backend.rooms.iter().find(|candidate| {
-            candidate.id == public_id
-                || room
-                    .display_name
-                    .as_deref()
-                    .map(|label| label == candidate.name)
-                    .unwrap_or(false)
-        });
+        // Bind by public id ONLY. Display names are not unique, so an
+        // `|| display_name == candidate.name` arm cross-binds one room's
+        // occupancy onto another room's card (#121). The id arm matches by
+        // construction whenever the backend answered for a presented
+        // credential, so a name arm can only ever fire wrongly.
+        let active = backend
+            .rooms
+            .iter()
+            .find(|candidate| candidate.id == public_id);
         out.push(RoomOccupancy {
             room_name,
             livekit_room,
@@ -2131,5 +2132,85 @@ mod tests {
         assert_eq!(rows[1].name, None);
         assert_eq!(rows[1].occupancy, None);
         assert!(rows[1].available, "an omitted room renders empty, not errored");
+    }
+
+    fn labelled_status_record(id: &str, credential: &str, display_name: &str) -> RoomRecord {
+        let mut record = status_record(id, credential, None, true);
+        record.display_name = Some(display_name.to_string());
+        record
+    }
+
+    // #121: display names are not unique. Two saved rooms sharing a label must
+    // each show their OWN row's occupancy, never the first name-match's.
+    #[test]
+    fn merge_room_status_binds_duplicate_display_names_to_their_own_backend_row() {
+        let first = labelled_status_record(
+            "a",
+            "room-8535e993a1b76ed8a9ee59b265f53dfc",
+            "Standup",
+        );
+        let second = labelled_status_record(
+            "b",
+            "room-00000000000000000000000000000001",
+            "Standup",
+        );
+        let first_id = public_room_id_for_livekit_room(&livekit_room_name(&first));
+        let second_id = public_room_id_for_livekit_room(&livekit_room_name(&second));
+        assert_ne!(first_id, second_id, "fixture must exercise two distinct rooms");
+        let backend = BackendRoomsResponse {
+            rooms: vec![
+                BackendRoomView {
+                    id: second_id.clone(),
+                    name: "Standup".into(),
+                    open: true,
+                    occupancy: 7,
+                },
+                BackendRoomView {
+                    id: first_id.clone(),
+                    name: "Standup".into(),
+                    open: true,
+                    occupancy: 2,
+                },
+            ],
+        };
+        let rows = merge_room_status(vec![first, second], backend);
+        assert_eq!(rows[0].id.as_deref(), Some(first_id.as_str()));
+        assert_eq!(
+            rows[0].occupancy,
+            Some(2),
+            "the first card must take its own row, not the earlier same-named row"
+        );
+        assert_eq!(rows[1].id.as_deref(), Some(second_id.as_str()));
+        assert_eq!(rows[1].occupancy, Some(7));
+    }
+
+    // #121: a backend row whose name matches a local label but whose id belongs
+    // to a different room must not bind at all.
+    #[test]
+    fn merge_room_status_ignores_a_foreign_row_that_shares_a_display_name() {
+        let local = labelled_status_record(
+            "a",
+            "room-8535e993a1b76ed8a9ee59b265f53dfc",
+            "Standup",
+        );
+        let local_id = public_room_id_for_livekit_room(&livekit_room_name(&local));
+        let backend = BackendRoomsResponse {
+            rooms: vec![BackendRoomView {
+                id: "room_deadbeefdeadbeefdeadbeefdeadbeef".into(),
+                name: "Standup".into(),
+                open: true,
+                occupancy: 5,
+            }],
+        };
+        let rows = merge_room_status(vec![local], backend);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some(local_id.as_str()));
+        assert_eq!(
+            rows[0].occupancy, None,
+            "another room's occupancy must never land on this card"
+        );
+        assert_eq!(rows[0].name, None);
+        assert_eq!(rows[0].open, None);
+        assert!(rows[0].available, "no answer renders empty, not errored");
     }
 }
