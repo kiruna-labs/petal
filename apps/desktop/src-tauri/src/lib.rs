@@ -1763,7 +1763,8 @@ pub fn run() {
             diagnostics::record_video_stream_state,
             // Cross-platform commands: Export logs (archive + redaction are
             // neutral; the reveal uses Explorer) and the updater (plugin API;
-            // the arch guard verifies the NSIS PE machine type on Windows).
+            // on Windows the guard only checks the archive is a PE at all --
+            // an NSIS stub's machine type says nothing about its payload, #116).
             logging::export_logs,
             logging::log_updater_event,
             updater::check_compatible_update_available,
