@@ -309,6 +309,78 @@ const ANY_TILE_OFF_REST = `Array.from(document.querySelectorAll('.tile-wrap')).s
       return style.transform !== 'none' || style.opacity !== '1';
     })`;
 
+/**
+ * #97: read a browser-side state until it matches what the assertion below
+ * expects, instead of sleeping a guessed interval and sampling once. Returns
+ * the last sample either way, so a state that never arrives still fails the
+ * caller's assertion with the real value that was observed. Sibling of #75's
+ * `pollUntil`, against this file's CDP browser.
+ */
+async function pollForState<T>(
+  browser: RenderedTestBrowser,
+  sessionId: string,
+  expression: string,
+  settled: (value: T) => boolean,
+  timeoutMs = 5_000
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let value = (await browser.evaluate(sessionId, expression)) as T;
+  while (!settled(value) && Date.now() < deadline) {
+    await new Promise((resolvePoll) => setTimeout(resolvePoll, 20));
+    value = (await browser.evaluate(sessionId, expression)) as T;
+  }
+  return value;
+}
+
+/**
+ * #97: wait for the page's own transitions to LAND rather than sleeping past
+ * where they are guessed to end. Two rAF hops get a pending style change onto
+ * a rendered frame so its transition actually starts; then every finite
+ * running animation is awaited, bounded, so a transition that never runs
+ * returns promptly and still fails the assertion instead of hanging. Same
+ * helper as #75's `settleMotion`, against CDP rather than Playwright.
+ */
+async function settleMotion(
+  browser: RenderedTestBrowser,
+  sessionId: string,
+  timeoutMs = 3_000
+): Promise<void> {
+  // Evaluated as a source string on purpose: tsx transpiles an inline page
+  // function with `keepNames`, which injects a `__name` helper that does not
+  // exist in the page and throws `ReferenceError: __name is not defined`.
+  await browser.evaluate(sessionId, `(async () => {
+    const deadline = Date.now() + ${timeoutMs};
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const running = () => document.getAnimations()
+      .filter((animation) => animation.playState === 'running'
+        && animation.effect?.getComputedTiming().iterations !== Infinity);
+    await frame();
+    await frame();
+    while (Date.now() < deadline) {
+      const pending = running();
+      if (pending.length === 0) return;
+      await Promise.race([
+        Promise.allSettled(pending.map((animation) => animation.finished)),
+        new Promise((resolve) => setTimeout(resolve, Math.max(0, deadline - Date.now())))
+      ]);
+      await frame();
+    }
+  })()`);
+}
+
+const SPOTLIGHT_TILE_COUNTS = `({
+      count: document.querySelectorAll('.tile-wrap').length,
+      main: document.querySelectorAll('.spotlight-main').length,
+      thumbs: document.querySelectorAll('.spotlight-thumb').length
+    })`;
+
+const LAYOUT_MODE_STATE = `({
+      spotlight: !!document.querySelector('.tiles.spotlight'),
+      count: document.querySelectorAll('.tile-wrap').length
+    })`;
+
+type SpotlightTileCounts = { count: number; main: number; thumbs: number };
+
 test('desktop transient toasts wrap copied invite links instead of truncating', () => {
   const toastMessageStyles = cssBlock(toastSource, '.message');
   const pillAutoHeightStyles = cssBlock(pillSource, '.pill.auto-height');
@@ -677,7 +749,9 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     // Let the fixture's initial participant intros settle before measuring the
     // mode-change transition; otherwise the first layout request competes with
     // the mount transition and hides the very morph this regression checks.
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 240));
+    // #97: wait for the intros themselves rather than a 240ms guess at how
+    // long they take -- on a loaded machine that guess expires early.
+    await settleMotion(browser, sessionId);
 
     const initialVideoState = await browser.evaluate(sessionId, `(() => {
       const videos = Array.from(document.querySelectorAll('video.video-el'));
@@ -698,14 +772,30 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     })()`);
     assert.deepEqual(initialVideoState, { count: 3, ready: false, visible: false });
     await browser.evaluate(sessionId, `Array.from(document.querySelectorAll('video.video-el')).forEach((video) => video.dispatchEvent(new Event('loadeddata')))`);
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 240));
-    const paintedVideoState = await browser.evaluate(sessionId, `({
+    // #97: `.ready` lands synchronously on `loadeddata`, but the opacity
+    // transition it starts only reaches `1` a frame-dependent time later. The
+    // old fixed 240ms sleep was a bet that the fade beat the scheduler; under
+    // full-suite load it lost and the run reported `{ ready: true, visible:
+    // false }` for a fade that was merely still running. Poll for the settled
+    // reading instead -- a fade that never completes leaves `visible: false`
+    // on the last sample and fails this exact assertion with that value.
+    const paintedVideoState = await pollForState<{ ready: boolean; visible: boolean }>(
+      browser,
+      sessionId,
+      `({
       ready: Array.from(document.querySelectorAll('video.video-el')).every((video) => video.classList.contains('ready')),
       visible: Array.from(document.querySelectorAll('video.video-el')).every((video) => getComputedStyle(video).opacity === '1')
-    })`);
+    })`,
+      (state) => state.ready && state.visible
+    );
     assert.deepEqual(paintedVideoState, { ready: true, visible: true });
 
     await browser.evaluate(sessionId, armMotionLatchAndClick('.layout-toggle', ANY_RUNNING_ANIMATION));
+    // #97: this 60ms is deliberately a mid-morph sample, and it is safe under
+    // load because every reading it takes holds at ANY point in the morph --
+    // the same three video elements stay connected, reused, ready and opaque
+    // before, during and after it. Landing early or late cannot change the
+    // answer, so there is no transient window to lose.
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 60));
     const gridToSpotlightVideoState = await browser.evaluate(sessionId, `(() => {
       const prior = Object.values(window.__galleryVideoNodes ?? {});
@@ -735,13 +825,16 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
       true,
       'grid → spotlight should be visibly in motion'
     );
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 280));
-
-    const settledSpotlight = await browser.evaluate(sessionId, `({
-      count: document.querySelectorAll('.tile-wrap').length,
-      main: document.querySelectorAll('.spotlight-main').length,
-      thumbs: document.querySelectorAll('.spotlight-thumb').length
-    })`);
+    // #97: the geometry read below measures `getBoundingClientRect()`, which
+    // includes an in-flight FLIP transform, so it must be taken after the
+    // morph has actually finished rather than 280ms after it started.
+    await settleMotion(browser, sessionId);
+    const settledSpotlight = await pollForState<SpotlightTileCounts>(
+      browser,
+      sessionId,
+      SPOTLIGHT_TILE_COUNTS,
+      (state) => state.count === 3 && state.main === 1 && state.thumbs === 2
+    );
     assert.deepEqual(settledSpotlight, { count: 3, main: 1, thumbs: 2 });
     const spotlightGeometry = await browser.evaluate(sessionId, `(() => {
       const rail = document.querySelector('.spotlight-rail')?.getBoundingClientRect();
@@ -769,6 +862,8 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     // Selecting a different hero while the spotlight branch stays mounted
     // exercises the keyed hero block and the hero↔rail FLIP pair.
     await browser.evaluate(sessionId, armMotionLatchAndClick('.spotlight-thumb', ANY_TILE_OFF_REST));
+    // Same as the grid -> spotlight sample above: mid-swap on purpose, and
+    // every reading holds at any sampling point, so load cannot flip it.
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 60));
     const heroSwapVideoState = await browser.evaluate(sessionId, `(() => {
       const prior = Object.values(window.__galleryVideoNodes ?? {});
@@ -789,29 +884,33 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     );
     const midHeroSwap = await waitForMotionLatch(browser, sessionId);
     assert.equal(midHeroSwap, true, 'spotlight hero swap should be visibly in motion');
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 280));
+    // #97: the swap is already known to be in motion, so wait for that motion
+    // to finish rather than for 280ms to pass. Polling would be wrong here --
+    // the tile counts asserted below already hold before the swap, so a poll
+    // could return a pre-swap sample.
+    await settleMotion(browser, sessionId);
     assert.deepEqual(
-      await browser.evaluate(sessionId, `({
-        count: document.querySelectorAll('.tile-wrap').length,
-        main: document.querySelectorAll('.spotlight-main').length,
-        thumbs: document.querySelectorAll('.spotlight-thumb').length
-      })`),
+      await browser.evaluate(sessionId, SPOTLIGHT_TILE_COUNTS),
       { count: 3, main: 1, thumbs: 2 }
     );
 
     // Retarget before the first mode change finishes. The last request wins,
     // with no duplicate outgoing tile tree left to block pointer input.
-    await browser.evaluate(sessionId, `(() => {
+    // #97: await the second click inside the page instead of assuming a 360ms
+    // sleep outlasts the 20ms timer plus two mode changes. The evaluation
+    // resolves only once BOTH clicks have been dispatched, so the settle below
+    // is measuring the retarget rather than racing it. A poll would be wrong
+    // here: the layout asserted below already holds before the retarget, so
+    // polling could return a pre-retarget sample.
+    await browser.evaluate(sessionId, `(async () => {
       const toggle = document.querySelector('.layout-toggle');
       toggle?.click();
-      setTimeout(() => document.querySelector('.layout-toggle')?.click(), 20);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      document.querySelector('.layout-toggle')?.click();
     })()`);
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 360));
+    await settleMotion(browser, sessionId);
     assert.deepEqual(
-      await browser.evaluate(sessionId, `({
-        spotlight: !!document.querySelector('.tiles.spotlight'),
-        count: document.querySelectorAll('.tile-wrap').length
-      })`),
+      await browser.evaluate(sessionId, LAYOUT_MODE_STATE),
       { spotlight: true, count: 3 }
     );
 
@@ -820,12 +919,12 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     }, sessionId);
     await browser.evaluate(sessionId, `document.querySelector('.layout-toggle')?.click()`);
     await browser.evaluate(sessionId, `document.querySelector('.layout-toggle')?.click()`);
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
+    // #97: both clicks are already awaited, so the only thing left to wait for
+    // is a rendered frame -- not 40ms of wall clock. Polling would be wrong
+    // here for the same reason as the retarget above.
+    await settleMotion(browser, sessionId);
     assert.deepEqual(
-      await browser.evaluate(sessionId, `({
-        spotlight: !!document.querySelector('.tiles.spotlight'),
-        count: document.querySelectorAll('.tile-wrap').length
-      })`),
+      await browser.evaluate(sessionId, LAYOUT_MODE_STATE),
       { spotlight: true, count: 3 }
     );
     const reducedVideoState = await browser.evaluate(sessionId, `(() => {

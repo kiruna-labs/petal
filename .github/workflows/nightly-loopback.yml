@@ -35,7 +35,11 @@ on:
   #     just created, so the gate tests the web build this release is about
   #     to promote instead of the previous one.
   # A staged deployment sits behind Vercel deployment protection; see
-  # `vercel_bypass_secret` below.
+  # `vercel_bypass_secret` below. The bypass covers only what the BROWSER
+  # navigates to. The web peer's cross-origin token mint against the backend is
+  # a separate gate that `deploy-web` checks with
+  # scripts/verify-web-peer-origin.sh (#42 follow-up: v0.9.10's six INFRA-FAILs
+  # were a 403 there, not a failed bypass).
   workflow_dispatch:
     inputs:
       harness_url:
@@ -176,7 +180,14 @@ jobs:
         env:
           COCKPIT_HARNESS_URL: ${{ inputs.harness_url || 'https://meet.petal.live' }}
           COCKPIT_BACKEND_URL: ${{ inputs.backend_url || 'https://app.petal.live' }}
-          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret }}
+          # The `||` is what makes a protected staged target reproducible BY
+          # HAND. A `workflow_call` from release.yml supplies
+          # `vercel_bypass_secret`; a `workflow_dispatch` cannot (a secret must
+          # never be a plaintext input), and in a called workflow a repo secret
+          # that was not passed reads as empty -- so exactly one side is ever
+          # non-empty. Without this, dispatching the gate at a staged URL to
+          # reproduce a gate failure silently ran with no bypass at all.
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret || secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         shell: bash
         run: |
           set -euo pipefail
@@ -466,7 +477,9 @@ jobs:
       - name: Scrub the deployment-protection bypass secret from artifacts
         if: always()
         env:
-          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret }}
+          # Must resolve the same way the cockpit step above does, or a
+          # dispatched staged run uploads artifacts nothing scrubbed.
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret || secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         shell: bash
         run: |
           set -euo pipefail
