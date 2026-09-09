@@ -45,7 +45,13 @@ especially for development.
    client-side install/verify, Settings UI, contracts) lives here, open source.
    Everything that *runs* the marketplace (signing, publishing, hosting,
    vetting, storefront) lives in a separate private repository owned by the
-   core team. This repo contains no marketplace server code.
+   core team. This repo contains no marketplace server code. **Amended
+   2026-09-09:** that repository is the website repo,
+   `kiruna-labs/petal-website` (private), under `marketplace/`; the registry
+   is a static tree on a petal.live subdomain and the storefront is web
+   pages, so it shares the site's domain and deploy pipeline. The code was
+   never the secret; the signing key lives in a protected GitHub environment
+   and never in a repo.
 8. **Plugin source lives in its own public repo** (owner, 2026-09-09):
    `kiruna-labs/petal-plugins`. This repo keeps the host runtime, the SDK
    (published to npm as `@petal/plugin-sdk`), the contracts, and the
@@ -388,10 +394,15 @@ repository.
 - Update check on meeting join at most once per day; re-consent only when
   permissions grew.
 
-**Marketplace repo (private, core team):** the publisher that validates,
-signs, uploads, and merges the index; the hosting project; the vendored copy
-of `contracts/plugin-registry/` with a drift test pinned to an upstream
-commit; later the scanner, vetting workflow, and storefront.
+**Marketplace (`kiruna-labs/petal-website`, private, `marketplace/`):** the
+publisher that validates, signs, uploads, and merges the index; the hosting
+(`plugins.petal.live` over a blob store that only the publish workflow
+writes, never committed site content, since anti-rollback would turn a
+`git revert` into a dead registry); the vendored copy of
+`contracts/plugin-registry/` with a drift test pinned to an upstream commit;
+later the scanner, vetting workflow, and storefront pages. Signing runs in a
+protected environment with required reviewers and never on the runner that
+built the bundle.
 
 ### 2.10 Install flows
 
@@ -475,7 +486,7 @@ Three homes, one artifact:
 |---|---|---|
 | `kiruna-labs/petal` (this repo) | host runtime, `@petal/plugin-sdk` source (published to npm, versioned with `apiVersion`), `contracts/plugin-registry/`, this design doc, vendored built-in bundles | the SDK is the contract with the host and mirrors `shared/plugin-host/api.ts`; splitting them would make every API change a two-repo event |
 | `kiruna-labs/petal-plugins` (public) | source of our own plugins (`plugins/<id>/`), community pointer files (`community/<id>/plugin.json`), `build-all`, the build CI, the public catalog of what is in the registry | the core repo shrinks; plugin contributors never build the app; curation is public and auditable |
-| `seinfish/petal-marketplace` (private) | signing key custody, publisher, hosting, scanner, storefront | only key custody and hosting stay private |
+| `kiruna-labs/petal-website` (private, `marketplace/`) | publisher, signing workflow, registry hosting, scanner, storefront pages | the registry is a subdomain and the storefront is web pages, so they share the site's domain and deploy pipeline; only the key and hosting credentials are secret, and those live in a protected environment, not in any repo |
 
 **Our plugins** are source in the plugins repo, depending on the published
 SDK like any third party. A change to Reactions is a plugins-repo PR, then a
