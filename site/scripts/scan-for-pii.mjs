@@ -110,8 +110,8 @@ const ALLOWED_EMAIL_PATTERNS = [
 function isAllowedEmail(match, line, matchStart) {
 	if (ALLOWED_EMAIL_PATTERNS.some((pattern) => pattern.test(match))) return true;
 	// URL userinfo (`scheme://user:pw@host`) is not an address: an email local
-	// part cannot contain a colon, so `pw@hooks.slack.com` inside
-	// `https://user:pw@hooks.slack.com/` is the tail of a URL credential, not a
+	// part cannot contain a colon, so the tail of a
+	// `scheme://user:pw@host/` URL is the tail of a URL credential, not a
 	// mailbox. Judged from the LINE, since the match itself starts after the
 	// colon. This kept `scripts/ci-local.sh` red on main: a test that asserts
 	// credentialed URLs are REFUSED was reported as a leak
