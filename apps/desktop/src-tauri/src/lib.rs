@@ -856,6 +856,14 @@ pub fn run() {
         "petal: app startup begin (log file: {})",
         log_path.display()
     );
+
+    // #104: raise the soft RLIMIT_NOFILE toward the hard limit BEFORE the Tauri
+    // builder, any webview, or the LiveKit runtime exists -- all of them
+    // allocate descriptors against whatever limit is in force when they start.
+    // macOS hands a Finder/Dock-launched app a soft limit of 256 against an
+    // unlimited hard limit; a field log showed that table filling during a long
+    // meeting and staying full for 20 hours. Headroom, not a leak fix.
+    platform::fd::log_startup_descriptor_limits();
     #[cfg(target_os = "macos")]
     log_startup_signing_state();
 
@@ -1524,6 +1532,14 @@ pub fn run() {
         log_path.display()
     );
 
+    // #104: raise the soft RLIMIT_NOFILE toward the hard limit BEFORE the Tauri
+    // builder, any webview, or the LiveKit runtime exists -- all of them
+    // allocate descriptors against whatever limit is in force when they start.
+    // macOS hands a Finder/Dock-launched app a soft limit of 256 against an
+    // unlimited hard limit; a field log showed that table filling during a long
+    // meeting and staying full for 20 hours. Headroom, not a leak fix.
+    platform::fd::log_startup_descriptor_limits();
+
     // Windows: declare per-monitor-v2 DPI awareness up front so
     // `GetWindowRect`/`EnumDisplayMonitors`/WGC report physical pixels,
     // matching what the capture pipeline and picker assume. Failure is
@@ -1747,7 +1763,8 @@ pub fn run() {
             diagnostics::record_video_stream_state,
             // Cross-platform commands: Export logs (archive + redaction are
             // neutral; the reveal uses Explorer) and the updater (plugin API;
-            // the arch guard verifies the NSIS PE machine type on Windows).
+            // on Windows the guard only checks the archive is a PE at all --
+            // an NSIS stub's machine type says nothing about its payload, #116).
             logging::export_logs,
             logging::log_updater_event,
             updater::check_compatible_update_available,

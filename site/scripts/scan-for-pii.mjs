@@ -107,8 +107,43 @@ const ALLOWED_EMAIL_PATTERNS = [
 	/\.(?:png|jpe?g|gif|webp|svg|ico|icns|woff2?|ttf|otf|css|js|mjs|ts|json|md|txt|html?|zip|dmg)$/i,
 ];
 
-function isAllowedEmail(match) {
-	return ALLOWED_EMAIL_PATTERNS.some((pattern) => pattern.test(match));
+function isAllowedEmail(match, line, matchStart) {
+	if (ALLOWED_EMAIL_PATTERNS.some((pattern) => pattern.test(match))) return true;
+	// URL userinfo (`scheme://user:pw@host`) is not an address: an email local
+	// part cannot contain a colon, so the tail of a
+	// `scheme://user:pw@host/` URL is the tail of a URL credential, not a
+	// mailbox. Judged from the LINE, since the match itself starts after the
+	// colon. This kept `scripts/ci-local.sh` red on main: a test that asserts
+	// credentialed URLs are REFUSED was reported as a leak
+	// (web-harness/tests/pluginPermissions.test.ts). Narrow on purpose -- a
+	// real address preceded by a colon in ordinary prose still
+	// reports, because that has no `//` scheme prefix before it.
+	const before = line.slice(0, matchStart);
+	return /:\/\/[^\s/@]*:[^\s/@]*$/.test(before);
+}
+
+// A credential-shaped URL whose user AND password are both well-known
+// placeholders is documentation or a test fixture, never a leak. Kept to an
+// exact list rather than a heuristic: anything outside it still reports, so a
+// real credential cannot hide behind a plausible-looking name.
+//
+// This exists because a test asserting that credentialed URLs are REFUSED
+// (web-harness/tests/pluginPermissions.test.ts) was itself reported as a leak,
+// which kept `scripts/ci-local.sh` red on main. Weakening the test to satisfy
+// the scanner would have removed real coverage; the scanner was wrong.
+const PLACEHOLDER_USERINFO = new Set([
+	'user:pw',
+	'user:pass',
+	'user:password',
+	'username:password',
+	'admin:admin',
+	'foo:bar',
+	'me:secret',
+]);
+
+function isPlaceholderCredential(match) {
+	const userinfo = match.match(/:\/\/([^\s/@]+)@/)?.[1];
+	return userinfo !== undefined && PLACEHOLDER_USERINFO.has(userinfo.toLowerCase());
 }
 
 const DENY_PATTERNS = [
@@ -155,6 +190,7 @@ const DENY_PATTERNS = [
 		name: 'credentialed-connection-string',
 		// Flags any URL carrying inline credentials, not just one database's.
 		regex: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/:@]+@[^\s/'"]+/gi,
+		allow: isPlaceholderCredential,
 		redact: () => '[REDACTED]',
 	},
 	...loadLocalPatterns(),
@@ -231,7 +267,7 @@ function scanFile(path) {
 					pattern.regex.lastIndex++;
 					continue;
 				}
-				if (pattern.allow?.(match[0])) continue;
+				if (pattern.allow?.(match[0], line, match.index)) continue;
 				const redacted = pattern.redact(match[0]);
 				hits.push({
 					line: idx + 1,
