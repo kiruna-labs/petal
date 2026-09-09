@@ -250,6 +250,17 @@ pub enum SentryDiagnosticEvent {
     MemoryPressure(MemoryPressureDiagnostic),
     DecoderAllocationFailed(DecoderAllocationFailedDiagnostic),
     BrowserUrlExtractionFailed(BrowserUrlExtractionFailedDiagnostic),
+    DescriptorPressure(DescriptorPressureDiagnostic),
+}
+
+/// Emitted (rate-limited) when open file descriptors cross a high-water
+/// fraction of the soft `RLIMIT_NOFILE`, or when Petal's own IO fails with
+/// `EMFILE`/`ENFILE` (#104). In the #104 field log this condition ran for 20 of
+/// a 29-hour meeting and reached us only because libwebrtc happened to print
+/// 38,062 errors into the log -- there was no Sentry signal at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescriptorPressureDiagnostic {
+    pub stage: DescriptorPressureStageTag,
 }
 
 /// Emitted (rate-limited) when the OS memory-pressure level transitions to
@@ -419,6 +430,12 @@ diagnostic_enum!(InstallDestinationClassTag { Applications => "applications", Us
 // purpose -- it must never read as an explanation.
 diagnostic_enum!(VanishedSessionCrashReportTag { Found => "found", NotFound => "not_found", Unverified => "unverified", NotApplicable => "not_applicable" });
 diagnostic_enum!(PressureLevelTag { Warn => "warn", Critical => "critical", NotApplicable => "not_applicable" });
+/// #104: how far descriptor pressure has gone. `high_water` is the sampler
+/// crossing 80% of the soft `RLIMIT_NOFILE`; `exhausted` is an allocation that
+/// has already failed with `EMFILE`/`ENFILE`. Two stages, not a level, because
+/// the second is observed from a different place (any failing IO) than the
+/// first (the in-room sampler).
+diagnostic_enum!(DescriptorPressureStageTag { HighWater => "high_water", Exhausted => "exhausted", NotApplicable => "not_applicable" });
 /// Mirrors `browser_url::UrlExtraction::cause()`'s string set exactly (minus
 /// "ok"/"unsupported", which are never logged as a failure) -- keep the two
 /// in sync by hand; there is no shared source because `browser_url` must not
@@ -435,7 +452,7 @@ diagnostic_enum!(BrowserUrlExtractionCauseTag {
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 15] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 16] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -451,6 +468,7 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 15] = [
     "memory-pressure",
     "decoder-allocation-failed",
     "browser-url-extraction-failed",
+    "descriptor-pressure",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -482,6 +500,7 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "crash_report_status",
     "pressure_level",
     "browser_url_extraction_cause",
+    "descriptor_pressure_stage",
     "dedup_count_bucket",
 ];
 
@@ -511,6 +530,7 @@ const WINDOW_SERVER_RESTART_DETECTED_MESSAGE_TAGS: &[&str] = &["session_role"];
 const MEMORY_PRESSURE_MESSAGE_TAGS: &[&str] = &["pressure_level"];
 const DECODER_ALLOCATION_FAILED_MESSAGE_TAGS: &[&str] = &["session_role"];
 const BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS: &[&str] = &["browser_url_extraction_cause"];
+const DESCRIPTOR_PRESSURE_MESSAGE_TAGS: &[&str] = &["descriptor_pressure_stage"];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
     "camera_direction",
@@ -550,6 +570,7 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "memory-pressure" => Some(MEMORY_PRESSURE_MESSAGE_TAGS),
         "decoder-allocation-failed" => Some(DECODER_ALLOCATION_FAILED_MESSAGE_TAGS),
         "browser-url-extraction-failed" => Some(BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS),
+        "descriptor-pressure" => Some(DESCRIPTOR_PRESSURE_MESSAGE_TAGS),
         _ => None,
     }
 }
@@ -875,6 +896,7 @@ impl SentryDiagnosticEvent {
             Self::MemoryPressure(_) => "memory-pressure",
             Self::DecoderAllocationFailed(_) => "decoder-allocation-failed",
             Self::BrowserUrlExtractionFailed(_) => "browser-url-extraction-failed",
+            Self::DescriptorPressure(_) => "descriptor-pressure",
         }
     }
 }
@@ -925,6 +947,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::CameraHealth(value) => {
             insert("session_role", value.role.tag());
@@ -951,6 +974,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::CameraSizeMismatchRecovery(value) => {
             insert("session_role", value.role.tag());
@@ -977,6 +1001,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::PlayoutDeviceRepointed(value) => {
             insert("session_role", value.role.tag());
@@ -1003,6 +1028,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::RepublishStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1029,6 +1055,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::PublishDropStreak(value) => {
             insert("session_role", value.role.tag());
@@ -1055,6 +1082,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::WatchdogRepeatStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1081,6 +1109,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::UpdateInstallFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1107,6 +1136,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::ShareOverlayCursorCaptureCleared(value) => {
             insert("session_role", value.role.tag());
@@ -1133,6 +1163,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerPortDead(value) => {
             insert("session_role", value.role.tag());
@@ -1159,6 +1190,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::PreviousSessionVanished(value) => {
             insert("session_role", "not_applicable");
@@ -1185,6 +1217,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", value.crash_report.tag());
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerRestartDetected(value) => {
             insert("session_role", value.role.tag());
@@ -1211,6 +1244,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::MemoryPressure(value) => {
             insert("session_role", "not_applicable");
@@ -1237,6 +1271,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", value.level.tag());
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::DecoderAllocationFailed(value) => {
             insert("session_role", value.role.tag());
@@ -1263,6 +1298,7 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
         }
         SentryDiagnosticEvent::BrowserUrlExtractionFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1289,6 +1325,34 @@ fn build_sentry_diagnostic_event(
             insert("crash_report_status", "not_applicable");
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", value.cause.tag());
+            insert("descriptor_pressure_stage", "not_applicable");
+        }
+        SentryDiagnosticEvent::DescriptorPressure(value) => {
+            insert("session_role", "not_applicable");
+            insert("source_selection", "not_applicable");
+            insert("capture_geometry", "not_applicable");
+            insert("configured_geometry", "not_applicable");
+            insert("pixel_format", "not_applicable");
+            insert("scale_bucket", "not_applicable");
+            insert("encoder_implementation", "not_applicable");
+            insert("stage_code", "not_applicable");
+            insert("camera_direction", "not_applicable");
+            insert("capture_cadence", "not_applicable");
+            insert("encode_cadence", "not_applicable");
+            insert("queue_backpressure", "not_applicable");
+            insert("decoder_render_health", "not_applicable");
+            insert("recovery_action", "not_applicable");
+            insert("playout_transition", "not_applicable");
+            insert("storm_scope", "not_applicable");
+            insert("install_failure_stage", "not_applicable");
+            insert("install_failure_kind", "not_applicable");
+            insert("install_volume_boundary", "not_applicable");
+            insert("install_destination_class", "not_applicable");
+            insert("overlay_clear_reason", "not_applicable");
+            insert("crash_report_status", "not_applicable");
+            insert("pressure_level", "not_applicable");
+            insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", value.stage.tag());
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
@@ -4577,6 +4641,9 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
             value,
             "denied" | "timeout" | "ambiguous" | "no-match" | "spawn" | "failed" | "not_applicable"
         ),
+        "descriptor_pressure_stage" => {
+            matches!(value, "high_water" | "exhausted" | "not_applicable")
+        }
         "capture_cadence" | "encode_cadence" => matches!(
             value,
             "healthy" | "reduced" | "severe" | "stalled" | "unknown" | "not_applicable"
@@ -7690,6 +7757,47 @@ mod tests {
     /// `valid_sentry_diagnostic_event` cannot catch this: it is fail-closed on
     /// tag count and fail-open on an absent message. Loop over the names so a
     /// class added later fails here instead of shipping untitled.
+    /// #104's descriptor diagnostic is only useful if it SURVIVES
+    /// `before_send` -- a rejected diagnostic is dropped silently, so a
+    /// forgotten `DIAGNOSTIC_TAGS` entry or `valid_diagnostic_tag` arm would
+    /// mean the field never sees a single exhaustion event. Round-trip both
+    /// stages.
+    #[test]
+    fn descriptor_pressure_diagnostic_survives_before_send_with_a_real_title() {
+        for stage in [
+            DescriptorPressureStageTag::HighWater,
+            DescriptorPressureStageTag::Exhausted,
+        ] {
+            let event = build_sentry_diagnostic_event(
+                SentryDiagnosticEvent::DescriptorPressure(DescriptorPressureDiagnostic { stage }),
+                "1",
+            );
+            assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+            assert_eq!(event.fingerprint.as_ref(), ["descriptor-pressure"]);
+            assert_eq!(
+                event.tags.get("descriptor_pressure_stage").map(String::as_str),
+                Some(stage.tag())
+            );
+            assert!(
+                event
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message
+                        == format!(
+                            "diagnostic: descriptor-pressure descriptor_pressure_stage={}",
+                            stage.tag()
+                        )),
+                "descriptor-pressure must ship with a title naming its stage: {:?}",
+                event.message
+            );
+            assert!(
+                valid_sentry_diagnostic_event(&event),
+                "descriptor-pressure ({}) must pass before_send",
+                stage.tag()
+            );
+        }
+    }
+
     #[test]
     fn every_diagnostic_event_name_has_message_tags() {
         for name in DIAGNOSTIC_EVENT_NAMES {
