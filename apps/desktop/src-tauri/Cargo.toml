@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.9.12"
+version = "0.9.13"
 description = "Low-latency, multi-window screensharing for macOS"
 authors = ["Kiruna Labs, Inc."]
 license = "Apache-2.0"
