@@ -4586,7 +4586,10 @@ mod tests {
         const EXTRA: u64 = 200;
         let mut held = Vec::with_capacity(EXTRA as usize);
         for _ in 0..EXTRA {
-            held.push(std::fs::File::open("/dev/null").expect("open /dev/null"));
+            held.push(
+                std::fs::File::open(crate::platform::fd::NULL_DEVICE)
+                    .expect("open the null device"),
+            );
         }
         let raised =
             crate::platform::fd::open_descriptor_count().expect("count while holding descriptors");

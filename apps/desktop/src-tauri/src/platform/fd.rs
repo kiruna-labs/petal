@@ -424,6 +424,12 @@ pub fn log_startup_descriptor_limits() {
     }
 }
 
+/// The always-openable null device, by platform. `/dev/null` does not exist
+/// on Windows and made two descriptor-gauge tests panic there while the
+/// gauge itself was fine (#104).
+#[cfg(test)]
+pub(crate) const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,7 +541,7 @@ mod tests {
         const SLACK: u64 = EXTRA / 2;
         let mut held = Vec::with_capacity(EXTRA as usize);
         for _ in 0..EXTRA {
-            held.push(std::fs::File::open("/dev/null").expect("open /dev/null"));
+            held.push(std::fs::File::open(NULL_DEVICE).expect("open the null device"));
         }
         let raised = open_descriptor_count().expect("count while holding descriptors");
         assert!(
