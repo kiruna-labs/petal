@@ -335,6 +335,31 @@ async function verifyPosthogKey(bundleDir) {
   });
 }
 
+// Same class again, and the one that actually shipped: every release through
+// 0.9.11 went out with in-app feedback compiled OFF, because release.yml never
+// passed VITE_USERDISPATCH_PUBLIC_KEY. `isFeedbackEnabled()` returned false, so
+// no bug-report trigger rendered anywhere and the SDK was never imported --
+// silently, with no signal at build or publish time. Users had no way to report
+// anything from inside the app, which is how we ended up asking for logs by
+// hand.
+//
+// Unlike Sentry/PostHog this is a Vite bake read by the WEBVIEW, not a Rust
+// `option_env!`; Tauri embeds the built frontend into the binary's asset table,
+// so the key is present per-slice the same way and the same check applies.
+// The value is a PUBLIC `pk_` key by design (it ships readable inside the
+// bundle), so the fallback pattern is safe to state literally here.
+async function verifyFeedbackKey(bundleDir) {
+  await verifyValueBakedInAllSlices(bundleDir, {
+    gateName: 'UserDispatch feedback key gate',
+    expectedValue: process.env.VITE_USERDISPATCH_PUBLIC_KEY?.trim() || null,
+    fallbackPattern: /pk_[A-Za-z0-9_-]{8,}/,
+    remediation:
+      'This build was compiled without VITE_USERDISPATCH_PUBLIC_KEY set for that slice, so in-app ' +
+      'feedback is compiled out and no bug-report trigger ships. Rebuild with ' +
+      'VITE_USERDISPATCH_PUBLIC_KEY=pk_<public key> set for BOTH targets (see docs/RELEASING.md).',
+  });
+}
+
 // NEW gate (#874): PETAL_BACKEND_URL previously had no publish-time check at
 // all -- only `build.rs`'s compile-time panic, which fires per cargo
 // invocation and cannot see a stale or partially-cached SECOND target (e.g.
@@ -563,6 +588,7 @@ await verifyEntitlements(bundleDir);
 await verifyCleanTarball(tarPath);
 await verifySentryDsn(bundleDir);
 await verifyPosthogKey(bundleDir);
+await verifyFeedbackKey(bundleDir);
 await verifyBackendUrl(bundleDir);
 await verifyStapledInsideTarball(bundleDir, tarPath);
 await verifyNotDowngrade(version);

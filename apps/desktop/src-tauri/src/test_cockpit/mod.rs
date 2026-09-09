@@ -8908,6 +8908,7 @@ async fn run_remote_control_native_to_web_scenario(
             "oracle": "rc_n2n::evaluate_delivery_only over the controller publish ledger and the harness received-input ledger",
         }),
     );
+    record_web_peer_navigation(scenario, access_code, writer).await;
     let web_peer = match spawn_web_peer(scenario, access_code, &writer.dir) {
         Ok(peer) => peer,
         Err(error) => return infra_fail_outcome(scenario, error),
@@ -9612,6 +9613,7 @@ async fn run_soak_stall_watch_scenario(
         }
     }
 
+    record_web_peer_navigation(scenario, access_code, writer).await;
     let web_peer = match spawn_web_peer(scenario, access_code, &writer.dir) {
         Ok(peer) => peer,
         Err(error) => return infra_fail_outcome(scenario, error),
@@ -9877,6 +9879,7 @@ async fn run_scenario(
         }
     }
 
+    record_web_peer_navigation(scenario, access_code, writer).await;
     let web_peer = match spawn_web_peer(scenario, access_code, &writer.dir) {
         Ok(peer) => peer,
         Err(error) => {
@@ -11717,6 +11720,41 @@ mod tests {
 
     // The navigation probe's own record leaves the runner twice (a log line and
     // a run.jsonl entry), so its redaction is load-bearing, not cosmetic.
+    // The probe shipped wired to ONE of the four `spawn_web_peer` call sites --
+    // and not the one the Quick tier uses -- so a live run produced zero
+    // `web-peer-navigation` records while every unit test stayed green. A pure
+    // function being correct says nothing about whether the real path calls it
+    // (CLAUDE.md's native-lifecycle lesson, same shape). Assert the wiring in
+    // the source, since that is where the defect lived.
+    #[test]
+    fn every_web_peer_spawn_is_preceded_by_a_navigation_record() {
+        let source = include_str!("mod.rs");
+        let spawn = "let web_peer = match spawn_web_peer(scenario, access_code, &writer.dir) {";
+        let record = "record_web_peer_navigation(scenario, access_code, writer).await;";
+
+        let lines: Vec<&str> = source.lines().collect();
+        let spawn_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.trim() == spawn)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            spawn_sites.len() >= 4,
+            "expected the scenario runners' web-peer spawn sites; found {}",
+            spawn_sites.len()
+        );
+        for index in spawn_sites {
+            let previous = lines[index - 1].trim();
+            assert_eq!(
+                previous, record,
+                "the spawn on line {} is not preceded by a navigation record; a scenario \
+                 launched from here reports an empty peer list with no explanation",
+                index + 1
+            );
+        }
+    }
+
     #[test]
     fn navigation_records_redact_the_bypass_secret() {
         let recorded = web_peer_url(
