@@ -771,15 +771,26 @@ const MEMORY_LOG_EVERY_N_TICKS: u32 = 60;
 
 /// #884: one line per minute while in a room -- own phys footprint plus the
 /// OS memory-pressure level -- so a field log carries a memory CURVE.
+///
+/// #106: `live_pixel_buffers` rides this line too. It was already sampled
+/// into `StatsSample` (below) and had no path to a log, so it appeared ZERO
+/// times across eight field logs. Note what it does and does not cover: it
+/// counts only `native_display::OwnedCVPixelBuffer`, i.e. RECEIVER-side
+/// decode output. It is blind to ScreenCaptureKit and VideoToolbox buffers,
+/// so on a sender-side spike its job is to rule the receiver class out, not
+/// to attribute the sender.
 fn log_in_room_memory_curve() {
     let footprint_mb = crate::platform::mem::process_footprint_bytes_throttled()
         .map(|bytes| format!("{:.0}", bytes as f64 / (1024.0 * 1024.0)))
         .unwrap_or_else(|| "unknown".into());
+    let live_pixel_buffers = crate::platform::mem::live_pixel_buffer_count()
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "n/a".into());
     let pressure = crate::platform::mem::memory_pressure_level()
         .map(|level| level.to_string())
         .unwrap_or_else(|| "unknown".into());
     log::info!(
-        "diagnostics: memory curve -- phys_footprint_mb={footprint_mb} os_pressure_level={pressure}"
+        "diagnostics: memory curve -- phys_footprint_mb={footprint_mb} live_pixel_buffers={live_pixel_buffers} os_pressure_level={pressure}"
     );
 }
 

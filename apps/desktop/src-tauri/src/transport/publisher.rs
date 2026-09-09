@@ -80,7 +80,7 @@ use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 
 use crate::capture::{CaptureBufferPool, CapturedFrame, CapturedFramePayload};
 
-const I420_BUFFER_POOL_LIMIT: usize = 3;
+pub(crate) const I420_BUFFER_POOL_LIMIT: usize = 3;
 /// A captured window's size must stay at ONE value for this long before the
 /// sender re-anchors the published size to it (one encoder recreation per
 /// resize gesture). Shorter than this and a slow drag would re-create the
