@@ -868,12 +868,17 @@ jobs:
         if: ${{ github.event_name == 'push' || inputs.publish == true }}
         env:
           BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-          # The publisher verifies both values are baked into BOTH slices; on
-          # x86_64 the compiler splits them across instructions, which is only
-          # checkable by reconstruction against the expected value. Without
-          # these the first 0.9.5 publish refused at the PostHog gate (#916).
+          # The publisher verifies all THREE values are baked into BOTH slices;
+          # on x86_64 the compiler splits them across instructions, which is
+          # only checkable by reconstruction against the expected value.
+          # Without these the first 0.9.5 publish refused at the PostHog gate
+          # (#916) and v0.9.12 refused at the feedback gate -- the same defect
+          # twice, because a gate was added without adding its value HERE.
+          # Adding a fourth gate to publish-blob.mjs means adding its secret to
+          # this list in the same commit.
           PETAL_SENTRY_DSN: ${{ secrets.PETAL_SENTRY_DSN }}
           PETAL_POSTHOG_KEY: ${{ secrets.PETAL_POSTHOG_KEY }}
+          VITE_USERDISPATCH_PUBLIC_KEY: ${{ secrets.VITE_USERDISPATCH_PUBLIC_KEY }}
           VERSION: ${{ steps.version.outputs.VERSION }}
           TAG: ${{ steps.version.outputs.TAG }}
           TAG_ANNOTATION: ${{ steps.version.outputs.TAG_ANNOTATION }}
