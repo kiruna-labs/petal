@@ -11,6 +11,7 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { ParticipantInfo, ParticipantInfo_State, ParticipantPermission } from 'livekit-server-sdk';
 import { MemoryRateLimitStore } from '../lib/ratelimit.js';
 import {
   decodeRoomMeta,
@@ -18,6 +19,7 @@ import {
   ensureRoom,
   ROOM_META_REMOVED_LIMIT,
   type RoomAdminService,
+  type RoomDiscoveryService,
   type RoomListingService,
   type RoomMetadataService,
 } from '../lib/livekit.js';
@@ -49,6 +51,8 @@ const CREDENTIAL = credentialForAccessCode(ACCESS_CODE)!;
 const LIVEKIT_ROOM = livekitRoomName(CREDENTIAL);
 const ALICE = 'web-11111111-1111-4111-8111-111111111111';
 const BOB = 'web-22222222-2222-4222-8222-222222222222';
+const CAROL = 'web-33333333-3333-4333-8333-333333333333';
+const DAVE = 'web-44444444-4444-4444-8444-444444444444';
 
 let failures = 0;
 async function test(name: string, fn: () => Promise<void> | void) {
@@ -63,11 +67,50 @@ async function test(name: string, fn: () => Promise<void> | void) {
   }
 }
 
+// Real protobuf participants, not object literals: the field paths the
+// occupancy filter reads (`permission.hidden`, `state`) are then pinned by
+// the type checker, so a filter on a field that does not exist cannot pass
+// (#120 -- the previous mocks were cast `as never` and would have).
+function participant(
+  identity: string,
+  options: { hidden?: boolean; state?: ParticipantInfo_State } = {}
+): ParticipantInfo {
+  return new ParticipantInfo({
+    identity,
+    name: identity,
+    state: options.state ?? ParticipantInfo_State.ACTIVE,
+    permission: new ParticipantPermission({
+      hidden: options.hidden ?? false,
+      canSubscribe: true,
+      canPublish: !options.hidden,
+    }),
+  });
+}
+
 // A room store mock that behaves like one LiveKit room's metadata: every
 // service type in lib/livekit.ts is satisfied by the same object so one mock
 // can flow through create -> kick -> token.
-function roomMock(initial?: { metadata: string; numParticipants?: number }) {
-  const state = { exists: !!initial, metadata: initial?.metadata ?? '', numParticipants: initial?.numParticipants ?? 0 };
+//
+// `numParticipants` and `participants` are INDEPENDENT state, exactly as they
+// are on a live server: `numParticipants` is the room-level number that
+// counts hidden participants, `participants` is the roster occupancy is now
+// counted from. A test that wants the count to move must move the roster.
+// The default roster is `numParticipants` plain visible people, i.e. the
+// no-bridge case where the two agree.
+function roomMock(initial?: {
+  metadata: string;
+  numParticipants?: number;
+  participants?: ParticipantInfo[];
+}) {
+  const numParticipants = initial?.numParticipants ?? 0;
+  const state = {
+    exists: !!initial,
+    metadata: initial?.metadata ?? '',
+    numParticipants,
+    participants:
+      initial?.participants ??
+      Array.from({ length: numParticipants }, (_unused, i) => participant(`visible-${i}`)),
+  };
   const calls: string[] = [];
   const service = {
     async createRoom(request: { name: string; metadata?: string }) {
@@ -94,12 +137,19 @@ function roomMock(initial?: { metadata: string; numParticipants?: number }) {
     async deleteRoom() {
       calls.push('deleteRoom');
     },
-    async listParticipants() {
-      calls.push('listParticipants');
-      return [] as never;
+    async listParticipants(room: string) {
+      calls.push(`listParticipants:${room}`);
+      return state.participants;
     },
   };
-  return { service: service as RoomMetadataService & RoomAdminService & RoomListingService, state, calls };
+  return {
+    service: service as RoomMetadataService &
+      RoomAdminService &
+      RoomListingService &
+      RoomDiscoveryService,
+    state,
+    calls,
+  };
 }
 
 async function main() {
@@ -154,7 +204,7 @@ async function main() {
   console.log('');
   console.log('2. POST /api/rooms/status: proof-of-possession, one RPC, cached:');
 
-  await test('repeated lookups inside the cache window cost one listRooms call', async () => {
+  await test('repeated lookups inside the cache window cost one listRooms and one listParticipants', async () => {
     const { service, calls } = roomMock({ metadata: encodeRoomMeta({ displayName: 'Cached', open: true }), numParticipants: 2 });
     const body = { rooms: [{ room: CREDENTIAL }] };
     const first = await handleRoomStatus(body, { service, nowMs: 10_000, rateLimitKey: 'a' });
@@ -162,22 +212,92 @@ async function main() {
     assert.equal(calls.filter((c) => c === 'listRooms').length, 1);
     assert.deepEqual(second, first);
     assert.equal(first.rooms.length, 1);
-    assert.equal(first.rooms[0]!.occupancy, 2, 'occupancy is numParticipants straight from listRooms');
+    assert.equal(first.rooms[0]!.occupancy, 2, 'two visible people, no bridge: the two numbers agree');
     assert.deepEqual(Object.keys(first.rooms[0]!).sort(), ['id', 'name', 'occupancy', 'open']);
     assert.ok(!JSON.stringify(first).includes(CREDENTIAL), 'the view never echoes the credential');
-    assert.ok(!calls.includes('listParticipants'), 'no per-room fan-out');
+    // The per-room call is bounded by the caller's presented set and cached
+    // on the same 3s clock as the room list -- it is a fan-out over <= 64
+    // credentials, not over every live room (#120, cf. #708).
+    assert.equal(
+      calls.filter((c) => c.startsWith('listParticipants:')).length,
+      1,
+      'one participants RPC per presented live room per cache window'
+    );
+  });
+
+  await test('#120: occupancy counts VISIBLE, connected people -- not numParticipants', async () => {
+    // The reported bug, as a fixture: LiveKit says 4, one of those is the
+    // reporter's hidden `-gallery` bridge and one is a terminal DISCONNECTED
+    // entry, so two humans are in the room and the card must say 2.
+    const { service, calls } = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Eng Sync', open: true }),
+      numParticipants: 4,
+      participants: [
+        participant(ALICE),
+        participant(`${ALICE}-gallery`, { hidden: true }),
+        participant(BOB, { state: ParticipantInfo_State.DISCONNECTED }),
+        participant(CAROL),
+      ],
+    });
+    const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
+    assert.equal(rooms.length, 1);
+    assert.equal(rooms[0]!.occupancy, 2, 'the hidden bridge and the disconnected entry are not people');
+    assert.equal(calls.filter((c) => c === `listParticipants:${LIVEKIT_ROOM}`).length, 1);
+  });
+
+  await test('#120: a room holding only a hidden bridge reads 0, not 1', async () => {
+    const { service } = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Empty but bridged', open: true }),
+      numParticipants: 1,
+      participants: [participant(`${ALICE}-gallery`, { hidden: true })],
+    });
+    const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
+    assert.equal(rooms[0]!.occupancy, 0);
+  });
+
+  await test('#120: a hidden participant is excluded by permission alone, even without the -gallery suffix', async () => {
+    const { service } = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Hidden other', open: true }),
+      numParticipants: 2,
+      participants: [participant(ALICE), participant(BOB, { hidden: true })],
+    });
+    const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
+    assert.equal(rooms[0]!.occupancy, 1);
+  });
+
+  await test('#120: an empty room costs no participants RPC at all', async () => {
+    const { service, calls } = roomMock({ metadata: encodeRoomMeta({ displayName: 'Idle', open: true }), numParticipants: 0 });
+    const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
+    assert.equal(rooms[0]!.occupancy, 0);
+    assert.equal(calls.filter((c) => c.startsWith('listParticipants:')).length, 0);
   });
 
   await test('the cache expires after ROOMS_LIST_CACHE_MS and refreshes from LiveKit', async () => {
+    // Drives off the ROSTER, not `numParticipants`: four people arrive, one
+    // of them behind a hidden bridge, and the refreshed answer must be 4 --
+    // a test that mutated `numParticipants` alone would pass on a handler
+    // that had gone back to reading it (#120).
     const { service, state, calls } = roomMock({ metadata: encodeRoomMeta({ displayName: 'Cached', open: true }), numParticipants: 1 });
     const body = { rooms: [{ room: CREDENTIAL }] };
     await handleRoomStatus(body, { service, nowMs: 10_000 });
     state.numParticipants = 5;
+    state.participants = [
+      participant(ALICE),
+      participant(`${ALICE}-gallery`, { hidden: true }),
+      participant(BOB),
+      participant(CAROL),
+      participant(DAVE),
+    ];
     const stale = await handleRoomStatus(body, { service, nowMs: 10_000 + ROOMS_LIST_CACHE_MS - 1 });
     assert.equal(stale.rooms[0]!.occupancy, 1, 'still served from cache');
     const fresh = await handleRoomStatus(body, { service, nowMs: 10_000 + ROOMS_LIST_CACHE_MS });
-    assert.equal(fresh.rooms[0]!.occupancy, 5, 'refreshed');
+    assert.equal(fresh.rooms[0]!.occupancy, 4, 'refreshed: five participants, four of them people');
     assert.equal(calls.filter((c) => c === 'listRooms').length, 2);
+    assert.equal(
+      calls.filter((c) => c.startsWith('listParticipants:')).length,
+      2,
+      'the participants cache expires on the same clock as the room list'
+    );
   });
 
   await test('a credential the caller does not present is omitted (no enumeration)', async () => {
@@ -261,12 +381,24 @@ async function main() {
     assert.deepEqual(Object.keys(rooms[0]!).sort(), fixture.responseKeys);
   });
 
-  await test('the full directory view still exists server-side (tooling) and shares the cache', async () => {
-    const { service, calls } = roomMock({ metadata: encodeRoomMeta({ displayName: 'Cached', open: true }), numParticipants: 2 });
+  await test('the full directory view still exists server-side (tooling), shares the cache, and keeps numParticipants', async () => {
+    // `handleListRooms` is not user-facing (GET /api/rooms is 410); it stays
+    // the raw room-level number, so this is where the two now differ (#120).
+    const { service, calls } = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Cached', open: true }),
+      numParticipants: 2,
+      participants: [participant(ALICE), participant(`${ALICE}-gallery`, { hidden: true })],
+    });
     const listed = await handleListRooms({ service, nowMs: 10_000 });
     const status = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 + 1 });
-    assert.deepEqual(status.rooms, listed.rooms);
-    assert.equal(calls.filter((c) => c === 'listRooms').length, 1);
+    assert.equal(listed.rooms[0]!.occupancy, 2, 'tooling keeps the raw numParticipants');
+    assert.equal(status.rooms[0]!.occupancy, 1, 'the user-facing answer counts people');
+    assert.deepEqual(
+      { ...status.rooms[0]!, occupancy: listed.rooms[0]!.occupancy },
+      listed.rooms[0],
+      'occupancy is the only field that differs'
+    );
+    assert.equal(calls.filter((c) => c === 'listRooms').length, 1, 'the room list is still shared');
   });
 
   console.log('3. /api/token enforces open:false:');
