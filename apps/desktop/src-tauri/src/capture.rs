@@ -654,6 +654,26 @@ pub struct WindowCaptureConfig {
     configured_state: Arc<Mutex<ConfiguredCaptureState>>,
 }
 
+/// #106: the capture source's PHYSICAL backing-store geometry.
+///
+/// NOT the `scale` printed by `capture: window N configured ...` or by
+/// `first frame received (WxH, scale N.NN)`. Those are the POST-CAP effective
+/// capture scale -- configured OUTPUT pixels per logical point -- so a 2x
+/// 2560x1440 display whose 5120x2880 backing store Auto caps back down to
+/// 2560x1440 reports `1.00` there while its backing scale is `2.00`. The two
+/// are separate fields on the share memory mark for exactly that reason:
+/// conflating them is what would make the new field say nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaptureBackingGeometry {
+    /// Physical pixels across the source's backing store.
+    pub width: u32,
+    /// Physical pixels down the source's backing store.
+    pub height: u32,
+    /// Physical pixels per logical point. Exactly `1.0` on a non-Retina
+    /// display, so a 1x reading stays a real reading rather than a gap.
+    pub scale: f64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CaptureSourceLayout {
     logical_width: f64,
@@ -664,6 +684,17 @@ struct CaptureSourceLayout {
 impl CaptureSourceLayout {
     fn backing_pixel_size(self) -> (u32, u32, f64) {
         capture_pixel_size(self.logical_width, self.logical_height, self.backing_scale)
+    }
+
+    /// #106: the same numbers `backing_pixel_size` already computes for the
+    /// stream configuration, in a shape a log line can name.
+    fn backing_geometry(self) -> CaptureBackingGeometry {
+        let (width, height, scale) = self.backing_pixel_size();
+        CaptureBackingGeometry {
+            width,
+            height,
+            scale,
+        }
     }
 
     /// The capture scale `update_stream_configuration` records for a
@@ -1323,7 +1354,12 @@ impl WindowCapture {
         }));
 
         log::info!(
-            "capture: window {window_id} configured {width}x{height}px via {capture_path} (layout origin {origin:?}, resolution {resolution:?}, backing {backing_width}x{backing_height}px, scale {initial_source_scale:.2}, color_profile {color_profile:?})"
+            // #106: `scale` used to be the only scale on this line and it is
+            // the POST-CAP capture scale, not the backing-store scale -- a 2x
+            // 5120x2880 display capped to 2560x1440 printed `scale 1.00` right
+            // beside `backing 5120x2880px`, which reads as a 1x display. Both
+            // are named now; neither may be renamed back to a bare `scale`.
+            "capture: window {window_id} configured {width}x{height}px via {capture_path} (layout origin {origin:?}, resolution {resolution:?}, backing {backing_width}x{backing_height}px, backing_scale {backing_scale:.2}, capture_scale {initial_source_scale:.2}, color_profile {color_profile:?})"
         );
         log::info!(
             "capture: window {window_id} creating SCStream via {capture_path} (layout origin {origin:?})"
@@ -1621,6 +1657,13 @@ impl WindowCapture {
 
     pub(crate) fn layout_gate(&self) -> LayoutIntegrityGate {
         self.layout_gate.clone()
+    }
+
+    /// #106: this capture's source backing store, in physical pixels, plus its
+    /// backing scale. Read live from the source layout so a display
+    /// reconfiguration mid-share is reflected rather than remembered.
+    pub(crate) fn backing_geometry(&self) -> CaptureBackingGeometry {
+        self.source_layout.lock_unpoisoned().backing_geometry()
     }
 
     pub fn fps(&self) -> u32 {
@@ -3922,6 +3965,111 @@ mod tests {
             INCIDENT_DEMAND_CAP,
         );
         (width, height)
+    }
+
+    /// #106: the two scales on the capture path are NOT the same number, and
+    /// the whole discriminator this issue needs rests on that.
+    ///
+    /// `backing_geometry().scale` is the source's backing-store scale --
+    /// physical pixels per logical point. The `scale` that `cap_capture_size*`
+    /// returns (printed as `capture_scale`, and formerly as a bare `scale`) is
+    /// the POST-CAP effective capture scale. The #841 incident source is the
+    /// exact case that separates them: a true 2x panel whose Auto capture is
+    /// capped straight back down, so the capture scale reads a flat 1.00 while
+    /// the backing store is genuinely 2x. Report the capped value as "backing
+    /// scale" and a Retina Mac is indistinguishable from the 1x CI runner --
+    /// which is the one comparison #106 exists to make.
+    #[test]
+    fn backing_scale_is_not_the_capped_capture_scale_106() {
+        // The reported field case: a 2560x1440 logical display on Apple
+        // silicon, i.e. a 5120x2880 backing store at 2x.
+        let reported = CaptureSourceLayout {
+            logical_width: 2560.0,
+            logical_height: 1440.0,
+            backing_scale: 2.0,
+        };
+        let backing = reported.backing_geometry();
+        assert_eq!(
+            (backing.width, backing.height),
+            (5120, 2880),
+            "the backing store is the LOGICAL size times the backing scale"
+        );
+        assert_eq!(backing.scale, 2.0, "the panel is a true 2x display");
+
+        let (output_w, output_h, capture_scale) = cap_capture_size(
+            backing.width,
+            backing.height,
+            backing.scale,
+            CaptureResolution::Auto,
+        );
+        // This is why the field log said `source=2560x1440`: Auto's H.264
+        // guardrail snaps a 2x 5K source back to effective 1x, so the
+        // configured output equals the LOGICAL size exactly.
+        assert_eq!((output_w, output_h), (2560, 1440));
+        assert_eq!(capture_scale, 1.0);
+        assert_ne!(
+            capture_scale, backing.scale,
+            "these are different quantities; a log line that prints one as the other is useless"
+        );
+        // And the output size cannot stand in for the backing size either --
+        // it is numerically identical to a 1x 2560x1440 panel's output.
+        assert_eq!(
+            (output_w, output_h),
+            (
+                CaptureSourceLayout {
+                    logical_width: 2560.0,
+                    logical_height: 1440.0,
+                    backing_scale: 1.0,
+                }
+                .backing_geometry()
+                .width,
+                CaptureSourceLayout {
+                    logical_width: 2560.0,
+                    logical_height: 1440.0,
+                    backing_scale: 1.0,
+                }
+                .backing_geometry()
+                .height,
+            ),
+            "a 1x panel of the same logical size produces the identical output size"
+        );
+
+        // Second point, from the #841 incident source, so this is not one
+        // convenient resolution: a 1728x1117pt 2x panel under a 2560 receiver
+        // demand cap reports a fractional capture scale that is neither the
+        // backing scale nor 1.
+        let incident = INCIDENT_SOURCE.backing_geometry();
+        assert_eq!((incident.width, incident.height), (3456, 2234));
+        assert_eq!(incident.scale, 2.0);
+        let (_, _, incident_capture_scale) = cap_capture_size_for_limits(
+            incident.width,
+            incident.height,
+            incident.scale,
+            CaptureResolution::Auto,
+            INCIDENT_DEMAND_CAP,
+        );
+        assert_ne!(incident_capture_scale, incident.scale);
+        assert!(
+            (incident_capture_scale - 1.4814814814814814).abs() < 1e-9,
+            "capture scale was {incident_capture_scale}"
+        );
+    }
+
+    /// The other direction, so the value stays interpretable on the 1x CI
+    /// runner rather than becoming a Retina-only special case: a 1x source
+    /// reports its logical size as its backing store, and a scale of exactly
+    /// 1.0. `backing == source` is then the reading "this display is 1x",
+    /// not a missing measurement.
+    #[test]
+    fn a_1x_source_reports_a_real_1x_backing_store_106() {
+        let runner = CaptureSourceLayout {
+            logical_width: 1920.0,
+            logical_height: 1080.0,
+            backing_scale: 1.0,
+        };
+        let backing = runner.backing_geometry();
+        assert_eq!((backing.width, backing.height), (1920, 1080));
+        assert_eq!(backing.scale, 1.0);
     }
 
     /// #841: a live display share republished its video track ~3x/second for
