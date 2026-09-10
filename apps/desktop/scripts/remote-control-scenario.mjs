@@ -25,6 +25,7 @@ import {
   summarizeObservationLatency,
 } from './remote-control-observation.mjs';
 import { ProcessLeaseLedger, psIdentity } from './process-lease-ledger.mjs';
+import { classifyShareBorderStackReport } from './remote-control-share-border.mjs';
 // #102: the autotest socket client lives in its own module so its per-command
 // timeout can be tested against a server that never answers.
 import { connectSocket } from './autotest-socket.mjs';
@@ -1343,9 +1344,42 @@ async function bootstrapPhotonSentinel(client, cdp) {
     await ensureShareReady(client, cdp, shared);
     return { shared, target: { targetUserId, windowId: shared.windowId } };
   } catch (error) {
+    // #154: the sentinel's window vanished mid-assertion on one release gate
+    // and NOTHING said so -- its exit code and its stderr were both held in
+    // these closures and printed on no failing path, so a dead fixture and a
+    // broken product looked identical. Snapshot liveness BEFORE teardown.
+    error.message = `${error.message} [${photonSentinelLiveness(child, stdout, stderr)}]`;
     stopPhotonSentinel();
     throw error;
   }
+}
+
+// One line describing whether the sentinel process is still alive, and what
+// it last said. `alive=false` on a post-readiness failure means the fixture
+// window disappeared because its process died -- not a Petal defect.
+function photonSentinelLiveness(child, stdout, stderr) {
+  // A just-killed child is a zombie until node reaps it, and macOS `ps`
+  // reports that as `<defunct>` -- treat it as dead, not alive.
+  const identity = psIdentity(child.pid);
+  const alive =
+    child.exitCode === null &&
+    child.signalCode === null &&
+    identity !== null &&
+    !identity.command.includes('defunct');
+  const tail = (text) => {
+    const trimmed = String(text ?? '').trim();
+    if (!trimmed) return 'none';
+    const lines = trimmed.split('\n');
+    return JSON.stringify(lines.slice(-3).join(' | '));
+  };
+  return [
+    `sentinel pid=${child.pid}`,
+    `alive=${alive}`,
+    `exitCode=${child.exitCode ?? 'null'}`,
+    `signal=${child.signalCode ?? 'null'}`,
+    `stderr=${tail(stderr)}`,
+    `stdout=${tail(stdout)}`,
+  ].join(' ');
 }
 
 async function waitForLiveTile(cdp, windowId, timeoutMs) {
@@ -1403,16 +1437,18 @@ async function ensureShareReady(client, cdp, shared) {
 // missing to make it load-bearing rather than dead code.
 async function assertShareBorderStacked(client, windowId) {
   const report = await command(client, { cmd: 'share_border_stack', window_id: windowId });
-  if (report.border == null || report.border.stackIndex == null) {
-    throw new Error(`share border missing or not on-screen for window ${windowId}: ${JSON.stringify(report)}`);
+  // #154: classification lives in remote-control-share-border.mjs so it is
+  // unit-testable, and so "the border broke" can never again be reported for
+  // "the source window went away". Deliberately NOT a retry loop -- retrying
+  // would make the real product failure invisible instead of merely
+  // misattributed.
+  const verdict = classifyShareBorderStackReport(report, windowId);
+  if (!verdict.ok) {
+    const error = new Error(verdict.message);
+    error.shareBorderReason = verdict.reason;
+    throw error;
   }
-  if (report.source.stackIndex == null) {
-    throw new Error(`shared source window ${windowId} not found in the on-screen stack: ${JSON.stringify(report)}`);
-  }
-  if (report.border.stackIndex >= report.source.stackIndex) {
-    throw new Error(`share border is not stacked in front of its source window: ${JSON.stringify(report)}`);
-  }
-  console.log(`# share-border-stack window=${windowId} border=${report.border.stackIndex} source=${report.source.stackIndex} (border in front)`);
+  console.log(verdict.summary);
 }
 
 async function bootstrapTextEditTarget(client, cdp) {

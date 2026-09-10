@@ -523,6 +523,17 @@ jobs:
             echo "::error::Petal (desktop) is no longer running after the loopback matrix." | tee -a "$HARNESS_LOG"
             gate_fail=1
           fi
+          # #154: the harness's own photon-sentinel window vanished mid-run on
+          # one release gate and nothing recorded why. These reports are
+          # DIAGNOSTIC ONLY -- a dead fixture already fails the run through the
+          # harness; this just puts the reason in the artifact.
+          SENTINEL_CRASHES="$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'PetalRCPhotonSentinel*.ips' -newer "$CRASH_MARK" 2>/dev/null || true)"
+          if [ -n "$SENTINEL_CRASHES" ]; then
+            echo "note: the photon sentinel wrote crash report(s) during this run (harness fixture, not Petal):" | tee -a "$HARNESS_LOG"
+            echo "$SENTINEL_CRASHES" | tee -a "$HARNESS_LOG"
+            mkdir -p "$LOG_DIR/crashes"
+            while IFS= read -r f; do [ -n "$f" ] && cp "$f" "$LOG_DIR/crashes/" 2>/dev/null || true; done <<< "$SENTINEL_CRASHES"
+          fi
           NEW_CRASHES="$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'desktop*.ips' -newer "$CRASH_MARK" 2>/dev/null || true)"
           if [ -n "$NEW_CRASHES" ]; then
             echo "::error::Petal wrote crash report(s) during the loopback run:" | tee -a "$HARNESS_LOG"
