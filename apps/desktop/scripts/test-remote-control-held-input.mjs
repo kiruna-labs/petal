@@ -15,10 +15,16 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_RELEASE_GRACE_MS,
   HOST_HELD_INPUT_TTL_MS,
+  RELEASE_NOT_INJECTED_NEEDLE,
   assertReleasedWithin,
   describeHeldButtons,
   heldInputs,
+  inputKey,
+  parseReleaseFailureReason,
   releaseFailureMessage,
+  releaseNotInjectedLines,
+  stressLeakOutcome,
+  summarizeReleaseStressLeak,
 } from './remote-control-held-input.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -231,4 +237,152 @@ test('a failed native release is observable in the host log, and the suite colle
     /pointer RELEASE not injected/,
     'captureCaseFailureForensics must collect that signature, or the log line reaches nobody (#134)'
   );
+});
+
+// ---- the #134 left-drag stress case --------------------------------------
+
+const RELEASE_NOT_INJECTED_LINE =
+  "2026-09-10T12:00:00 [ERROR] remote-control: pointer RELEASE not injected -- host may hold a phantom "
+  + "primary button: reason=routes-exhausted window_id=150 controller='web-28c0' seq=41 (#134)";
+
+test("#140's reason tag is read off the host's own line, and its absence is not mistaken for one", () => {
+  assert.deepEqual(releaseNotInjectedLines(['unrelated', RELEASE_NOT_INJECTED_LINE]), [RELEASE_NOT_INJECTED_LINE]);
+  assert.deepEqual(releaseNotInjectedLines(undefined), []);
+  assert.equal(parseReleaseFailureReason(RELEASE_NOT_INJECTED_LINE), 'routes-exhausted');
+  assert.equal(parseReleaseFailureReason('remote-control: something else entirely'), null);
+  assert.ok(RELEASE_NOT_INJECTED_LINE.includes(RELEASE_NOT_INJECTED_NEEDLE));
+});
+
+test('a leak WITH a host release-failure line is reported as a failed injection, naming the reason', () => {
+  const leak = summarizeReleaseStressLeak({
+    iteration: 4,
+    iterations: 12,
+    snapshot: HELD_PRIMARY,
+    logLines: [RELEASE_NOT_INJECTED_LINE],
+  });
+  assert.equal(leak.iteration, 4);
+  assert.equal(leak.upWasProcessed, 'injection-failed');
+  assert.deepEqual(leak.releaseFailureReasons, ['routes-exhausted']);
+  assert.match(leak.detail, /iteration 4\/12/);
+  assert.match(leak.detail, /primary/);
+  assert.match(leak.detail, /native injection of the Up FAILED/);
+});
+
+test('a leak WITHOUT one says the Up was never processed -- the discriminator #134 turns on', () => {
+  const leak = summarizeReleaseStressLeak({ iteration: 2, iterations: 12, snapshot: HELD_PRIMARY, logLines: [] });
+  assert.equal(leak.upWasProcessed, 'never-processed');
+  assert.deepEqual(leak.releaseFailureReasons, []);
+  assert.match(leak.detail, /never PROCESSED/);
+});
+
+test('the held key is compared against the live session key -- the surviving hypothesis', () => {
+  assert.equal(inputKey({ windowId: 150, controllerId: 'web-28c0' }), '(window 150, controller web-28c0)');
+  const agreeing = summarizeReleaseStressLeak({ iteration: 1, iterations: 12, snapshot: HELD_PRIMARY });
+  assert.equal(agreeing.keyMismatch, false);
+  assert.match(agreeing.detail, /keys agree/);
+  const mismatched = summarizeReleaseStressLeak({
+    iteration: 1,
+    iterations: 12,
+    snapshot: {
+      pressedInputs: [{ buttons: 1, controllerId: 'web-old', windowId: 150 }],
+      sessions: [{ controllerId: 'web-new', windowId: 150 }],
+    },
+  });
+  assert.equal(mismatched.keyMismatch, true);
+  assert.match(mismatched.detail, /KEY MISMATCH/);
+  assert.deepEqual(mismatched.pressedKeys, ['(window 150, controller web-old)']);
+  assert.deepEqual(mismatched.sessionKeys, ['(window 150, controller web-new)']);
+});
+
+test('a held entry filed under the PRE-gesture key is named as the mid-gesture key change', () => {
+  const leak = summarizeReleaseStressLeak({
+    iteration: 5,
+    iterations: 12,
+    snapshot: {
+      pressedInputs: [{ buttons: 1, controllerId: 'web-old', windowId: 150 }],
+      sessions: [{ controllerId: 'web-new', windowId: 150 }],
+    },
+    sessionKeysBeforeGesture: ['(window 150, controller web-old)'],
+  });
+  assert.equal(leak.keyChangedDuringGesture, true);
+  assert.equal(leak.heldKeyIsPreGestureKey, true);
+  assert.match(leak.detail, /the held key is the PRE-GESTURE key -- the key changed mid-gesture/);
+  // ... and a run where nothing moved must not claim it did.
+  const stable = summarizeReleaseStressLeak({
+    iteration: 5,
+    iterations: 12,
+    snapshot: HELD_PRIMARY,
+    sessionKeysBeforeGesture: ['(window 150, controller web-test)'],
+  });
+  assert.equal(stable.keyChangedDuringGesture, false);
+  assert.equal(stable.heldKeyIsPreGestureKey, false);
+  assert.doesNotMatch(stable.detail, /PRE-GESTURE key/);
+  // An unrecorded pre-gesture key is not evidence of stability either.
+  assert.equal(summarizeReleaseStressLeak({ iteration: 1, iterations: 12, snapshot: HELD_PRIMARY }).keyChangedDuringGesture, false);
+  assert.match(summarizeReleaseStressLeak({ iteration: 1, iterations: 12, snapshot: HELD_PRIMARY }).detail, /pre-gesture unrecorded/);
+});
+
+test('the recovery attempts are recorded, since a drain that misses is itself evidence', () => {
+  const leak = summarizeReleaseStressLeak({
+    iteration: 7,
+    iterations: 12,
+    snapshot: HELD_PRIMARY,
+    clearedByHoverMove: false,
+    clearedByTtl: true,
+  });
+  assert.equal(leak.clearedByHoverMove, false);
+  assert.equal(leak.clearedByTtl, true);
+  assert.match(leak.detail, /zero-mask move cleared it: false/);
+  assert.match(leak.detail, /host TTL cleared it: true/);
+});
+
+test('a quarantined leak is recorded as a skip -- never a pass, and never a gate failure', () => {
+  const leak = summarizeReleaseStressLeak({ iteration: 3, iterations: 12, snapshot: HELD_PRIMARY });
+  const quarantined = stressLeakOutcome(leak, { quarantined: true });
+  assert.equal(quarantined.status, 'skip');
+  assert.notEqual(quarantined.status, 'pass');
+  assert.match(quarantined.detail, /QUARANTINED \(#134/);
+  assert.match(quarantined.detail, /iteration 3\/12/);
+  // #134's own definition of done includes taking the quarantine off once the
+  // root cause is fixed; that flip must produce a real failure.
+  assert.equal(stressLeakOutcome(leak, { quarantined: false }).status, 'fail');
+  assert.equal(stressLeakOutcome(leak).status, 'skip');
+});
+
+test('the stress case exists, runs last, and cannot fail the gate while it is quarantined', () => {
+  const cases = scenarioCases();
+  const stress = cases.find((testCase) => testCase.id === 33);
+  assert.ok(stress, 'case 33 (left drag release stress) must exist');
+  assert.equal(cases[cases.length - 1].id, 33, 'the stress case must run LAST -- a press it leaks must not be inherited by another case');
+  assert.match(stress.source, /runLeftDragReleaseStress\(ctx\)/);
+
+  const start = scenario.indexOf('async function runLeftDragReleaseStress(');
+  assert.ok(start > 0, 'the stress runner must still exist');
+  const runner = scenario.slice(start, scenario.indexOf('\nconst CASES = [', start));
+  // Reuses the one release oracle rather than re-implementing the check.
+  assert.match(runner, /await assertReleased\(ctx, `left drag stress iteration/);
+  assert.match(runner, /stressLeakOutcome\(leak, \{ quarantined: LEFT_DRAG_STRESS_QUARANTINED \}\)/);
+  assert.match(runner, /sessionKeysBeforeGesture/, 'the pre-gesture key must be recorded before the drag, not reconstructed after it');
+  assert.doesNotMatch(runner, /status: 'fail'/, 'the stress runner must never hand back a failure of its own making');
+  // ... and neither may an unexpected error inside it (a wedged TextEdit, a
+  // dropped socket): twelve extra drags must not be able to fail a release
+  // over a bug that is already known and open.
+  assert.match(runner, /if \(!LEFT_DRAG_STRESS_QUARANTINED\) throw error;/);
+  assert.match(runner, /return skipCase\(`QUARANTINED \(#134\) -- the stress case could not complete/);
+  // The gesture must stay a byte-for-byte copy of case 6's, or it is a
+  // different experiment from the one #134 was filed about.
+  const case6 = cases.find((testCase) => testCase.id === 6);
+  const drag = /api\.drag\(\{ target, from: \$\{JSON\.stringify\(REMOTE_CONTROL_COORDINATES\.suiteDragFrom\)\}, to: \$\{JSON\.stringify\(REMOTE_CONTROL_COORDINATES\.suiteDragTo\)\}, steps: \$\{REMOTE_CONTROL_DRAG_STEPS\.suite\}, button: \$\{REMOTE_CONTROL_BUTTONS\.left\}/;
+  assert.match(case6.source, drag);
+  assert.match(runner, drag);
+});
+
+test('the stress iteration count stays in the range that makes a 1-in-3 fault likely to appear', () => {
+  // Below ~10 the run is back to relying on luck, which is the whole problem.
+  const match = /const DEFAULT_LEFT_DRAG_STRESS_ITERATIONS = (\d+);/.exec(scenario);
+  assert.ok(match, 'the stress iteration count must stay a named default');
+  assert.match(scenario, /PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS must be a non-negative integer/,
+    'a typo\'d override must fail loudly, not silently run zero iterations');
+  const iterations = Number(match[1]);
+  assert.ok(iterations >= 10 && iterations <= 20, `default iterations ${iterations} must stay in 10..20`);
 });
