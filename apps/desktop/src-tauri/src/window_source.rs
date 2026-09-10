@@ -38,7 +38,7 @@
 use crate::sync_ext::MutexExt;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -46,9 +46,30 @@ const LIST_CACHE_TTL: Duration = Duration::from_millis(2_500);
 const THUMB_CACHE_TTL: Duration = Duration::from_millis(8_000);
 const THUMB_PREWARM_LIMIT: usize = 8;
 
+/// #106: floor between two picker memory-mark episodes. The picker
+/// re-enumerates every `LIST_CACHE_TTL` for as long as it stays open, and each
+/// mark pays one bounded VM-region walk -- so without a floor these marks would
+/// fire ~24x a minute and become the sampler this diagnostic is explicitly not
+/// allowed to be. One bracketed triple per minute is enough for the shape being
+/// attributed: the reported thumbnail bursts last ~1.2s, decay within a minute,
+/// and occurred three times in a multi-hour session.
+const PICKER_MEMORY_MARK_COOLDOWN: Duration = Duration::from_secs(60);
+
 static LIST_CACHE: OnceLock<Mutex<Option<CachedList>>> = OnceLock::new();
 static THUMB_CACHE: OnceLock<Mutex<HashMap<u32, CachedThumbnail>>> = OnceLock::new();
 static THUMB_PREWARM_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// #106: monotonic count of thumbnail captures that actually reached the
+/// capture path. `capture_window_thumbnail_uncached` is the single funnel for
+/// all three producers -- the picker's prewarm burst, the picker's per-card
+/// refresh, and AI chat's frame pump -- so a DIFFERENCE between two picker
+/// memory marks counts every capture between them, not just the prewarm's.
+/// It must never reset for that reason.
+static THUMBNAIL_CAPTURES: AtomicU32 = AtomicU32::new(0);
+
+/// When the current picker memory-mark episode opened, for
+/// `PICKER_MEMORY_MARK_COOLDOWN`.
+static PICKER_MARK_LAST_EPISODE: Mutex<Option<Instant>> = Mutex::new(None);
 
 #[derive(Clone)]
 struct CachedList {
@@ -867,6 +888,168 @@ fn store_thumbnail(window_id: u32, bytes: &[u8], now: Instant) {
     guard.retain(|_, cached| now.duration_since(cached.captured_at) <= THUMB_CACHE_TTL);
 }
 
+// =============================================================================
+// Picker memory marks (#106)
+//
+// Half the 3.07 GB in the field report arrives BEFORE any share exists: the
+// process sits at 127 MB idle, `list()` enumerates 3 displays + 18 windows, 13
+// SCK thumbnails land in 1.2s, and 2.6s later -- still before the share takes a
+// frame -- it reads 1492 MB. `session::share`'s marks start at `start_begin`
+// and so cannot see any of that. These marks bracket the picker's own burst
+// with the same fields, so the two are directly comparable.
+//
+// Nothing here crosses the Sentry boundary: this is a log line, exactly like
+// the share marks. (`vm_attribution().top_owner()` is what crosses, from
+// `logging`'s memory-pressure event, and is already a bounded enum.)
+// =============================================================================
+
+/// What one picker thumbnail prewarm burst actually did. A bounded enum rather
+/// than free text -- `prewarm=` is meant to be grouped over many field logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrewarmOutcome {
+    /// The spawned burst ran to completion. The mark carrying this is taken
+    /// after the LAST capture returned, never at spawn time -- the whole point
+    /// is to bracket the burst, and a mark at spawn would read the footprint
+    /// before a single thumbnail had been captured.
+    Completed,
+    /// A previous burst still held `THUMB_PREWARM_IN_FLIGHT`; this call
+    /// captured nothing, so the episode's footprint delta is not its cost.
+    SkippedInFlight,
+    /// The enumeration was empty, so there was nothing to prewarm.
+    NoSources,
+}
+
+impl PrewarmOutcome {
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::SkippedInFlight => "skipped_in_flight",
+            Self::NoSources => "no_sources",
+        }
+    }
+}
+
+/// The display/window split of one enumeration. Displays are the expensive
+/// half of a picker burst on a Retina Mac -- a display card's 320px thumbnail
+/// is produced by compositing the display's whole backing store -- so the
+/// counts have to be on the mark for the burst's cost to be interpretable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PickerSourceCounts {
+    displays: usize,
+    windows: usize,
+}
+
+fn picker_source_counts(sources: &[ShareableWindow]) -> PickerSourceCounts {
+    let displays = sources
+        .iter()
+        .filter(|source| matches!(source.kind, Some(ShareableSourceKind::Display)))
+        .count();
+    PickerSourceCounts {
+        displays,
+        windows: sources.len().saturating_sub(displays),
+    }
+}
+
+const PICKER_MARK_STAGE_LIST_BEGIN: &str = "list_begin";
+const PICKER_MARK_STAGE_LIST_DONE: &str = "list_done";
+const PICKER_MARK_STAGE_PREWARM_DONE: &str = "prewarm_done";
+
+/// Pure half of the cooldown gate, so both directions are testable without a
+/// clock. `None` (no episode yet) always opens.
+fn picker_mark_episode_opens(since_last: Option<Duration>) -> bool {
+    match since_last {
+        None => true,
+        Some(elapsed) => elapsed >= PICKER_MEMORY_MARK_COOLDOWN,
+    }
+}
+
+/// Claim a picker mark episode, or decline. Stamping happens here so the three
+/// marks of one episode are decided ONCE: `list_done` and `prewarm_done` fire
+/// on the same boolean `list_begin` did, and a triple is never half-emitted
+/// because the cooldown expired in the middle of it.
+fn open_picker_mark_episode(now: Instant) -> bool {
+    let mut guard = PICKER_MARK_LAST_EPISODE.lock_unpoisoned();
+    let since_last = guard.map(|last| now.saturating_duration_since(last));
+    if picker_mark_episode_opens(since_last) {
+        *guard = Some(now);
+        true
+    } else {
+        false
+    }
+}
+
+/// #106: render one picker memory mark. Same fields as
+/// `session::share::share_memory_mark_line` so a picker episode and a share can
+/// be read on one axis, plus the two the picker needs of its own:
+///
+/// - `sources=<n>d/<n>w` -- what was enumerated. The reported machine has 3
+///   displays at 2x; the CI runner has 1 at 1x, which is why a burst costs a
+///   fraction there.
+/// - `thumbnail_captures=<n>` -- monotonic (`THUMBNAIL_CAPTURES`). Two marks
+///   give the burst SIZE by difference; a single value means nothing.
+///
+/// Read `vm_top` across two marks as a DIFFERENCE, never as a decomposition of
+/// the `phys_footprint_mb` beside it -- the same #142 caveat the share marks
+/// carry, for the same reason.
+///
+/// Windows-safe by construction: `process_footprint_bytes_now` has a real
+/// Windows implementation, `vm_attribution` returns `None` there and renders
+/// `vm_walk=unavailable` rather than a fabricated zero, and
+/// `live_pixel_buffer_count` renders `n/a`. The picker path itself is
+/// cross-platform, so Windows gets the enumeration marks too.
+fn picker_memory_mark_line(
+    stage: &str,
+    sources: Option<PickerSourceCounts>,
+    thumbnail_captures: u32,
+    prewarm: Option<PrewarmOutcome>,
+    footprint_bytes: Option<u64>,
+    live_pixel_buffers: Option<u32>,
+    attribution: Option<&crate::platform::mem::VmAttribution>,
+) -> String {
+    let footprint_mb = match footprint_bytes {
+        Some(bytes) => (bytes / (1024 * 1024)).to_string(),
+        None => "unknown".to_string(),
+    };
+    let buffers = match live_pixel_buffers {
+        Some(count) => count.to_string(),
+        None => "n/a".to_string(),
+    };
+    let sources_str = match sources {
+        Some(counts) => format!("{}d/{}w", counts.displays, counts.windows),
+        None => "n/a".to_string(),
+    };
+    let prewarm_str = prewarm.map_or("pending", PrewarmOutcome::tag);
+    let vm_fields = crate::platform::mem::vm_attribution_fields(attribution);
+    format!(
+        "window_source: picker memory mark -- stage={stage} \
+phys_footprint_mb={footprint_mb} live_pixel_buffers={buffers} sources={sources_str} \
+thumbnail_captures={thumbnail_captures} prewarm={prewarm_str} {vm_fields}"
+    )
+}
+
+/// One UNTHROTTLED footprint sample plus one bounded VM-region walk, at a named
+/// point in the picker's lifecycle. Three per episode, at most one episode per
+/// `PICKER_MEMORY_MARK_COOLDOWN` -- do NOT call this from the per-thumbnail
+/// loop or from any polling path; the cost is per call and #106 needs the
+/// transition, not a stream.
+fn log_picker_memory_mark(
+    stage: &str,
+    sources: Option<PickerSourceCounts>,
+    prewarm: Option<PrewarmOutcome>,
+) {
+    let attribution = crate::platform::mem::vm_attribution();
+    let line = picker_memory_mark_line(
+        stage,
+        sources,
+        THUMBNAIL_CAPTURES.load(Ordering::Relaxed),
+        prewarm,
+        crate::platform::mem::process_footprint_bytes_now(),
+        crate::platform::mem::live_pixel_buffer_count(),
+        attribution.as_ref(),
+    );
+    log::info!("{line}");
+}
+
 /// Cached shareable-window enumeration for UI surfaces that may open and
 /// close repeatedly. This still calls the real ScreenCaptureKit path when the
 /// short TTL expires; callers must run it off the main thread.
@@ -877,67 +1060,156 @@ pub fn list_cached() -> Result<Vec<ShareableWindow>, WindowSourceError> {
             "window_source: list_cached() served {} window(s) from cache",
             windows.len()
         );
-        prewarm_thumbnails(&windows);
+        prewarm_thumbnails(&windows, false);
         return Ok(windows);
     }
 
+    // #106: mark only around a REAL enumeration. A cache hit does no
+    // ScreenCaptureKit work, so marking it would price an empty call and
+    // spend the episode that the next real burst needs.
+    let marking = open_picker_mark_episode(now);
+    if marking {
+        log_picker_memory_mark(PICKER_MARK_STAGE_LIST_BEGIN, None, None);
+    }
+
+    // A failed enumeration leaves a lone `list_begin` on purpose: the
+    // `list() refused`/error line follows it immediately and says why, and
+    // synthesising the other two marks would put footprints on a burst that
+    // never happened.
     let windows = list()?;
     store_list(&windows, now);
-    prewarm_thumbnails(&windows);
+    if marking {
+        log_picker_memory_mark(
+            PICKER_MARK_STAGE_LIST_DONE,
+            Some(picker_source_counts(&windows)),
+            None,
+        );
+    }
+    prewarm_thumbnails(&windows, marking);
     Ok(windows)
 }
 
-fn prewarm_thumbnails(windows: &[ShareableWindow]) {
+/// `mark` is #106's episode flag, decided by `list_cached`. Every early return
+/// emits its own `prewarm_done` so an episode is always a complete triple --
+/// a missing third mark would read as "the burst is still running" when in
+/// fact nothing was captured at all.
+fn prewarm_thumbnails(windows: &[ShareableWindow], mark: bool) {
+    let sources = picker_source_counts(windows);
     let ids: Vec<u32> = windows
         .iter()
         .take(THUMB_PREWARM_LIMIT)
         .map(|w| w.window_id)
         .collect();
     if ids.is_empty() {
+        if mark {
+            log_picker_memory_mark(
+                PICKER_MARK_STAGE_PREWARM_DONE,
+                Some(sources),
+                Some(PrewarmOutcome::NoSources),
+            );
+        }
         return;
     }
     if THUMB_PREWARM_IN_FLIGHT
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
+        if mark {
+            log_picker_memory_mark(
+                PICKER_MARK_STAGE_PREWARM_DONE,
+                Some(sources),
+                Some(PrewarmOutcome::SkippedInFlight),
+            );
+        }
         return;
     }
 
     std::thread::spawn(move || {
-        for window_id in ids {
-            let now = Instant::now();
-            if cached_thumbnail(window_id, now).is_some() {
-                continue;
-            }
-            match capture_window_thumbnail_uncached(window_id, THUMBNAIL_MAX_LONG_EDGE) {
-                Ok(bytes) => store_thumbnail(window_id, &bytes, Instant::now()),
-                Err(e) => log::debug!(
-                    "window_source: thumbnail prewarm failed for window {window_id}: {e}"
-                ),
-            }
-        }
-        THUMB_PREWARM_IN_FLIGHT.store(false, Ordering::Release);
+        run_prewarm_burst(
+            ids,
+            mark,
+            sources,
+            |window_id| {
+                let now = Instant::now();
+                if cached_thumbnail(window_id, now).is_some() {
+                    return;
+                }
+                match capture_window_thumbnail_uncached(window_id, THUMBNAIL_MAX_LONG_EDGE) {
+                    Ok(bytes) => store_thumbnail(window_id, &bytes, Instant::now()),
+                    Err(e) => log::debug!(
+                        "window_source: thumbnail prewarm failed for window {window_id}: {e}"
+                    ),
+                }
+            },
+            |stage, sources, outcome| log_picker_memory_mark(stage, Some(sources), Some(outcome)),
+        );
     });
 }
 
+/// The burst body, with its capture and its mark emission injected.
+///
+/// #106's load-bearing ordering lives here, not in the formatter: the
+/// `prewarm_done` mark must be taken when the burst has actually FINISHED, not
+/// when its thread is spawned -- a mark at spawn reads the footprint before a
+/// single thumbnail exists and would report the burst as free. The in-flight
+/// guard is released first for the same class of reason: the mark pays a
+/// bounded VM-region walk, and holding the guard across it would stall the next
+/// enumeration behind a diagnostic. Neither property is visible to a test on
+/// `picker_memory_mark_line`, so the real chain is what the test drives.
+fn run_prewarm_burst<C, M>(
+    ids: Vec<u32>,
+    mark: bool,
+    sources: PickerSourceCounts,
+    mut capture: C,
+    mut emit: M,
+) where
+    C: FnMut(u32),
+    M: FnMut(&'static str, PickerSourceCounts, PrewarmOutcome),
+{
+    for window_id in ids {
+        capture(window_id);
+    }
+    THUMB_PREWARM_IN_FLIGHT.store(false, Ordering::Release);
+    if mark {
+        emit(
+            PICKER_MARK_STAGE_PREWARM_DONE,
+            sources,
+            PrewarmOutcome::Completed,
+        );
+    }
+}
+
 // =============================================================================
-// Thumbnail capture (cheap periodic preview, separate from the real SCStream
-// capture path). Reuses takt's `capture_window_by_id` technique verbatim:
-// `screencapture -x -o -l<id> -t jpg` to a temp file, read back as bytes.
-// This is deliberately NOT ScreenCaptureKit — it's a lightweight, infrequent
-// snapshot for the tab strip's preview thumbnail, not the realtime capture
-// stream (SPEC.md §4.1), which is a separate, much heavier `SCStream` path.
+// Thumbnail capture for the picker's preview cards, separate from the realtime
+// `SCStream` capture path (SPEC.md §4.1).
+//
+// On macOS this IS ScreenCaptureKit: `capture_window_thumbnail_sck` calls
+// `SCScreenshotManager::capture_sample_buffer`, and `screencapture -x -o
+// -l<id> -t jpg` survives only as the fallback for every SCK failure (#247).
+// This comment used to claim the opposite ("deliberately NOT ScreenCaptureKit
+// ... lightweight") over code that logs `captured via SCK`, and that claim cost
+// an #106 investigator a detour: the OUTPUT is small (`thumbnail_output_size`
+// caps the long edge at `THUMBNAIL_MAX_LONG_EDGE`), but SCK composites the
+// SOURCE to produce it, and a display card's source is a whole backing store --
+// 5120x2880 on the reported machine. Each call also re-runs a full
+// `SCShareableContent` enumeration of its own.
+//
+// What that actually costs is measured, not asserted: `window_source: picker
+// memory mark` brackets the prewarm burst above (#106). Do not restate a cost
+// here that no reading supports.
 // =============================================================================
 
 /// Long edge cap for the picker's own preview thumbnails — small on purpose,
 /// the card only ever displays ~284px wide.
 const THUMBNAIL_MAX_LONG_EDGE: u32 = 320;
 
-/// Capture a single window's current contents as a JPEG, by `CGWindowID`,
-/// via the system `screencapture` CLI. Returns the raw JPEG bytes.
+/// Capture a single source's current contents as a JPEG, by picker source id
+/// (a `CGWindowID`, or `DISPLAY_SOURCE_MARKER | CGDirectDisplayID`). Returns
+/// the raw JPEG bytes, served from the `THUMB_CACHE_TTL` cache when fresh.
 ///
-/// macOS-only (the `screencapture` binary and window ids are macOS
-/// concepts); on other platforms this always errors.
+/// macOS goes through `SCScreenshotManager` and falls back to the
+/// `screencapture` CLI; Windows goes through a WGC one-shot and returns PNG
+/// bytes. Other platforms always error.
 pub fn capture_window_thumbnail(window_id: u32) -> Result<Vec<u8>, String> {
     capture_window_thumbnail_inner(window_id, false)
 }
@@ -977,6 +1249,10 @@ pub(crate) fn capture_window_thumbnail_uncached(
     window_id: u32,
     max_long_edge: u32,
 ) -> Result<Vec<u8>, String> {
+    // #106: the single funnel every real capture passes through -- counted
+    // here rather than in the prewarm loop so the picker's per-card refreshes
+    // and AI chat's frame pump are in the same number. One relaxed add.
+    THUMBNAIL_CAPTURES.fetch_add(1, Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     {
         // In-process ScreenCaptureKit screenshot first (fast, downscaled, no
@@ -1448,6 +1724,287 @@ fn downscale_jpeg(jpeg: &[u8], max_long_edge: u32) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::mem::{VmAttribution, VmOwner, VmOwnerBytes};
+
+    fn source(window_id: u32, kind: ShareableSourceKind) -> ShareableWindow {
+        ShareableWindow {
+            window_id,
+            title: Some("t".to_string()),
+            app_name: "a".to_string(),
+            app_bundle_id: "b".to_string(),
+            app_pid: 1,
+            app_icon_base64: None,
+            kind: Some(kind),
+        }
+    }
+
+    /// An attribution shaped like the one #106 is hunting: IOSurface dominant.
+    fn iosurface_heavy_attribution() -> VmAttribution {
+        let mb = |n: u64| n * 1024 * 1024;
+        VmAttribution {
+            owners: vec![
+                VmOwnerBytes {
+                    owner: VmOwner::IoSurface,
+                    resident_bytes: mb(1300),
+                    mapped_dirty_bytes: mb(1300),
+                },
+                VmOwnerBytes {
+                    owner: VmOwner::Malloc,
+                    resident_bytes: mb(80),
+                    mapped_dirty_bytes: mb(72),
+                },
+            ],
+            regions_walked: 512,
+            truncated: false,
+            total_resident_bytes: mb(1380),
+            total_mapped_dirty_bytes: mb(1372),
+            other_top_user_tag: None,
+        }
+    }
+
+    /// #106: the picker's own marks must carry the same fields the share marks
+    /// do, so a picker episode and a share are readable on one axis, plus the
+    /// two the picker needs of its own (`sources=`, `thumbnail_captures=`).
+    /// The field report's pre-share elevation is the thing this line exists to
+    /// attribute, so it is asserted whole rather than field by field.
+    #[test]
+    fn picker_memory_mark_line_carries_the_fields_that_attribute_a_burst() {
+        let attribution = iosurface_heavy_attribution();
+        let line = picker_memory_mark_line(
+            PICKER_MARK_STAGE_PREWARM_DONE,
+            Some(PickerSourceCounts {
+                displays: 3,
+                windows: 18,
+            }),
+            13,
+            Some(PrewarmOutcome::Completed),
+            Some(1492 * 1024 * 1024),
+            Some(0),
+            Some(&attribution),
+        );
+        assert_eq!(
+            line,
+            "window_source: picker memory mark -- stage=prewarm_done \
+phys_footprint_mb=1492 live_pixel_buffers=0 sources=3d/18w thumbnail_captures=13 \
+prewarm=completed vm_walk=complete vm_regions=512 vm_resident_mb=1380 \
+vm_mapped_dirty_mb=1372 vm_top=iosurface:1300/1300,malloc:80/72 vm_other_tag=n/a"
+        );
+    }
+
+    /// The burst is bracketed, not sampled: `list_begin` fires before any
+    /// enumeration exists, so it must say so rather than invent counts. The
+    /// PAIR is the reading -- `thumbnail_captures` is monotonic and only means
+    /// something as a difference.
+    #[test]
+    fn picker_memory_mark_line_brackets_the_burst_with_an_opening_mark() {
+        let begin = picker_memory_mark_line(
+            PICKER_MARK_STAGE_LIST_BEGIN,
+            None,
+            4,
+            None,
+            Some(127 * 1024 * 1024),
+            Some(0),
+            None,
+        );
+        assert!(
+            begin.contains("stage=list_begin phys_footprint_mb=127"),
+            "{begin}"
+        );
+        assert!(begin.contains("sources=n/a"), "{begin}");
+        assert!(begin.contains("thumbnail_captures=4"), "{begin}");
+        // Not yet run, and not silently rendered as an outcome.
+        assert!(begin.contains("prewarm=pending"), "{begin}");
+    }
+
+    /// Every early return out of `prewarm_thumbnails` still closes the episode,
+    /// and each says WHY on its face -- a `prewarm_done` whose burst captured
+    /// nothing must not be read as a burst that cost nothing.
+    #[test]
+    fn picker_memory_mark_line_names_a_prewarm_that_did_no_work() {
+        for (outcome, expected) in [
+            (PrewarmOutcome::Completed, "prewarm=completed"),
+            (PrewarmOutcome::SkippedInFlight, "prewarm=skipped_in_flight"),
+            (PrewarmOutcome::NoSources, "prewarm=no_sources"),
+        ] {
+            let line = picker_memory_mark_line(
+                PICKER_MARK_STAGE_PREWARM_DONE,
+                Some(PickerSourceCounts {
+                    displays: 1,
+                    windows: 0,
+                }),
+                0,
+                Some(outcome),
+                Some(0),
+                Some(0),
+                None,
+            );
+            assert!(line.contains(expected), "{line}");
+        }
+    }
+
+    /// Windows path, and any failed read: absence must render as absence. A
+    /// fabricated `phys_footprint_mb=0` / `vm_top=none` would read as "nothing
+    /// is allocated", which is the plausible-looking-fake-data shape that would
+    /// close #106 with the wrong answer.
+    #[test]
+    fn picker_memory_mark_line_reports_an_unavailable_reading_as_unavailable() {
+        let line = picker_memory_mark_line(
+            PICKER_MARK_STAGE_LIST_DONE,
+            Some(PickerSourceCounts {
+                displays: 1,
+                windows: 7,
+            }),
+            0,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(line.contains("phys_footprint_mb=unknown"), "{line}");
+        assert!(line.contains("live_pixel_buffers=n/a"), "{line}");
+        assert!(line.contains("vm_walk=unavailable"), "{line}");
+        assert!(!line.contains("phys_footprint_mb=0"), "{line}");
+    }
+
+    /// Displays are the expensive half of a burst on a Retina Mac, so the
+    /// split has to survive onto the line -- `sources=21w` would hide the
+    /// difference between the reporter's 3 displays and the runner's 1.
+    #[test]
+    fn picker_source_counts_split_displays_from_windows() {
+        let sources = vec![
+            source(0x4000_0001, ShareableSourceKind::Display),
+            source(0x4000_0002, ShareableSourceKind::Display),
+            source(10, ShareableSourceKind::Window),
+        ];
+        let counts = picker_source_counts(&sources);
+        assert_eq!(counts.displays, 2);
+        assert_eq!(counts.windows, 1);
+        let line = picker_memory_mark_line(
+            PICKER_MARK_STAGE_LIST_DONE,
+            Some(counts),
+            0,
+            None,
+            Some(0),
+            Some(0),
+            None,
+        );
+        assert!(line.contains("sources=2d/1w"), "{line}");
+    }
+
+    /// The bound, in both directions. The picker re-enumerates every
+    /// `LIST_CACHE_TTL` while it is open, so a gate that only ever opened would
+    /// turn three marks per episode into a ~24-per-minute sampler -- exactly
+    /// what this diagnostic is not allowed to be.
+    #[test]
+    fn picker_mark_episodes_are_bounded_by_the_cooldown() {
+        assert!(
+            picker_mark_episode_opens(None),
+            "the first episode of a process must open"
+        );
+        assert!(
+            !picker_mark_episode_opens(Some(LIST_CACHE_TTL)),
+            "a re-enumeration one list-cache TTL later must NOT open a new episode"
+        );
+        assert!(
+            !picker_mark_episode_opens(Some(
+                PICKER_MEMORY_MARK_COOLDOWN - Duration::from_millis(1)
+            )),
+            "just inside the cooldown must not open"
+        );
+        assert!(
+            picker_mark_episode_opens(Some(PICKER_MEMORY_MARK_COOLDOWN)),
+            "at the cooldown, a new episode must open -- otherwise a picker \
+             opened once a minute is never marked at all"
+        );
+    }
+
+    /// The episode is claimed once, by the first caller, and the claim is what
+    /// makes a triple atomic: a second enumeration inside the cooldown must not
+    /// interleave its own `list_begin` into an episode already in flight.
+    #[test]
+    fn open_picker_mark_episode_claims_once_within_the_cooldown() {
+        {
+            let mut guard = PICKER_MARK_LAST_EPISODE.lock_unpoisoned();
+            *guard = None;
+        }
+        let now = Instant::now();
+        assert!(open_picker_mark_episode(now));
+        assert!(!open_picker_mark_episode(now + LIST_CACHE_TTL));
+        assert!(open_picker_mark_episode(now + PICKER_MEMORY_MARK_COOLDOWN));
+        {
+            let mut guard = PICKER_MARK_LAST_EPISODE.lock_unpoisoned();
+            *guard = None;
+        }
+    }
+
+    /// The one property of #106's picker marks that no test on the formatter
+    /// can see: the closing mark is taken AFTER the last capture returns, and
+    /// after the in-flight guard is released. A mark taken at spawn time would
+    /// read the footprint before a single thumbnail existed and report the
+    /// burst as free -- the exact wrong answer this instrument exists to
+    /// prevent. Drives the real burst function, not the line it eventually
+    /// formats.
+    #[test]
+    fn prewarm_burst_marks_after_the_last_capture_and_releases_the_guard_first() {
+        use std::cell::RefCell;
+
+        let events: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let counts = PickerSourceCounts {
+            displays: 3,
+            windows: 18,
+        };
+        // The real caller holds the guard for the whole burst.
+        THUMB_PREWARM_IN_FLIGHT.store(true, Ordering::Release);
+        run_prewarm_burst(
+            vec![11, 22, 33],
+            true,
+            counts,
+            |window_id| events.borrow_mut().push(format!("capture:{window_id}")),
+            |stage, sources, outcome| {
+                assert_eq!(sources, counts);
+                assert!(
+                    !THUMB_PREWARM_IN_FLIGHT.load(Ordering::Acquire),
+                    "the in-flight guard must be released BEFORE the mark's VM walk, or the \
+                     next enumeration stalls behind a diagnostic"
+                );
+                events
+                    .borrow_mut()
+                    .push(format!("mark:{stage}:{}", outcome.tag()));
+            },
+        );
+        assert_eq!(
+            events.into_inner(),
+            vec![
+                "capture:11",
+                "capture:22",
+                "capture:33",
+                "mark:prewarm_done:completed",
+            ]
+        );
+    }
+
+    /// A burst outside a marking episode captures exactly the same thumbnails
+    /// and emits nothing -- the cooldown is a bound on the DIAGNOSTIC, never on
+    /// the picker's own work.
+    #[test]
+    fn prewarm_burst_outside_an_episode_captures_but_never_marks() {
+        use std::cell::RefCell;
+
+        let captured: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+        THUMB_PREWARM_IN_FLIGHT.store(true, Ordering::Release);
+        run_prewarm_burst(
+            vec![7, 8],
+            false,
+            PickerSourceCounts {
+                displays: 0,
+                windows: 2,
+            },
+            |window_id| captured.borrow_mut().push(window_id),
+            |_, _, _| panic!("no mark may be emitted outside a marking episode"),
+        );
+        assert_eq!(captured.into_inner(), vec![7, 8]);
+        assert!(!THUMB_PREWARM_IN_FLIGHT.load(Ordering::Acquire));
+    }
 
     #[test]
     fn thumbnail_output_size_caps_the_long_edge_and_preserves_aspect() {

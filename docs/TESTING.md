@@ -1447,6 +1447,25 @@ subsequent cockpit work:
   make-golden.sh`); the footprint spike in #106 was reported on a 2560x1440
   display (3.69 MP) on real Apple silicon. A green SHARE-DESKTOP on the VM is a
   LOWER BOUND on that case, not a reproduction of it.
+- **`window_source: picker memory mark` brackets the SOURCE PICKER, before any
+  share exists (#106).** Roughly half the reported 3.07 GB arrives between
+  `list()` and the share's first frame, which is earlier than any
+  `session: share memory mark` can see. Three marks per episode --
+  `stage=list_begin` (before the enumeration), `stage=list_done` (after it),
+  `stage=prewarm_done` (after the LAST thumbnail of the prewarm burst returns,
+  not when its thread is spawned) -- carrying the same `phys_footprint_mb` /
+  `vm_top=` fields the share marks do, plus `sources=<n>d/<n>w` and a monotonic
+  `thumbnail_captures=<n>`. Read the burst's size and owner as the DIFFERENCE
+  between two marks; a single mark's `thumbnail_captures` means nothing, and
+  `vm_top` is never a decomposition of the footprint beside it (#142).
+  `prewarm=skipped_in_flight` / `no_sources` mean the episode captured nothing,
+  so its footprint delta is not a burst's cost.
+  Bounded, not sampled: at most one episode per 60s
+  (`PICKER_MEMORY_MARK_COOLDOWN`), and a cache-hit enumeration is never marked.
+  **Not currently visible in the live gate**: the cockpit's share scenarios call
+  `window_source::list()` directly, not the `list_cached()` picker path these
+  marks sit on, so today they reach field logs (`~/Library/Logs/Petal/petal.log`)
+  and a dev run only. Windows emits them too, with `vm_walk=unavailable`.
 - **Belt and suspenders, not either/or**: even inside the QA build channel,
   the privileged capabilities stay inert -- refuse to execute -- unless
   `cockpit-setup.sh`'s one-time local marker file is present, checked via
