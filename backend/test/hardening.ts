@@ -36,6 +36,7 @@ import {
   ROOM_CREATE_BUCKET_REFILL_MS,
   ROOM_CREATE_GLOBAL_CAPACITY,
   ROOMS_LIST_CACHE_MS,
+  ROOM_STATUS_MAX_PARTICIPANT_NAMES,
   ROOM_STATUS_MAX_ROOMS,
 } from '../lib/handlers.js';
 import { credentialForAccessCode, livekitRoomName } from '../lib/slug.js';
@@ -73,11 +74,14 @@ async function test(name: string, fn: () => Promise<void> | void) {
 // (#120 -- the previous mocks were cast `as never` and would have).
 function participant(
   identity: string,
-  options: { hidden?: boolean; state?: ParticipantInfo_State } = {}
+  options: { hidden?: boolean; state?: ParticipantInfo_State; name?: string } = {}
 ): ParticipantInfo {
   return new ParticipantInfo({
     identity,
-    name: identity,
+    // Defaults to the identity because that is what LiveKit does when a client
+    // publishes no displayName -- which is exactly the case #122's name list
+    // must NOT leak through (`looksLikeTechnicalIdentity` on the client).
+    name: options.name ?? identity,
     state: options.state ?? ParticipantInfo_State.ACTIVE,
     permission: new ParticipantPermission({
       hidden: options.hidden ?? false,
@@ -101,12 +105,16 @@ function roomMock(initial?: {
   metadata: string;
   numParticipants?: number;
   participants?: ParticipantInfo[];
+  listParticipantsError?: string;
 }) {
   const numParticipants = initial?.numParticipants ?? 0;
   const state = {
     exists: !!initial,
     metadata: initial?.metadata ?? '',
     numParticipants,
+    // Set to a message to make every `listParticipants` call reject, the
+    // per-room failure `withVisibleOccupancy` isolates (#120/#122).
+    listParticipantsError: initial?.listParticipantsError ?? null as string | null,
     participants:
       initial?.participants ??
       Array.from({ length: numParticipants }, (_unused, i) => participant(`visible-${i}`)),
@@ -139,6 +147,7 @@ function roomMock(initial?: {
     },
     async listParticipants(room: string) {
       calls.push(`listParticipants:${room}`);
+      if (state.listParticipantsError) throw new Error(state.listParticipantsError);
       return state.participants;
     },
   };
@@ -213,7 +222,7 @@ async function main() {
     assert.deepEqual(second, first);
     assert.equal(first.rooms.length, 1);
     assert.equal(first.rooms[0]!.occupancy, 2, 'two visible people, no bridge: the two numbers agree');
-    assert.deepEqual(Object.keys(first.rooms[0]!).sort(), ['id', 'name', 'occupancy', 'open']);
+    assert.deepEqual(Object.keys(first.rooms[0]!).sort(), ['id', 'name', 'occupancy', 'open', 'participants']);
     assert.ok(!JSON.stringify(first).includes(CREDENTIAL), 'the view never echoes the credential');
     // The per-room call is bounded by the caller's presented set and cached
     // on the same 3s clock as the room list -- it is a fan-out over <= 64
@@ -263,6 +272,95 @@ async function main() {
     });
     const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
     assert.equal(rooms[0]!.occupancy, 1);
+  });
+
+  await test('#122: participants carries visible display NAMES, deduped, sorted, no identities', async () => {
+    const { service, calls } = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Eng Sync', open: true }),
+      numParticipants: 5,
+      participants: [
+        participant(CAROL, { name: 'Wren' }),
+        participant(ALICE, { name: 'Ada' }),
+        // Same person, listed twice by a flaky roster read: one row, not two.
+        participant(ALICE, { name: 'Ada' }),
+        // Two different people may legitimately share a display name.
+        participant(DAVE, { name: 'Ada' }),
+        participant(`${ALICE}-gallery`, { hidden: true, name: 'Ada' }),
+        participant(BOB, { state: ParticipantInfo_State.DISCONNECTED, name: 'Bruno' }),
+      ],
+    });
+    const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
+    assert.deepEqual(rooms[0]!.participants, [{ name: 'Ada' }, { name: 'Ada' }, { name: 'Wren' }]);
+    assert.equal(rooms[0]!.occupancy, 3, 'the names and the count come from one filtered, deduped roster');
+    // The whole point of the field's shape: an identity is a stable
+    // per-install correlation handle and must never leave the backend here.
+    const encoded = JSON.stringify(rooms);
+    for (const identity of [ALICE, BOB, CAROL, DAVE, `${ALICE}-gallery`]) {
+      assert.ok(!encoded.includes(identity), `the status view leaked the identity ${identity}`);
+    }
+    assert.equal(
+      calls.filter((c) => c.startsWith('listParticipants:')).length,
+      1,
+      'the names must reuse the count RPC, not add a second fan-out'
+    );
+  });
+
+  await test('#122: a participant with no display name travels as an empty string, never as its identity', async () => {
+    const { service } = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Nameless', open: true }),
+      numParticipants: 1,
+      // Three ways a name can be no name at all: LiveKit's own fallback to the
+      // raw identity (`participant()`'s default), whitespace, and a client
+      // that set displayName to some OTHER opaque token.
+      participants: [
+        participant(ALICE),
+        participant(BOB, { name: '   ' }),
+        participant(CAROL, { name: '11111111-1111-4111-8111-111111111111' }),
+        participant(DAVE, { name: '8535e993a1b76ed8a9ee59b265f53dfc' }),
+      ],
+    });
+    const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
+    assert.deepEqual(rooms[0]!.participants, [{ name: '' }, { name: '' }, { name: '' }, { name: '' }]);
+    assert.equal(rooms[0]!.occupancy, 4, 'a nameless person is still a person');
+    for (const identity of [ALICE, BOB, CAROL, DAVE]) {
+      assert.ok(!JSON.stringify(rooms).includes(identity));
+    }
+  });
+
+  await test('#122: the name list is capped, and the cap never changes the count', async () => {
+    const many = Array.from({ length: ROOM_STATUS_MAX_PARTICIPANT_NAMES + 8 }, (_unused, i) =>
+      participant(`web-${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`, {
+        name: `Person ${String(i).padStart(3, '0')}`,
+      })
+    );
+    const { service } = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Big', open: true }),
+      numParticipants: many.length,
+      participants: many,
+    });
+    const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
+    assert.equal(rooms[0]!.participants!.length, ROOM_STATUS_MAX_PARTICIPANT_NAMES);
+    assert.equal(rooms[0]!.occupancy, many.length, 'the cap bounds the tooltip, not the headcount');
+    assert.equal(rooms[0]!.participants![0]!.name, 'Person 000');
+  });
+
+  await test('#122: a room whose listParticipants failed OMITS participants -- it never claims []', async () => {
+    const { service } = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Unreadable', open: true }),
+      numParticipants: 3,
+      listParticipantsError: 'upstream is down',
+    });
+    const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
+    assert.equal(rooms.length, 1);
+    assert.equal(rooms[0]!.occupancy, 3, 'the count falls back to numParticipants');
+    assert.ok(!('participants' in rooms[0]!), '"we could not ask" must not render as "nobody is here"');
+    assert.deepEqual(Object.keys(rooms[0]!).sort(), ['id', 'name', 'occupancy', 'open']);
+  });
+
+  await test('#122: a room the list already reports empty carries no participants key either', async () => {
+    const { service } = roomMock({ metadata: encodeRoomMeta({ displayName: 'Idle', open: true }), numParticipants: 0 });
+    const { rooms } = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 });
+    assert.ok(!('participants' in rooms[0]!));
   });
 
   await test('#120: an empty room costs no participants RPC at all', async () => {
@@ -367,6 +465,10 @@ async function main() {
         maxRooms: number;
         request: { rooms: { room: string; accessCode?: string }[] };
         responseKeys: string[];
+        responseKeysWithoutParticipants: string[];
+        participantKeys: string[];
+        maxParticipantNames: number;
+        participantsSample: { name: string }[];
         directoryGetStatus: number;
       };
     };
@@ -375,10 +477,29 @@ async function main() {
     assert.equal(fixture.directoryGetStatus, 410);
     assert.equal(fixture.request.rooms[0]!.room, CREDENTIAL, 'fixture shares the roomCredentials access code');
     assert.equal(credentialForAccessCode(fixture.request.rooms[0]!.accessCode!), CREDENTIAL);
-    const { service } = roomMock({ metadata: encodeRoomMeta({ displayName: 'Closed', open: false }), numParticipants: 1 });
+    assert.equal(fixture.maxParticipantNames, ROOM_STATUS_MAX_PARTICIPANT_NAMES);
+    const { service } = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Closed', open: false }),
+      numParticipants: 2,
+      participants: [participant(ALICE, { name: 'Ada' }), participant(BOB, { name: 'Bruno' })],
+    });
     const { rooms } = await handleRoomStatus(fixture.request, { service, nowMs: 1 });
     assert.equal(rooms.length, 1, 'the closed fixture room is returned with its code; the unknown one is omitted');
     assert.deepEqual(Object.keys(rooms[0]!).sort(), fixture.responseKeys);
+    // #122: the fixture pins the participant shape too -- names only.
+    assert.deepEqual(rooms[0]!.participants, fixture.participantsSample);
+    for (const occupant of rooms[0]!.participants!) {
+      assert.deepEqual(Object.keys(occupant).sort(), fixture.participantKeys);
+    }
+
+    // ...and the omitted-on-failure row, which the same fixture pins.
+    const failing = roomMock({
+      metadata: encodeRoomMeta({ displayName: 'Closed', open: false }),
+      numParticipants: 2,
+      listParticipantsError: 'upstream is down',
+    });
+    const unread = await handleRoomStatus(fixture.request, { service: failing.service, nowMs: 1 });
+    assert.deepEqual(Object.keys(unread.rooms[0]!).sort(), fixture.responseKeysWithoutParticipants);
   });
 
   await test('the full directory view still exists server-side (tooling), shares the cache, and keeps numParticipants', async () => {
@@ -393,10 +514,12 @@ async function main() {
     const status = await handleRoomStatus({ rooms: [{ room: CREDENTIAL }] }, { service, nowMs: 10_000 + 1 });
     assert.equal(listed.rooms[0]!.occupancy, 2, 'tooling keeps the raw numParticipants');
     assert.equal(status.rooms[0]!.occupancy, 1, 'the user-facing answer counts people');
+    assert.ok(!('participants' in listed.rooms[0]!), '#122 names are a status-only field');
+    assert.deepEqual(status.rooms[0]!.participants, [{ name: '' }], 'the status answer carries the name list');
     assert.deepEqual(
-      { ...status.rooms[0]!, occupancy: listed.rooms[0]!.occupancy },
-      listed.rooms[0],
-      'occupancy is the only field that differs'
+      { ...status.rooms[0]!, occupancy: listed.rooms[0]!.occupancy, participants: undefined },
+      { ...listed.rooms[0]!, participants: undefined },
+      'occupancy and participants (#122) are the only fields that differ'
     );
     assert.equal(calls.filter((c) => c === 'listRooms').length, 1, 'the room list is still shared');
   });

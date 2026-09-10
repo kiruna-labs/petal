@@ -14,6 +14,9 @@ import {
   REMOTE_CONTROL_SHORTCUTS,
 } from './remote-control-gestures.mjs';
 import { summarizePhotonSamples } from './remote-control-photon-metrics.mjs';
+// #134: the host-side release oracle. See that module's header for why a
+// per-case assertion replaced case 7's shared tripwire.
+import { assertReleasedWithin } from './remote-control-held-input.mjs';
 import { noResultSummary, suiteExitCode } from './remote-control-exit.mjs';
 import {
   correctnessTimeoutMs,
@@ -1026,8 +1029,21 @@ async function captureCaseFailureForensics(client, caseId) {
     // Best-effort only -- diagnostics state may be unavailable, or the socket
     // itself may already be in a bad state if the failure was connection-related.
   }
-  console.log(`# FAILURE-FORENSICS case=${caseId} screenshot=${screenshot ?? 'unavailable'} metrics=${metrics ? 'captured' : 'unavailable'}`);
-  return { screenshot, metrics };
+  // #134: the host's own reason a pointer release did not land. The
+  // controller's wire echo publishes an Up either way, so without these lines a
+  // stuck-button failure arrives with no explanation attached to the run that
+  // produced it -- which is exactly how the left-drag leak stayed invisible.
+  let releaseFailures = [];
+  try {
+    releaseFailures = petalLogLinesSince(null)
+      .filter((line) => line.includes('pointer RELEASE not injected'))
+      .slice(-10);
+  } catch {
+    // Best-effort only.
+  }
+  for (const line of releaseFailures) console.log(`# RELEASE-FAILURE ${line.trim()}`);
+  console.log(`# FAILURE-FORENSICS case=${caseId} screenshot=${screenshot ?? 'unavailable'} metrics=${metrics ? 'captured' : 'unavailable'} releaseFailures=${releaseFailures.length}`);
+  return { screenshot, metrics, releaseFailures };
 }
 
 function readClipboard() {
@@ -1524,6 +1540,18 @@ async function published(ctx, predicateSource, timeoutMs = acquisitionTimeoutMs)
       ),
     timeoutMs
   );
+}
+
+// #134: every case that presses a mouse button ends with this. The host's
+// `pressedInputs` is the ONLY release oracle here -- the controller's wire echo
+// always reports an Up. Case 7 used to be the sole caller, which made it the
+// tripwire for leaks that earlier cases caused and mis-named the gesture.
+async function assertReleased(ctx, gesture) {
+  return assertReleasedWithin({
+    gesture: `case ${ctx.caseId ?? '?'} ${gesture}`,
+    readStatus: () => command(ctx.client, { cmd: 'remote-control-status', window_id: ctx.target.windowId }),
+    sleep,
+  });
 }
 
 function pass(detail, measurement = {}) {
@@ -2197,7 +2225,8 @@ const CASES = [
           };
         }
       );
-      return pass('text landed after the click command; click effect itself still needs a sentinel', measurement);
+      await assertReleased(ctx, 'left click');
+      return pass('text landed after the click command; click effect itself still needs a sentinel; host confirms no held input', measurement);
     },
   },
   {
@@ -2209,7 +2238,8 @@ const CASES = [
       await send(ctx, `api.click({ target, ...${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteClick)}, button: ${REMOTE_CONTROL_BUTTONS.right} }); return true;`);
       const metric = await published(ctx, `m.kind === 'pointer' && m.action === 'click' && m.button === 2 && m.buttons === 0`);
       await send(ctx, `api.key({ target, key: 'Escape', code: 'Escape' }); return true;`);
-      return pass(`right-click packet shape action=click button=2 buttons=0 seq=${metric.seq}; host-side effect needs sentinel`);
+      await assertReleased(ctx, 'right click');
+      return pass(`right-click packet shape action=click button=2 buttons=0 seq=${metric.seq}; host-side effect needs sentinel; host confirms no held input`);
     },
   },
   {
@@ -2228,7 +2258,8 @@ const CASES = [
       // `otherMouseDown`, which is the assertion that actually matters here.
       const metric = await published(ctx, `m.kind === 'pointer' && m.action === 'click' && m.button === 1`);
       const event = await waitForSentinelEvent((event) => event.type === 'otherMouseDown' && event.button === 2, 'middle mouse-down');
-      return pass(`middle click button=${event.button} seq=${metric.seq}`);
+      await assertReleased(ctx, 'middle click');
+      return pass(`middle click button=${event.button} seq=${metric.seq}; host confirms no held input`);
     },
   },
   {
@@ -2242,7 +2273,11 @@ const CASES = [
       const selected = await waitForTextEditSelection();
       if (selected === null) return skipCase('AXSelectedText unavailable; deterministic drag assertion needs sentinel app');
       if (!selected) throw new Error('AXSelectedText was available but empty after left drag');
-      return pass(`AXSelectedText changed to ${JSON.stringify(selected)}`);
+      // #134: a left drag that selects text but never releases the primary
+      // button passed this case, and case 7 then reported the leak against its
+      // own right drag. The selection oracle alone is not enough.
+      await assertReleased(ctx, 'left drag');
+      return pass(`AXSelectedText changed to ${JSON.stringify(selected)}; host confirms no held input after release`);
     },
   },
   {
@@ -2260,11 +2295,9 @@ const CASES = [
       // this case exists to catch (native AX/SkyLight exhaustion on the Up,
       // leaving a phantom held button). Assert the real host-side effect via
       // remote-control-status's pressedInputs snapshot instead, same pattern
-      // case 25's TTL-release assertion already uses.
-      const snapshot = await command(ctx.client, { cmd: 'remote-control-status', window_id: ctx.target.windowId });
-      if (snapshot.pressedInputs?.length) {
-        throw new Error(`right-drag held input remained after release: ${JSON.stringify(snapshot)}`);
-      }
+      // case 25's TTL-release assertion already uses. #134 made that check a
+      // shared helper every pressing case runs, so a leak names its own case.
+      await assertReleased(ctx, 'right drag');
       return pass(`right-drag held buttons=2 seq=${metric.seq}; host confirms no held input after release`);
     },
   },
@@ -2278,7 +2311,8 @@ const CASES = [
       await send(ctx, `return api.drag({ target, from: ${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteClick)}, to: { x: 0.40, y: 0.30 }, steps: ${REMOTE_CONTROL_DRAG_STEPS.short}, button: ${REMOTE_CONTROL_BUTTONS.middle} });`);
       const metric = await published(ctx, `m.kind === 'pointer' && m.action === 'move' && m.button === -1 && m.buttons === 4`);
       const event = await waitForSentinelEvent((event) => event.type === 'otherMouseDragged' && event.button === 2, 'middle drag');
-      return pass(`middle drag button=${event.button} seq=${metric.seq}`);
+      await assertReleased(ctx, 'middle drag');
+      return pass(`middle drag button=${event.button} seq=${metric.seq}; host confirms no held input`);
     },
   },
   {
@@ -2529,8 +2563,9 @@ const CASES = [
       // `action: 'click'`, never `down`. The clamp assertion itself is the
       // point and is unchanged: x=-5 -> 0 and y=5 -> 1 (`normalizedHarnessPoint`).
       const metric = await published(ctx, `m.kind === 'pointer' && m.action === 'click' && m.x === 0 && m.y === 1`);
+      await assertReleased(ctx, 'clamped click');
       return pass(
-        `packet coordinates clamped to x=${metric.x} y=${metric.y}; later text landed but does not prove click placement`,
+        `packet coordinates clamped to x=${metric.x} y=${metric.y}; later text landed but does not prove click placement; host confirms no held input`,
         measurement
       );
     },
@@ -2545,7 +2580,8 @@ const CASES = [
       if (!displayplacerHasSecondaryDisplay()) return skipCase('displayplacer reports fewer than two displays');
       await send(ctx, `api.click({ target, x: 0.75, y: 0.5, button: 0 }); return true;`);
       const event = await waitForSentinelEvent((event) => event.type === 'leftMouseDown', 'secondary-display sentinel click');
-      return pass(`secondary-display click observed at button=${event.button}`);
+      await assertReleased(ctx, 'secondary-display click');
+      return pass(`secondary-display click observed at button=${event.button}; host confirms no held input`);
     },
   },
   {
@@ -2594,8 +2630,9 @@ const CASES = [
       }, 2000, 50);
       await evaluate(ctx.cdp, 'window.__petalHarness?.room?.disconnect();');
       const event = await waitForSentinelEvent((event) => event.type === 'leftMouseUp', 'disconnect synthetic mouse-up', 5000);
+      await assertReleased(ctx, 'held press through controller disconnect');
       await ctx.rejoinWebHarness();
-      return pass(`controller disconnect released button=${event.button}`);
+      return pass(`controller disconnect released button=${event.button}; host confirms no held input`);
     },
   },
   {
@@ -2669,8 +2706,7 @@ const CASES = [
         if (sawPostReconnectClick) break;
       }
       if (!sawPostReconnectClick) throw new Error(`post-reconnect input never landed within ${acquisitionTimeoutMs}ms of re-sent clicks`);
-      const final = await command(ctx.client, { cmd: 'remote-control-status', window_id: ctx.target.windowId });
-      if (final.pressedInputs?.length) throw new Error(`orphaned press after reconnect input: ${JSON.stringify(final)}`);
+      await assertReleased(ctx, 'held press across reconnect');
       return pass(`grant survived ${process.env.PETAL_REMOTE_CONTROL_RECONNECT_MODE || 'resume'} reconnect; next input landed`, { targetObservation: after });
     },
   },
@@ -2734,7 +2770,8 @@ const CASES = [
         if (!duplicateReplayObserved) {
           throw new Error('cached terminal replay did not produce two matching dispositions and one native side effect');
         }
-        return pass('duplicate operation returned the cached terminal disposition without a second native side effect');
+        await assertReleased(ctx, 'cached-terminal replay click');
+        return pass('duplicate operation returned the cached terminal disposition without a second native side effect; host confirms no held input');
       } finally {
         if (!ctx.terminalRecovery.duplicateReplayObserved) {
           const terminalDeliveries = await collectTerminalDeliveries(ctx).catch(() => []);
@@ -2872,6 +2909,7 @@ async function runCase(ctx, testCase) {
     targetObservationAttempts: null,
   };
   try {
+    ctx.caseId = testCase.id;
     ctx.target = testCase.target === 'sentinel' ? ctx.sentinelTarget : ctx.textTarget;
     if (testCase.target === 'sentinel') clearSentinelEventLog();
     if (testCase.target !== 'sentinel') {

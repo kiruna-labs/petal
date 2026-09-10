@@ -44,15 +44,15 @@ test --lib`), not by anything `ci-local.sh` runs locally.
 
 ### What the PR gates cover
 
-Two `pull_request` workflows gate every PR, and between them they always report
-their check names (each has an inverse `paths-ignore` companion, so a PR that
-touches none of a gate's paths still gets a green "not applicable" result rather
-than hanging on "Expected — waiting for status"):
+Two `pull_request` workflows gate every PR. Each triggers on *every* PR and
+decides internally whether its paths were touched, so its check names always
+report exactly once — for real when the paths changed, and as an immediate
+green "not applicable" line when they did not:
 
 | Workflow | Runner | Paths | What it runs |
 |---|---|---|---|
-| `rust-gate.yml` / `rust-gate-skip.yml` | `macos-26` + `windows-latest` | `apps/desktop/src-tauri/**`, `contracts/**`, `backend/**`, `scripts/ci-local.sh`, the two CI workflow files | `cargo build --locked`, `cargo build --examples`, `cargo test --lib`, the #99 no-CLT-rpath assertion |
-| `frontend-gate.yml` / `frontend-gate-skip.yml` | `ubuntu-latest` | `apps/desktop/`'s `src/`, `tests/`, `scripts/`, `static/` + its build config, `shared/**`, `web-harness/**`, `plugins/**` | desktop `npm run check` + `npm run build` + the `tests/*.test.ts` suite and harness script suites; web-harness `npm run build` (all four of `check-package-escapes`, `svelte-check`, `tsc -p tests`, `vite build`) + `npm test` + the isolated-deploy build simulation (`scripts/deploy-web-harness.sh --build-only`, #662/#93); plugins `tsc --noEmit` + `npm test` |
+| `rust-gate.yml` | `macos-26` + `windows-latest` | `apps/desktop/src-tauri/**`, `contracts/**`, `backend/**`, `scripts/ci-local.sh`, the two CI workflow files | `cargo build --locked`, `cargo build --examples`, `cargo test --lib`, the #99 no-CLT-rpath assertion |
+| `frontend-gate.yml` | `ubuntu-latest` | `apps/desktop/`'s `src/`, `tests/`, `scripts/`, `static/` + its build config, `shared/**`, `web-harness/**`, `plugins/**` | desktop `npm run check` + `npm run build` + the `tests/*.test.ts` suite and harness script suites; web-harness `npm run build` (all four of `check-package-escapes`, `svelte-check`, `tsc -p tests`, `vite build`) + `npm test` + the isolated-deploy build simulation (`scripts/deploy-web-harness.sh --build-only`, #662/#93); plugins `tsc --noEmit` + `npm test` |
 
 The frontend gate exists because for a long time nothing gated the TypeScript
 half at all: two red desktop tests (#75) and a web-harness build failure that
@@ -60,11 +60,30 @@ masked a second type error behind it (#77) all sat on `main` unnoticed, and
 reviewers kept having to re-run against `main` to tell their own regressions
 from the existing ones.
 
-One wrinkle worth knowing about both gates: `paths` and `paths-ignore` are only
-mutually exclusive when a PR's changed files fall entirely on one side of the
-list. A PR that touches both a gated path and an ungated one runs *both*
-workflows, so the same check name reports twice — once as a fast "not
-applicable" and once for real.
+**How the filtering works, and why it is not a `paths:` filter (#133).** A
+required check with a `paths:` filter never reports at all on a PR outside its
+paths, which leaves that PR at "Expected — waiting for status" forever. Each
+gate used to answer that with a no-op companion workflow carrying the same list
+under `paths-ignore:` and reporting the same check names. That was wrong in two
+ways. `paths-ignore` fires when *any* changed file falls outside the list, so a
+PR touching both a Rust path and a docs path ran the real gate *and* the no-op,
+and two check runs answered to one branch-protection-required context — which
+one resolved came down to which finished last (measured on PR #132: the no-op
+finished in 4s, the real gate in 19m14s). And the two path lists were kept in
+step only by a `KEEP THIS LIST IDENTICAL` comment; a path that drifted into
+matching *neither* list would have re-created the original deadlock.
+
+Now each gate has one list, in the `filter` step of its own workflow, evaluated
+by `scripts/gate-paths-changed.sh` against the PR's changed files from the
+GitHub API. The gate jobs always run and always report; when the filter says no,
+they say so in one line instead of doing the work (and the Rust/Windows jobs
+take an `ubuntu-latest` runner rather than a 10x-billed macOS one to say it).
+"Matches neither list" cannot exist, because the two outcomes are one list's
+boolean complement. The script rejects any pattern it cannot honour — only an
+exact path or a `dir/**` prefix — so a mistyped pattern fails the gate loudly
+rather than silently matching nothing, and it reports "changed" if it cannot
+establish the file list at all. `scripts/test-gate-paths-changed.sh` (run by
+`scripts/ci-local.sh`) exercises it in both directions.
 
 **Why the frontend gate's macOS half is not always-on.** `ci.yml` is
 `workflow_dispatch`-only on purpose — GitHub's macOS runners bill at 10x — so
@@ -1041,6 +1060,21 @@ macOS-bash-3.2 `set -u` "unbound variable" bug on `"${MODE_ARGS[@]}"` when
 empty (i.e. every default, non-`--press-to-photon` run) — worked around at
 the time by invoking `remote-control-local-loopback.mjs --live` directly.
 Since fixed in the wrapper (`${MODE_ARGS[@]+"${MODE_ARGS[@]}"}`).
+
+**Release assertions are now per-case (#134).** Case 7 being the ONLY case
+that read `pressedInputs` made it a shared tripwire for every case before it:
+a left drag (case 6) that selected text but never released the primary button
+passed its own case and failed case 7, whose message named the right drag.
+Every case that presses a button now calls `assertReleased()`
+(`scripts/remote-control-held-input.mjs`), which polls
+`remote-control-status` for up to 600ms — deliberately under the host's own
+1200ms `HELD_INPUT_TTL`, so the TTL sweeper cannot release the button for us
+and turn a leak into a pass. Cases 25 (TTL) and 28 (disable) keep their own
+stricter assertions. On the host side, a pointer Up that fails to inject now
+logs `remote-control: pointer RELEASE not injected ... reason=<cause>` at
+`error!` and emits the `pointer-release-not-injected` Sentry diagnostic;
+`captureCaseFailureForensics` collects those lines into any failing case's
+`# RELEASE-FAILURE` output. The root cause of #134 is still open.
 
 **Live status (2026-08-14, CURRENT): 27 pass / 2 fail / 1 skip**, up from
 **2 pass / 28 fail** at the start of the same session. Full video path

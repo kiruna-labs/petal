@@ -208,7 +208,8 @@ Use the bump tool — it writes every mirror in one go:
 
 ```
 node scripts/bump-version.mjs <new-version>   # e.g. 0.9.7
-node scripts/version-lockstep.mjs             # self-check: all nine fields agree
+bash scripts/generate-sbom.sh                 # the tenth mirror -- see below
+node scripts/version-lockstep.mjs             # self-check: all nine fields + the SBOMs agree
 ```
 
 The **nine lockstep fields** across seven files (`scripts/version-lockstep.mjs`
@@ -223,6 +224,31 @@ is the authority; `ci-local.sh` runs it):
 
 Editing these by hand and missing `Cargo.lock` or a lockfile's `packages[""]`
 entry fails the gate, which is why the tool exists.
+
+**A tenth mirror: the committed SBOMs.** Three of the CycloneDX manifests under
+`sbom/` embed the product version in their `metadata.component`, so a bump
+leaves them stale:
+- `sbom/desktop-npm.cdx.json`
+- `sbom/desktop-rust.cdx.json`
+- `sbom/web-harness-npm.cdx.json`
+
+(`sbom/backend-npm.cdx.json` and `sbom/site-npm.cdx.json` version
+independently and are not release mirrors.)
+
+`bump-version.mjs` deliberately does **not** rewrite them — regenerating needs
+`node_modules` in four npm roots plus `cargo-cyclonedx`, far heavier than a
+version bump. Refresh them yourself, before committing the bump:
+
+```
+bash scripts/generate-sbom.sh
+```
+
+Prereqs: `cargo install cargo-cyclonedx` (0.5.x), npm 11, and
+`npm ci --ignore-scripts` in `apps/desktop`, `backend`, `web-harness` and
+`site`. `scripts/version-lockstep.mjs` checks these three manifests alongside
+the nine fields and names that command when one drifts (#131) — skipping the
+step used to leave the `SBOM` workflow red on `main` after every release, and
+published an SBOM claiming an older version than the build it described.
 
 The release workflow checks these mirrors against the tag and fails before a
 desktop artifact is built if any value drifts. The web harness is built from
@@ -817,6 +843,17 @@ The release workflow builds an x86-64 Windows NSIS setup executable on
 `apps/desktop/src-tauri/src/updater.rs` validates the downloaded Windows
 updater as a PE executable, so MSI is not currently used as the auto-update
 payload. ARM64 and MSI distribution remain separate future work.
+
+**Windows installs before 0.9.15 cannot auto-update and never will (#125).**
+The arch guard shipped in every Windows build from v0.8.5 to 0.9.14 compared the
+NSIS stub's PE machine type (i386 `0x014c` by design) against the host, so it
+rejected every update archive. That broken guard lives in the INSTALLED client,
+so no manifest, artifact, or backend change can rescue those installs -- their
+users need one manual reinstall from `app.petal.live/api/download?platform=windows`.
+The Windows lane does not self-heal; do not assume a release reaches those users.
+Petal 0.9.15 onward accepts a real Windows update archive, and from 0.9.16 the
+updater's failure toast offers a "Download installer" action so a client that
+does hit a rejected archive is not left with a dead end.
 
 The current Windows installer is **not Authenticode-signed**. The Tauri `.sig`
 provides updater authenticity after installation, but it does not establish a

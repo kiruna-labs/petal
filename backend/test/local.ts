@@ -130,7 +130,16 @@ async function main() {
     check('occupancy is a number', typeof found?.occupancy === 'number');
     check('discovery does not expose credential slug', !('slug' in (found ?? {})));
     check('discovery does not expose LiveKit room name', !('liveKitRoom' in (found ?? {})));
-    check('discovery does not expose participant identities', !('participants' in (found ?? {})));
+    // #122: `participants` may now be present -- names only, never identities,
+    // and omitted entirely for a room whose roster was not read (this one is
+    // freshly created and empty, so it is omitted here).
+    check('an empty room reports no roster at all', !('participants' in (found ?? {})));
+    check(
+      'discovery never exposes a participant identity',
+      (found?.participants ?? []).every(
+        (p) => Object.keys(p).length === 1 && typeof p.name === 'string'
+      )
+    );
     // cleanup
     await roomService(env).deleteRoom(a.room.livekitRoom);
     await roomService(env).deleteRoom(b.room.livekitRoom);

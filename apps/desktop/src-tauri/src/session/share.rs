@@ -4005,12 +4005,24 @@ const SHARE_MEMORY_SETTLE_MARK_US: u64 = 30_000_000;
 /// line so the next field log answers "was that Petal's pools?" without a
 /// code read: a step an order of magnitude above the ceiling is coming from
 /// ScreenCaptureKit/VideoToolbox/libwebrtc, not from us.
+///
+/// The `vm_*` fields say WHICH of those three. They are one bounded walk of
+/// this process's own VM regions bucketed by kernel `user_tag` (see
+/// `platform::mem::VmOwner`), and the per-owner dirty column sums to
+/// `phys_footprint` itself -- so `vm_top` decomposes the very number printed
+/// beside it rather than offering a second, differently-defined one. Four
+/// marks per share, no per-frame or per-second cost. What a reader gets from
+/// two consecutive marks is the step's owner by NAME: `iosurface` growing
+/// across `start_begin` -> `publish_succeeded` is ScreenCaptureKit /
+/// VideoToolbox surfaces, `malloc` is libwebrtc or us, `ioaccelerator` is the
+/// GPU driver.
 fn share_memory_mark_line(
     window_id: u32,
     stage: &str,
     source: Option<(u32, u32)>,
     footprint_bytes: Option<u64>,
     live_pixel_buffers: Option<u32>,
+    attribution: Option<&crate::platform::mem::VmAttribution>,
 ) -> String {
     let footprint_mb = match footprint_bytes {
         Some(bytes) => format!("{}", bytes / (1024 * 1024)),
@@ -4035,14 +4047,21 @@ fn share_memory_mark_line(
         ),
         None => ("n/a".to_string(), "n/a".to_string()),
     };
+    let vm_fields = crate::platform::mem::vm_attribution_fields(attribution);
     format!(
         "session: share memory mark -- window={window_id} stage={stage} \
 phys_footprint_mb={footprint_mb} live_pixel_buffers={buffers} source={source_str} \
-petal_frame_pool_ceiling_mb={ceiling_str}"
+petal_frame_pool_ceiling_mb={ceiling_str} {vm_fields}"
     )
 }
 
 fn log_share_memory_mark(window_id: u32, stage: &str, source: Option<(u32, u32)>) {
+    // One VM-region walk per mark -- four per share. ~13 us per region,
+    // bounded by `platform::mem::VM_REGION_WALK_LIMIT` and
+    // `VM_REGION_WALK_DEADLINE` (25 ms). Do NOT move this onto the capture
+    // heartbeat or the once-a-minute curve: the cost is per call, and #106
+    // needs the transition, not a stream.
+    let attribution = crate::platform::mem::vm_attribution();
     log::info!(
         "{}",
         share_memory_mark_line(
@@ -4051,6 +4070,7 @@ fn log_share_memory_mark(window_id: u32, stage: &str, source: Option<(u32, u32)>
             source,
             crate::platform::mem::process_footprint_bytes_now(),
             crate::platform::mem::live_pixel_buffer_count(),
+            attribution.as_ref(),
         )
     );
 }
@@ -8512,25 +8532,99 @@ mod tests {
             Some((2560, 1440)),
             Some(3_074 * 1024 * 1024),
             Some(0),
+            Some(&sample_attribution()),
         );
         assert_eq!(
             line,
             "session: share memory mark -- window=1073741828 stage=first_frame \
 phys_footprint_mb=3074 live_pixel_buffers=0 source=2560x1440 \
-petal_frame_pool_ceiling_mb=47"
+petal_frame_pool_ceiling_mb=47 vm_walk=complete vm_regions=1204 \
+vm_resident_mb=3196 vm_dirty_mb=3072 vm_top=iosurface:2800/2800,malloc:280/272,untagged:116/0 \
+vm_other_tag=n/a"
         );
+    }
+
+    /// A stand-in for what the #106 field capture would have produced at its
+    /// 3074 MB peak, had this line existed: an IOSurface-dominated footprint
+    /// an order of magnitude above `petal_frame_pool_ceiling_mb`.
+    fn sample_attribution() -> crate::platform::mem::VmAttribution {
+        use crate::platform::mem::{VmOwner, VmOwnerBytes};
+        const MB: u64 = 1024 * 1024;
+        crate::platform::mem::VmAttribution {
+            owners: vec![
+                VmOwnerBytes {
+                    owner: VmOwner::IoSurface,
+                    resident_bytes: 2800 * MB,
+                    dirty_bytes: 2800 * MB,
+                },
+                VmOwnerBytes {
+                    owner: VmOwner::Malloc,
+                    resident_bytes: 280 * MB,
+                    dirty_bytes: 272 * MB,
+                },
+                VmOwnerBytes {
+                    owner: VmOwner::Untagged,
+                    resident_bytes: 116 * MB,
+                    dirty_bytes: 0,
+                },
+            ],
+            regions_walked: 1204,
+            truncated: false,
+            total_resident_bytes: (2800 + 280 + 116) * MB,
+            total_dirty_bytes: (2800 + 272) * MB,
+            other_top_user_tag: None,
+        }
+    }
+
+    #[test]
+    fn share_memory_mark_line_names_an_owner_that_petals_own_pools_cannot_explain() {
+        // #106's definition of done asks for a NAMED allocation owner. This is
+        // the wiring that puts one on the line: at the reported 3074 MB peak
+        // the ceiling of every Petal-owned buffer is 47 MB, and the walk says
+        // `iosurface` holds 2800 MB of it. A reader needs no code and no
+        // second machine to draw that conclusion.
+        let line = share_memory_mark_line(
+            9,
+            "publish_succeeded",
+            Some((2560, 1440)),
+            Some(3_074 * 1024 * 1024),
+            Some(0),
+            Some(&sample_attribution()),
+        );
+        assert!(line.contains("petal_frame_pool_ceiling_mb=47"), "{line}");
+        assert!(line.contains("vm_top=iosurface:2800/2800"), "{line}");
+        assert!(line.contains("vm_dirty_mb=3072"), "{line}");
+    }
+
+    #[test]
+    fn share_memory_mark_line_reports_an_unavailable_walk_without_faking_an_owner() {
+        // Windows, and a failed macOS read: the footprint half of the line
+        // still stands on its own, and nothing claims an owner.
+        let line = share_memory_mark_line(
+            9,
+            "settle_30s",
+            Some((2560, 1440)),
+            Some(280 * 1024 * 1024),
+            Some(0),
+            None,
+        );
+        assert!(line.contains("phys_footprint_mb=280"), "{line}");
+        assert!(line.contains("vm_walk=unavailable"), "{line}");
+        assert!(!line.contains("iosurface"), "{line}");
+        assert!(!line.contains("vm_dirty_mb=0"), "{line}");
     }
 
     #[test]
     fn share_memory_mark_line_says_unknown_rather_than_inventing_a_number() {
         // The other direction: an absent probe must read as absent, not as
         // zero -- a plausible-looking 0 MB would be worse than no line.
-        let line = share_memory_mark_line(7, "start_begin", None, None, None);
+        let line = share_memory_mark_line(7, "start_begin", None, None, None, None);
         assert_eq!(
             line,
             "session: share memory mark -- window=7 stage=start_begin \
 phys_footprint_mb=unknown live_pixel_buffers=n/a source=n/a \
-petal_frame_pool_ceiling_mb=n/a"
+petal_frame_pool_ceiling_mb=n/a vm_walk=unavailable vm_regions=n/a \
+vm_resident_mb=n/a vm_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         );
     }
 
@@ -8548,7 +8642,7 @@ petal_frame_pool_ceiling_mb=n/a"
             crate::capture::CAPTURE_QUEUE_DEPTH,
         )
         .total_mb();
-        assert!(share_memory_mark_line(1, "s", Some((2560, 1440)), Some(0), Some(0))
+        assert!(share_memory_mark_line(1, "s", Some((2560, 1440)), Some(0), Some(0), None)
             .contains(&format!("petal_frame_pool_ceiling_mb={expected_2560}")));
 
         let expected_5k = crate::platform::mem::frame_pool_ceiling(
@@ -8560,7 +8654,7 @@ petal_frame_pool_ceiling_mb=n/a"
         )
         .total_mb();
         assert!(expected_5k > expected_2560, "a 5K source must report a larger ceiling");
-        assert!(share_memory_mark_line(1, "s", Some((5120, 2880)), Some(0), Some(0))
+        assert!(share_memory_mark_line(1, "s", Some((5120, 2880)), Some(0), Some(0), None)
             .contains(&format!("petal_frame_pool_ceiling_mb={expected_5k}")));
     }
 

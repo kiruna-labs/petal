@@ -21,10 +21,13 @@
 name: Docs site
 
 on:
-  # NOTE: if this check is ever made REQUIRED by branch protection, the paths
-  # filter must go (or add an inverse paths-ignore companion like
-  # rust-gate-skip.yml): a required check that never reports blocks every PR
-  # that does not touch the site.
+  # NOTE: if this check is ever made REQUIRED by branch protection, this
+  # `paths:` filter must go: a required check that never reports blocks every
+  # PR that does not touch the site. Follow rust-gate.yml/frontend-gate.yml --
+  # trigger on every PR and decide inside the workflow with
+  # scripts/gate-paths-changed.sh. Do NOT add an inverse `paths-ignore`
+  # companion reporting the same check name; that was #133's bug (a mixed PR
+  # satisfies both filters, so two check runs answer to one required context).
   pull_request:
     paths:
       - 'site/**'

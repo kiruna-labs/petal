@@ -876,6 +876,29 @@ export interface RoomView {
   name: string; // human display name (from room metadata; falls back to slug)
   open: boolean;
   occupancy: number; // live participant count
+  /**
+   * #122: WHO is in the room -- display names ONLY, never identities. Present
+   * only on `POST /api/rooms/status`, only for a room whose `listParticipants`
+   * call actually succeeded, and OMITTED (not `[]`) when it failed, so a
+   * caller can tell "nobody visible" from "we could not ask". The same
+   * visible-participant filter `occupancy` uses produces it, so the count and
+   * the list can never disagree.
+   *
+   * An identity is a stable per-install value and would be a cross-room,
+   * cross-day correlation handle for every invite holder; a name is the thing
+   * the owner decided to expose here (see PRIVACY.md). Never log either.
+   */
+  participants?: RoomOccupantView[];
+}
+
+/**
+ * One visible person in a room, as `/api/rooms/status` reports them. Deliberately
+ * NAME-ONLY -- `RoomParticipantView` (identity + name) is the creator-only
+ * shape and must never reach this view. An empty string is a real value: the
+ * participant published no display name, and the client renders "Someone".
+ */
+export interface RoomOccupantView {
+  name: string;
 }
 
 export interface CreatedRoomView extends RoomView {
@@ -971,24 +994,91 @@ export function resetRoomsListCacheForTest(): void {
 // disconnecting stays `ACTIVE` for the SFU's ~20-30 s reconnect grace and is
 // counted for that whole window -- accepted, see docs/CONTRACTS.md. This only
 // drops the SDK's terminal state.
-export function visibleParticipantCount(participants: ParticipantInfo[]): number {
-  return participants.filter(
-    (p) =>
-      !p.permission?.hidden &&
-      !p.identity.endsWith(GALLERY_IDENTITY_SUFFIX) &&
-      p.state !== ParticipantInfo_State.DISCONNECTED
-  ).length;
+// Deduped by identity so the count and the name list (#122) are computed from
+// literally the same rows and cannot disagree. A live LiveKit roster is
+// identity-keyed, so this is defensive, not a fix for an observed duplicate.
+export function visibleParticipants(participants: ParticipantInfo[]): ParticipantInfo[] {
+  const seen = new Set<string>();
+  return participants.filter((p) => {
+    if (p.permission?.hidden) return false;
+    if (p.identity.endsWith(GALLERY_IDENTITY_SUFFIX)) return false;
+    if (p.state === ParticipantInfo_State.DISCONNECTED) return false;
+    if (seen.has(p.identity)) return false;
+    seen.add(p.identity);
+    return true;
+  });
 }
 
-interface ParticipantsCacheEntry {
-  at: number;
+/**
+ * #122: an identity must never travel as a NAME either. LiveKit sets
+ * `participant.name` from the client's `displayName` and falls back to the
+ * raw identity when there is none, so the default roster row for a
+ * display-name-less peer literally carries the identity in the name field --
+ * publishing it would hand every invite holder the correlation handle this
+ * whole field shape exists to withhold.
+ *
+ * Both rules are needed: `name === identity` catches LiveKit's own fallback,
+ * and the shape check catches a client that set `displayName` to some other
+ * opaque token. The three shapes are the identity formats this file mints and
+ * accepts (an opaque UUID, `web-<uuid>`, and a bare 32-hex credential-like
+ * token) and are kept in sync with shared/logic/participantNames.ts's
+ * `looksLikeTechnicalIdentity`, which the CLIENTS use to render "Someone".
+ * They are duplicated rather than imported because `backend/` deploys as its
+ * own self-contained Vercel root and cannot reach the repo-root shared/
+ * package (#662).
+ */
+const TECHNICAL_IDENTITY_SHAPES = [
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  /^web-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  /^[0-9a-f]{32}$/i,
+];
+function publishableName(p: ParticipantInfo): string {
+  const name = (p.name ?? '').trim();
+  if (!name) return '';
+  if (name === p.identity.trim()) return '';
+  if (TECHNICAL_IDENTITY_SHAPES.some((shape) => shape.test(name))) return '';
+  return name;
+}
+
+export function visibleParticipantCount(participants: ParticipantInfo[]): number {
+  return visibleParticipants(participants).length;
+}
+
+/** At most this many names travel in one room's status view (#122). */
+export const ROOM_STATUS_MAX_PARTICIPANT_NAMES = 32;
+
+/**
+ * #122: the names behind `occupancy`, for the row's hover tooltip. The same
+ * (already identity-deduped) `visibleParticipants` rows, then:
+ *   - reduced to `{ name }` -- the identity is dropped here and never leaves
+ *     the backend, in the `name` field or anywhere else (`publishableName`),
+ *   - sorted by name so the tooltip is stable across polls, and
+ *   - capped, because this is a hover tooltip, not a directory.
+ *
+ * The trim is deliberate and an empty result is kept: the client renders a
+ * nameless participant as "Someone" rather than the endpoint inventing a
+ * label, and NEVER substitutes the identity.
+ */
+export function visibleParticipantNames(participants: ParticipantInfo[]): RoomOccupantView[] {
+  return visibleParticipants(participants)
+    .map(publishableName)
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, ROOM_STATUS_MAX_PARTICIPANT_NAMES)
+    .map((name) => ({ name }));
+}
+
+interface RoomOccupancyReading {
   count: number;
+  participants: RoomOccupantView[];
+}
+interface ParticipantsCacheEntry extends RoomOccupancyReading {
+  at: number;
 }
 // Same keying discipline as roomsListCache: an injected test service never
 // shares cached counts with production, and concurrent misses for one room
 // coalesce onto a single upstream call.
 const participantsCache = new WeakMap<object, Map<string, ParticipantsCacheEntry>>();
-const participantsInFlight = new WeakMap<object, Map<string, Promise<number>>>();
+const participantsInFlight = new WeakMap<object, Map<string, Promise<RoomOccupancyReading>>>();
 const PARTICIPANTS_CACHE_MAX_ROOMS = 512;
 
 function perServiceMap<T>(store: WeakMap<object, Map<string, T>>, key: object): Map<string, T> {
@@ -1014,26 +1104,32 @@ function pruneParticipantsCache(cache: Map<string, ParticipantsCacheEntry>, nowM
   }
 }
 
-async function cachedVisibleOccupancy(
+// ONE `listParticipants` read answers both questions (#122): the count and
+// the names come out of the same roster, cached and coalesced together, so
+// adding the names costs no extra upstream call.
+async function cachedRoomOccupancy(
   service: RoomDiscoveryService,
   cacheKey: object,
   livekitRoom: string,
   nowMs: number
-): Promise<number> {
+): Promise<RoomOccupancyReading> {
   const cache = perServiceMap(participantsCache, cacheKey);
   const cached = cache.get(livekitRoom);
   if (cached && nowMs - cached.at < ROOMS_LIST_CACHE_MS && nowMs >= cached.at) {
-    return cached.count;
+    return { count: cached.count, participants: cached.participants };
   }
   const inFlight = perServiceMap(participantsInFlight, cacheKey);
   const existing = inFlight.get(livekitRoom);
   if (existing) return existing;
   const pending = withLiveKitRetry(() => service.listParticipants(livekitRoom))
     .then((participants) => {
-      const count = visibleParticipantCount(participants);
-      cache.set(livekitRoom, { at: nowMs, count });
+      const reading: RoomOccupancyReading = {
+        count: visibleParticipantCount(participants),
+        participants: visibleParticipantNames(participants),
+      };
+      cache.set(livekitRoom, { at: nowMs, ...reading });
       pruneParticipantsCache(cache, nowMs);
-      return count;
+      return reading;
     })
     .finally(() => {
       inFlight.delete(livekitRoom);
@@ -1059,9 +1155,9 @@ async function withVisibleOccupancy(
   const service: RoomDiscoveryService = context.service ?? roomService(loadLiveKitEnv());
   const cacheKey: object = context.service ?? PRODUCTION_ROOMS_LIST_CACHE_KEY;
   const settled = await Promise.allSettled(
-    live.map((entry) => cachedVisibleOccupancy(service, cacheKey, entry.livekitRoom, nowMs))
+    live.map((entry) => cachedRoomOccupancy(service, cacheKey, entry.livekitRoom, nowMs))
   );
-  const refined = new Map<string, number>();
+  const refined = new Map<string, RoomOccupancyReading>();
   live.forEach((entry, index) => {
     const result = settled[index]!;
     // One room's failure never fails the batch and never reads as 0: it falls
@@ -1072,8 +1168,13 @@ async function withVisibleOccupancy(
   });
   // Never mutate `e.view` -- it is the cached object handleListRooms returns.
   return matched.map((entry) => {
-    const count = refined.get(entry.livekitRoom);
-    return count === undefined ? entry.view : { ...entry.view, occupancy: count };
+    const reading = refined.get(entry.livekitRoom);
+    // #122: `participants` is OMITTED, never `[]`, for a room whose roster we
+    // could not read (the failed-RPC fallback above) and for a room the room
+    // list already says is empty. `[]` would claim "nobody is here", which is
+    // exactly the thing we do not know in the failure case.
+    if (!reading) return entry.view;
+    return { ...entry.view, occupancy: reading.count, participants: reading.participants };
   });
 }
 
@@ -1154,6 +1255,13 @@ export interface RoomStatusContext extends RequestContext {
  * one cached `listParticipants` per presented non-empty room (#120) -- NOT
  * `numParticipants`, which counts the hidden `-gallery` bridge every desktop
  * user opens and so reads N + k.
+ *
+ * `participants` (#122) is WHO those people are, by DISPLAY NAME ONLY, from
+ * that same roster read -- no second fan-out. Owner decision 2026-09-09: an
+ * invite holder sees the names without joining. Identities never appear, and
+ * nothing here logs a name (`handlers.ts` has no `console.*` at all; asserted
+ * by backend/test/privacy.ts). The key is omitted, never `[]`, for any room
+ * whose roster this call did not actually read.
  */
 export async function handleRoomStatus(
   body: Partial<RoomStatusRequest> | null | undefined,

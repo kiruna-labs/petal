@@ -37,15 +37,28 @@ import {
   markUpdateDownloading,
   markUpdateAvailable,
   markUpdateFailed,
-  markUpdateRelaunching
+  markUpdateRelaunching,
+  type UpdateRecovery
 } from '$lib/stores/updateStatus.svelte';
-import { friendlyUpdateErrorMessage } from '$lib/data/updaterErrors';
+import {
+  friendlyUpdateErrorMessage,
+  updateFailureOffersManualDownload
+} from '$lib/data/updaterErrors';
 import { isQuietUpdateCheckReason, type UpdateCheckReason } from '$lib/updateScheduler';
 
 export interface UpdateResult {
   status: 'up-to-date' | 'available' | 'installed' | 'unavailable' | 'error';
   version?: string;
   error?: string;
+  /** Set when the failure has a way out the app itself cannot take (#125). */
+  recovery?: UpdateRecovery;
+}
+
+/** A rejected update archive is unfixable in-app -- the guard will reject the
+ *  same artifact on every retry -- so that failure, and only that failure,
+ *  earns a "Download installer" action instead of a dead-end error (#125). */
+function recoveryFor(rawMessage: string): UpdateRecovery | undefined {
+  return updateFailureOffersManualDownload(rawMessage) ? 'download-installer' : undefined;
 }
 
 type UpdaterLogLevel = 'info' | 'warn' | 'error';
@@ -158,13 +171,14 @@ export async function checkForUpdate(
     // so a verbose error can never break the toast layout.
     const rawMessage = updateErrorMessage(err);
     const friendlyMessage = friendlyUpdateErrorMessage(rawMessage);
+    const recovery = recoveryFor(rawMessage);
     // Quiet (scheduler-driven) checks stay in petal.log only: a laptop that is
     // offline for a week would otherwise raise a failure toast every interval,
     // which is nagging, not observability (#90). A user-initiated check still
     // reports the failure -- that is #43's whole point.
-    if (!quiet) markUpdateFailed(friendlyMessage);
+    if (!quiet) markUpdateFailed(friendlyMessage, recovery);
     await logUpdaterStep('error', `failed: ${rawMessage}`);
-    return { status: 'error', error: friendlyMessage };
+    return { status: 'error', error: friendlyMessage, recovery };
   }
 }
 
@@ -201,8 +215,11 @@ export async function installUpdateAndRelaunch(
   } catch (err) {
     const rawMessage = updateErrorMessage(err);
     const friendlyMessage = friendlyUpdateErrorMessage(rawMessage);
-    markUpdateFailed(friendlyMessage);
+    // The archive guard rejects before anything is installed, so this is the
+    // branch a stranded client lands in on every single attempt (#125).
+    const recovery = recoveryFor(rawMessage);
+    markUpdateFailed(friendlyMessage, recovery);
     await logUpdaterStep('error', `failed: ${rawMessage}`);
-    return { status: 'error', error: friendlyMessage };
+    return { status: 'error', error: friendlyMessage, recovery };
   }
 }
