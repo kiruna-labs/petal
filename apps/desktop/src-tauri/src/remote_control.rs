@@ -3290,6 +3290,16 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
             );
         }
         ReplayRunOutcome::TimedOut => {
+            // #134: an abandoned injection thread stuck inside an AX call never
+            // reaches `mod input`'s own cancellation check, so report the
+            // release failure from here too. A thread that IS still running may
+            // also report `injection-cancelled` for the same event; two lines
+            // with different reasons, not a double count.
+            #[cfg(target_os = "macos")]
+            input::note_pointer_release_not_injected(
+                &task.message,
+                input::PointerReleaseFailure::InjectionTimeout,
+            );
             log_input_drop(
                 &task.message,
                 RemoteControlInputDropReason::InjectionTimeout,
@@ -6332,6 +6342,10 @@ pub(crate) mod input {
         normalized_to_global, truncate_text_to_limit, RemoteControlAction, RemoteControlButton,
         RemoteControlMessage, RemoteControlModifiers, RemoteControlType,
     };
+    use crate::logging::{
+        capture_sentry_diagnostic, PointerButtonTag, PointerReleaseFailureCauseTag,
+        PointerReleaseNotInjectedDiagnostic, SentryDiagnosticEvent,
+    };
     use crate::platform::cg::WindowFrame;
     use crate::sync_ext::MutexExt;
     use std::collections::{HashMap, HashSet};
@@ -6340,6 +6354,119 @@ pub(crate) mod input {
     use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    /// #134: why a pointer RELEASE did not reach the target. Every exit from
+    /// `replay_with_backends` that fails to deliver an Up maps to one of these.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum PointerReleaseFailure {
+        /// The AX route itself errored.
+        AxError,
+        /// AX and SkyLight both declined; there was no route left to try.
+        RoutesExhausted,
+        /// The CGEvent/session-tap fallback sink refused it.
+        SinkError,
+        /// The deadline waiter had already abandoned this injection, so the
+        /// replay returns `Ok(())` WITHOUT acting. Reported as success upstream.
+        InjectionCancelled,
+        /// `run_replay_with_deadline` gave up waiting; the injection thread was
+        /// detached mid-flight and may never have posted the Up.
+        InjectionTimeout,
+    }
+
+    impl PointerReleaseFailure {
+        fn tag(self) -> PointerReleaseFailureCauseTag {
+            match self {
+                Self::AxError => PointerReleaseFailureCauseTag::AxError,
+                Self::RoutesExhausted => PointerReleaseFailureCauseTag::RoutesExhausted,
+                Self::SinkError => PointerReleaseFailureCauseTag::SinkError,
+                Self::InjectionCancelled => PointerReleaseFailureCauseTag::InjectionCancelled,
+                Self::InjectionTimeout => PointerReleaseFailureCauseTag::InjectionTimeout,
+            }
+        }
+
+        fn reason(self) -> &'static str {
+            match self {
+                Self::AxError => "ax-error",
+                Self::RoutesExhausted => "routes-exhausted",
+                Self::SinkError => "sink-error",
+                Self::InjectionCancelled => "injection-cancelled",
+                Self::InjectionTimeout => "injection-timeout",
+            }
+        }
+    }
+
+    /// Test-only record of what `note_pointer_release_not_injected` reported, so
+    /// a test can drive the REAL dispatcher and assert the release failure was
+    /// actually recognised -- not merely that the classifier is correct in
+    /// isolation (CLAUDE.md's rule on wiring vs. pure helpers).
+    #[cfg(test)]
+    pub(crate) static RELEASE_FAILURE_REPORTS: Mutex<
+        Vec<(PointerButtonTag, PointerReleaseFailure)>,
+    > = Mutex::new(Vec::new());
+
+    #[cfg(test)]
+    pub(crate) fn take_release_failure_reports() -> Vec<(PointerButtonTag, PointerReleaseFailure)> {
+        std::mem::take(&mut *RELEASE_FAILURE_REPORTS.lock_unpoisoned())
+    }
+
+    pub(crate) fn is_pointer_button_release(message: &RemoteControlMessage) -> bool {
+        message.message_type == RemoteControlType::Pointer
+            && message.action == Some(RemoteControlAction::Up)
+    }
+
+    pub(crate) fn pointer_button_tag(message: &RemoteControlMessage) -> PointerButtonTag {
+        match super::button_from_wire(message.button) {
+            RemoteControlButton::Left => PointerButtonTag::Primary,
+            RemoteControlButton::Right => PointerButtonTag::Right,
+            RemoteControlButton::Middle => PointerButtonTag::Middle,
+        }
+    }
+
+    /// The same three names the diagnostic tag carries, for the log line --
+    /// `PointerButtonTag::tag()` is private to `logging`.
+    fn pointer_button_name(button: PointerButtonTag) -> &'static str {
+        match button {
+            PointerButtonTag::Primary => "primary",
+            PointerButtonTag::Right => "right",
+            PointerButtonTag::Middle => "middle",
+            PointerButtonTag::NotApplicable => "unknown",
+        }
+    }
+
+    /// #134: a failed RELEASE leaves the HOST holding a phantom mouse button --
+    /// the user's own machine, stuck. The controller publishes its Up regardless
+    /// of whether injection landed, so this is the only place the failure can be
+    /// seen. `error!` (not `warn!`) because Sentry keeps warn/info as breadcrumbs
+    /// that a storm evicts, and this signature must survive into a field log.
+    /// Down/Move/Wheel are NOT reported here: an undelivered press is a lost
+    /// click, not a stuck button.
+    pub(crate) fn note_pointer_release_not_injected(
+        message: &RemoteControlMessage,
+        cause: PointerReleaseFailure,
+    ) {
+        if !is_pointer_button_release(message) {
+            return;
+        }
+        let button = pointer_button_tag(message);
+        #[cfg(test)]
+        RELEASE_FAILURE_REPORTS
+            .lock_unpoisoned()
+            .push((button, cause));
+        log::error!(
+            "remote-control: pointer RELEASE not injected -- host may hold a phantom {} button: reason={} window_id={} controller='{}' seq={} (#134)",
+            pointer_button_name(button),
+            cause.reason(),
+            message.window_id,
+            message.controller_id,
+            message.seq,
+        );
+        capture_sentry_diagnostic(SentryDiagnosticEvent::PointerReleaseNotInjected(
+            PointerReleaseNotInjectedDiagnostic {
+                button,
+                cause: cause.tag(),
+            },
+        ));
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -9597,7 +9724,14 @@ pub(crate) mod input {
                     .saturating_sub(probe_before.cache_misses),
             );
         }
-        let ax_outcome = ax_result?;
+        // #134: `ax_result?` used to discard the fact that this was a RELEASE.
+        let ax_outcome = match ax_result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                note_pointer_release_not_injected(message, PointerReleaseFailure::AxError);
+                return Err(error);
+            }
+        };
         if message.message_type == RemoteControlType::Wheel
             && ax_outcome == AxReplayOutcome::PassThrough
             // Wheel is not classified as a move by should_log_message, so
@@ -9623,6 +9757,10 @@ pub(crate) mod input {
         // leaving a phantom held button. Bail out here, before ANY sink
         // dispatch, for every message type uniformly.
         if super::injection_was_cancelled() {
+            // #134: this returns SUCCESS for an event that was never posted. For
+            // an Up that means a phantom held button on the host, reported to
+            // the controller as released.
+            note_pointer_release_not_injected(message, PointerReleaseFailure::InjectionCancelled);
             return Ok(());
         }
         let result = match ax_outcome {
@@ -9674,6 +9812,16 @@ pub(crate) mod input {
         // invalidated only on frame change), keeping the wheel-stream latency win.
         if message_mutates_ui(message) {
             invalidate_ax_resolution_after_mutation(message.window_id);
+        }
+        if let Err(error) = &result {
+            note_pointer_release_not_injected(
+                message,
+                if error.contains("exhausted AX/SkyLight routes") {
+                    PointerReleaseFailure::RoutesExhausted
+                } else {
+                    PointerReleaseFailure::SinkError
+                },
+            );
         }
         result
     }
@@ -14863,6 +15011,91 @@ pub(crate) mod input {
                 .is_err());
             }
             assert!(sink.events().is_empty());
+        }
+
+        /// #134: the same exhausted-route sequence as the test above, read
+        /// through the release-failure reporter. A Down that fails is a lost
+        /// click; an UP that fails leaves the HOST holding a phantom button and
+        /// must be reported, naming the button. Drives the real dispatcher --
+        /// the classifier being right proves nothing about it being called.
+        #[test]
+        fn a_failed_pointer_release_is_reported_and_a_failed_press_is_not() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let _ = take_release_failure_reports();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(80);
+            ax.set_capabilities(80, AxCapabilities::default());
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let tap = RecordingSessionTap::untrusted();
+            let pb = RecordingPasteboard::default();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                1,
+            );
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.20,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+
+            assert!(replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).is_ok());
+            assert!(
+                take_release_failure_reports().is_empty(),
+                "a press is not a release; reporting one would make the signature meaningless"
+            );
+
+            assert!(replay_with_backends(&up, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).is_err());
+            assert_eq!(
+                take_release_failure_reports(),
+                vec![(
+                    PointerButtonTag::Primary,
+                    PointerReleaseFailure::RoutesExhausted
+                )],
+                "an Up that exhausted every route must be reported as a PRIMARY-button release failure"
+            );
+        }
+
+        /// #134: the cancelled path returns `Ok(())` without injecting -- the
+        /// exact shape of "the controller is told the button came up and it
+        /// never did". Success upstream must still report the release failure.
+        #[test]
+        fn a_cancelled_release_reports_even_though_the_replay_returns_ok() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let _ = take_release_failure_reports();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(80);
+            ax.set_capabilities(80, AxCapabilities::default());
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let tap = RecordingSessionTap::untrusted();
+            let pb = RecordingPasteboard::default();
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.20,
+                0.10,
+                RemoteControlButton::Right,
+                0,
+            );
+            let _cancelled = super::super::InjectionCancelledForTests::set();
+            let result = replay_with_backends(&up, frame, Some(1234), &sink, &ax, &sl, &pb, &tap);
+            assert!(result.is_ok(), "the cancelled path reports success by design");
+            assert_eq!(
+                take_release_failure_reports(),
+                vec![(
+                    PointerButtonTag::Right,
+                    PointerReleaseFailure::InjectionCancelled
+                )],
+            );
         }
 
         #[test]
