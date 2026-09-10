@@ -186,6 +186,16 @@ mod macos {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use screencapturekit::shareable_content::SCShareableContent;
+    use std::collections::HashMap;
+
+    /// Longest edge, in pixels, of the app icon handed to the picker.
+    ///
+    /// #106: this is a CEILING, not a hint. `WindowPicker.svelte` renders the
+    /// icon at 20-28 CSS px (`.app-icon` / `.fallback-icon`), so 128px covers
+    /// 2x retina with room to spare. Measured across 60 running apps, the
+    /// encoded PNG is 6.8-12.9KB at this ceiling against 103-354KB for the
+    /// 1024x1024 one that used to cross the IPC boundary every enumeration.
+    const APP_ICON_MAX_EDGE: f64 = 128.0;
 
     // Not a "normal app window" layer (menu bar, Dock, status items, etc.).
     // ScreenCaptureKit's `windowLayer` mirrors the same Quartz window-layer
@@ -231,6 +241,17 @@ mod macos {
         ))
     }
 
+    /// #889/#106: EVERY ObjC allocation on this path must be drained by this
+    /// pool. `list()` runs on pool-less Rust/tokio threads (the picker's
+    /// `spawn_blocking` refresh, `session::share::start_share` via
+    /// `source_info_for_window`), so an autorelease with no pool on the
+    /// thread is never balanced. Measured on this path: 216 icon renders cost
+    /// +13,560MB unpooled against +3,864MB pooled. Do not remove the pool,
+    /// and do not hoist any ObjC value out of it -- `ShareableWindow` is
+    /// plain owned Rust data, which is why returning the `Vec` is safe.
+    /// `app_icon_png_base64` keeps its own inner pool; the nesting is
+    /// deliberate, so a long enumeration drains per icon rather than once at
+    /// the end.
     pub fn list() -> Result<Vec<ShareableWindow>, WindowSourceError> {
         if !has_screen_recording_access() {
             log::warn!("window_source: list() refused -- Screen Recording permission DENIED");
@@ -241,7 +262,10 @@ mod macos {
                     .to_string(),
             ));
         }
+        objc2::rc::autoreleasepool(|_| list_pooled())
+    }
 
+    fn list_pooled() -> Result<Vec<ShareableWindow>, WindowSourceError> {
         // `with_on_screen_windows_only` + `with_exclude_desktop_windows`
         // trims out minimized/offscreen windows and desktop-picture/icon
         // layer noise before it ever reaches us — cheaper than filtering
@@ -256,8 +280,12 @@ mod macos {
         let mut out = Vec::new();
         // Displays first (mirrors the Windows picker's "Screen N" cards), so
         // the custom picker offers display sharing without the system picker.
-        let display_count = content.displays().len();
-        for (index, display) in content.displays().iter().enumerate() {
+        // ONE `displays()` call: it is `1 + N` FFI round-trips into the Swift
+        // bridge and allocates a `Vec<SCDisplay>`, and this used to run twice
+        // (once for `.len()`, once for `.iter()`).
+        let displays = content.displays();
+        let display_count = displays.len();
+        for (index, display) in displays.iter().enumerate() {
             out.push(ShareableWindow {
                 window_id: display_source_id(display.display_id()),
                 title: Some(format!("Screen {}", index + 1)),
@@ -268,6 +296,21 @@ mod macos {
                 kind: Some(ShareableSourceKind::Display),
             });
         }
+        // #106: the app icon is a property of the APPLICATION, not of the
+        // window, and `list()` is called once per enumerated window. The two
+        // field episodes in #106 differed by enumerated window count (18 vs 7)
+        // far more than by anything else, and this is the per-window
+        // multiplier on that path -- so resolve each owner's icon once and
+        // reuse it for that owner's other windows. Scoped to this call, so it
+        // can never serve a stale icon across enumerations.
+        let mut icon_by_pid: HashMap<i32, Option<String>> = HashMap::new();
+        // The per-element accessors below cross the Swift bridge once per
+        // attribute. That is real but CHEAP: the vendored crate benchmarks
+        // this whole walk at ~73us on a 220-window system against ~5us for
+        // its batched `SCShareableContent::snapshot()`. Microseconds and
+        // kilobytes -- do not go rewrite this for #106's gigabytes (its cost
+        // is the icon above), and note `snapshot()` links windows to apps by
+        // ObjC object identity, which nothing here has been able to verify.
         for window in content.windows() {
             let frame = window.frame();
             let Some(owning_app) = window.owning_application() else {
@@ -324,7 +367,10 @@ mod macos {
                 app_name: owning_app.application_name(),
                 app_bundle_id,
                 app_pid: owning_app.process_id(),
-                app_icon_base64: app_icon_png_base64(owning_app.process_id()),
+                app_icon_base64: icon_by_pid
+                    .entry(owning_app.process_id())
+                    .or_insert_with_key(|pid| app_icon_png_base64(*pid))
+                    .clone(),
                 kind: Some(ShareableSourceKind::Window),
             });
         }
@@ -345,29 +391,57 @@ mod macos {
     /// #889: EVERY ObjC allocation in here must be drained by the local
     /// autorelease pool. `list()` runs on pool-less Rust/tokio threads (it is
     /// called from `session::share::start_share` via `source_info_for_window`,
-    /// among others), and `TIFFRepresentation()` returns an AUTORELEASED
-    /// `NSData` holding every representation of the app icon uncompressed --
-    /// measured at **73,957,376 bytes (70.5MB) per icon**, allocated through
-    /// `NSAllocateMemoryPages`/`vm_allocate`. With no pool on the thread that
-    /// autorelease is never balanced, so each enumeration leaked ~70MB per
-    /// app: `malloc_history` on a live 1.9GB session attributed 21 calls /
-    /// 1,553,104,896 bytes to exactly this stack, and the owner measured
+    /// among others). With no pool on the thread an autorelease is never
+    /// balanced: `malloc_history` on a live 1.9GB session attributed 21 calls
+    /// / 1,553,104,896 bytes to exactly this stack, and the owner measured
     /// 500MB-1GB lost per share/unshare cycle (one enumeration each).
     /// Do not remove the pool, and do not hoist any ObjC value out of it.
+    ///
+    /// #106: **never ask for `TIFFRepresentation()` here.** It returns ONE
+    /// `NSData` holding EVERY representation of the app icon uncompressed
+    /// (16x16 through 1024x1024) -- ~70MB per icon, through
+    /// `NSAllocateMemoryPages`/`vm_allocate` -- and then hands the picker a
+    /// 1024x1024 PNG to draw at 20 CSS px. `list()` calls this once per
+    /// enumerated window, which is why #106's cost tracked *enumerated window
+    /// count* (18 -> +2802MB, 7 -> +875MB) rather than thumbnail count.
+    /// Measured on this machine, 18 windows in one enumeration:
+    ///
+    /// ```text
+    ///   TIFFRepresentation  ->  +1370MB phys_footprint, peak 1858MB,  833ms
+    ///   CGImageForProposedRect ->   +4.7MB,             peak    7MB,   74ms
+    /// ```
+    ///
+    /// `CGImageForProposedRect:` asks the icon for a raster at the size we
+    /// actually want and never materialises the other representations. It
+    /// still handles vector/PDF-backed icons (verified: 60/60 running apps
+    /// produced a PNG on both paths, off the main thread). Ask for pixels at
+    /// `APP_ICON_MAX_EDGE`, not for the whole icon.
     fn app_icon_png_base64(pid: i32) -> Option<String> {
         use objc2::rc::autoreleasepool;
+        use objc2::AnyThread;
         use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSRunningApplication};
-        use objc2_foundation::{NSDictionary, NSString};
+        use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
         autoreleasepool(|_| {
             let running_app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
             let icon = running_app.icon()?;
 
-            // NSImage -> PNG: go through NSBitmapImageRep, which is the standard
-            // Cocoa recipe for rasterizing an NSImage (which may be vector/PDF-
-            // backed for app icons) to a concrete bitmap we can encode.
-            let tiff_data = icon.TIFFRepresentation()?;
-            let bitmap = NSBitmapImageRep::imageRepWithData(&tiff_data)?;
+            // NSImage -> PNG at picker size. AppKit writes the rect it
+            // actually chose back through `proposed_rect`; we don't need it,
+            // but the parameter is in/out so it has to be a real `&mut`.
+            let mut proposed_rect = NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(APP_ICON_MAX_EDGE, APP_ICON_MAX_EDGE),
+            );
+            // SAFETY: `proposed_rect` is a valid pointer to a live `NSRect`,
+            // and both optional arguments are `None` -- no reference context
+            // to match against, no hints dictionary whose generic type could
+            // be wrong.
+            let cg_image = unsafe {
+                icon.CGImageForProposedRect_context_hints(&mut proposed_rect, None, None)
+            }?;
+            let bitmap =
+                NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg_image);
             let properties: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
             // SAFETY: `properties` is an empty dictionary, which is a valid
             // (if minimal) properties argument for PNG representation — PNG
@@ -395,6 +469,163 @@ mod macos {
         use crate::share_target::{
             classify, mac_window_facts, ShareTargetDecision, ShareTargetKind, ShareTargetRejection,
         };
+
+        /// Width/height out of a PNG's IHDR: 8-byte signature, 4-byte chunk
+        /// length, 4-byte "IHDR", then width and height as big-endian u32.
+        fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+            if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR"
+            {
+                return None;
+            }
+            let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+            let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+            Some((w, h))
+        }
+
+        /// #106, behavioural: the icon the picker gets must be rasterized at
+        /// picker size, not at the icon's native 1024x1024.
+        ///
+        /// This is the assertion the source-level pin below cannot make. The
+        /// `TIFFRepresentation()` route this replaced produced a **1024x1024**
+        /// PNG of 100-350KB per app -- measured, not assumed -- and paid
+        /// ~70MB of `NSAllocateMemoryPages` to build the intermediate, once
+        /// per ENUMERATED WINDOW. A regression to that route fails here on
+        /// the dimensions long before anyone has to measure memory again.
+        ///
+        /// Needs no Screen Recording grant: `NSWorkspace` /
+        /// `NSRunningApplication` / `NSImage` are TCC-free, which is exactly
+        /// why this half of `list()` is testable when the SCK half is not.
+        #[test]
+        fn app_icon_is_rasterized_at_picker_size_not_native_size() {
+            use base64::Engine as _;
+            use objc2::rc::autoreleasepool;
+            use objc2_app_kit::NSWorkspace;
+
+            let pids: Vec<i32> = autoreleasepool(|_| {
+                let apps = NSWorkspace::sharedWorkspace().runningApplications();
+                (0..apps.count())
+                    .map(|i| apps.objectAtIndex(i).processIdentifier())
+                    .collect()
+            });
+
+            let mut checked = 0usize;
+            for pid in pids.into_iter().take(24) {
+                let Some(url) = super::app_icon_png_base64(pid) else {
+                    continue;
+                };
+                let payload = url
+                    .strip_prefix("data:image/png;base64,")
+                    .expect("the picker binds this straight into an <img src>, so it must be a data URL");
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(payload)
+                    .expect("app icon payload must be valid base64");
+                let (w, h) = png_dimensions(&bytes).expect("app icon payload must be a PNG");
+                let max = super::APP_ICON_MAX_EDGE as u32;
+                assert!(
+                    w <= max && h <= max,
+                    "#106: app icon for pid {pid} came back {w}x{h}, over the {max}px picker \
+                     ceiling -- TIFFRepresentation()/the full-size icon is back, and with it \
+                     ~70MB per enumerated window"
+                );
+                assert!(
+                    bytes.len() <= 64 * 1024,
+                    "#106: app icon for pid {pid} encoded to {} bytes; a picker icon drawn at \
+                     20-28 CSS px does not need that, and it crosses the IPC boundary on every \
+                     enumeration",
+                    bytes.len()
+                );
+                checked += 1;
+            }
+
+            // No running application offered an icon at all (a genuinely
+            // headless box). Nothing to assert -- but say so rather than
+            // reporting a silent pass, and never fabricate a reading.
+            if checked == 0 {
+                eprintln!(
+                    "app_icon_is_rasterized_at_picker_size_not_native_size: no running \
+                     application produced an icon; nothing verified on this host"
+                );
+            }
+        }
+
+        /// #106, source-level: `list()` must enclose its ObjC work in an
+        /// autorelease pool, for the same reason `app_icon_png_base64` does
+        /// (#889) -- it runs on pool-less tokio/`std::thread` threads.
+        /// Measured on the icon path: 216 renders cost +13,560MB unpooled
+        /// against +3,864MB pooled.
+        ///
+        /// A pool that opens after the first ObjC touch drains nothing that
+        /// matters while looking correct, so this pins that `list()` itself
+        /// does no ObjC work: it checks permission (a CoreGraphics preflight
+        /// that allocates nothing) and immediately delegates the whole body
+        /// to `list_pooled` inside the pool.
+        #[test]
+        fn list_encloses_its_objc_work_in_an_autorelease_pool() {
+            let source = include_str!("window_source.rs");
+            let body = source
+                .split_once("    pub fn list() -> Result<Vec<ShareableWindow>, WindowSourceError> {")
+                .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+                .map(|(body, _)| body)
+                .expect("macos::list must exist");
+
+            let pool_at = body
+                .find("objc2::rc::autoreleasepool(|_| list_pooled())")
+                .expect("#889/#106: list() must run its enumeration inside an autorelease pool");
+            assert!(
+                body[..pool_at].find("SCShareableContent").is_none(),
+                "#889/#106: list() touches ScreenCaptureKit before opening its pool"
+            );
+            assert!(
+                body[pool_at..].trim().ends_with("objc2::rc::autoreleasepool(|_| list_pooled())"),
+                "#889/#106: nothing may run after the pool closes -- list() must return the \
+                 pooled call's result directly"
+            );
+
+            // The pool must stay explained, or the next reader deletes it as
+            // decoration. #889's comment is what kept the icon pool alive.
+            let rationale = source
+                .split_once("    pub fn list() -> Result<Vec<ShareableWindow>, WindowSourceError> {")
+                .map(|(before, _)| before)
+                .expect("list() must exist");
+            assert!(
+                rationale.ends_with(|c: char| c == '\n')
+                    && rationale.contains("#889/#106: EVERY ObjC allocation on this path"),
+                "list()'s pool must carry its #889/#106 rationale"
+            );
+        }
+
+        /// #106: the app icon belongs to the APPLICATION, and `list()` walks
+        /// WINDOWS. The two field episodes differed by enumerated window
+        /// count (18 vs 7) far more than by anything else, so resolving an
+        /// icon per window rather than per owner is the multiplier on the
+        /// implicated path. Pinning the memo, and pinning that the enumerated
+        /// display list is built once rather than twice.
+        #[test]
+        fn list_resolves_each_app_icon_once_and_enumerates_displays_once() {
+            let source = include_str!("window_source.rs");
+            let body = source
+                .split_once("    fn list_pooled() -> Result<Vec<ShareableWindow>, WindowSourceError> {")
+                .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+                .map(|(body, _)| body)
+                .expect("macos::list_pooled must exist");
+
+            assert!(
+                body.contains("icon_by_pid")
+                    && body.contains(".entry(owning_app.process_id())")
+                    && body.contains("app_icon_png_base64"),
+                "#106: list_pooled must resolve each owning application's icon ONCE per \
+                 enumeration, not once per window"
+            );
+            assert!(
+                !body.contains("app_icon_base64: app_icon_png_base64("),
+                "#106: the icon is being rendered inline per window again"
+            );
+            assert_eq!(
+                body.matches("content.displays()").count(),
+                1,
+                "#106: `displays()` is 1 + N FFI round-trips and allocates a Vec -- call it once"
+            );
+        }
 
         #[test]
         fn own_process_windows_are_excluded_from_share_source_enumeration() {
