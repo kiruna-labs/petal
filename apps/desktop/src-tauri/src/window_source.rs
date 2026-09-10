@@ -1475,6 +1475,7 @@ fn macos_at_least_14() -> bool {
 /// buffers while `screencapture` works).
 #[cfg(target_os = "macos")]
 fn capture_window_thumbnail_sck(window_id: u32, max_long_edge: u32) -> Result<Vec<u8>, String> {
+    use objc2::rc::autoreleasepool;
     // `image_buffer()` is on `CMSampleBufferExt` (the generic CoreMedia
     // accessors), NOT `CMSampleBufferSCExt` (which only carries the
     // SCStreamFrameInfo attachments like frame_status/dirty_rects).
@@ -1484,98 +1485,117 @@ fn capture_window_thumbnail_sck(window_id: u32, max_long_edge: u32) -> Result<Ve
     use screencapturekit::stream::configuration::{PixelFormat, SCStreamConfiguration};
     use screencapturekit::stream::content_filter::SCContentFilter;
 
-    if !macos_at_least_14() {
-        return Err("SCScreenshotManager requires macOS 14".to_string());
-    }
+    // #889 + #106: EVERY ObjC allocation in here must be drained by this
+    // pool, and it must enclose the WHOLE ObjC lifetime. Both callers are
+    // pool-less (`prewarm_thumbnails`'s bare `std::thread`, the picker
+    // refresh's tokio `spawn_blocking`), and a thread with no pool gets a
+    // runtime dummy pool that is never drained until the thread exits, so
+    // anything autoreleased on it is held for the thread's life. `list()`
+    // already paid that bill (see `macos::app_icon_png_base64` above): one
+    // unpooled `TIFFRepresentation()` per app, ~70MB each, 1,553,104,896
+    // bytes attributed by `malloc_history` on a live 1.9GB session (#889).
+    // This path allocates strictly more per call --
+    // a full `SCShareableContent` enumeration plus an
+    // `SCScreenshotManager` composite of the SOURCE, which for a display
+    // card is the whole 5120x2880 backing store -- 13-14 times per picker
+    // open (#106). Do not remove it, and hoist nothing ObjC out of the
+    // closure: only the Rust-owned JPEG `Vec<u8>` may cross it.
+    autoreleasepool(|_| {
+        if !macos_at_least_14() {
+            return Err("SCScreenshotManager requires macOS 14".to_string());
+        }
 
-    // Same enumeration + filter construction the real capture path uses, so
-    // the thumbnail and the eventual share agree on source identity. Display
-    // source ids (DISPLAY_SOURCE_MARKER | CGDirectDisplayID) build a display
-    // filter instead of a window filter.
-    let content = SCShareableContent::create()
-        .with_on_screen_windows_only(true)
-        .with_exclude_desktop_windows(true)
-        .get()
-        .map_err(|e| format!("SCShareableContent enumeration failed: {e}"))?;
-    let (filter, frame) = if is_display_source_id(window_id) {
-        let display_id = display_id_from_source_id(window_id);
-        let display = content
-            .displays()
-            .into_iter()
-            .find(|d| d.display_id() == display_id)
-            .ok_or_else(|| format!("display {display_id} not found in SCShareableContent"))?;
-        let frame = display.frame();
-        let filter = SCContentFilter::create()
-            .with_display(&display)
-            .with_excluding_windows(&[])
-            .build();
-        (filter, frame)
-    } else {
-        let window = content
-            .windows()
-            .into_iter()
-            .find(|w| w.window_id() == window_id)
-            .ok_or_else(|| format!("window {window_id} not found in SCShareableContent"))?;
-        let frame = window.frame();
-        let filter = SCContentFilter::create().with_window(&window).build();
-        (filter, frame)
-    };
-    // `frame` is in POINTS (SCWindow::frame()/SCDisplay::frame() are CGRects
-    // in the window-coordinate space), but SCStreamConfiguration's width/
-    // height are PIXELS -- the real capture path already carries this
-    // distinction (capture.rs's `capture_pixel_size`). Missing it here meant
-    // a Retina window under `max_long_edge` POINTS (extremely common --
-    // e.g. a half-screen window on a 14" MacBook is ~756pt / 1512px) was
-    // requested at 1x, silently capping AI chat's frames well under the
-    // 1280px budget this fix exists to deliver. `point_pixel_scale()` is the
-    // SAME scale the real filter would use if it opened a stream, not a
-    // separate NSScreen/CGDisplay lookup that could disagree with it.
-    let scale = f64::from(filter.point_pixel_scale()).max(1.0);
-    let (output_w, output_h) = thumbnail_output_size(
-        frame.size.width * scale,
-        frame.size.height * scale,
-        max_long_edge,
-    );
+        // Same enumeration + filter construction the real capture path uses, so
+        // the thumbnail and the eventual share agree on source identity. Display
+        // source ids (DISPLAY_SOURCE_MARKER | CGDirectDisplayID) build a display
+        // filter instead of a window filter.
+        let content = SCShareableContent::create()
+            .with_on_screen_windows_only(true)
+            .with_exclude_desktop_windows(true)
+            .get()
+            .map_err(|e| format!("SCShareableContent enumeration failed: {e}"))?;
+        let (filter, frame) = if is_display_source_id(window_id) {
+            let display_id = display_id_from_source_id(window_id);
+            let display = content
+                .displays()
+                .into_iter()
+                .find(|d| d.display_id() == display_id)
+                .ok_or_else(|| format!("display {display_id} not found in SCShareableContent"))?;
+            let frame = display.frame();
+            let filter = SCContentFilter::create()
+                .with_display(&display)
+                .with_excluding_windows(&[])
+                .build();
+            (filter, frame)
+        } else {
+            let window = content
+                .windows()
+                .into_iter()
+                .find(|w| w.window_id() == window_id)
+                .ok_or_else(|| format!("window {window_id} not found in SCShareableContent"))?;
+            let frame = window.frame();
+            let filter = SCContentFilter::create().with_window(&window).build();
+            (filter, frame)
+        };
+        // `frame` is in POINTS (SCWindow::frame()/SCDisplay::frame() are CGRects
+        // in the window-coordinate space), but SCStreamConfiguration's width/
+        // height are PIXELS -- the real capture path already carries this
+        // distinction (capture.rs's `capture_pixel_size`). Missing it here meant
+        // a Retina window under `max_long_edge` POINTS (extremely common --
+        // e.g. a half-screen window on a 14" MacBook is ~756pt / 1512px) was
+        // requested at 1x, silently capping AI chat's frames well under the
+        // 1280px budget this fix exists to deliver. `point_pixel_scale()` is the
+        // SAME scale the real filter would use if it opened a stream, not a
+        // separate NSScreen/CGDisplay lookup that could disagree with it.
+        let scale = f64::from(filter.point_pixel_scale()).max(1.0);
+        let (output_w, output_h) = thumbnail_output_size(
+            frame.size.width * scale,
+            frame.size.height * scale,
+            max_long_edge,
+        );
 
-    let config = SCStreamConfiguration::new()
-        .with_width(output_w)
-        .with_height(output_h)
-        .with_pixel_format(PixelFormat::YCbCr_420v)
-        .with_shows_cursor(false);
+        let config = SCStreamConfiguration::new()
+            .with_width(output_w)
+            .with_height(output_h)
+            .with_pixel_format(PixelFormat::YCbCr_420v)
+            .with_shows_cursor(false);
 
-    let sample = SCScreenshotManager::capture_sample_buffer(&filter, &config)
-        .map_err(|e| format!("SCScreenshotManager capture failed: {e}"))?;
-    let pixel_buffer = sample
-        .image_buffer()
-        .ok_or_else(|| "SCK screenshot sample has no image buffer".to_string())?;
+        let sample = SCScreenshotManager::capture_sample_buffer(&filter, &config)
+            .map_err(|e| format!("SCScreenshotManager capture failed: {e}"))?;
+        let pixel_buffer = sample
+            .image_buffer()
+            .ok_or_else(|| "SCK screenshot sample has no image buffer".to_string())?;
 
-    let width = pixel_buffer.width() as u32;
-    let height = pixel_buffer.height() as u32;
-    let payload = crate::capture::copy_nv12_payload(&pixel_buffer, None)
-        .map_err(|e| format!("SCK thumbnail NV12 copy failed: {e}"))?;
-    let crate::capture::CapturedFramePayload::Nv12 {
-        y,
-        y_stride,
-        uv,
-        uv_stride,
-        ..
-    } = payload
-    else {
-        return Err("SCK thumbnail payload was not NV12".to_string());
-    };
+        let width = pixel_buffer.width() as u32;
+        let height = pixel_buffer.height() as u32;
+        let payload = crate::capture::copy_nv12_payload(&pixel_buffer, None)
+            .map_err(|e| format!("SCK thumbnail NV12 copy failed: {e}"))?;
+        let crate::capture::CapturedFramePayload::Nv12 {
+            y,
+            y_stride,
+            uv,
+            uv_stride,
+            ..
+        } = payload
+        else {
+            return Err("SCK thumbnail payload was not NV12".to_string());
+        };
 
-    if screenshot_is_all_zero(&y, y_stride, &uv, uv_stride, height) {
-        return Err("SCK screenshot returned all-zero content (empty backing store)".to_string());
-    }
+        if screenshot_is_all_zero(&y, y_stride, &uv, uv_stride, height) {
+            return Err(
+                "SCK screenshot returned all-zero content (empty backing store)".to_string(),
+            );
+        }
 
-    let bgra = nv12_to_bgra(&y, y_stride, &uv, uv_stride, width, height)
-        .ok_or_else(|| "NV12 thumbnail conversion failed".to_string())?;
-    let bytes = encode_bgra_jpeg(&bgra, width as usize * 4, width, height)
-        .ok_or_else(|| "failed to encode thumbnail JPEG".to_string())?;
-    log::info!(
-        "window_source: thumbnail for window {window_id} captured via SCK ({width}x{height})"
-    );
-    Ok(bytes)
+        let bgra = nv12_to_bgra(&y, y_stride, &uv, uv_stride, width, height)
+            .ok_or_else(|| "NV12 thumbnail conversion failed".to_string())?;
+        let bytes = encode_bgra_jpeg(&bgra, width as usize * 4, width, height)
+            .ok_or_else(|| "failed to encode thumbnail JPEG".to_string())?;
+        log::info!(
+            "window_source: thumbnail for window {window_id} captured via SCK ({width}x{height})"
+        );
+        Ok(bytes)
+    })
 }
 
 /// Scale a tightly-packed BGRA raster so the longer side is at most `max_dim`
@@ -2231,5 +2251,121 @@ vm_mapped_dirty_mb=1372 vm_top=iosurface:1300/1300,malloc:80/72 vm_other_tag=n/a
         assert!(cached_list(now).is_some());
         invalidate_list_cache();
         assert!(cached_list(now).is_none());
+    }
+
+    /// Source-level pin (#889 + #106): the SCK thumbnail path must run its
+    /// ENTIRE ObjC lifetime inside an autorelease pool.
+    ///
+    /// This file already documents, on `macos::app_icon_png_base64`, what
+    /// an unpooled ObjC allocation on these threads costs -- ~70MB per
+    /// app icon, 1,553,104,896 bytes attributed by `malloc_history` on a
+    /// live 1.9GB session. `capture_window_thumbnail_sck` allocates strictly
+    /// more per call and runs on the same pool-less threads
+    /// (`prewarm_thumbnails`'s bare `std::thread`, the picker refresh's
+    /// tokio `spawn_blocking`), 13-14 times per picker open.
+    ///
+    /// A partial pool is the failure mode worth guarding against as much as
+    /// a missing one: a pool opened after the enumeration, or closed before
+    /// the composite, drains nothing that matters while looking correct. So
+    /// this asserts the pool opens before the FIRST ObjC touch and closes
+    /// only at the end of the function.
+    #[test]
+    fn sck_thumbnail_capture_encloses_its_whole_objc_lifetime_in_an_autorelease_pool() {
+        let source = include_str!("window_source.rs");
+        let body = source
+            .split_once("fn capture_window_thumbnail_sck(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("capture_window_thumbnail_sck must exist");
+
+        let pool_at = body
+            .find("autoreleasepool(|_| {")
+            .expect("#889/#106: capture_window_thumbnail_sck must open an autorelease pool");
+
+        // Every ObjC entry point on this path, in the order the function
+        // reaches them. All of them must sit AFTER the pool opens.
+        for objc_touch in [
+            "macos_at_least_14()",
+            "SCShareableContent::create()",
+            "SCContentFilter::create()",
+            "SCStreamConfiguration::new()",
+            "SCScreenshotManager::capture_sample_buffer(",
+            ".image_buffer()",
+        ] {
+            let at = body
+                .find(objc_touch)
+                .unwrap_or_else(|| panic!("expected `{objc_touch}` on the SCK thumbnail path"));
+            assert!(
+                at > pool_at,
+                "#889/#106: `{objc_touch}` runs OUTSIDE the autorelease pool -- a pool that \
+                 does not enclose the whole ObjC lifetime drains nothing that matters"
+            );
+        }
+
+        // The pool must close at the END of the function, not earlier. A
+        // textual "the last line is `})`" check is not enough: closing the
+        // pool and chaining (`.and_then(..)`, a second statement) also ends
+        // in `})` while leaving work outside it. So require that every line
+        // after the pool opens is nested INSIDE the closure -- the only line
+        // allowed back at the function's own 4-space indent is the closing
+        // `})` itself.
+        assert!(
+            body.trim_end().ends_with("Ok(bytes)\n    })"),
+            "#889/#106: the autorelease pool must close only at the end of \
+             capture_window_thumbnail_sck, returning Rust-owned bytes"
+        );
+        let after_pool: Vec<&str> = body[pool_at..].lines().skip(1).collect();
+        let (closing, inside) = after_pool
+            .split_last()
+            .expect("the pool closure must have a body");
+        assert_eq!(
+            closing.trim_end(),
+            "    })",
+            "#889/#106: the pool closure must be the last thing in the function"
+        );
+        for line in inside {
+            assert!(
+                line.trim().is_empty() || line.starts_with("        "),
+                "#889/#106: `{}` sits outside the autorelease pool -- every statement in \
+                 capture_window_thumbnail_sck must be nested inside the closure",
+                line.trim()
+            );
+        }
+        assert!(
+            source.contains(
+                "fn capture_window_thumbnail_sck(window_id: u32, max_long_edge: u32) \
+                 -> Result<Vec<u8>, String>"
+            ),
+            "the SCK thumbnail must keep returning Rust-owned bytes -- an ObjC value in the \
+             return type would escape the pool"
+        );
+
+        // The pool must stay explained. #889's own comment is what has kept
+        // the icon pool alive through later edits; an unexplained
+        // `autoreleasepool` reads as decoration and gets deleted.
+        let rationale = &body[..pool_at];
+        assert!(
+            rationale.contains("#889") && rationale.contains("#106"),
+            "the pool must carry its #889/#106 rationale, or the next reader deletes it"
+        );
+    }
+
+    /// The pool is only load-bearing because the thread that drives the
+    /// picker's 13-14 capture burst has none of its own. Pin that, so a
+    /// future refactor onto a pooled thread has to notice this test rather
+    /// than silently invalidate the reasoning above.
+    #[test]
+    fn thumbnail_prewarm_burst_runs_on_a_pool_less_thread() {
+        let source = include_str!("window_source.rs");
+        let prewarm = source
+            .split_once("fn prewarm_thumbnails(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("prewarm_thumbnails must exist");
+        assert!(
+            prewarm.contains("std::thread::spawn(move || {"),
+            "#106: the picker prewarm burst runs on a bare std::thread, which has no \
+             autorelease pool of its own"
+        );
     }
 }
