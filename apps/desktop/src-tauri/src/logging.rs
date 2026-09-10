@@ -252,6 +252,7 @@ pub enum SentryDiagnosticEvent {
     BrowserUrlExtractionFailed(BrowserUrlExtractionFailedDiagnostic),
     DescriptorPressure(DescriptorPressureDiagnostic),
     PointerReleaseNotInjected(PointerReleaseNotInjectedDiagnostic),
+    WgcBorderRequestFailed(WgcBorderRequestFailedDiagnostic),
 }
 
 /// Emitted (rate-limited) when a remote-control pointer RELEASE (an Up) fails
@@ -298,6 +299,18 @@ pub struct MemoryPressureDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecoderAllocationFailedDiagnostic {
     pub role: DiagnosticRole,
+}
+
+/// Emitted (rate-limited) when a Windows `GraphicsCaptureSession.
+/// IsBorderRequired` write fails during capture setup (#163). Before #163 the
+/// `show_*` shape aborted the share outright on every Windows build without
+/// `IGraphicsCaptureSession2` (pre-20348, where WGC's border is
+/// unconditional) and reached Sentry only as a `log::error!` carrying a
+/// localized OS string; now the share continues and this names direction x
+/// cause so the affected population is countable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WgcBorderRequestFailedDiagnostic {
+    pub failure: WgcBorderFailureTag,
 }
 
 /// Emitted once per share (at the first extraction failure for that share --
@@ -536,10 +549,24 @@ diagnostic_enum!(BrowserUrlExtractionCauseTag {
     Failed => "failed",
     NotApplicable => "not_applicable"
 });
+// Direction x cause of a failed WGC `IsBorderRequired` write (#163).
+// `show_*`: asked to show the border and could not (benign, share
+// continues); `hide_*`: asked to hide it and could not (system indicator
+// restored first). `*_no_interface` is `E_NOINTERFACE` -- no
+// `IGraphicsCaptureSession2` on this Windows build; `*_other` is any other
+// HRESULT (the numeric code is in petal.log). Mirrors
+// `windows_screen_capture::wgc_border_failure_tag`.
+diagnostic_enum!(WgcBorderFailureTag {
+    ShowNoInterface => "show_no_interface",
+    ShowOther => "show_other",
+    HideNoInterface => "hide_no_interface",
+    HideOther => "hide_other",
+    NotApplicable => "not_applicable"
+});
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 17] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 18] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -557,6 +584,7 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 17] = [
     "browser-url-extraction-failed",
     "descriptor-pressure",
     "pointer-release-not-injected",
+    "wgc-border-request-failed",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -593,6 +621,7 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "pointer_button",
     "pointer_release_failure_cause",
     "memory_top_owner",
+    "wgc_border_failure",
     "dedup_count_bucket",
 ];
 
@@ -626,6 +655,7 @@ const BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS: &[&str] = &["browser_url_extra
 const DESCRIPTOR_PRESSURE_MESSAGE_TAGS: &[&str] = &["descriptor_pressure_stage"];
 const POINTER_RELEASE_NOT_INJECTED_MESSAGE_TAGS: &[&str] =
     &["pointer_button", "pointer_release_failure_cause"];
+const WGC_BORDER_REQUEST_FAILED_MESSAGE_TAGS: &[&str] = &["wgc_border_failure"];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
     "camera_direction",
@@ -667,6 +697,7 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "browser-url-extraction-failed" => Some(BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS),
         "descriptor-pressure" => Some(DESCRIPTOR_PRESSURE_MESSAGE_TAGS),
         "pointer-release-not-injected" => Some(POINTER_RELEASE_NOT_INJECTED_MESSAGE_TAGS),
+        "wgc-border-request-failed" => Some(WGC_BORDER_REQUEST_FAILED_MESSAGE_TAGS),
         _ => None,
     }
 }
@@ -1013,6 +1044,7 @@ impl SentryDiagnosticEvent {
             Self::BrowserUrlExtractionFailed(_) => "browser-url-extraction-failed",
             Self::DescriptorPressure(_) => "descriptor-pressure",
             Self::PointerReleaseNotInjected(_) => "pointer-release-not-injected",
+            Self::WgcBorderRequestFailed(_) => "wgc-border-request-failed",
         }
     }
 }
@@ -1068,6 +1100,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::CameraHealth(value) => {
             insert("session_role", value.role.tag());
@@ -1099,6 +1132,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::CameraSizeMismatchRecovery(value) => {
             insert("session_role", value.role.tag());
@@ -1130,6 +1164,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::PlayoutDeviceRepointed(value) => {
             insert("session_role", value.role.tag());
@@ -1161,6 +1196,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::RepublishStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1192,6 +1228,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::PublishDropStreak(value) => {
             insert("session_role", value.role.tag());
@@ -1223,6 +1260,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::WatchdogRepeatStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1254,6 +1292,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::UpdateInstallFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1285,6 +1324,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::ShareOverlayCursorCaptureCleared(value) => {
             insert("session_role", value.role.tag());
@@ -1316,6 +1356,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerPortDead(value) => {
             insert("session_role", value.role.tag());
@@ -1347,6 +1388,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::PreviousSessionVanished(value) => {
             insert("session_role", "not_applicable");
@@ -1378,6 +1420,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerRestartDetected(value) => {
             insert("session_role", value.role.tag());
@@ -1409,6 +1452,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::MemoryPressure(value) => {
             insert("session_role", "not_applicable");
@@ -1440,6 +1484,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", value.top_owner.tag());
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::DecoderAllocationFailed(value) => {
             insert("session_role", value.role.tag());
@@ -1471,6 +1516,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::BrowserUrlExtractionFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1502,6 +1548,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::DescriptorPressure(value) => {
             insert("session_role", "not_applicable");
@@ -1533,6 +1580,7 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", "not_applicable");
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
         }
         SentryDiagnosticEvent::PointerReleaseNotInjected(value) => {
             insert("session_role", "sharer");
@@ -1564,6 +1612,39 @@ fn build_sentry_diagnostic_event(
             insert("pointer_button", value.button.tag());
             insert("pointer_release_failure_cause", value.cause.tag());
             insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
+        }
+        SentryDiagnosticEvent::WgcBorderRequestFailed(value) => {
+            insert("session_role", "sharer");
+            insert("source_selection", "not_applicable");
+            insert("capture_geometry", "not_applicable");
+            insert("configured_geometry", "not_applicable");
+            insert("pixel_format", "not_applicable");
+            insert("scale_bucket", "not_applicable");
+            insert("encoder_implementation", "not_applicable");
+            insert("stage_code", "not_applicable");
+            insert("camera_direction", "not_applicable");
+            insert("capture_cadence", "not_applicable");
+            insert("encode_cadence", "not_applicable");
+            insert("queue_backpressure", "not_applicable");
+            insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
+            insert("recovery_action", "not_applicable");
+            insert("playout_transition", "not_applicable");
+            insert("storm_scope", "not_applicable");
+            insert("install_failure_stage", "not_applicable");
+            insert("install_failure_kind", "not_applicable");
+            insert("install_volume_boundary", "not_applicable");
+            insert("install_destination_class", "not_applicable");
+            insert("overlay_clear_reason", "not_applicable");
+            insert("crash_report_status", "not_applicable");
+            insert("pressure_level", "not_applicable");
+            insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", value.failure.tag());
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
@@ -4895,6 +4976,10 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
         }
         "architecture" => matches!(value, "arm64" | "x86_64" | "other"),
         "pointer_button" => matches!(value, "primary" | "right" | "middle" | "not_applicable"),
+        "wgc_border_failure" => matches!(
+            value,
+            "show_no_interface" | "show_other" | "hide_no_interface" | "hide_other" | "not_applicable"
+        ),
         "pointer_release_failure_cause" => matches!(
             value,
             "ax_error"
@@ -8700,6 +8785,46 @@ mod tests {
                     "the title must name the button and the cause, not just the event: {message}"
                 );
             }
+        }
+    }
+
+    /// #163: a failed WGC `IsBorderRequired` write used to reach Sentry only
+    /// as a `log::error!` carrying a localized OS string. Round-trip every
+    /// bounded direction x cause value through the real validator so a
+    /// missing `DIAGNOSTIC_TAGS` entry or `valid_diagnostic_tag` arm cannot
+    /// drop the event silently.
+    #[test]
+    fn wgc_border_request_failed_diagnostic_is_a_valid_sentry_event() {
+        assert!(
+            DIAGNOSTIC_EVENT_NAMES.contains(&"wgc-border-request-failed"),
+            "wgc-border-request-failed must be in DIAGNOSTIC_EVENT_NAMES (#163)"
+        );
+        assert_eq!(
+            diagnostic_message_tags("wgc-border-request-failed").expect("message tags"),
+            ["wgc_border_failure"]
+        );
+        for failure in [
+            WgcBorderFailureTag::ShowNoInterface,
+            WgcBorderFailureTag::ShowOther,
+            WgcBorderFailureTag::HideNoInterface,
+            WgcBorderFailureTag::HideOther,
+        ] {
+            let event = build_sentry_diagnostic_event(
+                SentryDiagnosticEvent::WgcBorderRequestFailed(WgcBorderRequestFailedDiagnostic {
+                    failure,
+                }),
+                "1",
+            );
+            assert!(
+                valid_sentry_diagnostic_event(&event),
+                "failure {failure:?} produced an invalid Sentry diagnostic event"
+            );
+            assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+            let message = event.message.as_deref().expect("diagnostic title");
+            assert!(
+                message.contains("wgc-border-request-failed") && message.contains(failure.tag()),
+                "the title must name the direction and cause, not just the event: {message}"
+            );
         }
     }
 

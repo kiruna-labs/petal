@@ -131,6 +131,10 @@ and overlay surfaces described below.
 - `windows_screen_capture.rs` — unified WGC window/display capture; one D3D11
   capture thread per session (COM MTA), cached borderless-consent policy, and
   fail-safe `System`/`Petal` indicator selection.
+- `wgc_border_policy.rs` — host-independent (not Windows-gated, unit-tested
+  everywhere) decision for a failed WGC `IsBorderRequired` write: failing to
+  show the border is benign, failing to hide it must never proceed borderless
+  (#163).
 - `windows_compositor.rs` — receiver compositor: each remote share is a Tauri
   `WebviewWindow` on the shared `compositor/surface.html` route (same header UI
   as macOS) with the decoded video in a native child HWND below the header;

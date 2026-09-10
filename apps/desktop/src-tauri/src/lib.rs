@@ -251,6 +251,11 @@ mod windows_capture_target;
 mod windows_compositor;
 #[cfg(target_os = "windows")]
 pub mod windows_screen_capture;
+// Host-independent decision for a failed WGC `IsBorderRequired` write (#163):
+// pure and unit-tested on every platform; its only non-test caller is the
+// Windows-gated capture module, hence the off-Windows dead-code allowance.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod wgc_border_policy;
 // Native DWM corner radius for Petal's rectangular windows (see windows_corner.rs).
 #[cfg(target_os = "windows")]
 mod windows_corner;
