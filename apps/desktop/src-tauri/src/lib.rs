@@ -24,6 +24,8 @@
 ))]
 mod autotest;
 mod browser_url;
+// THROWAWAY (#133 failing-direction probe) -- do not merge.
+mod issue133_probe;
 #[cfg(target_os = "macos")]
 pub mod capture;
 #[cfg(not(target_os = "macos"))]

@@ -2557,3 +2557,5 @@ sound and the failure is in SkyLight posting itself, not in the harness.
 `remote_control.rs`'s `direct_pointer_routes_stay_opt_in_after_the_446_live_pass`
 test pins this. Anyone flipping a default needs a **new** measurement showing a
 real delivered NSEvent in a real target app.
+
+<!-- #133 failing-direction probe: a docs path in the same PR as a Rust path, so this PR is the MIXED case that used to double-report. -->
