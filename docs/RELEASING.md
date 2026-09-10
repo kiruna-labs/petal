@@ -208,7 +208,8 @@ Use the bump tool — it writes every mirror in one go:
 
 ```
 node scripts/bump-version.mjs <new-version>   # e.g. 0.9.7
-node scripts/version-lockstep.mjs             # self-check: all nine fields agree
+bash scripts/generate-sbom.sh                 # the tenth mirror -- see below
+node scripts/version-lockstep.mjs             # self-check: all nine fields + the SBOMs agree
 ```
 
 The **nine lockstep fields** across seven files (`scripts/version-lockstep.mjs`
@@ -223,6 +224,31 @@ is the authority; `ci-local.sh` runs it):
 
 Editing these by hand and missing `Cargo.lock` or a lockfile's `packages[""]`
 entry fails the gate, which is why the tool exists.
+
+**A tenth mirror: the committed SBOMs.** Three of the CycloneDX manifests under
+`sbom/` embed the product version in their `metadata.component`, so a bump
+leaves them stale:
+- `sbom/desktop-npm.cdx.json`
+- `sbom/desktop-rust.cdx.json`
+- `sbom/web-harness-npm.cdx.json`
+
+(`sbom/backend-npm.cdx.json` and `sbom/site-npm.cdx.json` version
+independently and are not release mirrors.)
+
+`bump-version.mjs` deliberately does **not** rewrite them — regenerating needs
+`node_modules` in four npm roots plus `cargo-cyclonedx`, far heavier than a
+version bump. Refresh them yourself, before committing the bump:
+
+```
+bash scripts/generate-sbom.sh
+```
+
+Prereqs: `cargo install cargo-cyclonedx` (0.5.x), npm 11, and
+`npm ci --ignore-scripts` in `apps/desktop`, `backend`, `web-harness` and
+`site`. `scripts/version-lockstep.mjs` checks these three manifests alongside
+the nine fields and names that command when one drifts (#131) — skipping the
+step used to leave the `SBOM` workflow red on `main` after every release, and
+published an SBOM claiming an older version than the build it described.
 
 The release workflow checks these mirrors against the tag and fails before a
 desktop artifact is built if any value drifts. The web harness is built from

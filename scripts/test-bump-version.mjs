@@ -5,6 +5,13 @@
 // by deliberately desyncing Cargo.lock's `desktop` version and confirming
 // scripts/version-lockstep.mjs actually catches it. That's the exact gap
 // issue #671 item 6 calls out: "the current gate doesn't check it."
+//
+// #131 adds the same treatment for the committed CycloneDX SBOMs, which
+// mirror the product version a tenth time and which bump-version.mjs
+// deliberately does not rewrite. Both directions are exercised for real:
+// in-sync manifests pass, and a doctored manifest is run through the actual
+// version-lockstep CLI and asserted to exit non-zero with a message naming
+// the field, the stale value and `bash scripts/generate-sbom.sh`.
 
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -95,6 +102,70 @@ async function writeFixture(root, version) {
       2
     ) + '\n'
   );
+
+  await writeFixtureSboms(root, version);
+}
+
+// The three committed CycloneDX manifests that mirror the product version
+// (#131), plus the two that deliberately do NOT (backend and site carry
+// their own independent versions and must be ignored by the gate). Shaped
+// like the real output of scripts/generate-sbom.sh: a metadata.component
+// carrying name/version/purl/bom-ref, and a dependency ref repeating the
+// version -- so a global string replace doctors a fixture exactly the way a
+// missed regeneration leaves the real file.
+const FIXTURE_SBOMS = {
+  'sbom/desktop-npm.cdx.json': { name: 'desktop', purl: (v) => `pkg:npm/desktop@${v}` },
+  'sbom/desktop-rust.cdx.json': {
+    name: 'desktop',
+    purl: (v) => `pkg:cargo/desktop@${v}?download_url=file://.`,
+  },
+  'sbom/web-harness-npm.cdx.json': { name: 'web-harness', purl: (v) => `pkg:npm/web-harness@${v}` },
+};
+
+// Independently versioned roots: present in the fixture so the tests prove
+// the gate ignores them rather than merely never seeing them.
+const FIXTURE_UNCHECKED_SBOMS = {
+  'sbom/backend-npm.cdx.json': { name: 'backend', version: '0.1.0', purl: (v) => `pkg:npm/petal-backend@${v}` },
+  'sbom/site-npm.cdx.json': { name: 'site', version: '0.0.1', purl: (v) => `pkg:npm/petal-docs-site@${v}` },
+};
+
+function sbomDocument(name, version, purl) {
+  return (
+    JSON.stringify(
+      {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.5',
+        version: 1,
+        metadata: {
+          component: {
+            'bom-ref': `${name}@${version}`,
+            name,
+            purl,
+            type: 'application',
+            version,
+          },
+        },
+        components: [
+          { 'bom-ref': 'left-pad@1.0.0', name: 'left-pad', purl: 'pkg:npm/left-pad@1.0.0', type: 'library', version: '1.0.0' },
+        ],
+        dependencies: [{ dependsOn: ['left-pad@1.0.0'], ref: `${name}@${version}` }],
+      },
+      null,
+      2
+    ) + '\n'
+  );
+}
+
+// Stand-in for `bash scripts/generate-sbom.sh` -- the step bump-version.mjs
+// deliberately does not perform.
+async function writeFixtureSboms(root, version) {
+  await mkdir(path.join(root, 'sbom'), { recursive: true });
+  for (const [rel, spec] of Object.entries(FIXTURE_SBOMS)) {
+    await writeFile(path.join(root, rel), sbomDocument(spec.name, version, spec.purl(version)));
+  }
+  for (const [rel, spec] of Object.entries(FIXTURE_UNCHECKED_SBOMS)) {
+    await writeFile(path.join(root, rel), sbomDocument(spec.name, spec.version, spec.purl(spec.version)));
+  }
 }
 
 async function readAllVersions(root) {
@@ -180,6 +251,10 @@ async function testDryRunWritesNothing() {
 async function testLockstepGateCatchesDesyncedCargoLock() {
   await withFixture('0.3.0', async (root) => {
     await execFileAsync('node', [BUMP_SCRIPT, '0.4.0', '--root', root]);
+    // bump-version.mjs deliberately leaves the SBOMs alone (#131); stand in
+    // for the `bash scripts/generate-sbom.sh` the releaser runs next, so
+    // this test isolates the Cargo.lock drift it is actually about.
+    await writeFixtureSboms(root, '0.4.0');
 
     // Sanity: lockstep passes right after a clean bump.
     await execFileAsync('node', [LOCKSTEP_SCRIPT, '0.4.0', root]);
@@ -209,10 +284,109 @@ async function testLockstepGateCatchesDesyncedCargoLock() {
   console.log('PASS: lockstep gate catches a deliberately desynced Cargo.lock desktop version (the 9th field)');
 }
 
+// Runs the REAL version-lockstep CLI and returns its exit code + combined
+// output, so a "this must fail" assertion is exercised rather than assumed.
+async function runLockstep(version, root) {
+  try {
+    const { stdout, stderr } = await execFileAsync('node', [LOCKSTEP_SCRIPT, version, root]);
+    return { code: 0, output: `${stdout}${stderr}` };
+  } catch (e) {
+    return { code: e.code ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+  }
+}
+
+async function testLockstepGateCatchesStaleSboms() {
+  await withFixture('0.9.15', async (root) => {
+    // Direction 1 (green): in-sync manifests pass.
+    const clean = await runLockstep('0.9.15', root);
+    assert.equal(clean.code, 0, `in-sync SBOMs must pass, got: ${clean.output}`);
+
+    // Direction 2 (red): each mirrored manifest, doctored one at a time, is
+    // caught. All three are pinned individually -- checking only one would
+    // let a typo'd path in the other two go unnoticed.
+    const expectedFields = {
+      'sbom/desktop-npm.cdx.json': 'sbomDesktopNpm',
+      'sbom/desktop-rust.cdx.json': 'sbomDesktopRust',
+      'sbom/web-harness-npm.cdx.json': 'sbomWebHarnessNpm',
+    };
+    for (const [rel, field] of Object.entries(expectedFields)) {
+      const filePath = path.join(root, rel);
+      const good = await readFile(filePath, 'utf8');
+      // Exactly what a missed regeneration leaves behind: every embedded
+      // occurrence still at the previous release.
+      await writeFile(filePath, good.split('0.9.15').join('0.9.14'));
+
+      const stale = await runLockstep('0.9.15', root);
+      assert.notEqual(stale.code, 0, `${rel}: stale SBOM version must fail the gate`);
+      assert.match(stale.output, new RegExp(field), `${rel}: failure must name the field that drifted`);
+      assert.match(stale.output, /"value":\s?"0\.9\.14"/, `${rel}: failure must show the stale value`);
+      assert.match(
+        stale.output,
+        /bash scripts\/generate-sbom\.sh/,
+        `${rel}: failure must name the exact command that fixes it`
+      );
+      assert.match(stale.output, /cargo-cyclonedx/, `${rel}: failure must state the prerequisites`);
+      assert.match(stale.output, /npm ci --ignore-scripts/, `${rel}: failure must state the prerequisites`);
+
+      await writeFile(filePath, good);
+      const restored = await runLockstep('0.9.15', root);
+      assert.equal(restored.code, 0, `${rel}: restoring the manifest must make the gate pass again`);
+    }
+
+    // The independently versioned roots must NOT be treated as mirrors:
+    // backend sits at 0.1.0 and site at 0.0.1 in the fixture, and the gate
+    // above passed with both present.
+    const backend = JSON.parse(await readFile(path.join(root, 'sbom/backend-npm.cdx.json'), 'utf8'));
+    const site = JSON.parse(await readFile(path.join(root, 'sbom/site-npm.cdx.json'), 'utf8'));
+    assert.equal(backend.metadata.component.version, '0.1.0');
+    assert.equal(site.metadata.component.version, '0.0.1');
+
+    // A half-edited manifest (version bumped, purl left behind) is rejected
+    // as internally inconsistent rather than silently trusted.
+    const halfPath = path.join(root, 'sbom/desktop-npm.cdx.json');
+    const original = await readFile(halfPath, 'utf8');
+    const half = JSON.parse(original);
+    half.metadata.component.version = '0.9.16';
+    await writeFile(halfPath, JSON.stringify(half, null, 2) + '\n');
+    const inconsistent = await runLockstep('0.9.16', root);
+    assert.notEqual(inconsistent.code, 0, 'a manifest whose version and purl disagree must fail');
+    assert.match(inconsistent.output, /internally inconsistent/);
+    assert.match(inconsistent.output, /bash scripts\/generate-sbom\.sh/);
+    await writeFile(halfPath, original);
+  });
+  console.log('PASS: lockstep gate catches a stale/doctored SBOM version (the 10th mirror) in both directions');
+}
+
+// The end-to-end shape of #131: a bump that does not regenerate the SBOMs
+// leaves them behind, bump-version still succeeds (regeneration is too heavy
+// to run from a bump), and the lockstep gate is what reports it.
+async function testBumpWithoutSbomRegenerationIsCaught() {
+  await withFixture('0.9.15', async (root) => {
+    const { stdout } = await execFileAsync('node', [BUMP_SCRIPT, '0.9.16', '--root', root]);
+    assert.match(stdout, /all 9 fields now read 0\.9\.16/, 'the bump itself must still succeed');
+    assert.match(stdout, /bash scripts\/generate-sbom\.sh/, 'the bump must point at the SBOM refresh command');
+
+    const stale = await runLockstep('0.9.16', root);
+    assert.notEqual(stale.code, 0, 'a bump with no SBOM regeneration must fail the gate');
+    for (const field of ['sbomDesktopNpm', 'sbomDesktopRust', 'sbomWebHarnessNpm']) {
+      assert.match(stale.output, new RegExp(field), `all three mirrors must be reported stale, missing ${field}`);
+    }
+    assert.match(stale.output, /bash scripts\/generate-sbom\.sh/);
+
+    // Running the regeneration step (stood in for here) clears it.
+    await writeFixtureSboms(root, '0.9.16');
+    const after = await runLockstep('0.9.16', root);
+    assert.equal(after.code, 0, `regenerating the SBOMs must clear the gate, got: ${after.output}`);
+  });
+  console.log('PASS: a bump without an SBOM regeneration fails the gate, and regenerating clears it');
+}
+
 async function main() {
   await testRealBumpUpdatesAllNineFields();
   await testDryRunWritesNothing();
   await testLockstepGateCatchesDesyncedCargoLock();
+  await testLockstepGateCatchesStaleSboms();
+  await testBumpWithoutSbomRegenerationIsCaught();
   console.log('\nALL bump-version / lockstep tests passed.');
 }
 
