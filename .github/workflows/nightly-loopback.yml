@@ -330,10 +330,63 @@ jobs:
           PETAL_PHASE_HANDOFF_TIMEOUT_S: "300"
         run: |
           set -euo pipefail
-          # shellcheck source=scripts/petal-instance-guard.sh
-          source scripts/petal-instance-guard.sh
-          if ! petal_guard_wait_for_instances_exit "$PETAL_PHASE_HANDOFF_TIMEOUT_S"; then
-            echo "::error::Cockpit -> loopback handoff: a Petal instance was STILL running ${PETAL_PHASE_HANDOFF_TIMEOUT_S}s after the Test Cockpit tier finished (pids named above). The loopback tier cannot start its own instance while that one holds the single-instance lock, so the gate stops here rather than reporting it later as an unexplained socket timeout."
+          GUARD_PHASE="Cockpit -> loopback handoff"
+          GUARD_REQUIRED_FNS="petal_guard_wait_for_instances_exit petal_guard_live_instances petal_guard_pid_alive"
+          # >>> petal-guard availability assertion (#150) >>>
+          # A check that cannot tell "I looked and found a problem" from "I could
+          # not look" is the exact failure this gate exists to prevent, so prove
+          # the helpers are HERE before trusting any exit status from them.
+          #
+          # WHY THEY CAN LEGITIMATELY BE ABSENT: `workflow_dispatch` runs the
+          # workflow definition from the DEFAULT BRANCH but checks out the ref you
+          # name. Dispatching an older tag therefore pairs this current step with a
+          # tree whose scripts/petal-instance-guard.sh predates these helpers --
+          # a legitimate way to run this workflow. Bash then returns 127 ("command
+          # not found"), `if ! helper ...` reads that identically to "the check ran
+          # and found trouble", and the step reports a cause it never observed:
+          # run 34475294637 printed a detailed lingering-instance message and "pids
+          # named above" having never looked, with no pids above.
+          #
+          # INLINE rather than a shared script, on purpose: the workflow always
+          # comes from the default branch, while anything under scripts/ is
+          # precisely what may be missing.
+          GUARD_SH="scripts/petal-instance-guard.sh"
+          GUARD_MISSING=""
+          if [ ! -f "$GUARD_SH" ]; then
+            GUARD_MISSING=" $GUARD_SH (the file itself)"
+          else
+            # shellcheck source=scripts/petal-instance-guard.sh
+            source "$GUARD_SH"
+            for fn in $GUARD_REQUIRED_FNS; do
+              declare -F "$fn" >/dev/null 2>&1 || GUARD_MISSING="$GUARD_MISSING $fn"
+            done
+          fi
+          if [ -n "$GUARD_MISSING" ]; then
+            echo "::error::${GUARD_PHASE}: CANNOT CHECK -- the petal-guard helpers this step relies on are not in this checkout (missing:${GUARD_MISSING}). NO instance check was performed, so this is NOT a report that a Petal instance is lingering -- nothing was observed either way. Most likely cause: workflow_dispatch runs the workflow definition from the default branch but checks out the ref you named, so an older tag pairs a current workflow with an older tree (#150). Re-dispatch a ref whose scripts/petal-instance-guard.sh defines these helpers."
+            exit 1
+          fi
+          # <<< petal-guard availability assertion (#150) <<<
+
+          # The wait's OWN output is the only source of pids this step may claim to
+          # have seen. Capture it, print it, and name pids in the error only when
+          # the wait actually named some: the previous wording said "pids named
+          # above" unconditionally, which was a fabrication on any path where the
+          # wait had not really run (#150).
+          # `tee`, not a captured substitution, so a long wait still streams into the
+          # job log instead of appearing all at once when it finishes.
+          HANDOFF_LOG="$(mktemp -t petal-handoff-wait)"
+          set +e
+          petal_guard_wait_for_instances_exit "$PETAL_PHASE_HANDOFF_TIMEOUT_S" 2>&1 | tee "$HANDOFF_LOG"
+          HANDOFF_RC=${PIPESTATUS[0]}
+          set -e
+          if [ "$HANDOFF_RC" -ne 0 ]; then
+            STUCK_PIDS="$(sed -n 's/.*(pid \([0-9][0-9]*\)) had not exited.*/\1/p' "$HANDOFF_LOG" | tr '\n' ' ')"
+            STUCK_PIDS="${STUCK_PIDS% }"
+            if [ -n "${STUCK_PIDS// /}" ]; then
+              echo "::error::Cockpit -> loopback handoff: a Petal instance was STILL running ${PETAL_PHASE_HANDOFF_TIMEOUT_S}s after the Test Cockpit tier finished (pid(s): ${STUCK_PIDS}). The loopback tier cannot start its own instance while that one holds the single-instance lock, so the gate stops here rather than reporting it later as an unexplained socket timeout."
+            else
+              echo "::error::Cockpit -> loopback handoff: the by-pid instance wait exited ${HANDOFF_RC} WITHOUT naming a lingering pid, so it is NOT established that anything is still running. Read the wait's own output above; do not assume a stuck instance."
+            fi
             exit 1
           fi
 
@@ -359,8 +412,52 @@ jobs:
           # reporting the same "did not open $SOCKET" for a crash, a launch
           # that never happened, and a single-instance lock held by another
           # Petal.
-          # shellcheck source=scripts/petal-instance-guard.sh
-          source scripts/petal-instance-guard.sh
+          #
+          # The availability assertion below is byte-identical to the phase-handoff
+          # step's, and this step needs it just as badly: without the helpers,
+          # `PRE_LAUNCH_INSTANCES="$(petal_guard_live_instances | ...)"` comes back
+          # EMPTY (the pipeline's status is tr's, so `set -e` never fires) and the
+          # step silently concludes "nothing was running" without looking, while
+          # `! petal_guard_pid_alive "$LAUNCHER_PID"` is true for every pid and can
+          # break the socket wait early reporting "the launcher is gone". Both are
+          # the same fabrication the handoff step made in run 34475294637. Stop
+          # here instead, naming the missing helper.
+          GUARD_PHASE="loopback tier"
+          GUARD_REQUIRED_FNS="petal_guard_live_instances petal_guard_pid_alive petal_guard_diagnose_missing_socket"
+          # >>> petal-guard availability assertion (#150) >>>
+          # A check that cannot tell "I looked and found a problem" from "I could
+          # not look" is the exact failure this gate exists to prevent, so prove
+          # the helpers are HERE before trusting any exit status from them.
+          #
+          # WHY THEY CAN LEGITIMATELY BE ABSENT: `workflow_dispatch` runs the
+          # workflow definition from the DEFAULT BRANCH but checks out the ref you
+          # name. Dispatching an older tag therefore pairs this current step with a
+          # tree whose scripts/petal-instance-guard.sh predates these helpers --
+          # a legitimate way to run this workflow. Bash then returns 127 ("command
+          # not found"), `if ! helper ...` reads that identically to "the check ran
+          # and found trouble", and the step reports a cause it never observed:
+          # run 34475294637 printed a detailed lingering-instance message and "pids
+          # named above" having never looked, with no pids above.
+          #
+          # INLINE rather than a shared script, on purpose: the workflow always
+          # comes from the default branch, while anything under scripts/ is
+          # precisely what may be missing.
+          GUARD_SH="scripts/petal-instance-guard.sh"
+          GUARD_MISSING=""
+          if [ ! -f "$GUARD_SH" ]; then
+            GUARD_MISSING=" $GUARD_SH (the file itself)"
+          else
+            # shellcheck source=scripts/petal-instance-guard.sh
+            source "$GUARD_SH"
+            for fn in $GUARD_REQUIRED_FNS; do
+              declare -F "$fn" >/dev/null 2>&1 || GUARD_MISSING="$GUARD_MISSING $fn"
+            done
+          fi
+          if [ -n "$GUARD_MISSING" ]; then
+            echo "::error::${GUARD_PHASE}: CANNOT CHECK -- the petal-guard helpers this step relies on are not in this checkout (missing:${GUARD_MISSING}). NO instance check was performed, so this is NOT a report that a Petal instance is lingering -- nothing was observed either way. Most likely cause: workflow_dispatch runs the workflow definition from the default branch but checks out the ref you named, so an older tag pairs a current workflow with an older tree (#150). Re-dispatch a ref whose scripts/petal-instance-guard.sh defines these helpers."
+            exit 1
+          fi
+          # <<< petal-guard availability assertion (#150) <<<
 
           LOG_DIR="$RUNNER_TEMP/petal-nightly-loopback"
           mkdir -p "$LOG_DIR"

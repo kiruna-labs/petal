@@ -883,6 +883,22 @@ next occurrence does not cost an artifact download. Both halves are contract
 tested in both directions by `scripts/test-e2e-gate-handoff.sh`, which extracts
 and executes the workflow's own wait rather than a copy of it.
 
+Both of those steps first **assert the `petal_guard_*` helpers exist**
+(`declare -F`) before trusting any exit status from them, and fail with a
+distinct `CANNOT CHECK` error naming the missing function if they do not. Why
+that can happen at all: `workflow_dispatch` runs the workflow definition from
+the **default branch** while checking out **the ref you name**, so dispatching
+an older tag legitimately pairs a current workflow with an older tree. Without
+the assertion, bash returns 127 for the missing function, `if ! helper ...`
+reads that identically to "the wait timed out", and the step reports a detailed
+lingering-instance cause it never observed &mdash; which is exactly what run
+`34475294637` printed, complete with "pids named above" and no pids above. For
+the same reason the timeout message now names pids only when the wait actually
+produced them; a failure that named none says so instead. To exercise the
+handoff for real, dispatch a ref that already contains the step (`gh workflow
+run release.yml -f tag=<tag> -f publish=false`) &mdash; never a freshly pushed
+tag, because `release.yml` triggers on `v*` and publishes on a tag push.
+
 `apps/desktop/scripts/remote-control-scenario.mjs` is the live scenario used by that
 wrapper. It uses the same autotest socket plus Chrome DevTools and TextEdit; it
 is not driven by a scenario JSON file.
