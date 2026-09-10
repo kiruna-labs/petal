@@ -153,6 +153,190 @@ mod macos {
         };
         (rc == 0).then_some(level)
     }
+
+    /// Mirrors XNU's `vm_region_submap_info_64` (`osfmk/mach/vm_region.h`)
+    /// truncated at the V1 revision -- through `pages_reusable`, leaving out
+    /// only V2's `object_id_full`, which nothing here reads. Same
+    /// truncate-and-request-exactly-that pattern as `TaskVmInfo` above.
+    ///
+    /// `#[repr(C, packed(4))]` is LOAD-BEARING, not decoration: the header
+    /// wraps these structs in `#pragma pack(push, 4)`, so `offset` (a `u64`)
+    /// sits at byte 12, not 16. Natural alignment would shift every field
+    /// after it by four bytes and read `pages_resident` out of `user_tag`'s
+    /// slot -- a silent wrong-answer, not a crash. Verified field-by-field
+    /// against the SDK header with `offsetof` (see the test below, which
+    /// re-asserts the two sizes the kernel actually contracts on).
+    #[repr(C, packed(4))]
+    #[derive(Default, Clone, Copy)]
+    struct VmRegionSubmapInfo64 {
+        protection: i32,
+        max_protection: i32,
+        inheritance: u32,
+        offset: u64,
+        user_tag: u32,
+        pages_resident: u32,
+        pages_shared_now_private: u32,
+        pages_swapped_out: u32,
+        pages_dirtied: u32,
+        ref_count: u32,
+        shadow_depth: u16,
+        external_pager: u8,
+        share_mode: u8,
+        is_submap: i32,
+        behavior: i32,
+        object_id: u32,
+        user_wired_count: u16,
+        flags: u16,
+        pages_reusable: u32,
+    }
+
+    /// `VM_REGION_SUBMAP_INFO_V1_COUNT_64` -- 17 `natural_t` on every arch
+    /// (the struct is explicitly 4-byte packed, so this does not vary).
+    const VM_REGION_SUBMAP_INFO_V1_COUNT_64: u32 =
+        (std::mem::size_of::<VmRegionSubmapInfo64>() / std::mem::size_of::<u32>()) as u32;
+
+    extern "C" {
+        fn mach_vm_region_recurse(
+            target_task: u32,
+            address: *mut u64,
+            size: *mut u64,
+            nesting_depth: *mut u32,
+            info: *mut u32,
+            info_count: *mut u32,
+        ) -> i32;
+    }
+
+    /// Bytes per page AS THE KERNEL COUNTS THEM IN `vm_region` RESULTS.
+    ///
+    /// Trap, measured rather than reasoned about (#106): `pages_resident` /
+    /// `pages_dirtied` are in units of the PROCESS's page size, which is what
+    /// `sysconf(_SC_PAGESIZE)` reports -- not `vm_kernel_page_size`. The two
+    /// differ only under Rosetta, where an x86_64 slice on Apple silicon sees
+    /// `vm_page_size=4096` while `vm_kernel_page_size=16384`. Multiplying by
+    /// the kernel value there reported 800 MB for a 200 MB allocation, a
+    /// silent 4x overstatement in exactly the direction that would make this
+    /// diagnostic lie about a memory spike.
+    fn page_size_bytes() -> u64 {
+        let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if size > 0 {
+            size as u64
+        } else {
+            4096
+        }
+    }
+
+    /// Walk this task's own VM regions once and bucket them by `user_tag`.
+    ///
+    /// Submaps (the dyld shared region is the only one that matters) are
+    /// stepped OVER, not descended into. Descending double-counts: the shared
+    /// cache's contents reported ~2.2 GB resident in a hello-world process,
+    /// which would swamp exactly the signal this exists to find. Their
+    /// contents are shared, clean and never the thing that grew.
+    pub fn vm_attribution() -> Option<super::VmAttribution> {
+        let page = page_size_bytes();
+        let mut totals = [(0u64, 0u64); 14];
+        let mut other_by_tag = std::collections::BTreeMap::<u32, u64>::new();
+        let mut address: u64 = 0;
+        let mut regions: u32 = 0;
+        let mut truncated = false;
+        let started = std::time::Instant::now();
+        loop {
+            if regions >= super::VM_REGION_WALK_LIMIT {
+                truncated = true;
+                break;
+            }
+            // Cheap: one `Instant::now()` per 256 regions, not per region.
+            if regions > 0
+                && regions % super::VM_REGION_WALK_DEADLINE_CHECK_INTERVAL == 0
+                && started.elapsed() >= super::VM_REGION_WALK_DEADLINE
+            {
+                truncated = true;
+                break;
+            }
+            let mut info = VmRegionSubmapInfo64::default();
+            let mut size: u64 = 0;
+            // Reset per call: this is an IN/OUT parameter, and a stale depth
+            // from a previous iteration is how the descend-into-submaps
+            // variant of this loop spins forever.
+            let mut depth: u32 = 0;
+            let mut count: u32 = VM_REGION_SUBMAP_INFO_V1_COUNT_64;
+            let status = unsafe {
+                mach_vm_region_recurse(
+                    mach_task_self_,
+                    &mut address,
+                    &mut size,
+                    &mut depth,
+                    &mut info as *mut VmRegionSubmapInfo64 as *mut u32,
+                    &mut count,
+                )
+            };
+            if status != KERN_SUCCESS {
+                // KERN_INVALID_ADDRESS is the normal end of the address space,
+                // reached on every successful walk -- not an error worth a log
+                // line. Anything else ends the walk with what was gathered so
+                // far, which `truncated` does not claim to be complete.
+                break;
+            }
+            if count < VM_REGION_SUBMAP_INFO_V1_COUNT_64 {
+                return None;
+            }
+            // `size` of 0 would make the address cursor stand still; treat it
+            // as the end rather than looping to the region cap.
+            if size == 0 {
+                break;
+            }
+            let Some(next) = address.checked_add(size) else {
+                break;
+            };
+            if info.is_submap != 0 {
+                address = next;
+                continue;
+            }
+            regions += 1;
+            let user_tag = info.user_tag;
+            let resident = u64::from(info.pages_resident) * page;
+            let dirty =
+                (u64::from(info.pages_dirtied) + u64::from(info.pages_swapped_out)) * page;
+            let owner = super::VmOwner::from_user_tag(user_tag);
+            let slot = &mut totals[owner.index()];
+            slot.0 += resident;
+            slot.1 += dirty;
+            if owner == super::VmOwner::Other {
+                *other_by_tag.entry(user_tag).or_insert(0) += dirty;
+            }
+            address = next;
+        }
+        if regions == 0 {
+            return None;
+        }
+        let other_top_user_tag = other_by_tag
+            .into_iter()
+            .max_by_key(|(tag, dirty)| (*dirty, std::cmp::Reverse(*tag)))
+            .map(|(tag, _)| tag);
+        Some(super::build_vm_attribution(
+            totals,
+            regions,
+            truncated,
+            other_top_user_tag,
+        ))
+    }
+
+    #[cfg(test)]
+    mod vm_layout_tests {
+        use super::*;
+
+        #[test]
+        fn submap_info_layout_matches_the_sdk_header() {
+            // Both numbers come from a C program compiled against
+            // <mach/vm_region.h> on this SDK: VM_REGION_SUBMAP_INFO_V1_SIZE
+            // is 68 and VM_REGION_SUBMAP_INFO_V1_COUNT_64 is 17. If a future
+            // edit drops `packed(4)` the size becomes 72 and this fails --
+            // which is the point, because the kernel would otherwise happily
+            // fill 17 words into a differently-shaped struct.
+            assert_eq!(std::mem::size_of::<VmRegionSubmapInfo64>(), 68);
+            assert_eq!(VM_REGION_SUBMAP_INFO_V1_COUNT_64, 17);
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -208,10 +392,26 @@ pub use stub::process_footprint_bytes;
 
 #[cfg(target_os = "macos")]
 pub use macos::memory_pressure_level;
+
 /// Non-macOS: memory-pressure sysctl not available; report honest absence
 /// (#884), same rationale as `live_pixel_buffer_count`'s platform gating.
 #[cfg(not(target_os = "macos"))]
 pub fn memory_pressure_level() -> Option<u32> {
+    None
+}
+
+/// #106: the VM-region walk, where it exists. macOS reads the real thing;
+/// every other platform reports honest absence rather than an empty
+/// attribution, which would read as "nothing is allocated" instead of "not
+/// measured here" (`platform::mem`'s house rule, same as
+/// `live_pixel_buffer_count`).
+#[cfg(target_os = "macos")]
+pub fn vm_attribution() -> Option<VmAttribution> {
+    macos::vm_attribution()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn vm_attribution() -> Option<VmAttribution> {
     None
 }
 
@@ -352,6 +552,355 @@ pub fn frame_pool_ceiling(
         sck_queue_bytes,
         total_bytes: capture_copy_bytes + i420_publish_bytes + sck_queue_bytes,
     }
+}
+
+// ---------------------------------------------------------------------------
+// #106: virtual-memory attribution by allocation owner
+// ---------------------------------------------------------------------------
+
+/// Which framework owns a run of pages, decoded from the kernel's per-region
+/// `user_tag` (`VM_MEMORY_*` in `<mach/vm_statistics.h>`).
+///
+/// #106 needs a NAME for the ~1 GB step a display share adds to
+/// `phys_footprint`. Petal's own pools are ruled out by arithmetic
+/// (`frame_pool_ceiling` above -- ~47 MB at 2560x1440) and the receiver pool
+/// by `live_pixel_buffers` reading 0 across the climb, so the owner is
+/// downstream of this codebase. These buckets are chosen to separate exactly
+/// the candidates that issue names: ScreenCaptureKit and VideoToolbox trade in
+/// IOSurfaces (`IoSurface`) backed by IOKit/GPU mappings (`IoKit`,
+/// `IoAccelerator`), CoreMedia pools have their own tags (`CoreMedia`), and
+/// libwebrtc allocates from the C heap (`Malloc`).
+///
+/// Deliberately a CLOSED set, not the raw tag: a value from here crosses the
+/// Sentry boundary as `memory_top_owner` (see `logging::MemoryOwnerTag`), so
+/// it must be a bounded enum and never free text or a path. `proc_regionfilename`
+/// would name the mapped file for a region and is NOT used here for that
+/// reason -- it returns user paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum VmOwner {
+    /// `user_tag` 0: anonymous mappings and everything the kernel does not
+    /// attribute, including the read-only dyld shared cache. Large and mostly
+    /// CLEAN -- see `VmAttribution`'s note on resident vs dirty.
+    Untagged,
+    /// The C heap (`VM_MEMORY_MALLOC*`, `TCMALLOC`, `DYLD_MALLOC`). Rust's
+    /// global allocator lands here too, as does libwebrtc's.
+    Malloc,
+    Stack,
+    /// Mapped code and the shared/unshared pmap regions.
+    Dylib,
+    /// `VM_MEMORY_IOSURFACE`. The currency of every zero-copy frame on macOS:
+    /// ScreenCaptureKit output, VideoToolbox encoder/decoder surfaces,
+    /// CoreAnimation-fed display layers.
+    IoSurface,
+    /// `VM_MEMORY_IOKIT` -- driver mappings other than IOSurface proper.
+    IoKit,
+    /// `VM_MEMORY_IOACCELERATOR` -- GPU driver allocations.
+    IoAccelerator,
+    CoreGraphics,
+    /// `VM_MEMORY_LAYERKIT` -- CoreAnimation.
+    CoreAnimation,
+    /// CoreMedia's pools and bitstream buffers -- the VideoToolbox side that
+    /// is NOT an IOSurface.
+    CoreMedia,
+    /// JavaScriptCore / the webview's JIT arenas.
+    JavaScript,
+    Network,
+    Audio,
+    /// Any tag with no bucket of its own. `VmAttribution::other_top_user_tag`
+    /// carries the raw numeric tag that dominates this bucket so a surprise is
+    /// still actionable without shipping free text.
+    Other,
+}
+
+impl VmOwner {
+    /// Every variant, in declaration order. Used to build a fixed-size
+    /// accumulator (no allocation during the walk) and to pin the
+    /// `logging::MemoryOwnerTag` mirror in tests.
+    pub const ALL: [VmOwner; 14] = [
+        VmOwner::Untagged,
+        VmOwner::Malloc,
+        VmOwner::Stack,
+        VmOwner::Dylib,
+        VmOwner::IoSurface,
+        VmOwner::IoKit,
+        VmOwner::IoAccelerator,
+        VmOwner::CoreGraphics,
+        VmOwner::CoreAnimation,
+        VmOwner::CoreMedia,
+        VmOwner::JavaScript,
+        VmOwner::Network,
+        VmOwner::Audio,
+        VmOwner::Other,
+    ];
+
+    /// Stable wire/log spelling. `logging::MemoryOwnerTag` mirrors these
+    /// exactly (there is no shared source because `platform::mem` must not
+    /// depend on `logging`'s Sentry machinery, the same split
+    /// `BrowserUrlExtractionCauseTag` documents); a test asserts the two
+    /// agree string-for-string.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            VmOwner::Untagged => "untagged",
+            VmOwner::Malloc => "malloc",
+            VmOwner::Stack => "stack",
+            VmOwner::Dylib => "dylib",
+            VmOwner::IoSurface => "iosurface",
+            VmOwner::IoKit => "iokit",
+            VmOwner::IoAccelerator => "ioaccelerator",
+            VmOwner::CoreGraphics => "coregraphics",
+            VmOwner::CoreAnimation => "coreanimation",
+            VmOwner::CoreMedia => "coremedia",
+            VmOwner::JavaScript => "javascript",
+            VmOwner::Network => "network",
+            VmOwner::Audio => "audio",
+            VmOwner::Other => "other",
+        }
+    }
+
+    // Used by `build_vm_attribution` and by this module's tests on every
+    // platform; the walk that feeds it only exists on macOS, so a Windows
+    // build sees no non-test caller (#106).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn index(self) -> usize {
+        match self {
+            VmOwner::Untagged => 0,
+            VmOwner::Malloc => 1,
+            VmOwner::Stack => 2,
+            VmOwner::Dylib => 3,
+            VmOwner::IoSurface => 4,
+            VmOwner::IoKit => 5,
+            VmOwner::IoAccelerator => 6,
+            VmOwner::CoreGraphics => 7,
+            VmOwner::CoreAnimation => 8,
+            VmOwner::CoreMedia => 9,
+            VmOwner::JavaScript => 10,
+            VmOwner::Network => 11,
+            VmOwner::Audio => 12,
+            VmOwner::Other => 13,
+        }
+    }
+
+    /// Decode a kernel `user_tag`. Values are the `VM_MEMORY_*` constants from
+    /// `<mach/vm_statistics.h>`; they are ABI, not private -- `vmmap` prints
+    /// the same numbers. Kept `const fn` and total (every one of the 256
+    /// possible tags maps to a variant) so a tag Apple adds later degrades to
+    /// `Other` rather than being dropped.
+    pub const fn from_user_tag(user_tag: u32) -> Self {
+        match user_tag {
+            0 => VmOwner::Untagged,
+            // VM_MEMORY_MALLOC(1)..MALLOC_PROB_GUARD(13), TCMALLOC(53),
+            // DYLD_MALLOC(61).
+            1..=13 | 53 | 61 => VmOwner::Malloc,
+            // VM_MEMORY_IOKIT.
+            21 => VmOwner::IoKit,
+            // VM_MEMORY_STACK(30), VM_MEMORY_GUARD(31).
+            30 | 31 => VmOwner::Stack,
+            // SHARED_PMAP(32), DYLIB(33), OBJC_DISPATCHERS(34),
+            // UNSHARED_PMAP(35), DYLD(60).
+            32..=35 | 60 => VmOwner::Dylib,
+            // COREGRAPHICS(42), CGIMAGE(52), COREGRAPHICS_DATA(54)..XALLOC(58).
+            42 | 52 | 54..=58 => VmOwner::CoreGraphics,
+            // VM_MEMORY_LAYERKIT.
+            51 => VmOwner::CoreAnimation,
+            // JAVASCRIPT_CORE(63), JIT_EXECUTABLE_ALLOCATOR(64),
+            // JIT_REGISTER_FILE(65).
+            63..=65 => VmOwner::JavaScript,
+            // SKYWALK(87), LIBNETWORK(89).
+            87 | 89 => VmOwner::Network,
+            // VM_MEMORY_IOSURFACE.
+            88 => VmOwner::IoSurface,
+            // VM_MEMORY_AUDIO.
+            90 => VmOwner::Audio,
+            // VIDEOBITSTREAM(91), CM_XPC(92), CM_RPC(93), CM_MEMORYPOOL(94),
+            // CM_READCACHE(95), CM_CRABS(96), CM_REGWARP(101), CM_HLS(106).
+            91..=96 | 101 | 106 => VmOwner::CoreMedia,
+            // VM_MEMORY_IOACCELERATOR.
+            100 => VmOwner::IoAccelerator,
+            _ => VmOwner::Other,
+        }
+    }
+}
+
+/// One owner's share of the address space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmOwnerBytes {
+    pub owner: VmOwner,
+    /// Pages currently in RAM. Includes CLEAN shared mappings (the dyld shared
+    /// cache alone is ~110 MB under `Untagged`), so this is NOT comparable to
+    /// `phys_footprint` -- use it to see whether a bucket is file-backed.
+    pub resident_bytes: u64,
+    /// Dirtied + swapped-out pages. THIS is the footprint-relevant number:
+    /// measured on this machine, the sum of this column across all owners
+    /// equalled `phys_footprint` exactly (284 MB vs 284 MB with 20 x 2560x1440
+    /// BGRA IOSurfaces held live). It is what makes the decomposition
+    /// answer #106's question rather than merely resemble it.
+    pub dirty_bytes: u64,
+}
+
+/// Hard cap on regions walked in one sample. A real Petal process maps a few
+/// thousand regions; this is an upper bound so a pathological address space
+/// cannot turn a diagnostic into a stall. `truncated` says the cap was hit, so
+/// a partial reading is never mistaken for a complete one.
+pub const VM_REGION_WALK_LIMIT: u32 = 16_384;
+
+/// Wall-clock ceiling on one walk, checked every
+/// `VM_REGION_WALK_DEADLINE_CHECK_INTERVAL` regions. The region cap alone is
+/// not a time bound: one `mach_vm_region_recurse` measured ~13 us here, so
+/// 16,384 of them is a fifth of a second, and `start_begin` sits in the user's
+/// click path. Whichever bound trips first ends the walk and sets `truncated`.
+pub const VM_REGION_WALK_DEADLINE: Duration = Duration::from_millis(25);
+/// Read only by the macOS walker (and by the bounds test everywhere).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const VM_REGION_WALK_DEADLINE_CHECK_INTERVAL: u32 = 256;
+
+/// How many owners the log line names. Four is enough to show the dominant
+/// bucket plus context without turning one line into a table.
+pub const VM_ATTRIBUTION_TOP_N: usize = 4;
+
+/// A single bounded walk of this process's own VM regions, bucketed by owner
+/// (#106).
+///
+/// ## What it is for
+///
+/// `phys_footprint` says HOW MUCH; this says WHO. Sampled only at share
+/// lifecycle marks (`start_begin`, `first_frame`, `publish_succeeded`,
+/// `settle_30s`) and when OS memory pressure transitions -- never per frame
+/// and never per second. Measured in this repo's own test binary: 46 regions
+/// in 0.6-2.0 ms, i.e. ~13 us per region, and both `VM_REGION_WALK_LIMIT` and
+/// `VM_REGION_WALK_DEADLINE` bound the worst case regardless of how many
+/// regions a real process maps.
+///
+/// ## Honest limits
+///
+/// - It attributes pages mapped into THIS process. A framework that parks
+///   bytes in another process (WindowServer, `replayd`) is invisible to it,
+///   and a spike that does not move any bucket here is evidence FOR that.
+/// - `Untagged` is a genuine bucket, not a failure: anonymous `mmap` and the
+///   shared cache both live there. A climb in `Untagged` narrows the owner
+///   without naming it.
+/// - Region-level `user_tag` is set by whoever mapped the memory. It names the
+///   allocating FRAMEWORK, not the feature -- `IoSurface` growing says
+///   "IOSurfaces", not "ScreenCaptureKit specifically".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmAttribution {
+    /// Owners with any nonzero bytes, sorted by `dirty_bytes` descending
+    /// (ties broken by `resident_bytes`, then by owner order for determinism).
+    pub owners: Vec<VmOwnerBytes>,
+    pub regions_walked: u32,
+    /// True when `VM_REGION_WALK_LIMIT` was reached -- the numbers are a floor.
+    pub truncated: bool,
+    pub total_resident_bytes: u64,
+    pub total_dirty_bytes: u64,
+    /// The raw `VM_MEMORY_*` tag with the most dirty bytes among regions that
+    /// fell into `VmOwner::Other`, when that bucket has any. A number in
+    /// `0..=255`, so it is safe to ship, and it turns a surprising `other`
+    /// into a one-line lookup in `<mach/vm_statistics.h>`.
+    pub other_top_user_tag: Option<u32>,
+}
+
+impl VmAttribution {
+    /// The owner holding the most dirty bytes, or `None` when nothing is
+    /// dirty. This is the value that crosses the Sentry boundary.
+    pub fn top_owner(&self) -> Option<VmOwner> {
+        self.owners
+            .iter()
+            .find(|entry| entry.dirty_bytes > 0)
+            .map(|entry| entry.owner)
+    }
+}
+
+/// Fold raw per-owner byte pairs into a sorted [`VmAttribution`]. Split out
+/// from the syscall loop so the ordering, filtering and `other_top_user_tag`
+/// rules are testable on every platform rather than only where the walk runs.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn build_vm_attribution(
+    totals: [(u64, u64); 14],
+    regions_walked: u32,
+    truncated: bool,
+    other_top_user_tag: Option<u32>,
+) -> VmAttribution {
+    let mut owners: Vec<VmOwnerBytes> = VmOwner::ALL
+        .iter()
+        .map(|owner| VmOwnerBytes {
+            owner: *owner,
+            resident_bytes: totals[owner.index()].0,
+            dirty_bytes: totals[owner.index()].1,
+        })
+        .filter(|entry| entry.resident_bytes > 0 || entry.dirty_bytes > 0)
+        .collect();
+    // Dirty first: it is the column that sums to `phys_footprint`, so ranking
+    // by resident would put the (clean, shared, never-growing) dyld cache above
+    // the bucket that actually moved.
+    owners.sort_by(|a, b| {
+        b.dirty_bytes
+            .cmp(&a.dirty_bytes)
+            .then(b.resident_bytes.cmp(&a.resident_bytes))
+            .then(a.owner.cmp(&b.owner))
+    });
+    let total_resident_bytes = owners.iter().map(|entry| entry.resident_bytes).sum();
+    let total_dirty_bytes = owners.iter().map(|entry| entry.dirty_bytes).sum();
+    let other_top_user_tag = owners
+        .iter()
+        .any(|entry| entry.owner == VmOwner::Other)
+        .then_some(other_top_user_tag)
+        .flatten();
+    VmAttribution {
+        owners,
+        regions_walked,
+        truncated,
+        total_resident_bytes,
+        total_dirty_bytes,
+        other_top_user_tag,
+    }
+}
+
+/// Render [`VmAttribution`] as log fields. Pure, so a field log's shape is
+/// asserted rather than assumed (#106's own complaint was that the one metric
+/// which would have attributed the spike never reached a log).
+///
+/// `None` renders `vm_walk=unavailable` with no numbers at all -- on Windows,
+/// and on a failed read, absence must not read as "nothing is allocated".
+pub fn vm_attribution_fields(attribution: Option<&VmAttribution>) -> String {
+    let Some(attribution) = attribution else {
+        return "vm_walk=unavailable vm_regions=n/a vm_resident_mb=n/a vm_dirty_mb=n/a \
+                vm_top=n/a vm_other_tag=n/a"
+            .to_string();
+    };
+    let mb = |bytes: u64| bytes / (1024 * 1024);
+    let walk = if attribution.truncated {
+        "truncated"
+    } else {
+        "complete"
+    };
+    let top = if attribution.owners.is_empty() {
+        "none".to_string()
+    } else {
+        attribution
+            .owners
+            .iter()
+            .take(VM_ATTRIBUTION_TOP_N)
+            .map(|entry| {
+                format!(
+                    "{}:{}/{}",
+                    entry.owner.tag(),
+                    mb(entry.resident_bytes),
+                    mb(entry.dirty_bytes)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let other_tag = attribution
+        .other_top_user_tag
+        .map(|tag| tag.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    format!(
+        "vm_walk={walk} vm_regions={} vm_resident_mb={} vm_dirty_mb={} vm_top={top} \
+         vm_other_tag={other_tag}",
+        attribution.regions_walked,
+        mb(attribution.total_resident_bytes),
+        mb(attribution.total_dirty_bytes)
+    )
 }
 
 /// Global counter of this app's own live (constructed, not yet dropped)
@@ -527,6 +1076,265 @@ mod tests {
             "raising a pool limit must raise the reported ceiling"
         );
         assert_eq!(frame_pool_ceiling(2560, 1440, 0, 0, 0).total_bytes, 0);
+    }
+
+    #[test]
+    fn vm_owner_decodes_the_tags_that_separate_the_106_candidates() {
+        // The four that matter for #106: SCK/VideoToolbox surfaces, the GPU
+        // driver, CoreMedia's own pools, and the C heap libwebrtc allocates
+        // from. Values are VM_MEMORY_* from <mach/vm_statistics.h>.
+        assert_eq!(VmOwner::from_user_tag(88), VmOwner::IoSurface);
+        assert_eq!(VmOwner::from_user_tag(21), VmOwner::IoKit);
+        assert_eq!(VmOwner::from_user_tag(100), VmOwner::IoAccelerator);
+        assert_eq!(VmOwner::from_user_tag(94), VmOwner::CoreMedia);
+        assert_eq!(VmOwner::from_user_tag(91), VmOwner::CoreMedia);
+        assert_eq!(VmOwner::from_user_tag(1), VmOwner::Malloc);
+        assert_eq!(VmOwner::from_user_tag(3), VmOwner::Malloc);
+        assert_eq!(VmOwner::from_user_tag(11), VmOwner::Malloc);
+        assert_eq!(VmOwner::from_user_tag(0), VmOwner::Untagged);
+        assert_eq!(VmOwner::from_user_tag(30), VmOwner::Stack);
+        assert_eq!(VmOwner::from_user_tag(33), VmOwner::Dylib);
+        assert_eq!(VmOwner::from_user_tag(42), VmOwner::CoreGraphics);
+        assert_eq!(VmOwner::from_user_tag(51), VmOwner::CoreAnimation);
+        assert_eq!(VmOwner::from_user_tag(63), VmOwner::JavaScript);
+        assert_eq!(VmOwner::from_user_tag(89), VmOwner::Network);
+        assert_eq!(VmOwner::from_user_tag(90), VmOwner::Audio);
+        // A tag Apple has not assigned yet degrades to `Other`, never panics
+        // and is never dropped from the accounting.
+        assert_eq!(VmOwner::from_user_tag(200), VmOwner::Other);
+        assert_eq!(VmOwner::from_user_tag(255), VmOwner::Other);
+    }
+
+    #[test]
+    fn vm_owner_mapping_is_total_and_the_index_is_a_bijection() {
+        // Every one of the 256 possible user tags maps somewhere -- the walk
+        // must never silently discard bytes.
+        for tag in 0u32..=255 {
+            let owner = VmOwner::from_user_tag(tag);
+            assert!(VmOwner::ALL.contains(&owner), "tag {tag} left the set");
+        }
+        let mut seen = [false; 14];
+        for owner in VmOwner::ALL {
+            let index = owner.index();
+            assert!(!seen[index], "{owner:?} reuses index {index}");
+            seen[index] = true;
+        }
+        assert!(seen.iter().all(|hit| *hit));
+        let mut tags: Vec<&str> = VmOwner::ALL.iter().map(|owner| owner.tag()).collect();
+        tags.sort_unstable();
+        let count = tags.len();
+        tags.dedup();
+        assert_eq!(tags.len(), count, "owner tag strings must be distinct");
+    }
+
+    fn synthetic_totals(pairs: &[(VmOwner, u64, u64)]) -> [(u64, u64); 14] {
+        let mut totals = [(0u64, 0u64); 14];
+        for (owner, resident, dirty) in pairs {
+            totals[owner.index()] = (*resident, *dirty);
+        }
+        totals
+    }
+
+    #[test]
+    fn vm_attribution_ranks_by_dirty_so_the_clean_shared_cache_cannot_lead() {
+        // The dyld shared cache reads ~110 MB RESIDENT and 0 dirty in every
+        // process. Ranking by resident would put it first on every line and
+        // bury the bucket that actually grew.
+        const MB: u64 = 1024 * 1024;
+        let attribution = build_vm_attribution(
+            synthetic_totals(&[
+                (VmOwner::Untagged, 112 * MB, 0),
+                (VmOwner::IoSurface, 281 * MB, 281 * MB),
+                (VmOwner::Malloc, 40 * MB, 38 * MB),
+            ]),
+            78,
+            false,
+            None,
+        );
+        assert_eq!(
+            attribution
+                .owners
+                .iter()
+                .map(|entry| entry.owner)
+                .collect::<Vec<_>>(),
+            vec![VmOwner::IoSurface, VmOwner::Malloc, VmOwner::Untagged]
+        );
+        assert_eq!(attribution.top_owner(), Some(VmOwner::IoSurface));
+        assert_eq!(attribution.total_resident_bytes, (112 + 281 + 40) * MB);
+        assert_eq!(attribution.total_dirty_bytes, (281 + 38) * MB);
+        // Owners with nothing at all are dropped rather than printed as zeros.
+        assert!(attribution
+            .owners
+            .iter()
+            .all(|entry| entry.owner != VmOwner::CoreMedia));
+    }
+
+    #[test]
+    fn vm_attribution_reports_no_top_owner_when_nothing_is_dirty() {
+        const MB: u64 = 1024 * 1024;
+        let attribution = build_vm_attribution(
+            synthetic_totals(&[(VmOwner::Untagged, 112 * MB, 0)]),
+            9,
+            false,
+            None,
+        );
+        assert_eq!(attribution.top_owner(), None);
+    }
+
+    #[test]
+    fn vm_attribution_keeps_the_raw_other_tag_only_when_other_has_bytes() {
+        const MB: u64 = 1024 * 1024;
+        let with_other = build_vm_attribution(
+            synthetic_totals(&[(VmOwner::Other, 9 * MB, 9 * MB)]),
+            4,
+            false,
+            Some(107),
+        );
+        assert_eq!(with_other.other_top_user_tag, Some(107));
+        // A raw tag with no `Other` bytes behind it would be a number with no
+        // meaning on the line.
+        let without_other = build_vm_attribution(
+            synthetic_totals(&[(VmOwner::Malloc, 9 * MB, 9 * MB)]),
+            4,
+            false,
+            Some(107),
+        );
+        assert_eq!(without_other.other_top_user_tag, None);
+    }
+
+    #[test]
+    fn vm_attribution_fields_render_the_top_owners_and_the_totals() {
+        const MB: u64 = 1024 * 1024;
+        let attribution = build_vm_attribution(
+            synthetic_totals(&[
+                (VmOwner::Untagged, 112 * MB, 1 * MB),
+                (VmOwner::IoSurface, 281 * MB, 281 * MB),
+                (VmOwner::Malloc, 40 * MB, 38 * MB),
+                (VmOwner::CoreMedia, 12 * MB, 11 * MB),
+                (VmOwner::Dylib, 2 * MB, 0),
+            ]),
+            78,
+            false,
+            None,
+        );
+        let line = vm_attribution_fields(Some(&attribution));
+        assert_eq!(
+            line,
+            "vm_walk=complete vm_regions=78 vm_resident_mb=447 vm_dirty_mb=331 \
+             vm_top=iosurface:281/281,malloc:40/38,coremedia:12/11,untagged:112/1 \
+             vm_other_tag=n/a"
+        );
+        // VM_ATTRIBUTION_TOP_N caps the list -- the fifth owner is summarised
+        // by the totals, not printed.
+        assert!(!line.contains("dylib"));
+    }
+
+    #[test]
+    fn vm_attribution_fields_say_unavailable_rather_than_inventing_zeros() {
+        // Windows, and a failed macOS read, must not render as "0 MB
+        // everywhere" -- that is a fabricated all-clear.
+        let line = vm_attribution_fields(None);
+        assert!(line.contains("vm_walk=unavailable"), "{line}");
+        assert!(line.contains("vm_dirty_mb=n/a"), "{line}");
+        assert!(line.contains("vm_top=n/a"), "{line}");
+        assert!(!line.contains("_mb=0"), "{line}");
+    }
+
+    #[test]
+    fn vm_attribution_fields_mark_a_capped_walk_as_truncated() {
+        let attribution = build_vm_attribution(
+            synthetic_totals(&[(VmOwner::Malloc, 1024 * 1024, 1024 * 1024)]),
+            VM_REGION_WALK_LIMIT,
+            true,
+            None,
+        );
+        let line = vm_attribution_fields(Some(&attribution));
+        assert!(line.contains("vm_walk=truncated"), "{line}");
+        assert!(line.contains(&format!("vm_regions={VM_REGION_WALK_LIMIT}")), "{line}");
+    }
+
+    #[test]
+    fn vm_walk_bounds_are_both_real_and_the_deadline_is_checked_often_enough() {
+        // Two independent bounds, because the region cap alone is not a time
+        // bound: at the ~13 us per region measured here, 16,384 regions is
+        // ~213 ms, and `start_begin` runs in the user's click path.
+        assert!(VM_REGION_WALK_LIMIT > 0);
+        assert!(VM_REGION_WALK_DEADLINE > Duration::ZERO);
+        // The deadline check must fire well before the region cap, or it is
+        // decoration.
+        assert!(VM_REGION_WALK_DEADLINE_CHECK_INTERVAL < VM_REGION_WALK_LIMIT);
+        assert!(VM_REGION_WALK_DEADLINE < Duration::from_millis(100));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn vm_attribution_walks_this_process_and_its_dirty_total_tracks_phys_footprint() {
+        // The claim this diagnostic rests on: the per-owner DIRTY column sums
+        // to `phys_footprint`, the very metric #106 is written in. Measured
+        // exactly equal on this machine in a controlled C harness; asserted
+        // loosely here because a live test process allocates between the two
+        // reads.
+        let attribution =
+            vm_attribution().expect("a running macOS process must have walkable VM regions");
+        assert!(attribution.regions_walked > 0);
+        assert!(
+            !attribution.truncated,
+            "a test process should not need {VM_REGION_WALK_LIMIT} regions"
+        );
+        assert!(
+            attribution.total_dirty_bytes > 1024 * 1024,
+            "a running process must have more than a megabyte dirty, got {}",
+            attribution.total_dirty_bytes
+        );
+        assert!(attribution.total_resident_bytes >= attribution.total_dirty_bytes);
+        let footprint = process_footprint_bytes().expect("phys_footprint must be readable");
+        let ratio = attribution.total_dirty_bytes as f64 / footprint as f64;
+        assert!(
+            (0.5..=2.0).contains(&ratio),
+            "walked dirty {} vs phys_footprint {footprint} (ratio {ratio:.2}) -- the \
+             decomposition no longer tracks the number it claims to explain",
+            attribution.total_dirty_bytes
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn vm_attribution_attributes_a_deliberate_allocation_to_the_malloc_owner() {
+        // Red-then-green in one test: walk, dirty a known number of bytes,
+        // walk again, and require the growth to land in the bucket that owns
+        // it. Without this, "the walker returns plausible numbers" would be
+        // the whole of the evidence -- and a mis-decoded `user_tag` returns
+        // plausible numbers too.
+        const CHUNK: usize = 128 * 1024 * 1024;
+        let dirty_before = vm_attribution()
+            .expect("walk must work")
+            .owners
+            .iter()
+            .find(|entry| entry.owner == VmOwner::Malloc)
+            .map(|entry| entry.dirty_bytes)
+            .unwrap_or(0);
+        let mut block = vec![0u8; CHUNK];
+        // Touch every page: an untouched allocation is neither resident nor
+        // dirty, so a walker could "pass" this test while reading nothing.
+        for index in (0..CHUNK).step_by(4096) {
+            block[index] = 0xA5;
+        }
+        let after = vm_attribution().expect("walk must work");
+        let dirty_after = after
+            .owners
+            .iter()
+            .find(|entry| entry.owner == VmOwner::Malloc)
+            .map(|entry| entry.dirty_bytes)
+            .expect("a 128 MiB touched allocation must give the malloc owner bytes");
+        let growth = dirty_after.saturating_sub(dirty_before);
+        assert!(
+            growth >= 100 * 1024 * 1024,
+            "malloc dirty grew only {growth} bytes after touching {CHUNK} -- \
+             attribution is not tracking the allocation"
+        );
+        // Keep the block alive across the second walk; dropping it earlier
+        // would let the allocator return the pages before they are counted.
+        assert_eq!(block[0], 0xA5);
     }
 
     #[test]
