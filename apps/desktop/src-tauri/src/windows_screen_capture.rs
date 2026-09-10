@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use crate::sync_ext::MutexExt;
 use crate::windows_capture_target::{self, WindowsCaptureTarget};
+use crate::wgc_border_policy::{self, BorderFailureCause, BorderRequestFailure};
 use windows::core::{factory, IInspectable, Interface};
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
@@ -339,6 +340,19 @@ fn runtime_indicator_fallback_outcome(
     } else {
         RuntimeIndicatorFallbackOutcome::Terminal
     })
+}
+
+/// Bounded Sentry tag for a failed `IsBorderRequired` write: direction x
+/// cause, mirrored string-for-string from `wgc_border_policy` (that module
+/// must not depend on `logging`'s Sentry machinery). `#163`.
+fn wgc_border_failure_tag(failure: &BorderRequestFailure) -> crate::logging::WgcBorderFailureTag {
+    use crate::logging::WgcBorderFailureTag as Tag;
+    match (failure.requested_border, failure.cause) {
+        (true, BorderFailureCause::NoInterface) => Tag::ShowNoInterface,
+        (true, BorderFailureCause::Other) => Tag::ShowOther,
+        (false, BorderFailureCause::NoInterface) => Tag::HideNoInterface,
+        (false, BorderFailureCause::Other) => Tag::HideOther,
+    }
 }
 
 /// Keep the safe indicator transition ordered at the capture-thread boundary.
@@ -721,52 +735,87 @@ fn setup_capture(
     let session = pool
         .CreateCaptureSession(&item)
         .map_err(|error| format!("failed to create capture session: {error}"))?;
-    // `IsBorderRequired` is available from Windows 10 build 20348 (not
-    // 19041). The coordinator has already proven that borderless consent and
-    // the replacement surface are both ready before a `Petal` mode reaches
-    // this boundary. Any API failure is logged; the capture itself continues
-    // because the system indicator is the safe fallback.
+    // `IsBorderRequired` (`IGraphicsCaptureSession2`) exists from Windows 10
+    // build 20348, not 19041; below that the write is E_NOINTERFACE and WGC
+    // draws its border unconditionally. A failed write is decided by the
+    // DIRECTION of the request (`wgc_border_policy`, #163): failing to SHOW
+    // the border is benign -- it was never off, `System` is already satisfied
+    // and the capture continues; failing to HIDE it must never proceed
+    // borderless -- WGC's border is restored and the Petal replacement
+    // disabled first, and only a failed restore is terminal. The coordinator
+    // has already proven borderless consent and a ready replacement before a
+    // `Petal` mode reaches this boundary. Before #163 a failed SHOW aborted
+    // the share for failing to request what the system was already doing
+    // (Sentry PETAL-DESKTOP-2J/2K on 0.9.23).
     let mut effective_indicator_mode = indicator_mode;
     let mut system_border_required = indicator_mode.system_border_required();
     if let Err(error) = session.SetIsBorderRequired(system_border_required) {
+        let failure =
+            wgc_border_policy::on_border_request_failure(system_border_required, error.code().0);
+        // Numeric HRESULT + bounded cause lead so the line is greppable; the
+        // localized OS text (`{error}`) only ever trails.
         log::warn!(
-            "windows screen capture: could not configure capture border mode={:?} region={} system_required={system_border_required}: {error}",
-            effective_indicator_mode,
-            region.is_some()
+            "windows screen capture: SetIsBorderRequired({system_border_required}) failed \
+             mode={:?} region={} cause={} hresult={:#010x} decision={:?}: {error}",
+            indicator_mode,
+            region.is_some(),
+            failure.cause.as_str(),
+            failure.hresult,
+            failure.decision
         );
-        if indicator_mode == CaptureIndicatorMode::Petal {
-            // A failed false-setting must never leave a custom border next to
-            // an uncertain WGC state. Restore WGC's border first, then hide
-            // the local replacement before any frame is delivered.
-            let fallback = restore_system_indicator_before_disable(
-                indicator_mode,
-                || {
-                    session
-                        .SetIsBorderRequired(true)
-                        .map_err(|error| error.to_string())
+        crate::logging::capture_sentry_diagnostic(
+            crate::logging::SentryDiagnosticEvent::WgcBorderRequestFailed(
+                crate::logging::WgcBorderRequestFailedDiagnostic {
+                    failure: wgc_border_failure_tag(&failure),
                 },
-                || {
-                    signal.mark_system_indicator_restored();
-                    crate::windows_share_overlay::disable_custom_indicator_for_fallback(token);
-                },
-            );
-            match fallback {
-                Ok(()) => {
-                    effective_indicator_mode = CaptureIndicatorMode::System;
-                    system_border_required = true;
-                }
-                Err(fallback_error) => {
-                    let message = format!(
-                        "system indicator fallback failed during capture setup: {fallback_error}"
-                    );
-                    set_terminal_error(state, &message);
-                    return Err(message);
+            ),
+        );
+        match failure.decision {
+            wgc_border_policy::BorderFailureDecision::ContinueWithSystemBorder => {
+                effective_indicator_mode = CaptureIndicatorMode::System;
+                system_border_required = true;
+            }
+            wgc_border_policy::BorderFailureDecision::RefuseBorderless => {
+                // A failed false-setting must never leave a custom border next
+                // to an uncertain WGC state. Restore WGC's border first, then
+                // hide the local replacement before any frame is delivered.
+                let fallback = restore_system_indicator_before_disable(
+                    indicator_mode,
+                    || {
+                        session.SetIsBorderRequired(true).map_err(|restore_error| {
+                            let cause = BorderFailureCause::classify(restore_error.code().0);
+                            log::warn!(
+                                "windows screen capture: restore SetIsBorderRequired(true) failed \
+                                 cause={} hresult={:#010x}: {restore_error}",
+                                cause.as_str(),
+                                restore_error.code().0
+                            );
+                            format!(
+                                "restore SetIsBorderRequired(true) failed cause={} hresult={:#010x}",
+                                cause.as_str(),
+                                restore_error.code().0
+                            )
+                        })
+                    },
+                    || {
+                        signal.mark_system_indicator_restored();
+                        crate::windows_share_overlay::disable_custom_indicator_for_fallback(token);
+                    },
+                );
+                match fallback {
+                    Ok(()) => {
+                        effective_indicator_mode = CaptureIndicatorMode::System;
+                        system_border_required = true;
+                    }
+                    Err(fallback_error) => {
+                        let message = format!(
+                            "system indicator fallback failed during capture setup: {fallback_error}"
+                        );
+                        set_terminal_error(state, &message);
+                        return Err(message);
+                    }
                 }
             }
-        } else {
-            let message = format!("required WGC system indicator could not be configured: {error}");
-            set_terminal_error(state, &message);
-            return Err(message);
         }
     }
     log::info!(
@@ -1688,6 +1737,53 @@ impl Drop for ComApartment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `wgc_border_policy::E_NOINTERFACE` is hand-typed so that module stays
+    /// host-independent; this pins it to the SDK constant on the one host
+    /// that has it (#163).
+    #[test]
+    fn e_nointerface_matches_the_sdk_constant() {
+        assert_eq!(
+            wgc_border_policy::E_NOINTERFACE,
+            windows::Win32::Foundation::E_NOINTERFACE.0
+        );
+        assert_eq!(
+            BorderFailureCause::classify(windows::Win32::Foundation::E_NOINTERFACE.0),
+            BorderFailureCause::NoInterface
+        );
+    }
+
+    /// Every (direction, cause) pair maps to its own bounded Sentry tag, and
+    /// the #163 field shape maps to `show_no_interface`.
+    #[test]
+    fn wgc_border_failure_tag_covers_every_direction_and_cause() {
+        use crate::logging::WgcBorderFailureTag as Tag;
+        let e_nointerface = windows::Win32::Foundation::E_NOINTERFACE.0;
+        let e_fail = windows::Win32::Foundation::E_FAIL.0;
+        let cases = [
+            (true, e_nointerface, Tag::ShowNoInterface),
+            (true, e_fail, Tag::ShowOther),
+            (false, e_nointerface, Tag::HideNoInterface),
+            (false, e_fail, Tag::HideOther),
+        ];
+        for (requested, hresult, expected) in cases {
+            let failure = wgc_border_policy::on_border_request_failure(requested, hresult);
+            assert_eq!(
+                wgc_border_failure_tag(&failure),
+                expected,
+                "requested={requested} hresult={hresult:#010x}"
+            );
+        }
+        let field_shape = wgc_border_policy::on_border_request_failure(
+            CaptureIndicatorMode::System.system_border_required(),
+            e_nointerface,
+        );
+        assert_eq!(
+            field_shape.decision,
+            wgc_border_policy::BorderFailureDecision::ContinueWithSystemBorder
+        );
+        assert_eq!(wgc_border_failure_tag(&field_shape), Tag::ShowNoInterface);
+    }
 
     #[test]
     fn borderless_policy_allows_only_allowed_status() {
