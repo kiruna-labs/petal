@@ -164,6 +164,8 @@ dotenvy = "0.15"
 # Test Cockpit MULTI-3 independently fingerprints the native presence roster
 # with the browser's SHA-256 canonicalization (#261). Already locked transitively.
 sha2 = "0.11"
+# Plugin registry: verifies index.json / bundle.json signatures (plugins/README.md §2.9).
+minisign-verify = "0.2"
 # Query-param encoding for compositor.rs's header webview URL (owner display
 # name / source window title, both arbitrary user/OS strings that can
 # contain spaces, em dashes, etc. -- share_border.rs's own hand-rolled `#`-only

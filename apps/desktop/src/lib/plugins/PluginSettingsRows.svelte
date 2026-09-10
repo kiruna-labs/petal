@@ -22,9 +22,11 @@
     installed: InstalledPlugin[];
     storage: StorageLike | undefined;
     onChanged?: (pluginId: string, enabled: boolean) => void;
+    /** Registry/dev installs only (built-ins cannot be removed). */
+    onUninstall?: (pluginId: string) => void;
   }
 
-  let { installed, storage, onChanged }: Props = $props();
+  let { installed, storage, onChanged, onUninstall }: Props = $props();
 
   // null until the user toggles something; until then the stored map is read
   // reactively so a `storage` prop change is honoured.
@@ -58,6 +60,9 @@
             {/if}
           </span>
         </label>
+        {#if row.canUninstall && onUninstall}
+          <button type="button" class="permissions-toggle remove" onclick={() => onUninstall?.(row.id)}>Remove {row.name}</button>
+        {/if}
         <button
           type="button"
           class="permissions-toggle"
@@ -171,6 +176,10 @@
     cursor: pointer;
     text-decoration: underline;
     text-underline-offset: 2px;
+  }
+
+  .permissions-toggle.remove {
+    color: var(--danger);
   }
 
   .permissions-toggle:focus-visible {

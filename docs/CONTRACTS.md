@@ -1263,6 +1263,28 @@ Files to change together:
 - `web-harness/tests/contracts.test.ts`
 - `contracts/petal-contracts.json`
 
+## Plugin registry
+
+`contracts/plugin-registry/` pins the registry the desktop installs from
+(`apps/desktop/src-tauri/src/plugins/registry.rs`, `minisign-verify`): a
+sample `index.json` and `bundle.json` signed with a throwaway test key
+(`test.pub`), plus `invalid-index-cases.json`, mutations that BOTH index
+validators (`plugins::registry::validate_index` and
+`shared/plugin-host/registry.ts` `parseRegistryIndex`, which the desktop
+Settings browser runs over the Rust-verified index) must reject case by case.
+Verify chain: minisign(index) → `generatedAt`/signature `timestamp:` not
+older than the last accepted index (anti-rollback, persisted in
+`plugins.json`) → `sha256(bundle) == entry.sha256` and `size` →
+minisign(bundle) → bundle manifest id/version == entry → grant =
+index permissions ∩ manifest permissions (known permissions only) → stored
+bundle re-hashed on every read. The public key is a compile-time constant
+(`option_env!`); the URL may be overridden at runtime in debug builds only.
+Entries with `verified: false` are listed but never installable. The private
+marketplace repository vendors this directory byte-for-byte; regenerate with
+`node contracts/plugin-registry/gen-fixtures.mjs`. Tests:
+`web-harness/tests/pluginRegistry.test.ts`, `plugins::registry` tests
+(including end-to-end installs against a fake registry server).
+
 ## Invite Links and Join Vectors
 
 Canonical HTTPS invite links:

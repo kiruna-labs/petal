@@ -1,0 +1,24 @@
+{
+  "$comment": "Mutations of index.json that BOTH registry implementations must reject as a whole (shared/plugin-host/registry.ts parseRegistryIndex and plugins::registry::validate_index). Each case applies `value` at `path` (a JSON pointer) to the fixture index; `delete: true` removes the pointed-at key instead.",
+  "cases": [
+    { "name": "schemaVersion must be 1", "path": "/schemaVersion", "value": 2 },
+    { "name": "generatedAt must be an RFC 3339 date", "path": "/generatedAt", "value": "not a date at all" },
+    { "name": "generatedAt before the registry existed", "path": "/generatedAt", "value": "1970-01-01T00:00:00.000Z" },
+    { "name": "http bundle url on a public host", "path": "/plugins/0/versions/0/bundleUrl", "value": "http://plugins.example.test/x" },
+    { "name": "localhost-prefixed public host is not localhost", "path": "/plugins/0/versions/0/bundleUrl", "value": "http://localhost.attacker.example/x" },
+    { "name": "127.0.0.1-prefixed public host is not loopback", "path": "/plugins/0/versions/0/sigUrl", "value": "http://127.0.0.1.attacker.example/x" },
+    { "name": "duplicate plugin id", "path": "/plugins/1/id", "value": "petal.test-hello" },
+    { "name": "latest not among versions", "path": "/plugins/0/latest", "value": "9.9.9" },
+    { "name": "sha256 must be 64 lowercase hex", "path": "/plugins/0/versions/0/sha256", "value": "XYZ" },
+    { "name": "size must be positive and within the bundle cap", "path": "/plugins/0/versions/0/size", "value": 0 },
+    { "name": "unknown permission", "path": "/plugins/0/versions/0/permissions", "value": ["meeting:read", "totally:made:up"] },
+    { "name": "reserved permission frames:read", "path": "/plugins/0/versions/0/permissions", "value": ["frames:read"] },
+    { "name": "net:fetch wildcard", "path": "/plugins/0/versions/0/permissions", "value": ["net:fetch:*"] },
+    { "name": "duplicate permission", "path": "/plugins/0/versions/0/permissions", "value": ["data:publish", "data:publish"] },
+    { "name": "bad plugin id", "path": "/plugins/0/id", "value": "Reactions" },
+    { "name": "name too long", "path": "/plugins/0/name", "value": "xxxxxxxxxxxxxxxxxxxxxxxxx" },
+    { "name": "version not strict semver", "path": "/plugins/0/versions/0/version", "value": "1.0" },
+    { "name": "verified must be boolean", "path": "/plugins/0/versions/0/verified", "value": "yes" },
+    { "name": "missing versions", "path": "/plugins/0/versions", "delete": true }
+  ]
+}

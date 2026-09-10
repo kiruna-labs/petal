@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-08T12:00:00.000Z",
+  "plugins": [
+    {
+      "id": "petal.test-hello",
+      "name": "Hello (test)",
+      "description": "Fixture plugin used by the plugin-host tests.",
+      "publisher": "petal",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "minHostVersion": "0.1.0",
+          "apiVersion": 1,
+          "permissions": [
+            "meeting:read",
+            "state:write",
+            "ui:toolbar-button",
+            "ui:toast"
+          ],
+          "bundleUrl": "https://plugins.example.test/plugins/petal.test-hello/1.0.0/bundle.json",
+          "sigUrl": "https://plugins.example.test/plugins/petal.test-hello/1.0.0/bundle.json.minisig",
+          "sha256": "19960f5779b3301b4c04fcb1995fdae5d5dfea3aa66bdf9e0d0e317e8f13bae2",
+          "size": 2092,
+          "verified": true,
+          "scan": {
+            "tool": "petal-scan",
+            "reportSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "at": "2026-09-08T11:00:00.000Z"
+          }
+        }
+      ]
+    },
+    {
+      "id": "acme.unverified-thing",
+      "name": "Unverified Thing",
+      "description": "A third-party plugin awaiting review.",
+      "publisher": "acme",
+      "latest": "0.1.0",
+      "versions": [
+        {
+          "version": "0.1.0",
+          "minHostVersion": "0.9.7",
+          "apiVersion": 1,
+          "permissions": [
+            "meeting:read",
+            "ui:toast"
+          ],
+          "bundleUrl": "https://plugins.example.test/plugins/acme.unverified-thing/0.1.0/bundle.json",
+          "sigUrl": "https://plugins.example.test/plugins/acme.unverified-thing/0.1.0/bundle.json.minisig",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 1234,
+          "verified": false,
+          "scan": null
+        }
+      ]
+    }
+  ]
+}

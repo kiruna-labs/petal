@@ -150,5 +150,8 @@ not accepted. New listings and version bumps appear as "Awaiting review"
 until a core-team member has read the change, and only then become
 installable. The app installs only bundles whose signature verifies against
 the registry key it was built with, whose sha256 and size match the signed
-index, and whose manifest id/version match the listing. Keep a lockfile in
-your repo: the build job has no network beyond what the lockfile pins.
+index, and whose manifest id/version match the listing. Users install from
+Settings → Plugins → Get plugins after seeing your permissions in plain
+words, and can remove or turn off your plugin there at any time. Keep a
+lockfile in your repo: the build job has no network beyond what the lockfile
+pins.

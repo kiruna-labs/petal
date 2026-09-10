@@ -82,6 +82,10 @@
   });
 
   function boot(version: string) {
+    void bootAsync(version);
+  }
+
+  async function bootAsync(version: string) {
     host = createPluginHost({
       document,
       adapter: createTauriAdapter({
@@ -101,7 +105,8 @@
         hostLog('warn', message);
       }
     });
-    for (const { plugin, source } of enabledPlugins()) {
+    for (const { plugin, source } of await enabledPlugins()) {
+      if (!host) return; // destroyed while the catalog loaded
       const compat = hostCompatibility(plugin.manifest, version);
       // Dev builds report a non-numeric version ("dev"); run built-ins anyway there.
       if (!compat.ok && /^\d/.test(version)) {

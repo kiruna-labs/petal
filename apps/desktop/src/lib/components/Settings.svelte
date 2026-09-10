@@ -40,6 +40,7 @@
   easy to accidentally decorate with color that doesn't belong.
 -->
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -54,6 +55,9 @@
   import type { RemoteControlPolicy } from '$lib/ipc';
   import DeviceSelect from './DeviceSelect.svelte';
   import PluginSettingsRows from '$lib/plugins/PluginSettingsRows.svelte';
+  import PluginRegistryBrowser from '$lib/plugins/PluginRegistryBrowser.svelte';
+  import { setInstalledEnabled, uninstallPlugin, type CatalogEntry } from '$lib/plugins/pluginCatalog';
+  import { getVersion } from '@tauri-apps/api/app';
   import { installedPlugins } from '$lib/plugins/pluginCatalog';
   import { browserStorage } from '$lib/data/storageKeys';
   import IdentitySetup from './IdentitySetup.svelte';
@@ -249,7 +253,42 @@
   let launchedScope = $state<Set<string>>(new Set());
   // Feature groups the user has collapsed (default: all expanded).
   let collapsedFeatures = $state<Set<string>>(new Set());
-  const installedPluginList = installedPlugins();
+  // Plugins: built-ins + registry installs (async: the latter come from the
+  // Rust store). Refreshed after an install or removal.
+  let installedPluginList = $state<CatalogEntry[]>([]);
+  let pluginHostVersion = $state<string | null>(null);
+  let pluginsNote = $state<string | null>(null);
+  const installedPluginVersions = $derived(Object.fromEntries(installedPluginList.map((p) => [p.manifest.id, p.manifest.version])));
+  async function refreshPlugins() {
+    installedPluginList = await installedPlugins();
+  }
+  async function handlePluginEnabledChange(pluginId: string, enabled: boolean) {
+    const entry = installedPluginList.find((p) => p.manifest.id === pluginId);
+    if (entry && entry.source !== 'builtin') {
+      try {
+        await setInstalledEnabled(pluginId, enabled);
+      } catch (e) {
+        pluginsNote = `Could not save that change: ${String((e as Error)?.message ?? e)}`;
+      }
+    }
+  }
+  async function handlePluginUninstall(pluginId: string) {
+    try {
+      await uninstallPlugin(pluginId);
+      pluginsNote = null;
+      await refreshPlugins();
+    } catch (e) {
+      pluginsNote = `Could not remove that plugin: ${String((e as Error)?.message ?? e)}`;
+    }
+  }
+  onMount(() => {
+    void refreshPlugins();
+    if (hasTauriBridge()) {
+      void getVersion()
+        .then((v) => (pluginHostVersion = v))
+        .catch(() => {});
+    }
+  });
   const cockpitFeatureGroupsView = cockpitFeatureGroups();
   // AI chat (#656). The key is WRITE-ONLY: `ai_chat_settings` returns
   // `hasApiKey`, never the value (mirrors Rust's `settings::Redacted`), so this
@@ -1719,10 +1758,19 @@
     <!-- ============ Plugins (plugins/README.md) ============ -->
     <section class="section">
       <h2 class="section-title">Plugins</h2>
-      <PluginSettingsRows installed={installedPluginList} storage={browserStorage()} />
+      <PluginSettingsRows
+        installed={installedPluginList}
+        storage={browserStorage()}
+        onChanged={(id, enabled) => void handlePluginEnabledChange(id, enabled)}
+        onUninstall={(id) => void handlePluginUninstall(id)}
+      />
+      {#if pluginsNote}
+        <span class="device-note error">{pluginsNote}</span>
+      {/if}
       <span class="support-description">
         Plugins add features to Petal without adding them to the app itself. Changes apply the next time you join a meeting.
       </span>
+      <PluginRegistryBrowser installed={installedPluginVersions} hostVersion={pluginHostVersion} onInstalled={() => void refreshPlugins()} />
     </section>
 
     <!-- ============ Diagnostics ============ -->

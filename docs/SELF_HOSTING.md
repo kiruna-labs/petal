@@ -207,6 +207,32 @@ activates the local dev token mint, which reads `LIVEKIT_URL`,
 Changing the environment variable causes Cargo to rebuild the relevant crate,
 so do not rely on a previously built app bundle.
 
+### Plugin registry (optional)
+
+Petal can install plugins from a **signed static registry** (see
+`plugins/README.md` §2.9 and `contracts/plugin-registry/`). Like the token
+backend, there is no hosted default: a build without these two variables has
+no "Get plugins" section and only runs the built-in plugins (sideloading in
+developer mode never needs a registry).
+
+```bash
+PETAL_PLUGIN_REGISTRY_URL=https://plugins.example.com \
+PETAL_PLUGIN_REGISTRY_PUBKEY='RWT…your minisign public key…' \
+npm run tauri build
+```
+
+Generate the keypair with `minisign -G` (keep it separate from your updater
+key so a compromise of one does not reach the other) and publish
+`index.json`, `index.json.minisig`, and `plugins/<id>/<version>/bundle.json`
+(+ `.minisig`) at that URL. The desktop verifies the index signature, refuses an index
+older than the last one it accepted, checks each bundle's sha256, size and
+signature and its manifest, and re-hashes stored bundles on every load. The
+public key is compiled in and cannot be changed at runtime; only debug builds
+accept a runtime `PETAL_PLUGIN_REGISTRY_URL` override, which must still be
+signed by the baked key.
+The browser client uses `VITE_PETAL_PLUGIN_REGISTRY_URL` and
+`VITE_PETAL_PLUGIN_REGISTRY_PUBKEY` at its build time.
+
 ### Auto-update and release signing for a fork
 
 **A build from a plain clone never phones home.** The committed

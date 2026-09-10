@@ -384,10 +384,22 @@ repository.
 - Build config `PETAL_PLUGIN_REGISTRY_URL` and `PETAL_PLUGIN_REGISTRY_PUBKEY`
   (desktop, through `build.rs`) and `VITE_PETAL_PLUGIN_REGISTRY_URL` and
   `_PUBKEY` (web). Forks point at their own registry.
-- Verify chain in both clients: minisign(index), sha256 match,
-  minisign(bundle), manifest id and version equal the index entry, manifest
-  validates, `minHostVersion` satisfied. Rust uses `minisign-verify`
-  (already a dependency); web uses `shared/plugin-host/minisign.ts`.
+- Verify chain (desktop, Rust `plugins::registry`): minisign(index) →
+  anti-rollback (`generatedAt` and the signature's `timestamp:` may never go
+  backwards for a registry; persisted in `plugins.json`) → sha256 + size →
+  minisign(bundle) → manifest id/version equal the index entry → grant = index
+  permissions ∩ manifest permissions, known permissions only → stored bundle
+  re-hashed on every read. **The public key is compile-time only**
+  (`option_env!`); a runtime URL override exists in debug builds only and
+  must still verify under the baked key. Registry HTTP uses its own client:
+  no redirects, no default headers, body streamed and cut at the cap.
+  `shared/plugin-host/registry.ts` is the index MODEL (shape validation,
+  installability, updates) consumed by the desktop Settings browser on top of
+  the Rust-verified index; the two validators are pinned to each other by
+  `contracts/plugin-registry/invalid-index-cases.json`. The web client gets
+  its own signature verifier together with its install path (I-6), so no
+  unused crypto ships before then. The contract fixtures are produced by the
+  marketplace signer and verified by the Rust crate in tests.
 - `plugins/build-all.mjs` emits the deterministic `bundle.json` the publisher
   consumes. Bundles are produced only by the plugins repo's CI from pinned
   source (§2.13); the publisher never signs a bundle it did not build.
@@ -639,9 +651,9 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-2 | M1 | adapters, surfaces, reactions (local), Settings section | seinfish | merged (kiruna-labs/petal#4); web plugins sheet deferred to I-10 |
 | I-3 | M2 | data bus (web + Rust), contracts | seinfish | merged (kiruna-labs/petal#55); live native↔web Reactions smoke passed both directions 2026-09-08 (`web-harness/tests/fixtures/plugins/live-peer.mjs`); cockpit journey `PLUGIN-N2W-REACT` still to automate |
 | I-4 | M2 | state + advertisement | seinfish | merged (kiruna-labs/petal#55); post-merge fixes in #70 |
-| I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | implemented on feature/plugin-provenance (stacked on #70) |
-| I-5a | M3 | registry client | unassigned | not started |
-| I-5b | M3 | marketplace publisher + hosting (private repo) | unassigned | not started |
+| I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | merged (kiruna-labs/petal#71) |
+| I-5a | M3 | registry client | seinfish | PR kiruna-labs/petal#99 (review fixes landed 2026-09-09: compile-time key, anti-rollback, permission intersection, streaming client; desktop install/enable/remove UI; web loads registry installs in I-6) |
+| I-5b | M3 | marketplace publisher + hosting (`kiruna-labs/petal-website` `marketplace/`) | seinfish | publisher, keygen, signer, vendored contracts + drift guard done 2026-09-08; moved into the website repo 2026-09-09 (petal-website PR #1); hosting, protected publish workflow and review tooling still to do |
 | I-5c | M3 | plugin source repo split (`kiruna-labs/petal-plugins`), SDK on npm, vendored built-in bundles, community pointer model | unassigned | decided 2026-09-09 (§2.13); not started; do after I-5a merges and before I-7 |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |
 | I-7 | M3 | chat plugin (first plugin written in the plugins repo) | unassigned | not started |
