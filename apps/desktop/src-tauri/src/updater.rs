@@ -250,15 +250,12 @@ pub async fn download_and_install_compatible_update<R: Runtime>(
         .await
         .map_err(|e| format!("update download failed: {e}"))?;
 
-    verify_update_archive_architecture(&bytes).map_err(|e| {
-        log::error!("updater: architecture guard rejected update {version}: {e}");
-        // #116: this said "this Mac" on every platform, so a Windows user was
-        // told their PC was a Mac. Name the device the user is actually on.
-        #[cfg(target_os = "windows")]
-        let device = "this PC";
-        #[cfg(not(target_os = "windows"))]
-        let device = "this Mac";
-        format!("update is incompatible with {device}: {e}")
+    verify_update_archive_architecture(&bytes).map_err(|message| {
+        log::error!(
+            "updater: archive guard rejected update {version}: {message} -- the app cannot retry \
+             its way out of this, so the failure toast offers a manual installer download (#125)"
+        );
+        message
     })?;
 
     #[cfg(target_os = "macos")]
@@ -839,7 +836,36 @@ fn filesystem_is_read_only(path: &Path) -> bool {
     false
 }
 
+/// Stable opening of every rejected-archive message. A rejected archive is
+/// the one updater failure the app can never retry its way out of, so the
+/// frontend keys its "Download installer" recovery action off this exact
+/// marker (#125) instead of guessing from OS error text. Mirrored in
+/// `src/lib/data/updaterErrors.ts`; change both together or the user is left
+/// with a dead-end error again.
+pub const INCOMPATIBLE_UPDATE_MARKER: &str = "update is incompatible with";
+
+/// The user-facing message for an update archive the guard refused.
+///
+/// #116: this said "this Mac" on every platform, so a Windows user was told
+/// their PC was a Mac. Name the device the user is actually on.
+fn incompatible_update_message(detail: &str) -> String {
+    #[cfg(target_os = "windows")]
+    let device = "this PC";
+    #[cfg(not(target_os = "windows"))]
+    let device = "this Mac";
+    format!("{INCOMPATIBLE_UPDATE_MARKER} {device}: {detail}")
+}
+
+/// The single production entry point for the archive guard.
+///
+/// It -- not its caller -- stamps `INCOMPATIBLE_UPDATE_MARKER` onto every
+/// rejection, so no call site can forget it and strand the user with an
+/// unrecognisable, unactionable error again (#125).
 fn verify_update_archive_architecture(bytes: &[u8]) -> Result<(), String> {
+    verify_update_archive_shape(bytes).map_err(|detail| incompatible_update_message(&detail))
+}
+
+fn verify_update_archive_shape(bytes: &[u8]) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         // Windows updates are NSIS installers, not macOS .app bundles, so the
@@ -1666,6 +1692,59 @@ mod tests {
             .expect("the universal tarball must install on Apple Silicon");
         verify_macos_archive_supports(&archive, CpuArch::X86_64)
             .expect("the universal tarball must install on Intel");
+    }
+
+    /// #125, THE FAILURE BRANCH. A rejected archive is the one updater
+    /// outcome the app can never retry its way out of: the fix is a manual
+    /// reinstall, and the frontend can only offer that if it can recognise
+    /// the failure. This drives the real production entry point --
+    /// `verify_update_archive_architecture`, the exact function
+    /// `download_and_install_compatible_update` calls -- over bytes that are
+    /// not a valid update archive on any platform, and pins the marker the
+    /// "Download installer" action keys off.
+    #[test]
+    fn a_rejected_update_archive_carries_the_manual_download_marker() {
+        let message = verify_update_archive_architecture(b"<html>404 not found</html>")
+            .expect_err("a 404 page is not an update archive on any platform");
+        assert!(
+            message.starts_with(INCOMPATIBLE_UPDATE_MARKER),
+            "the frontend recovery action keys off this prefix: {message}"
+        );
+        // #116's other half: name the device the user is actually on.
+        #[cfg(target_os = "windows")]
+        assert!(message.contains("this PC"), "{message}");
+        #[cfg(not(target_os = "windows"))]
+        assert!(message.contains("this Mac"), "{message}");
+        // The underlying detail survives for petal.log.
+        assert!(message.len() > INCOMPATIBLE_UPDATE_MARKER.len() + 10, "{message}");
+    }
+
+    /// The marker must not be stamped onto a SUCCESS, or the frontend would
+    /// offer a manual download for an update that installed fine. Both
+    /// directions, per CLAUDE.md's "test a gate in BOTH directions".
+    #[test]
+    fn an_accepted_update_archive_carries_no_marker() {
+        #[cfg(target_os = "windows")]
+        verify_update_archive_architecture(&pe_stub(0x014c))
+            .expect("the real Windows update archive must still be accepted");
+        #[cfg(not(target_os = "windows"))]
+        {
+            let archive = test_update_archive(&fat_be(&[CPU_TYPE_X86_64, CPU_TYPE_ARM64]));
+            verify_update_archive_architecture(&archive)
+                .expect("the shipped universal tarball must still be accepted");
+        }
+    }
+
+    /// The wording is a cross-language contract with
+    /// `src/lib/data/updaterErrors.ts`, which classifies the failure by this
+    /// marker BEFORE its older "archive"/"unpack" heuristics -- "update
+    /// archive is not a Windows executable" contains "archive" and would
+    /// otherwise be reported as a retryable install failure.
+    #[test]
+    fn the_marker_is_the_documented_frontend_contract() {
+        assert_eq!(INCOMPATIBLE_UPDATE_MARKER, "update is incompatible with");
+        assert!(incompatible_update_message("update archive is not a Windows executable")
+            .starts_with(INCOMPATIBLE_UPDATE_MARKER));
     }
 
     /// ...while a genuinely wrong-arch macOS tarball is still refused, so the

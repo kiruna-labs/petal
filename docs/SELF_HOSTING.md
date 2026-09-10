@@ -183,6 +183,14 @@ you host your own browser peer (`web-harness/`), set
 `VITE_PETAL_INVITE_ORIGIN=https://meet.example.com` in the same build
 environment so the desktop app's invite links point at your deployment.
 
+The desktop app also links `GET /api/download?platform=macos|windows` from the
+updater's failure toast, so a client whose update archive is rejected can still
+reinstall by hand (#125). That link defaults to `https://app.petal.live`; set
+`VITE_PETAL_BACKEND_URL=https://petal-backend.example.com` alongside
+`PETAL_BACKEND_URL` so it points at your own backend instead. (`PETAL_BACKEND_URL`
+is read by Rust at compile time and is not visible to the frontend, which is why
+this second, `VITE_`-prefixed variable exists.)
+
 **There is no hosted default.** A build that leaves `PETAL_BACKEND_URL` unset
 bakes no backend at all. A **release** build refuses to compile in that state
 (`build.rs` hard-fails; set `PETAL_ALLOW_NO_BACKEND=1` to build a deliberately

@@ -1,13 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { friendlyUpdateErrorMessage } from '../src/lib/data/updaterErrors.ts';
+import {
+  INCOMPATIBLE_UPDATE_MARKER,
+  friendlyUpdateErrorMessage,
+  updateFailureCategory,
+  updateFailureOffersManualDownload
+} from '../src/lib/data/updaterErrors.ts';
+import { DOWNLOAD_ORIGIN, manualDownloadUrl } from '../src/lib/data/updateDownload.ts';
 
 const updaterSource = readFileSync(new URL('../src/lib/updater.ts', import.meta.url), 'utf8');
 const layoutSource = readFileSync(new URL('../src/routes/+layout.svelte', import.meta.url), 'utf8');
 const ipcSource = readFileSync(new URL('../src/lib/ipc.ts', import.meta.url), 'utf8');
 const loggingSource = readFileSync(new URL('../src-tauri/src/logging.rs', import.meta.url), 'utf8');
 const libSource = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+const updaterRustSource = readFileSync(
+  new URL('../src-tauri/src/updater.rs', import.meta.url),
+  'utf8'
+);
 const updateStatusSource = readFileSync(
   new URL('../src/lib/stores/updateStatus.svelte.ts', import.meta.url),
   'utf8'
@@ -36,13 +46,13 @@ test('updater frontend steps are bridged into petal.log', () => {
 });
 
 test('updater failures surface as a degraded visible toast', () => {
-  assert.match(updateStatusSource, /\| \{ kind: 'failed'; message: string \}/);
-  assert.match(updateStatusSource, /markUpdateFailed\(message: string\)/);
-  assert.match(updaterSource, /markUpdateFailed\(friendlyMessage\)/);
+  assert.match(updateStatusSource, /\| \{ kind: 'failed'; message: string; recovery\?: UpdateRecovery \}/);
+  assert.match(updateStatusSource, /markUpdateFailed\(message: string, recovery\?: UpdateRecovery\)/);
+  assert.match(updaterSource, /markUpdateFailed\(friendlyMessage, recovery\)/);
   // The raw error (which can be an arbitrarily long/technical string, e.g. a
   // temp-file path) must never reach the toast directly -- see #105/the
   // AppleDouble incident, where it did and broke the layout.
-  assert.match(updaterSource, /import \{ friendlyUpdateErrorMessage \} from '\$lib\/data\/updaterErrors'/);
+  assert.match(updaterSource, /friendlyUpdateErrorMessage\s*\n?[^;]*from '\$lib\/data\/updaterErrors'/);
   assert.match(toastHostSource, /Update check failed: \$\{updateStatus\.message\}/);
   assert.match(toastHostSource, /variant=\{updateStatus\.kind === 'failed' \? 'degraded' : 'info'\}/);
 });
@@ -63,7 +73,9 @@ test('friendlyUpdateErrorMessage never leaks raw/long error text into the UI (#1
   );
   assert.equal(
     friendlyUpdateErrorMessage('update architecture x86_64 not supported by this build'),
-    "This build isn't compatible with your Mac"
+    // #125: no longer "your Mac" -- this exact sentence reached Windows users
+    // in the incident that filed the issue.
+    "This update isn't compatible with this device"
   );
   assert.equal(
     friendlyUpdateErrorMessage('network error: dns lookup timed out during fetch'),
@@ -156,4 +168,83 @@ test('passive updater checks never stage an update; restart action installs expl
   assert.match(toastHostSource, /installUpdateAndRelaunch\('toast'\)/);
   assert.match(toastHostSource, /updateStatus\.kind === 'available'/);
   assert.match(toastHostSource, /restart to install/);
+});
+
+test('a rejected update archive is classified as recoverable, and nothing else is (#125)', () => {
+  // Every Windows install from v0.8.5 to 0.9.14 shipped a guard that rejected
+  // its own update archive. Those clients retry forever and can never win, so
+  // this one failure earns a manual-download action. The classifier is the
+  // thing that decides, so pin it in BOTH directions.
+  const rejections = [
+    // The real Sentry PETAL-DESKTOP-2G text (the old guard's wording).
+    'update is incompatible with this Mac: update archive machine 0x014c does not match running architecture x86_64',
+    // What the current guard emits on Windows, after #116's device fix. Note
+    // it contains the word "archive", which the older "unpack/extract/archive"
+    // heuristic would have mis-reported as a retryable install failure --
+    // hence the marker check runs first.
+    'update is incompatible with this PC: update archive is not a Windows executable',
+    // ...and the macOS mirror image.
+    'update is incompatible with this Mac: running architecture arm64 not present in staged app bundle (x86_64)'
+  ];
+  for (const raw of rejections) {
+    assert.equal(updateFailureCategory(raw), 'incompatible', raw);
+    assert.equal(updateFailureOffersManualDownload(raw), true, raw);
+    assert.equal(friendlyUpdateErrorMessage(raw), "This update isn't compatible with this device");
+  }
+
+  // The negative direction: a transient or self-explaining failure must NOT
+  // send the user off to reinstall the app.
+  const notRecoverable = [
+    'network error: dns lookup timed out during fetch',
+    'signature verification failed for bundle',
+    'failed to unpack `._Petal.app` into `/var/folders/hv/tauri_updated_app170.tmp`',
+    'Petal is running from a read-only disk image. Drag Petal into Applications, then try again.',
+    'This update needs an administrator password. Moving Petal to Applications avoids this.',
+    'some completely unrecognized error shape'
+  ];
+  for (const raw of notRecoverable) {
+    assert.equal(updateFailureOffersManualDownload(raw), false, raw);
+  }
+});
+
+test('the recovery action opens the platform download endpoint, never a blob URL (#125)', () => {
+  // `/api/download?platform=…` 302s to the CURRENT artifact, so the link stays
+  // correct across releases. A hardcoded Vercel Blob URL would hand a stranded
+  // user a stale build -- the exact failure they are recovering from.
+  assert.equal(DOWNLOAD_ORIGIN, 'https://app.petal.live');
+  assert.equal(manualDownloadUrl('windows'), 'https://app.petal.live/api/download?platform=windows');
+  assert.equal(manualDownloadUrl('macos'), 'https://app.petal.live/api/download?platform=macos');
+  // The backend rejects anything but macos|windows (backend/api/download.ts).
+  assert.equal(manualDownloadUrl('other'), 'https://app.petal.live/api/download?platform=macos');
+
+  const downloadSource = readFileSync(
+    new URL('../src/lib/data/updateDownload.ts', import.meta.url),
+    'utf8'
+  );
+  assert.doesNotMatch(downloadSource, /blob\.vercel-storage\.com/);
+  assert.match(toastHostSource, /manualDownloadUrl\(\)/);
+  assert.match(toastHostSource, /'Download installer'/);
+  assert.match(toastHostSource, /updateStatus\.recovery === 'download-installer'/);
+});
+
+test('the Rust guard itself stamps the marker the recovery action keys off (#125)', () => {
+  // The marker is a cross-language contract, and the failure it labels shipped
+  // unobserved through seven releases. Pin the Rust side here too, so a
+  // reworded guard cannot silently turn the toast back into a dead end.
+  assert.match(
+    updaterRustSource,
+    /pub const INCOMPATIBLE_UPDATE_MARKER: &str = "update is incompatible with";/
+  );
+  assert.equal(INCOMPATIBLE_UPDATE_MARKER, 'update is incompatible with');
+  // The guard entry point wraps EVERY rejection, so no call site can forget.
+  assert.match(
+    updaterRustSource,
+    /fn verify_update_archive_architecture\(bytes: &\[u8\]\) -> Result<\(\), String> \{\n\s*verify_update_archive_shape\(bytes\)\.map_err\(\|detail\| incompatible_update_message\(&detail\)\)/
+  );
+  // ...and the install command still runs that guard on the downloaded bytes.
+  const installCommand = updaterRustSource.slice(
+    updaterRustSource.indexOf('pub async fn download_and_install_compatible_update'),
+    updaterRustSource.indexOf('enum MacInstallStage')
+  );
+  assert.match(installCommand, /verify_update_archive_architecture\(&bytes\)/);
 });

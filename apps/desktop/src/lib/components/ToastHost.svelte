@@ -40,9 +40,11 @@
 -->
 <script lang="ts">
   import { listen } from '@tauri-apps/api/event';
+  import { openUrl } from '@tauri-apps/plugin-opener';
   import { onMount } from 'svelte';
   import { toastTransition } from '$lib/motion';
   import { installUpdateAndRelaunch } from '$lib/updater';
+  import { manualDownloadUrl } from '$lib/data/updateDownload';
   import { openPrivacySettings } from '$lib/data/permissions';
   import { shareErrorDisplay } from '$lib/data/shareErrors';
   import { clearUpdateStatus, updateStatus } from '$lib/stores/updateStatus.svelte';
@@ -90,7 +92,15 @@
       case 'failed':
         // #43: failures used to be silent. Surface a short, dismissible reason
         // so "no prompt" becomes "update check failed: <why>".
-        return { message: `Update check failed: ${updateStatus.message}`, dismissible: true };
+        //
+        // #125: a rejected update archive is not a failed CHECK and is not
+        // retryable -- the guard rejects the same artifact every time, which
+        // is how every pre-0.9.15 Windows install got permanently pinned. It
+        // gets its own self-describing sentence plus the one action that
+        // actually works: download the installer and reinstall once.
+        return updateStatus.recovery === 'download-installer'
+          ? { message: updateStatus.message, dismissible: true }
+          : { message: `Update check failed: ${updateStatus.message}`, dismissible: true };
       case 'idle':
         return null;
     }
@@ -238,6 +248,34 @@
     await installUpdateAndRelaunch('toast');
   }
 
+  // #125's way out. `/api/download?platform=…` 302s to the current artifact,
+  // so this stays correct across releases without the app knowing a version.
+  // Never fatal: a failed opener must not replace one dead end with another.
+  async function downloadInstaller() {
+    clearTimeout(updateDismissTimer);
+    try {
+      await openUrl(manualDownloadUrl());
+    } catch (err) {
+      console.error('[updater] could not open the installer download page', err);
+    }
+  }
+
+  const updateActionLabel = $derived(
+    updateStatus.kind === 'available' || updateStatus.kind === 'pending-relaunch'
+      ? 'Restart now'
+      : updateStatus.kind === 'failed' && updateStatus.recovery === 'download-installer'
+        ? 'Download installer'
+        : undefined
+  );
+
+  const updateAction = $derived(
+    updateStatus.kind === 'available' || updateStatus.kind === 'pending-relaunch'
+      ? restartToApply
+      : updateStatus.kind === 'failed' && updateStatus.recovery === 'download-installer'
+        ? downloadInstaller
+        : undefined
+  );
+
   $effect(() => {
     setToastHostVisible(visible || (updateToastVisible && updateToast !== null));
   });
@@ -277,8 +315,8 @@
         message={updateToast.message}
         dismissible={updateToast.dismissible}
         onDismiss={dismissUpdateToast}
-        actionLabel={updateStatus.kind === 'available' || updateStatus.kind === 'pending-relaunch' ? 'Restart now' : undefined}
-        onAction={updateStatus.kind === 'available' || updateStatus.kind === 'pending-relaunch' ? restartToApply : undefined}
+        actionLabel={updateActionLabel}
+        onAction={updateAction}
       />
     {/if}
     {#if visible}
