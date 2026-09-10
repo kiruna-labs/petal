@@ -1061,6 +1061,21 @@ empty (i.e. every default, non-`--press-to-photon` run) — worked around at
 the time by invoking `remote-control-local-loopback.mjs --live` directly.
 Since fixed in the wrapper (`${MODE_ARGS[@]+"${MODE_ARGS[@]}"}`).
 
+**Release assertions are now per-case (#134).** Case 7 being the ONLY case
+that read `pressedInputs` made it a shared tripwire for every case before it:
+a left drag (case 6) that selected text but never released the primary button
+passed its own case and failed case 7, whose message named the right drag.
+Every case that presses a button now calls `assertReleased()`
+(`scripts/remote-control-held-input.mjs`), which polls
+`remote-control-status` for up to 600ms — deliberately under the host's own
+1200ms `HELD_INPUT_TTL`, so the TTL sweeper cannot release the button for us
+and turn a leak into a pass. Cases 25 (TTL) and 28 (disable) keep their own
+stricter assertions. On the host side, a pointer Up that fails to inject now
+logs `remote-control: pointer RELEASE not injected ... reason=<cause>` at
+`error!` and emits the `pointer-release-not-injected` Sentry diagnostic;
+`captureCaseFailureForensics` collects those lines into any failing case's
+`# RELEASE-FAILURE` output. The root cause of #134 is still open.
+
 **Live status (2026-08-14, CURRENT): 27 pass / 2 fail / 1 skip**, up from
 **2 pass / 28 fail** at the start of the same session. Full video path
 (`shareReadiness: live-tile`), `recoveries: 0`, `tokenlessDrops: 0`,
