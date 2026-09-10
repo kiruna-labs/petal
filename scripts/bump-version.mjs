@@ -17,6 +17,12 @@
 //      scripts/run-with-source-provenance.sh --require-clean's clean-tree
 //      check.
 //
+// It deliberately does NOT touch the committed CycloneDX SBOMs under sbom/,
+// which mirror the version a tenth time (#131): regenerating them needs
+// node_modules in four npm roots plus cargo-cyclonedx, far heavier than a
+// version bump should be. scripts/version-lockstep.mjs checks them, and this
+// script prints the one command that refreshes them once the bump lands.
+//
 // Deliberately uses targeted string replacement, NOT JSON.parse + stringify,
 // for every file: the lockfiles and Cargo.lock are large, and a full
 // parse/serialize round-trip risks reordering keys or reformatting far
@@ -49,6 +55,8 @@ import {
   extractCargoPackageVersion,
   extractCargoLockDesktopVersion,
   extractPackageLockVersions,
+  SBOM_FILES,
+  SBOM_FIELDS,
 } from './version-lockstep.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -217,8 +225,11 @@ async function main() {
 
   // Final on-disk confirmation via the real lockstep gate (belt-and-braces:
   // the in-memory verify above already proved this, but this also catches a
-  // write that silently failed or targeted the wrong path).
-  const { mismatches } = await checkLockstep(version, root);
+  // write that silently failed or targeted the wrong path). Scoped to the
+  // nine fields this script writes -- the SBOM mirrors it deliberately does
+  // not touch are reported separately below, as a next step rather than a
+  // failure (#131).
+  const { mismatches } = await checkLockstep(version, root, { includeSboms: false });
   if (mismatches.length > 0) {
     console.error(`bump-version: post-write lockstep check FAILED: ${JSON.stringify(mismatches)}`);
     process.exitCode = 1;
@@ -226,6 +237,15 @@ async function main() {
   }
 
   console.log(`bump-version: all 9 fields now read ${version}`);
+  console.log(
+    `bump-version: NEXT STEP -- the committed SBOMs (${SBOM_FIELDS.map((f) => SBOM_FILES[f]).join(', ')}) ` +
+      `also embed the version and are NOT written by this script.`
+  );
+  console.log('bump-version: refresh them before committing:  bash scripts/generate-sbom.sh');
+  console.log(
+    'bump-version: (needs cargo-cyclonedx 0.5.x, npm 11, and node_modules in apps/desktop, ' +
+      "backend, web-harness and site -- 'npm ci --ignore-scripts' in each.)"
+  );
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));

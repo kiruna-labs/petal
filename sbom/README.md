@@ -12,6 +12,14 @@ on any diff, so a lockfile change must land together with its SBOM).
 | `web-harness-npm.cdx.json` | `web-harness` | `npm sbom` | Full graph from `package-lock.json` |
 | `site-npm.cdx.json` | `site` | `npm sbom` | Full graph from `package-lock.json` (docs site, build-time only) |
 
+`desktop-rust.cdx.json`, `desktop-npm.cdx.json` and `web-harness-npm.cdx.json`
+also embed the **product version** in their `metadata.component`, so a release
+bump makes them stale even when no dependency changed.
+`scripts/version-lockstep.mjs` checks those three against
+`apps/desktop/src-tauri/tauri.conf.json` and fails naming the fix (#131);
+`backend-npm.cdx.json` and `site-npm.cdx.json` version independently and are
+not checked.
+
 Regenerate with `scripts/generate-sbom.sh` (needs `cargo install
 cargo-cyclonedx` and `npm ci --ignore-scripts` in each npm root). Output is
 normalised — timestamps, serial numbers and tool versions stripped, keys
