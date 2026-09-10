@@ -123,6 +123,79 @@ export function inputKey(entry) {
   return `(window ${entry?.windowId ?? '?'}, controller ${entry?.controllerId ?? '?'})`;
 }
 
+// ---- #134 left-drag release stress: WHERE the drags happen ---------------
+//
+// The first stress run (0.9.22 gate) put all twelve drags in a quiet tail,
+// after every other case had finished, and came back 12 for 12 clean. Against
+// the measured ~1-in-3-per-suite rate that outcome has roughly an 11% chance,
+// so the fault is probably NOT a flat per-drag probability -- it depends on
+// conditions a tight isolated loop never creates. These checkpoints spend the
+// same total number of drags in the four places the suite actually creates
+// them. Each is its own case, so `runCase` wraps it in a fresh
+// request/release grant cycle rather than reusing one long-lived grant.
+export const LEFT_DRAG_STRESS_CHECKPOINTS = Object.freeze([
+  Object.freeze({
+    id: 33,
+    afterCaseId: 7,
+    context: "case 7's right drag + Escape",
+    rationale:
+      'the historical neighbourhood: every observed failure was case 6 leaking a primary button '
+      + 'and case 7 (right drag, then Escape) reporting it. Drags here run with exactly the '
+      + 'traffic that preceded the real occurrences ahead of them.',
+  }),
+  Object.freeze({
+    id: 34,
+    afterCaseId: 21,
+    context: 'the keyboard/modifier/scroll block',
+    rationale:
+      'mid-suite, after a long run of non-pointer traffic on a heavily churned document -- '
+      + 'the interleaving the tail placement removed by construction.',
+  }),
+  Object.freeze({
+    id: 35,
+    afterCaseId: 26,
+    context: "case 26's controller-disconnect synthetic release",
+    rationale:
+      'the first lifecycle teardown that synthesises releases on the host. Hypothesis 3 is a '
+      + 'path that clears the entry owner without draining the button; this is where such a '
+      + 'path runs.',
+  }),
+  Object.freeze({
+    id: 36,
+    afterCaseId: 29,
+    context: "case 29's reconnect during control",
+    rationale:
+      'the leading surviving hypothesis needs the (window_id, controller_id) key to change '
+      + 'mid-gesture, and case 29 is the only reconnect in the suite. `runCase` already records '
+      + '(#808) that the case right after it can have its fresh grant revoked by a stale '
+      + 'ParticipantDisconnected aftershock -- i.e. the key really is in flux exactly here.',
+  }),
+]);
+
+/// Split a total iteration budget across the checkpoints. The remainder goes
+/// to the EARLIEST checkpoints, so a reduced budget still spends its drags in
+/// the historical neighbourhood first rather than thinning every site equally.
+export function distributeStressIterations(total, checkpointCount) {
+  if (!Number.isInteger(total) || total < 0) throw new Error(`stress iteration total must be a non-negative integer, got ${total}`);
+  if (!Number.isInteger(checkpointCount) || checkpointCount <= 0) {
+    throw new Error(`stress checkpoint count must be a positive integer, got ${checkpointCount}`);
+  }
+  const base = Math.floor(total / checkpointCount);
+  const remainder = total % checkpointCount;
+  return Array.from({ length: checkpointCount }, (_unused, index) => base + (index < remainder ? 1 : 0));
+}
+
+/// A leak recorded at a scattered checkpoint can be inherited by the cases
+/// that follow it -- the mis-attribution #134 is about, and the one property
+/// the tail placement gave away for free. Derived from the recovery attempts
+/// the case already makes, so the handoff hazard is stated rather than left
+/// for the next case to discover.
+export function stillHeldAfterRecovery({ clearedByHoverMove = null, clearedByTtl = null } = {}) {
+  if (clearedByHoverMove === true || clearedByTtl === true) return false;
+  if (clearedByHoverMove === null && clearedByTtl === null) return null;
+  return true;
+}
+
 export function summarizeReleaseStressLeak({
   iteration,
   iterations,
@@ -132,6 +205,10 @@ export function summarizeReleaseStressLeak({
   clearedByHoverMove = null,
   clearedByTtl = null,
   assertionMessage = null,
+  // Which of the scattered placements this leak came from. Two runs that both
+  // leak on "iteration 2" mean different things if one is after case 7's
+  // Escape and the other after case 29's reconnect.
+  checkpoint = null,
 }) {
   const pressed = heldInputs(snapshot);
   const failureLines = releaseNotInjectedLines(logLines);
@@ -161,12 +238,24 @@ export function summarizeReleaseStressLeak({
       + `${heldKeyIsPreGestureKey ? '; the held key is the PRE-GESTURE key -- the key changed mid-gesture' : ''}`
       + `${keyChangedDuringGesture && !heldKeyIsPreGestureKey ? '; the session key changed during the gesture' : ''}`
     : 'no held key in the snapshot';
+  const stillHeld = stillHeldAfterRecovery({ clearedByHoverMove, clearedByTtl });
   const recovery = [
     clearedByHoverMove === null ? null : `zero-mask move cleared it: ${clearedByHoverMove}`,
     clearedByTtl === null ? null : `host TTL cleared it: ${clearedByTtl}`,
+    // The stress drags are scattered through the suite now, so a phantom that
+    // survives recovery is standing in front of real cases. Say so here rather
+    // than letting the next case's release assertion report it as its own.
+    stillHeld === true
+      ? 'the host STILL held the button after recovery -- a LATER case\'s release assertion may inherit this leak (#134)'
+      : null,
   ].filter(Boolean).join('; ');
+  const where = checkpoint
+    ? ` at stress checkpoint ${checkpoint.index}/${checkpoint.of}`
+      + ` (case ${checkpoint.id ?? '?'}, immediately after case ${checkpoint.afterCaseId ?? '?'}`
+      + `${checkpoint.context ? ` -- ${checkpoint.context}` : ''})`
+    : '';
   const detail =
-    `left-drag release leaked on iteration ${iteration}/${iterations}: `
+    `left-drag release leaked on iteration ${iteration}/${iterations}${where}: `
     + `host holds ${describeHeldButtons(pressed)}. ${discriminator}. ${keyNote}.`
     + `${recovery ? ` ${recovery}.` : ''} snapshot=${JSON.stringify(snapshot)}`
     + `${assertionMessage ? ` assertion=${JSON.stringify(assertionMessage)}` : ''}`;
@@ -174,6 +263,7 @@ export function summarizeReleaseStressLeak({
     issue: 134,
     iteration,
     iterations,
+    checkpoint,
     heldButtons: describeHeldButtons(pressed),
     pressedKeys,
     sessionKeys,
@@ -186,6 +276,7 @@ export function summarizeReleaseStressLeak({
     upWasProcessed: failureLines.length > 0 ? 'injection-failed' : 'never-processed',
     clearedByHoverMove,
     clearedByTtl,
+    stillHeldAfterRecovery: stillHeld,
     snapshot,
     assertionMessage,
     detail,

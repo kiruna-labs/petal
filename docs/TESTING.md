@@ -1108,19 +1108,46 @@ logs `remote-control: pointer RELEASE not injected ... reason=<cause>` at
 `captureCaseFailureForensics` collects those lines into any failing case's
 `# RELEASE-FAILURE` output. The root cause of #134 is still open.
 
-**Case 33 is a QUARANTINED left-drag stress scenario (#134).** The leak
+**Cases 33–36 are QUARANTINED left-drag stress checkpoints (#134).** The leak
 reproduces about one suite run in three, so a single left drag finds it by
-luck. Case 33 repeats case 6's gesture byte for byte
-(`PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS`, default 12; `0` disables it) and runs
-the same `assertReleased()` after each iteration, which should surface a
-1-in-3 fault in most runs rather than one in three. It runs LAST, so a phantom
-press it provokes cannot be inherited by another case's release assertion —
-the mis-attribution #134 is about.
+luck. Each checkpoint repeats case 6's gesture byte for byte and runs the same
+`assertReleased()` after every iteration.
+`PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS` (default 12; `0` disables) is the
+**whole-run total**, split evenly across the checkpoints (3 drags each), with
+any remainder going to the earliest.
 
-It is **quarantined in the script itself**: a caught leak is reported as
+The checkpoints are **scattered through the sequence, not batched at the
+end** — their ids run out of numeric order on purpose, because the position is
+the experiment. The first stress run (0.9.22 gate) spent all twelve drags in a
+quiet tail after every other case had finished and came back 12 for 12 clean;
+against the measured rate that is roughly an 11% outcome, so the fault is
+probably not a flat per-drag probability but depends on conditions an isolated
+loop never creates. The placements, declared in
+`LEFT_DRAG_STRESS_CHECKPOINTS` (`scripts/remote-control-held-input.mjs`) and
+pinned to the real sequence by a unit test:
+
+| case | runs right after | why there |
+|---|---|---|
+| 33 | 7 (right drag + Escape) | the historical neighbourhood — every observed failure was case 6 leaking and case 7 reporting it |
+| 34 | 21 (horizontal scroll) | mid-suite, after a long run of keyboard/modifier/scroll traffic on a churned document |
+| 35 | 26 (controller-disconnect synthetic release) | the first lifecycle teardown that synthesises releases host-side |
+| 36 | 29 (reconnect during control) | the only reconnect in the suite — where the `(window_id, controller_id)` key can actually change mid-gesture |
+
+Each checkpoint is its own case, so `runCase` wraps it in a fresh
+request/release grant cycle rather than reusing one long-lived grant, and real
+traffic follows every burst. The tail placement made a leak un-inheritable by
+construction; scattering gives that up, so a leak that survives both recovery
+attempts (zero-mask move, then the host TTL) now emits its own `::warning::`
+saying a later case's `assertReleased` may report it as its own — the
+mis-attribution #134 is about, stated rather than left to be rediscovered.
+
+They are **quarantined in the script itself**: a caught leak is reported as
 `skip` with `QUARANTINED (#134 …)` in its detail — never `pass`, never `fail`
 — plus an `::warning::` line and a machine-readable `# STRESS-LEAK {…}` line
-in the harness log the gate uploads. Observing a known-open bug must not block
+in the harness log the gate uploads. Each checkpoint also prints a
+`# STRESS-CHECKPOINT {…}` line naming where it is spending its drags and why,
+and the run ends with one `# STRESS-SUMMARY {…}` roll-up so the headline
+"N drags, M leaks" number survives the split across four cases. Observing a known-open bug must not block
 a release, and in-script quarantine covers every consumer of the suite, not
 just the loopback tier's `E2E_QUARANTINE_RC_CASES` scorecard list. Removing
 the quarantine (`PETAL_RC_LEFT_DRAG_STRESS_QUARANTINE=0`, then deleting the
@@ -1131,6 +1158,9 @@ The leak record answers the questions the #134 analysis identified: which
 iteration failed; whether a `pointer RELEASE not injected` line accompanied it
 and with which `reason=` (present → native injection of the Up failed; absent
 → the Up was never *processed*, the discriminator); the `pressedInputs`
+which checkpoint it came from (two runs that both leak on "iteration 2" mean
+different things if one is after case 7's Escape and the other after case 29's
+reconnect); the `pressedInputs`
 snapshot with its `(window_id, controller_id)` key compared against both the
 live session key and the one recorded *before* that drag (`KEY MISMATCH`, and
 a held entry still filed under the PRE-GESTURE key, are the leading surviving
