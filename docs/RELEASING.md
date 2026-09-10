@@ -844,6 +844,17 @@ The release workflow builds an x86-64 Windows NSIS setup executable on
 updater as a PE executable, so MSI is not currently used as the auto-update
 payload. ARM64 and MSI distribution remain separate future work.
 
+**Windows installs before 0.9.15 cannot auto-update and never will (#125).**
+The arch guard shipped in every Windows build from v0.8.5 to 0.9.14 compared the
+NSIS stub's PE machine type (i386 `0x014c` by design) against the host, so it
+rejected every update archive. That broken guard lives in the INSTALLED client,
+so no manifest, artifact, or backend change can rescue those installs -- their
+users need one manual reinstall from `app.petal.live/api/download?platform=windows`.
+The Windows lane does not self-heal; do not assume a release reaches those users.
+Petal 0.9.15 onward accepts a real Windows update archive, and from 0.9.16 the
+updater's failure toast offers a "Download installer" action so a client that
+does hit a rejected archive is not left with a dead end.
+
 The current Windows installer is **not Authenticode-signed**. The Tauri `.sig`
 provides updater authenticity after installation, but it does not establish a
 trusted Windows publisher identity and does not prevent SmartScreen warnings on

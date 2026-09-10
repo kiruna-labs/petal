@@ -8,6 +8,8 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { build } from 'vite';
+import { friendlyUpdateErrorMessage } from '../src/lib/data/updaterErrors.ts';
+import { DOWNLOAD_ORIGIN as UPDATE_DOWNLOAD_ORIGIN } from '../src/lib/data/updateDownload.ts';
 
 const toastSource = readFileSync(
   new URL('../../../shared/ui/components/Toast.svelte', import.meta.url),
@@ -38,6 +40,12 @@ const fixtureRoot = new URL('./fixtures/', import.meta.url);
 const UPDATE_VERSION = '2.0.0-beta.20260712.123456';
 const UPDATE_MESSAGE = `Update ${UPDATE_VERSION} ready — restart to install`;
 const VIEWPORT_MARGIN_PX = 24;
+// #125's recovery affordance. Imported, not retyped, so the copy this test
+// measures is the copy the app ships.
+const UPDATE_RECOVERY_ACTION_LABEL = 'Download installer';
+const UPDATE_INCOMPATIBLE_MESSAGE = friendlyUpdateErrorMessage(
+  'update is incompatible with this PC: update archive is not a Windows executable'
+);
 
 function executable(path: string): boolean {
   try {
@@ -555,6 +563,181 @@ test('available update toast fits the documented main-window widths in rendered 
         removeTempPath(buildDir),
         removeTempPath(profileDir)
       ]);
+    }
+  }
+});
+
+test('a rejected update archive renders an untruncated "Download installer" recovery action (#125)', async () => {
+  // The failure branch, in rendered pixels. The fixture does not fake the
+  // toast state: it calls the real `installUpdateAndRelaunch()` and makes the
+  // Tauri command reject with the exact string `updater.rs`'s archive guard
+  // emits, so everything asserted below is a consequence of that rejection.
+  //
+  // Why pixels and not a source grep: "Download installer" is new user-facing
+  // copy on an already-crowded 400px-wide toast that also carries an icon, a
+  // wrapping message and a dismiss X. CLAUDE.md's hard rule is that it must
+  // never truncate, and only a real render can tell "fits" from "clipped".
+  const buildDir = await mkdtemp(join(tmpdir(), 'petal-update-recovery-build-'));
+  const profileDir = await mkdtemp(join(tmpdir(), 'petal-update-recovery-chrome-'));
+  let browser: Awaited<ReturnType<typeof launchRenderedTestBrowser>> | undefined;
+
+  try {
+    await build({
+      root: fileURLToPath(fixtureRoot),
+      configFile: false,
+      logLevel: 'silent',
+      base: './',
+      esbuild: {
+        tsconfigRaw: JSON.stringify({
+          compilerOptions: { target: 'ES2022', useDefineForClassFields: true }
+        })
+      },
+      plugins: [svelte({ configFile: false, preprocess: vitePreprocess() })],
+      resolve: {
+        alias: {
+          $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
+          '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+          '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
+        }
+      },
+      build: {
+        outDir: buildDir,
+        emptyOutDir: true,
+        rollupOptions: {
+          input: fileURLToPath(new URL('./update-recovery-toast.html', fixtureRoot))
+        }
+      }
+    });
+
+    browser = await launchRenderedTestBrowser(profileDir);
+    const fixtureUrl = pathToFileURL(join(buildDir, 'update-recovery-toast.html')).href;
+
+    for (const width of [380, 400]) {
+      const { targetId } = await browser.call('Target.createTarget', {
+        url: 'about:blank',
+        width,
+        height: 700
+      });
+      const { sessionId } = await browser.call('Target.attachToTarget', { targetId, flatten: true });
+      await browser.call(
+        'Emulation.setDeviceMetricsOverride',
+        {
+          width,
+          height: 700,
+          deviceScaleFactor: 1,
+          mobile: false,
+          screenWidth: width,
+          screenHeight: 700,
+          dontSetVisibleSize: false
+        },
+        sessionId
+      );
+      await browser.call('Page.navigate', { url: fixtureUrl }, sessionId);
+
+      const renderDeadline = Date.now() + 15_000;
+      let encodedMeasurement: string | undefined;
+      while (Date.now() < renderDeadline) {
+        const state = await browser.evaluate(
+          sessionId,
+          `({
+            measurement: document.body?.dataset.toastMeasurement ?? null,
+            error: document.body?.dataset.toastMeasurementError ?? null
+          })`
+        );
+        if (state?.error) {
+          throw new Error(
+            `rendered update-recovery fixture failed: ${decodeURIComponent(state.error)}`
+          );
+        }
+        if (state?.measurement) {
+          encodedMeasurement = state.measurement as string;
+          break;
+        }
+        const remainingMs = renderDeadline - Date.now();
+        if (remainingMs > 0) {
+          await new Promise((resolvePoll) => setTimeout(resolvePoll, Math.min(50, remainingMs)));
+        }
+      }
+      if (!encodedMeasurement) {
+        throw new Error(
+          `${width}px update-recovery render timed out after 15000ms\n${browser.stderr()}`
+        );
+      }
+      const measurement = JSON.parse(decodeURIComponent(encodedMeasurement));
+
+      // 1. The real failure branch ran, and classified itself as recoverable.
+      assert.ok(
+        measurement.invoked.includes('download_and_install_compatible_update'),
+        'the fixture never took the real install path'
+      );
+      assert.equal(measurement.result.status, 'error');
+      assert.equal(measurement.result.recovery, 'download-installer');
+      assert.equal(measurement.statusKind, 'failed');
+      assert.equal(measurement.statusRecovery, 'download-installer');
+
+      // 2. It is no longer a dead end: the toast carries an action, and the
+      //    action opens the platform download endpoint (never a blob URL).
+      assert.equal(measurement.action.text, UPDATE_RECOVERY_ACTION_LABEL);
+      assert.ok(
+        measurement.action.width > 0 && measurement.action.height > 0,
+        'the recovery action is not visible'
+      );
+      assert.deepEqual(measurement.openedUrls, [
+        `${UPDATE_DOWNLOAD_ORIGIN}/api/download?platform=macos`
+      ]);
+
+      // 3. The message says what happened, without the "Update check failed:"
+      //    prefix -- nothing was checked, an install was refused.
+      assert.equal(measurement.message.text, UPDATE_INCOMPATIBLE_MESSAGE);
+
+      // 4. CLAUDE.md's hard rule, measured. Nothing clipped, nothing
+      //    ellipsized, nothing past the window edge, at both real widths.
+      assert.equal(measurement.viewport.width, width, `${width}px browser viewport drifted`);
+      assert.equal(measurement.viewport.deviceScaleFactor, 1, 'pixel test must use CSS-pixel scale 1');
+      assert.equal(measurement.fonts.status, 'loaded', 'document fonts did not finish loading');
+      assert.equal(measurement.fonts.message, true, 'Albert Sans 500 did not load');
+      assert.equal(measurement.fonts.action, true, 'Albert Sans 600 did not load');
+      assert.match(measurement.fonts.computedActionFamily, /Albert Sans/, 'action uses the wrong font');
+
+      for (const text of [measurement.message, measurement.action]) {
+        assert.ok(
+          text.scrollWidth <= text.clientWidth,
+          `${width}px: "${text.text}" is truncated (scrollWidth ${text.scrollWidth} > clientWidth ${text.clientWidth})`
+        );
+        assert.notEqual(text.textOverflow, 'ellipsis', `${width}px: "${text.text}" would ellipsize`);
+        assert.ok(text.left >= 0, `${width}px: "${text.text}" starts off the left edge (${text.left})`);
+      }
+
+      const rightLimit = width - VIEWPORT_MARGIN_PX + 0.5;
+      assert.ok(
+        measurement.action.right <= rightLimit,
+        `action right edge ${measurement.action.right}px exceeds ${rightLimit}px at ${width}px`
+      );
+      assert.ok(
+        measurement.dismiss.right <= rightLimit,
+        `dismiss right edge ${measurement.dismiss.right}px exceeds ${rightLimit}px at ${width}px`
+      );
+      assert.ok(
+        measurement.dismiss.icon.scrollWidth <= measurement.dismiss.icon.clientWidth,
+        `dismiss icon overflows: ${measurement.dismiss.icon.scrollWidth}px > ${measurement.dismiss.icon.clientWidth}px`
+      );
+      assert.deepEqual(
+        measurement.overflow,
+        [],
+        `${width}px recovery toast contains scroll overflow: ${JSON.stringify(measurement.overflow)}`
+      );
+      assert.ok(
+        measurement.documentScrollWidth <= width,
+        `${width}px: the window scrolls horizontally (documentScrollWidth ${measurement.documentScrollWidth})`
+      );
+
+      await browser.call('Target.closeTarget', { targetId });
+    }
+  } finally {
+    try {
+      await browser?.close();
+    } finally {
+      await Promise.all([removeTempPath(buildDir), removeTempPath(profileDir)]);
     }
   }
 });
