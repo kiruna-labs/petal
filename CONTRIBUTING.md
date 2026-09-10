@@ -50,9 +50,10 @@ scripts/ci-local.sh
 ```
 
 This is the primary gate and mirrors CI. Budget real time for it — it is
-around twenty steps, not five: the nine-field version-lockstep check, release
-tooling unit tests (`bump-version`, `publish-blob`, source provenance), the
-harness contract tests, frontend check + build, backend typecheck + tests,
+around twenty steps, not five: the version-lockstep check (nine fields plus
+the three versioned SBOMs), release tooling unit tests (`bump-version`,
+`publish-blob`, source provenance), the harness contract tests, frontend
+check + build, backend typecheck + tests,
 `cargo build` + `cargo test --lib` (run twice: once plain, once with the
 `cockpit-privileged` feature), `cargo build --examples`, the vendored
 `tauri-nspanel` tests, clang syntax checks over `scripts/probes/`, the
