@@ -15,8 +15,16 @@ import {
 } from './remote-control-gestures.mjs';
 import { summarizePhotonSamples } from './remote-control-photon-metrics.mjs';
 // #134: the host-side release oracle. See that module's header for why a
-// per-case assertion replaced case 7's shared tripwire.
-import { assertReleasedWithin } from './remote-control-held-input.mjs';
+// per-case assertion replaced case 7's shared tripwire, and why the stress
+// case that repeats the left drag reports `skip` rather than `fail`.
+import {
+  assertReleasedWithin,
+  heldInputs,
+  inputKey,
+  releaseNotInjectedLines,
+  stressLeakOutcome,
+  summarizeReleaseStressLeak,
+} from './remote-control-held-input.mjs';
 import { noResultSummary, suiteExitCode } from './remote-control-exit.mjs';
 import {
   correctnessTimeoutMs,
@@ -2220,6 +2228,133 @@ function readLoadAverages() {
   return { one: Math.round(one * 100) / 100, five: Math.round(five * 100) / 100, fifteen: Math.round(fifteen * 100) / 100 };
 }
 
+// #134: QUARANTINED left-drag release stress. A left drag leaves the host
+// holding a phantom primary button roughly one suite run in three, so the
+// single drag in case 6 finds it by luck. This repeats the identical gesture
+// and asserts the release after each one, which turns "sometimes" into
+// "almost every run" -- and it reports `skip`, never `fail`, so observing a
+// known-open bug can never block a release. Remove the quarantine with the fix.
+// 12 keeps a ~1-in-3 fault likely in a single run without adding meaningful
+// wall clock; below ~10 the run is back to relying on luck.
+const DEFAULT_LEFT_DRAG_STRESS_ITERATIONS = 12;
+const LEFT_DRAG_STRESS_QUARANTINED = process.env.PETAL_RC_LEFT_DRAG_STRESS_QUARANTINE !== '0';
+
+// A typo'd override must not silently disable the case -- a stress run that
+// quietly did nothing would read exactly like a clean one.
+function leftDragStressIterations(raw = process.env.PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS) {
+  if (raw === undefined || raw === '') return DEFAULT_LEFT_DRAG_STRESS_ITERATIONS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS must be a non-negative integer, got '${raw}'`);
+  }
+  return parsed;
+}
+
+const LEFT_DRAG_STRESS_ITERATIONS = leftDragStressIterations();
+
+/// The host's own reason lines, whole-tail. Scoped per iteration by diffing
+/// against the same read taken before the drag, because the tail is truncated
+/// from the front and a byte offset into it is not stable.
+function releaseNotInjectedTail() {
+  return releaseNotInjectedLines(petalLogLinesSince(null)).map((line) => line.trim());
+}
+
+function releaseNotInjectedSince(before) {
+  const after = releaseNotInjectedTail();
+  return after.length >= before.length ? after.slice(before.length) : after;
+}
+
+async function readRemoteControlStatus(ctx) {
+  return command(ctx.client, { cmd: 'remote-control-status', window_id: ctx.target.windowId });
+}
+
+/// Leave the operator's Mac clean. A zero-mask move is the host's own
+/// `drain_buttons_not_in_mask` path, and whether it clears the entry is itself
+/// the discriminator for the key-mismatch hypothesis: a drain that misses means
+/// the entry is filed under a key this controller can no longer reach.
+async function recoverPhantomPress(ctx) {
+  let clearedByHoverMove = null;
+  let clearedByTtl = null;
+  try {
+    await send(ctx, `api.pointer({ target, action: 'move', ...${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteHeldInput)}, button: -1, buttons: 0 }); return true;`);
+    await sleep(400);
+    clearedByHoverMove = heldInputs(await readRemoteControlStatus(ctx)).length === 0;
+  } catch {
+    // Best-effort recovery; the leak itself is the result, not this.
+  }
+  if (clearedByHoverMove === false) {
+    try {
+      // Past HELD_INPUT_TTL (1200ms) plus one sweep interval (250ms).
+      await sleep(1800);
+      clearedByTtl = heldInputs(await readRemoteControlStatus(ctx)).length === 0;
+    } catch {
+      // Best-effort only.
+    }
+  }
+  return { clearedByHoverMove, clearedByTtl };
+}
+
+/// Quarantine means quarantine: while #134 is open this case can return only
+/// `pass` or `skip`, so neither the leak it hunts NOR the extra dozen drags it
+/// costs (a wedged TextEdit, say) can fail a release on a known-open bug.
+async function runLeftDragReleaseStress(ctx) {
+  try {
+    return await leftDragReleaseStressAttempt(ctx);
+  } catch (error) {
+    if (!LEFT_DRAG_STRESS_QUARANTINED) throw error;
+    console.log(`::warning::#134 left-drag stress case aborted (QUARANTINED, not a gate failure): ${error.message}`);
+    return skipCase(`QUARANTINED (#134) -- the stress case could not complete: ${error.message}`);
+  }
+}
+
+async function leftDragReleaseStressAttempt(ctx) {
+  if (LEFT_DRAG_STRESS_ITERATIONS === 0) {
+    return skipCase('left-drag release stress disabled (PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS=0)');
+  }
+  const iterations = LEFT_DRAG_STRESS_ITERATIONS;
+  for (let iteration = 1; iteration <= iterations; iteration += 1) {
+    // Each iteration is a byte-for-byte copy of case 6's gesture, including
+    // its document reset and its AXSelectedText wait -- the leak is a race and
+    // a differently-timed drag is a different experiment.
+    setTextEditDocument('remote-control drag target line\n'.repeat(12));
+    const logBefore = releaseNotInjectedTail();
+    // The key the grant holds BEFORE the gesture. A held entry that survives
+    // under this key while the live session reports another is the direct
+    // evidence for the mid-gesture key change (#134's surviving hypothesis).
+    const sessionKeysBeforeGesture = ((await readRemoteControlStatus(ctx).catch(() => null))?.sessions ?? []).map(inputKey);
+    await send(ctx, `return api.drag({ target, from: ${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteDragFrom)}, to: ${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteDragTo)}, steps: ${REMOTE_CONTROL_DRAG_STEPS.suite}, button: ${REMOTE_CONTROL_BUTTONS.left} });`);
+    const selected = await waitForTextEditSelection();
+    if (selected === null) {
+      return skipCase(`AXSelectedText unavailable; the stress drag cannot reproduce case 6's gesture (iteration ${iteration}/${iterations})`);
+    }
+    try {
+      await assertReleased(ctx, `left drag stress iteration ${iteration}/${iterations}`);
+    } catch (error) {
+      const snapshot = await readRemoteControlStatus(ctx).catch(() => null);
+      const logLines = releaseNotInjectedSince(logBefore);
+      const { clearedByHoverMove, clearedByTtl } = await recoverPhantomPress(ctx);
+      const leak = summarizeReleaseStressLeak({
+        iteration,
+        iterations,
+        snapshot,
+        logLines,
+        sessionKeysBeforeGesture,
+        clearedByHoverMove,
+        clearedByTtl,
+        assertionMessage: error.message,
+      });
+      // Loud in the Actions UI without a workflow-level verdict, and machine
+      // readable in the harness log the gate already uploads.
+      console.log(`::warning::#134 left-drag release leak reproduced on stress iteration ${iteration}/${iterations} (QUARANTINED, not a gate failure): ${leak.detail}`);
+      console.log(`# STRESS-LEAK ${JSON.stringify(leak)}`);
+      await captureCaseFailureForensics(ctx.client, `${ctx.caseId ?? 33}-stress-iteration-${iteration}`);
+      return stressLeakOutcome(leak, { quarantined: LEFT_DRAG_STRESS_QUARANTINED });
+    }
+  }
+  console.log(`# STRESS-CLEAN ${JSON.stringify({ issue: 134, iterations, leaks: 0 })}`);
+  return pass(`${iterations} consecutive left drags each released cleanly; no phantom primary button (#134 not observed this run)`);
+}
+
 const CASES = [
   {
     id: 1,
@@ -2924,6 +3059,16 @@ const CASES = [
         await command(ctx.client, { cmd: 'remote-control-policy', policy: 'auto' }).catch(() => null);
       }
     },
+  },
+  // #134: QUARANTINED -- reports `skip`, never `fail`, while the leak it hunts
+  // is open. It runs LAST so a phantom press it provokes cannot be inherited by
+  // another case's release assertion -- that mis-attribution is this issue.
+  {
+    id: 33,
+    name: 'left drag release stress (QUARANTINED #134)',
+    features: 'pointer/drag/buttons',
+    sequence: 'left drag x N',
+    run: async (ctx) => runLeftDragReleaseStress(ctx),
   },
 ];
 
