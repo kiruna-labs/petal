@@ -27,6 +27,11 @@ import tokenHandler from '../api/token.js';
 import updaterHandler from '../api/updater.js';
 import { sendApiError } from '../lib/http.js';
 import { _setSentryClientForTest } from '../lib/sentry.js';
+import {
+  DISTRIBUTION_METRIC_PREFIX,
+  distributionMetricLine,
+  recordDownload,
+} from '../lib/distributionMetrics.js';
 
 const originalEnv = {
   LIVEKIT_URL: process.env.LIVEKIT_URL,
@@ -1168,6 +1173,112 @@ async function main() {
       assert.deepEqual(flushCalls, [2000]);
     });
     assert.ok(messages.some((m) => m.startsWith('warn: updater: latest.json unavailable')));
+  });
+
+  // #125: /api/download is a PUBLIC marketing endpoint and the recording
+  // added there is a COUNT, never a profile. Sentry's allowlist-first posture
+  // applies verbatim: only `event`, `platform` and `version` may leave this
+  // process, each constrained to a closed set or a strict version shape. The
+  // recorder takes primitives and never a VercelRequest, so no header, IP,
+  // User-Agent, referrer or query string has a path in — these pin that a
+  // hostile value handed in anyway is replaced, not passed through.
+
+  await test('#125 download metric emits three allowlisted fields and nothing else', async () => {
+    const emitted: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      emitted.push(args.map(String).join(' '));
+    };
+    try {
+      recordDownload('windows', 'Petal_0.9.15_windows_x86_64-setup.exe');
+    } finally {
+      console.log = original;
+    }
+
+    assert.equal(emitted.length, 1);
+    assert.ok(emitted[0].startsWith(`${DISTRIBUTION_METRIC_PREFIX} `));
+    const payload = JSON.parse(emitted[0].slice(DISTRIBUTION_METRIC_PREFIX.length + 1));
+    // Exact key set, not a superset — a new field cannot be added without
+    // this failing and forcing a deliberate privacy decision.
+    assert.deepEqual(Object.keys(payload).sort(), ['event', 'platform', 'version']);
+    assert.deepEqual(payload, {
+      event: 'download',
+      platform: 'windows',
+      version: '0.9.15',
+    });
+  });
+
+  await test('#125 download metric never passes a hostile platform or version through', async () => {
+    const PII_MARKERS = [
+      // Regression marker: this one is the reason the version gate is a
+      // semver GRAMMAR and not a character class. An IPv4 address is digits
+      // and dots, so it sailed through the first draft's
+      // `^[0-9A-Za-z][0-9A-Za-z.+-]{0,39}$` and was emitted verbatim as a
+      // `version`. Keep it first in this list.
+      '203.0.113.7',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'alice@example.com',
+      PII_MARKER_DISPLAY_NAME,
+      'https://referrer.example/private-page',
+    ];
+
+    const emitted: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      emitted.push(args.map(String).join(' '));
+    };
+    try {
+      for (const marker of PII_MARKERS) {
+        // Both entry points, and both fields on each: a caller that somehow
+        // routed a request value here still cannot get it out.
+        recordDownload(marker, `Petal_${marker}_universal.dmg`);
+        recordDownload('windows', marker);
+        emitted.push(
+          distributionMetricLine({
+            event: 'download',
+            platform: marker as unknown as 'windows',
+            version: marker,
+          })
+        );
+      }
+    } finally {
+      console.log = original;
+    }
+
+    const serialized = emitted.join('\n');
+    for (const marker of PII_MARKERS) {
+      assert.ok(
+        !serialized.includes(marker),
+        `download metric leaked ${JSON.stringify(marker)}`
+      );
+    }
+    // Every one of those became the fixed sentinel rather than being dropped
+    // silently into a differently-shaped line.
+    for (const line of emitted) {
+      const payload = JSON.parse(line.slice(DISTRIBUTION_METRIC_PREFIX.length + 1));
+      assert.deepEqual(Object.keys(payload).sort(), ['event', 'platform', 'version']);
+      assert.equal(payload.event, 'download');
+      assert.ok(['macos', 'windows', 'unknown'].includes(payload.platform));
+      assert.ok(
+        payload.version === 'unknown' ||
+          /^\d{1,5}\.\d{1,5}\.\d{1,5}(?:[-+][0-9A-Za-z.-]{1,32})?$/.test(payload.version),
+        `version is neither a release version nor the sentinel: ${JSON.stringify(payload.version)}`
+      );
+    }
+  });
+
+  await test('#125 recordDownload swallows a broken log sink instead of throwing at its caller', () => {
+    const original = console.log;
+    console.log = () => {
+      throw new Error('log transport is down');
+    };
+    try {
+      // The handler calls this AFTER res.end(); a throw here would land in
+      // /api/download's catch and turn a served download into a 502.
+      assert.doesNotThrow(() => recordDownload('macos', 'Petal_1.2.3_universal.dmg'));
+    } finally {
+      console.log = original;
+    }
   });
 
   await test('sendApiError genuinely awaits Sentry.flush before returning — not fire-and-forget', async () => {

@@ -4,6 +4,7 @@
 
 import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { findBlobByPrefixSuffix } from '../lib/blob.js';
+import { recordDownload } from '../lib/distributionMetrics.js';
 import { applyCors, sendApiError } from '../lib/http.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -32,6 +33,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     res.setHeader('Location', blob.url);
     res.status(302).end();
+    // #125: this endpoint used to record NOTHING, so "how many people took the
+    // Windows build" was answerable only from the Vercel request log. Counted
+    // AFTER the redirect is written, so recording cannot delay or fail it, and
+    // only for a download actually served (a 400/404 is not a download).
+    // Platform + resolved version only — the privacy note in
+    // lib/distributionMetrics.ts is the authority, and nothing off `req` may
+    // ever be passed here.
+    recordDownload(platform, blob.pathname);
   } catch (err) {
     // #282: previously a bespoke inline catch with ZERO console logging on
     // unexpected failures — routed through sendApiError so download failures
