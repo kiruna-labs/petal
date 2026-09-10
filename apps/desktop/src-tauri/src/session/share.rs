@@ -4008,14 +4008,20 @@ const SHARE_MEMORY_SETTLE_MARK_US: u64 = 30_000_000;
 ///
 /// The `vm_*` fields say WHICH of those three. They are one bounded walk of
 /// this process's own VM regions bucketed by kernel `user_tag` (see
-/// `platform::mem::VmOwner`), and the per-owner dirty column sums to
-/// `phys_footprint` itself -- so `vm_top` decomposes the very number printed
-/// beside it rather than offering a second, differently-defined one. Four
-/// marks per share, no per-frame or per-second cost. What a reader gets from
-/// two consecutive marks is the step's owner by NAME: `iosurface` growing
-/// across `start_begin` -> `publish_succeeded` is ScreenCaptureKit /
-/// VideoToolbox surfaces, `malloc` is libwebrtc or us, `ioaccelerator` is the
-/// GPU driver.
+/// `platform::mem::VmOwner`). Four marks per share, no per-frame or
+/// per-second cost. What a reader gets from two consecutive marks is the
+/// step's owner by NAME: `iosurface` growing across `start_begin` ->
+/// `publish_succeeded` is ScreenCaptureKit / VideoToolbox surfaces, `malloc`
+/// is libwebrtc or us, `ioaccelerator` is the GPU driver.
+///
+/// Read those two marks as a DIFFERENCE, never as a decomposition of
+/// `phys_footprint_mb` beside them (#142). `vm_mapped_dirty_mb` counts pages
+/// MAPPED into this process; `phys_footprint` is a ledger of the pages this
+/// task is CHARGED for, and a share accumulates mapped-but-not-charged pages
+/// (an IOSurface belongs to whoever created it) -- which is why the live
+/// ratio between them drifted 1.50 -> 2.13 across one session. Neither number
+/// bounds the other. "IOSurface went 23 -> 66 MB across this share" is
+/// supported; "IOSurface holds 66 of the 67 MB" is not.
 fn share_memory_mark_line(
     window_id: u32,
     stage: &str,
@@ -8539,7 +8545,8 @@ mod tests {
             "session: share memory mark -- window=1073741828 stage=first_frame \
 phys_footprint_mb=3074 live_pixel_buffers=0 source=2560x1440 \
 petal_frame_pool_ceiling_mb=47 vm_walk=complete vm_regions=1204 \
-vm_resident_mb=3196 vm_dirty_mb=3072 vm_top=iosurface:2800/2800,malloc:280/272,untagged:116/0 \
+vm_resident_mb=3196 vm_mapped_dirty_mb=3072 \
+vm_top=iosurface:2800/2800,malloc:280/272,untagged:116/0 \
 vm_other_tag=n/a"
         );
     }
@@ -8555,23 +8562,23 @@ vm_other_tag=n/a"
                 VmOwnerBytes {
                     owner: VmOwner::IoSurface,
                     resident_bytes: 2800 * MB,
-                    dirty_bytes: 2800 * MB,
+                    mapped_dirty_bytes: 2800 * MB,
                 },
                 VmOwnerBytes {
                     owner: VmOwner::Malloc,
                     resident_bytes: 280 * MB,
-                    dirty_bytes: 272 * MB,
+                    mapped_dirty_bytes: 272 * MB,
                 },
                 VmOwnerBytes {
                     owner: VmOwner::Untagged,
                     resident_bytes: 116 * MB,
-                    dirty_bytes: 0,
+                    mapped_dirty_bytes: 0,
                 },
             ],
             regions_walked: 1204,
             truncated: false,
             total_resident_bytes: (2800 + 280 + 116) * MB,
-            total_dirty_bytes: (2800 + 272) * MB,
+            total_mapped_dirty_bytes: (2800 + 272) * MB,
             other_top_user_tag: None,
         }
     }
@@ -8593,7 +8600,11 @@ vm_other_tag=n/a"
         );
         assert!(line.contains("petal_frame_pool_ceiling_mb=47"), "{line}");
         assert!(line.contains("vm_top=iosurface:2800/2800"), "{line}");
-        assert!(line.contains("vm_dirty_mb=3072"), "{line}");
+        assert!(line.contains("vm_mapped_dirty_mb=3072"), "{line}");
+        // #142: the bare `vm_dirty_mb` name invited "2800 of the 3074 MB",
+        // which the walk cannot support. Renaming it is the fix; this guards
+        // the rename at the one place a field log is actually shaped.
+        assert!(!line.contains("vm_dirty_mb="), "{line}");
     }
 
     #[test]
@@ -8611,7 +8622,7 @@ vm_other_tag=n/a"
         assert!(line.contains("phys_footprint_mb=280"), "{line}");
         assert!(line.contains("vm_walk=unavailable"), "{line}");
         assert!(!line.contains("iosurface"), "{line}");
-        assert!(!line.contains("vm_dirty_mb=0"), "{line}");
+        assert!(!line.contains("vm_mapped_dirty_mb=0"), "{line}");
     }
 
     #[test]
@@ -8624,7 +8635,7 @@ vm_other_tag=n/a"
             "session: share memory mark -- window=7 stage=start_begin \
 phys_footprint_mb=unknown live_pixel_buffers=n/a source=n/a \
 petal_frame_pool_ceiling_mb=n/a vm_walk=unavailable vm_regions=n/a \
-vm_resident_mb=n/a vm_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
+vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         );
     }
 
