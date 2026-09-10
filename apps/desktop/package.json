@@ -12,7 +12,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "pretest": "playwright install chromium-headless-shell",
-    "test": "node --import tsx --test tests/*.test.ts && node --test scripts/test-remote-control-harness-preflight.mjs scripts/test-remote-control-exit-accounting.mjs scripts/test-remote-control-observation.mjs scripts/test-remote-control-held-input.mjs scripts/test-process-lease-ledger.mjs scripts/test-remote-control-share-readiness.mjs scripts/test-harness-timeouts.mjs && node scripts/check-panel-close.mjs && echo 'panel-close check passed'",
+    "test": "node --import tsx --test tests/*.test.ts && node --test scripts/test-remote-control-harness-preflight.mjs scripts/test-remote-control-exit-accounting.mjs scripts/test-remote-control-observation.mjs scripts/test-remote-control-held-input.mjs scripts/test-process-lease-ledger.mjs scripts/test-remote-control-share-readiness.mjs scripts/test-remote-control-share-border.mjs scripts/test-harness-timeouts.mjs && node scripts/check-panel-close.mjs && echo 'panel-close check passed'",
     "lint:panel-close": "node scripts/check-panel-close.mjs",
     "tauri": "tauri",
     "dev:clean": "bash scripts/dev.sh",

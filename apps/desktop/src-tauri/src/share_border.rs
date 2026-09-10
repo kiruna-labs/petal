@@ -1275,6 +1275,29 @@ pub(crate) struct QaWindowStackPosition {
     stack_index: Option<usize>,
 }
 
+/// The share-lifecycle state of the window the QA stack report is about.
+///
+/// #154: without this, "border not on-screen" was indistinguishable from
+/// "the border tracker deliberately ordered the border out because its SOURCE
+/// window left the window stack" -- the two states a live-gate failure has to
+/// be attributed between, and the reason one intermittent gate failure needed
+/// an artifact download to read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QaShareBorderShareState {
+    /// `SessionState`'s view of the share: `notShared` | `onScreen` |
+    /// `offScreen` | `closed`.
+    share: &'static str,
+    /// A border handle exists for this window in the border registry.
+    registered: bool,
+    /// The tracker has ordered the border panel OUT because its shared source
+    /// window is absent from the window stack (closed / minimized / other
+    /// Space). An off-screen border in this state is CORRECT behaviour.
+    tracker_hidden: bool,
+    /// A real hide/retire has been requested -- share teardown is in flight.
+    hide_requested: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct QaShareBorderStackReport {
@@ -1282,6 +1305,7 @@ pub(crate) struct QaShareBorderStackReport {
     source: QaWindowStackPosition,
     border: Option<QaWindowStackPosition>,
     overlays: Vec<QaWindowStackPosition>,
+    share_state: QaShareBorderShareState,
 }
 
 fn qa_stack_position(stack: &[i64], number: i64) -> QaWindowStackPosition {
@@ -1301,13 +1325,40 @@ pub(crate) fn qa_share_border_stack_report(
 ) -> Result<QaShareBorderStackReport, String> {
     use tauri::Manager;
 
-    let border_number = with_registry(|reg| {
-        reg.active
+    let (border_number, registered, tracker_hidden, hide_requested) = with_registry(|reg| {
+        // Prefer the live handle; fall back to a hide-pending one so a border
+        // whose teardown is already in flight is REPORTED as such rather than
+        // silently reading as "no border was ever registered".
+        let handle = reg
+            .active
             .values()
             .find(|handle| handle.window_id == window_id && !handle.hide_requested)
-            .map(|handle| handle.panel_number)
-            .filter(|number| *number > 0)
+            .or_else(|| {
+                reg.active
+                    .values()
+                    .find(|handle| handle.window_id == window_id)
+            });
+        match handle {
+            Some(handle) => (
+                (!handle.hide_requested)
+                    .then_some(handle.panel_number)
+                    .filter(|number| *number > 0),
+                true,
+                handle.tracker_hidden,
+                handle.hide_requested,
+            ),
+            None => (None, false, false, false),
+        }
     });
+    let share = match app
+        .state::<crate::session::SessionState>()
+        .shared_window_screen_status(window_id)
+    {
+        crate::session::SharedWindowScreenStatus::NotShared => "notShared",
+        crate::session::SharedWindowScreenStatus::OnScreen(_) => "onScreen",
+        crate::session::SharedWindowScreenStatus::OffScreen => "offScreen",
+        crate::session::SharedWindowScreenStatus::Closed => "closed",
+    };
     let overlay_labels = crate::share_overlay::overlay_labels_for_window(window_id);
     let app_main = app.clone();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -1338,6 +1389,12 @@ pub(crate) fn qa_share_border_stack_report(
             .into_iter()
             .map(|number| qa_stack_position(&stack, number))
             .collect(),
+        share_state: QaShareBorderShareState {
+            share,
+            registered,
+            tracker_hidden,
+            hide_requested,
+        },
     };
     log::info!("share-border-qa: WindowServer stack snapshot {report:?}");
     Ok(report)
@@ -1758,6 +1815,16 @@ pub fn start_tracker(app: &AppHandle) {
                             order_out(&window);
                             crate::share_overlay::order_out_for_window_on_main(
                                 &app_main, window_id,
+                            );
+                            // #154: this transition was the ONLY unlogged
+                            // border action, and it is the one that makes a
+                            // border legitimately leave the on-screen stack.
+                            // Its absence cost a full artifact download to
+                            // attribute one intermittent live-gate failure.
+                            // Fires once per hide, not once per tick.
+                            log::info!(
+                                "share_border: tracker ordered border {border_id} out -- source {} {window_id} absent from the window stack",
+                                share_source_label(source_kind)
                             );
                             with_registry(|reg| {
                                 if let Some(h) = reg.active.get_mut(&border_id) {
@@ -2277,6 +2344,50 @@ mod tests {
             }
         );
         assert_eq!(qa_stack_position(&stack, 77).stack_index, None);
+    }
+
+    /// #154: the live gate reads these exact keys out of the autotest socket
+    /// (`apps/desktop/scripts/remote-control-share-border.mjs`). A rename here
+    /// silently turns every share-state field into `undefined` on the harness
+    /// side, which reads as "no state reported" -- the condition this report
+    /// exists to remove. Keep this test and that module in step.
+    #[test]
+    fn qa_share_border_stack_report_serializes_the_share_state_the_gate_reads() {
+        let report = QaShareBorderStackReport {
+            window_id: 163,
+            source: QaWindowStackPosition {
+                number: 163,
+                stack_index: Some(12),
+            },
+            border: Some(QaWindowStackPosition {
+                number: 145,
+                stack_index: None,
+            }),
+            overlays: vec![QaWindowStackPosition {
+                number: 149,
+                stack_index: Some(11),
+            }],
+            share_state: QaShareBorderShareState {
+                share: "onScreen",
+                registered: true,
+                tracker_hidden: true,
+                hide_requested: false,
+            },
+        };
+        let value = serde_json::to_value(&report).expect("report serializes");
+        let state = value
+            .get("shareState")
+            .expect("shareState is reported alongside the stack positions");
+        assert_eq!(state.get("share").and_then(|v| v.as_str()), Some("onScreen"));
+        assert_eq!(state.get("registered").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            state.get("trackerHidden").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            state.get("hideRequested").and_then(|v| v.as_bool()),
+            Some(false)
+        );
     }
 
     #[test]
