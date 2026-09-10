@@ -3531,7 +3531,7 @@ async fn start_capture_for_share(
                 {
                     log_share_memory_mark(
                         window_id,
-                        "settled_30s",
+                        SHARE_MEMORY_SETTLE_STAGE,
                         Some((frame.width, frame.height)),
                     );
                 }
@@ -3990,6 +3990,12 @@ async fn start_capture_for_share(
 /// rather than transient.
 const SHARE_MEMORY_SETTLE_MARK_US: u64 = 30_000_000;
 
+/// The `stage=` this mark is emitted under. A `pub(crate)` const rather than a
+/// literal because the Test Cockpit's SHARE-DESKTOP scenario waits for exactly
+/// this stage; two literals would drift silently and the scenario would time
+/// out reporting "the capture stopped delivering frames" (#106).
+pub(crate) const SHARE_MEMORY_SETTLE_STAGE: &str = "settled_30s";
+
 /// #106: one UNTHROTTLED footprint sample at a named point in a share's
 /// lifecycle.
 ///
@@ -4055,6 +4061,34 @@ petal_frame_pool_ceiling_mb={ceiling_str} {vm_fields}"
     )
 }
 
+/// #106: the mark lines this process has emitted, oldest first, capped.
+///
+/// The log line is the field channel and stays authoritative. This in-process
+/// copy exists so the Test Cockpit can attach a share's own marks to its
+/// `run.jsonl` evidence instead of scraping a log file the runner may not be
+/// collecting -- SHARE-DESKTOP's whole point is that the marks reach CI. Four
+/// lines per share, so the cap is ~16 shares of history.
+#[cfg(feature = "cockpit-privileged")]
+static SHARE_MEMORY_MARK_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(feature = "cockpit-privileged")]
+const SHARE_MEMORY_MARK_LOG_LIMIT: usize = 64;
+
+#[cfg(feature = "cockpit-privileged")]
+fn record_share_memory_mark(line: &str) {
+    let mut log = SHARE_MEMORY_MARK_LOG.lock_unpoisoned();
+    if log.len() >= SHARE_MEMORY_MARK_LOG_LIMIT {
+        log.remove(0);
+    }
+    log.push(line.to_string());
+}
+
+/// Every `share memory mark` line emitted so far, oldest first.
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) fn recent_share_memory_marks() -> Vec<String> {
+    SHARE_MEMORY_MARK_LOG.lock_unpoisoned().clone()
+}
+
 fn log_share_memory_mark(window_id: u32, stage: &str, source: Option<(u32, u32)>) {
     // One VM-region walk per mark -- four per share. ~13 us per region,
     // bounded by `platform::mem::VM_REGION_WALK_LIMIT` and
@@ -4062,17 +4096,17 @@ fn log_share_memory_mark(window_id: u32, stage: &str, source: Option<(u32, u32)>
     // heartbeat or the once-a-minute curve: the cost is per call, and #106
     // needs the transition, not a stream.
     let attribution = crate::platform::mem::vm_attribution();
-    log::info!(
-        "{}",
-        share_memory_mark_line(
-            window_id,
-            stage,
-            source,
-            crate::platform::mem::process_footprint_bytes_now(),
-            crate::platform::mem::live_pixel_buffer_count(),
-            attribution.as_ref(),
-        )
+    let line = share_memory_mark_line(
+        window_id,
+        stage,
+        source,
+        crate::platform::mem::process_footprint_bytes_now(),
+        crate::platform::mem::live_pixel_buffer_count(),
+        attribution.as_ref(),
     );
+    #[cfg(feature = "cockpit-privileged")]
+    record_share_memory_mark(&line);
+    log::info!("{line}");
 }
 
 async fn start_share_with_capture_source(
@@ -8612,6 +8646,57 @@ vm_other_tag=n/a"
         assert!(line.contains("vm_walk=unavailable"), "{line}");
         assert!(!line.contains("iosurface"), "{line}");
         assert!(!line.contains("vm_dirty_mb=0"), "{line}");
+    }
+
+    /// #106 lockstep. SHARE-DESKTOP waits for the post-settle mark by reading
+    /// the emitted LINE, so the producer's format and the cockpit's parser are
+    /// one contract. Change the format without changing the parser and the
+    /// scenario would not fail loudly -- it would sit for its whole 50s budget
+    /// and then report "the capture stopped delivering frames", which is a
+    /// different and wrong conclusion. This is the test that stops that.
+    #[cfg(feature = "cockpit-privileged")]
+    #[test]
+    fn the_cockpit_parser_reads_the_stage_off_a_real_mark_line() {
+        // A display source id (DISPLAY_SOURCE_MARKER | CGDirectDisplayID 1),
+        // which is what SHARE-DESKTOP's marks are keyed by.
+        let display_source_id = 0x4000_0001u32;
+        let line = share_memory_mark_line(
+            display_source_id,
+            SHARE_MEMORY_SETTLE_STAGE,
+            Some((1920, 1080)),
+            Some(512 * 1024 * 1024),
+            Some(0),
+            None,
+        );
+        assert_eq!(
+            crate::test_cockpit::share_memory_mark_stage_for_window(&line, display_source_id),
+            Some(SHARE_MEMORY_SETTLE_STAGE),
+            "{line}"
+        );
+        assert_eq!(
+            crate::test_cockpit::share_memory_mark_stage_for_window(&line, 58),
+            None,
+            "another share's mark must not be read as this one's: {line}"
+        );
+    }
+
+    /// The in-process copy the cockpit reads must actually receive what the
+    /// log sink receives -- an accessor that always returns empty would make
+    /// SHARE-DESKTOP report "no marks" for a perfectly healthy share.
+    #[cfg(feature = "cockpit-privileged")]
+    #[test]
+    fn emitted_marks_reach_the_in_process_record() {
+        let before = recent_share_memory_marks().len();
+        log_share_memory_mark(0x4000_0002, "start_begin", Some((1920, 1080)));
+        let after = recent_share_memory_marks();
+        assert_eq!(after.len(), before + 1);
+        assert_eq!(
+            crate::test_cockpit::share_memory_mark_stage_for_window(
+                after.last().expect("a mark was just recorded"),
+                0x4000_0002
+            ),
+            Some("start_begin")
+        );
     }
 
     #[test]
