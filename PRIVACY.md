@@ -18,6 +18,11 @@ you self-host, it is you.
 - **Why:** the backend holds the LiveKit API secret so the client never has to.
   It returns a token scoped to one room.
 - **Note:** your display name is visible to everyone else in the room, by design.
+- **Note:** while you are in a room, your display name is also shown — without
+  your identity, and without them joining — to anyone who holds that room's
+  invite and has the room in their list (they see it by hovering the room in
+  their rooms list). A room stamped "knock to join" additionally requires its
+  access code.
 
 ### LiveKit SFU (media and signaling)
 

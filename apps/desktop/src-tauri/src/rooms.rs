@@ -117,10 +117,18 @@ pub struct RoomRecord {
     pub open: bool,
 }
 
+/// One visible person in a room, as `POST /api/rooms/status` reports them
+/// (#122). NAME ONLY -- the backend deliberately never sends an identity for
+/// a room this machine has not joined, because an identity is stable per
+/// install and would let every invite holder correlate the same person across
+/// rooms and days. Do not add an `identity` field back.
+///
+/// These are user-authored personal data: they may be rendered, and they must
+/// NEVER be logged. `occupancy_change_line` logs the public room id and a
+/// count for exactly this reason.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoomOccupancyParticipant {
-    pub identity: String,
     pub name: String,
 }
 
@@ -132,7 +140,11 @@ pub struct RoomOccupancy {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub available: bool,
-    pub participants: Vec<RoomOccupancyParticipant>,
+    /// Who is in the room, when the backend actually read the roster. `None`
+    /// means "not known" (the room is empty, unavailable, or its
+    /// `listParticipants` failed) -- distinct from `Some(vec![])`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participants: Option<Vec<RoomOccupancyParticipant>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
     // Backend status fields: populated from `POST /api/rooms/status` for the
@@ -1165,7 +1177,7 @@ fn merge_room_status(rooms: Vec<RoomRecord>, backend: BackendRoomsResponse) -> V
             livekit_room,
             id: Some(public_id),
             available: true,
-            participants: Vec::new(),
+            participants: active.and_then(|candidate| candidate.participants.clone()),
             unavailable_reason: None,
             name: active.map(|candidate| candidate.name.clone()),
             slug: None,
@@ -1189,6 +1201,11 @@ struct BackendRoomView {
     name: String,
     open: bool,
     occupancy: usize,
+    /// #122: names only, omitted (not `[]`) when the backend could not read
+    /// the room's roster. `#[serde(default)]` keeps an older backend, which
+    /// sends no such key at all, deserializing cleanly.
+    #[serde(default)]
+    participants: Option<Vec<RoomOccupancyParticipant>>,
 }
 
 fn unavailable_for_rooms(rooms: &[RoomRecord], reason: String) -> Vec<RoomOccupancy> {
@@ -1199,7 +1216,7 @@ fn unavailable_for_rooms(rooms: &[RoomRecord], reason: String) -> Vec<RoomOccupa
             livekit_room: livekit_room_name(room),
             id: Some(public_room_id_for_livekit_room(&livekit_room_name(room))),
             available: false,
-            participants: Vec::new(),
+            participants: None,
             unavailable_reason: Some(reason.clone()),
             name: None,
             slug: None,
@@ -2162,9 +2179,9 @@ mod tests {
         let public_id = public_room_id_for_livekit_room(&livekit_room_name(&held));
         let backend = BackendRoomsResponse {
             rooms: vec![
-                BackendRoomView { id: public_id.clone(), name: "Eng meeting".into(), open: true, occupancy: 3 },
+                BackendRoomView { id: public_id.clone(), name: "Eng meeting".into(), open: true, occupancy: 3, participants: None },
                 // A row we never asked for must NOT become a local room.
-                BackendRoomView { id: "room_deadbeef".into(), name: "Stranger".into(), open: true, occupancy: 9 },
+                BackendRoomView { id: "room_deadbeef".into(), name: "Stranger".into(), open: true, occupancy: 9, participants: None },
             ],
         };
         let rows = merge_room_status(vec![held, omitted], backend);
@@ -2259,12 +2276,14 @@ mod tests {
                     name: "Standup".into(),
                     open: true,
                     occupancy: 7,
+                    participants: None,
                 },
                 BackendRoomView {
                     id: first_id.clone(),
                     name: "Standup".into(),
                     open: true,
                     occupancy: 2,
+                    participants: None,
                 },
             ],
         };
@@ -2277,6 +2296,111 @@ mod tests {
         );
         assert_eq!(rows[1].id.as_deref(), Some(second_id.as_str()));
         assert_eq!(rows[1].occupancy, Some(7));
+    }
+
+    // #122: the roster the backend sends is names only, and "omitted" is a
+    // THIRD state distinct from "empty" -- a room whose `listParticipants`
+    // failed must not render as "nobody is here".
+    #[test]
+    fn backend_room_view_deserializes_present_empty_and_omitted_participants() {
+        let response: BackendRoomsResponse = serde_json::from_value(serde_json::json!({
+            "rooms": [
+                {
+                    "id": "room_1",
+                    "name": "Named",
+                    "open": true,
+                    "occupancy": 2,
+                    "participants": [{ "name": "Ada" }, { "name": "" }]
+                },
+                { "id": "room_2", "name": "Read but empty", "open": true, "occupancy": 0, "participants": [] },
+                { "id": "room_3", "name": "Unread", "open": true, "occupancy": 3 }
+            ]
+        }))
+        .expect("the status response must deserialize with participants present, empty and omitted");
+
+        let names: Vec<String> = response.rooms[0]
+            .participants
+            .as_ref()
+            .expect("present")
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(names, vec!["Ada".to_string(), String::new()]);
+        assert_eq!(
+            response.rooms[1].participants.as_ref().map(|p| p.len()),
+            Some(0),
+            "an empty roster is a real answer: the room was read and nobody was in it"
+        );
+        assert!(
+            response.rooms[2].participants.is_none(),
+            "an omitted roster must stay None, never default to an empty vec"
+        );
+    }
+
+    // A backend that predates #122 sends no `participants` key at all; the
+    // desktop must keep working against it rather than failing the whole poll.
+    #[test]
+    fn backend_room_view_tolerates_a_response_with_no_participants_key() {
+        let response: BackendRoomsResponse = serde_json::from_str(
+            r#"{"rooms":[{"id":"room_1","name":"Old backend","open":true,"occupancy":4}]}"#,
+        )
+        .expect("an older backend's response must still deserialize");
+        assert!(response.rooms[0].participants.is_none());
+    }
+
+    #[test]
+    fn merge_room_status_copies_the_roster_onto_the_matching_card_only() {
+        let held = status_record("a", "room-8535e993a1b76ed8a9ee59b265f53dfc", Some("abc-defg-hjk"), true);
+        let unread = status_record("b", "room-00000000000000000000000000000001", None, true);
+        let held_id = public_room_id_for_livekit_room(&livekit_room_name(&held));
+        let unread_id = public_room_id_for_livekit_room(&livekit_room_name(&unread));
+        let backend = BackendRoomsResponse {
+            rooms: vec![
+                BackendRoomView {
+                    id: held_id.clone(),
+                    name: "Eng meeting".into(),
+                    open: true,
+                    occupancy: 2,
+                    participants: Some(vec![
+                        RoomOccupancyParticipant { name: "Ada".into() },
+                        RoomOccupancyParticipant { name: String::new() },
+                    ]),
+                },
+                BackendRoomView {
+                    id: unread_id.clone(),
+                    name: "Standup".into(),
+                    open: true,
+                    occupancy: 3,
+                    participants: None,
+                },
+            ],
+        };
+        let rows = merge_room_status(vec![held, unread], backend);
+        let named: Vec<String> = rows[0]
+            .participants
+            .as_ref()
+            .expect("the answered room carries its roster")
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(named, vec!["Ada".to_string(), String::new()]);
+        assert_eq!(rows[1].occupancy, Some(3));
+        assert!(
+            rows[1].participants.is_none(),
+            "a room the backend could not read the roster for must stay None"
+        );
+    }
+
+    // #122 privacy: the occupancy log line is the ONLY thing this module
+    // writes about a room, and it must stay a public id plus a count. A
+    // display name in a log file is user-authored personal data leaving the
+    // machine's own boundary.
+    #[test]
+    fn occupancy_log_line_never_carries_a_participant_name() {
+        let line = occupancy_change_line("room_09abe457634f3c4848188932aa5070ed", Some(1), 2)
+            .expect("a change emits a line");
+        assert_eq!(line, "rooms: occupancy room_09abe457634f3c4848188932aa5070ed 1 -> 2");
+        assert!(!line.contains("Ada"));
     }
 
     // #121: a backend row whose name matches a local label but whose id belongs
@@ -2295,6 +2419,7 @@ mod tests {
                 name: "Standup".into(),
                 open: true,
                 occupancy: 5,
+                participants: None,
             }],
         };
         let rows = merge_room_status(vec![local], backend);

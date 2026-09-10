@@ -251,6 +251,19 @@ pub enum SentryDiagnosticEvent {
     DecoderAllocationFailed(DecoderAllocationFailedDiagnostic),
     BrowserUrlExtractionFailed(BrowserUrlExtractionFailedDiagnostic),
     DescriptorPressure(DescriptorPressureDiagnostic),
+    PointerReleaseNotInjected(PointerReleaseNotInjectedDiagnostic),
+}
+
+/// Emitted (rate-limited) when a remote-control pointer RELEASE (an Up) fails
+/// to inject natively, which leaves the HOST holding a phantom mouse button
+/// while the controller's wire echo reports the Up as sent (#134). Nothing
+/// recorded this before: a stuck primary button on someone else's Mac reached
+/// us only as an intermittent test-suite failure attributed to the wrong
+/// gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerReleaseNotInjectedDiagnostic {
+    pub button: PointerButtonTag,
+    pub cause: PointerReleaseFailureCauseTag,
 }
 
 /// Emitted (rate-limited) when open file descriptors cross a high-water
@@ -270,6 +283,10 @@ pub struct DescriptorPressureDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryPressureDiagnostic {
     pub level: PressureLevelTag,
+    /// #106: the allocation owner holding the most dirty bytes at the moment
+    /// pressure was reported. Without it a pressure event says only that the
+    /// machine is short of memory, never whose bytes are responsible.
+    pub top_owner: MemoryOwnerTag,
 }
 
 /// Emitted (rate-limited) when libwebrtc reports a decode failure with
@@ -435,12 +452,77 @@ diagnostic_enum!(InstallDestinationClassTag { Applications => "applications", Us
 // purpose -- it must never read as an explanation.
 diagnostic_enum!(VanishedSessionCrashReportTag { Found => "found", NotFound => "not_found", Unverified => "unverified", NotApplicable => "not_applicable" });
 diagnostic_enum!(PressureLevelTag { Warn => "warn", Critical => "critical", NotApplicable => "not_applicable" });
+// #106: WHICH allocation owner held the most dirty bytes when a
+// memory-pressure transition was reported. `phys_footprint` alone says how
+// much and never who -- the reported 3.07 GB share-start spike sat in the
+// field log with no telemetry able to attribute a single megabyte of it.
+// Mirrors `platform::mem::VmOwner::tag()` string-for-string (that module must
+// not depend on this one's Sentry machinery, the same split
+// `BrowserUrlExtractionCauseTag` documents above);
+// `memory_owner_tag_mirrors_platform_vm_owner` fails if they drift.
+// `not_applicable` covers Windows, a failed region walk, and a process with
+// nothing dirty -- never a fabricated owner.
+diagnostic_enum!(MemoryOwnerTag {
+    Untagged => "untagged",
+    Malloc => "malloc",
+    Stack => "stack",
+    Dylib => "dylib",
+    IoSurface => "iosurface",
+    IoKit => "iokit",
+    IoAccelerator => "ioaccelerator",
+    CoreGraphics => "coregraphics",
+    CoreAnimation => "coreanimation",
+    CoreMedia => "coremedia",
+    JavaScript => "javascript",
+    Network => "network",
+    Audio => "audio",
+    Other => "other",
+    NotApplicable => "not_applicable"
+});
+
+impl MemoryOwnerTag {
+    pub fn from_vm_owner(owner: crate::platform::mem::VmOwner) -> Self {
+        use crate::platform::mem::VmOwner;
+        match owner {
+            VmOwner::Untagged => Self::Untagged,
+            VmOwner::Malloc => Self::Malloc,
+            VmOwner::Stack => Self::Stack,
+            VmOwner::Dylib => Self::Dylib,
+            VmOwner::IoSurface => Self::IoSurface,
+            VmOwner::IoKit => Self::IoKit,
+            VmOwner::IoAccelerator => Self::IoAccelerator,
+            VmOwner::CoreGraphics => Self::CoreGraphics,
+            VmOwner::CoreAnimation => Self::CoreAnimation,
+            VmOwner::CoreMedia => Self::CoreMedia,
+            VmOwner::JavaScript => Self::JavaScript,
+            VmOwner::Network => Self::Network,
+            VmOwner::Audio => Self::Audio,
+            VmOwner::Other => Self::Other,
+        }
+    }
+}
 /// #104: how far descriptor pressure has gone. `high_water` is the sampler
 /// crossing 80% of the soft `RLIMIT_NOFILE`; `exhausted` is an allocation that
 /// has already failed with `EMFILE`/`ENFILE`. Two stages, not a level, because
 /// the second is observed from a different place (any failing IO) than the
 /// first (the in-room sampler).
 diagnostic_enum!(DescriptorPressureStageTag { HighWater => "high_water", Exhausted => "exhausted", NotApplicable => "not_applicable" });
+// The DOM-style button a remote-control pointer event names, decoded here so
+// the off-device value is a closed enum rather than a raw wire integer.
+// (`///` on a macro invocation is an unused-doc-comment warning.)
+diagnostic_enum!(PointerButtonTag { Primary => "primary", Right => "right", Middle => "middle", NotApplicable => "not_applicable" });
+// Why a pointer release did not reach the target. `injection_cancelled` and
+// `injection_timeout` are the two that previously reported SUCCESS upstream:
+// the cancelled path returns `Ok(())` without acting, and a timed-out
+// injection is abandoned mid-flight (#134).
+diagnostic_enum!(PointerReleaseFailureCauseTag {
+    AxError => "ax_error",
+    RoutesExhausted => "routes_exhausted",
+    SinkError => "sink_error",
+    InjectionCancelled => "injection_cancelled",
+    InjectionTimeout => "injection_timeout",
+    NotApplicable => "not_applicable"
+});
 /// Mirrors `browser_url::UrlExtraction::cause()`'s string set exactly (minus
 /// "ok"/"unsupported", which are never logged as a failure) -- keep the two
 /// in sync by hand; there is no shared source because `browser_url` must not
@@ -457,7 +539,7 @@ diagnostic_enum!(BrowserUrlExtractionCauseTag {
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 16] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 17] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -474,6 +556,7 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 16] = [
     "decoder-allocation-failed",
     "browser-url-extraction-failed",
     "descriptor-pressure",
+    "pointer-release-not-injected",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -507,6 +590,9 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "pressure_level",
     "browser_url_extraction_cause",
     "descriptor_pressure_stage",
+    "pointer_button",
+    "pointer_release_failure_cause",
+    "memory_top_owner",
     "dedup_count_bucket",
 ];
 
@@ -534,10 +620,12 @@ const SHARE_OVERLAY_CURSOR_CAPTURE_MESSAGE_TAGS: &[&str] = &["session_role", "ov
 const WINSRV_PORT_DEAD_MESSAGE_TAGS: &[&str] = &["session_role"];
 const PREVIOUS_SESSION_VANISHED_MESSAGE_TAGS: &[&str] = &["crash_report_status"];
 const WINDOW_SERVER_RESTART_DETECTED_MESSAGE_TAGS: &[&str] = &["session_role"];
-const MEMORY_PRESSURE_MESSAGE_TAGS: &[&str] = &["pressure_level"];
+const MEMORY_PRESSURE_MESSAGE_TAGS: &[&str] = &["pressure_level", "memory_top_owner"];
 const DECODER_ALLOCATION_FAILED_MESSAGE_TAGS: &[&str] = &["session_role"];
 const BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS: &[&str] = &["browser_url_extraction_cause"];
 const DESCRIPTOR_PRESSURE_MESSAGE_TAGS: &[&str] = &["descriptor_pressure_stage"];
+const POINTER_RELEASE_NOT_INJECTED_MESSAGE_TAGS: &[&str] =
+    &["pointer_button", "pointer_release_failure_cause"];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
     "camera_direction",
@@ -578,6 +666,7 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "decoder-allocation-failed" => Some(DECODER_ALLOCATION_FAILED_MESSAGE_TAGS),
         "browser-url-extraction-failed" => Some(BROWSER_URL_EXTRACTION_FAILED_MESSAGE_TAGS),
         "descriptor-pressure" => Some(DESCRIPTOR_PRESSURE_MESSAGE_TAGS),
+        "pointer-release-not-injected" => Some(POINTER_RELEASE_NOT_INJECTED_MESSAGE_TAGS),
         _ => None,
     }
 }
@@ -923,6 +1012,7 @@ impl SentryDiagnosticEvent {
             Self::DecoderAllocationFailed(_) => "decoder-allocation-failed",
             Self::BrowserUrlExtractionFailed(_) => "browser-url-extraction-failed",
             Self::DescriptorPressure(_) => "descriptor-pressure",
+            Self::PointerReleaseNotInjected(_) => "pointer-release-not-injected",
         }
     }
 }
@@ -975,6 +1065,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::CameraHealth(value) => {
             insert("session_role", value.role.tag());
@@ -1003,6 +1096,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::CameraSizeMismatchRecovery(value) => {
             insert("session_role", value.role.tag());
@@ -1031,6 +1127,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::PlayoutDeviceRepointed(value) => {
             insert("session_role", value.role.tag());
@@ -1059,6 +1158,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::RepublishStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1087,6 +1189,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::PublishDropStreak(value) => {
             insert("session_role", value.role.tag());
@@ -1115,6 +1220,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::WatchdogRepeatStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1143,6 +1251,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::UpdateInstallFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1171,6 +1282,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::ShareOverlayCursorCaptureCleared(value) => {
             insert("session_role", value.role.tag());
@@ -1199,6 +1313,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerPortDead(value) => {
             insert("session_role", value.role.tag());
@@ -1227,6 +1344,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::PreviousSessionVanished(value) => {
             insert("session_role", "not_applicable");
@@ -1255,6 +1375,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerRestartDetected(value) => {
             insert("session_role", value.role.tag());
@@ -1283,6 +1406,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::MemoryPressure(value) => {
             insert("session_role", "not_applicable");
@@ -1311,6 +1437,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", value.level.tag());
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", value.top_owner.tag());
         }
         SentryDiagnosticEvent::DecoderAllocationFailed(value) => {
             insert("session_role", value.role.tag());
@@ -1339,6 +1468,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::BrowserUrlExtractionFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1367,6 +1499,9 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", value.cause.tag());
             insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
         }
         SentryDiagnosticEvent::DescriptorPressure(value) => {
             insert("session_role", "not_applicable");
@@ -1395,6 +1530,40 @@ fn build_sentry_diagnostic_event(
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", value.stage.tag());
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
+        }
+        SentryDiagnosticEvent::PointerReleaseNotInjected(value) => {
+            insert("session_role", "sharer");
+            insert("source_selection", "not_applicable");
+            insert("capture_geometry", "not_applicable");
+            insert("configured_geometry", "not_applicable");
+            insert("pixel_format", "not_applicable");
+            insert("scale_bucket", "not_applicable");
+            insert("encoder_implementation", "not_applicable");
+            insert("stage_code", "not_applicable");
+            insert("camera_direction", "not_applicable");
+            insert("capture_cadence", "not_applicable");
+            insert("encode_cadence", "not_applicable");
+            insert("queue_backpressure", "not_applicable");
+            insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
+            insert("recovery_action", "not_applicable");
+            insert("playout_transition", "not_applicable");
+            insert("storm_scope", "not_applicable");
+            insert("install_failure_stage", "not_applicable");
+            insert("install_failure_kind", "not_applicable");
+            insert("install_volume_boundary", "not_applicable");
+            insert("install_destination_class", "not_applicable");
+            insert("overlay_clear_reason", "not_applicable");
+            insert("crash_report_status", "not_applicable");
+            insert("pressure_level", "not_applicable");
+            insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", value.button.tag());
+            insert("pointer_release_failure_cause", value.cause.tag());
+            insert("memory_top_owner", "not_applicable");
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
@@ -4725,6 +4894,16 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
                         .all(|byte| byte.is_ascii_digit() || byte == b'.'))
         }
         "architecture" => matches!(value, "arm64" | "x86_64" | "other"),
+        "pointer_button" => matches!(value, "primary" | "right" | "middle" | "not_applicable"),
+        "pointer_release_failure_cause" => matches!(
+            value,
+            "ax_error"
+                | "routes_exhausted"
+                | "sink_error"
+                | "injection_cancelled"
+                | "injection_timeout"
+                | "not_applicable"
+        ),
         // `not_applicable` is reachable: `update-install-failed` fires outside
         // any meeting, so it has no sharer/receiver role to report (#871).
         "session_role" => matches!(value, "sharer" | "receiver" | "both" | "not_applicable"),
@@ -4809,6 +4988,28 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
             "found" | "not_found" | "unverified" | "not_applicable"
         ),
         "pressure_level" => matches!(value, "warn" | "critical" | "not_applicable"),
+        // #106: the closed set mirrored from `platform::mem::VmOwner`. Kept a
+        // hand-written `matches!` rather than a loop over `MemoryOwnerTag` so
+        // this reads as an allowlist at the boundary it guards;
+        // `memory_owner_tag_mirrors_platform_vm_owner` pins the two together.
+        "memory_top_owner" => matches!(
+            value,
+            "untagged"
+                | "malloc"
+                | "stack"
+                | "dylib"
+                | "iosurface"
+                | "iokit"
+                | "ioaccelerator"
+                | "coregraphics"
+                | "coreanimation"
+                | "coremedia"
+                | "javascript"
+                | "network"
+                | "audio"
+                | "other"
+                | "not_applicable"
+        ),
         "browser_url_extraction_cause" => matches!(
             value,
             "denied" | "timeout" | "ambiguous" | "no-match" | "spawn" | "failed" | "not_applicable"
@@ -8268,6 +8469,118 @@ mod tests {
         }
     }
 
+    /// #106: the two enums are hand-mirrored across a deliberate module
+    /// boundary (`platform::mem` must not pull in this file's Sentry
+    /// machinery). A drift here does not fail to compile -- it ships an owner
+    /// string the Sentry allowlist then rejects, dropping the whole event
+    /// silently. Pin every variant, in both directions.
+    #[test]
+    fn memory_owner_tag_mirrors_platform_vm_owner() {
+        use crate::platform::mem::VmOwner;
+        for owner in VmOwner::ALL {
+            let tag = MemoryOwnerTag::from_vm_owner(owner);
+            assert_eq!(
+                tag.tag(),
+                owner.tag(),
+                "MemoryOwnerTag and VmOwner disagree on {owner:?}"
+            );
+            assert!(
+                valid_diagnostic_tag("memory_top_owner", owner.tag()),
+                "VmOwner::{owner:?} renders '{}', which the Sentry allowlist rejects",
+                owner.tag()
+            );
+        }
+        // The extra variant that has no VmOwner: absence, not a fabricated
+        // owner.
+        assert_eq!(MemoryOwnerTag::NotApplicable.tag(), "not_applicable");
+        assert!(valid_diagnostic_tag(
+            "memory_top_owner",
+            MemoryOwnerTag::NotApplicable.tag()
+        ));
+        // Both directions: a value that is not in the mirror must be refused,
+        // or the allowlist proves nothing.
+        assert!(!valid_diagnostic_tag("memory_top_owner", "videotoolbox"));
+        assert!(!valid_diagnostic_tag("memory_top_owner", ""));
+        assert!(!valid_diagnostic_tag(
+            "memory_top_owner",
+            "/Users/someone/Library/Caches/thing"
+        ));
+    }
+
+    /// #106: a memory-pressure event now names WHO held the bytes. It is only
+    /// worth anything if it survives `before_send` -- a forgotten
+    /// `DIAGNOSTIC_TAGS` entry drops the event entirely rather than dropping
+    /// the tag, so round-trip every owner.
+    #[test]
+    fn memory_pressure_diagnostic_carries_the_owner_through_before_send() {
+        use crate::platform::mem::VmOwner;
+        // `scrub_event_for_sentry` short-circuits to `None` while
+        // `SENTRY_ENABLED` is false; take the same shared lock the
+        // enable/disable-toggling tests use so this cannot race a `false`
+        // window and read a healthy event as rejected.
+        let _guard = SENTRY_ENABLED_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for level in [PressureLevelTag::Warn, PressureLevelTag::Critical] {
+            for owner in VmOwner::ALL
+                .iter()
+                .map(|owner| MemoryOwnerTag::from_vm_owner(*owner))
+                .chain(std::iter::once(MemoryOwnerTag::NotApplicable))
+            {
+                let event = build_sentry_diagnostic_event(
+                    SentryDiagnosticEvent::MemoryPressure(MemoryPressureDiagnostic {
+                        level,
+                        top_owner: owner,
+                    }),
+                    "1",
+                );
+                assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+                assert_eq!(
+                    event.tags.get("memory_top_owner").map(String::as_str),
+                    Some(owner.tag())
+                );
+                assert_eq!(
+                    event.message.as_deref(),
+                    Some(
+                        format!(
+                            "diagnostic: memory-pressure pressure_level={} memory_top_owner={}",
+                            level.tag(),
+                            owner.tag()
+                        )
+                        .as_str()
+                    ),
+                    "the title must name the owner, so Sentry groups an IOSurface spike \
+                     apart from a heap one"
+                );
+                assert!(
+                    valid_sentry_diagnostic_event(&event),
+                    "memory-pressure ({}, {}) must pass before_send",
+                    level.tag(),
+                    owner.tag()
+                );
+                assert!(scrub_event_for_sentry(event).is_some());
+            }
+        }
+    }
+
+    /// Every OTHER event must still carry the tag, set to `not_applicable`.
+    /// `valid_sentry_diagnostic_event` is fail-closed on tag COUNT, so a
+    /// missed arm silently stops that whole event class from reaching Sentry.
+    #[test]
+    fn every_other_diagnostic_event_reports_a_not_applicable_owner() {
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::DescriptorPressure(DescriptorPressureDiagnostic {
+                stage: DescriptorPressureStageTag::Exhausted,
+            }),
+            "1",
+        );
+        assert_eq!(
+            event.tags.get("memory_top_owner").map(String::as_str),
+            Some("not_applicable")
+        );
+        assert!(valid_sentry_diagnostic_event(&event));
+    }
+
     #[test]
     fn every_diagnostic_event_name_has_message_tags() {
         for name in DIAGNOSTIC_EVENT_NAMES {
@@ -8338,6 +8651,55 @@ mod tests {
                 valid_sentry_diagnostic_event(&event),
                 "cause {cause:?} produced an invalid Sentry diagnostic event"
             );
+        }
+    }
+
+    /// #134: a failed pointer RELEASE leaves the HOST holding a phantom mouse
+    /// button while the controller reports the Up as sent. Round-trip every
+    /// (button, cause) pair through the real validator -- a missing
+    /// `DIAGNOSTIC_TAGS` entry or `valid_diagnostic_tag` arm would drop the
+    /// event silently, which is the failure mode this diagnostic exists to end.
+    #[test]
+    fn pointer_release_not_injected_diagnostic_is_a_valid_sentry_event() {
+        assert!(
+            DIAGNOSTIC_EVENT_NAMES.contains(&"pointer-release-not-injected"),
+            "pointer-release-not-injected must be in DIAGNOSTIC_EVENT_NAMES (#134)"
+        );
+        assert_eq!(
+            diagnostic_message_tags("pointer-release-not-injected").expect("message tags"),
+            ["pointer_button", "pointer_release_failure_cause"]
+        );
+        for button in [
+            PointerButtonTag::Primary,
+            PointerButtonTag::Right,
+            PointerButtonTag::Middle,
+        ] {
+            for cause in [
+                PointerReleaseFailureCauseTag::AxError,
+                PointerReleaseFailureCauseTag::RoutesExhausted,
+                PointerReleaseFailureCauseTag::SinkError,
+                PointerReleaseFailureCauseTag::InjectionCancelled,
+                PointerReleaseFailureCauseTag::InjectionTimeout,
+            ] {
+                let event = build_sentry_diagnostic_event(
+                    SentryDiagnosticEvent::PointerReleaseNotInjected(
+                        PointerReleaseNotInjectedDiagnostic { button, cause },
+                    ),
+                    "1",
+                );
+                assert!(
+                    valid_sentry_diagnostic_event(&event),
+                    "button {button:?} cause {cause:?} produced an invalid Sentry diagnostic event"
+                );
+                assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+                let message = event.message.as_deref().expect("diagnostic title");
+                assert!(
+                    message.contains("pointer-release-not-injected")
+                        && message.contains(button.tag())
+                        && message.contains(cause.tag()),
+                    "the title must name the button and the cause, not just the event: {message}"
+                );
+            }
         }
     }
 

@@ -297,7 +297,7 @@ test('only background checks are quiet -- the manual path still reports progress
   // takes the same code path it always did.
   assert.match(updaterSource, /const quiet = isQuietUpdateCheckReason\(opts\.reason\)/);
   assert.match(updaterSource, /if \(!quiet\) markUpdateDownloading\(\)/);
-  assert.match(updaterSource, /if \(!quiet\) markUpdateFailed\(friendlyMessage\)/);
+  assert.match(updaterSource, /if \(!quiet\) markUpdateFailed\(friendlyMessage, recovery\)/);
   // Availability semantics unchanged: a check never downloads or installs.
   assert.match(updaterSource, /COMMANDS\.checkCompatibleUpdateAvailable/);
   assert.doesNotMatch(

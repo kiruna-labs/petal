@@ -26,7 +26,7 @@ cd "$ROOT"
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$1"; }
 
-step "Release: version lockstep gate (9 fields, incl. Cargo.lock's desktop entry -- #671)"
+step "Release: version lockstep gate (9 fields + the 3 versioned SBOMs -- #671, #131)"
 # Self-check mode (no tag here): every version field must agree with
 # tauri.conf.json's own version. release.yml runs the SAME script against
 # the tag being released; this is the local equivalent so drift is caught
@@ -51,6 +51,9 @@ step "Harness: rc-live-suite foreign-instance guard (both directions)"
 
 step "Harness: capture-preflight contract (plan 6d step 2)"
 "$ROOT/scripts/test-capture-preflight.sh"
+
+step "CI: PR-gate path filter, both directions (#133)"
+"$ROOT/scripts/test-gate-paths-changed.sh"
 
 # Self-installing, idempotent: makes scripts/git-hooks/pre-push (the local
 # replacement for the disabled .github/workflows/rust-gate.yml -- GitHub

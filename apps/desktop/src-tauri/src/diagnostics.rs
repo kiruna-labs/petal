@@ -1010,14 +1010,25 @@ fn observe_memory_pressure_transition(last_level: &mut Option<u32>) {
         } else {
             crate::logging::PressureLevelTag::Warn
         };
+        // #106: one bounded VM-region walk, here and nowhere else on this
+        // path. A pressure transition is rate-limited and rare, so this costs
+        // nothing per frame or per second -- and it is the one moment where
+        // "who owns the memory" is worth more than "how much is there".
+        let attribution = crate::platform::mem::vm_attribution();
+        let top_owner = attribution
+            .as_ref()
+            .and_then(crate::platform::mem::VmAttribution::top_owner)
+            .map(crate::logging::MemoryOwnerTag::from_vm_owner)
+            .unwrap_or(crate::logging::MemoryOwnerTag::NotApplicable);
         log::warn!(
             "diagnostics: OS memory pressure transitioned to level {transitioned_to} \
-             ({:?}) -- see #878's leak->pressure->teardown chain (#884)",
-            tag
+             ({:?}) -- see #878's leak->pressure->teardown chain (#884) -- {}",
+            tag,
+            crate::platform::mem::vm_attribution_fields(attribution.as_ref())
         );
         crate::logging::capture_sentry_diagnostic(
             crate::logging::SentryDiagnosticEvent::MemoryPressure(
-                crate::logging::MemoryPressureDiagnostic { level: tag },
+                crate::logging::MemoryPressureDiagnostic { level: tag, top_owner },
             ),
         );
     }
