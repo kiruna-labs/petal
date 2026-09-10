@@ -1,0 +1,21 @@
+2026-09-10 12:00:00.100 [INFO] [desktop_lib::logging] logging: file sink initialized
+2026-09-10 12:00:00.145 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.23 commit=605bd3cd build_date=2026-09-10 bundle_id=com.petal.app
+2026-09-10 12:00:04.010 [INFO] [desktop_lib::session::room] session: joined room '<redacted:r1>'
+2026-09-10 12:00:12.480 [INFO] [desktop_lib::camera_session] session: camera-intent intended=true
+2026-09-10 12:00:12.482 [INFO] [desktop_lib::camera_session] session: start_camera_publish begin (identity '<redacted:i1>')
+2026-09-10 12:00:12.690 [INFO] [desktop_lib::camera_session] session: start_camera_publish capture running, waiting for first frame
+2026-09-10 12:00:12.892 [INFO] [desktop_lib::camera_session] session: start_camera_publish succeeded (1280x720)
+2026-09-10 12:00:31.100 [INFO] [desktop_lib::camera_session] session: stop_camera_publish begin
+2026-09-10 12:00:31.138 [INFO] [desktop_lib::camera_session] session: stop_camera_publish done (camera released)
+2026-09-10 12:00:31.139 [INFO] [desktop_lib::camera_session] session: camera-intent intended=false
+2026-09-10 12:00:47.000 [INFO] [desktop_lib::camera_session] session: camera-intent intended=true
+2026-09-10 12:00:47.006 [INFO] [desktop_lib::camera_session] session: start_camera_publish begin (identity '<redacted:i1>')
+2026-09-10 12:00:47.210 [INFO] [desktop_lib::camera_session] session: start_camera_publish capture running, waiting for first frame
+2026-09-10 12:00:47.404 [INFO] [desktop_lib::camera_session] session: start_camera_publish succeeded (1280x720)
+2026-09-10 12:01:03.500 [INFO] [desktop_lib::camera_session] session: stop_camera_publish begin
+2026-09-10 12:01:03.541 [INFO] [desktop_lib::camera_session] session: stop_camera_publish done (camera released)
+2026-09-10 12:01:03.542 [INFO] [desktop_lib::camera_session] session: camera-intent intended=true
+2026-09-10 12:01:03.550 [INFO] [desktop_lib::camera_session] session: start_camera_publish begin (identity '<redacted:i1>')
+2026-09-10 12:01:03.760 [INFO] [desktop_lib::camera_session] session: start_camera_publish capture running, waiting for first frame
+2026-09-10 12:01:04.040 [INFO] [desktop_lib::camera_session] session: start_camera_publish succeeded (1920x1080)
+2026-09-10 12:02:00.000 [INFO] [desktop_lib::session::room] session: left room

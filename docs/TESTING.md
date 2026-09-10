@@ -1558,6 +1558,8 @@ subsequent cockpit work:
   `window_source::list()` directly, not the `list_cached()` picker path these
   marks sit on, so today they reach field logs (`~/Library/Logs/Petal/petal.log`)
   and a dev run only. Windows emits them too, with `vm_walk=unavailable`.
+  `scripts/analyze-field-log.mjs` reads these marks out of a log and reports the
+  enumeration/thumbnail split for you -- see "Reading a field log" below.
 - **Belt and suspenders, not either/or**: even inside the QA build channel,
   the privileged capabilities stay inert -- refuse to execute -- unless
   `cockpit-setup.sh`'s one-time local marker file is present, checked via
@@ -1739,6 +1741,73 @@ publications and from the compositor, logging the blocking reason
 (`test-cockpit: <ID> waiting for previous web peer(s) ...`). Evidence lands in
 the run's `web-peer-teardown` and `previous-peer-gate` records; a healthy run
 shows `departedGracefully: true` and a gate `waitedMs` well under a second.
+
+## Reading a field log: `scripts/analyze-field-log.mjs`
+
+Two measurements are taken by reading a `petal.log` rather than by running a
+harness, and both used to end with "paste the grep here and someone will
+interpret it". The interpretation is mechanical, so it is a script:
+
+```sh
+node scripts/analyze-field-log.mjs ~/Library/Logs/Petal/petal.log
+node scripts/analyze-field-log.mjs ~/Library/Logs/Petal          # the whole directory
+node scripts/analyze-field-log.mjs --json petal.log.gz           # machine-readable
+```
+
+It reports:
+
+- **The camera-intent margin (#76).** Per publish episode: the margin from
+  `session: camera-intent intended=true` to `succeeded`/`failed`, split into the
+  release window (intent -> `start_camera_publish begin`, which is what a live
+  Settings preview has to let go inside of) and the acquisition
+  (begin -> outcome); whether the FIRST attempt won or a bounded self-heal retry
+  was needed; and the ON, OFF and device-switch cases separately. The verdict is
+  the one #76's definition of done asks for and nothing more:
+  **first-attempt-wins** or **retry-needed**.
+- **Picker memory (#159).** Per picker episode, the `list_begin` ->
+  `prewarm_done` delta **split** into enumeration (`list_begin` -> `list_done`,
+  the half #148 fixed) and thumbnails (`list_done` -> `prewarm_done`, the half
+  that has never been priced), with the `sources=<n>d/<n>w` counts and the
+  per-window cost against #106's pre-fix ~70 MB/window.
+
+Things it deliberately refuses to do:
+
+- **It never prints log text.** No room name, identity, access code, path or
+  window title reaches the output; absolute wall-clock timestamps are withheld
+  too, and episodes are located by offset from the log's first line. Field logs
+  come from users, and a log that did NOT come through "Export logs"
+  (`logging.rs`'s `redact_for_export`) still carries the raw LiveKit identity on
+  every `start_camera_publish begin` line. The report is numbers, stages and
+  verdicts, so it is safe to paste into an issue as-is.
+- **It never infers a verdict the log cannot support.** A publish with no
+  `camera-intent` line before it (the log starts mid-episode, or the build
+  predates #78) has no margin to measure, so it is listed as NOT COUNTED instead
+  of being folded into the verdict. An episode is never reported as spanning an
+  app restart. A picker episode whose `prewarm=` says `skipped_in_flight` or
+  `no_sources` captured nothing, so its footprint delta never sets the verdict.
+- **It says what the log cannot show.** A `first-attempt-wins` verdict is only
+  evidence about the contended case if the log came from #76's runbook, because
+  the Settings preview holds the camera from the webview (`getUserMedia`) and
+  emits no native line -- an uncontended publish that wins looks identical. The
+  report prints that caveat next to the verdict rather than leaving the reader
+  to supply it.
+- **It fails helpfully when the lines are simply absent.** It names the build in
+  the log, states the first version that emitted the instrumentation
+  (`0.9.10` for the intent line, `0.9.20` for the picker marks, `0.9.21` for the
+  build that carries #148's fix), and prints the two-minute runbook for
+  producing the missing episode. Absence of a line is not evidence of a defect.
+
+**Concurrent instances are a real hazard, and it flags them.** One log file can
+carry two builds (an upgrade, or two app instances writing to the same path),
+and a log directory routinely holds several instances' rotated output. The
+script warns on more than one build version in a file or across the files given,
+on backwards timestamp jumps, and on two files whose wall-clock spans genuinely
+overlap. A rotation handover shares exactly one instant between two files and is
+correctly NOT reported as an overlap. Never average numbers across those
+reports.
+
+Unit tests: `scripts/test-analyze-field-log.mjs`, with fixture logs under
+`scripts/fixtures/field-logs/`, run by `scripts/ci-local.sh`.
 
 ## Signed Release Clean-TCC Smoke
 

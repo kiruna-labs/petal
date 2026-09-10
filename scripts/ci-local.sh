@@ -39,6 +39,9 @@ node "$ROOT/scripts/test-bump-version.mjs"
 step "Release: publish-blob.mjs pure-logic unit tests (#671)"
 node "$ROOT/scripts/test-publish-blob-lib.mjs"
 
+step "Field logs: analyze-field-log.mjs unit tests (#76, #159)"
+node "$ROOT/scripts/test-analyze-field-log.mjs"
+
 step "Source provenance wrapper + signed cross-machine integration"
 "$ROOT/scripts/test-run-with-source-provenance.sh"
 "$ROOT/scripts/test-cross-machine-rc-suite.sh"

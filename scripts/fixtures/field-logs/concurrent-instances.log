@@ -1,0 +1,10 @@
+2026-09-08 13:05:02.105 [INFO] [desktop_lib::logging] logging: file sink initialized
+2026-09-08 13:05:02.145 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.4 commit=66634904 build_date=2026-08-26 bundle_id=com.petal.app
+2026-09-08 13:05:09.450 [INFO] [desktop_lib::session::room] session: joined room '<redacted:r1>'
+2026-09-08 13:05:12.642 [INFO] [desktop_lib::logging] logging: file sink initialized
+2026-09-08 13:05:12.678 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.9 commit=457b4b4 build_date=2026-09-07 bundle_id=com.petal.app
+2026-09-08 13:05:20.000 [INFO] [desktop_lib::camera_session] session: camera-intent intended=true
+2026-09-08 13:05:20.004 [INFO] [desktop_lib::camera_session] session: start_camera_publish begin (identity '<redacted:i1>')
+2026-09-08 13:05:20.418 [INFO] [desktop_lib::camera_session] session: start_camera_publish succeeded (1280x720)
+2026-09-08 13:05:19.000 [INFO] [desktop_lib::session::room] session: joined room '<redacted:r2>'
+2026-09-08 13:06:00.000 [INFO] [desktop_lib::session::room] session: left room
