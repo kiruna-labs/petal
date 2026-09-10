@@ -1,10 +1,10 @@
 # Petal plugin system — design and status
 
-This directory holds the plugin SDK (`sdk/`), the first-party plugins
-(`reactions/`, `chat/`, `webhook-notifier/`, `window-link/`), and the build
-script that packs them (`build-all.mjs`). The host runtime that loads plugins
-lives in `shared/plugin-host/` so the desktop app and the browser client share
-one implementation.
+This directory holds the plugin SDK (`sdk/`) and the vendored built-in
+bundles (`builtins/<id>/bundle.json`, pinned by `builtins/SOURCES.json` to a
+commit of `kiruna-labs/petal-plugins`, where plugin **source** lives). The
+host runtime that loads plugins lives in `shared/plugin-host/` so the desktop
+app and the browser client share one implementation.
 
 This file is the **living design document** for the feature branch
 `feature/plugin-system`. Edit it on the branch as decisions change; keep the
@@ -87,9 +87,8 @@ especially for development.
 | Path | What |
 |---|---|
 | `plugins/sdk/` | `@petal/plugin-sdk`: manifest types, `definePlugin`, the frame-side bridge, a Vite lib-build template |
-| `plugins/<id>/` | one first-party plugin each: `manifest.json`, `plugin.js`, `tests/` — **until I-5c**, when source moves to the plugins repo and this becomes `plugins/builtins/<id>/bundle.json(.minisig)`, the vendored signed artifact |
-| `plugins/build-all.mjs` | builds every plugin and emits a deterministic `bundle.json` per plugin (moves to the plugins repo in I-5c) |
-| `kiruna-labs/petal-plugins` (separate public repo, from I-5c) | source of our own plugins, pointer files for community plugins, the build-and-sign CI that produces every registry bundle |
+| `plugins/builtins/<id>/bundle.json` | the vendored registry artifact of each built-in, produced by the plugins repo's CI at the commit in `plugins/builtins/SOURCES.json`; `builtins.test.mjs` pins canonical form and the pin (signatures follow the production key) |
+| `kiruna-labs/petal-plugins` (separate repo) | source of our own plugins (`plugins/<id>/`), pointer files for community plugins (`community/`), `build-all.mjs` and the no-secrets build CI that produces every registry bundle |
 | `shared/plugin-host/` | host runtime shared by both clients: manifest validation, permissions, protocol, frame loader, rate limits, suggestion logic, settings model |
 | `apps/desktop/src/lib/plugins/` | Tauri `HostAdapter` and Svelte surfaces |
 | `web-harness/src/plugins/` | browser `HostAdapter` and DOM surfaces |
@@ -400,9 +399,9 @@ repository.
   its own signature verifier together with its install path (I-6), so no
   unused crypto ships before then. The contract fixtures are produced by the
   marketplace signer and verified by the Rust crate in tests.
-- `plugins/build-all.mjs` emits the deterministic `bundle.json` the publisher
-  consumes. Bundles are produced only by the plugins repo's CI from pinned
-  source (§2.13); the publisher never signs a bundle it did not build.
+- `build-all.mjs` in the plugins repo emits the deterministic `bundle.json`
+  the publisher consumes. Bundles are produced only by that repo's CI from
+  pinned source (§2.13); the publisher never signs a bundle it did not build.
 - Update check on meeting join at most once per day; re-consent only when
   permissions grew.
 
@@ -440,12 +439,15 @@ built the bundle.
 | Window link | `petal.window-link` / local | shares:read, ui:header-button | none | header button "Open URL", hidden when the share has no source URL; the native button is removed in the same PR |
 
 Built-ins are compiled into both clients by `shared/plugin-host/builtins.ts`
-through relative `?raw` imports (`../../plugins/<id>/plugin.js`), which
-resolve the same way in the desktop app, the web dev server, Vercel's staged
-deploy (the `web-harness/plugins` symlink is dereferenced next to `shared/` by
-`scripts/deploy-web-harness.sh`), and every rendered test that aliases
-`@petal/shared`. No second alias to keep in sync. They are preinstalled with
-source `builtin` and enabled by default, except the webhook notifier.
+through relative `?raw` imports of the vendored
+`../../plugins/builtins/<id>/bundle.json`, parsed by
+`shared/plugin-host/bundle.ts` (the same parser the desktop uses for
+installed bundles). The relative import resolves the same way in the desktop
+app, the web dev server, Vercel's staged deploy (the `web-harness/plugins`
+symlink is dereferenced next to `shared/` by `scripts/deploy-web-harness.sh`),
+and every rendered test that aliases `@petal/shared`. No second alias to keep
+in sync. They are preinstalled with source `builtin` and enabled by default,
+except the webhook notifier.
 
 **Built-ins are buildless** (decided while implementing I-2): each is one
 plain-JS `plugin.js` with no imports, registered through the
@@ -453,17 +455,19 @@ plain-JS `plugin.js` with no imports, registered through the
 clients import them with `?raw`, and a build step before every app build
 (including Vercel's remote web build, which has no `plugins/node_modules`)
 would be fragile. Third-party plugins use `@petal/plugin-sdk` + Vite and
-produce the same single-file shape. `build-all.mjs` still packs built-ins
-into `bundle.json` for registry publishing.
+produce the same single-file shape; `build-all.mjs` (plugins repo) packs both
+kinds into `bundle.json`.
 
-**Built-ins after I-5c.** Once plugin source moves to the plugins repo, the
-clients import the vendored `plugins/builtins/<id>/bundle.json` instead of a
-`plugin.js`: the very artifact the registry serves, signed with the registry
-key, so a built-in is a preinstalled registry plugin and can later be updated
-from the registry with no special path. A built-in bump is a PR here that
-replaces the vendored bundle and its signature; a test verifies every vendored
-bundle against the baked public key (fixture key in tests) so an unsigned or
-tampered vendored bundle cannot ship.
+**Built-ins are vendored bundles** (I-5c, 2026-09-10). The clients import
+`plugins/builtins/<id>/bundle.json`, the very artifact the registry serves,
+so a built-in is a preinstalled registry plugin and can later be updated from
+the registry with no special path. A built-in bump is a PR here that replaces
+the vendored bundle with the plugins repo's CI artifact and updates the
+commit in `SOURCES.json`; `plugins/builtins/builtins.test.mjs` fails on a
+hand-edited (non-canonical) bundle or a pin that disagrees with the manifest.
+Signature files and their verification test follow once the production
+registry key exists (owner keygen); until then provenance is the pinned
+commit.
 
 **M1 storage note:** the enabled map and per-plugin KV live in
 `localStorage` on both clients for now (`shared/plugin-host/settingsModel.ts`
@@ -652,9 +656,9 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-3 | M2 | data bus (web + Rust), contracts | seinfish | merged (kiruna-labs/petal#55); live native↔web Reactions smoke passed both directions 2026-09-08 (`web-harness/tests/fixtures/plugins/live-peer.mjs`); cockpit journey `PLUGIN-N2W-REACT` still to automate |
 | I-4 | M2 | state + advertisement | seinfish | merged (kiruna-labs/petal#55); post-merge fixes in #70 |
 | I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | merged (kiruna-labs/petal#71) |
-| I-5a | M3 | registry client | seinfish | PR kiruna-labs/petal#99 (review fixes landed 2026-09-09: compile-time key, anti-rollback, permission intersection, streaming client; desktop install/enable/remove UI; web loads registry installs in I-6) |
+| I-5a | M3 | registry client | seinfish | merged (kiruna-labs/petal#99, 2026-09-10; review fixes: compile-time key, anti-rollback, permission intersection, streaming client; web loads registry installs in I-6) |
 | I-5b | M3 | marketplace publisher + hosting (`kiruna-labs/petal-website` `marketplace/`) | seinfish | publisher, keygen, signer, vendored contracts + drift guard done 2026-09-08; moved into the website repo 2026-09-09 (petal-website PR #1); hosting, protected publish workflow and review tooling still to do |
-| I-5c | M3 | plugin source repo split (`kiruna-labs/petal-plugins`), SDK on npm, vendored built-in bundles, community pointer model | unassigned | decided 2026-09-09 (§2.13); not started; do after I-5a merges and before I-7 |
+| I-5c | M3 | plugin source repo split (`kiruna-labs/petal-plugins`), vendored built-in bundles, community pointer contract | seinfish | plugins repo live 2026-09-10 (reactions source, packer, build CI, `community/README.md`); monorepo vendors `plugins/builtins/` on feature/plugin-system-i5c; still to do: publish `@petal/plugin-sdk` to npm (owner: npm scope), signed vendored bundles once the production key exists |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |
 | I-7 | M3 | chat plugin (first plugin written in the plugins repo) | unassigned | not started |
 | I-8 | M4 | webhook notifier + net fetch | unassigned | not started |

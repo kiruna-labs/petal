@@ -96,10 +96,11 @@ if [ ! -d "$STAGE/shared" ] || [ -L "$STAGE/shared" ]; then
   echo "FATAL: $STAGE/shared is missing or still a symlink -- rsync -L did not dereference it" >&2
   exit 1
 fi
-# Same for the built-in plugin sources (`@petal/plugins`, plugins/README.md).
-# `--exclude node_modules` above already drops plugins/node_modules.
-if [ ! -d "$STAGE/plugins" ] || [ -L "$STAGE/plugins" ] || [ ! -f "$STAGE/plugins/reactions/plugin.js" ]; then
-  echo "FATAL: $STAGE/plugins is missing, still a symlink, or lacks the built-in plugin sources" >&2
+# Same for the vendored built-in plugin bundles (plugins/builtins/, plugins/README.md §2.11).
+# `--exclude node_modules` above already drops plugins/node_modules; `--exclude dist`
+# is why that directory is named builtins/, not dist/.
+if [ ! -d "$STAGE/plugins" ] || [ -L "$STAGE/plugins" ] || [ ! -f "$STAGE/plugins/builtins/petal.reactions/bundle.json" ]; then
+  echo "FATAL: $STAGE/plugins is missing, still a symlink, or lacks the vendored built-in plugin bundles" >&2
   exit 1
 fi
 

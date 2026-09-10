@@ -36,14 +36,17 @@ my-plugin/
 ```
 
 Build with `vite build` (use `pluginLibConfig` from `@petal/plugin-sdk/vite`
-so the output is one self-contained ES module). Pack with
-`node plugins/build-all.mjs <dir>` to get a `bundle.json`, which is what the
-registry publishes and what Petal installs.
+so the output is one self-contained ES module). `build-all.mjs` in
+`kiruna-labs/petal-plugins` packs it into a `bundle.json`, which is what the
+registry publishes and what Petal installs. Plugin source lives in that repo,
+not in the app monorepo (`plugins/README.md` §2.13).
 
-Petal's own built-in plugins (`plugins/reactions/` and friends) skip the build
-step entirely: each is one plain `plugin.js` with no imports that registers
-via the `globalThis.__petalRegister` hook. That is only because the clients
-compile them in directly; write yours with the SDK.
+Petal's own built-in plugins (`plugins/reactions/` there) skip the build step
+entirely: each is one plain `plugin.js` with no imports that registers via
+the `globalThis.__petalRegister` hook, and the app vendors the packed
+`bundle.json` (`plugins/builtins/` in the monorepo, pinned to a commit). That
+is only because the clients compile them in directly; write yours with the
+SDK.
 
 ## What runs where *(M1)*
 

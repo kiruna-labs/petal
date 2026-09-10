@@ -17,7 +17,18 @@ const ed = await load('@noble/ed25519/index.js');
 const { sha512, sha256 } = await load('@noble/hashes/sha2.js');
 const { blake2b } = await load('@noble/hashes/blake2.js');
 ed.hashes.sha512 = sha512;
-const { packBundle } = await import(pathToFileURL(resolve(repoRoot, 'plugins/build-all.mjs')).href);
+
+// Canonical bundle form, mirror of packBundle in kiruna-labs/petal-plugins build-all.mjs
+// (keys sorted deeply, two-space JSON, LF, trailing newline). plugins/builtins/builtins.test.mjs
+// pins the same form for the vendored built-ins.
+function sortKeysDeep(value) {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((k) => [k, sortKeysDeep(value[k])]));
+  return value;
+}
+function packBundle(manifest, entrySource) {
+  return JSON.stringify(sortKeysDeep({ manifest, files: { [manifest.entry]: entrySource } }), null, 2).replace(/\r\n/g, '\n') + '\n';
+}
 
 // --- minisign primitives (same format the Rust `minisign-verify` crate reads; kept inline so this
 // script has no TS dependency) ---

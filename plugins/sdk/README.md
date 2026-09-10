@@ -16,4 +16,5 @@ export default definePlugin({
 ```
 
 Build with the shared Vite config (`plugins/sdk/vite.lib.ts`) to a single
-`dist/plugin.js`, then `node plugins/build-all.mjs <dir>` to pack `bundle.json`.
+`dist/plugin.js`; `build-all.mjs` in `kiruna-labs/petal-plugins` packs it into
+`bundle.json` (plugin source lives in that repo, not here).

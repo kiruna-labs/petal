@@ -9,7 +9,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { builtinPlugins } from '@petal/shared/plugin-host/builtins';
 import type { LoadedPlugin } from '@petal/shared/plugin-host/broker';
-import { compareVersions, isPermission, validateManifest, type Permission } from '@petal/shared/plugin-host/manifest';
+import { parseBundle } from '@petal/shared/plugin-host/bundle';
+import { compareVersions, isPermission, type Permission } from '@petal/shared/plugin-host/manifest';
 import { isPluginEnabled, readEnabledOverrides, type InstalledPlugin } from '@petal/shared/plugin-host/settingsModel';
 import { browserStorage } from '$lib/data/storageKeys';
 import { COMMANDS, hasTauriBridge, type CommandArgs, type CommandReturns } from '$lib/ipc';
@@ -35,13 +36,10 @@ export async function registryInstalledPlugins(warn: (message: string) => void =
   for (const [id, record] of Object.entries(state.plugins)) {
     try {
       const text = await invoke<string>(COMMANDS.pluginReadBundle, { pluginId: id } satisfies CommandArgs[typeof COMMANDS.pluginReadBundle]);
-      const raw = JSON.parse(text) as { manifest?: unknown; files?: Record<string, unknown> };
-      const validated = validateManifest(raw.manifest);
-      if (!validated.ok) throw new Error(validated.errors[0]);
-      const manifest = validated.manifest;
+      const parsed = parseBundle(text);
+      if (!parsed.ok) throw new Error(parsed.error);
+      const { manifest, source } = parsed.bundle;
       if (manifest.id !== id || manifest.version !== record.version) throw new Error('stored bundle does not match its record');
-      const source = raw.files?.[manifest.entry];
-      if (typeof source !== 'string' || source.length === 0) throw new Error('stored bundle lacks its entry file');
       out.push({
         manifest,
         source: record.source === 'dev' ? 'dev' : 'registry',
