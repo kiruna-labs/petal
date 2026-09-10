@@ -70,7 +70,13 @@ python3 -c "import json;[print(o['payload']['scenarioId'],o['payload']['verdict'
 ```
 
 Expected green: `PLUGIN-BOOT`, `SHARE-N2W-Q`, `SHARE-W2N-Q` (29–31fps),
-`DRAW-N`, `CAM` (~19–22fps), `AUD`, `TELE`.
+`DRAW-N`, `CAM` (~19–22fps), `AUD`, `TELE`, `SHARE-DESKTOP`.
+
+`SHARE-DESKTOP` runs last and takes ~60s on its own: it is the only scenario
+that captures a whole DISPLAY, and it holds the share past 30s so the
+`settled_30s` memory mark can fire. Read its `share-memory-marks` record
+(what a display share costs, by allocation owner — #106) alongside its
+`display-share-source` record (the pixel geometry the run actually got).
 
 ⚠️ The runbook's own recipe starts with a bare `pkill -f "target/debug/desktop"`.
 **Do not run that line** on a shared machine — it kills other sessions' live

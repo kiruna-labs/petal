@@ -1409,6 +1409,32 @@ subsequent cockpit work:
   (received at the source resolution, frames advancing), not raw fps. Real
   third-party app windows capture at full fps -- SHARE-W2N-Q proves the 30fps
   media path in reverse.
+- **SHARE-DESKTOP is the gate's only DISPLAY-capture scenario (#199 / #106).**
+  Every other share scenario captures the 960x600 test-pattern WINDOW; this one
+  captures the whole display, through the same picker path a user takes
+  (`share_window` -> `toggle_window_share_from_picker`, display-source-id
+  branch). Three things about it are deliberate and should not be "simplified":
+  1. It runs **LAST** in the Quick tier. It rearranges nothing, but it captures
+     everything on screen and holds the share longest, so nothing it disturbs
+     can reach a sibling scenario.
+  2. It **opens the animating test-pattern canvas first and proves it is
+     drawing** before starting the share. ScreenCaptureKit's stream is
+     change-driven and the `settled_30s` memory mark rides the RAW capture
+     callback (not the snapshot-pull fallback), so a motionless display
+     produces no frames and the scenario would otherwise report a capture
+     failure for an idle source.
+  3. It **holds the share past 30s** so `settled_30s` can fire, and writes
+     every `session: share memory mark` line for that share into run.jsonl as
+     `share-memory-marks`. That is the #106 measurement: a display share's own
+     `phys_footprint_mb` and `vm_top=<owner>:<resident>/<dirty>` breakdown, in
+     CI, without waiting for another field report.
+
+  Read its `display-share-source` record before reading its memory numbers: it
+  states the pixel geometry the run actually got. The self-hosted Tart guest is
+  configured `--display 1920x1080` at 1x (2.07 MP -- `scripts/runner/tart/
+  make-golden.sh`); the footprint spike in #106 was reported on a 2560x1440
+  display (3.69 MP) on real Apple silicon. A green SHARE-DESKTOP on the VM is a
+  LOWER BOUND on that case, not a reproduction of it.
 - **Belt and suspenders, not either/or**: even inside the QA build channel,
   the privileged capabilities stay inert -- refuse to execute -- unless
   `cockpit-setup.sh`'s one-time local marker file is present, checked via

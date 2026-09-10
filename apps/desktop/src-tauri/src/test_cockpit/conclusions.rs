@@ -21,6 +21,12 @@ pub fn for_scenario(id: &str) -> EvidenceBasis {
         "SHARE-W2N-Q" => EvidenceBasis::ContentVerified,
         // These currently prove delivery/heartbeat shape, not the user-visible effect.
         "SHARE-N2W-Q" | "DRAW-N" | "TELE" => EvidenceBasis::WireShape,
+        // SHARE-DESKTOP's receiver oracle is the same delivery/liveness shape
+        // as SHARE-N2W-Q's; nothing reads the display's pixels back. Its extra
+        // evidence (#106's per-share memory marks, the sharer border) is
+        // host-side but does not make the RECEIVED image content-verified, and
+        // labelling it so would overstate what a pass means.
+        "SHARE-DESKTOP" => EvidenceBasis::WireShape,
         "CAM" | "AUD" => EvidenceBasis::LivenessProxy,
         // CAM-N2W reads the PIXELS the browser drew (canvas readback behind a
         // positive control) alongside the frame-advance counters, so a pass

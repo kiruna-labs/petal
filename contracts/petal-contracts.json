@@ -244,6 +244,10 @@
       "tier": "quick"
     },
     {
+      "id": "SHARE-DESKTOP",
+      "tier": "quick"
+    },
+    {
       "id": "CHAOS-DEVICE",
       "tier": "full"
     },
@@ -290,10 +294,6 @@
     {
       "id": "SHARE-MULTIDISP",
       "tier": "multi-display"
-    },
-    {
-      "id": "SHARE-DESKTOP",
-      "tier": "native"
     },
     {
       "id": "CAM-BITRATE",

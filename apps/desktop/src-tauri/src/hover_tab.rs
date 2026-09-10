@@ -1050,8 +1050,12 @@ pub async fn toggle_window_share(
 /// started from the picker is byte-for-byte identical (capture + publish +
 /// border + `share-error` plumbing) to one started from the pill. Returns
 /// the new shared state for this window.
+///
+/// `pub(crate)` so the Test Cockpit's SHARE-DESKTOP scenario starts a display
+/// share through THIS path rather than a private replica of it (CLAUDE.md
+/// crash class 2: tests must exercise the real UI path).
 #[cfg(target_os = "macos")]
-async fn toggle_window_share_from_picker(
+pub(crate) async fn toggle_window_share_from_picker(
     app: &AppHandle,
     state: &crate::session::SessionState,
     window_id: u32,

@@ -132,7 +132,16 @@ jobs:
       # printed as a ::warning "QUARANTINED" -- never counted as a pass -- and
       # does not fail the gate; anything NOT listed does. Every entry needs a
       # tracking issue; remove the entry when the issue closes.
-      E2E_QUARANTINE_COCKPIT: ""
+      # SHARE-DESKTOP is quarantined for its FIRST runs, deliberately (#106).
+      # It is brand new, it is the only scenario that captures a whole display,
+      # and it is the only one that holds a share past 30s -- none of which has
+      # ever run on this VM. Quarantined it still runs, still writes its
+      # `display-share-source` geometry and its `share-memory-marks` evidence
+      # into run.jsonl, and still prints LOUDLY as ::warning on failure; what it
+      # cannot do is block a release on a scenario nobody has watched succeed
+      # yet. Remove this entry once it has passed several consecutive runs --
+      # #106 is its tracking issue.
+      E2E_QUARANTINE_COCKPIT: "SHARE-DESKTOP"
       E2E_QUARANTINE_RC_CASES: ""
     steps:
       - uses: actions/checkout@v7
