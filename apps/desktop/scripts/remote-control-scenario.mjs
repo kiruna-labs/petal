@@ -18,10 +18,13 @@ import { summarizePhotonSamples } from './remote-control-photon-metrics.mjs';
 // per-case assertion replaced case 7's shared tripwire, and why the stress
 // case that repeats the left drag reports `skip` rather than `fail`.
 import {
+  LEFT_DRAG_STRESS_CHECKPOINTS,
   assertReleasedWithin,
+  distributeStressIterations,
   heldInputs,
   inputKey,
   releaseNotInjectedLines,
+  stillHeldAfterRecovery,
   stressLeakOutcome,
   summarizeReleaseStressLeak,
 } from './remote-control-held-input.mjs';
@@ -2231,11 +2234,19 @@ function readLoadAverages() {
 // #134: QUARANTINED left-drag release stress. A left drag leaves the host
 // holding a phantom primary button roughly one suite run in three, so the
 // single drag in case 6 finds it by luck. This repeats the identical gesture
-// and asserts the release after each one, which turns "sometimes" into
-// "almost every run" -- and it reports `skip`, never `fail`, so observing a
-// known-open bug can never block a release. Remove the quarantine with the fix.
-// 12 keeps a ~1-in-3 fault likely in a single run without adding meaningful
-// wall clock; below ~10 the run is back to relying on luck.
+// and asserts the release after each one -- and it reports `skip`, never
+// `fail`, so observing a known-open bug can never block a release. Remove the
+// quarantine with the fix.
+//
+// The FIRST stress run (0.9.22 gate) spent all twelve drags in one batch after
+// every other case had finished, and came back 12 for 12 clean -- about an 11%
+// outcome against the measured rate, which argues the fault is not a flat
+// per-drag probability. So the same budget is now SCATTERED across
+// LEFT_DRAG_STRESS_CHECKPOINTS instead: same number of drags, four different
+// places in the sequence, each preceded by different traffic and each wrapped
+// by `runCase` in its own grant cycle. 12 total keeps a ~1-in-3 fault likely
+// in a single run without adding meaningful wall clock; below ~10 the run is
+// back to relying on luck.
 const DEFAULT_LEFT_DRAG_STRESS_ITERATIONS = 12;
 const LEFT_DRAG_STRESS_QUARANTINED = process.env.PETAL_RC_LEFT_DRAG_STRESS_QUARANTINE !== '0';
 
@@ -2250,7 +2261,16 @@ function leftDragStressIterations(raw = process.env.PETAL_RC_LEFT_DRAG_STRESS_IT
   return parsed;
 }
 
+// The env var is the TOTAL across the whole run, not a per-checkpoint count,
+// so an operator raising it cannot accidentally multiply it by four.
 const LEFT_DRAG_STRESS_ITERATIONS = leftDragStressIterations();
+const LEFT_DRAG_STRESS_PER_CHECKPOINT = distributeStressIterations(
+  LEFT_DRAG_STRESS_ITERATIONS,
+  LEFT_DRAG_STRESS_CHECKPOINTS.length
+);
+// Four `# STRESS-CLEAN` lines are harder to read than one headline, and the
+// "12 for 12" number the last run was reported on has to survive the split.
+const leftDragStressLedger = { issue: 134, total: LEFT_DRAG_STRESS_ITERATIONS, drags: 0, leaks: 0, checkpoints: [] };
 
 /// The host's own reason lines, whole-tail. Scoped per iteration by diffing
 /// against the same read taken before the drag, because the tail is truncated
@@ -2294,12 +2314,13 @@ async function recoverPhantomPress(ctx) {
   return { clearedByHoverMove, clearedByTtl };
 }
 
-/// Quarantine means quarantine: while #134 is open this case can return only
-/// `pass` or `skip`, so neither the leak it hunts NOR the extra dozen drags it
-/// costs (a wedged TextEdit, say) can fail a release on a known-open bug.
-async function runLeftDragReleaseStress(ctx) {
+/// Quarantine means quarantine: while #134 is open a stress checkpoint can
+/// return only `pass` or `skip`, so neither the leak it hunts NOR the extra
+/// drags it costs (a wedged TextEdit, say) can fail a release on a known-open
+/// bug. `checkpointIndex` is 0-based into LEFT_DRAG_STRESS_CHECKPOINTS.
+async function runLeftDragReleaseStress(ctx, checkpointIndex) {
   try {
-    return await leftDragReleaseStressAttempt(ctx);
+    return await leftDragReleaseStressAttempt(ctx, checkpointIndex);
   } catch (error) {
     if (!LEFT_DRAG_STRESS_QUARANTINED) throw error;
     console.log(`::warning::#134 left-drag stress case aborted (QUARANTINED, not a gate failure): ${error.message}`);
@@ -2307,11 +2328,30 @@ async function runLeftDragReleaseStress(ctx) {
   }
 }
 
-async function leftDragReleaseStressAttempt(ctx) {
-  if (LEFT_DRAG_STRESS_ITERATIONS === 0) {
-    return skipCase('left-drag release stress disabled (PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS=0)');
+async function leftDragReleaseStressAttempt(ctx, checkpointIndex) {
+  const plan = LEFT_DRAG_STRESS_CHECKPOINTS[checkpointIndex];
+  if (!plan) throw new Error(`no #134 stress checkpoint at index ${checkpointIndex}`);
+  const checkpoint = {
+    index: checkpointIndex + 1,
+    of: LEFT_DRAG_STRESS_CHECKPOINTS.length,
+    id: plan.id,
+    afterCaseId: plan.afterCaseId,
+    context: plan.context,
+  };
+  const iterations = LEFT_DRAG_STRESS_PER_CHECKPOINT[checkpointIndex];
+  if (iterations === 0) {
+    return skipCase(
+      LEFT_DRAG_STRESS_ITERATIONS === 0
+        ? 'left-drag release stress disabled (PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS=0)'
+        : `no drags budgeted for stress checkpoint ${checkpoint.index}/${checkpoint.of} `
+          + `(PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS=${LEFT_DRAG_STRESS_ITERATIONS} across ${checkpoint.of} checkpoints)`
+    );
   }
-  const iterations = LEFT_DRAG_STRESS_ITERATIONS;
+  // Says WHERE these drags are being spent, so a reader of the raw log can
+  // tell the four checkpoints apart without cross-referencing the source.
+  console.log(
+    `# STRESS-CHECKPOINT ${JSON.stringify({ issue: 134, ...checkpoint, iterations, rationale: plan.rationale })}`
+  );
   for (let iteration = 1; iteration <= iterations; iteration += 1) {
     // Each iteration is a byte-for-byte copy of case 6's gesture, including
     // its document reset and its AXSelectedText wait -- the leak is a race and
@@ -2327,8 +2367,12 @@ async function leftDragReleaseStressAttempt(ctx) {
     if (selected === null) {
       return skipCase(`AXSelectedText unavailable; the stress drag cannot reproduce case 6's gesture (iteration ${iteration}/${iterations})`);
     }
+    leftDragStressLedger.drags += 1;
     try {
-      await assertReleased(ctx, `left drag stress iteration ${iteration}/${iterations}`);
+      await assertReleased(
+        ctx,
+        `left drag stress checkpoint ${checkpoint.index}/${checkpoint.of} iteration ${iteration}/${iterations}`
+      );
     } catch (error) {
       const snapshot = await readRemoteControlStatus(ctx).catch(() => null);
       const logLines = releaseNotInjectedSince(logBefore);
@@ -2342,17 +2386,33 @@ async function leftDragReleaseStressAttempt(ctx) {
         clearedByHoverMove,
         clearedByTtl,
         assertionMessage: error.message,
+        checkpoint,
       });
+      leftDragStressLedger.leaks += 1;
+      leftDragStressLedger.checkpoints.push({ ...checkpoint, iteration, iterations, leaked: true });
       // Loud in the Actions UI without a workflow-level verdict, and machine
       // readable in the harness log the gate already uploads.
-      console.log(`::warning::#134 left-drag release leak reproduced on stress iteration ${iteration}/${iterations} (QUARANTINED, not a gate failure): ${leak.detail}`);
+      console.log(`::warning::#134 left-drag release leak reproduced on stress checkpoint ${checkpoint.index}/${checkpoint.of} iteration ${iteration}/${iterations} (QUARANTINED, not a gate failure): ${leak.detail}`);
       console.log(`# STRESS-LEAK ${JSON.stringify(leak)}`);
-      await captureCaseFailureForensics(ctx.client, `${ctx.caseId ?? 33}-stress-iteration-${iteration}`);
+      // The tail placement made a leak un-inheritable by construction; a
+      // scattered one is not, so the handoff hazard gets its own line rather
+      // than surfacing later as some unrelated case's release failure.
+      if (stillHeldAfterRecovery({ clearedByHoverMove, clearedByTtl }) === true) {
+        console.log(
+          `::warning::#134 stress checkpoint ${checkpoint.index}/${checkpoint.of} left the host STILL holding a primary button `
+          + 'after both recovery attempts; a later case\'s assertReleased may report this leak as its own'
+        );
+      }
+      await captureCaseFailureForensics(ctx.client, `${ctx.caseId ?? plan.id}-stress-iteration-${iteration}`);
       return stressLeakOutcome(leak, { quarantined: LEFT_DRAG_STRESS_QUARANTINED });
     }
   }
-  console.log(`# STRESS-CLEAN ${JSON.stringify({ issue: 134, iterations, leaks: 0 })}`);
-  return pass(`${iterations} consecutive left drags each released cleanly; no phantom primary button (#134 not observed this run)`);
+  leftDragStressLedger.checkpoints.push({ ...checkpoint, iterations, leaked: false });
+  console.log(`# STRESS-CLEAN ${JSON.stringify({ issue: 134, ...checkpoint, iterations, leaks: 0 })}`);
+  return pass(
+    `${iterations} consecutive left drags each released cleanly immediately after case ${checkpoint.afterCaseId} `
+    + `(${checkpoint.context}); no phantom primary button (#134 not observed at this checkpoint)`
+  );
 }
 
 const CASES = [
@@ -2471,6 +2531,19 @@ const CASES = [
       await assertReleased(ctx, 'right drag');
       return pass(`right-drag held buttons=2 seq=${metric.seq}; host confirms no held input after release`);
     },
+  },
+  // #134: QUARANTINED stress checkpoint -- reports `skip`, never `fail`, while
+  // the leak it hunts is open. The ids run 33..36 out of numeric order on
+  // purpose: they are SCATTERED by position, and the position (what ran just
+  // before them) is the whole experiment. LEFT_DRAG_STRESS_CHECKPOINTS carries
+  // the placement and the reason for each; a unit test pins these entries to
+  // it so the plan and the sequence cannot drift apart.
+  {
+    id: 33,
+    name: 'left drag release stress after case 7 -- right drag + Escape (QUARANTINED #134)',
+    features: 'pointer/drag/buttons',
+    sequence: 'left drag x N',
+    run: async (ctx) => runLeftDragReleaseStress(ctx, 0),
   },
   {
     id: 8,
@@ -2713,6 +2786,19 @@ const CASES = [
       return pass(`horizontal scroll strip moved to originX=${event.originX} (delta ${event.deltaX}) seq=${metric.seq}`);
     },
   },
+  // #134: QUARANTINED stress checkpoint -- reports `skip`, never `fail`, while
+  // the leak it hunts is open. The ids run 33..36 out of numeric order on
+  // purpose: they are SCATTERED by position, and the position (what ran just
+  // before them) is the whole experiment. LEFT_DRAG_STRESS_CHECKPOINTS carries
+  // the placement and the reason for each; a unit test pins these entries to
+  // it so the plan and the sequence cannot drift apart.
+  {
+    id: 34,
+    name: 'left drag release stress after case 21 -- keyboard/modifier/scroll block (QUARANTINED #134)',
+    features: 'pointer/drag/buttons',
+    sequence: 'left drag x N',
+    run: async (ctx) => runLeftDragReleaseStress(ctx, 1),
+  },
   {
     id: 22,
     name: 'coordinate clamp',
@@ -2806,6 +2892,19 @@ const CASES = [
       return pass(`controller disconnect released button=${event.button}; host confirms no held input`);
     },
   },
+  // #134: QUARANTINED stress checkpoint -- reports `skip`, never `fail`, while
+  // the leak it hunts is open. The ids run 33..36 out of numeric order on
+  // purpose: they are SCATTERED by position, and the position (what ran just
+  // before them) is the whole experiment. LEFT_DRAG_STRESS_CHECKPOINTS carries
+  // the placement and the reason for each; a unit test pins these entries to
+  // it so the plan and the sequence cannot drift apart.
+  {
+    id: 35,
+    name: 'left drag release stress after case 26 -- controller-disconnect release (QUARANTINED #134)',
+    features: 'pointer/drag/buttons',
+    sequence: 'left drag x N',
+    run: async (ctx) => runLeftDragReleaseStress(ctx, 2),
+  },
   {
     id: 27,
     name: 'non-focus-stealing',
@@ -2880,6 +2979,19 @@ const CASES = [
       await assertReleased(ctx, 'held press across reconnect');
       return pass(`grant survived ${process.env.PETAL_REMOTE_CONTROL_RECONNECT_MODE || 'resume'} reconnect; next input landed`, { targetObservation: after });
     },
+  },
+  // #134: QUARANTINED stress checkpoint -- reports `skip`, never `fail`, while
+  // the leak it hunts is open. The ids run 33..36 out of numeric order on
+  // purpose: they are SCATTERED by position, and the position (what ran just
+  // before them) is the whole experiment. LEFT_DRAG_STRESS_CHECKPOINTS carries
+  // the placement and the reason for each; a unit test pins these entries to
+  // it so the plan and the sequence cannot drift apart.
+  {
+    id: 36,
+    name: 'left drag release stress after case 29 -- reconnect during control (QUARANTINED #134)',
+    features: 'pointer/drag/buttons',
+    sequence: 'left drag x N',
+    run: async (ctx) => runLeftDragReleaseStress(ctx, 3),
   },
   {
     id: 30,
@@ -3059,16 +3171,6 @@ const CASES = [
         await command(ctx.client, { cmd: 'remote-control-policy', policy: 'auto' }).catch(() => null);
       }
     },
-  },
-  // #134: QUARANTINED -- reports `skip`, never `fail`, while the leak it hunts
-  // is open. It runs LAST so a phantom press it provokes cannot be inherited by
-  // another case's release assertion -- that mis-attribution is this issue.
-  {
-    id: 33,
-    name: 'left drag release stress (QUARANTINED #134)',
-    features: 'pointer/drag/buttons',
-    sequence: 'left drag x N',
-    run: async (ctx) => runLeftDragReleaseStress(ctx),
   },
 ];
 
@@ -3327,6 +3429,11 @@ try {
       }
       results.push(result);
     }
+
+    // #134: one headline for four scattered checkpoints. Without it the "12
+    // for 12 clean" number the last run was reported on is spread across four
+    // separate `# STRESS-CLEAN` lines and has to be re-added by hand.
+    console.log(`# STRESS-SUMMARY ${JSON.stringify(leftDragStressLedger)}`);
 
     // #45 scorecard: feed EVERY sample into the distribution, including the
     // over-budget ones a retry rescued. A creeping regression has to stay
