@@ -52,6 +52,9 @@ step "Harness: rc-live-suite foreign-instance guard (both directions)"
 step "Harness: capture-preflight contract (plan 6d step 2)"
 "$ROOT/scripts/test-capture-preflight.sh"
 
+step "CI: PR-gate path filter, both directions (#133)"
+"$ROOT/scripts/test-gate-paths-changed.sh"
+
 # Self-installing, idempotent: makes scripts/git-hooks/pre-push (the local
 # replacement for the disabled .github/workflows/rust-gate.yml -- GitHub
 # Actions billing on macOS runners made that workflow unreliable) apply to

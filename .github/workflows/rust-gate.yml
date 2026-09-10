@@ -7,53 +7,110 @@
 # show an explicit Rust build/test result. If `webrtc-sys` cannot download its
 # external WebRTC artifact, this check fails or stays red/pending instead of
 # looking like a pass.
+#
+# #133: this workflow triggers on EVERY pull request and filters internally,
+# rather than carrying a `paths:` filter with a no-op `paths-ignore` companion
+# reporting the same required check names. Both of those are load-bearing:
+#   - A path-filtered required check NEVER reports on a PR outside its paths,
+#     which leaves the PR at "Expected -- waiting for status" forever. That is
+#     why the companion existed and it is a real problem; it is fixed here by
+#     the jobs always running, not by deleting the companion.
+#   - `paths-ignore` fires when ANY changed file falls outside the list, so a
+#     PR touching both a Rust path and a docs path ran the real gate AND the
+#     no-op, and two check runs answered to one required context. Which one
+#     branch protection resolved came down to which finished last.
+# One path list, in one place (the `filter` step below). The two outcomes are
+# its boolean complement, so "matches neither list" cannot exist.
 name: Rust PR Gate
 
 on:
   pull_request:
-    paths:
-      - ".github/workflows/rust-gate.yml"
-      - ".github/workflows/ci.yml"
-      - "scripts/ci-local.sh"
-      - "apps/desktop/src-tauri/**"
-      - "contracts/**"
-      - "backend/**"
 
 concurrency:
   group: rust-pr-gate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
+  changes:
+    name: Rust path filter
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
+          sparse-checkout-cone-mode: true
+
+      # THE path list for this gate. There is no second copy anywhere; if you
+      # add a path here, nothing else needs to agree with it.
+      # gate-paths-changed.sh fails the step on a pattern it cannot honour, and
+      # reports "changed" if it cannot establish the PR's file list at all.
+      - id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          scripts/gate-paths-changed.sh <<'PATHS' >> "$GITHUB_OUTPUT"
+          .github/workflows/rust-gate.yml
+          .github/workflows/ci.yml
+          scripts/ci-local.sh
+          scripts/gate-paths-changed.sh
+          apps/desktop/src-tauri/**
+          contracts/**
+          backend/**
+          PATHS
+
   rust:
     name: Rust build + lib tests
-    runs-on: macos-26
+    needs: changes
+    # Not applicable still means this job RUNS and reports its required check
+    # name -- it just does not take a 10x-billed macOS runner to say so.
+    runs-on: ${{ needs.changes.outputs.rust == 'true' && 'macos-26' || 'ubuntu-latest' }}
     # #724: recent macOS runs measure ~10-14min; a stalled test (or any other
     # hang) must fail loudly instead of idling toward GitHub's 6h default.
     timeout-minutes: 30
     env:
+      RUN: ${{ needs.changes.outputs.rust }}
       # Match the manual CI/release proof: do not inherit the dev-only CLT rpath.
       RUSTFLAGS: ""
       MACOSX_DEPLOYMENT_TARGET: "13.0"
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       CARGO_INCREMENTAL: 0
     steps:
+      - name: Not applicable
+        if: env.RUN != 'true'
+        run: echo "No Rust-relevant paths changed in this PR; the Rust gate is not applicable."
+
       - uses: actions/checkout@v7
+        if: env.RUN == 'true'
 
       - uses: dtolnay/rust-toolchain@stable
+        if: env.RUN == 'true'
 
       - uses: Swatinem/rust-cache@v2
+        if: env.RUN == 'true'
         with:
           workspaces: apps/desktop/src-tauri
 
       - name: Install frontend deps
+        if: env.RUN == 'true'
         working-directory: apps/desktop
         run: npm ci
 
       - name: Build frontend for Tauri context
+        if: env.RUN == 'true'
         working-directory: apps/desktop
         run: npm run build
 
       - name: cargo build
+        if: env.RUN == 'true'
         working-directory: apps/desktop/src-tauri
         run: cargo build --locked
 
@@ -70,18 +127,22 @@ jobs:
       # gate that could not build its own harness. `check` is enough to catch
       # that class and costs a fraction of a full build.
       - name: cargo check (cockpit-privileged)
+        if: env.RUN == 'true'
         working-directory: apps/desktop/src-tauri
         run: cargo check --features cockpit-privileged --locked
 
       - name: cargo build (examples)
+        if: env.RUN == 'true'
         working-directory: apps/desktop/src-tauri
         run: cargo build --examples --locked
 
       - name: cargo test (lib)
+        if: env.RUN == 'true'
         working-directory: apps/desktop/src-tauri
         run: cargo test --lib --locked
 
       - name: Assert no CommandLineTools rpath in debug binary (#99)
+        if: env.RUN == 'true'
         working-directory: apps/desktop/src-tauri
         run: |
           BIN=target/debug/desktop
@@ -94,22 +155,31 @@ jobs:
 
   windows:
     name: Windows build + lib tests
-    runs-on: windows-latest
+    needs: changes
+    runs-on: ${{ needs.changes.outputs.rust == 'true' && 'windows-latest' || 'ubuntu-latest' }}
     # #724: recent Windows runs measure ~20-27min; same backstop as the
     # macOS `rust` job above, with headroom for the slower runner.
     timeout-minutes: 45
     env:
+      RUN: ${{ needs.changes.outputs.rust }}
       # No dev-only CLT rpath recipe applies here (that's macOS-only in
       # .cargo/config.toml), so RUSTFLAGS is intentionally left unset: it
       # must not override .cargo/config.toml's target.x86_64-pc-windows-msvc
       # `+crt-static`, which is load-bearing for the MSVC link (#673).
       CARGO_INCREMENTAL: 0
     steps:
+      - name: Not applicable
+        if: env.RUN != 'true'
+        run: echo "No Rust-relevant paths changed in this PR; the Windows gate is not applicable."
+
       - uses: actions/checkout@v7
+        if: env.RUN == 'true'
 
       - uses: dtolnay/rust-toolchain@stable
+        if: env.RUN == 'true'
 
       - uses: Swatinem/rust-cache@v2
+        if: env.RUN == 'true'
         with:
           workspaces: apps/desktop/src-tauri
 
@@ -121,17 +191,21 @@ jobs:
       # deterministic, and visible in its own log rather than buried inside
       # the cargo build step.
       - name: Install frontend deps
+        if: env.RUN == 'true'
         working-directory: apps/desktop
         run: npm ci
 
       - name: Build frontend for Tauri context
+        if: env.RUN == 'true'
         working-directory: apps/desktop
         run: npm run build
 
       - name: cargo build
+        if: env.RUN == 'true'
         working-directory: apps/desktop/src-tauri
         run: cargo build --locked
 
       - name: cargo test (lib)
+        if: env.RUN == 'true'
         working-directory: apps/desktop/src-tauri
         run: cargo test --lib --locked
