@@ -865,7 +865,23 @@ opened the autotest socket, or the self-hosted runner lost one of its live
 prerequisites. Inspect the uploaded `nightly-loopback-*` artifact first:
 `remote-control-live.log` has the parsed RESULT/SUMMARY lines, while
 `petal-dev.log`, `web-harness.log`, `livekit.log`, and `chrome-cdp.log` separate
-app bugs from runner setup/TCC/display problems.
+app bugs from runner setup/TCC/display problems. The artifact also carries
+`crashes/*.ips` (any crash report Petal wrote during the loopback tier) and
+`wedge-*-reason.txt` / `wedge-*-sample-<pid>.txt` (#102's `sample` backtraces);
+both were collected but silently left out of the upload globs until #150.
+
+A missing autotest socket now names its own cause instead of reporting the same
+sentence for four different failures (#150). The workflow waits for the Test
+Cockpit tier's Petal to actually exit before the loopback tier launches its own
+&mdash; **by PID** (`ps -p`), because a `pgrep -f` poll matches the watcher's own
+command line and is wrong in both directions &mdash; and a socket that never
+appears is diagnosed as one of `single-instance-lock-held` (another Petal still
+held `tauri-plugin-single-instance`, so ours forwarded its argv and exited),
+`petal-crashed`, `launcher-exited`, `no-petal-process`, or
+`running-but-no-socket`. The cause is in the `::error::` line itself, so the
+next occurrence does not cost an artifact download. Both halves are contract
+tested in both directions by `scripts/test-e2e-gate-handoff.sh`, which extracts
+and executes the workflow's own wait rather than a copy of it.
 
 `apps/desktop/scripts/remote-control-scenario.mjs` is the live scenario used by that
 wrapper. It uses the same autotest socket plus Chrome DevTools and TextEdit; it

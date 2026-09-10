@@ -305,6 +305,38 @@ jobs:
         working-directory: web-harness
         run: npm ci
 
+      # #150: the phase handoff, made explicit. The Cockpit tier and the
+      # loopback tier each run their own Petal, and it is the SAME
+      # single-instance app: while the first is still tearing down, a second
+      # launch has its argv forwarded to it by `tauri-plugin-single-instance`
+      # and exits, after which the loopback below spends its whole socket
+      # budget waiting for a socket nobody will ever open. Waiting here turns
+      # that into a bounded, named failure BEFORE the tier that would report it
+      # as an unexplained 600s timeout.
+      #
+      # The wait is BY PID (`ps -p`), never by re-running a `pgrep -f` pattern
+      # in a loop: `pgrep -f` matches the watcher's own command line, so it is
+      # wrong in BOTH directions -- it has reported a finished job as running
+      # and a killed process as still alive (CLAUDE.md rule 5). A pattern is
+      # used once, to discover candidates; every decision after that is by pid.
+      #
+      # It waits, it does not kill: "refuse, don't kill" (#846). Nothing here
+      # clears the way for the next phase -- if an instance will not exit, the
+      # gate says so and stops.
+      - name: Wait for the Cockpit's Petal to exit (phase handoff)
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          PETAL_PHASE_HANDOFF_TIMEOUT_S: "300"
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/petal-instance-guard.sh
+          source scripts/petal-instance-guard.sh
+          if ! petal_guard_wait_for_instances_exit "$PETAL_PHASE_HANDOFF_TIMEOUT_S"; then
+            echo "::error::Cockpit -> loopback handoff: a Petal instance was STILL running ${PETAL_PHASE_HANDOFF_TIMEOUT_S}s after the Test Cockpit tier finished (pids named above). The loopback tier cannot start its own instance while that one holds the single-instance lock, so the gate stops here rather than reporting it later as an unexplained socket timeout."
+            exit 1
+          fi
+
       - name: Run live loopback harness
         if: ${{ !cancelled() }}
         shell: bash
@@ -321,6 +353,14 @@ jobs:
           PETAL_DEV_LOG: ${{ runner.temp }}/petal-nightly-loopback/petal-dev.log
         run: |
           set -euo pipefail
+
+          # #150: petal_guard_* -- the by-pid instance helpers. Sourced here so
+          # a socket that never appears can name WHICH failure it is instead of
+          # reporting the same "did not open $SOCKET" for a crash, a launch
+          # that never happened, and a single-instance lock held by another
+          # Petal.
+          # shellcheck source=scripts/petal-instance-guard.sh
+          source scripts/petal-instance-guard.sh
 
           LOG_DIR="$RUNNER_TEMP/petal-nightly-loopback"
           mkdir -p "$LOG_DIR"
@@ -382,22 +422,41 @@ jobs:
           fi
 
           echo "==> Start Petal dev with autotest socket" | tee -a "$HARNESS_LOG"
+          # #150: snapshot every Petal that is alive BEFORE we launch our own.
+          # Discovery by pattern happens exactly once, here; from now on each
+          # of these is judged by its pid. A survivor from this list is the one
+          # thing that can hold the single-instance lock against us, and that
+          # is what the timeout below reports instead of guessing.
+          PRE_LAUNCH_INSTANCES="$(petal_guard_live_instances | tr '\n' ' ')"
+          if [ -n "${PRE_LAUNCH_INSTANCES// /}" ]; then
+            echo "::warning::A Petal instance was already running when the loopback tier launched its own: $PRE_LAUNCH_INSTANCES -- the phase handoff did not settle." | tee -a "$HARNESS_LOG"
+          fi
           (
             cd apps/desktop
             PETAL_BACKEND_URL= \
             PETAL_AUTOTEST_SOCK="$SOCKET" \
             npm run dev:clean
           ) >"$PETAL_LOG" 2>&1 &
-          pids+=("$!")
+          # The launcher's own pid (this subshell, which runs `npm run
+          # dev:clean` and stays alive for as long as the app it started). Its
+          # death is one of the causes the diagnosis below distinguishes.
+          LAUNCHER_PID=$!
+          pids+=("$LAUNCHER_PID")
 
           echo "==> Wait for native join and autotest socket" | tee -a "$HARNESS_LOG"
           joined=""
+          # Overridable ONLY so the contract test in
+          # scripts/test-e2e-gate-handoff.sh can drive this exact loop -- the
+          # real wiring, not a copy of it -- in seconds instead of ten minutes.
+          # CI never sets it; the gate's budget is the 600 default.
+          SOCKET_BUDGET_S="${PETAL_SOCKET_BUDGET_S:-600}"
           # `npm run dev:clean` may rebuild the Rust app first (minutes on a
           # fresh runner), so the budget is generous; a real join failure or
           # an ownership refusal still fails within a second of appearing.
           # Readiness is the autotest socket, as in scripts/rc-live-suite.sh --
           # with FRESH_ROOM the joined room is not literally named 'rctest'.
-          for _ in $(seq 1 600); do
+          waited=0
+          while [ "$waited" -lt "$SOCKET_BUDGET_S" ]; do
             if grep -qE "join_room\('[^']*'\) failed|autotest room ownership rejected" "$PETAL_LOG" 2>/dev/null; then
               echo "::error::Native join failed; see petal-dev.log artifact." | tee -a "$HARNESS_LOG"
               grep -E "join_room\('[^']*'\) failed|autotest room ownership rejected" "$PETAL_LOG" | tee -a "$HARNESS_LOG"
@@ -408,10 +467,40 @@ jobs:
               sleep 2
               break
             fi
+            # #150: don't spend the whole budget on an outcome that is already
+            # decided. Every 15s, if the launcher is gone AND no Petal process
+            # exists at all, no socket is coming -- stop and diagnose. This
+            # only ever fails FASTER; it can never turn a failure into a pass.
+            if [ $((waited % 15)) -eq 14 ] \
+               && ! petal_guard_pid_alive "$LAUNCHER_PID" \
+               && [ -z "$(petal_guard_live_instances | tr -d '[:space:]')" ]; then
+              echo "petal-guard: the launcher is gone and no Petal process is running after ${waited}s -- not waiting out the rest of the ${SOCKET_BUDGET_S}s budget." | tee -a "$HARNESS_LOG"
+              break
+            fi
             sleep 1
+            waited=$((waited + 1))
           done
           if [ -z "$joined" ]; then
-            echo "::error::Petal did not open $SOCKET within 600s; see petal-dev.log artifact." | tee -a "$HARNESS_LOG"
+            # #150: "did not open $SOCKET" is the same sentence for four
+            # different failures (a crash, a launch that never happened, a
+            # single-instance lock held by another Petal, and an app that is up
+            # but not answering). Name which one, in the log, at the moment it
+            # is still knowable -- an artifact download a day later cannot
+            # recover it.
+            set +e
+            DIAGNOSIS="$(petal_guard_diagnose_missing_socket \
+              "$SOCKET" "$LAUNCHER_PID" "$HOME/Library/Logs/DiagnosticReports" "$CRASH_MARK" \
+              $PRE_LAUNCH_INSTANCES 2>&1)"
+            set -e
+            printf '%s\n' "$DIAGNOSIS" | tee -a "$HARNESS_LOG"
+            # A crash on this path is evidence too, and the post-suite crash
+            # collection below never runs when we exit here -- so collect it
+            # into the directory the artifact upload covers (#150).
+            mkdir -p "$LOG_DIR/crashes"
+            find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'desktop*.ips' \
+              -newer "$CRASH_MARK" -exec cp {} "$LOG_DIR/crashes/" \; 2>/dev/null || true
+            SOCKET_CAUSE="$(printf '%s\n' "$DIAGNOSIS" | sed -n 's/^petal-guard: cause=//p' | head -1)"
+            echo "::error::Petal did not open $SOCKET within ${waited}s (budget ${SOCKET_BUDGET_S}s) -- cause: ${SOCKET_CAUSE:-undiagnosed}. Diagnosis above; see the petal-dev.log artifact." | tee -a "$HARNESS_LOG"
             exit 1
           fi
 
@@ -542,6 +631,15 @@ jobs:
           print(f"scrubbed the bypass secret from {scrubbed} artifact file(s)")
           PY
 
+      # #150: the paths are explicit, not a `**` sweep, because this directory
+      # also holds Chrome's whole user-data profile -- but every glob here must
+      # actually cover the evidence the steps above go to the trouble of
+      # collecting. Two did not: the loopback tier's crash reports
+      # (`crashes/*.ips`, which the gate DETECTS, prints "Petal wrote crash
+      # report(s)" about, and then dropped on the floor) and #102's wedge
+      # evidence (`wedge-*-reason.txt`, `wedge-*-sample-<pid>.txt` -- the
+      # `sample` backtraces that are the entire point of capturing a wedge).
+      # Both were written into this directory and neither was ever uploaded.
       - name: Upload live loopback artifacts
         if: always()
         uses: actions/upload-artifact@v7
@@ -550,5 +648,7 @@ jobs:
           path: |
             ${{ runner.temp }}/petal-nightly-loopback/*.log
             ${{ runner.temp }}/petal-nightly-loopback/*.json
+            ${{ runner.temp }}/petal-nightly-loopback/*.txt
+            ${{ runner.temp }}/petal-nightly-loopback/crashes/**
             ${{ runner.temp }}/petal-cockpit/**
           if-no-files-found: warn
