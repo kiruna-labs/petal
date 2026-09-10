@@ -247,6 +247,72 @@
       "version": "1.50.4"
     },
     {
+      "bom-ref": "@noble/ed25519@3.2.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@noble/ed25519/-/ed25519-3.2.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "72b883811967500d3d85c858ad3cbf25458f2046a9e6b67141eeb00d6cd1c79d68596a4345c529b8dce580fc4325a38ae80b16f5cd3029c8f7aca46feadf9b3d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@noble/ed25519",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/%40noble/ed25519@3.2.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "3.2.0"
+    },
+    {
+      "bom-ref": "@noble/hashes@2.4.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@noble/hashes/-/hashes-2.4.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5f95da5566480424fb1c76469b923b6505c3c0b1be6c65ee4ab310016fbb66f97cee1d6499cd5907555244972951fa14ac6429e05928c66e6467e32cf9a5be78"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@noble/hashes",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/%40noble/hashes@2.4.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "2.4.0"
+    },
+    {
       "bom-ref": "@oxc-project/types@0.148.0",
       "externalReferences": [
         {
@@ -4086,6 +4152,8 @@
         "@sentry/browser@10.73.0",
         "@userdispatch/sdk@1.0.1",
         "livekit-client@2.22.2",
+        "@noble/ed25519@3.2.0",
+        "@noble/hashes@2.4.0",
         "@sveltejs/vite-plugin-svelte@7.3.0",
         "@types/node@26.4.1",
         "dotenv@17.4.2",
@@ -4096,7 +4164,7 @@
         "typescript@6.0.3",
         "vite@8.2.2"
       ],
-      "ref": "web-harness@0.9.23"
+      "ref": "web-harness@0.9.24"
     },
     {
       "dependsOn": [],
@@ -4140,6 +4208,14 @@
         "@bufbuild/protobuf@1.10.1"
       ],
       "ref": "@livekit/protocol@1.50.4"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@noble/ed25519@3.2.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@noble/hashes@2.4.0"
     },
     {
       "dependsOn": [],
@@ -4797,7 +4873,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "web-harness@0.9.23",
+      "bom-ref": "web-harness@0.9.24",
       "description": "Petal browser client",
       "licenses": [
         {
@@ -4813,10 +4889,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/web-harness@0.9.23",
+      "purl": "pkg:npm/web-harness@0.9.24",
       "scope": "required",
       "type": "library",
-      "version": "0.9.23"
+      "version": "0.9.24"
     },
     "lifecycles": [
       {

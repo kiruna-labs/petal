@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.9.23",
+  "version": "0.9.24",
   "license": "Apache-2.0",
   "description": "Petal desktop app - low-latency, multi-window screensharing for macOS and Windows",
   "repository": "https://github.com/kiruna-labs/petal",

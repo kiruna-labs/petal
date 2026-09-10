@@ -21703,6 +21703,7 @@
         "path+file:///petal/apps/desktop/vendor/livekit#0.7.49",
         "registry+https://github.com/rust-lang/crates.io-index#livekit-api@0.5.4",
         "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34",
+        "registry+https://github.com/rust-lang/crates.io-index#minisign-verify@0.2.5",
         "registry+https://github.com/rust-lang/crates.io-index#objc2@0.6.4",
         "registry+https://github.com/rust-lang/crates.io-index#objc2-app-kit@0.3.2",
         "registry+https://github.com/rust-lang/crates.io-index#objc2-foundation@0.3.2",
@@ -21738,7 +21739,7 @@
         "registry+https://github.com/rust-lang/crates.io-index#yuv-sys@0.3.15",
         "registry+https://github.com/rust-lang/crates.io-index#zip@8.6.0"
       ],
-      "ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.23"
+      "ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.24"
     },
     {
       "dependsOn": [
@@ -27566,21 +27567,21 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.23",
+      "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.24",
       "components": [
         {
-          "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.23 bin-target-0",
+          "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.24 bin-target-0",
           "name": "desktop_lib",
-          "purl": "pkg:cargo/desktop@0.9.23?download_url=file://.#src/lib.rs",
+          "purl": "pkg:cargo/desktop@0.9.24?download_url=file://.#src/lib.rs",
           "type": "library",
-          "version": "0.9.23"
+          "version": "0.9.24"
         },
         {
-          "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.23 bin-target-1",
+          "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.24 bin-target-1",
           "name": "desktop",
-          "purl": "pkg:cargo/desktop@0.9.23?download_url=file://.#src/main.rs",
+          "purl": "pkg:cargo/desktop@0.9.24?download_url=file://.#src/main.rs",
           "type": "application",
-          "version": "0.9.23"
+          "version": "0.9.24"
         }
       ],
       "description": "Low-latency, multi-window screensharing for macOS",
@@ -27590,10 +27591,10 @@
         }
       ],
       "name": "desktop",
-      "purl": "pkg:cargo/desktop@0.9.23?download_url=file://.",
+      "purl": "pkg:cargo/desktop@0.9.24?download_url=file://.",
       "scope": "required",
       "type": "application",
-      "version": "0.9.23"
+      "version": "0.9.24"
     },
     "properties": [
       {
