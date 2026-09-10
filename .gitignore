@@ -14,6 +14,10 @@ src-tauri/gen/
 
 # Logs
 *.log
+# ...except the synthetic petal.log fixtures scripts/test-analyze-field-log.mjs
+# reads. They keep the real extension because the analyzer's directory and
+# gzip handling keys off it.
+!scripts/fixtures/field-logs/*.log
 
 # macOS
 .DS_Store

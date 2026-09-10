@@ -1,0 +1,16 @@
+2026-09-10 09:00:00.100 [INFO] [desktop_lib::logging] logging: file sink initialized
+2026-09-10 09:00:00.145 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.23 commit=605bd3cd build_date=2026-09-10 bundle_id=com.petal.app
+2026-09-10 09:00:08.000 [INFO] [desktop_lib::session::room] session: joined room '<redacted:r1>'
+2026-09-10 09:00:20.000 [INFO] [desktop_lib::camera_session] session: camera-intent intended=true
+2026-09-10 09:00:20.003 [INFO] [desktop_lib::camera_session] session: start_camera_publish begin (identity '<redacted:i1>')
+2026-09-10 09:00:20.240 [INFO] [desktop_lib::camera_session] session: start_camera_publish capture running, waiting for first frame
+2026-09-10 09:00:25.010 [WARN] [desktop_lib::camera_session] session: start_camera_publish failed: camera capture: first frame timed out
+2026-09-10 09:00:25.011 [WARN] [desktop_lib::camera_session] session: start_camera_publish_command immediate attempt failed, starting self-heal: camera capture: first frame timed out
+2026-09-10 09:00:25.261 [INFO] [desktop_lib::camera_session] session: start_camera_publish begin (identity '<redacted:i1>')
+2026-09-10 09:00:25.500 [INFO] [desktop_lib::camera_session] session: start_camera_publish capture running, waiting for first frame
+2026-09-10 09:00:30.265 [WARN] [desktop_lib::camera_session] session: start_camera_publish failed: camera capture: first frame timed out
+2026-09-10 09:00:30.265 [WARN] [desktop_lib::camera_session] session: camera self-heal attempt 1/4 failed: camera capture: first frame timed out
+2026-09-10 09:00:30.770 [INFO] [desktop_lib::camera_session] session: start_camera_publish begin (identity '<redacted:i1>')
+2026-09-10 09:00:31.100 [INFO] [desktop_lib::camera_session] session: start_camera_publish capture running, waiting for first frame
+2026-09-10 09:00:31.880 [INFO] [desktop_lib::camera_session] session: start_camera_publish succeeded (1280x720)
+2026-09-10 09:01:00.000 [INFO] [desktop_lib::session::room] session: left room
