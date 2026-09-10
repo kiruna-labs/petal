@@ -70,6 +70,14 @@
     roomParticipantsByName?: Record<string, RoomParticipant[]>;
     /** Server-side headcounts (no identities) keyed by immutable room code. */
     roomOccupancyByName?: Record<string, number>;
+    /**
+     * #122: server-side display NAMES (still no identities) keyed by immutable
+     * room code -- the room-row hover/focus tooltip only. Deliberately
+     * separate from `roomParticipantsByName`: that map drives the avatar
+     * stack, the hero promotion and the live sort, so routing status names
+     * through it would reorder the list as a side effect.
+     */
+    roomRosterByName?: Record<string, string[]>;
     /** Optional local display labels keyed by immutable room code. */
     roomDisplayNamesByName?: Record<string, string>;
     /** Canonical user-facing letter codes keyed by immutable room code. */
@@ -115,6 +123,7 @@
     currentRoom = null,
     roomParticipantsByName = {},
     roomOccupancyByName = {},
+    roomRosterByName = {},
     roomDisplayNamesByName = {},
     roomAccessCodesByName = {},
     onJoinLive,
@@ -393,6 +402,7 @@
             accessCode={roomAccessCodesByName[room] ?? null}
             participants={roomParticipantsByName[room] ?? []}
             occupancy={roomOccupancyByName[room] ?? null}
+            roster={roomRosterByName[room] ?? []}
             current={rowIsCurrent}
             favorite={favoriteNamesLower.has(room.trim().toLowerCase())}
             onJoin={() => onJoinRoom?.(room)}

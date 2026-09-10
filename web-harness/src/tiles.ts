@@ -10,6 +10,7 @@ import {
 import type { HarnessContext } from './context.ts';
 import { commitLayoutModeTransition, layoutModeStateOf } from './tileLayout.ts';
 import { dismissSpotlight, endAutoSpotlight } from '@petal/shared/logic/tileLayoutMode';
+import { looksLikeTechnicalIdentity } from '@petal/shared/logic/participantNames';
 import {
   colorProfileFromMetadata,
   identityPaletteIndexFromMetadata,
@@ -95,14 +96,11 @@ export function browserColorCorrectionMode(range: 'full' | 'video' | null | unde
   return 'none';
 }
 
-export function looksLikeTechnicalIdentity(value: string): boolean {
-  const trimmed = value.trim();
-  return (
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed) ||
-    /^web-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed) ||
-    /^[0-9a-f]{32}$/i.test(trimmed)
-  );
-}
+// #122: the one definition lives in shared/logic so the desktop room-roster
+// tooltip and these tile labels cannot drift on what counts as a machine
+// identity. Re-exported here because this module is the barrel its callers
+// already import from.
+export { looksLikeTechnicalIdentity } from '@petal/shared/logic/participantNames';
 
 export function participantDisplayName(identity: string, displayName?: string | null): string {
   const name = displayName?.trim();
