@@ -1278,11 +1278,21 @@ mod tests {
             .split("pub fn parse_config")
             .next()
             .unwrap();
-        assert!(
-            !body.contains("std::env::var(\"PETAL_PLUGIN_REGISTRY_PUBKEY\")"),
-            "runtime key override must never return"
+        // Positive guard, not a blocklist: a negative match only rejects the spellings its
+        // author thought of (`env::var("PETAL_PLUGIN_REGISTRY_PUBKEY")` with `use std::env;`
+        // in scope slips past one). Instead require that EVERY mention of the key's name in
+        // `config()` is the compile-time read -- any other way of reading it, however spelled,
+        // adds a mention that is not inside `option_env!` and fails here.
+        let baked = "option_env!(\"PETAL_PLUGIN_REGISTRY_PUBKEY\")";
+        let mentions = body.matches("PETAL_PLUGIN_REGISTRY_PUBKEY").count();
+        let baked_reads = body.matches(baked).count();
+        assert!(baked_reads >= 1, "config() must read the key via {baked}");
+        assert_eq!(
+            mentions, baked_reads,
+            "every PETAL_PLUGIN_REGISTRY_PUBKEY read in config() must be {baked}; \
+             found {mentions} mention(s) but only {baked_reads} compile-time read(s) -- \
+             a runtime key override must never return, in any spelling"
         );
-        assert!(body.contains("option_env!(\"PETAL_PLUGIN_REGISTRY_PUBKEY\")"));
         assert!(
             body.contains("cfg!(debug_assertions)"),
             "URL override stays debug-only"
