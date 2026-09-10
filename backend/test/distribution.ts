@@ -15,6 +15,10 @@ import {
   findBlobByPrefixSuffix,
 } from '../lib/blob.js';
 import { sendApiError } from '../lib/http.js';
+import {
+  DISTRIBUTION_METRIC_PREFIX,
+  versionFromArtifactPathname,
+} from '../lib/distributionMetrics.js';
 
 type BlobJson = {
   url: string;
@@ -184,6 +188,45 @@ async function captureConsoleError(fn: () => Promise<void> | void): Promise<stri
     console.error = original;
   }
   return messages;
+}
+
+// #125's recording path writes to stdout, not stderr, so it needs its own
+// spy. Returns every console.log line the body produced.
+async function captureConsoleLog(fn: () => Promise<void> | void): Promise<string[]> {
+  const messages: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    messages.push(args.map(String).join(' '));
+  };
+  try {
+    await fn();
+  } finally {
+    console.log = original;
+  }
+  return messages;
+}
+
+// The `petal.metric ...` lines only, parsed. Anything else the body logged is
+// ignored, so these assertions do not depend on the test runner's own output.
+async function captureMetrics(fn: () => Promise<void> | void): Promise<unknown[]> {
+  const lines = await captureConsoleLog(fn);
+  return lines
+    .filter((line) => line.startsWith(`${DISTRIBUTION_METRIC_PREFIX} `))
+    .map((line) => JSON.parse(line.slice(DISTRIBUTION_METRIC_PREFIX.length + 1)));
+}
+
+// Simulates a broken/replaced log transport for the duration of `fn`: the
+// sink itself throws. Nothing downstream may notice.
+async function withThrowingConsoleLog(fn: () => Promise<void>): Promise<void> {
+  const original = console.log;
+  console.log = () => {
+    throw new Error('log transport is down');
+  };
+  try {
+    await fn();
+  } finally {
+    console.log = original;
+  }
 }
 
 async function withMissingLiveKitEnv(fn: () => Promise<void>) {
@@ -542,6 +585,98 @@ async function main() {
 
     assert.equal(response.statusCode, 404);
     assert.deepEqual(response.body, { error: 'no release published yet' });
+  });
+
+  // #125 download observability. `/api/download` recorded NOTHING before
+  // this: no console line, no analytics call, no Sentry breadcrumb. "How many
+  // people took the Windows build while every Windows install was stranded?"
+  // was answerable only from the Vercel request log — dashboard-gated, short
+  // retention, no resolved version. These pin the count, its field set, and
+  // the rule that recording can never cost a download.
+
+  await test('/api/download counts a served Windows download by platform and resolved version (#125)', async () => {
+    const currentInstaller = blob('Petal_1.2.3_windows_x86_64-setup.exe', '2026-07-01T10:00:00.000Z');
+    listBlobs('Petal_', [currentInstaller]);
+
+    let response!: TestResponse;
+    const metrics = await captureMetrics(async () => {
+      response = await call(downloadHandler, 'GET', { platform: 'windows' });
+    });
+
+    assert.equal(response.statusCode, 302);
+    assert.equal(metrics.length, 1);
+    assert.deepEqual(metrics[0], {
+      event: 'download',
+      platform: 'windows',
+      version: '1.2.3',
+    });
+  });
+
+  await test('/api/download counts a bare (macOS-default) request as macos (#125)', async () => {
+    const currentDmg = blob('Petal_1.2.4_universal.dmg', '2026-07-01T10:00:00.000Z');
+    listBlobs('Petal_', [currentDmg]);
+
+    const metrics = await captureMetrics(async () => {
+      await call(downloadHandler);
+    });
+
+    assert.deepEqual(metrics, [{ event: 'download', platform: 'macos', version: '1.2.4' }]);
+  });
+
+  await test('/api/download counts only downloads it actually served — not a 400 or a 404 (#125)', async () => {
+    const currentDmg = blob('Petal_1.2.3_universal.dmg', '2026-07-01T10:00:00.000Z');
+    listBlobs('Petal_', [currentDmg]);
+
+    const metrics = await captureMetrics(async () => {
+      // Rejected platform: never reaches the blob list at all.
+      assert.equal((await call(downloadHandler, 'GET', { platform: 'linux' })).statusCode, 400);
+      // No Windows artifact published: 404, nothing downloaded.
+      assert.equal((await call(downloadHandler, 'GET', { platform: 'windows' })).statusCode, 404);
+    });
+
+    assert.deepEqual(metrics, []);
+  });
+
+  await test('/api/download: a recorder failure must never fail the redirect (#125)', async () => {
+    const currentInstaller = blob('Petal_1.2.3_windows_x86_64-setup.exe', '2026-07-01T10:00:00.000Z');
+    listBlobs('Petal_', [currentInstaller]);
+
+    let response!: TestResponse;
+    await withThrowingConsoleLog(async () => {
+      response = await call(downloadHandler, 'GET', { platform: 'windows' });
+    });
+
+    // The whole point: a missing count is a missing count, a failed redirect
+    // is a person who cannot install Petal. The handler's own catch would
+    // have turned this into a 502 "download service unavailable".
+    assert.equal(response.statusCode, 302);
+    assert.equal(response.headers.location, currentInstaller.url);
+    assert.equal(response.ended, true);
+    assert.equal(response.body, undefined);
+  });
+
+  await test('versionFromArtifactPathname resolves release names and yields "unknown" for anything else (#125)', () => {
+    assert.equal(versionFromArtifactPathname('Petal_1.2.3_universal.dmg'), '1.2.3');
+    assert.equal(
+      versionFromArtifactPathname('Petal_0.9.15_windows_x86_64-setup.exe'),
+      '0.9.15'
+    );
+    assert.equal(versionFromArtifactPathname('Petal_1.2.3-beta.1_universal.dmg'), '1.2.3-beta.1');
+    // Nothing that fails the anchored parse may contribute any of itself.
+    for (const pathname of [
+      'latest.json',
+      'Petal_universal.dmg',
+      'notPetal_1.2.3_universal.dmg',
+      // Four numeric components, i.e. an IPv4 address wearing a filename.
+      // The parse must reject it whole, not truncate it to '203.0.113'.
+      'Petal_203.0.113.7_universal.dmg',
+      '',
+      undefined,
+      null,
+      42,
+    ]) {
+      assert.equal(versionFromArtifactPathname(pathname), 'unknown');
+    }
   });
 
   await test('/api/index redirects to the marketing site', async () => {

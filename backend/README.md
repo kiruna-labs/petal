@@ -182,6 +182,36 @@ that content:
 - **`GET /`** — this project is a pure API host (app.petal.live); it just
   302-redirects to the marketing site at `https://petal.live/`.
 
+### Counting downloads (#125)
+
+`/api/download` recorded nothing until #125, so "how many people took the
+Windows build?" could only be answered from the Vercel request log —
+dashboard-gated, short retention, and carrying no resolved version. Every
+download it actually serves now also writes one structured line to stdout:
+
+```
+petal.metric {"event":"download","platform":"windows","version":"0.9.15"}
+```
+
+Count them by grepping the runtime logs (or a log drain) for the
+`petal.metric ` prefix. A `400` (bad platform) or `404` (no artifact
+published) writes nothing — only a served redirect is a download.
+
+Three fields, and no more: `platform` is `macos` | `windows` | `unknown`, and
+`version` is parsed from the artifact's own blob pathname. **Nothing is read
+off the request** — no IP, no User-Agent, no referrer, no header, no query
+string, no identity. `lib/distributionMetrics.ts` takes primitives rather
+than a `VercelRequest` so that stays true, and `test/privacy.ts` fails if a
+fourth field or an unsanitized value ever appears. This is a count, not a
+profile.
+
+`/api/updater` deliberately has no per-platform equivalent: the request
+carries no platform (the client picks its own key out of the manifest) and
+the only remaining signal is the User-Agent, which is off limits. Adding
+`{{target}}` to the client's configured updater endpoint is the clean route
+if that count is ever needed, and only builds shipped after that change would
+send it.
+
 ## Environment
 
 | Variable | Needed for |

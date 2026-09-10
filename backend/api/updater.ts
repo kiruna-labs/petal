@@ -2,6 +2,14 @@
 // This is the endpoint the app's tauri-plugin-updater is configured to hit.
 // CI produces latest.json and uploads it to Vercel Blob at the stable
 // pathname "latest.json" (issue #104); this handler only serves it.
+//
+// #125: deliberately NOT counted by platform here. The request carries no
+// platform — the client picks its own key out of the manifest — and the only
+// per-request signal left is the User-Agent, which is off limits (a person's
+// header, and tauri-plugin-updater's is platform-less anyway). Do not add
+// UA sniffing. The clean path is `{{target}}` in the configured updater
+// endpoint (tauri.release.conf.json), which is a client change only new
+// builds would send; /api/download is the countable endpoint today.
 
 import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { findBlobByPathname, fetchBlobJson } from '../lib/blob.js';
