@@ -1429,6 +1429,18 @@ subsequent cockpit work:
      `phys_footprint_mb` and `vm_top=<owner>:<resident>/<dirty>` breakdown, in
      CI, without waiting for another field report.
 
+  Every mark also carries `backing=<WxH> backing_scale=<N.NN>` beside
+  `source=` (#106). `source=` is the configured capture OUTPUT, and Auto caps
+  a 2x display's backing store straight back down to its logical size, so a
+  2560x1440 Retina Mac and a 1x 2560x1440 panel both print
+  `source=2560x1440`; `backing=5120x2880 backing_scale=2.00` versus
+  `backing=2560x1440 backing_scale=1.00` is what tells them apart. The third
+  scale on the line, `capture_scale=`, is the post-cap capture scale (the
+  value `first frame received` has always printed) and is NOT the backing
+  scale -- it reads 1.00 for both of those displays. The runner is 1x, so its
+  marks read `backing=` equal to `source=` with `backing_scale=1.00`: a
+  reading, not a gap.
+
   Read its `display-share-source` record before reading its memory numbers: it
   states the pixel geometry the run actually got. The self-hosted Tart guest is
   configured `--display 1920x1080` at 1x (2.07 MP -- `scripts/runner/tart/
