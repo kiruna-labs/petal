@@ -21,10 +21,17 @@
   color elsewhere in this system (ControlButton's active-share state,
   Gallery). Flagged as an approximation, not an invented new color.
 -->
+<script module lang="ts">
+  // Stable, deterministic ids for `aria-describedby` (SSR is off app-wide).
+  let rosterTooltipSeq = 0;
+</script>
+
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import Avatar from './Avatar.svelte';
   import type { IdentityColor } from './Avatar.svelte';
+  import { participantNamesSummary } from '$lib/data/participantNames';
+  import { placeRowTooltip } from '$lib/data/rowTooltipPlacement';
 
   interface RoomParticipant {
     name: string;
@@ -39,11 +46,20 @@
     participants?: RoomParticipant[];
     /**
      * Server-side headcount from `POST /api/rooms/status` for a room this
-     * machine holds a credential for. Identities are not included (only
-     * joined rooms have a roster), so a non-zero count with no participants
-     * renders as a count, not avatars.
+     * machine holds a credential for. Identities are STILL not included --
+     * `/api/rooms/status` sends display names only (#122) -- so a non-zero
+     * count with no `participants` renders as a count, not avatars, and the
+     * names it does send arrive separately through `roster`.
      */
     occupancy?: number | null;
+    /**
+     * #122: WHO is in this room, display names only, for the hover/focus
+     * tooltip and the row's accessible name. Deliberately NOT `participants`:
+     * that prop drives the avatar stack, the hero promotion and the list
+     * sort, and feeding status names into it would silently reorder the list.
+     * Empty (the default) renders no tooltip at all.
+     */
+    roster?: string[];
     /** This process is currently joined to this room. */
     current?: boolean;
     favorite?: boolean;
@@ -60,6 +76,7 @@
     subtitle,
     participants = [],
     occupancy = null,
+    roster = [],
     current = false,
     accessCode = null,
     favorite = false,
@@ -85,6 +102,61 @@
   );
   const joinLabel = $derived(current ? 'Return' : 'Join now');
   const joinButtonLabel = $derived(current ? 'Return' : 'Join');
+
+  // #122: one string for the tooltip AND the row's accessible name, so a
+  // screen reader hears exactly what a sighted user reads (mirrors
+  // LiveHero.svelte's `${names.join(', ')} in this room` aria-label).
+  const rosterSummary = $derived(participantNamesSummary(roster));
+  const rosterLabel = $derived(rosterSummary ? `${rosterSummary} in this room` : '');
+  const rowLabel = $derived(
+    rosterLabel
+      ? `${current ? `Return to ${name}` : `Join ${name}`} \u2014 ${rosterLabel}`
+      : current
+        ? `Return to ${name}`
+        : `Join ${name}`
+  );
+
+  // The tooltip is `position: fixed` (see $lib/data/rowTooltipPlacement.ts for
+  // why an absolute one is clipped by the scrolling room list). CSS owns
+  // WHETHER it shows -- `:hover` / `:has(:focus-visible)`, never `:active` --
+  // and this owns WHERE, recomputed whenever the row moves under the pointer.
+  const tooltipId = `room-roster-tooltip-${++rosterTooltipSeq}`;
+  let rowShell = $state<HTMLElement | null>(null);
+  let tooltipEl = $state<HTMLElement | null>(null);
+  let tooltipLeft = $state(0);
+  let tooltipTop = $state(0);
+  let tooltipTracking = false;
+
+  function positionTooltip() {
+    if (!rowShell || !tooltipEl) return;
+    const anchor = rowShell.getBoundingClientRect();
+    const box = tooltipEl.getBoundingClientRect();
+    const placed = placeRowTooltip(
+      anchor,
+      { width: box.width, height: box.height },
+      { width: window.innerWidth, height: window.innerHeight }
+    );
+    tooltipLeft = placed.left;
+    tooltipTop = placed.top;
+  }
+
+  function startTrackingTooltip() {
+    if (!rosterSummary) return;
+    positionTooltip();
+    if (tooltipTracking) return;
+    tooltipTracking = true;
+    // Capture phase: the row list is the scroller, and a scroll event on it
+    // does not bubble to window.
+    window.addEventListener('scroll', positionTooltip, true);
+    window.addEventListener('resize', positionTooltip);
+  }
+
+  function stopTrackingTooltip() {
+    if (!tooltipTracking) return;
+    tooltipTracking = false;
+    window.removeEventListener('scroll', positionTooltip, true);
+    window.removeEventListener('resize', positionTooltip);
+  }
 
   function targetIsControl(event: Event): boolean {
     const target = event.target;
@@ -128,6 +200,7 @@
 
   onDestroy(() => {
     clearTimeout(accessCodeCopyTimer);
+    stopTrackingTooltip();
   });
 
   function removeRoom(event: MouseEvent) {
@@ -240,6 +313,24 @@
   {/if}
 {/snippet}
 
+{#snippet rosterTooltip()}
+  {#if rosterSummary}
+    <!-- #122: a STYLED tooltip, never `title=` -- native tooltips are
+         stripped at runtime on this surface (suppressNativeTooltips.ts).
+         `position: fixed` so the scrolling room list cannot clip it; hidden
+         while the row is `:active` because the press transform would make the
+         row its containing block. Wraps, never truncates. -->
+    <span
+      class="room-roster-tooltip"
+      id={tooltipId}
+      role="tooltip"
+      bind:this={tooltipEl}
+      style={`left:${tooltipLeft}px;top:${tooltipTop}px`}
+      data-testid="room-roster-tooltip"
+    >{rosterLabel}</span>
+  {/if}
+{/snippet}
+
 {#if onJoin}
   <!-- The row is a JOIN surface that also contains real controls (access-
        code copy, favorite, remove). role="button" here was wrong: a
@@ -253,17 +344,37 @@
   <div
     class="room-row-shell clickable"
     class:live={isLive}
+    bind:this={rowShell}
     role="group"
     tabindex="0"
-    aria-label={current ? `Return to ${name}` : `Join ${name}`}
+    aria-label={rowLabel}
+    aria-describedby={rosterSummary ? tooltipId : undefined}
     onclick={joinFromRow}
     onkeydown={joinFromKeyboard}
+    onmouseenter={startTrackingTooltip}
+    onmouseleave={stopTrackingTooltip}
+    onfocusin={startTrackingTooltip}
+    onfocusout={stopTrackingTooltip}
   >
     {@render rowContents()}
+    {@render rosterTooltip()}
   </div>
 {:else}
-  <div class="room-row-shell" class:live={isLive}>
+  <!-- The non-clickable variant (dev harnesses pass no `onJoin`) still needs
+       the tooltip's position handlers: CSS reveals it on hover either way, so
+       without them it would paint at the window origin. -->
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class="room-row-shell"
+    class:live={isLive}
+    bind:this={rowShell}
+    onmouseenter={startTrackingTooltip}
+    onmouseleave={stopTrackingTooltip}
+    onfocusin={startTrackingTooltip}
+    onfocusout={stopTrackingTooltip}
+  >
     {@render rowContents()}
+    {@render rosterTooltip()}
   </div>
 {/if}
 
@@ -289,6 +400,57 @@
 
   .room-row-shell.clickable:active {
     transform: scale(var(--press-scale, 0.96));
+  }
+
+  /* #122 -- who is in this room, on hover or keyboard focus.
+
+     `position: fixed`, NOT absolute: rows scroll inside
+     `.room-list-scroll` (overflow-y: auto) under `.main-menu`'s
+     `overflow: hidden`, which clips an absolutely-positioned child. The
+     coordinates come from `placeRowTooltip` (see rowTooltipPlacement.ts).
+
+     Hidden on `:active`: the press `transform: scale()` above makes the row
+     the containing block for fixed descendants, which snaps the tooltip into
+     row coordinates mid-press.
+
+     Never `white-space: nowrap` and never an ellipsis -- CLAUDE.md's "UI text
+     must NEVER truncate" rule. The names wrap and the box grows. */
+  .room-roster-tooltip {
+    position: fixed;
+    z-index: 40;
+    max-width: min(340px, calc(100vw - 16px));
+    padding: 6px 9px;
+    border: 1px solid var(--hairline-strong);
+    border-radius: var(--radius-chip);
+    background: var(--glass-panel);
+    box-shadow: var(--shadow-tooltip);
+    color: var(--text-soft);
+    font: 600 11px / 1.35 var(--font-ui);
+    text-align: left;
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-wrap: pretty;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--motion-fast) var(--ease-standard) var(--motion-tooltip-delay);
+  }
+
+  /* BOTH focus selectors are load-bearing. The row shell is itself the
+     focusable join surface (`tabindex="0"`), and `:has(:focus-visible)` only
+     matches when a DESCENDANT is focused -- it never fires for the row's own
+     keyboard focus, which is the case this tooltip exists for. Keep
+     `:focus-visible` for the row and `:has(:focus-visible)` for its inner
+     controls (copy / favorite / remove). */
+  .room-row-shell:hover .room-roster-tooltip,
+  .room-row-shell:focus-visible .room-roster-tooltip,
+  .room-row-shell:has(:focus-visible) .room-roster-tooltip {
+    opacity: 1;
+  }
+
+  .room-row-shell.clickable:active .room-roster-tooltip {
+    opacity: 0;
+    transition-delay: 0ms;
   }
 
   .room-row-shell.clickable:focus-visible {

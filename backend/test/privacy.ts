@@ -2,15 +2,18 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import { credentialForAccessCode, generateRoomCredential, livekitRoomName } from '../lib/slug.js';
-import type { RoomDiscoveryService, RoomMetadataService } from '../lib/livekit.js';
+import { ParticipantInfo, ParticipantInfo_State, ParticipantPermission } from 'livekit-server-sdk';
+import type { RoomDiscoveryService, RoomListingService, RoomMetadataService } from '../lib/livekit.js';
 import {
   handleAdminControl,
   handleCreateRoom,
   handleGalleryToken,
   handleListRooms,
+  handleRoomStatus,
   handleToken,
   HttpError,
   publicRoomIdForLiveKitRoom,
+  resetRoomsListCacheForTest,
   resetTokenRateLimitsForTest,
   roomDiscoveryView,
   ROOM_CREATE_BUCKET_CAPACITY,
@@ -468,6 +471,52 @@ async function main() {
     assert.ok(!JSON.stringify(view).includes(credential));
     assert.ok(!JSON.stringify(view).includes(livekitRoom));
     assert.ok(!JSON.stringify(view).includes(ALICE_ID));
+  });
+
+  await test('#122: /api/rooms/status returns display names but logs NOTHING', async () => {
+    // The names this endpoint now returns are user-authored personal data.
+    // They may be rendered by a caller that presented the room's credential;
+    // they must never reach a log line, a breadcrumb or an error message.
+    // `handlers.ts` has no `console.*` at all -- this is what keeps it that
+    // way once a code path starts handling names.
+    const accessCode = 'aaa-aaaa-aaj';
+    const credential = credentialForAccessCode(accessCode)!;
+    const livekitRoom = livekitRoomName(credential);
+    const service = {
+      async listRooms() {
+        return [
+          {
+            name: livekitRoom,
+            metadata: JSON.stringify({ displayName: 'Standup', open: true }),
+            numParticipants: 2,
+          },
+        ] as never;
+      },
+      async listParticipants() {
+        return [
+          new ParticipantInfo({
+            identity: ALICE_ID,
+            name: 'Ada Lovelace',
+            state: ParticipantInfo_State.ACTIVE,
+            permission: new ParticipantPermission({ hidden: false, canSubscribe: true }),
+          }),
+        ] as never;
+      },
+    } as unknown as RoomDiscoveryService & RoomListingService;
+
+    let rooms: Awaited<ReturnType<typeof handleRoomStatus>>['rooms'] = [];
+    const messages = await captureConsole(async () => {
+      resetRoomsListCacheForTest();
+      ({ rooms } = await handleRoomStatus(
+        { rooms: [{ room: credential, accessCode }] },
+        { service, nowMs: 5_000, rateLimitKey: '203.0.113.44' }
+      ));
+    });
+
+    assert.deepEqual(rooms[0]!.participants, [{ name: 'Ada Lovelace' }]);
+    assert.ok(!JSON.stringify(rooms).includes(ALICE_ID), 'the identity must not travel');
+    assert.deepEqual(messages, [], 'a participant display name reached the console');
+    resetRoomsListCacheForTest();
   });
 
   await test('/api/rooms create credential generation is access-code backed and non-throwing', () => {

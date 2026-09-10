@@ -91,7 +91,26 @@
       "id",
       "name",
       "occupancy",
+      "open",
+      "participants"
+    ],
+    "responseKeysWithoutParticipants": [
+      "id",
+      "name",
+      "occupancy",
       "open"
+    ],
+    "participantKeys": [
+      "name"
+    ],
+    "maxParticipantNames": 32,
+    "participantsSample": [
+      {
+        "name": "Ada"
+      },
+      {
+        "name": "Bruno"
+      }
     ],
     "directoryGetStatus": 410
   },

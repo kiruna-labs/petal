@@ -239,8 +239,9 @@ prove which rooms it may ask about.
   at most `ROOM_STATUS_MAX_ROOMS` (64) entries; more is 400. `room` is the
   internal credential (`room-<32 lowercase hex>`); `accessCode` is the
   invite's letter code.
-- Response: `{ rooms: [{ id, name, open, occupancy }] }` — the same view
-  shape the directory had (`id` is the opaque public id, never a credential).
+- Response: `{ rooms: [{ id, name, open, occupancy, participants? }] }`. `id`
+  is the opaque public id, never a credential; `name` is the ROOM's display
+  label, not a person's.
 - **Only rooms the caller presented are returned.** A credential that is
   malformed, unknown, or not live is silently **omitted** — never 404'd — so
   the endpoint cannot be used as an existence oracle for guessed credentials.
@@ -265,7 +266,24 @@ prove which rooms it may ask about.
   (#120). A room whose `listParticipants` fails falls back to
   `numParticipants` for that room alone and never fails the batch.
   `GET`-style server-side tooling (`handleListRooms`) still reports the raw
-  `numParticipants`.
+  `numParticipants` and NEVER carries `participants`.
+- `participants` (#122) is WHO those visible people are: `[{ name }]`,
+  **display names only, never identities**. It comes out of the same cached
+  `listParticipants` read as `occupancy` — no second fan-out — with the same
+  hidden/`-gallery`/`DISCONNECTED` filter, then deduped by identity, sorted by
+  name, and capped at 32 (`ROOM_STATUS_MAX_PARTICIPANT_NAMES`). A participant
+  with no display name travels as `""`; the client renders that as "Someone"
+  and must never substitute an identity.
+  **The key is OMITTED, never `[]`, for any room whose roster this call did
+  not actually read** — a room the room list already reports as empty, and a
+  room whose `listParticipants` failed and fell back to `numParticipants`.
+  `[]` would assert "nobody is here", which is exactly what the failure case
+  does not know. Rust models this as `Option<Vec<RoomOccupancyParticipant>>`
+  with `#[serde(default)]` so an older backend deserializes cleanly.
+  Owner decision 2026-09-09: an invite holder sees the names without joining
+  (closed rooms still need the access code). Names are user-authored personal
+  data — render them, never log them; the desktop logs occupancy by public
+  room id for exactly that reason (`occupancy_change_line`).
 - **Accepted lag.** A participant that drops without disconnecting stays
   `ACTIVE` in `listParticipants` for the SFU's reconnect grace (~20–30s
   measured) and is counted for that whole window; the `DISCONNECTED` filter
@@ -293,7 +311,9 @@ Files to change together:
 - `backend/api/rooms/status.ts`, `backend/api/rooms.ts` (410)
 - `backend/test/hardening.ts`, `backend/test/local.ts`, `backend/test/distribution.ts`
 - `contracts/petal-contracts.json` (`roomStatusRequest`)
-- `apps/desktop/src-tauri/src/rooms.rs` (`room_status_request`, `merge_room_status`)
+- `apps/desktop/src-tauri/src/rooms.rs` (`room_status_request`, `merge_room_status`,
+  `BackendRoomView`, `RoomOccupancyParticipant`)
+- `apps/desktop/src/lib/ipc.ts` (`RoomOccupancy`, `RoomOccupancyParticipant`)
 - `scripts/verify-backend-live.sh`
 
 ## Gallery Bridge Token Grants (#109)

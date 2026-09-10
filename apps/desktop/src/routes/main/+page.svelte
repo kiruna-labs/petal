@@ -107,6 +107,13 @@
   // (`list_room_occupancy`). Was fetched and discarded before the public
   // directory was removed; now it is what a not-joined room row shows.
   let occupancyByRoom = $state<Record<string, number>>({});
+  // #122: the display names behind those headcounts, for the row's hover
+  // tooltip ONLY. Kept OUT of `presenceByRoom` on purpose: that map is what
+  // `promotedLiveRoom`, `roomListPriority` and RoomRow's avatar branch read,
+  // so feeding status names into it would yank a live room out of the list
+  // into the hero and re-sort the list as a side effect of showing names.
+  // Absent key = the backend did not report a roster for that room.
+  let statusRosterByRoom = $state<Record<string, string[]>>({});
   let unlistenPresence: UnlistenFn | undefined;
   let unlistenAutotestJoinResult: UnlistenFn | undefined;
   let unlistenRoomUpdated: UnlistenFn | undefined;
@@ -364,10 +371,15 @@
   function applyOccupancy(occupancy: RoomOccupancy[] | null, roomList = rooms) {
     const nextPresence: Record<string, VisibleParticipant[]> = {};
     const nextOccupancy: Record<string, number> = {};
+    const nextRoster: Record<string, string[]> = {};
 
-    if (!occupancy) {
-      for (const room of roomList) nextPresence[room.name] = [];
-    } else {
+    // #122: the status lookup NEVER writes `nextPresence`. It carries display
+    // names now (it used to carry an always-empty array), and `presenceByRoom`
+    // drives hero promotion, the live sort and the avatar stack -- none of
+    // which this issue changes. Presence stays what it always was: the roster
+    // of the room THIS process is joined to, from `presence-update`. The names
+    // go to `statusRosterByRoom`, which only the row tooltip reads.
+    if (occupancy) {
       const occupancyByKey = new Map<string, RoomOccupancy>();
       for (const row of occupancy) {
         for (const key of occupancyKeys(row)) {
@@ -376,19 +388,25 @@
       }
       for (const room of roomList) {
         const row = roomKeys(room).map((key) => occupancyByKey.get(key)).find(Boolean);
+        nextPresence[room.name] = [];
         if (row && row.available !== false) {
-          nextPresence[room.name] = visibleParticipants(row.participants ?? []);
           if (typeof row.occupancy === 'number' && row.occupancy > 0) {
             nextOccupancy[room.name] = row.occupancy;
           }
-        } else {
-          nextPresence[room.name] = [];
+          // Omitted (not empty) means the backend could not read the roster;
+          // leave the key out so the row simply shows no tooltip.
+          if (row.participants) {
+            nextRoster[room.name] = row.participants.map((p) => p.name);
+          }
         }
       }
+    } else {
+      for (const room of roomList) nextPresence[room.name] = [];
     }
 
     presenceByRoom = nextPresence;
     occupancyByRoom = nextOccupancy;
+    statusRosterByRoom = nextRoster;
   }
 
   async function refreshOccupancy() {
@@ -418,6 +436,7 @@
       if (routeActive) {
         presenceByRoom = Object.fromEntries(rooms.map((room) => [room.name, []]));
         occupancyByRoom = {};
+        statusRosterByRoom = {};
       }
     } finally {
       occupancyRefreshInFlight = false;
@@ -579,6 +598,17 @@
     return orderRoomsForMenu(rooms, favoriteRooms)
       .sort((a, b) => roomListPriority(b.name) - roomListPriority(a.name))
       .map((r) => r.name);
+  });
+
+  // #122: one map for the row tooltip, from both sources. The room this
+  // process is joined to already has real names via `presence-update`; every
+  // other row's names come from the status lookup.
+  const roomRosterByName = $derived.by(() => {
+    const merged: Record<string, string[]> = { ...statusRosterByRoom };
+    for (const [roomName, participants] of Object.entries(presenceByRoom)) {
+      if (participants.length > 0) merged[roomName] = participants.map((p) => p.name);
+    }
+    return merged;
   });
 
   const promotedLiveRoom = $derived.by(() => {
@@ -746,6 +776,7 @@
         roomAccessCodesByName={roomAccessCodesByName}
         roomParticipantsByName={presenceByRoom}
         roomOccupancyByName={occupancyByRoom}
+        roomRosterByName={roomRosterByName}
         favoriteRooms={favoriteRooms}
         onJoinLive={promotedLiveRoom ? () => joinAndGo(promotedLiveRoom.name) : undefined}
         onOpenSettings={handleOpenSettings}

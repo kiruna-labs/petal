@@ -692,8 +692,14 @@ export interface PresentParticipant {
   micMuted: boolean;
 }
 
+/**
+ * Mirrors `rooms::RoomOccupancyParticipant` (src-tauri/src/rooms.rs). #122:
+ * NAME ONLY. `POST /api/rooms/status` never sends an identity for a room this
+ * machine has not joined -- an identity is stable per install and would be a
+ * cross-room correlation handle for every invite holder. Do not add one back.
+ * A blank name is a real value; render it as "Someone", never as an identity.
+ */
 export interface RoomOccupancyParticipant {
-  identity: string;
   name: string;
 }
 
@@ -707,6 +713,8 @@ export interface RoomOccupancy {
   livekitRoom: string;
   available?: boolean;
   occupancy?: number;
+  /** Absent when the roster is unknown (empty/unavailable room, or the
+   * backend's `listParticipants` failed) -- distinct from an empty array. */
   participants?: RoomOccupancyParticipant[];
   unavailableReason?: string;
 }
