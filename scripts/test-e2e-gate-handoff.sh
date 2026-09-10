@@ -47,8 +47,15 @@ check_wiring() {
     || { echo "missing: the by-pid handoff wait"; rc=1; }
   grep -q 'petal_guard_diagnose_missing_socket' "$wf" \
     || { echo "missing: the socket-timeout diagnosis"; rc=1; }
-  grep -q 'source scripts/petal-instance-guard.sh' "$wf" \
+  grep -q 'GUARD_SH="scripts/petal-instance-guard.sh"' "$wf" \
     || { echo "missing: the guard is never sourced"; rc=1; }
+  [ "$(grep -c '>>> petal-guard availability assertion' "$wf")" -eq 2 ] \
+    || { echo "missing: a step relies on the petal_guard_* helpers without asserting they exist"; rc=1; }
+  grep -q 'declare -F "$fn"' "$wf" \
+    || { echo "missing: the helpers' existence is never actually proved"; rc=1; }
+  if grep -q 'pids named above' "$wf"; then
+    echo "missing: the timeout still claims 'pids named above' unconditionally"; rc=1
+  fi
   grep -q 'petal-nightly-loopback/crashes/\*\*' "$wf" \
     || { echo "missing: the loopback crash reports are not uploaded"; rc=1; }
   grep -q 'petal-nightly-loopback/\*\.txt' "$wf" \
@@ -80,7 +87,34 @@ mutate_and_expect 'petal_guard_wait_for_instances_exit' 'missing: the by-pid han
 mutate_and_expect 'petal_guard_diagnose_missing_socket' 'missing: the socket-timeout diagnosis'
 mutate_and_expect 'petal-nightly-loopback/crashes/' 'missing: the loopback crash reports are not uploaded'
 mutate_and_expect 'petal-nightly-loopback/\*\.txt' 'missing: the wedge evidence'
+mutate_and_expect '>>> petal-guard availability assertion' \
+  'missing: a step relies on the petal_guard_\* helpers without asserting they exist'
+mutate_and_expect 'declare -F "\$fn"' 'missing: the helpers'"'"' existence is never actually proved'
+# The 'pids named above' rule is a NEGATIVE requirement, so deleting a line can
+# never exercise it -- add the phrase back instead and check it is rejected.
+ADDED="$TMP/mutant-added.yml"
+{ cat "$WORKFLOW"; echo '          # (pids named above)'; } > "$ADDED"
+set +e
+OUTPUT="$(check_wiring "$ADDED" 2>&1)"
+STATUS=$?
+set -e
+[ "$STATUS" -ne 0 ] || fail "re-introducing 'pids named above' was NOT caught"
+grep -q "unconditionally" <<<"$OUTPUT" || fail "re-introducing 'pids named above' reported the wrong thing: $OUTPUT"
 echo "ok  2 - removing any one of them fails the check, and says which"
+
+# --- Direction 2b: the two availability assertions must stay byte-identical,
+# so a fix to one can never silently leave the other lying.
+extract_assertion_blocks() {
+  awk '/>>> petal-guard availability assertion/ { n++; inblock = 1 }
+       inblock { print > ("'"$TMP"'/assertion-" n ".txt") }
+       /<<< petal-guard availability assertion/ { inblock = 0 }' "$WORKFLOW"
+}
+extract_assertion_blocks
+[ -s "$TMP/assertion-1.txt" ] && [ -s "$TMP/assertion-2.txt" ] \
+  || fail "expected both steps to carry an availability assertion"
+cmp -s "$TMP/assertion-1.txt" "$TMP/assertion-2.txt" \
+  || fail "the phase-handoff and loopback availability assertions have drifted apart"
+echo "ok  2b - both steps carry the same availability assertion, byte for byte"
 
 # --------------------------------------------------------------------------
 # Behavioural half: run the workflow's OWN socket wait.
@@ -245,5 +279,119 @@ else
   [ $((SECONDS - START)) -lt 10 ] || fail "the handoff waited on a clean machine instead of returning"
   echo "ok  8 - a clean handoff passes immediately, without spending its budget"
 fi
+
+# --------------------------------------------------------------------------
+# The "I could not look" direction (#150).
+#
+# `workflow_dispatch` runs the workflow definition from the DEFAULT BRANCH but
+# checks out the ref you name, so a current step can legitimately meet an older
+# tree whose scripts/petal-instance-guard.sh predates these helpers. Bash then
+# returns 127 for the call, and `if ! helper ...` cannot tell that from a real
+# timeout: run 34475294637 printed a confident lingering-instance message and
+# "pids named above" having never looked, with no pids above. These directions
+# are the point of the whole issue -- a check must distinguish "I looked and
+# found a problem" from "I could not look".
+# --------------------------------------------------------------------------
+
+# assert_cannot_check <output> <status> <string the message must name>
+# The message must say it could not check, name what is missing, and must NOT
+# make the lingering-instance claim or cite pids it never saw.
+assert_cannot_check() {
+  local out="$1" st="$2" needle="$3"
+  [ "$st" -eq 1 ] || fail "a missing helper must fail the step, got $st: $out"
+  grep -q "CANNOT CHECK" <<<"$out" || fail "a missing helper must say it could not check: $out"
+  grep -q -- "$needle" <<<"$out" || fail "the message must name '$needle': $out"
+  if grep -q "STILL running" <<<"$out"; then
+    fail "a missing helper was reported as a lingering instance -- the exact #150 defect: $out"
+  fi
+  if grep -q "pids named above" <<<"$out"; then
+    fail "the message cites pids it never collected: $out"
+  fi
+  if grep -q "pid(s):" <<<"$out"; then
+    fail "the message cites pids it never collected: $out"
+  fi
+}
+
+# --- Direction 9: the guard FILE is absent from the checkout.
+NOGUARD="$TMP/root-noguard"; mkdir -p "$NOGUARD/scripts"
+set +e
+OUTPUT="$(cd "$NOGUARD" && PETAL_PHASE_HANDOFF_TIMEOUT_S=2 bash "$HANDOFF" 2>&1)"
+STATUS=$?
+set -e
+assert_cannot_check "$OUTPUT" "$STATUS" "the file itself"
+grep -q "workflow_dispatch" <<<"$OUTPUT" \
+  || fail "the message must name the likely cause (dispatch runs the default branch's workflow against the ref you name): $OUTPUT"
+echo "ok  9 - a checkout with no petal-instance-guard.sh says it could NOT check, not that an instance is stuck"
+
+# --- Direction 10: the guard file exists but predates the handoff helpers --
+# exactly the v0.9.21 shape that produced the false report.
+OLDROOT="$TMP/root-oldguard"; mkdir -p "$OLDROOT/scripts"
+cat > "$OLDROOT/scripts/petal-instance-guard.sh" <<'OLDGUARD'
+# The pre-#150 guard: the #846 helpers only, none of the phase-handoff ones.
+petal_guard_no_foreign_instance() { return 0; }
+petal_guard_kill_pid_verified() { return 0; }
+OLDGUARD
+set +e
+OUTPUT="$(cd "$OLDROOT" && PETAL_PHASE_HANDOFF_TIMEOUT_S=2 bash "$HANDOFF" 2>&1)"
+STATUS=$?
+set -e
+assert_cannot_check "$OUTPUT" "$STATUS" "petal_guard_wait_for_instances_exit"
+echo "ok 10 - an older tree's guard names the missing function instead of inventing a lingering instance"
+
+# --- Direction 11: the helpers ARE present and the wait genuinely fails, but
+# names no pid. The step may not upgrade that into a pid claim either.
+MUTEROOT="$TMP/root-mute-wait"; mkdir -p "$MUTEROOT/scripts"
+cat > "$MUTEROOT/scripts/petal-instance-guard.sh" <<'MUTEGUARD'
+petal_guard_pid_alive() { return 1; }
+petal_guard_live_instances() { :; }
+# Fails the way the real helper does, but silently -- no "(pid N) had not
+# exited" line for the step to quote.
+petal_guard_wait_for_instances_exit() { return 4; }
+MUTEGUARD
+set +e
+OUTPUT="$(cd "$MUTEROOT" && PETAL_PHASE_HANDOFF_TIMEOUT_S=2 bash "$HANDOFF" 2>&1)"
+STATUS=$?
+set -e
+[ "$STATUS" -eq 1 ] || fail "a failing wait must fail the step, got $STATUS: $OUTPUT"
+grep -q "WITHOUT naming a lingering pid" <<<"$OUTPUT" \
+  || fail "a wait that named no pid must be reported as such: $OUTPUT"
+if grep -q "pid(s):" <<<"$OUTPUT"; then
+  fail "the step claimed pids the wait never produced: $OUTPUT"
+fi
+echo "ok 11 - a wait that fails without naming a pid is not dressed up as one that did"
+
+# --------------------------------------------------------------------------
+# The loopback step's sibling assertion, extracted and executed.
+# --------------------------------------------------------------------------
+LOOPASSERT="$TMP/loopback-assert.sh"
+{
+  echo 'set -euo pipefail'
+  awk '/GUARD_PHASE="loopback tier"/, /<<< petal-guard availability assertion/' "$WORKFLOW" \
+    | sed 's/^          //'
+} > "$LOOPASSERT"
+grep -q 'petal_guard_diagnose_missing_socket' "$LOOPASSERT" \
+  || fail "extraction failed: the loopback assertion does not require the diagnosis helper"
+bash -n "$LOOPASSERT" || fail "extracted loopback assertion is not valid bash"
+
+# --- Direction 12: the same older tree stops the loopback tier too, naming the
+# diagnosis helper -- rather than silently reading "no instance was running"
+# out of a `petal_guard_live_instances` that never ran.
+set +e
+OUTPUT="$(cd "$OLDROOT" && bash "$LOOPASSERT" 2>&1)"
+STATUS=$?
+set -e
+assert_cannot_check "$OUTPUT" "$STATUS" "petal_guard_diagnose_missing_socket"
+grep -q "loopback tier" <<<"$OUTPUT" || fail "the loopback failure must name its own phase: $OUTPUT"
+echo "ok 12 - the loopback tier refuses to run blind when its diagnosis helpers are absent"
+
+# --- Direction 13: and the real checkout passes that same assertion, so 9-12
+# are not passing because the assertion rejects everything.
+set +e
+OUTPUT="$(cd "$ROOT" && bash "$LOOPASSERT" 2>&1)"
+STATUS=$?
+set -e
+[ "$STATUS" -eq 0 ] || fail "the availability assertion rejected the REAL checkout: $OUTPUT"
+[ -z "$OUTPUT" ] || fail "a satisfied availability assertion must say nothing: $OUTPUT"
+echo "ok 13 - the real checkout satisfies the assertion silently"
 
 echo "test result: e2e-gate handoff contract tests passed"
