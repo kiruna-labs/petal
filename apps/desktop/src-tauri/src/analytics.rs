@@ -1172,15 +1172,33 @@ fn note_remote_control_applied_in(
 }
 
 pub(crate) fn device_changed(kind: DeviceKind, change: DeviceChange) {
+    device_changed_in(&LAST_DISPLAY_RECONFIG, Instant::now(), kind, change);
+}
+
+/// The real body of `device_changed`, with the debounce cell and clock passed
+/// in (same shape as #868's `note_remote_control_applied_in`).
+///
+/// #149: do NOT test the debounce through the process-wide
+/// `LAST_DISPLAY_RECONFIG`. `resilience`'s display-reconfiguration tests arm
+/// that cell from their own harness thread without `TEST_LOCK`, which
+/// suppressed BOTH reconfigures in the analytics test (`left: ["sleep"]`).
+fn device_changed_in(
+    last_reconfig: &Mutex<Option<Instant>>,
+    now: Instant,
+    kind: DeviceKind,
+    change: DeviceChange,
+) {
     if !in_meeting() {
         return;
     }
     if kind == DeviceKind::Display && change == DeviceChange::Reconfigured {
-        let mut last = LAST_DISPLAY_RECONFIG.lock_unpoisoned();
-        if last.is_some_and(|previous| previous.elapsed() < DISPLAY_RECONFIG_DEBOUNCE) {
+        let mut last = last_reconfig.lock_unpoisoned();
+        if last.is_some_and(|previous| {
+            now.saturating_duration_since(previous) < DISPLAY_RECONFIG_DEBOUNCE
+        }) {
             return;
         }
-        *last = Some(Instant::now());
+        *last = Some(now);
     }
     capture(Event::DeviceChanged { kind, change });
 }
@@ -1220,6 +1238,14 @@ mod tests {
 
     fn names(events: &[CapturedEvent]) -> Vec<&str> {
         events.iter().map(|event| event.name.as_str()).collect()
+    }
+
+    fn display_changes(events: &[CapturedEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter(|event| event.name == "device_changed")
+            .map(|event| extra(event, "change"))
+            .collect()
     }
 
     fn extra<'a>(event: &'a CapturedEvent, key: &str) -> &'a str {
@@ -1522,18 +1548,87 @@ mod tests {
 
     #[test]
     fn display_reconfigure_debounces_inside_one_second() {
+        // #149: local debounce cell and explicit timestamps -- never the
+        // process-wide `LAST_DISPLAY_RECONFIG` or the wall clock. Another
+        // test's thread arming that cell used to suppress BOTH reconfigures
+        // here, and a busy machine must not be able to move these instants.
+        let last = Mutex::new(None);
+        let t0 = Instant::now();
         let (_, events) = with_sink(|| {
             meeting_joined();
-            device_changed(DeviceKind::Display, DeviceChange::Reconfigured);
-            device_changed(DeviceKind::Display, DeviceChange::Reconfigured);
-            device_changed(DeviceKind::Display, DeviceChange::Sleep);
+            device_changed_in(&last, t0, DeviceKind::Display, DeviceChange::Reconfigured);
+            device_changed_in(
+                &last,
+                t0 + DISPLAY_RECONFIG_DEBOUNCE - Duration::from_millis(1),
+                DeviceKind::Display,
+                DeviceChange::Reconfigured,
+            );
+            device_changed_in(
+                &last,
+                t0 + DISPLAY_RECONFIG_DEBOUNCE - Duration::from_millis(1),
+                DeviceKind::Display,
+                DeviceChange::Sleep,
+            );
         });
-        let device: Vec<_> = events
-            .iter()
-            .filter(|event| event.name == "device_changed")
-            .map(|event| extra(event, "change"))
-            .collect();
-        assert_eq!(device, ["reconfigured", "sleep"]);
+        assert_eq!(display_changes(&events), ["reconfigured", "sleep"]);
+    }
+
+    #[test]
+    fn display_reconfigure_passes_again_once_the_debounce_window_elapses() {
+        // The other half of the contract: the debounce suppresses a burst, it
+        // does not silence the event. Without this, deleting the `*last =
+        // Some(now)` write alone would still leave the suite green.
+        let last = Mutex::new(None);
+        let t0 = Instant::now();
+        let (_, events) = with_sink(|| {
+            meeting_joined();
+            device_changed_in(&last, t0, DeviceKind::Display, DeviceChange::Reconfigured);
+            device_changed_in(
+                &last,
+                t0 + DISPLAY_RECONFIG_DEBOUNCE,
+                DeviceKind::Display,
+                DeviceChange::Reconfigured,
+            );
+        });
+        assert_eq!(display_changes(&events), ["reconfigured", "reconfigured"]);
+    }
+
+    #[test]
+    fn a_concurrent_global_display_reconfigure_writer_cannot_perturb_a_local_one() {
+        // #149: `resilience::handle_display_reconfiguration` calls the GLOBAL
+        // `device_changed(Display, Reconfigured)`, and its two `#[tokio::test]`s
+        // do so from their own harness threads without holding `TEST_LOCK`.
+        // Landing one between `meeting_joined()` and the debounce test's first
+        // call armed the shared cell, suppressed BOTH of that test's
+        // reconfigures (`left: ["sleep"]`), and blocked a release push. Drive
+        // the global hard while the local cell runs the same sequence: the
+        // local result must be unaffected. The writer's own `capture` calls
+        // land in ITS thread's unset `TEST_SINK`, so only the shared
+        // `LAST_DISPLAY_RECONFIG` was ever the hazard.
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let writer = {
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    device_changed(DeviceKind::Display, DeviceChange::Reconfigured);
+                }
+            })
+        };
+
+        let last = Mutex::new(None);
+        let t0 = Instant::now();
+        let (_, events) = with_sink(|| {
+            meeting_joined();
+            std::thread::yield_now();
+            device_changed_in(&last, t0, DeviceKind::Display, DeviceChange::Reconfigured);
+            device_changed_in(&last, t0, DeviceKind::Display, DeviceChange::Reconfigured);
+            device_changed_in(&last, t0, DeviceKind::Display, DeviceChange::Sleep);
+        });
+
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+
+        assert_eq!(display_changes(&events), ["reconfigured", "sleep"]);
     }
 
     #[test]

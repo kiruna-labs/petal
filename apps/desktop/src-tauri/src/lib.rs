@@ -593,11 +593,12 @@ fn has_screen_recording_access() -> bool {
     window_source::has_screen_recording_access()
 }
 
-/// Capture a cheap, one-shot JPEG thumbnail of a single window by its
-/// `CGWindowID`, for the tab strip's periodic preview image. Much lighter
-/// weight than the real `SCStream` capture path (SPEC.md §4.1) — this
-/// shells out to `screencapture -l<id>` the same way takt's one-shot
-/// screenshot picker does; it is not a live stream.
+/// Capture a one-shot thumbnail of a single picker source for the tab strip's
+/// preview image. Not a live stream, but not a cheap subprocess either: on
+/// macOS this is an in-process `SCScreenshotManager` capture that composites
+/// the SOURCE (a whole display backing store for a display card) to produce a
+/// small output, with `screencapture` only as the SCK fallback. #106 is
+/// measuring what a burst of these costs; don't assert a cost here.
 #[tauri::command]
 async fn capture_window_thumbnail(window_id: u32, force: Option<bool>) -> Result<String, String> {
     let force = force.unwrap_or(false);

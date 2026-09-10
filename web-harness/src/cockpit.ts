@@ -427,6 +427,12 @@ export function setupCockpit(
         await sharePattern();
         return { step: 'sharePattern', ok: true, detail: 'test-pattern publish started' };
       }
+      // SHARE-DESKTOP shares the native side's WHOLE DISPLAY rather than the
+      // 960x600 test-pattern window (#199 SHARE-10; #106 needs a display-shaped
+      // share in the gate). The receiver-side question is identical -- did a
+      // live remote share tile arrive and is it advancing -- so it runs the same
+      // oracle. Only the source on the native side differs.
+      case 'SHARE-DESKTOP':
       case 'SHARE-N2W-Q': {
         const video = await waitForRemoteShareVideo(cockpitOwnerParam());
         const stats = await measureVideoFrames(video);

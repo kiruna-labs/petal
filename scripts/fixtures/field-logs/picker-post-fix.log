@@ -1,0 +1,7 @@
+2026-09-10 10:00:00.100 [INFO] [desktop_lib::logging] logging: file sink initialized
+2026-09-10 10:00:00.145 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.21 commit=157ebf85 build_date=2026-09-10 bundle_id=com.petal.app
+2026-09-10 10:00:29.000 [INFO] [desktop_lib::session::room] session: joined room '<redacted:r1>'
+2026-09-10 10:00:41.000 [INFO] [desktop_lib::window_source] window_source: picker memory mark -- stage=list_begin phys_footprint_mb=214 live_pixel_buffers=0 sources=n/a thumbnail_captures=0 prewarm=pending vm_walk=complete vm_regions=421 vm_resident_mb=205 vm_mapped_dirty_mb=196 vm_top=malloc:70/66,iosurface:22/22 vm_other_tag=n/a
+2026-09-10 10:00:41.812 [INFO] [desktop_lib::window_source] window_source: picker memory mark -- stage=list_done phys_footprint_mb=219 live_pixel_buffers=0 sources=3d/18w thumbnail_captures=0 prewarm=pending vm_walk=complete vm_regions=436 vm_resident_mb=210 vm_mapped_dirty_mb=200 vm_top=malloc:74/70,iosurface:22/22 vm_other_tag=n/a
+2026-09-10 10:00:43.713 [INFO] [desktop_lib::window_source] window_source: picker memory mark -- stage=prewarm_done phys_footprint_mb=237 live_pixel_buffers=0 sources=3d/18w thumbnail_captures=13 prewarm=completed vm_walk=complete vm_regions=478 vm_resident_mb=228 vm_mapped_dirty_mb=217 vm_top=iosurface:122/122,malloc:74/70 vm_other_tag=n/a
+2026-09-10 10:02:10.000 [INFO] [desktop_lib::session::room] session: left room

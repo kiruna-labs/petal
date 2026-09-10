@@ -1,0 +1,7 @@
+2026-09-08 13:05:02.105 [INFO] [desktop_lib::logging] logging: file sink initialized
+2026-09-08 13:05:02.145 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.4 commit=66634904 build_date=2026-08-26 bundle_id=com.petal.app
+2026-09-08 13:05:02.266 [INFO] [desktop_lib] petal: session state created (SessionState::default() managed)
+2026-09-08 13:05:02.266 [INFO] [desktop_lib] petal: camera device preferences state created (managed)
+2026-09-08 13:05:02.740 [INFO] [desktop_lib::menubar::platform] menubar: NSStatusItem created
+2026-09-08 13:05:09.450 [INFO] [desktop_lib::session::room] session: joined room '<redacted:r1>'
+2026-09-08 13:06:09.450 [INFO] [desktop_lib::session::room] session: left room

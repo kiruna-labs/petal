@@ -2141,6 +2141,24 @@ const SCENARIO_TABLE: &[ScenarioSpec] = &[
         requires_native_share: true,
     },
     ScenarioSpec {
+        // LAST in the Quick tier, deliberately. It shares the WHOLE display,
+        // so anything it disturbs on screen must not reach a sibling, and it
+        // is the only Quick scenario that holds its share past 30s (#106's
+        // `settled_30s` memory mark cannot fire sooner).
+        //
+        // #106: this is the ONE gate scenario that exercises DISPLAY capture.
+        // Every other share scenario captures a 960x600 window, measured at a
+        // 70 MB peak for a whole run -- i.e. it does not reproduce the
+        // 2560x1440 full-display footprint spike this scenario exists to
+        // observe. Do not "simplify" it back to a window source.
+        id: "SHARE-DESKTOP",
+        tier: "quick",
+        kind: ScenarioKind::FullDesktopShare,
+        // The source is a DISPLAY, not the test-pattern window; this flag
+        // drives `start_native_test_pattern_share`, which is the wrong path.
+        requires_native_share: false,
+    },
+    ScenarioSpec {
         id: "CHAOS-DEVICE",
         tier: "full",
         kind: ScenarioKind::ChaosDevice,
@@ -2220,12 +2238,6 @@ const SCENARIO_TABLE: &[ScenarioSpec] = &[
         id: "SHARE-MULTIDISP",
         tier: "multi-display",
         kind: ScenarioKind::MultiDisplayShare,
-        requires_native_share: false,
-    },
-    ScenarioSpec {
-        id: "SHARE-DESKTOP",
-        tier: "native",
-        kind: ScenarioKind::FullDesktopShare,
         requires_native_share: false,
     },
     ScenarioSpec {
@@ -3556,9 +3568,10 @@ fn source_issue_for_scenario(scenario_id: &str) -> &'static str {
 fn coverage_kind_for_scenario(scenario_id: &str) -> &'static str {
     if scenario_id == "SHARE-N2N" {
         "test-cockpit-native-native"
+    } else if scenario_id == "SHARE-DESKTOP" {
+        "test-cockpit-display-share"
     } else if scenario_id == "SHARE-MULTIWIN"
         || scenario_id == "SHARE-MULTIDISP"
-        || scenario_id == "SHARE-DESKTOP"
         || scenario_id == "CAM-BITRATE"
         || scenario_id == "CAM-STALL"
         || scenario_id == "ROOM-JOIN"
@@ -5211,7 +5224,12 @@ fn web_report_outcome(scenario: ScenarioSpec, report: &WebCockpitReport) -> Scen
         // device-pixel demand. Fixed source-size floors would reject a valid,
         // network-conscious lower layer that still exceeds the displayed
         // pixels. Native only adds the independent advancing-frame check.
-        ScenarioKind::NativeToWebShare => ok && fps > N2W_LIVENESS_FPS,
+        // SHARE-DESKTOP joins this arm: its web oracle is the same receiver
+        // liveness check, so the native side applies the same independent
+        // advancing-frame floor rather than trusting `ok` alone.
+        ScenarioKind::NativeToWebShare | ScenarioKind::FullDesktopShare => {
+            ok && fps > N2W_LIVENESS_FPS
+        }
         _ => ok,
     };
     ScenarioOutcome {
@@ -9113,15 +9131,6 @@ fn gap_scaffold_metadata(kind: ScenarioKind) -> (Vec<&'static str>, &'static str
             "native_peer::evaluate_independent_move (cross-display translation) + gap_oracles::evaluate_focus_weighted_cap",
             "SHARE-06 needs >=2 physical displays/Spaces and live capture+composite across them; the cross-display drag is not auto-driven headlessly yet",
         ),
-        ScenarioKind::FullDesktopShare => (
-            vec![
-                "share-whole-display",
-                "composites-on-peer",
-                "sharer-border-persists",
-            ],
-            "gap_oracles::assert_no_text_overflow is N/A; verdict uses receiver liveness + sharer-border presence (#199)",
-            "SHARE-10 needs a live full-display capture published to a receiver and the sharer-border overlay checked around the whole display (#199); not auto-driven headlessly yet",
-        ),
         ScenarioKind::CameraBitrateScaling => (
             vec![
                 "publish-camera-at-tier",
@@ -9165,6 +9174,432 @@ fn gap_scaffold_metadata(kind: ScenarioKind) -> (Vec<&'static str>, &'static str
             "scenario was routed through the gap scaffold unexpectedly",
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// SHARE-DESKTOP -- journey SHARE-10 (#199), and the #106 display-capture probe.
+//
+// Every other share scenario in the gate captures ONE 960x600 window. Measured
+// end to end on 0.9.18's own gate run that is a 52 -> 54 MB footprint at
+// publish, 67 by settle, 70 MB peak for the WHOLE run -- so the suite had no
+// scenario that even resembles the case #106 was filed on (a 2560x1440 WHOLE
+// DISPLAY share reaching 3.07 GB on real Apple silicon). Three things differ
+// there at once: display vs window, 3.7 MP vs 0.6 MP, and real hardware vs the
+// self-hosted VM. This scenario removes the first, narrows the second, and
+// leaves the third stated rather than hidden -- `displayShareSource` records
+// the geometry the run actually got, so nobody has to assume it.
+//
+// It holds the share past `SHARE_MEMORY_SETTLE_MARK_US` on purpose: the
+// `settled_30s` mark rides the capture callback and cannot fire for a share
+// that stopped first, so a shorter scenario would report three marks and call
+// it coverage.
+// ---------------------------------------------------------------------------
+
+use crate::session::SHARE_MEMORY_SETTLE_STAGE;
+
+/// The display SHARE-DESKTOP captures, in the geometry its evidence is
+/// written in.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DisplayShareSource {
+    /// `DISPLAY_SOURCE_MARKER | CGDirectDisplayID` -- what the picker's
+    /// `share_window` command takes, and the key every downstream share
+    /// record (borders, publications, memory marks) uses.
+    source_id: u32,
+    display_id: u32,
+    pixels_wide: u32,
+    pixels_high: u32,
+}
+
+#[cfg(target_os = "macos")]
+impl DisplayShareSource {
+    fn megapixels(self) -> f64 {
+        f64::from(self.pixels_wide) * f64::from(self.pixels_high) / 1_000_000.0
+    }
+}
+
+/// Pick the display to share, through the SAME enumeration the picker shows a
+/// user (`window_source::list()`), then read its pixel dimensions from
+/// CoreGraphics. `list()`'s entries deliberately carry no geometry -- the
+/// picker does not need it and this scenario is the only caller that does.
+#[cfg(target_os = "macos")]
+fn first_display_share_source() -> Result<DisplayShareSource, String> {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGDisplayPixelsWide(display: u32) -> usize;
+        fn CGDisplayPixelsHigh(display: u32) -> usize;
+    }
+
+    let sources = crate::window_source::list()
+        .map_err(|error| format!("could not enumerate shareable sources: {error}"))?;
+    let display = sources
+        .into_iter()
+        .find(|source| {
+            matches!(
+                source.kind,
+                Some(crate::window_source::ShareableSourceKind::Display)
+            )
+        })
+        .ok_or_else(|| {
+            "SCShareableContent offered no display source; a headless session cannot run \
+             SHARE-DESKTOP"
+                .to_string()
+        })?;
+    let source_id = display.window_id;
+    if !crate::window_source::is_display_source_id(source_id) {
+        return Err(format!(
+            "picker offered source {source_id} as a Display but it is not a display source id"
+        ));
+    }
+    let display_id = crate::window_source::display_id_from_source_id(source_id);
+    // SAFETY: both take a CGDirectDisplayID by value and return a size_t; a
+    // stale id returns 0, which the check below rejects.
+    let (pixels_wide, pixels_high) = unsafe {
+        (
+            CGDisplayPixelsWide(display_id),
+            CGDisplayPixelsHigh(display_id),
+        )
+    };
+    let pixels_wide = u32::try_from(pixels_wide).unwrap_or(0);
+    let pixels_high = u32::try_from(pixels_high).unwrap_or(0);
+    if pixels_wide == 0 || pixels_high == 0 {
+        return Err(format!(
+            "CoreGraphics reported a {pixels_wide}x{pixels_high} framebuffer for display \
+             {display_id}; there is nothing to capture"
+        ));
+    }
+    Ok(DisplayShareSource {
+        source_id,
+        display_id,
+        pixels_wide,
+        pixels_high,
+    })
+}
+
+/// The `stage=` of a `session: share memory mark` line belonging to
+/// `window_id`, or `None` for any other line. Pure, so the settle wait below
+/// is testable without a live share.
+pub(crate) fn share_memory_mark_stage_for_window(line: &str, window_id: u32) -> Option<&str> {
+    let needle = format!(" window={window_id} stage=");
+    let rest = line.split_once(needle.as_str())?.1;
+    Some(rest.split_whitespace().next().unwrap_or_default())
+}
+
+/// The mark lines this share emitted, oldest first.
+#[cfg(feature = "cockpit-privileged")]
+fn share_memory_marks_for_window(window_id: u32) -> Vec<String> {
+    crate::session::recent_share_memory_marks()
+        .into_iter()
+        .filter(|line| share_memory_mark_stage_for_window(line, window_id).is_some())
+        .collect()
+}
+
+/// Wait (bounded) for the share's post-settle memory mark. Returns the mark
+/// lines observed, and whether `settled_30s` was among them.
+#[cfg(feature = "cockpit-privileged")]
+async fn await_settled_memory_mark(window_id: u32, budget: Duration) -> (Vec<String>, bool) {
+    let deadline = Instant::now() + budget;
+    loop {
+        let marks = share_memory_marks_for_window(window_id);
+        let settled = marks.iter().any(|line| {
+            share_memory_mark_stage_for_window(line, window_id) == Some(SHARE_MEMORY_SETTLE_STAGE)
+        });
+        if settled || Instant::now() >= deadline {
+            return (marks, settled);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// How long to wait for the test-pattern canvas to prove it is drawing before
+/// starting the display share.
+const DISPLAY_SHARE_MOTION_BUDGET: Duration = Duration::from_secs(15);
+
+/// Wait (bounded) for the test-pattern canvas to report strictly advancing
+/// frames. Returns the snapshot that satisfied it, or an honest reason.
+#[cfg(target_os = "macos")]
+async fn await_test_pattern_motion(
+    budget: Duration,
+) -> Result<crate::dev_test_pattern::TestPatternLivenessSnapshot, String> {
+    let deadline = Instant::now() + budget;
+    loop {
+        let last = crate::dev_test_pattern::test_pattern_liveness_snapshot();
+        if last.fresh && last.advancing_reports >= 2 {
+            return Ok(last);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the test-pattern canvas never reported advancing frames within {budget:?} \
+                 (advancingReports={}, counterDelta={}, fresh={}); with nothing moving on the \
+                 display, ScreenCaptureKit emits no raw frames and SHARE-DESKTOP would blame \
+                 capture for an idle source",
+                last.advancing_reports, last.counter_delta, last.fresh
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// How long SHARE-DESKTOP will hold a live display share waiting for the
+/// `settled_30s` mark. The producer fires it 30s after the capture's FIRST
+/// frame, so this is that plus room for stream warm-up on a cold VM.
+const DISPLAY_SHARE_SETTLE_BUDGET: Duration = Duration::from_secs(50);
+
+#[cfg(target_os = "macos")]
+async fn run_full_desktop_share_scenario(
+    app: &AppHandle,
+    scenario: ScenarioSpec,
+    access_code: &str,
+    writer: &mut ResultsWriter,
+    children: &mut RunChildren,
+) -> ScenarioOutcome {
+    let source = match first_display_share_source() {
+        Ok(source) => source,
+        Err(error) => return infra_fail_outcome(scenario, error),
+    };
+    let _ = writer.write(
+        "display-share-source",
+        Some(scenario.id),
+        serde_json::json!({
+            "sourceId": source.source_id,
+            "displayId": source.display_id,
+            "pixelsWide": source.pixels_wide,
+            "pixelsHigh": source.pixels_high,
+            "megapixels": (source.megapixels() * 100.0).round() / 100.0,
+            "displayCount": available_display_count(app),
+            // Stated, not implied: this run's pixel count against the one the
+            // field report in #106 was filed on. A reader comparing footprints
+            // needs both numbers on the same record.
+            "issue106ReportedSource": "2560x1440 (3.69 MP) on real Apple silicon",
+        }),
+    );
+
+    // SHARE-DESKTOP must be the ONLY share in the room while it runs, and the
+    // scenario loop has no native-share teardown between scenarios: TELE (and
+    // DRAW-N, and SHARE-N2W-Q before it) leave the 960x600 test-pattern WINDOW
+    // published. Two things break if it is still up. The web peer's
+    // `waitForRemoteShareVideo` would happily latch onto that window's tile and
+    // report a healthy "display share" that is actually the same 0.6 MP window
+    // every other scenario already covers -- a green verdict for zero new
+    // coverage. And `phys_footprint_mb` is process-wide, so a concurrent second
+    // capture+encode would be folded into the number #106 is trying to read.
+    let stopped = stop_all_active_shares(app).await;
+    let _ = writer.write(
+        "display-share-isolation",
+        Some(scenario.id),
+        serde_json::json!({
+            "stoppedShareIds": stopped,
+            "why": "the display share must be the only publication in the room, and the only capture counted in phys_footprint",
+        }),
+    );
+
+    // A display with NOTHING MOVING on it produces no ScreenCaptureKit frames
+    // at all -- SCK's stream is change-driven, and `settled_30s` rides the RAW
+    // capture callback rather than the snapshot-pull fallback, so a static
+    // framebuffer would report "the capture stopped delivering frames" for a
+    // capture that was never asked to deliver any. Put the animating
+    // test-pattern canvas on the display first, and prove it is animating
+    // BEFORE the share starts, so a failure after this point is about capture.
+    if let Err(error) = crate::dev_test_pattern::open_test_pattern_window_for_cockpit(
+        app.clone(),
+        crate::dev_test_pattern::CockpitTestPatternPhase::CaptureLocked,
+    ) {
+        crate::dev_test_pattern::retire_cockpit_test_pattern_status(app);
+        return infra_fail_outcome(
+            scenario,
+            format!("could not open the animating test-pattern canvas: {error}"),
+        );
+    }
+    let liveness = match await_test_pattern_motion(DISPLAY_SHARE_MOTION_BUDGET).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            crate::dev_test_pattern::retire_cockpit_test_pattern_status(app);
+            return infra_fail_outcome(scenario, error);
+        }
+    };
+    let _ = writer.write(
+        "display-share-motion",
+        Some(scenario.id),
+        serde_json::json!({
+            "advancingReports": liveness.advancing_reports,
+            "counterDelta": liveness.counter_delta,
+            "fresh": liveness.fresh,
+            "why": "SCK is change-driven; a static display emits no raw frames and no settle mark",
+        }),
+    );
+
+    let state = app.state::<crate::session::SessionState>();
+    // The real picker path (`share_window` -> toggle_window_share_from_picker),
+    // not a private replica of it. A display source id routes itself to the
+    // display-filter branch inside that function.
+    let mut shared = false;
+    for attempt in 1..=4 {
+        shared = crate::hover_tab::toggle_window_share_from_picker(
+            app,
+            state.inner(),
+            source.source_id,
+            None,
+        )
+        .await;
+        if shared {
+            break;
+        }
+        log::warn!(
+            "test-cockpit: {} display share attempt {attempt}/4 for source {} did not enter shared state; retrying",
+            scenario.id,
+            source.source_id
+        );
+        tokio::time::sleep(Duration::from_millis(750)).await;
+    }
+    if !shared || !state.inner().is_share_active(source.source_id) {
+        crate::dev_test_pattern::retire_cockpit_test_pattern_status(app);
+        return infra_fail_outcome(
+            scenario,
+            format!(
+                "display {} ({}x{}) did not enter shared state through the picker path",
+                source.display_id, source.pixels_wide, source.pixels_high
+            ),
+        );
+    }
+
+    record_web_peer_navigation(scenario, access_code, writer).await;
+    let web_peer = match spawn_web_peer(scenario, access_code, &writer.dir) {
+        Ok(peer) => peer,
+        Err(error) => {
+            stop_display_share(app, source.source_id).await;
+            crate::dev_test_pattern::retire_cockpit_test_pattern_status(app);
+            return infra_fail_outcome(scenario, error);
+        }
+    };
+    let _ = writer.write(
+        "web-peer",
+        Some(scenario.id),
+        serde_json::json!({ "mode": web_peer.mode, "url": web_peer.url, "pid": web_peer.pid() }),
+    );
+    children.record_web_peer(&web_peer);
+    children.adopt_web_peer(web_peer);
+
+    let report = await_web_report(app, scenario, writer).await;
+    let mut outcome = match report {
+        Some(report) => web_report_outcome(scenario, &report),
+        None => infra_fail_outcome(
+            scenario,
+            "web harness did not report a terminal petal.cockpit result for the display share",
+        ),
+    };
+
+    // #199's own criterion: the sharer border is drawn around the shared
+    // DISPLAY, not just around windows. `autotest_ui_shared_window_ids` reads
+    // the same border/overlay registries the product populates.
+    let border_present =
+        crate::hover_tab::autotest_ui_shared_window_ids().contains(&source.source_id);
+    outcome.assertions.push(AssertionOutcome {
+        name: "display-sharer-border".to_string(),
+        passed: border_present,
+        detail: format!(
+            "sharer border/overlay registered for display source {}: {border_present}",
+            source.source_id
+        ),
+    });
+
+    // Hold the share until the post-settle mark fires. This is the whole
+    // reason the scenario exists; do not shorten it.
+    let (marks, settled) =
+        await_settled_memory_mark(source.source_id, DISPLAY_SHARE_SETTLE_BUDGET).await;
+    let _ = writer.write(
+        "share-memory-marks",
+        Some(scenario.id),
+        serde_json::json!({
+            "issue": "#106",
+            "sourceId": source.source_id,
+            // CoreGraphics' view of the display. The AUTHORITATIVE pixel count
+            // for a footprint comparison is each mark line's own `source=WxH`,
+            // which is the resolution ScreenCaptureKit actually delivered.
+            "displayGeometry": format!("{}x{}", source.pixels_wide, source.pixels_high),
+            "settledMarkObserved": settled,
+            "marks": marks,
+        }),
+    );
+    for mark in &marks {
+        log::info!("test-cockpit: {} {mark}", scenario.id);
+    }
+    outcome.assertions.push(AssertionOutcome {
+        name: "display-share-memory-marks".to_string(),
+        passed: settled,
+        detail: if settled {
+            format!(
+                "{} mark(s) recorded for display source {}, including {SHARE_MEMORY_SETTLE_STAGE}",
+                marks.len(),
+                source.source_id
+            )
+        } else {
+            format!(
+                "{} mark(s) recorded for display source {} but no {SHARE_MEMORY_SETTLE_STAGE} within {:?} -- the capture stopped delivering frames before the share settled",
+                marks.len(),
+                source.source_id,
+                DISPLAY_SHARE_SETTLE_BUDGET
+            )
+        },
+    });
+    if !settled && matches!(outcome.verdict, ScenarioVerdict::Pass) {
+        outcome.verdict = ScenarioVerdict::TestFail;
+        outcome.message = format!(
+            "{} TEST-FAIL display share never reached its {SHARE_MEMORY_SETTLE_STAGE} memory mark",
+            scenario.id
+        );
+    }
+
+    stop_display_share(app, source.source_id).await;
+    crate::dev_test_pattern::retire_cockpit_test_pattern_status(app);
+    outcome
+}
+
+/// Stop every share this process currently has active, and report which ids
+/// were stopped. Used as SHARE-DESKTOP's prologue -- see the call site for why
+/// a leftover window share would make the scenario pass for the wrong reason.
+#[cfg(target_os = "macos")]
+async fn stop_all_active_shares(app: &AppHandle) -> Vec<u32> {
+    let state = app.state::<crate::session::SessionState>();
+    let active = state.active_share_ids();
+    let mut stopped = Vec::new();
+    for window_id in active {
+        match crate::session::stop_share(app, state.inner(), window_id).await {
+            Ok(_) => stopped.push(window_id),
+            Err(error) => log::warn!(
+                "test-cockpit: SHARE-DESKTOP could not stop leftover share {window_id}: {error}"
+            ),
+        }
+    }
+    if !stopped.is_empty() {
+        // Let the unpublish reach the SFU before a new publication arrives, so
+        // the web peer cannot see both tiles at once.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+    }
+    stopped
+}
+
+/// Stop a display share on every exit path. A whole-display capture left
+/// running would follow the cockpit into the next scenario.
+#[cfg(target_os = "macos")]
+async fn stop_display_share(app: &AppHandle, source_id: u32) {
+    let state = app.state::<crate::session::SessionState>();
+    if let Err(error) = crate::session::stop_share(app, state.inner(), source_id).await {
+        log::warn!("test-cockpit: stopping display share {source_id} failed: {error}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn run_full_desktop_share_scenario(
+    _app: &AppHandle,
+    scenario: ScenarioSpec,
+    _access_code: &str,
+    _writer: &mut ResultsWriter,
+    _children: &mut RunChildren,
+) -> ScenarioOutcome {
+    infra_fail_outcome(
+        scenario,
+        "SHARE-DESKTOP display capture is macOS-only in this build",
+    )
 }
 
 /// Honest scaffold for the P-3 gap journeys. Writes a `scenario-scaffold` event
@@ -9766,9 +10201,12 @@ async fn run_scenario(
         ScenarioKind::PluginFrameBoot => {
             return run_plugin_frame_boot_scenario(app, scenario, writer).await
         }
+        ScenarioKind::FullDesktopShare => {
+            return run_full_desktop_share_scenario(app, scenario, access_code, writer, children)
+                .await
+        }
         ScenarioKind::MultiWindowShare
         | ScenarioKind::MultiDisplayShare
-        | ScenarioKind::FullDesktopShare
         | ScenarioKind::CameraBitrateScaling
         | ScenarioKind::CameraStall
         | ScenarioKind::JoinRoom
@@ -11039,7 +11477,11 @@ mod tests {
                 "DRAW-N",
                 "CAM",
                 "AUD",
-                "TELE"
+                "TELE",
+                // #106: last, and deliberately so -- see the SCENARIO_TABLE
+                // entry. It is also the only Quick scenario that shares a
+                // DISPLAY rather than a window.
+                "SHARE-DESKTOP"
             ]
         );
     }
@@ -12207,12 +12649,6 @@ not-json
                 "multi-display",
             ),
             (
-                "SHARE-10",
-                "SHARE-DESKTOP",
-                ScenarioKind::FullDesktopShare,
-                "native",
-            ),
-            (
                 "CAM-03",
                 "CAM-BITRATE",
                 ScenarioKind::CameraBitrateScaling,
@@ -12710,6 +13146,90 @@ not-json
             reverse.iter().any(|s| s.id == "CAM-N2W"),
             "see:nat-web must include the native->web camera scenario, got {:?}",
             reverse.iter().map(|s| s.id).collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // SHARE-DESKTOP (#199 / #106): the gate's only DISPLAY-capture scenario.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn share_desktop_runs_last_in_the_quick_tier_as_a_display_share() {
+        let quick = resolve_scenarios("quick").unwrap();
+        let last = quick.last().expect("quick tier is not empty");
+        assert_eq!(
+            last.id, "SHARE-DESKTOP",
+            "SHARE-DESKTOP must run LAST: it shares the whole display and holds \
+             it past 30s, so anything it disturbs must not reach a sibling"
+        );
+        assert_eq!(last.kind, ScenarioKind::FullDesktopShare);
+        assert!(
+            !last.requires_native_share,
+            "the source is a display, not the test-pattern window;              requires_native_share would route it through the wrong starter"
+        );
+        assert_eq!(
+            quick
+                .iter()
+                .filter(|scenario| scenario.kind == ScenarioKind::FullDesktopShare)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn share_desktop_is_no_longer_reported_as_a_gap_scaffold() {
+        // It used to INFRA-FAIL by design. A stale coverage kind would keep
+        // reporting a real live run as scaffolding.
+        assert_eq!(
+            coverage_kind_for_scenario("SHARE-DESKTOP"),
+            "test-cockpit-display-share"
+        );
+        assert_eq!(source_issue_for_scenario("SHARE-DESKTOP"), "#199");
+    }
+
+    #[test]
+    fn memory_mark_stage_is_read_per_share_not_per_line() {
+        let settled = "session: share memory mark -- window=1073741825 stage=settled_30s \
+phys_footprint_mb=512 live_pixel_buffers=0 source=1920x1080";
+        assert_eq!(
+            share_memory_mark_stage_for_window(settled, 1073741825),
+            Some("settled_30s")
+        );
+        // A different share's line is not this share's evidence.
+        assert_eq!(share_memory_mark_stage_for_window(settled, 58), None);
+        // And a prefix must not match: window=1 is not window=1073741825.
+        assert_eq!(share_memory_mark_stage_for_window(settled, 1), None);
+        // Nor is an unrelated log line.
+        assert_eq!(
+            share_memory_mark_stage_for_window("session: window 58 capture heartbeat", 58),
+            None
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn display_share_source_reports_the_pixel_count_the_run_actually_got() {
+        // The number that decides whether a SHARE-DESKTOP run is evidence for
+        // #106 or merely a smoke test. It is recorded, never assumed: the
+        // self-hosted Tart guest is configured 1920x1080 @1x (2.07 MP), the
+        // report in #106 is 2560x1440 (3.69 MP).
+        let runner = DisplayShareSource {
+            source_id: 0x4000_0001,
+            display_id: 1,
+            pixels_wide: 1920,
+            pixels_high: 1080,
+        };
+        assert!((runner.megapixels() - 2.0736).abs() < 0.0001);
+        let reported = DisplayShareSource {
+            source_id: 0x4000_0001,
+            display_id: 1,
+            pixels_wide: 2560,
+            pixels_high: 1440,
+        };
+        assert!((reported.megapixels() - 3.6864).abs() < 0.0001);
+        assert!(
+            reported.megapixels() > runner.megapixels(),
+            "a run on the VM is a lower bound on the reported case, not a match for it"
         );
     }
 

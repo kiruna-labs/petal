@@ -39,6 +39,9 @@ node "$ROOT/scripts/test-bump-version.mjs"
 step "Release: publish-blob.mjs pure-logic unit tests (#671)"
 node "$ROOT/scripts/test-publish-blob-lib.mjs"
 
+step "Field logs: analyze-field-log.mjs unit tests (#76, #159)"
+node "$ROOT/scripts/test-analyze-field-log.mjs"
+
 step "Source provenance wrapper + signed cross-machine integration"
 "$ROOT/scripts/test-run-with-source-provenance.sh"
 "$ROOT/scripts/test-cross-machine-rc-suite.sh"
@@ -48,6 +51,12 @@ step "Harness: owned-process cleanup contract (plan Item 7)"
 
 step "Harness: rc-live-suite foreign-instance guard (both directions)"
 "$ROOT/scripts/test-rc-suite-instance-guard.sh"
+
+step "Harness: shared instance guard + by-pid phase-handoff helpers (#846, #150)"
+"$ROOT/scripts/test-petal-instance-guard.sh"
+
+step "CI: live e2e gate Cockpit -> loopback handoff, both directions (#150)"
+"$ROOT/scripts/test-e2e-gate-handoff.sh"
 
 step "Harness: capture-preflight contract (plan 6d step 2)"
 "$ROOT/scripts/test-capture-preflight.sh"

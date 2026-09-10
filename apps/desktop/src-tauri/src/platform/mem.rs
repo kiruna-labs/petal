@@ -729,12 +729,14 @@ pub struct VmOwnerBytes {
     /// cache alone is ~110 MB under `Untagged`), so this is NOT comparable to
     /// `phys_footprint` -- use it to see whether a bucket is file-backed.
     pub resident_bytes: u64,
-    /// Dirtied + swapped-out pages. THIS is the footprint-relevant number:
-    /// measured on this machine, the sum of this column across all owners
-    /// equalled `phys_footprint` exactly (284 MB vs 284 MB with 20 x 2560x1440
-    /// BGRA IOSurfaces held live). It is what makes the decomposition
-    /// answer #106's question rather than merely resemble it.
-    pub dirty_bytes: u64,
+    /// Dirtied + swapped-out pages MAPPED INTO this address space, whoever
+    /// the kernel charges them to.
+    ///
+    /// Read it as RELATIVE attribution -- which bucket moved, and by how
+    /// much -- which is what #106 needs. Do NOT read it as this owner's slice
+    /// of `phys_footprint`; see [`VmAttribution`]'s "Why this is not
+    /// `phys_footprint`" section for the measured reason (#142).
+    pub mapped_dirty_bytes: u64,
 }
 
 /// Hard cap on regions walked in one sample. A real Petal process maps a few
@@ -770,6 +772,52 @@ pub const VM_ATTRIBUTION_TOP_N: usize = 4;
 /// `VM_REGION_WALK_DEADLINE` bound the worst case regardless of how many
 /// regions a real process maps.
 ///
+/// ## Why this is NOT `phys_footprint` decomposed (#142)
+///
+/// #141 shipped claiming the dirty column summed to `phys_footprint`. In the
+/// live app it does not: 0.9.18's own e2e gate read the ratio at 1.50 rising
+/// monotonically to 2.13 over three minutes of one session. The stated
+/// suspect was compression, and that was measured and RULED OUT -- on real
+/// long-running processes (`vmmap`/`footprint`, macOS 26.6) the compressed
+/// pages appear on BOTH sides at once, so they cancel rather than accumulate:
+///
+/// | real process | dirty | swapped (compressed) | phys_footprint |
+/// |---|---|---|---|
+/// | Chrome Helper GPU | 6577K | 16.2M | 22.6M |
+/// | Chrome Helper | 17.4M | 17.6M | 35.0M |
+/// | Google Chrome | 119.5M | 33.6M | 153.2M |
+///
+/// `dirty + swapped == footprint` in every row even where compression is 72%
+/// of the total, so `dirty ~= footprint + compressed` is false. (The walk
+/// already ADDS `pages_swapped_out`, and `phys_footprint` already INCLUDES
+/// `compressed`.)
+///
+/// What the divergence actually is, measured one mechanism at a time in a
+/// standalone probe on this machine -- bytes added to this total vs to
+/// `phys_footprint`:
+///
+/// | mechanism | this total | `phys_footprint` |
+/// |---|---|---|
+/// | private anon, touched here | +256 MB | +256 MB |
+/// | POSIX shm dirtied by ANOTHER process | +256 MB | +0 MB |
+/// | the same object mapped twice more | +512 MB | +0 MB |
+/// | file-backed `MAP_SHARED`, dirtied here | +128 MB | +0 MB |
+/// | IOSurfaces created HERE | +129 MB | +129 MB |
+/// | purgeable-volatile, touched here | +128 MB | +0 MB |
+///
+/// The rule: `phys_footprint` is a LEDGER of what this task is CHARGED for;
+/// this walk counts what is MAPPED. Pages another task owns (an IOSurface
+/// from ScreenCaptureKit), a second mapping of one object, file-backed pages
+/// and volatile purgeable pages are all mapped-but-not-charged, and a share
+/// accumulates them -- which is the observed monotonic drift. It runs the
+/// other way too: `phys_footprint` charges pages that are not mapped at all
+/// ("owned unmapped", 5.5 MB in a five-day-old Terminal), which no walk can
+/// see. So neither total bounds the other, in either direction.
+///
+/// Use the per-owner columns as RELATIVE attribution -- IOSurface 23 -> 66 MB
+/// across a share is a real, usable signal. Do not quote this total as "N of
+/// the M megabytes of footprint".
+///
 /// ## Honest limits
 ///
 /// - It attributes pages mapped into THIS process. A framework that parks
@@ -790,8 +838,10 @@ pub struct VmAttribution {
     /// True when `VM_REGION_WALK_LIMIT` was reached -- the numbers are a floor.
     pub truncated: bool,
     pub total_resident_bytes: u64,
-    pub total_dirty_bytes: u64,
-    /// The raw `VM_MEMORY_*` tag with the most dirty bytes among regions that
+    /// Sum of [`VmOwnerBytes::mapped_dirty_bytes`]. An address-space total,
+    /// NOT `phys_footprint` decomposed -- see the type doc (#142).
+    pub total_mapped_dirty_bytes: u64,
+    /// The raw `VM_MEMORY_*` tag with the most mapped-dirty bytes among regions that
     /// fell into `VmOwner::Other`, when that bucket has any. A number in
     /// `0..=255`, so it is safe to ship, and it turns a surprising `other`
     /// into a one-line lookup in `<mach/vm_statistics.h>`.
@@ -799,12 +849,12 @@ pub struct VmAttribution {
 }
 
 impl VmAttribution {
-    /// The owner holding the most dirty bytes, or `None` when nothing is
-    /// dirty. This is the value that crosses the Sentry boundary.
+    /// The owner holding the most mapped-dirty bytes, or `None` when nothing
+    /// is dirty. This is the value that crosses the Sentry boundary.
     pub fn top_owner(&self) -> Option<VmOwner> {
         self.owners
             .iter()
-            .find(|entry| entry.dirty_bytes > 0)
+            .find(|entry| entry.mapped_dirty_bytes > 0)
             .map(|entry| entry.owner)
     }
 }
@@ -824,21 +874,22 @@ fn build_vm_attribution(
         .map(|owner| VmOwnerBytes {
             owner: *owner,
             resident_bytes: totals[owner.index()].0,
-            dirty_bytes: totals[owner.index()].1,
+            mapped_dirty_bytes: totals[owner.index()].1,
         })
-        .filter(|entry| entry.resident_bytes > 0 || entry.dirty_bytes > 0)
+        .filter(|entry| entry.resident_bytes > 0 || entry.mapped_dirty_bytes > 0)
         .collect();
-    // Dirty first: it is the column that sums to `phys_footprint`, so ranking
-    // by resident would put the (clean, shared, never-growing) dyld cache above
-    // the bucket that actually moved.
+    // Dirty first: it is the column that MOVES when a share allocates, so
+    // ranking by resident would put the (clean, shared, never-growing) dyld
+    // cache above the bucket that actually grew. Ranking, not accounting --
+    // the column does not sum to `phys_footprint` (#142).
     owners.sort_by(|a, b| {
-        b.dirty_bytes
-            .cmp(&a.dirty_bytes)
+        b.mapped_dirty_bytes
+            .cmp(&a.mapped_dirty_bytes)
             .then(b.resident_bytes.cmp(&a.resident_bytes))
             .then(a.owner.cmp(&b.owner))
     });
     let total_resident_bytes = owners.iter().map(|entry| entry.resident_bytes).sum();
-    let total_dirty_bytes = owners.iter().map(|entry| entry.dirty_bytes).sum();
+    let total_mapped_dirty_bytes = owners.iter().map(|entry| entry.mapped_dirty_bytes).sum();
     let other_top_user_tag = owners
         .iter()
         .any(|entry| entry.owner == VmOwner::Other)
@@ -849,7 +900,7 @@ fn build_vm_attribution(
         regions_walked,
         truncated,
         total_resident_bytes,
-        total_dirty_bytes,
+        total_mapped_dirty_bytes,
         other_top_user_tag,
     }
 }
@@ -858,11 +909,16 @@ fn build_vm_attribution(
 /// asserted rather than assumed (#106's own complaint was that the one metric
 /// which would have attributed the spike never reached a log).
 ///
+/// The total is emitted as `vm_mapped_dirty_mb`, not `vm_dirty_mb` (#142):
+/// the old name read as "the footprint, decomposed", which it is not. The
+/// name is load-bearing -- it is the only thing on the line telling a reader
+/// this number is not comparable to `phys_footprint_mb` beside it.
+///
 /// `None` renders `vm_walk=unavailable` with no numbers at all -- on Windows,
 /// and on a failed read, absence must not read as "nothing is allocated".
 pub fn vm_attribution_fields(attribution: Option<&VmAttribution>) -> String {
     let Some(attribution) = attribution else {
-        return "vm_walk=unavailable vm_regions=n/a vm_resident_mb=n/a vm_dirty_mb=n/a \
+        return "vm_walk=unavailable vm_regions=n/a vm_resident_mb=n/a vm_mapped_dirty_mb=n/a \
                 vm_top=n/a vm_other_tag=n/a"
             .to_string();
     };
@@ -884,7 +940,7 @@ pub fn vm_attribution_fields(attribution: Option<&VmAttribution>) -> String {
                     "{}:{}/{}",
                     entry.owner.tag(),
                     mb(entry.resident_bytes),
-                    mb(entry.dirty_bytes)
+                    mb(entry.mapped_dirty_bytes)
                 )
             })
             .collect::<Vec<_>>()
@@ -895,11 +951,11 @@ pub fn vm_attribution_fields(attribution: Option<&VmAttribution>) -> String {
         .map(|tag| tag.to_string())
         .unwrap_or_else(|| "n/a".to_string());
     format!(
-        "vm_walk={walk} vm_regions={} vm_resident_mb={} vm_dirty_mb={} vm_top={top} \
+        "vm_walk={walk} vm_regions={} vm_resident_mb={} vm_mapped_dirty_mb={} vm_top={top} \
          vm_other_tag={other_tag}",
         attribution.regions_walked,
         mb(attribution.total_resident_bytes),
-        mb(attribution.total_dirty_bytes)
+        mb(attribution.total_mapped_dirty_bytes)
     )
 }
 
@@ -936,6 +992,8 @@ pub fn live_pixel_buffer_count() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use crate::sync_ext::MutexExt;
 
     #[test]
     #[cfg(target_os = "macos")]
@@ -1129,8 +1187,8 @@ mod tests {
 
     fn synthetic_totals(pairs: &[(VmOwner, u64, u64)]) -> [(u64, u64); 14] {
         let mut totals = [(0u64, 0u64); 14];
-        for (owner, resident, dirty) in pairs {
-            totals[owner.index()] = (*resident, *dirty);
+        for (owner, resident, mapped_dirty) in pairs {
+            totals[owner.index()] = (*resident, *mapped_dirty);
         }
         totals
     }
@@ -1161,7 +1219,17 @@ mod tests {
         );
         assert_eq!(attribution.top_owner(), Some(VmOwner::IoSurface));
         assert_eq!(attribution.total_resident_bytes, (112 + 281 + 40) * MB);
-        assert_eq!(attribution.total_dirty_bytes, (281 + 38) * MB);
+        assert_eq!(attribution.total_mapped_dirty_bytes, (281 + 38) * MB);
+        // The total is exactly the sum of the columns above it -- the one
+        // arithmetic property this diagnostic does guarantee (#142).
+        assert_eq!(
+            attribution.total_mapped_dirty_bytes,
+            attribution
+                .owners
+                .iter()
+                .map(|entry| entry.mapped_dirty_bytes)
+                .sum::<u64>()
+        );
         // Owners with nothing at all are dropped rather than printed as zeros.
         assert!(attribution
             .owners
@@ -1220,10 +1288,14 @@ mod tests {
         let line = vm_attribution_fields(Some(&attribution));
         assert_eq!(
             line,
-            "vm_walk=complete vm_regions=78 vm_resident_mb=447 vm_dirty_mb=331 \
+            "vm_walk=complete vm_regions=78 vm_resident_mb=447 vm_mapped_dirty_mb=331 \
              vm_top=iosurface:281/281,malloc:40/38,coremedia:12/11,untagged:112/1 \
              vm_other_tag=n/a"
         );
+        // #142 rename guard: `vm_dirty_mb` read as "phys_footprint, but
+        // decomposed" and got quoted that way. The bare name must not come
+        // back without the accounting behind it changing first.
+        assert!(!line.contains("vm_dirty_mb="), "{line}");
         // VM_ATTRIBUTION_TOP_N caps the list -- the fifth owner is summarised
         // by the totals, not printed.
         assert!(!line.contains("dylib"));
@@ -1235,7 +1307,7 @@ mod tests {
         // everywhere" -- that is a fabricated all-clear.
         let line = vm_attribution_fields(None);
         assert!(line.contains("vm_walk=unavailable"), "{line}");
-        assert!(line.contains("vm_dirty_mb=n/a"), "{line}");
+        assert!(line.contains("vm_mapped_dirty_mb=n/a"), "{line}");
         assert!(line.contains("vm_top=n/a"), "{line}");
         assert!(!line.contains("_mb=0"), "{line}");
     }
@@ -1268,12 +1340,12 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn vm_attribution_walks_this_process_and_its_dirty_total_tracks_phys_footprint() {
-        // The claim this diagnostic rests on: the per-owner DIRTY column sums
-        // to `phys_footprint`, the very metric #106 is written in. Measured
-        // exactly equal on this machine in a controlled C harness; asserted
-        // loosely here because a live test process allocates between the two
-        // reads.
+    fn vm_attribution_walks_this_process_and_reports_a_self_consistent_total() {
+        // What the walk does guarantee, and all it guarantees: it completes,
+        // it sees the address space, and its total is exactly the sum of its
+        // own columns. It is deliberately NOT compared to `phys_footprint`
+        // here -- see the divergence test below for why that comparison was
+        // false (#142).
         let attribution =
             vm_attribution().expect("a running macOS process must have walkable VM regions");
         assert!(attribution.regions_walked > 0);
@@ -1282,18 +1354,435 @@ mod tests {
             "a test process should not need {VM_REGION_WALK_LIMIT} regions"
         );
         assert!(
-            attribution.total_dirty_bytes > 1024 * 1024,
+            attribution.total_mapped_dirty_bytes > 1024 * 1024,
             "a running process must have more than a megabyte dirty, got {}",
-            attribution.total_dirty_bytes
+            attribution.total_mapped_dirty_bytes
         );
-        assert!(attribution.total_resident_bytes >= attribution.total_dirty_bytes);
-        let footprint = process_footprint_bytes().expect("phys_footprint must be readable");
-        let ratio = attribution.total_dirty_bytes as f64 / footprint as f64;
+        assert_eq!(
+            attribution.total_mapped_dirty_bytes,
+            attribution
+                .owners
+                .iter()
+                .map(|entry| entry.mapped_dirty_bytes)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            attribution.total_resident_bytes,
+            attribution
+                .owners
+                .iter()
+                .map(|entry| entry.resident_bytes)
+                .sum::<u64>()
+        );
+    }
+
+    /// One POSIX shared-memory object, dirtied once, that can then be mapped
+    /// into this process again and again. Every mapping is its own VM region,
+    /// so the walk counts the same physical pages once PER MAPPING while the
+    /// footprint ledger charges them exactly once -- the smallest faithful
+    /// stand-in for what a long-running share accumulates (an IOSurface
+    /// belongs to whoever created it, not to whoever maps it). Unmaps, closes
+    /// and unlinks on drop.
+    #[cfg(target_os = "macos")]
+    struct SharedRegion {
+        fd: libc::c_int,
+        mappings: Vec<*mut libc::c_void>,
+        len: usize,
+        name: std::ffi::CString,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl SharedRegion {
+        /// Create the object, map it once and dirty every page through that
+        /// first mapping. After this the pages exist, are resident, and ARE
+        /// charged to this task -- the ordinary case.
+        fn create_and_dirty(len: usize) -> Option<Self> {
+            // macOS caps POSIX shm names at 31 bytes (PSHMNAMLEN); a counter
+            // keeps concurrent tests in one binary from colliding.
+            static NEXT: AtomicI64 = AtomicI64::new(0);
+            let name = std::ffi::CString::new(format!(
+                "/petal142-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ))
+            .ok()?;
+            unsafe {
+                // Variadic: C promotes `mode_t` (u16 here) to `int`, so the
+                // mode must be passed as `c_int`, not as `mode_t`.
+                let fd = libc::shm_open(
+                    name.as_ptr(),
+                    libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                    0o600 as libc::c_int,
+                );
+                if fd < 0 {
+                    return None;
+                }
+                // `ftruncate` on a POSIX shm object is one-shot and must
+                // precede every mapping.
+                if libc::ftruncate(fd, len as libc::off_t) != 0 {
+                    libc::close(fd);
+                    libc::shm_unlink(name.as_ptr());
+                    return None;
+                }
+                let mut region = SharedRegion {
+                    fd,
+                    mappings: Vec::new(),
+                    len,
+                    name,
+                };
+                region.map_once()?;
+                let bytes = region.mappings[0] as *mut u8;
+                let mut offset = 0usize;
+                while offset < len {
+                    std::ptr::write_volatile(bytes.add(offset), 0xA5);
+                    offset += 4096;
+                }
+                Some(region)
+            }
+        }
+
+        fn map_once(&mut self) -> Option<()> {
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    self.len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    self.fd,
+                    0,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                return None;
+            }
+            self.mappings.push(ptr);
+            Some(())
+        }
+
+        /// Map the SAME already-dirty object `count` more times. Not one new
+        /// physical page is created here, and nothing is touched -- so every
+        /// byte this adds to the walk is a byte `phys_footprint` never sees.
+        fn add_aliases(&mut self, count: usize) -> Option<()> {
+            for _ in 0..count {
+                self.map_once()?;
+            }
+            Some(())
+        }
+
+        /// Read a byte back through the newest alias, so nothing about the
+        /// extra mappings can be optimised away as unobserved.
+        fn probe(&self) -> u8 {
+            unsafe { std::ptr::read_volatile(*self.mappings.last().unwrap() as *const u8) }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for SharedRegion {
+        fn drop(&mut self) {
+            unsafe {
+                for ptr in self.mappings.drain(..) {
+                    libc::munmap(ptr, self.len);
+                }
+                libc::close(self.fd);
+                libc::shm_unlink(self.name.as_ptr());
+            }
+        }
+    }
+
+    /// Serialises the tests below that MOVE or MEASURE process-global VM
+    /// numbers (#153). `vm_attribution`'s total and `phys_footprint` are
+    /// whole-process quantities: a sibling test allocating or freeing between
+    /// two readings lands directly in the difference, and at
+    /// `--test-threads=8` the sibling that frees 128 MiB is the next test in
+    /// this very module. Same pattern, same reason as
+    /// `analytics::tests::TEST_LOCK`.
+    #[cfg(target_os = "macos")]
+    static VM_GLOBALS_LOCK: Mutex<()> = Mutex::new(());
+
+    /// What a pair of (walk, footprint) readings taken around a batch of
+    /// aliased mappings says about the walk's total.
+    #[cfg(target_os = "macos")]
+    #[derive(Debug, PartialEq, Eq)]
+    enum AliasVerdict {
+        /// The walk grew by every alias while `phys_footprint` did not: the
+        /// total is a count of MAPPINGS, so it cannot be `phys_footprint`
+        /// decomposed (#142).
+        CountsMappings,
+        /// The walk did not grow by the aliases at all -- it has stopped
+        /// counting every mapping.
+        MissedMappings,
+        /// Both grew together: aliased mappings are charged now, and the
+        /// total may finally be describable as a decomposition. The doc
+        /// comment and the `vm_mapped_dirty_mb` field name would need
+        /// re-deriving -- this assertion must NOT be relaxed to hide it.
+        ChargedLikeADecomposition,
+    }
+
+    /// The verdict as a PURE function of the four readings, so the failing
+    /// directions can be exercised on a kernel that does not actually produce
+    /// them (#153's "verify the failing direction" -- no test can conjure a
+    /// reading where aliases are charged on a machine where they are not).
+    ///
+    /// Both differences are signed. `saturating_sub` here was a real hole:
+    /// when concurrent tests FREED memory the footprint delta went negative,
+    /// saturated to zero, and stopped cancelling the same movement out of the
+    /// walk delta -- which is the opposite of what the subtraction is for.
+    #[cfg(target_os = "macos")]
+    fn classify_alias_growth(
+        dirty_before: u64,
+        dirty_after: u64,
+        footprint_before: u64,
+        footprint_after: u64,
+        aliased_bytes: u64,
+        ambient_tolerance: u64,
+    ) -> AliasVerdict {
+        let dirty_growth = i128::from(dirty_after) - i128::from(dirty_before);
+        let footprint_growth = i128::from(footprint_after) - i128::from(footprint_before);
+        let floor = i128::from(aliased_bytes) - i128::from(ambient_tolerance);
+        if dirty_growth < floor {
+            return AliasVerdict::MissedMappings;
+        }
+        // Memory that IS charged raises both sides equally and cancels here;
+        // aliased pages raise only the walk.
+        if dirty_growth - footprint_growth < floor {
+            return AliasVerdict::ChargedLikeADecomposition;
+        }
+        AliasVerdict::CountsMappings
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn vm_attribution_total_counts_mappings_and_so_cannot_decompose_phys_footprint() {
+        // #142, red-then-green. #141 asserted `0.5 <= dirty/footprint <= 2.0`
+        // and passed -- but only because a fresh `cargo test` binary has
+        // almost nothing mapped that it is not also charged for. The live app
+        // left that band within seconds of a share starting and drifted on to
+        // 2.13 over three minutes. A bound that only holds in the first
+        // second of a process is not a bound.
+        //
+        // So this test puts the live condition INTO the test process rather
+        // than hoping to observe it: one already-dirtied object, mapped
+        // fifteen more times. The pages exist once and are charged once; the
+        // walk sees sixteen regions holding them. Against the old band that
+        // is red on the spot, and it stays red for as long as the total is
+        // what it now says it is -- a count of MAPPINGS.
+        //
+        // #153: every number here is PROCESS-GLOBAL, so what the test reads
+        // is its own aliasing plus whatever the rest of the binary did in the
+        // same window -- and the shipped assertion allowed exactly zero of
+        // the latter. It failed by 16384 bytes, one page, at iteration 2163
+        // of a `--test-threads=8` loop. Two things make the reading a
+        // measurement rather than a hope: this lock keeps the module's own
+        // 128 MiB sibling out of the window, and `classify_alias_growth`
+        // cancels charged movement with a SIGNED difference.
+        let _guard = VM_GLOBALS_LOCK.lock_unpoisoned();
+
+        const CHUNK: usize = 64 * 1024 * 1024;
+        const EXTRA_MAPPINGS: usize = 15;
+        // Measured, not chosen. An instrumented build recorded the walk delta
+        // on every full-suite run at `--test-threads=8` under 44 CPU
+        // spinners. Unserialised, it landed BELOW the aliased total in 3 of
+        // 96 runs; with this lock held, in 1 of 251, and by 16384 bytes --
+        // one page, freed by some other module's test. The residual never
+        // exceeded 48 KB either way, so one chunk is ~1300x it. The lock is
+        // what handles the big mover and the tolerance is what handles the
+        // page: sized to swallow the 128 MiB sibling instead, this margin
+        // would stop detecting a walk that had genuinely dropped two of the
+        // fifteen mappings. One chunk is also the slack #143 already gave the
+        // second half of this property.
+        const AMBIENT_TOLERANCE: u64 = CHUNK as u64;
+
+        let mut region = SharedRegion::create_and_dirty(CHUNK)
+            .expect("POSIX shared memory must be creatable in a test process");
+
+        // Baseline AFTER the pages are dirty and charged, so the deltas below
+        // isolate aliasing alone: no allocation of ours sits between the two
+        // reads, and the footprint delta should be ~zero by construction.
+        let before = vm_attribution().expect("walk must work");
+        let footprint_before = process_footprint_bytes().expect("phys_footprint must be readable");
+
+        region
+            .add_aliases(EXTRA_MAPPINGS)
+            .expect("mapping an existing shm object again must succeed");
+
+        let after = vm_attribution().expect("walk must work");
+        let footprint_after = process_footprint_bytes().expect("phys_footprint must be readable");
+
+        // A truncated walk is a floor, not a total, and differencing two
+        // floors measures nothing. A test process maps ~120 regions against a
+        // 16,384 cap, so this should be unreachable -- say so rather than
+        // silently asserting on a partial reading.
         assert!(
-            (0.5..=2.0).contains(&ratio),
-            "walked dirty {} vs phys_footprint {footprint} (ratio {ratio:.2}) -- the \
-             decomposition no longer tracks the number it claims to explain",
-            attribution.total_dirty_bytes
+            !before.truncated && !after.truncated,
+            "walk truncated ({} then {} regions) -- the totals are floors and \
+             their difference is not a measurement",
+            before.regions_walked,
+            after.regions_walked
+        );
+
+        let verdict = classify_alias_growth(
+            before.total_mapped_dirty_bytes,
+            after.total_mapped_dirty_bytes,
+            footprint_before,
+            footprint_after,
+            EXTRA_MAPPINGS as u64 * CHUNK as u64,
+            AMBIENT_TOLERANCE,
+        );
+        assert_eq!(
+            verdict,
+            AliasVerdict::CountsMappings,
+            "mapped-dirty went {} -> {} and phys_footprint {} -> {} across \
+             {EXTRA_MAPPINGS} further mappings of the same {CHUNK}-byte object. \
+             `MissedMappings` means the walk stopped counting every mapping; \
+             `ChargedLikeADecomposition` means aliased mappings are charged now, \
+             so the type doc and the `vm_mapped_dirty_mb` field name need \
+             re-deriving rather than this assertion relaxing",
+            before.total_mapped_dirty_bytes,
+            after.total_mapped_dirty_bytes,
+            footprint_before,
+            footprint_after
+        );
+
+        // And the same fact stated as the ratio #141 tried to bound, so a
+        // failure here reads directly against the band that was there. Held
+        // live rather than differenced, and measured at 5.2-6.1 in this
+        // binary, so process-global movement cannot reach it.
+        let ratio = after.total_mapped_dirty_bytes as f64 / footprint_after as f64;
+        assert!(
+            ratio > 2.0,
+            "ratio {ratio:.2} (mapped-dirty {} vs phys_footprint {footprint_after}) is \
+             still inside #141's 0.5..=2.0 band while {EXTRA_MAPPINGS} extra mappings \
+             of {CHUNK} bytes are held live",
+            after.total_mapped_dirty_bytes
+        );
+
+        // Hold every mapping across both reads; dropping earlier returns the
+        // pages before they are counted.
+        assert_eq!(region.probe(), 0xA5);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn alias_growth_the_footprint_also_charges_is_reported_as_a_decomposition() {
+        // The failing direction #143 exists to catch, which no real reading on
+        // this kernel can produce (#153). Both sides move by the aliased
+        // amount: the walk total would then BE `phys_footprint` decomposed.
+        const ALIASED: u64 = 15 * 64 * 1024 * 1024;
+        assert_eq!(
+            classify_alias_growth(
+                1_000_000_000,
+                1_000_000_000 + ALIASED,
+                400_000_000,
+                400_000_000 + ALIASED,
+                ALIASED,
+                64 * 1024 * 1024,
+            ),
+            AliasVerdict::ChargedLikeADecomposition
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_walk_that_stops_counting_every_mapping_is_reported_as_missed() {
+        // The other failing direction: the walk charges the aliased object
+        // once, like the ledger does, so the total stops counting mappings.
+        const ALIASED: u64 = 15 * 64 * 1024 * 1024;
+        assert_eq!(
+            classify_alias_growth(
+                1_000_000_000,
+                1_000_000_000,
+                400_000_000,
+                400_000_000,
+                ALIASED,
+                64 * 1024 * 1024,
+            ),
+            AliasVerdict::MissedMappings
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn charged_movement_by_other_threads_does_not_change_the_verdict() {
+        // Why the second check subtracts rather than bounds: memory that IS
+        // charged raises the walk and the ledger by the same amount and
+        // cancels. A sibling allocating 200 MiB inside the window...
+        const CHUNK: u64 = 64 * 1024 * 1024;
+        const ALIASED: u64 = 15 * CHUNK;
+        const ALLOCATED: u64 = 200 * 1024 * 1024;
+        assert_eq!(
+            classify_alias_growth(
+                1_000_000_000,
+                1_000_000_000 + ALIASED + ALLOCATED,
+                400_000_000,
+                400_000_000 + ALLOCATED,
+                ALIASED,
+                CHUNK,
+            ),
+            AliasVerdict::CountsMappings
+        );
+        // ...and one FREEING 32 MiB, which only cancels because the
+        // arithmetic is signed (#153). The `saturating_sub` this replaced
+        // clamped that -32 MiB footprint delta to zero, so it stopped
+        // cancelling in exactly the direction that broke the test.
+        const FREED: u64 = 32 * 1024 * 1024;
+        assert_eq!(
+            classify_alias_growth(
+                1_000_000_000,
+                1_000_000_000 + ALIASED - FREED,
+                400_000_000,
+                400_000_000 - FREED,
+                ALIASED,
+                CHUNK,
+            ),
+            AliasVerdict::CountsMappings
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_one_page_of_ambient_movement_that_failed_in_the_field_is_absorbed() {
+        // #153's captured failure, replayed as arithmetic: the walk grew by
+        // 1006616576 where 15 mappings of 67108864 bytes is 1006632960 --
+        // short by 16384 bytes, one page freed elsewhere in the binary. The
+        // shipped assertion allowed zero movement and failed on it.
+        const CHUNK: u64 = 64 * 1024 * 1024;
+        const ALIASED: u64 = 15 * CHUNK;
+        assert_eq!(ALIASED, 1_006_632_960);
+        assert_eq!(
+            classify_alias_growth(
+                1_000_000_000,
+                1_000_000_000 + ALIASED - 16_384,
+                400_000_000,
+                400_000_000 - 16_384,
+                ALIASED,
+                CHUNK,
+            ),
+            AliasVerdict::CountsMappings
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_free_larger_than_the_tolerance_is_why_the_128_mib_sibling_is_serialised() {
+        // The tolerance is NOT what handles the 128 MiB sibling: a free that
+        // big still trips the first check, because the walk delta alone is
+        // 128 MiB short and only the second check gets the cancellation. That
+        // is the reason `VM_GLOBALS_LOCK` exists rather than a margin wide
+        // enough to swallow it -- a margin that wide would stop detecting a
+        // walk that had genuinely dropped two of the fifteen mappings.
+        const CHUNK: u64 = 64 * 1024 * 1024;
+        const ALIASED: u64 = 15 * CHUNK;
+        const FREED: u64 = 128 * 1024 * 1024;
+        assert_eq!(
+            classify_alias_growth(
+                1_000_000_000,
+                1_000_000_000 + ALIASED - FREED,
+                400_000_000,
+                400_000_000 - FREED,
+                ALIASED,
+                CHUNK,
+            ),
+            AliasVerdict::MissedMappings
         );
     }
 
@@ -1305,13 +1794,20 @@ mod tests {
         // it. Without this, "the walker returns plausible numbers" would be
         // the whole of the evidence -- and a mis-decoded `user_tag` returns
         // plausible numbers too.
+        //
+        // #153: this test moves 128 MiB of process-global dirty memory and
+        // then frees it. Held unserialised it is what made the aliasing test
+        // above fail -- and its own `dirty_before`/`dirty_after` pair is a
+        // global delta with the same exposure in reverse.
+        let _guard = VM_GLOBALS_LOCK.lock_unpoisoned();
+
         const CHUNK: usize = 128 * 1024 * 1024;
         let dirty_before = vm_attribution()
             .expect("walk must work")
             .owners
             .iter()
             .find(|entry| entry.owner == VmOwner::Malloc)
-            .map(|entry| entry.dirty_bytes)
+            .map(|entry| entry.mapped_dirty_bytes)
             .unwrap_or(0);
         let mut block = vec![0u8; CHUNK];
         // Touch every page: an untouched allocation is neither resident nor
@@ -1324,7 +1820,7 @@ mod tests {
             .owners
             .iter()
             .find(|entry| entry.owner == VmOwner::Malloc)
-            .map(|entry| entry.dirty_bytes)
+            .map(|entry| entry.mapped_dirty_bytes)
             .expect("a 128 MiB touched allocation must give the malloc owner bytes");
         let growth = dirty_after.saturating_sub(dirty_before);
         assert!(

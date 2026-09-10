@@ -3362,6 +3362,14 @@ async fn start_capture_for_share(
     // settle clock or re-arm a mark that already fired.
     let capture_first_frame_us = Arc::new(AtomicU64::new(0));
     let settle_memory_mark_done = Arc::new(AtomicBool::new(false));
+    // #106: the source's PHYSICAL backing geometry, published once the stream
+    // exists so the settle mark below can name it. A plain Copy value, NOT a
+    // `WindowCaptureConfig`: that handle holds the `SCStream`, and parking one
+    // in a cell the stream's own frame callback captures would keep the stream
+    // alive forever. `None` until the constructor returns -- rendered `n/a`,
+    // never inferred from the frame size.
+    let capture_backing_geometry: Arc<Mutex<Option<crate::capture::CaptureBackingGeometry>>> =
+        Arc::new(Mutex::new(None));
     let capture_attempt_generation = Arc::new(AtomicU64::new(0));
     let capture_source_name = match &capture_source {
         ShareCaptureSource::DirectWindowId => "direct-window-id",
@@ -3484,6 +3492,7 @@ async fn start_capture_for_share(
             let capture_heartbeat_last_frame_count_cb = capture_heartbeat_last_frame_count.clone();
             let capture_first_frame_us_cb = capture_first_frame_us.clone();
             let settle_memory_mark_done_cb = settle_memory_mark_done.clone();
+            let capture_backing_geometry_cb = capture_backing_geometry.clone();
             let size_tx_cb = size_tx.clone();
             let capture_error_tx_cb = capture_error_tx.clone();
             let diagnostics_cb = diagnostics.clone();
@@ -3531,8 +3540,12 @@ async fn start_capture_for_share(
                 {
                     log_share_memory_mark(
                         window_id,
-                        "settled_30s",
-                        Some((frame.width, frame.height)),
+                        SHARE_MEMORY_SETTLE_STAGE,
+                        Some(ShareMarkGeometry {
+                            output: (frame.width, frame.height),
+                            backing: *capture_backing_geometry_cb.lock_unpoisoned(),
+                            capture_scale: frame.source_scale,
+                        }),
                     );
                 }
                 // Capture-freeze diagnostics (#capture-freeze): explain a frozen
@@ -3772,6 +3785,11 @@ async fn start_capture_for_share(
                 e
             })?;
             started_without_frame = true;
+            // #106: publish this attempt's backing geometry for the settle
+            // mark. After the constructor, because that is where the source
+            // layout is resolved; a retry overwrites it so a mark never
+            // reports the geometry of an abandoned attempt.
+            *capture_backing_geometry.lock_unpoisoned() = Some(capture.backing_geometry());
 
             let first_frame_deadline = tokio::time::Instant::now() + FIRST_FRAME_TIMEOUT;
             // #183-family fallback for the FIRST frame: a wedged SCStream can
@@ -3964,10 +3982,26 @@ async fn start_capture_for_share(
             return Err(ShareSessionError::Capture(message));
         }
     };
+    // #106: `scale` here is the capture scale (configured output pixels per
+    // logical point), never the backing-store scale -- named so nobody reads
+    // a 2x display's capped `1.00` as "this display is 1x".
+    let backing_geometry = capture.backing_geometry();
     log::info!(
-        "session: {reason}(window {window_id}) first frame received ({width}x{height}, scale {source_scale:.2})"
+        "session: {reason}(window {window_id}) first frame received ({width}x{height}, \
+capture_scale {source_scale:.2}, backing {}x{}px, backing_scale {:.2})",
+        backing_geometry.width,
+        backing_geometry.height,
+        backing_geometry.scale
     );
-    log_share_memory_mark(window_id, "first_frame", Some((width, height)));
+    log_share_memory_mark(
+        window_id,
+        "first_frame",
+        Some(ShareMarkGeometry {
+            output: (width, height),
+            backing: Some(backing_geometry),
+            capture_scale: source_scale,
+        }),
+    );
 
     let layout_gate = capture.layout_gate();
     Ok(StartedShareCapture {
@@ -3990,6 +4024,28 @@ async fn start_capture_for_share(
 /// rather than transient.
 const SHARE_MEMORY_SETTLE_MARK_US: u64 = 30_000_000;
 
+/// The `stage=` this mark is emitted under. A `pub(crate)` const rather than a
+/// literal because the Test Cockpit's SHARE-DESKTOP scenario waits for exactly
+/// this stage; two literals would drift silently and the scenario would time
+/// out reporting "the capture stopped delivering frames" (#106).
+pub(crate) const SHARE_MEMORY_SETTLE_STAGE: &str = "settled_30s";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ShareMarkGeometry {
+    /// The configured capture OUTPUT size, in pixels. What `source=` has
+    /// always carried, and what `petal_frame_pool_ceiling_mb` is computed
+    /// from -- our own pools hold output frames, not backing stores.
+    output: (u32, u32),
+    /// The source's PHYSICAL backing store and its scale (#106). `None` only
+    /// when no capture exists yet to ask; never guessed from `output`.
+    backing: Option<crate::capture::CaptureBackingGeometry>,
+    /// Configured OUTPUT pixels per logical point -- the value the
+    /// `first frame received (WxH, scale N.NN)` line has always printed.
+    /// A 2x display captured at Auto reports `1.00` here and `2.00` for
+    /// `backing.scale`; the pair is the reading, either alone is not.
+    capture_scale: f64,
+}
+
 /// #106: one UNTHROTTLED footprint sample at a named point in a share's
 /// lifecycle.
 ///
@@ -4008,18 +4064,33 @@ const SHARE_MEMORY_SETTLE_MARK_US: u64 = 30_000_000;
 ///
 /// The `vm_*` fields say WHICH of those three. They are one bounded walk of
 /// this process's own VM regions bucketed by kernel `user_tag` (see
-/// `platform::mem::VmOwner`), and the per-owner dirty column sums to
-/// `phys_footprint` itself -- so `vm_top` decomposes the very number printed
-/// beside it rather than offering a second, differently-defined one. Four
-/// marks per share, no per-frame or per-second cost. What a reader gets from
-/// two consecutive marks is the step's owner by NAME: `iosurface` growing
-/// across `start_begin` -> `publish_succeeded` is ScreenCaptureKit /
-/// VideoToolbox surfaces, `malloc` is libwebrtc or us, `ioaccelerator` is the
-/// GPU driver.
+/// `platform::mem::VmOwner`). Four marks per share, no per-frame or
+/// per-second cost. What a reader gets from two consecutive marks is the
+/// step's owner by NAME: `iosurface` growing across `start_begin` ->
+/// `publish_succeeded` is ScreenCaptureKit / VideoToolbox surfaces, `malloc`
+/// is libwebrtc or us, `ioaccelerator` is the GPU driver.
+///
+/// `backing=`/`backing_scale=` are the #106 discriminator that `source=`
+/// cannot carry. `source=` is the configured capture OUTPUT, so a 2x
+/// 2560x1440 display whose 5120x2880 backing store Auto caps straight back
+/// down to 2560x1440 prints exactly what a 1x 2560x1440 display prints --
+/// and the CI runner (confirmed 1x) and the reported Apple-silicon Mac
+/// differ in precisely that. A 1x source reports `backing_scale=1.00` with
+/// `backing=` equal to `source=`, so the runner's own reading stays a
+/// reading rather than a special case.
+///
+/// Read those two marks as a DIFFERENCE, never as a decomposition of
+/// `phys_footprint_mb` beside them (#142). `vm_mapped_dirty_mb` counts pages
+/// MAPPED into this process; `phys_footprint` is a ledger of the pages this
+/// task is CHARGED for, and a share accumulates mapped-but-not-charged pages
+/// (an IOSurface belongs to whoever created it) -- which is why the live
+/// ratio between them drifted 1.50 -> 2.13 across one session. Neither number
+/// bounds the other. "IOSurface went 23 -> 66 MB across this share" is
+/// supported; "IOSurface holds 66 of the 67 MB" is not.
 fn share_memory_mark_line(
     window_id: u32,
     stage: &str,
-    source: Option<(u32, u32)>,
+    source: Option<ShareMarkGeometry>,
     footprint_bytes: Option<u64>,
     live_pixel_buffers: Option<u32>,
     attribution: Option<&crate::platform::mem::VmAttribution>,
@@ -4033,7 +4104,10 @@ fn share_memory_mark_line(
         None => "n/a".to_string(),
     };
     let (source_str, ceiling_str) = match source {
-        Some((width, height)) => (
+        Some(ShareMarkGeometry {
+            output: (width, height),
+            ..
+        }) => (
             format!("{width}x{height}"),
             crate::platform::mem::frame_pool_ceiling(
                 width,
@@ -4047,32 +4121,76 @@ fn share_memory_mark_line(
         ),
         None => ("n/a".to_string(), "n/a".to_string()),
     };
+    // #106: `source=` alone cannot tell a 1x display captured natively from a
+    // 2x display already capped back down to its logical size -- both print
+    // `source=2560x1440`. `backing=`/`backing_scale=` are the difference, and
+    // they are only ever absent, never inferred.
+    let (backing_str, backing_scale_str) = match source.and_then(|geometry| geometry.backing) {
+        Some(backing) => (
+            format!("{}x{}", backing.width, backing.height),
+            format!("{:.2}", backing.scale),
+        ),
+        None => ("n/a".to_string(), "n/a".to_string()),
+    };
+    let capture_scale_str = match source {
+        Some(geometry) => format!("{:.2}", geometry.capture_scale),
+        None => "n/a".to_string(),
+    };
     let vm_fields = crate::platform::mem::vm_attribution_fields(attribution);
     format!(
         "session: share memory mark -- window={window_id} stage={stage} \
 phys_footprint_mb={footprint_mb} live_pixel_buffers={buffers} source={source_str} \
+backing={backing_str} backing_scale={backing_scale_str} capture_scale={capture_scale_str} \
 petal_frame_pool_ceiling_mb={ceiling_str} {vm_fields}"
     )
 }
 
-fn log_share_memory_mark(window_id: u32, stage: &str, source: Option<(u32, u32)>) {
+/// #106: the mark lines this process has emitted, oldest first, capped.
+///
+/// The log line is the field channel and stays authoritative. This in-process
+/// copy exists so the Test Cockpit can attach a share's own marks to its
+/// `run.jsonl` evidence instead of scraping a log file the runner may not be
+/// collecting -- SHARE-DESKTOP's whole point is that the marks reach CI. Four
+/// lines per share, so the cap is ~16 shares of history.
+#[cfg(feature = "cockpit-privileged")]
+static SHARE_MEMORY_MARK_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(feature = "cockpit-privileged")]
+const SHARE_MEMORY_MARK_LOG_LIMIT: usize = 64;
+
+#[cfg(feature = "cockpit-privileged")]
+fn record_share_memory_mark(line: &str) {
+    let mut log = SHARE_MEMORY_MARK_LOG.lock_unpoisoned();
+    if log.len() >= SHARE_MEMORY_MARK_LOG_LIMIT {
+        log.remove(0);
+    }
+    log.push(line.to_string());
+}
+
+/// Every `share memory mark` line emitted so far, oldest first.
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) fn recent_share_memory_marks() -> Vec<String> {
+    SHARE_MEMORY_MARK_LOG.lock_unpoisoned().clone()
+}
+
+fn log_share_memory_mark(window_id: u32, stage: &str, source: Option<ShareMarkGeometry>) {
     // One VM-region walk per mark -- four per share. ~13 us per region,
     // bounded by `platform::mem::VM_REGION_WALK_LIMIT` and
     // `VM_REGION_WALK_DEADLINE` (25 ms). Do NOT move this onto the capture
     // heartbeat or the once-a-minute curve: the cost is per call, and #106
     // needs the transition, not a stream.
     let attribution = crate::platform::mem::vm_attribution();
-    log::info!(
-        "{}",
-        share_memory_mark_line(
-            window_id,
-            stage,
-            source,
-            crate::platform::mem::process_footprint_bytes_now(),
-            crate::platform::mem::live_pixel_buffer_count(),
-            attribution.as_ref(),
-        )
+    let line = share_memory_mark_line(
+        window_id,
+        stage,
+        source,
+        crate::platform::mem::process_footprint_bytes_now(),
+        crate::platform::mem::live_pixel_buffer_count(),
+        attribution.as_ref(),
     );
+    #[cfg(feature = "cockpit-privileged")]
+    record_share_memory_mark(&line);
+    log::info!("{line}");
 }
 
 async fn start_share_with_capture_source(
@@ -4441,7 +4559,15 @@ async fn start_share_with_capture_source(
         );
     }
     log::info!("session: start_share(window {window_id}) publish succeeded");
-    log_share_memory_mark(window_id, "publish_succeeded", Some((width, height)));
+    log_share_memory_mark(
+        window_id,
+        "publish_succeeded",
+        Some(ShareMarkGeometry {
+            output: (width, height),
+            backing: Some(capture.backing_geometry()),
+            capture_scale: source_scale,
+        }),
+    );
 
     let published = Arc::new(Mutex::new(Arc::new(published)));
     let republish_intent = Arc::new(RepublishCoordinator::default());
@@ -8521,15 +8647,39 @@ mod tests {
         );
     }
 
+    /// A mark's geometry, spelled out at the call site. `backing` is
+    /// `(width, height, scale)` when the source's backing store is known.
+    fn mark_geometry(
+        output: (u32, u32),
+        backing: Option<(u32, u32, f64)>,
+        capture_scale: f64,
+    ) -> ShareMarkGeometry {
+        ShareMarkGeometry {
+            output,
+            backing: backing.map(
+                |(width, height, scale)| crate::capture::CaptureBackingGeometry {
+                    width,
+                    height,
+                    scale,
+                },
+            ),
+            capture_scale,
+        }
+    }
+
     #[test]
     fn share_memory_mark_line_reports_the_footprint_the_buffers_and_the_pool_ceiling() {
         // #106: the whole point of this line is that a field log can date a
         // memory step AND immediately say whether Petal's own pools could
         // account for it. Both facts must be on the line.
+        //
+        // The geometry is the reported field case as it would really read on
+        // Apple silicon: a 2560x1440 logical display with a 2x backing store,
+        // captured back down to 2560x1440.
         let line = share_memory_mark_line(
             1073741828,
             "first_frame",
-            Some((2560, 1440)),
+            Some(mark_geometry((2560, 1440), Some((5120, 2880, 2.0)), 1.0)),
             Some(3_074 * 1024 * 1024),
             Some(0),
             Some(&sample_attribution()),
@@ -8538,9 +8688,139 @@ mod tests {
             line,
             "session: share memory mark -- window=1073741828 stage=first_frame \
 phys_footprint_mb=3074 live_pixel_buffers=0 source=2560x1440 \
+backing=5120x2880 backing_scale=2.00 capture_scale=1.00 \
 petal_frame_pool_ceiling_mb=47 vm_walk=complete vm_regions=1204 \
-vm_resident_mb=3196 vm_dirty_mb=3072 vm_top=iosurface:2800/2800,malloc:280/272,untagged:116/0 \
+vm_resident_mb=3196 vm_mapped_dirty_mb=3072 \
+vm_top=iosurface:2800/2800,malloc:280/272,untagged:116/0 \
 vm_other_tag=n/a"
+        );
+    }
+
+    /// #106's discriminator, stated as the thing it has to distinguish.
+    ///
+    /// Both the reported Apple-silicon Mac and a hypothetical 1x panel of the
+    /// same logical size print `source=2560x1440` -- `source=` is the
+    /// configured capture OUTPUT, and Auto caps a 2x 5120x2880 backing store
+    /// straight back down to it. So `source=` alone cannot tell the two
+    /// apart, and neither can `capture_scale`, which reads 1.00 for both.
+    /// Only `backing=`/`backing_scale=` separate them.
+    #[test]
+    fn a_2x_source_is_distinguishable_from_a_1x_source_of_the_same_logical_size_106() {
+        let retina = share_memory_mark_line(
+            1,
+            "publish_succeeded",
+            Some(mark_geometry((2560, 1440), Some((5120, 2880, 2.0)), 1.0)),
+            Some(0),
+            Some(0),
+            None,
+        );
+        let one_x = share_memory_mark_line(
+            1,
+            "publish_succeeded",
+            Some(mark_geometry((2560, 1440), Some((2560, 1440, 1.0)), 1.0)),
+            Some(0),
+            Some(0),
+            None,
+        );
+
+        // The field every previous reading had.
+        assert!(retina.contains("source=2560x1440"), "{retina}");
+        assert!(one_x.contains("source=2560x1440"), "{one_x}");
+        // The field that separates them.
+        assert!(
+            retina.contains("backing=5120x2880 backing_scale=2.00"),
+            "{retina}"
+        );
+        assert!(
+            one_x.contains("backing=2560x1440 backing_scale=1.00"),
+            "{one_x}"
+        );
+        assert_ne!(
+            retina, one_x,
+            "two materially different displays must not produce identical marks"
+        );
+    }
+
+    /// The conflation guard. `capture_scale` is the post-cap capture scale and
+    /// `backing_scale` is the backing-store scale; on the reported case they
+    /// are 1.00 and 2.00. Rendering the first as the second would make a 2x
+    /// Mac read as 1x -- exactly the wrong answer, printed confidently.
+    #[test]
+    fn backing_scale_is_not_the_capture_scale_on_the_mark_line_106() {
+        let line = share_memory_mark_line(
+            1,
+            "first_frame",
+            Some(mark_geometry((2560, 1440), Some((5120, 2880, 2.0)), 1.0)),
+            Some(0),
+            Some(0),
+            None,
+        );
+        assert!(line.contains("backing_scale=2.00"), "{line}");
+        assert!(line.contains("capture_scale=1.00"), "{line}");
+        assert!(
+            !line.contains("backing_scale=1.00"),
+            "the backing scale must never be rendered from the capped capture scale: {line}"
+        );
+    }
+
+    /// The 1x CI runner's own reading has to stay a reading. `backing` equal
+    /// to `source` with `backing_scale=1.00` is the positive statement "this
+    /// display is 1x", which is what makes the runner's ~6 MB display-share
+    /// measurement comparable to a field log at all.
+    #[test]
+    fn a_1x_runner_reading_is_a_reading_not_a_special_case_106() {
+        let line = share_memory_mark_line(
+            0x4000_0001,
+            SHARE_MEMORY_SETTLE_STAGE,
+            Some(mark_geometry((1920, 1080), Some((1920, 1080, 1.0)), 1.0)),
+            Some(73 * 1024 * 1024),
+            Some(0),
+            None,
+        );
+        assert!(
+            line.contains("source=1920x1080 backing=1920x1080 backing_scale=1.00"),
+            "{line}"
+        );
+        assert!(!line.contains("backing=n/a"), "{line}");
+    }
+
+    /// A mark taken before any capture exists must say so. Inferring the
+    /// backing store from the output size is how a 1x reading gets invented
+    /// for a 2x machine.
+    #[test]
+    fn share_memory_mark_line_never_infers_a_backing_store_it_was_not_given_106() {
+        let line = share_memory_mark_line(
+            1,
+            "first_frame",
+            Some(mark_geometry((2560, 1440), None, 1.0)),
+            Some(0),
+            Some(0),
+            None,
+        );
+        assert!(line.contains("source=2560x1440"), "{line}");
+        assert!(
+            line.contains("backing=n/a backing_scale=n/a capture_scale=1.00"),
+            "{line}"
+        );
+    }
+
+    /// A downscaled share still reports the backing store it is downscaling
+    /// FROM. This is the 0.9.19 gate reading -- `source=` fell 1920x1080 ->
+    /// 960x540 between publish and settle -- and without `backing=` the
+    /// settle mark loses every trace of the source's real size.
+    #[test]
+    fn a_downscaled_share_still_names_the_backing_store_it_came_from_106() {
+        let line = share_memory_mark_line(
+            0x4000_0001,
+            SHARE_MEMORY_SETTLE_STAGE,
+            Some(mark_geometry((960, 540), Some((1920, 1080, 1.0)), 0.5)),
+            Some(73 * 1024 * 1024),
+            Some(0),
+            None,
+        );
+        assert!(
+            line.contains("source=960x540 backing=1920x1080 backing_scale=1.00 capture_scale=0.50"),
+            "{line}"
         );
     }
 
@@ -8555,23 +8835,23 @@ vm_other_tag=n/a"
                 VmOwnerBytes {
                     owner: VmOwner::IoSurface,
                     resident_bytes: 2800 * MB,
-                    dirty_bytes: 2800 * MB,
+                    mapped_dirty_bytes: 2800 * MB,
                 },
                 VmOwnerBytes {
                     owner: VmOwner::Malloc,
                     resident_bytes: 280 * MB,
-                    dirty_bytes: 272 * MB,
+                    mapped_dirty_bytes: 272 * MB,
                 },
                 VmOwnerBytes {
                     owner: VmOwner::Untagged,
                     resident_bytes: 116 * MB,
-                    dirty_bytes: 0,
+                    mapped_dirty_bytes: 0,
                 },
             ],
             regions_walked: 1204,
             truncated: false,
             total_resident_bytes: (2800 + 280 + 116) * MB,
-            total_dirty_bytes: (2800 + 272) * MB,
+            total_mapped_dirty_bytes: (2800 + 272) * MB,
             other_top_user_tag: None,
         }
     }
@@ -8586,14 +8866,18 @@ vm_other_tag=n/a"
         let line = share_memory_mark_line(
             9,
             "publish_succeeded",
-            Some((2560, 1440)),
+            Some(mark_geometry((2560, 1440), Some((5120, 2880, 2.0)), 1.0)),
             Some(3_074 * 1024 * 1024),
             Some(0),
             Some(&sample_attribution()),
         );
         assert!(line.contains("petal_frame_pool_ceiling_mb=47"), "{line}");
         assert!(line.contains("vm_top=iosurface:2800/2800"), "{line}");
-        assert!(line.contains("vm_dirty_mb=3072"), "{line}");
+        assert!(line.contains("vm_mapped_dirty_mb=3072"), "{line}");
+        // #142: the bare `vm_dirty_mb` name invited "2800 of the 3074 MB",
+        // which the walk cannot support. Renaming it is the fix; this guards
+        // the rename at the one place a field log is actually shaped.
+        assert!(!line.contains("vm_dirty_mb="), "{line}");
     }
 
     #[test]
@@ -8603,7 +8887,7 @@ vm_other_tag=n/a"
         let line = share_memory_mark_line(
             9,
             "settle_30s",
-            Some((2560, 1440)),
+            Some(mark_geometry((2560, 1440), Some((5120, 2880, 2.0)), 1.0)),
             Some(280 * 1024 * 1024),
             Some(0),
             None,
@@ -8611,7 +8895,62 @@ vm_other_tag=n/a"
         assert!(line.contains("phys_footprint_mb=280"), "{line}");
         assert!(line.contains("vm_walk=unavailable"), "{line}");
         assert!(!line.contains("iosurface"), "{line}");
-        assert!(!line.contains("vm_dirty_mb=0"), "{line}");
+        assert!(!line.contains("vm_mapped_dirty_mb=0"), "{line}");
+    }
+
+    /// #106 lockstep. SHARE-DESKTOP waits for the post-settle mark by reading
+    /// the emitted LINE, so the producer's format and the cockpit's parser are
+    /// one contract. Change the format without changing the parser and the
+    /// scenario would not fail loudly -- it would sit for its whole 50s budget
+    /// and then report "the capture stopped delivering frames", which is a
+    /// different and wrong conclusion. This is the test that stops that.
+    #[cfg(feature = "cockpit-privileged")]
+    #[test]
+    fn the_cockpit_parser_reads_the_stage_off_a_real_mark_line() {
+        // A display source id (DISPLAY_SOURCE_MARKER | CGDirectDisplayID 1),
+        // which is what SHARE-DESKTOP's marks are keyed by.
+        let display_source_id = 0x4000_0001u32;
+        let line = share_memory_mark_line(
+            display_source_id,
+            SHARE_MEMORY_SETTLE_STAGE,
+            Some(mark_geometry((1920, 1080), Some((1920, 1080, 1.0)), 1.0)),
+            Some(512 * 1024 * 1024),
+            Some(0),
+            None,
+        );
+        assert_eq!(
+            crate::test_cockpit::share_memory_mark_stage_for_window(&line, display_source_id),
+            Some(SHARE_MEMORY_SETTLE_STAGE),
+            "{line}"
+        );
+        assert_eq!(
+            crate::test_cockpit::share_memory_mark_stage_for_window(&line, 58),
+            None,
+            "another share's mark must not be read as this one's: {line}"
+        );
+    }
+
+    /// The in-process copy the cockpit reads must actually receive what the
+    /// log sink receives -- an accessor that always returns empty would make
+    /// SHARE-DESKTOP report "no marks" for a perfectly healthy share.
+    #[cfg(feature = "cockpit-privileged")]
+    #[test]
+    fn emitted_marks_reach_the_in_process_record() {
+        let before = recent_share_memory_marks().len();
+        log_share_memory_mark(
+            0x4000_0002,
+            "start_begin",
+            Some(mark_geometry((1920, 1080), Some((1920, 1080, 1.0)), 1.0)),
+        );
+        let after = recent_share_memory_marks();
+        assert_eq!(after.len(), before + 1);
+        assert_eq!(
+            crate::test_cockpit::share_memory_mark_stage_for_window(
+                after.last().expect("a mark was just recorded"),
+                0x4000_0002
+            ),
+            Some("start_begin")
+        );
     }
 
     #[test]
@@ -8623,8 +8962,9 @@ vm_other_tag=n/a"
             line,
             "session: share memory mark -- window=7 stage=start_begin \
 phys_footprint_mb=unknown live_pixel_buffers=n/a source=n/a \
+backing=n/a backing_scale=n/a capture_scale=n/a \
 petal_frame_pool_ceiling_mb=n/a vm_walk=unavailable vm_regions=n/a \
-vm_resident_mb=n/a vm_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
+vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         );
     }
 
@@ -8642,8 +8982,15 @@ vm_resident_mb=n/a vm_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             crate::capture::CAPTURE_QUEUE_DEPTH,
         )
         .total_mb();
-        assert!(share_memory_mark_line(1, "s", Some((2560, 1440)), Some(0), Some(0), None)
-            .contains(&format!("petal_frame_pool_ceiling_mb={expected_2560}")));
+        assert!(share_memory_mark_line(
+            1,
+            "s",
+            Some(mark_geometry((2560, 1440), Some((5120, 2880, 2.0)), 1.0)),
+            Some(0),
+            Some(0),
+            None
+        )
+        .contains(&format!("petal_frame_pool_ceiling_mb={expected_2560}")));
 
         let expected_5k = crate::platform::mem::frame_pool_ceiling(
             5120,
@@ -8654,8 +9001,15 @@ vm_resident_mb=n/a vm_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         )
         .total_mb();
         assert!(expected_5k > expected_2560, "a 5K source must report a larger ceiling");
-        assert!(share_memory_mark_line(1, "s", Some((5120, 2880)), Some(0), Some(0), None)
-            .contains(&format!("petal_frame_pool_ceiling_mb={expected_5k}")));
+        assert!(share_memory_mark_line(
+            1,
+            "s",
+            Some(mark_geometry((5120, 2880), Some((5120, 2880, 1.0)), 1.0)),
+            Some(0),
+            Some(0),
+            None
+        )
+        .contains(&format!("petal_frame_pool_ceiling_mb={expected_5k}")));
     }
 
     #[test]

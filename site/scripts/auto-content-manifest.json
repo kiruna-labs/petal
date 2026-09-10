@@ -8,7 +8,7 @@
 		"backend-api": {
 			"source": "backend/README.md",
 			"dest": "site/src/content/docs/customizing/backend-api.md",
-			"sha256": "a496f0402e65d2961110bfa20d835888fa4bbf69dca40f4e2decf77d419dab44"
+			"sha256": "db2f0749e95146965104685d666b60f35efe39d97a12aab19c6d654e476ae0ef"
 		},
 		"web-harness-fragment": {
 			"source": "web-harness/README.md",

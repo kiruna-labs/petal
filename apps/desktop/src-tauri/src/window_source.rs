@@ -38,7 +38,7 @@
 use crate::sync_ext::MutexExt;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -46,9 +46,30 @@ const LIST_CACHE_TTL: Duration = Duration::from_millis(2_500);
 const THUMB_CACHE_TTL: Duration = Duration::from_millis(8_000);
 const THUMB_PREWARM_LIMIT: usize = 8;
 
+/// #106: floor between two picker memory-mark episodes. The picker
+/// re-enumerates every `LIST_CACHE_TTL` for as long as it stays open, and each
+/// mark pays one bounded VM-region walk -- so without a floor these marks would
+/// fire ~24x a minute and become the sampler this diagnostic is explicitly not
+/// allowed to be. One bracketed triple per minute is enough for the shape being
+/// attributed: the reported thumbnail bursts last ~1.2s, decay within a minute,
+/// and occurred three times in a multi-hour session.
+const PICKER_MEMORY_MARK_COOLDOWN: Duration = Duration::from_secs(60);
+
 static LIST_CACHE: OnceLock<Mutex<Option<CachedList>>> = OnceLock::new();
 static THUMB_CACHE: OnceLock<Mutex<HashMap<u32, CachedThumbnail>>> = OnceLock::new();
 static THUMB_PREWARM_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// #106: monotonic count of thumbnail captures that actually reached the
+/// capture path. `capture_window_thumbnail_uncached` is the single funnel for
+/// all three producers -- the picker's prewarm burst, the picker's per-card
+/// refresh, and AI chat's frame pump -- so a DIFFERENCE between two picker
+/// memory marks counts every capture between them, not just the prewarm's.
+/// It must never reset for that reason.
+static THUMBNAIL_CAPTURES: AtomicU32 = AtomicU32::new(0);
+
+/// When the current picker memory-mark episode opened, for
+/// `PICKER_MEMORY_MARK_COOLDOWN`.
+static PICKER_MARK_LAST_EPISODE: Mutex<Option<Instant>> = Mutex::new(None);
 
 #[derive(Clone)]
 struct CachedList {
@@ -165,6 +186,16 @@ mod macos {
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use screencapturekit::shareable_content::SCShareableContent;
+    use std::collections::HashMap;
+
+    /// Longest edge, in pixels, of the app icon handed to the picker.
+    ///
+    /// #106: this is a CEILING, not a hint. `WindowPicker.svelte` renders the
+    /// icon at 20-28 CSS px (`.app-icon` / `.fallback-icon`), so 128px covers
+    /// 2x retina with room to spare. Measured across 60 running apps, the
+    /// encoded PNG is 6.8-12.9KB at this ceiling against 103-354KB for the
+    /// 1024x1024 one that used to cross the IPC boundary every enumeration.
+    const APP_ICON_MAX_EDGE: f64 = 128.0;
 
     // Not a "normal app window" layer (menu bar, Dock, status items, etc.).
     // ScreenCaptureKit's `windowLayer` mirrors the same Quartz window-layer
@@ -210,6 +241,17 @@ mod macos {
         ))
     }
 
+    /// #889/#106: EVERY ObjC allocation on this path must be drained by this
+    /// pool. `list()` runs on pool-less Rust/tokio threads (the picker's
+    /// `spawn_blocking` refresh, `session::share::start_share` via
+    /// `source_info_for_window`), so an autorelease with no pool on the
+    /// thread is never balanced. Measured on this path: 216 icon renders cost
+    /// +13,560MB unpooled against +3,864MB pooled. Do not remove the pool,
+    /// and do not hoist any ObjC value out of it -- `ShareableWindow` is
+    /// plain owned Rust data, which is why returning the `Vec` is safe.
+    /// `app_icon_png_base64` keeps its own inner pool; the nesting is
+    /// deliberate, so a long enumeration drains per icon rather than once at
+    /// the end.
     pub fn list() -> Result<Vec<ShareableWindow>, WindowSourceError> {
         if !has_screen_recording_access() {
             log::warn!("window_source: list() refused -- Screen Recording permission DENIED");
@@ -220,7 +262,10 @@ mod macos {
                     .to_string(),
             ));
         }
+        objc2::rc::autoreleasepool(|_| list_pooled())
+    }
 
+    fn list_pooled() -> Result<Vec<ShareableWindow>, WindowSourceError> {
         // `with_on_screen_windows_only` + `with_exclude_desktop_windows`
         // trims out minimized/offscreen windows and desktop-picture/icon
         // layer noise before it ever reaches us — cheaper than filtering
@@ -235,8 +280,12 @@ mod macos {
         let mut out = Vec::new();
         // Displays first (mirrors the Windows picker's "Screen N" cards), so
         // the custom picker offers display sharing without the system picker.
-        let display_count = content.displays().len();
-        for (index, display) in content.displays().iter().enumerate() {
+        // ONE `displays()` call: it is `1 + N` FFI round-trips into the Swift
+        // bridge and allocates a `Vec<SCDisplay>`, and this used to run twice
+        // (once for `.len()`, once for `.iter()`).
+        let displays = content.displays();
+        let display_count = displays.len();
+        for (index, display) in displays.iter().enumerate() {
             out.push(ShareableWindow {
                 window_id: display_source_id(display.display_id()),
                 title: Some(format!("Screen {}", index + 1)),
@@ -247,6 +296,21 @@ mod macos {
                 kind: Some(ShareableSourceKind::Display),
             });
         }
+        // #106: the app icon is a property of the APPLICATION, not of the
+        // window, and `list()` is called once per enumerated window. The two
+        // field episodes in #106 differed by enumerated window count (18 vs 7)
+        // far more than by anything else, and this is the per-window
+        // multiplier on that path -- so resolve each owner's icon once and
+        // reuse it for that owner's other windows. Scoped to this call, so it
+        // can never serve a stale icon across enumerations.
+        let mut icon_by_pid: HashMap<i32, Option<String>> = HashMap::new();
+        // The per-element accessors below cross the Swift bridge once per
+        // attribute. That is real but CHEAP: the vendored crate benchmarks
+        // this whole walk at ~73us on a 220-window system against ~5us for
+        // its batched `SCShareableContent::snapshot()`. Microseconds and
+        // kilobytes -- do not go rewrite this for #106's gigabytes (its cost
+        // is the icon above), and note `snapshot()` links windows to apps by
+        // ObjC object identity, which nothing here has been able to verify.
         for window in content.windows() {
             let frame = window.frame();
             let Some(owning_app) = window.owning_application() else {
@@ -303,7 +367,10 @@ mod macos {
                 app_name: owning_app.application_name(),
                 app_bundle_id,
                 app_pid: owning_app.process_id(),
-                app_icon_base64: app_icon_png_base64(owning_app.process_id()),
+                app_icon_base64: icon_by_pid
+                    .entry(owning_app.process_id())
+                    .or_insert_with_key(|pid| app_icon_png_base64(*pid))
+                    .clone(),
                 kind: Some(ShareableSourceKind::Window),
             });
         }
@@ -324,29 +391,57 @@ mod macos {
     /// #889: EVERY ObjC allocation in here must be drained by the local
     /// autorelease pool. `list()` runs on pool-less Rust/tokio threads (it is
     /// called from `session::share::start_share` via `source_info_for_window`,
-    /// among others), and `TIFFRepresentation()` returns an AUTORELEASED
-    /// `NSData` holding every representation of the app icon uncompressed --
-    /// measured at **73,957,376 bytes (70.5MB) per icon**, allocated through
-    /// `NSAllocateMemoryPages`/`vm_allocate`. With no pool on the thread that
-    /// autorelease is never balanced, so each enumeration leaked ~70MB per
-    /// app: `malloc_history` on a live 1.9GB session attributed 21 calls /
-    /// 1,553,104,896 bytes to exactly this stack, and the owner measured
+    /// among others). With no pool on the thread an autorelease is never
+    /// balanced: `malloc_history` on a live 1.9GB session attributed 21 calls
+    /// / 1,553,104,896 bytes to exactly this stack, and the owner measured
     /// 500MB-1GB lost per share/unshare cycle (one enumeration each).
     /// Do not remove the pool, and do not hoist any ObjC value out of it.
+    ///
+    /// #106: **never ask for `TIFFRepresentation()` here.** It returns ONE
+    /// `NSData` holding EVERY representation of the app icon uncompressed
+    /// (16x16 through 1024x1024) -- ~70MB per icon, through
+    /// `NSAllocateMemoryPages`/`vm_allocate` -- and then hands the picker a
+    /// 1024x1024 PNG to draw at 20 CSS px. `list()` calls this once per
+    /// enumerated window, which is why #106's cost tracked *enumerated window
+    /// count* (18 -> +2802MB, 7 -> +875MB) rather than thumbnail count.
+    /// Measured on this machine, 18 windows in one enumeration:
+    ///
+    /// ```text
+    ///   TIFFRepresentation  ->  +1370MB phys_footprint, peak 1858MB,  833ms
+    ///   CGImageForProposedRect ->   +4.7MB,             peak    7MB,   74ms
+    /// ```
+    ///
+    /// `CGImageForProposedRect:` asks the icon for a raster at the size we
+    /// actually want and never materialises the other representations. It
+    /// still handles vector/PDF-backed icons (verified: 60/60 running apps
+    /// produced a PNG on both paths, off the main thread). Ask for pixels at
+    /// `APP_ICON_MAX_EDGE`, not for the whole icon.
     fn app_icon_png_base64(pid: i32) -> Option<String> {
         use objc2::rc::autoreleasepool;
+        use objc2::AnyThread;
         use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSRunningApplication};
-        use objc2_foundation::{NSDictionary, NSString};
+        use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
         autoreleasepool(|_| {
             let running_app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
             let icon = running_app.icon()?;
 
-            // NSImage -> PNG: go through NSBitmapImageRep, which is the standard
-            // Cocoa recipe for rasterizing an NSImage (which may be vector/PDF-
-            // backed for app icons) to a concrete bitmap we can encode.
-            let tiff_data = icon.TIFFRepresentation()?;
-            let bitmap = NSBitmapImageRep::imageRepWithData(&tiff_data)?;
+            // NSImage -> PNG at picker size. AppKit writes the rect it
+            // actually chose back through `proposed_rect`; we don't need it,
+            // but the parameter is in/out so it has to be a real `&mut`.
+            let mut proposed_rect = NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(APP_ICON_MAX_EDGE, APP_ICON_MAX_EDGE),
+            );
+            // SAFETY: `proposed_rect` is a valid pointer to a live `NSRect`,
+            // and both optional arguments are `None` -- no reference context
+            // to match against, no hints dictionary whose generic type could
+            // be wrong.
+            let cg_image = unsafe {
+                icon.CGImageForProposedRect_context_hints(&mut proposed_rect, None, None)
+            }?;
+            let bitmap =
+                NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg_image);
             let properties: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
             // SAFETY: `properties` is an empty dictionary, which is a valid
             // (if minimal) properties argument for PNG representation — PNG
@@ -374,6 +469,163 @@ mod macos {
         use crate::share_target::{
             classify, mac_window_facts, ShareTargetDecision, ShareTargetKind, ShareTargetRejection,
         };
+
+        /// Width/height out of a PNG's IHDR: 8-byte signature, 4-byte chunk
+        /// length, 4-byte "IHDR", then width and height as big-endian u32.
+        fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+            if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR"
+            {
+                return None;
+            }
+            let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+            let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+            Some((w, h))
+        }
+
+        /// #106, behavioural: the icon the picker gets must be rasterized at
+        /// picker size, not at the icon's native 1024x1024.
+        ///
+        /// This is the assertion the source-level pin below cannot make. The
+        /// `TIFFRepresentation()` route this replaced produced a **1024x1024**
+        /// PNG of 100-350KB per app -- measured, not assumed -- and paid
+        /// ~70MB of `NSAllocateMemoryPages` to build the intermediate, once
+        /// per ENUMERATED WINDOW. A regression to that route fails here on
+        /// the dimensions long before anyone has to measure memory again.
+        ///
+        /// Needs no Screen Recording grant: `NSWorkspace` /
+        /// `NSRunningApplication` / `NSImage` are TCC-free, which is exactly
+        /// why this half of `list()` is testable when the SCK half is not.
+        #[test]
+        fn app_icon_is_rasterized_at_picker_size_not_native_size() {
+            use base64::Engine as _;
+            use objc2::rc::autoreleasepool;
+            use objc2_app_kit::NSWorkspace;
+
+            let pids: Vec<i32> = autoreleasepool(|_| {
+                let apps = NSWorkspace::sharedWorkspace().runningApplications();
+                (0..apps.count())
+                    .map(|i| apps.objectAtIndex(i).processIdentifier())
+                    .collect()
+            });
+
+            let mut checked = 0usize;
+            for pid in pids.into_iter().take(24) {
+                let Some(url) = super::app_icon_png_base64(pid) else {
+                    continue;
+                };
+                let payload = url
+                    .strip_prefix("data:image/png;base64,")
+                    .expect("the picker binds this straight into an <img src>, so it must be a data URL");
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(payload)
+                    .expect("app icon payload must be valid base64");
+                let (w, h) = png_dimensions(&bytes).expect("app icon payload must be a PNG");
+                let max = super::APP_ICON_MAX_EDGE as u32;
+                assert!(
+                    w <= max && h <= max,
+                    "#106: app icon for pid {pid} came back {w}x{h}, over the {max}px picker \
+                     ceiling -- TIFFRepresentation()/the full-size icon is back, and with it \
+                     ~70MB per enumerated window"
+                );
+                assert!(
+                    bytes.len() <= 64 * 1024,
+                    "#106: app icon for pid {pid} encoded to {} bytes; a picker icon drawn at \
+                     20-28 CSS px does not need that, and it crosses the IPC boundary on every \
+                     enumeration",
+                    bytes.len()
+                );
+                checked += 1;
+            }
+
+            // No running application offered an icon at all (a genuinely
+            // headless box). Nothing to assert -- but say so rather than
+            // reporting a silent pass, and never fabricate a reading.
+            if checked == 0 {
+                eprintln!(
+                    "app_icon_is_rasterized_at_picker_size_not_native_size: no running \
+                     application produced an icon; nothing verified on this host"
+                );
+            }
+        }
+
+        /// #106, source-level: `list()` must enclose its ObjC work in an
+        /// autorelease pool, for the same reason `app_icon_png_base64` does
+        /// (#889) -- it runs on pool-less tokio/`std::thread` threads.
+        /// Measured on the icon path: 216 renders cost +13,560MB unpooled
+        /// against +3,864MB pooled.
+        ///
+        /// A pool that opens after the first ObjC touch drains nothing that
+        /// matters while looking correct, so this pins that `list()` itself
+        /// does no ObjC work: it checks permission (a CoreGraphics preflight
+        /// that allocates nothing) and immediately delegates the whole body
+        /// to `list_pooled` inside the pool.
+        #[test]
+        fn list_encloses_its_objc_work_in_an_autorelease_pool() {
+            let source = include_str!("window_source.rs");
+            let body = source
+                .split_once("    pub fn list() -> Result<Vec<ShareableWindow>, WindowSourceError> {")
+                .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+                .map(|(body, _)| body)
+                .expect("macos::list must exist");
+
+            let pool_at = body
+                .find("objc2::rc::autoreleasepool(|_| list_pooled())")
+                .expect("#889/#106: list() must run its enumeration inside an autorelease pool");
+            assert!(
+                body[..pool_at].find("SCShareableContent").is_none(),
+                "#889/#106: list() touches ScreenCaptureKit before opening its pool"
+            );
+            assert!(
+                body[pool_at..].trim().ends_with("objc2::rc::autoreleasepool(|_| list_pooled())"),
+                "#889/#106: nothing may run after the pool closes -- list() must return the \
+                 pooled call's result directly"
+            );
+
+            // The pool must stay explained, or the next reader deletes it as
+            // decoration. #889's comment is what kept the icon pool alive.
+            let rationale = source
+                .split_once("    pub fn list() -> Result<Vec<ShareableWindow>, WindowSourceError> {")
+                .map(|(before, _)| before)
+                .expect("list() must exist");
+            assert!(
+                rationale.ends_with(|c: char| c == '\n')
+                    && rationale.contains("#889/#106: EVERY ObjC allocation on this path"),
+                "list()'s pool must carry its #889/#106 rationale"
+            );
+        }
+
+        /// #106: the app icon belongs to the APPLICATION, and `list()` walks
+        /// WINDOWS. The two field episodes differed by enumerated window
+        /// count (18 vs 7) far more than by anything else, so resolving an
+        /// icon per window rather than per owner is the multiplier on the
+        /// implicated path. Pinning the memo, and pinning that the enumerated
+        /// display list is built once rather than twice.
+        #[test]
+        fn list_resolves_each_app_icon_once_and_enumerates_displays_once() {
+            let source = include_str!("window_source.rs");
+            let body = source
+                .split_once("    fn list_pooled() -> Result<Vec<ShareableWindow>, WindowSourceError> {")
+                .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+                .map(|(body, _)| body)
+                .expect("macos::list_pooled must exist");
+
+            assert!(
+                body.contains("icon_by_pid")
+                    && body.contains(".entry(owning_app.process_id())")
+                    && body.contains("app_icon_png_base64"),
+                "#106: list_pooled must resolve each owning application's icon ONCE per \
+                 enumeration, not once per window"
+            );
+            assert!(
+                !body.contains("app_icon_base64: app_icon_png_base64("),
+                "#106: the icon is being rendered inline per window again"
+            );
+            assert_eq!(
+                body.matches("content.displays()").count(),
+                1,
+                "#106: `displays()` is 1 + N FFI round-trips and allocates a Vec -- call it once"
+            );
+        }
 
         #[test]
         fn own_process_windows_are_excluded_from_share_source_enumeration() {
@@ -867,6 +1119,168 @@ fn store_thumbnail(window_id: u32, bytes: &[u8], now: Instant) {
     guard.retain(|_, cached| now.duration_since(cached.captured_at) <= THUMB_CACHE_TTL);
 }
 
+// =============================================================================
+// Picker memory marks (#106)
+//
+// Half the 3.07 GB in the field report arrives BEFORE any share exists: the
+// process sits at 127 MB idle, `list()` enumerates 3 displays + 18 windows, 13
+// SCK thumbnails land in 1.2s, and 2.6s later -- still before the share takes a
+// frame -- it reads 1492 MB. `session::share`'s marks start at `start_begin`
+// and so cannot see any of that. These marks bracket the picker's own burst
+// with the same fields, so the two are directly comparable.
+//
+// Nothing here crosses the Sentry boundary: this is a log line, exactly like
+// the share marks. (`vm_attribution().top_owner()` is what crosses, from
+// `logging`'s memory-pressure event, and is already a bounded enum.)
+// =============================================================================
+
+/// What one picker thumbnail prewarm burst actually did. A bounded enum rather
+/// than free text -- `prewarm=` is meant to be grouped over many field logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrewarmOutcome {
+    /// The spawned burst ran to completion. The mark carrying this is taken
+    /// after the LAST capture returned, never at spawn time -- the whole point
+    /// is to bracket the burst, and a mark at spawn would read the footprint
+    /// before a single thumbnail had been captured.
+    Completed,
+    /// A previous burst still held `THUMB_PREWARM_IN_FLIGHT`; this call
+    /// captured nothing, so the episode's footprint delta is not its cost.
+    SkippedInFlight,
+    /// The enumeration was empty, so there was nothing to prewarm.
+    NoSources,
+}
+
+impl PrewarmOutcome {
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::SkippedInFlight => "skipped_in_flight",
+            Self::NoSources => "no_sources",
+        }
+    }
+}
+
+/// The display/window split of one enumeration. Displays are the expensive
+/// half of a picker burst on a Retina Mac -- a display card's 320px thumbnail
+/// is produced by compositing the display's whole backing store -- so the
+/// counts have to be on the mark for the burst's cost to be interpretable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PickerSourceCounts {
+    displays: usize,
+    windows: usize,
+}
+
+fn picker_source_counts(sources: &[ShareableWindow]) -> PickerSourceCounts {
+    let displays = sources
+        .iter()
+        .filter(|source| matches!(source.kind, Some(ShareableSourceKind::Display)))
+        .count();
+    PickerSourceCounts {
+        displays,
+        windows: sources.len().saturating_sub(displays),
+    }
+}
+
+const PICKER_MARK_STAGE_LIST_BEGIN: &str = "list_begin";
+const PICKER_MARK_STAGE_LIST_DONE: &str = "list_done";
+const PICKER_MARK_STAGE_PREWARM_DONE: &str = "prewarm_done";
+
+/// Pure half of the cooldown gate, so both directions are testable without a
+/// clock. `None` (no episode yet) always opens.
+fn picker_mark_episode_opens(since_last: Option<Duration>) -> bool {
+    match since_last {
+        None => true,
+        Some(elapsed) => elapsed >= PICKER_MEMORY_MARK_COOLDOWN,
+    }
+}
+
+/// Claim a picker mark episode, or decline. Stamping happens here so the three
+/// marks of one episode are decided ONCE: `list_done` and `prewarm_done` fire
+/// on the same boolean `list_begin` did, and a triple is never half-emitted
+/// because the cooldown expired in the middle of it.
+fn open_picker_mark_episode(now: Instant) -> bool {
+    let mut guard = PICKER_MARK_LAST_EPISODE.lock_unpoisoned();
+    let since_last = guard.map(|last| now.saturating_duration_since(last));
+    if picker_mark_episode_opens(since_last) {
+        *guard = Some(now);
+        true
+    } else {
+        false
+    }
+}
+
+/// #106: render one picker memory mark. Same fields as
+/// `session::share::share_memory_mark_line` so a picker episode and a share can
+/// be read on one axis, plus the two the picker needs of its own:
+///
+/// - `sources=<n>d/<n>w` -- what was enumerated. The reported machine has 3
+///   displays at 2x; the CI runner has 1 at 1x, which is why a burst costs a
+///   fraction there.
+/// - `thumbnail_captures=<n>` -- monotonic (`THUMBNAIL_CAPTURES`). Two marks
+///   give the burst SIZE by difference; a single value means nothing.
+///
+/// Read `vm_top` across two marks as a DIFFERENCE, never as a decomposition of
+/// the `phys_footprint_mb` beside it -- the same #142 caveat the share marks
+/// carry, for the same reason.
+///
+/// Windows-safe by construction: `process_footprint_bytes_now` has a real
+/// Windows implementation, `vm_attribution` returns `None` there and renders
+/// `vm_walk=unavailable` rather than a fabricated zero, and
+/// `live_pixel_buffer_count` renders `n/a`. The picker path itself is
+/// cross-platform, so Windows gets the enumeration marks too.
+fn picker_memory_mark_line(
+    stage: &str,
+    sources: Option<PickerSourceCounts>,
+    thumbnail_captures: u32,
+    prewarm: Option<PrewarmOutcome>,
+    footprint_bytes: Option<u64>,
+    live_pixel_buffers: Option<u32>,
+    attribution: Option<&crate::platform::mem::VmAttribution>,
+) -> String {
+    let footprint_mb = match footprint_bytes {
+        Some(bytes) => (bytes / (1024 * 1024)).to_string(),
+        None => "unknown".to_string(),
+    };
+    let buffers = match live_pixel_buffers {
+        Some(count) => count.to_string(),
+        None => "n/a".to_string(),
+    };
+    let sources_str = match sources {
+        Some(counts) => format!("{}d/{}w", counts.displays, counts.windows),
+        None => "n/a".to_string(),
+    };
+    let prewarm_str = prewarm.map_or("pending", PrewarmOutcome::tag);
+    let vm_fields = crate::platform::mem::vm_attribution_fields(attribution);
+    format!(
+        "window_source: picker memory mark -- stage={stage} \
+phys_footprint_mb={footprint_mb} live_pixel_buffers={buffers} sources={sources_str} \
+thumbnail_captures={thumbnail_captures} prewarm={prewarm_str} {vm_fields}"
+    )
+}
+
+/// One UNTHROTTLED footprint sample plus one bounded VM-region walk, at a named
+/// point in the picker's lifecycle. Three per episode, at most one episode per
+/// `PICKER_MEMORY_MARK_COOLDOWN` -- do NOT call this from the per-thumbnail
+/// loop or from any polling path; the cost is per call and #106 needs the
+/// transition, not a stream.
+fn log_picker_memory_mark(
+    stage: &str,
+    sources: Option<PickerSourceCounts>,
+    prewarm: Option<PrewarmOutcome>,
+) {
+    let attribution = crate::platform::mem::vm_attribution();
+    let line = picker_memory_mark_line(
+        stage,
+        sources,
+        THUMBNAIL_CAPTURES.load(Ordering::Relaxed),
+        prewarm,
+        crate::platform::mem::process_footprint_bytes_now(),
+        crate::platform::mem::live_pixel_buffer_count(),
+        attribution.as_ref(),
+    );
+    log::info!("{line}");
+}
+
 /// Cached shareable-window enumeration for UI surfaces that may open and
 /// close repeatedly. This still calls the real ScreenCaptureKit path when the
 /// short TTL expires; callers must run it off the main thread.
@@ -877,67 +1291,156 @@ pub fn list_cached() -> Result<Vec<ShareableWindow>, WindowSourceError> {
             "window_source: list_cached() served {} window(s) from cache",
             windows.len()
         );
-        prewarm_thumbnails(&windows);
+        prewarm_thumbnails(&windows, false);
         return Ok(windows);
     }
 
+    // #106: mark only around a REAL enumeration. A cache hit does no
+    // ScreenCaptureKit work, so marking it would price an empty call and
+    // spend the episode that the next real burst needs.
+    let marking = open_picker_mark_episode(now);
+    if marking {
+        log_picker_memory_mark(PICKER_MARK_STAGE_LIST_BEGIN, None, None);
+    }
+
+    // A failed enumeration leaves a lone `list_begin` on purpose: the
+    // `list() refused`/error line follows it immediately and says why, and
+    // synthesising the other two marks would put footprints on a burst that
+    // never happened.
     let windows = list()?;
     store_list(&windows, now);
-    prewarm_thumbnails(&windows);
+    if marking {
+        log_picker_memory_mark(
+            PICKER_MARK_STAGE_LIST_DONE,
+            Some(picker_source_counts(&windows)),
+            None,
+        );
+    }
+    prewarm_thumbnails(&windows, marking);
     Ok(windows)
 }
 
-fn prewarm_thumbnails(windows: &[ShareableWindow]) {
+/// `mark` is #106's episode flag, decided by `list_cached`. Every early return
+/// emits its own `prewarm_done` so an episode is always a complete triple --
+/// a missing third mark would read as "the burst is still running" when in
+/// fact nothing was captured at all.
+fn prewarm_thumbnails(windows: &[ShareableWindow], mark: bool) {
+    let sources = picker_source_counts(windows);
     let ids: Vec<u32> = windows
         .iter()
         .take(THUMB_PREWARM_LIMIT)
         .map(|w| w.window_id)
         .collect();
     if ids.is_empty() {
+        if mark {
+            log_picker_memory_mark(
+                PICKER_MARK_STAGE_PREWARM_DONE,
+                Some(sources),
+                Some(PrewarmOutcome::NoSources),
+            );
+        }
         return;
     }
     if THUMB_PREWARM_IN_FLIGHT
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
+        if mark {
+            log_picker_memory_mark(
+                PICKER_MARK_STAGE_PREWARM_DONE,
+                Some(sources),
+                Some(PrewarmOutcome::SkippedInFlight),
+            );
+        }
         return;
     }
 
     std::thread::spawn(move || {
-        for window_id in ids {
-            let now = Instant::now();
-            if cached_thumbnail(window_id, now).is_some() {
-                continue;
-            }
-            match capture_window_thumbnail_uncached(window_id, THUMBNAIL_MAX_LONG_EDGE) {
-                Ok(bytes) => store_thumbnail(window_id, &bytes, Instant::now()),
-                Err(e) => log::debug!(
-                    "window_source: thumbnail prewarm failed for window {window_id}: {e}"
-                ),
-            }
-        }
-        THUMB_PREWARM_IN_FLIGHT.store(false, Ordering::Release);
+        run_prewarm_burst(
+            ids,
+            mark,
+            sources,
+            |window_id| {
+                let now = Instant::now();
+                if cached_thumbnail(window_id, now).is_some() {
+                    return;
+                }
+                match capture_window_thumbnail_uncached(window_id, THUMBNAIL_MAX_LONG_EDGE) {
+                    Ok(bytes) => store_thumbnail(window_id, &bytes, Instant::now()),
+                    Err(e) => log::debug!(
+                        "window_source: thumbnail prewarm failed for window {window_id}: {e}"
+                    ),
+                }
+            },
+            |stage, sources, outcome| log_picker_memory_mark(stage, Some(sources), Some(outcome)),
+        );
     });
 }
 
+/// The burst body, with its capture and its mark emission injected.
+///
+/// #106's load-bearing ordering lives here, not in the formatter: the
+/// `prewarm_done` mark must be taken when the burst has actually FINISHED, not
+/// when its thread is spawned -- a mark at spawn reads the footprint before a
+/// single thumbnail exists and would report the burst as free. The in-flight
+/// guard is released first for the same class of reason: the mark pays a
+/// bounded VM-region walk, and holding the guard across it would stall the next
+/// enumeration behind a diagnostic. Neither property is visible to a test on
+/// `picker_memory_mark_line`, so the real chain is what the test drives.
+fn run_prewarm_burst<C, M>(
+    ids: Vec<u32>,
+    mark: bool,
+    sources: PickerSourceCounts,
+    mut capture: C,
+    mut emit: M,
+) where
+    C: FnMut(u32),
+    M: FnMut(&'static str, PickerSourceCounts, PrewarmOutcome),
+{
+    for window_id in ids {
+        capture(window_id);
+    }
+    THUMB_PREWARM_IN_FLIGHT.store(false, Ordering::Release);
+    if mark {
+        emit(
+            PICKER_MARK_STAGE_PREWARM_DONE,
+            sources,
+            PrewarmOutcome::Completed,
+        );
+    }
+}
+
 // =============================================================================
-// Thumbnail capture (cheap periodic preview, separate from the real SCStream
-// capture path). Reuses takt's `capture_window_by_id` technique verbatim:
-// `screencapture -x -o -l<id> -t jpg` to a temp file, read back as bytes.
-// This is deliberately NOT ScreenCaptureKit — it's a lightweight, infrequent
-// snapshot for the tab strip's preview thumbnail, not the realtime capture
-// stream (SPEC.md §4.1), which is a separate, much heavier `SCStream` path.
+// Thumbnail capture for the picker's preview cards, separate from the realtime
+// `SCStream` capture path (SPEC.md §4.1).
+//
+// On macOS this IS ScreenCaptureKit: `capture_window_thumbnail_sck` calls
+// `SCScreenshotManager::capture_sample_buffer`, and `screencapture -x -o
+// -l<id> -t jpg` survives only as the fallback for every SCK failure (#247).
+// This comment used to claim the opposite ("deliberately NOT ScreenCaptureKit
+// ... lightweight") over code that logs `captured via SCK`, and that claim cost
+// an #106 investigator a detour: the OUTPUT is small (`thumbnail_output_size`
+// caps the long edge at `THUMBNAIL_MAX_LONG_EDGE`), but SCK composites the
+// SOURCE to produce it, and a display card's source is a whole backing store --
+// 5120x2880 on the reported machine. Each call also re-runs a full
+// `SCShareableContent` enumeration of its own.
+//
+// What that actually costs is measured, not asserted: `window_source: picker
+// memory mark` brackets the prewarm burst above (#106). Do not restate a cost
+// here that no reading supports.
 // =============================================================================
 
 /// Long edge cap for the picker's own preview thumbnails — small on purpose,
 /// the card only ever displays ~284px wide.
 const THUMBNAIL_MAX_LONG_EDGE: u32 = 320;
 
-/// Capture a single window's current contents as a JPEG, by `CGWindowID`,
-/// via the system `screencapture` CLI. Returns the raw JPEG bytes.
+/// Capture a single source's current contents as a JPEG, by picker source id
+/// (a `CGWindowID`, or `DISPLAY_SOURCE_MARKER | CGDirectDisplayID`). Returns
+/// the raw JPEG bytes, served from the `THUMB_CACHE_TTL` cache when fresh.
 ///
-/// macOS-only (the `screencapture` binary and window ids are macOS
-/// concepts); on other platforms this always errors.
+/// macOS goes through `SCScreenshotManager` and falls back to the
+/// `screencapture` CLI; Windows goes through a WGC one-shot and returns PNG
+/// bytes. Other platforms always error.
 pub fn capture_window_thumbnail(window_id: u32) -> Result<Vec<u8>, String> {
     capture_window_thumbnail_inner(window_id, false)
 }
@@ -977,6 +1480,10 @@ pub(crate) fn capture_window_thumbnail_uncached(
     window_id: u32,
     max_long_edge: u32,
 ) -> Result<Vec<u8>, String> {
+    // #106: the single funnel every real capture passes through -- counted
+    // here rather than in the prewarm loop so the picker's per-card refreshes
+    // and AI chat's frame pump are in the same number. One relaxed add.
+    THUMBNAIL_CAPTURES.fetch_add(1, Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     {
         // In-process ScreenCaptureKit screenshot first (fast, downscaled, no
@@ -1199,6 +1706,7 @@ fn macos_at_least_14() -> bool {
 /// buffers while `screencapture` works).
 #[cfg(target_os = "macos")]
 fn capture_window_thumbnail_sck(window_id: u32, max_long_edge: u32) -> Result<Vec<u8>, String> {
+    use objc2::rc::autoreleasepool;
     // `image_buffer()` is on `CMSampleBufferExt` (the generic CoreMedia
     // accessors), NOT `CMSampleBufferSCExt` (which only carries the
     // SCStreamFrameInfo attachments like frame_status/dirty_rects).
@@ -1208,98 +1716,117 @@ fn capture_window_thumbnail_sck(window_id: u32, max_long_edge: u32) -> Result<Ve
     use screencapturekit::stream::configuration::{PixelFormat, SCStreamConfiguration};
     use screencapturekit::stream::content_filter::SCContentFilter;
 
-    if !macos_at_least_14() {
-        return Err("SCScreenshotManager requires macOS 14".to_string());
-    }
+    // #889 + #106: EVERY ObjC allocation in here must be drained by this
+    // pool, and it must enclose the WHOLE ObjC lifetime. Both callers are
+    // pool-less (`prewarm_thumbnails`'s bare `std::thread`, the picker
+    // refresh's tokio `spawn_blocking`), and a thread with no pool gets a
+    // runtime dummy pool that is never drained until the thread exits, so
+    // anything autoreleased on it is held for the thread's life. `list()`
+    // already paid that bill (see `macos::app_icon_png_base64` above): one
+    // unpooled `TIFFRepresentation()` per app, ~70MB each, 1,553,104,896
+    // bytes attributed by `malloc_history` on a live 1.9GB session (#889).
+    // This path allocates strictly more per call --
+    // a full `SCShareableContent` enumeration plus an
+    // `SCScreenshotManager` composite of the SOURCE, which for a display
+    // card is the whole 5120x2880 backing store -- 13-14 times per picker
+    // open (#106). Do not remove it, and hoist nothing ObjC out of the
+    // closure: only the Rust-owned JPEG `Vec<u8>` may cross it.
+    autoreleasepool(|_| {
+        if !macos_at_least_14() {
+            return Err("SCScreenshotManager requires macOS 14".to_string());
+        }
 
-    // Same enumeration + filter construction the real capture path uses, so
-    // the thumbnail and the eventual share agree on source identity. Display
-    // source ids (DISPLAY_SOURCE_MARKER | CGDirectDisplayID) build a display
-    // filter instead of a window filter.
-    let content = SCShareableContent::create()
-        .with_on_screen_windows_only(true)
-        .with_exclude_desktop_windows(true)
-        .get()
-        .map_err(|e| format!("SCShareableContent enumeration failed: {e}"))?;
-    let (filter, frame) = if is_display_source_id(window_id) {
-        let display_id = display_id_from_source_id(window_id);
-        let display = content
-            .displays()
-            .into_iter()
-            .find(|d| d.display_id() == display_id)
-            .ok_or_else(|| format!("display {display_id} not found in SCShareableContent"))?;
-        let frame = display.frame();
-        let filter = SCContentFilter::create()
-            .with_display(&display)
-            .with_excluding_windows(&[])
-            .build();
-        (filter, frame)
-    } else {
-        let window = content
-            .windows()
-            .into_iter()
-            .find(|w| w.window_id() == window_id)
-            .ok_or_else(|| format!("window {window_id} not found in SCShareableContent"))?;
-        let frame = window.frame();
-        let filter = SCContentFilter::create().with_window(&window).build();
-        (filter, frame)
-    };
-    // `frame` is in POINTS (SCWindow::frame()/SCDisplay::frame() are CGRects
-    // in the window-coordinate space), but SCStreamConfiguration's width/
-    // height are PIXELS -- the real capture path already carries this
-    // distinction (capture.rs's `capture_pixel_size`). Missing it here meant
-    // a Retina window under `max_long_edge` POINTS (extremely common --
-    // e.g. a half-screen window on a 14" MacBook is ~756pt / 1512px) was
-    // requested at 1x, silently capping AI chat's frames well under the
-    // 1280px budget this fix exists to deliver. `point_pixel_scale()` is the
-    // SAME scale the real filter would use if it opened a stream, not a
-    // separate NSScreen/CGDisplay lookup that could disagree with it.
-    let scale = f64::from(filter.point_pixel_scale()).max(1.0);
-    let (output_w, output_h) = thumbnail_output_size(
-        frame.size.width * scale,
-        frame.size.height * scale,
-        max_long_edge,
-    );
+        // Same enumeration + filter construction the real capture path uses, so
+        // the thumbnail and the eventual share agree on source identity. Display
+        // source ids (DISPLAY_SOURCE_MARKER | CGDirectDisplayID) build a display
+        // filter instead of a window filter.
+        let content = SCShareableContent::create()
+            .with_on_screen_windows_only(true)
+            .with_exclude_desktop_windows(true)
+            .get()
+            .map_err(|e| format!("SCShareableContent enumeration failed: {e}"))?;
+        let (filter, frame) = if is_display_source_id(window_id) {
+            let display_id = display_id_from_source_id(window_id);
+            let display = content
+                .displays()
+                .into_iter()
+                .find(|d| d.display_id() == display_id)
+                .ok_or_else(|| format!("display {display_id} not found in SCShareableContent"))?;
+            let frame = display.frame();
+            let filter = SCContentFilter::create()
+                .with_display(&display)
+                .with_excluding_windows(&[])
+                .build();
+            (filter, frame)
+        } else {
+            let window = content
+                .windows()
+                .into_iter()
+                .find(|w| w.window_id() == window_id)
+                .ok_or_else(|| format!("window {window_id} not found in SCShareableContent"))?;
+            let frame = window.frame();
+            let filter = SCContentFilter::create().with_window(&window).build();
+            (filter, frame)
+        };
+        // `frame` is in POINTS (SCWindow::frame()/SCDisplay::frame() are CGRects
+        // in the window-coordinate space), but SCStreamConfiguration's width/
+        // height are PIXELS -- the real capture path already carries this
+        // distinction (capture.rs's `capture_pixel_size`). Missing it here meant
+        // a Retina window under `max_long_edge` POINTS (extremely common --
+        // e.g. a half-screen window on a 14" MacBook is ~756pt / 1512px) was
+        // requested at 1x, silently capping AI chat's frames well under the
+        // 1280px budget this fix exists to deliver. `point_pixel_scale()` is the
+        // SAME scale the real filter would use if it opened a stream, not a
+        // separate NSScreen/CGDisplay lookup that could disagree with it.
+        let scale = f64::from(filter.point_pixel_scale()).max(1.0);
+        let (output_w, output_h) = thumbnail_output_size(
+            frame.size.width * scale,
+            frame.size.height * scale,
+            max_long_edge,
+        );
 
-    let config = SCStreamConfiguration::new()
-        .with_width(output_w)
-        .with_height(output_h)
-        .with_pixel_format(PixelFormat::YCbCr_420v)
-        .with_shows_cursor(false);
+        let config = SCStreamConfiguration::new()
+            .with_width(output_w)
+            .with_height(output_h)
+            .with_pixel_format(PixelFormat::YCbCr_420v)
+            .with_shows_cursor(false);
 
-    let sample = SCScreenshotManager::capture_sample_buffer(&filter, &config)
-        .map_err(|e| format!("SCScreenshotManager capture failed: {e}"))?;
-    let pixel_buffer = sample
-        .image_buffer()
-        .ok_or_else(|| "SCK screenshot sample has no image buffer".to_string())?;
+        let sample = SCScreenshotManager::capture_sample_buffer(&filter, &config)
+            .map_err(|e| format!("SCScreenshotManager capture failed: {e}"))?;
+        let pixel_buffer = sample
+            .image_buffer()
+            .ok_or_else(|| "SCK screenshot sample has no image buffer".to_string())?;
 
-    let width = pixel_buffer.width() as u32;
-    let height = pixel_buffer.height() as u32;
-    let payload = crate::capture::copy_nv12_payload(&pixel_buffer, None)
-        .map_err(|e| format!("SCK thumbnail NV12 copy failed: {e}"))?;
-    let crate::capture::CapturedFramePayload::Nv12 {
-        y,
-        y_stride,
-        uv,
-        uv_stride,
-        ..
-    } = payload
-    else {
-        return Err("SCK thumbnail payload was not NV12".to_string());
-    };
+        let width = pixel_buffer.width() as u32;
+        let height = pixel_buffer.height() as u32;
+        let payload = crate::capture::copy_nv12_payload(&pixel_buffer, None)
+            .map_err(|e| format!("SCK thumbnail NV12 copy failed: {e}"))?;
+        let crate::capture::CapturedFramePayload::Nv12 {
+            y,
+            y_stride,
+            uv,
+            uv_stride,
+            ..
+        } = payload
+        else {
+            return Err("SCK thumbnail payload was not NV12".to_string());
+        };
 
-    if screenshot_is_all_zero(&y, y_stride, &uv, uv_stride, height) {
-        return Err("SCK screenshot returned all-zero content (empty backing store)".to_string());
-    }
+        if screenshot_is_all_zero(&y, y_stride, &uv, uv_stride, height) {
+            return Err(
+                "SCK screenshot returned all-zero content (empty backing store)".to_string(),
+            );
+        }
 
-    let bgra = nv12_to_bgra(&y, y_stride, &uv, uv_stride, width, height)
-        .ok_or_else(|| "NV12 thumbnail conversion failed".to_string())?;
-    let bytes = encode_bgra_jpeg(&bgra, width as usize * 4, width, height)
-        .ok_or_else(|| "failed to encode thumbnail JPEG".to_string())?;
-    log::info!(
-        "window_source: thumbnail for window {window_id} captured via SCK ({width}x{height})"
-    );
-    Ok(bytes)
+        let bgra = nv12_to_bgra(&y, y_stride, &uv, uv_stride, width, height)
+            .ok_or_else(|| "NV12 thumbnail conversion failed".to_string())?;
+        let bytes = encode_bgra_jpeg(&bgra, width as usize * 4, width, height)
+            .ok_or_else(|| "failed to encode thumbnail JPEG".to_string())?;
+        log::info!(
+            "window_source: thumbnail for window {window_id} captured via SCK ({width}x{height})"
+        );
+        Ok(bytes)
+    })
 }
 
 /// Scale a tightly-packed BGRA raster so the longer side is at most `max_dim`
@@ -1448,6 +1975,287 @@ fn downscale_jpeg(jpeg: &[u8], max_long_edge: u32) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::mem::{VmAttribution, VmOwner, VmOwnerBytes};
+
+    fn source(window_id: u32, kind: ShareableSourceKind) -> ShareableWindow {
+        ShareableWindow {
+            window_id,
+            title: Some("t".to_string()),
+            app_name: "a".to_string(),
+            app_bundle_id: "b".to_string(),
+            app_pid: 1,
+            app_icon_base64: None,
+            kind: Some(kind),
+        }
+    }
+
+    /// An attribution shaped like the one #106 is hunting: IOSurface dominant.
+    fn iosurface_heavy_attribution() -> VmAttribution {
+        let mb = |n: u64| n * 1024 * 1024;
+        VmAttribution {
+            owners: vec![
+                VmOwnerBytes {
+                    owner: VmOwner::IoSurface,
+                    resident_bytes: mb(1300),
+                    mapped_dirty_bytes: mb(1300),
+                },
+                VmOwnerBytes {
+                    owner: VmOwner::Malloc,
+                    resident_bytes: mb(80),
+                    mapped_dirty_bytes: mb(72),
+                },
+            ],
+            regions_walked: 512,
+            truncated: false,
+            total_resident_bytes: mb(1380),
+            total_mapped_dirty_bytes: mb(1372),
+            other_top_user_tag: None,
+        }
+    }
+
+    /// #106: the picker's own marks must carry the same fields the share marks
+    /// do, so a picker episode and a share are readable on one axis, plus the
+    /// two the picker needs of its own (`sources=`, `thumbnail_captures=`).
+    /// The field report's pre-share elevation is the thing this line exists to
+    /// attribute, so it is asserted whole rather than field by field.
+    #[test]
+    fn picker_memory_mark_line_carries_the_fields_that_attribute_a_burst() {
+        let attribution = iosurface_heavy_attribution();
+        let line = picker_memory_mark_line(
+            PICKER_MARK_STAGE_PREWARM_DONE,
+            Some(PickerSourceCounts {
+                displays: 3,
+                windows: 18,
+            }),
+            13,
+            Some(PrewarmOutcome::Completed),
+            Some(1492 * 1024 * 1024),
+            Some(0),
+            Some(&attribution),
+        );
+        assert_eq!(
+            line,
+            "window_source: picker memory mark -- stage=prewarm_done \
+phys_footprint_mb=1492 live_pixel_buffers=0 sources=3d/18w thumbnail_captures=13 \
+prewarm=completed vm_walk=complete vm_regions=512 vm_resident_mb=1380 \
+vm_mapped_dirty_mb=1372 vm_top=iosurface:1300/1300,malloc:80/72 vm_other_tag=n/a"
+        );
+    }
+
+    /// The burst is bracketed, not sampled: `list_begin` fires before any
+    /// enumeration exists, so it must say so rather than invent counts. The
+    /// PAIR is the reading -- `thumbnail_captures` is monotonic and only means
+    /// something as a difference.
+    #[test]
+    fn picker_memory_mark_line_brackets_the_burst_with_an_opening_mark() {
+        let begin = picker_memory_mark_line(
+            PICKER_MARK_STAGE_LIST_BEGIN,
+            None,
+            4,
+            None,
+            Some(127 * 1024 * 1024),
+            Some(0),
+            None,
+        );
+        assert!(
+            begin.contains("stage=list_begin phys_footprint_mb=127"),
+            "{begin}"
+        );
+        assert!(begin.contains("sources=n/a"), "{begin}");
+        assert!(begin.contains("thumbnail_captures=4"), "{begin}");
+        // Not yet run, and not silently rendered as an outcome.
+        assert!(begin.contains("prewarm=pending"), "{begin}");
+    }
+
+    /// Every early return out of `prewarm_thumbnails` still closes the episode,
+    /// and each says WHY on its face -- a `prewarm_done` whose burst captured
+    /// nothing must not be read as a burst that cost nothing.
+    #[test]
+    fn picker_memory_mark_line_names_a_prewarm_that_did_no_work() {
+        for (outcome, expected) in [
+            (PrewarmOutcome::Completed, "prewarm=completed"),
+            (PrewarmOutcome::SkippedInFlight, "prewarm=skipped_in_flight"),
+            (PrewarmOutcome::NoSources, "prewarm=no_sources"),
+        ] {
+            let line = picker_memory_mark_line(
+                PICKER_MARK_STAGE_PREWARM_DONE,
+                Some(PickerSourceCounts {
+                    displays: 1,
+                    windows: 0,
+                }),
+                0,
+                Some(outcome),
+                Some(0),
+                Some(0),
+                None,
+            );
+            assert!(line.contains(expected), "{line}");
+        }
+    }
+
+    /// Windows path, and any failed read: absence must render as absence. A
+    /// fabricated `phys_footprint_mb=0` / `vm_top=none` would read as "nothing
+    /// is allocated", which is the plausible-looking-fake-data shape that would
+    /// close #106 with the wrong answer.
+    #[test]
+    fn picker_memory_mark_line_reports_an_unavailable_reading_as_unavailable() {
+        let line = picker_memory_mark_line(
+            PICKER_MARK_STAGE_LIST_DONE,
+            Some(PickerSourceCounts {
+                displays: 1,
+                windows: 7,
+            }),
+            0,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(line.contains("phys_footprint_mb=unknown"), "{line}");
+        assert!(line.contains("live_pixel_buffers=n/a"), "{line}");
+        assert!(line.contains("vm_walk=unavailable"), "{line}");
+        assert!(!line.contains("phys_footprint_mb=0"), "{line}");
+    }
+
+    /// Displays are the expensive half of a burst on a Retina Mac, so the
+    /// split has to survive onto the line -- `sources=21w` would hide the
+    /// difference between the reporter's 3 displays and the runner's 1.
+    #[test]
+    fn picker_source_counts_split_displays_from_windows() {
+        let sources = vec![
+            source(0x4000_0001, ShareableSourceKind::Display),
+            source(0x4000_0002, ShareableSourceKind::Display),
+            source(10, ShareableSourceKind::Window),
+        ];
+        let counts = picker_source_counts(&sources);
+        assert_eq!(counts.displays, 2);
+        assert_eq!(counts.windows, 1);
+        let line = picker_memory_mark_line(
+            PICKER_MARK_STAGE_LIST_DONE,
+            Some(counts),
+            0,
+            None,
+            Some(0),
+            Some(0),
+            None,
+        );
+        assert!(line.contains("sources=2d/1w"), "{line}");
+    }
+
+    /// The bound, in both directions. The picker re-enumerates every
+    /// `LIST_CACHE_TTL` while it is open, so a gate that only ever opened would
+    /// turn three marks per episode into a ~24-per-minute sampler -- exactly
+    /// what this diagnostic is not allowed to be.
+    #[test]
+    fn picker_mark_episodes_are_bounded_by_the_cooldown() {
+        assert!(
+            picker_mark_episode_opens(None),
+            "the first episode of a process must open"
+        );
+        assert!(
+            !picker_mark_episode_opens(Some(LIST_CACHE_TTL)),
+            "a re-enumeration one list-cache TTL later must NOT open a new episode"
+        );
+        assert!(
+            !picker_mark_episode_opens(Some(
+                PICKER_MEMORY_MARK_COOLDOWN - Duration::from_millis(1)
+            )),
+            "just inside the cooldown must not open"
+        );
+        assert!(
+            picker_mark_episode_opens(Some(PICKER_MEMORY_MARK_COOLDOWN)),
+            "at the cooldown, a new episode must open -- otherwise a picker \
+             opened once a minute is never marked at all"
+        );
+    }
+
+    /// The episode is claimed once, by the first caller, and the claim is what
+    /// makes a triple atomic: a second enumeration inside the cooldown must not
+    /// interleave its own `list_begin` into an episode already in flight.
+    #[test]
+    fn open_picker_mark_episode_claims_once_within_the_cooldown() {
+        {
+            let mut guard = PICKER_MARK_LAST_EPISODE.lock_unpoisoned();
+            *guard = None;
+        }
+        let now = Instant::now();
+        assert!(open_picker_mark_episode(now));
+        assert!(!open_picker_mark_episode(now + LIST_CACHE_TTL));
+        assert!(open_picker_mark_episode(now + PICKER_MEMORY_MARK_COOLDOWN));
+        {
+            let mut guard = PICKER_MARK_LAST_EPISODE.lock_unpoisoned();
+            *guard = None;
+        }
+    }
+
+    /// The one property of #106's picker marks that no test on the formatter
+    /// can see: the closing mark is taken AFTER the last capture returns, and
+    /// after the in-flight guard is released. A mark taken at spawn time would
+    /// read the footprint before a single thumbnail existed and report the
+    /// burst as free -- the exact wrong answer this instrument exists to
+    /// prevent. Drives the real burst function, not the line it eventually
+    /// formats.
+    #[test]
+    fn prewarm_burst_marks_after_the_last_capture_and_releases_the_guard_first() {
+        use std::cell::RefCell;
+
+        let events: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let counts = PickerSourceCounts {
+            displays: 3,
+            windows: 18,
+        };
+        // The real caller holds the guard for the whole burst.
+        THUMB_PREWARM_IN_FLIGHT.store(true, Ordering::Release);
+        run_prewarm_burst(
+            vec![11, 22, 33],
+            true,
+            counts,
+            |window_id| events.borrow_mut().push(format!("capture:{window_id}")),
+            |stage, sources, outcome| {
+                assert_eq!(sources, counts);
+                assert!(
+                    !THUMB_PREWARM_IN_FLIGHT.load(Ordering::Acquire),
+                    "the in-flight guard must be released BEFORE the mark's VM walk, or the \
+                     next enumeration stalls behind a diagnostic"
+                );
+                events
+                    .borrow_mut()
+                    .push(format!("mark:{stage}:{}", outcome.tag()));
+            },
+        );
+        assert_eq!(
+            events.into_inner(),
+            vec![
+                "capture:11",
+                "capture:22",
+                "capture:33",
+                "mark:prewarm_done:completed",
+            ]
+        );
+    }
+
+    /// A burst outside a marking episode captures exactly the same thumbnails
+    /// and emits nothing -- the cooldown is a bound on the DIAGNOSTIC, never on
+    /// the picker's own work.
+    #[test]
+    fn prewarm_burst_outside_an_episode_captures_but_never_marks() {
+        use std::cell::RefCell;
+
+        let captured: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+        THUMB_PREWARM_IN_FLIGHT.store(true, Ordering::Release);
+        run_prewarm_burst(
+            vec![7, 8],
+            false,
+            PickerSourceCounts {
+                displays: 0,
+                windows: 2,
+            },
+            |window_id| captured.borrow_mut().push(window_id),
+            |_, _, _| panic!("no mark may be emitted outside a marking episode"),
+        );
+        assert_eq!(captured.into_inner(), vec![7, 8]);
+        assert!(!THUMB_PREWARM_IN_FLIGHT.load(Ordering::Acquire));
+    }
 
     #[test]
     fn thumbnail_output_size_caps_the_long_edge_and_preserves_aspect() {
@@ -1674,5 +2482,121 @@ mod tests {
         assert!(cached_list(now).is_some());
         invalidate_list_cache();
         assert!(cached_list(now).is_none());
+    }
+
+    /// Source-level pin (#889 + #106): the SCK thumbnail path must run its
+    /// ENTIRE ObjC lifetime inside an autorelease pool.
+    ///
+    /// This file already documents, on `macos::app_icon_png_base64`, what
+    /// an unpooled ObjC allocation on these threads costs -- ~70MB per
+    /// app icon, 1,553,104,896 bytes attributed by `malloc_history` on a
+    /// live 1.9GB session. `capture_window_thumbnail_sck` allocates strictly
+    /// more per call and runs on the same pool-less threads
+    /// (`prewarm_thumbnails`'s bare `std::thread`, the picker refresh's
+    /// tokio `spawn_blocking`), 13-14 times per picker open.
+    ///
+    /// A partial pool is the failure mode worth guarding against as much as
+    /// a missing one: a pool opened after the enumeration, or closed before
+    /// the composite, drains nothing that matters while looking correct. So
+    /// this asserts the pool opens before the FIRST ObjC touch and closes
+    /// only at the end of the function.
+    #[test]
+    fn sck_thumbnail_capture_encloses_its_whole_objc_lifetime_in_an_autorelease_pool() {
+        let source = include_str!("window_source.rs");
+        let body = source
+            .split_once("fn capture_window_thumbnail_sck(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("capture_window_thumbnail_sck must exist");
+
+        let pool_at = body
+            .find("autoreleasepool(|_| {")
+            .expect("#889/#106: capture_window_thumbnail_sck must open an autorelease pool");
+
+        // Every ObjC entry point on this path, in the order the function
+        // reaches them. All of them must sit AFTER the pool opens.
+        for objc_touch in [
+            "macos_at_least_14()",
+            "SCShareableContent::create()",
+            "SCContentFilter::create()",
+            "SCStreamConfiguration::new()",
+            "SCScreenshotManager::capture_sample_buffer(",
+            ".image_buffer()",
+        ] {
+            let at = body
+                .find(objc_touch)
+                .unwrap_or_else(|| panic!("expected `{objc_touch}` on the SCK thumbnail path"));
+            assert!(
+                at > pool_at,
+                "#889/#106: `{objc_touch}` runs OUTSIDE the autorelease pool -- a pool that \
+                 does not enclose the whole ObjC lifetime drains nothing that matters"
+            );
+        }
+
+        // The pool must close at the END of the function, not earlier. A
+        // textual "the last line is `})`" check is not enough: closing the
+        // pool and chaining (`.and_then(..)`, a second statement) also ends
+        // in `})` while leaving work outside it. So require that every line
+        // after the pool opens is nested INSIDE the closure -- the only line
+        // allowed back at the function's own 4-space indent is the closing
+        // `})` itself.
+        assert!(
+            body.trim_end().ends_with("Ok(bytes)\n    })"),
+            "#889/#106: the autorelease pool must close only at the end of \
+             capture_window_thumbnail_sck, returning Rust-owned bytes"
+        );
+        let after_pool: Vec<&str> = body[pool_at..].lines().skip(1).collect();
+        let (closing, inside) = after_pool
+            .split_last()
+            .expect("the pool closure must have a body");
+        assert_eq!(
+            closing.trim_end(),
+            "    })",
+            "#889/#106: the pool closure must be the last thing in the function"
+        );
+        for line in inside {
+            assert!(
+                line.trim().is_empty() || line.starts_with("        "),
+                "#889/#106: `{}` sits outside the autorelease pool -- every statement in \
+                 capture_window_thumbnail_sck must be nested inside the closure",
+                line.trim()
+            );
+        }
+        assert!(
+            source.contains(
+                "fn capture_window_thumbnail_sck(window_id: u32, max_long_edge: u32) \
+                 -> Result<Vec<u8>, String>"
+            ),
+            "the SCK thumbnail must keep returning Rust-owned bytes -- an ObjC value in the \
+             return type would escape the pool"
+        );
+
+        // The pool must stay explained. #889's own comment is what has kept
+        // the icon pool alive through later edits; an unexplained
+        // `autoreleasepool` reads as decoration and gets deleted.
+        let rationale = &body[..pool_at];
+        assert!(
+            rationale.contains("#889") && rationale.contains("#106"),
+            "the pool must carry its #889/#106 rationale, or the next reader deletes it"
+        );
+    }
+
+    /// The pool is only load-bearing because the thread that drives the
+    /// picker's 13-14 capture burst has none of its own. Pin that, so a
+    /// future refactor onto a pooled thread has to notice this test rather
+    /// than silently invalidate the reasoning above.
+    #[test]
+    fn thumbnail_prewarm_burst_runs_on_a_pool_less_thread() {
+        let source = include_str!("window_source.rs");
+        let prewarm = source
+            .split_once("fn prewarm_thumbnails(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("prewarm_thumbnails must exist");
+        assert!(
+            prewarm.contains("std::thread::spawn(move || {"),
+            "#106: the picker prewarm burst runs on a bare std::thread, which has no \
+             autorelease pool of its own"
+        );
     }
 }

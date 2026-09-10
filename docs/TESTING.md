@@ -865,7 +865,39 @@ opened the autotest socket, or the self-hosted runner lost one of its live
 prerequisites. Inspect the uploaded `nightly-loopback-*` artifact first:
 `remote-control-live.log` has the parsed RESULT/SUMMARY lines, while
 `petal-dev.log`, `web-harness.log`, `livekit.log`, and `chrome-cdp.log` separate
-app bugs from runner setup/TCC/display problems.
+app bugs from runner setup/TCC/display problems. The artifact also carries
+`crashes/*.ips` (any crash report Petal wrote during the loopback tier) and
+`wedge-*-reason.txt` / `wedge-*-sample-<pid>.txt` (#102's `sample` backtraces);
+both were collected but silently left out of the upload globs until #150.
+
+A missing autotest socket now names its own cause instead of reporting the same
+sentence for four different failures (#150). The workflow waits for the Test
+Cockpit tier's Petal to actually exit before the loopback tier launches its own
+&mdash; **by PID** (`ps -p`), because a `pgrep -f` poll matches the watcher's own
+command line and is wrong in both directions &mdash; and a socket that never
+appears is diagnosed as one of `single-instance-lock-held` (another Petal still
+held `tauri-plugin-single-instance`, so ours forwarded its argv and exited),
+`petal-crashed`, `launcher-exited`, `no-petal-process`, or
+`running-but-no-socket`. The cause is in the `::error::` line itself, so the
+next occurrence does not cost an artifact download. Both halves are contract
+tested in both directions by `scripts/test-e2e-gate-handoff.sh`, which extracts
+and executes the workflow's own wait rather than a copy of it.
+
+Both of those steps first **assert the `petal_guard_*` helpers exist**
+(`declare -F`) before trusting any exit status from them, and fail with a
+distinct `CANNOT CHECK` error naming the missing function if they do not. Why
+that can happen at all: `workflow_dispatch` runs the workflow definition from
+the **default branch** while checking out **the ref you name**, so dispatching
+an older tag legitimately pairs a current workflow with an older tree. Without
+the assertion, bash returns 127 for the missing function, `if ! helper ...`
+reads that identically to "the wait timed out", and the step reports a detailed
+lingering-instance cause it never observed &mdash; which is exactly what run
+`34475294637` printed, complete with "pids named above" and no pids above. For
+the same reason the timeout message now names pids only when the wait actually
+produced them; a failure that named none says so instead. To exercise the
+handoff for real, dispatch a ref that already contains the step (`gh workflow
+run release.yml -f tag=<tag> -f publish=false`) &mdash; never a freshly pushed
+tag, because `release.yml` triggers on `v*` and publishes on a tag push.
 
 `apps/desktop/scripts/remote-control-scenario.mjs` is the live scenario used by that
 wrapper. It uses the same autotest socket plus Chrome DevTools and TextEdit; it
@@ -1075,6 +1107,66 @@ logs `remote-control: pointer RELEASE not injected ... reason=<cause>` at
 `error!` and emits the `pointer-release-not-injected` Sentry diagnostic;
 `captureCaseFailureForensics` collects those lines into any failing case's
 `# RELEASE-FAILURE` output. The root cause of #134 is still open.
+
+**Cases 33–36 are QUARANTINED left-drag stress checkpoints (#134).** The leak
+reproduces about one suite run in three, so a single left drag finds it by
+luck. Each checkpoint repeats case 6's gesture byte for byte and runs the same
+`assertReleased()` after every iteration.
+`PETAL_RC_LEFT_DRAG_STRESS_ITERATIONS` (default 12; `0` disables) is the
+**whole-run total**, split evenly across the checkpoints (3 drags each), with
+any remainder going to the earliest.
+
+The checkpoints are **scattered through the sequence, not batched at the
+end** — their ids run out of numeric order on purpose, because the position is
+the experiment. The first stress run (0.9.22 gate) spent all twelve drags in a
+quiet tail after every other case had finished and came back 12 for 12 clean;
+against the measured rate that is roughly an 11% outcome, so the fault is
+probably not a flat per-drag probability but depends on conditions an isolated
+loop never creates. The placements, declared in
+`LEFT_DRAG_STRESS_CHECKPOINTS` (`scripts/remote-control-held-input.mjs`) and
+pinned to the real sequence by a unit test:
+
+| case | runs right after | why there |
+|---|---|---|
+| 33 | 7 (right drag + Escape) | the historical neighbourhood — every observed failure was case 6 leaking and case 7 reporting it |
+| 34 | 21 (horizontal scroll) | mid-suite, after a long run of keyboard/modifier/scroll traffic on a churned document |
+| 35 | 26 (controller-disconnect synthetic release) | the first lifecycle teardown that synthesises releases host-side |
+| 36 | 29 (reconnect during control) | the only reconnect in the suite — where the `(window_id, controller_id)` key can actually change mid-gesture |
+
+Each checkpoint is its own case, so `runCase` wraps it in a fresh
+request/release grant cycle rather than reusing one long-lived grant, and real
+traffic follows every burst. The tail placement made a leak un-inheritable by
+construction; scattering gives that up, so a leak that survives both recovery
+attempts (zero-mask move, then the host TTL) now emits its own `::warning::`
+saying a later case's `assertReleased` may report it as its own — the
+mis-attribution #134 is about, stated rather than left to be rediscovered.
+
+They are **quarantined in the script itself**: a caught leak is reported as
+`skip` with `QUARANTINED (#134 …)` in its detail — never `pass`, never `fail`
+— plus an `::warning::` line and a machine-readable `# STRESS-LEAK {…}` line
+in the harness log the gate uploads. Each checkpoint also prints a
+`# STRESS-CHECKPOINT {…}` line naming where it is spending its drags and why,
+and the run ends with one `# STRESS-SUMMARY {…}` roll-up so the headline
+"N drags, M leaks" number survives the split across four cases. Observing a known-open bug must not block
+a release, and in-script quarantine covers every consumer of the suite, not
+just the loopback tier's `E2E_QUARANTINE_RC_CASES` scorecard list. Removing
+the quarantine (`PETAL_RC_LEFT_DRAG_STRESS_QUARANTINE=0`, then deleting the
+flag) is part of fixing #134, and the unit tests pin that the un-quarantined
+outcome is a real `fail`.
+
+The leak record answers the questions the #134 analysis identified: which
+iteration failed; whether a `pointer RELEASE not injected` line accompanied it
+and with which `reason=` (present → native injection of the Up failed; absent
+→ the Up was never *processed*, the discriminator); the `pressedInputs`
+which checkpoint it came from (two runs that both leak on "iteration 2" mean
+different things if one is after case 7's Escape and the other after case 29's
+reconnect); the `pressedInputs`
+snapshot with its `(window_id, controller_id)` key compared against both the
+live session key and the one recorded *before* that drag (`KEY MISMATCH`, and
+a held entry still filed under the PRE-GESTURE key, are the leading surviving
+hypothesis — the key changing mid-gesture); and whether
+a zero-mask move or the host TTL cleared the phantom press afterwards — the
+case leaves the machine clean either way.
 
 **Live status (2026-08-14, CURRENT): 27 pass / 2 fail / 1 skip**, up from
 **2 pass / 28 fail** at the start of the same session. Full video path
@@ -1409,6 +1501,65 @@ subsequent cockpit work:
   (received at the source resolution, frames advancing), not raw fps. Real
   third-party app windows capture at full fps -- SHARE-W2N-Q proves the 30fps
   media path in reverse.
+- **SHARE-DESKTOP is the gate's only DISPLAY-capture scenario (#199 / #106).**
+  Every other share scenario captures the 960x600 test-pattern WINDOW; this one
+  captures the whole display, through the same picker path a user takes
+  (`share_window` -> `toggle_window_share_from_picker`, display-source-id
+  branch). Three things about it are deliberate and should not be "simplified":
+  1. It runs **LAST** in the Quick tier. It rearranges nothing, but it captures
+     everything on screen and holds the share longest, so nothing it disturbs
+     can reach a sibling scenario.
+  2. It **opens the animating test-pattern canvas first and proves it is
+     drawing** before starting the share. ScreenCaptureKit's stream is
+     change-driven and the `settled_30s` memory mark rides the RAW capture
+     callback (not the snapshot-pull fallback), so a motionless display
+     produces no frames and the scenario would otherwise report a capture
+     failure for an idle source.
+  3. It **holds the share past 30s** so `settled_30s` can fire, and writes
+     every `session: share memory mark` line for that share into run.jsonl as
+     `share-memory-marks`. That is the #106 measurement: a display share's own
+     `phys_footprint_mb` and `vm_top=<owner>:<resident>/<dirty>` breakdown, in
+     CI, without waiting for another field report.
+
+  Every mark also carries `backing=<WxH> backing_scale=<N.NN>` beside
+  `source=` (#106). `source=` is the configured capture OUTPUT, and Auto caps
+  a 2x display's backing store straight back down to its logical size, so a
+  2560x1440 Retina Mac and a 1x 2560x1440 panel both print
+  `source=2560x1440`; `backing=5120x2880 backing_scale=2.00` versus
+  `backing=2560x1440 backing_scale=1.00` is what tells them apart. The third
+  scale on the line, `capture_scale=`, is the post-cap capture scale (the
+  value `first frame received` has always printed) and is NOT the backing
+  scale -- it reads 1.00 for both of those displays. The runner is 1x, so its
+  marks read `backing=` equal to `source=` with `backing_scale=1.00`: a
+  reading, not a gap.
+
+  Read its `display-share-source` record before reading its memory numbers: it
+  states the pixel geometry the run actually got. The self-hosted Tart guest is
+  configured `--display 1920x1080` at 1x (2.07 MP -- `scripts/runner/tart/
+  make-golden.sh`); the footprint spike in #106 was reported on a 2560x1440
+  display (3.69 MP) on real Apple silicon. A green SHARE-DESKTOP on the VM is a
+  LOWER BOUND on that case, not a reproduction of it.
+- **`window_source: picker memory mark` brackets the SOURCE PICKER, before any
+  share exists (#106).** Roughly half the reported 3.07 GB arrives between
+  `list()` and the share's first frame, which is earlier than any
+  `session: share memory mark` can see. Three marks per episode --
+  `stage=list_begin` (before the enumeration), `stage=list_done` (after it),
+  `stage=prewarm_done` (after the LAST thumbnail of the prewarm burst returns,
+  not when its thread is spawned) -- carrying the same `phys_footprint_mb` /
+  `vm_top=` fields the share marks do, plus `sources=<n>d/<n>w` and a monotonic
+  `thumbnail_captures=<n>`. Read the burst's size and owner as the DIFFERENCE
+  between two marks; a single mark's `thumbnail_captures` means nothing, and
+  `vm_top` is never a decomposition of the footprint beside it (#142).
+  `prewarm=skipped_in_flight` / `no_sources` mean the episode captured nothing,
+  so its footprint delta is not a burst's cost.
+  Bounded, not sampled: at most one episode per 60s
+  (`PICKER_MEMORY_MARK_COOLDOWN`), and a cache-hit enumeration is never marked.
+  **Not currently visible in the live gate**: the cockpit's share scenarios call
+  `window_source::list()` directly, not the `list_cached()` picker path these
+  marks sit on, so today they reach field logs (`~/Library/Logs/Petal/petal.log`)
+  and a dev run only. Windows emits them too, with `vm_walk=unavailable`.
+  `scripts/analyze-field-log.mjs` reads these marks out of a log and reports the
+  enumeration/thumbnail split for you -- see "Reading a field log" below.
 - **Belt and suspenders, not either/or**: even inside the QA build channel,
   the privileged capabilities stay inert -- refuse to execute -- unless
   `cockpit-setup.sh`'s one-time local marker file is present, checked via
@@ -1590,6 +1741,73 @@ publications and from the compositor, logging the blocking reason
 (`test-cockpit: <ID> waiting for previous web peer(s) ...`). Evidence lands in
 the run's `web-peer-teardown` and `previous-peer-gate` records; a healthy run
 shows `departedGracefully: true` and a gate `waitedMs` well under a second.
+
+## Reading a field log: `scripts/analyze-field-log.mjs`
+
+Two measurements are taken by reading a `petal.log` rather than by running a
+harness, and both used to end with "paste the grep here and someone will
+interpret it". The interpretation is mechanical, so it is a script:
+
+```sh
+node scripts/analyze-field-log.mjs ~/Library/Logs/Petal/petal.log
+node scripts/analyze-field-log.mjs ~/Library/Logs/Petal          # the whole directory
+node scripts/analyze-field-log.mjs --json petal.log.gz           # machine-readable
+```
+
+It reports:
+
+- **The camera-intent margin (#76).** Per publish episode: the margin from
+  `session: camera-intent intended=true` to `succeeded`/`failed`, split into the
+  release window (intent -> `start_camera_publish begin`, which is what a live
+  Settings preview has to let go inside of) and the acquisition
+  (begin -> outcome); whether the FIRST attempt won or a bounded self-heal retry
+  was needed; and the ON, OFF and device-switch cases separately. The verdict is
+  the one #76's definition of done asks for and nothing more:
+  **first-attempt-wins** or **retry-needed**.
+- **Picker memory (#159).** Per picker episode, the `list_begin` ->
+  `prewarm_done` delta **split** into enumeration (`list_begin` -> `list_done`,
+  the half #148 fixed) and thumbnails (`list_done` -> `prewarm_done`, the half
+  that has never been priced), with the `sources=<n>d/<n>w` counts and the
+  per-window cost against #106's pre-fix ~70 MB/window.
+
+Things it deliberately refuses to do:
+
+- **It never prints log text.** No room name, identity, access code, path or
+  window title reaches the output; absolute wall-clock timestamps are withheld
+  too, and episodes are located by offset from the log's first line. Field logs
+  come from users, and a log that did NOT come through "Export logs"
+  (`logging.rs`'s `redact_for_export`) still carries the raw LiveKit identity on
+  every `start_camera_publish begin` line. The report is numbers, stages and
+  verdicts, so it is safe to paste into an issue as-is.
+- **It never infers a verdict the log cannot support.** A publish with no
+  `camera-intent` line before it (the log starts mid-episode, or the build
+  predates #78) has no margin to measure, so it is listed as NOT COUNTED instead
+  of being folded into the verdict. An episode is never reported as spanning an
+  app restart. A picker episode whose `prewarm=` says `skipped_in_flight` or
+  `no_sources` captured nothing, so its footprint delta never sets the verdict.
+- **It says what the log cannot show.** A `first-attempt-wins` verdict is only
+  evidence about the contended case if the log came from #76's runbook, because
+  the Settings preview holds the camera from the webview (`getUserMedia`) and
+  emits no native line -- an uncontended publish that wins looks identical. The
+  report prints that caveat next to the verdict rather than leaving the reader
+  to supply it.
+- **It fails helpfully when the lines are simply absent.** It names the build in
+  the log, states the first version that emitted the instrumentation
+  (`0.9.10` for the intent line, `0.9.20` for the picker marks, `0.9.21` for the
+  build that carries #148's fix), and prints the two-minute runbook for
+  producing the missing episode. Absence of a line is not evidence of a defect.
+
+**Concurrent instances are a real hazard, and it flags them.** One log file can
+carry two builds (an upgrade, or two app instances writing to the same path),
+and a log directory routinely holds several instances' rotated output. The
+script warns on more than one build version in a file or across the files given,
+on backwards timestamp jumps, and on two files whose wall-clock spans genuinely
+overlap. A rotation handover shares exactly one instant between two files and is
+correctly NOT reported as an overlap. Never average numbers across those
+reports.
+
+Unit tests: `scripts/test-analyze-field-log.mjs`, with fixture logs under
+`scripts/fixtures/field-logs/`, run by `scripts/ci-local.sh`.
 
 ## Signed Release Clean-TCC Smoke
 

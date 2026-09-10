@@ -164,6 +164,10 @@ pub use share::{
     start_share, stop_share,
 };
 pub(crate) use share::{stop_share_explained, StopShareAnalytics};
+// #106: SHARE-DESKTOP attaches a display share's own memory marks to its
+// run.jsonl evidence rather than scraping the app log.
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) use share::{recent_share_memory_marks, SHARE_MEMORY_SETTLE_STAGE};
 
 use crate::sync_ext::MutexExt;
 use std::collections::HashMap;
