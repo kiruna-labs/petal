@@ -598,7 +598,9 @@ impl Compositor {
             return;
         }
         window.canonical_pixel_size = Some(size);
-        window_geometry().lock_unpoisoned().insert(key.clone(), size);
+        window_geometry()
+            .lock_unpoisoned()
+            .insert(key.clone(), size);
         let _ = compositor_handle().tx.try_send(Command::ResizeWebview {
             key: key.clone(),
             width: size.0,
@@ -1423,10 +1425,7 @@ pub(crate) struct RemoteControlTargetMetadata {
     pub(crate) share_instance_id: String,
 }
 
-pub(crate) fn remote_control_window_exists(
-    window_id: u32,
-    owner_identity: Option<&str>,
-) -> bool {
+pub(crate) fn remote_control_window_exists(window_id: u32, owner_identity: Option<&str>) -> bool {
     snapshot().lock_unpoisoned().iter().any(|window| {
         window.window_id == window_id
             && owner_identity.is_none_or(|owner| owner == window.owner_identity)
@@ -2259,10 +2258,7 @@ pub(crate) async fn push_frame(
         },
     );
 }
-pub(crate) async fn update_window_canonical_source_size(
-    key: WindowKey,
-    size: (u32, u32),
-) {
+pub(crate) async fn update_window_canonical_source_size(key: WindowKey, size: (u32, u32)) {
     send_command_async(Command::UpdateCanonicalSourceSize { key, size }).await;
 }
 
@@ -3221,6 +3217,16 @@ fn crop_debounce_should_apply(
     }
 }
 
+fn should_present_full_frame_during_pending_crop(
+    applied: Option<(u32, u32, u32, u32)>,
+    incoming: Option<(u32, u32, u32, u32)>,
+    applied_buffer_size: (u32, u32),
+    frame_size: (u32, u32),
+    crop_applied: bool,
+) -> bool {
+    !crop_applied && incoming != applied && (applied.is_some() || applied_buffer_size != frame_size)
+}
+
 /// Paint the swap chain's back buffer a neutral "connecting" gray once at
 /// creation, so a revealed-but-not-yet-framed remote window reads as a
 /// loading panel rather than a broken black void (the first decoded frame
@@ -3349,6 +3355,34 @@ fn present_frame(
             }
             window.back_buffer_size = (crop_w, crop_h);
             recreate_texture_for_window(device, window);
+        } else if should_present_full_frame_during_pending_crop(
+            window.content_rect,
+            content_rect,
+            window.back_buffer_size,
+            frame_size,
+            apply,
+        ) {
+            // While a new crop is settling, present the complete decoded
+            // frame. Intersecting it with the previous crop makes each
+            // successive resize look smaller when the source keeps changing
+            // before the debounce expires. The sender's bars remain visible
+            // temporarily, but the content never compounds an old crop.
+            window.content_rect = None;
+            if window.back_buffer_size != frame_size {
+                if let Err(error) = unsafe {
+                    window.swap_chain.ResizeBuffers(
+                        2,
+                        frame_size.0,
+                        frame_size.1,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_SWAP_CHAIN_FLAG(0),
+                    )
+                } {
+                    return device_removed(&error);
+                }
+                window.back_buffer_size = frame_size;
+                recreate_texture_for_window(device, window);
+            }
         }
     } else {
         window.crop_pending = None;
@@ -4107,6 +4141,33 @@ mod tests {
             Some((24, 32, 300, 200)),
             t1 + std::time::Duration::from_millis(401),
             dwell
+        ));
+    }
+
+    #[test]
+    fn pending_crop_uses_full_frame_instead_of_stale_crop() {
+        let old_crop = Some((24, 32, 272, 176));
+        let new_crop = Some((40, 20, 240, 200));
+        assert!(should_present_full_frame_during_pending_crop(
+            old_crop,
+            new_crop,
+            (272, 176),
+            (320, 240),
+            false,
+        ));
+        assert!(!should_present_full_frame_during_pending_crop(
+            old_crop,
+            new_crop,
+            (272, 176),
+            (320, 240),
+            true,
+        ));
+        assert!(!should_present_full_frame_during_pending_crop(
+            None,
+            None,
+            (320, 240),
+            (320, 240),
+            false,
         ));
     }
 }

@@ -42,6 +42,12 @@ use crate::video_color::VideoColorProfile;
 
 const NO_FRAME_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
 const NO_FRAME_RETIRE_AFTER: Duration = Duration::from_secs(30);
+/// Hard receiver-side upper bound for a frozen share whose publication is
+/// still present. A crashed source can leave the SFU publication alive and
+/// cannot start sender negotiation, so publication presence alone must not
+/// keep a native window on screen forever. The first 30s remains the normal
+/// repair/hold period; this is the final stale-source backstop.
+const STALE_PUBLICATION_RETIRE_AFTER: Duration = Duration::from_secs(60);
 const FRAME_HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// Receiver-side starvation policy (Windows decode loop): once a window has
 /// received its first frame, this long without another decoded frame while
@@ -55,6 +61,10 @@ const FRAME_HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// healthy share delivers a frame at least every ~2s, so 5s is a 2.5x
 /// margin that only a genuinely stalled layer trips.
 const STARVATION_DOWNGRADE_AFTER: Duration = Duration::from_secs(5);
+/// Receiver-local quality fallback: three consecutive five-second windows
+/// below this decoded rate select LOW for this receiver only.
+const RECEIVER_LOW_FPS_THRESHOLD: f64 = 10.0;
+const RECEIVER_LOW_FPS_WINDOWS: u32 = 3;
 /// Cadence of the decode loop's stall watchdog tick.
 const STARVATION_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// While starved on LOW, re-request HIGH this often to probe whether the
@@ -105,6 +115,19 @@ const QUALITY_DOWNGRADE_AVG_QP: f64 = 30.0;
 /// own `RUNG_STARVATION_GUARD_TRIGGER_SAMPLES` (`publisher.rs`) by design.
 const QUALITY_DOWNGRADE_SUSTAINED_SAMPLES: u32 = 3;
 const PLAYOUT_DELAY_ENV: &str = "PETAL_PLAYOUT_DELAY_MS";
+/// Camera tracks are rendered by the hidden gallery bridge, not the native
+/// compositor. Keep the old native subscription available only as an explicit
+/// diagnostic escape hatch.
+const ENABLE_NATIVE_CAMERA_SUBSCRIBE_ENV: &str = "PETAL_ENABLE_NATIVE_CAMERA_SUBSCRIBE";
+
+fn native_camera_subscription_disabled() -> bool {
+    std::env::var(ENABLE_NATIVE_CAMERA_SUBSCRIBE_ENV).as_deref() != Ok("1")
+}
+
+fn should_disable_native_camera_subscription(track_name: &str, disabled: bool) -> bool {
+    disabled && track_name.starts_with(crate::transport::publisher::CAMERA_TRACK_PREFIX)
+}
+
 /// Upper bound on a decoded remote frame's width/height before this module
 /// will convert or push it. Generous (16K per axis) -- real shares top out
 /// far below; anything larger is a corrupt dimension field, not content.
@@ -759,6 +782,16 @@ pub(crate) fn forget_window_publication(owner_identity: &str, window_id: u32) {
         .remove(&(owner_identity.to_string(), window_id));
 }
 
+fn forget_window_publications_for(owner_identity: &str) {
+    window_publications()
+        .lock_unpoisoned()
+        .retain(|(owner, _), _| owner != owner_identity);
+}
+
+fn forget_all_window_publications() {
+    window_publications().lock_unpoisoned().clear();
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SubscriberError {
     #[error("room connect failed: {0}")]
@@ -1406,7 +1439,8 @@ pub(crate) fn start_compositor_feed(
                         // the same way as the Windows decode loop's
                         // equivalent tick (`spawn_windows_decode_loop`).
                         let mut watchdog_tick = tokio::time::interval(STARVATION_CHECK_INTERVAL);
-                        watchdog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        watchdog_tick
+                            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                         loop {
                             let frame = tokio::select! {
                                 _ = watchdog_tick.tick() => {
@@ -1419,6 +1453,10 @@ pub(crate) fn start_compositor_feed(
                                         last_quality_check = std::time::Instant::now();
                                         match video_track_for_stats.get_stats().await {
                                         Ok(stats) => {
+                                            log_inbound_video_webrtc_stats(
+                                                &format!("window {window_id}"),
+                                                &stats,
+                                            );
                                             let inbound_video = stats.iter().find_map(|s| match s {
                                                 RtcStats::InboundRtp(inbound)
                                                     if inbound.stream.kind == "video" =>
@@ -2091,8 +2129,10 @@ pub(crate) fn start_compositor_feed(
                             crate::transport::publisher::shared_window_kind_from_metadata(
                                 &metadata, window_id,
                             );
-                        let share_instance_id = crate::transport::publisher::
-                            shared_window_share_instance_from_metadata(&metadata, window_id);
+                        let share_instance_id =
+                            crate::transport::publisher::shared_window_share_instance_from_metadata(
+                                &metadata, window_id,
+                            );
                         let source_title = source_title_for_kind(source_kind, &source_title);
                         let source_url =
                             crate::transport::publisher::shared_window_url_from_metadata(
@@ -2201,6 +2241,7 @@ pub(crate) fn start_compositor_feed(
             }
         }
         cancel_all_window_states(&window_states);
+        forget_all_window_publications();
     });
 }
 
@@ -2256,12 +2297,25 @@ pub(crate) fn start_compositor_feed(
 ) {
     // The Windows feed creates/closes Tauri WebviewWindows for remote shares
     // (the surface route renders the header), so it needs the app handle.
+    log::info!(
+        "windows compositor feed: native camera subscription disabled={} (override env={})",
+        native_camera_subscription_disabled(),
+        ENABLE_NATIVE_CAMERA_SUBSCRIBE_ENV
+    );
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         // Receiver-side cadence log (verification item 10's "measured rather
         // than inferred"): per 5s interval, how many decoded frames were
         // dispatched to the native compositor.
         let frames_this_interval = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Track subscription time separately from frame timing. A source can
+        // crash before its first decoded frame, in which case
+        // `active_frame_keys()` has no entry and a frame-only watchdog would
+        // never notice the native window it already created.
+        let mut window_subscribed_at: HashMap<
+            crate::windows_compositor::WindowKey,
+            std::time::Instant,
+        > = HashMap::new();
         let mut health_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             let event = tokio::select! {
@@ -2285,38 +2339,70 @@ pub(crate) fn start_compositor_feed(
                             frames as f64 / 5.0
                         );
                     }
-                    // Windows no-frame watchdog: safety net ONLY (macOS
-                    // parity, 30s). The pinned SDK should deliver
-                    // `TrackUnpublished` for an explicit stop-sharing but
-                    // does not on Windows (under investigation); this retires
-                    // only after 30s of silence AND the SFU holding no
-                    // publication (#627), so a poor-network stall never
-                    // closes a live window.
+                    // Windows no-frame watchdog: the first 30s is a safety
+                    // net for a missing unpublish and a poor-network stall.
+                    // A source crash can leave the SFU publication present
+                    // forever, though, and the sender may have no opportunity
+                    // to negotiate its removal. Do not let that stale
+                    // publication pin the frozen native window forever:
+                    // retire it at the hard receiver-side deadline.
                     let now = std::time::Instant::now();
-                    for key in crate::windows_compositor::active_frame_keys() {
+                    let mut watchdog_keys = window_subscribed_at
+                        .keys()
+                        .cloned()
+                        .collect::<std::collections::HashSet<_>>();
+                    watchdog_keys.extend(crate::windows_compositor::active_frame_keys());
+                    for key in watchdog_keys {
                         if !generation.is_current() {
                             break;
                         }
-                        let Some(last) = crate::windows_compositor::last_frame_at(&key) else {
+                        let last_media_at = crate::windows_compositor::last_frame_at(&key)
+                            .or_else(|| window_subscribed_at.get(&key).copied());
+                        let Some(last_media_at) = last_media_at else {
                             continue;
                         };
-                        if now.duration_since(last) < NO_FRAME_RETIRE_AFTER {
+                        let silence = now.duration_since(last_media_at);
+                        if silence < NO_FRAME_RETIRE_AFTER {
+                            continue;
+                        }
+                        // A deliberately hidden/minimized remote window has
+                        // no decoded frames by design. Its liveness clock is
+                        // paused until it is visible again; only an on-screen
+                        // frozen window is a user-visible stale-window bug.
+                        if !crate::windows_compositor::window_is_on_screen(&key) {
+                            // Reset the source clock while hidden so a user
+                            // who restores a deliberately minimized window
+                            // receives a fresh resume grace period.
+                            window_subscribed_at.insert(key.clone(), now);
+                            crate::windows_compositor::drop_frame_timing(&key);
                             continue;
                         }
                         let (owner_identity, window_id) = &key;
-                        if window_publication_exists(&room, owner_identity, *window_id, &[]) {
+                        let publication_exists =
+                            window_publication_exists(&room, owner_identity, *window_id, &[]);
+                        if publication_exists
+                            && !stale_publication_should_retire(silence)
+                        {
                             log::debug!(
-                                "windows compositor feed: window {window_id} from '{owner_identity}' has no frames for >= {}s but the SFU still holds the publication; keeping the frozen window",
+                                "windows compositor feed: window {window_id} from '{owner_identity}' has no frames for >= {}s but the SFU still holds the publication; keeping the frozen window until the stale-source deadline",
                                 NO_FRAME_RETIRE_AFTER.as_secs()
                             );
                             continue;
                         }
-                        log::warn!(
-                            "windows compositor feed: no frames for window {window_id} from '{owner_identity}' for >= {}s and the SFU holds no publication; retiring frozen window",
-                            NO_FRAME_RETIRE_AFTER.as_secs()
-                        );
+                        if publication_exists {
+                            log::warn!(
+                                "windows compositor feed: window {window_id} from '{owner_identity}' has no frames for >= {}s while the SFU still holds the publication; retiring stale frozen window without sender negotiation",
+                                STALE_PUBLICATION_RETIRE_AFTER.as_secs()
+                            );
+                        } else {
+                            log::warn!(
+                                "windows compositor feed: no frames for window {window_id} from '{owner_identity}' for >= {}s and the SFU holds no publication; retiring frozen window",
+                                NO_FRAME_RETIRE_AFTER.as_secs()
+                            );
+                        }
                         crate::windows_compositor::remove_window(&app, key.clone()).await;
                         crate::windows_compositor::drop_frame_timing(&key);
+                        window_subscribed_at.remove(&key);
                     }
                     continue;
                 }
@@ -2342,6 +2428,16 @@ pub(crate) fn start_compositor_feed(
                         continue;
                     };
                     let track_name = video_track.name();
+                    if should_disable_native_camera_subscription(
+                        &track_name,
+                        native_camera_subscription_disabled(),
+                    ) {
+                        log::info!(
+                            "windows compositor feed: native camera subscription disabled; unsubscribing from '{track_name}'"
+                        );
+                        publication.set_subscribed(false);
+                        continue;
+                    }
                     // EXACT `petal-window-<id>` prefix only — camera slugs
                     // must never parse as window ids (see the publisher
                     // contract test), so remote cameras stay on the gallery
@@ -2356,6 +2452,13 @@ pub(crate) fn start_compositor_feed(
                     };
                     let owner_identity = participant.identity().to_string();
                     let key = (owner_identity.clone(), window_id);
+                    // Reset the receiver-side liveness clock for every new
+                    // subscription, including a republish. A replacement
+                    // that has not produced its first frame must get its own
+                    // full grace period rather than inheriting the old SID's
+                    // last-frame timestamp.
+                    window_subscribed_at.insert(key.clone(), std::time::Instant::now());
+                    crate::windows_compositor::drop_frame_timing(&key);
                     // Record the window's current publication so the
                     // TrackUnpublished arm's sid guard (`resolve_teardown` ←
                     // `window_publications()`) can recognize a genuine
@@ -2489,6 +2592,7 @@ pub(crate) fn start_compositor_feed(
                     spawn_windows_decode_loop(
                         video_track,
                         key,
+                        app.clone(),
                         source_kind == crate::transport::publisher::SharedSourceKind::DisplayRegion,
                         generation.clone(),
                         frames_this_interval.clone(),
@@ -2515,11 +2619,34 @@ pub(crate) fn start_compositor_feed(
                             continue;
                         }
                         let window_id = window.window_id;
+                        // The pinned SDK can fail to deliver the remote
+                        // TrackUnpublished event when the sharer's sender
+                        // teardown negotiation fails or races with a leave.
+                        // The sender still clears this authoritative Petal
+                        // metadata after stopping the share, so use that
+                        // update as a visual-teardown fallback. Restrict it
+                        // to metadata carrying Petal's title map; arbitrary
+                        // or legacy participant metadata must not close a
+                        // live compositor window.
+                        let has_title_metadata =
+                            crate::transport::publisher::has_shared_window_title_metadata(
+                                &metadata,
+                            );
                         let source_title =
                             crate::transport::publisher::shared_window_title_from_metadata(
                                 &metadata, window_id,
-                            )
-                            .unwrap_or_else(|| window.source_title.clone());
+                            );
+                        if has_title_metadata && source_title.is_none() {
+                            log::info!(
+                                "windows compositor feed: metadata no longer declares window {window_id} from '{owner_identity}', removing stale window"
+                            );
+                            let key = (owner_identity.clone(), window_id);
+                            crate::windows_compositor::remove_window(&app, key.clone()).await;
+                            window_subscribed_at.remove(&key);
+                            continue;
+                        }
+                        let source_title =
+                            source_title.unwrap_or_else(|| window.source_title.clone());
                         let source_kind =
                             crate::transport::publisher::shared_window_kind_from_metadata(
                                 &metadata, window_id,
@@ -2630,11 +2757,9 @@ pub(crate) fn start_compositor_feed(
                                 log::info!(
                                     "windows compositor feed: window {window_id} unpublished by '{owner_identity}' and the SFU holds no replacement, removing"
                                 );
-                                crate::windows_compositor::remove_window(
-                                    &app,
-                                    (owner_identity, window_id),
-                                )
-                                .await;
+                                let key = (owner_identity.clone(), window_id);
+                                crate::windows_compositor::remove_window(&app, key.clone()).await;
+                                window_subscribed_at.remove(&key);
                             }
                         }
                     }
@@ -2651,10 +2776,20 @@ pub(crate) fn start_compositor_feed(
                     let is_window_share =
                         crate::transport::publisher::window_id_from_track_name(&track_name)
                             .is_some();
-                    log::info!(
-                        "windows compositor feed: track published sid={} name='{track_name}' from '{owner_identity}' (window_share={is_window_share}); awaiting auto-subscribe",
-                        publication.sid()
-                    );
+                    if should_disable_native_camera_subscription(
+                        &track_name,
+                        native_camera_subscription_disabled(),
+                    ) {
+                        log::info!(
+                            "windows compositor feed: native camera subscription disabled; declining '{track_name}' from '{owner_identity}'"
+                        );
+                        publication.set_subscribed(false);
+                    } else {
+                        log::info!(
+                            "windows compositor feed: track published sid={} name='{track_name}' from '{owner_identity}' (window_share={is_window_share}); awaiting auto-subscribe",
+                            publication.sid()
+                        );
+                    }
                 }
                 RoomEvent::ParticipantDisconnected(participant) => {
                     let identity = participant.identity().to_string();
@@ -2664,13 +2799,17 @@ pub(crate) fn start_compositor_feed(
                     log::info!(
                         "windows compositor feed: participant '{identity}' disconnected; removing their compositor windows"
                     );
-                    crate::windows_compositor::remove_all_for(&app, identity).await;
+                    crate::windows_compositor::remove_all_for(&app, identity.clone()).await;
+                    forget_window_publications_for(&identity);
+                    window_subscribed_at.retain(|(owner, _), _| owner != &identity);
                 }
                 RoomEvent::Disconnected { reason } => {
                     log::warn!(
                         "windows compositor feed: room disconnected ({reason:?}); removing all compositor windows"
                     );
                     crate::windows_compositor::remove_all(&app).await;
+                    forget_all_window_publications();
+                    window_subscribed_at.clear();
                     // Fan out: the session performs its own teardown on the
                     // receiving end (move of the old disconnect watcher).
                     let _ = on_forced_disconnect.send(());
@@ -2679,6 +2818,7 @@ pub(crate) fn start_compositor_feed(
                 _ => {}
             }
         }
+        forget_all_window_publications();
     });
 }
 
@@ -2776,6 +2916,80 @@ fn quality_downgrade_due(consecutive_high_qp_samples: u32) -> bool {
     consecutive_high_qp_samples >= QUALITY_DOWNGRADE_SUSTAINED_SAMPLES
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiverQualityAction {
+    Keep,
+    SelectLow,
+    ProbeHigh,
+    SelectHigh,
+}
+
+#[derive(Debug)]
+struct ReceiverQualityController {
+    low_selected: bool,
+    low_fps_windows: u32,
+    next_probe_at: Option<std::time::Instant>,
+    probe_outstanding: bool,
+}
+
+impl Default for ReceiverQualityController {
+    fn default() -> Self {
+        Self {
+            low_selected: false,
+            low_fps_windows: 0,
+            next_probe_at: None,
+            probe_outstanding: false,
+        }
+    }
+}
+
+impl ReceiverQualityController {
+    fn is_low(&self) -> bool {
+        self.low_selected
+    }
+
+    fn force_low(&mut self, now: std::time::Instant) {
+        self.low_selected = true;
+        self.low_fps_windows = 0;
+        self.probe_outstanding = false;
+        self.next_probe_at = Some(now + STARVATION_PROBE_BASE);
+    }
+
+    fn observe_window(&mut self, fps: f64, now: std::time::Instant) -> ReceiverQualityAction {
+        if !self.low_selected {
+            if fps < RECEIVER_LOW_FPS_THRESHOLD {
+                self.low_fps_windows = self.low_fps_windows.saturating_add(1);
+            } else {
+                self.low_fps_windows = 0;
+            }
+            if self.low_fps_windows >= RECEIVER_LOW_FPS_WINDOWS {
+                self.low_selected = true;
+                self.low_fps_windows = 0;
+                self.next_probe_at = Some(now + STARVATION_PROBE_BASE);
+                return ReceiverQualityAction::SelectLow;
+            }
+            return ReceiverQualityAction::Keep;
+        }
+
+        if self.probe_outstanding {
+            self.probe_outstanding = false;
+            self.next_probe_at = Some(now + STARVATION_PROBE_BASE);
+            if fps >= RECEIVER_LOW_FPS_THRESHOLD {
+                self.low_selected = false;
+                self.next_probe_at = None;
+                return ReceiverQualityAction::SelectHigh;
+            }
+            return ReceiverQualityAction::Keep;
+        }
+
+        if self.next_probe_at.is_some_and(|at| now >= at) {
+            self.probe_outstanding = true;
+            return ReceiverQualityAction::ProbeHigh;
+        }
+        ReceiverQualityAction::Keep
+    }
+}
+
 /// macOS starvation decision: the Windows `starvation_action` liveness
 /// trigger, layered with the quality-based trigger above. A sustained-high-QP
 /// streak downgrades immediately (bypassing the liveness clock, since frames
@@ -2801,6 +3015,70 @@ fn starvation_action_for_macos(
     )
 }
 
+/// Log receiver-side WebRTC counters at the same cadence as the compositor
+/// health samples. These counters distinguish packets arriving from frames
+/// decoded/rendered, and expose loss, jitter, decoder pacing, keyframe
+/// requests, and the negotiated decoder implementation.
+fn log_inbound_video_webrtc_stats(label: &str, stats: &[RtcStats]) {
+    let mut found_inbound = false;
+    for stat in stats {
+        let RtcStats::InboundRtp(inbound) = stat else {
+            continue;
+        };
+        if inbound.stream.kind != "video" {
+            continue;
+        }
+        found_inbound = true;
+        let i = &inbound.inbound;
+        let codec = stats.iter().find_map(|stat| match stat {
+            RtcStats::Codec(codec) if codec.rtc.id == inbound.stream.codec_id => Some(codec),
+            _ => None,
+        });
+        log::debug!(
+            "[DEBUG-WEBRTC-STATS] subscriber: {} inbound ssrc={} mid='{}' codec_id='{}' codec='{}' fmtp='{}' remote_id='{}' packets_received={} packets_lost={} packets_discarded={} bytes_received={} jitter_ms={:.2} frames_received={} frames_decoded={} key_frames_decoded={} frames_rendered={} frames_dropped={} frame={}x{} fps={:.1} decode_ms={:.1} processing_ms={:.1} inter_frame_ms={:.1} freeze_count={} freeze_ms={:.1} pause_count={} pause_ms={:.1} nack={} fir={} pli={} retransmitted_packets={} decoder='{}' power_efficient={}",
+            label,
+            inbound.stream.ssrc,
+            i.mid,
+            inbound.stream.codec_id,
+            codec.map_or("", |codec| codec.codec.mime_type.as_str()),
+            codec.map_or("", |codec| codec.codec.sdp_fmtp_line.as_str()),
+            i.remote_id,
+            inbound.received.packets_received,
+            inbound.received.packets_lost,
+            i.packets_discarded,
+            i.bytes_received,
+            inbound.received.jitter * 1000.0,
+            i.frames_received,
+            i.frames_decoded,
+            i.key_frames_decoded,
+            i.frames_rendered,
+            i.frames_dropped,
+            i.frame_width,
+            i.frame_height,
+            i.frames_per_second,
+            i.total_decode_time * 1000.0,
+            i.total_processing_delay * 1000.0,
+            i.total_inter_frame_delay * 1000.0,
+            i.freeze_count,
+            i.total_freeze_duration * 1000.0,
+            i.pause_count,
+            i.total_pause_duration * 1000.0,
+            i.nack_count,
+            i.fir_count,
+            i.pli_count,
+            i.retransmitted_packets_received,
+            i.decoder_implementation,
+            i.power_efficient_decoder,
+        );
+    }
+    if !found_inbound {
+        log::warn!(
+            "[DEBUG-WEBRTC-STATS] subscriber: {} stats contained no inbound video record",
+            label
+        );
+    }
+}
+
 /// #694 (Windows sibling of #682): `cancel_token` ties this loop's lifetime
 /// to its window's teardown -- installed by the `TrackSubscribed` arm above
 /// via `windows_compositor::install_decode_loop_token`, which is also the
@@ -2817,6 +3095,7 @@ fn starvation_action_for_macos(
 fn spawn_windows_decode_loop(
     video_track: RemoteVideoTrack,
     key: crate::windows_compositor::WindowKey,
+    app: tauri::AppHandle,
     is_display_region: bool,
     generation: RoomGeneration,
     frames_this_interval: Arc<std::sync::atomic::AtomicU64>,
@@ -2824,6 +3103,7 @@ fn spawn_windows_decode_loop(
 ) {
     use std::sync::atomic::Ordering;
     tauri::async_runtime::spawn(async move {
+        let video_track_for_stats = video_track.clone();
         let rtc_track = video_track.rtc_track();
         let mut stream = NativeVideoStream::new(rtc_track.clone());
         let mut first_frame_logged = false;
@@ -2839,6 +3119,12 @@ fn spawn_windows_decode_loop(
         let mut starved = false;
         let mut starved_since: Option<std::time::Instant> = None;
         let mut consecutive_probe_failures: u32 = 0;
+        let mut quality_controller = ReceiverQualityController::default();
+        let mut quality_window_started = std::time::Instant::now();
+        let mut quality_window_frames: u64 = 0;
+        let mut last_webrtc_stats_poll = std::time::Instant::now();
+        let mut last_webrtc_stats_error_logged: Option<std::time::Instant> = None;
+        const WEBRTC_STATS_ERROR_LOG_THROTTLE: Duration = Duration::from_secs(60);
         // Set when a recovery probe is outstanding; the next stall-downgrade
         // counts as a probe failure, any other downgrade resets the count.
         let mut probe_outstanding = false;
@@ -2936,10 +3222,94 @@ fn spawn_windows_decode_loop(
             // own biased cancellation handling.
             let frame = tokio::select! {
                 _ = watchdog_tick.tick() => {
-                    if !first_frame_received {
+                    if first_frame_received {
+                        let now = std::time::Instant::now();
+                        if log::log_enabled!(log::Level::Debug)
+                            && now.duration_since(last_webrtc_stats_poll)
+                                >= QUALITY_STATS_POLL_INTERVAL
+                        {
+                            last_webrtc_stats_poll = now;
+                            match video_track_for_stats.get_stats().await {
+                                Ok(stats) => log_inbound_video_webrtc_stats(
+                                    &format!("window {key:?}"),
+                                    &stats,
+                                ),
+                                Err(error) => {
+                                    let should_log = last_webrtc_stats_error_logged
+                                        .is_none_or(|last| {
+                                            last.elapsed() >= WEBRTC_STATS_ERROR_LOG_THROTTLE
+                                        });
+                                    if should_log {
+                                        last_webrtc_stats_error_logged = Some(now);
+                                        log::warn!(
+                                            "[DEBUG-WEBRTC-STATS] subscriber: window {key:?} get_stats() failed: {error:?} (throttled to once per {}s)",
+                                            WEBRTC_STATS_ERROR_LOG_THROTTLE.as_secs()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        let window_elapsed = now.duration_since(quality_window_started);
+                        if window_elapsed >= QUALITY_STATS_POLL_INTERVAL {
+                            let fps = quality_window_frames as f64
+                                / window_elapsed.as_secs_f64().max(0.001);
+                            quality_window_started = now;
+                            quality_window_frames = 0;
+                            match quality_controller.observe_window(fps, now) {
+                                ReceiverQualityAction::SelectLow => {
+                                    if let Some(publication) = window_publications()
+                                        .lock_unpoisoned()
+                                        .get(&key)
+                                        .cloned()
+                                    {
+                                        publication.set_video_quality(VideoQuality::Low);
+                                    }
+                                    log::warn!(
+                                        "windows compositor feed: window {key:?} decoded {:.1} fps for {} consecutive {}s windows below {:.0} fps; selecting LOW locally (sender ladder unchanged)",
+                                        fps,
+                                        RECEIVER_LOW_FPS_WINDOWS,
+                                        QUALITY_STATS_POLL_INTERVAL.as_secs(),
+                                        RECEIVER_LOW_FPS_THRESHOLD,
+                                    );
+                                }
+                                ReceiverQualityAction::ProbeHigh => {
+                                    if let Some(publication) = window_publications()
+                                        .lock_unpoisoned()
+                                        .get(&key)
+                                        .cloned()
+                                    {
+                                        publication.set_video_quality(VideoQuality::High);
+                                    }
+                                    log::info!(
+                                        "windows compositor feed: window {key:?} probing HIGH after receiver-local LOW hold"
+                                    );
+                                }
+                                ReceiverQualityAction::SelectHigh => {
+                                    if let Some(publication) = window_publications()
+                                        .lock_unpoisoned()
+                                        .get(&key)
+                                        .cloned()
+                                    {
+                                        publication.set_video_quality(VideoQuality::High);
+                                    }
+                                    log::info!(
+                                        "windows compositor feed: window {key:?} recovered to HIGH after receiver-local probe"
+                                    );
+                                }
+                                ReceiverQualityAction::Keep => {}
+                            }
+                        }
+                    } else {
                         // Initial subscription negotiation in flight; nothing
                         // to starve yet. Do not downgrade a brand-new share
                         // whose first frame is merely slow to land.
+                        continue;
+                    }
+                    // Once the receiver-local controller has selected LOW,
+                    // its 30s probe owns quality changes. The older no-frame
+                    // liveness guard must not re-request HIGH on a faster,
+                    // conflicting cadence.
+                    if quality_controller.is_low() {
                         continue;
                     }
                     let since_last_frame = last_frame_seen.elapsed();
@@ -2963,7 +3333,9 @@ fn spawn_windows_decode_loop(
                             }
                             probe_outstanding = false;
                             starved = true;
-                            starved_since = Some(std::time::Instant::now());
+                            let downgrade_at = std::time::Instant::now();
+                            starved_since = Some(downgrade_at);
+                            quality_controller.force_low(downgrade_at);
                             // On-demand fetch: a sender republish replaces
                             // the registered publication, and the downgrade
                             // must ride the CURRENT one.
@@ -3042,8 +3414,11 @@ fn spawn_windows_decode_loop(
             // the stall clock here rather than after validation.
             if !first_frame_received {
                 first_frame_received = true;
+                quality_window_started = std::time::Instant::now();
+                quality_window_frames = 0;
             }
             last_frame_seen = std::time::Instant::now();
+            quality_window_frames = quality_window_frames.saturating_add(1);
             // #907 review finding 7: a probe is outstanding exactly when we
             // re-requested HIGH after a downgrade and are waiting to find out
             // whether it recovered. The FIRST frame received afterward is
@@ -3090,6 +3465,7 @@ fn spawn_windows_decode_loop(
             // starvation downgrade (black/frozen oscillation every few
             // seconds). Recovery from LOW happens via the watchdog's probe.
             if !starved
+                && !quality_controller.is_low()
                 && !is_display_region
                 && !crate::windows_compositor::decoded_frame_has_source_aspect_change(
                     publication_dimension_for_window(&key),
@@ -3116,6 +3492,13 @@ fn spawn_windows_decode_loop(
                 i420.height(),
             )
             .await;
+            crate::diagnostics::record_native_compositor_frame(
+                &app,
+                &key.0,
+                key.1,
+                i420.width(),
+                i420.height(),
+            );
             frames_this_interval.fetch_add(1, Ordering::Relaxed);
         }
     });
@@ -3380,15 +3763,34 @@ fn no_frame_decision(
     reconnecting: bool,
     already_held: bool,
 ) -> NoFrameDecision {
-    if track_muted || reconnecting || already_held {
+    let last_media_at = last_frame_at.unwrap_or(subscribed_at);
+    let silence = now.duration_since(last_media_at);
+    if reconnecting {
         return NoFrameDecision::Keep;
     }
-    let last_media_at = last_frame_at.unwrap_or(subscribed_at);
-    if now.duration_since(last_media_at) >= NO_FRAME_RETIRE_AFTER {
+    // A muted video publication may be an intentional transient state, but it
+    // cannot be allowed to suppress the hard stale-source deadline forever:
+    // a crashed source can remain advertised as muted with no sender able to
+    // negotiate an unpublish.
+    if track_muted && silence < STALE_PUBLICATION_RETIRE_AFTER {
+        return NoFrameDecision::Keep;
+    }
+    // A normal hold is one-shot so it does not repeatedly request repair, but
+    // it must become eligible again at the hard stale-publication deadline.
+    // Otherwise a source crash after the initial hold leaves the window held
+    // forever because the receive state is intentionally retained.
+    if already_held && silence < STALE_PUBLICATION_RETIRE_AFTER {
+        return NoFrameDecision::Keep;
+    }
+    if silence >= NO_FRAME_RETIRE_AFTER {
         NoFrameDecision::Retire
     } else {
         NoFrameDecision::Keep
     }
+}
+
+fn stale_publication_should_retire(silence: Duration) -> bool {
+    silence >= STALE_PUBLICATION_RETIRE_AFTER
 }
 
 /// Record that a frame arrived for `key`, or -- #682's item 3 -- signal that
@@ -3540,15 +3942,16 @@ fn retire_no_frame_windows(
     for (key, state) in retire {
         let window_id = key.window_id;
         // #627: decide BEFORE touching the receive state. A stall is not an
-        // ended share: while the SFU still holds a publication the share is
-        // real and merely not arriving, so hiding the window would make a live
-        // share vanish. Hold its last frame and KEEP the receive state, so this
-        // watchdog can re-arm if the stall later becomes a real disappearance.
-        // (Removing it made the watchdog one-shot and, combined with the
-        // registry drop, left the window with no teardown path at all.)
+        // ended share during the initial recovery window: while the SFU still
+        // holds a publication the share may be real and merely not arriving,
+        // so hiding it immediately would make a live share vanish. Hold its
+        // last frame and KEEP the receive state, but only until the hard
+        // stale-publication deadline. A source crash can leave the publication
+        // present with no sender able to negotiate its removal.
         let publication_exists =
             window_publication_exists(room, &key.owner_identity, window_id, &[]);
-        if publication_exists {
+        let silence = now.duration_since(state.last_frame_at.unwrap_or(state.subscribed_at));
+        if publication_exists && !stale_publication_should_retire(silence) {
             let held = crate::compositor::hold_window_last_frame(
                 app,
                 &key.owner_identity,
@@ -3581,12 +3984,20 @@ fn retire_no_frame_windows(
         if remove_window_state(states, &key).is_none() {
             continue;
         }
-        log::warn!(
-            "compositor feed: no frames for window {window_id} from '{}' for >= {}s and the SFU \
-             holds no publication; retiring frozen window",
-            state.owner_identity,
-            NO_FRAME_RETIRE_AFTER.as_secs()
-        );
+        if publication_exists {
+            log::warn!(
+                "compositor feed: no frames for window {window_id} from '{}' for >= {}s while the SFU still holds the publication; retiring stale frozen window without sender negotiation",
+                state.owner_identity,
+                STALE_PUBLICATION_RETIRE_AFTER.as_secs()
+            );
+        } else {
+            log::warn!(
+                "compositor feed: no frames for window {window_id} from '{}' for >= {}s and the SFU \
+                 holds no publication; retiring frozen window",
+                state.owner_identity,
+                NO_FRAME_RETIRE_AFTER.as_secs()
+            );
+        }
         crate::diagnostics::record_native_video_stream_state(
             app,
             &state.owner_identity,
@@ -3610,6 +4021,232 @@ fn retire_no_frame_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_camera_subscription_policy_only_matches_camera_tracks() {
+        assert!(should_disable_native_camera_subscription(
+            "petal-camera-alice",
+            true
+        ));
+        assert!(!should_disable_native_camera_subscription(
+            "petal-window-1",
+            true
+        ));
+        assert!(!should_disable_native_camera_subscription(
+            "petal-camera-alice",
+            false
+        ));
+    }
+
+    #[test]
+    fn receiver_quality_controller_isolated_per_receiver() {
+        let start = Instant::now();
+        let mut weak = ReceiverQualityController::default();
+        let mut capable = ReceiverQualityController::default();
+        for window in 0..3 {
+            assert_eq!(
+                weak.observe_window(8.0, start + Duration::from_secs(5 * window)),
+                if window == 2 {
+                    ReceiverQualityAction::SelectLow
+                } else {
+                    ReceiverQualityAction::Keep
+                }
+            );
+            assert_eq!(
+                capable.observe_window(30.0, start + Duration::from_secs(5 * window)),
+                ReceiverQualityAction::Keep
+            );
+        }
+        assert!(weak.is_low());
+        assert!(!capable.is_low());
+    }
+
+    #[test]
+    fn windows_media_lifecycle_acceptance_matrix_covers_weak_receiver_and_republish() {
+        let start = Instant::now();
+        let mut weak = ReceiverQualityController::default();
+        let mut capable = ReceiverQualityController::default();
+        for window in 0..3 {
+            assert_eq!(
+                weak.observe_window(8.0, start + Duration::from_secs(5 * window)),
+                if window == 2 {
+                    ReceiverQualityAction::SelectLow
+                } else {
+                    ReceiverQualityAction::Keep
+                }
+            );
+            assert_eq!(
+                capable.observe_window(30.0, start + Duration::from_secs(5 * window)),
+                ReceiverQualityAction::Keep
+            );
+        }
+        assert!(weak.is_low());
+        assert!(!capable.is_low());
+        assert_eq!(
+            teardown_decision(Some("old"), "old", true),
+            TeardownDecision::HoldForReplacement
+        );
+        assert_eq!(
+            teardown_decision(Some("old"), "old", false),
+            TeardownDecision::RemoveWindow
+        );
+        assert_eq!(
+            teardown_decision(Some("new"), "old", false),
+            TeardownDecision::IgnoreSuperseded
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_media_lifecycle_runtime_matrix_drives_terminal_events() {
+        // Drive the production lifecycle helpers in the same order as the
+        // Windows SDK events: delayed unpublish, replacement, terminal stop,
+        // then reconnect/leave. This is intentionally an executable matrix,
+        // not a source-shape assertion.
+        let states: Arc<Mutex<HashMap<ReceiveWindowKey, ReceiveWindowState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let key = ReceiveWindowKey::new("windows-runtime-owner".to_string(), 9001);
+        let old_cancel = CancellationToken::new();
+        insert_window_state(
+            &states,
+            key.clone(),
+            ReceiveWindowState::new(
+                "windows-runtime-owner".to_string(),
+                "petal-window-9001".to_string(),
+                VideoColorProfile::BT601_VIDEO,
+                Instant::now(),
+                old_cancel.clone(),
+            ),
+        );
+
+        // A transient unsubscribe holds the state; it is not a terminal
+        // removal while the SFU can still deliver a replacement publication.
+        assert_eq!(
+            teardown_decision(Some("sid-old"), "sid-old", true),
+            TeardownDecision::HoldForReplacement
+        );
+        let old_task = tokio::spawn({
+            let cancel = old_cancel.clone();
+            async move {
+                let mut stream = futures::stream::pending::<()>();
+                assert!(matches!(
+                    next_frame_or_cancelled(&mut stream, &cancel).await,
+                    FrameOrCancelled::Cancelled
+                ));
+            }
+        });
+        tokio::task::yield_now().await;
+
+        // The real replacement path inserts through this helper. It must
+        // cancel the old decoder even when no explicit remove event arrived.
+        let new_cancel = CancellationToken::new();
+        insert_window_state(
+            &states,
+            key.clone(),
+            ReceiveWindowState::new(
+                "windows-runtime-owner".to_string(),
+                "petal-window-9001-replacement".to_string(),
+                VideoColorProfile::BT601_VIDEO,
+                Instant::now(),
+                new_cancel.clone(),
+            ),
+        );
+        tokio::time::timeout(Duration::from_secs(2), old_task)
+            .await
+            .expect("replacement must cancel the old decoder")
+            .expect("old decoder task must not panic");
+        assert!(!new_cancel.is_cancelled());
+
+        // A genuine terminal unpublish removes the successor and cancels its
+        // decoder; a stale old event cannot remove it first.
+        assert_eq!(
+            teardown_decision(Some("sid-new"), "sid-old", false),
+            TeardownDecision::IgnoreSuperseded
+        );
+        assert_eq!(
+            teardown_decision(Some("sid-new"), "sid-new", false),
+            TeardownDecision::RemoveWindow
+        );
+        assert!(remove_window_state(&states, &key).is_some());
+        assert!(new_cancel.is_cancelled());
+        assert!(states.lock_unpoisoned().is_empty());
+
+        // Reconnect/leave drains every remaining decode loop through the same
+        // production helper used by the feed loop.
+        let mut handles = Vec::new();
+        for window_id in [9002_u32, 9003_u32] {
+            let reconnect_key =
+                ReceiveWindowKey::new("windows-runtime-owner".to_string(), window_id);
+            let cancel = CancellationToken::new();
+            insert_window_state(
+                &states,
+                reconnect_key,
+                ReceiveWindowState::new(
+                    "windows-runtime-owner".to_string(),
+                    format!("petal-window-{window_id}"),
+                    VideoColorProfile::BT601_VIDEO,
+                    Instant::now(),
+                    cancel.clone(),
+                ),
+            );
+            handles.push(tokio::spawn(async move {
+                let mut stream = futures::stream::pending::<()>();
+                assert!(matches!(
+                    next_frame_or_cancelled(&mut stream, &cancel).await,
+                    FrameOrCancelled::Cancelled
+                ));
+            }));
+        }
+        tokio::task::yield_now().await;
+        cancel_all_window_states(&states);
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("reconnect must terminate every decoder")
+                .expect("reconnect decoder task must not panic");
+        }
+        assert!(states.lock_unpoisoned().is_empty());
+    }
+
+    #[test]
+    fn receiver_quality_controller_requires_three_low_windows_and_probes_after_thirty_seconds() {
+        let start = Instant::now();
+        let mut controller = ReceiverQualityController::default();
+        for window in 0..2 {
+            assert_eq!(
+                controller.observe_window(9.9, start + Duration::from_secs(5 * window)),
+                ReceiverQualityAction::Keep
+            );
+            assert!(!controller.is_low());
+        }
+        assert_eq!(
+            controller.observe_window(9.9, start + Duration::from_secs(10)),
+            ReceiverQualityAction::SelectLow
+        );
+        assert!(controller.is_low());
+        assert_eq!(
+            controller.observe_window(30.0, start + Duration::from_secs(20)),
+            ReceiverQualityAction::Keep,
+            "HIGH must not be probed before the 30s hold"
+        );
+        assert_eq!(
+            controller.observe_window(30.0, start + Duration::from_secs(40)),
+            ReceiverQualityAction::ProbeHigh
+        );
+        assert_eq!(
+            controller.observe_window(9.0, start + Duration::from_secs(45)),
+            ReceiverQualityAction::Keep,
+            "a failed probe retains LOW"
+        );
+        assert_eq!(
+            controller.observe_window(30.0, start + Duration::from_secs(75)),
+            ReceiverQualityAction::ProbeHigh
+        );
+        assert_eq!(
+            controller.observe_window(30.0, start + Duration::from_secs(80)),
+            ReceiverQualityAction::SelectHigh
+        );
+        assert!(!controller.is_low());
+    }
 
     // ---- Starvation watchdog policy --------------------------------------
     //
@@ -3726,7 +4363,9 @@ mod tests {
             );
         }
         assert!(quality_downgrade_due(QUALITY_DOWNGRADE_SUSTAINED_SAMPLES));
-        assert!(quality_downgrade_due(QUALITY_DOWNGRADE_SUSTAINED_SAMPLES + 5));
+        assert!(quality_downgrade_due(
+            QUALITY_DOWNGRADE_SUSTAINED_SAMPLES + 5
+        ));
     }
 
     #[test]
@@ -3802,7 +4441,10 @@ mod tests {
                 _ = tokio::time::sleep(Duration::from_millis(33)) => { fast_ticks += 1; }
             }
         }
-        assert!(fast_ticks > 0, "the fast branch must actually be racing, or this test proves nothing");
+        assert!(
+            fast_ticks > 0,
+            "the fast branch must actually be racing, or this test proves nothing"
+        );
         assert!(
             watchdog_fires >= 3,
             "a persistent `Interval` created once outside the loop must keep firing on its own \
@@ -4295,6 +4937,27 @@ mod tests {
         let now = subscribed + NO_FRAME_RETIRE_AFTER + Duration::from_secs(1);
         assert_eq!(
             no_frame_decision(now, subscribed, Some(subscribed), false, false, false),
+            NoFrameDecision::Retire
+        );
+    }
+
+    #[test]
+    fn stale_publication_deadline_is_bounded_and_held_windows_rearm() {
+        assert!(!stale_publication_should_retire(
+            STALE_PUBLICATION_RETIRE_AFTER - Duration::from_millis(1)
+        ));
+        assert!(stale_publication_should_retire(
+            STALE_PUBLICATION_RETIRE_AFTER
+        ));
+
+        let subscribed = Instant::now();
+        let hard_stale = subscribed + STALE_PUBLICATION_RETIRE_AFTER;
+        assert_eq!(
+            no_frame_decision(hard_stale, subscribed, Some(subscribed), false, false, true),
+            NoFrameDecision::Retire
+        );
+        assert_eq!(
+            no_frame_decision(hard_stale, subscribed, Some(subscribed), true, false, false),
             NoFrameDecision::Retire
         );
     }

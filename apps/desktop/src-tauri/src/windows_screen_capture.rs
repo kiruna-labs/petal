@@ -520,6 +520,14 @@ impl TargetCaptureSession {
             state: self.state.clone(),
         }
     }
+
+    /// Test-cockpit fault injection: stop the native capture thread while the
+    /// production share publication remains registered, reproducing a
+    /// crash/missed-unpublish tail without terminating the test process.
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn request_stop_for_test(&self) {
+        self.signal.request_stop();
+    }
 }
 
 impl Drop for TargetCaptureSession {
@@ -905,6 +913,7 @@ fn run_pump_loop(
     let mut seen_delivered = state.frames_delivered.load(Ordering::Relaxed);
     let mut arrived_this_interval = 0u64;
     let mut delivered_this_interval = 0u64;
+    let mut last_health_log = Instant::now();
     let mut last_region_geometry_check: Option<Instant> = None;
     loop {
         let mut guard = signal.arrival_mutex.lock_unpoisoned();
@@ -935,14 +944,6 @@ fn run_pump_loop(
                 // a selector dragged back onto its owning display was never
                 // noticed and the share stayed paused forever (014A).
                 break;
-            }
-            if timed_out && wait_timeout == CAPTURE_HEALTH_INTERVAL {
-                log::info!(
-                    "windows screen capture: {arrived_this_interval} frame(s) arrived, {delivered_this_interval} delivered in the last {}s",
-                    CAPTURE_HEALTH_INTERVAL.as_secs()
-                );
-                arrived_this_interval = 0;
-                delivered_this_interval = 0;
             }
         }
         if signal.stop_requested() {
@@ -1041,26 +1042,34 @@ fn run_pump_loop(
             }
         }
 
-        if setup.region_paused {
-            continue;
+        if !setup.region_paused {
+            drain_and_push(
+                &setup.pool,
+                &setup.direct3d_device,
+                &setup.device,
+                &setup.context,
+                &mut setup.current_size,
+                &mut setup.staging,
+                &mut setup.roi_texture,
+                &mut setup.canvas_texture,
+                setup.region.as_ref(),
+                state,
+                on_frame,
+            );
         }
-
-        drain_and_push(
-            &setup.pool,
-            &setup.direct3d_device,
-            &setup.device,
-            &setup.context,
-            &mut setup.current_size,
-            &mut setup.staging,
-            &mut setup.roi_texture,
-            &mut setup.canvas_texture,
-            setup.region.as_ref(),
-            state,
-            on_frame,
-        );
         let delivered = state.frames_delivered.load(Ordering::Relaxed);
         delivered_this_interval += delivered - seen_delivered;
         seen_delivered = delivered;
+        if last_health_log.elapsed() >= CAPTURE_HEALTH_INTERVAL {
+            log::info!(
+                "windows screen capture: WGC deltas token={token} frame_arrived={arrived_this_interval} delivered={delivered_this_interval} dropped_before_delivery={} interval_s={}",
+                arrived_this_interval.saturating_sub(delivered_this_interval),
+                last_health_log.elapsed().as_secs_f64()
+            );
+            arrived_this_interval = 0;
+            delivered_this_interval = 0;
+            last_health_log = Instant::now();
+        }
     }
 
     let _ = setup.item.RemoveClosed(setup.closed_token);
