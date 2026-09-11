@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   FREEZE_WATCHDOG_TIMEOUT_MS,
+  FREEZE_WATCHDOG_POLL_MS,
   nextCameraFreezeState,
   isCameraFrameStale,
   framesDecodedFromStatsReport,
@@ -423,6 +424,83 @@ test('classifyCameraReceiveHealth emits only confirmed unhealthy buckets', () =>
       vector.name
     );
   }
+});
+
+test('the production six-second clock reports reduced cadence as an active stream and true silence as zero decode', () => {
+  // The gallery health interval is 15s but it is evaluated on a 2s poll, so a
+  // field run actually emits on this clock. 26 frames per 2s is ~13 fps:
+  // degraded, still progressing, and therefore NOT a stall.
+  const pollMs = 2_000;
+  const frames = [100, 126, 152, 178];
+  const intervalMs = 6_000;
+  let state = nextCameraDecodeHealthState(undefined, frames[0], 0, intervalMs).state;
+  for (const [index, at] of [2_000, 4_000].entries()) {
+    const tick = nextCameraDecodeHealthState(state, frames[index + 1], at, intervalMs);
+    assert.equal(tick.health, null, `no sample is due at ${at}ms`);
+    state = tick.state;
+  }
+
+  const due = nextCameraDecodeHealthState(state, frames[3], 6_000, intervalMs);
+  assert.ok(due.health, 'a sample must be due at 6000ms');
+  assert.equal(due.health.decodedFps, 13);
+  assert.equal(due.health.intervalMs, 6_000);
+  assert.equal(due.health.intervalSequence, 1);
+
+  const signal = classifyCameraReceiveHealth(due.health.decodedFps, false, false);
+  assert.equal(signal?.cadence, 'reduced');
+  const observation = composeCameraReceiveObservation(signal, false, false);
+  assert.equal(
+    observation.streamState,
+    'active',
+    'progressing reduced cadence must never be reported as stalled'
+  );
+  assert.equal(observation.degraded, true);
+
+  // The next six-second window makes no progress at all: that IS a stall, and
+  // it carries its own cause rather than a decoder fault.
+  const silent = nextCameraDecodeHealthState(
+    due.state,
+    frames[3],
+    6_000 + intervalMs,
+    intervalMs
+  );
+  assert.ok(silent.health);
+  assert.equal(silent.health.decodedFps, 0);
+  const silence = classifyCameraReceiveHealth(silent.health.decodedFps, false, false);
+  assert.equal(silence?.stallCause, 'decode_zero');
+  assert.equal(composeCameraReceiveObservation(silence, false, false).streamState, 'stalled');
+  // A zero-progress window is not yet the 30s stale watchdog's verdict.
+  assert.equal(
+    isCameraFrameStale({ lastFramesDecoded: frames[3], lastProgressAt: 6_000 }, 12_000),
+    false
+  );
+  assert.equal(
+    isCameraFrameStale({ lastFramesDecoded: frames[3], lastProgressAt: 6_000 }, 36_000),
+    true
+  );
+  assert.equal(pollMs, FREEZE_WATCHDOG_POLL_MS);
+});
+
+test('a decode counter that rolls back is treated as a replacement, not as a stall', () => {
+  // A receiver restart or a replacement publication reuses the identity while
+  // the cumulative counter starts over. Reading that as "no progress" would
+  // make the watchdog raise a stall for a perfectly healthy stream.
+  const seeded = nextCameraFreezeState(undefined, 500, 0);
+  const rolledBack = nextCameraFreezeState(seeded, 3, 1_000);
+  assert.deepEqual(rolledBack, { lastFramesDecoded: 3, lastProgressAt: 1_000 });
+  assert.equal(isCameraFrameStale(rolledBack, 20_000), false, 'a rollback must re-seed the clock');
+
+  // The interval sampler re-seeds too, and the sequence restarts so a reader
+  // cannot compare a post-replacement sample against the old publication.
+  const health = nextCameraDecodeHealthState(undefined, 500, 0, 5_000, 'TR_same');
+  const afterRollback = nextCameraDecodeHealthState(health.state, 3, 6_000, 5_000, 'TR_same');
+  assert.equal(afterRollback.health, null, 'the first reading after a rollback is a baseline');
+  assert.deepEqual(afterRollback.state, {
+    lastLoggedAt: 6_000,
+    lastLoggedFramesDecoded: 3,
+    intervalSequence: 0,
+    trackSid: 'TR_same'
+  });
 });
 
 // #126: 1,002 receive-side `camera-health` events were byte-identical because

@@ -1492,6 +1492,28 @@ mod tests {
         );
     }
 
+    /// A frame the WebRTC source refused and a frame that failed conversion
+    /// are different faults with different owners: one is adaptation/bandwidth
+    /// policy, the other is our own NV12 conversion. The log line is the only
+    /// place both are visible, so it must keep them separable.
+    #[test]
+    fn camera_publish_health_counts_source_rejections_apart_from_conversion_drops() {
+        let line = format_camera_publish_health(&CameraPublishHealth {
+            captured_frames: 600,
+            pushed_frames: 300,
+            dropped_push_frames: 0,
+            overwritten_latest_frames: 0,
+            capture_fps: 60.0,
+            source_rejected_frames: 300,
+            push_fps: 30.0,
+        });
+        assert!(line.contains("conversion_dropped=0"), "{line}");
+        assert!(line.contains("source_rejected=300"), "{line}");
+        assert!(!line.contains("conversion_dropped=300"), "{line}");
+        assert!(line.contains("capture_fps=60.0"), "{line}");
+        assert!(line.contains("push_fps=30.0"), "{line}");
+    }
+
     #[test]
     fn camera_publish_health_emits_only_for_classified_unhealthy_intervals() {
         let healthy = CameraPublishHealth {

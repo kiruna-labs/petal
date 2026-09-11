@@ -332,6 +332,21 @@ export function nextCameraDecodeHealthState(
       health: null
     };
   }
+  // A counter that went BACKWARDS is not the stream we were watching: the
+  // receiver restarted or a replacement reused the identity. Keeping the old
+  // baseline would read every later frame as "no progress" and manufacture a
+  // stall, so re-seed from the new reading instead.
+  if (previous && framesDecoded !== null && framesDecoded < previous.lastLoggedFramesDecoded) {
+    return {
+      state: {
+        lastLoggedAt: now,
+        lastLoggedFramesDecoded: framesDecoded,
+        intervalSequence: 0,
+        trackSid: previous.trackSid ?? trackSid
+      },
+      health: null
+    };
+  }
   const elapsedMs = now - previous.lastLoggedAt;
   if (elapsedMs < logIntervalMs) {
     return { state: previous, health: null };
@@ -379,6 +394,12 @@ export function nextCameraFreezeState(
 ): CameraFreezeState {
   if (framesDecoded === null) {
     return previous ?? { lastFramesDecoded: -1, lastProgressAt: now };
+  }
+  // Backwards progress is the same replacement signal as a SID change. Without
+  // this, a counter that reset mid-stream would look permanently frozen and the
+  // watchdog would raise a stall for a stream that is decoding normally.
+  if (previous && framesDecoded < previous.lastFramesDecoded) {
+    return { lastFramesDecoded: framesDecoded, lastProgressAt: now };
   }
   if (!previous || framesDecoded > previous.lastFramesDecoded) {
     return { lastFramesDecoded: framesDecoded, lastProgressAt: now };
