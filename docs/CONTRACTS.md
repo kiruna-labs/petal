@@ -370,6 +370,31 @@ Microphone track:
 | native | `petal-mic` | `Microphone` |
 | web | `petal-mic` | `Microphone` |
 
+Screen-audio companion tracks:
+
+- Display and region shares request the singleton logical source `SystemOutput`.
+  The companion is named `petal-window-audio-system` and uses the same value as
+  its LiveKit `stream` label.
+- Window shares request `Process(<owning pid>)` where the platform can resolve
+  and capture that process. The name and `stream` are
+  `petal-window-audio-process-<pid>`.
+- A room publishes at most one companion per logical source. System output
+  takes precedence over process sources; still-desired process sources resume
+  when the system source is released.
+- Native publishes these tracks with `TrackSource::ScreenshareAudio`, fixed
+  interleaved S16/48 kHz stereo 10 ms frames, and a bounded oldest-drop queue.
+  Audio capture/publication failure is best-effort: the visual share remains
+  active and the source is reported as unavailable in native diagnostics.
+- `SystemOutput` is not monitor-isolated, and process loopback is not
+  per-window-isolated. macOS ScreenCaptureKit and supported Windows process
+  loopback provide the broad source scopes above; no client should infer a
+  particular monitor or window from the track name.
+
+| Logical source | Track name / stream | LiveKit source |
+|---|---|---|
+| `SystemOutput` | `petal-window-audio-system` | `ScreenshareAudio` |
+| `Process(42)` (example PID) | `petal-window-audio-process-42` | `ScreenshareAudio` |
+
 **Audio publish options are NOT symmetric, and that is a known open question,
 not a contract.** Both sides negotiate Opus with in-band FEC (unconditional in
 both SDKs), but:

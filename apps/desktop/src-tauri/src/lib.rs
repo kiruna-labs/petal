@@ -175,7 +175,10 @@ mod windows_share_overlay;
 mod resilience_event;
 
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_screen_audio;
+#[cfg(target_os = "macos")]
 mod resilience;
+pub(crate) mod screen_audio;
 mod shutdown;
 pub mod video_color;
 // `rooms` (local room-metadata persistence, SPEC.md §4.6) is NOT macOS-only:
@@ -244,6 +247,8 @@ pub mod window_source;
 mod windows_audio_device;
 #[cfg(target_os = "windows")]
 mod windows_capture_target;
+#[cfg(target_os = "windows")]
+mod windows_screen_audio;
 // `pub` (not crate-private) so `examples/windows_share_source_probe.rs` — a
 // separate crate-root binary linking against `desktop_lib` — can drive the
 // WGC live-capture session directly, same pattern as `window_source`.
@@ -272,10 +277,10 @@ use menubar::{get_menubar_state, set_mic_muted, toggle_menubar_mic};
 #[cfg(target_os = "macos")]
 use menubar::{hide_menubar_popover, resize_menubar_popover};
 use network_cockpit::open_network_cockpit_window;
-use settings_window::open_settings_window;
 use rooms::{
     create_room, forget_room, list_room_occupancy, list_rooms, rename_room, reset_local_rooms,
 };
+use settings_window::open_settings_window;
 #[cfg(target_os = "macos")]
 use share_border::update_share_border_frame;
 use window_source::{ShareableWindow, WindowSourceError};
@@ -1063,6 +1068,7 @@ pub fn run() {
             diagnostics::get_event_journal,
             diagnostics::set_cockpit_open,
             diagnostics::record_video_stream_state,
+            diagnostics::record_camera_receiver_interval,
             logging::export_logs,
             logging::log_updater_event,
             logging::set_sentry_enabled,
@@ -1783,6 +1789,7 @@ pub fn run() {
             diagnostics::get_event_journal,
             diagnostics::set_cockpit_open,
             diagnostics::record_video_stream_state,
+            diagnostics::record_camera_receiver_interval,
             // Cross-platform commands: Export logs (archive + redaction are
             // neutral; the reveal uses Explorer) and the updater (plugin API;
             // on Windows the guard only checks the archive is a PE at all --

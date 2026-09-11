@@ -44,6 +44,7 @@ import {
   AI_TRACK_PREFIX,
   aiTrackName,
   isAiTrackName,
+  isScreenAudioTrackName,
   type AiChatMessage,
   type DrawMessage,
   type LatencyProbeMessage,
@@ -78,6 +79,13 @@ const contractFixture = JSON.parse(
     webJoinQuery: string;
   }>;
   micTrack: { trackName: string; source: string };
+  screenAudioTracks: Array<{
+    sourceKey: string;
+    trackName: string;
+    stream: string;
+    source: string;
+    pid?: number;
+  }>;
   windowTracks: Array<{ windowId: number; trackName: string }>;
   cameraTracks: Array<{ identity: string; trackName: string }>;
   cameraWindowIds: Array<{ trackName: string; windowId: number }>;
@@ -356,6 +364,16 @@ test('mic track name matches the shared native/web fixture', () => {
   assert.equal(MIC_TRACK_NAME, contractFixture.micTrack.trackName);
   assert.equal(MIC_TRACK_NAME, 'petal-mic');
   assert.equal(contractFixture.micTrack.source, 'microphone');
+});
+
+test('screen-audio track names and source labels match the shared fixture', () => {
+  for (const vector of contractFixture.screenAudioTracks) {
+    assert.equal(vector.trackName, vector.stream);
+    assert.equal(vector.source, 'screenshare_audio');
+    assert.ok(isScreenAudioTrackName(vector.trackName));
+  }
+  assert.equal(isScreenAudioTrackName('petal-mic'), false);
+  assert.equal(isScreenAudioTrackName('petal-window-42'), false);
 });
 
 test('camera track names match the shared native/web fixture', () => {

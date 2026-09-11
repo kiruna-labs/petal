@@ -11,14 +11,17 @@ use crate::logging::{
     CaptureLayoutDiagnostic, CaptureLayoutStage, DiagnosticRole, EncoderImplementationClass,
     GeometryBucket, PixelFormatClass, ScaleBucket, SentryDiagnosticEvent, SourceSelectionClass,
 };
+use crate::screen_audio::{AudioSourceKey, AudioSourceTransition};
 use crate::share_priority::SharePriority;
 use crate::time_util::now_us;
+use crate::transport::audio::ScreenAudioTrack;
 use crate::transport::publisher::{
     CaptureResolution, PostWakeEncoderFallbackRecovery, RoomConnection, ShareQuality,
     SharedSourceKind,
 };
 use crate::video_color::VideoColorProfile;
 use screencapturekit::stream::content_filter::SCContentFilter;
+use tauri::Manager;
 
 use super::{RoomGeneration, SessionInner, SessionState, ShareSessionError};
 
@@ -414,6 +417,10 @@ pub(super) struct ActiveShare {
     interaction_signal: Arc<InteractionSignal>,
     resolution: CaptureResolution,
     demand_resolution: Mutex<ViewerDemandResolutionState>,
+    /// The logical audio source elected for this visual share. Multiple
+    /// shares may point at one source; the session-level registry owns the
+    /// single capture/publication handle.
+    audio_source: Option<AudioSourceKey>,
     republish_intent: RepublishIntent,
     /// Whether remote peers may CONTROL this specific share. Seeded from the
     /// user's global default at share start, flippable mid-share from the
@@ -2957,6 +2964,447 @@ impl SessionState {
     }
 }
 
+const SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS: usize = 3;
+const SCREEN_AUDIO_FAILURE_RESTART_DELAY: Duration = Duration::from_millis(250);
+const SCREEN_AUDIO_FAILURE_POLL: Duration = Duration::from_millis(500);
+
+fn screen_audio_source_for_share(
+    source_kind: SharedSourceKind,
+    owner_pid: Option<i32>,
+) -> Option<AudioSourceKey> {
+    AudioSourceKey::for_share(
+        source_kind,
+        owner_pid.and_then(|pid| u32::try_from(pid).ok()),
+    )
+}
+
+async fn publish_screen_audio_if_needed(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    source: AudioSourceKey,
+) -> bool {
+    let (should_start, already_present) = {
+        let guard = state.inner.lock_unpoisoned();
+        let current_room = generation.is_current()
+            && guard
+                .joined
+                .as_ref()
+                .is_some_and(|joined| Arc::ptr_eq(&joined.room_connection, room_connection));
+        (
+            current_room
+                && guard.screen_audio_sources.is_active(source)
+                && !guard.screen_audio.contains_key(&source),
+            current_room && guard.screen_audio.contains_key(&source),
+        )
+    };
+    if !should_start {
+        return already_present;
+    }
+
+    let label = source.label();
+    let track = match ScreenAudioTrack::publish(room_connection.room(), source, move |error| {
+        log::warn!("screen-audio source '{label}' failed: {error}")
+    })
+    .await
+    {
+        Ok(track) => Arc::new(track),
+        Err(error) => {
+            // Audio is deliberately best-effort: the visual share remains
+            // healthy when a platform source or publication is unavailable.
+            log::warn!(
+                "session: screen-audio source '{}' unavailable; continuing video-only: {error}",
+                source.label()
+            );
+            return false;
+        }
+    };
+
+    let committed = {
+        let mut guard = state.inner.lock_unpoisoned();
+        let current_room = generation.is_current()
+            && guard
+                .joined
+                .as_ref()
+                .is_some_and(|joined| Arc::ptr_eq(&joined.room_connection, room_connection));
+        if current_room
+            && guard.screen_audio_sources.is_active(source)
+            && !guard.screen_audio.contains_key(&source)
+        {
+            guard.screen_audio.insert(source, track.clone());
+            true
+        } else {
+            false
+        }
+    };
+    if committed {
+        spawn_screen_audio_failure_monitor(app, state, generation.clone(), source, track);
+        true
+    } else {
+        track.stop().await;
+        false
+    }
+}
+
+async fn publish_screen_audio_with_retries(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    source: AudioSourceKey,
+) -> bool {
+    if crate::transport::audio::audio_disabled_by_env() {
+        return false;
+    }
+    for attempt in 1..=SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS {
+        if attempt > 1 {
+            tokio::time::sleep(SCREEN_AUDIO_FAILURE_RESTART_DELAY * (attempt as u32 - 1)).await;
+        }
+        let serial = state.lock_screen_audio_control().await;
+        if !generation.is_current()
+            || !state.is_in_room()
+            || !state.screen_audio_source_is_active(source)
+        {
+            drop(serial);
+            return false;
+        }
+        if publish_screen_audio_if_needed(app, state, room_connection, generation, source).await {
+            drop(serial);
+            if attempt > 1 {
+                log::info!(
+                    "session: screen-audio source '{}' started on retry {attempt}/{SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS}",
+                    source.label()
+                );
+            }
+            return true;
+        }
+        drop(serial);
+    }
+    log::warn!(
+        "session: screen-audio source '{}' unavailable after {SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS} start attempts; continuing video-only",
+        source.label()
+    );
+    false
+}
+
+async fn apply_screen_audio_transitions(
+    state: &SessionState,
+    transitions: Vec<AudioSourceTransition>,
+) -> Vec<AudioSourceKey> {
+    let mut starts = Vec::new();
+    for transition in transitions {
+        match transition {
+            AudioSourceTransition::Stop(source) => {
+                let track = state.inner.lock_unpoisoned().screen_audio.remove(&source);
+                if let Some(track) = track {
+                    track.stop().await;
+                }
+            }
+            AudioSourceTransition::Start(source) => starts.push(source),
+        }
+    }
+    starts
+}
+
+async fn acquire_screen_audio_source(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    share_id: u64,
+    source: AudioSourceKey,
+) {
+    if crate::transport::audio::audio_disabled_by_env() {
+        log::debug!(
+            "session: PETAL_DISABLE_AUDIO set -- skipping screen-audio source '{}'",
+            source.label()
+        );
+        return;
+    }
+    let serial = state.lock_screen_audio_control().await;
+    let transitions = {
+        let mut guard = state.inner.lock_unpoisoned();
+        let Some(joined) = guard.joined.as_ref() else {
+            drop(serial);
+            return;
+        };
+        if !generation.is_current() {
+            drop(serial);
+            return;
+        };
+        if !Arc::ptr_eq(&joined.room_connection, room_connection) {
+            drop(serial);
+            return;
+        }
+        guard.screen_audio_sources.acquire(share_id, source)
+    };
+    let starts = apply_screen_audio_transitions(state, transitions).await;
+    let source_was_started = starts.contains(&source);
+    drop(serial);
+
+    // Start only after all old owners have been stopped. Retries acquire the
+    // control lock per attempt so a stop can cancel the backoff promptly.
+    for start in starts {
+        let _ =
+            publish_screen_audio_with_retries(app, state, room_connection, generation, start).await;
+    }
+    if !source_was_started
+        && generation.is_current()
+        && state.screen_audio_source_is_active(source)
+        && !state.screen_audio_handle_present(source)
+    {
+        // A duplicate acquisition may not produce a Start transition, but it
+        // is still a useful bounded retry after an earlier failed start. A
+        // newly-started source already consumed its retry budget above.
+        let _ = publish_screen_audio_with_retries(app, state, room_connection, generation, source)
+            .await;
+    }
+}
+
+async fn ensure_screen_audio_source(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    source: AudioSourceKey,
+) {
+    let _ =
+        publish_screen_audio_with_retries(app, state, room_connection, generation, source).await;
+}
+
+async fn release_screen_audio_source(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: Option<&Arc<RoomConnection>>,
+    share_id: u64,
+    source: AudioSourceKey,
+) {
+    let generation = state.current_room_generation();
+    let serial = state.lock_screen_audio_control().await;
+    let transitions = {
+        let mut guard = state.inner.lock_unpoisoned();
+        let wrong_room = match room_connection {
+            Some(room_connection) => !guard
+                .joined
+                .as_ref()
+                .is_some_and(|joined| Arc::ptr_eq(&joined.room_connection, room_connection)),
+            None => guard.joined.is_some(),
+        };
+        if wrong_room {
+            drop(serial);
+            return;
+        }
+        if guard.screen_audio_sources.source_for_share(share_id) != Some(source) {
+            drop(serial);
+            return;
+        }
+        guard.screen_audio_sources.release(share_id)
+    };
+    if let Some(room_connection) = room_connection {
+        let starts = apply_screen_audio_transitions(state, transitions).await;
+        drop(serial);
+        for start in starts {
+            let _ =
+                publish_screen_audio_with_retries(app, state, room_connection, &generation, start)
+                    .await;
+        }
+    } else {
+        // The room may already have been detached by a forced-disconnect
+        // cleanup. Do not retain a native owner just because its late visual
+        // start callback arrived after that detach; no new source may start
+        // without a current room.
+        let tracks = {
+            let mut guard = state.inner.lock_unpoisoned();
+            std::mem::take(&mut guard.screen_audio)
+        };
+        for (_, track) in tracks {
+            track.stop().await;
+        }
+        drop(serial);
+    }
+}
+
+fn spawn_screen_audio_release(
+    app: &tauri::AppHandle,
+    room_connection: Option<Arc<RoomConnection>>,
+    share_id: u64,
+    source: AudioSourceKey,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app.try_state::<SessionState>() else {
+            return;
+        };
+        release_screen_audio_source(
+            &app,
+            state.inner(),
+            room_connection.as_ref(),
+            share_id,
+            source,
+        )
+        .await;
+    });
+}
+
+fn spawn_screen_audio_failure_monitor(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    generation: RoomGeneration,
+    source: AudioSourceKey,
+    expected: Arc<ScreenAudioTrack>,
+) {
+    let app = app.clone();
+    let _ = state;
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(SCREEN_AUDIO_FAILURE_POLL);
+        loop {
+            interval.tick().await;
+            let Some(state) = app.try_state::<SessionState>() else {
+                return;
+            };
+            if !generation.is_current()
+                || !state.screen_audio_is_current(source, &expected)
+                || expected.is_stopped()
+            {
+                return;
+            }
+            if !expected.capture_failed() {
+                continue;
+            }
+            restart_failed_screen_audio_source(
+                &app,
+                state.inner(),
+                generation.clone(),
+                source,
+                expected.clone(),
+            )
+            .await;
+            return;
+        }
+    });
+}
+
+async fn restart_failed_screen_audio_source(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    generation: RoomGeneration,
+    source: AudioSourceKey,
+    expected: Arc<ScreenAudioTrack>,
+) {
+    let serial = state.lock_screen_audio_control().await;
+    let (old, room_connection) = {
+        let mut guard = state.inner.lock_unpoisoned();
+        let Some(current) = guard.screen_audio.get(&source) else {
+            drop(serial);
+            return;
+        };
+        if !generation.is_current()
+            || !Arc::ptr_eq(current, &expected)
+            || !current.capture_failed()
+            || !guard.screen_audio_sources.is_active(source)
+        {
+            drop(serial);
+            return;
+        }
+        let Some(room_connection) = guard
+            .joined
+            .as_ref()
+            .map(|joined| joined.room_connection.clone())
+        else {
+            drop(serial);
+            return;
+        };
+        let old = guard
+            .screen_audio
+            .remove(&source)
+            .expect("screen audio handle present");
+        (old, room_connection)
+    };
+    // Keep the source-operation lock through teardown. Otherwise a concurrent
+    // handoff can publish a replacement while the failed track is still
+    // unpublishing/stopping.
+    let _ = old.stop().await;
+    drop(serial);
+
+    for attempt in 1..=SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS {
+        if attempt > 1 {
+            tokio::time::sleep(SCREEN_AUDIO_FAILURE_RESTART_DELAY * (attempt as u32 - 1)).await;
+        }
+        let serial = state.lock_screen_audio_control().await;
+        let should_try = {
+            let guard = state.inner.lock_unpoisoned();
+            generation.is_current()
+                && guard.joined.as_ref().is_some_and(|joined| {
+                    Arc::ptr_eq(&joined.room_connection, &room_connection)
+                        && guard.screen_audio_sources.is_active(source)
+                        && !guard.screen_audio.contains_key(&source)
+                })
+        };
+        if !should_try {
+            drop(serial);
+            return;
+        }
+        let label = source.label();
+        let result = ScreenAudioTrack::publish(room_connection.room(), source, move |error| {
+            log::warn!("screen-audio source '{label}' failed: {error}")
+        })
+        .await;
+        match result {
+            Ok(track) => {
+                let track = Arc::new(track);
+                let committed = {
+                    let mut guard = state.inner.lock_unpoisoned();
+                    let current_room = generation.is_current()
+                        && guard.joined.as_ref().is_some_and(|joined| {
+                            Arc::ptr_eq(&joined.room_connection, &room_connection)
+                        });
+                    if current_room
+                        && guard.screen_audio_sources.is_active(source)
+                        && !guard.screen_audio.contains_key(&source)
+                    {
+                        guard.screen_audio.insert(source, track.clone());
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if committed {
+                    drop(serial);
+                    log::info!(
+                        "session: restarted failed screen-audio source '{}' on attempt {attempt}/{SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS}",
+                        source.label()
+                    );
+                    spawn_screen_audio_failure_monitor(
+                        app,
+                        state,
+                        generation.clone(),
+                        source,
+                        track,
+                    );
+                } else {
+                    // The failed commit still published a native/LiveKit
+                    // resource; serialize its teardown with the next start.
+                    track.stop().await;
+                    drop(serial);
+                }
+                return;
+            }
+            Err(error) => {
+                drop(serial);
+                log::warn!(
+                    "session: screen-audio source '{}' restart attempt {attempt}/{SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS} failed: {error}",
+                    source.label()
+                );
+            }
+        }
+    }
+    log::error!(
+        "session: screen-audio source '{}' restart exhausted; continuing video-only",
+        source.label()
+    );
+}
+
 /// Start sharing `window_id`: requires this process to already be joined to
 /// a room (`join_room` -- see module doc comment; this NO LONGER connects a
 /// room lazily on first share), starts a real `SCStream` capture via
@@ -4264,6 +4712,10 @@ async fn start_share_with_capture_source(
         };
         joined.room_connection.clone()
     };
+    // Capture the room generation alongside the connection. The visual start
+    // may await capture and signaling for seconds; a leave/rejoin during that
+    // gap must not commit the old share or start its audio in the new room.
+    let share_generation = state.current_room_generation();
 
     let priority_value = crate::share_priority::current();
     let priority = Arc::new(Mutex::new(priority_value));
@@ -4569,6 +5021,26 @@ async fn start_share_with_capture_source(
         }),
     );
 
+    // Audio is a companion to a healthy visual publication, never a
+    // prerequisite for it. Register the logical source only now so a failed
+    // native audio start cannot make the video share fail.
+    let audio_source = screen_audio_source_for_share(source_kind, owner_pid);
+    if let Some(source) = audio_source {
+        acquire_screen_audio_source(
+            &app,
+            state,
+            &room_connection,
+            &share_generation,
+            started_seq,
+            source,
+        )
+        .await;
+    } else if source_kind == SharedSourceKind::Window {
+        log::warn!(
+            "session: share {window_id} has no valid owner process for screen audio; continuing video-only"
+        );
+    }
+
     let published = Arc::new(Mutex::new(Arc::new(published)));
     let republish_intent = Arc::new(RepublishCoordinator::default());
     let interaction_signal = Arc::new(InteractionSignal::default());
@@ -4635,10 +5107,24 @@ async fn start_share_with_capture_source(
         resolution,
         demand_resolution: Mutex::new(ViewerDemandResolutionState::default()),
         republish_intent,
+        audio_source,
         url_refresh,
     });
-    let window_id_to_demote = layout_gate.activate_if_valid(|| {
+    enum ShareActivation {
+        Active(Option<u32>),
+        StaleRoom,
+    }
+
+    let activation = layout_gate.activate_if_valid(|| {
         let mut guard = state.inner.lock_unpoisoned();
+        let current_room = share_generation.is_current()
+            && guard
+                .joined
+                .as_ref()
+                .is_some_and(|joined| Arc::ptr_eq(&joined.room_connection, &room_connection));
+        if !current_room {
+            return ShareActivation::StaleRoom;
+        }
         let previously_focused = guard.focused_window();
         guard.shares.insert(
             window_id,
@@ -4663,11 +5149,12 @@ async fn start_share_with_capture_source(
         if let Some(demote_id) = demote {
             seed_startup_grace_demand(&mut guard, demote_id, Instant::now());
         }
-        demote
+        ShareActivation::Active(demote)
     });
-    let window_id_to_demote = match window_id_to_demote {
-        Some(demote) => demote,
-        None => {
+    let layout_invalid = activation.is_none();
+    let window_id_to_demote = match activation {
+        Some(ShareActivation::Active(demote)) => demote,
+        None | Some(ShareActivation::StaleRoom) => {
             let candidate = candidate
                 .take()
                 .expect("failed activation preserves active share candidate");
@@ -4677,6 +5164,16 @@ async fn start_share_with_capture_source(
                 url_refresh.stop();
             }
             unregister_interaction_signal(window_id, &candidate.interaction_signal);
+            if let Some(source) = candidate.audio_source {
+                release_screen_audio_source(
+                    &app,
+                    state,
+                    Some(&room_connection),
+                    started_seq,
+                    source,
+                )
+                .await;
+            }
             let published = candidate.published.lock_unpoisoned().clone();
             let _ = published.unpublish().await;
             let _ = stop_capture_with_timeout(
@@ -4690,10 +5187,13 @@ async fn start_share_with_capture_source(
                 room_connection.clear_shared_window_title_for_generation(window_id, started_seq)
             })
             .await;
-            emit_capture_layout_invalid(diagnostic_source, CaptureLayoutStage::Publish);
-            return Err(ShareSessionError::Capture(
-                crate::capture::CAPTURE_LAYOUT_INVALID.to_string(),
-            ));
+            if layout_invalid {
+                emit_capture_layout_invalid(diagnostic_source, CaptureLayoutStage::Publish);
+                return Err(ShareSessionError::Capture(
+                    crate::capture::CAPTURE_LAYOUT_INVALID.to_string(),
+                ));
+            }
+            return Err(ShareSessionError::NotInRoom);
         }
     };
     if crate::region_window::resolve(window_id).is_some() {
@@ -4731,11 +5231,7 @@ async fn start_share_with_capture_source(
 /// against its latched display, persist the state, and emit `region-warning`
 /// with the selector's native label only on transitions. The frontend banner
 /// routes by that label because capture tokens diverge from selector numbers.
-fn sync_region_outside_display(
-    app: &tauri::AppHandle,
-    window_id: u32,
-    last: &mut Option<bool>,
-) {
+fn sync_region_outside_display(app: &tauri::AppHandle, window_id: u32, last: &mut Option<bool>) {
     use tauri::Emitter;
 
     let Some(source) = crate::region_window::resolve(window_id) else {
@@ -4837,9 +5333,7 @@ fn spawn_share_pump(
         // Crisp mode (#384 Phase 1 spike) -- see crisp_still.rs.
         let mut crisp_still_gate = crate::crisp_still::StillSendGate::default();
         let mut adaptive_idle_tick = AdaptiveIdleTick::default();
-        let mut region_tick = tokio::time::interval(
-            crate::region_window::REGION_GEOMETRY_INTERVAL,
-        );
+        let mut region_tick = tokio::time::interval(crate::region_window::REGION_GEOMETRY_INTERVAL);
         region_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let is_region_share = crate::region_window::resolve(window_id).is_some();
         // Outside-display warning lifecycle (Windows parity): deduplicated at
@@ -4950,11 +5444,7 @@ fn spawn_share_pump(
                         );
                     }
                 }
-                sync_region_outside_display(
-                    &pump_app,
-                    window_id,
-                    &mut last_region_warning,
-                );
+                sync_region_outside_display(&pump_app, window_id, &mut last_region_warning);
             }
 
             let mut interaction_pull_epoch = None;
@@ -6214,11 +6704,11 @@ fn spawn_pump_failure_recovery(
                     let source_title = current.source_title.clone();
                     let border_color = current.border_color.clone();
                     let resolution = current.resolution;
+                    let audio_source = current.audio_source;
                     // Preserve the per-share lock across a republish: re-seeding
                     // from the global default here would silently undo a
                     // mid-share denial on the next quality/wake restart.
-                    let allow_remote_control =
-                        current.allow_remote_control.load(Ordering::Relaxed);
+                    let allow_remote_control = current.allow_remote_control.load(Ordering::Relaxed);
                     let demand_resolution = *current.demand_resolution.lock_unpoisoned();
                     guard.shares.insert(
                         window_id,
@@ -6246,6 +6736,7 @@ fn spawn_pump_failure_recovery(
                             resolution,
                             demand_resolution: Mutex::new(demand_resolution),
                             republish_intent: snapshot.republish_intent.clone(),
+                            audio_source,
                             url_refresh: new_url_refresh.take(),
                         },
                     );
@@ -6509,6 +7000,20 @@ async fn stop_share_with_started_seq_inner(
     // only recorded once we know a real share actually existed and was
     // removed, not on the idempotent no-op path above.
     state.set_last_toggled_window(window_id);
+
+    // Release the logical audio reference independently. Audio unpublish/native
+    // stop can cross an async or platform boundary; visual teardown must not
+    // wait for that signaling and must proceed to remove the remote window.
+    // The release task still takes the same source-control lock, so a new
+    // share cannot race an in-flight source handoff.
+    if let Some(source) = share.audio_source {
+        spawn_screen_audio_release(
+            app,
+            room_connection_at_removal.clone(),
+            share.started_seq,
+            source,
+        );
+    }
 
     // Step-bracketing (issue #13): one line around EACH teardown step, so a
     // future crash's last logged line pinpoints the fatal step -- this
@@ -6793,6 +7298,110 @@ async fn restart_active_shares_after_wake_with<
                     log::error!("session: post-wake restart of share {window_id} failed: {error}");
                     on_terminal_failure(window_id, error);
                     break;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn repair_screen_audio_publications_after_reconnect(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    reconnect_guard: ReconnectRepairGuard,
+) {
+    let Some((room_connection, sources)) = state.screen_audio_repair_snapshot(&reconnect_guard)
+    else {
+        return;
+    };
+    for (source, track) in sources {
+        if !state.reconnect_repair_guard_is_current(&reconnect_guard) {
+            log::info!("session: cancelling stale screen-audio reconnect repair");
+            return;
+        }
+        let Some(track) = track else {
+            // A prior native start may have failed while the visual share
+            // stayed alive. Reconnect is a cheap, generation-gated chance to
+            // restore the desired source without touching video.
+            ensure_screen_audio_source(
+                app,
+                state,
+                &room_connection,
+                &reconnect_guard.room_generation,
+                source,
+            )
+            .await;
+            continue;
+        };
+        if track.capture_failed() {
+            restart_failed_screen_audio_source(
+                app,
+                state,
+                reconnect_guard.room_generation.clone(),
+                source,
+                track,
+            )
+            .await;
+            continue;
+        }
+
+        // Stop/restart and reconnect repair share the same source map. Hold
+        // the control lock across the health check and any republish so a
+        // concurrent stop cannot publish the old track after removing it.
+        let _serial = state.lock_screen_audio_control().await;
+        if !state.reconnect_repair_guard_is_current(&reconnect_guard)
+            || !state.screen_audio_is_current(source, &track)
+            || !state.screen_audio_source_is_active(source)
+        {
+            return;
+        }
+        if track.capture_failed() {
+            drop(_serial);
+            restart_failed_screen_audio_source(
+                app,
+                state,
+                reconnect_guard.room_generation.clone(),
+                source,
+                track,
+            )
+            .await;
+            continue;
+        }
+        let current_sid = track.track_sid().to_string();
+        let expected_name = source.track_name();
+        let publications: Vec<(String, String)> = room_connection
+            .room()
+            .local_participant()
+            .track_publications()
+            .values()
+            .map(|publication| (publication.sid().to_string(), publication.name()))
+            .collect();
+        match crate::screen_audio::screen_audio_publication_health(
+            &current_sid,
+            &expected_name,
+            publications
+                .iter()
+                .map(|(sid, name)| (sid.as_str(), name.as_str())),
+        ) {
+            crate::screen_audio::ScreenAudioPublicationHealth::CurrentSidPresent => {}
+            crate::screen_audio::ScreenAudioPublicationHealth::ReplacementAlreadyPresent => {
+                // The SDK already created the stable-name replacement. Do not
+                // publish a second copy merely because the tracked SID is old.
+                log::info!(
+                    "session: screen-audio source '{}' reconnect publication already present by name",
+                    source.label()
+                );
+            }
+            crate::screen_audio::ScreenAudioPublicationHealth::Missing => {
+                if let Err(error) = track.republish_after_reconnect().await {
+                    log::warn!(
+                        "session: screen-audio source '{}' reconnect publication repair failed: {error}",
+                        source.label()
+                    );
+                } else {
+                    log::info!(
+                        "session: screen-audio source '{}' reconnect publication repaired",
+                        source.label()
+                    );
                 }
             }
         }
@@ -9015,7 +9624,10 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
     #[test]
     fn effective_title_prefers_live_and_falls_back_to_start() {
         assert_eq!(
-            effective_title(Some("Live Tab — Chrome".to_string()), Some("Start Tab — Chrome")),
+            effective_title(
+                Some("Live Tab — Chrome".to_string()),
+                Some("Start Tab — Chrome")
+            ),
             Some("Live Tab — Chrome".to_string()),
             "a live title must win so the freshness-skip check can see a real change"
         );

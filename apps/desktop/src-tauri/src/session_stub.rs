@@ -6,6 +6,7 @@
 //! share publication to that connection; the receiver compositor and the
 //! share feed live in `windows_compositor`/`transport::subscriber`.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::remote_control_core::RemoteControlPolicy;
@@ -15,7 +16,9 @@ use crate::camera_session::ActiveCamera;
 // Re-exported so `crate::session::RoomGeneration` keeps working for the many
 // external consumers that imported it through the session module.
 pub(crate) use crate::room_generation::RoomGeneration;
+use crate::screen_audio::{AudioSourceKey, AudioSourceRegistry, AudioSourceTransition};
 use crate::sync_ext::MutexExt;
+use crate::transport::audio::ScreenAudioTrack;
 use crate::transport::publisher::{RoomConnection, SharedSourceKind};
 use crate::video_color::VideoColorProfile;
 use crate::windows_capture_target::TargetKind;
@@ -146,6 +149,11 @@ struct ActiveShare {
     /// normalization is a ratio (scale-invariant), and remote control (the
     /// logical-point consumer on macOS) does not exist on Windows yet.
     frame: Mutex<crate::platform::cg::WindowFrame>,
+    /// Logical companion source for this share, if its target exposes one.
+    audio_source: Option<AudioSourceKey>,
+    /// Unique registry owner. It must not be the reusable window token: a
+    /// detached stop from an older share can otherwise release a replacement.
+    audio_share_id: u64,
 }
 
 #[derive(Clone)]
@@ -163,6 +171,8 @@ struct MediaResources {
     camera: Option<ActiveCamera>,
     microphone: Option<Arc<crate::transport::audio::MicTrack>>,
     playout: Option<crate::transport::audio::SpeakerPlayout>,
+    screen_audio_sources: AudioSourceRegistry,
+    screen_audio: BTreeMap<AudioSourceKey, Arc<ScreenAudioTrack>>,
     shares: Vec<ActiveShare>,
 }
 
@@ -207,6 +217,9 @@ pub struct SessionState {
     camera_control_lock: tokio::sync::Mutex<()>,
     share_control_lock: tokio::sync::Mutex<()>,
     audio_device_lock: tokio::sync::Mutex<()>,
+    /// Serializes screen-audio source handoffs and publication starts; the
+    /// joined-state mutex is never held across native/LiveKit awaits.
+    screen_audio_control_lock: tokio::sync::Mutex<()>,
     /// `RemoteControlPolicy::as_u8`; live gate + the default "on" restores
     /// to. Same shape as the macOS session (session/mod.rs).
     remote_control_policy: AtomicU8,
@@ -217,6 +230,7 @@ pub struct SessionState {
     /// Ensures at most one camera self-heal loop runs at a time (see
     /// `camera_session::ensure_camera_published`).
     camera_heal_active: AtomicBool,
+    next_audio_share_id: AtomicU64,
 }
 
 impl Default for SessionState {
@@ -228,12 +242,14 @@ impl Default for SessionState {
             camera_control_lock: tokio::sync::Mutex::new(()),
             share_control_lock: tokio::sync::Mutex::new(()),
             audio_device_lock: tokio::sync::Mutex::new(()),
+            screen_audio_control_lock: tokio::sync::Mutex::new(()),
             remote_control_policy: AtomicU8::new(RemoteControlPolicy::default().as_u8()),
             remote_control_default_policy: AtomicU8::new(RemoteControlPolicy::default().as_u8()),
             desired_mic_muted: AtomicBool::new(true),
             desired_camera_on: AtomicBool::new(false),
             room_generation: Arc::new(AtomicU64::new(0)),
             camera_heal_active: AtomicBool::new(false),
+            next_audio_share_id: AtomicU64::new(0),
         }
     }
 }
@@ -251,12 +267,68 @@ impl SessionState {
         )
     }
 
+    fn next_audio_share_id(&self) -> u64 {
+        self.next_audio_share_id.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     pub(crate) fn invalidate_room_generation(&self) {
         self.room_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub(crate) fn is_in_room(&self) -> bool {
         self.joined.lock_unpoisoned().is_some()
+    }
+
+    pub(crate) async fn lock_screen_audio_control(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.screen_audio_control_lock.lock().await
+    }
+
+    pub(crate) fn screen_audio_repair_snapshot(
+        &self,
+        reconnect_guard: &RoomGeneration,
+    ) -> Option<(
+        Arc<RoomConnection>,
+        Vec<(AudioSourceKey, Option<Arc<ScreenAudioTrack>>)>,
+    )> {
+        let joined = self.joined.lock_unpoisoned();
+        let session = joined.as_ref()?;
+        if !reconnect_guard.is_current() {
+            return None;
+        }
+        let sources = session
+            .media
+            .screen_audio_sources
+            .active_source_keys()
+            .into_iter()
+            .map(|source| (source, session.media.screen_audio.get(&source).cloned()))
+            .collect();
+        Some((session.room_connection.clone(), sources))
+    }
+
+    pub(crate) fn screen_audio_is_current(
+        &self,
+        source: AudioSourceKey,
+        expected: &Arc<ScreenAudioTrack>,
+    ) -> bool {
+        self.joined
+            .lock_unpoisoned()
+            .as_ref()
+            .and_then(|session| session.media.screen_audio.get(&source))
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+    }
+
+    pub(crate) fn screen_audio_source_is_active(&self, source: AudioSourceKey) -> bool {
+        self.joined
+            .lock_unpoisoned()
+            .as_ref()
+            .is_some_and(|session| session.media.screen_audio_sources.is_active(source))
+    }
+
+    pub(crate) fn screen_audio_handle_present(&self, source: AudioSourceKey) -> bool {
+        self.joined
+            .lock_unpoisoned()
+            .as_ref()
+            .is_some_and(|session| session.media.screen_audio.contains_key(&source))
     }
 
     fn current_room_name(&self) -> Option<String> {
@@ -277,7 +349,11 @@ impl SessionState {
     /// Same contract as the macOS session's `joined_room_for_rename`.
     fn joined_room_for_rename(
         &self,
-    ) -> Option<(Arc<livekit::Room>, Arc<crate::presence::PresenceState>, String)> {
+    ) -> Option<(
+        Arc<livekit::Room>,
+        Arc<crate::presence::PresenceState>,
+        String,
+    )> {
         self.joined.lock_unpoisoned().as_ref().map(|joined| {
             (
                 joined.room_connection.room(),
@@ -1035,6 +1111,416 @@ async fn drop_share_capture(capture: crate::windows_screen_capture::TargetCaptur
     }
 }
 
+const SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS: usize = 3;
+const SCREEN_AUDIO_FAILURE_RESTART_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(250);
+const SCREEN_AUDIO_FAILURE_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+async fn publish_screen_audio_if_needed(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    source: AudioSourceKey,
+) -> bool {
+    let (should_start, already_present) = {
+        let joined = state.joined.lock_unpoisoned();
+        let current_room = generation.is_current()
+            && joined
+                .as_ref()
+                .is_some_and(|session| Arc::ptr_eq(&session.room_connection, room_connection));
+        (
+            current_room
+                && joined.as_ref().is_some_and(|session| {
+                    session.media.screen_audio_sources.is_active(source)
+                        && !session.media.screen_audio.contains_key(&source)
+                }),
+            current_room
+                && joined
+                    .as_ref()
+                    .is_some_and(|session| session.media.screen_audio.contains_key(&source)),
+        )
+    };
+    if !should_start {
+        return already_present;
+    }
+
+    let label = source.label();
+    let track = match ScreenAudioTrack::publish(room_connection.room(), source, move |error| {
+        log::warn!("screen-audio source '{label}' failed: {error}")
+    })
+    .await
+    {
+        Ok(track) => Arc::new(track),
+        Err(error) => {
+            log::warn!(
+                "windows session: screen-audio source '{}' unavailable; continuing video-only: {error}",
+                source.label()
+            );
+            return false;
+        }
+    };
+
+    let committed = {
+        let mut joined = state.joined.lock_unpoisoned();
+        let current = generation.is_current()
+            && joined.as_mut().is_some_and(|session| {
+                Arc::ptr_eq(&session.room_connection, room_connection)
+                    && session.media.screen_audio_sources.is_active(source)
+                    && !session.media.screen_audio.contains_key(&source)
+            });
+        if current {
+            joined
+                .as_mut()
+                .expect("current Windows media session")
+                .media
+                .screen_audio
+                .insert(source, track.clone());
+            true
+        } else {
+            false
+        }
+    };
+    if committed {
+        spawn_screen_audio_failure_monitor(app, generation.clone(), source, track);
+        true
+    } else {
+        track.stop().await;
+        false
+    }
+}
+
+async fn publish_screen_audio_with_retries(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    source: AudioSourceKey,
+) -> bool {
+    if crate::transport::audio::audio_disabled_by_env() {
+        return false;
+    }
+    for attempt in 1..=SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS {
+        if attempt > 1 {
+            tokio::time::sleep(SCREEN_AUDIO_FAILURE_RESTART_DELAY * (attempt as u32 - 1)).await;
+        }
+        let serial = state.lock_screen_audio_control().await;
+        if !generation.is_current()
+            || !state.is_in_room()
+            || !state.screen_audio_source_is_active(source)
+        {
+            drop(serial);
+            return false;
+        }
+        if publish_screen_audio_if_needed(app, state, room_connection, generation, source).await {
+            drop(serial);
+            if attempt > 1 {
+                log::info!(
+                    "windows session: screen-audio source '{}' started on retry {attempt}/{SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS}",
+                    source.label()
+                );
+            }
+            return true;
+        }
+        drop(serial);
+    }
+    log::warn!(
+        "windows session: screen-audio source '{}' unavailable after {SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS} start attempts; continuing video-only",
+        source.label()
+    );
+    false
+}
+
+async fn apply_screen_audio_transitions(
+    state: &SessionState,
+    transitions: Vec<AudioSourceTransition>,
+) -> Vec<AudioSourceKey> {
+    let mut starts = Vec::new();
+    for transition in transitions {
+        match transition {
+            AudioSourceTransition::Stop(source) => {
+                let track = state
+                    .joined
+                    .lock_unpoisoned()
+                    .as_mut()
+                    .and_then(|session| session.media.screen_audio.remove(&source));
+                if let Some(track) = track {
+                    track.stop().await;
+                }
+            }
+            AudioSourceTransition::Start(source) => starts.push(source),
+        }
+    }
+    starts
+}
+
+async fn acquire_screen_audio_source(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    share_id: u64,
+    source: AudioSourceKey,
+) {
+    if crate::transport::audio::audio_disabled_by_env() {
+        log::debug!(
+            "windows session: PETAL_DISABLE_AUDIO set -- skipping screen-audio source '{}'",
+            source.label()
+        );
+        return;
+    }
+    let serial = state.lock_screen_audio_control().await;
+    let transitions = {
+        let mut joined = state.joined.lock_unpoisoned();
+        let Some(session) = joined.as_mut() else {
+            drop(serial);
+            return;
+        };
+        if !generation.is_current() || !Arc::ptr_eq(&session.room_connection, room_connection) {
+            drop(serial);
+            return;
+        }
+        session.media.screen_audio_sources.acquire(share_id, source)
+    };
+    let starts = apply_screen_audio_transitions(state, transitions).await;
+    let source_was_started = starts.contains(&source);
+    drop(serial);
+
+    // Start only after all old owners have been stopped. Retries acquire the
+    // control lock per attempt so a stop can cancel the backoff promptly.
+    for start in starts {
+        let _ =
+            publish_screen_audio_with_retries(app, state, room_connection, generation, start).await;
+    }
+    // A previous capture/publication failure can leave the desired source
+    // registered but without a handle. Retry that source even when this
+    // acquisition did not change the active set. A source just started above
+    // already had its bounded retry budget consumed; do not run a second
+    // budget in the same acquisition.
+    if !source_was_started
+        && generation.is_current()
+        && state.screen_audio_source_is_active(source)
+        && !state.screen_audio_handle_present(source)
+    {
+        let _ = publish_screen_audio_with_retries(app, state, room_connection, generation, source)
+            .await;
+    }
+}
+
+async fn ensure_screen_audio_source(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    source: AudioSourceKey,
+) {
+    let _ =
+        publish_screen_audio_with_retries(app, state, room_connection, generation, source).await;
+}
+
+async fn release_screen_audio_source(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: Option<&Arc<RoomConnection>>,
+    share_id: u64,
+    source: AudioSourceKey,
+) {
+    let Some(room_connection) = room_connection else {
+        return;
+    };
+    let generation = state.current_room_generation();
+    let serial = state.lock_screen_audio_control().await;
+    let transitions = {
+        let mut joined = state.joined.lock_unpoisoned();
+        let Some(session) = joined.as_mut() else {
+            drop(serial);
+            return;
+        };
+        if !Arc::ptr_eq(&session.room_connection, room_connection) {
+            drop(serial);
+            return;
+        }
+        if session
+            .media
+            .screen_audio_sources
+            .source_for_share(share_id)
+            != Some(source)
+        {
+            drop(serial);
+            return;
+        }
+        session.media.screen_audio_sources.release(share_id)
+    };
+    let starts = apply_screen_audio_transitions(state, transitions).await;
+    drop(serial);
+    for start in starts {
+        let _ = publish_screen_audio_with_retries(app, state, room_connection, &generation, start)
+            .await;
+    }
+}
+
+fn spawn_screen_audio_release(
+    app: &tauri::AppHandle,
+    room_connection: Option<Arc<RoomConnection>>,
+    share_id: u64,
+    source: AudioSourceKey,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app.try_state::<SessionState>() else {
+            return;
+        };
+        release_screen_audio_source(
+            &app,
+            state.inner(),
+            room_connection.as_ref(),
+            share_id,
+            source,
+        )
+        .await;
+    });
+}
+
+fn spawn_screen_audio_failure_monitor(
+    app: &tauri::AppHandle,
+    generation: RoomGeneration,
+    source: AudioSourceKey,
+    expected: Arc<ScreenAudioTrack>,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(SCREEN_AUDIO_FAILURE_POLL);
+        loop {
+            interval.tick().await;
+            let Some(state) = app.try_state::<SessionState>() else {
+                return;
+            };
+            if !generation.is_current()
+                || !state.screen_audio_is_current(source, &expected)
+                || expected.is_stopped()
+            {
+                return;
+            }
+            if !expected.capture_failed() {
+                continue;
+            }
+            restart_failed_screen_audio_source(
+                &app,
+                state.inner(),
+                generation.clone(),
+                source,
+                expected.clone(),
+            )
+            .await;
+            return;
+        }
+    });
+}
+
+async fn restart_failed_screen_audio_source(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    generation: RoomGeneration,
+    source: AudioSourceKey,
+    expected: Arc<ScreenAudioTrack>,
+) {
+    let serial = state.lock_screen_audio_control().await;
+    let (old, room_connection) = {
+        let mut joined = state.joined.lock_unpoisoned();
+        let Some(session) = joined.as_mut() else {
+            drop(serial);
+            return;
+        };
+        let Some(current) = session.media.screen_audio.get(&source) else {
+            drop(serial);
+            return;
+        };
+        if !generation.is_current()
+            || !Arc::ptr_eq(current, &expected)
+            || !current.capture_failed()
+            || !session.media.screen_audio_sources.is_active(source)
+        {
+            drop(serial);
+            return;
+        }
+        let room_connection = session.room_connection.clone();
+        let old = session
+            .media
+            .screen_audio
+            .remove(&source)
+            .expect("screen audio handle present");
+        (old, room_connection)
+    };
+    // Do not let a handoff start while the failed publication is still being
+    // unpublished and its native capture is stopping.
+    old.stop().await;
+    drop(serial);
+
+    for attempt in 1..=SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS {
+        if attempt > 1 {
+            tokio::time::sleep(SCREEN_AUDIO_FAILURE_RESTART_DELAY * (attempt as u32 - 1)).await;
+        }
+        let serial = state.lock_screen_audio_control().await;
+        if !generation.is_current() || !state.screen_audio_source_is_active(source) {
+            drop(serial);
+            return;
+        }
+        let label = source.label();
+        match ScreenAudioTrack::publish(room_connection.room(), source, move |error| {
+            log::warn!("screen-audio source '{label}' failed: {error}")
+        })
+        .await
+        {
+            Ok(track) => {
+                let track = Arc::new(track);
+                let committed = {
+                    let mut joined = state.joined.lock_unpoisoned();
+                    let current = generation.is_current()
+                        && joined.as_mut().is_some_and(|session| {
+                            Arc::ptr_eq(&session.room_connection, &room_connection)
+                                && session.media.screen_audio_sources.is_active(source)
+                                && !session.media.screen_audio.contains_key(&source)
+                        });
+                    if current {
+                        joined
+                            .as_mut()
+                            .expect("current Windows media session")
+                            .media
+                            .screen_audio
+                            .insert(source, track.clone());
+                    }
+                    current
+                };
+                if committed {
+                    drop(serial);
+                    log::info!(
+                        "windows session: restarted failed screen-audio source '{}' on attempt {attempt}/{SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS}",
+                        source.label()
+                    );
+                    spawn_screen_audio_failure_monitor(app, generation.clone(), source, track);
+                } else {
+                    // The failed commit still published a native/LiveKit
+                    // resource; serialize its teardown with the next start.
+                    track.stop().await;
+                    drop(serial);
+                }
+                return;
+            }
+            Err(error) => {
+                drop(serial);
+                log::warn!(
+                    "windows session: screen-audio source '{}' restart attempt {attempt}/{SCREEN_AUDIO_FAILURE_RESTART_ATTEMPTS} failed: {error}",
+                    source.label()
+                );
+            }
+        }
+    }
+    log::error!(
+        "windows session: screen-audio source '{}' restart exhausted; continuing video-only",
+        source.label()
+    );
+}
+
 pub(crate) async fn start_share_token(
     app: tauri::AppHandle,
     state: &SessionState,
@@ -1078,6 +1564,7 @@ pub(crate) async fn start_share_token(
             target,
         )
     };
+    let audio_share_id = state.next_audio_share_id();
     let control_mode = effective_control_mode(
         if is_region_share {
             TargetKind::Display
@@ -1285,6 +1772,30 @@ pub(crate) async fn start_share_token(
         }
     };
 
+    let audio_source = AudioSourceKey::for_share(
+        kind,
+        (kind == SharedSourceKind::Window)
+            .then(|| target.owner_process_id())
+            .filter(|pid| *pid != 0),
+    );
+    if let Some(source) = audio_source {
+        // Audio is best-effort and starts only after the visual publication is
+        // healthy; a failed process loopback never substitutes system audio.
+        acquire_screen_audio_source(
+            &app,
+            state,
+            &room_connection,
+            &generation,
+            audio_share_id,
+            source,
+        )
+        .await;
+    } else if kind == SharedSourceKind::Window {
+        log::warn!(
+            "windows session: share token={token} has no valid owner process for screen audio; continuing video-only"
+        );
+    }
+
     let title = share_title_for_target(target);
     // Kind/title metadata is REQUIRED for display-share interop: receivers
     // read `shared_window_title_from_metadata` to title the compositor
@@ -1373,6 +1884,8 @@ pub(crate) async fn start_share_token(
                     height: 0,
                 }),
         ),
+        audio_source,
+        audio_share_id,
     });
 
     let _committed = {
@@ -1408,8 +1921,20 @@ pub(crate) async fn start_share_token(
             url_refresh,
             shared,
             selector_capture_exclusion,
+            audio_source,
+            audio_share_id,
             ..
         } = share;
+        if let Some(source) = audio_source {
+            release_screen_audio_source(
+                &app,
+                state,
+                Some(&room_connection),
+                audio_share_id,
+                source,
+            )
+            .await;
+        }
         pump.abort();
         if let Some(url_refresh) = url_refresh {
             url_refresh.abort();
@@ -1534,6 +2059,14 @@ fn start_share_frame_pump(
         let mut first_frame_logged = false;
         let mut minimized_hold_logged = false;
         let mut pushed_this_interval = 0u64;
+        let mut accepted_this_interval = 0u64;
+        let mut push_failed_this_interval = 0u64;
+        let mut source_rejected_this_interval = 0u64;
+        let mut convert_ms_this_interval = 0.0f64;
+        let mut capture_return_ms_this_interval = 0.0f64;
+        let mut max_capture_age_ms_this_interval = 0.0f64;
+        let mut max_convert_ms_this_interval = 0.0f64;
+        let mut max_capture_return_ms_this_interval = 0.0f64;
         // Last successfully pushed frame: re-pushed by the idle-refresh timer
         // when WGC goes silent on static content (see the constant's doc).
         let mut last_pushed: Option<crate::windows_screen_capture::BgraFrame> = None;
@@ -1563,12 +2096,25 @@ fn start_share_frame_pump(
                     if !generation.is_current() {
                         break;
                     }
-                    log::info!(
-                        "windows session: share {token} pushed {pushed_this_interval} frame(s) in the last {}s ({:.1} fps)",
+                    log::debug!(
+                        "[DEBUG-MEDIA-FPS] windows session: share {token} pump_pushed={pushed_this_interval} accepted={accepted_this_interval} frame(s) in the last {}s ({:.1} fps), push_failed={push_failed_this_interval} source_rejected={source_rejected_this_interval} avg_convert_ms={:.2} avg_capture_frame_return_ms={:.2} max_capture_age_ms={:.1} max_convert_ms={:.2} max_capture_frame_return_ms={:.2}",
                         SHARE_PUMP_HEALTH_INTERVAL.as_secs(),
-                        pushed_this_interval as f64 / SHARE_PUMP_HEALTH_INTERVAL.as_secs() as f64
+                        pushed_this_interval as f64 / SHARE_PUMP_HEALTH_INTERVAL.as_secs() as f64,
+                        if pushed_this_interval > 0 { convert_ms_this_interval / pushed_this_interval as f64 } else { 0.0 },
+                        if pushed_this_interval > 0 { capture_return_ms_this_interval / pushed_this_interval as f64 } else { 0.0 },
+                        max_capture_age_ms_this_interval,
+                        max_convert_ms_this_interval,
+                        max_capture_return_ms_this_interval,
                     );
                     pushed_this_interval = 0;
+                    accepted_this_interval = 0;
+                    push_failed_this_interval = 0;
+                    source_rejected_this_interval = 0;
+                    convert_ms_this_interval = 0.0;
+                    capture_return_ms_this_interval = 0.0;
+                    max_capture_age_ms_this_interval = 0.0;
+                    max_convert_ms_this_interval = 0.0;
+                    max_capture_return_ms_this_interval = 0.0;
                     continue;
                 }
                 _ = tokio::time::sleep(refresh_interval) => {
@@ -1600,15 +2146,30 @@ fn start_share_frame_pump(
                     sequence += 1;
                     let captured = share_captured_frame(previous, sequence);
                     let published = shared.published.lock_unpoisoned().clone();
-                    if published
-                        .push_frame(&captured, previous.capture_wall_time_us)
-                        .is_some()
+                    if let Some(timing) =
+                        published.push_frame(&captured, previous.capture_wall_time_us)
                     {
                         pushed_this_interval += 1;
+                        convert_ms_this_interval += timing.convert_ms;
+                        capture_return_ms_this_interval += timing.capture_frame_return_ms;
+                        max_capture_age_ms_this_interval =
+                            max_capture_age_ms_this_interval.max(timing.capture_age_ms);
+                        max_convert_ms_this_interval =
+                            max_convert_ms_this_interval.max(timing.convert_ms);
+                        max_capture_return_ms_this_interval = max_capture_return_ms_this_interval
+                            .max(timing.capture_frame_return_ms);
+                        if timing.source_accepted {
+                            accepted_this_interval += 1;
+                        } else {
+                            source_rejected_this_interval += 1;
+                        }
+
                         last_push_at = std::time::Instant::now();
                         log::debug!(
                             "windows session: share {token} idle-refresh pushed last frame (static content)"
                         );
+                    } else {
+                        push_failed_this_interval += 1;
                     }
                     continue;
                 }
@@ -1652,11 +2213,21 @@ fn start_share_frame_pump(
             }
             let captured = share_captured_frame(&frame, sequence);
             let published = shared.published.lock_unpoisoned().clone();
-            let pushed = published
-                .push_frame(&captured, frame.capture_wall_time_us)
-                .is_some();
-            if pushed {
+            let push_result = published.push_frame(&captured, frame.capture_wall_time_us);
+            if let Some(timing) = push_result {
                 pushed_this_interval += 1;
+                convert_ms_this_interval += timing.convert_ms;
+                capture_return_ms_this_interval += timing.capture_frame_return_ms;
+                max_capture_age_ms_this_interval =
+                    max_capture_age_ms_this_interval.max(timing.capture_age_ms);
+                max_convert_ms_this_interval = max_convert_ms_this_interval.max(timing.convert_ms);
+                max_capture_return_ms_this_interval =
+                    max_capture_return_ms_this_interval.max(timing.capture_frame_return_ms);
+                if timing.source_accepted {
+                    accepted_this_interval += 1;
+                } else {
+                    source_rejected_this_interval += 1;
+                }
                 last_pushed = Some(frame);
                 last_push_at = std::time::Instant::now();
                 continue;
@@ -1666,6 +2237,7 @@ fn start_share_frame_pump(
             // handled inside the publisher: frames are letterboxed to the
             // published size during the gesture and the size is re-anchored
             // once it settles — no track republish on Windows.
+            push_failed_this_interval += 1;
             continue;
         }
     })
@@ -1764,9 +2336,17 @@ async fn stop_share(
         kind,
         shared,
         selector_capture_exclusion,
+        audio_source,
+        audio_share_id,
         ..
     } = share;
     let started = std::time::Instant::now();
+    if let Some(source) = audio_source {
+        // Audio signaling/native stop is independent of the visual lifecycle;
+        // do not hold remote-window teardown behind it. The detached release
+        // still uses the source-control lock before any replacement starts.
+        spawn_screen_audio_release(app, Some(room_connection.clone()), audio_share_id, source);
+    }
     pump.abort();
     if let Some(url_refresh) = url_refresh {
         url_refresh.abort();
@@ -2141,7 +2721,11 @@ pub async fn join_room_command(
     // Plugin data bus (plugins/README.md §2.6), Windows parity with
     // session/room.rs: without this the bus is send-only here -- publishes go
     // out but no `plugin-data` / `plugin-state-changed` event ever arrives.
-    crate::plugins::start_receiver_for_room(&app, room_connection.room().clone(), generation.clone());
+    crate::plugins::start_receiver_for_room(
+        &app,
+        room_connection.room().clone(),
+        generation.clone(),
+    );
     crate::remote_control::start_receiver_for_room(
         &app,
         room_connection.room().clone(),
@@ -2179,11 +2763,10 @@ pub async fn join_room_command(
             None
         }
     };
-    // The compositor feed is the sole consumer of the connect-time receiver
-    // (one mpsc receiver, one consumer); there is no resilience watcher on
-    // Windows. Drop that fanout branch now so it cannot accumulate room
-    // events for the session lifetime (#584).
-    room_connection.discard_resilience_events();
+    // Keep the resilience branch for the independent screen-audio
+    // publication repair watcher. The compositor still owns the other branch
+    // and the watcher exits on the room's Disconnected event.
+    let resilience_events = room_connection.take_resilience_events();
 
     state.seed_remote_control_policy(remote_control_policy);
     {
@@ -2276,6 +2859,9 @@ pub async fn join_room_command(
         watcher_cancelled,
     )
     .await;
+    if let Some(events) = resilience_events {
+        start_screen_audio_reconnect_watcher(app.clone(), events, generation.clone());
+    }
     if !generation.is_current()
         || room_connection.room().connection_state() == livekit::ConnectionState::Disconnected
     {
@@ -2295,6 +2881,104 @@ pub async fn join_room_command(
     Ok(room_record)
 }
 
+fn start_screen_audio_reconnect_watcher(
+    app: tauri::AppHandle,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<livekit::RoomEvent>,
+    generation: RoomGeneration,
+) {
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if !generation.is_current() {
+                return;
+            }
+            match event {
+                livekit::RoomEvent::Reconnected => {
+                    let Some(state) = app.try_state::<SessionState>() else {
+                        return;
+                    };
+                    repair_screen_audio_publications_after_reconnect(
+                        &app,
+                        state.inner(),
+                        generation.clone(),
+                    )
+                    .await;
+                }
+                livekit::RoomEvent::Disconnected { .. } => return,
+                _ => {}
+            }
+        }
+    });
+}
+
+async fn repair_screen_audio_publications_after_reconnect(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    generation: RoomGeneration,
+) {
+    let Some((room_connection, sources)) = state.screen_audio_repair_snapshot(&generation) else {
+        return;
+    };
+    for (source, track) in sources {
+        if !generation.is_current() {
+            return;
+        }
+        let Some(track) = track else {
+            ensure_screen_audio_source(app, state, &room_connection, &generation, source).await;
+            continue;
+        };
+        if track.capture_failed() {
+            restart_failed_screen_audio_source(app, state, generation.clone(), source, track).await;
+            continue;
+        }
+
+        // Serialize the health check and republish with stop/source handoffs.
+        let _serial = state.lock_screen_audio_control().await;
+        if !generation.is_current()
+            || !state.screen_audio_is_current(source, &track)
+            || !state.screen_audio_source_is_active(source)
+        {
+            return;
+        }
+        if track.capture_failed() {
+            drop(_serial);
+            restart_failed_screen_audio_source(app, state, generation.clone(), source, track).await;
+            continue;
+        }
+        let current_sid = track.track_sid().to_string();
+        let expected_name = source.track_name();
+        let publications: Vec<(String, String)> = room_connection
+            .room()
+            .local_participant()
+            .track_publications()
+            .values()
+            .map(|publication| (publication.sid().to_string(), publication.name()))
+            .collect();
+        match crate::screen_audio::screen_audio_publication_health(
+            &current_sid,
+            &expected_name,
+            publications
+                .iter()
+                .map(|(sid, name)| (sid.as_str(), name.as_str())),
+        ) {
+            crate::screen_audio::ScreenAudioPublicationHealth::CurrentSidPresent => {}
+            crate::screen_audio::ScreenAudioPublicationHealth::ReplacementAlreadyPresent => {
+                log::info!(
+                    "windows session: screen-audio source '{}' reconnect publication already present by name",
+                    source.label()
+                );
+            }
+            crate::screen_audio::ScreenAudioPublicationHealth::Missing => {
+                if let Err(error) = track.republish_after_reconnect().await {
+                    log::warn!(
+                        "windows session: screen-audio source '{}' reconnect publication repair failed: {error}",
+                        source.label()
+                    );
+                }
+            }
+        }
+    }
+}
+
 async fn start_audio_for_session(
     app: tauri::AppHandle,
     state: &SessionState,
@@ -2307,7 +2991,7 @@ async fn start_audio_for_session(
     let audio_opt_out = std::env::var("PETAL_DISABLE_AUDIO").ok();
     if audio_is_disabled(audio_opt_out.as_deref()) {
         log::warn!(
-            "windows session: PETAL_DISABLE_AUDIO set -- skipping mic publish + speaker playout"
+            "windows session: PETAL_DISABLE_AUDIO set -- skipping native audio (video-only run)"
         );
         return;
     }
@@ -2612,6 +3296,8 @@ async fn leave_room_inner(
         camera: _,
         microphone,
         playout,
+        screen_audio_sources: _,
+        mut screen_audio,
         shares,
     } = std::mem::take(&mut joined.media);
     for share in shares {
@@ -2625,6 +3311,11 @@ async fn leave_room_inner(
     // Petal View selectors are meeting-scoped too: close them so no hollow
     // window outlives the session (each close stops its share + unregisters).
     crate::region_window::close_all_region_windows(app).await;
+    let serial = state.lock_screen_audio_control().await;
+    for (_, track) in std::mem::take(&mut screen_audio) {
+        track.stop().await;
+    }
+    drop(serial);
     drop(microphone);
     drop(playout);
 
@@ -2879,6 +3570,424 @@ mod tests {
         assert!(media.playout.is_none());
         assert!(media.camera.is_none());
         assert!(media.shares.is_empty());
+    }
+
+    /// Real Windows integration gate. Unlike the headless unit matrix, this
+    /// enters the production `start_share_token`/`stop_share_token` path,
+    /// starts WGC for an operator-supplied HWND, publishes through LiveKit,
+    /// starts the native screen-audio adapter, and then verifies terminal
+    /// cleanup. It is ignored in ordinary CI because it needs a visible target,
+    /// Windows capture/audio consent, and a LiveKit server.
+    #[cfg(target_os = "windows")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires PETAL_WINDOWS_MEDIA_INTEGRATION, a visible HWND, and LiveKit"]
+    async fn windows_share_session_runs_real_wgc_livekit_audio_lifecycle() {
+        use crate::remote_control_core::RemoteControlMode;
+        use crate::screen_audio::{AudioSourceKey, ScreenAudioCapture};
+        use crate::transport::publisher::SharedSourceKind;
+        use crate::transport::RoomConnection;
+        use futures::StreamExt;
+        use livekit::prelude::{RemoteTrack, RoomEvent};
+        use livekit::track::VideoQuality;
+        use livekit::webrtc::video_stream::native::NativeVideoStream;
+        use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+        use std::time::Duration;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+        assert_eq!(
+            std::env::var("PETAL_WINDOWS_MEDIA_INTEGRATION").as_deref(),
+            Ok("1"),
+            "set PETAL_WINDOWS_MEDIA_INTEGRATION=1 to run the real Windows gate"
+        );
+        let raw_handle = std::env::var("PETAL_WINDOWS_CAPTURE_HWND")
+            .expect("PETAL_WINDOWS_CAPTURE_HWND must identify a visible target")
+            .parse::<usize>()
+            .expect("PETAL_WINDOWS_CAPTURE_HWND must be a decimal HWND");
+        let hwnd = HWND(raw_handle as *mut std::ffi::c_void);
+        let mut owner_pid = 0_u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner_pid)) };
+        assert_ne!(
+            owner_pid, 0,
+            "the selected HWND must have a live owner process"
+        );
+        let token = crate::windows_capture_target::register(raw_handle, owner_pid)
+            .expect("register the operator-selected HWND");
+
+        let url = crate::transport::token::livekit_url()
+            .expect("LIVEKIT_URL must point at a running LiveKit server");
+        let room_name = format!(
+            "petal-windows-media-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_millis()
+        );
+        let identity = format!("windows-media-{}", std::process::id());
+        let access = crate::transport::mint_access_token(&identity, &room_name, true, true)
+            .expect("mint an integration token");
+        let connection = Arc::new(
+            RoomConnection::connect(&url, &access)
+                .await
+                .expect("connect the production RoomConnection"),
+        );
+        let observer_identity = format!("windows-media-observer-{}", std::process::id());
+        let observer_access =
+            crate::transport::mint_access_token(&observer_identity, &room_name, false, true)
+                .expect("mint the observer token");
+        let observer = RoomConnection::connect(&url, &observer_access)
+            .await
+            .expect("connect the real LiveKit observer");
+        let mut observer_events = observer
+            .take_compositor_events()
+            .expect("observer connect-time event receiver");
+        let observer_stop = Arc::new(AtomicBool::new(false));
+        let observer_frames = Arc::new(AtomicU64::new(0));
+        let observer_requested_low = Arc::new(AtomicBool::new(false));
+        let observer_min_width = Arc::new(AtomicU32::new(u32::MAX));
+        let stop_observer = observer_stop.clone();
+        let count_observer_frames = observer_frames.clone();
+        let request_observer_low = observer_requested_low.clone();
+        let record_observer_width = observer_min_width.clone();
+        let observer_task = tokio::spawn(async move {
+            while let Some(event) = observer_events.recv().await {
+                if stop_observer.load(Ordering::Acquire) {
+                    break;
+                }
+                let RoomEvent::TrackSubscribed {
+                    track, publication, ..
+                } = event
+                else {
+                    continue;
+                };
+                let RemoteTrack::Video(video) = track else {
+                    continue;
+                };
+                if crate::transport::publisher::window_id_from_track_name(&video.name())
+                    != Some(token)
+                {
+                    continue;
+                }
+                // This observer is the deliberately weak leg. Make the
+                // receiver-local request explicit, then verify that the
+                // decoded frames actually move to the lower simulcast rung.
+                publication.set_video_quality(VideoQuality::Low);
+                request_observer_low.store(true, Ordering::Release);
+                let mut stream = NativeVideoStream::new(video.rtc_track());
+                while let Some(frame) = stream.next().await {
+                    if stop_observer.load(Ordering::Acquire) {
+                        return;
+                    }
+                    count_observer_frames.fetch_add(1, Ordering::Relaxed);
+                    record_observer_width.fetch_min(frame.buffer.width(), Ordering::Relaxed);
+                }
+            }
+        });
+        let capable_identity = format!("windows-media-capable-{}", std::process::id());
+        let capable_access =
+            crate::transport::mint_access_token(&capable_identity, &room_name, false, true)
+                .expect("mint the capable observer token");
+        let capable_observer = RoomConnection::connect(&url, &capable_access)
+            .await
+            .expect("connect the real capable LiveKit observer");
+        let mut capable_events = capable_observer
+            .take_compositor_events()
+            .expect("capable observer connect-time event receiver");
+        let capable_subscriptions = Arc::new(AtomicU64::new(0));
+        let capable_max_width = Arc::new(AtomicU32::new(0));
+        let capable_replacement_frames = Arc::new(AtomicU64::new(0));
+        let capable_count = capable_subscriptions.clone();
+        let count_replacement_frames = capable_replacement_frames.clone();
+        let record_capable_width = capable_max_width.clone();
+        let capable_task = tokio::spawn(async move {
+            let mut stream_tasks = tokio::task::JoinSet::new();
+            while let Some(event) = capable_events.recv().await {
+                let RoomEvent::TrackSubscribed {
+                    track, publication, ..
+                } = event
+                else {
+                    continue;
+                };
+                let RemoteTrack::Video(video) = track else {
+                    continue;
+                };
+                if crate::transport::publisher::window_id_from_track_name(&video.name())
+                    != Some(token)
+                {
+                    continue;
+                }
+                // Keep this observer explicitly HIGH. Its decoded dimensions
+                // are the runtime oracle that the weak observer's LOW request
+                // did not mutate the sender or this independent subscriber.
+                publication.set_video_quality(VideoQuality::High);
+                let subscription_number = capable_count.fetch_add(1, Ordering::AcqRel) + 1;
+                let record_width = record_capable_width.clone();
+                let count_replacement = count_replacement_frames.clone();
+                stream_tasks.spawn(async move {
+                    let mut stream = NativeVideoStream::new(video.rtc_track());
+                    while let Some(frame) = stream.next().await {
+                        record_width.fetch_max(frame.buffer.width(), Ordering::Relaxed);
+                        if subscription_number > 1 {
+                            count_replacement.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+            stream_tasks.abort_all();
+            while stream_tasks.join_next().await.is_some() {}
+        });
+
+        let app = tauri::Builder::default()
+            .build(tauri::generate_context!())
+            .expect("build the Tauri app for the integration gate");
+        app.manage(SessionState::default());
+        let state = app.state::<SessionState>();
+        let generation = state.begin_room_generation();
+        *state.joined.lock_unpoisoned() = Some(WindowsMediaSession {
+            room_record: room("windows-media-integration", &room_name),
+            identity,
+            room_connection: connection.clone(),
+            presence: Arc::new(crate::presence::PresenceState::default()),
+            media: MediaResources::default(),
+            watcher_cancellation: None,
+        });
+        assert!(generation.is_current());
+
+        // Exercise the actual session coordinator: WGC first, then the
+        // publisher and best-effort process-loopback audio.
+        start_share_token(
+            app.handle().clone(),
+            &state,
+            token,
+            RemoteControlMode::CursorPreserving,
+            "#ffffff".to_string(),
+        )
+        .await
+        .expect("production Windows share start");
+        assert!(state.is_share_active(token));
+        let window_audio_source =
+            AudioSourceKey::for_share(SharedSourceKind::Window, Some(owner_pid))
+                .expect("a registered HWND must have a process audio source");
+        assert!(
+            state.screen_audio_handle_present(window_audio_source),
+            "production share start did not publish the native process-loopback audio track"
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while observer_frames.load(Ordering::Acquire) == 0 && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            observer_frames.load(Ordering::Acquire) > 0,
+            "real WGC -> production publisher -> LiveKit -> observer decoded no frames"
+        );
+        let capable_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while capable_subscriptions.load(Ordering::Acquire) == 0
+            && tokio::time::Instant::now() < capable_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            capable_subscriptions.load(Ordering::Acquire) > 0,
+            "the independent capable LiveKit observer never subscribed"
+        );
+
+        // A LOW request must be observable in decoded output, not merely in
+        // the test observer's call site. Wait for both legs to produce frames
+        // and compare the actual received dimensions.
+        let quality_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while (observer_min_width.load(Ordering::Acquire) == u32::MAX
+            || capable_max_width.load(Ordering::Acquire) == 0
+            || observer_min_width.load(Ordering::Acquire)
+                >= capable_max_width.load(Ordering::Acquire))
+            && tokio::time::Instant::now() < quality_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            observer_requested_low.load(Ordering::Acquire),
+            "weak observer never issued its receiver-local LOW request"
+        );
+        assert!(
+            observer_min_width.load(Ordering::Acquire) < capable_max_width.load(Ordering::Acquire),
+            "weak observer did not receive a lower decoded simulcast rung: weak_min_width={} capable_max_width={}",
+            observer_min_width.load(Ordering::Acquire),
+            capable_max_width.load(Ordering::Acquire)
+        );
+        let initial_capable_subscriptions = capable_subscriptions.load(Ordering::Acquire);
+
+        // Republish the same production window name while the old publication
+        // is still live. The existing session pump reads this shared slot, so
+        // the replacement receives real WGC frames before the old SID is
+        // removed (the delayed-unpublish/republish contract).
+        let (old_published, width, height) = {
+            let joined = state.joined.lock_unpoisoned();
+            let share = &joined
+                .as_ref()
+                .expect("joined integration session")
+                .media
+                .shares[0];
+            let old = share.shared.published.lock_unpoisoned().clone();
+            let width = old.width();
+            let height = old.height();
+            (old, width, height)
+        };
+        let replacement = Arc::new(
+            connection
+                .publish_window_at(
+                    width,
+                    height,
+                    crate::transport::publisher::ShareQuality::Full,
+                    Some(token),
+                )
+                .await
+                .expect("publish the real replacement window track"),
+        );
+        {
+            let joined = state.joined.lock_unpoisoned();
+            let share = &joined
+                .as_ref()
+                .expect("joined integration session")
+                .media
+                .shares[0];
+            *share.shared.published.lock_unpoisoned() = replacement;
+        }
+        old_published
+            .unpublish()
+            .await
+            .expect("unpublish the superseded real window track");
+
+        let republish_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while (capable_subscriptions.load(Ordering::Acquire) <= initial_capable_subscriptions
+            || capable_replacement_frames.load(Ordering::Acquire) == 0)
+            && tokio::time::Instant::now() < republish_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            capable_subscriptions.load(Ordering::Acquire) > initial_capable_subscriptions,
+            "capable observer did not receive a TrackSubscribed event for the replacement publication"
+        );
+        assert!(
+            capable_replacement_frames.load(Ordering::Acquire) > 0,
+            "capable observer subscribed to the replacement but decoded no replacement frames"
+        );
+
+        // Reconnect a receiver while the replacement is active and require a
+        // connect-time TrackSubscribed event for the existing publication.
+        observer_stop.store(true, Ordering::Release);
+        observer.room().close().await.ok();
+        tokio::time::timeout(Duration::from_secs(2), observer_task)
+            .await
+            .expect("weak observer task must terminate on reconnect")
+            .expect("weak observer task must not panic");
+        capable_observer.room().close().await.ok();
+        tokio::time::timeout(Duration::from_secs(2), capable_task)
+            .await
+            .expect("capable observer task must terminate")
+            .expect("capable observer task must not panic");
+        let reconnected = RoomConnection::connect(&url, &capable_access)
+            .await
+            .expect("reconnect the capable LiveKit observer");
+        let mut reconnected_events = reconnected
+            .take_compositor_events()
+            .expect("reconnected observer event receiver");
+        let reconnected_frame = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = reconnected_events.recv().await {
+                let RoomEvent::TrackSubscribed { track, .. } = event else {
+                    continue;
+                };
+                if let RemoteTrack::Video(video) = track {
+                    if crate::transport::publisher::window_id_from_track_name(&video.name())
+                        == Some(token)
+                    {
+                        let mut stream = NativeVideoStream::new(video.rtc_track());
+                        return stream.next().await.is_some();
+                    }
+                }
+            }
+            false
+        })
+        .await
+        .expect("reconnected observer subscription deadline");
+        assert!(
+            reconnected_frame,
+            "reconnect did not resubscribe and decode the replacement"
+        );
+        reconnected.room().close().await.ok();
+
+        // Normal stop is the first real terminal path.
+        stop_share_token(&app.handle(), &state, token)
+            .await
+            .expect("production Windows share stop");
+        assert!(!state.is_share_active(token));
+        assert!(state.shared_window_ids().is_empty());
+
+        // Re-start the same real share, stop only WGC, and verify that a
+        // capture crash does not pretend the LiveKit publication disappeared;
+        // the production stop path must still clean up the missed-unpublish
+        // tail.
+        start_share_token(
+            app.handle().clone(),
+            &state,
+            token,
+            RemoteControlMode::CursorPreserving,
+            "#ffffff".to_string(),
+        )
+        .await
+        .expect("production Windows share restart");
+        state
+            .joined
+            .lock_unpoisoned()
+            .as_ref()
+            .expect("joined integration session")
+            .media
+            .shares
+            .first()
+            .expect("restarted share")
+            .capture
+            .request_stop_for_test();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            state.is_share_active(token),
+            "capture failure must leave the publication for bounded recovery"
+        );
+        stop_share_token(&app.handle(), &state, token)
+            .await
+            .expect("cleanup after missed unpublish");
+
+        // Exercise delayed unpublish on a fresh production share. The fault
+        // injection delays only the SDK tail; visual/native cleanup still
+        // returns through the normal session coordinator.
+        start_share_token(
+            app.handle().clone(),
+            &state,
+            token,
+            RemoteControlMode::CursorPreserving,
+            "#ffffff".to_string(),
+        )
+        .await
+        .expect("production Windows share delayed-stop setup");
+        std::env::set_var("PETAL_TEST_UNPUBLISH_DELAY_MS", "100");
+        let delayed_start = std::time::Instant::now();
+        stop_share_token(&app.handle(), &state, token)
+            .await
+            .expect("delayed production Windows share stop");
+        std::env::remove_var("PETAL_TEST_UNPUBLISH_DELAY_MS");
+        assert!(delayed_start.elapsed() >= Duration::from_millis(100));
+
+        // Exercise the adapter independently as well: a visual stop must not
+        // await this signaling path, and repeated stop is idempotent.
+        let system_audio = ScreenAudioCapture::start(AudioSourceKey::SystemOutput, |_| {})
+            .expect("Windows loopback audio must start for this integration gate");
+        system_audio.stop().expect("first audio stop");
+        system_audio.stop().expect("repeated audio stop");
+
+        state.invalidate_room_generation();
+        observer_stop.store(true, Ordering::Release);
+        observer.room().close().await.ok();
+        connection.room().close().await.ok();
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     #[test]

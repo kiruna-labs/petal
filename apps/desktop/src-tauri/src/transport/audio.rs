@@ -141,6 +141,7 @@
 //! made under `DEV_IDENTITY`. No new identity concept introduced for audio.
 
 use crate::sync_ext::MutexExt;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -154,9 +155,14 @@ use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::AudioSourceOptions;
 use livekit::webrtc::audio_source::RtcAudioSource;
 use livekit::webrtc::audio_stream::native::NativeAudioStream;
-use livekit::{AudioProcessingOptions, PlatformAudio};
+use livekit::PlatformAudio;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
+use crate::screen_audio::{
+    AudioSourceKey, ScreenAudioCapture, SCREEN_AUDIO_CHANNELS, SCREEN_AUDIO_SAMPLES_PER_CHANNEL,
+    SCREEN_AUDIO_SAMPLE_RATE,
+};
 use crate::session::RoomGeneration;
 
 #[derive(Debug, thiserror::Error)]
@@ -238,6 +244,190 @@ fn audio_publish_summary(options: &TrackPublishOptions) -> String {
     )
 }
 
+/// Screen-audio is already the speaker/output signal, so applying microphone
+/// AEC/NS/AGC would distort it. Keep the SDK's internal queue disabled because
+/// `ScreenAudioQueue` is the bounded backpressure seam for the native callback.
+fn screen_audio_publish_options(source: AudioSourceKey) -> TrackPublishOptions {
+    TrackPublishOptions {
+        audio_encoding: Some(livekit::options::AudioEncoding {
+            max_bitrate: 128_000,
+        }),
+        source: TrackSource::ScreenshareAudio,
+        stream: source.label(),
+        dtx: false,
+        red: false,
+        ..Default::default()
+    }
+}
+
+/// One logical screen-audio source: native capture, the LiveKit audio source,
+/// and its companion publication are deliberately owned together. This keeps
+/// the capture alive independently of visual capture while making teardown
+/// order explicit (close queue -> stop pump -> unpublish -> stop native API).
+pub(crate) struct ScreenAudioTrack {
+    source: AudioSourceKey,
+    capture: ScreenAudioCapture,
+    track: LocalAudioTrack,
+    room: Arc<Room>,
+    pump: tauri::async_runtime::JoinHandle<()>,
+    delivery_failed: Arc<AtomicBool>,
+    stopped: AtomicBool,
+}
+
+impl ScreenAudioTrack {
+    pub(crate) async fn publish(
+        room: Arc<Room>,
+        source: AudioSourceKey,
+        on_error: impl Fn(String) + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        let on_error: Arc<dyn Fn(String) + Send + Sync> = Arc::new(on_error);
+        let capture_callback = on_error.clone();
+        let capture = ScreenAudioCapture::start(source, move |error| capture_callback(error))?;
+        let queue = capture.queue();
+        let native_source = NativeAudioSource::new(
+            AudioSourceOptions {
+                echo_cancellation: false,
+                noise_suppression: false,
+                auto_gain_control: false,
+            },
+            SCREEN_AUDIO_SAMPLE_RATE,
+            SCREEN_AUDIO_CHANNELS as u32,
+            0,
+        );
+        let pump_source = native_source.clone();
+        let delivery_failed = Arc::new(AtomicBool::new(false));
+        let pump_delivery_failed = delivery_failed.clone();
+        let pump = tauri::async_runtime::spawn(async move {
+            while let Some(frame) = queue.pop().await {
+                let samples = frame.into_samples();
+                let audio_frame = AudioFrame {
+                    data: Cow::Owned(samples),
+                    sample_rate: SCREEN_AUDIO_SAMPLE_RATE,
+                    num_channels: SCREEN_AUDIO_CHANNELS as u32,
+                    samples_per_channel: SCREEN_AUDIO_SAMPLES_PER_CHANNEL as u32,
+                };
+                if let Err(error) = pump_source.capture_frame(&audio_frame).await {
+                    let detail = format!("screen audio LiveKit frame delivery failed: {error:?}");
+                    log::warn!("audio: {detail}");
+                    pump_delivery_failed.store(true, Ordering::Release);
+                    queue.close();
+                    on_error(detail);
+                    break;
+                }
+            }
+        });
+
+        let track_name = source.track_name();
+        let track =
+            LocalAudioTrack::create_audio_track(&track_name, RtcAudioSource::Native(native_source));
+        let options = screen_audio_publish_options(source);
+        if let Err(error) = room
+            .local_participant()
+            .publish_track(LocalTrack::Audio(track.clone()), options)
+            .await
+        {
+            capture.close_queue();
+            pump.abort();
+            let _ = capture.stop();
+            return Err(format!(
+                "failed to publish screen audio '{track_name}': {error}"
+            ));
+        }
+
+        log::info!(
+            "audio: published screen-audio source '{}' ({})",
+            track_name,
+            audio_publish_summary(&screen_audio_publish_options(source))
+        );
+        Ok(Self {
+            source,
+            capture,
+            track,
+            room,
+            pump,
+            delivery_failed,
+            stopped: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn source(&self) -> AudioSourceKey {
+        self.source
+    }
+
+    pub(crate) fn track_sid(&self) -> TrackSid {
+        self.track.sid()
+    }
+
+    pub(crate) fn track_name(&self) -> String {
+        self.source.track_name()
+    }
+
+    pub(crate) fn capture_failed(&self) -> bool {
+        self.capture.failed() || self.delivery_failed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn republish_after_reconnect(&self) -> Result<(), livekit::RoomError> {
+        if self.is_stopped() {
+            return Err(livekit::RoomError::Internal(
+                "screen-audio track is stopped".to_string(),
+            ));
+        }
+        self.room
+            .local_participant()
+            .publish_track(
+                LocalTrack::Audio(self.track.clone()),
+                screen_audio_publish_options(self.source),
+            )
+            .await?;
+        log::info!(
+            "audio: screen-audio source '{}' republished after reconnect",
+            self.track_name()
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn stop(&self) {
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.capture.close_queue();
+        self.pump.abort();
+        let sid = self.track.sid();
+        if let Err(error) = self.room.local_participant().unpublish_track(&sid).await {
+            log::debug!(
+                "audio: screen-audio source '{}' unpublish failed (room may be closed): {error}",
+                self.track_name()
+            );
+        }
+        if let Err(error) = self.capture.stop() {
+            log::debug!(
+                "audio: screen-audio source '{}' stop failed: {error}",
+                self.track_name()
+            );
+        }
+    }
+}
+
+impl Drop for ScreenAudioTrack {
+    fn drop(&mut self) {
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.capture.close_queue();
+        self.pump.abort();
+        if let Err(error) = self.capture.stop() {
+            log::debug!(
+                "audio: screen-audio source '{}' drop stop failed: {error}",
+                self.track_name()
+            );
+        }
+    }
+}
+
 /// This process's published microphone track: the live `PlatformAudio`
 /// handle (keeps the ADM's recording side alive), the resulting
 /// `LocalAudioTrack` (for `mute`/`unmute`), and the muted-state cache so
@@ -312,9 +502,15 @@ impl MicTrack {
     /// Reuses the SAME `LocalAudioTrack`/`AudioSource` this `MicTrack` was
     /// built with, so capture itself never stopped -- only the SFU-side
     /// publication was lost.
-    pub(crate) async fn republish_after_reconnect(&self, room: &Arc<Room>) -> Result<(), AudioError> {
+    pub(crate) async fn republish_after_reconnect(
+        &self,
+        room: &Arc<Room>,
+    ) -> Result<(), AudioError> {
         room.local_participant()
-            .publish_track(LocalTrack::Audio(self.track.clone()), audio_publish_options())
+            .publish_track(
+                LocalTrack::Audio(self.track.clone()),
+                audio_publish_options(),
+            )
             .await?;
         log::info!("audio: mic track republished after reconnect publication repair");
         Ok(())
@@ -781,9 +977,9 @@ impl PreparedMicrophone {
     }
 }
 
-/// `PETAL_DISABLE_AUDIO` -- the single predicate both session paths (macOS
-/// `session::room`, Windows `session_stub`) use, so a video-only run means
-/// the same thing on both.
+/// `PETAL_DISABLE_AUDIO` -- the single predicate all native audio paths use,
+/// so a video-only run means the same thing on macOS and Windows. It covers
+/// microphone, speaker playout, and screen-audio companions.
 ///
 /// `0`/`false`/`no`/`off` mean audio stays ENABLED. This previously treated
 /// any non-empty value as "disable", so `PETAL_DISABLE_AUDIO=0` -- the exact
@@ -800,6 +996,10 @@ pub(crate) fn audio_is_disabled(value: Option<&str>) -> bool {
                 "0" | "false" | "no" | "off"
             )
     })
+}
+
+pub(crate) fn audio_disabled_by_env() -> bool {
+    audio_is_disabled(std::env::var("PETAL_DISABLE_AUDIO").ok().as_deref())
 }
 
 /// #812 (journey AUD-04): substitute a deterministic 440Hz tone for the
@@ -875,12 +1075,10 @@ fn synthetic_tone_source() -> RtcAudioSource {
         let mut phase: f32 = 0.0;
         let mut frames: u64 = 0;
         let phase_step = 2.0 * std::f32::consts::PI * SYNTH_TONE_HZ / SYNTH_SAMPLE_RATE as f32;
-        let mut ticker =
-            tokio::time::interval(Duration::from_millis(u64::from(SYNTH_FRAME_MS)));
+        let mut ticker = tokio::time::interval(Duration::from_millis(u64::from(SYNTH_FRAME_MS)));
         loop {
             ticker.tick().await;
-            let mut frame =
-                AudioFrame::new(SYNTH_SAMPLE_RATE, SYNTH_CHANNELS, samples_per_frame);
+            let mut frame = AudioFrame::new(SYNTH_SAMPLE_RATE, SYNTH_CHANNELS, samples_per_frame);
             {
                 let data = frame.data.to_mut();
                 for sample in data.iter_mut() {
@@ -962,15 +1160,6 @@ pub fn prepare_microphone(
                 "audio: preferred recording device {wanted_id} not present -- using default"
             ),
         }
-    }
-
-    // `PlatformAudio::new()` already applies `AudioProcessingOptions::default()`
-    // internally (see module doc comment) -- called again here, explicitly,
-    // purely so the intent (AEC+NS+AGC on) is visible at this call site
-    // rather than only inside a dependency's constructor. A no-op in
-    // practice since the values match the default already applied.
-    if let Err(e) = audio.configure_audio_processing(AudioProcessingOptions::default()) {
-        log::warn!("audio: failed to (re-)configure APM options: {e}");
     }
 
     // #812: the ONLY substitution is the sample source; name/options/publish
@@ -1331,6 +1520,24 @@ pub async fn set_audio_devices(
 /// independent receivers as callers create (confirmed by this codebase
 /// already doing it twice for the same room -- telepointer data + this), so
 /// there's no need to fold this into another module's loop.
+fn spawn_remote_audio_watch(
+    watched: &mut std::collections::HashMap<String, (String, CancellationToken)>,
+    identity: String,
+    track: RemoteAudioTrack,
+    speaking: Arc<Mutex<HashSet<String>>>,
+    generation: RoomGeneration,
+) {
+    let sid = track.sid().to_string();
+    if watched.contains_key(&sid) {
+        return;
+    }
+    let cancel = CancellationToken::new();
+    watched.insert(sid, (identity.clone(), cancel.clone()));
+    tokio::spawn(async move {
+        watch_remote_audio_track(identity, track, speaking, generation, cancel).await;
+    });
+}
+
 pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGeneration) {
     let mut events = room.subscribe();
     let speaking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -1340,25 +1547,25 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
         // before this logger existed -- the exact ordering of the live
         // incident, and it left both this log line and the watchdog blind.
         // Enumerate them at start; `watched` dedupes against a late event.
-        let mut watched: HashSet<String> = HashSet::new();
+        let mut watched: std::collections::HashMap<String, (String, CancellationToken)> =
+            std::collections::HashMap::new();
         for (_, participant) in room.remote_participants() {
             for publication in participant.track_publications().values() {
                 if let Some(RemoteTrack::Audio(audio_track)) = publication.track() {
-                    let sid = audio_track.sid().to_string();
-                    if watched.insert(sid) {
+                    if !watched.contains_key(&audio_track.sid().to_string()) {
                         log::info!(
                             "audio: subscribed to remote audio track from '{}' (sid={}, muted={}) -- pre-existing at join",
                             participant.identity(),
                             audio_track.sid(),
                             audio_track.is_muted()
                         );
-                        let identity = participant.identity().to_string();
-                        let speaking = speaking.clone();
-                        let generation = generation.clone();
-                        tokio::spawn(async move {
-                            watch_remote_audio_track(identity, audio_track, speaking, generation)
-                                .await;
-                        });
+                        spawn_remote_audio_watch(
+                            &mut watched,
+                            participant.identity().to_string(),
+                            audio_track,
+                            speaking.clone(),
+                            generation.clone(),
+                        );
                     }
                 }
             }
@@ -1373,7 +1580,7 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                     track, participant, ..
                 } => {
                     if let RemoteTrack::Audio(audio_track) = track {
-                        if !watched.insert(audio_track.sid().to_string()) {
+                        if watched.contains_key(&audio_track.sid().to_string()) {
                             continue;
                         }
                         log::info!(
@@ -1382,13 +1589,13 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                             audio_track.sid(),
                             audio_track.is_muted()
                         );
-                        let identity = participant.identity().to_string();
-                        let speaking = speaking.clone();
-                        let generation = generation.clone();
-                        tokio::spawn(async move {
-                            watch_remote_audio_track(identity, audio_track, speaking, generation)
-                                .await;
-                        });
+                        spawn_remote_audio_watch(
+                            &mut watched,
+                            participant.identity().to_string(),
+                            audio_track,
+                            speaking.clone(),
+                            generation.clone(),
+                        );
                     }
                 }
                 RoomEvent::TrackUnsubscribed { publication, .. } => {
@@ -1396,7 +1603,11 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                     // that re-subscribes the SAME sid within one room
                     // generation would be deduped into permanent blindness
                     // -- recreating the exact gap this logger closes.
-                    watched.remove(publication.sid().to_string().as_str());
+                    if let Some((_, cancel)) =
+                        watched.remove(publication.sid().to_string().as_str())
+                    {
+                        cancel.cancel();
+                    }
                 }
                 RoomEvent::ActiveSpeakersChanged { speakers } => {
                     let mut guard = speaking.lock_unpoisoned();
@@ -1405,8 +1616,21 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                         guard.insert(speaker.identity().to_string());
                     }
                 }
+                RoomEvent::ParticipantDisconnected(participant) => {
+                    let identity = participant.identity().to_string();
+                    for (_, (watch_identity, cancel)) in watched.iter() {
+                        if watch_identity == &identity {
+                            cancel.cancel();
+                        }
+                    }
+                    watched.retain(|_, (watch_identity, _)| watch_identity != &identity);
+                }
+                RoomEvent::Disconnected { .. } => break,
                 _ => {}
             }
+        }
+        for (_, (_, cancel)) in watched.drain() {
+            cancel.cancel();
         }
     });
 }
@@ -1656,6 +1880,7 @@ async fn watch_remote_audio_track(
     track: RemoteAudioTrack,
     speaking: Arc<Mutex<HashSet<String>>>,
     generation: RoomGeneration,
+    cancel: CancellationToken,
 ) {
     let sid = track.sid();
     let mut stream =
@@ -1664,7 +1889,10 @@ async fn watch_remote_audio_track(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // `interval`'s first tick completes immediately; burn it so the first
     // real evaluation covers a full window rather than zero elapsed time.
-    ticker.tick().await;
+    tokio::select! {
+        _ = cancel.cancelled() => return,
+        _ = ticker.tick() => {},
+    }
 
     let mut window_started = tokio::time::Instant::now();
     let mut frames: u64 = 0;
@@ -1675,6 +1903,7 @@ async fn watch_remote_audio_track(
 
     loop {
         tokio::select! {
+            _ = cancel.cancelled() => break,
             frame = stream.next() => {
                 let Some(frame) = frame else { break };
                 frames += 1;
@@ -1992,6 +2221,30 @@ mod tests {
         assert!(energy.is_audible(), "{}", energy.summary());
         assert!(energy.peak_abs > AUDIBLE_PEAK_FLOOR);
         assert!(energy.nonzero_samples > 400);
+    }
+
+    #[test]
+    fn windows_audio_lifecycle_acceptance_matrix_covers_stop_and_silence() {
+        let silent = window(0, 0);
+        assert_eq!(classify(silent), RemoteAudioVerdict::NoDecodedFrames);
+        assert!(RemoteAudioVerdict::NoDecodedFrames.is_alarmed());
+
+        let speaking = RemoteAudioWindow {
+            remote_speaking: true,
+            ..window(1_000, 0)
+        };
+        assert_eq!(classify(speaking), RemoteAudioVerdict::SilentWhileSpeaking);
+        assert!(RemoteAudioVerdict::SilentWhileSpeaking.is_alarmed());
+
+        // Muting/teardown is terminal for the watchdog verdict: it must not
+        // turn a deliberate stop into a repeated alarm.
+        let muted = RemoteAudioWindow {
+            track_muted: true,
+            remote_speaking: true,
+            ..silent
+        };
+        assert_eq!(classify(muted), RemoteAudioVerdict::Muted);
+        assert!(!RemoteAudioVerdict::Muted.is_alarmed());
     }
 
     #[test]

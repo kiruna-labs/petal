@@ -219,9 +219,10 @@ fn report_audio_join_failure(app: &tauri::AppHandle, failure: AudioJoinFailure, 
     );
 }
 
-/// `PETAL_DISABLE_AUDIO`: skip mic capture AND speaker playout for this run
-/// (headless/automated video-only testing). Extracted so the idempotent-
-/// rejoin repair below honors exactly the same opt-out as the join path.
+/// `PETAL_DISABLE_AUDIO`: skip all native audio for this run, including mic
+/// capture, speaker playout, and screen-audio companions (headless/automated
+/// video-only testing). Extracted so the idempotent-rejoin repair below honors
+/// exactly the same opt-out as the join path.
 ///
 /// `0`/`false`/`no`/`off` mean ENABLED. This used to treat any non-empty
 /// value as "disable", so the one incantation every doc, the cockpit
@@ -232,7 +233,7 @@ fn report_audio_join_failure(app: &tauri::AppHandle, failure: AudioJoinFailure, 
 /// Anything else non-empty still disables, so existing `=1` callers are
 /// unchanged.
 fn audio_disabled_by_env() -> bool {
-    crate::transport::audio::audio_is_disabled(std::env::var("PETAL_DISABLE_AUDIO").ok().as_deref())
+    crate::transport::audio::audio_disabled_by_env()
 }
 
 /// `enable_managed_playout` bounded and retried, mirroring the microphone path above.
@@ -477,7 +478,11 @@ impl SessionState {
     /// the session mutex across the LiveKit round trip. None when not joined.
     pub(crate) fn joined_room_for_rename(
         &self,
-    ) -> Option<(Arc<livekit::Room>, Arc<crate::presence::PresenceState>, String)> {
+    ) -> Option<(
+        Arc<livekit::Room>,
+        Arc<crate::presence::PresenceState>,
+        String,
+    )> {
         let guard = self.inner.lock_unpoisoned();
         guard.joined.as_ref().map(|j| {
             (
@@ -953,18 +958,16 @@ pub async fn join_room(
     // prevent joining the room -- log and continue rather than failing
     // `join_room` outright.
     //
-    // Opt-out escape hatch (`PETAL_DISABLE_AUDIO`): when set, skip mic capture
-    // AND speaker playout entirely for this run. This exists for headless/
-    // automated testing of the *video* screenshare loop where grabbing the
-    // mic/speaker devices is undesirable -- e.g. when the tester is on a
-    // parallel voice call and the app opening the mic causes feedback. It is
-    // env-gated and OFF by default, so normal launches are unaffected. Screen
-    // sharing works fine without audio (the two are independent, per the
-    // module doc comment).
+    // Opt-out escape hatch (`PETAL_DISABLE_AUDIO`): when set, skip native audio
+    // entirely for this run, including mic capture, speaker playout, and
+    // screen-audio companions. This exists for headless/automated testing of
+    // the *video* screenshare loop where grabbing audio devices or capturing
+    // output is undesirable -- e.g. when the tester is on a parallel voice
+    // call and the app opening the mic causes feedback. It is env-gated and
+    // OFF by default, so normal launches are unaffected. Screen sharing works
+    // fine without audio (the two are independent, per the module doc comment).
     if audio_disabled_by_env() {
-        log::warn!(
-            "session: PETAL_DISABLE_AUDIO set -- skipping mic publish + speaker playout (video-only run)"
-        );
+        log::warn!("session: PETAL_DISABLE_AUDIO set -- skipping native audio (video-only run)");
     } else {
         let audio_preferences = app.try_state::<crate::transport::audio::AudioDevicePreferences>();
         let preferred_recording_device = audio_preferences
@@ -1430,10 +1433,29 @@ async fn cleanup_left_room(
     // camera capturing into a dead track.
     stop_camera_publish(app, state).await;
 
-    let (joined, mic, playout) = {
+    let serial = state.lock_screen_audio_control().await;
+    let (joined, mic, playout, mut screen_audio) = {
         let mut guard = state.inner.lock_unpoisoned();
-        (guard.joined.take(), guard.mic.take(), guard.playout.take())
+        // The registry is room-scoped even though it lives beside `joined` so
+        // source references can be serialized without borrowing RoomJoinInfo.
+        // Reset it with the room rather than letting a late start retain a
+        // reference into the next join.
+        let _screen_audio_sources = std::mem::take(&mut guard.screen_audio_sources);
+        (
+            guard.joined.take(),
+            guard.mic.take(),
+            guard.playout.take(),
+            std::mem::take(&mut guard.screen_audio),
+        )
     };
+    // Normal share teardown already removes these handles. Keep a final
+    // room-level drain for partial starts, forced disconnects, and any future
+    // lifecycle path that removes a visual share without releasing its audio
+    // owner. The companion must be unpublished while the room is still valid.
+    for (_, track) in std::mem::take(&mut screen_audio) {
+        track.stop().await;
+    }
+    drop(serial);
     // Explicitly unmute/unpublish isn't needed -- `Room::close()` below tears
     // down every locally published track along with the room. `mic`/
     // `playout` are dropped here (releasing the platform ADM's recording/

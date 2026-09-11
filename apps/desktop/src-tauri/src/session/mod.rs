@@ -126,7 +126,6 @@ pub(crate) use crate::camera_session::{
     ensure_camera_published, repair_camera_publication_after_reconnect, stop_camera_publish,
 };
 pub use commands::{
-    set_share_remote_control_allowed, share_remote_control_allowed,
     __cmd__current_room, __cmd__join_room_command, __cmd__leave_room_command,
     __cmd__remote_control_allowed, __cmd__remote_control_policy, __cmd__room_presence,
     __cmd__set_display_name, __cmd__set_remote_control_allowed, __cmd__set_remote_control_policy,
@@ -138,24 +137,25 @@ pub use commands::{
     __tauri_command_name_set_remote_control_allowed,
     __tauri_command_name_set_remote_control_policy,
     __tauri_command_name_set_share_remote_control_allowed,
-    __tauri_command_name_set_share_resolution,
-    __tauri_command_name_share_remote_control_allowed,
+    __tauri_command_name_set_share_resolution, __tauri_command_name_share_remote_control_allowed,
     current_room, join_room_command, leave_room_command, remote_control_allowed,
     remote_control_policy, room_presence, set_display_name, set_remote_control_allowed,
-    set_remote_control_policy, set_share_resolution,
+    set_remote_control_policy, set_share_remote_control_allowed, set_share_resolution,
+    share_remote_control_allowed,
 };
 pub(crate) use room::cleanup_for_forced_disconnect;
 #[allow(unused_imports)]
 pub use room::RoomLeftEvent;
 pub use room::{join_room, leave_room};
+pub(crate) use share::MAX_CONCURRENT_SHARES;
 #[cfg(test)]
 pub(crate) use share::VIEWER_DEMAND_STALE_AFTER;
-pub(crate) use share::MAX_CONCURRENT_SHARES;
 pub(crate) use share::{
     expire_stale_viewer_demands, note_passive_viewer_demand, note_remote_interaction,
     reconcile_quality_for_window, repair_active_share_publication,
     repair_active_share_publications_after_reconnect,
-    repair_local_track_publication_after_reconnect, restart_active_shares_after_wake,
+    repair_local_track_publication_after_reconnect,
+    repair_screen_audio_publications_after_reconnect, restart_active_shares_after_wake,
     set_share_priority, start_share_with_system_picker_filter, ReconnectRepairGuard,
     SharedWindowScreenStatus, ViewerDemandEvent, ViewerDemandUpdate,
 };
@@ -170,7 +170,7 @@ pub(crate) use share::{stop_share_explained, StopShareAnalytics};
 pub(crate) use share::{recent_share_memory_marks, SHARE_MEMORY_SETTLE_STAGE};
 
 use crate::sync_ext::MutexExt;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::remote_control_core::RemoteControlPolicy;
@@ -180,7 +180,8 @@ use crate::capture::CaptureError;
 // Re-exported so `crate::session::RoomGeneration` keeps working for the many
 // external consumers that imported it through the session module.
 pub(crate) use crate::room_generation::RoomGeneration;
-use crate::transport::audio::{AudioError, MicTrack};
+use crate::screen_audio::{AudioSourceKey, AudioSourceRegistry};
+use crate::transport::audio::{AudioError, MicTrack, ScreenAudioTrack};
 use crate::transport::publisher::{RoomConnection, RoomConnectionError};
 
 use room::RoomJoinInfo;
@@ -281,6 +282,11 @@ struct SessionInner {
     /// struct's own mutex on every poll tick -- see `MicWatchHandle::new`'s
     /// call site in `join_room` below.
     mic: Option<Arc<MicTrack>>,
+    /// Desired screen-audio sources are reference-counted by active visual
+    /// shares. The capture/publication map contains at most one companion
+    /// track for each elected source key.
+    screen_audio_sources: AudioSourceRegistry,
+    screen_audio: BTreeMap<AudioSourceKey, Arc<ScreenAudioTrack>>,
     /// Keeps this process's speaker playout enabled for as long as the room
     /// connection lives (SPEC.md §4.9). `Arc`-wrapped for the same reason as
     /// `mic`, so resilience's device-watch poll can hold a cheap clone;
@@ -414,6 +420,9 @@ pub struct SessionState {
     /// Serializes shared-window metadata writes. A stale title-clear waits,
     /// revalidates, and cannot race a new share's title publish.
     share_metadata_apply_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes screen-audio source handoffs and publication starts. The
+    /// state mutex cannot be held across LiveKit/native async teardown.
+    screen_audio_control_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for SessionState {
@@ -433,6 +442,7 @@ impl Default for SessionState {
             mic_mute_apply_lock: Arc::new(tokio::sync::Mutex::new(())),
             ai_chat_ducking: AtomicBool::new(false),
             share_metadata_apply_lock: Arc::new(tokio::sync::Mutex::new(())),
+            screen_audio_control_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -518,6 +528,66 @@ impl SessionState {
 
     pub(crate) fn is_in_room(&self) -> bool {
         self.inner.lock_unpoisoned().joined.is_some()
+    }
+
+    pub(crate) async fn lock_screen_audio_control(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.screen_audio_control_lock.lock().await
+    }
+
+    /// Snapshot the active companion sources and their current handles while
+    /// the reconnect generation is still current. A missing handle means the
+    /// desired source is eligible for a fresh audio-only start on repair.
+    pub(crate) fn screen_audio_repair_snapshot(
+        &self,
+        reconnect_guard: &ReconnectRepairGuard,
+    ) -> Option<(
+        Arc<RoomConnection>,
+        Vec<(AudioSourceKey, Option<Arc<ScreenAudioTrack>>)>,
+    )> {
+        let guard = self.inner.lock_unpoisoned();
+        if !reconnect_guard.is_current_with_inner(&guard) {
+            return None;
+        }
+        let room = guard.joined.as_ref()?.room_connection.clone();
+        let sources = guard
+            .screen_audio_sources
+            .active_source_keys()
+            .into_iter()
+            .map(|source| (source, guard.screen_audio.get(&source).cloned()))
+            .collect();
+        Some((room, sources))
+    }
+
+    /// Whether `expected` is still the elected handle for `source`. Failure
+    /// monitors use this identity check so a late callback from an old source
+    /// cannot restart or stop a newer replacement.
+    pub(crate) fn screen_audio_is_current(
+        &self,
+        source: AudioSourceKey,
+        expected: &Arc<ScreenAudioTrack>,
+    ) -> bool {
+        self.inner
+            .lock_unpoisoned()
+            .screen_audio
+            .get(&source)
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+    }
+
+    /// Whether the source is still desired by at least one active visual
+    /// share. Used after an async native publication attempt completes.
+    pub(crate) fn screen_audio_source_is_active(&self, source: AudioSourceKey) -> bool {
+        self.inner
+            .lock_unpoisoned()
+            .screen_audio_sources
+            .is_active(source)
+    }
+
+    /// Whether an elected source currently has a companion handle.
+    pub(crate) fn screen_audio_handle_present(&self, source: AudioSourceKey) -> bool {
+        self.inner
+            .lock_unpoisoned()
+            .screen_audio
+            .contains_key(&source)
     }
 
     /// Whether the local webcam is currently being published to the room.
@@ -611,7 +681,8 @@ impl SessionState {
     /// that is the default).
     pub(crate) fn set_remote_control_allowed(&self, allowed: bool) {
         let next = RemoteControlPolicy::from_allowed(allowed, self.remote_control_default_policy());
-        self.remote_control_policy.store(next.as_u8(), Ordering::Relaxed);
+        self.remote_control_policy
+            .store(next.as_u8(), Ordering::Relaxed);
     }
 
     pub(crate) fn remote_control_policy(&self) -> RemoteControlPolicy {
@@ -627,7 +698,8 @@ impl SessionState {
     pub(crate) fn seed_remote_control_policy(&self, policy: RemoteControlPolicy) {
         self.remote_control_default_policy
             .store(policy.as_u8(), Ordering::Relaxed);
-        self.remote_control_policy.store(policy.as_u8(), Ordering::Relaxed);
+        self.remote_control_policy
+            .store(policy.as_u8(), Ordering::Relaxed);
     }
 
     /// Settings change (possibly mid-meeting): always update the default,
@@ -639,7 +711,8 @@ impl SessionState {
         self.remote_control_default_policy
             .store(policy.as_u8(), Ordering::Relaxed);
         if self.remote_control_policy().allows_requests() || !policy.allows_requests() {
-            self.remote_control_policy.store(policy.as_u8(), Ordering::Relaxed);
+            self.remote_control_policy
+                .store(policy.as_u8(), Ordering::Relaxed);
         }
     }
 
@@ -651,9 +724,7 @@ impl SessionState {
         guard.mic.clone()
     }
 
-    pub(crate) fn current_playout(
-        &self,
-    ) -> Option<Arc<crate::transport::audio::SpeakerPlayout>> {
+    pub(crate) fn current_playout(&self) -> Option<Arc<crate::transport::audio::SpeakerPlayout>> {
         let guard = self.inner.lock_unpoisoned();
         guard.playout.clone()
     }
@@ -727,8 +798,8 @@ impl SessionState {
     /// go through the identical generation-guarded, crash-safe apply path
     /// (see the comment on the SDK call below for why it must be this way).
     fn apply_effective_mic_mute(&self) {
-        let muted =
-            self.desired_mic_muted.load(Ordering::SeqCst) || self.ai_chat_ducking.load(Ordering::SeqCst);
+        let muted = self.desired_mic_muted.load(Ordering::SeqCst)
+            || self.ai_chat_ducking.load(Ordering::SeqCst);
         let generation = self.mic_mute_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let latest_generation = self.mic_mute_generation.clone();
         let apply_lock = self.mic_mute_apply_lock.clone();
@@ -847,7 +918,10 @@ mod tests {
             plan.shares.is_empty(),
             "a share must never be republished into a room the user did not share it in"
         );
-        assert!(!plan.camera_on, "camera intent must not leak across rooms either");
+        assert!(
+            !plan.camera_on,
+            "camera intent must not leak across rooms either"
+        );
     }
 
     #[test]
@@ -859,11 +933,7 @@ mod tests {
             width: 800,
             height: 600,
         };
-        state.record_leave_publish_carryover(
-            "room-aaaa".to_string(),
-            true,
-            vec![(4242, frame)],
-        );
+        state.record_leave_publish_carryover("room-aaaa".to_string(), true, vec![(4242, frame)]);
 
         let plan = state.take_leave_publish_carryover("room-aaaa");
         assert_eq!(
@@ -875,7 +945,10 @@ mod tests {
 
         // One-shot: a later join must not resurrect a stale intent.
         let second = state.take_leave_publish_carryover("room-aaaa");
-        assert!(second.shares.is_empty(), "carryover must be consumed exactly once");
+        assert!(
+            second.shares.is_empty(),
+            "carryover must be consumed exactly once"
+        );
     }
     use super::*;
 

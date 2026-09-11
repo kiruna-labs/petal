@@ -143,6 +143,21 @@
     "trackName": "petal-mic",
     "source": "microphone"
   },
+  "screenAudioTracks": [
+    {
+      "sourceKey": "system",
+      "trackName": "petal-window-audio-system",
+      "stream": "petal-window-audio-system",
+      "source": "screenshare_audio"
+    },
+    {
+      "sourceKey": "process",
+      "pid": 42,
+      "trackName": "petal-window-audio-process-42",
+      "stream": "petal-window-audio-process-42",
+      "source": "screenshare_audio"
+    }
+  ],
   "cameraTracks": [
     {
       "identity": "Web Tester",
