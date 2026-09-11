@@ -378,6 +378,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
         await goto(`/meeting/${encodeURIComponent(joinedRoom.name)}`, { replaceState: true });
         return true;
       }
+
       const snapshotRevision = presenceRevision;
       const snapshot = await roomPresence();
       if (snapshotRevision === presenceRevision) presence = snapshot;
@@ -391,9 +392,14 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     // hidden bridge participant after teardown, which nothing disconnects.
     if (disposed) return false;
 
-    // Remote camera tiles (issue #26) — after the native join so the
-    // room exists; non-fatal if it can't connect.
+    // Start the hidden camera receiver only once the native room join has
+    // succeeded AND this session is still alive. The bridge token is
+    // intentionally minted only after that join (the backend verifies the
+    // real participant is in the room), and starting it before the disposal
+    // guard above would resurrect the bridge after a client-side navigation
+    // unmounted the route -- a hidden participant nothing disconnects.
     void startGalleryBridge();
+
     return false;
   }
 
