@@ -2774,6 +2774,24 @@ pub struct CameraReceiverInterval {
     pub decoder_implementation: Option<String>,
     pub presented_frames: Option<u64>,
     pub presented_fps: Option<f64>,
+    pub presentation_probe_starts: Option<u64>,
+    pub presentation_rvfc_available: Option<bool>,
+    pub presentation_ready_state: Option<u32>,
+    pub presentation_paused: Option<bool>,
+    pub presentation_hidden: Option<bool>,
+    pub presentation_observing: Option<bool>,
+    pub presentation_gap_count100_ms: Option<u64>,
+    pub presentation_gap_count250_ms: Option<u64>,
+    pub presentation_max_gap_ms: Option<f64>,
+    pub presentation_excess_gap_ms: Option<f64>,
+    pub presentation_current_gap_ms: Option<f64>,
+    pub path_protocol: Option<String>,
+    pub path_local_candidate_type: Option<String>,
+    pub path_remote_candidate_type: Option<String>,
+    pub path_relay_protocol: Option<String>,
+    pub path_selected_pair_changes: Option<u64>,
+    pub path_round_trip_time_ms: Option<f64>,
+    pub path_available_incoming_kbps: Option<f64>,
     pub stream_state: String,
     pub stall_cause: String,
     pub gap_since_last_frame_ms: u64,
@@ -2790,6 +2808,45 @@ fn interval_float(value: Option<f64>, digits: usize) -> String {
 
 fn interval_count(value: Option<u64>) -> String {
     value.map_or_else(|| String::from("unknown"), |value| value.to_string())
+}
+
+fn interval_bool(value: Option<bool>) -> String {
+    value.map_or_else(|| String::from("unknown"), |value| value.to_string())
+}
+
+/// Bounded presentation-boundary summary: whether the WebView presented the
+/// decoded frames, and how long its gaps were. `unknown` means the browser
+/// could not report it -- never a healthy zero.
+fn camera_presentation_summary(interval: &CameraReceiverInterval) -> String {
+    format!(
+        "rvfc={} observing={} paused={} hidden={} ready_state={} probe_starts={} gaps_100ms={} gaps_250ms={} max_gap_ms={} excess_ms={} current_gap_ms={}",
+        interval_bool(interval.presentation_rvfc_available),
+        interval_bool(interval.presentation_observing),
+        interval_bool(interval.presentation_paused),
+        interval_bool(interval.presentation_hidden),
+        interval_count(interval.presentation_ready_state.map(u64::from)),
+        interval_count(interval.presentation_probe_starts),
+        interval_count(interval.presentation_gap_count100_ms),
+        interval_count(interval.presentation_gap_count250_ms),
+        interval_float(interval.presentation_max_gap_ms, 1),
+        interval_float(interval.presentation_excess_gap_ms, 1),
+        interval_float(interval.presentation_current_gap_ms, 1),
+    )
+}
+
+/// Bounded selected-path summary from the browser. Categorical candidate
+/// types and protocols only; every free-form value is capped here too.
+fn camera_receiver_path_summary(interval: &CameraReceiverInterval) -> String {
+    format!(
+        "protocol={} local={} remote={} relay={} selected_pair_changes={} rtt_ms={} available_in_kbps={}",
+        interval_text(interval.path_protocol.as_ref(), 16),
+        interval_text(interval.path_local_candidate_type.as_ref(), 16),
+        interval_text(interval.path_remote_candidate_type.as_ref(), 16),
+        interval_text(interval.path_relay_protocol.as_ref(), 16),
+        interval_count(interval.path_selected_pair_changes),
+        interval_float(interval.path_round_trip_time_ms, 2),
+        interval_float(interval.path_available_incoming_kbps, 1),
+    )
 }
 
 /// Render the record as one bounded log line.
@@ -2810,7 +2867,7 @@ fn camera_receiver_interval_line(interval: &CameraReceiverInterval) -> String {
         _ => String::from("unknown"),
     };
     format!(
-        "diagnostics: camera receiver interval route={} t_ms={} trial_id={} track_sid={} track_name={} participant={} stream_state={} stall_cause={} interval_seq={} interval_ms={} decoded_dimensions={} frames_decoded={} decoded_fps={} frames_received={} frames_rendered={} frames_dropped={} freeze_count={} freeze_ms={} key_frames_decoded={} bytes_received={} packets_received={} packets_lost={} packets_discarded={} retransmitted_packets={} nack={} pli={} fir={} jitter_ms={} jitter_buffer_ms={} jitter_buffer_emitted={} decode_ms={} loss_pct={} presented_frames={} presented_fps={} gap_since_last_frame_ms={} decoder={}",
+        "diagnostics: camera receiver interval route={} t_ms={} trial_id={} track_sid={} track_name={} participant={} stream_state={} stall_cause={} interval_seq={} interval_ms={} decoded_dimensions={} frames_decoded={} decoded_fps={} frames_received={} frames_rendered={} frames_dropped={} freeze_count={} freeze_ms={} key_frames_decoded={} bytes_received={} packets_received={} packets_lost={} packets_discarded={} retransmitted_packets={} nack={} pli={} fir={} jitter_ms={} jitter_buffer_ms={} jitter_buffer_emitted={} decode_ms={} loss_pct={} presented_frames={} presented_fps={} gap_since_last_frame_ms={} decoder={} presentation={} path={}",
         field(&interval.route, 32),
         now_ms(),
         field(&interval.track_sid, 64),
@@ -2849,6 +2906,8 @@ fn camera_receiver_interval_line(interval: &CameraReceiverInterval) -> String {
         interval_float(interval.presented_fps, 2),
         interval.gap_since_last_frame_ms,
         interval_text(interval.decoder_implementation.as_ref(), 48),
+        camera_presentation_summary(interval),
+        camera_receiver_path_summary(interval),
     )
 }
 
@@ -3566,6 +3625,148 @@ fn log_one_transport_stats(direction: &str, stats: &[livekit::webrtc::stats::Rtc
     }
 }
 
+/// Privacy-safe summary of the SELECTED transport path. Only categorical
+/// candidate types and protocols cross this boundary: addresses, ports,
+/// foundations, usernames, and full candidate strings never leave the stats
+/// report.
+#[derive(Debug, Clone, Default)]
+struct TransportPath {
+    protocol: Option<String>,
+    local_candidate_type: Option<String>,
+    remote_candidate_type: Option<String>,
+    relay_protocol: Option<String>,
+    selected_pair_changes: Option<u32>,
+    round_trip_time_ms: Option<f64>,
+    available_outgoing_kbps: Option<f64>,
+    available_incoming_kbps: Option<f64>,
+}
+
+impl TransportPath {
+    fn protocol(&self) -> String {
+        self.protocol
+            .clone()
+            .unwrap_or_else(|| String::from("unknown"))
+    }
+
+    fn local(&self) -> String {
+        self.local_candidate_type
+            .clone()
+            .unwrap_or_else(|| String::from("unknown"))
+    }
+
+    fn remote(&self) -> String {
+        self.remote_candidate_type
+            .clone()
+            .unwrap_or_else(|| String::from("unknown"))
+    }
+
+    fn relay(&self) -> String {
+        self.relay_protocol
+            .clone()
+            .unwrap_or_else(|| String::from("none"))
+    }
+}
+
+fn ice_candidate_type_label(
+    value: Option<livekit::webrtc::stats::IceCandidateType>,
+) -> Option<String> {
+    value.map(|value| format!("{value:?}").to_ascii_lowercase())
+}
+
+fn ice_relay_protocol_label(
+    value: Option<livekit::webrtc::stats::IceServerTransportProtocol>,
+) -> Option<String> {
+    value.map(|value| format!("{value:?}").to_ascii_lowercase())
+}
+
+/// Follow the transport's selected candidate-pair id into the candidate-pair
+/// and candidate entries. Deterministic: selected id first, then a nominated
+/// pair, then the first pair in report order.
+fn transport_path_from_stats(stats: &[livekit::webrtc::stats::RtcStats]) -> Option<TransportPath> {
+    use livekit::webrtc::stats::RtcStats;
+
+    let mut selected_pair_id = String::new();
+    let mut selected_pair_changes = None;
+    for stat in stats {
+        if let RtcStats::Transport(transport) = stat {
+            if !transport.transport.selected_candidate_pair_id.is_empty() {
+                selected_pair_id = transport.transport.selected_candidate_pair_id.clone();
+                selected_pair_changes = Some(transport.transport.selected_candidate_pair_changes);
+                break;
+            }
+        }
+    }
+
+    let mut candidates: HashMap<String, (Option<String>, Option<String>, Option<String>)> =
+        HashMap::new();
+    for stat in stats {
+        match stat {
+            RtcStats::LocalCandidate(candidate) => {
+                candidates.insert(
+                    candidate.rtc.id.clone(),
+                    (
+                        ice_candidate_type_label(candidate.local_candidate.candidate_type),
+                        Some(candidate.local_candidate.protocol.to_ascii_lowercase())
+                            .filter(|protocol| !protocol.is_empty()),
+                        ice_relay_protocol_label(candidate.local_candidate.relay_protocol),
+                    ),
+                );
+            }
+            RtcStats::RemoteCandidate(candidate) => {
+                candidates.insert(
+                    candidate.rtc.id.clone(),
+                    (
+                        ice_candidate_type_label(candidate.remote_candidate.candidate_type),
+                        Some(candidate.remote_candidate.protocol.to_ascii_lowercase())
+                            .filter(|protocol| !protocol.is_empty()),
+                        ice_relay_protocol_label(candidate.remote_candidate.relay_protocol),
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let mut pair = None;
+    let mut nominated = None;
+    let mut first = None;
+    for stat in stats {
+        if let RtcStats::CandidatePair(candidate_pair) = stat {
+            if first.is_none() {
+                first = Some(&candidate_pair.candidate_pair);
+            }
+            if candidate_pair.candidate_pair.nominated && nominated.is_none() {
+                nominated = Some(&candidate_pair.candidate_pair);
+            }
+            if !selected_pair_id.is_empty()
+                && candidate_pair.rtc.id == selected_pair_id
+                && pair.is_none()
+            {
+                pair = Some(&candidate_pair.candidate_pair);
+            }
+        }
+    }
+    let pair = pair.or(nominated).or(first)?;
+
+    let local = candidates.get(&pair.local_candidate_id);
+    let remote = candidates.get(&pair.remote_candidate_id);
+    let present = |value: f64| (value.is_finite() && value > 0.0).then_some(value);
+    Some(TransportPath {
+        protocol: local
+            .and_then(|(_, protocol, _)| protocol.clone())
+            .or_else(|| remote.and_then(|(_, protocol, _)| protocol.clone())),
+        local_candidate_type: local.and_then(|(kind, _, _)| kind.clone()),
+        remote_candidate_type: remote.and_then(|(kind, _, _)| kind.clone()),
+        relay_protocol: local
+            .and_then(|(_, _, relay)| relay.clone())
+            .or_else(|| remote.and_then(|(_, _, relay)| relay.clone())),
+        selected_pair_changes,
+        round_trip_time_ms: present(pair.current_round_trip_time * 1000.0),
+        available_outgoing_kbps: present(pair.available_outgoing_bitrate / 1000.0),
+        available_incoming_kbps: present(pair.available_incoming_bitrate / 1000.0),
+    })
+}
+
 /// One poll tick: read `get_stats()` from every local + remote track on the
 /// room and fold into (aggregate sample, per-track health). `dt_ms` is the
 /// elapsed time since the previous tick (None on the first tick -- rates
@@ -3582,6 +3783,14 @@ pub async fn collect_tick(
     dt_ms: Option<u64>,
 ) -> (StatsSample, Vec<TrackHealth>) {
     use livekit::webrtc::stats::RtcStats;
+
+    // Categorical path context for the camera sender interval. Fetched once
+    // per tick from the publisher transport; never contains addresses.
+    let publisher_path = room
+        .get_stats()
+        .await
+        .ok()
+        .and_then(|session| transport_path_from_stats(&session.publisher_stats));
 
     let mut tracks: Vec<TrackHealth> = Vec::new();
     let mut rtts: Vec<f64> = Vec::new();
@@ -3745,8 +3954,9 @@ pub async fn collect_tick(
         }
         if health.raw_track_name.as_deref().is_some_and(|name| name.starts_with("petal-camera-")) {
             let encoded = health.encoded_sent.as_ref();
+            let path = publisher_path.as_ref();
             log::info!(
-                "diagnostics: camera sender interval route=native-stats t_ms={} trial_id={} sid={} track={} encoded_dimensions={}x{} outbound_stats_fps={} encode_fps={} resolution_changes={} send_kbps={:.1} target_kbps={:.1} codec={} quality_limitation={} software_encoder={} qp={} packets_lost={} frames_encoded={} frames_sent={} keyframes={} retransmitted_packets={} rtt_ms={} jitter_ms={} loss_pct={}",
+                "diagnostics: camera sender interval route=native-stats t_ms={} trial_id={} sid={} track={} encoded_dimensions={}x{} outbound_stats_fps={} encode_fps={} resolution_changes={} send_kbps={:.1} target_kbps={:.1} codec={} quality_limitation={} software_encoder={} qp={} packets_lost={} frames_encoded={} frames_sent={} keyframes={} retransmitted_packets={} rtt_ms={} jitter_ms={} loss_pct={} path_protocol={} path_local={} path_remote={} path_relay={} path_changes={} path_rtt_ms={} path_avail_out_kbps={}",
                 now_ms(),
                 health.sid,
                 health.sid,
@@ -3777,6 +3987,13 @@ pub async fn collect_tick(
                     .map_or_else(|| String::from("unknown"), |value| format!("{value:.2}")),
                 rtcp_loss_pct
                     .map_or_else(|| String::from("unknown"), |value| format!("{value:.3}")),
+                path.map_or_else(|| String::from("unknown"), |path| path.protocol()),
+                path.map_or_else(|| String::from("unknown"), |path| path.local()),
+                path.map_or_else(|| String::from("unknown"), |path| path.remote()),
+                path.map_or_else(|| String::from("none"), |path| path.relay()),
+                interval_count(path.and_then(|path| path.selected_pair_changes.map(u64::from))),
+                interval_float(path.and_then(|path| path.round_trip_time_ms), 2),
+                interval_float(path.and_then(|path| path.available_outgoing_kbps), 1),
             );
         }
         send_kbps_total += health.actual_kbps;
@@ -5872,6 +6089,24 @@ mod tests {
             decoder_implementation: Some("hardware H264".into()),
             presented_frames: Some(447),
             presented_fps: Some(29.8),
+            presentation_rvfc_available: Some(true),
+            presentation_probe_starts: Some(1),
+            presentation_ready_state: Some(4),
+            presentation_paused: Some(false),
+            presentation_hidden: Some(false),
+            presentation_observing: Some(true),
+            presentation_gap_count100_ms: Some(1),
+            presentation_gap_count250_ms: Some(0),
+            presentation_max_gap_ms: Some(140.5),
+            presentation_excess_gap_ms: Some(40.5),
+            presentation_current_gap_ms: Some(16.0),
+            path_protocol: Some("udp".into()),
+            path_local_candidate_type: Some("srflx".into()),
+            path_remote_candidate_type: Some("relay".into()),
+            path_relay_protocol: Some("udp".into()),
+            path_selected_pair_changes: Some(1),
+            path_round_trip_time_ms: Some(24.5),
+            path_available_incoming_kbps: Some(4200.0),
             stream_state: "active".into(),
             stall_cause: "not_applicable".into(),
             gap_since_last_frame_ms: 33,
@@ -5884,6 +6119,14 @@ mod tests {
         assert!(line.contains("decoded_dimensions=1280x720"));
         assert!(line.contains("presented_fps=29.80"));
         assert!(line.contains("decoder=hardware H264"));
+        assert!(line.contains("presentation=rvfc=true"), "{line}");
+        assert!(line.contains("probe_starts=1"), "{line}");
+        assert!(line.contains("gaps_100ms=1"), "{line}");
+        assert!(line.contains("gaps_250ms=0"), "{line}");
+        assert!(
+            line.contains("path=protocol=udp local=srflx remote=relay"),
+            "{line}"
+        );
         // Missing measurements must read as unknown, never as a zero that a
         // reader would take for a real measurement.
         assert!(line.contains("frames_dropped=unknown"), "{line}");
@@ -5930,6 +6173,24 @@ mod tests {
             decoder_implementation: Some("d".repeat(500)),
             presented_frames: None,
             presented_fps: None,
+            presentation_rvfc_available: None,
+            presentation_probe_starts: None,
+            presentation_ready_state: None,
+            presentation_paused: None,
+            presentation_hidden: None,
+            presentation_observing: None,
+            presentation_gap_count100_ms: None,
+            presentation_gap_count250_ms: None,
+            presentation_max_gap_ms: None,
+            presentation_excess_gap_ms: None,
+            presentation_current_gap_ms: None,
+            path_protocol: Some("p".repeat(500)),
+            path_local_candidate_type: None,
+            path_remote_candidate_type: None,
+            path_relay_protocol: None,
+            path_selected_pair_changes: None,
+            path_round_trip_time_ms: None,
+            path_available_incoming_kbps: None,
             stream_state: "active".into(),
             stall_cause: "not_applicable".into(),
             gap_since_last_frame_ms: 0,
@@ -5938,6 +6199,15 @@ mod tests {
         assert!(!line.contains(&"i".repeat(65)), "identity must be capped: {line}");
         assert!(!line.contains(&"t".repeat(65)), "track name must be capped: {line}");
         assert!(!line.contains(&"d".repeat(49)), "decoder must be capped: {line}");
+        assert!(
+            !line.contains(&"p".repeat(17)),
+            "path protocol must be capped: {line}"
+        );
+        assert!(line.contains("presentation=rvfc=unknown"), "{line}");
+        assert!(
+            line.contains("path=protocol=pppppppppppppppp"),
+            "path protocol is capped to 16 chars: {line}"
+        );
         // One dimension present and one missing is not a measurement.
         assert!(line.contains("decoded_dimensions=unknown"), "{line}");
         // A non-finite rate is missing, not a number.

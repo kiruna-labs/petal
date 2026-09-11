@@ -17,18 +17,6 @@ export const FREEZE_WATCHDOG_TIMEOUT_MS = 30_000;
 export const FREEZE_WATCHDOG_POLL_MS = 2_000;
 export const CAMERA_DECODE_HEALTH_LOG_MS = 15_000;
 
-/** Compute the rate at which an HTMLVideoElement presented frames between logs.
- * This is intentionally separate from inbound-rtp framesDecoded: it measures
- * the WebView presentation boundary. */
-export function cameraPresentedFps(
-  previousPresentedFrames: number,
-  presentedFrames: number,
-  elapsedMs: number
-): number {
-  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return 0;
-  return (Math.max(0, presentedFrames - previousPresentedFrames) * 1000) / elapsedMs;
-}
-
 export interface CameraFreezeState {
   lastFramesDecoded: number;
   lastProgressAt: number;
@@ -211,6 +199,106 @@ export function cameraReceiveStatsFromStatsReport(
  * primary inbound report every other receiver metric uses. */
 export function framesDecodedFromStatsReport(report: RTCStatsReport | undefined): number | null {
   return cameraReceiveStatsFromStatsReport(report)?.framesDecoded ?? null;
+}
+
+/** Selected-path context for one receiver, kept categorical and privacy-safe:
+ * candidate types and protocols only, never addresses, ports, or candidate
+ * strings. */
+export interface CameraPathStats {
+  protocol: string | null;
+  localCandidateType: string | null;
+  remoteCandidateType: string | null;
+  relayProtocol: string | null;
+  selectedPairChanges: number | null;
+  roundTripTimeMs: number | null;
+  availableIncomingKbps: number | null;
+}
+
+type TransportStat = {
+  type?: string;
+  selectedCandidatePairId?: unknown;
+  selectedCandidatePairChanges?: unknown;
+};
+
+type CandidatePairStat = {
+  type?: string;
+  id?: unknown;
+  localCandidateId?: unknown;
+  remoteCandidateId?: unknown;
+  nominated?: unknown;
+  currentRoundTripTime?: unknown;
+  availableIncomingBitrate?: unknown;
+};
+
+type CandidateStat = {
+  type?: string;
+  id?: unknown;
+  candidateType?: unknown;
+  protocol?: unknown;
+  relayProtocol?: unknown;
+};
+
+/** Follow the transport's selected candidate-pair id into the candidate-pair
+ * and candidate entries. Unknown fields stay null, never zero. */
+export function cameraPathStatsFromStatsReport(
+  report: RTCStatsReport | undefined
+): CameraPathStats | null {
+  if (!report) return null;
+  const numberOrNull = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
+  const stringOrNull = (value: unknown): string | null =>
+    typeof value === 'string' && value.length > 0 ? value : null;
+
+  let selectedPairId: string | null = null;
+  let selectedPairChanges: number | null = null;
+  const candidates = new Map<
+    string,
+    { candidateType: string | null; protocol: string | null; relayProtocol: string | null }
+  >();
+  report.forEach((stat) => {
+    const s = stat as TransportStat & CandidateStat;
+    if (s.type === 'transport') {
+      if (selectedPairId === null) selectedPairId = stringOrNull(s.selectedCandidatePairId);
+      if (selectedPairChanges === null) {
+        selectedPairChanges = numberOrNull(s.selectedCandidatePairChanges);
+      }
+      return;
+    }
+    if (s.type !== 'local-candidate' && s.type !== 'remote-candidate') return;
+    const id = stringOrNull(s.id);
+    if (id === null) return;
+    candidates.set(id, {
+      candidateType: stringOrNull(s.candidateType),
+      protocol: stringOrNull(s.protocol),
+      relayProtocol: stringOrNull(s.relayProtocol)
+    });
+  });
+
+  const pairs: CandidatePairStat[] = [];
+  report.forEach((stat) => {
+    const s = stat as CandidatePairStat;
+    if (s.type !== 'candidate-pair') return;
+    pairs.push(s);
+  });
+  const pair =
+    pairs.find((candidate) => selectedPairId !== null && candidate.id === selectedPairId) ??
+    pairs.find((candidate) => candidate.nominated === true) ??
+    pairs[0];
+  if (!pair) return null;
+
+  const local = candidates.get(stringOrNull(pair.localCandidateId) ?? '');
+  const remote = candidates.get(stringOrNull(pair.remoteCandidateId) ?? '');
+  const roundTripTime = numberOrNull(pair.currentRoundTripTime);
+  const availableIncoming = numberOrNull(pair.availableIncomingBitrate);
+  return {
+    protocol: local?.protocol ?? remote?.protocol ?? null,
+    localCandidateType: local?.candidateType ?? null,
+    remoteCandidateType: remote?.candidateType ?? null,
+    relayProtocol: local?.relayProtocol ?? remote?.relayProtocol ?? null,
+    selectedPairChanges,
+    roundTripTimeMs: roundTripTime === null ? null : roundTripTime * 1_000,
+    availableIncomingKbps: availableIncoming === null ? null : availableIncoming / 1_000
+  };
 }
 
 /** Closed, privacy-safe buckets accepted by the native Sentry bridge. */

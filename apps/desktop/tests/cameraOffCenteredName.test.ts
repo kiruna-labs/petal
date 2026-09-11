@@ -33,10 +33,11 @@ test('desktop participant tile keeps video and placeholder layers mounted for cr
 });
 
 test('desktop participant tile fades real video in only after decoded-frame readiness', () => {
-  assert.match(participantTile, /requestVideoFrameCallback\?/);
-  assert.match(participantTile, /schedulePresentationCallback\(\)/);
-  assert.match(participantTile, /camera presentation health/);
-  assert.match(participantTile, /video\.addEventListener\('loadeddata', markReady, \{ once: true \}\)/);
+  // Readiness and the presentation boundary are owned by the generation-owned
+  // probe, not by an inline rVFC loop in the tile.
+  assert.match(participantTile, /startCameraPresentationProbe\(\{/);
+  assert.match(participantTile, /onFirstFrame:/);
+  assert.match(participantTile, /probe\.stop\(\)/);
   assert.match(participantTile, /const videoReady = \$derived\(videoOn && hasVisibleVideoStream && videoFrameReady\)/);
   assert.match(participantTile, /\.video-el\s*{[\s\S]*opacity:\s*0;[\s\S]*transition:\s*opacity var\(--motion-base\)/);
   assert.match(participantTile, /\.video-el\.ready\s*{[\s\S]*opacity:\s*1;/);

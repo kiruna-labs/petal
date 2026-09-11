@@ -44,12 +44,13 @@ import {
   nextCameraFreezeState,
   isCameraFrameStale,
   cameraReceiveStatsFromStatsReport,
+  cameraPathStatsFromStatsReport,
   nextCameraDecodeHealthState,
   formatCameraDecodeHealth,
   classifyCameraReceiveHealth,
   composeCameraReceiveObservation
 } from './cameraFreezeWatchdog.ts';
-import { cameraPresentationFor, clearAllCameraPresentations } from './cameraPresentation.ts';
+import { takeCameraPresentationSnapshot, clearAllCameraPresentations } from './cameraPresentation.ts';
 import {
   type CameraReceiverLifecyclePhase,
   createCameraReceiverLifecycleRecorder
@@ -306,6 +307,7 @@ export async function connectGalleryBridge(
         report = undefined;
       }
       const receiveStats = cameraReceiveStatsFromStatsReport(report);
+      const pathStats = cameraPathStatsFromStatsReport(report);
       const framesDecoded = receiveStats?.framesDecoded ?? null;
       // Prefer the publication SID recorded at subscription time: it is the
       // authoritative identity of the current publication, whereas a stale
@@ -377,7 +379,7 @@ export async function connectGalleryBridge(
           cameraStreamPaused(identity),
           stale
         );
-        const presentation = cameraPresentationFor(identity);
+        const presentation = takeCameraPresentationSnapshot(identity);
         void invoke(COMMANDS.recordCameraReceiverInterval, {
           interval: {
             participantIdentity: identity,
@@ -412,6 +414,24 @@ export async function connectGalleryBridge(
             decoderImplementation: receiveStats?.decoderImplementation ?? null,
             presentedFrames: presentation?.presentedFrames ?? null,
             presentedFps: presentation?.presentedFps ?? null,
+            presentationProbeStarts: presentation?.probeStarts ?? null,
+            presentationRvfcAvailable: presentation?.rvfcAvailable ?? null,
+            presentationReadyState: presentation?.readyState ?? null,
+            presentationPaused: presentation?.paused ?? null,
+            presentationHidden: presentation?.hidden ?? null,
+            presentationObserving: presentation?.observing ?? null,
+            presentationGapCount100Ms: presentation?.gapCount100Ms ?? null,
+            presentationGapCount250Ms: presentation?.gapCount250Ms ?? null,
+            presentationMaxGapMs: presentation?.maxGapMs ?? null,
+            presentationExcessGapMs: presentation?.excessGapMs ?? null,
+            presentationCurrentGapMs: presentation?.currentGapMs ?? null,
+            pathProtocol: pathStats?.protocol ?? null,
+            pathLocalCandidateType: pathStats?.localCandidateType ?? null,
+            pathRemoteCandidateType: pathStats?.remoteCandidateType ?? null,
+            pathRelayProtocol: pathStats?.relayProtocol ?? null,
+            pathSelectedPairChanges: pathStats?.selectedPairChanges ?? null,
+            pathRoundTripTimeMs: pathStats?.roundTripTimeMs ?? null,
+            pathAvailableIncomingKbps: pathStats?.availableIncomingKbps ?? null,
             streamState: observation.streamState,
             stallCause: observation.stallCause ?? 'not_applicable',
             gapSinceLastFrameMs: now - next.lastProgressAt

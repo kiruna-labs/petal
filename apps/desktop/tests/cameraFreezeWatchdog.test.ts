@@ -13,18 +13,12 @@ import {
   formatCameraDecodeHealth,
   classifyCameraReceiveHealth,
   composeCameraReceiveObservation,
-  cameraPresentedFps
+  cameraPathStatsFromStatsReport
 } from '../src/lib/data/cameraFreezeWatchdog.ts';
 
 // #247: unit tests for the local camera freeze-watchdog decision logic
 // (galleryBridge.ts has none of this today -- see the issue). Mirrors the
 // native no_frame_watchdog_* tests in transport/subscriber.rs.
-
-test('cameraPresentedFps measures WebView presentation progress independently', () => {
-  assert.equal(cameraPresentedFps(10, 25, 5_000), 3);
-  assert.equal(cameraPresentedFps(25, 10, 5_000), 0);
-  assert.equal(cameraPresentedFps(10, 25, 0), 0);
-});
 
 test('nextCameraFreezeState advances progress when framesDecoded increases', () => {
   const t0 = 1_000;
@@ -560,4 +554,115 @@ test('formatCameraDecodeHealth preserves the log contract fields', () => {
     }),
     "gallery bridge: camera decode health for 'alice' -- frames_decoded=42 decoded_fps=29.9 browser_fps=unknown frames_dropped=unknown freeze_count=unknown freeze_ms=unknown packets_received=unknown packets_lost=unknown packets_discarded=unknown retransmitted_packets=unknown bytes_received=unknown nack=unknown pli=unknown fir=unknown key_frames_decoded=unknown jitter_buffer_ms=unknown jitter_buffer_emitted=unknown decode_ms=unknown decoder='unknown' gap_since_last_frame_ms=120"
   );
+});
+
+// #247 path context: the receiver's durable interval records WHICH transport
+// path carried the camera, using categorical candidate types/protocols only.
+
+function fakeReport(stats: Record<string, unknown>[]): RTCStatsReport {
+  return {
+    forEach(callback: (value: unknown, key: string) => void) {
+      for (const stat of stats) callback(stat, String(stat.id ?? ''));
+    }
+  } as unknown as RTCStatsReport;
+}
+
+test('cameraPathStatsFromStatsReport follows the selected candidate pair', () => {
+  const path = cameraPathStatsFromStatsReport(
+    fakeReport([
+      {
+        id: 'T01',
+        type: 'transport',
+        selectedCandidatePairId: 'CP2',
+        selectedCandidatePairChanges: 3
+      },
+      { id: 'CP1', type: 'candidate-pair', nominated: true, currentRoundTripTime: 0.09 },
+      {
+        id: 'CP2',
+        type: 'candidate-pair',
+        nominated: false,
+        localCandidateId: 'L2',
+        remoteCandidateId: 'R2',
+        currentRoundTripTime: 0.024,
+        availableIncomingBitrate: 4_200_000
+      },
+      { id: 'L2', type: 'local-candidate', candidateType: 'srflx', protocol: 'udp' },
+      {
+        id: 'R2',
+        type: 'remote-candidate',
+        candidateType: 'relay',
+        protocol: 'udp',
+        relayProtocol: 'udp'
+      }
+    ])
+  );
+  assert.deepEqual(path, {
+    protocol: 'udp',
+    localCandidateType: 'srflx',
+    remoteCandidateType: 'relay',
+    relayProtocol: 'udp',
+    selectedPairChanges: 3,
+    roundTripTimeMs: 24,
+    availableIncomingKbps: 4_200
+  });
+});
+
+test('cameraPathStatsFromStatsReport falls back to the nominated pair and stays unknown', () => {
+  const path = cameraPathStatsFromStatsReport(
+    fakeReport([
+      { id: 'T01', type: 'transport' },
+      { id: 'CP1', type: 'candidate-pair', nominated: false },
+      { id: 'CP2', type: 'candidate-pair', nominated: true, localCandidateId: 'L1' }
+    ])
+  );
+  assert.ok(path);
+  assert.equal(path.selectedPairChanges, null);
+  // Unknown stays null, never a misleading zero.
+  assert.equal(path.roundTripTimeMs, null);
+  assert.equal(path.availableIncomingKbps, null);
+  assert.equal(path.localCandidateType, null);
+
+  assert.equal(cameraPathStatsFromStatsReport(undefined), null);
+  assert.equal(cameraPathStatsFromStatsReport(fakeReport([])), null);
+});
+
+test('cameraPathStatsFromStatsReport never carries addresses or candidate strings', () => {
+  const path = cameraPathStatsFromStatsReport(
+    fakeReport([
+      { id: 'T01', type: 'transport', selectedCandidatePairId: 'CP1' },
+      {
+        id: 'CP1',
+        type: 'candidate-pair',
+        localCandidateId: 'L1',
+        remoteCandidateId: 'R1',
+        currentRoundTripTime: 0.01,
+        availableIncomingBitrate: 2_000_000
+      },
+      {
+        id: 'L1',
+        type: 'local-candidate',
+        candidateType: 'host',
+        protocol: 'udp',
+        address: '192.0.2.44',
+        ip: '192.0.2.44',
+        port: 54321,
+        url: 'stun:example.invalid',
+        foundation: 'secret'
+      },
+      {
+        id: 'R1',
+        type: 'remote-candidate',
+        candidateType: 'relay',
+        protocol: 'tcp',
+        address: '203.0.113.9',
+        port: 443
+      }
+    ])
+  );
+  const serialized = JSON.stringify(path);
+  for (const forbidden of ['192.0.2.44', '203.0.113.9', '54321', 'example.invalid', 'secret']) {
+    assert.ok(!serialized.includes(forbidden), `leaked ${forbidden}: ${serialized}`);
+  }
+  assert.equal(path?.protocol, 'udp');
+  assert.equal(path?.remoteCandidateType, 'relay');
 });

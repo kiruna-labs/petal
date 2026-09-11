@@ -21,8 +21,13 @@
   does not reuse `Avatar`; issue #137 only adds the centered name treatment,
   with the compact Pill Avatar left unchanged.
 -->
+<script module lang="ts">
+  // Monotonic per-tile-instance key for tiles with no owner identity
+  // (filmstrip), so their presentation probes never collide.
+  let tileProbeSeq = 0;
+</script>
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { cameraOffNameLabelForFit, firstGrapheme, nameChipLabelForFit } from '$lib/data/nameChipFit';
   import { colorForIdentity, identityColorCss, identityColorFromPaletteIndex } from '$lib/data/identityColor';
@@ -36,11 +41,7 @@
     shareCountPillLabel,
     shouldShowSharePill
   } from '$lib/data/shareCountPill';
-  import { cameraPresentedFps } from '$lib/data/cameraFreezeWatchdog';
-  import {
-    recordCameraPresentation,
-    clearCameraPresentation
-  } from '$lib/data/cameraPresentation';
+  import { startCameraPresentationProbe, type CameraPresentationVideo } from '$lib/data/cameraPresentation';
   import ControlButton from './ControlButton.svelte';
 
   interface Props {
@@ -150,7 +151,7 @@
   const showCameraOffName = $derived(!videoOn);
   const videoReady = $derived(videoOn && hasVisibleVideoStream && videoFrameReady);
   const videoDetachDelayMs = 180;
-  const cameraPresentationLogMs = 15_000;
+  const tileProbeIdentity = `tile:${tileProbeSeq++}`;
 
   function clamp01(value: number): number {
     return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
@@ -382,77 +383,26 @@
   });
 
   $effect(() => {
+    // Anchored to the ELEMENT, not to the stream reference. A tile or stream
+    // handoff must not restart the probe (which would erase cumulative gap
+    // history); only a new element or a new tile instance does.
     const video = videoEl;
-    const stream = visibleVideoStream;
-    if (!video || !stream) return;
+    if (!video) return;
 
     let cancelled = false;
-    let presentedFrames = 0;
-    let lastLoggedFrames = 0;
-    let lastLoggedAt = performance.now();
-    let presentationCallbackHandle: number | undefined;
-    const remoteIdentity = !isLocal ? ownerIdentity : undefined;
-    const track = stream.getVideoTracks()[0];
-    const frameVideo = video as unknown as {
-      requestVideoFrameCallback?: (
-        callback: (now: number, metadata: unknown) => void
-      ) => number;
-      cancelVideoFrameCallback?: (handle: number) => void;
-    };
-    const markReady = () => {
-      if (!cancelled) markVideoFrameReady(stream);
-    };
-    const schedulePresentationCallback = () => {
-      if (cancelled || !frameVideo.requestVideoFrameCallback) return;
-      presentationCallbackHandle = frameVideo.requestVideoFrameCallback(() => {
-        presentationCallbackHandle = undefined;
-        if (cancelled) return;
-        presentedFrames += 1;
-        markReady();
-        schedulePresentationCallback();
-      });
-    };
-    const logPresentationHealth = () => {
-      if (!remoteIdentity) return;
-      const now = performance.now();
-      const presentedFps = cameraPresentedFps(
-        lastLoggedFrames,
-        presentedFrames,
-        now - lastLoggedAt
-      );
-      console.debug(
-        `gallery bridge: camera presentation health for '${remoteIdentity}' -- presented_frames=${presentedFrames} presented_fps=${presentedFps.toFixed(1)} ready_state=${video.readyState} paused=${video.paused} track_ready_state=${track?.readyState ?? 'unknown'} track_enabled=${track?.enabled ?? 'unknown'} track_muted=${track?.muted ?? 'unknown'} rvfc=${frameVideo.requestVideoFrameCallback ? 'available' : 'unavailable'}`
-      );
-      lastLoggedFrames = presentedFrames;
-      lastLoggedAt = now;
-      // Publish the same aggregate to the durable receiver-interval record so
-      // `petal.log` carries the presentation boundary next to the decoder
-      // counters, instead of a console line nobody can read after the fact.
-      recordCameraPresentation(remoteIdentity, {
-        presentedFrames,
-        presentedFps,
-        readyState: video.readyState,
-        videoPaused: video.paused
-      });
-    };
-    const presentationLog = remoteIdentity
-      ? setInterval(logPresentationHealth, cameraPresentationLogMs)
-      : undefined;
-
-    schedulePresentationCallback();
-    video.addEventListener('loadeddata', markReady, { once: true });
-    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && typeof requestAnimationFrame !== 'undefined') {
-      requestAnimationFrame(markReady);
-    }
+    const probe = startCameraPresentationProbe({
+      identity: ownerIdentity ?? tileProbeIdentity,
+      video: video as unknown as CameraPresentationVideo,
+      onFirstFrame: () => {
+        // `markVideoFrameReady` reads visibleVideoStream/videoOn; untrack so a
+        // synchronous ready call cannot make them probe dependencies.
+        if (!cancelled) untrack(() => markVideoFrameReady());
+      }
+    });
 
     return () => {
       cancelled = true;
-      video.removeEventListener('loadeddata', markReady);
-      if (presentationCallbackHandle !== undefined) {
-        frameVideo.cancelVideoFrameCallback?.(presentationCallbackHandle);
-      }
-      if (presentationLog !== undefined) clearInterval(presentationLog);
-      if (remoteIdentity) clearCameraPresentation(remoteIdentity);
+      probe.stop();
     };
   });
 
