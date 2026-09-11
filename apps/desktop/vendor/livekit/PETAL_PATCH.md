@@ -44,6 +44,23 @@ The encoder logs the codec mode, the chosen mode, which of those two decided it,
 and every `ICodecAPI` HRESULT so the effective policy is observable rather than
 assumed.
 
+"Bitrate-driven" was a description, not a setting. The camera path left the
+driver's rate-control MODE untouched, and Microsoft documents the H.264 encoder
+as defaulting to unconstrained VBR — so no explicit mode was ever selected. On a
+live publication the camera overshot WebRTC's own target by 2.0x (6291 kbps sent
+against a 3149 kbps target), which was followed by 11.7% loss, 110 ms jitter,
+>1300 retransmitted packets and a target collapse to 30–46 kbps; the resolution
+re-climb that followed is the remote freeze users reported.
+
+`PETAL_MF_CAMERA_RATE_CONTROL` therefore selects the mode explicitly for the
+realtime camera path only — `cbr` or `peak-vbr`; anything else leaves the default
+standing. It is applied BEFORE the media types are negotiated, because a static
+rate-control property set afterwards may be ignored, and screensharing keeps its
+quality-first policy unchanged. `SetRates` no longer discards its
+`AVEncCommonMeanBitRate` HRESULT: the first call and then one call per 60 log the
+requested target alongside the result, so a rejected target cannot masquerade as
+a healthy encoder.
+
 ## Updating
 
 Drop this patch once upstream exposes a per-encoder rate-control policy the

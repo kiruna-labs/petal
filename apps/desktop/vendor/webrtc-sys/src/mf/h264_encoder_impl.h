@@ -99,6 +99,14 @@ class MfH264EncoderImpl : public VideoEncoder {
   void ProcessOutput();
   // Complete async-MFT teardown (Chromium MFVEA Reset() sequence).
   void TeardownMft();
+  // Screenshare/quality-first policy for this encoder. `source` (optional)
+  // receives the bounded provenance string used in the bring-up log, so the
+  // rule lives in exactly one place.
+  bool QualityModeEnabled(const char** source) const;
+  // Camera-only rate-control experiment arm (PETAL_MF_CAMERA_RATE_CONTROL).
+  // Static ICodecAPI property, so it must be applied BEFORE the media types
+  // are negotiated -- an older encoder ignores a mode set afterwards.
+  void ApplyCameraRateControlMode();
 
   Microsoft::WRL::ComPtr<IMFTransform> mft_;
   Microsoft::WRL::ComPtr<IMFMediaEventGenerator> event_generator_;
@@ -136,6 +144,10 @@ class MfH264EncoderImpl : public VideoEncoder {
   int height_ = 0;
   int max_framerate_ = 0;
   uint32_t target_bps_ = 0;
+  // Bounded SetRates diagnostic cadence: the first call proves the MFT accepts
+  // a mid-stream target change, then one sample per ~60 updates keeps the
+  // requested-vs-accepted relationship visible without flooding the log.
+  uint64_t set_rates_calls_ = 0;
   // VideoCodecMode this encoder was configured for. Realtime camera and
   // screensharing want opposite rate-control policies, so the mode is a real
   // input to InitMft rather than a caller-side detail.

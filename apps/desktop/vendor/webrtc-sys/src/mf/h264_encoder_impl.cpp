@@ -191,17 +191,8 @@ int32_t MfH264EncoderImpl::InitMft(int width, int height) {
     // PETAL_MF_QUALITY_MODE overrides the mode-derived default for controlled
     // experiments: "1" forces quality mode, "0" forces bitrate mode, any
     // other value is ignored and the mode-derived default stands.
-    const char* override_value = std::getenv("PETAL_MF_QUALITY_MODE");
-    bool quality_mode = (codec_mode_ == VideoCodecMode::kScreensharing);
-    const char* quality_source = quality_mode ? "screensharing-default"
-                                             : "realtime-default";
-    if (override_value != nullptr && std::strcmp(override_value, "1") == 0) {
-      quality_mode = true;
-      quality_source = "env-override";
-    } else if (override_value != nullptr && std::strcmp(override_value, "0") == 0) {
-      quality_mode = false;
-      quality_source = "env-override";
-    }
+    const char* quality_source = "mode-default";
+    const bool quality_mode = QualityModeEnabled(&quality_source);
 
     HRESULT mode_hr = E_NOTIMPL;
     HRESULT quality_hr = E_NOTIMPL;
@@ -279,6 +270,10 @@ int32_t MfH264EncoderImpl::InitMft(int width, int height) {
     mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
     mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
   }
+
+  // Static rate-control properties must be set BEFORE the media types are
+  // negotiated (older encoders ignore a mode applied afterwards).
+  ApplyCameraRateControlMode();
 
   int32_t config_result =
       ConfigureMft(width, height, max_framerate_, target_bps_);
@@ -865,14 +860,130 @@ void MfH264EncoderImpl::SetRates(const RateControlParameters& parameters) {
   const uint32_t target_bps = parameters.bitrate.get_sum_bps();
   if (target_bps > 0) {
     target_bps_ = target_bps;
+    HRESULT mean_hr = E_NOTIMPL;
     if (codec_api_) {
       VARIANT var;
       var.vt = VT_UI4;
       var.ulVal = target_bps;
       // Best-effort; some MFTs reject mid-stream bitrate changes.
-      codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
+      mean_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
+    }
+    // Bounded, so a sub-second rate-control churn cannot flood the log, but a
+    // silently REJECTED target change (the exact shape that lets the encoder
+    // ignore WebRTC's estimate and overshoot) is visible rather than assumed.
+    set_rates_calls_ += 1;
+    if (set_rates_calls_ <= 1 || set_rates_calls_ % 60 == 0) {
+      RTC_LOG(LS_WARNING) << "MF H264 encoder: set_rates call=" << set_rates_calls_
+                          << " requested_bps=" << target_bps
+                          << " framerate=" << parameters.framerate_fps
+                          << " mean_bitrate_hr=0x" << std::hex << mean_hr
+                          << std::dec;
     }
   }
+}
+
+bool MfH264EncoderImpl::QualityModeEnabled(const char** source) const {
+  const char* override_value = std::getenv("PETAL_MF_QUALITY_MODE");
+  if (override_value != nullptr && std::strcmp(override_value, "1") == 0) {
+    if (source != nullptr) {
+      *source = "env-override";
+    }
+    return true;
+  }
+  if (override_value != nullptr && std::strcmp(override_value, "0") == 0) {
+    if (source != nullptr) {
+      *source = "env-override";
+    }
+    return false;
+  }
+  const bool default_mode = (codec_mode_ == VideoCodecMode::kScreensharing);
+  if (source != nullptr) {
+    *source = default_mode ? "screensharing-default" : "realtime-default";
+  }
+  return default_mode;
+}
+
+// Camera-only rate-control arm for the remote-freeze investigation.
+//
+// The camera path previously left the rate-control MODE at whatever the driver
+// defaults to. Microsoft documents that the H.264 encoder defaults to
+// unconstrained VBR, and Chromium's MediaFoundation path maps constant-bitrate
+// operation to CBR and variable-bitrate operation to peak-constrained VBR --
+// so "bitrate mode" was never actually selected here. Measured on a live
+// publication, the camera overshot WebRTC's own target by 2.0x (6291 kbps sent
+// against a 3149 kbps target), which was followed by 11.7% loss, 110 ms jitter,
+// >1300 retransmitted packets and a target collapse to 30-46 kbps; the
+// resulting resolution re-climb is the remote freeze the user reported.
+//
+// This selector exists to test one explicit mode at a time on the same route.
+// Screenshare quality mode is deliberately OUT of scope (it minimizes QP and
+// ignores the target by design).
+//
+// PETAL_MF_CAMERA_RATE_CONTROL: "default" | "cbr" | "peak-vbr". Any other
+// value is ignored and the default stands (strict, like PETAL_MF_QUALITY_MODE).
+void MfH264EncoderImpl::ApplyCameraRateControlMode() {
+  const char* value = std::getenv("PETAL_MF_CAMERA_RATE_CONTROL");
+  // A SINGLE unambiguous line per encoder creation, emitted at WARNING because
+  // the application's log sink does NOT capture libwebrtc INFO output -- an INFO
+  // line here is invisible in petal.log, which silently makes every
+  // rate-control A/B unreadable (the pre-existing quality-mode bring-up line has
+  // exactly that bug). WARNING survives the sink, and one line per publication
+  // cannot spam.
+  if (!codec_api_) {
+    RTC_LOG(LS_WARNING) << "MF H264 encoder: camera rate control selected=unavailable"
+                        << " codec_api_present=false requested="
+                        << (value == nullptr ? "unset" : value);
+    return;
+  }
+  if (QualityModeEnabled(nullptr)) {
+    RTC_LOG(LS_WARNING) << "MF H264 encoder: camera rate control selected=quality"
+                        << " codec_api_present=true requested="
+                        << (value == nullptr ? "unset" : value)
+                        << " (screenshare policy; the camera arm does not apply)";
+    return;
+  }
+  const char* selected = "default";
+  HRESULT mode_hr = E_NOTIMPL;
+  HRESULT mean_hr = E_NOTIMPL;
+  HRESULT max_hr = E_NOTIMPL;
+  if (value != nullptr && std::strcmp(value, "cbr") == 0) {
+    selected = "cbr";
+    VARIANT mode = {};
+    mode.vt = VT_UI4;
+    mode.ulVal = eAVEncCommonRateControlMode_CBR;
+    mode_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
+    if (target_bps_ > 0) {
+      VARIANT mean = {};
+      mean.vt = VT_UI4;
+      mean.ulVal = target_bps_;
+      mean_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &mean);
+    }
+  } else if (value != nullptr && std::strcmp(value, "peak-vbr") == 0) {
+    selected = "peak-vbr";
+    VARIANT mode = {};
+    mode.vt = VT_UI4;
+    mode.ulVal = eAVEncCommonRateControlMode_PeakConstrainedVBR;
+    mode_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
+    if (target_bps_ > 0) {
+      VARIANT mean = {};
+      mean.vt = VT_UI4;
+      mean.ulVal = target_bps_;
+      mean_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &mean);
+      VARIANT peak = {};
+      peak.vt = VT_UI4;
+      // A bounded ceiling, not a tuned value: the point of this arm is to CAP
+      // the overshoot, so the documented "peak-constrained" shape is a
+      // doubled mean rather than a number chosen to flatter one run.
+      peak.ulVal = target_bps_ * 2;
+      max_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &peak);
+    }
+  }
+  RTC_LOG(LS_WARNING) << "MF H264 encoder: camera rate control selected="
+                      << selected
+                      << " requested=" << (value == nullptr ? "unset" : value)
+                      << " target_bps=" << target_bps_ << " mode_hr=0x" << std::hex
+                      << mode_hr << " mean_hr=0x" << mean_hr << " max_hr=0x"
+                      << max_hr << std::dec;
 }
 
 VideoEncoder::EncoderInfo MfH264EncoderImpl::GetEncoderInfo() const {
