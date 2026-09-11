@@ -2641,6 +2641,61 @@ substitute for this hardware gate. For controlled candidate A/B runs, set
 `PETAL_MF_NATIVE_INDEX` to one enumerated index and record the selected subtype,
 advertised rate, observed rate, encoder implementation, bitrate, and loss.
 
+### Windows camera media-ownership and presentation acceptance
+
+Deterministic tests cover the admission table, the camera publish policy, and
+the presentation probe. They cannot prove a real route rendered the decoded
+frames, so a camera change is live-verified only after this recipe. Run it on
+the affected Windows machine with the BRIO connected, no other application
+holding the camera, and a second peer on the same route.
+
+1. **Ownership.** Grep the sender's `petal.log` for `native subscription`. The
+   native room must never report a camera `TrackSubscribed`; the only camera
+   subscription is the hidden gallery bridge
+   (`route=gallery-webview`, reaching `subscribed` then `first_decode` for the
+   same SID). Unset `PETAL_ENABLE_NATIVE_CAMERA_SUBSCRIBE` — the variable and its
+   platform branch no longer exist.
+2. **Source cadence.** Explicit 60 must sustain >=48 unique frames/s in local
+   self-view (expected ~60) with zero duplicate timestamps; Auto/30 must
+   sustain >=24 (expected ~30). One camera activation per toggle.
+3. **Presentation.** After each tile registers, `camera receiver interval` must
+   carry a `presentation=` section every interval. `rvfc=false` is honest
+   unsupported telemetry, not a healthy zero. Select the healthy-route bitrate
+   from repeated evidence: run 3000/4000/5000 kbps arms with
+   `PETAL_CAMERA_EXPERIMENT_MAX_KBPS`, fresh process per arm, >=2.5 minutes
+   each, ideally ABBA order, and compare presentation gaps, decoded/presented
+   fps, freezes, drops, NACKs, retransmissions, bitrate ratio, RTT/jitter, route
+   categories, decoded dimensions, and QP. Do not tune to one startup sample.
+4. **Toggle cycles.** Three camera toggles, each showing one successful
+   activation, generation isolation, clean unpublish/reacquisition, and encoder
+   session retirement.
+
+### Windows Cargo + MSVC build workarounds
+
+Two environmental failures cost a full rebuild when rediscovered, so handle
+them up front:
+
+- **`clangd` wins the object-file race (MSVC `C1056`).** `cl` fails with
+  `cannot update the time date stamp field in '…o'` when another process holds
+  the object. Stop `clangd` (and any editor language server indexing
+  `src-tauri`) before a C++/Cargo build. The failure is retryable; the second
+  `cargo test --lib` run after the editor settles usually succeeds.
+- **MAX_PATH breaks the webrtc-sys include paths.** `webrtc-sys-build`
+  extracts the prebuilt libwebrtc into a `scratch-<hash>` directory under
+  `target`, so the nested `absl` headers exceed 260 characters. Build through a
+  short `subst` drive alias (`subst P: <repo>`), run every subsequent Cargo
+  command from `P:\`, and keep `CARGO_TARGET_DIR` unset. If the `scratch`
+  crate's baked `OUT_DIR` still points at the long path, `cargo clean -p
+  scratch` (from the `P:` path) forces `scratch` to recompile with the short
+  one; the extracted libwebrtc can be copied back from
+  `target/release/build/scratch-*/out/livekit_webrtc` instead of re-downloading.
+  Unmap the alias only after returning to the real path.
+- **Frontend assets rebuild from the `P:` path fails.** `src-tauri/build.rs`
+  runs `npm run build` whenever `apps/desktop/src` is newer than
+  `build/index.html`, and SvelteKit's output-dir check rejects the subst path.
+  Run `npm run build` from the real (non-subst) path first, then run Cargo from
+  `P:`, which then skips the frontend step.
+
 ## Environment Variables
 
 | Variable | Used by | Purpose |
@@ -2707,6 +2762,8 @@ advertised rate, observed rate, encoder implementation, bitrate, and loss.
 | `PETAL_MF_QUALITY_MODE` | Windows Media Foundation H.264 encoder (`vendor/webrtc-sys/src/mf/h264_encoder_impl.cpp`) | Overrides the mode-derived rate control for a controlled comparison: `1` forces quality mode (minimize QP, ignore the bitrate target), `0` forces bitrate-driven mode. Any other value is ignored and the default stands — screensharing publishes get quality mode, realtime camera publishes get bitrate-driven mode. The encoder logs the codec mode, the chosen policy, which of those two decided it, and every `ICodecAPI` HRESULT, so an arm's effective policy is read rather than assumed. Each arm must run in its own process: the experimental share-rate gate is cached in a function-static. |
 | `PETAL_MF_CAMERA_RATE_CONTROL` | Windows Media Foundation H.264 encoder, **realtime camera only** | Selects the encoder's explicit `ICodecAPI` rate-control MODE: `default` (leave the driver default — Microsoft documents unconstrained VBR), `cbr` (constant bitrate pinned to the current target), or `peak-vbr` (peak-constrained VBR with a ceiling of 2× the target). Any other value is ignored and the default stands. Never applies to screensharing, which keeps its quality-first policy. This exists because the camera path had never actually selected a mode: on a live publication it overshot WebRTC's own target 2.0× (6291 kbps sent against a 3149 kbps target), which was followed by 11.7% loss, 110 ms jitter, >1300 retransmitted packets and a target collapse to 30–46 kbps. The encoder logs the requested arm, the selected arm, the target, and each HRESULT (`mode_hr`/`mean_hr`/`max_hr`); `SetRates` additionally logs the accepted mean-bitrate HRESULT on the first call and then once per 60 calls, so a silently rejected target is visible. Each arm must run in its own process. |
 | `PETAL_MF_NATIVE_INDEX` | Windows Media Foundation camera diagnostics | Forces one enumerated native media-type index for controlled candidate A/B tests; never set in normal runs. An index whose advertised rate exceeds the 60 fps capture ceiling is rejected with an explicit error instead of being published. The production path automatically retries one ranked same-resolution native candidate when sustained startup cadence misses its floor. |
+| `PETAL_CAMERA_DEGRADATION_PREFERENCE` | desktop camera publish | Strict diagnostic opt-in for the sender's WebRTC degradation policy. `maintain-resolution` publishes with `MaintainResolution`; unset, `native`, or any unrecognized value leaves WebRTC's native behavior (`None`, which is NOT enum `Disabled`). An invalid value is logged once per camera publish. Never set in production: on a constrained link, dropping frames is worse than dropping resolution. |
+| `PETAL_CAMERA_EXPERIMENT_MAX_KBPS` | desktop camera publish | Diagnostic bitrate ceiling for the camera arm comparison, in kbps. Accepts [500, 16000]; anything else (including unset) leaves the production formula unchanged. Each arm must run in its own process, because the value is resolved once per published camera. |
 | `PETAL_MF_CHARACTERIZE` | Windows Media Foundation camera diagnostics | Logs every enumerated native candidate (index, subtype, dimensions, rational FPS) during a focused capture characterization run. |
 | `PETAL_DISABLE_DIRTY_RECT_SKIP` | desktop share pump | Set to `1` to disable dirty-rect-clean frame skipping during live debugging; remote-control cadence remains unchanged. |
 | `PETAL_DISABLE_SNAPSHOT_PULL` | `apps/desktop/src-tauri/src/session/share.rs` | Kill switch (`1`) disabling the #183 `SCScreenshotManager` snapshot-pull fallback in the share frame pump (also self-disables on hard API errors, e.g. macOS 13). **Debug builds only** — compiled out of release. |

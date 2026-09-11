@@ -408,6 +408,34 @@ reachable in-window context menu, toolbar, or dropdown for both operations.
 Browser peers ignore this native-only request/topic, and generic `kind: "text"`
 continues to serve IME/composed input and existing harness behavior.
 
+## Remote media ownership
+
+Every remote media kind has exactly one receiving owner. `RoomConnection`
+connects with `auto_subscribe = false`; the `NativeSubscriptionCoordinator`
+(`transport/native_subscription.rs`) is the only place that admits a native
+subscription, and it runs against the post-connect room snapshot, every future
+`TrackPublished` before the connect-time fanout forwards it, and the live room
+snapshot on `Reconnected`.
+
+| Remote media | Owner |
+|---|---|
+| Audio (mic, share audio, assistant voice) | Native room |
+| Video `petal-window-<u32>` | Native room → native compositor |
+| Video `petal-camera-*` | Hidden gallery bridge (WebView), alone |
+| Video with any other name | Nobody (not subscribed) |
+
+The native compositor therefore never receives its own copy of a remote camera,
+and needs no compensating `set_subscribed(false)`. A subscribed non-window video
+arriving at the native compositor is an invariant violation and is logged as
+one.
+
+Camera publish policy is declarative: `CameraPublishPolicy` resolves the send
+choices once per published camera and both the initial publish and Petal
+reconnect repair build `TrackPublishOptions` from it. The sender degradation
+preference is `None` (WebRTC-native) unless
+`PETAL_CAMERA_DEGRADATION_PREFERENCE=maintain-resolution` is set for a
+diagnostic run; `None` is not the same as enum `Disabled`.
+
 ## Cross-language contracts
 
 Slug/room-name derivation, track names (`petal-window-*`/`petal-camera-*`),
