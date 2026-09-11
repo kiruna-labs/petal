@@ -2732,6 +2732,13 @@ pub fn record_video_stream_state(
 /// journal entry, or a Sentry event, so a receiver interval can never be
 /// mistaken for an authoritative pause/stall signal. Every free-form field is
 /// bounded, and the record is written to the local Petal log only.
+///
+/// `decoder_implementation` is OPTIONAL because the browser's stats dictionary
+/// omits it on some platforms. It must stay optional on both sides of the
+/// boundary: the webview sends `null` when it is absent (see the matching
+/// `string | null` in `src/lib/ipc.ts`), and a required `String` here made every
+/// single receive interval fail to deserialize -- which is precisely why the
+/// receiver side produced no durable records at all.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CameraReceiverInterval {
@@ -2764,7 +2771,7 @@ pub struct CameraReceiverInterval {
     pub jitter_buffer_emitted_count: Option<u64>,
     pub total_decode_time_ms: Option<f64>,
     pub loss_pct: Option<f64>,
-    pub decoder_implementation: String,
+    pub decoder_implementation: Option<String>,
     pub presented_frames: Option<u64>,
     pub presented_fps: Option<f64>,
     pub stream_state: String,
@@ -2841,7 +2848,7 @@ fn camera_receiver_interval_line(interval: &CameraReceiverInterval) -> String {
         interval_count(interval.presented_frames),
         interval_float(interval.presented_fps, 2),
         interval.gap_since_last_frame_ms,
-        field(&interval.decoder_implementation, 48),
+        interval_text(interval.decoder_implementation.as_ref(), 48),
     )
 }
 
@@ -5862,7 +5869,7 @@ mod tests {
             jitter_buffer_emitted_count: Some(450),
             total_decode_time_ms: Some(310.5),
             loss_pct: Some(0.0),
-            decoder_implementation: "hardware H264".into(),
+            decoder_implementation: Some("hardware H264".into()),
             presented_frames: Some(447),
             presented_fps: Some(29.8),
             stream_state: "active".into(),
@@ -5920,7 +5927,7 @@ mod tests {
             jitter_buffer_emitted_count: None,
             total_decode_time_ms: None,
             loss_pct: None,
-            decoder_implementation: "d".repeat(500),
+            decoder_implementation: Some("d".repeat(500)),
             presented_frames: None,
             presented_fps: None,
             stream_state: "active".into(),
@@ -5935,6 +5942,58 @@ mod tests {
         assert!(line.contains("decoded_dimensions=unknown"), "{line}");
         // A non-finite rate is missing, not a number.
         assert!(line.contains("decoded_fps=unknown"), "{line}");
+    }
+
+    #[test]
+    fn camera_receiver_interval_accepts_a_missing_decoder_implementation() {
+        // The webview sends `null` when the browser's stats dictionary omits the
+        // decoder name. A REQUIRED `String` here rejected the whole payload, so
+        // every receive interval failed to deserialize -- which is exactly why
+        // the receiver side produced no durable records at all despite the
+        // instrumentation appearing to be wired up.
+        let json = serde_json::json!({
+            "participantIdentity": "alice",
+            "trackName": "petal-camera-alice",
+            "trackSid": "TR_abc",
+            "route": "gallery-webview",
+            "intervalSequence": 2,
+            "intervalMs": 15_001,
+            "framesDecoded": 900,
+            "decodedFps": 59.9,
+            "decodedWidth": 1280,
+            "decodedHeight": 720,
+            "framesReceived": 900,
+            "framesRendered": 900,
+            "framesDropped": 0,
+            "freezeCount": 0,
+            "totalFreezesDurationMs": null,
+            "bytesReceived": 1,
+            "packetsReceived": 1,
+            "packetsLost": 0,
+            "packetsDiscarded": 0,
+            "retransmittedPacketsReceived": 0,
+            "keyFramesDecoded": 1,
+            "nackCount": 0,
+            "pliCount": 0,
+            "firCount": 0,
+            "jitterMs": 1.0,
+            "jitterBufferDelayMs": 1.0,
+            "jitterBufferEmittedCount": 1,
+            "totalDecodeTimeMs": 1.0,
+            "lossPct": 0.0,
+            "decoderImplementation": null,
+            "presentedFrames": 1,
+            "presentedFps": 59.0,
+            "streamState": "active",
+            "stallCause": "not_applicable",
+            "gapSinceLastFrameMs": 1
+        });
+        let interval: CameraReceiverInterval =
+            serde_json::from_value(json).expect("a null decoder_implementation must deserialize");
+        assert!(interval.decoder_implementation.is_none());
+        let line = camera_receiver_interval_line(&interval);
+        assert!(line.contains("decoder=unknown"), "{line}");
+        assert!(line.contains("interval_seq=2"), "{line}");
     }
 
     #[test]
