@@ -210,8 +210,33 @@ pub(crate) fn synthetic_camera_low_bitrate_enabled() -> bool {
 pub(crate) const SYNTH_CAMERA_WIDTH: u32 = 1280;
 pub(crate) const SYNTH_CAMERA_HEIGHT: u32 = 720;
 pub(crate) const SYNTH_CAMERA_FPS: u32 = 30;
+/// The ABBA comparison needs a fixed 1280x720@60 source. Nothing else in the
+/// product runs the synthetic camera at this rate, so it stays a named
+/// constant rather than a general knob.
+pub(crate) const SYNTH_CAMERA_ABBA_FPS: u32 = 60;
 pub(crate) const SYNTH_CAMERA_DEVICE_ID: &str = "petal-synthetic-camera";
 pub(crate) const SYNTH_CAMERA_PATTERN_VERSION: &str = "camera-chart-v1";
+
+/// Parse the synthetic source's rate override. Deliberately strict, like
+/// `parse_experimental_share_fps`: only the exact ABBA rate is accepted, so a
+/// stray value cannot silently change what an experiment measured.
+fn parse_synthetic_camera_fps(value: &str) -> Option<u32> {
+    (value.trim() == "60").then_some(SYNTH_CAMERA_ABBA_FPS)
+}
+
+/// Rate the synthetic source publishes at. `PETAL_CAMERA_SYNTH_FPS=60` raises
+/// it for the ABBA arms; every other value (including an unset variable)
+/// keeps the ordinary 30 fps default. Honored only together with
+/// `PETAL_CAMERA_SYNTH_SOURCE=1`, so the override cannot follow a real camera.
+pub(crate) fn synthetic_camera_fps() -> u32 {
+    if !synthetic_camera_capture_enabled() {
+        return SYNTH_CAMERA_FPS;
+    }
+    std::env::var("PETAL_CAMERA_SYNTH_FPS")
+        .ok()
+        .and_then(|value| parse_synthetic_camera_fps(&value))
+        .unwrap_or(SYNTH_CAMERA_FPS)
+}
 
 const SYNTH_BACKGROUND_LUMA: u8 = 96;
 const SYNTH_SENTINEL_LUMA: u8 = 235;
@@ -342,11 +367,12 @@ impl CameraStatusSource for SyntheticCameraState {
 }
 
 /// A `CameraBackend` that pumps [`synthetic_camera_frame`] at
-/// [`SYNTH_CAMERA_FPS`] from its own thread, standing in for the platform
+/// [`synthetic_camera_fps`] from its own thread, standing in for the platform
 /// adapter at the `open_camera` boundary and nowhere deeper.
 struct SyntheticCameraCapture {
     state: Arc<SyntheticCameraState>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    fps: u32,
     pump: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -355,13 +381,13 @@ impl SyntheticCameraCapture {
         let state = Arc::new(SyntheticCameraState::default());
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let frozen = synthetic_camera_freeze_enabled();
+        let fps = synthetic_camera_fps();
         let pump_state = state.clone();
         let pump_stop = stop.clone();
         let pump = std::thread::Builder::new()
             .name("petal-synthetic-camera".to_string())
             .spawn(move || {
-                let interval =
-                    std::time::Duration::from_micros(1_000_000 / u64::from(SYNTH_CAMERA_FPS));
+                let interval = std::time::Duration::from_micros(1_000_000 / u64::from(fps));
                 let mut frame_index: u64 = 0;
                 while !pump_stop.load(Ordering::Relaxed) {
                     // Frozen still DELIVERS: a stopped pump is a different
@@ -384,13 +410,14 @@ impl SyntheticCameraCapture {
             })?;
         log::warn!(
             "camera: PETAL_CAMERA_SYNTH_SOURCE=1 -- publishing a synthetic \
-             {SYNTH_CAMERA_WIDTH}x{SYNTH_CAMERA_HEIGHT}@{SYNTH_CAMERA_FPS} test pattern \
+             {SYNTH_CAMERA_WIDTH}x{SYNTH_CAMERA_HEIGHT}@{fps} test pattern \
              INSTEAD of camera input (test hook; the rest of the publish path is unchanged; \
              frozen={frozen})"
         );
         Ok(Self {
             state,
             stop,
+            fps,
             pump: Some(pump),
         })
     }
@@ -409,7 +436,7 @@ impl CameraBackend for SyntheticCameraCapture {
     }
 
     fn frame_rate(&self) -> (u32, u32) {
-        (SYNTH_CAMERA_FPS, 1)
+        (self.fps, 1)
     }
 
     fn device_id(&self) -> &str {
@@ -964,6 +991,75 @@ mod tests {
         match restore.1 {
             Some(value) => std::env::set_var("PETAL_CAMERA_SYNTH_FREEZE", value),
             None => std::env::remove_var("PETAL_CAMERA_SYNTH_FREEZE"),
+        }
+    }
+
+    /// The ABBA comparison runs at a fixed 1280x720@60, so the override must
+    /// be exact and must never be able to follow a real camera.
+    #[test]
+    fn synthetic_camera_fps_override_is_strict_and_source_gated() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let restore = (
+            std::env::var("PETAL_CAMERA_SYNTH_SOURCE").ok(),
+            std::env::var("PETAL_CAMERA_SYNTH_FPS").ok(),
+        );
+
+        assert_eq!(parse_synthetic_camera_fps("60"), Some(SYNTH_CAMERA_ABBA_FPS));
+        assert_eq!(parse_synthetic_camera_fps(" 60 "), Some(SYNTH_CAMERA_ABBA_FPS));
+        for rejected in ["30", "61", "120", "", "sixty", "0"] {
+            assert_eq!(
+                parse_synthetic_camera_fps(rejected),
+                None,
+                "{rejected:?} must not silently change the measured rate"
+            );
+        }
+
+        std::env::set_var("PETAL_CAMERA_SYNTH_FPS", "60");
+        std::env::remove_var("PETAL_CAMERA_SYNTH_SOURCE");
+        assert_eq!(
+            synthetic_camera_fps(),
+            SYNTH_CAMERA_FPS,
+            "the rate override must be inert without PETAL_CAMERA_SYNTH_SOURCE=1"
+        );
+
+        std::env::set_var("PETAL_CAMERA_SYNTH_SOURCE", "1");
+        assert_eq!(synthetic_camera_fps(), SYNTH_CAMERA_ABBA_FPS);
+
+        std::env::set_var("PETAL_CAMERA_SYNTH_FPS", "45");
+        assert_eq!(
+            synthetic_camera_fps(),
+            SYNTH_CAMERA_FPS,
+            "an unsupported rate must fall back to the default rather than being rounded"
+        );
+
+        match restore.0 {
+            Some(value) => std::env::set_var("PETAL_CAMERA_SYNTH_SOURCE", value),
+            None => std::env::remove_var("PETAL_CAMERA_SYNTH_SOURCE"),
+        }
+        match restore.1 {
+            Some(value) => std::env::set_var("PETAL_CAMERA_SYNTH_FPS", value),
+            None => std::env::remove_var("PETAL_CAMERA_SYNTH_FPS"),
+        }
+    }
+
+    /// A 60 fps arm is only meaningful if every frame is genuinely new. The
+    /// sentinel step is per-frame, so consecutive indices must move the
+    /// picture at any rate -- a rate change must never be implemented by
+    /// repeating a frame.
+    #[test]
+    fn consecutive_synthetic_frames_are_never_repeated_at_any_rate() {
+        for rate in [SYNTH_CAMERA_FPS, SYNTH_CAMERA_ABBA_FPS] {
+            let mut previous =
+                synthetic_camera_frame(SYNTH_CAMERA_WIDTH, SYNTH_CAMERA_HEIGHT, 0, 1);
+            for index in 1..8u64 {
+                let next =
+                    synthetic_camera_frame(SYNTH_CAMERA_WIDTH, SYNTH_CAMERA_HEIGHT, index, index);
+                assert_ne!(
+                    previous.y, next.y,
+                    "frame {index} at {rate} fps must differ from its predecessor"
+                );
+                previous = next;
+            }
         }
     }
 
