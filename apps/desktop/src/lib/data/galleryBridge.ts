@@ -50,6 +50,10 @@ import {
   composeCameraReceiveObservation
 } from './cameraFreezeWatchdog.ts';
 import { cameraPresentationFor, clearAllCameraPresentations } from './cameraPresentation.ts';
+import {
+  type CameraReceiverLifecyclePhase,
+  createCameraReceiverLifecycleRecorder
+} from './cameraReceiverLifecycle.ts';
 
 const CAMERA_TRACK_PREFIX = 'petal-camera-';
 const WINDOW_TRACK_PREFIX = 'petal-window-';
@@ -144,6 +148,29 @@ export async function connectGalleryBridge(
   const room = new Room();
   const bridgeStartedAt = performance.now();
   const bridgeAgeMs = () => Math.round(performance.now() - bridgeStartedAt);
+  // Durable receiver-lifecycle evidence (see cameraReceiverLifecycle.ts). The
+  // periodic interval further down only proves a SUBSCRIBED camera is being
+  // sampled; these edges are what make an ABSENT interval attributable to a
+  // specific broken boundary instead of leaving the receiver side unobservable.
+  const lifecycle = createCameraReceiverLifecycleRecorder({
+    invoke: (payload) => invoke(COMMANDS.recordCameraReceiverLifecycle, { lifecycle: payload }),
+    onFailure: (failure) =>
+      // The durable sink itself is unavailable, so keep a local trace only.
+      // The rejection text is deliberately NOT recorded (it can carry a path
+      // or a token); the closed-list phase is the whole diagnostic payload.
+      console.error(
+        `gallery bridge: receiver lifecycle record failed phase='${failure.phase}' attempt=${failure.attempt}`
+      )
+  });
+  const recordLifecycle = (
+    phase: CameraReceiverLifecyclePhase,
+    input: {
+      participantIdentity?: string | null;
+      trackName?: string | null;
+      trackSid?: string | null;
+      detail?: string | null;
+    } = {}
+  ) => void lifecycle.record({ phase, bridgeAgeMs: bridgeAgeMs(), ...input });
   const cameras = new Map<string, RemoteCamera>();
   const windowShares = new Map<string, Set<string>>();
   const weakConnections = new Map<string, Set<string>>();
@@ -187,6 +214,11 @@ export async function connectGalleryBridge(
   const maybeSubscribe = (pub: RemoteTrackPublication, participant: RemoteParticipant) => {
     if (!isCameraPub(pub, participant)) return;
     pub.setVideoQuality(VideoQuality.HIGH);
+    recordLifecycle('subscribe_requested', {
+      participantIdentity: participant.identity,
+      trackName: pub.trackName,
+      trackSid: pub.trackSid
+    });
     console.info(
       `gallery bridge: camera subscription requested for '${participant.identity}' track='${pub.trackName}' bridge_age_ms=${bridgeAgeMs()}`
     );
@@ -297,6 +329,15 @@ export async function connectGalleryBridge(
         !firstDecodedCameras.has(identity)
       ) {
         firstDecodedCameras.add(identity);
+        // The first decoded frame is the boundary the periodic interval cannot
+        // report on its own: it proves media actually reached the decoder, not
+        // merely that a publication was accepted.
+        recordLifecycle('first_decode', {
+          participantIdentity: identity,
+          trackName: cameraTrackNames.get(identity) ?? null,
+          trackSid: trackSid ?? null,
+          detail: `frames_decoded=${framesDecoded}`
+        });
         console.info(
           `gallery bridge: first camera decode for '${identity}' frames_decoded=${framesDecoded} bridge_age_ms=${bridgeAgeMs()}`
         );
@@ -375,7 +416,17 @@ export async function connectGalleryBridge(
             stallCause: observation.stallCause ?? 'not_applicable',
             gapSinceLastFrameMs: now - next.lastProgressAt
           }
-        }).catch(() => {});
+        }).catch(() => {
+          // A rejected invoke here is exactly the silent gap that made the
+          // receiver side unobservable: never swallow it again. The detail is
+          // a closed literal, so no rejection text reaches the log.
+          recordLifecycle('interval_failed', {
+            participantIdentity: identity,
+            trackName,
+            trackSid: diagnosticTrackSid,
+            detail: 'invoke_rejected'
+          });
+        });
       }
 
       const wasStale = staleCameras.has(identity);
@@ -413,6 +464,11 @@ export async function connectGalleryBridge(
     (track: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
       if (!isCameraPub(pub, p)) return;
       pub.setVideoQuality(VideoQuality.HIGH);
+      recordLifecycle('subscribed', {
+        participantIdentity: p.identity,
+        trackName: pub.trackName,
+        trackSid: pub.trackSid
+      });
       console.info(
         `gallery bridge: camera subscribed for '${p.identity}' track='${pub.trackName}' bridge_age_ms=${bridgeAgeMs()}`
       );
@@ -451,6 +507,12 @@ export async function connectGalleryBridge(
     RoomEvent.TrackUnsubscribed,
     (_t: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
       if (isCameraPub(pub, p)) {
+        recordLifecycle('unsubscribed', {
+          participantIdentity: p.identity,
+          trackName: cameraTrackNames.get(p.identity) ?? null,
+          trackSid: cameraTrackSids.get(p.identity) ?? null,
+          detail: 'track_unsubscribed'
+        });
         drop(p.identity);
         setWeakConnection(pub, p, false);
         clearFreezeWatchdogState(p.identity);
@@ -465,6 +527,12 @@ export async function connectGalleryBridge(
   );
   room.on(RoomEvent.TrackUnpublished, (pub: RemoteTrackPublication, p: RemoteParticipant) => {
     if (isCameraPub(pub, p)) {
+      recordLifecycle('unsubscribed', {
+        participantIdentity: p.identity,
+        trackName: cameraTrackNames.get(p.identity) ?? null,
+        trackSid: cameraTrackSids.get(p.identity) ?? null,
+        detail: 'track_unpublished'
+      });
       drop(p.identity);
       setWeakConnection(pub, p, false);
       clearFreezeWatchdogState(p.identity);
@@ -480,6 +548,9 @@ export async function connectGalleryBridge(
     emitSignals();
   });
   room.on(RoomEvent.Disconnected, () => {
+    recordLifecycle('bridge_disconnected', {
+      detail: `cameras=${cameras.size} failures=${lifecycle.failures()}`
+    });
     if (cameras.size > 0) {
       cameras.clear();
       emit();
@@ -509,7 +580,14 @@ export async function connectGalleryBridge(
   // autoSubscribe OFF: everything except petal-camera-* video (audio, window
   // shares) must never be pulled into the webview -- see module doc.
   console.info('gallery bridge: connecting hidden receiver');
+  recordLifecycle('bridge_connecting');
   await room.connect(config.url, config.token, { autoSubscribe: false });
+  // Unconditional proof that the hidden receiver actually joined. If this line
+  // is the LAST receiver record, the subscription path is the broken boundary
+  // -- not the SFU, not the sender, and not the decoder.
+  recordLifecycle('bridge_connected', {
+    detail: `remote_participants=${room.remoteParticipants.size}`
+  });
   console.info(
     `gallery bridge: connected hidden receiver remote_participants=${room.remoteParticipants.size}`
   );

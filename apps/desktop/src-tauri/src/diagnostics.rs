@@ -2845,10 +2845,73 @@ fn camera_receiver_interval_line(interval: &CameraReceiverInterval) -> String {
     )
 }
 
+/// One durable gallery-bridge receiver lifecycle edge.
+///
+/// The periodic `CameraReceiverInterval` only fires while the webview is
+/// actively sampling a subscribed camera, so an absent interval is ambiguous:
+/// it can mean "no camera was published", "the bridge never subscribed", or
+/// "the bridge never even connected". This record closes that gap -- it writes
+/// one bounded line per lifecycle edge, so the first missing phase names the
+/// boundary that actually failed instead of leaving the whole receiver side
+/// unobservable.
+///
+/// Observational only, exactly like `CameraReceiverInterval`: it must never
+/// create a stream-state transition, a journal entry, or a Sentry event. Every
+/// free-form field is bounded and the record goes to the local log only.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraReceiverLifecycle {
+    pub phase: String,
+    pub participant_identity: Option<String>,
+    pub track_name: Option<String>,
+    pub track_sid: Option<String>,
+    pub route: Option<String>,
+    pub detail: Option<String>,
+    pub bridge_age_ms: Option<u64>,
+}
+
+fn interval_text(value: Option<&String>, max: usize) -> String {
+    value.map_or_else(
+        || String::from("unknown"),
+        |value| {
+            bounded_detail(value.clone())
+                .map(|value| {
+                    value
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(max)
+                        .collect()
+                })
+                .unwrap_or_else(|| String::from("unknown"))
+        },
+    )
+}
+
+/// Render the lifecycle record as one bounded log line.
+fn camera_receiver_lifecycle_line(lifecycle: &CameraReceiverLifecycle) -> String {
+    format!(
+        "diagnostics: camera receiver lifecycle route={} t_ms={} phase={} participant={} track_sid={} track_name={} bridge_age_ms={} detail={}",
+        interval_text(lifecycle.route.as_ref(), 32),
+        now_ms(),
+        interval_text(Some(&lifecycle.phase), 32),
+        interval_text(lifecycle.participant_identity.as_ref(), 64),
+        interval_text(lifecycle.track_sid.as_ref(), 64),
+        interval_text(lifecycle.track_name.as_ref(), 64),
+        interval_count(lifecycle.bridge_age_ms),
+        interval_text(lifecycle.detail.as_ref(), 96),
+    )
+}
+
 /// Bounded webview-to-native receiver-interval sink (local `petal.log` only).
 #[tauri::command]
 pub fn record_camera_receiver_interval(interval: CameraReceiverInterval) {
     log::info!("{}", camera_receiver_interval_line(&interval));
+}
+
+/// Bounded webview-to-native receiver-lifecycle sink (local `petal.log` only).
+#[tauri::command]
+pub fn record_camera_receiver_lifecycle(lifecycle: CameraReceiverLifecycle) {
+    log::info!("{}", camera_receiver_lifecycle_line(&lifecycle));
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -5872,6 +5935,68 @@ mod tests {
         assert!(line.contains("decoded_dimensions=unknown"), "{line}");
         // A non-finite rate is missing, not a number.
         assert!(line.contains("decoded_fps=unknown"), "{line}");
+    }
+
+    #[test]
+    fn camera_receiver_lifecycle_line_names_the_phase_and_stays_honest() {
+        let lifecycle = CameraReceiverLifecycle {
+            phase: "subscribed".into(),
+            participant_identity: Some("alice".into()),
+            track_name: Some("petal-camera-alice".into()),
+            track_sid: Some("TR_abc".into()),
+            route: Some("gallery-webview".into()),
+            detail: None,
+            bridge_age_ms: Some(1234),
+        };
+        let line = camera_receiver_lifecycle_line(&lifecycle);
+        assert!(line.contains("route=gallery-webview"), "{line}");
+        assert!(line.contains("phase=subscribed"), "{line}");
+        assert!(line.contains("participant=alice"), "{line}");
+        assert!(line.contains("track_sid=TR_abc"), "{line}");
+        assert!(line.contains("bridge_age_ms=1234"), "{line}");
+        // A missing detail is missing, never an empty string that reads like a
+        // value the sender actually supplied.
+        assert!(line.contains("detail=unknown"), "{line}");
+    }
+
+    #[test]
+    fn camera_receiver_lifecycle_line_caps_free_form_fields() {
+        let lifecycle = CameraReceiverLifecycle {
+            phase: "p".repeat(200),
+            participant_identity: Some("i".repeat(500)),
+            track_name: Some("t".repeat(500)),
+            track_sid: Some("s".repeat(500)),
+            route: Some("r".repeat(200)),
+            detail: Some(format!("bad\nline{}", "d".repeat(500))),
+            bridge_age_ms: None,
+        };
+        let line = camera_receiver_lifecycle_line(&lifecycle);
+        assert!(
+            !line.contains(&"p".repeat(33)),
+            "phase must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"i".repeat(65)),
+            "identity must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"t".repeat(65)),
+            "track name must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"s".repeat(65)),
+            "track sid must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"r".repeat(33)),
+            "route must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"d".repeat(97)),
+            "detail must be capped: {line}"
+        );
+        // A newline in a free-form field must never split one record in two.
+        assert!(!line.contains('\n'), "{line}");
     }
 
     #[test]

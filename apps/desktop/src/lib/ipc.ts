@@ -129,6 +129,7 @@ export const COMMANDS = {
   quitApp: 'quit_app',
   recordVideoStreamState: 'record_video_stream_state',
   recordCameraReceiverInterval: 'record_camera_receiver_interval',
+  recordCameraReceiverLifecycle: 'record_camera_receiver_lifecycle',
   recordCameraReceiveHealth: 'record_camera_receive_health',
   remoteControlAllowed: 'remote_control_allowed',
   remoteControlAnswerConsent: 'remote_control_answer_consent',
@@ -1600,6 +1601,21 @@ export interface CommandArgs {
       streamState: string;
       stallCause: string;
       gapSinceLastFrameMs: number;
+    };
+  };
+  /** Observational only: one durable local-log receiver lifecycle edge from the
+   * gallery webview. Same contract as the interval record above -- it never
+   * changes stream state, and it exists so an ABSENT interval is attributable
+   * to a specific boundary instead of being unobservable. */
+  [COMMANDS.recordCameraReceiverLifecycle]: {
+    lifecycle: {
+      phase: string;
+      participantIdentity: string | null;
+      trackName: string | null;
+      trackSid: string | null;
+      route: string;
+      detail: string | null;
+      bridgeAgeMs: number | null;
     };
   };
   [COMMANDS.recordCameraReceiveHealth]: {
