@@ -129,9 +129,10 @@ pub fn start(app: &AppHandle, identity: &str) -> Result<(), TapError> {
         .ok_or(TapError::ParticipantUnknown)?;
 
     // Resolve the publication by the same rule `choose_audio_track` states, then
-    // take the decoded track behind it. `auto_subscribe` is on for every Petal
-    // room, so a live audio publication is normally already subscribed; if it
-    // is not, that is a genuine failure and the claim has to fail with it.
+    // take the decoded track behind it. The native subscription coordinator
+    // admits every remote audio track, so a live audio publication is normally
+    // already subscribed; if it is not, that is a genuine failure and the claim
+    // has to fail with it.
     let track = participant
         .track_publications()
         .values()
