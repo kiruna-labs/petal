@@ -1,3 +1,54 @@
+# Petal patch: transceiver direction for unpublish teardown
+
+## Why this exists
+
+`LocalParticipant::unpublish_track` used to call `StopStandard` on the
+transceiver *before* the unpublish offer/answer was negotiated. Stopping the
+sender immediately makes simulcast answer processing fail with
+"Cannot disable encodings on a stopped sender", which left remote publications
+visible and kept the old send stream (and its MFT/NVENC session) alive across
+repeated unpublish/republish cycles.
+
+## The fix
+
+This patch exposes `RtpTransceiver::set_direction` through `libwebrtc` and uses
+it from `unpublish_track`: the track is removed, then the transceiver is set
+`Inactive` so the same m-line teardown is negotiated without invalidating the
+sender before the answer. WebRTC can then retire the send stream and its
+encoder as part of applying the negotiated inactive m-line.
+
+## Updating
+
+Drop this patch once the SDK negotiates an inactive sender on unpublish on its
+own.
+
+# Petal patch: source-aware Media Foundation H.264 rate control
+
+## Why this exists
+
+`webrtc-sys`'s Media Foundation H.264 encoder applied one rate-control policy to
+every caller. Both settings were measured to be wrong for one of the two
+sources Petal publishes:
+
+- Quality mode (minimize QP, ignore the bitrate target) keeps remote screen text
+  crisp but starves camera frames.
+- Bitrate-driven mode respects the target but softens screenshare text.
+
+## The fix
+
+The vendored `MfH264EncoderImpl` now records the `VideoCodecMode` it was
+configured for and derives its default from it: screensharing gets quality mode,
+realtime camera gets bitrate-driven mode. `PETAL_MF_QUALITY_MODE=1` or `=0`
+overrides the default for controlled experiments; any other value is ignored.
+The encoder logs the codec mode, the chosen mode, which of those two decided it,
+and every `ICodecAPI` HRESULT so the effective policy is observable rather than
+assumed.
+
+## Updating
+
+Drop this patch once upstream exposes a per-encoder rate-control policy the
+caller can set.
+
 # Petal patch: H.264 profile preference for native screenshares
 
 Vendored from `livekit` 0.7.49 (crates.io), pinned via `[patch.crates-io]` in
@@ -191,13 +242,14 @@ Repeated unpublish/republish (or sequential shares) therefore accumulated GPU
 sessions until MFT creation failed (GeForce 12-session cap) -> OpenH264
 fallback -> 0 RTP -> receiver freeze.
 
-**Fix:** `unpublish_track` now captures the track's transceiver and calls
-`transceiver.stop()` (StopStandard) before `remove_track`, so the renegotiation
-that follows drops the old m-line/SSRC and webrtc destroys the old
-VideoSendStream, running `VideoEncoder::Release()` on the encoder. `stop()` is
-safe because livekit creates a fresh transceiver per sender. `remove_track`
-errors (engine-closed/timing race) are logged and ignored, matching
-`rtc_engine`'s own TODO.
+**Fix:** `unpublish_track` first calls `remove_track` while the sender is still
+live, then changes the transceiver direction to `Inactive`. Stopping the
+transceiver immediately makes WebRTC reject simulcast answer processing with
+`Cannot disable encodings on a stopped sender`, leaving the remote publication
+visible. Negotiating an inactive m-line keeps the sender valid while the
+unpublish offer/answer completes, then lets WebRTC retire the send stream and
+release its encoder. `remove_track` errors (engine-closed/timing race) are
+logged and ignored, matching `rtc_engine`'s own TODO.
 
 **Updating:** keep this patch while the vendored livekit lacks transceiver-stop
 on unpublish; drop it once upstream tears down the send stream on unpublish.
