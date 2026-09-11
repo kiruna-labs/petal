@@ -58,6 +58,7 @@
 //! theoretical gap, not a live correctness bug -- closing it for real would
 //! require forking/rebuilding libwebrtc itself.
 
+use super::native_subscription::NativeSubscriptionCoordinator;
 use crate::sync_ext::MutexExt;
 use crate::video_color::{self, VideoColorProfile};
 use std::collections::{HashMap, VecDeque};
@@ -607,18 +608,29 @@ pub struct RoomConnection<R = Arc<Room>> {
 /// compositor and resilience consumers have one ordered, zero-gap source.
 /// A dropped consumer is removed on its next send; once both are gone this
 /// task exits and retains no unconsumed event queue.
+///
+/// `coordinator` decides native subscription ownership before either consumer
+/// sees the event, so no consumer has to compensate for a track the native
+/// room does not own.
 fn start_connect_event_fanout(
     source: tokio::sync::mpsc::UnboundedReceiver<livekit::RoomEvent>,
     compositor_tx: tokio::sync::mpsc::UnboundedSender<livekit::RoomEvent>,
     resilience_tx: tokio::sync::mpsc::UnboundedSender<livekit::RoomEvent>,
+    coordinator: Option<Arc<NativeSubscriptionCoordinator>>,
 ) {
-    tauri::async_runtime::spawn(fanout_connect_events(source, compositor_tx, resilience_tx));
+    tauri::async_runtime::spawn(fanout_connect_events(
+        source,
+        compositor_tx,
+        resilience_tx,
+        coordinator,
+    ));
 }
 
 async fn fanout_connect_events(
     mut source: tokio::sync::mpsc::UnboundedReceiver<livekit::RoomEvent>,
     compositor_tx: tokio::sync::mpsc::UnboundedSender<livekit::RoomEvent>,
     resilience_tx: tokio::sync::mpsc::UnboundedSender<livekit::RoomEvent>,
+    coordinator: Option<Arc<NativeSubscriptionCoordinator>>,
 ) {
     let mut compositor_tx = Some(compositor_tx);
     let mut resilience_tx = Some(resilience_tx);
@@ -636,6 +648,9 @@ async fn fanout_connect_events(
                 let Some(event) = event else {
                     break;
                 };
+                if let Some(coordinator) = &coordinator {
+                    coordinator.observe(&event);
+                }
                 if let Some(sender) = &compositor_tx {
                     if sender.send(event.clone()).is_err() {
                         compositor_tx = None;
@@ -662,9 +677,17 @@ impl<R> RoomConnection<R> {
         room: R,
         events: tokio::sync::mpsc::UnboundedReceiver<livekit::RoomEvent>,
     ) -> Self {
+        Self::with_connect_event_source_and_coordinator(room, events, None)
+    }
+
+    fn with_connect_event_source_and_coordinator(
+        room: R,
+        events: tokio::sync::mpsc::UnboundedReceiver<livekit::RoomEvent>,
+        coordinator: Option<Arc<NativeSubscriptionCoordinator>>,
+    ) -> Self {
         let (compositor_tx, compositor_events) = tokio::sync::mpsc::unbounded_channel();
         let (resilience_tx, resilience_events) = tokio::sync::mpsc::unbounded_channel();
-        start_connect_event_fanout(events, compositor_tx, resilience_tx);
+        start_connect_event_fanout(events, compositor_tx, resilience_tx, coordinator);
         Self {
             room,
             compositor_events: Mutex::new(Some(compositor_events)),
@@ -1143,24 +1166,17 @@ impl I420BufferPool {
 }
 
 impl RoomConnection<Arc<Room>> {
-    /// Connect to `url` as the identity encoded in `token`. Despite the
-    /// name, this is ALSO the one real room connection the in-app path
-    /// (`session::join_room`) uses to receive -- `auto_subscribe: true`
-    /// (flipped on for this task; previously `false` when "subscribing to
-    /// others' shared windows" was still "a separate, not-yet-built receiver
-    /// path", per this doc comment's own prior wording -- that receiver path
-    /// is `compositor.rs`, built this task). SPEC.md's model has no manual
-    /// per-window "accept this share" UI -- every participant automatically
-    /// sees every other participant's shared windows as real compositor
-    /// windows (SPEC.md §4.4) -- so auto-subscribing to every remote track
-    /// on this same connection is the correct behavior, not a stopgap: no
-    /// second LiveKit connection is opened for receiving. The receiver
-    /// returned by `Room::connect` is immediately fanned out to the compositor
-    /// and resilience receivers before the join tail starts, preserving early
-    /// events without a later `Room::subscribe()` race.
+    /// Connect to `url` as the identity encoded in `token`. This is the one
+    /// real room connection the in-app path (`session::join_room`) uses.
+    ///
+    /// `auto_subscribe` is `false`: [`NativeSubscriptionCoordinator`] admits
+    /// audio and canonical window shares explicitly, and remote cameras stay
+    /// unsubscribed because the hidden gallery bridge is their only renderer.
+    /// The connect-time receiver is fanned out before any join-tail work, so
+    /// early events are neither missed nor decided twice.
     pub async fn connect(url: &str, token: &str) -> Result<Self, RoomConnectionError> {
         let mut room_options = RoomOptions::default();
-        room_options.auto_subscribe = true;
+        room_options.auto_subscribe = false;
 
         let (room, events) = Room::connect(url, token, room_options).await?;
         let room = Arc::new(room);
@@ -1172,7 +1188,14 @@ impl RoomConnection<Arc<Room>> {
                 .unwrap_or_else(|| "pending".to_string())
         );
 
-        Ok(Self::with_connect_event_source(room, events))
+        let coordinator = Arc::new(NativeSubscriptionCoordinator::new(room.clone()));
+        coordinator.apply_snapshot();
+
+        Ok(Self::with_connect_event_source_and_coordinator(
+            room,
+            events,
+            Some(coordinator),
+        ))
     }
 
     pub fn room(&self) -> Arc<Room> {
@@ -8724,6 +8747,7 @@ mod tests {
             source_rx,
             compositor_tx,
             resilience_tx,
+            None,
         ));
 
         source_tx.send(livekit::RoomEvent::Reconnecting).unwrap();
@@ -8761,6 +8785,7 @@ mod tests {
             source_rx,
             compositor_tx,
             resilience_tx,
+            None,
         ));
 
         drop(compositor_rx);
@@ -8784,6 +8809,7 @@ mod tests {
             source_rx,
             compositor_tx,
             resilience_tx,
+            None,
         ));
 
         drop(compositor_rx);

@@ -115,18 +115,6 @@ const QUALITY_DOWNGRADE_AVG_QP: f64 = 30.0;
 /// own `RUNG_STARVATION_GUARD_TRIGGER_SAMPLES` (`publisher.rs`) by design.
 const QUALITY_DOWNGRADE_SUSTAINED_SAMPLES: u32 = 3;
 const PLAYOUT_DELAY_ENV: &str = "PETAL_PLAYOUT_DELAY_MS";
-/// Camera tracks are rendered by the hidden gallery bridge, not the native
-/// compositor. Keep the old native subscription available only as an explicit
-/// diagnostic escape hatch.
-const ENABLE_NATIVE_CAMERA_SUBSCRIBE_ENV: &str = "PETAL_ENABLE_NATIVE_CAMERA_SUBSCRIBE";
-
-fn native_camera_subscription_disabled() -> bool {
-    std::env::var(ENABLE_NATIVE_CAMERA_SUBSCRIBE_ENV).as_deref() != Ok("1")
-}
-
-fn should_disable_native_camera_subscription(track_name: &str, disabled: bool) -> bool {
-    disabled && track_name.starts_with(crate::transport::publisher::CAMERA_TRACK_PREFIX)
-}
 
 /// Upper bound on a decoded remote frame's width/height before this module
 /// will convert or push it. Generous (16K per axis) -- real shares top out
@@ -923,16 +911,14 @@ impl Subscriber {
 /// registration (#357).
 ///
 /// `local_identity` is this process's own LiveKit identity -- used only to
-/// skip a track this same process published (shouldn't normally arrive as a
-/// `TrackSubscribed` for our own publish, but guarded explicitly rather than
-/// assumed, since `auto_subscribe: true`'s exact self-track behavior isn't
-/// spelled out in the SDK docs).
+/// skip a track this same process published.
 ///
 /// For each subscribed remote video track:
 /// 1. Recovers `window_id` from the track name
-///    (`publisher::window_id_from_track_name`) -- tracks that don't parse
-///    (e.g. a camera track, or a non-Petal publisher) are skipped: this feed
-///    is specifically for shared-WINDOW tracks, not every video track in the
+///    (`publisher::window_id_from_track_name`) -- a video track that does not
+///    parse is an invariant violation because the native subscription
+///    coordinator admits only canonical window shares: this feed is
+///    specifically for shared-WINDOW tracks, not every video track in the
 ///    room.
 /// 2. Opens (idempotently) a real compositor window for that `window_id` via
 ///    `compositor::ensure_window`.
@@ -1019,30 +1005,12 @@ pub(crate) fn start_compositor_feed(
                     let Some(window_id) =
                         crate::transport::publisher::window_id_from_track_name(&track_name)
                     else {
-                        // #51 waterproofing: a camera track landing here is
-                        // routine (every participant's webcam is a video
-                        // track, just not a window share) -- keep that at
-                        // debug. Anything else is unexpected: a genuinely new
-                        // TrackSubscribed for a video track this feed doesn't
-                        // recognize at all is exactly the shape of bug this
-                        // module exists to catch (e.g. a track-naming
-                        // mismatch that would otherwise silently swallow a
-                        // real window share with zero INFO-level trace), so
-                        // surface it instead of debug-only.
-                        if track_name.starts_with(crate::transport::publisher::CAMERA_TRACK_PREFIX)
-                        {
-                            log::debug!(
-                                "compositor feed: track '{}' from '{}' is a camera track, not a window share, skipping",
-                                track_name,
-                                participant.identity()
-                            );
-                        } else {
-                            log::info!(
-                                "compositor feed: track '{}' from '{}' is not a recognized Petal window/camera share, skipping",
-                                track_name,
-                                participant.identity()
-                            );
-                        }
+                        // The native subscription coordinator never admits a
+                        // non-window video, so this is an SDK-behavior change,
+                        // not a routine camera landing here.
+                        crate::transport::native_subscription::log_unexpected_native_video(
+                            &track_name,
+                        );
                         continue;
                     };
 
@@ -1921,14 +1889,14 @@ pub(crate) fn start_compositor_feed(
                     }
                 }
                 // #51 waterproofing: `TrackPublished` fires as soon as the SFU
-                // registers a remote participant's new track -- BEFORE
-                // `auto_subscribe` completes the actual `TrackSubscribed`
-                // handshake above. Logging it gives a diagnostic anchor point:
-                // if a share never becomes visible, "was TrackPublished seen
-                // at all for this identity/track" answers whether the publish
-                // reached this client's room-event stream in the first place
-                // (ruling out "Bob never actually published") versus the
-                // subscribe step silently never completing after it.
+                // registers a remote participant's new track, before the SFU
+                // answers the native subscription request. Logging it gives a
+                // diagnostic anchor point: if a share never becomes visible,
+                // "was TrackPublished seen at all for this identity/track"
+                // answers whether the publish reached this client's room-event
+                // stream in the first place (ruling out "Bob never actually
+                // published") versus the subscribe step silently never
+                // completing after it.
                 RoomEvent::TrackPublished {
                     publication,
                     participant,
@@ -1942,19 +1910,19 @@ pub(crate) fn start_compositor_feed(
                         crate::transport::publisher::window_id_from_track_name(&track_name)
                             .is_some();
                     log::info!(
-                        "compositor feed: track published sid={} name='{track_name}' kind={:?} from '{owner_identity}' (window_share={is_window_share}); awaiting auto-subscribe",
+                        "compositor feed: track published sid={} name='{track_name}' kind={:?} from '{owner_identity}' (window_share={is_window_share}); awaiting native subscription",
                         publication.sid(),
                         publication.kind()
                     );
                 }
                 // #51 waterproofing: previously unhandled (fell into the `_ =>
                 // {}` catch-all with zero log trace). This is the room event
-                // for "auto_subscribe tried to subscribe to a track and
-                // failed" -- exactly the shape of bug this file exists to
-                // catch (a remote share that *was* published but never
-                // becomes a visible compositor window for this viewer, with
-                // no prior log line explaining why). Surfacing it turns a
-                // silent no-op into a diagnosable WARN.
+                // for "a native subscription request failed" -- exactly the
+                // shape of bug this file exists to catch (a remote share that
+                // *was* published but never becomes a visible compositor
+                // window for this viewer, with no prior log line explaining
+                // why). Surfacing it turns a silent no-op into a diagnosable
+                // WARN.
                 RoomEvent::TrackSubscriptionFailed {
                     participant,
                     error,
@@ -2297,11 +2265,6 @@ pub(crate) fn start_compositor_feed(
 ) {
     // The Windows feed creates/closes Tauri WebviewWindows for remote shares
     // (the surface route renders the header), so it needs the app handle.
-    log::info!(
-        "windows compositor feed: native camera subscription disabled={} (override env={})",
-        native_camera_subscription_disabled(),
-        ENABLE_NATIVE_CAMERA_SUBSCRIBE_ENV
-    );
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         // Receiver-side cadence log (verification item 10's "measured rather
@@ -2428,25 +2391,13 @@ pub(crate) fn start_compositor_feed(
                         continue;
                     };
                     let track_name = video_track.name();
-                    if should_disable_native_camera_subscription(
-                        &track_name,
-                        native_camera_subscription_disabled(),
-                    ) {
-                        log::info!(
-                            "windows compositor feed: native camera subscription disabled; unsubscribing from '{track_name}'"
-                        );
-                        publication.set_subscribed(false);
-                        continue;
-                    }
-                    // EXACT `petal-window-<id>` prefix only — camera slugs
-                    // must never parse as window ids (see the publisher
-                    // contract test), so remote cameras stay on the gallery
-                    // bridge and are never fed to the compositor.
                     let Some(window_id) =
                         crate::transport::publisher::window_id_from_track_name(&track_name)
                     else {
-                        log::debug!(
-                            "windows compositor feed: track '{track_name}' is not a window share; keeping it on the gallery bridge"
+                        // The native subscription coordinator never admits a
+                        // non-window video, so this is an SDK-behavior change.
+                        crate::transport::native_subscription::log_unexpected_native_video(
+                            &track_name,
                         );
                         continue;
                     };
@@ -2776,20 +2727,10 @@ pub(crate) fn start_compositor_feed(
                     let is_window_share =
                         crate::transport::publisher::window_id_from_track_name(&track_name)
                             .is_some();
-                    if should_disable_native_camera_subscription(
-                        &track_name,
-                        native_camera_subscription_disabled(),
-                    ) {
-                        log::info!(
-                            "windows compositor feed: native camera subscription disabled; declining '{track_name}' from '{owner_identity}'"
-                        );
-                        publication.set_subscribed(false);
-                    } else {
-                        log::info!(
-                            "windows compositor feed: track published sid={} name='{track_name}' from '{owner_identity}' (window_share={is_window_share}); awaiting auto-subscribe",
-                            publication.sid()
-                        );
-                    }
+                    log::info!(
+                        "windows compositor feed: track published sid={} name='{track_name}' from '{owner_identity}' (window_share={is_window_share}); awaiting native subscription",
+                        publication.sid()
+                    );
                 }
                 RoomEvent::ParticipantDisconnected(participant) => {
                     let identity = participant.identity().to_string();
@@ -4021,22 +3962,6 @@ fn retire_no_frame_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn native_camera_subscription_policy_only_matches_camera_tracks() {
-        assert!(should_disable_native_camera_subscription(
-            "petal-camera-alice",
-            true
-        ));
-        assert!(!should_disable_native_camera_subscription(
-            "petal-window-1",
-            true
-        ));
-        assert!(!should_disable_native_camera_subscription(
-            "petal-camera-alice",
-            false
-        ));
-    }
 
     #[test]
     fn receiver_quality_controller_isolated_per_receiver() {

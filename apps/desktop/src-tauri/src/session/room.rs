@@ -639,24 +639,24 @@ pub async fn join_room(
     // `can_subscribe: true` -- telepointers (SPEC.md §4.5) need this process
     // to *receive* other participants' cursor data-channel messages on this
     // same room connection, not just publish video. `RoomEvent::DataReceived`
-    // is delivered independent of `auto_subscribe`/video-track subscription
-    // (that flag only gates automatic *track* subscription, checked directly
-    // against the `livekit` 0.7.49 source -- there is no separate
+    // is delivered independent of track subscription (there is no separate
     // data-channel auto-subscribe knob), but `can_subscribe` is a
     // server-enforced room-join grant, and this process is both a potential
     // sharer AND a potential viewer of others' telepointers, so it needs the
-    // grant. Video tracks are auto-subscribed by `RoomConnection`'s
-    // `RoomOptions::auto_subscribe = true`; the compositor consumes the
-    // connect-time event receiver below so pre-existing shares are retained.
+    // grant. Audio and window-share video are subscribed by
+    // `RoomConnection`'s `NativeSubscriptionCoordinator`; the compositor
+    // consumes the connect-time event receiver below so pre-existing shares
+    // are retained.
 
     // #569: one generation and one terminal deadline cover every external
     // await from room connect through palette/microphone publication.
     let room_generation = state.begin_room_generation();
     let join_budget = JoinBudget::start();
 
-    // #787: enable speaker playout BEFORE connecting. `auto_subscribe` wires
-    // any already-published remote audio DURING connect, and the voice
-    // engine's InitPlayout/StartPlayout race a post-connect enable -- an
+    // #787: enable speaker playout BEFORE connecting. The native subscription
+    // coordinator admits already-published remote audio as soon as the
+    // connect-time snapshot is applied, so the voice engine's
+    // InitPlayout/StartPlayout race a post-connect enable -- an
     // enable landing between them would leave the platform ADM started-but-
     // never-initialized and the meeting silent until the next fresh audio
     // publication (structurally possible; never reproduced live). Acquire
