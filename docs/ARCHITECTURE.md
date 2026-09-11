@@ -434,7 +434,9 @@ choices once per published camera and both the initial publish and Petal
 reconnect repair build `TrackPublishOptions` from it. The sender degradation
 preference is `None` (WebRTC-native) unless
 `PETAL_CAMERA_DEGRADATION_PREFERENCE=maintain-resolution` is set for a
-diagnostic run; `None` is not the same as enum `Disabled`.
+diagnostic run; `None` is not the same as enum `Disabled`. Holding resolution
+was measured WORSE than native adaptation on the Windows-to-macOS route (see
+that variable's row in `docs/TESTING.md`).
 
 ## Cross-language contracts
 

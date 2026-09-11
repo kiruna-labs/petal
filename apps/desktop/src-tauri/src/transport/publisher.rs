@@ -1885,18 +1885,29 @@ fn camera_experiment_max_bitrate_bps() -> Option<u64> {
         .then_some(bps)
 }
 
-/// Strict diagnostic opt-in for the camera sender's degradation preference.
-/// Unset, `native`, or any unrecognized value leaves WebRTC's native behavior
-/// in place (`None`, which is NOT enum `Disabled`); an invalid value is logged
-/// once per camera publish.
+/// Camera degradation policy.
+///
+/// Default is WebRTC-native (absent, which is NOT enum `Disabled`): the
+/// encoder adapts to the send-side bandwidth estimate.
+///
+/// `PETAL_CAMERA_DEGRADATION_PREFERENCE=maintain-resolution` is a diagnostic
+/// arm only. Measured on the Windows-to-macOS route, holding the source
+/// resolution is WORSE, not better: the opening estimate is ~0.7 Mbps while
+/// 720p60 needs several Mbps, so the encoder is starved to a ~700 kbps target
+/// (QP 37-40) and the receiver stalls far longer than the native resolution
+/// adaptation it was meant to avoid (14 freezes / 12683 ms in the first 16 s
+/// vs 5 / 3780 ms). Do not promote it without a matched run that says
+/// otherwise.
 fn camera_degradation_preference_from_env() -> Option<RtpDegradationPreference> {
-    let raw = std::env::var(CAMERA_DEGRADATION_PREFERENCE_ENV).ok()?;
-    camera_degradation_preference_from_value(&raw)
+    match std::env::var(CAMERA_DEGRADATION_PREFERENCE_ENV) {
+        Ok(raw) => camera_degradation_preference_from_value(&raw),
+        Err(_) => None,
+    }
 }
 
 /// Pure parser behind [`camera_degradation_preference_from_env`]. Kept
-/// separate so the strict opt-in table is testable without mutating the
-/// process environment.
+/// separate so the table is testable without mutating the process
+/// environment.
 fn camera_degradation_preference_from_value(raw: &str) -> Option<RtpDegradationPreference> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "maintain-resolution" => Some(RtpDegradationPreference::MaintainResolution),
