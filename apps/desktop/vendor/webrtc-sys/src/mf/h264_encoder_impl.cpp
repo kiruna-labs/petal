@@ -128,6 +128,7 @@ int32_t MfH264EncoderImpl::InitEncode(const VideoCodec* codec_settings,
   height_ = codec_settings->height;
   max_framerate_ = codec_settings->maxFramerate > 0 ? codec_settings->maxFramerate : 30;
   target_bps_ = codec_settings->startBitrate * 1000;
+  codec_mode_ = codec_settings->mode;
 
   if (width_ <= 0 || height_ <= 0) {
     RTC_LOG(LS_ERROR) << "MF H264 encoder: unsupported dimensions " << width_
@@ -175,38 +176,65 @@ int32_t MfH264EncoderImpl::InitMft(int width, int height) {
     }
 
     // ICodecAPI for keyframe + bitrate control (optional; some MFTs lack it).
-    mft_.As(&codec_api_);
+    const HRESULT codec_api_hr = mft_.As(&codec_api_);
 
-    // Window-share quality (Petal): DEFAULT to QUALITY rate-control mode.
-    // The bitrate-driven default settles at QP 26 under the BWE-bound target
-    // (~3.4Mbps on a static share), which softens remote text on every host
-    // (measured: QP 26; fuzzy). Quality mode ignores the bitrate target and
-    // minimizes QP (measured live: QP 26 -> 16, crisp text — the fix).
-    // Simulcast safety: a constrained receiver still downgrades to the
-    // bitrate-capped q rung via the SFU, so the h rung's higher bitrate only
-    // costs bandwidth when it is actually being watched. Set
-    // PETAL_MF_QUALITY_MODE=0 to opt back into bitrate-driven encoding.
-    if (codec_api_) {
-      const char* qm = std::getenv("PETAL_MF_QUALITY_MODE");
-      const bool quality_mode = qm == nullptr || std::strcmp(qm, "0") != 0;
-      if (quality_mode) {
-        VARIANT mode;
-        mode.vt = VT_UI4;
-        mode.ulVal = eAVEncCommonRateControlMode_Quality;
-        codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
-        VARIANT quality;
-        quality.vt = VT_UI4;
-        quality.ulVal = 100;
-        codec_api_->SetValue(&CODECAPI_AVEncCommonQuality, &quality);
-        VARIANT qvs;
-        qvs.vt = VT_UI4;
-        qvs.ulVal = 100;
-        codec_api_->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &qvs);
-        RTC_LOG(LS_INFO)
-            << "MF H264 encoder: quality rate control enabled (QP minimized; "
-               "set PETAL_MF_QUALITY_MODE=0 to disable)";
-      }
+    // Screen content and camera content want opposite rate control:
+    //
+    //  - Screensharing -> QUALITY mode. It minimizes QP and ignores the
+    //    bitrate target, which is what keeps remote text crisp. A constrained
+    //    receiver still gets the bitrate-capped simulcast rung from the SFU,
+    //    so the extra bitrate is only spent when someone is actually watching.
+    //  - Realtime camera -> BITRATE mode. Quality mode ignores the target and
+    //    was measured starving frames (QP 26 -> 16 with severe frame
+    //    starvation) on the camera path.
+    //
+    // PETAL_MF_QUALITY_MODE overrides the mode-derived default for controlled
+    // experiments: "1" forces quality mode, "0" forces bitrate mode, any
+    // other value is ignored and the mode-derived default stands.
+    const char* override_value = std::getenv("PETAL_MF_QUALITY_MODE");
+    bool quality_mode = (codec_mode_ == VideoCodecMode::kScreensharing);
+    const char* quality_source = quality_mode ? "screensharing-default"
+                                             : "realtime-default";
+    if (override_value != nullptr && std::strcmp(override_value, "1") == 0) {
+      quality_mode = true;
+      quality_source = "env-override";
+    } else if (override_value != nullptr && std::strcmp(override_value, "0") == 0) {
+      quality_mode = false;
+      quality_source = "env-override";
     }
+
+    HRESULT mode_hr = E_NOTIMPL;
+    HRESULT quality_hr = E_NOTIMPL;
+    HRESULT quality_vs_speed_hr = E_NOTIMPL;
+    bool quality_settings_attempted = false;
+    if (codec_api_ && quality_mode) {
+      quality_settings_attempted = true;
+      VARIANT mode = {};
+      mode.vt = VT_UI4;
+      mode.ulVal = eAVEncCommonRateControlMode_Quality;
+      mode_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode,
+                                     &mode);
+      VARIANT quality = {};
+      quality.vt = VT_UI4;
+      quality.ulVal = 100;
+      quality_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonQuality, &quality);
+      VARIANT qvs = {};
+      qvs.vt = VT_UI4;
+      qvs.ulVal = 100;
+      quality_vs_speed_hr = codec_api_->SetValue(
+          &CODECAPI_AVEncCommonQualityVsSpeed, &qvs);
+    }
+    RTC_LOG(LS_INFO)
+        << "MF H264 encoder: codec_mode="
+        << (codec_mode_ == VideoCodecMode::kScreensharing ? "screensharing"
+                                                          : "realtime")
+        << " quality_mode=" << (quality_mode ? "on" : "off")
+        << " quality_mode_source=" << quality_source
+        << " codec_api_hr=0x" << std::hex << codec_api_hr
+        << " codec_api_present=" << (codec_api_ ? "true" : "false")
+        << " attempted=" << (quality_settings_attempted ? "true" : "false")
+        << " mode_hr=0x" << mode_hr << " quality_hr=0x" << quality_hr
+        << " quality_vs_speed_hr=0x" << quality_vs_speed_hr << std::dec;
 
     if (!ResolveStreamIds(mft_.Get(), &input_stream_id_, &output_stream_id_)) {
       RTC_LOG(LS_ERROR) << "MF H264 encoder: could not resolve stream ids";

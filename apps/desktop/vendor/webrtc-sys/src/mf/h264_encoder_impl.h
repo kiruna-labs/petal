@@ -136,6 +136,10 @@ class MfH264EncoderImpl : public VideoEncoder {
   int height_ = 0;
   int max_framerate_ = 0;
   uint32_t target_bps_ = 0;
+  // VideoCodecMode this encoder was configured for. Realtime camera and
+  // screensharing want opposite rate-control policies, so the mode is a real
+  // input to InitMft rather than a caller-side detail.
+  VideoCodecMode codec_mode_ = VideoCodecMode::kRealtimeVideo;
 
   // Reused encoded-image scaffolding (only touched on the encoder thread).
   EncodedImage encoded_image_;
