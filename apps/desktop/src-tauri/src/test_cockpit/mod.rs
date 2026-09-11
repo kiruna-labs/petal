@@ -194,7 +194,10 @@ fn web_peer_url(
         access_code,
         scenario_id.to_ascii_lowercase()
     );
-    if let Some(owner) = native_owner.map(str::trim).filter(|owner| !owner.is_empty()) {
+    if let Some(owner) = native_owner
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+    {
         url.push_str("&owner=");
         url.push_str(owner);
     }
@@ -313,7 +316,7 @@ async fn probe_web_peer_navigation(navigation_url: &str) -> WebPeerNavigationPro
                 redirects: 0,
                 problem: None,
                 error: Some(error.to_string()),
-            }
+            };
         }
     };
     let mut url = navigation_url.to_string();
@@ -332,7 +335,7 @@ async fn probe_web_peer_navigation(navigation_url: &str) -> WebPeerNavigationPro
                     redirects,
                     problem: None,
                     error: Some(error.to_string()),
-                }
+                };
             }
         };
         let status = response.status();
@@ -3040,7 +3043,9 @@ const PHASE_TABLE: &[Phase] = &[
     Phase {
         slug: "control",
         title: "Control remote windows",
-        journeys: &["RC-01", "RC-02", "RC-03", "RC-04", "RC-05", "RC-06", "RC-07"],
+        journeys: &[
+            "RC-01", "RC-02", "RC-03", "RC-04", "RC-05", "RC-06", "RC-07",
+        ],
     },
     Phase {
         slug: "point",
@@ -3050,7 +3055,9 @@ const PHASE_TABLE: &[Phase] = &[
     Phase {
         slug: "survive",
         title: "Survive real-world entropy",
-        journeys: &["RES-01", "RES-02", "RES-03", "RES-04", "RES-05", "RES-06", "RES-07"],
+        journeys: &[
+            "RES-01", "RES-02", "RES-03", "RES-04", "RES-05", "RES-06", "RES-07",
+        ],
     },
     Phase {
         slug: "look",
@@ -3155,9 +3162,7 @@ impl JourneyAxis {
             JourneyAxis::Phase(phase) => journey_in_phase(phase, journey),
             JourneyAxis::Feature(code) => journey.feature.eq_ignore_ascii_case(code),
             JourneyAxis::Priority(pri) => journey.priority == pri,
-            JourneyAxis::Depth(depth) => {
-                journey.depth == *depth || journey.depth == "short-long"
-            }
+            JourneyAxis::Depth(depth) => journey.depth == *depth || journey.depth == "short-long",
             // A "both"-direction journey satisfies either directional query;
             // an exact match satisfies everything else.
             JourneyAxis::Direction(dir) => {
@@ -3204,11 +3209,7 @@ fn parse_journey_axis(token: &str) -> Option<JourneyAxis> {
 /// through to id-list resolution -- a half-parsed intersection must not
 /// silently widen into something else.
 fn resolve_journey_group_selector(token: &str) -> Option<Vec<ScenarioSpec>> {
-    let axes: Option<Vec<JourneyAxis>> = token
-        .trim()
-        .split(':')
-        .map(parse_journey_axis)
-        .collect();
+    let axes: Option<Vec<JourneyAxis>> = token.trim().split(':').map(parse_journey_axis).collect();
     let axes = axes?;
     if axes.is_empty() {
         return None;
@@ -4189,7 +4190,10 @@ fn test_pattern_content_check(path: &Path) -> Result<(), String> {
         if distance > COLOR_DISTANCE_TOLERANCE {
             return Err(format!(
                 "calibration square missing at ({x},{y}) [captured px ({px},{py}) in a {}x{} frame]: observed {:?}, expected {:?}, distance={distance:.1}",
-                image.width(), image.height(), pixel, color
+                image.width(),
+                image.height(),
+                pixel,
+                color
             ));
         }
     }
@@ -4580,7 +4584,10 @@ async fn teardown_scenario_web_peers(
         if disconnect_requested > 0 {
             while started.elapsed() < WEB_PEER_DISCONNECT_TIMEOUT {
                 let present = remote_participant_identities(app);
-                if identities.iter().all(|identity| !present.contains(identity)) {
+                if identities
+                    .iter()
+                    .all(|identity| !present.contains(identity))
+                {
                     break;
                 }
                 tokio::time::sleep(PREVIOUS_PEER_POLL_INTERVAL).await;
@@ -4687,7 +4694,9 @@ fn previous_peer_blockers(pending: &[String], probe: &mut impl PreviousPeerProbe
         }
         let windows = probe.compositor_windows(identity);
         if !windows.is_empty() {
-            blockers.push(format!("'{identity}' still has compositor window(s) {windows:?}"));
+            blockers.push(format!(
+                "'{identity}' still has compositor window(s) {windows:?}"
+            ));
         }
     }
     blockers
@@ -5141,10 +5150,12 @@ fn roster_fingerprint(identities: &[String]) -> String {
     // compiles. Write the bytes out directly: the web peer compares this
     // against its own hex, and `roster_fingerprint.len() == 64` is asserted,
     // so the STRING has to stay byte-identical to what 0.10 produced.
-    Sha256::digest(canonical).iter().fold(String::with_capacity(64), |mut acc, byte| {
-        let _ = write!(acc, "{byte:02x}");
-        acc
-    })
+    Sha256::digest(canonical)
+        .iter()
+        .fold(String::with_capacity(64), |mut acc, byte| {
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        })
 }
 
 fn parse_web_cockpit_report_line(message: &str) -> Option<WebCockpitReport> {
@@ -5267,8 +5278,11 @@ where
     S: AsRef<str>,
 {
     let own_window = native_share_window_id.map(|id| format!(" to own shared window {id} "));
-    let names_our_window =
-        |message: &str| own_window.as_deref().is_none_or(|needle| message.contains(needle));
+    let names_our_window = |message: &str| {
+        own_window
+            .as_deref()
+            .is_none_or(|needle| message.contains(needle))
+    };
     journal_messages_contain_pair(
         messages
             .into_iter()
@@ -5761,11 +5775,65 @@ async fn start_native_test_pattern_share(
 
 #[cfg(not(target_os = "macos"))]
 async fn start_native_test_pattern_share(
-    _app: &AppHandle,
-    _scenario: ScenarioSpec,
-    _writer: &mut ResultsWriter,
+    app: &AppHandle,
+    scenario: ScenarioSpec,
+    writer: &mut ResultsWriter,
 ) -> Result<NativeTestPatternShare, String> {
-    Err("INFRA-FAIL native test-pattern sharing is macOS-only".to_string())
+    // Windows has no synthetic test-pattern window: use an operator-selected
+    // real HWND so this cockpit leg exercises the production WGC/session/share
+    // path rather than a model or source-shape assertion. The HWND is kept as
+    // an input-only setup value; the app converts it to the same opaque token
+    // the picker uses before calling the real session coordinator.
+    let raw_handle = std::env::var("PETAL_COCKPIT_WINDOWS_HWND")
+        .map_err(|_| {
+            "INFRA-FAIL set PETAL_COCKPIT_WINDOWS_HWND to a visible target HWND".to_string()
+        })?
+        .parse::<usize>()
+        .map_err(|_| "INFRA-FAIL PETAL_COCKPIT_WINDOWS_HWND must be a decimal HWND".to_string())?;
+    let hwnd = windows::Win32::Foundation::HWND(raw_handle as *mut std::ffi::c_void);
+    let mut owner_pid = 0_u32;
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            hwnd,
+            Some(&mut owner_pid),
+        );
+    }
+    if owner_pid == 0 {
+        return Err("INFRA-FAIL selected Windows HWND has no live owner process".to_string());
+    }
+    let window_id = crate::windows_capture_target::register(raw_handle, owner_pid)
+        .map_err(|error| format!("INFRA-FAIL registering Windows cockpit HWND: {error}"))?;
+    let state = app.state::<crate::session::SessionState>();
+    crate::session::start_share_token(
+        app.clone(),
+        state.inner(),
+        window_id,
+        crate::remote_control_core::RemoteControlMode::CursorPreserving,
+        "#ffffff".to_string(),
+    )
+    .await
+    .map_err(|error| format!("INFRA-FAIL starting production Windows share: {error}"))?;
+    if !state.inner().is_share_active(window_id) {
+        return Err(
+            "INFRA-FAIL production Windows share returned without an active share".to_string(),
+        );
+    }
+    let visible_source = register_cockpit_visible_source(window_id);
+    let _ = writer.write(
+        "native-share-source",
+        Some(scenario.id),
+        serde_json::json!({
+            "windowId": window_id,
+            "source": "PETAL_COCKPIT_WINDOWS_HWND",
+            "ownerPid": owner_pid,
+            "capture": "Windows.Graphics.Capture",
+            "publication": "production session::start_share_token",
+        }),
+    );
+    Ok(NativeTestPatternShare {
+        window_id,
+        _visible_source: visible_source,
+    })
 }
 
 fn report_payload_bool(payload: &serde_json::Value, fields: &[&str]) -> bool {
@@ -6111,14 +6179,14 @@ async fn assert_reported_scenario(
                                 Ok(energy) => energy,
                                 Err(error) => {
                                     return failed_native_assertion_outcome(
-                                            scenario,
-                                            report,
-                                            "native-audio-pcm-energy",
-                                            format!(
-                                                "recv telemetry was healthy ({} state={} kbps={:.1}) but the decoded PCM could not be captured: {error}",
-                                                track.name, track.stream_state, track.actual_kbps
-                                            ),
-                                        );
+                                        scenario,
+                                        report,
+                                        "native-audio-pcm-energy",
+                                        format!(
+                                            "recv telemetry was healthy ({} state={} kbps={:.1}) but the decoded PCM could not be captured: {error}",
+                                            track.name, track.stream_state, track.actual_kbps
+                                        ),
+                                    );
                                 }
                             };
                             if !energy.is_audible() {
@@ -6200,7 +6268,10 @@ async fn assert_reported_scenario(
                     "beginEndDelivered",
                 ],
             );
-            let web_window_id = report.payload.get("windowId").and_then(serde_json::Value::as_u64);
+            let web_window_id = report
+                .payload
+                .get("windowId")
+                .and_then(serde_json::Value::as_u64);
             let target_is_ours =
                 draw_target_matches_native_share(web_window_id, native_share_window_id);
             let mut outcome = web_report_outcome(scenario, report);
@@ -6485,7 +6556,9 @@ async fn run_plugin_frame_boot_scenario(
     };
     let self_nav_note = match self_nav_refused {
         Some(true) => " srcdoc self-navigation was refused by frame-src.",
-        Some(false) => " srcdoc self-navigation raised no frame-src violation (the host's second-load teardown is the layer that still covers it).",
+        Some(false) => {
+            " srcdoc self-navigation raised no frame-src violation (the host's second-load teardown is the layer that still covers it)."
+        }
         None => " srcdoc self-navigation observation did not report.",
     };
 
@@ -6525,10 +6598,7 @@ async fn run_plugin_frame_boot_scenario(
             assertions: vec![AssertionOutcome {
                 name: "plugin-srcdoc-frame-reported-ready".to_string(),
                 passed: false,
-                detail: format!(
-                    "ready ids seen: [{}]",
-                    evidence.ready_plugin_ids.join(", ")
-                ),
+                detail: format!("ready ids seen: [{}]", evidence.ready_plugin_ids.join(", ")),
             }],
         },
         plugin_boot::ProbeConclusion::ProbeNeverMounted => infra_fail_outcome(
@@ -6885,7 +6955,7 @@ async fn run_remote_control_scaled_scenario(
             return infra_fail_outcome(
                 scenario,
                 format!("could not launch remote-control driver: {error}"),
-            )
+            );
         }
     };
     if !status.success() {
@@ -6900,7 +6970,7 @@ async fn run_remote_control_scaled_scenario(
     {
         Ok(report) => report,
         Err(error) => {
-            return infra_fail_outcome(scenario, format!("invalid remote-control ledger: {error}"))
+            return infra_fail_outcome(scenario, format!("invalid remote-control ledger: {error}"));
         }
     };
     let latency = match verify_remote_control_drive(&report) {
@@ -7354,7 +7424,7 @@ async fn run_native_peer_control_host(app: AppHandle) -> Result<(), String> {
                     "native peer found {} windows matching {target_app}/{target_title}; the run \
                      marker is supposed to be unique",
                     many.len()
-                ))
+                ));
             }
             _ if started.elapsed() < NATIVE_PEER_TIMEOUT => {
                 tokio::time::sleep(native_peer::RECEIVER_READINESS_SAMPLE_INTERVAL).await;
@@ -7362,7 +7432,7 @@ async fn run_native_peer_control_host(app: AppHandle) -> Result<(), String> {
             _ => {
                 return Err(format!(
                     "native peer never saw a shareable {target_app} window titled '*{target_title}*'"
-                ))
+                ));
             }
         }
     };
@@ -7370,8 +7440,12 @@ async fn run_native_peer_control_host(app: AppHandle) -> Result<(), String> {
     // Share through the REAL UI path, exactly as a user's click does. Going
     // straight to the session layer would skip the share border, overlay and
     // hover-tab state a live host actually has (CLAUDE.md crash-class 2).
-    let frame = crate::platform::cg::frame_for_window_id(window.window_id)
-        .ok_or_else(|| format!("native peer target window {} is not on screen", window.window_id))?;
+    let frame = crate::platform::cg::frame_for_window_id(window.window_id).ok_or_else(|| {
+        format!(
+            "native peer target window {} is not on screen",
+            window.window_id
+        )
+    })?;
     crate::hover_tab::toggle_share_for_window(&app, session.inner(), window.window_id, frame).await;
     if !session.inner().is_share_active(window.window_id) {
         return Err(format!(
@@ -7544,7 +7618,7 @@ async fn run_native_to_native_scenario(
                         "INFRA-FAIL create native-peer socket {}: {error}",
                         socket_path.display()
                     ),
-                )
+                );
             }
         };
         let source_share = match start_native_test_pattern_share(app, scenario, writer).await {
@@ -8106,7 +8180,9 @@ fn controller_ledger_projection(
         .filter(|entry| entry.window_id == window_id)
         .map(|entry| rc_n2n::DrivenInput {
             kind: wire_kind_label(entry.kind).to_string(),
-            action: entry.action.map(|action| wire_action_label(action).to_string()),
+            action: entry
+                .action
+                .map(|action| wire_action_label(action).to_string()),
             key: entry.key.clone(),
             meta: entry.meta,
             t_ms: entry.t_ms,
@@ -8206,7 +8282,10 @@ fn host_report_projection(
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            t_ms: entry.get("tMs").and_then(|value| value.as_u64()).unwrap_or(0),
+            t_ms: entry
+                .get("tMs")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
         })
         .collect::<Vec<_>>();
     if let Some(clipboard_replays) = report
@@ -8235,7 +8314,10 @@ fn host_report_projection(
                         .and_then(|value| value.as_str())
                         .unwrap_or("unknown")
                         .to_string(),
-                    t_ms: entry.get("tMs").and_then(|value| value.as_u64()).unwrap_or(0),
+                    t_ms: entry
+                        .get("tMs")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0),
                 }),
         );
         replays.sort_by_key(|entry| entry.t_ms);
@@ -8262,7 +8344,10 @@ fn host_report_projection(
                 .get("buttons")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
-            let keys = entry.get("keys").and_then(|value| value.as_u64()).unwrap_or(0);
+            let keys = entry
+                .get("keys")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
             (buttons + keys) as usize
         })
         .sum();
@@ -8359,7 +8444,10 @@ async fn run_remote_control_native_to_native_scenario(
     let document = match open_sacrificial_document() {
         Ok(document) => document,
         Err(error) => {
-            return infra_fail_outcome(scenario, format!("INFRA-FAIL sacrificial document: {error}"))
+            return infra_fail_outcome(
+                scenario,
+                format!("INFRA-FAIL sacrificial document: {error}"),
+            );
         }
     };
     let socket_path = native_peer_socket_path(&writer.dir);
@@ -8405,9 +8493,9 @@ async fn run_remote_control_native_to_native_scenario(
         .env(NATIVE_PEER_TARGET_APP_ENV, "TextEdit")
         .env(NATIVE_PEER_TARGET_TITLE_ENV, &document.marker)
         .env("PETAL_DISABLE_AUDIO", "1")
-            // #823: peers must not pollute the Dock or steal focus (their
-            // self-activation broke RC-N2N's AX focus live).
-            .env("PETAL_ACCESSORY_UI", "1")
+        // #823: peers must not pollute the Dock or steal focus (their
+        // self-activation broke RC-N2N's AX focus live).
+        .env("PETAL_ACCESSORY_UI", "1")
         .stdout(Stdio::from(peer_stdout))
         .stderr(Stdio::from(peer_stderr))
         .spawn()
@@ -8661,9 +8749,12 @@ async fn run_remote_control_native_to_native_scenario(
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
         let script = rc_n2n::drive_script(&step);
-        if let Err(error) =
-            crate::compositor::cockpit_eval_in_control_overlay(app, &host_identity, host_window_id, script)
-        {
+        if let Err(error) = crate::compositor::cockpit_eval_in_control_overlay(
+            app,
+            &host_identity,
+            host_window_id,
+            script,
+        ) {
             drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
         }
         tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
@@ -8852,7 +8943,8 @@ async fn run_remote_control_native_to_native_scenario(
             ],
         },
         rc_n2n::RcVerdict::TestFail(detail) => {
-            let mut outcome = infra_fail_outcome(scenario, format!("{} TEST-FAIL {detail}", scenario.id));
+            let mut outcome =
+                infra_fail_outcome(scenario, format!("{} TEST-FAIL {detail}", scenario.id));
             outcome.verdict = ScenarioVerdict::TestFail;
             outcome.message = format!("{} TEST-FAIL {detail}", scenario.id);
             outcome
@@ -8960,7 +9052,7 @@ async fn run_remote_control_native_to_web_scenario(
                         "INFRA-FAIL {}",
                         readiness.timeout_error(&host_identity, host_window_id)
                     ),
-                )
+                );
             }
             Ok(_) => tokio::time::sleep(native_peer::RECEIVER_READINESS_SAMPLE_INTERVAL).await,
             Err(error) => {
@@ -8977,13 +9069,15 @@ async fn run_remote_control_native_to_web_scenario(
                 scenario,
                 "INFRA-FAIL the web peer's share does not advertise remote control, so the \
                  controller's grant can never arm the overlay and the drive would publish nothing",
-            )
+            );
         }
         Err(error) => {
             return infra_fail_outcome(
                 scenario,
-                format!("INFRA-FAIL could not read the remote window's control availability: {error}"),
-            )
+                format!(
+                    "INFRA-FAIL could not read the remote window's control availability: {error}"
+                ),
+            );
         }
     }
 
@@ -9054,7 +9148,8 @@ async fn run_remote_control_native_to_web_scenario(
         .unwrap_or_default();
     let web_granted = report_payload_bool(&report.payload, &["controlGranted"]);
     let (driven, _statuses) = controller_ledger_projection(host_window_id);
-    let verdict = rc_n2n::evaluate_delivery_only(&driven, &received_kinds, granted_locally && web_granted);
+    let verdict =
+        rc_n2n::evaluate_delivery_only(&driven, &received_kinds, granted_locally && web_granted);
     let _ = writer.write(
         "rc-n2w-evidence",
         Some(scenario.id),
@@ -10136,16 +10231,16 @@ async fn run_scenario(
 
     match scenario.kind {
         ScenarioKind::ChaosDevice => {
-            return run_chaos_device_scenario(app, scenario, access_code, writer, children).await
+            return run_chaos_device_scenario(app, scenario, access_code, writer, children).await;
         }
         ScenarioKind::ChaosDisplayChange => {
-            return run_chaos_display_change_scenario(app, scenario, writer).await
+            return run_chaos_display_change_scenario(app, scenario, writer).await;
         }
         ScenarioKind::ChaosNet | ScenarioKind::ChaosLifecycle => {
-            return run_net_impair_scenario(scenario, writer).await
+            return run_net_impair_scenario(scenario, writer).await;
         }
         ScenarioKind::MultiPeer => {
-            return run_multi_peer_scenario(app, scenario, access_code, writer, children).await
+            return run_multi_peer_scenario(app, scenario, access_code, writer, children).await;
         }
         ScenarioKind::RemoteControlScaled => {
             return run_remote_control_scaled_scenario(
@@ -10156,10 +10251,10 @@ async fn run_scenario(
                 writer,
                 children,
             )
-            .await
+            .await;
         }
         ScenarioKind::NativeToNativeShare => {
-            return run_native_to_native_scenario(app, scenario, run_meta, writer, children).await
+            return run_native_to_native_scenario(app, scenario, run_meta, writer, children).await;
         }
         ScenarioKind::RemoteControlNativeToNative => {
             #[cfg(target_os = "macos")]
@@ -10192,14 +10287,14 @@ async fn run_scenario(
                 writer,
                 children,
             )
-            .await
+            .await;
         }
         ScenarioKind::SoakStallWatch => {
             return run_soak_stall_watch_scenario(app, scenario, access_code, writer, children)
-                .await
+                .await;
         }
         ScenarioKind::PluginFrameBoot => {
-            return run_plugin_frame_boot_scenario(app, scenario, writer).await
+            return run_plugin_frame_boot_scenario(app, scenario, writer).await;
         }
         ScenarioKind::FullDesktopShare => {
             return run_full_desktop_share_scenario(app, scenario, access_code, writer, children)
@@ -10211,7 +10306,7 @@ async fn run_scenario(
         | ScenarioKind::CameraStall
         | ScenarioKind::JoinRoom
         | ScenarioKind::UiScreenshot => {
-            return run_gap_scaffold_scenario(app, scenario, writer).await
+            return run_gap_scaffold_scenario(app, scenario, writer).await;
         }
         _ => {}
     }
@@ -10235,7 +10330,10 @@ async fn run_scenario(
     if matches!(scenario.kind, ScenarioKind::AudioNativeToWeb) {
         if let Some(state) = app.try_state::<crate::session::SessionState>() {
             state.set_mic_muted(false);
-            log::info!("test-cockpit: {} unmuted the native mic for the listener", scenario.id);
+            log::info!(
+                "test-cockpit: {} unmuted the native mic for the listener",
+                scenario.id
+            );
             tokio::time::sleep(Duration::from_millis(1500)).await;
             log::info!(
                 "test-cockpit: {} mic state after unmute: session_reports_muted={}",
@@ -10243,7 +10341,10 @@ async fn run_scenario(
                 state.mic_muted()
             );
         } else {
-            log::warn!("test-cockpit: {} could not reach SessionState to unmute the mic", scenario.id);
+            log::warn!(
+                "test-cockpit: {} could not reach SessionState to unmute the mic",
+                scenario.id
+            );
         }
     }
 
@@ -10894,7 +10995,10 @@ mod tests {
 
         assert!(result.ready, "{result:?}");
         assert!(!result.timed_out);
-        assert_eq!(result.polls, 4, "started only once the publication was untracked");
+        assert_eq!(
+            result.polls, 4,
+            "started only once the publication was untracked"
+        );
         assert!(result.blockers.is_empty());
     }
 
@@ -10922,7 +11026,10 @@ mod tests {
         assert!(result.polls >= 2, "{result:?}");
         assert!(result.waited_ms >= 40, "{result:?}");
         let joined = result.blockers.join("\n");
-        assert!(joined.contains("'web-ghost' is still a room participant"), "{joined}");
+        assert!(
+            joined.contains("'web-ghost' is still a room participant"),
+            "{joined}"
+        );
         assert!(joined.contains("116208"), "{joined}");
     }
 
@@ -10946,7 +11053,10 @@ mod tests {
 
         assert!(result.ready);
         assert_eq!(result.polls, 1);
-        assert_eq!(probe.polls, 0, "an empty pending set never even probes the room");
+        assert_eq!(
+            probe.polls, 0,
+            "an empty pending set never even probes the room"
+        );
     }
 
     struct StaticProbe {
@@ -11054,7 +11164,10 @@ mod tests {
         let taken = children.take_web_peers();
         assert_eq!(taken.len(), 1);
         assert_eq!(taken[0].mode, "default-browser");
-        assert!(children.web_peers.is_empty(), "taken once, gone from the run");
+        assert!(
+            children.web_peers.is_empty(),
+            "taken once, gone from the run"
+        );
         assert!(children.take_web_peers().is_empty());
     }
 
@@ -11919,7 +12032,10 @@ mod tests {
 
     #[test]
     fn skipped_outcome_is_not_a_failure_verdict() {
-        let outcome = skipped_outcome(named_scenario("CHAOS-DEVICE"), "SKIPPED(tooling): missing tool");
+        let outcome = skipped_outcome(
+            named_scenario("CHAOS-DEVICE"),
+            "SKIPPED(tooling): missing tool",
+        );
 
         assert_eq!(outcome.verdict, ScenarioVerdict::Skipped);
         assert_eq!(outcome.scenario_id, "CHAOS-DEVICE");
@@ -11941,7 +12057,8 @@ mod tests {
             }),
         };
 
-        let outcome = chaos_device_outcome_from_report(named_scenario("CHAOS-DEVICE"), &report, false);
+        let outcome =
+            chaos_device_outcome_from_report(named_scenario("CHAOS-DEVICE"), &report, false);
 
         assert_eq!(outcome.verdict, ScenarioVerdict::Pass);
         assert!(outcome.message.contains("camera disappeared"));
@@ -11963,7 +12080,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.sender, "web-peer");
-        assert!(report_matches_scenario(&report, named_scenario("SHARE-N2W-Q")));
+        assert!(report_matches_scenario(
+            &report,
+            named_scenario("SHARE-N2W-Q")
+        ));
         assert!(report_ok(&report.payload));
         assert_eq!(
             report_number(&report.payload, &["fps", "deliveredFps"]),
@@ -12112,7 +12232,12 @@ mod tests {
     #[test]
     fn web_peer_url_names_the_native_owner_when_known() {
         assert_eq!(
-            web_peer_url("https://meet.petal.live/", "abc-defg-hjk", "DRAW-N", Some("p-cockpit-1a")),
+            web_peer_url(
+                "https://meet.petal.live/",
+                "abc-defg-hjk",
+                "DRAW-N",
+                Some("p-cockpit-1a")
+            ),
             "https://meet.petal.live/?code=abc-defg-hjk&auto=draw-n&owner=p-cockpit-1a"
         );
         assert_eq!(

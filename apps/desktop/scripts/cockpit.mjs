@@ -75,8 +75,9 @@ function usage() {
   ].join('\n');
 }
 
-// An audio journey run with PETAL_DISABLE_AUDIO=1 skips the mic publish and
-// speaker playout it exists to verify. The AUD scenario's decoded-PCM oracle
+// An audio journey run with PETAL_DISABLE_AUDIO=1 skips native audio (mic,
+// speaker playout, and screen-audio companions) that it exists to verify. The
+// AUD scenario's decoded-PCM oracle
 // still exercises the receive decode, but a video-only run must never be
 // mistaken for full audio validation (the exact confusion #787 grew in), so
 // refuse the combination instead of annotating it.

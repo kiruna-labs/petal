@@ -33,7 +33,9 @@ test('desktop participant tile keeps video and placeholder layers mounted for cr
 });
 
 test('desktop participant tile fades real video in only after decoded-frame readiness', () => {
-  assert.match(participantTile, /requestVideoFrameCallback\?\.\(markReady\)/);
+  assert.match(participantTile, /requestVideoFrameCallback\?/);
+  assert.match(participantTile, /schedulePresentationCallback\(\)/);
+  assert.match(participantTile, /camera presentation health/);
   assert.match(participantTile, /video\.addEventListener\('loadeddata', markReady, \{ once: true \}\)/);
   assert.match(participantTile, /const videoReady = \$derived\(videoOn && hasVisibleVideoStream && videoFrameReady\)/);
   assert.match(participantTile, /\.video-el\s*{[\s\S]*opacity:\s*0;[\s\S]*transition:\s*opacity var\(--motion-base\)/);

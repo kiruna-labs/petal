@@ -46,6 +46,7 @@ agents/
 # Machine-local agent/session state
 .claude/
 .codex/
+.pi/
 
 # Local build output not covered by target/
 target-peer/

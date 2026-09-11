@@ -260,7 +260,10 @@ pub(crate) struct RcN2nObservations<'a> {
 }
 
 fn is_input(kind: &str) -> bool {
-    matches!(kind, "pointer" | "key" | "text" | "wheel" | "copy" | "paste")
+    matches!(
+        kind,
+        "pointer" | "key" | "text" | "wheel" | "copy" | "paste"
+    )
 }
 
 fn is_delivery_input(kind: &str) -> bool {
@@ -403,13 +406,13 @@ pub(crate) fn evaluate(obs: RcN2nObservations<'_>) -> RcVerdict {
         Some(selection) => {
             return RcVerdict::TestFail(format!(
                 "Cmd+A did not select the document: selection was '{selection}'"
-            ))
+            ));
         }
         None => {
             return RcVerdict::InfraFail(
                 "the host could not read the document selection, so Cmd+A's effect is unmeasured"
                     .to_string(),
-            )
+            );
         }
     }
 
@@ -647,7 +650,10 @@ mod tests {
         match verdict {
             RcVerdict::TestFail(detail) => {
                 assert!(detail.contains("never granted control"), "{detail}");
-                assert!(detail.contains("denied"), "must name what it did see: {detail}");
+                assert!(
+                    detail.contains("denied"),
+                    "must name what it did see: {detail}"
+                );
             }
             other => panic!("expected TestFail, got {other:?}"),
         }
@@ -806,7 +812,9 @@ mod tests {
         );
         obs.sessions_after = 2;
         match evaluate(obs) {
-            RcVerdict::TestFail(detail) => assert!(detail.contains("survived the release"), "{detail}"),
+            RcVerdict::TestFail(detail) => {
+                assert!(detail.contains("survived the release"), "{detail}")
+            }
             other => panic!("expected TestFail, got {other:?}"),
         }
     }

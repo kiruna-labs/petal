@@ -11,7 +11,10 @@ const expectedVersion =
   process.env.PETAL_EXPECTED_VERSION ??
   JSON.parse(readFileSync(resolve(repoRoot, 'web-harness/package.json'), 'utf8')).version;
 const escapedExpectedVersion = escapeRegExp(expectedVersion);
-const downloadHref = 'https://app.petal.live/api/download';
+const expectedDownloadPlatform = process.platform === 'win32' ? 'windows' : 'macos';
+const expectedDownloadLabel =
+  expectedDownloadPlatform === 'windows' ? 'Download Petal for Windows' : 'Download Petal for macOS';
+const downloadHref = `https://app.petal.live/api/download?platform=${expectedDownloadPlatform}`;
 const widths = [320, 380, 400, 420];
 
 let chromium;
@@ -40,7 +43,8 @@ try {
       await page.waitForFunction(() => document.querySelector('#build-version-text')?.textContent, null, {
         timeout: 10_000,
       });
-      const result = await page.evaluate(({ escapedExpectedVersion: escapedExpected, downloadHref: expectedHref }) => {
+      const result = await page.evaluate(
+        ({ escapedExpectedVersion: escapedExpected, downloadHref: expectedHref, downloadLabel: expectedLabel }) => {
         const version = document.querySelector('#build-version-text');
         const link = document.querySelector('.web-status-bar__download');
         const footer = document.querySelector('#build-version');
@@ -63,7 +67,7 @@ try {
         return {
           ok:
             versionPattern.test(version.textContent ?? '') &&
-            link.textContent === 'Download Petal for macOS' &&
+            link.textContent === expectedLabel &&
             link.getAttribute('href') === expectedHref &&
             visible(version, version.getBoundingClientRect()) &&
             visible(link, linkRect) &&
@@ -81,7 +85,9 @@ try {
           viewportWidth: window.innerWidth,
           focusVisible: link.matches(':focus-visible'),
         };
-      }, { escapedExpectedVersion, downloadHref });
+        },
+        { escapedExpectedVersion, downloadHref, downloadLabel: expectedDownloadLabel }
+      );
 
       if (!result.ok) {
         throw new Error(JSON.stringify(result));

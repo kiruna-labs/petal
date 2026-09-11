@@ -75,6 +75,7 @@
 //! so there's exactly one raw `CGEventCreate` FFI call site, not two.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -268,6 +269,14 @@ fn update_for_authenticated_sender(
 /// within `frame` (a shared window's global logical frame), plus whether the
 /// cursor is actually inside those bounds. Pure function, unit-tested below
 /// without needing a real window/cursor.
+fn pointer_position_changed<K: Eq + Hash>(
+    last_sent: &HashMap<K, (f64, f64)>,
+    key: &K,
+    position: (f64, f64),
+) -> bool {
+    last_sent.get(key).copied() != Some(position)
+}
+
 fn normalize(cursor: (f64, f64), frame: &WindowFrame) -> (f64, f64, bool) {
     let (cx, cy) = cursor;
     let (fx, fy, fw, fh) = (
@@ -434,23 +443,29 @@ fn pointer_targets_with_owners(
             panel_family_ids: Vec::new(),
             is_visible: true,
         })
-        .chain(remote_content_frames.iter().map(|(window_id, frame, owner)| {
-            let meta = remote_family_meta
+        .chain(
+            remote_content_frames
                 .iter()
-                .find(|meta| meta.window_id == *window_id && meta.owner_identity == *owner);
-            PointerTarget {
-                kind: PointerTargetKind::RemoteCompositor,
-                window_id: *window_id,
-                frame: *frame,
-                surface_owner_id: Some(owner.clone()),
-                display_like: false,
-                panel_family_ids: meta.map(|meta| meta.family_ids.clone()).unwrap_or_default(),
-                // No meta yet (e.g. the ~9Hz refresh hasn't run since this
-                // window opened) fails CLOSED: never claim a panel is visible
-                // without having actually observed it (#906 DoD).
-                is_visible: meta.is_some_and(|meta| meta.is_visible),
-            }
-        }))
+                .map(|(window_id, frame, owner)| {
+                    let meta = remote_family_meta
+                        .iter()
+                        .find(|meta| meta.window_id == *window_id && meta.owner_identity == *owner);
+                    PointerTarget {
+                        kind: PointerTargetKind::RemoteCompositor,
+                        window_id: *window_id,
+                        frame: *frame,
+                        surface_owner_id: Some(owner.clone()),
+                        display_like: false,
+                        panel_family_ids: meta
+                            .map(|meta| meta.family_ids.clone())
+                            .unwrap_or_default(),
+                        // No meta yet (e.g. the ~9Hz refresh hasn't run since this
+                        // window opened) fails CLOSED: never claim a panel is visible
+                        // without having actually observed it (#906 DoD).
+                        is_visible: meta.is_some_and(|meta| meta.is_visible),
+                    }
+                }),
+        )
         .collect()
 }
 
@@ -517,7 +532,11 @@ fn vanished_visible_keys(
         .filter(|(key, visible)| {
             **visible
                 && !targets.iter().any(|target| {
-                    (target.kind, target.window_id, target.surface_owner_id.clone()) == **key
+                    (
+                        target.kind,
+                        target.window_id,
+                        target.surface_owner_id.clone(),
+                    ) == **key
                 })
         })
         .map(|(key, _)| key.clone())
@@ -581,7 +600,12 @@ fn select_macos_pointer_target<'a>(
                 && target.is_visible
                 && topmost_window_id.is_some_and(|wid| target.panel_family_ids.contains(&wid))
         })
-        .or_else(|| targets.iter().filter(|target| target.display_like).find(inside))
+        .or_else(|| {
+            targets
+                .iter()
+                .filter(|target| target.display_like)
+                .find(inside)
+        })
         // #906: this final fallback must NEVER re-match a `RemoteCompositor`
         // target -- it exists only to pick a plain LOCAL share when nothing
         // else matched, not to undo the occlusion gate above. Without this
@@ -647,6 +671,8 @@ fn sender_loop(app: AppHandle) {
     // idle-timeout eventually fades it, or (b) spamming visible=false on
     // every subsequent tick for a window the cursor left minutes ago.
     let mut last_visible: HashMap<(PointerTargetKind, u32, Option<String>), bool> = HashMap::new();
+    let mut last_sent_position: HashMap<(PointerTargetKind, u32, Option<String>), (f64, f64)> =
+        HashMap::new();
     // Tick counter for the ~9Hz frame refresh (issue #30) -- see the module
     // doc comment's "Coordinate model" section for the full rationale.
     let mut tick: u64 = 0;
@@ -769,6 +795,7 @@ fn sender_loop(app: AppHandle) {
             // there is nothing left to publish it to. Clear tracked
             // visibility so a fresh share later starts clean.
             last_visible.clear();
+            last_sent_position.clear();
             continue;
         };
         // Real per-user identity (SPEC.md's onboarding identity, threaded
@@ -791,6 +818,7 @@ fn sender_loop(app: AppHandle) {
                 publish_vanished_hide(&publisher, &user_id, &key);
             }
             last_visible.clear();
+            last_sent_position.clear();
             continue;
         }
 
@@ -839,14 +867,27 @@ fn sender_loop(app: AppHandle) {
                 None => (0.5, 0.5, false),
             };
 
-            let key = (target.kind, target.window_id, target.surface_owner_id.clone());
+            let key = (
+                target.kind,
+                target.window_id,
+                target.surface_owner_id.clone(),
+            );
             let was_visible = last_visible.get(&key).copied().unwrap_or(false);
             if !inside && !was_visible {
                 // Already told the receiver this pointer is hidden; nothing
                 // new to say for this window this tick.
                 continue;
             }
-            last_visible.insert(key, inside);
+            if inside && was_visible && !pointer_position_changed(&last_sent_position, &key, (x, y))
+            {
+                continue;
+            }
+            last_visible.insert(key.clone(), inside);
+            if inside {
+                last_sent_position.insert(key.clone(), (x, y));
+            } else {
+                last_sent_position.remove(&key);
+            }
             if inside && !was_visible {
                 log::info!(
                     "telepointer: local user '{user_id}' entered {} window {} frame=({}, {}, {}, {})",
@@ -891,7 +932,8 @@ fn sender_loop(app: AppHandle) {
         // until the receiver's own idle-timeout.
         for key in vanished_visible_keys(&targets, &last_visible) {
             publish_vanished_hide(&publisher, &user_id, &key);
-            last_visible.insert(key, false);
+            last_visible.insert(key.clone(), false);
+            last_sent_position.remove(&key);
         }
     }
 }
@@ -970,6 +1012,7 @@ fn sender_loop_windows(app: AppHandle) {
     use tauri::Manager;
 
     let mut last_visible: HashMap<WindowsPointerKey, bool> = HashMap::new();
+    let mut last_sent_position: HashMap<WindowsPointerKey, (f64, f64)> = HashMap::new();
     let mut tick: u64 = 0;
     // Remote-compositor content frames, refreshed at the ~9Hz cadence only:
     // the snapshot is a BLOCKING cross-thread RPC into the compositor thread,
@@ -1076,6 +1119,7 @@ fn sender_loop_windows(app: AppHandle) {
 
         let Some(publisher) = publisher else {
             last_visible.clear();
+            last_sent_position.clear();
             continue;
         };
         let user_id = identity.unwrap_or_else(|| "unknown".to_string());
@@ -1142,10 +1186,18 @@ fn sender_loop_windows(app: AppHandle) {
                 _ => (0.5, 0.5),
             };
             let was_visible = last_visible.get(&key).copied().unwrap_or(false);
+            if visible
+                && was_visible
+                && !pointer_position_changed(&last_sent_position, &key, (x, y))
+            {
+                continue;
+            }
             if visible {
                 last_visible.insert(key.clone(), true);
+                last_sent_position.insert(key.clone(), (x, y));
             } else {
                 last_visible.remove(&key);
+                last_sent_position.remove(&key);
             }
             if visible && !was_visible {
                 log::info!(
@@ -1882,6 +1934,21 @@ mod windows_tests {
 }
 
 // macOS-only: the tests replay `window_fixtures` (CG window snapshots) and
+#[cfg(test)]
+mod pointer_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_pointer_coordinates_are_deduplicated_but_moves_and_hides_are_not() {
+        let key = (PointerTargetKind::LocalShare, 7, None::<String>);
+        let mut last = HashMap::new();
+        assert!(pointer_position_changed(&last, &key, (0.25, 0.5)));
+        last.insert(key.clone(), (0.25, 0.5));
+        assert!(!pointer_position_changed(&last, &key, (0.25, 0.5)));
+        assert!(pointer_position_changed(&last, &key, (0.26, 0.5)));
+    }
+}
+
 // exercise the macOS compositor/receiver paths.
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
@@ -2512,8 +2579,7 @@ mod tests {
         );
         for family_member in [300u32, 301, 302, 303] {
             let selected =
-                select_macos_pointer_target((100.0, 100.0), Some(family_member), &targets)
-                    .unwrap();
+                select_macos_pointer_target((100.0, 100.0), Some(family_member), &targets).unwrap();
             assert_eq!(selected.window_id, 3);
         }
     }
@@ -2596,7 +2662,11 @@ mod tests {
     /// revisits a key that no longer has a target at all.
     #[test]
     fn vanished_visible_keys_reports_a_key_with_no_target_left() {
-        let key = (PointerTargetKind::RemoteCompositor, 9, Some("alice".to_string()));
+        let key = (
+            PointerTargetKind::RemoteCompositor,
+            9,
+            Some("alice".to_string()),
+        );
         let last_visible = HashMap::from([(key.clone(), true)]);
         assert_eq!(vanished_visible_keys(&[], &last_visible), vec![key]);
     }
@@ -2606,7 +2676,11 @@ mod tests {
         // Only entries the loop last published as visible=true need a
         // falling-edge hide; one already recorded false has nothing new to
         // say by disappearing.
-        let key = (PointerTargetKind::RemoteCompositor, 9, Some("alice".to_string()));
+        let key = (
+            PointerTargetKind::RemoteCompositor,
+            9,
+            Some("alice".to_string()),
+        );
         let last_visible = HashMap::from([(key, false)]);
         assert!(vanished_visible_keys(&[], &last_visible).is_empty());
     }
@@ -2620,7 +2694,11 @@ mod tests {
             &meta,
             "local",
         );
-        let key = (PointerTargetKind::RemoteCompositor, 9, Some("alice".to_string()));
+        let key = (
+            PointerTargetKind::RemoteCompositor,
+            9,
+            Some("alice".to_string()),
+        );
         let last_visible = HashMap::from([(key, true)]);
         assert!(
             vanished_visible_keys(&targets, &last_visible).is_empty(),
@@ -2664,7 +2742,8 @@ mod tests {
     /// ORDER is what answers "what's on top," and the first frame-containing
     /// record, whatever its layer, IS the real topmost thing at that point.
     #[test]
-    fn resolve_topmost_window_id_fallback_never_skips_a_layer_ineligible_occluder_above_the_panel() {
+    fn resolve_topmost_window_id_fallback_never_skips_a_layer_ineligible_occluder_above_the_panel()
+    {
         // The occluder (e.g. the menu bar) is FIRST in front-to-back order,
         // ahead of the panel it covers -- the walk must return the occluder,
         // not reach past it to the panel.

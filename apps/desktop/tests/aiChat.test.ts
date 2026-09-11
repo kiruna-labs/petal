@@ -713,7 +713,10 @@ test('the receiver commands and event exist in Rust with the names ipc.ts uses',
   // Both request commands are addressed by (window_id, owner_identity) —
   // Tauri camel-cases these, which is what the frontend passes.
   assert.match(commandsRs, /pub fn ai_chat_request_start\(\s*app: AppHandle,\s*window_id: u32,\s*owner_identity: String/);
-  assert.match(commandsRs, /pub fn ai_chat_remote_session\(window_id: u32, owner_identity: String\)/);
+  assert.match(
+    commandsRs,
+    /pub fn ai_chat_remote_session\(\s*window_id: u32,\s*owner_identity: String\s*,?\s*\)/
+  );
 });
 
 test('ask and listen are ONE shape, in Rust and in ipc.ts', () => {
@@ -724,7 +727,7 @@ test('ask and listen are ONE shape, in Rust and in ipc.ts', () => {
   const topicRs = read('../src-tauri/src/ai_chat/topic.rs');
   assert.match(
     commandsRs,
-    /pub fn ai_chat_remote_session\(window_id: u32, owner_identity: String\) -> Option<super::topic::RemoteState>/
+    /pub fn ai_chat_remote_session\(\s*window_id: u32,\s*owner_identity: String\s*,?\s*\)\s*->\s*Option<super::topic::RemoteState>/
   );
 
   const state = topicRs.slice(

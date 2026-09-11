@@ -11,7 +11,7 @@ use crate::hover_core::{
     DEFAULT_HOVER_TAB_POSITION, DEFAULT_HOVER_TAB_SIDE, DEFAULT_HOVER_TAB_VERTICAL_OFFSET,
 };
 use crate::sync_ext::MutexExt;
-use crate::transport::publisher::CaptureResolution;
+use crate::transport::publisher::{experimental_share_fps, CaptureResolution};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -40,7 +40,10 @@ impl SharePriority {
         }
     }
 
-    pub const fn capture_fps(self) -> u32 {
+    pub fn capture_fps(self) -> u32 {
+        if let Some(fps) = experimental_share_fps() {
+            return fps;
+        }
         match self {
             Self::DataSaver => 15,
             Self::Automatic | Self::Responsive | Self::SharpText => 30,
@@ -127,7 +130,9 @@ impl SharePriorityStore {
                     // back to the side/offset pair every shipped build wrote
                     // instead of guessing a model and relocating the tab.
                     let position = json_f64(file.hover_tab_perimeter_position.as_ref())
-                        .filter(|_| file.hover_tab_perimeter_version == Some(HOVER_TAB_POSITION_VERSION))
+                        .filter(|_| {
+                            file.hover_tab_perimeter_version == Some(HOVER_TAB_POSITION_VERSION)
+                        })
                         .map(normalize_hover_tab_position)
                         .unwrap_or_else(|| {
                             hover_tab_position_for_side_offset(file.hover_tab_side, legacy_offset)

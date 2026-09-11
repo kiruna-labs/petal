@@ -291,8 +291,7 @@ pub(crate) fn evaluate_independent_move(
     assert_independent_of_sharer(sharer_before, sharer_after)?;
     Ok(format!(
         "receiver window translated by ({dx},{dy}) with size preserved ({}x{}); sharer source window stayed put (independent)",
-        receiver_after.width,
-        receiver_after.height,
+        receiver_after.width, receiver_after.height,
     ))
 }
 

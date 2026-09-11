@@ -56,7 +56,7 @@ test('an escaping relative import to shared/ is rejected with an actionable mess
     const { status, output } = runGuard(root);
     assert.equal(status, 1, output);
     assert.match(output, /PACKAGE-ESCAPE GATE BLOCKED/);
-    assert.match(output, /tests\/fixtures\/plugins\/fixture\.ts:1/);
+    assert.match(output, /tests[\\/]fixtures[\\/]plugins[\\/]fixture\.ts:1/);
     assert.match(output, /\.\.\/\.\.\/\.\.\/\.\.\/shared\/plugin-host\/host\.ts/);
     // The message has to name the fix, not just the offence.
     assert.match(output, /@petal\/shared/);

@@ -82,7 +82,11 @@ test('Windows frame arrival cannot bypass the region geometry cadence', () => {
   const refresh = pump.indexOf('region_capture_spec(token, &target, Some(previous_region.monitor))');
   assert.ok(due >= 0 && refresh > due, 'Windows ROI refresh is not behind the cadence gate');
   assert.match(pump, /last_region_geometry_check\s*=\s*Some\(now\)/);
-  assert.match(pump, /if setup\.region_paused \{\s*continue;\s*\}/s);
+  assert.match(
+    pump,
+    /if !setup\.region_paused \{\s*drain_and_push\(/s,
+    'paused region captures must not reach the frame push path'
+  );
   assert.match(
     windowsCaptureSource,
     /context\.CopySubresourceRegion\(/,

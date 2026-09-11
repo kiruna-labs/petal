@@ -634,7 +634,9 @@ mod tests {
         assert_eq!(result["regressionVerdict"], "INSUFFICIENT DATA");
         assert_eq!(
             result["insufficientData"],
-            json!(["SHARE-W2N-Q: INSUFFICIENT DATA for p95 comparison (baseline sampleCount: 4; current sampleCount: not measured)"])
+            json!([
+                "SHARE-W2N-Q: INSUFFICIENT DATA for p95 comparison (baseline sampleCount: 4; current sampleCount: not measured)"
+            ])
         );
         assert!(result["regressions"].as_array().unwrap().is_empty());
     }
