@@ -72,6 +72,7 @@ use livekit::options::{
     H264ProfilePreference, TrackPublishOptions, VideoCodec, VideoEncoderBackend, VideoPreset,
 };
 use livekit::prelude::*;
+use livekit::webrtc::rtp_parameters::RtpDegradationPreference;
 #[cfg(target_os = "macos")]
 use livekit::webrtc::video_frame::native::NativeBuffer;
 use livekit::webrtc::video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation};
@@ -744,11 +745,11 @@ pub struct PublishedTrack {
     // compiling unchanged via `Arc<T>`'s `Deref<Target = T>`.
     published_width: Arc<std::sync::atomic::AtomicU32>,
     published_height: Arc<std::sync::atomic::AtomicU32>,
-    /// Frame rate the track was published at, so a reconnect republish
-    /// (`republish_camera_after_reconnect`) rebuilds the identical encoding.
-    /// Meaningful only for camera tracks; window shares derive their fps from
-    /// `ShareQuality` and store 0.0 (unused).
-    published_frame_rate: f64,
+    /// Stable camera send policy (frame rate, experiment ceiling, degradation
+    /// preference). `None` for window shares; initial publish and Petal
+    /// reconnect repair both rebuild options from this one value so the two
+    /// paths cannot drift.
+    camera_policy: Option<CameraPublishPolicy>,
     /// (mismatched captured size, first-seen instant) while a resize has not
     /// yet settled; cleared when the captured size matches the published size.
     resize_settle: Mutex<Option<((u32, u32), std::time::Instant)>>,
@@ -1716,7 +1717,7 @@ impl RoomConnection<Arc<Room>> {
             track,
             published_width,
             published_height,
-            published_frame_rate: 0.0, // window shares derive fps from ShareQuality
+            camera_policy: None, // window shares derive fps from ShareQuality
             resize_settle: Mutex::new(None),
             camera_size_recovery: Mutex::new(CameraSizeRecovery::default()),
             simulcast_ladder,
@@ -1760,7 +1761,8 @@ impl RoomConnection<Arc<Room>> {
             RtcVideoSource::Native(rtc_source.clone()),
         );
 
-        let publish_opts = camera_publish_options(width, height, frame_rate);
+        let publish_policy = CameraPublishPolicy::from_environment(frame_rate);
+        let publish_opts = publish_policy.publish_options(width, height);
         let requested_encoder = publish_opts.video_encoder;
         let configured_bitrate = publish_opts
             .video_encoding
@@ -1773,9 +1775,10 @@ impl RoomConnection<Arc<Room>> {
             .await?;
 
         log::info!(
-            "Published camera track '{track_name}' {width}x{height} (H.264, requested encoder: {requested_encoder:?}, max bitrate: {} kbps{})",
+            "Published camera track '{track_name}' {width}x{height} (H.264, requested encoder: {requested_encoder:?}, max bitrate: {} kbps, degradation: {:?}{})",
             configured_bitrate.unwrap_or_default() / 1000,
-            if camera_experiment_max_bitrate_bps().is_some() {
+            publish_policy.degradation_preference,
+            if publish_policy.experiment_cap_bps.is_some() {
                 "; PETAL_CAMERA_EXPERIMENT_MAX_KBPS active"
             } else {
                 ""
@@ -1802,7 +1805,7 @@ impl RoomConnection<Arc<Room>> {
             track,
             published_width: Arc::new(std::sync::atomic::AtomicU32::new(width)),
             published_height: Arc::new(std::sync::atomic::AtomicU32::new(height)),
-            published_frame_rate: frame_rate,
+            camera_policy: Some(publish_policy),
             resize_settle: Mutex::new(None),
             camera_size_recovery: Mutex::new(CameraSizeRecovery::default()),
             // Camera has one source encoding and never receives share-quality
@@ -1857,6 +1860,64 @@ fn camera_experiment_max_bitrate_bps() -> Option<u64> {
     (CAMERA_MIN_BITRATE_BPS..=CAMERA_MAX_CEILING_BPS)
         .contains(&bps)
         .then_some(bps)
+}
+
+/// Strict diagnostic opt-in for the camera sender's degradation preference.
+/// Unset, `native`, or any unrecognized value leaves WebRTC's native behavior
+/// in place (`None`, which is NOT enum `Disabled`); an invalid value is logged
+/// once per camera publish.
+fn camera_degradation_preference_from_env() -> Option<RtpDegradationPreference> {
+    let raw = std::env::var(CAMERA_DEGRADATION_PREFERENCE_ENV).ok()?;
+    camera_degradation_preference_from_value(&raw)
+}
+
+/// Pure parser behind [`camera_degradation_preference_from_env`]. Kept
+/// separate so the strict opt-in table is testable without mutating the
+/// process environment.
+fn camera_degradation_preference_from_value(raw: &str) -> Option<RtpDegradationPreference> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "maintain-resolution" => Some(RtpDegradationPreference::MaintainResolution),
+        "native" | "" => None,
+        _ => {
+            log::warn!(
+                "camera: ignoring unrecognized {CAMERA_DEGRADATION_PREFERENCE_ENV}='{raw}'; WebRTC degradation behavior stays native"
+            );
+            None
+        }
+    }
+}
+
+const CAMERA_DEGRADATION_PREFERENCE_ENV: &str = "PETAL_CAMERA_DEGRADATION_PREFERENCE";
+
+/// The stable camera send choices, resolved once when the camera track is
+/// created. Both the initial publish and `republish_camera_after_reconnect`
+/// build their [`TrackPublishOptions`] from this value, so a reconnect cannot
+/// silently change the camera's encoding or degradation policy.
+#[derive(Debug, Clone, Copy)]
+struct CameraPublishPolicy {
+    frame_rate: f64,
+    experiment_cap_bps: Option<u64>,
+    degradation_preference: Option<RtpDegradationPreference>,
+}
+
+impl CameraPublishPolicy {
+    fn from_environment(frame_rate: f64) -> Self {
+        Self {
+            frame_rate,
+            experiment_cap_bps: camera_experiment_max_bitrate_bps(),
+            degradation_preference: camera_degradation_preference_from_env(),
+        }
+    }
+
+    fn publish_options(&self, width: u32, height: u32) -> TrackPublishOptions {
+        camera_publish_options(
+            width,
+            height,
+            self.frame_rate,
+            self.experiment_cap_bps,
+            self.degradation_preference,
+        )
+    }
 }
 
 /// Camera encoding ceiling: the 720p30 baseline (2.5 Mbps, the pre-existing
@@ -1918,22 +1979,34 @@ fn camera_video_encoding_with_cap(
 
 /// Camera uses one explicit source encoding. Lower simulcast layers made fresh
 /// subscriptions begin at 320x180 and climb through 640x360 even when every
-/// receiver requested HIGH; a single 2.5 Mbps/30 fps encoding keeps startup at
-/// source resolution on every native platform.
-fn camera_publish_options(width: u32, height: u32, frame_rate: f64) -> TrackPublishOptions {
+/// receiver requested HIGH; a single source-resolution encoding keeps startup
+/// at source resolution on every native platform.
+fn camera_publish_options(
+    width: u32,
+    height: u32,
+    frame_rate: f64,
+    experiment_cap_bps: Option<u64>,
+    degradation_preference: Option<RtpDegradationPreference>,
+) -> TrackPublishOptions {
     TrackPublishOptions {
         source: TrackSource::Camera,
         video_codec: VideoCodec::H264,
         video_encoder: select_encoder_backend(),
         simulcast: false,
         simulcast_layers: None,
-        video_encoding: Some(camera_video_encoding(width, height, frame_rate)),
+        video_encoding: Some(camera_video_encoding_with_cap(
+            width,
+            height,
+            frame_rate,
+            experiment_cap_bps,
+        )),
         frame_metadata_features: {
             let mut f = livekit::options::FrameMetadataFeatures::default();
             f.user_timestamp = true;
             f.frame_id = true;
             f
         },
+        degradation_preference,
         ..Default::default()
     }
 }
@@ -1988,8 +2061,10 @@ fn window_publish_options_for_region(
         video_codec,
         video_encoder: select_encoder_backend(),
         // LiveKit 0.7.49's public Rust API does not expose the native
-        // contentHint or sender degradationPreference setters. Keep this
-        // limitation scoped to #382; do not patch the vendored SDK here.
+        // contentHint setter. Degradation preference is deliberately left
+        // `None` (WebRTC-native): a full share's region budget is expressed
+        // through `simulcast_layers` below, and overriding degradation here
+        // would fight that ladder rather than complement it.
         // #181: macOS screencast low-latency RC/QP cap only engage on a
         // High-family H.264 profile; keep 42e01f after it as browser fallback.
         h264_profile_preference: H264ProfilePreference::HighFirst,
@@ -4927,8 +5002,91 @@ mod track_name_tests {
     }
 
     #[test]
+    fn camera_degradation_preference_is_strictly_opt_in() {
+        assert_eq!(
+            camera_degradation_preference_from_value("maintain-resolution"),
+            Some(RtpDegradationPreference::MaintainResolution)
+        );
+        assert_eq!(
+            camera_degradation_preference_from_value("  MAINTAIN-RESOLUTION  "),
+            Some(RtpDegradationPreference::MaintainResolution)
+        );
+        // Absent/native/invalid must stay WebRTC-native, which is NOT the same
+        // as enum `Disabled`.
+        assert_eq!(camera_degradation_preference_from_value("native"), None);
+        assert_eq!(camera_degradation_preference_from_value(""), None);
+        assert_eq!(camera_degradation_preference_from_value("disabled"), None);
+        assert_eq!(camera_degradation_preference_from_value("balanced"), None);
+        assert_eq!(camera_degradation_preference_from_value("nonsense"), None);
+    }
+
+    #[test]
+    fn camera_publish_options_carry_the_degradation_preference_declaratively() {
+        // `TrackPublishOptions::default()` must leave the field absent so
+        // screenshare and every other publisher keep WebRTC's native behavior.
+        assert!(TrackPublishOptions::default()
+            .degradation_preference
+            .is_none());
+
+        let policy = CameraPublishPolicy {
+            frame_rate: 30.0,
+            experiment_cap_bps: None,
+            degradation_preference: Some(RtpDegradationPreference::MaintainResolution),
+        };
+        assert_eq!(
+            policy.publish_options(1280, 720).degradation_preference,
+            Some(RtpDegradationPreference::MaintainResolution)
+        );
+
+        let native = CameraPublishPolicy {
+            frame_rate: 30.0,
+            experiment_cap_bps: None,
+            degradation_preference: None,
+        };
+        assert!(native
+            .publish_options(1280, 720)
+            .degradation_preference
+            .is_none());
+    }
+
+    #[test]
+    fn camera_policy_rebuilds_identical_options_for_initial_publish_and_repair() {
+        let policy = CameraPublishPolicy {
+            frame_rate: 59.94,
+            experiment_cap_bps: Some(4_000_000),
+            degradation_preference: None,
+        };
+        let initial = policy.publish_options(1280, 720);
+        // The reconnect path calls the same method with the published size.
+        let repaired = policy.publish_options(1280, 720);
+        assert_eq!(
+            initial
+                .video_encoding
+                .as_ref()
+                .map(|e| (e.max_bitrate, e.max_framerate)),
+            repaired
+                .video_encoding
+                .as_ref()
+                .map(|e| (e.max_bitrate, e.max_framerate))
+        );
+        assert_eq!(
+            initial.degradation_preference,
+            repaired.degradation_preference
+        );
+        assert_eq!(initial.video_encoder, repaired.video_encoder);
+        assert_eq!(
+            initial.h264_profile_preference,
+            repaired.h264_profile_preference
+        );
+        assert_eq!(
+            initial.video_encoding.as_ref().map(|e| e.max_bitrate),
+            Some(4_000_000)
+        );
+    }
+
+    #[test]
     fn camera_publish_options_pin_single_source_encoding() {
-        let options = camera_publish_options(1280, 720, 30.0);
+        let options = camera_publish_options(1280, 720, 30.0, None, None);
 
         assert_eq!(options.source, TrackSource::Camera);
         assert_eq!(options.video_codec, VideoCodec::H264);
@@ -4949,7 +5107,7 @@ mod track_name_tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_camera_publish_options_request_hardware_720p30_source() {
-        let options = camera_publish_options(1280, 720, 30.0);
+        let options = camera_publish_options(1280, 720, 30.0, None, None);
         let source = options.video_encoding.expect("camera source encoding");
 
         assert_eq!(options.video_encoder, VideoEncoderBackend::Hardware);
@@ -4962,7 +5120,7 @@ mod track_name_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_camera_publish_options_keep_videotoolbox_720p30_source() {
-        let options = camera_publish_options(1280, 720, 30.0);
+        let options = camera_publish_options(1280, 720, 30.0, None, None);
         let top = options.video_encoding.expect("camera top encoding");
 
         assert_eq!(options.video_encoder, VideoEncoderBackend::VideoToolbox);
@@ -4972,7 +5130,7 @@ mod track_name_tests {
 
     #[test]
     fn camera_and_share_publishes_keep_their_distinct_encoding_shapes() {
-        let camera = camera_publish_options(1280, 720, 30.0);
+        let camera = camera_publish_options(1280, 720, 30.0, None, None);
         assert!(!camera.simulcast);
         assert!(camera.simulcast_layers.is_none());
 
@@ -6631,11 +6789,16 @@ impl PublishedTrack {
     /// SDK's own republish shape (same Track Arc, new server-assigned SID).
     pub(crate) async fn republish_camera_after_reconnect(&self) -> Result<(), RoomConnectionError> {
         let (width, height) = self.published_size();
+        let policy = self.camera_policy.ok_or_else(|| {
+            RoomConnectionError::InvalidVideoConfig(
+                "camera reconnect repair requested for a track with no camera policy".to_string(),
+            )
+        })?;
         self.room
             .local_participant()
             .publish_track(
                 LocalTrack::Video(self.track.clone()),
-                camera_publish_options(width, height, self.published_frame_rate),
+                policy.publish_options(width, height),
             )
             .await?;
         log::info!(

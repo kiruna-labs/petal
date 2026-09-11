@@ -66,6 +66,33 @@ a healthy encoder.
 Drop this patch once upstream exposes a per-encoder rate-control policy the
 caller can set.
 
+# Petal patch: declarative sender degradation preference
+
+Vendored `libwebrtc` and `livekit`; pinned via `[patch.crates-io]` in
+`apps/desktop/src-tauri/Cargo.toml`.
+
+## Why this exists
+
+Upstream LiveKit 0.7.49's Rust API exposes no way to choose a sender's RTP
+degradation preference: the field round-trips through
+`webrtc_sys::rtp_parameters::DegradationPreference` and
+`native/rtp_parameters.rs`, but no public mutator exists.
+
+## The fix
+
+`TrackPublishOptions::degradation_preference: Option<RtpDegradationPreference>`
+(`None` = WebRTC's native behavior, which is NOT `Disabled`).
+`LocalParticipant::publish_track` applies it through
+`LocalVideoTrack::set_degradation_preference` after sender creation and before
+negotiation, so the initial publish and every reconnect that reuses the stored
+publish options carry the same policy. `RtpParameters::set_degradation_preference`
+is the underlying mutator.
+
+## Updating
+
+Drop this patch once upstream exposes a degradation-preference field on
+`TrackPublishOptions` or an equivalent setter on the Rust API.
+
 # Petal patch: H.264 profile preference for native screenshares
 
 Vendored from `livekit` 0.7.49 (crates.io), pinned via `[patch.crates-io]` in

@@ -435,6 +435,15 @@ impl LocalParticipant {
 
         track.set_transceiver(Some(transceiver));
 
+        // Petal patch: declarative degradation policy. Applied after the sender
+        // exists and before `publisher_negotiation_needed`, and stored on the
+        // publication with the rest of `options` so an SDK reconnect reuses it.
+        if let (LocalTrack::Video(video_track), Some(preference)) =
+            (&track, options.degradation_preference)
+        {
+            video_track.set_degradation_preference(preference)?;
+        }
+
         if let LocalTrack::Video(video_track) = &track {
             let has_timing_subscribers = video_track.has_publish_timing_subscribers();
             if needs_video_sender_transformer(&options, has_timing_subscribers) {

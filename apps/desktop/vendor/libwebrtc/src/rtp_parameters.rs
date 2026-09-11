@@ -43,6 +43,32 @@ pub struct RtpParameters {
     pub(crate) degradation_preference: i32,
 }
 
+/// Petal patch: how a sender is allowed to degrade under bandwidth pressure.
+///
+/// Upstream LiveKit 0.7.49 exposes no setter, so the field could only be read
+/// and round-tripped. The FFI plumbing already existed
+/// (`webrtc_sys::rtp_parameters::DegradationPreference` and
+/// `native/rtp_parameters.rs`'s conversion); only a public mutator was missing.
+///
+/// Values mirror `webrtc::DegradationPreference` (DISABLED, MAINTAIN_FRAMERATE,
+/// MAINTAIN_RESOLUTION, BALANCED).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtpDegradationPreference {
+    Disabled = 0,
+    MaintainFramerate = 1,
+    MaintainResolution = 2,
+    Balanced = 3,
+}
+
+impl RtpParameters {
+    /// Set the sender degradation preference. Turns the `has_*` flag on, since
+    /// WebRTC ignores the value when it is absent.
+    pub fn set_degradation_preference(&mut self, preference: RtpDegradationPreference) {
+        self.has_degradation_preference = true;
+        self.degradation_preference = preference as i32;
+    }
+}
+
 /// Mirrors webrtc_sys RtcpFeedback for round-trip fidelity.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CodecFeedback {

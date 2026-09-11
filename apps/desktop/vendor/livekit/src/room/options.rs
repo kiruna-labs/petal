@@ -144,6 +144,10 @@ pub struct TrackPublishOptions {
     /// encoding is produced and that mode is forwarded to libwebrtc to
     /// enable true SVC for VP9/AV1. Has no effect for VP8/H264.
     pub scalability_mode: Option<String>,
+    /// Petal patch: sender degradation preference applied to the video sender
+    /// before negotiation. `None` leaves WebRTC's native behavior untouched
+    /// and is NOT equivalent to `Some(Disabled)`.
+    pub degradation_preference: Option<RtpDegradationPreference>,
 }
 
 impl Default for TrackPublishOptions {
@@ -163,6 +167,7 @@ impl Default for TrackPublishOptions {
             video_encoder: VideoEncoderBackend::Auto,
             h264_profile_preference: H264ProfilePreference::ConstrainedBaselineFirst,
             scalability_mode: None,
+            degradation_preference: None,
         }
     }
 }

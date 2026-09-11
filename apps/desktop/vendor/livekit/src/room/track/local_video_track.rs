@@ -430,6 +430,29 @@ impl LocalVideoTrack {
             .map_err(|e| RoomError::Internal(format!("failed to set sender parameters: {e}")))
     }
 
+    /// Petal patch: apply the sender's degradation preference.
+    ///
+    /// Called by `LocalParticipant::publish_track` from
+    /// `TrackPublishOptions::degradation_preference` before negotiation, so a
+    /// reconnect that reuses the stored publish options re-applies the same
+    /// policy. `None` never reaches this method.
+    pub(crate) fn set_degradation_preference(
+        &self,
+        preference: crate::webrtc::rtp_parameters::RtpDegradationPreference,
+    ) -> RoomResult<()> {
+        let transceiver = self.transceiver().ok_or_else(|| {
+            RoomError::Internal("cannot set degradation preference: no transceiver".into())
+        })?;
+        let sender = transceiver.sender();
+        let mut params = sender.parameters();
+        params.set_degradation_preference(preference);
+        sender
+            .set_parameters(params)
+            .map_err(|e| RoomError::Internal(format!("failed to set sender parameters: {e}")))?;
+        log::debug!("degradation preference set to {preference:?}");
+        Ok(())
+    }
+
     /// Toggle simulcast encoding layers on/off based on subscriber demand.
     /// Used by dynacast: the SFU tells us which quality levels are needed,
     /// and we set `encoding.active` accordingly on the RTP sender.
