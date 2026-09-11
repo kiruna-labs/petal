@@ -19,10 +19,10 @@ pub mod mf; // Windows-only (the file carries its own #![cfg] gate)
 
 // Re-export the concrete capture type so consumers can name the adapter
 // when they need its inherent API (tests, the Windows loss monitor).
-#[cfg(target_os = "windows")]
-pub use mf::CameraCapture;
 #[cfg(target_os = "macos")]
 pub use avf::CameraCapture;
+#[cfg(target_os = "windows")]
+pub use mf::CameraCapture;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum CameraError {
@@ -115,6 +115,11 @@ pub struct CameraFrame {
 pub(crate) trait CameraStatusSource: Send + Sync {
     fn terminal_error(&self) -> Option<String>;
     fn frames_delivered(&self) -> u64;
+    /// Live callback cadence over the recorded frame window, or `None` while
+    /// too few frames are recorded to measure. Exposed so a physical run can
+    /// compare the rate the QUALIFICATION window saw against the steady-state
+    /// rate the same reader sustains -- the two disagreeing is itself the bug.
+    fn observed_frame_rate(&self) -> Option<f64>;
 }
 
 /// Unified status handle for a running capture: terminal error, delivered
@@ -136,6 +141,10 @@ impl CameraStatus {
 
     pub fn frames_delivered(&self) -> u64 {
         self.state.frames_delivered()
+    }
+
+    pub(crate) fn observed_frame_rate(&self) -> Option<f64> {
+        self.state.observed_frame_rate()
     }
 
     pub fn same_capture(&self, other: &Self) -> bool {
@@ -190,44 +199,114 @@ pub(crate) fn synthetic_camera_freeze_enabled() -> bool {
         && std::env::var("PETAL_CAMERA_SYNTH_FREEZE").as_deref() == Ok("1")
 }
 
-pub(crate) const SYNTH_CAMERA_WIDTH: u32 = 640;
-pub(crate) const SYNTH_CAMERA_HEIGHT: u32 = 480;
+/// A synthetic-only bitrate mutation for the end-to-end quality oracle. It is
+/// gated by the source hook so a leaked environment variable cannot degrade a
+/// real user's camera publication.
+pub(crate) fn synthetic_camera_low_bitrate_enabled() -> bool {
+    synthetic_camera_capture_enabled()
+        && std::env::var("PETAL_CAMERA_SYNTH_LOW_BITRATE").as_deref() == Ok("1")
+}
+
+pub(crate) const SYNTH_CAMERA_WIDTH: u32 = 1280;
+pub(crate) const SYNTH_CAMERA_HEIGHT: u32 = 720;
 pub(crate) const SYNTH_CAMERA_FPS: u32 = 30;
 pub(crate) const SYNTH_CAMERA_DEVICE_ID: &str = "petal-synthetic-camera";
+pub(crate) const SYNTH_CAMERA_PATTERN_VERSION: &str = "camera-chart-v1";
 
-const SYNTH_BACKGROUND_LUMA: u8 = 128;
-const SYNTH_BAR_LUMA: u8 = 235;
-const SYNTH_BAR_STEP_PX: u64 = 8;
+const SYNTH_BACKGROUND_LUMA: u8 = 96;
+const SYNTH_SENTINEL_LUMA: u8 = 235;
+const SYNTH_SENTINEL_STEP_PX: u64 = 8;
 
-/// One NV12 test frame: a bright bar sweeping across a mid-grey field.
-///
-/// Both properties are load-bearing for CAM-N2W's web oracle — mid-grey is
-/// not black, and the bar moves every frame — so this is deliberately not a
-/// flat fill. Deterministic in `frame_index`, which is what lets the freeze
-/// lever above remove the motion without changing anything else.
+/// One versioned 720p NV12 camera chart. The static chart contains four
+/// distinct corner marks, multi-frequency bars, and a diagonal edge. The
+/// moving sentinel is confined to the bottom band so quality metrics can
+/// exclude it while the liveness oracle still has a deterministic motion
+/// signal. Neutral chroma makes the primary quality signal luma-only.
 fn synthetic_camera_frame(
     width: u32,
     height: u32,
     frame_index: u64,
     capture_wall_time_us: u64,
 ) -> CameraFrame {
-    let mut y = vec![SYNTH_BACKGROUND_LUMA; (width as usize) * (height as usize)];
-    let bar_width = (width / 8).max(1);
-    let bar_x = ((frame_index * SYNTH_BAR_STEP_PX) % u64::from(width)) as u32;
-    for row in 0..height as usize {
-        let row_start = row * width as usize;
-        for offset in 0..bar_width {
-            let column = ((bar_x + offset) % width) as usize;
-            y[row_start + column] = SYNTH_BAR_LUMA;
+    let width_usize = width as usize;
+    let height_usize = height as usize;
+    let mut y = vec![SYNTH_BACKGROUND_LUMA; width_usize * height_usize];
+
+    // Three spatial frequencies: 4, 8, and 16-pixel vertical bars.
+    for row in 72..height.saturating_sub(96) as usize {
+        let row_start = row * width_usize;
+        for column in 160..width.saturating_sub(160) as usize {
+            let band = column % 96;
+            y[row_start + column] = if band < 4 {
+                220
+            } else if band < 12 {
+                175
+            } else if band < 28 {
+                140
+            } else {
+                SYNTH_BACKGROUND_LUMA
+            };
         }
     }
+
+    // A high-contrast slanted edge across the chart.
+    for row in 140..height.saturating_sub(140) as usize {
+        let edge = 260 + row / 3;
+        for column in edge..(edge + 5).min(width_usize) {
+            y[row * width_usize + column] = 235;
+        }
+    }
+
+    // Four corner calibration marks with distinct luma values. Their borders
+    // stay static and are reserved for receiver alignment.
+    // Keep these geometry constants aligned with web-harness/crispness.ts:
+    // margin 16, square size 24, center at 28 px from each edge.
+    let mark_size = 24usize.min(width_usize / 8).min(height_usize / 8);
+    let corners = [
+        (16usize, 16usize, 235u8),
+        (width_usize.saturating_sub(16 + mark_size), 16usize, 180u8),
+        (
+            16usize,
+            height_usize.saturating_sub(16 + mark_size),
+            80u8,
+        ),
+        (
+            width_usize.saturating_sub(16 + mark_size),
+            height_usize.saturating_sub(16 + mark_size),
+            16u8,
+        ),
+    ];
+    for (left, top, value) in corners {
+        // One exact center pixel makes the web alignment oracle unambiguous
+        // after scaling and codec filtering.
+        let center_x = (left + mark_size / 2).min(width_usize.saturating_sub(1));
+        let center_y = (top + mark_size / 2).min(height_usize.saturating_sub(1));
+        y[center_y * width_usize + center_x] = value;
+    }
+
+    // Moving sentinel: exclude this bottom-band ROI from fidelity metrics.
+    let sentinel_width = (width / 12).max(1) as usize;
+    let sentinel_margin = 64u32.min(width / 4);
+    let sentinel_travel = width
+        .saturating_sub(sentinel_margin.saturating_mul(2))
+        .saturating_sub(sentinel_width as u32)
+        .max(1);
+    let sentinel_x = sentinel_margin as usize
+        + ((frame_index * SYNTH_SENTINEL_STEP_PX) % u64::from(sentinel_travel)) as usize;
+    for row in height_usize.saturating_sub(64)..height_usize.saturating_sub(16) {
+        let start = row * width_usize + sentinel_x.min(width_usize);
+        let end = (sentinel_x + sentinel_width).min(width_usize);
+        for pixel in &mut y[start..row * width_usize + end] {
+            *pixel = SYNTH_SENTINEL_LUMA;
+        }
+    }
+
     CameraFrame {
         width,
         height,
         y,
         y_stride: width,
-        // Neutral chroma (128,128) — the luma plane carries the whole signal.
-        uv: vec![128u8; (width as usize) * (height as usize) / 2],
+        uv: vec![128u8; width_usize * height_usize / 2],
         uv_stride: width,
         capture_wall_time_us,
     }
@@ -253,6 +332,12 @@ impl CameraStatusSource for SyntheticCameraState {
 
     fn frames_delivered(&self) -> u64 {
         self.frames_delivered.load(Ordering::Relaxed)
+    }
+
+    fn observed_frame_rate(&self) -> Option<f64> {
+        // The synthetic pump has no measured-cadence window; its rate is the
+        // configured constant.
+        Some(f64::from(synthetic_camera_fps()))
     }
 }
 
@@ -429,6 +514,10 @@ pub struct CameraMode {
     pub frame_rate_denominator: u32,
 }
 
+/// Camera capture remains opt-in at higher rates, but never accepts a mode
+/// above 60fps. The ordinary/default mode is still 30fps.
+pub const CAMERA_MAX_CAPTURE_FPS: u32 = 60;
+
 #[cfg(any(target_os = "windows", test))]
 const CAMERA_TARGET_WIDTH: u32 = 1280;
 #[cfg(any(target_os = "windows", test))]
@@ -437,6 +526,24 @@ const CAMERA_TARGET_HEIGHT: u32 = 720;
 const CAMERA_TARGET_FPS: u32 = 30;
 #[cfg(any(target_os = "windows", test))]
 const CAMERA_MIN_HEALTHY_FPS: u32 = 24;
+
+/// Startup cadence floors are intentionally separate from the advertised
+/// native mode. A driver may claim 30/60 while supplying fewer callbacks.
+#[cfg(any(target_os = "windows", test))]
+fn camera_cadence_floor(requested_fps: f64) -> f64 {
+    if requested_fps >= 55.0 {
+        48.0
+    } else if requested_fps >= 24.0 {
+        24.0
+    } else {
+        requested_fps.max(1.0)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn camera_cadence_qualifies(requested_fps: f64, observed_fps: f64) -> bool {
+    observed_fps.is_finite() && observed_fps >= camera_cadence_floor(requested_fps)
+}
 
 #[cfg(any(target_os = "windows", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,9 +588,13 @@ impl FrameLayout {
     /// not a dependency on macOS, so this cannot live under `test`-cfg code
     /// that macOS test builds compile).
     #[cfg(target_os = "windows")]
-    fn from_media_type(media_type: &windows::Win32::Media::MediaFoundation::IMFAttributes) -> Result<Self, CameraError> {
-        let packed = unsafe { media_type.GetUINT64(&windows::Win32::Media::MediaFoundation::MF_MT_FRAME_SIZE) }
-            .map_err(|error| operation_error("camera media type has no frame size", error))?;
+    fn from_media_type(
+        media_type: &windows::Win32::Media::MediaFoundation::IMFAttributes,
+    ) -> Result<Self, CameraError> {
+        let packed = unsafe {
+            media_type.GetUINT64(&windows::Win32::Media::MediaFoundation::MF_MT_FRAME_SIZE)
+        }
+        .map_err(|error| operation_error("camera media type has no frame size", error))?;
         Self::new((packed >> 32) as u32, packed as u32)
     }
 
@@ -622,13 +733,20 @@ fn select_camera_format_index<I>(
 where
     I: IntoIterator<Item = CameraFormatMetadata>,
 {
-    let formats: Vec<CameraFormatMetadata> = formats.into_iter().collect();
+    let formats: Vec<(usize, CameraFormatMetadata)> = formats
+        .into_iter()
+        .enumerate()
+        .filter(|(_, format)| {
+            format.frame_rate().is_none_or(|(numerator, denominator)| {
+                numerator as u64 <= CAMERA_MAX_CAPTURE_FPS as u64 * denominator as u64
+            })
+        })
+        .collect();
 
     if let Some(preferred) = preferred {
         let same_resolution: Vec<(usize, CameraFormatMetadata)> = formats
             .iter()
             .copied()
-            .enumerate()
             .filter(|(_, format)| {
                 format.width == preferred.width && format.height == preferred.height
             })
@@ -647,11 +765,10 @@ where
 
     let has_healthy_format = formats
         .iter()
-        .any(|format| format.is_usable() && format.has_healthy_frame_rate());
+        .any(|(_, format)| format.is_usable() && format.has_healthy_frame_rate());
     formats
         .iter()
         .copied()
-        .enumerate()
         .filter(|(_, format)| {
             format.is_usable() && (!has_healthy_format || format.has_healthy_frame_rate())
         })
@@ -692,6 +809,11 @@ fn format_frame_rate_distance(format: CameraFormatMetadata, target_fps: u32) -> 
 /// ordered by resolution ascending, then fps descending.
 #[cfg(any(target_os = "windows", test))]
 fn dedupe_and_sort_modes(mut modes: Vec<CameraMode>) -> Vec<CameraMode> {
+    modes.retain(|mode| {
+        mode.frame_rate_denominator == 0
+            || mode.frame_rate_numerator as u64
+                <= CAMERA_MAX_CAPTURE_FPS as u64 * mode.frame_rate_denominator as u64
+    });
     modes.sort_by(|left, right| {
         (left.width * left.height)
             .cmp(&(right.width * right.height))
@@ -754,6 +876,18 @@ mod tests {
 
     fn mean_luma(frame: &CameraFrame) -> f64 {
         frame.y.iter().map(|value| f64::from(*value)).sum::<f64>() / frame.y.len() as f64
+    }
+
+    #[test]
+    fn camera_cadence_floors_preserve_explicit_15_and_protect_30_60() {
+        assert_eq!(camera_cadence_floor(15.0), 15.0);
+        assert_eq!(camera_cadence_floor(30.0), 24.0);
+        assert_eq!(camera_cadence_floor(60.0), 48.0);
+        assert!(camera_cadence_qualifies(15.0, 15.0));
+        assert!(!camera_cadence_qualifies(30.0, 23.99));
+        assert!(camera_cadence_qualifies(30.0, 24.0));
+        assert!(!camera_cadence_qualifies(60.0, 47.99));
+        assert!(camera_cadence_qualifies(60.0, 48.0));
     }
 
     /// #815: the two properties CAM-N2W's web oracle keys on. A flat black
@@ -894,6 +1028,39 @@ mod tests {
         assert_eq!(sorted[1].frame_rate_denominator, 1);
         assert_eq!(sorted[2].frame_rate_numerator, 30000);
         assert_eq!(sorted[2].frame_rate_denominator, 1001);
+    }
+
+    #[test]
+    fn camera_modes_drop_rates_above_the_60fps_cap() {
+        let modes = dedupe_and_sort_modes(vec![
+            CameraMode {
+                width: 1280,
+                height: 720,
+                frame_rate_numerator: 60,
+                frame_rate_denominator: 1,
+            },
+            CameraMode {
+                width: 1280,
+                height: 720,
+                frame_rate_numerator: 120,
+                frame_rate_denominator: 1,
+            },
+        ]);
+        assert_eq!(modes.len(), 1);
+        assert_eq!(modes[0].frame_rate_numerator, CAMERA_MAX_CAPTURE_FPS);
+    }
+
+    #[test]
+    fn camera_format_selection_drops_rates_above_the_60fps_cap() {
+        let formats = [
+            camera_format(1280, 720, 120, true),
+            camera_format(1280, 720, 60, true),
+        ];
+        assert_eq!(
+            select_camera_format_index(formats, None),
+            Some(1),
+            "a 120fps mode must not be selected when a capped 60fps mode exists"
+        );
     }
 
     #[test]

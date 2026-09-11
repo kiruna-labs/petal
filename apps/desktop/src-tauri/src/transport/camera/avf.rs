@@ -142,6 +142,11 @@ impl CameraStatusSource for DelegateShared {
     fn frames_delivered(&self) -> u64 {
         self.frames_delivered.load(Ordering::Relaxed)
     }
+
+    fn observed_frame_rate(&self) -> Option<f64> {
+        // macOS does not measure a cadence window; preserve that exactly.
+        None
+    }
 }
 
 impl DelegateShared {

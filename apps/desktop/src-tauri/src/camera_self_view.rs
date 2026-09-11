@@ -72,6 +72,45 @@ fn halve_nv12(y: &[u8], uv: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec<u8>
 /// Latest-wins single frame slot; `None` while the camera is off.
 static LATEST: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
+/// Decoded header of one buffered self-view payload. The webview reads these
+/// same three fields straight out of the buffer; keeping one Rust-side parser
+/// means the regression seam measures the bytes production actually ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelfViewFrameHeader {
+    pub width: u32,
+    pub height: u32,
+    pub capture_wall_time_us: u64,
+}
+
+/// Parse the 16-byte header, rejecting a body that cannot hold its own plane
+/// sizes so a truncated buffer can never be read as a valid frame.
+pub(crate) fn parse_frame_header(buffer: &[u8]) -> Option<SelfViewFrameHeader> {
+    if buffer.len() < 16 {
+        return None;
+    }
+    let width = u32::from_le_bytes(buffer[0..4].try_into().ok()?);
+    let height = u32::from_le_bytes(buffer[4..8].try_into().ok()?);
+    let capture_wall_time_us = u64::from_le_bytes(buffer[8..16].try_into().ok()?);
+    let luma_len = (width as usize).checked_mul(height as usize)?;
+    let expected_body = luma_len.checked_add(luma_len / 2)?;
+    if buffer.len() != 16 + expected_body {
+        return None;
+    }
+    Some(SelfViewFrameHeader {
+        width,
+        height,
+        capture_wall_time_us,
+    })
+}
+
+/// Pull the newest buffered payload, if one is waiting. This is the exact
+/// hand-off the `next_self_view_frame` command performs; the physical
+/// regression test calls this directly so it measures production behavior at
+/// the same boundary the webview pulls from.
+pub(crate) fn take_latest() -> Option<Vec<u8>> {
+    LATEST.lock_unpoisoned().take()
+}
+
 /// Copy one captured frame into the self-view slot. Called from the camera
 /// frame callback (capture thread); replaces any unconsumed previous frame.
 ///
@@ -119,7 +158,7 @@ pub(crate) fn clear() {
 /// frame is available (webview checks `byteLength === 0`).
 #[tauri::command]
 pub fn next_self_view_frame() -> Result<tauri::ipc::Response, String> {
-    let bytes = LATEST.lock_unpoisoned().take();
+    let bytes = take_latest();
     Ok(tauri::ipc::Response::new(bytes.unwrap_or_default()))
 }
 

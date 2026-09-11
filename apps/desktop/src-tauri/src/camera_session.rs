@@ -76,6 +76,7 @@ struct CameraPublishTelemetry {
     captured_frames: u64,
     pushed_frames: u64,
     dropped_push_frames: u64,
+    source_rejected_frames: u64,
     overwritten_latest_frames: u64,
 }
 
@@ -84,6 +85,7 @@ struct CameraPublishBaseline {
     captured_frames: u64,
     pushed_frames: u64,
     dropped_push_frames: u64,
+    source_rejected_frames: u64,
     overwritten_latest_frames: u64,
 }
 
@@ -93,6 +95,7 @@ impl From<&CameraPublishTelemetry> for CameraPublishBaseline {
             captured_frames: value.captured_frames,
             pushed_frames: value.pushed_frames,
             dropped_push_frames: value.dropped_push_frames,
+            source_rejected_frames: value.source_rejected_frames,
             overwritten_latest_frames: value.overwritten_latest_frames,
         }
     }
@@ -103,20 +106,22 @@ struct CameraPublishHealth {
     captured_frames: u64,
     pushed_frames: u64,
     dropped_push_frames: u64,
+    source_rejected_frames: u64,
     overwritten_latest_frames: u64,
     capture_fps: f64,
-    encode_fps: f64,
+    push_fps: f64,
 }
 
 fn format_camera_publish_health(health: &CameraPublishHealth) -> String {
     format!(
-        "session: camera publish health -- captured={} pushed={} dropped_push={} overwritten_latest={} capture_fps={:.1} encode_fps={:.1}",
+        "[DEBUG-MEDIA-FPS] session: camera publish health -- captured={} pushed={} conversion_dropped={} source_rejected={} overwritten_latest={} capture_fps={:.1} push_fps={:.1}",
         health.captured_frames,
         health.pushed_frames,
         health.dropped_push_frames,
+        health.source_rejected_frames,
         health.overwritten_latest_frames,
         health.capture_fps,
-        health.encode_fps
+        health.push_fps
     )
 }
 
@@ -133,7 +138,7 @@ fn camera_publish_interval_health(
     } else {
         0.0
     };
-    let encode_fps = if elapsed > 0.0 {
+    let push_fps = if elapsed > 0.0 {
         telemetry
             .pushed_frames
             .saturating_sub(baseline.pushed_frames) as f64
@@ -146,9 +151,10 @@ fn camera_publish_interval_health(
             captured_frames: telemetry.captured_frames,
             pushed_frames: telemetry.pushed_frames,
             dropped_push_frames: telemetry.dropped_push_frames,
+            source_rejected_frames: telemetry.source_rejected_frames,
             overwritten_latest_frames: telemetry.overwritten_latest_frames,
             capture_fps,
-            encode_fps,
+            push_fps,
         },
         telemetry
             .dropped_push_frames
@@ -191,7 +197,7 @@ fn unhealthy_camera_publish_diagnostic(
     overwritten_latest_frames: u64,
 ) -> Option<SentryDiagnosticEvent> {
     let capture_cadence = camera_cadence_bucket(health.capture_fps);
-    let encode_cadence = camera_cadence_bucket(health.encode_fps);
+    let encode_cadence = camera_cadence_bucket(health.push_fps);
     let queue_backpressure =
         camera_queue_backpressure_bucket(dropped_push_frames, overwritten_latest_frames);
     if capture_cadence == CadenceBucket::Healthy
@@ -374,11 +380,7 @@ pub(crate) async fn start_camera_publish_with_device(
         let Some((room_connection, identity)) = state.control_channel_snapshot() else {
             return Err("not in room".to_string());
         };
-        (
-            room_connection,
-            identity,
-            state.current_room_generation(),
-        )
+        (room_connection, identity, state.current_room_generation())
     };
     log::info!(
         "session: start_camera_publish begin (identity '{}')",
@@ -467,6 +469,11 @@ pub(crate) async fn start_camera_publish_with_device(
     // negotiated rather than a hardcoded 30.
     let (frame_rate_num, frame_rate_den) = capture.frame_rate();
     let negotiated_frame_rate = frame_rate_num as f64 / frame_rate_den.max(1) as f64;
+    log::info!(
+        "session: camera capture accepted at {}x{} @ {negotiated_frame_rate:.2} fps; publishing with the measured cadence",
+        width,
+        height,
+    );
     let published = match room_connection
         .publish_camera(width, height, negotiated_frame_rate, &identity)
         .await
@@ -540,7 +547,7 @@ fn start_camera_frame_pump(
                     let (health, dropped_push_frames, overwritten_latest_frames) =
                         camera_publish_interval_health(&snapshot, health_baseline, elapsed);
                     drop(snapshot);
-                    log::info!("{}", format_camera_publish_health(&health));
+                    log::debug!("{}", format_camera_publish_health(&health));
                     if let Some(event) = unhealthy_camera_publish_diagnostic(
                         &health,
                         dropped_push_frames,
@@ -555,20 +562,22 @@ fn start_camera_frame_pump(
                     let Some(frame) = latest_frame.lock_unpoisoned().take() else {
                         continue;
                     };
-                    let pushed = published
-                        .push_nv12(
-                            &frame.y,
-                            frame.y_stride,
-                            &frame.uv,
-                            frame.uv_stride,
-                            frame.width,
-                            frame.height,
-                            frame.capture_wall_time_us,
-                        )
-                        .is_some();
+                    let push_result = published.push_nv12(
+                        &frame.y,
+                        frame.y_stride,
+                        &frame.uv,
+                        frame.uv_stride,
+                        frame.width,
+                        frame.height,
+                        frame.capture_wall_time_us,
+                    );
                     let mut telemetry = telemetry.lock_unpoisoned();
-                    if pushed {
+                    if let Some(timing) = push_result {
                         telemetry.pushed_frames = telemetry.pushed_frames.saturating_add(1);
+                        if !timing.source_accepted {
+                            telemetry.source_rejected_frames =
+                                telemetry.source_rejected_frames.saturating_add(1);
+                        }
                     } else {
                         telemetry.dropped_push_frames =
                             telemetry.dropped_push_frames.saturating_add(1);
@@ -699,9 +708,9 @@ pub(crate) fn emit_camera_intent(app: &tauri::AppHandle, intended: bool) {
     // acquisition then succeeds, the preview yielded in time; if it fails and
     // only the self-heal retry recovers, it did not.
     log::info!("session: camera-intent intended={intended}");
-    if let Err(error) = tauri::Emitter::emit(app, "camera-intent-changed", CameraIntentEvent {
-        intended,
-    }) {
+    if let Err(error) =
+        tauri::Emitter::emit(app, "camera-intent-changed", CameraIntentEvent { intended })
+    {
         log::warn!("session: failed to emit camera-intent-changed: {error}");
     }
 }
@@ -791,12 +800,7 @@ pub(crate) async fn ensure_camera_published(
             let _control = state.lock_camera_control().await;
             let (preferred_device, preferred_mode) = app
                 .try_state::<CameraDevicePreferences>()
-                .map(|preferences| {
-                    (
-                        preferences.preferred_device(),
-                        preferences.preferred_mode(),
-                    )
-                })
+                .map(|preferences| (preferences.preferred_device(), preferences.preferred_mode()))
                 .unwrap_or((None, None));
             start_camera_publish_with_device(app, state, preferred_device, preferred_mode)
                 .await
@@ -957,7 +961,12 @@ pub async fn set_camera_prefs(
 ) -> Result<crate::transport::camera::AppliedCameraDevice, String> {
     let _camera_transaction = state.lock_camera_control().await;
     let mode = match (width, height, frame_rate) {
-        (Some(width), Some(height), Some(frame_rate)) if width > 0 && height > 0 && frame_rate > 0 => {
+        (Some(width), Some(height), Some(frame_rate))
+            if width > 0
+                && height > 0
+                && frame_rate > 0
+                && frame_rate <= crate::transport::camera::CAMERA_MAX_CAPTURE_FPS =>
+        {
             Some(PreferredCameraMode {
                 width,
                 height,
@@ -1474,11 +1483,12 @@ mod tests {
             dropped_push_frames: 1,
             overwritten_latest_frames: 2,
             capture_fps: 29.97,
-            encode_fps: 29.40,
+            source_rejected_frames: 0,
+            push_fps: 29.40,
         });
         assert_eq!(
             line,
-            "session: camera publish health -- captured=120 pushed=118 dropped_push=1 overwritten_latest=2 capture_fps=30.0 encode_fps=29.4"
+            "[DEBUG-MEDIA-FPS] session: camera publish health -- captured=120 pushed=118 conversion_dropped=1 source_rejected=0 overwritten_latest=2 capture_fps=30.0 push_fps=29.4"
         );
     }
 
@@ -1490,7 +1500,8 @@ mod tests {
             dropped_push_frames: 1,
             overwritten_latest_frames: 1,
             capture_fps: 30.0,
-            encode_fps: 29.8,
+            source_rejected_frames: 0,
+            push_fps: 29.8,
         };
         assert_eq!(unhealthy_camera_publish_diagnostic(&healthy, 1, 1), None);
 
@@ -1500,7 +1511,8 @@ mod tests {
             dropped_push_frames: 4,
             overwritten_latest_frames: 8,
             capture_fps: 1.0,
-            encode_fps: 0.8,
+            source_rejected_frames: 0,
+            push_fps: 0.8,
         };
         assert_eq!(
             unhealthy_camera_publish_diagnostic(&degraded, 4, 8),
@@ -1524,18 +1536,20 @@ mod tests {
             captured_frames: 50_000,
             pushed_frames: 49_000,
             dropped_push_frames: 500,
+            source_rejected_frames: 0,
             overwritten_latest_frames: 750,
         };
         let current = CameraPublishTelemetry {
             captured_frames: 50_150,
             pushed_frames: 49_149,
             dropped_push_frames: 501,
+            source_rejected_frames: 0,
             overwritten_latest_frames: 751,
         };
         let (health, dropped, overwritten) =
             camera_publish_interval_health(&current, baseline, 5.0);
         assert_eq!(health.capture_fps, 30.0);
-        assert_eq!(health.encode_fps, 29.8);
+        assert_eq!(health.push_fps, 29.8);
         assert_eq!((dropped, overwritten), (1, 1));
         assert_eq!(
             unhealthy_camera_publish_diagnostic(&health, dropped, overwritten),
@@ -1594,6 +1608,9 @@ mod tests {
             &None::<PreferredCameraMode>
         ));
         assert!(!camera_request_is_unchanged(&mode_a, &mode_b));
-        assert!(!camera_request_is_unchanged(&mode_a, &None::<PreferredCameraMode>));
+        assert!(!camera_request_is_unchanged(
+            &mode_a,
+            &None::<PreferredCameraMode>
+        ));
     }
 }
