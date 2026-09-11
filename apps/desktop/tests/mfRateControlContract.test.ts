@@ -46,14 +46,28 @@ test('the camera rate-control mode is applied before media types are negotiated'
   );
 });
 
-test('only the exact documented camera rate-control arms are honored', () => {
+test('the camera rate-control default is CBR, with only two strict overrides', () => {
   const apply = bodyOf('void MfH264EncoderImpl::ApplyCameraRateControlMode()');
-  assert.match(apply, /std::strcmp\(value, "cbr"\) == 0/);
+  // The measured default: CBR (2 freezes / 18 retransmits) beat the driver's
+  // untouched mode (11 freezes / 1046 retransmits) on the same route, so CBR is
+  // the default rather than an opt-in arm.
+  assert.match(
+    apply,
+    /const char\* selected = "cbr";/,
+    'CBR must be the camera default'
+  );
+  // Only these two literal values may override it; anything else keeps CBR.
+  assert.match(apply, /std::strcmp\(value, "default"\) == 0/);
   assert.match(apply, /std::strcmp\(value, "peak-vbr"\) == 0/);
-  // Anything else must fall through to the default rather than being passed to
-  // the encoder as an unvalidated mode.
+  assert.equal(
+    apply.includes('std::strcmp(value, "cbr")'),
+    false,
+    'cbr is the default, so it must not be an opt-in branch'
+  );
+  // Unvalidated env values must never reach the encoder as a mode.
   assert.equal(apply.includes('else {'), false, 'strict parsing: no catch-all arm');
-  assert.match(apply, /selected = "default"/);
+  const assignments = apply.match(/selected = "/g) ?? [];
+  assert.equal(assignments.length, 3, 'one initial default plus exactly two overrides');
 });
 
 test('the camera arm leaves the screenshare quality policy alone', () => {

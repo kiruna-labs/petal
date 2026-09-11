@@ -942,12 +942,26 @@ void MfH264EncoderImpl::ApplyCameraRateControlMode() {
                         << " (screenshare policy; the camera arm does not apply)";
     return;
   }
-  const char* selected = "default";
+  // The realtime-camera DEFAULT is now CBR. Measured on a real route at
+  // 1280x720p60, the driver's untouched (unconstrained VBR) mode overshot
+  // WebRTC's own target and cost 11 renderer freezes / 9711 ms frozen and 1046
+  // retransmitted packets over a 190 s publication; explicit CBR on the SAME
+  // route cost 2 freezes / 1710 ms and 18 retransmits. The remaining 2 were the
+  // startup resolution ladder, not rate control.
+  //
+  // PETAL_MF_CAMERA_RATE_CONTROL remains the experiment/escape hatch:
+  // "default" leaves the driver mode untouched, "peak-vbr" selects the bounded
+  // VBR arm, "cbr" and any unrecognized value keep the CBR default.
+  const char* selected = "cbr";
+  if (value != nullptr && std::strcmp(value, "default") == 0) {
+    selected = "default";
+  } else if (value != nullptr && std::strcmp(value, "peak-vbr") == 0) {
+    selected = "peak-vbr";
+  }
   HRESULT mode_hr = E_NOTIMPL;
   HRESULT mean_hr = E_NOTIMPL;
   HRESULT max_hr = E_NOTIMPL;
-  if (value != nullptr && std::strcmp(value, "cbr") == 0) {
-    selected = "cbr";
+  if (std::strcmp(selected, "cbr") == 0) {
     VARIANT mode = {};
     mode.vt = VT_UI4;
     mode.ulVal = eAVEncCommonRateControlMode_CBR;
@@ -958,8 +972,7 @@ void MfH264EncoderImpl::ApplyCameraRateControlMode() {
       mean.ulVal = target_bps_;
       mean_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &mean);
     }
-  } else if (value != nullptr && std::strcmp(value, "peak-vbr") == 0) {
-    selected = "peak-vbr";
+  } else if (std::strcmp(selected, "peak-vbr") == 0) {
     VARIANT mode = {};
     mode.vt = VT_UI4;
     mode.ulVal = eAVEncCommonRateControlMode_PeakConstrainedVBR;
