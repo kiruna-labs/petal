@@ -5,7 +5,9 @@ import {
   alignByCalibrationSquares,
   edgeSharpnessRatio,
   laplacianEnergy,
+  lumaPsnr,
   lumaSsim,
+  percentile,
   resolutionMatches,
   type PixelBuffer,
 } from '../src/crispness.ts';
@@ -104,6 +106,14 @@ test('alignByCalibrationSquares finds local corner offsets and rejects absent sq
 
   assert.deepEqual(alignByCalibrationSquares(buf, colors), offset);
   assert.equal(alignByCalibrationSquares(buffer(960, 600, [27, 16, 51]), colors), null);
+});
+
+test('PSNR and percentile provide stable run-level quality evidence', () => {
+  const reference = checker(16, 16, 2);
+  const same = lumaPsnr(reference, reference, { dx: 0, dy: 0 });
+  assert.equal(same, Number.POSITIVE_INFINITY);
+  assert.equal(percentile([3, 1, 2], 0.5), 2);
+  assert.equal(percentile([3, 1, 2], 0.9), 3);
 });
 
 test('luma SSIM passes matching buffers and fails clearly different images under strict baseline', () => {

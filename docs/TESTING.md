@@ -2622,6 +2622,25 @@ x86_64. A defect that does *not* reproduce here is weaker evidence: say so
 rather than closing the issue as fixed. `scripts/cross-machine-rc-suite.sh`
 still rejects translated execution for release evidence, and that stays true.
 
+### Windows physical-camera cadence gate
+
+Run this on the affected Windows machine with the BRIO connected and no other
+application holding the camera:
+
+```powershell
+$env:PETAL_MF_CHARACTERIZE = "1"
+cargo test --lib transport::camera::mf::tests::media_foundation_camera_cadence_characterization -- --ignored --nocapture
+```
+
+The probe must report the enumerated native candidates, must not publish a
+30-fps contract from a candidate that sustains below 24 fps, and must finish
+with at least 24 observed fps for automatic/30-fps capture. Explicit 15-fps
+capture remains valid. This is real Media Foundation evidence; the synthetic
+`CAM-N2W`/chart tests validate post-capture publish fidelity only and cannot
+substitute for this hardware gate. For controlled candidate A/B runs, set
+`PETAL_MF_NATIVE_INDEX` to one enumerated index and record the selected subtype,
+advertised rate, observed rate, encoder implementation, bitrate, and loss.
+
 ## Environment Variables
 
 | Variable | Used by | Purpose |
@@ -2677,12 +2696,15 @@ still rejects translated execution for release evidence, and that stays true.
 | `PETAL_TEST_PEER_FEATURES` | `apps/desktop/scripts/build-test-peer.sh` | Extra comma-separated Cargo features appended to `cockpit-privileged` when building the test-peer binary. |
 | `PETAL_PEER_TEST_MODE` | `apps/desktop/scripts/test-build-test-peer-runtime.sh` (fake `otool` fixture it generates) | Self-test-only switch making the fixture's fake `otool` report a forbidden CommandLineTools rpath, to regression-test the #315 runtime-policy failure path itself. |
 | `PETAL_TEST_CASE` | `test_cockpit/mod.rs`, `apps/desktop/scripts/cockpit.mjs` | Default cockpit scenario/test-case selector used when no `--test-case` CLI argument is given; defaults to `quick`. |
-| `PETAL_DISABLE_AUDIO` | desktop session | Skips mic publish and speaker playout for video-only test runs. **`0`/`false`/`no`/`off` mean ENABLED** — it used to treat any non-empty value as "disable", so `=0` silently skipped the mic (#812). |
+| `PETAL_DISABLE_AUDIO` | desktop session | Skips native audio (mic publish, speaker playout, and screen-audio companions) for video-only test runs. **`0`/`false`/`no`/`off` mean ENABLED** — it used to treat any non-empty value as "disable", so `=0` silently skipped the mic (#812). |
 | `PETAL_ACCESSORY_UI` | app activation policy | `1` puts the app in Accessory policy at startup: no Dock tile, no Cmd-Tab entry, self-activation becomes a no-op (the main window is shown, never focused). Set by every cockpit native-peer spawn, `rc-live-suite.sh`, and the `verify-*` audio scripts (#823). Do not set it for a scenario that asserts on real activation semantics. |
 | `PETAL_AUDIO_SYNTH_TONE` | desktop mic publish | Substitutes a deterministic 440Hz tone for microphone INPUT, leaving the entire publish path real. Exists because an agent machine's mic records a silent room, so a green audio run would otherwise prove nothing. |
 | `PETAL_AUDIO_PUBLISH_UNMUTED` | desktop mic publish | Publishes the mic unmuted and refuses the session's join-time mute. **Only honored together with `PETAL_AUDIO_SYNTH_TONE=1`** — un-gated it would join a real microphone hot while the UI still read muted. Petal joins muted, so rigs with no UI to click unmute need this or they measure correct-but-useless silence. |
-| `PETAL_CAMERA_SYNTH_SOURCE` | desktop camera publish (`transport::camera::open_camera`) | Substitutes a deterministic NV12 test pattern — a bright bar sweeping a mid-grey field — for camera INPUT, leaving the entire publish path real. Exists because an agent machine may have no camera at all, and a real camera in a dark room delivers frames a receiver cannot tell apart from a broken pipeline. Used by cockpit `CAM-N2W` (journey CAM-05, #815). |
-| `PETAL_CAMERA_SYNTH_FREEZE` | desktop camera publish | Holds the synthetic pattern on one frame, so the picture stops changing while frames keep being delivered. This is `CAM-N2W`'s **mutation lever**: with it set, a live run must go TEST-FAIL, which is how you prove the oracle can fail at all. **Only honored together with `PETAL_CAMERA_SYNTH_SOURCE=1`** — un-gated it would be a variable that alters what a REAL camera publishes. |
+| `PETAL_CAMERA_SYNTH_SOURCE` | desktop camera publish (`transport::camera::open_camera`) | Substitutes the versioned `camera-chart-v1` deterministic 1280×720@30 NV12 chart for camera INPUT, leaving the entire publish path real. The chart has calibration marks, spatial detail, a slanted edge, neutral chroma, and a moving sentinel. It does not test Media Foundation/AVFoundation capture. Used by cockpit `CAM-N2W` (journey CAM-05, #815). |
+| `PETAL_CAMERA_SYNTH_FREEZE` | desktop camera publish | Holds the synthetic chart on one frame, so the picture stops changing while frames keep being delivered. This is `CAM-N2W`'s **mutation lever**: with it set, a live run must go TEST-FAIL. **Only honored together with `PETAL_CAMERA_SYNTH_SOURCE=1`**. |
+| `PETAL_CAMERA_SYNTH_LOW_BITRATE` | desktop camera publish options | Sets a synthetic-only 250 kbps camera ceiling for the quality-oracle negative control. **Only honored together with `PETAL_CAMERA_SYNTH_SOURCE=1`**; it cannot degrade a real camera. |
+| `PETAL_MF_NATIVE_INDEX` | Windows Media Foundation camera diagnostics | Forces one enumerated native media-type index for controlled candidate A/B tests; never set in normal runs. The production path automatically retries one ranked same-resolution native candidate when sustained startup cadence misses its floor. |
+| `PETAL_MF_CHARACTERIZE` | Windows Media Foundation camera diagnostics | Logs every enumerated native candidate (index, subtype, dimensions, rational FPS) during a focused capture characterization run. |
 | `PETAL_DISABLE_DIRTY_RECT_SKIP` | desktop share pump | Set to `1` to disable dirty-rect-clean frame skipping during live debugging; remote-control cadence remains unchanged. |
 | `PETAL_DISABLE_SNAPSHOT_PULL` | `apps/desktop/src-tauri/src/session/share.rs` | Kill switch (`1`) disabling the #183 `SCScreenshotManager` snapshot-pull fallback in the share frame pump (also self-disables on hard API errors, e.g. macOS 13). **Debug builds only** — compiled out of release. |
 | `PETAL_DISABLE_RECONNECT_SHARE_REPAIR` | `apps/desktop/src-tauri/src/resilience.rs` | Emergency kill switch (`1`) for Petal's delayed post-reconnect share-republish repair (#298), leaving only LiveKit's own reconnect/resume behavior active. **Debug builds only** — compiled out of release. |

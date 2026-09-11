@@ -43,6 +43,7 @@ import {
   evaluateRemoteCameraTile,
 } from './cameraFrameAdvance.ts';
 import { AUDIBILITY_RMS_BAR, assertRemoteAudioOraclesAgree } from './audioOracleAgreement.ts';
+import { CAMERA_CHART_VERSION, measureCameraQuality } from './cameraQuality.ts';
 import { setRoomDisplayLabel } from './roomLabels.ts';
 import { inviteLinkCopiedToastMessage } from './inviteToast.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
@@ -963,6 +964,30 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       }
     };
 
+    let qualityCanvas: HTMLCanvasElement | null = null;
+    let qualityContext: CanvasRenderingContext2D | null = null;
+    const sampleQualityFrame = (): import('./crispness.ts').PixelBuffer | null => {
+      if (video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
+      if (!qualityCanvas || qualityCanvas.width !== video.videoWidth || qualityCanvas.height !== video.videoHeight) {
+        qualityCanvas = document.createElement('canvas');
+        qualityCanvas.width = video.videoWidth;
+        qualityCanvas.height = video.videoHeight;
+        qualityContext = qualityCanvas.getContext('2d', { willReadFrequently: true });
+      }
+      if (!qualityContext || !qualityCanvas) return null;
+      try {
+        qualityContext.clearRect(0, 0, qualityCanvas.width, qualityCanvas.height);
+        qualityContext.drawImage(video, 0, 0, qualityCanvas.width, qualityCanvas.height);
+        return {
+          width: qualityCanvas.width,
+          height: qualityCanvas.height,
+          data: qualityContext.getImageData(0, 0, qualityCanvas.width, qualityCanvas.height).data,
+        };
+      } catch {
+        return null;
+      }
+    };
+
     const before = await readFramesDecoded(track);
     let frameCallbackCount = 0;
     let sampling = true;
@@ -985,8 +1010,10 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       await new Promise((resolve) => setTimeout(resolve, 100));
       first = sampleFrame();
     }
+    const qualityFirst = sampleQualityFrame();
     await new Promise((resolve) => setTimeout(resolve, windowMs));
     const last = sampleFrame();
+    const qualityLast = sampleQualityFrame();
     sampling = false;
     const after = await readFramesDecoded(track);
 
@@ -1004,6 +1031,16 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     }
     const framesDecodedDelta = before === null || after === null ? null : after - before;
     const nonBlackRatio = Math.max(...samples.map((sample) => sample.nonBlack), 0);
+    const qualityResults = [qualityFirst, qualityLast]
+      .filter((sample): sample is NonNullable<typeof qualityFirst> => sample !== null)
+      .map((sample) => measureCameraQuality(sample));
+    const qualityDetail = qualityResults.length
+      ? ` ${CAMERA_CHART_VERSION} full-res samples=${qualityResults.length} ` +
+        `aligned=${qualityResults.every((result) => result.aligned)} ` +
+        `ssim=${Math.min(...qualityResults.map((result) => result.ssim)).toFixed(4)} ` +
+        `psnr=${Math.min(...qualityResults.map((result) => result.psnr)).toFixed(2)}dB ` +
+        `edge=${Math.min(...qualityResults.map((result) => result.edgeRatio)).toFixed(3)}`
+      : '';
 
     const verdict = evaluateRemoteCameraTile({
       readyState: video.readyState,
@@ -1030,7 +1067,7 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       interFrameDiff: Number(interFrameDiff.toFixed(3)),
       trackSid,
       publisher,
-      detail: `camera from '${publisher}' track=${trackSid}: ${verdict.detail}`,
+      detail: `camera from '${publisher}' track=${trackSid}: ${verdict.detail}${qualityDetail}`,
     };
   }
 

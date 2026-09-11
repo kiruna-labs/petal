@@ -190,6 +190,34 @@ function ssimForWindow(pairs: Array<[number, number]>, start: number, length: nu
  * Luma-only SSIM after applying a caller-supplied alignment offset. The pass
  * threshold is a recorded known-good baseline, never a hardcoded 0.95 (#256).
  */
+export function lumaPsnr(
+  received: PixelBuffer,
+  reference: PixelBuffer,
+  alignment: AlignmentOffset
+): number {
+  assertValidBuffer(received);
+  assertValidBuffer(reference);
+  const pairs = alignedPairs(received, reference, alignment);
+  if (pairs.length === 0) return 0;
+  let mse = 0;
+  for (const [actual, expected] of pairs) {
+    const error = actual - expected;
+    mse += error * error;
+  }
+  mse /= pairs.length;
+  return mse === 0 ? Number.POSITIVE_INFINITY : 10 * Math.log10((255 * 255) / mse);
+}
+
+/** Return a deterministic nearest-rank percentile for run-level metrics. */
+export function percentile(values: number[], fraction: number): number {
+  if (values.length === 0) return 0;
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+    throw new Error(`percentile fraction must be between 0 and 1: ${fraction}`);
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))];
+}
+
 export function lumaSsim(
   received: PixelBuffer,
   reference: PixelBuffer,
