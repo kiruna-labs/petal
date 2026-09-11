@@ -6,14 +6,24 @@ import {
   nextCameraFreezeState,
   isCameraFrameStale,
   framesDecodedFromStatsReport,
+  cameraInboundVideoStatFromReport,
+  cameraReceiveStatsFromStatsReport,
   nextCameraDecodeHealthState,
   formatCameraDecodeHealth,
-  classifyCameraReceiveHealth
+  classifyCameraReceiveHealth,
+  composeCameraReceiveObservation,
+  cameraPresentedFps
 } from '../src/lib/data/cameraFreezeWatchdog.ts';
 
 // #247: unit tests for the local camera freeze-watchdog decision logic
 // (galleryBridge.ts has none of this today -- see the issue). Mirrors the
 // native no_frame_watchdog_* tests in transport/subscriber.rs.
+
+test('cameraPresentedFps measures WebView presentation progress independently', () => {
+  assert.equal(cameraPresentedFps(10, 25, 5_000), 3);
+  assert.equal(cameraPresentedFps(25, 10, 5_000), 0);
+  assert.equal(cameraPresentedFps(10, 25, 0), 0);
+});
 
 test('nextCameraFreezeState advances progress when framesDecoded increases', () => {
   const t0 = 1_000;
@@ -82,6 +92,88 @@ test('framesDecodedFromStatsReport reads the video inbound-rtp entry', () => {
   assert.equal(framesDecodedFromStatsReport(report), 42);
 });
 
+test('cameraReceiveStatsFromStatsReport captures decoder, render, loss, and freeze counters', () => {
+  const report = new Map([
+    [
+      'video-in',
+      {
+        type: 'inbound-rtp',
+        kind: 'video',
+        framesDecoded: 42,
+        framesPerSecond: 29.5,
+        framesDropped: 3,
+        freezeCount: 2,
+        totalFreezesDuration: 1.25,
+        packetsLost: 4,
+        nackCount: 7,
+        bytesReceived: 120_000,
+        packetsReceived: 900,
+        packetsDiscarded: 2,
+        retransmittedPacketsReceived: 8,
+        keyFramesDecoded: 3,
+        pliCount: 4,
+        firCount: 1,
+        jitterBufferDelay: 0.045,
+        jitterBufferEmittedCount: 40,
+        totalDecodeTime: 0.8,
+        decoderImplementation: 'hardware H264'
+      }
+    ]
+  ]) as unknown as RTCStatsReport;
+  const stats = cameraReceiveStatsFromStatsReport(report);
+  assert.ok(stats, 'a video inbound report must produce receiver stats');
+  assert.deepEqual(
+    {
+      framesDecoded: stats.framesDecoded,
+      framesPerSecond: stats.framesPerSecond,
+      framesDropped: stats.framesDropped,
+      freezeCount: stats.freezeCount,
+      totalFreezesDurationMs: stats.totalFreezesDurationMs,
+      packetsLost: stats.packetsLost,
+      nackCount: stats.nackCount,
+      bytesReceived: stats.bytesReceived,
+      packetsReceived: stats.packetsReceived,
+      packetsDiscarded: stats.packetsDiscarded,
+      retransmittedPacketsReceived: stats.retransmittedPacketsReceived,
+      keyFramesDecoded: stats.keyFramesDecoded,
+      pliCount: stats.pliCount,
+      firCount: stats.firCount,
+      jitterBufferDelayMs: stats.jitterBufferDelayMs,
+      jitterBufferEmittedCount: stats.jitterBufferEmittedCount,
+      totalDecodeTimeMs: stats.totalDecodeTimeMs,
+      decoderImplementation: stats.decoderImplementation
+    },
+    {
+      framesDecoded: 42,
+      framesPerSecond: 29.5,
+      framesDropped: 3,
+      freezeCount: 2,
+      totalFreezesDurationMs: 1250,
+      packetsLost: 4,
+      nackCount: 7,
+      bytesReceived: 120_000,
+      packetsReceived: 900,
+      packetsDiscarded: 2,
+      retransmittedPacketsReceived: 8,
+      keyFramesDecoded: 3,
+      pliCount: 4,
+      firCount: 1,
+      jitterBufferDelayMs: 45,
+      jitterBufferEmittedCount: 40,
+      totalDecodeTimeMs: 800,
+      decoderImplementation: 'hardware H264'
+    }
+  );
+  assert.ok(stats.lossPct !== null && Math.abs(stats.lossPct - 400 / 904) < 1e-12);
+  // A report with no dimensions/jitter/render counters stays honestly
+  // unavailable rather than substituting a guess.
+  assert.equal(stats.decodedWidth, null);
+  assert.equal(stats.decodedHeight, null);
+  assert.equal(stats.framesReceived, null);
+  assert.equal(stats.framesRendered, null);
+  assert.equal(stats.jitterMs, null);
+});
+
 test('framesDecodedFromStatsReport returns null for missing/empty reports', () => {
   assert.equal(framesDecodedFromStatsReport(undefined), null);
   const empty = new Map() as unknown as RTCStatsReport;
@@ -90,6 +182,90 @@ test('framesDecodedFromStatsReport returns null for missing/empty reports', () =
     ['audio-in', { type: 'inbound-rtp', kind: 'audio', framesDecoded: 999 }]
   ]) as unknown as RTCStatsReport;
   assert.equal(framesDecodedFromStatsReport(noVideo), null);
+  assert.equal(cameraReceiveStatsFromStatsReport(noVideo), null);
+});
+
+test('cameraReceiveStatsFromStatsReport extracts jitter, loss, and render counters', () => {
+  const report = new Map([
+    [
+      'inbound',
+      {
+        type: 'inbound-rtp',
+        kind: 'video',
+        jitter: 0.012,
+        packetsLost: 2,
+        packetsReceived: 98,
+        framesRendered: 47
+      }
+    ]
+  ]) as unknown as RTCStatsReport;
+  const stats = cameraReceiveStatsFromStatsReport(report);
+  assert.ok(stats, 'a video inbound report must produce receiver stats');
+  assert.deepEqual(
+    {
+      jitterMs: stats.jitterMs,
+      lossPct: stats.lossPct,
+      decodedWidth: stats.decodedWidth,
+      decodedHeight: stats.decodedHeight,
+      framesReceived: stats.framesReceived,
+      bytesReceived: stats.bytesReceived,
+      framesRendered: stats.framesRendered
+    },
+    {
+      jitterMs: 12,
+      lossPct: 2,
+      decodedWidth: null,
+      decodedHeight: null,
+      framesReceived: null,
+      bytesReceived: null,
+      framesRendered: 47
+    }
+  );
+});
+
+test('receiver dimensions and counters come from the same primary inbound report', () => {
+  const entries = [
+    ['small', {
+      type: 'inbound-rtp', kind: 'video', frameWidth: 320, frameHeight: 180,
+      framesDecoded: 10, framesReceived: 11, bytesReceived: 1000, framesRendered: 9
+    }],
+    ['large', {
+      type: 'inbound-rtp', kind: 'video', frameWidth: 1280, frameHeight: 720,
+      framesDecoded: 42, framesReceived: 44, bytesReceived: 4000, framesRendered: 40
+    }]
+  ] as const;
+  const report = new Map(entries) as unknown as RTCStatsReport;
+  assert.equal(framesDecodedFromStatsReport(report), 42);
+  const stats = cameraReceiveStatsFromStatsReport(report);
+  assert.ok(stats, 'the primary report must produce stats');
+  assert.deepEqual(
+    {
+      decodedWidth: stats.decodedWidth,
+      decodedHeight: stats.decodedHeight,
+      framesDecoded: stats.framesDecoded,
+      framesReceived: stats.framesReceived,
+      bytesReceived: stats.bytesReceived,
+      framesRendered: stats.framesRendered
+    },
+    {
+      decodedWidth: 1280,
+      decodedHeight: 720,
+      framesDecoded: 42,
+      framesReceived: 44,
+      bytesReceived: 4000,
+      framesRendered: 40
+    }
+  );
+  // The primary-report choice must be selected by decoded area, not by
+  // Map insertion order: the same two reports listed small-first select
+  // identically to large-first.
+  assert.equal(cameraInboundVideoStatFromReport(report), entries[1][1]);
+  const reversed = new Map([entries[1], entries[0]]) as unknown as RTCStatsReport;
+  const reversedStats = cameraReceiveStatsFromStatsReport(reversed);
+  assert.ok(reversedStats, 'the primary report must produce stats when listed first');
+  assert.equal(reversedStats.decodedWidth, 1280);
+  assert.equal(reversedStats.framesDecoded, 42);
+  assert.equal(reversedStats.bytesReceived, 4000);
 });
 
 test('nextCameraDecodeHealthState emits periodic decoded-fps telemetry', () => {
@@ -105,7 +281,55 @@ test('nextCameraDecodeHealthState emits periodic decoded-fps telemetry', () => {
   assert.deepEqual(due.health, {
     framesDecoded: 25,
     decodedFps: 3,
-    gapSinceLastFrameMs: 0
+    gapSinceLastFrameMs: 0,
+    intervalMs: 5_000,
+    intervalSequence: 1
+  });
+});
+
+test('six-second reduced cadence stays active while stalled cadence is stalled', () => {
+  const reduced = composeCameraReceiveObservation(
+    classifyCameraReceiveHealth(13, false, false), false, false
+  );
+  assert.deepEqual(reduced, {
+    cadence: 'reduced',
+    streamState: 'active',
+    degraded: true,
+    stallCause: 'not_applicable'
+  });
+
+  const stalled = composeCameraReceiveObservation(
+    classifyCameraReceiveHealth(0, false, false), false, false
+  );
+  assert.deepEqual(stalled, {
+    cadence: 'stalled',
+    streamState: 'stalled',
+    degraded: false,
+    stallCause: 'decode_zero'
+  });
+
+  // #126 semantics survive composition: an SFU pause keeps its own state and
+  // its pause cause instead of being flattened into a decoder-fault stall.
+  const paused = composeCameraReceiveObservation(
+    classifyCameraReceiveHealth(0, true, true), true, true
+  );
+  assert.deepEqual(paused, {
+    cadence: 'stalled',
+    streamState: 'paused',
+    degraded: false,
+    stallCause: 'stream_paused'
+  });
+});
+
+test('decode interval state resets when a publication SID changes', () => {
+  const first = nextCameraDecodeHealthState(undefined, 100, 0, 5_000, 'TR_old');
+  const replacement = nextCameraDecodeHealthState(first.state, 1, 6_000, 5_000, 'TR_new');
+  assert.equal(replacement.health, null);
+  assert.deepEqual(replacement.state, {
+    lastLoggedAt: 6_000,
+    lastLoggedFramesDecoded: 1,
+    intervalSequence: 0,
+    trackSid: 'TR_new'
   });
 });
 
@@ -252,8 +476,10 @@ test('formatCameraDecodeHealth preserves the log contract fields', () => {
       identity: 'alice',
       framesDecoded: 42,
       decodedFps: 29.94,
-      gapSinceLastFrameMs: 120
+      gapSinceLastFrameMs: 120,
+      intervalMs: 5_000,
+      intervalSequence: 1
     }),
-    "gallery bridge: camera decode health for 'alice' -- frames_decoded=42 decoded_fps=29.9 gap_since_last_frame_ms=120"
+    "gallery bridge: camera decode health for 'alice' -- frames_decoded=42 decoded_fps=29.9 browser_fps=unknown frames_dropped=unknown freeze_count=unknown freeze_ms=unknown packets_received=unknown packets_lost=unknown packets_discarded=unknown retransmitted_packets=unknown bytes_received=unknown nack=unknown pli=unknown fir=unknown key_frames_decoded=unknown jitter_buffer_ms=unknown jitter_buffer_emitted=unknown decode_ms=unknown decoder='unknown' gap_since_last_frame_ms=120"
   );
 });

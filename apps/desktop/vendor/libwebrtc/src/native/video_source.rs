@@ -63,7 +63,7 @@ impl NativeVideoSource {
         self.sys_handle.clone()
     }
 
-    pub fn capture_frame<T: AsRef<dyn VideoBuffer>>(&self, frame: &VideoFrame<T>) {
+    pub fn capture_frame<T: AsRef<dyn VideoBuffer>>(&self, frame: &VideoFrame<T>) -> bool {
         let mut builder = vf_sys::ffi::new_video_frame_builder();
         builder.pin_mut().set_rotation(frame.rotation.into());
         builder
@@ -94,7 +94,7 @@ impl NativeVideoSource {
                 user_timestamp: user_ts,
                 frame_id: fid,
             },
-        );
+        )
     }
 
     /// Captures a Jetson DMA-buffer backed video frame.

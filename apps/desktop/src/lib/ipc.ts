@@ -128,6 +128,7 @@ export const COMMANDS = {
   toggleWindowPickerWindow: 'toggle_window_picker_window',
   quitApp: 'quit_app',
   recordVideoStreamState: 'record_video_stream_state',
+  recordCameraReceiverInterval: 'record_camera_receiver_interval',
   recordCameraReceiveHealth: 'record_camera_receive_health',
   remoteControlAllowed: 'remote_control_allowed',
   remoteControlAnswerConsent: 'remote_control_answer_consent',
@@ -1558,6 +1559,48 @@ export interface CommandArgs {
     trackName: string;
     state: string;
     source: string;
+    metrics?: string;
+  };
+  /** Observational only: one durable local-log receiver interval. Carries no
+   * identity beyond the track it describes and never changes stream state. */
+  [COMMANDS.recordCameraReceiverInterval]: {
+    interval: {
+      participantIdentity: string;
+      trackName: string;
+      trackSid: string;
+      route: string;
+      intervalSequence: number;
+      intervalMs: number;
+      framesDecoded: number | null;
+      decodedFps: number | null;
+      decodedWidth: number | null;
+      decodedHeight: number | null;
+      framesReceived: number | null;
+      framesRendered: number | null;
+      framesDropped: number | null;
+      freezeCount: number | null;
+      totalFreezesDurationMs: number | null;
+      bytesReceived: number | null;
+      packetsReceived: number | null;
+      packetsLost: number | null;
+      packetsDiscarded: number | null;
+      retransmittedPacketsReceived: number | null;
+      keyFramesDecoded: number | null;
+      nackCount: number | null;
+      pliCount: number | null;
+      firCount: number | null;
+      jitterMs: number | null;
+      jitterBufferDelayMs: number | null;
+      jitterBufferEmittedCount: number | null;
+      totalDecodeTimeMs: number | null;
+      lossPct: number | null;
+      decoderImplementation: string | null;
+      presentedFrames: number | null;
+      presentedFps: number | null;
+      streamState: string;
+      stallCause: string;
+      gapSinceLastFrameMs: number;
+    };
   };
   [COMMANDS.recordCameraReceiveHealth]: {
     cadence: 'reduced' | 'severe' | 'stalled';

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 
@@ -141,6 +142,22 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
     const FrameMetadata& frame_metadata) {
   webrtc::MutexLock lock(&mutex_);
 
+  // Experimental receiver-stress gate. It is deliberately limited to
+  // screencast sources: camera adaptation and normal production behavior stay
+  // unchanged. A valid PETAL_EXPERIMENTAL_VIDEO_FPS value is handled by the
+  // Rust publish path; here it bypasses AdaptFrame's feedback-driven source
+  // rejection so every captured screencast frame reaches the encoder. Keep
+  // the native guard's ceiling in sync with the Rust 60fps cap.
+  static const bool force_unconditional_fps = [] {
+    const char* value = std::getenv("PETAL_EXPERIMENTAL_VIDEO_FPS");
+    if (value == nullptr) {
+      return false;
+    }
+    const int fps = std::atoi(value);
+    return fps == 60;
+  }();
+  const bool bypass_adaptation = is_screencast_ && force_unconditional_fps;
+
   int64_t aligned_timestamp_us = timestamp_aligner_.TranslateTimestamp(
       frame.timestamp_us(), webrtc::TimeMicros());
 
@@ -162,16 +179,18 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
                                   static_cast<uint32_t>(buffer->height())};
   }
 
-  int adapted_width, adapted_height, crop_width, crop_height, crop_x, crop_y;
-  if (!AdaptFrame(buffer->width(), buffer->height(), aligned_timestamp_us,
-                  &adapted_width, &adapted_height, &crop_width, &crop_height,
-                  &crop_x, &crop_y)) {
-    return false;
-  }
+  if (!bypass_adaptation) {
+    int adapted_width, adapted_height, crop_width, crop_height, crop_x, crop_y;
+    if (!AdaptFrame(buffer->width(), buffer->height(), aligned_timestamp_us,
+                    &adapted_width, &adapted_height, &crop_width, &crop_height,
+                    &crop_x, &crop_y)) {
+      return false;
+    }
 
-  if (adapted_width != frame.width() || adapted_height != frame.height()) {
-    buffer = buffer->CropAndScale(crop_x, crop_y, crop_width, crop_height,
-                                  adapted_width, adapted_height);
+    if (adapted_width != frame.width() || adapted_height != frame.height()) {
+      buffer = buffer->CropAndScale(crop_x, crop_y, crop_width, crop_height,
+                                    adapted_width, adapted_height);
+    }
   }
 
   webrtc::VideoRotation rotation = frame.rotation();

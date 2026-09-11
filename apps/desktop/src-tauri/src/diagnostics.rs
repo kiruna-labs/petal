@@ -170,9 +170,15 @@ pub struct TrackHealth {
     pub kind: String,
     /// "send" (published by us) | "recv" (subscribed remote track).
     pub direction: String,
+    /// Current primary outbound/decoded dimensions. For send tracks these are
+    /// encoded dimensions from OutboundRtpStats, not camera capture size.
     pub width: u32,
     pub height: u32,
+    /// Outbound RTP or inbound decoder smoothed cadence, depending on direction.
+    /// Camera source callback cadence is logged independently by camera_session.
     pub fps: f64,
+    /// Send-only count of WebRTC adaptation-driven encoded resolution changes.
+    pub quality_limitation_resolution_changes: u32,
     /// Encoder implementation for send tracks (the VideoToolbox
     /// confirmation, same field `log_encoder_once` reads) / decoder
     /// implementation for recv tracks. Empty until libwebrtc reports it.
@@ -192,6 +198,13 @@ pub struct TrackHealth {
     pub frames_encoded: u32,
     /// Send only: encoder-reported keyframes (cumulative).
     pub key_frames_encoded: u32,
+    /// Send only: cumulative encoder QP sum when the backend reports it.
+    /// `None` means unsupported/unpopulated; it is never represented as a
+    /// misleading zero (the custom MF encoder currently leaves this unset).
+    pub qp_sum: Option<u64>,
+    /// Send only: interval average QP derived from cumulative deltas. Null on
+    /// the first sample or when the encoder does not populate `qp_sum`.
+    pub average_qp: Option<f64>,
     /// Receive only: decoder-reported decoded frames (cumulative).
     pub frames_decoded: u32,
     /// Receive only: decoder-reported keyframes (cumulative).
@@ -540,6 +553,15 @@ struct DisplayEnqueueRateSample {
     frames: u64,
     t_ms: u64,
     received: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompositorDispatchObservation {
+    frames: u64,
+    width: u32,
+    height: u32,
+    sampled_frames: u64,
+    sampled_at_ms: u64,
 }
 
 /// Per-window grab-rate sampler. The hot `on_frame` path records only the
@@ -1247,6 +1269,9 @@ struct DiagInner {
     stream_states: HashMap<String, StreamStateObservation>,
     capture_pipeline: CapturePipelineSampler,
     display_pipeline: DisplayPipelineSampler,
+    /// Windows' native compositor has no AppKit enqueue snapshot, so keep the
+    /// same bounded per-window stage counter from its decode dispatch path.
+    compositor_dispatch: HashMap<String, CompositorDispatchObservation>,
     software_decode_fallbacks: HashMap<String, u64>,
     /// Last time each track's >30% display-enqueue-drop warning fired.
     /// Absent (or a recovered track that was removed) means the next
@@ -1661,6 +1686,30 @@ impl DiagnosticsState {
         inner
             .capture_pipeline
             .record_frame(window_id, sequence, width, height, state);
+    }
+
+    pub(crate) fn record_compositor_frame(
+        &self,
+        owner_identity: &str,
+        window_id: u32,
+        width: u32,
+        height: u32,
+    ) {
+        let key = latency_key(owner_identity, &format!("petal-window-{window_id}"));
+        let mut inner = self.lock();
+        let entry = inner
+            .compositor_dispatch
+            .entry(key)
+            .or_insert(CompositorDispatchObservation {
+                frames: 0,
+                width,
+                height,
+                sampled_frames: 0,
+                sampled_at_ms: now_ms(),
+            });
+        entry.frames = entry.frames.saturating_add(1);
+        entry.width = width;
+        entry.height = height;
     }
 
     pub(crate) fn record_capture_push_timing(
@@ -2279,6 +2328,22 @@ impl DiagnosticsState {
                         .sample_stage(&track.latency_key, *snapshot, now);
                 track.display_drop_pct = inner.display_pipeline.drop_pct(&track.latency_key);
             }
+            #[cfg(not(target_os = "macos"))]
+            if let Some(dispatch) = inner.compositor_dispatch.get_mut(&track.latency_key) {
+                let fps = (now > dispatch.sampled_at_ms).then(|| {
+                    dispatch.frames.saturating_sub(dispatch.sampled_frames) as f64 * 1000.0
+                        / (now - dispatch.sampled_at_ms) as f64
+                });
+                track.frames_display_enqueued = dispatch.frames;
+                track.display_enqueued = Some(PipelineStageMetrics {
+                    width: present_dimension(dispatch.width),
+                    height: present_dimension(dispatch.height),
+                    fps,
+                    kbps: None,
+                });
+                dispatch.sampled_frames = dispatch.frames;
+                dispatch.sampled_at_ms = now;
+            }
             track.software_decode_fallbacks = inner
                 .software_decode_fallbacks
                 .get(&track.latency_key)
@@ -2291,7 +2356,10 @@ impl DiagnosticsState {
                 // the backoff does: a gated enqueue makes 100% drop an
                 // artifact, not a report-worthy rate (#882 review).
                 if drop_pct > 30.0 && !sleep_paused && !global_backoff_paused {
-                    let last_warned = inner.display_drop_last_warned.get(&track.latency_key).copied();
+                    let last_warned = inner
+                        .display_drop_last_warned
+                        .get(&track.latency_key)
+                        .copied();
                     if display_drop_rewarn_allowed(last_warned, warn_now) {
                         inner
                             .display_drop_last_warned
@@ -2362,6 +2430,7 @@ impl DiagnosticsState {
         track_name: String,
         state: String,
         source: String,
+        metrics: Option<String>,
     ) {
         self.record_video_stream_state_by_key(
             app,
@@ -2373,17 +2442,16 @@ impl DiagnosticsState {
             ),
             state,
             source,
-            None,
+            metrics,
         );
     }
 
     /// `metrics`, when present, is appended to the file-log line only (never
     /// the cockpit journal message -- see repo rule against ever truncating
     /// UI text, and this is meant for a post-hoc `petal.log` read, not the
-    /// cockpit). Only the stats-derived poller (`start_for_room`'s Task 2)
-    /// currently supplies it, with decoded/displayed-stage numbers (#358);
-    /// the other, authoritative callers (livekit-js `stream-state`,
-    /// `record_native_video_stream_state`) pass `None`.
+    /// cockpit). The stats-derived poller supplies decoded/displayed-stage
+    /// numbers (#358), and the gallery webview supplies camera receiver
+    /// intervals; the other authoritative callers pass `None`.
     fn record_video_stream_state_by_key(
         &self,
         app: &tauri::AppHandle,
@@ -2409,6 +2477,12 @@ impl DiagnosticsState {
             );
             (changed, first)
         };
+        // Receiver health intervals are intentionally durable even when the
+        // state bucket does not change. They are the correlation record for
+        // sender capture/encode and receiver decode/render boundaries.
+        if let Some(metrics) = metrics.as_deref() {
+            log::info!("diagnostics: video health interval for {display_label} (source={source}) {metrics}");
+        }
         // First observation for an active track is normal startup, not a
         // recovery event. Pauses/stalls are still journaled immediately.
         if !changed {
@@ -2536,13 +2610,21 @@ pub(crate) fn record_video_stream_state_internal(
     track_name: String,
     state: String,
     source: String,
+    metrics: Option<String>,
 ) {
     use tauri::Manager;
     let Some(state_handle) = app.try_state::<DiagnosticsState>() else {
         return;
     };
     let diagnostics: DiagnosticsState = state_handle.inner().clone();
-    diagnostics.record_video_stream_state(app, participant_identity, track_name, state, source);
+    diagnostics.record_video_stream_state(
+        app,
+        participant_identity,
+        track_name,
+        state,
+        source,
+        metrics,
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -2563,6 +2645,7 @@ pub(crate) fn record_native_video_stream_state(
         track_name.to_string(),
         normalized.to_string(),
         source.to_string(),
+        None,
     );
 }
 
@@ -2579,6 +2662,22 @@ pub(crate) fn record_native_receiver_frame(
     };
     let diagnostics: DiagnosticsState = state_handle.inner().clone();
     diagnostics.record_receiver_frame(latency_key(owner_identity, track_name), frame_id);
+}
+
+pub(crate) fn record_native_compositor_frame(
+    app: &tauri::AppHandle,
+    owner_identity: &str,
+    window_id: u32,
+    width: u32,
+    height: u32,
+) {
+    use tauri::Manager;
+    let Some(state) = app.try_state::<DiagnosticsState>() else {
+        return;
+    };
+    state
+        .inner()
+        .record_compositor_frame(owner_identity, window_id, width, height);
 }
 
 #[cfg(target_os = "macos")]
@@ -2610,12 +2709,146 @@ pub fn record_video_stream_state(
     track_name: String,
     state: String,
     source: String,
+    metrics: Option<String>,
 ) {
     let normalized = match state.as_str() {
         "active" | "paused" | "stalled" | "unknown" => state,
         _ => "unknown".to_string(),
     };
-    record_video_stream_state_internal(&app, participant_identity, track_name, normalized, source);
+    record_video_stream_state_internal(
+        &app,
+        participant_identity,
+        track_name,
+        normalized,
+        source,
+        metrics,
+    );
+}
+
+/// One durable receiver-interval record from the gallery webview.
+///
+/// This is deliberately separate from `record_video_stream_state`: it is
+/// OBSERVATIONAL only. It must never create a stream-state transition, a
+/// journal entry, or a Sentry event, so a receiver interval can never be
+/// mistaken for an authoritative pause/stall signal. Every free-form field is
+/// bounded, and the record is written to the local Petal log only.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraReceiverInterval {
+    pub participant_identity: String,
+    pub track_name: String,
+    pub track_sid: String,
+    pub route: String,
+    pub interval_sequence: u32,
+    pub interval_ms: u64,
+    pub frames_decoded: Option<u64>,
+    pub decoded_fps: Option<f64>,
+    pub decoded_width: Option<u32>,
+    pub decoded_height: Option<u32>,
+    pub frames_received: Option<u64>,
+    pub frames_rendered: Option<u64>,
+    pub frames_dropped: Option<u64>,
+    pub freeze_count: Option<u64>,
+    pub total_freezes_duration_ms: Option<f64>,
+    pub bytes_received: Option<u64>,
+    pub packets_received: Option<u64>,
+    pub packets_lost: Option<i64>,
+    pub packets_discarded: Option<u64>,
+    pub retransmitted_packets_received: Option<u64>,
+    pub key_frames_decoded: Option<u64>,
+    pub nack_count: Option<u64>,
+    pub pli_count: Option<u64>,
+    pub fir_count: Option<u64>,
+    pub jitter_ms: Option<f64>,
+    pub jitter_buffer_delay_ms: Option<f64>,
+    pub jitter_buffer_emitted_count: Option<u64>,
+    pub total_decode_time_ms: Option<f64>,
+    pub loss_pct: Option<f64>,
+    pub decoder_implementation: String,
+    pub presented_frames: Option<u64>,
+    pub presented_fps: Option<f64>,
+    pub stream_state: String,
+    pub stall_cause: String,
+    pub gap_since_last_frame_ms: u64,
+}
+
+/// Format an optional measurement honestly: a missing value is `unknown`, never
+/// a misleading zero, and a non-finite value counts as missing.
+fn interval_float(value: Option<f64>, digits: usize) -> String {
+    match value {
+        Some(value) if value.is_finite() => format!("{value:.digits$}"),
+        _ => String::from("unknown"),
+    }
+}
+
+fn interval_count(value: Option<u64>) -> String {
+    value.map_or_else(|| String::from("unknown"), |value| value.to_string())
+}
+
+/// Render the record as one bounded log line.
+fn camera_receiver_interval_line(interval: &CameraReceiverInterval) -> String {
+    let field = |value: &str, max: usize| {
+        bounded_detail(value.to_string())
+            .map(|value| {
+                value
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(max)
+                    .collect::<String>()
+            })
+            .unwrap_or_else(|| String::from("unknown"))
+    };
+    let dimensions = match (interval.decoded_width, interval.decoded_height) {
+        (Some(width), Some(height)) => format!("{width}x{height}"),
+        _ => String::from("unknown"),
+    };
+    format!(
+        "diagnostics: camera receiver interval route={} t_ms={} trial_id={} track_sid={} track_name={} participant={} stream_state={} stall_cause={} interval_seq={} interval_ms={} decoded_dimensions={} frames_decoded={} decoded_fps={} frames_received={} frames_rendered={} frames_dropped={} freeze_count={} freeze_ms={} key_frames_decoded={} bytes_received={} packets_received={} packets_lost={} packets_discarded={} retransmitted_packets={} nack={} pli={} fir={} jitter_ms={} jitter_buffer_ms={} jitter_buffer_emitted={} decode_ms={} loss_pct={} presented_frames={} presented_fps={} gap_since_last_frame_ms={} decoder={}",
+        field(&interval.route, 32),
+        now_ms(),
+        field(&interval.track_sid, 64),
+        field(&interval.track_sid, 64),
+        field(&interval.track_name, 64),
+        field(&interval.participant_identity, 64),
+        field(&interval.stream_state, 16),
+        field(&interval.stall_cause, 16),
+        interval.interval_sequence,
+        interval.interval_ms,
+        dimensions,
+        interval_count(interval.frames_decoded),
+        interval_float(interval.decoded_fps, 2),
+        interval_count(interval.frames_received),
+        interval_count(interval.frames_rendered),
+        interval_count(interval.frames_dropped),
+        interval_count(interval.freeze_count),
+        interval_float(interval.total_freezes_duration_ms, 1),
+        interval_count(interval.key_frames_decoded),
+        interval_count(interval.bytes_received),
+        interval_count(interval.packets_received),
+        interval
+            .packets_lost
+            .map_or_else(|| String::from("unknown"), |value| value.to_string()),
+        interval_count(interval.packets_discarded),
+        interval_count(interval.retransmitted_packets_received),
+        interval_count(interval.nack_count),
+        interval_count(interval.pli_count),
+        interval_count(interval.fir_count),
+        interval_float(interval.jitter_ms, 2),
+        interval_float(interval.jitter_buffer_delay_ms, 2),
+        interval_count(interval.jitter_buffer_emitted_count),
+        interval_float(interval.total_decode_time_ms, 2),
+        interval_float(interval.loss_pct, 3),
+        interval_count(interval.presented_frames),
+        interval_float(interval.presented_fps, 2),
+        interval.gap_since_last_frame_ms,
+        field(&interval.decoder_implementation, 48),
+    )
+}
+
+/// Bounded webview-to-native receiver-interval sink (local `petal.log` only).
+#[tauri::command]
+pub fn record_camera_receiver_interval(interval: CameraReceiverInterval) {
+    log::info!("{}", camera_receiver_interval_line(&interval));
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2718,6 +2951,7 @@ pub fn start_for_room(
         inner.stream_states.clear();
         inner.capture_pipeline.clear_all();
         inner.display_pipeline.clear_all();
+        inner.compositor_dispatch.clear();
         inner.software_decode_fallbacks.clear();
         inner.display_drop_last_warned.clear();
         inner.enqueue_backoff.clear();
@@ -2948,6 +3182,7 @@ pub fn start_for_room(
                             inner.stream_states.clear();
                             inner.capture_pipeline.clear_all();
                             inner.display_pipeline.clear_all();
+                            inner.compositor_dispatch.clear();
                             inner.software_decode_fallbacks.clear();
                             inner.display_drop_last_warned.clear();
                             inner.enqueue_backoff.clear();
@@ -2984,10 +3219,12 @@ pub fn start_for_room(
             // Previous cumulative byte counters, keyed by "<sid>:<dir>", for
             // rate derivation (see module doc comment).
             let mut prev_bytes: HashMap<String, u64> = HashMap::new();
+            let mut prev_qp: HashMap<String, (u64, u32)> = HashMap::new();
             let mut prev_tick: Option<std::time::Instant> = None;
             // Debounce for the "stalled" classification only (#358); see
             // `StallDebounce`'s doc comment.
             let mut stall_debounce = StallDebounce::default();
+            let mut transport_stats_tick = 0u32;
             // #884: in-room memory curve + pressure-transition watch. The
             // footprint line every MEMORY_LOG_EVERY_N_TICKS gives field logs
             // a curve instead of anomaly snapshots (#878's 1301->1987MB jump
@@ -3017,7 +3254,17 @@ pub fn start_for_room(
                 observe_memory_pressure_transition(&mut last_pressure_level);
                 observe_descriptor_pressure(&mut descriptor_episode);
 
-                let (sample, mut tracks) = collect_tick(&room, &mut prev_bytes, dt_ms).await;
+                let (sample, mut tracks) =
+                    collect_tick(&room, &mut prev_bytes, &mut prev_qp, dt_ms).await;
+                // Debug-only transport/ICE sampling. It is gated on the level
+                // actually being enabled so a default-level field log pays
+                // nothing for it, and it is decimated to every fifth tick.
+                if log::log_enabled!(log::Level::Debug) {
+                    transport_stats_tick = transport_stats_tick.wrapping_add(1);
+                    if transport_stats_tick % 5 == 0 {
+                        log_room_transport_stats(&room).await;
+                    }
+                }
                 state.apply_track_overlays(&mut tracks, sample.rtt_ms);
                 crate::pipeline_stats::publish_for_tracks(
                     room.clone(),
@@ -3137,6 +3384,118 @@ pub fn start_for_room(
     }
 }
 
+/// Poll the connection-level WebRTC stats. Track stats tell us that packets
+/// were lost, but these records identify the selected ICE path, the sender and
+/// receiver bandwidth estimates, and packets discarded before socket send.
+async fn log_room_transport_stats(room: &livekit::Room) {
+    let Ok(session) = room.get_stats().await else {
+        return;
+    };
+    log_one_transport_stats("publisher", &session.publisher_stats);
+    log_one_transport_stats("subscriber", &session.subscriber_stats);
+}
+
+fn log_one_transport_stats(direction: &str, stats: &[livekit::webrtc::stats::RtcStats]) {
+    use livekit::webrtc::stats::RtcStats;
+
+    let selected_pairs = stats
+        .iter()
+        .filter_map(|stat| match stat {
+            RtcStats::Transport(transport)
+                if !transport.transport.selected_candidate_pair_id.is_empty() =>
+            {
+                Some(transport.transport.selected_candidate_pair_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut candidates = HashMap::<String, (String, String, String)>::new();
+    for stat in stats {
+        match stat {
+            RtcStats::LocalCandidate(candidate) => {
+                candidates.insert(
+                    candidate.rtc.id.clone(),
+                    (
+                        format!("local:{:?}", candidate.local_candidate.candidate_type),
+                        candidate.local_candidate.protocol.clone(),
+                        format!("relay:{:?}", candidate.local_candidate.relay_protocol),
+                    ),
+                );
+            }
+            RtcStats::RemoteCandidate(candidate) => {
+                candidates.insert(
+                    candidate.rtc.id.clone(),
+                    (
+                        format!("remote:{:?}", candidate.remote_candidate.candidate_type),
+                        candidate.remote_candidate.protocol.clone(),
+                        format!("relay:{:?}", candidate.remote_candidate.relay_protocol),
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    for stat in stats {
+        match stat {
+            RtcStats::Transport(transport) => {
+                let t = &transport.transport;
+                log::debug!(
+                    "[DEBUG-WEBRTC-TRANSPORT] direction={} transport_id='{}' ice_role={:?} ice_state={:?} dtls_state={:?} selected_pair='{}' packets_sent={} packets_received={} bytes_sent={} bytes_received={} candidate_pair_changes={}",
+                    direction,
+                    transport.rtc.id,
+                    t.ice_role,
+                    t.ice_state,
+                    t.dtls_state,
+                    t.selected_candidate_pair_id,
+                    t.packets_sent,
+                    t.packets_received,
+                    t.bytes_sent,
+                    t.bytes_received,
+                    t.selected_candidate_pair_changes,
+                );
+            }
+            RtcStats::CandidatePair(pair) => {
+                let p = &pair.candidate_pair;
+                if !p.nominated && !selected_pairs.contains(&pair.rtc.id) {
+                    continue;
+                }
+                let local = candidates
+                    .get(&p.local_candidate_id)
+                    .map(|(kind, protocol, relay)| format!("{kind}/{protocol}/{relay}"))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let remote = candidates
+                    .get(&p.remote_candidate_id)
+                    .map(|(kind, protocol, relay)| format!("{kind}/{protocol}/{relay}"))
+                    .unwrap_or_else(|| "unknown".to_string());
+                log::debug!(
+                    "[DEBUG-WEBRTC-TRANSPORT] direction={} candidate_pair='{}' state={:?} nominated={} local={} remote={} rtt_ms={:.1} available_out_kbps={:.0} available_in_kbps={:.0} packets_sent={} packets_received={} bytes_sent={} bytes_received={} requests_sent={} requests_received={} responses_sent={} responses_received={} discarded_send_packets={} discarded_send_bytes={}",
+                    direction,
+                    pair.rtc.id,
+                    p.state,
+                    p.nominated,
+                    local,
+                    remote,
+                    p.current_round_trip_time * 1000.0,
+                    p.available_outgoing_bitrate / 1000.0,
+                    p.available_incoming_bitrate / 1000.0,
+                    p.packets_sent,
+                    p.packets_received,
+                    p.bytes_sent,
+                    p.bytes_received,
+                    p.requests_sent,
+                    p.requests_received,
+                    p.responses_sent,
+                    p.responses_received,
+                    p.packets_discarded_on_send,
+                    p.bytes_discarded_on_send,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 /// One poll tick: read `get_stats()` from every local + remote track on the
 /// room and fold into (aggregate sample, per-track health). `dt_ms` is the
 /// elapsed time since the previous tick (None on the first tick -- rates
@@ -3149,6 +3508,7 @@ pub fn start_for_room(
 pub async fn collect_tick(
     room: &livekit::Room,
     prev_bytes: &mut HashMap<String, u64>,
+    prev_qp: &mut HashMap<String, (u64, u32)>,
     dt_ms: Option<u64>,
 ) -> (StatsSample, Vec<TrackHealth>) {
     use livekit::webrtc::stats::RtcStats;
@@ -3181,6 +3541,19 @@ pub async fn collect_tick(
         };
         let mut bytes_sent: u64 = 0;
         let mut packets_lost_total: i64 = 0;
+        // Latest RTCP report from THIS publication's receivers. The aggregate
+        // `rtts`/`send_jitters`/`losses` vectors below are tick-wide sums for
+        // StatsSample, so reading `.last()` off them for a per-track log let a
+        // camera that reported no RTCP inherit whichever other track's sample
+        // happened to be appended last. Keep this publication's own values.
+        let mut rtcp_rtt_ms: Option<f64> = None;
+        let mut rtcp_jitter_ms: Option<f64> = None;
+        let mut rtcp_loss_pct: Option<f64> = None;
+        // Outbound-only counters: these exist solely on the OutboundRtp report
+        // and would otherwise be lost now that the duplicate publisher-side
+        // camera poller is gone.
+        let mut frames_sent: u32 = 0;
+        let mut retransmitted_packets_sent: u64 = 0;
         // A Full-tier share publishes 2 simulcast layers (full-res + a throttled
         // half-res layer, transport/publisher.rs:673-683 `full_share_simulcast_
         // layers`), so `stats` carries one `OutboundRtp` entry PER LAYER. Naively
@@ -3228,6 +3601,8 @@ pub async fn collect_tick(
                         });
                         health.quality_limitation =
                             format!("{:?}", o.outbound.quality_limitation_reason).to_lowercase();
+                        health.quality_limitation_resolution_changes =
+                            o.outbound.quality_limitation_resolution_changes;
                         health.software_encoder =
                             crate::transport::publisher::encoder_looks_software(
                                 &o.outbound.encoder_implementation,
@@ -3237,6 +3612,9 @@ pub async fn collect_tick(
                     health.target_kbps = o.outbound.target_bitrate / 1000.0;
                     health.frames_encoded = o.outbound.frames_encoded;
                     health.key_frames_encoded = o.outbound.key_frames_encoded;
+                    health.qp_sum = (o.outbound.qp_sum > 0).then_some(o.outbound.qp_sum);
+                    frames_sent = o.outbound.frames_sent;
+                    retransmitted_packets_sent = o.outbound.retransmitted_packets_sent;
                     health.nack_count = o.outbound.nack_count;
                     health.fir_count = o.outbound.fir_count;
                     health.pli_count = o.outbound.pli_count;
@@ -3248,10 +3626,16 @@ pub async fn collect_tick(
                     // bytes_sent above) so "cumulative" loss covers the whole
                     // track, not just whichever layer's report was read last.
                     if r.remote_inbound.round_trip_time > 0.0 {
-                        rtts.push(r.remote_inbound.round_trip_time * 1000.0);
+                        let rtt_ms = r.remote_inbound.round_trip_time * 1000.0;
+                        rtts.push(rtt_ms);
+                        rtcp_rtt_ms = Some(rtt_ms);
                     }
-                    send_jitters.push(r.received.jitter * 1000.0);
-                    losses.push(r.remote_inbound.fraction_lost * 100.0);
+                    let jitter_ms = r.received.jitter * 1000.0;
+                    send_jitters.push(jitter_ms);
+                    rtcp_jitter_ms = Some(jitter_ms);
+                    let loss_pct = r.remote_inbound.fraction_lost * 100.0;
+                    losses.push(loss_pct);
+                    rtcp_loss_pct = Some(loss_pct);
                     packets_lost_total += r.received.packets_lost;
                 }
                 _ => {}
@@ -3273,6 +3657,58 @@ pub async fn collect_tick(
             stage.fps = encoded_fps;
             stage.kbps = dt_ms.map(|_| health.actual_kbps);
         }
+        if health.kind == "video" {
+            if let Some(qp_sum) = health.qp_sum {
+                let key = format!("{sid}:qp");
+                if let Some((previous_qp, previous_frames)) = prev_qp.insert(
+                    key,
+                    (qp_sum, health.frames_encoded),
+                ) {
+                    let frame_delta = health.frames_encoded.saturating_sub(previous_frames);
+                    if frame_delta > 0 {
+                        health.average_qp = Some(
+                            qp_sum.saturating_sub(previous_qp) as f64 / frame_delta as f64,
+                        );
+                    }
+                }
+            }
+        }
+        if health.raw_track_name.as_deref().is_some_and(|name| name.starts_with("petal-camera-")) {
+            let encoded = health.encoded_sent.as_ref();
+            log::info!(
+                "diagnostics: camera sender interval route=native-stats t_ms={} trial_id={} sid={} track={} encoded_dimensions={}x{} outbound_stats_fps={} encode_fps={} resolution_changes={} send_kbps={:.1} target_kbps={:.1} codec={} quality_limitation={} software_encoder={} qp={} packets_lost={} frames_encoded={} frames_sent={} keyframes={} retransmitted_packets={} rtt_ms={} jitter_ms={} loss_pct={}",
+                now_ms(),
+                health.sid,
+                health.sid,
+                health.raw_track_name.as_deref().unwrap_or("unknown"),
+                health.width,
+                health.height,
+                health.fps,
+                encoded
+                    .and_then(|stage| stage.fps)
+                    .map_or_else(|| String::from("unknown"), |value| format!("{value:.2}")),
+                health.quality_limitation_resolution_changes,
+                health.actual_kbps,
+                health.target_kbps,
+                health.codec_impl,
+                health.quality_limitation,
+                health.software_encoder,
+                health
+                    .average_qp
+                    .map_or_else(|| String::from("unknown"), |value| format!("{value:.2}")),
+                health.packets_lost,
+                health.frames_encoded,
+                frames_sent,
+                health.key_frames_encoded,
+                retransmitted_packets_sent,
+                rtcp_rtt_ms
+                    .map_or_else(|| String::from("unknown"), |value| format!("{value:.2}")),
+                rtcp_jitter_ms
+                    .map_or_else(|| String::from("unknown"), |value| format!("{value:.2}")),
+                rtcp_loss_pct
+                    .map_or_else(|| String::from("unknown"), |value| format!("{value:.3}")),
+            );
+        }
         send_kbps_total += health.actual_kbps;
         tracks.push(health);
     }
@@ -3280,6 +3716,13 @@ pub async fn collect_tick(
     // --- Subscribed (recv) tracks ---
     for (identity, participant) in room.remote_participants() {
         for (sid, publication) in participant.track_publications() {
+            // A RemoteTrack handle can outlive the subscription transition
+            // briefly. Do not poll stats for a publication that is no longer
+            // subscribed: libwebrtc then repeatedly asks for RTP parameters
+            // for a retired SSRC (the stale-camera warning seen on Windows).
+            if !publication.is_desired() || !publication.is_subscribed() {
+                continue;
+            }
             let Some(track) = publication.track() else {
                 continue;
             };
@@ -4003,7 +4446,11 @@ mod tests {
         let result = bounded_detail(value);
 
         let result = result.expect("non-empty input must produce Some");
-        assert!(result.len() <= 160, "result must be bounded to <=160 bytes, got {}", result.len());
+        assert!(
+            result.len() <= 160,
+            "result must be bounded to <=160 bytes, got {}",
+            result.len()
+        );
         // Merely constructing/using `result` as a &str proves it is valid UTF-8;
         // String::truncate itself guarantees this once it doesn't panic.
         assert!(result.chars().all(|c| c == '\u{4e2d}'));
@@ -4135,24 +4582,16 @@ mod tests {
         // Reproduces the reported bug: a Full-tier share publishes a full-res
         // layer and a throttled half-res layer; the full layer must win
         // regardless of which report is read first.
-        assert!(is_more_primary_layer(
-            true, true, 1_282_988, true, 356_580
-        ));
-        assert!(!is_more_primary_layer(
-            true, true, 356_580, true, 1_282_988
-        ));
+        assert!(is_more_primary_layer(true, true, 1_282_988, true, 356_580));
+        assert!(!is_more_primary_layer(true, true, 356_580, true, 1_282_988));
     }
 
     #[test]
     fn simulcast_primary_layer_prefers_active_over_larger_inactive() {
         // An active-but-smaller layer beats an inactive-but-larger one -- a
         // stale/paused layer's report should never win just by being bigger.
-        assert!(is_more_primary_layer(
-            true, true, 100, false, 1_000_000
-        ));
-        assert!(!is_more_primary_layer(
-            true, false, 1_000_000, true, 100
-        ));
+        assert!(is_more_primary_layer(true, true, 100, false, 1_000_000));
+        assert!(!is_more_primary_layer(true, false, 1_000_000, true, 100));
     }
 
     #[test]
@@ -4958,10 +5397,7 @@ mod tests {
         assert_eq!(describe_track("petal-window-4242"), "window 4242 share");
         // The assistant's voice must read as itself, not as an unknown track.
         #[cfg(target_os = "macos")]
-        assert_eq!(
-            describe_track("petal-ai-window-4242"),
-            "AI assistant voice"
-        );
+        assert_eq!(describe_track("petal-ai-window-4242"), "AI assistant voice");
         assert_eq!(describe_track("petal-camera-web-tester"), "webcam");
         assert_eq!(describe_track("microphone"), "'microphone'");
         assert_eq!(describe_track(""), "a track");
@@ -5231,6 +5667,33 @@ mod tests {
         assert_eq!(tracks[0].quality_limitation, "livekit-js-stream-state");
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn compositor_dispatch_counter_reaches_windows_track_overlay() {
+        let state = DiagnosticsState::default();
+        state.record_compositor_frame("owner", 42, 640, 480);
+        state.record_compositor_frame("owner", 42, 640, 480);
+        let mut tracks = [TrackHealth {
+            latency_key: latency_key("owner", "petal-window-42"),
+            owner_identity: Some("owner".into()),
+            window_id: Some(42),
+            name: "petal-window-42 (owner)".into(),
+            direction: "recv".into(),
+            kind: "video".into(),
+            ..Default::default()
+        }];
+        state.apply_track_overlays(&mut tracks, None);
+        assert_eq!(tracks[0].frames_display_enqueued, 2);
+        assert_eq!(
+            tracks[0].display_enqueued.as_ref().unwrap().width,
+            Some(640)
+        );
+        assert_eq!(
+            tracks[0].display_enqueued.as_ref().unwrap().height,
+            Some(480)
+        );
+    }
+
     #[test]
     fn stats_sample_round_trips_the_683_memory_fields() {
         // #683: `phys_footprint_mb`/`live_pixel_buffers` ride `StatsSample`
@@ -5244,7 +5707,10 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_value(&present).unwrap();
-        assert_eq!(json.get("physFootprintMb").unwrap(), &serde_json::json!(487));
+        assert_eq!(
+            json.get("physFootprintMb").unwrap(),
+            &serde_json::json!(487)
+        );
         assert_eq!(json.get("livePixelBuffers").unwrap(), &serde_json::json!(3));
 
         let absent = StatsSample {
@@ -5299,6 +5765,113 @@ mod tests {
 
         state.record_peer_rtt(f64::NAN);
         assert_eq!(state.snapshot().peer_rtt_ms, Some(24.5));
+    }
+
+    #[test]
+    fn camera_receiver_interval_line_is_bounded_and_honest_about_unknowns() {
+        let interval = CameraReceiverInterval {
+            participant_identity: "alice".into(),
+            track_name: "petal-camera-alice".into(),
+            track_sid: "TR_abc".into(),
+            route: "gallery-webview".into(),
+            interval_sequence: 3,
+            interval_ms: 15_000,
+            frames_decoded: Some(450),
+            decoded_fps: Some(30.0),
+            decoded_width: Some(1280),
+            decoded_height: Some(720),
+            frames_received: Some(451),
+            frames_rendered: Some(448),
+            frames_dropped: None,
+            freeze_count: None,
+            total_freezes_duration_ms: None,
+            bytes_received: Some(900_000),
+            packets_received: Some(1_200),
+            packets_lost: Some(0),
+            packets_discarded: None,
+            retransmitted_packets_received: None,
+            key_frames_decoded: Some(2),
+            nack_count: Some(1),
+            pli_count: None,
+            fir_count: None,
+            jitter_ms: Some(4.5),
+            jitter_buffer_delay_ms: Some(12.25),
+            jitter_buffer_emitted_count: Some(450),
+            total_decode_time_ms: Some(310.5),
+            loss_pct: Some(0.0),
+            decoder_implementation: "hardware H264".into(),
+            presented_frames: Some(447),
+            presented_fps: Some(29.8),
+            stream_state: "active".into(),
+            stall_cause: "not_applicable".into(),
+            gap_since_last_frame_ms: 33,
+        };
+        let line = camera_receiver_interval_line(&interval);
+        assert!(line.contains("route=gallery-webview"));
+        assert!(line.contains("track_sid=TR_abc"));
+        assert!(line.contains("interval_seq=3"));
+        assert!(line.contains("interval_ms=15000"));
+        assert!(line.contains("decoded_dimensions=1280x720"));
+        assert!(line.contains("presented_fps=29.80"));
+        assert!(line.contains("decoder=hardware H264"));
+        // Missing measurements must read as unknown, never as a zero that a
+        // reader would take for a real measurement.
+        assert!(line.contains("frames_dropped=unknown"), "{line}");
+        assert!(line.contains("pli=unknown"), "{line}");
+        assert!(line.contains("fir=unknown"), "{line}");
+        // A measured zero is still a measurement.
+        assert!(line.contains("loss_pct=0.000"), "{line}");
+        assert!(line.contains("packets_lost=0"), "{line}");
+        assert!(!line.contains('\n'), "the record must stay one line");
+    }
+
+    #[test]
+    fn camera_receiver_interval_line_caps_free_form_fields() {
+        let interval = CameraReceiverInterval {
+            participant_identity: "i".repeat(500),
+            track_name: "t".repeat(500),
+            track_sid: "s".repeat(500),
+            route: "r".repeat(500),
+            interval_sequence: 0,
+            interval_ms: 0,
+            frames_decoded: None,
+            decoded_fps: Some(f64::NAN),
+            decoded_width: Some(0),
+            decoded_height: None,
+            frames_received: None,
+            frames_rendered: None,
+            frames_dropped: None,
+            freeze_count: None,
+            total_freezes_duration_ms: None,
+            bytes_received: None,
+            packets_received: None,
+            packets_lost: None,
+            packets_discarded: None,
+            retransmitted_packets_received: None,
+            key_frames_decoded: None,
+            nack_count: None,
+            pli_count: None,
+            fir_count: None,
+            jitter_ms: None,
+            jitter_buffer_delay_ms: None,
+            jitter_buffer_emitted_count: None,
+            total_decode_time_ms: None,
+            loss_pct: None,
+            decoder_implementation: "d".repeat(500),
+            presented_frames: None,
+            presented_fps: None,
+            stream_state: "active".into(),
+            stall_cause: "not_applicable".into(),
+            gap_since_last_frame_ms: 0,
+        };
+        let line = camera_receiver_interval_line(&interval);
+        assert!(!line.contains(&"i".repeat(65)), "identity must be capped: {line}");
+        assert!(!line.contains(&"t".repeat(65)), "track name must be capped: {line}");
+        assert!(!line.contains(&"d".repeat(49)), "decoder must be capped: {line}");
+        // One dimension present and one missing is not a measurement.
+        assert!(line.contains("decoded_dimensions=unknown"), "{line}");
+        // A non-finite rate is missing, not a number.
+        assert!(line.contains("decoded_fps=unknown"), "{line}");
     }
 
     #[test]
@@ -5834,13 +6407,28 @@ mod tests {
     // warn/critical only; steady state, recovery, and normal are silent.
     #[test]
     fn memory_pressure_transition_reports_only_upward_elevations() {
-        assert_eq!(memory_pressure_transition(None, 1), None, "normal first reading is silent");
-        assert_eq!(memory_pressure_transition(None, 2), Some(2), "joining mid-pressure reports");
+        assert_eq!(
+            memory_pressure_transition(None, 1),
+            None,
+            "normal first reading is silent"
+        );
+        assert_eq!(
+            memory_pressure_transition(None, 2),
+            Some(2),
+            "joining mid-pressure reports"
+        );
         assert_eq!(memory_pressure_transition(Some(1), 2), Some(2));
         assert_eq!(memory_pressure_transition(Some(2), 4), Some(4));
-        assert_eq!(memory_pressure_transition(Some(2), 2), None, "steady warn is silent");
-        assert_eq!(memory_pressure_transition(Some(4), 2), None, "recovery is silent");
+        assert_eq!(
+            memory_pressure_transition(Some(2), 2),
+            None,
+            "steady warn is silent"
+        );
+        assert_eq!(
+            memory_pressure_transition(Some(4), 2),
+            None,
+            "recovery is silent"
+        );
         assert_eq!(memory_pressure_transition(Some(2), 1), None);
     }
-
 }

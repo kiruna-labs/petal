@@ -15,7 +15,19 @@
 
 export const FREEZE_WATCHDOG_TIMEOUT_MS = 30_000;
 export const FREEZE_WATCHDOG_POLL_MS = 2_000;
-export const CAMERA_DECODE_HEALTH_LOG_MS = 5_000;
+export const CAMERA_DECODE_HEALTH_LOG_MS = 15_000;
+
+/** Compute the rate at which an HTMLVideoElement presented frames between logs.
+ * This is intentionally separate from inbound-rtp framesDecoded: it measures
+ * the WebView presentation boundary. */
+export function cameraPresentedFps(
+  previousPresentedFrames: number,
+  presentedFrames: number,
+  elapsedMs: number
+): number {
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return 0;
+  return (Math.max(0, presentedFrames - previousPresentedFrames) * 1000) / elapsedMs;
+}
 
 export interface CameraFreezeState {
   lastFramesDecoded: number;
@@ -25,6 +37,8 @@ export interface CameraFreezeState {
 export interface CameraDecodeHealthState {
   lastLoggedAt: number;
   lastLoggedFramesDecoded: number;
+  intervalSequence: number;
+  trackSid?: string;
 }
 
 export interface CameraDecodeHealth {
@@ -32,6 +46,171 @@ export interface CameraDecodeHealth {
   framesDecoded: number | null;
   decodedFps: number;
   gapSinceLastFrameMs: number;
+  /** Actual elapsed time since the previous emitted interval sample. */
+  intervalMs: number;
+  /** Monotonic per-publication sample counter; resets on SID replacement. */
+  intervalSequence: number;
+  /** Optional receive-side fields from the browser's inbound-rtp report. */
+  framesPerSecond?: number | null;
+  framesDropped?: number | null;
+  freezeCount?: number | null;
+  totalFreezesDurationMs?: number | null;
+  packetsLost?: number | null;
+  nackCount?: number | null;
+  bytesReceived?: number | null;
+  packetsReceived?: number | null;
+  packetsDiscarded?: number | null;
+  retransmittedPacketsReceived?: number | null;
+  keyFramesDecoded?: number | null;
+  pliCount?: number | null;
+  firCount?: number | null;
+  jitterBufferDelayMs?: number | null;
+  jitterBufferEmittedCount?: number | null;
+  totalDecodeTimeMs?: number | null;
+  decoderImplementation?: string | null;
+}
+
+/** Raw `inbound-rtp` video stat fields this module reads. Kept permissive
+ * because the browser's stats dictionary is platform-dependent. */
+type InboundVideoStat = {
+  frameWidth?: unknown;
+  frameHeight?: unknown;
+  framesDecoded?: unknown;
+  framesPerSecond?: unknown;
+  framesDropped?: unknown;
+  freezeCount?: unknown;
+  totalFreezesDuration?: unknown;
+  packetsLost?: unknown;
+  nackCount?: unknown;
+  bytesReceived?: unknown;
+  packetsReceived?: unknown;
+  packetsDiscarded?: unknown;
+  retransmittedPacketsReceived?: unknown;
+  keyFramesDecoded?: unknown;
+  framesReceived?: unknown;
+  framesRendered?: unknown;
+  pliCount?: unknown;
+  firCount?: unknown;
+  jitter?: unknown;
+  jitterBufferDelay?: unknown;
+  jitterBufferEmittedCount?: unknown;
+  totalDecodeTime?: unknown;
+  decoderImplementation?: unknown;
+};
+
+/** Select the ONE primary inbound video report every receiver metric is read
+ * from. A camera track can transiently expose more than one inbound-rtp video
+ * report (simulcast re-selection, unsubscribe/subscribe handoff), and reading
+ * different metrics off different entries mixes two layers into one sample.
+ * Prefer the largest reported decoded area; equal areas keep the first entry
+ * so the selection is stable across polls. */
+export function cameraInboundVideoStatFromReport(
+  report: RTCStatsReport | undefined
+): InboundVideoStat | null {
+  if (!report) return null;
+  let selected: InboundVideoStat | null = null;
+  let selectedArea = -1;
+  report.forEach((stat) => {
+    const s = stat as InboundVideoStat & { type?: string; kind?: string };
+    if (s.type !== 'inbound-rtp' || s.kind !== 'video') return;
+    const width = typeof s.frameWidth === 'number' && Number.isFinite(s.frameWidth) ? s.frameWidth : 0;
+    const height =
+      typeof s.frameHeight === 'number' && Number.isFinite(s.frameHeight) ? s.frameHeight : 0;
+    const area = width * height;
+    if (selected === null || area > selectedArea) {
+      selected = s;
+      selectedArea = area;
+    }
+  });
+  return selected;
+}
+
+/** Every receive-side counter and decode dimension for one camera track, all
+ * read from the same primary inbound video report. These values are kept
+ * outside the Sentry schema and are only written to the local Petal log for
+ * post-hoc sender/receiver correlation. */
+export interface CameraReceiveStats {
+  framesDecoded: number | null;
+  framesPerSecond: number | null;
+  framesDropped: number | null;
+  freezeCount: number | null;
+  totalFreezesDurationMs: number | null;
+  packetsLost: number | null;
+  nackCount: number | null;
+  bytesReceived: number | null;
+  packetsReceived: number | null;
+  packetsDiscarded: number | null;
+  retransmittedPacketsReceived: number | null;
+  keyFramesDecoded: number | null;
+  pliCount: number | null;
+  firCount: number | null;
+  jitterBufferDelayMs: number | null;
+  jitterBufferEmittedCount: number | null;
+  totalDecodeTimeMs: number | null;
+  decoderImplementation: string | null;
+  framesReceived: number | null;
+  framesRendered: number | null;
+  decodedWidth: number | null;
+  decodedHeight: number | null;
+  jitterMs: number | null;
+  lossPct: number | null;
+}
+
+/** Extract the browser's receive-side video counters for one camera track from
+ * the single primary inbound report (see
+ * `cameraInboundVideoStatFromReport`). The result is intentionally aggregate
+ * and privacy-safe: no identity, URL, or track id crosses this helper. */
+export function cameraReceiveStatsFromStatsReport(
+  report: RTCStatsReport | undefined
+): CameraReceiveStats | null {
+  const selected = cameraInboundVideoStatFromReport(report);
+  if (!selected) return null;
+  const numberOrNull = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
+  const secondsToMs = (value: unknown): number | null => {
+    const seconds = numberOrNull(value);
+    return seconds === null ? null : seconds * 1_000;
+  };
+  const stringOrNull = (value: unknown): string | null =>
+    typeof value === 'string' && value.length > 0 ? value : null;
+  const jitter = numberOrNull(selected.jitter);
+  const packetsLost = numberOrNull(selected.packetsLost);
+  const packetsReceived = numberOrNull(selected.packetsReceived);
+  const lost = packetsLost === null ? null : Math.max(0, packetsLost);
+  const received = packetsReceived === null ? null : Math.max(0, packetsReceived);
+  const total = (lost ?? 0) + (received ?? 0);
+  return {
+    framesDecoded: numberOrNull(selected.framesDecoded),
+    framesPerSecond: numberOrNull(selected.framesPerSecond),
+    framesDropped: numberOrNull(selected.framesDropped),
+    freezeCount: numberOrNull(selected.freezeCount),
+    totalFreezesDurationMs: secondsToMs(selected.totalFreezesDuration),
+    packetsLost,
+    nackCount: numberOrNull(selected.nackCount),
+    bytesReceived: numberOrNull(selected.bytesReceived),
+    packetsReceived,
+    packetsDiscarded: numberOrNull(selected.packetsDiscarded),
+    retransmittedPacketsReceived: numberOrNull(selected.retransmittedPacketsReceived),
+    keyFramesDecoded: numberOrNull(selected.keyFramesDecoded),
+    pliCount: numberOrNull(selected.pliCount),
+    firCount: numberOrNull(selected.firCount),
+    jitterBufferDelayMs: secondsToMs(selected.jitterBufferDelay),
+    jitterBufferEmittedCount: numberOrNull(selected.jitterBufferEmittedCount),
+    totalDecodeTimeMs: secondsToMs(selected.totalDecodeTime),
+    decoderImplementation: stringOrNull(selected.decoderImplementation),
+    framesReceived: numberOrNull(selected.framesReceived),
+    framesRendered: numberOrNull(selected.framesRendered),
+    decodedWidth: numberOrNull(selected.frameWidth),
+    decodedHeight: numberOrNull(selected.frameHeight),
+    jitterMs: jitter === null ? null : jitter * 1000,
+    lossPct: lost === null || total <= 0 ? null : (lost * 100) / total
+  };
+}
+
+/** Extract the decoder's cumulative `framesDecoded` counter for the same
+ * primary inbound report every other receiver metric uses. */
+export function framesDecodedFromStatsReport(report: RTCStatsReport | undefined): number | null {
+  return cameraReceiveStatsFromStatsReport(report)?.framesDecoded ?? null;
 }
 
 /** Closed, privacy-safe buckets accepted by the native Sentry bridge. */
@@ -91,16 +270,65 @@ export function classifyCameraReceiveHealth(
   return { cadence: 'stalled', decoderRender: 'decoder_degraded', stallCause: 'decode_zero' };
 }
 
+/** Durable liveness state reported alongside cadence. `paused` is the SFU's
+ * own pause (a network condition); `stalled` is a genuine no-progress
+ * condition. Reduced/severe cadence is still progressing media, so it stays
+ * `active` and is reported only as degraded quality. */
+export type CameraReceiveStreamState = 'active' | 'paused' | 'stalled';
+
+export interface CameraReceiveObservation {
+  cadence: CameraReceiveCadence | null;
+  streamState: CameraReceiveStreamState;
+  degraded: boolean;
+  stallCause: CameraReceiveStallCause | null;
+}
+
+/** Compose the diagnostic cadence with the durable stream state. Pause is
+ * checked first and preserved as its own state so it is never flattened into
+ * a decoder-fault `stalled`; only real no-progress or a stalled classifier
+ * result becomes `stalled`. */
+export function composeCameraReceiveObservation(
+  signal: CameraReceiveHealthSignal | null,
+  streamPaused: boolean,
+  stale: boolean
+): CameraReceiveObservation {
+  const cadence = signal?.cadence ?? null;
+  if (streamPaused) {
+    return { cadence, streamState: 'paused', degraded: false, stallCause: 'stream_paused' };
+  }
+  if (stale || cadence === 'stalled') {
+    return {
+      cadence,
+      streamState: 'stalled',
+      degraded: false,
+      stallCause: signal?.stallCause ?? (stale ? 'decode_stale' : 'decode_zero')
+    };
+  }
+  return {
+    cadence,
+    streamState: 'active',
+    degraded: cadence === 'reduced' || cadence === 'severe',
+    stallCause: signal?.stallCause ?? null
+  };
+}
+
 export function nextCameraDecodeHealthState(
   previous: CameraDecodeHealthState | undefined,
   framesDecoded: number | null,
   now: number,
-  logIntervalMs: number = CAMERA_DECODE_HEALTH_LOG_MS
+  logIntervalMs: number = CAMERA_DECODE_HEALTH_LOG_MS,
+  trackSid?: string
 ): { state: CameraDecodeHealthState; health: Omit<CameraDecodeHealth, 'identity'> | null } {
+  // A replacement publication reuses the participant identity with a new
+  // track SID and counters starting over. Carrying the old baseline across
+  // would read the reset as negative progress and fabricate a stall.
+  if (previous?.trackSid !== undefined && trackSid !== undefined && previous.trackSid !== trackSid) {
+    previous = undefined;
+  }
   const currentFrames = framesDecoded ?? previous?.lastLoggedFramesDecoded ?? 0;
   if (!previous) {
     return {
-      state: { lastLoggedAt: now, lastLoggedFramesDecoded: currentFrames },
+      state: { lastLoggedAt: now, lastLoggedFramesDecoded: currentFrames, intervalSequence: 0, trackSid },
       health: null
     };
   }
@@ -108,22 +336,35 @@ export function nextCameraDecodeHealthState(
   if (elapsedMs < logIntervalMs) {
     return { state: previous, health: null };
   }
+  const intervalSequence = previous.intervalSequence + 1;
   return {
-    state: { lastLoggedAt: now, lastLoggedFramesDecoded: currentFrames },
+    state: {
+      lastLoggedAt: now,
+      lastLoggedFramesDecoded: currentFrames,
+      intervalSequence,
+      trackSid: previous.trackSid ?? trackSid
+    },
     health: {
       framesDecoded,
       decodedFps:
         framesDecoded === null || elapsedMs <= 0
           ? 0
           : (Math.max(0, framesDecoded - previous.lastLoggedFramesDecoded) * 1000) / elapsedMs,
-      gapSinceLastFrameMs: 0
+      gapSinceLastFrameMs: 0,
+      intervalMs: elapsedMs,
+      intervalSequence
     }
   };
 }
 
 export function formatCameraDecodeHealth(health: CameraDecodeHealth): string {
-  const frames = health.framesDecoded === null ? 'unknown' : String(health.framesDecoded);
-  return `gallery bridge: camera decode health for '${health.identity}' -- frames_decoded=${frames} decoded_fps=${health.decodedFps.toFixed(1)} gap_since_last_frame_ms=${health.gapSinceLastFrameMs}`;
+  const value = (number: number | null | undefined, digits = 0) =>
+    number === null || number === undefined
+      ? 'unknown'
+      : digits === 0
+        ? String(number)
+        : number.toFixed(digits);
+  return `gallery bridge: camera decode health for '${health.identity}' -- frames_decoded=${value(health.framesDecoded)} decoded_fps=${value(health.decodedFps, 1)} browser_fps=${value(health.framesPerSecond, 1)} frames_dropped=${value(health.framesDropped)} freeze_count=${value(health.freezeCount)} freeze_ms=${value(health.totalFreezesDurationMs, 1)} packets_received=${value(health.packetsReceived)} packets_lost=${value(health.packetsLost)} packets_discarded=${value(health.packetsDiscarded)} retransmitted_packets=${value(health.retransmittedPacketsReceived)} bytes_received=${value(health.bytesReceived)} nack=${value(health.nackCount)} pli=${value(health.pliCount)} fir=${value(health.firCount)} key_frames_decoded=${value(health.keyFramesDecoded)} jitter_buffer_ms=${value(health.jitterBufferDelayMs, 1)} jitter_buffer_emitted=${value(health.jitterBufferEmittedCount)} decode_ms=${value(health.totalDecodeTimeMs, 1)} decoder='${health.decoderImplementation ?? 'unknown'}' gap_since_last_frame_ms=${health.gapSinceLastFrameMs}`;
 }
 
 /** Pure state transition: advances `lastProgressAt` only when
@@ -153,19 +394,4 @@ export function isCameraFrameStale(
   timeoutMs: number = FREEZE_WATCHDOG_TIMEOUT_MS
 ): boolean {
   return now - state.lastProgressAt >= timeoutMs;
-}
-
-/** Extract the decoder's cumulative `framesDecoded` counter for the video
- * inbound-rtp stat in a getRTCStatsReport() result, or null if unavailable
- * (report missing, or no matching video inbound-rtp entry yet). */
-export function framesDecodedFromStatsReport(report: RTCStatsReport | undefined): number | null {
-  if (!report) return null;
-  let framesDecoded: number | null = null;
-  report.forEach((stat) => {
-    const s = stat as { type?: string; kind?: string; framesDecoded?: unknown };
-    if (s.type === 'inbound-rtp' && s.kind === 'video' && typeof s.framesDecoded === 'number') {
-      framesDecoded = s.framesDecoded;
-    }
-  });
-  return framesDecoded;
 }

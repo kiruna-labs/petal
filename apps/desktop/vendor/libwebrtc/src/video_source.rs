@@ -75,7 +75,7 @@ pub mod native {
             Self { handle: vs_imp::NativeVideoSource::new(resolution, is_screencast) }
         }
 
-        pub fn capture_frame<T: AsRef<dyn VideoBuffer>>(&self, frame: &VideoFrame<T>) {
+        pub fn capture_frame<T: AsRef<dyn VideoBuffer>>(&self, frame: &VideoFrame<T>) -> bool {
             self.handle.capture_frame(frame)
         }
 

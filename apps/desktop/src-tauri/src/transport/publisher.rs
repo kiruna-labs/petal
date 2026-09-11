@@ -77,6 +77,7 @@ use livekit::webrtc::video_frame::native::NativeBuffer;
 use livekit::webrtc::video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
+use tokio_util::sync::CancellationToken;
 
 use crate::capture::{CaptureBufferPool, CapturedFrame, CapturedFramePayload};
 
@@ -113,6 +114,22 @@ const NATIVE_ZERO_COPY_REPROBE_INITIAL_BACKOFF: std::time::Duration =
     std::time::Duration::from_secs(1);
 const NATIVE_ZERO_COPY_REPROBE_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(8);
 const PETAL_FORCE_CODEC_ENV: &str = "PETAL_FORCE_CODEC";
+/// Experimental screencast stress gate. Set exactly to `60` to raise the
+/// capture/encoding ceiling and bypass WebRTC's source-frame adaptation drops
+/// for window shares. It never affects cameras.
+pub const PETAL_EXPERIMENTAL_VIDEO_FPS_ENV: &str = "PETAL_EXPERIMENTAL_VIDEO_FPS";
+const PETAL_EXPERIMENTAL_VIDEO_FPS_MAX: u32 = 60;
+
+pub fn experimental_share_fps() -> Option<u32> {
+    std::env::var(PETAL_EXPERIMENTAL_VIDEO_FPS_ENV)
+        .ok()
+        .and_then(|value| parse_experimental_share_fps(&value))
+}
+
+fn parse_experimental_share_fps(value: &str) -> Option<u32> {
+    (value.trim() == "60").then_some(PETAL_EXPERIMENTAL_VIDEO_FPS_MAX)
+}
+
 // Debug-only kill switch (see native_publish_disabled_by_env): a shipped
 // build must not let the environment force the slower NV12->I420 fallback.
 #[cfg(debug_assertions)]
@@ -236,6 +253,12 @@ pub enum CaptureResolution {
 
 const CAMERA_MAX_BITRATE_BPS: u64 = 2_500_000;
 const CAMERA_MAX_FRAMERATE_FPS: f64 = 30.0;
+const CAMERA_CAPTURE_FPS_CAP: f64 = 60.0;
+const CAMERA_MIN_BITRATE_BPS: u64 = 500_000;
+const CAMERA_MAX_CEILING_BPS: u64 = 16_000_000;
+/// Synthetic-only constrained-route control. Intentionally below the
+/// production floor; unreachable unless the synthetic camera is enabled.
+const SYNTHETIC_CAMERA_LOW_BITRATE_BPS: u64 = 250_000;
 const FULL_SIMULCAST_HALF_MIN_BITRATE_BPS: u64 = 1_250_000;
 const FULL_SIMULCAST_HALF_BASE_PIXELS: u64 = 960 * 540;
 const FULL_SIMULCAST_HALF_MAX_BITRATE_BPS: u64 = 6_000_000;
@@ -430,7 +453,7 @@ impl CaptureResolution {
 }
 
 impl ShareQuality {
-    pub const fn capture_fps(self) -> u32 {
+    pub fn capture_fps(self) -> u32 {
         match self {
             // #907/#383: 30fps is adequate for this product's content (small
             // engineering syncs, text/UI-heavy shares) and the prior 60fps
@@ -439,7 +462,7 @@ impl ShareQuality {
             // share of the field-measured 10.8 Mbps two-rung ask that
             // starved the top rung, see #907). Kept at 30 rather than
             // Reduced's 4 so a focused share still feels responsive.
-            Self::Full => 30,
+            Self::Full => experimental_share_fps().unwrap_or(30),
             Self::Reduced => 4,
         }
     }
@@ -744,12 +767,30 @@ pub struct PublishedTrack {
     native_publish_disabled_by_env: bool,
     native_zero_copy_latch: Mutex<NativeZeroCopyLatch>,
     push_drop_streak: Mutex<crate::logging::DropStreakDetector>,
+    /// Rate-limits source-boundary logs while guaranteeing a sample at least
+    /// every five seconds whenever frames reach the publisher.
+    last_source_boundary_log: Mutex<Option<std::time::Instant>>,
+    /// Cancels the detached encoder diagnostics when this track is terminal.
+    background_cancel: CancellationToken,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PublishedFrameTiming {
     pub convert_ms: f64,
     pub capture_frame_return_ms: f64,
+    /// Wall-clock age of the captured frame when it entered WebRTC's source.
+    /// This catches capture-pump queueing without changing the queue policy.
+    pub capture_age_ms: f64,
+    /// Monotonic publisher-local frame id, useful for correlating source-stage
+    /// logs with capture cadence without exposing frame content.
+    pub frame_id: u32,
+    /// Whether WebRTC's adapted source accepted the frame after applying its
+    /// current constraints. `false` is distinct from conversion failure.
+    pub source_accepted: bool,
+}
+
+fn capture_age_ms(capture_wall_time_us: u64) -> f64 {
+    crate::time_util::now_us().saturating_sub(capture_wall_time_us) as f64 / 1_000.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1566,6 +1607,11 @@ impl RoomConnection<Arc<Room>> {
         encoder_recovery: Option<PostWakeEncoderFallbackRecovery>,
     ) -> Result<PublishedTrack, RoomConnectionError> {
         validate_video_toolbox_h264_size(width, height)?;
+        if let Some(fps) = experimental_share_fps() {
+            log::warn!(
+                "{PETAL_EXPERIMENTAL_VIDEO_FPS_ENV}={fps}: forcing screencast stress mode; source adaptation drops are bypassed"
+            );
+        }
         // Resolve once per publication. The same value stays with the track
         // for later quality-only updates even if the process environment is
         // changed before a focus transition.
@@ -1619,13 +1665,15 @@ impl RoomConnection<Arc<Room>> {
             quality
         );
 
+        let background_cancel = CancellationToken::new();
         // Background task: log the actual negotiated encoder implementation
         // once stats are available, so we *confirm* VideoToolbox rather than
         // assume the preference took effect (see module doc comment).
         {
             let track_for_stats = track.clone();
+            let cancel = background_cancel.clone();
             tokio::spawn(async move {
-                log_encoder_once(track_for_stats, encoder_origin, encoder_recovery).await;
+                log_encoder_once(track_for_stats, encoder_origin, encoder_recovery, cancel).await;
             });
         }
         // #907 review finding 4/6: shared (not per-task-snapshotted) state so
@@ -1648,6 +1696,7 @@ impl RoomConnection<Arc<Room>> {
             let quality_for_stats = shared_quality.clone();
             let width_for_stats = published_width.clone();
             let height_for_stats = published_height.clone();
+            let cancel = background_cancel.clone();
             tokio::spawn(async move {
                 log_window_share_encoder_stats(
                     track_for_stats,
@@ -1655,6 +1704,7 @@ impl RoomConnection<Arc<Room>> {
                     width_for_stats,
                     height_for_stats,
                     simulcast_ladder,
+                    cancel,
                 )
                 .await;
             });
@@ -1678,6 +1728,8 @@ impl RoomConnection<Arc<Room>> {
             native_publish_disabled_by_env: native_publish_disabled_by_env(),
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
+            last_source_boundary_log: Mutex::new(None),
+            background_cancel,
         })
     }
 
@@ -1695,7 +1747,13 @@ impl RoomConnection<Arc<Room>> {
         frame_rate: f64,
         identity: &str,
     ) -> Result<PublishedTrack, RoomConnectionError> {
-        let rtc_source = NativeVideoSource::new(VideoResolution { width, height }, true);
+        // This is a webcam source, not a window/display capture. The
+        // `is_screencast` bit changes libwebrtc adaptation and encoder policy;
+        // TrackSource::Camera below is independent publication metadata.
+        let rtc_source = NativeVideoSource::new(
+            VideoResolution { width, height },
+            camera_native_source_is_screencast(),
+        );
         let track_name = camera_track_name(identity);
         let track = LocalVideoTrack::create_video_track(
             &track_name,
@@ -1704,6 +1762,10 @@ impl RoomConnection<Arc<Room>> {
 
         let publish_opts = camera_publish_options(width, height, frame_rate);
         let requested_encoder = publish_opts.video_encoder;
+        let configured_bitrate = publish_opts
+            .video_encoding
+            .as_ref()
+            .map(|encoding| encoding.max_bitrate);
 
         self.room
             .local_participant()
@@ -1711,16 +1773,29 @@ impl RoomConnection<Arc<Room>> {
             .await?;
 
         log::info!(
-            "Published camera track '{track_name}' {width}x{height} (H.264, requested encoder: {requested_encoder:?})"
+            "Published camera track '{track_name}' {width}x{height} (H.264, requested encoder: {requested_encoder:?}, max bitrate: {} kbps{})",
+            configured_bitrate.unwrap_or_default() / 1000,
+            if camera_experiment_max_bitrate_bps().is_some() {
+                "; PETAL_CAMERA_EXPERIMENT_MAX_KBPS active"
+            } else {
+                ""
+            }
         );
 
+        let background_cancel = CancellationToken::new();
         {
             let track_for_stats = track.clone();
+            let cancel = background_cancel.clone();
             tokio::spawn(async move {
-                log_encoder_once(track_for_stats, EncoderPublishOrigin::Ordinary, None).await;
+                log_encoder_once(
+                    track_for_stats,
+                    EncoderPublishOrigin::Ordinary,
+                    None,
+                    cancel,
+                )
+                .await;
             });
         }
-
         Ok(PublishedTrack {
             room: self.room.clone(),
             rtc_source,
@@ -1741,6 +1816,8 @@ impl RoomConnection<Arc<Room>> {
             native_publish_disabled_by_env: false,
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
+            last_source_boundary_log: Mutex::new(None),
+            background_cancel,
         })
     }
 
@@ -1770,25 +1847,69 @@ fn validate_video_toolbox_h264_size(width: u32, height: u32) -> Result<(), RoomC
     )))
 }
 
+/// Optional diagnostic ceiling for the camera experiment. It is deliberately
+/// process-wide and opt-in: production remains unchanged unless a test launch
+/// sets `PETAL_CAMERA_EXPERIMENT_MAX_KBPS` to a value in [500, 16000].
+fn camera_experiment_max_bitrate_bps() -> Option<u64> {
+    let raw = std::env::var("PETAL_CAMERA_EXPERIMENT_MAX_KBPS").ok()?;
+    let kbps = raw.parse::<u64>().ok()?;
+    let bps = kbps.saturating_mul(1000);
+    (CAMERA_MIN_BITRATE_BPS..=CAMERA_MAX_CEILING_BPS)
+        .contains(&bps)
+        .then_some(bps)
+}
+
 /// Camera encoding ceiling: the 720p30 baseline (2.5 Mbps, the pre-existing
 /// fixed ceiling) scales with pixels and fps, clamped to [500 kbps, 16 Mbps].
 /// 720p30 stays exactly 2.5 Mbps so defaults are unchanged; 1080p30 gets
 /// ~5.6 Mbps, 4K30 clamps at 16 Mbps, and a low 480p15 request floors at
-/// 500 kbps.
+/// 500 kbps. The optional experiment cap only lowers this result.
+///
+/// This is a webcam source, not a window/display capture: the `is_screencast`
+/// bit changes libwebrtc's source adaptation and encoder policy, so a camera
+/// must not claim it. `TrackSource::Camera` is independent publication metadata
+/// and does not decide this.
+fn camera_native_source_is_screencast() -> bool {
+    false
+}
 fn camera_video_encoding(
     width: u32,
     height: u32,
     frame_rate: f64,
 ) -> livekit::options::VideoEncoding {
+    camera_video_encoding_with_cap(
+        width,
+        height,
+        frame_rate,
+        camera_experiment_max_bitrate_bps(),
+    )
+}
+
+fn camera_video_encoding_with_cap(
+    width: u32,
+    height: u32,
+    frame_rate: f64,
+    experiment_cap_bps: Option<u64>,
+) -> livekit::options::VideoEncoding {
     const CAMERA_BASELINE_PIXELS: u64 = 1280 * 720;
     const CAMERA_BASELINE_FPS: f64 = 30.0;
-    const CAMERA_MIN_BITRATE_BPS: u64 = 500_000;
-    const CAMERA_MAX_CEILING_BPS: u64 = 16_000_000;
+    let frame_rate = frame_rate.clamp(0.0, CAMERA_CAPTURE_FPS_CAP);
     let pixels = u64::from(width) * u64::from(height);
     let scaled = CAMERA_MAX_BITRATE_BPS as f64
         * (pixels as f64 / CAMERA_BASELINE_PIXELS as f64)
         * (frame_rate / CAMERA_BASELINE_FPS);
-    let max_bitrate = (scaled.round() as u64).clamp(CAMERA_MIN_BITRATE_BPS, CAMERA_MAX_CEILING_BPS);
+    let clamped = (scaled.round() as u64)
+        .clamp(CAMERA_MIN_BITRATE_BPS, CAMERA_MAX_CEILING_BPS)
+        .min(experiment_cap_bps.unwrap_or(CAMERA_MAX_CEILING_BPS));
+    // The synthetic low-bitrate control deliberately asks for LESS than the
+    // production floor: it is the only way to exercise the constrained-route
+    // path on a machine with no real bandwidth limit, and it is unreachable
+    // unless the synthetic camera itself is enabled.
+    let max_bitrate = if crate::transport::camera::synthetic_camera_low_bitrate_enabled() {
+        SYNTHETIC_CAMERA_LOW_BITRATE_BPS
+    } else {
+        clamped
+    };
     livekit::options::VideoEncoding {
         max_bitrate,
         max_framerate: frame_rate,
@@ -1851,7 +1972,10 @@ fn window_publish_options_for_region(
             let lower_rungs_bitrate_bps: u64 =
                 layers.iter().map(|layer| layer.encoding.max_bitrate).sum();
             livekit::options::VideoEncoding {
-                max_bitrate: budgeted_top_bitrate(raw_top_encoding.max_bitrate, lower_rungs_bitrate_bps),
+                max_bitrate: budgeted_top_bitrate(
+                    raw_top_encoding.max_bitrate,
+                    lower_rungs_bitrate_bps,
+                ),
                 max_framerate: raw_top_encoding.max_framerate,
             }
         }
@@ -2037,40 +2161,40 @@ fn full_share_simulcast_layers(
     let quarter_height = half_dimension(half_height);
     let three_quarter_width = three_quarter_dimension(width);
     let three_quarter_height = three_quarter_dimension(height);
+    let experimental_fps = experimental_share_fps().map(|fps| fps as f64);
+    let half_fps = experimental_fps.unwrap_or(FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS);
+    let quarter_fps = experimental_fps.unwrap_or(FULL_SIMULCAST_QUARTER_MAX_FRAMERATE_FPS);
 
     match ladder {
-        // Keep this branch byte-for-byte equivalent in values to the former
-        // fixed ladder: a quarter rung at 15fps and a half rung at 30fps.
+        // Keep the default values unchanged; the experimental gate raises both
+        // rungs so the receiver, rather than the source adaptation filter, is
+        // the limiting stage.
         FullShareSimulcastLadder::Legacy => vec![
             VideoPreset::new(
                 quarter_width,
                 quarter_height,
                 full_share_quarter_layer_max_bitrate(quarter_width, quarter_height),
-                FULL_SIMULCAST_QUARTER_MAX_FRAMERATE_FPS,
+                quarter_fps,
             ),
             VideoPreset::new(
                 half_width,
                 half_height,
                 full_share_half_layer_max_bitrate(half_width, half_height),
-                FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
+                half_fps,
             ),
         ],
-        // Identical to Legacy except the bottom rung's framerate cap.
-        // Measured 2026-07-28 (#613, n=6): p50 175.2ms vs legacy's 138.0ms
-        // and encoder utilisation 74%->~90% -- cadence is NOT the lever, the
-        // rung spread is. Kept so that verdict stays re-measurable.
         FullShareSimulcastLadder::LegacyBottom30 => vec![
             VideoPreset::new(
                 quarter_width,
                 quarter_height,
                 full_share_quarter_layer_max_bitrate(quarter_width, quarter_height),
-                FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
+                half_fps,
             ),
             VideoPreset::new(
                 half_width,
                 half_height,
                 full_share_half_layer_max_bitrate(half_width, half_height),
-                FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
+                half_fps,
             ),
         ],
         FullShareSimulcastLadder::Raised => vec![
@@ -2078,26 +2202,26 @@ fn full_share_simulcast_layers(
                 half_width,
                 half_height,
                 full_share_half_layer_max_bitrate(half_width, half_height),
-                FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
+                half_fps,
             ),
             VideoPreset::new(
                 three_quarter_width,
                 three_quarter_height,
                 full_share_half_layer_max_bitrate(three_quarter_width, three_quarter_height),
-                FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
+                half_fps,
             ),
         ],
         FullShareSimulcastLadder::TwoRung => vec![VideoPreset::new(
             three_quarter_width,
             three_quarter_height,
             full_share_half_layer_max_bitrate(three_quarter_width, three_quarter_height),
-            FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
+            half_fps,
         )],
         FullShareSimulcastLadder::TwoRungHalf => vec![VideoPreset::new(
             half_width,
             half_height,
             full_share_half_layer_max_bitrate(half_width, half_height),
-            FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
+            half_fps,
         )],
     }
 }
@@ -2588,6 +2712,19 @@ pub fn identity_palette_index_from_metadata(metadata: &str) -> Option<u8> {
         .get(PETAL_IDENTITY_PALETTE_INDEX_METADATA_KEY)?
         .as_u64()?;
     (raw < 6).then_some(raw as u8)
+}
+
+/// Whether `metadata` contains Petal's authoritative shared-window title
+/// map. An empty map is meaningful: it is the metadata state after the last
+/// share stopped. Callers use this distinction to avoid treating unrelated or
+/// legacy participant metadata as a teardown signal.
+pub fn has_shared_window_title_metadata(metadata: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata) else {
+        return false;
+    };
+    value
+        .get(PETAL_WINDOW_TITLES_METADATA_KEY)
+        .is_some_and(serde_json::Value::is_object)
 }
 
 pub fn shared_window_title_from_metadata(metadata: &str, window_id: u32) -> Option<String> {
@@ -3413,7 +3550,10 @@ mod track_name_tests {
         metadata.titles.insert(7, "Terminal".to_string());
         let encoded = encode_window_metadata(&metadata);
         let root: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-        assert!(root.get(PETAL_PLUGINS_METADATA_KEY).is_none(), "empty plugins map is omitted");
+        assert!(
+            root.get(PETAL_PLUGINS_METADATA_KEY).is_none(),
+            "empty plugins map is omitted"
+        );
 
         metadata.plugins.insert(
             "petal.reactions".to_string(),
@@ -3430,6 +3570,23 @@ mod track_name_tests {
             Some("Terminal"),
             "other keys still round-trip beside plugins"
         );
+    }
+
+    #[test]
+    fn shared_window_title_metadata_map_distinguishes_active_and_cleared_shares() {
+        let mut metadata = ShareMetadata::default();
+        metadata.titles.insert(7, "Terminal".to_string());
+        assert!(has_shared_window_title_metadata(&encode_window_metadata(
+            &metadata
+        )));
+
+        metadata.titles.remove(&7);
+        let cleared = encode_window_metadata(&metadata);
+        assert!(has_shared_window_title_metadata(&cleared));
+        assert_eq!(shared_window_title_from_metadata(&cleared, 7), None);
+
+        assert!(!has_shared_window_title_metadata("{}"));
+        assert!(!has_shared_window_title_metadata("not json"));
     }
 
     #[test]
@@ -3503,8 +3660,8 @@ mod track_name_tests {
             shared_window_region_physical_size_from_metadata(&metadata, 4242),
             Some((1280, 960))
         );
-        let region = serde_json::from_str::<serde_json::Value>(&metadata)
-            .unwrap()[PETAL_WINDOW_REGIONS_METADATA_KEY]["4242"]
+        let region = serde_json::from_str::<serde_json::Value>(&metadata).unwrap()
+            [PETAL_WINDOW_REGIONS_METADATA_KEY]["4242"]
             .clone();
         assert_eq!(region["displayLocalX"], 30.0);
         assert_eq!(region["displayLocalY"], 40.0);
@@ -3813,16 +3970,26 @@ mod track_name_tests {
     }
 
     #[test]
+    fn experimental_share_fps_is_screencast_only_and_capped_at_60() {
+        assert_eq!(parse_experimental_share_fps("60"), Some(60));
+        assert_eq!(parse_experimental_share_fps(" 31 "), None);
+        assert_eq!(parse_experimental_share_fps("30"), None);
+        assert_eq!(parse_experimental_share_fps("61"), None);
+        assert_eq!(parse_experimental_share_fps("120"), None);
+    }
+
+    #[test]
     fn share_quality_capture_fps_matches_encoder_tier() {
         // #907/#383: dropped from 60 -> 30. 60fps on the top rung was
         // cosmetic for this product's content and directly inflated the
         // top-rung bitrate ask that starved on a constrained link.
-        assert_eq!(ShareQuality::Full.capture_fps(), 30);
+        let expected_full_fps = experimental_share_fps().unwrap_or(30);
+        assert_eq!(ShareQuality::Full.capture_fps(), expected_full_fps);
         assert_eq!(ShareQuality::Reduced.capture_fps(), 4);
 
         assert_eq!(
             ShareQuality::Full.video_encoding(1280, 720).max_framerate,
-            30.0
+            expected_full_fps as f64
         );
         assert_eq!(
             ShareQuality::Reduced
@@ -4221,7 +4388,11 @@ mod track_name_tests {
             count = next_count;
             state = next_state;
         }
-        assert_eq!(state, RungFundingState::Probing, "should enter Probing after the interval");
+        assert_eq!(
+            state,
+            RungFundingState::Probing,
+            "should enter Probing after the interval"
+        );
 
         // Still starved once probed: back to Throttled, one more failure
         // recorded.
@@ -4401,9 +4572,8 @@ mod track_name_tests {
         // largest bitrate" -- at 4K Reduced quality `q`'s halved ceiling
         // (3,000,000) exceeds `h`'s (2,985,984), which a largest-bitrate
         // heuristic would have picked instead of the real top rung.
-        let guard =
-            RungStarvationGuard::for_rid(FullShareSimulcastLadder::TwoRung.top_rid(), 2)
-                .expect("two layers must be guarded");
+        let guard = RungStarvationGuard::for_rid(FullShareSimulcastLadder::TwoRung.top_rid(), 2)
+            .expect("two layers must be guarded");
         assert_eq!(guard.rid, "h");
         assert_eq!(guard.state, RungFundingState::Funded);
     }
@@ -4433,7 +4603,11 @@ mod track_name_tests {
             "sample 3: sustained -- transitions and reports it"
         );
         assert_eq!(
-            RungStarvationGuard::live_parameters_for(RungFundingState::Throttled, configured_bitrate_bps, 30.0),
+            RungStarvationGuard::live_parameters_for(
+                RungFundingState::Throttled,
+                configured_bitrate_bps,
+                30.0
+            ),
             (RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS, 30.0)
         );
         // No further transition until the probe interval elapses.
@@ -4751,7 +4925,6 @@ mod track_name_tests {
         assert_eq!(reduced_bitrate, 2_000_000);
         assert_eq!(reduced_framerate, 4.0);
     }
-
 
     #[test]
     fn camera_publish_options_pin_single_source_encoding() {
@@ -5154,6 +5327,23 @@ mod track_name_tests {
         assert_eq!(camera_video_encoding(640, 480, 15.0).max_bitrate, 500_000);
         assert_eq!(camera_video_encoding(1920, 1080, 30.0).max_framerate, 30.0);
         assert_eq!(camera_video_encoding(1280, 720, 60.0).max_framerate, 60.0);
+        assert_eq!(camera_video_encoding(1280, 720, 120.0).max_framerate, 60.0);
+    }
+
+    #[test]
+    fn camera_experiment_cap_only_lowers_the_normal_encoding_ceiling() {
+        assert_eq!(
+            camera_video_encoding_with_cap(1280, 720, 30.0, Some(1_000_000)).max_bitrate,
+            1_000_000
+        );
+        assert_eq!(
+            camera_video_encoding_with_cap(1920, 1080, 30.0, Some(1_000_000)).max_bitrate,
+            1_000_000
+        );
+        assert_eq!(
+            camera_video_encoding_with_cap(1280, 720, 30.0, None).max_bitrate,
+            CAMERA_MAX_BITRATE_BPS
+        );
     }
 
     #[test]
@@ -6368,6 +6558,49 @@ impl PublishedTrack {
         self.track.sid()
     }
 
+    /// Sample the capture -> WebRTC source boundary. The periodic encoder
+    /// stats show what came out, while this line shows whether frames arrived
+    /// there accepted, how old they were, and whether conversion or the source
+    /// call itself stalled. Sampling keeps a healthy 30 FPS stream quiet;
+    /// unusually old/slow frames are always logged.
+    fn log_source_boundary(&self, timing: PublishedFrameTiming) {
+        let now = std::time::Instant::now();
+        let slow_or_queued = timing.capture_age_ms >= 100.0
+            || timing.convert_ms >= 10.0
+            || timing.capture_frame_return_ms >= 5.0;
+        let should_log = {
+            let mut last = self
+                .last_source_boundary_log
+                .lock()
+                .expect("source boundary log mutex poisoned");
+            let periodic = last.is_none_or(|previous| {
+                now.duration_since(previous) >= std::time::Duration::from_secs(5)
+            });
+            let slow_sample = slow_or_queued
+                && last.is_none_or(|previous| {
+                    now.duration_since(previous) >= std::time::Duration::from_secs(5)
+                });
+            if periodic || slow_sample {
+                *last = Some(now);
+                true
+            } else {
+                false
+            }
+        };
+        if !should_log {
+            return;
+        }
+        log::debug!(
+            "[DEBUG-MEDIA-FPS] publisher: source boundary track='{}' frame_id={} accepted={} age_ms={:.1} convert_ms={:.1} capture_frame_return_ms={:.1}",
+            self.track.name(),
+            timing.frame_id,
+            timing.source_accepted,
+            timing.capture_age_ms,
+            timing.convert_ms,
+            timing.capture_frame_return_ms,
+        );
+    }
+
     /// One place where a push outcome updates the drop-streak detector. A window
     /// share and a camera reach it from different entry points; the scope tag comes
     /// from the track name so the Sentry event says which one stopped (#788).
@@ -6425,6 +6658,10 @@ impl PublishedTrack {
     /// republishes on a stable resize (its VideoToolbox encoder lifecycle
     /// tolerates re-creation; the MF/NVENC path on Windows must not).
     pub async fn unpublish(&self) -> Result<(), RoomConnectionError> {
+        // Diagnostics are local to this publication. Stop them before the
+        // network tail so a failed/delayed unpublish cannot leave a poller
+        // querying a dead sender.
+        self.background_cancel.cancel();
         // Debug/test-only fault injection for the real hover-tab toggle path.
         // This lets the cockpit hold or fail the network tail after the local
         // capture/border boundary without changing release behavior (#420).
@@ -6547,6 +6784,9 @@ impl PublishedTrack {
         capture_wall_time_us: u64,
     ) -> Option<PublishedFrameTiming> {
         let result = self.push_frame_inner(captured, capture_wall_time_us);
+        if let Some(timing) = result {
+            self.log_source_boundary(timing);
+        }
         self.record_push_outcome(result.is_some());
         result
     }
@@ -6637,7 +6877,7 @@ impl PublishedTrack {
                 }),
                 buffer: &native_buffer,
             };
-            self.rtc_source.capture_frame(&frame);
+            self.rtc_source.capture_frame(&frame)
         }));
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         if result.is_err() {
@@ -6649,6 +6889,9 @@ impl PublishedTrack {
         Ok(PublishedFrameTiming {
             convert_ms: 0.0,
             capture_frame_return_ms,
+            capture_age_ms: capture_age_ms(capture_wall_time_us),
+            frame_id,
+            source_accepted: result.unwrap_or(false),
         })
     }
 
@@ -6857,11 +7100,14 @@ impl PublishedTrack {
         };
 
         let capture_frame_started = std::time::Instant::now();
-        self.rtc_source.capture_frame(&frame);
+        let source_accepted = self.rtc_source.capture_frame(&frame);
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         Some(PublishedFrameTiming {
             convert_ms,
             capture_frame_return_ms,
+            capture_age_ms: capture_age_ms(capture_wall_time_us),
+            frame_id,
+            source_accepted,
         })
     }
 
@@ -7010,6 +7256,9 @@ impl PublishedTrack {
             height,
             capture_wall_time_us,
         );
+        if let Some(timing) = result {
+            self.log_source_boundary(timing);
+        }
         self.record_push_outcome(result.is_some());
         result
     }
@@ -7152,12 +7401,21 @@ impl PublishedTrack {
             }
         };
         let capture_frame_started = std::time::Instant::now();
-        self.rtc_source.capture_frame(&frame);
+        let source_accepted = self.rtc_source.capture_frame(&frame);
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         Some(PublishedFrameTiming {
             convert_ms,
             capture_frame_return_ms,
+            capture_age_ms: capture_age_ms(capture_wall_time_us),
+            frame_id,
+            source_accepted,
         })
+    }
+}
+
+impl Drop for PublishedTrack {
+    fn drop(&mut self) {
+        self.background_cancel.cancel();
     }
 }
 
@@ -7165,15 +7423,18 @@ async fn log_encoder_once(
     track: LocalVideoTrack,
     origin: EncoderPublishOrigin,
     recovery: Option<PostWakeEncoderFallbackRecovery>,
+    cancel: CancellationToken,
 ) {
     let track_name = track.name().to_string();
     log_encoder_once_with(
         &track_name,
         || {
             let track = track.clone();
+            let cancel = cancel.clone();
             async move {
-                let Ok(stats) = track.get_stats().await else {
-                    return None;
+                let stats = tokio::select! {
+                    _ = cancel.cancelled() => return None,
+                    result = track.get_stats() => result.ok()?,
                 };
                 let sender_parameters = track.publishing_layer_parameters();
                 log::info!(
@@ -7204,7 +7465,15 @@ async fn log_encoder_once(
                 })
             }
         },
-        || tokio::time::sleep(std::time::Duration::from_millis(500)),
+        || {
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {},
+                }
+            }
+        },
         origin,
         recovery,
     )
@@ -7423,7 +7692,8 @@ fn lower_rung_activity(samples: &[RungSample], guarded_rid: &str) -> LowerRungAc
 /// the fresh CONFIGURED value, never whatever this guard last wrote.
 fn rung_is_starved(target_bitrate_bps: u64, configured_max_bitrate_bps: u64) -> bool {
     configured_max_bitrate_bps > 0
-        && (target_bitrate_bps as f64) < RUNG_STARVATION_GUARD_FRACTION * configured_max_bitrate_bps as f64
+        && (target_bitrate_bps as f64)
+            < RUNG_STARVATION_GUARD_FRACTION * configured_max_bitrate_bps as f64
 }
 
 /// Probe interval after `consecutive_probe_failures` (30s, 60s, 120s,
@@ -7492,7 +7762,11 @@ fn rung_starvation_next_state(
             if count >= interval {
                 (0, consecutive_probe_failures, RungFundingState::Probing)
             } else {
-                (count, consecutive_probe_failures, RungFundingState::Throttled)
+                (
+                    count,
+                    consecutive_probe_failures,
+                    RungFundingState::Throttled,
+                )
             }
         }
         // The probe sample decides immediately: no need to re-accumulate the
@@ -7691,9 +7965,10 @@ impl RungStarvationGuard {
             RungFundingState::Funded | RungFundingState::Probing => {
                 (configured_bitrate_bps, configured_framerate)
             }
-            RungFundingState::Throttled | RungFundingState::GivenUp => {
-                (RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS, configured_framerate)
-            }
+            RungFundingState::Throttled | RungFundingState::GivenUp => (
+                RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS,
+                configured_framerate,
+            ),
         }
     }
 }
@@ -7852,6 +8127,7 @@ async fn log_window_share_encoder_stats(
     published_width: Arc<std::sync::atomic::AtomicU32>,
     published_height: Arc<std::sync::atomic::AtomicU32>,
     ladder: FullShareSimulcastLadder,
+    cancel: CancellationToken,
 ) {
     let mut guard: Option<RungStarvationGuard> = None;
     let mut guard_initialized = false;
@@ -7862,21 +8138,27 @@ async fn log_window_share_encoder_stats(
     let mut last_stats_error_logged: Option<std::time::Instant> = None;
     const STATS_ERROR_LOG_THROTTLE: std::time::Duration = std::time::Duration::from_secs(60);
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let stats = match track.get_stats().await {
-            Ok(stats) => stats,
-            Err(error) => {
-                let should_log = last_stats_error_logged
-                    .is_none_or(|last| last.elapsed() >= STATS_ERROR_LOG_THROTTLE);
-                if should_log {
-                    last_stats_error_logged = Some(std::time::Instant::now());
-                    log::warn!(
-                        "publisher: window-share encoder stats poll failed for '{}': {error:?} (throttled to once per {}s; the #907 starvation guard riding on this poll cannot observe funding while this persists)",
-                        track.name(),
-                        STATS_ERROR_LOG_THROTTLE.as_secs()
-                    );
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+        }
+        let stats = tokio::select! {
+            _ = cancel.cancelled() => break,
+            result = track.get_stats() => match result {
+                Ok(stats) => stats,
+                Err(error) => {
+                    let should_log = last_stats_error_logged
+                        .is_none_or(|last| last.elapsed() >= STATS_ERROR_LOG_THROTTLE);
+                    if should_log {
+                        last_stats_error_logged = Some(std::time::Instant::now());
+                        log::warn!(
+                            "publisher: window-share encoder stats poll failed for '{}': {error:?} (throttled to once per {}s; the #907 starvation guard riding on this poll cannot observe funding while this persists)",
+                            track.name(),
+                            STATS_ERROR_LOG_THROTTLE.as_secs()
+                        );
+                    }
+                    continue;
                 }
-                continue;
             }
         };
         if !guard_initialized {
@@ -7887,10 +8169,13 @@ async fn log_window_share_encoder_stats(
         // Fresh every poll -- see the module doc comment above for why a
         // one-time snapshot is exactly the bug an earlier version of this
         // guard had.
-        let current_quality = *quality.lock().expect("published track quality mutex poisoned");
+        let current_quality = *quality
+            .lock()
+            .expect("published track quality mutex poisoned");
         let current_width = published_width.load(std::sync::atomic::Ordering::Relaxed);
         let current_height = published_height.load(std::sync::atomic::Ordering::Relaxed);
-        let current_top = current_top_rid_parameters(current_quality, current_width, current_height, ladder);
+        let current_top =
+            current_top_rid_parameters(current_quality, current_width, current_height, ladder);
 
         // #107: collect EVERY video rung's sample from this one poll BEFORE
         // deciding anything. The guard's premise is about the OTHER rungs,
@@ -7904,12 +8189,15 @@ async fn log_window_share_encoder_stats(
                 continue;
             }
             let o = &outbound.outbound;
+            if guard.is_none() {
+                continue;
+            }
             let avg_qp = if o.frames_encoded > 0 {
                 o.qp_sum as f64 / o.frames_encoded as f64
             } else {
                 0.0
             };
-            log::info!(
+            log::debug!(
                 "publisher: window-share encoder rid={} target={:.0}kbps encoded={}x{} fps={:.1} avg_qp={:.1} limitation={:?} frames_encoded={}",
                 o.rid,
                 o.target_bitrate / 1000.0,
@@ -8060,7 +8348,12 @@ mod tests {
         ));
         // Malformed / non-JSON / wrong value types all fail OPEN too -- this
         // is an affordance hint, not the authorization (that is host-side).
-        for metadata in ["", "not json", "[]", r#"{"petalWindowRemoteControl":"nope"}"#] {
+        for metadata in [
+            "",
+            "not json",
+            "[]",
+            r#"{"petalWindowRemoteControl":"nope"}"#,
+        ] {
             assert!(
                 shared_window_remote_control_allowed_from_metadata(metadata, 7),
                 "{metadata:?} must not be read as a denial"
@@ -8091,11 +8384,15 @@ mod tests {
             !encoded.contains(PETAL_WINDOW_REMOTE_CONTROL_METADATA_KEY),
             "an allowed window must not emit the key at all: {encoded}"
         );
-        assert!(shared_window_remote_control_allowed_from_metadata(&encoded, 7));
+        assert!(shared_window_remote_control_allowed_from_metadata(
+            &encoded, 7
+        ));
 
         metadata.remote_control_allowed.insert(9, false);
         let encoded = encode_window_metadata(&metadata);
-        assert!(!shared_window_remote_control_allowed_from_metadata(&encoded, 9));
+        assert!(!shared_window_remote_control_allowed_from_metadata(
+            &encoded, 9
+        ));
         assert!(
             shared_window_remote_control_allowed_from_metadata(&encoded, 7),
             "the allowed window must stay allowed alongside a denied one"
@@ -8154,7 +8451,9 @@ mod tests {
     fn stage_shared_window_url_none_removes_it() {
         let mut metadata = ShareMetadata::default();
         metadata.generations.insert(7, 42);
-        metadata.urls.insert(7, "https://example.com/page".to_string());
+        metadata
+            .urls
+            .insert(7, "https://example.com/page".to_string());
         assert!(stage_shared_window_url(&mut metadata, 7, 42, None));
         assert!(!metadata.urls.contains_key(&7));
     }
@@ -8162,6 +8461,11 @@ mod tests {
     use super::*;
 
     static ENCODER_WARNING_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn webcam_native_source_is_not_marked_as_screencast() {
+        assert!(!camera_native_source_is_screencast());
+    }
 
     fn software_encoder_observation() -> EncoderObservation {
         EncoderObservation {
@@ -8989,7 +9293,8 @@ mod tests {
             // Every 5th push succeeds, resetting the streak before it can
             // reach the consecutive-frame threshold.
             let published = frame % 5 == 0;
-            let fired = push_drop_streak_diagnostic(&detector, "petal-camera-alice", published, now);
+            let fired =
+                push_drop_streak_diagnostic(&detector, "petal-camera-alice", published, now);
             assert!(
                 fired.is_none(),
                 "an intermittent hiccup with regular successful pushes must never trip the storm detector"
