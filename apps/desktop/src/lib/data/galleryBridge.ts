@@ -43,11 +43,18 @@ import {
   type CameraDecodeHealthState,
   nextCameraFreezeState,
   isCameraFrameStale,
-  framesDecodedFromStatsReport,
+  cameraReceiveStatsFromStatsReport,
+  cameraPathStatsFromStatsReport,
   nextCameraDecodeHealthState,
   formatCameraDecodeHealth,
-  classifyCameraReceiveHealth
+  classifyCameraReceiveHealth,
+  composeCameraReceiveObservation
 } from './cameraFreezeWatchdog.ts';
+import { takeCameraPresentationSnapshot, clearAllCameraPresentations } from './cameraPresentation.ts';
+import {
+  type CameraReceiverLifecyclePhase,
+  createCameraReceiverLifecycleRecorder
+} from './cameraReceiverLifecycle.ts';
 
 const CAMERA_TRACK_PREFIX = 'petal-camera-';
 const WINDOW_TRACK_PREFIX = 'petal-window-';
@@ -140,10 +147,38 @@ export async function connectGalleryBridge(
   onDisconnected?: () => void
 ): Promise<GalleryBridge> {
   const room = new Room();
+  const bridgeStartedAt = performance.now();
+  const bridgeAgeMs = () => Math.round(performance.now() - bridgeStartedAt);
+  // Durable receiver-lifecycle evidence (see cameraReceiverLifecycle.ts). The
+  // periodic interval further down only proves a SUBSCRIBED camera is being
+  // sampled; these edges are what make an ABSENT interval attributable to a
+  // specific broken boundary instead of leaving the receiver side unobservable.
+  const lifecycle = createCameraReceiverLifecycleRecorder({
+    invoke: (payload) => invoke(COMMANDS.recordCameraReceiverLifecycle, { lifecycle: payload }),
+    onFailure: (failure) =>
+      // The durable sink itself is unavailable, so keep a local trace only.
+      // The rejection text is deliberately NOT recorded (it can carry a path
+      // or a token); the closed-list phase is the whole diagnostic payload.
+      console.error(
+        `gallery bridge: receiver lifecycle record failed phase='${failure.phase}' attempt=${failure.attempt}`
+      )
+  });
+  const recordLifecycle = (
+    phase: CameraReceiverLifecyclePhase,
+    input: {
+      participantIdentity?: string | null;
+      trackName?: string | null;
+      trackSid?: string | null;
+      detail?: string | null;
+    } = {}
+  ) => void lifecycle.record({ phase, bridgeAgeMs: bridgeAgeMs(), ...input });
   const cameras = new Map<string, RemoteCamera>();
   const windowShares = new Map<string, Set<string>>();
   const weakConnections = new Map<string, Set<string>>();
   const cameraTracks = new Map<string, RemoteTrack>();
+  const cameraTrackNames = new Map<string, string>();
+  const cameraTrackSids = new Map<string, string>();
+  const firstDecodedCameras = new Set<string>();
   const freezeStates = new Map<string, CameraFreezeState>();
   const decodeHealthStates = new Map<string, CameraDecodeHealthState>();
   const staleCameras = new Set<string>();
@@ -180,6 +215,14 @@ export async function connectGalleryBridge(
   const maybeSubscribe = (pub: RemoteTrackPublication, participant: RemoteParticipant) => {
     if (!isCameraPub(pub, participant)) return;
     pub.setVideoQuality(VideoQuality.HIGH);
+    recordLifecycle('subscribe_requested', {
+      participantIdentity: participant.identity,
+      trackName: pub.trackName,
+      trackSid: pub.trackSid
+    });
+    console.info(
+      `gallery bridge: camera subscription requested for '${participant.identity}' track='${pub.trackName}' bridge_age_ms=${bridgeAgeMs()}`
+    );
     void pub.setSubscribed(true);
   };
   const addWindowShare = (pub: RemoteTrackPublication, participant: RemoteParticipant) => {
@@ -263,22 +306,50 @@ export async function connectGalleryBridge(
       } catch {
         report = undefined;
       }
-      const framesDecoded = framesDecodedFromStatsReport(report);
+      const receiveStats = cameraReceiveStatsFromStatsReport(report);
+      const pathStats = cameraPathStatsFromStatsReport(report);
+      const framesDecoded = receiveStats?.framesDecoded ?? null;
+      // Prefer the publication SID recorded at subscription time: it is the
+      // authoritative identity of the current publication, whereas a stale
+      // `RemoteTrack.sid` can lag across a handoff.
+      const trackSid = cameraTrackSids.get(identity) ?? track.sid ?? undefined;
       const previous = freezeStates.get(identity);
       const next = nextCameraFreezeState(previous, framesDecoded, now);
       freezeStates.set(identity, next);
       const decodeHealth = nextCameraDecodeHealthState(
         decodeHealthStates.get(identity),
         framesDecoded,
-        now
+        now,
+        undefined,
+        trackSid
       );
       decodeHealthStates.set(identity, decodeHealth.state);
       const stale = isCameraFrameStale(next, now);
-      if (decodeHealth.health) {
+      if (
+        framesDecoded !== null &&
+        framesDecoded > 0 &&
+        !firstDecodedCameras.has(identity)
+      ) {
+        firstDecodedCameras.add(identity);
+        // The first decoded frame is the boundary the periodic interval cannot
+        // report on its own: it proves media actually reached the decoder, not
+        // merely that a publication was accepted.
+        recordLifecycle('first_decode', {
+          participantIdentity: identity,
+          trackName: cameraTrackNames.get(identity) ?? null,
+          trackSid: trackSid ?? null,
+          detail: `frames_decoded=${framesDecoded}`
+        });
         console.info(
+          `gallery bridge: first camera decode for '${identity}' frames_decoded=${framesDecoded} bridge_age_ms=${bridgeAgeMs()}`
+        );
+      }
+      if (decodeHealth.health) {
+        console.debug(
           formatCameraDecodeHealth({
             identity,
             ...decodeHealth.health,
+            ...(receiveStats ?? {}),
             gapSinceLastFrameMs: now - next.lastProgressAt
           })
         );
@@ -297,6 +368,85 @@ export async function connectGalleryBridge(
             stallCause: signal.stallCause
           }).catch(() => {});
         }
+        // One durable, correlated receiver interval per emitted sample, even
+        // when the health bucket is unchanged. This is the webview's only
+        // durable decode/render/presentation boundary, and it is sent through
+        // the observational command so it can never mutate stream state.
+        const diagnosticTrackSid = trackSid ?? 'unknown';
+        const trackName = cameraTrackNames.get(identity) ?? diagnosticTrackSid;
+        const observation = composeCameraReceiveObservation(
+          signal,
+          cameraStreamPaused(identity),
+          stale
+        );
+        const presentation = takeCameraPresentationSnapshot(identity);
+        void invoke(COMMANDS.recordCameraReceiverInterval, {
+          interval: {
+            participantIdentity: identity,
+            trackName,
+            trackSid: diagnosticTrackSid,
+            route: 'gallery-webview',
+            intervalSequence: decodeHealth.health.intervalSequence,
+            intervalMs: decodeHealth.health.intervalMs,
+            framesDecoded: decodeHealth.health.framesDecoded,
+            decodedFps: decodeHealth.health.decodedFps,
+            decodedWidth: receiveStats?.decodedWidth ?? null,
+            decodedHeight: receiveStats?.decodedHeight ?? null,
+            framesReceived: receiveStats?.framesReceived ?? null,
+            framesRendered: receiveStats?.framesRendered ?? null,
+            framesDropped: receiveStats?.framesDropped ?? null,
+            freezeCount: receiveStats?.freezeCount ?? null,
+            totalFreezesDurationMs: receiveStats?.totalFreezesDurationMs ?? null,
+            bytesReceived: receiveStats?.bytesReceived ?? null,
+            packetsReceived: receiveStats?.packetsReceived ?? null,
+            packetsLost: receiveStats?.packetsLost ?? null,
+            packetsDiscarded: receiveStats?.packetsDiscarded ?? null,
+            retransmittedPacketsReceived: receiveStats?.retransmittedPacketsReceived ?? null,
+            keyFramesDecoded: receiveStats?.keyFramesDecoded ?? null,
+            nackCount: receiveStats?.nackCount ?? null,
+            pliCount: receiveStats?.pliCount ?? null,
+            firCount: receiveStats?.firCount ?? null,
+            jitterMs: receiveStats?.jitterMs ?? null,
+            jitterBufferDelayMs: receiveStats?.jitterBufferDelayMs ?? null,
+            jitterBufferEmittedCount: receiveStats?.jitterBufferEmittedCount ?? null,
+            totalDecodeTimeMs: receiveStats?.totalDecodeTimeMs ?? null,
+            lossPct: receiveStats?.lossPct ?? null,
+            decoderImplementation: receiveStats?.decoderImplementation ?? null,
+            presentedFrames: presentation?.presentedFrames ?? null,
+            presentedFps: presentation?.presentedFps ?? null,
+            presentationProbeStarts: presentation?.probeStarts ?? null,
+            presentationRvfcAvailable: presentation?.rvfcAvailable ?? null,
+            presentationReadyState: presentation?.readyState ?? null,
+            presentationPaused: presentation?.paused ?? null,
+            presentationHidden: presentation?.hidden ?? null,
+            presentationObserving: presentation?.observing ?? null,
+            presentationGapCount100Ms: presentation?.gapCount100Ms ?? null,
+            presentationGapCount250Ms: presentation?.gapCount250Ms ?? null,
+            presentationMaxGapMs: presentation?.maxGapMs ?? null,
+            presentationExcessGapMs: presentation?.excessGapMs ?? null,
+            presentationCurrentGapMs: presentation?.currentGapMs ?? null,
+            pathProtocol: pathStats?.protocol ?? null,
+            pathLocalCandidateType: pathStats?.localCandidateType ?? null,
+            pathRemoteCandidateType: pathStats?.remoteCandidateType ?? null,
+            pathRelayProtocol: pathStats?.relayProtocol ?? null,
+            pathSelectedPairChanges: pathStats?.selectedPairChanges ?? null,
+            pathRoundTripTimeMs: pathStats?.roundTripTimeMs ?? null,
+            pathAvailableIncomingKbps: pathStats?.availableIncomingKbps ?? null,
+            streamState: observation.streamState,
+            stallCause: observation.stallCause ?? 'not_applicable',
+            gapSinceLastFrameMs: now - next.lastProgressAt
+          }
+        }).catch(() => {
+          // A rejected invoke here is exactly the silent gap that made the
+          // receiver side unobservable: never swallow it again. The detail is
+          // a closed literal, so no rejection text reaches the log.
+          recordLifecycle('interval_failed', {
+            participantIdentity: identity,
+            trackName,
+            trackSid: diagnosticTrackSid,
+            detail: 'invoke_rejected'
+          });
+        });
       }
 
       const wasStale = staleCameras.has(identity);
@@ -310,7 +460,7 @@ export async function connectGalleryBridge(
       }
       void invoke(COMMANDS.recordVideoStreamState, {
         participantIdentity: identity,
-        trackName: track.sid ?? '',
+        trackName: cameraTrackNames.get(identity) ?? cameraTrackSids.get(identity) ?? '',
         state: stale ? 'stalled' : 'active',
         source: 'gallery-bridge-freeze-watchdog'
       }).catch(() => {});
@@ -334,6 +484,14 @@ export async function connectGalleryBridge(
     (track: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
       if (!isCameraPub(pub, p)) return;
       pub.setVideoQuality(VideoQuality.HIGH);
+      recordLifecycle('subscribed', {
+        participantIdentity: p.identity,
+        trackName: pub.trackName,
+        trackSid: pub.trackSid
+      });
+      console.info(
+        `gallery bridge: camera subscribed for '${p.identity}' track='${pub.trackName}' bridge_age_ms=${bridgeAgeMs()}`
+      );
       setWeakConnection(pub, p, publicationPaused(pub));
       cameras.set(p.identity, {
         identity: p.identity,
@@ -342,6 +500,8 @@ export async function connectGalleryBridge(
         stream: new MediaStream([track.mediaStreamTrack])
       });
       cameraTracks.set(p.identity, track);
+      cameraTrackNames.set(p.identity, pub.trackName);
+      cameraTrackSids.set(p.identity, pub.trackSid);
       freezeStates.delete(p.identity);
       decodeHealthStates.delete(p.identity);
       clearStaleCamera(p.identity);
@@ -356,6 +516,9 @@ export async function connectGalleryBridge(
   };
   const clearFreezeWatchdogState = (identity: string) => {
     cameraTracks.delete(identity);
+    cameraTrackNames.delete(identity);
+    cameraTrackSids.delete(identity);
+    firstDecodedCameras.delete(identity);
     freezeStates.delete(identity);
     decodeHealthStates.delete(identity);
     clearStaleCamera(identity);
@@ -364,6 +527,12 @@ export async function connectGalleryBridge(
     RoomEvent.TrackUnsubscribed,
     (_t: RemoteTrack, pub: RemoteTrackPublication, p: RemoteParticipant) => {
       if (isCameraPub(pub, p)) {
+        recordLifecycle('unsubscribed', {
+          participantIdentity: p.identity,
+          trackName: cameraTrackNames.get(p.identity) ?? null,
+          trackSid: cameraTrackSids.get(p.identity) ?? null,
+          detail: 'track_unsubscribed'
+        });
         drop(p.identity);
         setWeakConnection(pub, p, false);
         clearFreezeWatchdogState(p.identity);
@@ -378,6 +547,12 @@ export async function connectGalleryBridge(
   );
   room.on(RoomEvent.TrackUnpublished, (pub: RemoteTrackPublication, p: RemoteParticipant) => {
     if (isCameraPub(pub, p)) {
+      recordLifecycle('unsubscribed', {
+        participantIdentity: p.identity,
+        trackName: cameraTrackNames.get(p.identity) ?? null,
+        trackSid: cameraTrackSids.get(p.identity) ?? null,
+        detail: 'track_unpublished'
+      });
       drop(p.identity);
       setWeakConnection(pub, p, false);
       clearFreezeWatchdogState(p.identity);
@@ -393,6 +568,9 @@ export async function connectGalleryBridge(
     emitSignals();
   });
   room.on(RoomEvent.Disconnected, () => {
+    recordLifecycle('bridge_disconnected', {
+      detail: `cameras=${cameras.size} failures=${lifecycle.failures()}`
+    });
     if (cameras.size > 0) {
       cameras.clear();
       emit();
@@ -410,6 +588,10 @@ export async function connectGalleryBridge(
       emitSignals();
     }
     cameraTracks.clear();
+    cameraTrackNames.clear();
+    cameraTrackSids.clear();
+    firstDecodedCameras.clear();
+    clearAllCameraPresentations();
     freezeStates.clear();
     decodeHealthStates.clear();
     onDisconnected?.();
@@ -417,7 +599,18 @@ export async function connectGalleryBridge(
 
   // autoSubscribe OFF: everything except petal-camera-* video (audio, window
   // shares) must never be pulled into the webview -- see module doc.
+  console.info('gallery bridge: connecting hidden receiver');
+  recordLifecycle('bridge_connecting');
   await room.connect(config.url, config.token, { autoSubscribe: false });
+  // Unconditional proof that the hidden receiver actually joined. If this line
+  // is the LAST receiver record, the subscription path is the broken boundary
+  // -- not the SFU, not the sender, and not the decoder.
+  recordLifecycle('bridge_connected', {
+    detail: `remote_participants=${room.remoteParticipants.size}`
+  });
+  console.info(
+    `gallery bridge: connected hidden receiver remote_participants=${room.remoteParticipants.size}`
+  );
   streamStatePoll = setInterval(syncStreamStates, 1000);
   freezeWatchdogPoll = setInterval(() => void checkCameraFreezeWatchdog(), FREEZE_WATCHDOG_POLL_MS);
 

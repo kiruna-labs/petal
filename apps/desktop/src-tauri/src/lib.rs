@@ -1082,6 +1082,8 @@ pub fn run() {
             diagnostics::get_event_journal,
             diagnostics::set_cockpit_open,
             diagnostics::record_video_stream_state,
+            diagnostics::record_camera_receiver_interval,
+            diagnostics::record_camera_receiver_lifecycle,
             logging::export_logs,
             logging::log_updater_event,
             logging::set_sentry_enabled,
@@ -1807,6 +1809,8 @@ pub fn run() {
             diagnostics::get_event_journal,
             diagnostics::set_cockpit_open,
             diagnostics::record_video_stream_state,
+            diagnostics::record_camera_receiver_interval,
+            diagnostics::record_camera_receiver_lifecycle,
             // Cross-platform commands: Export logs (archive + redaction are
             // neutral; the reveal uses Explorer) and the updater (plugin API;
             // on Windows the guard only checks the archive is a PE at all --

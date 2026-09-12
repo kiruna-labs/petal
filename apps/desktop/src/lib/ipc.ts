@@ -128,6 +128,8 @@ export const COMMANDS = {
   toggleWindowPickerWindow: 'toggle_window_picker_window',
   quitApp: 'quit_app',
   recordVideoStreamState: 'record_video_stream_state',
+  recordCameraReceiverInterval: 'record_camera_receiver_interval',
+  recordCameraReceiverLifecycle: 'record_camera_receiver_lifecycle',
   recordCameraReceiveHealth: 'record_camera_receive_health',
   remoteControlAllowed: 'remote_control_allowed',
   remoteControlAnswerConsent: 'remote_control_answer_consent',
@@ -1565,6 +1567,80 @@ export interface CommandArgs {
     trackName: string;
     state: string;
     source: string;
+  };
+  /** Observational only: one durable local-log receiver interval. Carries no
+   * identity beyond the track it describes and never changes stream state. */
+  [COMMANDS.recordCameraReceiverInterval]: {
+    interval: {
+      participantIdentity: string;
+      trackName: string;
+      trackSid: string;
+      route: string;
+      intervalSequence: number;
+      intervalMs: number;
+      framesDecoded: number | null;
+      decodedFps: number | null;
+      decodedWidth: number | null;
+      decodedHeight: number | null;
+      framesReceived: number | null;
+      framesRendered: number | null;
+      framesDropped: number | null;
+      freezeCount: number | null;
+      totalFreezesDurationMs: number | null;
+      bytesReceived: number | null;
+      packetsReceived: number | null;
+      packetsLost: number | null;
+      packetsDiscarded: number | null;
+      retransmittedPacketsReceived: number | null;
+      keyFramesDecoded: number | null;
+      nackCount: number | null;
+      pliCount: number | null;
+      firCount: number | null;
+      jitterMs: number | null;
+      jitterBufferDelayMs: number | null;
+      jitterBufferEmittedCount: number | null;
+      totalDecodeTimeMs: number | null;
+      lossPct: number | null;
+      decoderImplementation: string | null;
+      presentedFrames: number | null;
+      presentedFps: number | null;
+      presentationProbeStarts: number | null;
+      presentationRvfcAvailable: boolean | null;
+      presentationReadyState: number | null;
+      presentationPaused: boolean | null;
+      presentationHidden: boolean | null;
+      presentationObserving: boolean | null;
+      presentationGapCount100Ms: number | null;
+      presentationGapCount250Ms: number | null;
+      presentationMaxGapMs: number | null;
+      presentationExcessGapMs: number | null;
+      presentationCurrentGapMs: number | null;
+      pathProtocol: string | null;
+      pathLocalCandidateType: string | null;
+      pathRemoteCandidateType: string | null;
+      pathRelayProtocol: string | null;
+      pathSelectedPairChanges: number | null;
+      pathRoundTripTimeMs: number | null;
+      pathAvailableIncomingKbps: number | null;
+      streamState: string;
+      stallCause: string;
+      gapSinceLastFrameMs: number;
+    };
+  };
+  /** Observational only: one durable local-log receiver lifecycle edge from the
+   * gallery webview. Same contract as the interval record above -- it never
+   * changes stream state, and it exists so an ABSENT interval is attributable
+   * to a specific boundary instead of being unobservable. */
+  [COMMANDS.recordCameraReceiverLifecycle]: {
+    lifecycle: {
+      phase: string;
+      participantIdentity: string | null;
+      trackName: string | null;
+      trackSid: string | null;
+      route: string;
+      detail: string | null;
+      bridgeAgeMs: number | null;
+    };
   };
   [COMMANDS.recordCameraReceiveHealth]: {
     cadence: 'reduced' | 'severe' | 'stalled';
