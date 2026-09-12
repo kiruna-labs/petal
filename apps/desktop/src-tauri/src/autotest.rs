@@ -603,6 +603,21 @@ mod command_server {
             title_contains: Option<String>,
             pid: Option<i32>,
         },
+        /// #76 runbook drivers: the meeting camera and the Settings window,
+        /// so the preview-vs-publish contention measurement is one script
+        /// (`scripts/measure-camera-intent.mjs`) instead of a person at the
+        /// keyboard. Each goes through the SAME entry point the UI uses
+        /// (`camera_session::start_camera_publish_intent` and friends), so
+        /// the log lines the analyzer reads are the production ones.
+        CameraOn,
+        CameraOff,
+        CameraState,
+        ListCameraDevices,
+        SetCameraDevice {
+            device_id: String,
+        },
+        OpenSettings,
+        CloseSettings,
         AccessibilityStatus,
         /// Test-cockpit walking-skeleton metric readback (#254): the existing
         /// `DiagnosticsState::snapshot()`/`journal()` (already computed by the
@@ -900,6 +915,73 @@ mod command_server {
                     value
                 })
             }),
+            Command::CameraOn => {
+                let app = app.clone();
+                tauri::async_runtime::block_on(async move {
+                    let preferences =
+                        app.state::<crate::transport::camera::CameraDevicePreferences>();
+                    let session = app.state::<crate::session::SessionState>();
+                    crate::camera_session::start_camera_publish_intent(
+                        &app,
+                        preferences.inner(),
+                        session.inner(),
+                    )
+                    .await
+                    .map(|result| serde_json::json!({ "published": result.published }))
+                })
+            }
+            Command::CameraOff => {
+                let app = app.clone();
+                tauri::async_runtime::block_on(async move {
+                    let session = app.state::<crate::session::SessionState>();
+                    crate::camera_session::stop_camera_publish_intent(&app, session.inner())
+                        .await;
+                    Ok(serde_json::json!({ "stopped": true }))
+                })
+            }
+            Command::CameraState => {
+                let session = app.state::<crate::session::SessionState>();
+                Ok(serde_json::json!({
+                    "publishing": session.camera_publishing(),
+                    "intended": session.camera_intent(),
+                }))
+            }
+            Command::ListCameraDevices => crate::transport::camera::list_devices()
+                .map(|devices| serde_json::json!({ "devices": devices }))
+                .map_err(|e| e.to_string()),
+            Command::SetCameraDevice { device_id } => {
+                let app = app.clone();
+                tauri::async_runtime::block_on(async move {
+                    let preferences =
+                        app.state::<crate::transport::camera::CameraDevicePreferences>();
+                    let session = app.state::<crate::session::SessionState>();
+                    crate::camera_session::apply_camera_device(
+                        &app,
+                        device_id,
+                        preferences.inner(),
+                        session.inner(),
+                    )
+                    .await
+                    .and_then(|applied| serde_json::to_value(applied).map_err(|e| e.to_string()))
+                })
+            }
+            Command::OpenSettings => {
+                let app = app.clone();
+                tauri::async_runtime::block_on(async move {
+                    crate::settings_window::open_settings_window(app.clone())
+                        .await
+                        .map(|_| serde_json::json!({ "opened": true }))
+                })
+            }
+            Command::CloseSettings => {
+                match app.get_webview_window(crate::settings_window::SETTINGS_WINDOW_LABEL) {
+                    Some(window) => window
+                        .close()
+                        .map(|_| serde_json::json!({ "closed": true }))
+                        .map_err(|e| e.to_string()),
+                    None => Ok(serde_json::json!({ "closed": false })),
+                }
+            }
             Command::AccessibilityStatus => Ok(serde_json::json!({
                 "trusted": accessibility_trusted()
             })),
@@ -1142,6 +1224,27 @@ mod command_server {
                 serde_json::from_str(r#"{"cmd":"remote-control-status","window_id":17}"#)
                     .unwrap();
             assert!(matches!(status, Command::RemoteControlStatus { window_id: Some(17) }));
+        }
+
+        #[test]
+        fn issue76_runbook_commands_parse_and_the_device_switch_needs_an_id() {
+            for (wire, expected) in [
+                ("camera_on", "CameraOn"),
+                ("camera_off", "CameraOff"),
+                ("camera_state", "CameraState"),
+                ("list_camera_devices", "ListCameraDevices"),
+                ("open_settings", "OpenSettings"),
+                ("close_settings", "CloseSettings"),
+            ] {
+                let command: Command =
+                    serde_json::from_str(&format!(r#"{{"cmd":"{wire}"}}"#)).unwrap();
+                assert_eq!(format!("{command:?}"), expected, "{wire}");
+            }
+            let switch: Command =
+                serde_json::from_str(r#"{"cmd":"set_camera_device","device_id":"cam-2"}"#)
+                    .unwrap();
+            assert!(matches!(switch, Command::SetCameraDevice { device_id } if device_id == "cam-2"));
+            assert!(serde_json::from_str::<Command>(r#"{"cmd":"set_camera_device"}"#).is_err());
         }
 
         #[test]

@@ -692,6 +692,14 @@ pub(crate) fn emit_camera_publish_state(
 /// immediate publish attempt runs. That attempt can still lose the race --
 /// the bounded self-heal loop (`CAMERA_HEAL_RETRY_BACKOFF`) is what makes it
 /// converge, and this event is what makes the preview yield in time for it.
+///
+/// MEASURED MARGIN: not yet taken on real hardware (#76). The whole timeline
+/// is in `petal.log` -- this line, the preview's own
+/// `settings: camera preview released` (see [`log_camera_preview_state`]),
+/// and the `start_camera_publish` outcome -- and
+/// `apps/desktop/scripts/measure-camera-intent.mjs` drives the runbook and
+/// reads it back. Replace this paragraph with the numbers it prints once a
+/// run on a Mac with a camera has been done.
 pub(crate) fn emit_camera_intent(app: &tauri::AppHandle, intended: bool) {
     // Timestamped so one live run measures the margin that matters (#76): the
     // gap between this line and the `start_camera_publish` that follows is the
@@ -703,6 +711,46 @@ pub(crate) fn emit_camera_intent(app: &tauri::AppHandle, intended: bool) {
         intended,
     }) {
         log::warn!("session: failed to emit camera-intent-changed: {error}");
+    }
+}
+
+/// The Settings window's camera PREVIEW, as seen from the native log (#76).
+///
+/// The preview holds the device from the webview (`getUserMedia`), which no
+/// native line can see, so a `camera-intent` episode alone cannot say
+/// whether the publish was contended at all -- an uncontended win looks
+/// identical to a contended one. Settings reports its own edges here:
+///
+/// ```text
+/// settings: camera preview acquired
+/// settings: camera preview released reason=<slug>
+/// settings: camera preview failed reason=<DOMException name>
+/// ```
+///
+/// `scripts/analyze-field-log.mjs` reads exactly these three shapes to label
+/// each episode contended or not, so the text is fixed and the free-form
+/// `reason` is reduced to a slug: webview-supplied text must never be able to
+/// forge a second log line or carry a device label.
+#[tauri::command]
+pub fn log_camera_preview_state(state: String, reason: Option<String>) {
+    log::info!("{}", camera_preview_log_line(&state, reason.as_deref()));
+}
+
+pub(crate) fn camera_preview_log_line(state: &str, reason: Option<&str>) -> String {
+    let phase = match state {
+        "acquired" | "released" | "failed" => state,
+        _ => "unknown",
+    };
+    let reason: String = reason
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(48)
+        .collect();
+    if reason.is_empty() {
+        format!("settings: camera preview {phase}")
+    } else {
+        format!("settings: camera preview {phase} reason={reason}")
     }
 }
 
@@ -1028,6 +1076,18 @@ pub async fn set_camera_device(
     preferences: tauri::State<'_, CameraDevicePreferences>,
     state: tauri::State<'_, crate::session::SessionState>,
 ) -> Result<crate::transport::camera::AppliedCameraDevice, String> {
+    apply_camera_device(&app, device_id, preferences.inner(), state.inner()).await
+}
+
+/// [`set_camera_device`] without the Tauri command envelope, so the #76
+/// runbook driver (`autotest.rs`'s `set_camera_device` socket command) goes
+/// through exactly the path the Settings picker does.
+pub(crate) async fn apply_camera_device(
+    app: &tauri::AppHandle,
+    device_id: String,
+    preferences: &CameraDevicePreferences,
+    state: &crate::session::SessionState,
+) -> Result<crate::transport::camera::AppliedCameraDevice, String> {
     let _camera_transaction = state.lock_camera_control().await;
     let devices = crate::transport::camera::list_devices().map_err(|error| error.to_string())?;
     if !device_id.is_empty() && !devices.iter().any(|device| device.id == device_id) {
@@ -1069,10 +1129,10 @@ pub async fn set_camera_device(
         });
     }
 
-    stop_camera_publish(&app, &state).await;
+    stop_camera_publish(app, state).await;
     match start_camera_publish_with_device(
-        &app,
-        &state,
+        app,
+        state,
         preferences.preferred_device(),
         preferences.preferred_mode(),
     )
@@ -1096,8 +1156,8 @@ pub async fn set_camera_device(
                 crate::analytics::DeviceChange::Failed,
             );
             state.set_camera_intent(false);
-            emit_camera_intent(&app, false);
-            emit_camera_publish_state(&app, false, Some(error.clone()));
+            emit_camera_intent(app, false);
+            emit_camera_publish_state(app, false, Some(error.clone()));
             Ok(crate::transport::camera::AppliedCameraDevice {
                 applied: false,
                 in_room: true,
@@ -1119,14 +1179,26 @@ pub async fn start_camera_publish_command(
     preferences: tauri::State<'_, CameraDevicePreferences>,
     state: tauri::State<'_, crate::session::SessionState>,
 ) -> Result<StartCameraPublishResult, String> {
+    start_camera_publish_intent(&app, preferences.inner(), state.inner()).await
+}
+
+/// The body of [`start_camera_publish_command`]: intent first, then the
+/// device. Shared with the #76 runbook driver (`autotest.rs`'s `camera_on`
+/// socket command) so the measurement exercises the real ON path and not a
+/// test-only copy of it.
+pub(crate) async fn start_camera_publish_intent(
+    app: &tauri::AppHandle,
+    preferences: &CameraDevicePreferences,
+    state: &crate::session::SessionState,
+) -> Result<StartCameraPublishResult, String> {
     let _control = state.lock_camera_control().await;
     state.set_camera_intent(true);
     // Announce the intent BEFORE acquiring: the Settings window's preview
     // holds the same physical device and has to let go for this to succeed.
-    emit_camera_intent(&app, true);
+    emit_camera_intent(app, true);
     match start_camera_publish_with_device(
-        &app,
-        &state,
+        app,
+        state,
         preferences.preferred_device(),
         preferences.preferred_mode(),
     )
@@ -1137,7 +1209,7 @@ pub async fn start_camera_publish_command(
             // Not retryable — there is no room to publish into. Intent is
             // cleared so a later join doesn't surprise-start the camera.
             state.set_camera_intent(false);
-            emit_camera_intent(&app, false);
+            emit_camera_intent(app, false);
             Err(error)
         }
         Err(error) => {
@@ -1166,10 +1238,19 @@ pub async fn stop_camera_publish_command(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::session::SessionState>,
 ) -> Result<(), ()> {
+    stop_camera_publish_intent(&app, state.inner()).await;
+    Ok(())
+}
+
+/// The body of [`stop_camera_publish_command`]; shared with the #76 runbook
+/// driver (`autotest.rs`'s `camera_off` socket command).
+pub(crate) async fn stop_camera_publish_intent(
+    app: &tauri::AppHandle,
+    state: &crate::session::SessionState,
+) {
     let _control = state.lock_camera_control().await;
     state.set_camera_intent(false);
-    stop_camera_publish(&app, &state).await;
-    Ok(())
+    stop_camera_publish(app, state).await;
 }
 
 /// Real camera publish/intent snapshot — lets a (re)mounting UI surface
@@ -1189,6 +1270,27 @@ pub fn camera_publish_state(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn camera_preview_log_line_is_fixed_text_with_a_slug_reason() {
+        assert_eq!(
+            camera_preview_log_line("acquired", None),
+            "settings: camera preview acquired"
+        );
+        assert_eq!(
+            camera_preview_log_line("released", Some("meeting-camera")),
+            "settings: camera preview released reason=meeting-camera"
+        );
+        // Webview text cannot forge a second line or smuggle a device label.
+        assert_eq!(
+            camera_preview_log_line("failed", Some("NotReadableError\nsession: x 'FaceTime HD'")),
+            "settings: camera preview failed reason=NotReadableErrorsessionxFaceTimeHD"
+        );
+        assert_eq!(
+            camera_preview_log_line("whatever", Some("")),
+            "settings: camera preview unknown"
+        );
+    }
 
     /// Fake capture for `await_first_frame_or_release`: records whether the
     /// release path actually ran (the property the 2026-07-30 B2 fix must

@@ -159,6 +159,86 @@ await run('#76 fixture: first attempt wins, with ON / OFF / device-switch split 
   assert.match(report, /CAVEAT: nothing in a log says whether the Settings camera preview/);
 });
 
+await run('#76 fixture: the Settings preview lines label each episode contended or not', async () => {
+  const analysis = await analyzeFile(fixture('camera-preview-contended.log'));
+  const summary = cameraVerdict(analysis);
+  assert.equal(summary.verdict, 'first-attempt-wins');
+  assert.equal(analysis.previewLineCount, 6);
+
+  const kinds = analysis.cameraEpisodes.map((episode) => episode.kind);
+  assert.deepEqual(kinds, ['on', 'off', 'on', 'device-switch', 'off', 'on']);
+
+  // ON with the preview live: the preview let go 34 ms after the intent, which
+  // was AFTER the native side had already begun acquiring (begin at +2 ms).
+  const [first, off, second, swap, secondOff, uncontended] = analysis.cameraEpisodes;
+  assert.equal(first.contended, true);
+  assert.equal(first.previewReleaseMs, 34);
+  assert.equal(first.previewReleasedBeforeBegin, false);
+  assert.equal(first.verdict, 'first-attempt-wins');
+  // ON where the preview let go 1 ms after the intent, before begin (+6 ms).
+  assert.equal(second.contended, true);
+  assert.equal(second.previewReleaseMs, 1);
+  assert.equal(second.previewReleasedBeforeBegin, true);
+  // OFF: how long the preview took to come back once the device was free.
+  assert.equal(off.previewReacquireMs, 812);
+  assert.equal(secondOff.previewReacquireMs, 661);
+  // A live device switch runs with the preview already off; what matters is
+  // that it did not grab the device in the stop -> start gap.
+  assert.equal(swap.contended, false);
+  assert.equal(swap.previewReleaseMs, null);
+  // After Settings closed, a publish is uncontended -- and says so, rather
+  // than being counted as evidence about the preview.
+  assert.equal(uncontended.contended, false);
+
+  assert.equal(summary.contended.length, 2);
+  assert.equal(summary.uncontended.length, 2);
+  assert.equal(summary.unknownContention.length, 0);
+
+  const report = formatReport(analysis);
+  assert.match(report, /VERDICT: first-attempt-wins/);
+  assert.match(report, /CONTENDED: 2 of 4 measured episode\(s\)/);
+  assert.match(report, /1 ms\.\.34 ms after the intent; 1 of 2 released before the publish began/);
+  assert.match(report, /live at intent; released 34 ms later \(after the publish began\)/);
+  assert.match(report, /not holding the device \(it did not grab it in the switch gap\)/);
+  assert.match(report, /preview came back in       812 ms/);
+  assert.doesNotMatch(report, /CAVEAT: nothing in a log says/);
+  // The reason slug never reaches the output.
+  assert.doesNotMatch(report, /meeting-camera|teardown/);
+
+  const json = toJson(analysis);
+  assert.equal(json.camera.previewLines, 6);
+  assert.equal(json.camera.episodes[0].contended, true);
+});
+
+await run('#76: an uncontended-only run is named as such, not as evidence about the preview', () => {
+  const analysis = analyzeLines([
+    '2026-09-12 20:00:00.145 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.26 commit=0123abcd build_date=2026-09-12 bundle_id=com.petal.app',
+    '2026-09-12 20:00:06.000 [INFO] [desktop_lib::camera_session] settings: camera preview acquired',
+    '2026-09-12 20:00:07.000 [INFO] [desktop_lib::camera_session] settings: camera preview released reason=teardown',
+    '2026-09-12 20:00:12.480 [INFO] [desktop_lib::camera_session] session: camera-intent intended=true',
+    "2026-09-12 20:00:12.482 [INFO] [desktop_lib::camera_session] session: start_camera_publish begin (identity '<redacted:i1>')",
+    '2026-09-12 20:00:12.892 [INFO] [desktop_lib::camera_session] session: start_camera_publish succeeded (1280x720)',
+  ]);
+  const summary = cameraVerdict(analysis);
+  assert.equal(summary.verdict, 'first-attempt-wins');
+  assert.equal(summary.uncontended.length, 1);
+  assert.match(formatReport(analysis), /NOT THE RUNBOOK: the Settings preview was not holding the device/);
+});
+
+await run('#76: a preview line from before a restart never labels an episode after it', () => {
+  const analysis = analyzeLines([
+    '2026-09-12 20:00:00.145 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.26 commit=0123abcd build_date=2026-09-12 bundle_id=com.petal.app',
+    '2026-09-12 20:00:06.000 [INFO] [desktop_lib::camera_session] settings: camera preview acquired',
+    '2026-09-12 20:05:00.145 [INFO] [desktop_lib] petal: startup build identity -- version=0.9.26 commit=0123abcd build_date=2026-09-12 bundle_id=com.petal.app',
+    '2026-09-12 20:05:12.480 [INFO] [desktop_lib::camera_session] session: camera-intent intended=true',
+    "2026-09-12 20:05:12.482 [INFO] [desktop_lib::camera_session] session: start_camera_publish begin (identity '<redacted:i1>')",
+    '2026-09-12 20:05:12.892 [INFO] [desktop_lib::camera_session] session: start_camera_publish succeeded (1280x720)',
+  ]);
+  const [episode] = analysis.cameraEpisodes;
+  assert.equal(episode.contended, null, 'the earlier run says nothing about this one');
+  assert.match(formatReport(analysis), /unknown \(no preview line in this run\)/);
+});
+
 await run('#76 fixture: a self-heal retry flips the verdict to retry-needed', async () => {
   const analysis = await analyzeFile(fixture('camera-retry-needed.log'));
   const summary = cameraVerdict(analysis);

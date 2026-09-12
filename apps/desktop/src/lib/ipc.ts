@@ -184,6 +184,7 @@ export const COMMANDS = {
   startCameraPublish: 'start_camera_publish_command',
   stopCameraPublish: 'stop_camera_publish_command',
   cameraPublishState: 'camera_publish_state',
+  logCameraPreviewState: 'log_camera_preview_state',
   cancelTestCockpit: 'cancel_test_cockpit',
   toggleMenubarMic: 'toggle_menubar_mic',
   toggleWindowShare: 'toggle_window_share',
@@ -1591,6 +1592,12 @@ export interface CommandArgs {
   [COMMANDS.setAudioDevices]: { recordingId: string | null; playoutId: string | null };
   [COMMANDS.listCameraModes]: { preferredDeviceId: string | null };
   [COMMANDS.setCameraDevice]: { deviceId: string };
+  /** Settings' camera-preview edge, written to petal.log so a #76 camera-intent
+   *  episode can be labelled contended or not (`camera_session::log_camera_preview_state`). */
+  [COMMANDS.logCameraPreviewState]: {
+    state: 'acquired' | 'released' | 'failed';
+    reason: string | null;
+  };
   [COMMANDS.setCameraPrefs]: {
     width: number | null;
     height: number | null;
@@ -1707,6 +1714,7 @@ export interface CommandReturns {
   [COMMANDS.pluginPublishData]: void;
   [COMMANDS.pluginSetState]: void;
   [COMMANDS.pluginHostLog]: void;
+  [COMMANDS.logCameraPreviewState]: void;
   [COMMANDS.pluginRegistryStatus]: { configured: boolean; url: string | null };
   [COMMANDS.pluginRegistryIndex]: PluginRegistryVerifiedIndex;
   [COMMANDS.pluginInstallFromRegistry]: PluginInstalledRecord;
