@@ -61,7 +61,8 @@ class FakePetal {
     this.commands.push(command.cmd);
     switch (command.cmd) {
       case 'dump_state':
-        return { current_room: this.room };
+        // camelCase, as serde renames `DumpState` on the wire.
+        return { currentRoom: this.room };
       case 'join':
         this.room = 'room-joined';
         return { room: this.room };

@@ -249,7 +249,7 @@ async function runbook(options) {
           'PETAL_AUTOTEST_SOCK set to that path first.'
       );
     }
-    if (!state.current_room) {
+    if (!state.currentRoom) {
       if (!options.room) {
         throw new Error(
           'the app is not in a room. Launch with PETAL_AUTOTEST_ROOM, or pass --room <qa-key>.'
@@ -261,7 +261,7 @@ async function runbook(options) {
       state = await pollUntil(
         'join',
         () => socket.ok({ cmd: 'dump_state' }),
-        (s) => Boolean(s.current_room),
+        (s) => Boolean(s.currentRoom),
         30_000
       );
     }
