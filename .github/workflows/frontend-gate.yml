@@ -64,6 +64,7 @@ jobs:
           apps/desktop/tests/**
           apps/desktop/scripts/**
           apps/desktop/static/**
+          apps/desktop/vendor/**
           apps/desktop/package.json
           apps/desktop/package-lock.json
           apps/desktop/svelte.config.js
