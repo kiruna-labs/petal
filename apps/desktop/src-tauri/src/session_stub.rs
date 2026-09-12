@@ -1094,6 +1094,15 @@ pub fn share_audio_state(
     state: tauri::State<'_, SessionState>,
     window_id: u32,
 ) -> ShareAudioState {
+    share_audio_state_for_state(&state, window_id)
+}
+
+/// Token-addressed audio state for native surfaces that already resolved a
+/// live token from a selector label, so no token crosses into their payloads.
+pub(crate) fn share_audio_state_for_state(
+    state: &SessionState,
+    window_id: u32,
+) -> ShareAudioState {
     windows_share_audio_state_locked(&state.joined.lock_unpoisoned(), window_id)
 }
 
@@ -1236,6 +1245,17 @@ pub async fn set_share_audio_enabled(
     window_id: u32,
     enabled: bool,
 ) -> Result<ShareAudioState, String> {
+    set_share_audio_enabled_for_state(&app, &state, window_id, enabled).await
+}
+
+/// Token-addressed enable/disable shared by the share-owned command and the
+/// label-addressed Petal View command, which resolves the token per action.
+pub(crate) async fn set_share_audio_enabled_for_state(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    window_id: u32,
+    enabled: bool,
+) -> Result<ShareAudioState, String> {
     let generation = state.current_room_generation();
     // Intent is written before serialization so Off immediately invalidates
     // any delayed publication commit for this incarnation.
@@ -1266,7 +1286,7 @@ pub async fn set_share_audio_enabled(
                 }
             });
             let result = windows_share_audio_state_locked(&joined, window_id);
-            let _ = tauri::Emitter::emit(&app, "share-audio-state-changed", result.clone());
+            let _ = tauri::Emitter::emit(app, "share-audio-state-changed", result.clone());
             return Ok(result);
         }
         let source = source.expect("checked eligible active share audio source");
@@ -1309,9 +1329,9 @@ pub async fn set_share_audio_enabled(
             session.media.screen_audio_sources.release(prepared.1)
         }
     };
-    apply_windows_audio_transitions(&app, &state, &prepared.0, &generation, transitions).await;
+    apply_windows_audio_transitions(app, state, &prepared.0, &generation, transitions).await;
     let result = windows_share_audio_state_locked(&state.joined.lock_unpoisoned(), window_id);
-    let _ = tauri::Emitter::emit(&app, "share-audio-state-changed", result.clone());
+    let _ = tauri::Emitter::emit(app, "share-audio-state-changed", result.clone());
     Ok(result)
 }
 

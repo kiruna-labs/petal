@@ -159,7 +159,8 @@ pub(crate) use share::{
     repair_active_share_publications_after_reconnect,
     repair_local_track_publication_after_reconnect,
     repair_screen_audio_publications_after_reconnect, restart_active_shares_after_wake,
-    set_share_priority, start_share_with_system_picker_filter, ReconnectRepairGuard,
+    set_share_audio_enabled_for_state, set_share_priority, share_audio_state_for_state,
+    start_share_with_system_picker_filter, ReconnectRepairGuard,
     SharedWindowScreenStatus, ViewerDemandEvent, ViewerDemandUpdate,
 };
 pub use share::{
