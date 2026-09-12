@@ -1043,6 +1043,13 @@ trait DisplayReconfigurationContext {
     fn active_share_sources(&self) -> Vec<(u32, crate::transport::publisher::SharedSourceKind)>;
     fn update_share_frames(&self, fresh: &[(u32, crate::hover_tab::WindowFrame)]);
     fn stop_missing_share(&self, source_id: u32) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The window's fresh on-screen frame; `None` for an off-screen window
+    /// (hidden, minimized, another Space) as much as for a closed one.
+    fn window_frame(&self, window_id: u32) -> Option<crate::hover_tab::WindowFrame>;
+    /// Whether the window still exists anywhere (#171): the question that
+    /// tells an off-screen window apart from a closed one. Consulted only
+    /// when `window_frame` returned `None`.
+    fn window_exists(&self, window_id: u32) -> bool;
 }
 
 #[cfg(target_os = "macos")]
@@ -1062,6 +1069,21 @@ impl DisplayReconfigurationContext for AppDisplayReconfigurationContext {
     fn update_share_frames(&self, fresh: &[(u32, crate::hover_tab::WindowFrame)]) {
         if let Some(state) = self.app.try_state::<crate::session::SessionState>() {
             state.update_share_frames(fresh);
+        }
+    }
+
+    fn window_frame(&self, window_id: u32) -> Option<crate::hover_tab::WindowFrame> {
+        // #744: route the fresh single-id read through the registry.
+        match crate::window_registry::global() {
+            Some(reg) => reg.frame_fresh(window_id),
+            None => crate::platform::cg::frame_for_window_id(window_id),
+        }
+    }
+
+    fn window_exists(&self, window_id: u32) -> bool {
+        match crate::window_registry::global() {
+            Some(reg) => reg.exists_fresh(window_id),
+            None => crate::platform::cg::window_exists(window_id),
         }
     }
 
@@ -1136,11 +1158,20 @@ async fn handle_display_reconfiguration(
     for (source_id, source_kind) in share_sources {
         let frame = match source_kind {
             crate::transport::publisher::SharedSourceKind::Window => {
-                // #744: route the fresh single-id read through the registry.
-                match crate::window_registry::global() {
-                    Some(reg) => reg.frame_fresh(source_id),
-                    None => crate::platform::cg::frame_for_window_id(source_id),
+                let frame = context.window_frame(source_id);
+                // #171: a missing frame means OFF SCREEN as often as it
+                // means closed -- `frame_for_window_id` is `None` for a
+                // hidden, minimized, or other-Space window by design. Only a
+                // window that no longer exists anywhere is torn down; an
+                // off-screen one keeps its share (and its held last frame)
+                // and simply gets no frame refresh from this pass.
+                if frame.is_none() && context.window_exists(source_id) {
+                    log::info!(
+                        "resilience: shared window {source_id} is off screen after display reconfiguration (hidden, minimized, or on another Space); keeping the share (#171)"
+                    );
+                    continue;
                 }
+                frame
             }
             crate::transport::publisher::SharedSourceKind::DisplayRegion => {
                 crate::region_window::resolve(source_id).map(|source| {
@@ -1776,6 +1807,11 @@ mod tests {
         shares: Vec<(u32, crate::transport::publisher::SharedSourceKind)>,
         updated_frames: Mutex<Vec<(u32, crate::hover_tab::WindowFrame)>>,
         stopped_sources: Mutex<Vec<u32>>,
+        /// On-screen windows and their frames.
+        window_frames: std::collections::HashMap<u32, crate::hover_tab::WindowFrame>,
+        /// Every window that exists anywhere (on screen or not).
+        existing_windows: Vec<u32>,
+        existence_queries: Mutex<Vec<u32>>,
     }
 
     #[cfg(target_os = "macos")]
@@ -1788,6 +1824,29 @@ mod tests {
                 )],
                 updated_frames: Mutex::new(Vec::new()),
                 stopped_sources: Mutex::new(Vec::new()),
+                window_frames: std::collections::HashMap::new(),
+                existing_windows: Vec::new(),
+                existence_queries: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// One shared WINDOW. `on_screen` gives its fresh frame (`None` =
+        /// off screen); `exists` says whether it exists anywhere.
+        fn window(
+            window_id: u32,
+            on_screen: Option<crate::hover_tab::WindowFrame>,
+            exists: bool,
+        ) -> Self {
+            Self {
+                shares: vec![(
+                    window_id,
+                    crate::transport::publisher::SharedSourceKind::Window,
+                )],
+                updated_frames: Mutex::new(Vec::new()),
+                stopped_sources: Mutex::new(Vec::new()),
+                window_frames: on_screen.map(|f| (window_id, f)).into_iter().collect(),
+                existing_windows: if exists { vec![window_id] } else { Vec::new() },
+                existence_queries: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1813,6 +1872,15 @@ mod tests {
             Box::pin(async move {
                 self.stopped_sources.lock_unpoisoned().push(source_id);
             })
+        }
+
+        fn window_frame(&self, window_id: u32) -> Option<crate::hover_tab::WindowFrame> {
+            self.window_frames.get(&window_id).copied()
+        }
+
+        fn window_exists(&self, window_id: u32) -> bool {
+            self.existence_queries.lock_unpoisoned().push(window_id);
+            self.existing_windows.contains(&window_id)
         }
     }
 
@@ -1893,6 +1961,74 @@ mod tests {
             [tagged_source_id],
             "a display absent from the online-display lookup must still take the handler's teardown path"
         );
+    }
+
+    /// #171: a hidden/minimized/other-Space window has no on-screen frame
+    /// but still exists. A display reconfiguration must not stop its share.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn display_reconfiguration_keeps_an_off_screen_window_share_that_still_exists() {
+        let context = FakeDisplayReconfigurationContext::window(4242, None, true);
+        let displays = FakeDisplayFrameLookup::new([]);
+
+        handle_display_reconfiguration(&context, &displays).await;
+
+        assert_eq!(
+            context.existence_queries.lock_unpoisoned().as_slice(),
+            [4242],
+            "a missing frame must be followed by the existence question, not by teardown"
+        );
+        assert!(
+            context.stopped_sources.lock_unpoisoned().is_empty(),
+            "an off-screen window that still exists keeps its share"
+        );
+        assert!(
+            context.updated_frames.lock_unpoisoned().is_empty(),
+            "no frame to refresh for an off-screen window"
+        );
+    }
+
+    /// The other direction of #171's gate: a window that no longer exists
+    /// anywhere still takes the teardown path.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn display_reconfiguration_stops_a_window_share_whose_window_is_gone() {
+        let context = FakeDisplayReconfigurationContext::window(4242, None, false);
+        let displays = FakeDisplayFrameLookup::new([]);
+
+        handle_display_reconfiguration(&context, &displays).await;
+
+        assert_eq!(context.existence_queries.lock_unpoisoned().as_slice(), [4242]);
+        assert_eq!(
+            context.stopped_sources.lock_unpoisoned().as_slice(),
+            [4242],
+            "a window absent everywhere must still be torn down"
+        );
+    }
+
+    /// An on-screen window never pays for the existence query (#171 must
+    /// not add WindowServer cost to the common case) and gets its frame
+    /// refreshed as before.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn display_reconfiguration_refreshes_an_on_screen_window_without_an_existence_query() {
+        let frame = crate::hover_tab::WindowFrame {
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 600,
+        };
+        let context = FakeDisplayReconfigurationContext::window(4242, Some(frame), true);
+        let displays = FakeDisplayFrameLookup::new([]);
+
+        handle_display_reconfiguration(&context, &displays).await;
+
+        assert!(context.existence_queries.lock_unpoisoned().is_empty());
+        assert_eq!(
+            context.updated_frames.lock_unpoisoned().as_slice(),
+            [(4242, frame)]
+        );
+        assert!(context.stopped_sources.lock_unpoisoned().is_empty());
     }
 
     #[tokio::test]
