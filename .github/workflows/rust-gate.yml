@@ -63,6 +63,7 @@ jobs:
           scripts/ci-local.sh
           scripts/gate-paths-changed.sh
           apps/desktop/src-tauri/**
+          apps/desktop/vendor/**
           contracts/**
           backend/**
           PATHS

@@ -100,6 +100,22 @@ class MfH264EncoderImpl : public VideoEncoder {
   // Complete async-MFT teardown (Chromium MFVEA Reset() sequence).
   void TeardownMft();
 
+  // The one rate-control decision for this encoder. Resolved from the codec
+  // mode (plus documented env overrides), then applied in exactly one place, so
+  // that one source's policy can never fall through into the other's.
+  enum class RateControlPolicy {
+    // Set nothing and leave the driver's own mode alone. Screensharing default.
+    DriverDefault,
+    // Minimize QP and ignore the bitrate target. Explicit experiment only.
+    Quality,
+    // Constant bitrate at the target. Realtime-camera default.
+    Cbr,
+    // Bounded VBR: mean at the target, peak at 2x. Camera experiment arm.
+    PeakVbr,
+  };
+  RateControlPolicy ResolveRateControlPolicy(const char** source) const;
+  void ApplyRateControlPolicy(RateControlPolicy policy, const char* source);
+
   Microsoft::WRL::ComPtr<IMFTransform> mft_;
   Microsoft::WRL::ComPtr<IMFMediaEventGenerator> event_generator_;
   Microsoft::WRL::ComPtr<ICodecAPI> codec_api_;
@@ -136,6 +152,14 @@ class MfH264EncoderImpl : public VideoEncoder {
   int height_ = 0;
   int max_framerate_ = 0;
   uint32_t target_bps_ = 0;
+  // VideoCodecMode this encoder was configured for. Screen content and camera
+  // content want opposite rate control, so the codec mode is a real input to
+  // the policy rather than a caller-side detail.
+  VideoCodecMode codec_mode_ = VideoCodecMode::kRealtimeVideo;
+  // Bounded `set_rates` diagnostic cadence: the first call proves the MFT
+  // accepts a mid-stream target change, then one sample per ~60 updates keeps
+  // requested-vs-accepted visible without flooding the log.
+  uint64_t set_rates_calls_ = 0;
 
   // Reused encoded-image scaffolding (only touched on the encoder thread).
   EncodedImage encoded_image_;

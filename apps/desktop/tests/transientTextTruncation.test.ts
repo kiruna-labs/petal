@@ -682,9 +682,17 @@ test('a rejected update archive renders an untruncated "Download installer" reco
         measurement.action.width > 0 && measurement.action.height > 0,
         'the recovery action is not visible'
       );
-      assert.deepEqual(measurement.openedUrls, [
-        `${UPDATE_DOWNLOAD_ORIGIN}/api/download?platform=macos`
-      ]);
+      // The endpoint is platform-derived (the fixture runs Chromium on the
+      // host), so assert the shape and origin rather than one host's platform.
+      assert.equal(measurement.openedUrls.length, 1, 'exactly one download URL');
+      assert.match(
+        measurement.openedUrls[0],
+        /^https:\/\/app\.petal\.live\/api\/download\?platform=(macos|windows)$/
+      );
+      assert.ok(
+        measurement.openedUrls[0].startsWith(`${UPDATE_DOWNLOAD_ORIGIN}/api/download?platform=`),
+        'the recovery action must open the platform download endpoint, never a blob URL'
+      );
 
       // 3. The message says what happened, without the "Update check failed:"
       //    prefix -- nothing was checked, an install was refused.

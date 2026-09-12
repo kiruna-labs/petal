@@ -3221,6 +3221,23 @@ fn crop_debounce_should_apply(
     }
 }
 
+/// Should this frame be presented WHOLE, because a new crop is still settling?
+///
+/// Intersecting the incoming rect with the currently-applied one makes every
+/// frame during a live resize look progressively smaller: the source keeps
+/// changing before the debounce expires, so each stale crop compounds the last
+/// one. Presenting the complete decoded frame instead shows the sender's
+/// letterbox bars briefly, but the content never compounds a previous crop.
+fn should_present_full_frame_during_pending_crop(
+    applied: Option<(u32, u32, u32, u32)>,
+    incoming: Option<(u32, u32, u32, u32)>,
+    applied_buffer_size: (u32, u32),
+    frame_size: (u32, u32),
+    crop_applied: bool,
+) -> bool {
+    !crop_applied && incoming != applied && (applied.is_some() || applied_buffer_size != frame_size)
+}
+
 /// Paint the swap chain's back buffer a neutral "connecting" gray once at
 /// creation, so a revealed-but-not-yet-framed remote window reads as a
 /// loading panel rather than a broken black void (the first decoded frame
@@ -3349,6 +3366,33 @@ fn present_frame(
             }
             window.back_buffer_size = (crop_w, crop_h);
             recreate_texture_for_window(device, window);
+        } else if should_present_full_frame_during_pending_crop(
+            window.content_rect,
+            content_rect,
+            window.back_buffer_size,
+            frame_size,
+            apply,
+        ) {
+            // A new crop has NOT been applied yet, so present the complete
+            // decoded frame rather than intersecting it with the previous
+            // crop. Swapping to the full frame can also change the buffer
+            // size, which the swap chain has to follow before the copy.
+            window.content_rect = None;
+            if window.back_buffer_size != frame_size {
+                if let Err(error) = unsafe {
+                    window.swap_chain.ResizeBuffers(
+                        2,
+                        frame_size.0,
+                        frame_size.1,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_SWAP_CHAIN_FLAG(0),
+                    )
+                } {
+                    return device_removed(&error);
+                }
+                window.back_buffer_size = frame_size;
+                recreate_texture_for_window(device, window);
+            }
         }
     } else {
         window.crop_pending = None;
@@ -4107,6 +4151,46 @@ mod tests {
             Some((24, 32, 300, 200)),
             t1 + std::time::Duration::from_millis(401),
             dwell
+        ));
+    }
+
+    #[test]
+    fn pending_crop_uses_full_frame_instead_of_stale_crop() {
+        let old_crop = Some((24, 32, 272, 176));
+        let new_crop = Some((40, 20, 240, 200));
+        // A different crop while one is already applied: present the whole
+        // frame for this pass rather than compounding the old crop.
+        assert!(should_present_full_frame_during_pending_crop(
+            old_crop,
+            new_crop,
+            (272, 176),
+            (320, 240),
+            false,
+        ));
+        // The debounce already applied THIS frame's crop: nothing to work
+        // around, and re-presenting would undo the crop.
+        assert!(!should_present_full_frame_during_pending_crop(
+            old_crop,
+            new_crop,
+            (272, 176),
+            (320, 240),
+            true,
+        ));
+        // No crop on either side: the ordinary full-frame path already.
+        assert!(!should_present_full_frame_during_pending_crop(
+            None,
+            None,
+            (320, 240),
+            (320, 240),
+            false,
+        ));
+        // An identical incoming rect is not a pending change.
+        assert!(!should_present_full_frame_during_pending_crop(
+            old_crop,
+            old_crop,
+            (272, 176),
+            (320, 240),
+            false,
         ));
     }
 }

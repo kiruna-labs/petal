@@ -35,6 +35,64 @@ The Rust-side halves of #787 are `session::room`'s pre-connect playout
 enable and rejoin re-assert, plus `livekit`'s `reassert_playout` (see
 `vendor/livekit/PETAL_PATCH.md`).
 
+## Patch 3: source-aware Media Foundation H.264 rate control
+
+The vendored MF encoder applied ONE rate-control policy to every caller:
+`eAVEncCommonRateControlMode_Quality` (minimize QP, ignore the bitrate
+target), with `PETAL_MF_QUALITY_MODE=0` as the only escape. Quality mode was
+chosen for shared-window text crispness (measured QP 26 -> 16), but it is the
+wrong default for screen content on a real link: it ignores the bitrate target
+WebRTC's own estimate produces, so the encoder stops serving frames instead of
+lowering quality.
+
+Measured on the Windows-to-macOS route at 2560x1392, one receiver, one
+simulated ladder, same binary, changing ONLY the rate-control policy:
+
+| Policy | Receiver rendered cadence |
+| --- | --- |
+| QUALITY | median ~5.6 fps (766 frames / 137 s) |
+| driver default (nothing set) | median ~29.5 fps (5170 frames / 317 s) |
+
+Screen capture was healthy in both arms (WGC delivered ~30-38 frames/s,
+`dropped_before_delivery=0`), and both arms ran the same configured 30 fps
+ceiling, so the loss was entirely in the encoder.
+
+### The fix
+
+`MfH264EncoderImpl` now records the `VideoCodecMode` it was configured with and
+resolves exactly one rate-control policy from it, in one place
+(`ResolveRateControlPolicy` / `ApplyRateControlPolicy`):
+
+| Source | Default | Rationale |
+| --- | --- | --- |
+| Screensharing | driver default (set nothing) | honours WebRTC's bitrate target; text crispness comes from the link budget, not from overriding it |
+| Realtime camera | CBR at the target | QUALITY starves camera frames, and the driver's untouched mode (unconstrained VBR) overshot WebRTC's target by 2.0x measured; explicit CBR on the same route cut renderer freezes from 11 to 2 |
+
+Overrides, both strict (an unrecognized value is ignored, never silently
+substituted):
+
+- `PETAL_MF_QUALITY_MODE=1` forces QUALITY for either source (explicit
+experiment). `=0` forces the non-QUALITY path, which is now the default for both
+sources -- redundant, but still honoured exactly rather than ignored.
+- `PETAL_MF_CAMERA_RATE_CONTROL=default|cbr|peak-vbr` applies to **realtime
+camera encoders only**. It is deliberately NOT consulted for screensharing:
+letting a camera selector run for screen content is what coupled the two
+policies in the first place.
+
+The policy is a STATIC MFT property, so it is applied before the media types are
+negotiated (an older encoder ignores a mode set afterwards). One line per
+encoder creation is logged at WARNING: this application's log sink does not
+capture libwebrtc INFO output, so an INFO line here would be invisible and every
+rate-control A/B would silently be unreadable. `SetRates` also stops discarding
+its `AVEncCommonMeanBitRate` HRESULT -- the first call and then one per 60 log
+the requested target alongside the result, so a rejected target cannot
+masquerade as a healthy encoder.
+
+### Updating
+
+Drop this patch once upstream exposes a per-encoder rate-control policy the
+caller can select.
+
 ## #886: per-frame autorelease leak in `objc_video_frame_buffer.mm`
 
 `native_buffer_to_platform_image_buffer` runs once per DECODED frame on
