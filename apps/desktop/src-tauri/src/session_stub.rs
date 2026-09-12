@@ -1330,6 +1330,8 @@ pub(crate) async fn start_share_token(
         shared.clone(),
         token,
         kind,
+        #[cfg(debug_assertions)]
+        status.clone(),
     );
     let loss_monitor = start_share_loss_monitor(
         app.clone(),
@@ -1528,6 +1530,7 @@ fn start_share_frame_pump(
     shared: Arc<SharePumpShared>,
     token: u32,
     kind: SharedSourceKind,
+    #[cfg(debug_assertions)] capture_status: crate::windows_screen_capture::CaptureStatus,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let mut sequence = 0u64;
@@ -1543,6 +1546,13 @@ fn start_share_frame_pump(
         let pump_started_at = std::time::Instant::now();
         let mut last_region_warning = None;
         loop {
+            #[cfg(debug_assertions)]
+            if capture_status.test_delivery_stopped() {
+                log::warn!(
+                    "windows session: test-only delivery stop token={token}; stopping frame pump including cached refresh, publication remains active"
+                );
+                break;
+            }
             sync_region_warning(&app, token, &mut last_region_warning);
             // WGC is change-driven; during a remote-control input window the
             // pump re-pushes at the boost cadence so the receiver stream stays

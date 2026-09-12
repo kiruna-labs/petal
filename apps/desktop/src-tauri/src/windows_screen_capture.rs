@@ -234,6 +234,13 @@ pub struct CaptureStatus {
 }
 
 impl CaptureStatus {
+    /// Stops the test sender pump too: otherwise its cached-frame refresh
+    /// keeps receiver liveness alive after the injected WGC stop.
+    #[cfg(debug_assertions)]
+    pub(crate) fn test_delivery_stopped(&self) -> bool {
+        self.state.test_delivery_stopped.load(Ordering::Acquire)
+    }
+
     pub fn terminal_error(&self) -> Option<String> {
         self.state.terminal_error.lock_unpoisoned().clone()
     }
@@ -248,6 +255,8 @@ impl CaptureStatus {
 }
 
 struct CaptureState {
+    #[cfg(debug_assertions)]
+    test_delivery_stopped: AtomicBool,
     terminal_error: Mutex<Option<String>>,
     frames_delivered: AtomicU64,
     /// Monotonic arrival counter; the capture thread compares it against its
@@ -420,7 +429,7 @@ fn test_capture_stop_delay(raw: Option<&str>) -> Option<Duration> {
 /// on an unpublish or terminating the process. Release builds contain neither
 /// the environment lookup nor the timer.
 #[cfg(debug_assertions)]
-fn schedule_test_capture_stop(token: u32, signal: &Arc<CaptureSignal>) {
+fn schedule_test_capture_stop(token: u32, signal: &Arc<CaptureSignal>, state: &Arc<CaptureState>) {
     let raw = std::env::var(TEST_CAPTURE_STOP_AFTER_MS_ENV).ok();
     let Some(delay) = test_capture_stop_delay(raw.as_deref()) else {
         if let Some(raw) = raw {
@@ -432,6 +441,7 @@ fn schedule_test_capture_stop(token: u32, signal: &Arc<CaptureSignal>) {
     };
 
     let signal = Arc::clone(signal);
+    let state = Arc::clone(state);
     log::warn!(
         "windows screen capture: armed test-only capture stop token={token} after {}ms; publication will remain active",
         delay.as_millis()
@@ -440,6 +450,7 @@ fn schedule_test_capture_stop(token: u32, signal: &Arc<CaptureSignal>) {
         .name(format!("petal-wgc-test-stop-{token}"))
         .spawn(move || {
             std::thread::sleep(delay);
+            state.test_delivery_stopped.store(true, Ordering::Release);
             signal.request_stop();
             log::warn!(
                 "windows screen capture: test-only capture stop requested token={token}; publication remains active"
@@ -485,6 +496,8 @@ impl TargetCaptureSession {
         }
 
         let state = Arc::new(CaptureState {
+            #[cfg(debug_assertions)]
+            test_delivery_stopped: AtomicBool::new(false),
             terminal_error: Mutex::new(None),
             frames_delivered: AtomicU64::new(0),
             frames_arrived: AtomicU64::new(0),
@@ -523,7 +536,7 @@ impl TargetCaptureSession {
         match setup_rx.recv_timeout(CAPTURE_SETUP_TIMEOUT) {
             Ok(Ok(())) => {
                 #[cfg(debug_assertions)]
-                schedule_test_capture_stop(token, &signal);
+                schedule_test_capture_stop(token, &signal, &state);
                 Ok((
                     Self {
                         token,
