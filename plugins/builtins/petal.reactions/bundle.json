@@ -1,0 +1,44 @@
+{
+  "files": {
+    "plugin.js": "// Reactions — a built-in Petal plugin. One file, no imports: built-ins are\n// buildless so both clients can compile them in with a `?raw` import and the\n// browser deploy stays self-contained. Third-party plugins use\n// @petal/plugin-sdk + Vite instead; see docs/PLUGINS.md.\n//\n// Three frames run this same file:\n//   logic   -> activate(): owns the wire protocol and fan-out\n//   popover -> mountSurface('picker'): the 8-emoji picker\n//   overlay -> mountSurface('fx'): draws floating emoji over the meeting\n//\n// Wire (plugins/README.md §2.11): topic `plugin/petal.reactions/emoji`,\n// lossy, `{ e: \"<emoji>\", t: <ms> }`, at most 4 per second per sender.\n// Sender identity comes from the host, never from the payload.\n\nconst EMOJI = ['👍', '❤️', '😂', '🎉', '👏', '🤔', '👀', '🔥'];\nconst MAX_PER_SECOND = 4;\nconst REACTION_LIFETIME_MS = 2600;\n\n/** @type {import('@petal/plugin-sdk').PluginDefinition} */\nconst definition = {\n  activate(petal) {\n    const overlay = petal.ui.channel('fx');\n    const picker = petal.ui.channel('picker');\n    const sent = [];\n\n    function show(emoji, name) {\n      overlay.postMessage({ kind: 'react', emoji, name });\n    }\n\n    function throttled() {\n      const now = Date.now();\n      while (sent.length && now - sent[0] > 1000) sent.shift();\n      if (sent.length >= MAX_PER_SECOND) return true;\n      sent.push(now);\n      return false;\n    }\n\n    picker.onMessage((message) => {\n      if (!message || message.kind !== 'pick') return;\n      const emoji = String(message.emoji);\n      if (!EMOJI.includes(emoji) || throttled()) return;\n      // Local echo first so the sender sees an instant response even when\n      // the meeting-wide publish is unavailable (M1) or slow.\n      const self = petal.meeting.self();\n      show(emoji, self ? self.name : 'You');\n      petal.data\n        .publish('emoji', { e: emoji, t: Date.now() }, { reliable: false })\n        .catch((error) => {\n          if (error && error.code === 'unavailable') return; // not wired yet on this host\n          petal.log.warn('publish failed', error && error.message);\n        });\n    });\n\n    petal.data.on('emoji', (message) => {\n      if (message.sender.isLocal) return; // already echoed locally\n      let body;\n      try {\n        body = message.json();\n      } catch (_) {\n        return;\n      }\n      if (!body || !EMOJI.includes(body.e)) return;\n      show(body.e, message.sender.name);\n    });\n  },\n\n  mountSurface(petal, surface) {\n    if (surface.id === 'picker') return mountPicker(petal, surface);\n    if (surface.id === 'fx') return mountOverlay(surface);\n  },\n};\n\nfunction mountPicker(petal, surface) {\n  const root = surface.root;\n  root.innerHTML = '';\n  const style = document.createElement('style');\n  style.textContent = `\n    :root { color-scheme: dark; }\n    body { margin: 0; font: 14px system-ui, sans-serif; }\n    .picker { display: flex; gap: 4px; padding: 8px; border-radius: 14px;\n      background: linear-gradient(180deg, #1c1e21, #121416); border: 1px solid rgba(255,255,255,.12);\n      box-shadow: 0 12px 32px rgba(0,0,0,.35); box-sizing: border-box; width: 100%; justify-content: space-between; }\n    button { all: unset; cursor: pointer; width: 32px; height: 32px; line-height: 32px; text-align: center;\n      font-size: 22px; border-radius: 8px; transition: transform 100ms ease, background 100ms ease; }\n    button:hover, button:focus-visible { background: rgba(255,255,255,.1); transform: scale(1.15); outline: none; }\n    button:active { transform: scale(0.95); }\n  `;\n  root.appendChild(style);\n  const row = document.createElement('div');\n  row.className = 'picker';\n  row.setAttribute('role', 'group');\n  row.setAttribute('aria-label', 'Pick a reaction');\n  for (const emoji of EMOJI) {\n    const button = document.createElement('button');\n    button.type = 'button';\n    button.textContent = emoji;\n    button.setAttribute('aria-label', `React with ${emoji}`);\n    button.addEventListener('click', () => surface.channel.postMessage({ kind: 'pick', emoji }));\n    row.appendChild(button);\n  }\n  root.appendChild(row);\n  const first = row.querySelector('button');\n  if (first) first.focus();\n  void petal;\n}\n\nfunction mountOverlay(surface) {\n  const root = surface.root;\n  root.innerHTML = '';\n  const style = document.createElement('style');\n  style.textContent = `\n    html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; pointer-events: none; }\n    .fx { position: fixed; inset: 0; }\n    .r { position: absolute; bottom: 96px; display: flex; flex-direction: column; align-items: center; gap: 2px;\n      animation: rise ${REACTION_LIFETIME_MS}ms cubic-bezier(.2,.7,.3,1) forwards; will-change: transform, opacity; }\n    .r .e { font-size: 34px; line-height: 1; filter: drop-shadow(0 2px 6px rgba(0,0,0,.45)); }\n    .r .n { font: 600 11px system-ui, sans-serif; color: rgba(255,255,255,.92); background: rgba(0,0,0,.45);\n      padding: 2px 6px; border-radius: 999px; white-space: nowrap; }\n    @keyframes rise { 0% { transform: translateY(0) scale(.7); opacity: 0; } 12% { opacity: 1; transform: translateY(-20px) scale(1); }\n      100% { transform: translateY(-260px) scale(1.05); opacity: 0; } }\n    @media (prefers-reduced-motion: reduce) { .r { animation-duration: 1200ms; } }\n  `;\n  root.appendChild(style);\n  const layer = document.createElement('div');\n  layer.className = 'fx';\n  layer.setAttribute('aria-live', 'polite');\n  root.appendChild(layer);\n\n  surface.channel.onMessage((message) => {\n    if (!message || message.kind !== 'react') return;\n    const node = document.createElement('div');\n    node.className = 'r';\n    const lane = 16 + Math.random() * 68; // percent across the width\n    node.style.left = `calc(${lane}% - 20px)`;\n    node.style.setProperty('--drift', `${(Math.random() - 0.5) * 60}px`);\n    const e = document.createElement('span');\n    e.className = 'e';\n    e.textContent = String(message.emoji);\n    const n = document.createElement('span');\n    n.className = 'n';\n    n.textContent = String(message.name || '').split(' ')[0] || '';\n    node.appendChild(e);\n    if (n.textContent) node.appendChild(n);\n    layer.appendChild(node);\n    setTimeout(() => node.remove(), REACTION_LIFETIME_MS + 100);\n  });\n}\n\nexport default (globalThis.__petalRegister ? globalThis.__petalRegister(definition) : definition);\n"
+  },
+  "manifest": {
+    "apiVersion": 1,
+    "contributes": {
+      "surfaces": {
+        "overlay": {
+          "id": "fx"
+        },
+        "popover": {
+          "height": 64,
+          "id": "picker",
+          "width": 296
+        }
+      },
+      "toolbarButtons": [
+        {
+          "icon": "smile",
+          "id": "react",
+          "label": "React",
+          "opens": "popover:picker"
+        }
+      ]
+    },
+    "description": "React with an emoji that floats up over the meeting for everyone.",
+    "entry": "plugin.js",
+    "id": "petal.reactions",
+    "manifestVersion": 1,
+    "minHostVersion": "0.9.7",
+    "name": "Reactions",
+    "native": null,
+    "permissions": [
+      "meeting:read",
+      "data:publish",
+      "ui:toolbar-button",
+      "ui:popover",
+      "ui:overlay"
+    ],
+    "scope": "meeting",
+    "version": "1.0.0"
+  }
+}

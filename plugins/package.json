@@ -1,14 +1,13 @@
 {
   "name": "petal-plugins",
   "private": true,
-  "description": "npm workspace root for the Petal plugin SDK and first-party plugins. Deliberately NOT the repo root so a hoisted node_modules can never shadow apps/desktop or web-harness dependency resolution.",
+  "description": "npm workspace root for the Petal plugin SDK plus the vendored built-in bundles (builtins/). Plugin SOURCE lives in kiruna-labs/petal-plugins. Deliberately NOT the repo root so a hoisted node_modules can never shadow apps/desktop or web-harness dependency resolution.",
   "type": "module",
   "workspaces": [
     "sdk"
   ],
   "scripts": {
-    "build": "node build-all.mjs",
-    "test": "node --test build-all.test.mjs"
+    "test": "node --test builtins/builtins.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

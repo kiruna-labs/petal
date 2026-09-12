@@ -8,10 +8,10 @@ import { createPluginHost } from '@petal/shared/plugin-host/host.ts';
 import { validateManifest } from '@petal/shared/plugin-host/manifest.ts';
 import type { PluginHostAdapter } from '@petal/shared/plugin-host/host.ts';
 import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces.ts';
+import { parseBundle } from '@petal/shared/plugin-host/bundle.ts';
 import helloManifestText from './hello/manifest.json?raw';
 import helloSource from './hello/plugin.js?raw';
-import reactionsManifestText from '../../../plugins/reactions/manifest.json?raw';
-import reactionsSource from '../../../plugins/reactions/plugin.js?raw';
+import reactionsBundleText from '../../../plugins/builtins/petal.reactions/bundle.json?raw';
 
 const probe = {
   toasts: [] as string[],
@@ -97,16 +97,12 @@ const host = createPluginHost({
   warn: (m) => probe.logs.push(`warn:${m}`),
 });
 
-for (const [text, source] of [
-  [helloManifestText, helloSource],
-  [reactionsManifestText, reactionsSource],
-] as const) {
-  const v = validateManifest(JSON.parse(text));
-  if (!v.ok) {
-    probe.errors.push(v.errors.join('; '));
-    continue;
-  }
-  host.load({ manifest: v.manifest, granted: v.manifest.permissions, source: 'builtin' }, source);
-}
+const hello = validateManifest(JSON.parse(helloManifestText));
+if (hello.ok) host.load({ manifest: hello.manifest, granted: hello.manifest.permissions, source: 'builtin' }, helloSource);
+else probe.errors.push(hello.errors.join('; '));
+// The real vendored built-in, exactly as the clients load it.
+const reactions = parseBundle(reactionsBundleText);
+if (reactions.ok) host.load({ manifest: reactions.bundle.manifest, granted: reactions.bundle.manifest.permissions, source: 'builtin' }, reactions.bundle.source);
+else probe.errors.push(reactions.error);
 (window as unknown as { __host: typeof host }).__host = host;
 document.body.dataset.ready = 'true';
