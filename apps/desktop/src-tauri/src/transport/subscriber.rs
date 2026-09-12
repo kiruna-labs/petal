@@ -42,6 +42,12 @@ use crate::video_color::VideoColorProfile;
 
 const NO_FRAME_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
 const NO_FRAME_RETIRE_AFTER: Duration = Duration::from_secs(30);
+/// Hard receiver-side upper bound for a frozen share whose publication is
+/// still present. A crashed source can leave the SFU publication alive and
+/// cannot start sender negotiation, so publication presence alone must not
+/// keep a native window on screen forever. The first 30s remains the normal
+/// repair/hold period; this is the final stale-source backstop.
+const STALE_PUBLICATION_RETIRE_AFTER: Duration = Duration::from_secs(60);
 const FRAME_HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// Receiver-side starvation policy (Windows decode loop): once a window has
 /// received its first frame, this long without another decoded frame while
@@ -757,6 +763,21 @@ pub(crate) fn forget_window_publication(owner_identity: &str, window_id: u32) {
     window_publications()
         .lock_unpoisoned()
         .remove(&(owner_identity.to_string(), window_id));
+}
+
+/// Drop every recorded publication for one owner. Used when a participant
+/// leaves: their windows are being removed, so their publication records must
+/// not survive to make a later generation's teardown guard match a phantom.
+fn forget_window_publications_for(owner_identity: &str) {
+    window_publications()
+        .lock_unpoisoned()
+        .retain(|(owner, _), _| owner != owner_identity);
+}
+
+/// Drop every recorded publication. Used at feed teardown and on a room
+/// disconnect, where no record from this generation is meaningful afterwards.
+fn forget_all_window_publications() {
+    window_publications().lock_unpoisoned().clear();
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2201,6 +2222,7 @@ pub(crate) fn start_compositor_feed(
             }
         }
         cancel_all_window_states(&window_states);
+        forget_all_window_publications();
     });
 }
 
@@ -2262,6 +2284,14 @@ pub(crate) fn start_compositor_feed(
         // than inferred"): per 5s interval, how many decoded frames were
         // dispatched to the native compositor.
         let frames_this_interval = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Track subscription time separately from frame timing. A source can
+        // crash before its first decoded frame, in which case
+        // `active_frame_keys()` has no entry and a frame-only watchdog would
+        // never notice the native window it already created.
+        let mut window_subscribed_at: HashMap<
+            crate::windows_compositor::WindowKey,
+            std::time::Instant,
+        > = HashMap::new();
         let mut health_interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             let event = tokio::select! {
@@ -2285,37 +2315,69 @@ pub(crate) fn start_compositor_feed(
                             frames as f64 / 5.0
                         );
                     }
-                    // Windows no-frame watchdog: safety net ONLY (macOS
-                    // parity, 30s). The pinned SDK should deliver
-                    // `TrackUnpublished` for an explicit stop-sharing but
-                    // does not on Windows (under investigation); this retires
-                    // only after 30s of silence AND the SFU holding no
-                    // publication (#627), so a poor-network stall never
-                    // closes a live window.
+                    // Windows no-frame watchdog: the first 30s is a safety
+                    // net for a missing unpublish and a poor-network stall.
+                    // A source crash can leave the SFU publication present
+                    // forever, though, and the sender may have no opportunity
+                    // to negotiate its removal. Do not let that stale
+                    // publication pin the frozen native window forever:
+                    // retire it at the hard receiver-side deadline.
                     let now = std::time::Instant::now();
-                    for key in crate::windows_compositor::active_frame_keys() {
+                    let mut watchdog_keys = window_subscribed_at
+                        .keys()
+                        .cloned()
+                        .collect::<std::collections::HashSet<_>>();
+                    watchdog_keys.extend(crate::windows_compositor::active_frame_keys());
+                    for key in watchdog_keys {
                         if !generation.is_current() {
                             break;
                         }
-                        let Some(last) = crate::windows_compositor::last_frame_at(&key) else {
+                        // A source that crashed before its first frame has no
+                        // frame timing at all; its subscription clock is the
+                        // only evidence it ever arrived.
+                        let last_media_at = crate::windows_compositor::last_frame_at(&key)
+                            .or_else(|| window_subscribed_at.get(&key).copied());
+                        let Some(last_media_at) = last_media_at else {
                             continue;
                         };
-                        if now.duration_since(last) < NO_FRAME_RETIRE_AFTER {
+                        let silence = now.duration_since(last_media_at);
+                        if silence < NO_FRAME_RETIRE_AFTER {
+                            continue;
+                        }
+                        // A deliberately hidden/minimized remote window has
+                        // no decoded frames by design. Its liveness clock is
+                        // paused until it is visible again; only an on-screen
+                        // frozen window is a user-visible stale-window bug.
+                        if !crate::windows_compositor::window_is_on_screen(&key) {
+                            // Reset the source clock while hidden so a user
+                            // receives a fresh resume grace period.
+                            window_subscribed_at.insert(key.clone(), now);
+                            crate::windows_compositor::drop_frame_timing(&key);
                             continue;
                         }
                         let (owner_identity, window_id) = &key;
-                        if window_publication_exists(&room, owner_identity, *window_id, &[]) {
+                        let publication_exists =
+                            window_publication_exists(&room, owner_identity, *window_id, &[]);
+                        if publication_exists && !stale_publication_should_retire(silence) {
                             log::debug!(
-                                "windows compositor feed: window {window_id} from '{owner_identity}' has no frames for >= {}s but the SFU still holds the publication; keeping the frozen window",
+                                "windows compositor feed: window {window_id} from '{owner_identity}' has no frames for >= {}s but the SFU still holds the publication; keeping the frozen window until the stale-source deadline",
                                 NO_FRAME_RETIRE_AFTER.as_secs()
                             );
                             continue;
                         }
-                        log::warn!(
-                            "windows compositor feed: no frames for window {window_id} from '{owner_identity}' for >= {}s and the SFU holds no publication; retiring frozen window",
-                            NO_FRAME_RETIRE_AFTER.as_secs()
-                        );
+                        if publication_exists {
+                            log::warn!(
+                                "windows compositor feed: window {window_id} from '{owner_identity}' has no frames for >= {}s while the SFU still holds the publication; retiring stale frozen window without sender negotiation",
+                                STALE_PUBLICATION_RETIRE_AFTER.as_secs()
+                            );
+                        } else {
+                            log::warn!(
+                                "windows compositor feed: no frames for window {window_id} from '{owner_identity}' for >= {}s and the SFU holds no publication; retiring frozen window",
+                                NO_FRAME_RETIRE_AFTER.as_secs()
+                            );
+                        }
                         crate::windows_compositor::remove_window(&app, key.clone()).await;
+                        window_subscribed_at.remove(&key);
                         crate::windows_compositor::drop_frame_timing(&key);
                     }
                     continue;
@@ -2356,6 +2418,13 @@ pub(crate) fn start_compositor_feed(
                     };
                     let owner_identity = participant.identity().to_string();
                     let key = (owner_identity.clone(), window_id);
+                    // Reset the receiver-side liveness clock for every new
+                    // subscription, including a republish. A replacement
+                    // that has not produced its first frame must get its own
+                    // full grace period rather than inheriting the old SID's
+                    // last-frame timestamp.
+                    window_subscribed_at.insert(key.clone(), std::time::Instant::now());
+                    crate::windows_compositor::drop_frame_timing(&key);
                     // Record the window's current publication so the
                     // TrackUnpublished arm's sid guard (`resolve_teardown` ←
                     // `window_publications()`) can recognize a genuine
@@ -2630,11 +2699,9 @@ pub(crate) fn start_compositor_feed(
                                 log::info!(
                                     "windows compositor feed: window {window_id} unpublished by '{owner_identity}' and the SFU holds no replacement, removing"
                                 );
-                                crate::windows_compositor::remove_window(
-                                    &app,
-                                    (owner_identity, window_id),
-                                )
-                                .await;
+                                let key = (owner_identity.clone(), window_id);
+                                crate::windows_compositor::remove_window(&app, key.clone()).await;
+                                window_subscribed_at.remove(&key);
                             }
                         }
                     }
@@ -2664,13 +2731,17 @@ pub(crate) fn start_compositor_feed(
                     log::info!(
                         "windows compositor feed: participant '{identity}' disconnected; removing their compositor windows"
                     );
-                    crate::windows_compositor::remove_all_for(&app, identity).await;
+                    crate::windows_compositor::remove_all_for(&app, identity.clone()).await;
+                    forget_window_publications_for(&identity);
+                    window_subscribed_at.retain(|(owner, _), _| owner != &identity);
                 }
                 RoomEvent::Disconnected { reason } => {
                     log::warn!(
                         "windows compositor feed: room disconnected ({reason:?}); removing all compositor windows"
                     );
                     crate::windows_compositor::remove_all(&app).await;
+                    forget_all_window_publications();
+                    window_subscribed_at.clear();
                     // Fan out: the session performs its own teardown on the
                     // receiving end (move of the old disconnect watcher).
                     let _ = on_forced_disconnect.send(());
@@ -2679,6 +2750,7 @@ pub(crate) fn start_compositor_feed(
                 _ => {}
             }
         }
+        forget_all_window_publications();
     });
 }
 
@@ -3380,15 +3452,34 @@ fn no_frame_decision(
     reconnecting: bool,
     already_held: bool,
 ) -> NoFrameDecision {
-    if track_muted || reconnecting || already_held {
+    let last_media_at = last_frame_at.unwrap_or(subscribed_at);
+    let silence = now.duration_since(last_media_at);
+    if reconnecting {
         return NoFrameDecision::Keep;
     }
-    let last_media_at = last_frame_at.unwrap_or(subscribed_at);
-    if now.duration_since(last_media_at) >= NO_FRAME_RETIRE_AFTER {
+    // A muted video publication may be an intentional transient state, but it
+    // cannot be allowed to suppress the hard stale-source deadline forever:
+    // a crashed source can remain advertised as muted with no sender able to
+    // negotiate an unpublish.
+    if track_muted && silence < STALE_PUBLICATION_RETIRE_AFTER {
+        return NoFrameDecision::Keep;
+    }
+    // A normal hold is one-shot so it does not repeatedly request repair, but
+    // it must become eligible again at the hard stale-publication deadline.
+    // Otherwise a source crash after the initial hold leaves the window held
+    // forever because the receive state is intentionally retained.
+    if already_held && silence < STALE_PUBLICATION_RETIRE_AFTER {
+        return NoFrameDecision::Keep;
+    }
+    if silence >= NO_FRAME_RETIRE_AFTER {
         NoFrameDecision::Retire
     } else {
         NoFrameDecision::Keep
     }
+}
+
+fn stale_publication_should_retire(silence: Duration) -> bool {
+    silence >= STALE_PUBLICATION_RETIRE_AFTER
 }
 
 /// Record that a frame arrived for `key`, or -- #682's item 3 -- signal that
@@ -3548,7 +3639,8 @@ fn retire_no_frame_windows(
         // registry drop, left the window with no teardown path at all.)
         let publication_exists =
             window_publication_exists(room, &key.owner_identity, window_id, &[]);
-        if publication_exists {
+        let silence = now.duration_since(state.last_frame_at.unwrap_or(state.subscribed_at));
+        if publication_exists && !stale_publication_should_retire(silence) {
             let held = crate::compositor::hold_window_last_frame(
                 app,
                 &key.owner_identity,
@@ -3581,12 +3673,21 @@ fn retire_no_frame_windows(
         if remove_window_state(states, &key).is_none() {
             continue;
         }
-        log::warn!(
-            "compositor feed: no frames for window {window_id} from '{}' for >= {}s and the SFU \
-             holds no publication; retiring frozen window",
-            state.owner_identity,
-            NO_FRAME_RETIRE_AFTER.as_secs()
-        );
+        if publication_exists {
+            log::warn!(
+                "compositor feed: no frames for window {window_id} from '{}' for >= {}s while the SFU \
+                 still holds the publication; retiring stale frozen window without sender negotiation",
+                state.owner_identity,
+                STALE_PUBLICATION_RETIRE_AFTER.as_secs()
+            );
+        } else {
+            log::warn!(
+                "compositor feed: no frames for window {window_id} from '{}' for >= {}s and the SFU \
+                 holds no publication; retiring frozen window",
+                state.owner_identity,
+                NO_FRAME_RETIRE_AFTER.as_secs()
+            );
+        }
         crate::diagnostics::record_native_video_stream_state(
             app,
             &state.owner_identity,
@@ -3610,6 +3711,36 @@ fn retire_no_frame_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_publication_deadline_is_bounded_and_held_windows_rearm() {
+        assert!(!stale_publication_should_retire(
+            STALE_PUBLICATION_RETIRE_AFTER - Duration::from_millis(1)
+        ));
+        assert!(stale_publication_should_retire(
+            STALE_PUBLICATION_RETIRE_AFTER
+        ));
+
+        // A muted or already-held window is protected for the normal hold
+        // period, but both must still become eligible at the hard deadline:
+        // otherwise a crashed source pins the window forever, because the
+        // receive state is deliberately retained across a hold.
+        let subscribed = Instant::now();
+        let hard_stale = subscribed + STALE_PUBLICATION_RETIRE_AFTER;
+        assert_eq!(
+            no_frame_decision(hard_stale, subscribed, Some(subscribed), false, false, true),
+            NoFrameDecision::Retire
+        );
+        assert_eq!(
+            no_frame_decision(hard_stale, subscribed, Some(subscribed), true, false, false),
+            NoFrameDecision::Retire
+        );
+        // A reconnect is never terminal, at any silence.
+        assert_eq!(
+            no_frame_decision(hard_stale, subscribed, Some(subscribed), false, true, false),
+            NoFrameDecision::Keep
+        );
+    }
 
     // ---- Starvation watchdog policy --------------------------------------
     //

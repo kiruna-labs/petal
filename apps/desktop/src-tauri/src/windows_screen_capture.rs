@@ -65,6 +65,12 @@ const CAPTURE_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const BORDERLESS_ACCESS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Periodic arrival/delivery cadence log while the pump loop is idle.
 const CAPTURE_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(any(test, debug_assertions))]
+const TEST_CAPTURE_STOP_AFTER_MS_ENV: &str = "PETAL_TEST_WINDOWS_CAPTURE_STOP_AFTER_MS";
+#[cfg(any(test, debug_assertions))]
+const TEST_CAPTURE_STOP_MIN_DELAY: Duration = Duration::from_millis(100);
+#[cfg(any(test, debug_assertions))]
+const TEST_CAPTURE_STOP_MAX_DELAY: Duration = Duration::from_secs(60);
 /// Latest-wins drain: at most this many frames are processed per wakeup
 /// (the last one wins; older pool frames are released).
 const DRAIN_FRAME_BUDGET: usize = 8;
@@ -400,6 +406,47 @@ pub(crate) fn request_system_indicator_fallback(token: u32) -> bool {
     signal.request_system_indicator()
 }
 
+#[cfg(any(test, debug_assertions))]
+fn test_capture_stop_delay(raw: Option<&str>) -> Option<Duration> {
+    let delay = Duration::from_millis(raw?.parse::<u64>().ok()?);
+    (TEST_CAPTURE_STOP_MIN_DELAY..=TEST_CAPTURE_STOP_MAX_DELAY)
+        .contains(&delay)
+        .then_some(delay)
+}
+
+/// Debug-build-only fault injection for the stale-publication acceptance test.
+/// The capture thread exits after setup, but its owning share and publication
+/// remain alive. This reproduces a wedged/dead capture source without relying
+/// on an unpublish or terminating the process. Release builds contain neither
+/// the environment lookup nor the timer.
+#[cfg(debug_assertions)]
+fn schedule_test_capture_stop(token: u32, signal: &Arc<CaptureSignal>) {
+    let raw = std::env::var(TEST_CAPTURE_STOP_AFTER_MS_ENV).ok();
+    let Some(delay) = test_capture_stop_delay(raw.as_deref()) else {
+        if let Some(raw) = raw {
+            log::warn!(
+                "windows screen capture: ignoring invalid {TEST_CAPTURE_STOP_AFTER_MS_ENV}='{raw}' (expected 100..=60000)"
+            );
+        }
+        return;
+    };
+
+    let signal = Arc::clone(signal);
+    log::warn!(
+        "windows screen capture: armed test-only capture stop token={token} after {}ms; publication will remain active",
+        delay.as_millis()
+    );
+    let _ = std::thread::Builder::new()
+        .name(format!("petal-wgc-test-stop-{token}"))
+        .spawn(move || {
+            std::thread::sleep(delay);
+            signal.request_stop();
+            log::warn!(
+                "windows screen capture: test-only capture stop requested token={token}; publication remains active"
+            );
+        });
+}
+
 pub struct TargetCaptureSession {
     token: u32,
     thread: Option<JoinHandle<()>>,
@@ -474,15 +521,19 @@ impl TargetCaptureSession {
         };
 
         match setup_rx.recv_timeout(CAPTURE_SETUP_TIMEOUT) {
-            Ok(Ok(())) => Ok((
-                Self {
-                    token,
-                    thread: Some(thread),
-                    state: state.clone(),
-                    signal: signal.clone(),
-                },
-                CaptureStatus { state },
-            )),
+            Ok(Ok(())) => {
+                #[cfg(debug_assertions)]
+                schedule_test_capture_stop(token, &signal);
+                Ok((
+                    Self {
+                        token,
+                        thread: Some(thread),
+                        state: state.clone(),
+                        signal: signal.clone(),
+                    },
+                    CaptureStatus { state },
+                ))
+            }
             Ok(Err(error)) => {
                 log::error!("windows screen capture: capture setup failed: {error}");
                 signal.request_stop();
@@ -520,6 +571,7 @@ impl TargetCaptureSession {
             state: self.state.clone(),
         }
     }
+
 }
 
 impl Drop for TargetCaptureSession {
@@ -905,6 +957,7 @@ fn run_pump_loop(
     let mut seen_delivered = state.frames_delivered.load(Ordering::Relaxed);
     let mut arrived_this_interval = 0u64;
     let mut delivered_this_interval = 0u64;
+    let mut last_health_log = Instant::now();
     let mut last_region_geometry_check: Option<Instant> = None;
     loop {
         let mut guard = signal.arrival_mutex.lock_unpoisoned();
@@ -935,14 +988,6 @@ fn run_pump_loop(
                 // a selector dragged back onto its owning display was never
                 // noticed and the share stayed paused forever (014A).
                 break;
-            }
-            if timed_out && wait_timeout == CAPTURE_HEALTH_INTERVAL {
-                log::info!(
-                    "windows screen capture: {arrived_this_interval} frame(s) arrived, {delivered_this_interval} delivered in the last {}s",
-                    CAPTURE_HEALTH_INTERVAL.as_secs()
-                );
-                arrived_this_interval = 0;
-                delivered_this_interval = 0;
             }
         }
         if signal.stop_requested() {
@@ -1041,26 +1086,34 @@ fn run_pump_loop(
             }
         }
 
-        if setup.region_paused {
-            continue;
+        if !setup.region_paused {
+            drain_and_push(
+                &setup.pool,
+                &setup.direct3d_device,
+                &setup.device,
+                &setup.context,
+                &mut setup.current_size,
+                &mut setup.staging,
+                &mut setup.roi_texture,
+                &mut setup.canvas_texture,
+                setup.region.as_ref(),
+                state,
+                on_frame,
+            );
         }
-
-        drain_and_push(
-            &setup.pool,
-            &setup.direct3d_device,
-            &setup.device,
-            &setup.context,
-            &mut setup.current_size,
-            &mut setup.staging,
-            &mut setup.roi_texture,
-            &mut setup.canvas_texture,
-            setup.region.as_ref(),
-            state,
-            on_frame,
-        );
         let delivered = state.frames_delivered.load(Ordering::Relaxed);
         delivered_this_interval += delivered - seen_delivered;
         seen_delivered = delivered;
+        if last_health_log.elapsed() >= CAPTURE_HEALTH_INTERVAL {
+            log::info!(
+                "windows screen capture: WGC deltas token={token} frame_arrived={arrived_this_interval} delivered={delivered_this_interval} dropped_before_delivery={} interval_s={}",
+                arrived_this_interval.saturating_sub(delivered_this_interval),
+                last_health_log.elapsed().as_secs_f64()
+            );
+            arrived_this_interval = 0;
+            delivered_this_interval = 0;
+            last_health_log = Instant::now();
+        }
     }
 
     let _ = setup.item.RemoveClosed(setup.closed_token);
@@ -1737,6 +1790,18 @@ impl Drop for ComApartment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_capture_stop_delay_is_bounded() {
+        assert_eq!(
+            test_capture_stop_delay(Some("5000")),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(test_capture_stop_delay(None), None);
+        assert_eq!(test_capture_stop_delay(Some("not-a-number")), None);
+        assert_eq!(test_capture_stop_delay(Some("99")), None);
+        assert_eq!(test_capture_stop_delay(Some("60001")), None);
+    }
 
     /// `wgc_border_policy::E_NOINTERFACE` is hand-typed so that module stays
     /// host-independent; this pins it to the SDK constant on the one host
