@@ -51,9 +51,9 @@ especially for development.
    is a static tree on a petal.live subdomain and the directory is web
    pages, so it shares the site's domain and deploy pipeline. **Naming
    (2026-09-12):** "plugin registry" for the signed tree, "plugin directory"
-   for the pages people browse; never "marketplace", nothing is sold. The code was
-   never the secret; the signing key lives in a protected GitHub environment
-   and never in a repo.
+   for the pages people browse; never "marketplace", nothing is sold. The
+   code was never the secret; the signing key lives in a protected GitHub
+   environment and never in a repo.
 8. **Plugin source lives in its own public repo** (owner, 2026-09-09):
    `kiruna-labs/petal-plugins`. This repo keeps the host runtime, the SDK
    (published to npm as `@petal/plugin-sdk`), the contracts, and the
