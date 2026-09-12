@@ -165,6 +165,20 @@ contain. And beware sparse sampling — #416's "3/16 failure rate" was the
 sampler's *detection* rate; a 40ms gap-free sampler found the defect in
 **16/16**, including a 198pt excursion inside 137ms on a trial scored `pass`.
 
+## Vendored crate lockfiles
+
+Never track a `Cargo.lock` inside `apps/desktop/vendor/`. Those crates arrive as
+`[patch.crates-io]` path dependencies (or a git patch), so the app resolves them
+inside `apps/desktop/src-tauri/Cargo.lock` — the only lock that governs a build
+or release. A nested lock is resolved *standalone*, with no pin from the app
+graph, so it can encode a version this repo does not support: measured, the
+rust-analyzer-generated `vendor/livekit/Cargo.lock` selects `webrtc-sys 0.3.45`,
+while `src-tauri` pins `=0.3.35` because 0.3.36+ does not compile against
+libwebrtc 0.3.38. Four tracked nested locks had already drifted apart from each
+other (tokio 1.50/1.52/1.53, serde 1.0.228/1.0.229) and nothing in CI builds a
+vendored crate standalone. `.gitignore` enforces the rule; editor tooling may
+still write one next to a crate it indexes.
+
 ## Known deviations / flagged items
 
 - **Glass-to-glass latency is the product's defining metric, and it is
