@@ -495,6 +495,34 @@ screen-share sharer that never throttles) avoids this entirely.
   handler unwinds), which is why the overlay sync is deferred to the next
   main-thread turn.
 
+## Native subscription ownership acceptance
+
+`transport/native_subscription.rs` has the pure admission table. It must keep
+these classes explicit:
+
+| Publication | Native room | Hidden gallery bridge |
+|---|---|---|
+| Audio (including future share companions) | subscribed | not owned |
+| Exact `petal-window-<u32>` video | subscribed | not owned |
+| `petal-camera-*` video | not subscribed | subscribed |
+| Malformed/unknown video | not subscribed | not owned |
+
+A real two-peer run must cover a window already published before join, one
+published after join, stop/republish, reconnect, remote audio playout, a remote
+camera visible only in the gallery tile, and malformed/unknown video remaining
+absent from the native compositor. For each window case, record
+`TrackPublished` → `TrackSubscribed` → first decoded frame plus initial frame
+dimensions and steady cadence. A call to `set_subscribed(true)` is a request,
+not acceptance evidence.
+
+Before this ownership policy was enabled, the same Windows binary compared SDK
+automatic subscription with explicit-all admission against the same 1138×774
+Mac source. Republish reached first frame in 486 ms automatic vs 539 ms explicit;
+leave/rejoin with an existing share took 946 ms vs 1050 ms. Both settled at
+29.2–29.6 FPS and 1136×772 on rejoin, with no subscription failures. That A/B
+validates the mechanism only; camera exclusion and malformed-video handling
+remain requirements of the narrower ownership run above.
+
 ## Manual Cross-Client Test (desktop + browser, real permissions)
 
 A repeatable manual procedure for validating cross-client camera, window
