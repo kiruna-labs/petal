@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ios>
 #include <mutex>
 #include <thread>
 
@@ -128,6 +129,7 @@ int32_t MfH264EncoderImpl::InitEncode(const VideoCodec* codec_settings,
   height_ = codec_settings->height;
   max_framerate_ = codec_settings->maxFramerate > 0 ? codec_settings->maxFramerate : 30;
   target_bps_ = codec_settings->startBitrate * 1000;
+  codec_mode_ = codec_settings->mode;
 
   if (width_ <= 0 || height_ <= 0) {
     RTC_LOG(LS_ERROR) << "MF H264 encoder: unsupported dimensions " << width_
@@ -177,37 +179,6 @@ int32_t MfH264EncoderImpl::InitMft(int width, int height) {
     // ICodecAPI for keyframe + bitrate control (optional; some MFTs lack it).
     mft_.As(&codec_api_);
 
-    // Window-share quality (Petal): DEFAULT to QUALITY rate-control mode.
-    // The bitrate-driven default settles at QP 26 under the BWE-bound target
-    // (~3.4Mbps on a static share), which softens remote text on every host
-    // (measured: QP 26; fuzzy). Quality mode ignores the bitrate target and
-    // minimizes QP (measured live: QP 26 -> 16, crisp text — the fix).
-    // Simulcast safety: a constrained receiver still downgrades to the
-    // bitrate-capped q rung via the SFU, so the h rung's higher bitrate only
-    // costs bandwidth when it is actually being watched. Set
-    // PETAL_MF_QUALITY_MODE=0 to opt back into bitrate-driven encoding.
-    if (codec_api_) {
-      const char* qm = std::getenv("PETAL_MF_QUALITY_MODE");
-      const bool quality_mode = qm == nullptr || std::strcmp(qm, "0") != 0;
-      if (quality_mode) {
-        VARIANT mode;
-        mode.vt = VT_UI4;
-        mode.ulVal = eAVEncCommonRateControlMode_Quality;
-        codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
-        VARIANT quality;
-        quality.vt = VT_UI4;
-        quality.ulVal = 100;
-        codec_api_->SetValue(&CODECAPI_AVEncCommonQuality, &quality);
-        VARIANT qvs;
-        qvs.vt = VT_UI4;
-        qvs.ulVal = 100;
-        codec_api_->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &qvs);
-        RTC_LOG(LS_INFO)
-            << "MF H264 encoder: quality rate control enabled (QP minimized; "
-               "set PETAL_MF_QUALITY_MODE=0 to disable)";
-      }
-    }
-
     if (!ResolveStreamIds(mft_.Get(), &input_stream_id_, &output_stream_id_)) {
       RTC_LOG(LS_ERROR) << "MF H264 encoder: could not resolve stream ids";
       return WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE;
@@ -250,6 +221,20 @@ int32_t MfH264EncoderImpl::InitMft(int width, int height) {
     // Drain settled; now end the stream and renegotiate the types.
     mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
     mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+  }
+
+  // Rate control is a STATIC MFT property: it has to be set before the media
+  // types are negotiated, or an older encoder ignores it. One resolution, one
+  // application point -- see ResolveRateControlPolicy for why the codec mode is
+  // an input to the decision rather than a caller-side detail.
+  {
+    const char* policy_source = "unset";
+    // Resolved into a NAMED local before it is used: passing the resolver and
+    // the out-parameter in one call leaves the argument evaluation order
+    // unspecified, so the log could print the pre-call value while the compiler
+    // legally dead-stored the resolved one.
+    const RateControlPolicy policy = ResolveRateControlPolicy(&policy_source);
+    ApplyRateControlPolicy(policy, policy_source);
   }
 
   int32_t config_result =
@@ -842,9 +827,180 @@ void MfH264EncoderImpl::SetRates(const RateControlParameters& parameters) {
       var.vt = VT_UI4;
       var.ulVal = target_bps;
       // Best-effort; some MFTs reject mid-stream bitrate changes.
-      codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
+      const HRESULT mean_hr =
+          codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
+      // Bounded, so a sub-second rate-control churn cannot flood the log, but a
+      // silently REJECTED target change (the exact shape that lets the encoder
+      // ignore WebRTC's own estimate and starve the link) is visible rather
+      // than assumed.
+      set_rates_calls_ += 1;
+      if (set_rates_calls_ <= 1 || set_rates_calls_ % 60 == 0) {
+        RTC_LOG(LS_WARNING)
+            << "MF H264 encoder: set_rates call=" << set_rates_calls_
+            << " requested_bps=" << target_bps
+            << " framerate=" << parameters.framerate_fps
+            << " mean_bitrate_hr=0x" << std::hex << mean_hr << std::dec;
+      }
     }
   }
+}
+
+// The single rate-control decision for this encoder.
+//
+// Screen content and camera content want opposite policies, and they used to
+// share one global default -- which is exactly how a screen share ended up on
+// QUALITY mode (minimize QP, ignore the bitrate target) and rendered a fraction
+// of its configured cadence while screen capture was perfectly healthy. Measured
+// on the Windows-to-macOS route, 2560x1392, identical receiver and identical
+// simulated ladder, changing ONLY this policy:
+//
+//   * QUALITY mode  -> receiver rendered a median ~5.6 fps (766 frames / 137 s)
+//   * driver default -> receiver rendered a median ~29.5 fps (5170 / 317 s)
+//
+// So the defaults are:
+//
+//   * Screensharing -> DriverDefault: set nothing and let the encoder honour
+//     the bitrate target WebRTC's own estimate produces. Text crispness is
+//     recovered by the link budget, not by overriding the target.
+//   * Realtime camera -> Cbr. QUALITY starves camera frames, and the driver's
+//     untouched mode (unconstrained VBR) overshot WebRTC's target by 2.0x,
+//     measured, which cost loss and retransmits; explicit CBR on the same route
+//     cut renderer freezes from 11 to 2.
+//
+// QUALITY stays available to BOTH sources as an explicit experiment via
+// PETAL_MF_QUALITY_MODE=1, because it does make static text measurably crisper
+// (QP 26 -> 16) when the link can afford it. PETAL_MF_CAMERA_RATE_CONTROL is
+// consulted for realtime camera encoders ONLY: letting a camera selector run for
+// screen content is what coupled the two policies in the first place.
+MfH264EncoderImpl::RateControlPolicy
+MfH264EncoderImpl::ResolveRateControlPolicy(const char** source) const {
+  const char* quality_override = std::getenv("PETAL_MF_QUALITY_MODE");
+  if (quality_override != nullptr && std::strcmp(quality_override, "1") == 0) {
+    if (source != nullptr) {
+      *source = "env-quality-override";
+    }
+    return RateControlPolicy::Quality;
+  }
+  // "0" forces the non-QUALITY path. That is now the default for both sources,
+  // so this is redundant rather than load-bearing -- it is still honoured
+  // exactly (not ignored) so an existing script keeps a defined meaning.
+  const bool quality_forbidden =
+      quality_override != nullptr && std::strcmp(quality_override, "0") == 0;
+
+  if (codec_mode_ == VideoCodecMode::kScreensharing) {
+    if (source != nullptr) {
+      *source =
+          quality_forbidden ? "env-nonquality-override" : "screenshare-default";
+    }
+    return RateControlPolicy::DriverDefault;
+  }
+
+  const char* camera_arm = std::getenv("PETAL_MF_CAMERA_RATE_CONTROL");
+  if (camera_arm != nullptr) {
+    if (std::strcmp(camera_arm, "default") == 0) {
+      if (source != nullptr) {
+        *source = "env-camera-default";
+      }
+      return RateControlPolicy::DriverDefault;
+    }
+    if (std::strcmp(camera_arm, "peak-vbr") == 0) {
+      if (source != nullptr) {
+        *source = "env-camera-peak-vbr";
+      }
+      return RateControlPolicy::PeakVbr;
+    }
+    // "cbr" and any unrecognized value keep the measured camera default.
+    if (source != nullptr) {
+      *source = "env-camera-cbr";
+    }
+    return RateControlPolicy::Cbr;
+  }
+  if (source != nullptr) {
+    *source = "camera-default";
+  }
+  return RateControlPolicy::Cbr;
+}
+
+// Applies the resolved policy, in one place. Every branch sets at most one
+// policy and DriverDefault sets nothing at all, so there is no ordering
+// dependence between them, and no branch can leave a previous decoder-enforced
+// state half-applied.
+void MfH264EncoderImpl::ApplyRateControlPolicy(RateControlPolicy policy,
+                                               const char* source) {
+  // Exactly one line per encoder creation, at WARNING: this application's log
+  // sink does not capture libwebrtc INFO output, so an INFO line here is
+  // invisible in petal.log and silently makes every rate-control A/B
+  // unreadable.
+  const char* codec_mode_name = codec_mode_ == VideoCodecMode::kScreensharing
+                                    ? "screensharing"
+                                    : "realtime";
+  if (!codec_api_) {
+    RTC_LOG(LS_WARNING) << "MF H264 encoder: rate control selected=unavailable"
+                        << " codec_mode=" << codec_mode_name
+                        << " codec_api_present=false source=" << source;
+    return;
+  }
+
+  const char* policy_name = "driver-default";
+  HRESULT mode_hr = E_NOTIMPL;
+  HRESULT mean_hr = E_NOTIMPL;
+  HRESULT max_hr = E_NOTIMPL;
+
+  switch (policy) {
+    case RateControlPolicy::DriverDefault:
+      break;
+    case RateControlPolicy::Quality: {
+      policy_name = "quality";
+      VARIANT mode = {};
+      mode.vt = VT_UI4;
+      mode.ulVal = eAVEncCommonRateControlMode_Quality;
+      mode_hr =
+          codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
+      VARIANT quality = {};
+      quality.vt = VT_UI4;
+      quality.ulVal = 100;
+      codec_api_->SetValue(&CODECAPI_AVEncCommonQuality, &quality);
+      VARIANT quality_vs_speed = {};
+      quality_vs_speed.vt = VT_UI4;
+      quality_vs_speed.ulVal = 100;
+      codec_api_->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed,
+                           &quality_vs_speed);
+      break;
+    }
+    case RateControlPolicy::Cbr:
+    case RateControlPolicy::PeakVbr: {
+      const bool peak_constrained = policy == RateControlPolicy::PeakVbr;
+      policy_name = peak_constrained ? "peak-vbr" : "cbr";
+      VARIANT mode = {};
+      mode.vt = VT_UI4;
+      mode.ulVal = peak_constrained
+                       ? eAVEncCommonRateControlMode_PeakConstrainedVBR
+                       : eAVEncCommonRateControlMode_CBR;
+      mode_hr =
+          codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
+      if (target_bps_ > 0) {
+        VARIANT mean = {};
+        mean.vt = VT_UI4;
+        mean.ulVal = target_bps_;
+        mean_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &mean);
+        if (peak_constrained) {
+          VARIANT peak = {};
+          peak.vt = VT_UI4;
+          // A bounded ceiling, not a tuned value: the documented
+          // "peak-constrained" shape is a doubled mean.
+          peak.ulVal = target_bps_ * 2;
+          max_hr = codec_api_->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &peak);
+        }
+      }
+      break;
+    }
+  }
+
+  RTC_LOG(LS_WARNING) << "MF H264 encoder: rate control selected=" << policy_name
+                      << " codec_mode=" << codec_mode_name
+                      << " source=" << source << " target_bps=" << target_bps_
+                      << " mode_hr=0x" << std::hex << mode_hr << " mean_hr=0x"
+                      << mean_hr << " max_hr=0x" << max_hr << std::dec;
 }
 
 VideoEncoder::EncoderInfo MfH264EncoderImpl::GetEncoderInfo() const {
