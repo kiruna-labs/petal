@@ -6,6 +6,7 @@
 //! share publication to that connection; the receiver compositor and the
 //! share feed live in `windows_compositor`/`transport::subscriber`.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::remote_control_core::RemoteControlPolicy;
@@ -15,6 +16,9 @@ use crate::camera_session::ActiveCamera;
 // Re-exported so `crate::session::RoomGeneration` keeps working for the many
 // external consumers that imported it through the session module.
 pub(crate) use crate::room_generation::RoomGeneration;
+use crate::screen_audio::{
+    AudioSourceKey, AudioSourceRegistry, AudioSourceTransition, ShareAudioState,
+};
 use crate::sync_ext::MutexExt;
 use crate::transport::publisher::{RoomConnection, SharedSourceKind};
 use crate::video_color::VideoColorProfile;
@@ -126,6 +130,11 @@ struct ActiveShare {
     url_refresh: Option<tauri::async_runtime::JoinHandle<()>>,
     token: u32,
     kind: SharedSourceKind,
+    audio_share_id: u64,
+    audio_source: Option<AudioSourceKey>,
+    audio_enabled: bool,
+    audio_available: bool,
+    audio_error: Option<String>,
     title: String,
     shared: Arc<SharePumpShared>,
     share_instance_id: String,
@@ -164,6 +173,8 @@ struct MediaResources {
     microphone: Option<Arc<crate::transport::audio::MicTrack>>,
     playout: Option<crate::transport::audio::SpeakerPlayout>,
     shares: Vec<ActiveShare>,
+    screen_audio_sources: AudioSourceRegistry,
+    screen_audio: BTreeMap<AudioSourceKey, Arc<crate::transport::audio::ScreenAudioTrack>>,
 }
 
 #[derive(Clone)]
@@ -206,6 +217,7 @@ pub struct SessionState {
     mic_control_lock: tokio::sync::Mutex<()>,
     camera_control_lock: tokio::sync::Mutex<()>,
     share_control_lock: tokio::sync::Mutex<()>,
+    screen_audio_control_lock: tokio::sync::Mutex<()>,
     audio_device_lock: tokio::sync::Mutex<()>,
     /// `RemoteControlPolicy::as_u8`; live gate + the default "on" restores
     /// to. Same shape as the macOS session (session/mod.rs).
@@ -214,6 +226,7 @@ pub struct SessionState {
     desired_mic_muted: AtomicBool,
     desired_camera_on: AtomicBool,
     room_generation: Arc<AtomicU64>,
+    next_audio_share_id: AtomicU64,
     /// Ensures at most one camera self-heal loop runs at a time (see
     /// `camera_session::ensure_camera_published`).
     camera_heal_active: AtomicBool,
@@ -227,18 +240,28 @@ impl Default for SessionState {
             mic_control_lock: tokio::sync::Mutex::new(()),
             camera_control_lock: tokio::sync::Mutex::new(()),
             share_control_lock: tokio::sync::Mutex::new(()),
+            screen_audio_control_lock: tokio::sync::Mutex::new(()),
             audio_device_lock: tokio::sync::Mutex::new(()),
             remote_control_policy: AtomicU8::new(RemoteControlPolicy::default().as_u8()),
             remote_control_default_policy: AtomicU8::new(RemoteControlPolicy::default().as_u8()),
             desired_mic_muted: AtomicBool::new(true),
             desired_camera_on: AtomicBool::new(false),
             room_generation: Arc::new(AtomicU64::new(0)),
+            next_audio_share_id: AtomicU64::new(1),
             camera_heal_active: AtomicBool::new(false),
         }
     }
 }
 
 impl SessionState {
+    async fn lock_screen_audio_control(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.screen_audio_control_lock.lock().await
+    }
+
+    fn next_audio_share_id(&self) -> u64 {
+        self.next_audio_share_id.fetch_add(1, Ordering::SeqCst)
+    }
+
     pub(crate) fn begin_room_generation(&self) -> RoomGeneration {
         let value = self.room_generation.fetch_add(1, Ordering::SeqCst) + 1;
         RoomGeneration::new(self.room_generation.clone(), value)
@@ -1035,6 +1058,379 @@ async fn drop_share_capture(capture: crate::windows_screen_capture::TargetCaptur
     }
 }
 
+fn windows_share_audio_state_locked(
+    joined: &Option<WindowsMediaSession>,
+    window_id: u32,
+) -> ShareAudioState {
+    let Some(session) = joined.as_ref() else {
+        return ShareAudioState::inactive(window_id);
+    };
+    let Some(share) = session.media.shares.iter().find(|share| share.token == window_id) else {
+        return ShareAudioState::inactive(window_id);
+    };
+    let publishing = share.audio_source.is_some_and(|source| {
+        session.media.screen_audio_sources.is_active(source)
+            && session
+                .media
+                .screen_audio
+                .get(&source)
+                .is_some_and(|track| !track.is_stopped() && !track.failed())
+    });
+    ShareAudioState {
+        window_id,
+        enabled: share.audio_enabled,
+        available: share.audio_available,
+        publishing,
+        scope: share.audio_source.map(|source| match source {
+            AudioSourceKey::SystemOutput => "systemOutput".to_string(),
+            AudioSourceKey::Process(_) => "process".to_string(),
+        }),
+        error: share.audio_error.clone(),
+    }
+}
+
+#[tauri::command]
+pub fn share_audio_state(
+    state: tauri::State<'_, SessionState>,
+    window_id: u32,
+) -> ShareAudioState {
+    windows_share_audio_state_locked(&state.joined.lock_unpoisoned(), window_id)
+}
+
+async fn apply_windows_audio_transitions(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    transitions: Vec<AudioSourceTransition>,
+) {
+    for transition in transitions {
+        match transition {
+            AudioSourceTransition::Stop(source) => {
+                let old = state
+                    .joined
+                    .lock_unpoisoned()
+                    .as_mut()
+                    .and_then(|session| session.media.screen_audio.remove(&source));
+                if let Some(old) = old {
+                    old.stop().await;
+                }
+            }
+            AudioSourceTransition::Start(source) => {
+                if !generation.is_current() {
+                    continue;
+                }
+                let error_app = app.clone();
+                let error_generation = generation.clone();
+                match crate::transport::audio::ScreenAudioTrack::publish(
+                    room_connection.room(),
+                    source,
+                    move |error| {
+                        log::warn!("audio: source '{}' failed: {error}", source.label());
+                        let Some(state) = error_app.try_state::<SessionState>() else {
+                            return;
+                        };
+                        if !error_generation.is_current() {
+                            return;
+                        }
+                        let updates = {
+                            let mut joined = state.joined.lock_unpoisoned();
+                            let Some(session) = joined.as_mut() else {
+                                return;
+                            };
+                            let ids = session
+                                .media
+                                .shares
+                                .iter_mut()
+                                .filter_map(|share| {
+                                    (share.audio_enabled && share.audio_source == Some(source))
+                                        .then(|| {
+                                            share.audio_available = false;
+                                            share.audio_error = Some(error.clone());
+                                            share.token
+                                        })
+                                })
+                                .collect::<Vec<_>>();
+                            ids.into_iter()
+                                .map(|window_id| {
+                                    windows_share_audio_state_locked(&joined, window_id)
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        for update in updates {
+                            let _ = tauri::Emitter::emit(
+                                &error_app,
+                                "share-audio-state-changed",
+                                update,
+                            );
+                        }
+                    },
+                )
+                .await
+                {
+                    Ok(track) => {
+                        let track = Arc::new(track);
+                        let committed = {
+                            let mut joined = state.joined.lock_unpoisoned();
+                            match joined.as_mut() {
+                                Some(session)
+                                    if generation.is_current()
+                                        && Arc::ptr_eq(
+                                            &session.room_connection,
+                                            room_connection,
+                                        )
+                                        && session.media.shares.iter().any(|share| {
+                                            share.audio_enabled
+                                                && share.audio_source == Some(source)
+                                        })
+                                        && session
+                                            .media
+                                            .screen_audio_sources
+                                            .is_active(source)
+                                        && !session.media.screen_audio.contains_key(&source) =>
+                                {
+                                    session.media.screen_audio.insert(source, track.clone());
+                                    for share in &mut session.media.shares {
+                                        if share.audio_enabled
+                                            && share.audio_source == Some(source)
+                                        {
+                                            share.audio_available = true;
+                                            share.audio_error = None;
+                                        }
+                                    }
+                                    true
+                                }
+                                _ => false,
+                            }
+                        };
+                        if !committed {
+                            track.stop().await;
+                        }
+                    }
+                    Err(error) => {
+                        let mut joined = state.joined.lock_unpoisoned();
+                        if let Some(session) = joined.as_mut() {
+                            if generation.is_current()
+                                && Arc::ptr_eq(&session.room_connection, room_connection)
+                                && session.media.screen_audio_sources.is_active(source)
+                            {
+                                for share in &mut session.media.shares {
+                                    if share.audio_enabled && share.audio_source == Some(source) {
+                                        share.audio_available = false;
+                                        share.audio_error = Some(error.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn set_share_audio_enabled(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SessionState>,
+    window_id: u32,
+    enabled: bool,
+) -> Result<ShareAudioState, String> {
+    let generation = state.current_room_generation();
+    // Intent is written before serialization so Off immediately invalidates
+    // any delayed publication commit for this incarnation.
+    let prepared = {
+        let mut joined = state.joined.lock_unpoisoned();
+        let Some(session) = joined.as_mut() else {
+            return Ok(ShareAudioState::inactive(window_id));
+        };
+        let Some(index) = session
+            .media
+            .shares
+            .iter()
+            .position(|share| share.token == window_id)
+        else {
+            return Ok(ShareAudioState::inactive(window_id));
+        };
+        let share_id = session.media.shares[index].audio_share_id;
+        let source = session.media.shares[index].audio_source;
+        if source.is_none() || (enabled && crate::transport::audio::audio_disabled_by_env()) {
+            let share = &mut session.media.shares[index];
+            share.audio_enabled = false;
+            share.audio_available = false;
+            share.audio_error = enabled.then(|| {
+                if source.is_none() {
+                    "Process audio is unavailable for this window".to_string()
+                } else {
+                    "Audio capture is disabled for this Petal run".to_string()
+                }
+            });
+            let result = windows_share_audio_state_locked(&joined, window_id);
+            let _ = tauri::Emitter::emit(&app, "share-audio-state-changed", result.clone());
+            return Ok(result);
+        }
+        let source = source.expect("checked eligible active share audio source");
+        let share = &mut session.media.shares[index];
+        share.audio_enabled = enabled;
+        share.audio_available = true;
+        share.audio_error = None;
+        (session.room_connection.clone(), share_id, source)
+    };
+
+    let _audio_control = state.lock_screen_audio_control().await;
+    let transitions = {
+        let mut joined = state.joined.lock_unpoisoned();
+        let Some(session) = joined.as_mut() else {
+            return Ok(ShareAudioState::inactive(window_id));
+        };
+        let current = generation.is_current()
+            && Arc::ptr_eq(&session.room_connection, &prepared.0)
+            && session.media.shares.iter().any(|share| {
+                share.token == window_id
+                    && share.audio_share_id == prepared.1
+                    && share.audio_enabled == enabled
+            });
+        if !current {
+            return Ok(windows_share_audio_state_locked(&joined, window_id));
+        }
+        if enabled {
+            let mut transitions = session
+                .media
+                .screen_audio_sources
+                .acquire(prepared.1, prepared.2);
+            if transitions.is_empty()
+                && session.media.screen_audio_sources.is_active(prepared.2)
+                && !session.media.screen_audio.contains_key(&prepared.2)
+            {
+                transitions.push(AudioSourceTransition::Start(prepared.2));
+            }
+            transitions
+        } else {
+            session.media.screen_audio_sources.release(prepared.1)
+        }
+    };
+    apply_windows_audio_transitions(&app, &state, &prepared.0, &generation, transitions).await;
+    let result = windows_share_audio_state_locked(&state.joined.lock_unpoisoned(), window_id);
+    let _ = tauri::Emitter::emit(&app, "share-audio-state-changed", result.clone());
+    Ok(result)
+}
+
+fn start_screen_audio_reconnect_watcher(
+    app: tauri::AppHandle,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<livekit::RoomEvent>,
+    generation: RoomGeneration,
+) {
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if !generation.is_current() {
+                return;
+            }
+            match event {
+                livekit::RoomEvent::Reconnected => {
+                    let Some(state) = app.try_state::<SessionState>() else {
+                        return;
+                    };
+                    repair_windows_screen_audio_after_reconnect(
+                        &app,
+                        state.inner(),
+                        generation.clone(),
+                    )
+                    .await;
+                }
+                livekit::RoomEvent::Disconnected { .. } => return,
+                _ => {}
+            }
+        }
+    });
+}
+
+async fn repair_windows_screen_audio_after_reconnect(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    generation: RoomGeneration,
+) {
+    let _audio_control = state.lock_screen_audio_control().await;
+    let (room_connection, sources) = {
+        let joined = state.joined.lock_unpoisoned();
+        let Some(session) = joined.as_ref() else {
+            return;
+        };
+        if !generation.is_current() {
+            return;
+        }
+        (
+            session.room_connection.clone(),
+            session
+                .media
+                .screen_audio_sources
+                .active_source_keys()
+                .into_iter()
+                .map(|source| (source, session.media.screen_audio.get(&source).cloned()))
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    for (source, track) in sources {
+        if !generation.is_current() {
+            return;
+        }
+        let Some(track) = track else {
+            apply_windows_audio_transitions(
+                app,
+                state,
+                &room_connection,
+                &generation,
+                vec![AudioSourceTransition::Start(source)],
+            )
+            .await;
+            continue;
+        };
+        if track.failed() {
+            let removed = state
+                .joined
+                .lock_unpoisoned()
+                .as_mut()
+                .and_then(|session| session.media.screen_audio.remove(&source));
+            if let Some(removed) = removed {
+                removed.stop().await;
+            }
+            apply_windows_audio_transitions(
+                app,
+                state,
+                &room_connection,
+                &generation,
+                vec![AudioSourceTransition::Start(source)],
+            )
+            .await;
+            continue;
+        }
+        let publications = room_connection
+            .room()
+            .local_participant()
+            .track_publications()
+            .values()
+            .map(|publication| (publication.sid().to_string(), publication.name()))
+            .collect::<Vec<_>>();
+        if matches!(
+            crate::screen_audio::screen_audio_publication_health(
+                &track.track_sid().to_string(),
+                &track.track_name(),
+                publications
+                    .iter()
+                    .map(|(sid, name)| (sid.as_str(), name.as_str())),
+            ),
+            crate::screen_audio::ScreenAudioPublicationHealth::Missing
+        ) {
+            if let Err(error) = track.republish_after_reconnect().await {
+                log::warn!(
+                    "audio: Windows reconnect repair failed for source '{}': {error}",
+                    source.label()
+                );
+            }
+        }
+    }
+}
+
 pub(crate) async fn start_share_token(
     app: tauri::AppHandle,
     state: &SessionState,
@@ -1341,6 +1737,10 @@ pub(crate) async fn start_share_token(
         token,
     );
 
+    // Allocate a unique audio incarnation only after the visual publication is
+    // healthy. Merely starting a share does not register or open this source.
+    let audio_share_id = state.next_audio_share_id();
+    let audio_source = AudioSourceKey::for_share(kind, Some(target.owner_process_id()));
     let mut share = Some(ActiveShare {
         capture,
         status: status.clone(),
@@ -1348,6 +1748,12 @@ pub(crate) async fn start_share_token(
         url_refresh,
         token,
         kind,
+        audio_share_id,
+        audio_source,
+        audio_enabled: false,
+        audio_available: audio_source.is_some()
+            && !crate::transport::audio::audio_disabled_by_env(),
+        audio_error: None,
         title,
         shared,
         share_instance_id,
@@ -1752,7 +2158,7 @@ fn start_share_loss_monitor(
             let Some(share) = share else {
                 break;
             };
-            stop_share(&app, share, room_connection.clone()).await;
+            stop_share(&app, state.inner(), share, room_connection.clone()).await;
             crate::analytics::share_stopped(crate::analytics::ShareStoppedReason::CaptureFailed);
             emit_share_state_changed(&app, token, false);
             emit_share_error(&app, token, false, ShareError::Capture(error));
@@ -1763,6 +2169,7 @@ fn start_share_loss_monitor(
 
 async fn stop_share(
     app: &tauri::AppHandle,
+    state: &SessionState,
     share: ActiveShare,
     room_connection: Arc<RoomConnection>,
 ) {
@@ -1772,11 +2179,40 @@ async fn stop_share(
         url_refresh,
         token,
         kind,
+        audio_share_id,
         shared,
         selector_capture_exclusion,
         ..
     } = share;
     let started = std::time::Instant::now();
+    // Invalidate the desired reference synchronously, then clean up audio in
+    // its own serialized task. A delayed enable cannot commit, and visual
+    // teardown never waits for native audio or signaling.
+    let transitions = state
+        .joined
+        .lock_unpoisoned()
+        .as_mut()
+        .map(|session| session.media.screen_audio_sources.release(audio_share_id))
+        .unwrap_or_default();
+    if !transitions.is_empty() {
+        let audio_app = app.clone();
+        let audio_room = room_connection.clone();
+        let generation = state.current_room_generation();
+        tauri::async_runtime::spawn(async move {
+            let Some(state) = audio_app.try_state::<SessionState>() else {
+                return;
+            };
+            let _audio_control = state.lock_screen_audio_control().await;
+            apply_windows_audio_transitions(
+                &audio_app,
+                state.inner(),
+                &audio_room,
+                &generation,
+                transitions,
+            )
+            .await;
+        });
+    }
     pump.abort();
     if let Some(url_refresh) = url_refresh {
         url_refresh.abort();
@@ -1869,7 +2305,7 @@ pub(crate) async fn stop_share_token(
         let share = session.media.shares.remove(position);
         (share, session.room_connection.clone())
     };
-    stop_share(app, share, room_connection).await;
+    stop_share(app, state, share, room_connection).await;
     crate::analytics::share_stopped(crate::analytics::ShareStoppedReason::User);
     // Drop the local mode gate so a stale packet after teardown refuses.
     crate::windows_remote_control::clear_share_mode(token);
@@ -2189,11 +2625,10 @@ pub async fn join_room_command(
             None
         }
     };
-    // The compositor feed is the sole consumer of the connect-time receiver
-    // (one mpsc receiver, one consumer); there is no resilience watcher on
-    // Windows. Drop that fanout branch now so it cannot accumulate room
-    // events for the session lifetime (#584).
-    room_connection.discard_resilience_events();
+    // The compositor remains the only compositor-event owner. The independent
+    // resilience branch is consumed only for generation-gated screen-audio
+    // publication repair, so no fanout receiver accumulates (#584/#184).
+    let resilience_events = room_connection.take_resilience_events();
 
     state.seed_remote_control_policy(remote_control_policy);
     {
@@ -2206,6 +2641,10 @@ pub async fn join_room_command(
             media: MediaResources::default(),
             watcher_cancellation: Some(watcher_cancellation),
         });
+    }
+
+    if let Some(events) = resilience_events {
+        start_screen_audio_reconnect_watcher(app.clone(), events, generation.clone());
     }
 
     crate::presence::start_for_room(
@@ -2607,6 +3046,7 @@ async fn leave_room_inner(
     // frame), which is exactly why the generation check in
     // `camera_session::start_camera_publish_with_device` exists.
     crate::camera_session::stop_camera_publish(app, state).await;
+    let audio_control = state.lock_screen_audio_control().await;
     let joined = state.joined.lock_unpoisoned().take();
     let Some(mut joined) = joined else {
         return;
@@ -2623,10 +3063,18 @@ async fn leave_room_inner(
         microphone,
         playout,
         shares,
+        screen_audio_sources: _,
+        screen_audio,
     } = std::mem::take(&mut joined.media);
+    // Consent and handles are room-scoped. Drain companions before closing
+    // the room; no intent or pending source survives leave/rejoin.
+    for (_, track) in screen_audio {
+        track.stop().await;
+    }
+    drop(audio_control);
     for share in shares {
         let token = share.token;
-        stop_share(app, share, joined.room_connection.clone()).await;
+        stop_share(app, state, share, joined.room_connection.clone()).await;
         emit_share_state_changed(app, token, false);
     }
     // Receiver-side: retire every remote compositor window (we are no longer

@@ -1393,10 +1393,21 @@ async fn cleanup_left_room(
     // camera capturing into a dead track.
     stop_camera_publish(app, state).await;
 
-    let (joined, mic, playout) = {
+    let audio_control = state.lock_screen_audio_control().await;
+    let (joined, mic, playout, screen_audio) = {
         let mut guard = state.inner.lock_unpoisoned();
-        (guard.joined.take(), guard.mic.take(), guard.playout.take())
+        guard.screen_audio_sources.clear();
+        (
+            guard.joined.take(),
+            guard.mic.take(),
+            guard.playout.take(),
+            std::mem::take(&mut guard.screen_audio),
+        )
     };
+    for (_, track) in screen_audio {
+        track.stop().await;
+    }
+    drop(audio_control);
     // Explicitly unmute/unpublish isn't needed -- `Room::close()` below tears
     // down every locally published track along with the room. `mic`/
     // `playout` are dropped here (releasing the platform ADM's recording/
