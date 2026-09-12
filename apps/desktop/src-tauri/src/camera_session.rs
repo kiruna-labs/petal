@@ -693,13 +693,25 @@ pub(crate) fn emit_camera_publish_state(
 /// the bounded self-heal loop (`CAMERA_HEAL_RETRY_BACKOFF`) is what makes it
 /// converge, and this event is what makes the preview yield in time for it.
 ///
-/// MEASURED MARGIN: not yet taken on real hardware (#76). The whole timeline
-/// is in `petal.log` -- this line, the preview's own
-/// `settings: camera preview released` (see [`log_camera_preview_state`]),
-/// and the `start_camera_publish` outcome -- and
-/// `apps/desktop/scripts/measure-camera-intent.mjs` drives the runbook and
-/// reads it back. Replace this paragraph with the numbers it prints once a
-/// run on a Mac with a camera has been done.
+/// MEASURED (#76, 2026-09-12, MacBook Air, macOS 26, build 0.9.25, three
+/// runs of `apps/desktop/scripts/measure-camera-intent.mjs` with the Settings
+/// preview live): the first attempt won all 6 contended ON episodes and all
+/// 6 live device switches; no self-heal retry was ever needed.
+///
+/// - intent -> `start_camera_publish begin`: 0-1 ms. The preview's release
+///   landed 2-6 ms after the intent, i.e. AFTER the native acquisition had
+///   begun, every time. The immediate attempt still succeeded because the
+///   acquisition itself takes ~1.1 s to its first frame (margin intent ->
+///   succeeded 1.06-1.41 s), and on macOS AVFoundation does not refuse a
+///   second client while the webview's capture winds down.
+/// - OFF: capture released 124-181 ms after the intent cleared; the preview
+///   was back 10-17 ms after that.
+/// - device switch: old capture released 87-134 ms; the preview never took
+///   the device in the stop -> start gap (the intent stays ON across it).
+///
+/// So on macOS the ordering plus the retry loop is sufficient and the retry
+/// loop was not exercised. Windows' single-client capture was not measured;
+/// re-run the script there before relying on the same conclusion.
 pub(crate) fn emit_camera_intent(app: &tauri::AppHandle, intended: bool) {
     // Timestamped so one live run measures the margin that matters (#76): the
     // gap between this line and the `start_camera_publish` that follows is the

@@ -721,9 +721,19 @@ export function pickerVerdict(analysis) {
 export function concurrencyWarnings(analysis) {
   const warnings = [];
   if (analysis.builds.length > 1) {
-    const names = analysis.builds.map((build) => build.version ?? '?').join(', ');
+    // Same version, different commits is the ordinary dev-loop rebuild; name
+    // the commits so it does not read as an upgrade or a second instance.
+    const versions = new Set(analysis.builds.map((build) => build.version ?? '?'));
+    const names = analysis.builds
+      .map((build) =>
+        versions.size === 1 && build.commit
+          ? `${build.version ?? '?'}@${build.commit}`
+          : (build.version ?? '?')
+      )
+      .join(', ');
     warnings.push(
-      `${analysis.builds.length} DIFFERENT builds appear in this log (versions: ${names}). ` +
+      `${analysis.builds.length} DIFFERENT builds appear in this log ` +
+        `(${versions.size === 1 ? 'same version, commits' : 'versions'}: ${names}). ` +
         'That is either an upgrade mid-file or two app instances writing to the same path. ' +
         'Episodes are reported per instance and never span a restart, but do not average across builds.'
     );
