@@ -459,7 +459,7 @@ diagnostic_enum!(StormScopeTag {
 diagnostic_enum!(InstallFailureStageTag { Resolve => "resolve", Stage => "stage", Extract => "extract", Backup => "backup", Promote => "promote", Rollback => "rollback", Privileged => "privileged", NotApplicable => "not_applicable" });
 diagnostic_enum!(InstallFailureKindTag { CrossDevice => "cross_device", PermissionDenied => "permission_denied", ReadOnly => "read_only", NoSpace => "no_space", NotFound => "not_found", Other => "other", NotApplicable => "not_applicable" });
 diagnostic_enum!(InstallVolumeBoundaryTag { SameVolume => "same_volume", CrossVolume => "cross_volume", Unknown => "unknown", NotApplicable => "not_applicable" });
-diagnostic_enum!(InstallDestinationClassTag { Applications => "applications", UserApplications => "user_applications", DiskImage => "disk_image", RemovableVolume => "removable_volume", Other => "other", NotApplicable => "not_applicable" });
+diagnostic_enum!(InstallDestinationClassTag { Applications => "applications", UserApplications => "user_applications", DiskImage => "disk_image", Translocated => "translocated", RemovableVolume => "removable_volume", Other => "other", NotApplicable => "not_applicable" });
 // `Unverified` (#105): a `desktop-*.ips` exists in the scan window but
 // could NOT be attributed to the dead session. Distinct from `Found` on
 // purpose -- it must never read as an explanation.
@@ -5060,6 +5060,7 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
             "applications"
                 | "user_applications"
                 | "disk_image"
+                | "translocated"
                 | "removable_volume"
                 | "other"
                 | "not_applicable"
@@ -8465,6 +8466,7 @@ mod tests {
             InstallDestinationClassTag::Applications,
             InstallDestinationClassTag::UserApplications,
             InstallDestinationClassTag::DiskImage,
+            InstallDestinationClassTag::Translocated,
             InstallDestinationClassTag::RemovableVolume,
             InstallDestinationClassTag::Other,
             InstallDestinationClassTag::NotApplicable,

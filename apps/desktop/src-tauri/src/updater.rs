@@ -714,7 +714,10 @@ fn report_macos_install_failure(error: &MacInstallError, destination: &Path) {
     let destination_dev = device_id_for_path(&error.destination)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    log::error!(
+    // Warn, not error (#172): the structured `update-install-failed`
+    // diagnostic below already carries every fact, and an error here opened a
+    // second Sentry issue per attempt.
+    log::warn!(
         "updater: install failed stage={} kind={:?} source={} destination={} source_dev={} destination_dev={} error={}",
         error.stage.as_str(),
         error.kind,
@@ -817,11 +820,20 @@ fn install_destination_class(destination: &Path) -> crate::logging::InstallDesti
             InstallDestinationClassTag::RemovableVolume
         };
     }
+    // #172: Gatekeeper's App Translocation mounts a quarantined bundle at a
+    // randomized read-only path; the install fails there just like on the
+    // disk image, and the two must be told apart in the diagnostic.
+    if destination
+        .components()
+        .any(|component| component.as_os_str() == "AppTranslocation")
+    {
+        return InstallDestinationClassTag::Translocated;
+    }
     InstallDestinationClassTag::Other
 }
 
 #[cfg(target_os = "macos")]
-fn filesystem_is_read_only(path: &Path) -> bool {
+pub(crate) fn filesystem_is_read_only(path: &Path) -> bool {
     let mut candidate = Some(path);
     while let Some(current) = candidate {
         if let Ok(path) = CString::new(current.as_os_str().as_bytes()) {
@@ -1553,6 +1565,13 @@ mod tests {
         assert_eq!(
             install_destination_class(Path::new("/Volumes/PETAL/Petal.app")),
             crate::logging::InstallDestinationClassTag::RemovableVolume
+        );
+        assert_eq!(
+            install_destination_class(Path::new(
+                "/private/var/folders/d8/x/T/AppTranslocation/6B1C-4F2A/d/Petal.app"
+            )),
+            crate::logging::InstallDestinationClassTag::Translocated,
+            "#172: a translocated run must not read as `Other`"
         );
 
         let test_directory = TestDirectory::new();
