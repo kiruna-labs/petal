@@ -494,6 +494,16 @@ to the Rust-owned files described in §2.2 with the registry client (I-5a).
 
 ---
 
+**Unlisted until launch (owner, 2026-09-12).** The marketplace stays
+undiscoverable until enough plugins exist to announce it: the storefront is
+never linked from petal.live's navigation or sitemap and its pages and the
+registry origin send `X-Robots-Tag: noindex, nofollow, noarchive` (no
+`robots.txt` Disallow, which would advertise the path); and the release
+workflows set no `PETAL_PLUGIN_REGISTRY_URL` / `_PUBKEY`, so shipped apps
+have no "Get plugins" section. Launch is the reverse: links, header removed,
+registry variables set in the release workflows. Test builds and testers get
+the URL by hand.
+
 ### 2.13 Where plugin source lives (owner decision, 2026-09-09)
 
 Three homes, one artifact:
