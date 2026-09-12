@@ -68,6 +68,13 @@ impl RtpTransceiver {
         self.handle.set_codec_preferences(codecs)
     }
 
+    pub fn set_direction(
+        &self,
+        direction: RtpTransceiverDirection,
+    ) -> Result<(), RtcError> {
+        self.handle.set_direction(direction)
+    }
+
     pub fn stop(&self) -> Result<(), RtcError> {
         self.handle.stop()
     }

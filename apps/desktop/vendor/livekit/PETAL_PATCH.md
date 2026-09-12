@@ -1,3 +1,26 @@
+# Petal patch: transceiver direction for unpublish teardown
+
+## Why this exists
+
+`LocalParticipant::unpublish_track` caught the track's transceiver and called
+`StopStandard` on it *before* the unpublish offer/answer had been negotiated.
+Marking the sender stopped that early makes simulcast answer processing fail
+with `Cannot disable encodings on a stopped sender`, so the remote publication
+stayed visible while the old send stream -- with its MF/NVENC encoder session --
+survived repeated unpublish/republish cycles.
+
+## The fix
+
+`libwebrtc`'s `RtpTransceiver` now exposes `set_direction`, and `unpublish_track`
+removes the track while the sender is still live and then negotiates the
+transceiver `Inactive`. An inactive m-line produces the same media teardown --
+WebRTC retires the send stream and runs `VideoEncoder::Release()` on its
+encoder -- without invalidating the sender before the answer is processed.
+
+## Updating
+
+Drop this patch once the SDK negotiates an inactive sender on unpublish itself.
+
 # Petal patch: H.264 profile preference for native screenshares
 
 Vendored from `livekit` 0.7.49 (crates.io), pinned via `[patch.crates-io]` in
@@ -191,16 +214,20 @@ Repeated unpublish/republish (or sequential shares) therefore accumulated GPU
 sessions until MFT creation failed (GeForce 12-session cap) -> OpenH264
 fallback -> 0 RTP -> receiver freeze.
 
-**Fix:** `unpublish_track` now captures the track's transceiver and calls
-`transceiver.stop()` (StopStandard) before `remove_track`, so the renegotiation
-that follows drops the old m-line/SSRC and webrtc destroys the old
-VideoSendStream, running `VideoEncoder::Release()` on the encoder. `stop()` is
-safe because livekit creates a fresh transceiver per sender. `remove_track`
-errors (engine-closed/timing race) are logged and ignored, matching
-`rtc_engine`'s own TODO.
+**Fix:** `unpublish_track` calls `remove_track` while the sender is still live,
+then sets the transceiver direction to `Inactive`, so the unpublish offer/answer
+negotiates the m-line teardown without invalidating the sender first. (Stopping
+the transceiver up front makes WebRTC reject simulcast answer processing with
+`Cannot disable encodings on a stopped sender`, which left the remote
+publication visible and kept the old send stream alive.) WebRTC then retires the
+old VideoSendStream as part of applying the inactive m-line, running
+`VideoEncoder::Release()` on the encoder. `remove_track` errors
+(engine-closed/timing race) are logged and ignored, matching `rtc_engine`'s own
+TODO.
 
-**Updating:** keep this patch while the vendored livekit lacks transceiver-stop
-on unpublish; drop it once upstream tears down the send stream on unpublish.
+**Updating:** keep this patch while the vendored livekit tears the send stream
+down only through an explicitly negotiated inactive/unpublished transceiver;
+drop it once upstream does that on its own.
 
 # Petal patch 2: `PlatformAudio::reassert_playout` (#787)
 
