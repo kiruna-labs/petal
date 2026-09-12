@@ -20,7 +20,7 @@ For "how do I write a plugin" see `docs/PLUGINS.md` (grows with M1).
 Petal should stay a small, focused app while letting people extend it in
 powerful ways. A plugin system does that better than feature accretion:
 contributors build plugins instead of forking, the project gains defensibility
-and community investment, and a vetted registry (later a marketplace with
+and community investment, and a vetted registry (later a plugin directory with
 security scanning) becomes a distribution channel. Sideloading always works,
 especially for development.
 
@@ -43,13 +43,15 @@ especially for development.
    to `main` by PR when green. The branch is a review surface, not a fork.
 7. **Repo split.** Everything the app needs (host, SDK, built-in plugins,
    client-side install/verify, Settings UI, contracts) lives here, open source.
-   Everything that *runs* the marketplace (signing, publishing, hosting,
-   vetting, storefront) lives in a separate private repository owned by the
-   core team. This repo contains no marketplace server code. **Amended
-   2026-09-09:** that repository is the website repo,
-   `kiruna-labs/petal-website` (private), under `marketplace/`; the registry
-   is a static tree on a petal.live subdomain and the storefront is web
-   pages, so it shares the site's domain and deploy pipeline. The code was
+   Everything that *runs* the registry (signing, publishing, hosting,
+   vetting, the plugin directory pages) lives in a separate private
+   repository owned by the core team. This repo contains no registry server
+   code. **Amended 2026-09-09:** that repository is the website repo,
+   `kiruna-labs/petal-website` (private), under `registry/`; the registry
+   is a static tree on a petal.live subdomain and the directory is web
+   pages, so it shares the site's domain and deploy pipeline. **Naming
+   (2026-09-12):** "plugin registry" for the signed tree, "plugin directory"
+   for the pages people browse; never "marketplace", nothing is sold. The code was
    never the secret; the signing key lives in a protected GitHub environment
    and never in a repo.
 8. **Plugin source lives in its own public repo** (owner, 2026-09-09):
@@ -93,7 +95,7 @@ especially for development.
 | `apps/desktop/src/lib/plugins/` | Tauri `HostAdapter` and Svelte surfaces |
 | `web-harness/src/plugins/` | browser `HostAdapter` and DOM surfaces |
 | `apps/desktop/src-tauri/src/plugins/` | Rust: installed-state store, KV storage, registry verify/install, data bus, metadata state, net fetch, commands |
-| `contracts/plugin-registry/` | registry index and bundle schemas plus signed test fixtures, vendored by the marketplace repo |
+| `contracts/plugin-registry/` | registry index and bundle schemas plus signed test fixtures, vendored by the registry publisher in the website repo |
 
 `plugins/package.json` is the npm workspace root for the SDK and the
 first-party plugins. It is deliberately not the repo root: a hoisted
@@ -398,20 +400,20 @@ repository.
   `contracts/plugin-registry/invalid-index-cases.json`. The web client gets
   its own signature verifier together with its install path (I-6), so no
   unused crypto ships before then. The contract fixtures are produced by the
-  marketplace signer and verified by the Rust crate in tests.
+  registry publisher's signer and verified by the Rust crate in tests.
 - `build-all.mjs` in the plugins repo emits the deterministic `bundle.json`
   the publisher consumes. Bundles are produced only by that repo's CI from
   pinned source (§2.13); the publisher never signs a bundle it did not build.
 - Update check on meeting join at most once per day; re-consent only when
   permissions grew.
 
-**Marketplace (`kiruna-labs/petal-website`, private, `marketplace/`):** the
+**Registry server side (`kiruna-labs/petal-website`, private, `registry/`):** the
 publisher that validates, signs, uploads, and merges the index; the hosting
 (`plugins.petal.live` over a blob store that only the publish workflow
 writes, never committed site content, since anti-rollback would turn a
 `git revert` into a dead registry); the vendored copy of
 `contracts/plugin-registry/` with a drift test pinned to an upstream commit;
-later the scanner, vetting workflow, and storefront pages. Signing runs in a
+later the scanner, vetting workflow, and the plugin directory pages. Signing runs in a
 protected environment with required reviewers and never on the runner that
 built the bundle.
 
@@ -494,9 +496,9 @@ to the Rust-owned files described in §2.2 with the registry client (I-5a).
 
 ---
 
-**Unlisted until launch (owner, 2026-09-12).** The marketplace stays
-undiscoverable until enough plugins exist to announce it: the storefront is
-never linked from petal.live's navigation or sitemap and its pages and the
+**Unlisted until launch (owner, 2026-09-12).** The registry and the plugin
+directory stay undiscoverable until enough plugins exist to announce them:
+the directory is never linked from petal.live's navigation or sitemap and its pages and the
 registry origin send `X-Robots-Tag: noindex, nofollow, noarchive` (no
 `robots.txt` Disallow, which would advertise the path); and the release
 workflows set no `PETAL_PLUGIN_REGISTRY_URL` / `_PUBKEY`, so shipped apps
@@ -512,7 +514,7 @@ Three homes, one artifact:
 |---|---|---|
 | `kiruna-labs/petal` (this repo) | host runtime, `@petal/plugin-sdk` source (published to npm, versioned with `apiVersion`), `contracts/plugin-registry/`, this design doc, vendored built-in bundles | the SDK is the contract with the host and mirrors `shared/plugin-host/api.ts`; splitting them would make every API change a two-repo event |
 | `kiruna-labs/petal-plugins` (public) | source of our own plugins (`plugins/<id>/`), community pointer files (`community/<id>/plugin.json`), `build-all`, the build CI, the public catalog of what is in the registry | the core repo shrinks; plugin contributors never build the app; curation is public and auditable |
-| `kiruna-labs/petal-website` (private, `marketplace/`) | publisher, signing workflow, registry hosting, scanner, storefront pages | the registry is a subdomain and the storefront is web pages, so they share the site's domain and deploy pipeline; only the key and hosting credentials are secret, and those live in a protected environment, not in any repo |
+| `kiruna-labs/petal-website` (private, `registry/`) | publisher, signing workflow, registry hosting, scanner, plugin directory pages | the registry is a subdomain and the directory is web pages, so they share the site's domain and deploy pipeline; only the key and hosting credentials are secret, and those live in a protected environment, not in any repo |
 
 **Our plugins** are source in the plugins repo, depending on the published
 SDK like any third party. A change to Reactions is a plugins-repo PR, then a
@@ -567,7 +569,7 @@ Definition of done and the usual labels.
 - I-5a (this repo) Registry client: fixtures, Rust `plugins::registry`, web
   minisign, URL and pubkey plumbing, "Get plugins", update check. DoD:
   install the fixture plugin from a local static server in both clients.
-- I-5b (marketplace repo) Publisher, hosting, vendored contracts with drift
+- I-5b (website repo, `registry/`) Publisher, hosting, vendored contracts with drift
   test, key runbook. DoD: publish the reactions bundle to a staging origin
   and install it through I-5a.
 - I-5c Plugin source repo split (§2.13): create `kiruna-labs/petal-plugins`
@@ -638,7 +640,7 @@ Definition of done and the usual labels.
 - Metadata churn: coalesce `state.set` to two writes per second.
 - The broker is full-privilege: keep `shared/plugin-host` small and test
   denial paths first.
-- Two-repo drift: the registry schema is the only coupling; the marketplace
+- Two-repo drift: the registry schema is the only coupling; the publisher's
   drift test pins an upstream commit so a schema change is a deliberate
   two-PR event.
 - Feature branch vs trunk rule: never hold more than one milestone unmerged.
@@ -667,7 +669,7 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-4 | M2 | state + advertisement | seinfish | merged (kiruna-labs/petal#55); post-merge fixes in #70 |
 | I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | merged (kiruna-labs/petal#71) |
 | I-5a | M3 | registry client | seinfish | merged (kiruna-labs/petal#99, 2026-09-10; review fixes: compile-time key, anti-rollback, permission intersection, streaming client; web loads registry installs in I-6) |
-| I-5b | M3 | marketplace publisher + hosting (`kiruna-labs/petal-website` `marketplace/`) | seinfish | publisher, keygen, signer, vendored contracts + drift guard done 2026-09-08; moved into the website repo 2026-09-09 (petal-website PR #1); hosting, protected publish workflow and review tooling still to do |
+| I-5b | M3 | registry publisher + hosting (`kiruna-labs/petal-website` `registry/`) | seinfish | publisher, keygen, signer, vendored contracts + drift guard done 2026-09-08; moved into the website repo 2026-09-09 (petal-website PR #1); hosting, protected publish workflow and review tooling still to do |
 | I-5c | M3 | plugin source repo split (`kiruna-labs/petal-plugins`), vendored built-in bundles, community pointer contract | seinfish | plugins repo live 2026-09-10 (reactions source, packer, build CI, `community/README.md`); monorepo vendors `plugins/builtins/` on feature/plugin-system-i5c; still to do: publish `@petal/plugin-sdk` to npm (owner: npm scope), signed vendored bundles once the production key exists |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |
 | I-7 | M3 | chat plugin (first plugin written in the plugins repo) | unassigned | not started |

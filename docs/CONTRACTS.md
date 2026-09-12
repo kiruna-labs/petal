@@ -1280,7 +1280,7 @@ index permissions ∩ manifest permissions (known permissions only) → stored
 bundle re-hashed on every read. The public key is a compile-time constant
 (`option_env!`); the URL may be overridden at runtime in debug builds only.
 Entries with `verified: false` are listed but never installable. The private
-marketplace repository vendors this directory byte-for-byte; regenerate with
+website repository's registry publisher vendors this directory byte-for-byte; regenerate with
 `node contracts/plugin-registry/gen-fixtures.mjs`. Tests:
 `web-harness/tests/pluginRegistry.test.ts`, `plugins::registry` tests
 (including end-to-end installs against a fake registry server).
