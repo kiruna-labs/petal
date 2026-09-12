@@ -282,6 +282,26 @@ actual_bundle="$(cat "$FAKE_LOG/bundle-path")"
 [[ ! -e "$TEST_ROOT/apps/desktop/node_modules" ]] ||
   fail "isolated npm ci wrote dependencies into the caller checkout"
 
+# A tree with no git metadata (a Mutagen sync target, an exported tarball) must
+# still run the local gate: default mode runs in place and reports provenance
+# honestly, while --require-clean refuses there because there is no commit to
+# attest and no clean state to materialize.
+NO_GIT_ROOT="$SYNC_ROOT/no-git"
+mkdir -p "$NO_GIT_ROOT"
+nogit="$(
+  cd "$NO_GIT_ROOT"
+  "$WRAPPER" sh -c \
+    'printf "%s|%s|%s\n" "$PETAL_OFFICIAL_SOURCE_SHA_FULL" "$PETAL_OFFICIAL_SOURCE_STATE" "$PETAL_SOURCE_PROVENANCE_WRAPPED"' 2>/dev/null
+)" || fail "default mode refused to run outside a Git worktree"
+IFS='|' read -r nogit_sha nogit_state nogit_guard <<<"$nogit"
+[[ "$nogit_sha" == "unverified" ]] || fail "git-less run claimed a trusted SHA"
+[[ "$nogit_state" == "unverified-no-worktree" ]] || fail "git-less run did not mark its provenance state"
+[[ "$nogit_guard" == "$nogit_state" ]] || fail "git-less provenance marker is not self-consistent"
+
+if (cd "$NO_GIT_ROOT" && "$WRAPPER" --require-clean true) 2>/dev/null; then
+  fail "--require-clean accepted a tree with no Git worktree"
+fi
+
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 grep -Fq \
   '../../scripts/run-with-source-provenance.sh --require-clean bash -c' \
@@ -292,4 +312,4 @@ grep -Fq \
   "$REPO_ROOT/.github/workflows/release.yml" ||
   fail "shipping release workflow does not build isolated source into the expected output target"
 
-echo "source provenance wrapper: 14/14 passed"
+echo "source provenance wrapper: 15/15 passed"

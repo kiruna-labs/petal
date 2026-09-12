@@ -50,6 +50,12 @@ agents/
 # Local build output not covered by target/
 target-peer/
 
+# Vendored crates are path/git patches, so the app build resolves them inside
+# apps/desktop/src-tauri/Cargo.lock -- the only lock that governs a release. A
+# nested lock is resolved standalone (no pin from the app graph) and can encode
+# a version this repo does not support; see docs/ENGINEERING.md.
+apps/desktop/vendor/**/Cargo.lock
+
 # Local, machine-specific PII deny-list for scan-for-pii.mjs (never commit).
 site/.pii-patterns.local.json
 .pii-patterns.local.json

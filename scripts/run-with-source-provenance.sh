@@ -3,7 +3,17 @@
 # Run a command with source-state invalidation. Default/raw mode is explicitly
 # unverified. Only --require-clean materializes canonical HEAD in an isolated
 # checkout and may supply trusted provenance to a release/QA build.
+#
+# A tree with no git metadata (a Mutagen sync target, an exported tarball) still
+# runs the local gate: default mode executes in place and marks the run
+# `unverified-no-worktree`. --require-clean still refuses there, because there is
+# no commit to attest and no clean state to materialize.
 set -euo pipefail
+
+# Marker for "no worktree to fingerprint". Deliberately NOT a SHA-256: build.rs
+# validates the shape and falls back to "unverified", and ci-local.sh accepts
+# this marker so it does not re-exec the wrapper forever.
+readonly NO_WORKTREE_MARKER="unverified-no-worktree"
 
 require_clean=0
 if [[ "${1:-}" == "--require-clean" ]]; then
@@ -17,8 +27,15 @@ if [[ "$#" -eq 0 ]]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-  echo "source provenance: current directory is not in a Git worktree" >&2
-  exit 2
+  if [[ "$require_clean" -eq 1 ]]; then
+    echo "source provenance: current directory is not in a Git worktree; --require-clean cannot attest without one" >&2
+    exit 2
+  fi
+  echo "source provenance: no Git worktree here; running in place with unverified provenance" >&2
+  export PETAL_OFFICIAL_SOURCE_SHA_FULL="unverified"
+  export PETAL_OFFICIAL_SOURCE_STATE="$NO_WORKTREE_MARKER"
+  export PETAL_SOURCE_PROVENANCE_WRAPPED="$NO_WORKTREE_MARKER"
+  exec "$@"
 }
 repo_root="$(cd "$repo_root" && pwd -P)"
 caller_cwd="$(pwd -P)"
