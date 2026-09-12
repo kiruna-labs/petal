@@ -63,6 +63,13 @@ export function trackNameForCamera(identity: string): string {
  */
 export const AI_TRACK_PREFIX = 'petal-ai-';
 
+/** Companion native system/process audio tracks. */
+export const SCREEN_AUDIO_TRACK_PREFIX = 'petal-window-audio-';
+
+export function isScreenAudioTrackName(trackName: string | null | undefined): boolean {
+  return typeof trackName === 'string' && trackName.startsWith(SCREEN_AUDIO_TRACK_PREFIX);
+}
+
 /** The assistant's audio track name for a shared window. */
 export function aiTrackName(windowId: number): string {
   return `${AI_TRACK_PREFIX}window-${windowId}`;

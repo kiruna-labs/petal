@@ -364,6 +364,7 @@ test('remote audio tracks still attach to hidden audio elements for playback', a
         attach: (element: FakeElement) => {
           attachedElement = element;
         },
+        detach: () => (attachedElement ? [attachedElement] : []),
       },
       { trackName: 'mic', trackSid: 'pub-1' },
       { identity: 'remote-riley', name: 'Riley' }
@@ -375,6 +376,58 @@ test('remote audio tracks still attach to hidden audio elements for playback', a
     assert.equal(attached.tagName, 'audio');
     assert.equal(attached.dataset.trackSid, 'audio-track');
     assert.equal(attached.dataset.participant, 'remote-riley');
+  } finally {
+    fakeDom.restore();
+  }
+});
+
+test('screen-audio tracks attach without mic activity and clean up on unsubscribe/participant leave', async () => {
+  installBrowserGlobals();
+  const fakeDom = installFakeDom();
+  try {
+    const topbarRight = fakeDom.document.createElement('div');
+    const { ctx, state } = makeConnectionContext(topbarRight);
+    const rooms: FakeRoom[] = [];
+    const createRoom = () => {
+      const room = new FakeRoom();
+      rooms.push(room);
+      return room as unknown as Room;
+    };
+    let participantAudioActiveCalls = 0;
+    (ctx.cb as unknown as { setParticipantAudioActive: () => void }).setParticipantAudioActive = () => {
+      participantAudioActiveCalls += 1;
+    };
+    let attachedElement: FakeElement | null = null;
+    const track = {
+      kind: Track.Kind.Audio,
+      sid: 'screen-audio-track',
+      attach: (element: FakeElement) => {
+        attachedElement = element;
+      },
+      detach: () => (attachedElement ? [attachedElement] : []),
+    };
+    const publication = {
+      trackName: 'petal-window-audio-system',
+      trackSid: 'screen-audio-publication',
+    };
+    const participant = { identity: 'remote-riley', name: 'Riley' };
+
+    await setupConnection(ctx, createRoom).connectToMeeting(CREDENTIAL, 'web-riley');
+    if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+
+    rooms[0]!.emit(RoomEvent.TrackSubscribed, track, publication, participant);
+    assert.equal(participantAudioActiveCalls, 0);
+    assert.ok(attachedElement);
+    const attached = attachedElement as FakeElement;
+    assert.equal(attached.dataset.screenAudio, 'true');
+    assert.equal(attached.dataset.aiChat, undefined);
+    assert.equal(attached.parent, fakeDom.document.body);
+
+    // A participant teardown must remove a screen-audio element even if the
+    // SDK does not deliver a separate TrackUnsubscribed event first.
+    rooms[0]!.emit(RoomEvent.ParticipantDisconnected, participant);
+    assert.equal(attached.parent, null);
+    assert.equal(participantAudioActiveCalls, 0);
   } finally {
     fakeDom.restore();
   }

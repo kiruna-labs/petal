@@ -10,6 +10,7 @@
     type RegionControlStateChanged,
     type RegionViewOptionsChanged,
     type RegionViewOptionsState,
+    type ShareAudioState,
     type SharePriority
   } from '$lib/ipc';
   import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
@@ -62,6 +63,15 @@
   let optionsStateVersion = $state(0);
   let optionsPending = $state(false);
   let priority = $state<SharePriority>('automatic');
+  let shareWindowId = $state<number | null>(null);
+  let shareAudio = $state<ShareAudioState>({
+    windowId: 0,
+    enabled: false,
+    available: false,
+    publishing: false,
+    scope: null,
+    error: null
+  });
   let drawActive = $state(false);
   let aiChatEnabled = $state(false);
   let aiChatActive = $state(false);
@@ -84,7 +94,11 @@
   }
 
   type RegionShareState = { active: boolean };
-  type RegionShareStateEvent = { selectorLabel?: string | null; active: boolean };
+  type RegionShareStateEvent = {
+    windowId: number;
+    selectorLabel?: string | null;
+    active: boolean;
+  };
 
   const activeRegionColor = $derived(identityColorCss(session.identity ?? 'slate'));
   const activeRegionInk = $derived(identityInkCss(session.identity ?? 'slate'));
@@ -126,6 +140,7 @@
   }
 
   function applyRegionOptions(next: RegionViewOptionsState) {
+    shareWindowId = next.windowId;
     shareActive = next.shareActive;
     priority = next.priority;
     drawActive = next.drawActive;
@@ -214,9 +229,38 @@
     }
   }
 
+  async function setRegionShareAudio(windowId: number, enabled: boolean) {
+    try {
+      const result = await invoke<ShareAudioState>(COMMANDS.setShareAudioEnabled, {
+        windowId,
+        enabled
+      });
+      if (shareWindowId === windowId) shareAudio = result;
+      if (result.error) console.error(`share audio unavailable: ${result.error}`);
+    } catch (error) {
+      console.error(`set_share_audio_enabled(${windowId}) failed`, error);
+    }
+  }
+
   async function openRegionOptionsMenu(event: MouseEvent) {
     event.stopPropagation();
     if (!appWindow || optionsPending || placementActive || placementSettlementPending) return;
+    // Resolve the label immediately before opening: Windows stop/restart mints
+    // a fresh token, and callbacks must retain this menu's exact target.
+    await seedRegionOptionsState();
+    const menuWindowId = shareWindowId;
+    if (menuWindowId !== null) {
+      shareAudio = await invoke<ShareAudioState>(COMMANDS.shareAudioState, {
+        windowId: menuWindowId
+      }).catch(() => ({
+        windowId: menuWindowId,
+        enabled: false,
+        available: false,
+        publishing: false,
+        scope: null,
+        error: null
+      }));
+    }
     const entries = buildShareOptionsMenuEntries(
       priority,
       shareActive,
@@ -225,14 +269,22 @@
       false,
       aiChatEnabled,
       aiChatActive,
-      true
+      true,
+      false,
+      true,
+      'right',
+      shareAudio.enabled,
+      shareAudio.available
     );
     await popupShareOptionsMenu(entries, {
       onPriority: (value) => void setRegionPriority(value),
       onControlMode: () => {},
       onDraw: (active) => void setRegionDrawActive(active),
       onAiChat: () => void toggleRegionAiChat(),
-      onDebug: () => void openRegionDebugCockpit()
+      onDebug: () => void openRegionDebugCockpit(),
+      onShareAudio: (enabled) => {
+        if (menuWindowId !== null) void setRegionShareAudio(menuWindowId, enabled);
+      }
     });
   }
 
@@ -562,9 +614,11 @@
           if (event.payload.selectorLabel !== regionWindowLabel) return;
           shareStateVersion += 1;
           optionsStateVersion += 1;
+          shareWindowId = event.payload.windowId;
           shareActive = event.payload.active;
           if (!event.payload.active) {
             sharePending = false;
+            shareAudio = { windowId: event.payload.windowId, enabled: false, available: false, publishing: false, scope: null, error: null };
             drawActive = false;
             aiChatActive = false;
             controllerName = null;
@@ -572,6 +626,11 @@
           }
         }
       )
+    );
+    trackUnlisten(
+      listen<ShareAudioState>(EVENTS.shareAudioStateChanged, (event) => {
+        if (event.payload.windowId === shareWindowId) shareAudio = event.payload;
+      })
     );
     trackUnlisten(
       listen<RegionViewOptionsChanged>(

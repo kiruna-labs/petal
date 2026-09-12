@@ -18,6 +18,8 @@ export interface ShareOptionsMenuActions {
   onPosition?(value: HoverTabPosition): void;
   /** Flip the per-share remote-control lock. `allowed` is the NEW value. */
   onRemoteControlAllowed?(allowed: boolean): void;
+  /** Flip explicit output-audio consent for the menu's captured target. */
+  onShareAudio?(enabled: boolean): void;
 }
 
 /**
@@ -43,6 +45,10 @@ export function dispatchShareOptionsMenuEntry(
     case 'remote-control-allowed':
       return entry.enabled && actions.onRemoteControlAllowed
         ? () => actions.onRemoteControlAllowed?.(!entry.checked)
+        : undefined;
+    case 'share-audio':
+      return entry.enabled && actions.onShareAudio
+        ? () => actions.onShareAudio?.(!entry.checked)
         : undefined;
     case 'debug':
       return () => actions.onDebug();
@@ -106,6 +112,7 @@ export async function popupShareOptionsMenu(
             action: dispatchShareOptionsMenuEntry(entry, actions)
           });
         case 'remote-control-allowed':
+        case 'share-audio':
           return CheckMenuItem.new({
             id: entry.id,
             text: entry.text,
