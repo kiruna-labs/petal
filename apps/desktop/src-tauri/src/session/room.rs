@@ -1211,17 +1211,17 @@ pub async fn join_room(
 }
 
 /// The single, explicit "rejoin restores what the user was publishing" seam
-/// (see `LeavePublishCarryover` in mod.rs for the full inventory -- add any
-/// future locally-published track type THERE and consume it HERE):
+/// (see `LeavePublishCarryover` in mod.rs for the full inventory -- decide
+/// THERE whether a future locally-published track type carries over, and
+/// consume it HERE):
 /// - **mic**: join-driven; `join_room`'s audio tail already republished it.
 /// - **camera**: if the carried-over intent was ON, restore it through the
 ///   bounded self-heal loop (immediate attempt + backed-off retries, then a
 ///   terminal `camera-publish-state` event -- never a silent drop, which is
 ///   exactly what the 2026-07-30 leave→rejoin incident shipped).
-/// - **window shares**: re-share via the REAL UI path
-///   (`hover_tab::toggle_share_for_window` -- border bookkeeping,
-///   optimistic-then-rollback, `share-error` emission), so hover-tab state
-///   cannot go stale the way bypassing it once did (issue #13).
+/// - **window shares**: never restored (#170). Leaving a room stops your
+///   shares and rejoining must not resume them; other participants' shares
+///   are re-discovered by the subscriber reconcile and are unaffected.
 /// #680: build the full border + draw-overlay retired-pool capacity off the
 /// join_room critical path. A first/second share must still consume these
 /// already-realized handles instead of racing into CreateFresh, but nothing
@@ -1242,18 +1242,13 @@ fn spawn_local_publish_reconcile(app: &tauri::AppHandle, room_id: String) {
         let Some(state) = tauri::Manager::try_state::<SessionState>(&app) else {
             return;
         };
-        let generation = state.current_room_generation();
         let plan = state.take_leave_publish_carryover(&room_id);
-        if !plan.camera_on && plan.shares.is_empty() {
+        if !plan.camera_on {
             return;
         }
-        log::info!(
-            "session: reconciling local publish state after rejoin (camera_on={}, shares={:?})",
-            plan.camera_on,
-            plan.shares.iter().map(|(id, _)| *id).collect::<Vec<_>>()
-        );
+        log::info!("session: reconciling local publish state after rejoin (camera_on=true)");
 
-        if plan.camera_on && !state.camera_publishing() {
+        if !state.camera_publishing() {
             state.set_camera_intent(true);
             // Same contract as the manual toggle: announce the intent before
             // the reconcile reaches for the device, so a Settings preview
@@ -1271,28 +1266,6 @@ fn spawn_local_publish_reconcile(app: &tauri::AppHandle, room_id: String) {
                 )
                 .await;
             });
-        }
-
-        for (window_id, frame) in plan.shares {
-            if !generation.is_current() {
-                log::info!(
-                    "session: rejoin publish reconcile cancelled before window {window_id} (room left again)"
-                );
-                return;
-            }
-            if state.is_share_active(window_id) {
-                continue;
-            }
-            let shared =
-                crate::hover_tab::toggle_share_for_window(&app, &state, window_id, frame).await;
-            if !shared {
-                // toggle_share_for_window already rolled back its border and
-                // emitted `share-error` (visible in the UI); just record why
-                // this window didn't come back.
-                log::warn!(
-                    "session: rejoin re-share of window {window_id} failed (window closed during the gap?)"
-                );
-            }
         }
     });
 }
@@ -1340,12 +1313,14 @@ async fn cleanup_left_room(
     }
     state.invalidate_room_generation();
 
-    // Snapshot the user's local-publish intent BEFORE tearing anything down,
-    // so a rejoin of the SAME room can reconcile publishes back to what the
-    // user wanted (see `LeavePublishCarryover` in mod.rs -- the fix for the
-    // live 2026-07-30 incident where rejoin restored the mic but silently
-    // dropped the camera). The mic needs no carryover: `join_room`'s audio
-    // tail republishes it on every join.
+    // Snapshot the user's camera intent BEFORE tearing anything down, so a
+    // rejoin of the SAME room can reconcile it back to what the user wanted
+    // (see `LeavePublishCarryover` in mod.rs -- the fix for the live
+    // 2026-07-30 incident where rejoin restored the mic but silently dropped
+    // the camera). The mic needs no carryover: `join_room`'s audio tail
+    // republishes it on every join. Window shares are deliberately NOT
+    // snapshotted (#170): leaving stops them and rejoining must not resume
+    // them.
     {
         let room_id = {
             let guard = state.inner.lock_unpoisoned();
@@ -1355,21 +1330,9 @@ async fn cleanup_left_room(
                 .map(|joined| joined.room_record.id.clone())
         };
         if let Some(room_id) = room_id {
-            let shares: Vec<(u32, crate::hover_tab::WindowFrame)> = state
-                .active_share_restart_plan()
-                .into_iter()
-                .map(
-                    |(window_id, frame, _started_seq, _resolution, _source_kind, _border_color)| {
-                        (window_id, frame)
-                    },
-                )
-                .collect();
             let camera_on = state.camera_intent();
-            log::info!(
-                "session: {reason} recording publish carryover (camera_on={camera_on}, shares={:?})",
-                shares.iter().map(|(id, _)| *id).collect::<Vec<_>>()
-            );
-            state.record_leave_publish_carryover(room_id, camera_on, shares);
+            log::info!("session: {reason} recording publish carryover (camera_on={camera_on})");
+            state.record_leave_publish_carryover(room_id, camera_on);
         }
         // Leaving turns everything off; the carryover above (not this live
         // flag) is what a same-room rejoin consumes.
@@ -1507,41 +1470,29 @@ mod tests {
 
     /// The leave→rejoin publish carryover (the B1 fix's source of truth) is
     /// room-scoped and one-shot: rejoining the SAME room consumes the
-    /// recorded intent exactly once; joining a DIFFERENT room discards it so
-    /// the camera/window shares can never leak into an audience that never
-    /// saw them.
+    /// recorded camera intent exactly once; joining a DIFFERENT room discards
+    /// it so the camera can never leak into an audience that never saw it.
+    /// It carries camera intent ONLY -- window shares stop on leave and are
+    /// never resumed by a rejoin (#170).
     #[test]
     fn leave_publish_carryover_is_room_scoped_and_one_shot() {
-        let frame = crate::hover_tab::WindowFrame {
-            x: 10,
-            y: 20,
-            width: 800,
-            height: 600,
-        };
-
         // Joining a DIFFERENT room discards (and still clears) the snapshot.
         let state = SessionState::default();
-        state.record_leave_publish_carryover("room-a".to_string(), true, vec![(157, frame)]);
+        state.record_leave_publish_carryover("room-a".to_string(), true);
         let other = state.take_leave_publish_carryover("room-b");
         assert!(!other.camera_on);
-        assert!(other.shares.is_empty());
         let after_discard = state.take_leave_publish_carryover("room-a");
         assert!(
-            !after_discard.camera_on && after_discard.shares.is_empty(),
+            !after_discard.camera_on,
             "a discarded carryover must not linger for a later same-room join"
         );
 
         // Rejoining the SAME room consumes it exactly once.
-        state.record_leave_publish_carryover("room-a".to_string(), true, vec![(157, frame)]);
+        state.record_leave_publish_carryover("room-a".to_string(), true);
         let plan = state.take_leave_publish_carryover("room-a");
         assert!(plan.camera_on);
-        assert_eq!(plan.shares.len(), 1);
-        assert_eq!(plan.shares[0].0, 157);
         let second = state.take_leave_publish_carryover("room-a");
-        assert!(
-            !second.camera_on && second.shares.is_empty(),
-            "the carryover is one-shot"
-        );
+        assert!(!second.camera_on, "the carryover is one-shot");
     }
 
     struct DropSpy(Arc<AtomicUsize>);
