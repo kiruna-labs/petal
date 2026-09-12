@@ -108,6 +108,7 @@ mod hover_core;
 mod instance_lock;
 #[cfg(target_os = "macos")]
 mod latency_probe;
+mod launch_location;
 // Top-center "<Name> is sharing a window" notice pill (#679).
 #[cfg(target_os = "macos")]
 mod share_notice;
@@ -916,8 +917,23 @@ pub fn run() {
     // before `tauri::Builder`/`NSApplicationMain`: the Dock decides this
     // process's tile at check-in, so repairing from the `setup` hook is too
     // late for the launch already under way. No-op when healthy or unbundled.
+    // #172: decide where this launch runs from BEFORE registering anything.
+    // A disk-image or App-Translocated bundle is an ephemeral path; registering
+    // it would point the Dock at a mount that disappears on eject. The
+    // webview's launch router reads the same class and diverts the user to
+    // move the app.
     #[cfg(target_os = "macos")]
-    platform::launch_services::repair_registration_if_missing();
+    {
+        let launch_location = launch_location::probe_at_startup();
+        if launch_location.skip_launch_services_registration() {
+            log::warn!(
+                "launch_services: skipping startup registration for an ephemeral {} bundle path (#172)",
+                launch_location.as_str()
+            );
+        } else {
+            platform::launch_services::repair_registration_if_missing();
+        }
+    }
 
     // Load local development env files without logging their contents. Process
     // env wins, then apps/desktop/.env, then legacy src-tauri/.env.
@@ -993,6 +1009,9 @@ pub fn run() {
         //   remote native-window controls, remote control, window diagnostics
         .invoke_handler(tauri::generate_handler![
             restart_app,
+            launch_location::launch_location_class,
+            launch_location::open_applications_folder,
+            launch_location::reveal_running_bundle,
             list_shareable_windows,
             has_screen_recording_access,
             permissions::check_screen_recording,
@@ -1660,6 +1679,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             restart_app,
+            launch_location::launch_location_class,
+            launch_location::open_applications_folder,
+            launch_location::reveal_running_bundle,
             frontend_ready,
             get_build_info,
             list_shareable_windows,

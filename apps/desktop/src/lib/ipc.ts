@@ -160,6 +160,12 @@ export const COMMANDS = {
   setRemoteControlAllowed: 'set_remote_control_allowed',
   setRemoteControlPolicy: 'set_remote_control_policy',
   setSentryEnabled: 'set_sentry_enabled',
+  /** #172: where this launch runs from -- a closed class string, never a
+   * path. The launch router diverts to /relocate when the class needs the
+   * user to move the app (disk image, App Translocation, read-only). */
+  launchLocationClass: 'launch_location_class',
+  openApplicationsFolder: 'open_applications_folder',
+  revealRunningBundle: 'reveal_running_bundle',
   setSharePriority: 'set_share_priority',
   setHoverTabTooltip: 'set_hover_tab_tooltip',
   setShareResolution: 'set_share_resolution',

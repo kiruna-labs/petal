@@ -13,7 +13,9 @@
     after first run);
   - a best-effort `listRooms()` warm-up so `/main` paints with data.
 
-  Route decision:
+  Route decision (`$lib/data/launchLocation`'s `launchRoute`, in order):
+  - running from the disk image / App Translocation / read-only → /relocate
+    (#172) — before everything else, so returning users see it too;
   - onboarding never completed → /onboarding immediately;
   - onboarding completed → /main immediately, then permission checks redirect
     to /onboarding only if a REQUIRED permission is missing.
@@ -44,6 +46,7 @@
     checkAccessibility
   } from '$lib/data/permissions';
   import { listRooms } from '$lib/data/rooms';
+  import { fetchLaunchLocationClass, launchRoute } from '$lib/data/launchLocation';
   import { hasTauriBridge } from '$lib/ipc';
 
   async function permissionsOk() {
@@ -57,14 +60,19 @@
 
   async function decide() {
     try {
-      if (!session.onboardingComplete) {
-        goto('/onboarding', { replaceState: true });
-        return;
-      }
+      const hasBridge = hasTauriBridge();
+      // #172: a disk-image or App-Translocated run is diverted to /relocate
+      // before anything else -- `launchRoute` puts the location first so a
+      // returning, fully-permissioned user still sees it. A fast local read;
+      // any failure reads as `other` and never blocks the launch.
+      const location = hasBridge ? await fetchLaunchLocationClass() : null;
+      const onboardingComplete = session.onboardingComplete;
 
-      if (!hasTauriBridge()) {
-        // Browser fallback: localStorage-only decision (see header comment).
-        goto('/main', { replaceState: true });
+      const early = launchRoute({ onboardingComplete, hasBridge, location, permissionsOk: true });
+      if (early === '/relocate' || !onboardingComplete || !hasBridge) {
+        // Browser fallback (no bridge): localStorage-only decision (see
+        // header comment).
+        goto(early, { replaceState: true });
         return;
       }
 
@@ -74,11 +82,13 @@
       // duration before being bounced to onboarding. listRooms() (the
       // network part) stays background per #8.
       listRooms().catch((e) => console.warn('launch: listRooms warm-up failed', e));
-      if (!(await permissionsOk())) {
-        goto('/onboarding', { replaceState: true });
-        return;
-      }
-      goto('/main', { replaceState: true });
+      const route = launchRoute({
+        onboardingComplete,
+        hasBridge,
+        location,
+        permissionsOk: await permissionsOk()
+      });
+      goto(route, { replaceState: true });
     } catch (e) {
       console.error('launch: startup checks failed', e);
     }
