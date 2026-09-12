@@ -24,6 +24,7 @@
     HoverTabSide,
     HoverTabUpdate,
     RemoteControlStatus,
+    ShareAudioState,
     ShareControlModeChanged,
     SharePriority,
     WindowFrame
@@ -558,6 +559,7 @@
       sharedWindows = windowShareSet(sharedWindows, event.payload.windowId, event.payload.shared);
       if (!event.payload.shared && currentWindowId === event.payload.windowId) {
         drawActive = false;
+        shareAudio = { windowId: event.payload.windowId, enabled: false, available: false, publishing: false, scope: null, error: null };
         shareControlMode = displayLike ? 'fullControl' : 'cursorPreserving';
       }
       if (!event.payload.shared) {
@@ -565,6 +567,10 @@
           [...controlledWindows].filter(([id]) => id !== event.payload.windowId)
         );
       }
+    });
+
+    const unShareAudio = listen<ShareAudioState>(EVENTS.shareAudioStateChanged, (event) => {
+      if (currentWindowId === event.payload.windowId) shareAudio = event.payload;
     });
 
     const unShareControlMode = listen<ShareControlModeChanged>(EVENTS.shareControlModeChanged, (event) => {
@@ -610,6 +616,7 @@
     return () => {
       unUpdate.then((u) => u()).catch(() => {});
       unShareState.then((u) => u()).catch(() => {});
+      unShareAudio.then((u) => u()).catch(() => {});
       unShareControlMode.then((u) => u()).catch(() => {});
       unRemoteStatus.then((u) => u()).catch(() => {});
       unHide.then((u) => u()).catch(() => {});
@@ -656,6 +663,29 @@
   // rolled back on failure: leaving the menu showing "allowed" when the host
   // still has it locked (or vice versa) misrepresents a permission.
   let shareRemoteControlAllowed = $state(true);
+  let shareAudio = $state<ShareAudioState>({
+    windowId: 0,
+    enabled: false,
+    available: false,
+    publishing: false,
+    scope: null,
+    error: null
+  });
+
+  async function setShareAudioForTarget(windowId: number, enabled: boolean) {
+    try {
+      const result = await invoke<ShareAudioState>(COMMANDS.setShareAudioEnabled, {
+        windowId,
+        enabled
+      });
+      // A menu callback owns the target it was opened for. Never apply a late
+      // result to whichever source happens to be under the hover tab now.
+      if (currentWindowId === windowId) shareAudio = result;
+      if (result.error) console.error(`share audio unavailable: ${result.error}`);
+    } catch (error) {
+      console.error(`set_share_audio_enabled(${windowId}) failed`, error);
+    }
+  }
 
   async function onSetShareRemoteControlAllowed(allowed: boolean) {
     const windowId = currentWindowId;
@@ -839,6 +869,19 @@
     if (menuPending) return;
 
     const remoteControlSupported = isWindows();
+    const menuWindowId = currentWindowId;
+    if (menuWindowId !== null) {
+      shareAudio = await invoke<ShareAudioState>(COMMANDS.shareAudioState, {
+        windowId: menuWindowId
+      }).catch(() => ({
+        windowId: menuWindowId,
+        enabled: false,
+        available: false,
+        publishing: false,
+        scope: null,
+        error: null
+      }));
+    }
     await invoke(COMMANDS.setHoverTabMenuOpen, { open: true }).catch(() => {});
 
     try {
@@ -855,7 +898,9 @@
         // presets (Petal View's region window deliberately omits them).
         true,
         shareRemoteControlAllowed,
-        side
+        side,
+        shareAudio.enabled,
+        shareAudio.available
       );
       const placement = keyboardInvocation && actionButton
         ? (() => {
@@ -873,7 +918,10 @@
         onAiChat: () => void onToggleAiChat(),
         onDebug: () => void openDebugCockpit(),
         onPosition: (value) => void selectPosition(value as HoverTabPosition),
-        onRemoteControlAllowed: (allowed) => void onSetShareRemoteControlAllowed(allowed)
+        onRemoteControlAllowed: (allowed) => void onSetShareRemoteControlAllowed(allowed),
+        onShareAudio: (enabled) => {
+          if (menuWindowId !== null) void setShareAudioForTarget(menuWindowId, enabled);
+        }
       }, placement);
     } finally {
       await invoke(COMMANDS.setHoverTabMenuOpen, { open: false }).catch(() => {});

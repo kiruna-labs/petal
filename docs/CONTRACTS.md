@@ -370,6 +370,38 @@ Microphone track:
 | native | `petal-mic` | `Microphone` |
 | web | `petal-mic` | `Microphone` |
 
+Screen-audio companion tracks:
+
+- Every new share starts with output audio **off**. Consent is scoped to that
+  active share incarnation and is cleared by stop, leave, and rejoin.
+- Display and region shares request the singleton logical source `SystemOutput`
+  only after their explicit “Share audio (system output)” opt-in.
+  The companion is named `petal-window-audio-system` and uses the same value as
+  its LiveKit `stream` label.
+- Opted-in window shares request `Process(<owning pid>)` where the platform can
+  resolve and capture that process; they never broaden to system output. The
+  name and `stream` are
+  `petal-window-audio-process-<pid>`.
+- A room publishes at most one companion per logical source. System output
+  takes precedence over opted-in process sources; still-consented process
+  sources resume when the last opted-in system source is released.
+- Windows system output is unavailable unless process-loopback exclusion can
+  exclude Petal's process tree; ordinary default-render loopback is forbidden
+  because it can recapture meeting playout.
+- Native publishes these tracks with `TrackSource::ScreenshareAudio`, fixed
+  interleaved S16/48 kHz stereo 10 ms frames, and a bounded oldest-drop queue.
+  Audio capture/publication failure is best-effort: the visual share remains
+  active and the source is reported as unavailable in native diagnostics.
+- `SystemOutput` is not monitor-isolated, and process loopback is not
+  per-window-isolated. macOS ScreenCaptureKit and supported Windows process
+  loopback provide the broad source scopes above; no client should infer a
+  particular monitor or window from the track name.
+
+| Logical source | Track name / stream | LiveKit source |
+|---|---|---|
+| `SystemOutput` | `petal-window-audio-system` | `ScreenshareAudio` |
+| `Process(42)` (example PID) | `petal-window-audio-process-42` | `ScreenshareAudio` |
+
 **Audio publish options are NOT symmetric, and that is a known open question,
 not a contract.** Both sides negotiate Opus with in-band FEC (unconditional in
 both SDKs), but:
