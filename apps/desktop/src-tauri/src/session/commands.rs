@@ -1,5 +1,9 @@
 use crate::remote_control_core::RemoteControlPolicy;
-use super::share::set_share_resolution as set_share_resolution_impl;
+use super::share::{
+    set_share_audio_enabled as set_share_audio_enabled_impl,
+    set_share_resolution as set_share_resolution_impl,
+    share_audio_state as share_audio_state_impl,
+};
 use super::{join_room, leave_room, SessionState, ShareSessionError};
 
 // =============================================================================
@@ -137,6 +141,31 @@ pub async fn set_share_remote_control_allowed(
         if allowed { "ALLOWED" } else { "LOCKED" }
     );
     Ok(allowed)
+}
+
+/// Authoritative consent/availability/publication state for one active share.
+/// Inactive and newly-started shares always report `enabled: false`.
+#[tauri::command]
+pub fn share_audio_state(
+    state: tauri::State<'_, SessionState>,
+    window_id: u32,
+) -> crate::screen_audio::ShareAudioState {
+    share_audio_state_impl(&state, window_id)
+}
+
+/// Enable or disable the output-audio companion for this exact share
+/// incarnation. Audio failure is returned in the state and never fails/stops
+/// the visual share.
+#[tauri::command]
+pub async fn set_share_audio_enabled(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SessionState>,
+    window_id: u32,
+    enabled: bool,
+) -> crate::screen_audio::ShareAudioState {
+    let result = set_share_audio_enabled_impl(&app, &state, window_id, enabled).await;
+    let _ = tauri::Emitter::emit(&app, "share-audio-state-changed", result.clone());
+    result
 }
 
 /// Set the capture-resolution cap for an active share. This republishes the track if dimensions
