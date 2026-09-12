@@ -155,17 +155,19 @@ pub fn share_audio_state(
 
 /// Enable or disable the output-audio companion for this exact share
 /// incarnation. Audio failure is returned in the state and never fails/stops
-/// the visual share.
+/// the visual share. The `Result` is required by Tauri because this command
+/// takes borrowed inputs; an unavailable source is still reported as state,
+/// not as a transport error.
 #[tauri::command]
 pub async fn set_share_audio_enabled(
     app: tauri::AppHandle,
     state: tauri::State<'_, SessionState>,
     window_id: u32,
     enabled: bool,
-) -> crate::screen_audio::ShareAudioState {
+) -> Result<crate::screen_audio::ShareAudioState, String> {
     let result = set_share_audio_enabled_impl(&app, &state, window_id, enabled).await;
     let _ = tauri::Emitter::emit(&app, "share-audio-state-changed", result.clone());
-    result
+    Ok(result)
 }
 
 /// Set the capture-resolution cap for an active share. This republishes the track if dimensions
