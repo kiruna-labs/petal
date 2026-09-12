@@ -3,12 +3,17 @@ import test from 'node:test';
 
 import {
   FREEZE_WATCHDOG_TIMEOUT_MS,
+  FREEZE_WATCHDOG_POLL_MS,
   nextCameraFreezeState,
   isCameraFrameStale,
   framesDecodedFromStatsReport,
+  cameraInboundVideoStatFromReport,
+  cameraReceiveStatsFromStatsReport,
   nextCameraDecodeHealthState,
   formatCameraDecodeHealth,
-  classifyCameraReceiveHealth
+  classifyCameraReceiveHealth,
+  composeCameraReceiveObservation,
+  cameraPathStatsFromStatsReport
 } from '../src/lib/data/cameraFreezeWatchdog.ts';
 
 // #247: unit tests for the local camera freeze-watchdog decision logic
@@ -82,6 +87,88 @@ test('framesDecodedFromStatsReport reads the video inbound-rtp entry', () => {
   assert.equal(framesDecodedFromStatsReport(report), 42);
 });
 
+test('cameraReceiveStatsFromStatsReport captures decoder, render, loss, and freeze counters', () => {
+  const report = new Map([
+    [
+      'video-in',
+      {
+        type: 'inbound-rtp',
+        kind: 'video',
+        framesDecoded: 42,
+        framesPerSecond: 29.5,
+        framesDropped: 3,
+        freezeCount: 2,
+        totalFreezesDuration: 1.25,
+        packetsLost: 4,
+        nackCount: 7,
+        bytesReceived: 120_000,
+        packetsReceived: 900,
+        packetsDiscarded: 2,
+        retransmittedPacketsReceived: 8,
+        keyFramesDecoded: 3,
+        pliCount: 4,
+        firCount: 1,
+        jitterBufferDelay: 0.045,
+        jitterBufferEmittedCount: 40,
+        totalDecodeTime: 0.8,
+        decoderImplementation: 'hardware H264'
+      }
+    ]
+  ]) as unknown as RTCStatsReport;
+  const stats = cameraReceiveStatsFromStatsReport(report);
+  assert.ok(stats, 'a video inbound report must produce receiver stats');
+  assert.deepEqual(
+    {
+      framesDecoded: stats.framesDecoded,
+      framesPerSecond: stats.framesPerSecond,
+      framesDropped: stats.framesDropped,
+      freezeCount: stats.freezeCount,
+      totalFreezesDurationMs: stats.totalFreezesDurationMs,
+      packetsLost: stats.packetsLost,
+      nackCount: stats.nackCount,
+      bytesReceived: stats.bytesReceived,
+      packetsReceived: stats.packetsReceived,
+      packetsDiscarded: stats.packetsDiscarded,
+      retransmittedPacketsReceived: stats.retransmittedPacketsReceived,
+      keyFramesDecoded: stats.keyFramesDecoded,
+      pliCount: stats.pliCount,
+      firCount: stats.firCount,
+      jitterBufferDelayMs: stats.jitterBufferDelayMs,
+      jitterBufferEmittedCount: stats.jitterBufferEmittedCount,
+      totalDecodeTimeMs: stats.totalDecodeTimeMs,
+      decoderImplementation: stats.decoderImplementation
+    },
+    {
+      framesDecoded: 42,
+      framesPerSecond: 29.5,
+      framesDropped: 3,
+      freezeCount: 2,
+      totalFreezesDurationMs: 1250,
+      packetsLost: 4,
+      nackCount: 7,
+      bytesReceived: 120_000,
+      packetsReceived: 900,
+      packetsDiscarded: 2,
+      retransmittedPacketsReceived: 8,
+      keyFramesDecoded: 3,
+      pliCount: 4,
+      firCount: 1,
+      jitterBufferDelayMs: 45,
+      jitterBufferEmittedCount: 40,
+      totalDecodeTimeMs: 800,
+      decoderImplementation: 'hardware H264'
+    }
+  );
+  assert.ok(stats.lossPct !== null && Math.abs(stats.lossPct - 400 / 904) < 1e-12);
+  // A report with no dimensions/jitter/render counters stays honestly
+  // unavailable rather than substituting a guess.
+  assert.equal(stats.decodedWidth, null);
+  assert.equal(stats.decodedHeight, null);
+  assert.equal(stats.framesReceived, null);
+  assert.equal(stats.framesRendered, null);
+  assert.equal(stats.jitterMs, null);
+});
+
 test('framesDecodedFromStatsReport returns null for missing/empty reports', () => {
   assert.equal(framesDecodedFromStatsReport(undefined), null);
   const empty = new Map() as unknown as RTCStatsReport;
@@ -90,6 +177,90 @@ test('framesDecodedFromStatsReport returns null for missing/empty reports', () =
     ['audio-in', { type: 'inbound-rtp', kind: 'audio', framesDecoded: 999 }]
   ]) as unknown as RTCStatsReport;
   assert.equal(framesDecodedFromStatsReport(noVideo), null);
+  assert.equal(cameraReceiveStatsFromStatsReport(noVideo), null);
+});
+
+test('cameraReceiveStatsFromStatsReport extracts jitter, loss, and render counters', () => {
+  const report = new Map([
+    [
+      'inbound',
+      {
+        type: 'inbound-rtp',
+        kind: 'video',
+        jitter: 0.012,
+        packetsLost: 2,
+        packetsReceived: 98,
+        framesRendered: 47
+      }
+    ]
+  ]) as unknown as RTCStatsReport;
+  const stats = cameraReceiveStatsFromStatsReport(report);
+  assert.ok(stats, 'a video inbound report must produce receiver stats');
+  assert.deepEqual(
+    {
+      jitterMs: stats.jitterMs,
+      lossPct: stats.lossPct,
+      decodedWidth: stats.decodedWidth,
+      decodedHeight: stats.decodedHeight,
+      framesReceived: stats.framesReceived,
+      bytesReceived: stats.bytesReceived,
+      framesRendered: stats.framesRendered
+    },
+    {
+      jitterMs: 12,
+      lossPct: 2,
+      decodedWidth: null,
+      decodedHeight: null,
+      framesReceived: null,
+      bytesReceived: null,
+      framesRendered: 47
+    }
+  );
+});
+
+test('receiver dimensions and counters come from the same primary inbound report', () => {
+  const entries = [
+    ['small', {
+      type: 'inbound-rtp', kind: 'video', frameWidth: 320, frameHeight: 180,
+      framesDecoded: 10, framesReceived: 11, bytesReceived: 1000, framesRendered: 9
+    }],
+    ['large', {
+      type: 'inbound-rtp', kind: 'video', frameWidth: 1280, frameHeight: 720,
+      framesDecoded: 42, framesReceived: 44, bytesReceived: 4000, framesRendered: 40
+    }]
+  ] as const;
+  const report = new Map(entries) as unknown as RTCStatsReport;
+  assert.equal(framesDecodedFromStatsReport(report), 42);
+  const stats = cameraReceiveStatsFromStatsReport(report);
+  assert.ok(stats, 'the primary report must produce stats');
+  assert.deepEqual(
+    {
+      decodedWidth: stats.decodedWidth,
+      decodedHeight: stats.decodedHeight,
+      framesDecoded: stats.framesDecoded,
+      framesReceived: stats.framesReceived,
+      bytesReceived: stats.bytesReceived,
+      framesRendered: stats.framesRendered
+    },
+    {
+      decodedWidth: 1280,
+      decodedHeight: 720,
+      framesDecoded: 42,
+      framesReceived: 44,
+      bytesReceived: 4000,
+      framesRendered: 40
+    }
+  );
+  // The primary-report choice must be selected by decoded area, not by
+  // Map insertion order: the same two reports listed small-first select
+  // identically to large-first.
+  assert.equal(cameraInboundVideoStatFromReport(report), entries[1][1]);
+  const reversed = new Map([entries[1], entries[0]]) as unknown as RTCStatsReport;
+  const reversedStats = cameraReceiveStatsFromStatsReport(reversed);
+  assert.ok(reversedStats, 'the primary report must produce stats when listed first');
+  assert.equal(reversedStats.decodedWidth, 1280);
+  assert.equal(reversedStats.framesDecoded, 42);
+  assert.equal(reversedStats.bytesReceived, 4000);
 });
 
 test('nextCameraDecodeHealthState emits periodic decoded-fps telemetry', () => {
@@ -105,7 +276,55 @@ test('nextCameraDecodeHealthState emits periodic decoded-fps telemetry', () => {
   assert.deepEqual(due.health, {
     framesDecoded: 25,
     decodedFps: 3,
-    gapSinceLastFrameMs: 0
+    gapSinceLastFrameMs: 0,
+    intervalMs: 5_000,
+    intervalSequence: 1
+  });
+});
+
+test('six-second reduced cadence stays active while stalled cadence is stalled', () => {
+  const reduced = composeCameraReceiveObservation(
+    classifyCameraReceiveHealth(13, false, false), false, false
+  );
+  assert.deepEqual(reduced, {
+    cadence: 'reduced',
+    streamState: 'active',
+    degraded: true,
+    stallCause: 'not_applicable'
+  });
+
+  const stalled = composeCameraReceiveObservation(
+    classifyCameraReceiveHealth(0, false, false), false, false
+  );
+  assert.deepEqual(stalled, {
+    cadence: 'stalled',
+    streamState: 'stalled',
+    degraded: false,
+    stallCause: 'decode_zero'
+  });
+
+  // #126 semantics survive composition: an SFU pause keeps its own state and
+  // its pause cause instead of being flattened into a decoder-fault stall.
+  const paused = composeCameraReceiveObservation(
+    classifyCameraReceiveHealth(0, true, true), true, true
+  );
+  assert.deepEqual(paused, {
+    cadence: 'stalled',
+    streamState: 'paused',
+    degraded: false,
+    stallCause: 'stream_paused'
+  });
+});
+
+test('decode interval state resets when a publication SID changes', () => {
+  const first = nextCameraDecodeHealthState(undefined, 100, 0, 5_000, 'TR_old');
+  const replacement = nextCameraDecodeHealthState(first.state, 1, 6_000, 5_000, 'TR_new');
+  assert.equal(replacement.health, null);
+  assert.deepEqual(replacement.state, {
+    lastLoggedAt: 6_000,
+    lastLoggedFramesDecoded: 1,
+    intervalSequence: 0,
+    trackSid: 'TR_new'
   });
 });
 
@@ -201,6 +420,83 @@ test('classifyCameraReceiveHealth emits only confirmed unhealthy buckets', () =>
   }
 });
 
+test('the production six-second clock reports reduced cadence as an active stream and true silence as zero decode', () => {
+  // The gallery health interval is 15s but it is evaluated on a 2s poll, so a
+  // field run actually emits on this clock. 26 frames per 2s is ~13 fps:
+  // degraded, still progressing, and therefore NOT a stall.
+  const pollMs = 2_000;
+  const frames = [100, 126, 152, 178];
+  const intervalMs = 6_000;
+  let state = nextCameraDecodeHealthState(undefined, frames[0], 0, intervalMs).state;
+  for (const [index, at] of [2_000, 4_000].entries()) {
+    const tick = nextCameraDecodeHealthState(state, frames[index + 1], at, intervalMs);
+    assert.equal(tick.health, null, `no sample is due at ${at}ms`);
+    state = tick.state;
+  }
+
+  const due = nextCameraDecodeHealthState(state, frames[3], 6_000, intervalMs);
+  assert.ok(due.health, 'a sample must be due at 6000ms');
+  assert.equal(due.health.decodedFps, 13);
+  assert.equal(due.health.intervalMs, 6_000);
+  assert.equal(due.health.intervalSequence, 1);
+
+  const signal = classifyCameraReceiveHealth(due.health.decodedFps, false, false);
+  assert.equal(signal?.cadence, 'reduced');
+  const observation = composeCameraReceiveObservation(signal, false, false);
+  assert.equal(
+    observation.streamState,
+    'active',
+    'progressing reduced cadence must never be reported as stalled'
+  );
+  assert.equal(observation.degraded, true);
+
+  // The next six-second window makes no progress at all: that IS a stall, and
+  // it carries its own cause rather than a decoder fault.
+  const silent = nextCameraDecodeHealthState(
+    due.state,
+    frames[3],
+    6_000 + intervalMs,
+    intervalMs
+  );
+  assert.ok(silent.health);
+  assert.equal(silent.health.decodedFps, 0);
+  const silence = classifyCameraReceiveHealth(silent.health.decodedFps, false, false);
+  assert.equal(silence?.stallCause, 'decode_zero');
+  assert.equal(composeCameraReceiveObservation(silence, false, false).streamState, 'stalled');
+  // A zero-progress window is not yet the 30s stale watchdog's verdict.
+  assert.equal(
+    isCameraFrameStale({ lastFramesDecoded: frames[3], lastProgressAt: 6_000 }, 12_000),
+    false
+  );
+  assert.equal(
+    isCameraFrameStale({ lastFramesDecoded: frames[3], lastProgressAt: 6_000 }, 36_000),
+    true
+  );
+  assert.equal(pollMs, FREEZE_WATCHDOG_POLL_MS);
+});
+
+test('a decode counter that rolls back is treated as a replacement, not as a stall', () => {
+  // A receiver restart or a replacement publication reuses the identity while
+  // the cumulative counter starts over. Reading that as "no progress" would
+  // make the watchdog raise a stall for a perfectly healthy stream.
+  const seeded = nextCameraFreezeState(undefined, 500, 0);
+  const rolledBack = nextCameraFreezeState(seeded, 3, 1_000);
+  assert.deepEqual(rolledBack, { lastFramesDecoded: 3, lastProgressAt: 1_000 });
+  assert.equal(isCameraFrameStale(rolledBack, 20_000), false, 'a rollback must re-seed the clock');
+
+  // The interval sampler re-seeds too, and the sequence restarts so a reader
+  // cannot compare a post-replacement sample against the old publication.
+  const health = nextCameraDecodeHealthState(undefined, 500, 0, 5_000, 'TR_same');
+  const afterRollback = nextCameraDecodeHealthState(health.state, 3, 6_000, 5_000, 'TR_same');
+  assert.equal(afterRollback.health, null, 'the first reading after a rollback is a baseline');
+  assert.deepEqual(afterRollback.state, {
+    lastLoggedAt: 6_000,
+    lastLoggedFramesDecoded: 3,
+    intervalSequence: 0,
+    trackSid: 'TR_same'
+  });
+});
+
 // #126: 1,002 receive-side `camera-health` events were byte-identical because
 // three conditions shared one output. This asserts the property that made them
 // unactionable is gone -- the three stalled conditions must not collapse onto
@@ -252,8 +548,121 @@ test('formatCameraDecodeHealth preserves the log contract fields', () => {
       identity: 'alice',
       framesDecoded: 42,
       decodedFps: 29.94,
-      gapSinceLastFrameMs: 120
+      gapSinceLastFrameMs: 120,
+      intervalMs: 5_000,
+      intervalSequence: 1
     }),
-    "gallery bridge: camera decode health for 'alice' -- frames_decoded=42 decoded_fps=29.9 gap_since_last_frame_ms=120"
+    "gallery bridge: camera decode health for 'alice' -- frames_decoded=42 decoded_fps=29.9 browser_fps=unknown frames_dropped=unknown freeze_count=unknown freeze_ms=unknown packets_received=unknown packets_lost=unknown packets_discarded=unknown retransmitted_packets=unknown bytes_received=unknown nack=unknown pli=unknown fir=unknown key_frames_decoded=unknown jitter_buffer_ms=unknown jitter_buffer_emitted=unknown decode_ms=unknown decoder='unknown' gap_since_last_frame_ms=120"
   );
+});
+
+// #247 path context: the receiver's durable interval records WHICH transport
+// path carried the camera, using categorical candidate types/protocols only.
+
+function fakeReport(stats: Record<string, unknown>[]): RTCStatsReport {
+  return {
+    forEach(callback: (value: unknown, key: string) => void) {
+      for (const stat of stats) callback(stat, String(stat.id ?? ''));
+    }
+  } as unknown as RTCStatsReport;
+}
+
+test('cameraPathStatsFromStatsReport follows the selected candidate pair', () => {
+  const path = cameraPathStatsFromStatsReport(
+    fakeReport([
+      {
+        id: 'T01',
+        type: 'transport',
+        selectedCandidatePairId: 'CP2',
+        selectedCandidatePairChanges: 3
+      },
+      { id: 'CP1', type: 'candidate-pair', nominated: true, currentRoundTripTime: 0.09 },
+      {
+        id: 'CP2',
+        type: 'candidate-pair',
+        nominated: false,
+        localCandidateId: 'L2',
+        remoteCandidateId: 'R2',
+        currentRoundTripTime: 0.024,
+        availableIncomingBitrate: 4_200_000
+      },
+      { id: 'L2', type: 'local-candidate', candidateType: 'srflx', protocol: 'udp' },
+      {
+        id: 'R2',
+        type: 'remote-candidate',
+        candidateType: 'relay',
+        protocol: 'udp',
+        relayProtocol: 'udp'
+      }
+    ])
+  );
+  assert.deepEqual(path, {
+    protocol: 'udp',
+    localCandidateType: 'srflx',
+    remoteCandidateType: 'relay',
+    relayProtocol: 'udp',
+    selectedPairChanges: 3,
+    roundTripTimeMs: 24,
+    availableIncomingKbps: 4_200
+  });
+});
+
+test('cameraPathStatsFromStatsReport falls back to the nominated pair and stays unknown', () => {
+  const path = cameraPathStatsFromStatsReport(
+    fakeReport([
+      { id: 'T01', type: 'transport' },
+      { id: 'CP1', type: 'candidate-pair', nominated: false },
+      { id: 'CP2', type: 'candidate-pair', nominated: true, localCandidateId: 'L1' }
+    ])
+  );
+  assert.ok(path);
+  assert.equal(path.selectedPairChanges, null);
+  // Unknown stays null, never a misleading zero.
+  assert.equal(path.roundTripTimeMs, null);
+  assert.equal(path.availableIncomingKbps, null);
+  assert.equal(path.localCandidateType, null);
+
+  assert.equal(cameraPathStatsFromStatsReport(undefined), null);
+  assert.equal(cameraPathStatsFromStatsReport(fakeReport([])), null);
+});
+
+test('cameraPathStatsFromStatsReport never carries addresses or candidate strings', () => {
+  const path = cameraPathStatsFromStatsReport(
+    fakeReport([
+      { id: 'T01', type: 'transport', selectedCandidatePairId: 'CP1' },
+      {
+        id: 'CP1',
+        type: 'candidate-pair',
+        localCandidateId: 'L1',
+        remoteCandidateId: 'R1',
+        currentRoundTripTime: 0.01,
+        availableIncomingBitrate: 2_000_000
+      },
+      {
+        id: 'L1',
+        type: 'local-candidate',
+        candidateType: 'host',
+        protocol: 'udp',
+        address: '192.0.2.44',
+        ip: '192.0.2.44',
+        port: 54321,
+        url: 'stun:example.invalid',
+        foundation: 'secret'
+      },
+      {
+        id: 'R1',
+        type: 'remote-candidate',
+        candidateType: 'relay',
+        protocol: 'tcp',
+        address: '203.0.113.9',
+        port: 443
+      }
+    ])
+  );
+  const serialized = JSON.stringify(path);
+  for (const forbidden of ['192.0.2.44', '203.0.113.9', '54321', 'example.invalid', 'secret']) {
+    assert.ok(!serialized.includes(forbidden), `leaked ${forbidden}: ${serialized}`);
+  }
+  assert.equal(path?.protocol, 'udp');
+  assert.equal(path?.remoteCandidateType, 'relay');
 });
