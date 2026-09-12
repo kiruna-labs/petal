@@ -47,6 +47,19 @@ const NO_FRAME_RETIRE_AFTER: Duration = Duration::from_secs(30);
 /// cannot start sender negotiation, so publication presence alone must not
 /// keep a native window on screen forever. The first 30s remains the normal
 /// repair/hold period; this is the final stale-source backstop.
+///
+/// INVARIANT — this deadline measures *media* silence, so a sender that keeps
+/// re-pushing a parked/cached frame stays under it by construction, and two
+/// legitimate cases depend on that: a deliberately hidden/minimized share
+/// (#171 hides the capture source without stopping the publication) and a
+/// static shared document. On macOS `session/share.rs` re-pushes the last
+/// frame every `STATIC_REFRESH_INTERVAL_US` (1s) with
+/// `STATIC_FRAME_DEDUP_ENABLED = false`; the Windows pump does the same on its
+/// idle timer (`SHARE_IDLE_REFRESH_INTERVAL`, 2s in `session_stub.rs`). If
+/// that refresh is ever removed, slowed toward this bound, or made
+/// dedup-aware, a live-but-parked share starts being retired a minute later.
+/// Keep the parked refresh period far below this value, or teach the
+/// retirement path that the source is intentionally parked rather than dead.
 const STALE_PUBLICATION_RETIRE_AFTER: Duration = Duration::from_secs(60);
 const FRAME_HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// Receiver-side starvation policy (Windows decode loop): once a window has
@@ -3461,6 +3474,13 @@ fn no_frame_decision(
     // cannot be allowed to suppress the hard stale-source deadline forever:
     // a crashed source can remain advertised as muted with no sender able to
     // negotiate an unpublish.
+    //
+    // Today this arm is inert: nothing mutes a window/video track (Petal only
+    // mutes the microphone track, via `LocalAudioTrack::mute()`), so window
+    // tracks are never `track_muted`. It exists so the first sender-side video
+    // mute -- for example an occlusion optimisation -- cannot silently
+    // suppress this deadline; that change should revisit the bound below
+    // rather than inherit it.
     if track_muted && silence < STALE_PUBLICATION_RETIRE_AFTER {
         return NoFrameDecision::Keep;
     }
