@@ -44,6 +44,7 @@ use chrono::Utc;
 use libwebrtc::{
     native::{create_random_uuid, packet_trailer},
     rtp_parameters::RtpEncodingParameters,
+    rtp_transceiver::RtpTransceiverDirection,
     video_source::RtcVideoSource,
 };
 use livekit_api::signal_client::SignalError;
@@ -625,23 +626,25 @@ impl LocalParticipant {
             let transceiver = track.transceiver().unwrap();
             let sender = transceiver.sender();
 
-            // Stop the transceiver FIRST so the renegotiation that follows
-            // drops the old m-line/SSRC and webrtc destroys the old
-            // VideoSendStream, which runs VideoEncoder::Release() on the old
-            // encoder. Without this, livekit only calls RemoveTrackOrError
-            // (SetTrack(null)) and the old send stream stays alive holding
-            // its MF H.264 MFT / NVENC session, so repeated
-            // unpublish/republish accumulates GPU encoder sessions until
-            // MFT creation fails (GeForce 12-session cap) -> OpenH264
-            // fallback -> 0 RTP to receivers.
-            let _ = transceiver.stop();
-
             if let Err(error) = self.inner.rtc_engine.remove_track(sender) {
                 // Engine-closed/timing race; rtc_engine itself treats these
-                // as ignorable. Continue so the track is still detached and
-                // the negotiation fires — leaving it bound to a stopped
-                // transceiver would hold the send stream's encoder.
+                // as ignorable. Continue so the inactive direction is still
+                // negotiated when possible.
                 log::warn!("unpublish_track: remove_track failed: {error}");
+            }
+
+            // Keep the transceiver live while the unpublish offer/answer is
+            // negotiated. StopStandard marks the sender stopped immediately;
+            // simulcast answer processing then fails with "Cannot disable
+            // encodings on a stopped sender", leaving the remote publication
+            // visible (the failure seen in the Windows teardown logs).
+            //
+            // An inactive transceiver produces the same negotiated media
+            // teardown without making the sender invalid before the answer.
+            // WebRTC can therefore retire the send stream and its encoder as
+            // part of applying the negotiated inactive m-line.
+            if let Err(error) = transceiver.set_direction(RtpTransceiverDirection::Inactive) {
+                log::warn!("unpublish_track: failed to set transceiver inactive: {error}");
             }
             track.set_transceiver(None);
 

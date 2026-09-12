@@ -92,6 +92,15 @@ impl RtpTransceiver {
             .map_err(|e| unsafe { sys_err::ffi::RtcError::from(e.what()).into() })
     }
 
+    pub fn set_direction(
+        &self,
+        direction: RtpTransceiverDirection,
+    ) -> Result<(), RtcError> {
+        self.sys_handle
+            .set_direction(direction.into())
+            .map_err(|e| unsafe { sys_err::ffi::RtcError::from(e.what()).into() })
+    }
+
     pub fn stop(&self) -> Result<(), RtcError> {
         self.sys_handle
             .stop_standard()
