@@ -116,6 +116,7 @@ export const COMMANDS = {
   regionShareState: 'region_share_state',
   syncRegionWindowFrame: 'sync_region_window_frame',
   regionViewOptionsState: 'region_view_options_state',
+  setRegionShareAudio: 'set_region_share_audio',
   setRegionSharePriority: 'set_region_share_priority',
   setRegionDrawActive: 'set_region_draw_active',
   regionAiChatStart: 'region_ai_chat_start',
@@ -964,13 +965,19 @@ export interface RegionShareState {
 }
 
 export interface RegionViewOptionsState {
-  windowId: number;
   shareActive: boolean;
   priority: SharePriority;
   drawActive: boolean;
   aiChatEnabled: boolean;
   aiChatActive: boolean;
   controllerName: string | null;
+  /**
+   * Output-audio consent/availability for the share this selector label names.
+   * Carried here so the Petal View route never holds a capture token.
+   */
+  audioEnabled: boolean;
+  audioAvailable: boolean;
+  audioError: string | null;
 }
 
 export interface RegionViewOptionsChanged {
@@ -1653,6 +1660,7 @@ export interface CommandArgs {
   [COMMANDS.regionShareState]: { windowLabel: string };
   [COMMANDS.syncRegionWindowFrame]: { windowLabel: string };
   [COMMANDS.regionViewOptionsState]: { windowLabel: string };
+  [COMMANDS.setRegionShareAudio]: { windowLabel: string; enabled: boolean };
   [COMMANDS.setRegionSharePriority]: { windowLabel: string; priority: SharePriority };
   [COMMANDS.setRegionDrawActive]: { windowLabel: string; active: boolean };
   [COMMANDS.regionAiChatStart]: { windowLabel: string };
@@ -1779,6 +1787,7 @@ export interface CommandReturns {
   [COMMANDS.regionShareState]: RegionShareState;
   [COMMANDS.syncRegionWindowFrame]: void;
   [COMMANDS.regionViewOptionsState]: RegionViewOptionsState;
+  [COMMANDS.setRegionShareAudio]: RegionViewOptionsState;
   [COMMANDS.setRegionSharePriority]: SharePriority;
   [COMMANDS.setRegionDrawActive]: boolean;
   [COMMANDS.regionAiChatStart]: AiChatStartOutcome;

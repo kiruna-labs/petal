@@ -3030,6 +3030,23 @@ pub(crate) fn share_audio_state(state: &SessionState, window_id: u32) -> ShareAu
     share_audio_state_locked(&state.inner.lock_unpoisoned(), window_id)
 }
 
+/// Token-addressed audio state for native surfaces that already resolved a
+/// live token from a selector label, so no token crosses into their payloads.
+pub(crate) fn share_audio_state_for_state(state: &SessionState, window_id: u32) -> ShareAudioState {
+    share_audio_state(state, window_id)
+}
+
+/// Token-addressed enable/disable shared by the share-owned command and the
+/// label-addressed Petal View command, which resolves the token per action.
+pub(crate) async fn set_share_audio_enabled_for_state(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    window_id: u32,
+    enabled: bool,
+) -> Result<ShareAudioState, String> {
+    Ok(set_share_audio_enabled(app, state, window_id, enabled).await)
+}
+
 async fn apply_audio_transitions(
     app: &tauri::AppHandle,
     state: &SessionState,
@@ -3157,8 +3174,7 @@ pub(crate) async fn set_share_audio_enabled(
     state: &SessionState,
     window_id: u32,
     enabled: bool,
-) -> ShareAudioState {
-    let generation = state.current_room_generation();
+) -> ShareAudioState {    let generation = state.current_room_generation();
     // Record intent BEFORE waiting for an in-flight native start. Off therefore
     // invalidates that start's commit immediately, even though it still waits
     // for serialized cleanup before returning.
