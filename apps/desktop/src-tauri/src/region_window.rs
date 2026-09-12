@@ -559,12 +559,12 @@ pub(crate) struct RegionShareState {
 }
 
 /// Label-addressed state for the persistent Petal View title-bar actions.
-/// `window_id`/capture tokens deliberately do not cross this boundary: a
-/// Windows Stop retires the native token and a later action must resolve the
-/// selector label again.
+/// `window_id` is an ephemeral action target only. A Windows Stop retires it;
+/// every fresh label-addressed query resolves and returns the current token.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RegionViewOptionsState {
+    pub window_id: u32,
     pub share_active: bool,
     pub priority: crate::share_priority::SharePriority,
     pub draw_active: bool,
@@ -609,6 +609,7 @@ fn region_view_options_for_token(
 ) -> RegionViewOptionsState {
     let ai_chat = crate::ai_chat::commands::ai_chat_settings();
     RegionViewOptionsState {
+        window_id: token,
         share_active: state.is_share_active(token),
         priority: crate::share_priority::current(),
         draw_active: region_draw_active(token),
