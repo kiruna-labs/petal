@@ -947,6 +947,34 @@ fn screen_status_from_flags(
     }
 }
 
+/// What the raw-capture watchdog may do with a share whose stream went
+/// silent, given where its window is (#171).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StalledCaptureAction {
+    /// The window exists but is off screen (hidden, minimized, another
+    /// Space): ScreenCaptureKit delivers nothing for it, which is not a
+    /// wedge. Keep capture and pump alive and keep holding the last frame;
+    /// the restart path would re-enumerate on-screen windows only, read the
+    /// window as closed, and end the share.
+    HoldOffScreen,
+    /// On screen (a real stall), closed, or not shared: the existing
+    /// abort-and-recover path decides.
+    Recover,
+}
+
+/// THE decision the share monitor's `Stalled` arm makes before it aborts the
+/// pump (#171). Consulted BEFORE the abort on purpose: the restart snapshot
+/// does not carry the screen status, so gating inside recovery would be too
+/// late -- the pump is already gone by then.
+pub(crate) fn stalled_capture_action(status: SharedWindowScreenStatus) -> StalledCaptureAction {
+    match status {
+        SharedWindowScreenStatus::OffScreen => StalledCaptureAction::HoldOffScreen,
+        SharedWindowScreenStatus::OnScreen(_)
+        | SharedWindowScreenStatus::Closed
+        | SharedWindowScreenStatus::NotShared => StalledCaptureAction::Recover,
+    }
+}
+
 /// Decide `(visible_on_screen, known_closed)` per shared source.
 ///
 /// THE implementation used by `update_share_frames_and_visibility_with`, split
@@ -5538,6 +5566,11 @@ fn spawn_share_monitor(
         }
         let mut interval = tokio::time::interval(CAPTURE_WATCHDOG_INTERVAL);
         let mut last_silent_log_us = 0;
+        // #171: the last tick that found the window off screen. The raw
+        // capture silence clock is measured from the LATER of the last frame
+        // and this, so a window that comes back after minutes hidden gets a
+        // full silence window to resume before it is called stalled.
+        let mut off_screen_seen_us: u64 = 0;
         let mut layout_reconfigure_deadline: Option<(tokio::time::Instant, (u32, u32))> = None;
         // Debounced ROI reconfiguration: events stash the newest target here
         // and the timed apply branch below commits it. A resize storm
@@ -5776,7 +5809,7 @@ fn spawn_share_monitor(
 
                     match raw_capture_watchdog_decision(
                         now,
-                        last,
+                        last.max(off_screen_seen_us),
                         source_appears_idle(window_id),
                     ) {
                         RawCaptureWatchdogDecision::Healthy => {}
@@ -5796,6 +5829,29 @@ fn spawn_share_monitor(
                             }
                         }
                         RawCaptureWatchdogDecision::Stalled { silent_for_us } => {
+                            // #171: an off-screen window (Cmd-H, minimize,
+                            // another Space) is silent because ScreenCaptureKit
+                            // has nothing to deliver, not because the stream is
+                            // wedged. Hold -- receivers keep the last good
+                            // frame -- and do not touch the recovery breaker.
+                            let screen_status = tauri::Manager::try_state::<SessionState>(&app)
+                                .map(|state| state.shared_window_screen_status(window_id))
+                                .unwrap_or(SharedWindowScreenStatus::NotShared);
+                            if stalled_capture_action(screen_status)
+                                == StalledCaptureAction::HoldOffScreen
+                            {
+                                off_screen_seen_us = now;
+                                if now.saturating_sub(last_silent_log_us)
+                                    > RAW_CAPTURE_SILENCE_RESTART_THRESHOLD_US
+                                {
+                                    last_silent_log_us = now;
+                                    log::info!(
+                                        "session: window {window_id} raw capture silent {:.1}s while the window is off screen (hidden, minimized, or on another Space) -- holding the last frame, no restart (#171)",
+                                        silent_for_us as f64 / 1_000_000.0
+                                    );
+                                }
+                                continue;
+                            }
                             // Snapshot pulls succeeding (#183) prove the share is
                             // alive and delivering content even though the push
                             // stream is silent -- restarting would only churn the
@@ -8402,6 +8458,57 @@ async fn republish_window_for_resolution(
 
 #[cfg(test)]
 mod tests {
+    /// #171: the ONE screen status that must never reach the abort-and-recover
+    /// path is OffScreen. Every other status (including NotShared, which the
+    /// recovery path already rejects as stale) recovers as before.
+    #[test]
+    fn stalled_capture_holds_only_for_an_off_screen_window() {
+        use super::{stalled_capture_action, SharedWindowScreenStatus, StalledCaptureAction};
+        let frame = crate::hover_tab::WindowFrame {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        assert_eq!(
+            stalled_capture_action(SharedWindowScreenStatus::OffScreen),
+            StalledCaptureAction::HoldOffScreen
+        );
+        assert_eq!(
+            stalled_capture_action(SharedWindowScreenStatus::OnScreen(frame)),
+            StalledCaptureAction::Recover
+        );
+        assert_eq!(
+            stalled_capture_action(SharedWindowScreenStatus::Closed),
+            StalledCaptureAction::Recover,
+            "a closed window must still be torn down"
+        );
+        assert_eq!(
+            stalled_capture_action(SharedWindowScreenStatus::NotShared),
+            StalledCaptureAction::Recover
+        );
+    }
+
+    /// The status the gate reads is the production flag mapping, so a hidden
+    /// window (absent from the on-screen list, still existing) is OffScreen,
+    /// and a window absent everywhere is Closed.
+    #[test]
+    fn hidden_window_reads_as_off_screen_and_gone_window_as_closed_for_the_gate() {
+        use super::{screen_status_from_flags, stalled_capture_action, SharedWindowScreenStatus, StalledCaptureAction};
+        let frame = crate::hover_tab::WindowFrame {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        let hidden = screen_status_from_flags(frame, false, false);
+        assert_eq!(hidden, SharedWindowScreenStatus::OffScreen);
+        assert_eq!(stalled_capture_action(hidden), StalledCaptureAction::HoldOffScreen);
+        let gone = screen_status_from_flags(frame, false, true);
+        assert_eq!(gone, SharedWindowScreenStatus::Closed);
+        assert_eq!(stalled_capture_action(gone), StalledCaptureAction::Recover);
+    }
+
     use super::*;
 
     // -- #108: log-volume regression gate ---------------------------------

@@ -2814,8 +2814,10 @@ const JOURNEY_TABLE: &[Journey] = &[
         legacy: &["CHAOS-LIFECYCLE"],
     },
     // RES-06: hide the shared app 5+ min, then unhide -- the share must
-    // survive and resume. Known broken today (#810: the 300s defensive
-    // restart cannot enumerate a hidden window and treats it as closed).
+    // survive and resume. The mechanism that broke it (#810/#171: the 45s and
+    // 300s watchdog restarts re-enumerated on-screen windows only and read a
+    // hidden window as closed) is gated on window existence now; the
+    // pixel-sampled journey that proves it live is still to be written.
     Journey {
         id: "RES-06",
         title: "Hidden app share survives",
