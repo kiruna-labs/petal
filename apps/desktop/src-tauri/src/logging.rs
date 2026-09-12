@@ -103,7 +103,11 @@
 //! `warn!` so they stay in petal.log as breadcrumbs and do not open issues.
 //! Rates of those events are a future PostHog allowlist
 //! (`docs/POSTHOG_EVENT_ALLOWLIST.md`), not a Sentry issue class.
-//! Native `.ips` crash symbolication is explicitly out of scope. A runtime
+//! Native `.ips` crash symbolication is explicitly out of scope; the
+//! next-launch detector does read the report's exception/signal/faulting-
+//! thread facts and files them as one Fatal event against the crashed build
+//! (`native_crash_report_event`, #168) -- a crash is therefore invisible
+//! until the user launches Petal again. A runtime
 //! opt-out (Settings -> Diagnostics, general-purpose, not panic-only) is
 //! enforced by `SENTRY_ENABLED`, checked at the top of both scrub hooks.
 //!
@@ -3979,8 +3983,14 @@ enum CrashAttribution {
     /// `reason` is the specific failing check, and it is stated in the log
     /// line: an ambiguous verdict must read as ambiguous.
     Unattributed { path: PathBuf, reason: String },
-    /// A report that passes every ordering and identity check.
-    Attributed { path: PathBuf, evidence: String },
+    /// A report that passes every ordering and identity check. `cause` is
+    /// what the report says happened -- descriptive, never attribution
+    /// evidence (#168).
+    Attributed {
+        path: PathBuf,
+        evidence: String,
+        cause: NativeCrashCause,
+    },
 }
 
 /// Verdict for the previous session, produced once at startup.
@@ -4144,6 +4154,339 @@ struct CrashReportFacts {
     crashed_at: Option<std::time::SystemTime>,
     pid: Option<u32>,
     proc_path: Option<String>,
+    /// Descriptive only (#168): what the report says crashed. NEVER read by
+    /// `attribute_crash_report` -- attribution is decided by the pid/procPath
+    /// ordering rules alone, and the cause is reported only for a report
+    /// that already passed them.
+    cause: NativeCrashCause,
+}
+
+/// The `bug_type` macOS stamps on a crash report proper. Other report kinds
+/// share the `.ips` suffix (hangs, resource-limit notices) and are never
+/// labelled a crash (#168).
+const IPS_BUG_TYPE_CRASH: &str = "309";
+/// How many frames of the faulting thread the next-launch event names.
+const CRASH_REPORT_FRAMES: usize = 3;
+/// Hard cap on the event message: build + taxonomy + three frames fit
+/// comfortably; anything longer is a schema surprise, not evidence.
+const CRASH_REPORT_MESSAGE_MAX_BYTES: usize = 512;
+
+/// Closed taxonomy of the Mach exception a crash report names. Free text
+/// from the report never reaches Sentry; an unrecognised value maps to
+/// `Other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeExceptionKind {
+    BadAccess,
+    Crash,
+    Breakpoint,
+    BadInstruction,
+    Arithmetic,
+    Guard,
+    Resource,
+    Other,
+    Unknown,
+}
+
+impl NativeExceptionKind {
+    fn classify(raw: Option<&str>) -> Self {
+        match raw {
+            None => Self::Unknown,
+            Some("EXC_BAD_ACCESS") => Self::BadAccess,
+            Some("EXC_CRASH") => Self::Crash,
+            Some("EXC_BREAKPOINT") => Self::Breakpoint,
+            Some("EXC_BAD_INSTRUCTION") => Self::BadInstruction,
+            Some("EXC_ARITHMETIC") => Self::Arithmetic,
+            Some("EXC_GUARD") => Self::Guard,
+            Some("EXC_RESOURCE") => Self::Resource,
+            Some(_) => Self::Other,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BadAccess => "EXC_BAD_ACCESS",
+            Self::Crash => "EXC_CRASH",
+            Self::Breakpoint => "EXC_BREAKPOINT",
+            Self::BadInstruction => "EXC_BAD_INSTRUCTION",
+            Self::Arithmetic => "EXC_ARITHMETIC",
+            Self::Guard => "EXC_GUARD",
+            Self::Resource => "EXC_RESOURCE",
+            Self::Other => "EXC_OTHER",
+            Self::Unknown => "EXC_UNKNOWN",
+        }
+    }
+}
+
+/// Closed taxonomy of the POSIX signal a crash report names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSignalKind {
+    Segv,
+    Abrt,
+    Bus,
+    Ill,
+    Trap,
+    Kill,
+    Fpe,
+    Other,
+    Unknown,
+}
+
+impl NativeSignalKind {
+    fn classify(raw: Option<&str>) -> Self {
+        match raw {
+            None => Self::Unknown,
+            Some("SIGSEGV") => Self::Segv,
+            Some("SIGABRT") => Self::Abrt,
+            Some("SIGBUS") => Self::Bus,
+            Some("SIGILL") => Self::Ill,
+            Some("SIGTRAP") => Self::Trap,
+            Some("SIGKILL") => Self::Kill,
+            Some("SIGFPE") => Self::Fpe,
+            Some(_) => Self::Other,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Segv => "SIGSEGV",
+            Self::Abrt => "SIGABRT",
+            Self::Bus => "SIGBUS",
+            Self::Ill => "SIGILL",
+            Self::Trap => "SIGTRAP",
+            Self::Kill => "SIGKILL",
+            Self::Fpe => "SIGFPE",
+            Self::Other => "SIG_OTHER",
+            Self::Unknown => "SIG_UNKNOWN",
+        }
+    }
+}
+
+/// One frame of the faulting thread: the image's basename and the offset
+/// into it. Never the image path, never a symbol -- symbolication is out of
+/// scope and paths can carry a home directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeCrashFrame {
+    image: String,
+    offset: u64,
+}
+
+/// What a crash report says about the crash (#168). Every field is
+/// descriptive; see `CrashReportFacts::cause`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeCrashCause {
+    /// The header's `bug_type`; `309` is a crash.
+    bug_type: Option<String>,
+    exception: Option<NativeExceptionKind>,
+    signal: Option<NativeSignalKind>,
+    /// `termination.indicator` (e.g. `Segmentation fault: 11`). Local log
+    /// line only -- free text stays out of Sentry.
+    termination_indicator: Option<String>,
+    /// `termination.reasons[0]`. Local log line only.
+    termination_reason: Option<String>,
+    faulting_thread: Option<u64>,
+    /// Top `CRASH_REPORT_FRAMES` frames of the faulting thread.
+    frames: Vec<NativeCrashFrame>,
+    /// `bundleInfo.CFBundleShortVersionString`: the build that crashed,
+    /// which is not necessarily the build reading the report.
+    crashed_build: Option<String>,
+}
+
+impl NativeCrashCause {
+    /// Only a `bug_type` 309 report is a crash. Anything else (or a header
+    /// that names no type) is a diagnostic report of some other kind.
+    fn is_crash(&self) -> bool {
+        self.bug_type.as_deref() == Some(IPS_BUG_TYPE_CRASH)
+    }
+
+    fn exception_kind(&self) -> NativeExceptionKind {
+        self.exception.unwrap_or(NativeExceptionKind::Unknown)
+    }
+
+    fn signal_kind(&self) -> NativeSignalKind {
+        self.signal.unwrap_or(NativeSignalKind::Unknown)
+    }
+
+    /// `x.y.z` only; anything else is reported as `unknown` rather than
+    /// guessed, so a crash is never filed against the wrong release.
+    fn crashed_build_for_release(&self) -> &str {
+        match self.crashed_build.as_deref() {
+            Some(build) if is_strict_semver(build) => build,
+            _ => "unknown",
+        }
+    }
+
+    fn frames_summary(&self) -> String {
+        if self.frames.is_empty() {
+            return "no frames".to_string();
+        }
+        self.frames
+            .iter()
+            .map(|frame| format!("{}+0x{:x}", frame.image, frame.offset))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// One line for petal.log: taxonomy plus the report's own indicator.
+    fn log_summary(&self) -> String {
+        let mut out = format!(
+            "{} {} on thread {}",
+            self.exception_kind().as_str(),
+            self.signal_kind().as_str(),
+            self.faulting_thread
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "?".to_string())
+        );
+        if let Some(indicator) = &self.termination_indicator {
+            out.push_str(&format!(" ({indicator})"));
+        }
+        if let Some(reason) = &self.termination_reason {
+            out.push_str(&format!(" [{reason}]"));
+        }
+        out.push_str(&format!("; frames: {}", self.frames_summary()));
+        out
+    }
+}
+
+fn is_strict_semver(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let ok = |part: Option<&str>| {
+        part.is_some_and(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    ok(parts.next()) && ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
+}
+
+fn parse_native_crash_cause(
+    header: Option<&serde_json::Value>,
+    body: Option<&serde_json::Value>,
+) -> NativeCrashCause {
+    let mut cause = NativeCrashCause::default();
+    if let Some(header) = header {
+        cause.bug_type = header
+            .get("bug_type")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && s.len() <= 8)
+            .map(str::to_string);
+    }
+    let Some(body) = body else {
+        return cause;
+    };
+    if let Some(exception) = body.get("exception") {
+        cause.exception = Some(NativeExceptionKind::classify(
+            exception.get("type").and_then(|v| v.as_str()),
+        ));
+        cause.signal = Some(NativeSignalKind::classify(
+            exception.get("signal").and_then(|v| v.as_str()),
+        ));
+    }
+    if let Some(termination) = body.get("termination") {
+        cause.termination_indicator = termination
+            .get("indicator")
+            .and_then(|v| v.as_str())
+            .map(|s| s.chars().take(128).collect());
+        cause.termination_reason = termination
+            .get("reasons")
+            .and_then(|v| v.as_array())
+            .and_then(|reasons| reasons.first())
+            .and_then(|v| v.as_str())
+            .map(|s| s.chars().take(128).collect());
+    }
+    cause.faulting_thread = body.get("faultingThread").and_then(|v| v.as_u64());
+    cause.crashed_build = body
+        .get("bundleInfo")
+        .and_then(|b| b.get("CFBundleShortVersionString"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let images = body.get("usedImages").and_then(|v| v.as_array());
+    let thread = cause.faulting_thread.and_then(|index| {
+        body.get("threads")
+            .and_then(|v| v.as_array())
+            .and_then(|threads| threads.get(usize::try_from(index).ok()?))
+    });
+    if let Some(frames) = thread
+        .and_then(|t| t.get("frames"))
+        .and_then(|v| v.as_array())
+    {
+        for frame in frames.iter().take(CRASH_REPORT_FRAMES) {
+            let offset = frame
+                .get("imageOffset")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            // `name` only -- `path` is the on-disk location and can carry a
+            // home directory. A missing name is reported as such, never
+            // substituted from the path.
+            let image = frame
+                .get("imageIndex")
+                .and_then(|v| v.as_u64())
+                .and_then(|i| images.and_then(|images| images.get(usize::try_from(i).ok()?)))
+                .and_then(|image| image.get("name"))
+                .and_then(|v| v.as_str())
+                .filter(|name| !name.is_empty() && !name.contains('/'))
+                .map(|name| name.chars().take(64).collect())
+                .unwrap_or_else(|| "?".to_string());
+            cause.frames.push(NativeCrashFrame { image, offset });
+        }
+    }
+    cause
+}
+
+/// The next-launch Sentry event for an ATTRIBUTED crash report (#168): a
+/// Fatal exception built from the closed taxonomy above, filed against the
+/// build that crashed, fingerprinted by exception kind so every occurrence
+/// of one crash shape lands in one issue. `None` for a report that is not
+/// a crash (`bug_type` other than 309): those are described in petal.log
+/// and never labelled a crash. Goes through the single `before_send`
+/// scrubber like every other event; no attachments.
+fn native_crash_report_event(cause: &NativeCrashCause) -> Option<sentry::protocol::Event<'static>> {
+    if !cause.is_crash() {
+        return None;
+    }
+    let exception = cause.exception_kind();
+    let signal = cause.signal_kind();
+    let crashed_build = cause.crashed_build_for_release().to_string();
+    let mut message = format!(
+        "previous session crashed on build {crashed_build}: {} {} on thread {}; frames: {}",
+        exception.as_str(),
+        signal.as_str(),
+        cause
+            .faulting_thread
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        cause.frames_summary()
+    );
+    if message.len() > CRASH_REPORT_MESSAGE_MAX_BYTES {
+        let mut cut = CRASH_REPORT_MESSAGE_MAX_BYTES;
+        while !message.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        message.truncate(cut);
+    }
+    let mut tags = sentry::protocol::Map::new();
+    tags.insert("build_version".to_string(), crashed_build.clone());
+    Some(sentry::protocol::Event {
+        level: sentry::protocol::Level::Fatal,
+        message: Some(message),
+        exception: vec![sentry::protocol::Exception {
+            ty: exception.as_str().into(),
+            value: Some(format!(
+                "{} (bug_type {IPS_BUG_TYPE_CRASH})",
+                signal.as_str()
+            )),
+            mechanism: Some(sentry::protocol::Mechanism {
+                ty: "native_crash_report".into(),
+                handled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]
+        .into(),
+        fingerprint: Cow::Owned(vec![
+            Cow::Borrowed("native-crash-report"),
+            Cow::Borrowed(exception.as_str()),
+        ]),
+        release: Some(Cow::Owned(crashed_build)),
+        tags,
+        ..Default::default()
+    })
 }
 
 /// Bounded: a crash report is normally a few hundred KB, and this runs on
@@ -4182,13 +4525,16 @@ fn crash_report_facts_from_text(text: &str) -> CrashReportFacts {
         Some((header, body)) => (header, body),
         None => (text, ""),
     };
-    if let Ok(header) = serde_json::from_str::<serde_json::Value>(header.trim()) {
+    let header = serde_json::from_str::<serde_json::Value>(header.trim()).ok();
+    let body = serde_json::from_str::<serde_json::Value>(body.trim()).ok();
+    facts.cause = parse_native_crash_cause(header.as_ref(), body.as_ref());
+    if let Some(header) = &header {
         facts.crashed_at = header
             .get("timestamp")
             .and_then(|v| v.as_str())
             .and_then(parse_ips_timestamp);
     }
-    if let Ok(body) = serde_json::from_str::<serde_json::Value>(body.trim()) {
+    if let Some(body) = &body {
         facts.pid = body
             .get("pid")
             .and_then(|v| v.as_u64())
@@ -4457,7 +4803,13 @@ fn attribute_previous_crash_report(
     for path in reports.into_iter().take(MAX_CRASH_REPORTS_EXAMINED) {
         let facts = read_crash_report_facts(&path);
         match attribute_crash_report(&facts, session) {
-            Ok(evidence) => return CrashAttribution::Attributed { path, evidence },
+            Ok(evidence) => {
+                return CrashAttribution::Attributed {
+                    path,
+                    evidence,
+                    cause: facts.cause,
+                }
+            }
             Err(reason) => rejected = Some((path, reason)),
         }
     }
@@ -4510,16 +4862,34 @@ fn analyze_previous_session(inputs: &PreviousSessionInputs<'_>) -> PreviousSessi
 }
 
 /// The crash-report statement, or `None` when there is nothing to say.
-/// ERROR is reserved for an ATTRIBUTED report: `sentry_log`'s default
-/// filter turns an error into a Sentry event, and #105 is the story of a
-/// wrong one.
+/// Never ERROR: `sentry_log`'s default filter turns an error into a bare
+/// Sentry event that cannot carry a cause, and an ATTRIBUTED crash already
+/// ships its own Fatal event from `native_crash_report_event` (#168) -- one
+/// crash, one issue. #105 is the story of a wrong attribution.
 fn crash_report_log_line(report: &PreviousSessionReport) -> Option<(log::Level, String)> {
     match &report.crash {
         CrashAttribution::NotScanned | CrashAttribution::NoReport => None,
-        CrashAttribution::Attributed { path, evidence } => Some((
-            log::Level::Error,
+        CrashAttribution::Attributed {
+            path,
+            evidence,
+            cause,
+        } if cause.is_crash() => Some((
+            log::Level::Warn,
             format!(
-                "previous session appears to have CRASHED (see {}) -- attributed to it: {evidence} (#105)",
+                "previous session CRASHED (see {}): {} -- attributed to it: {evidence} (#105, #168)",
+                path.display(),
+                cause.log_summary()
+            ),
+        )),
+        CrashAttribution::Attributed {
+            path,
+            evidence,
+            cause,
+        } => Some((
+            log::Level::Warn,
+            format!(
+                "previous session left a diagnostic report that is NOT a crash report (bug_type {}, see {}) -- attributed to it: {evidence}; not claiming a crash (#168)",
+                cause.bug_type.as_deref().unwrap_or("absent"),
                 path.display()
             ),
         )),
@@ -4584,8 +4954,8 @@ fn previous_session_log_line(report: &PreviousSessionReport) -> Option<(log::Lev
 }
 
 /// The Sentry diagnostic, if this verdict warrants one. Only an ATTRIBUTED
-/// report suppresses it -- and only because the ERROR line above already
-/// ships its own event for that case.
+/// report suppresses it -- and only because `native_crash_report_event`
+/// ships the crash's own Fatal event for that case (#168).
 fn previous_session_sentry_event(report: &PreviousSessionReport) -> Option<SentryDiagnosticEvent> {
     if report.outcome != PreviousSessionOutcome::Vanished {
         return None;
@@ -4610,6 +4980,16 @@ fn report_previous_session(report: &PreviousSessionReport) {
     }
     if let Some(event) = previous_session_sentry_event(report) {
         capture_sentry_diagnostic(event);
+    }
+    // The crash itself (#168). A no-op without a Sentry client, and the
+    // single `before_send` scrubber still decides whether it leaves the
+    // machine. Only known once the user launches Petal again: a crash is
+    // invisible until the next launch, and a machine that never relaunches
+    // never reports it.
+    if let CrashAttribution::Attributed { cause, .. } = &report.crash {
+        if let Some(event) = native_crash_report_event(cause) {
+            sentry::capture_event(event);
+        }
     }
 }
 
@@ -6061,6 +6441,345 @@ mod tests {
         );
     }
 
+    /// A full-schema crash report body (#168): the shape macOS writes for a
+    /// SIGSEGV in a bundled app, with a home-directory image path that must
+    /// never reach Sentry.
+    fn ips_crash_body(pid: u32, bug_type: &str, build: Option<&str>) -> String {
+        let bundle = match build {
+            Some(build) => format!(
+                ",\n  \"bundleInfo\" : {{\"CFBundleShortVersionString\":\"{build}\",\"CFBundleVersion\":\"{build}\",\"CFBundleIdentifier\":\"com.petal.app\"}}"
+            ),
+            None => String::new(),
+        };
+        format!(
+            "{{\"app_name\":\"desktop\",\"timestamp\":\"2026-09-09 02:45:25.00 +0000\",\"name\":\"desktop\",\"bug_type\":\"{bug_type}\"}}\n\
+             {{\n  \"pid\" : {pid},\n  \"procName\" : \"desktop\",\n  \"procPath\" : \"{FIELD_EXECUTABLE}\",\n\
+             \"exception\" : {{\"codes\":\"0x0000000000000001, 0x0000000000000010\",\"rawCodes\":[1,16],\"type\":\"EXC_BAD_ACCESS\",\"signal\":\"SIGSEGV\",\"subtype\":\"KERN_INVALID_ADDRESS at 0x0000000000000010\"}},\n\
+             \"termination\" : {{\"flags\":0,\"code\":11,\"namespace\":\"SIGNAL\",\"indicator\":\"Segmentation fault: 11\",\"reasons\":[\"secret-room-name in a reason string\"],\"byProc\":\"exc handler\",\"byPid\":{pid}}},\n\
+             \"faultingThread\" : 1,\n\
+             \"threads\" : [\n\
+               {{\"id\":100,\"name\":\"main\",\"frames\":[{{\"imageOffset\":1,\"imageIndex\":0}}]}},\n\
+               {{\"id\":101,\"triggered\":true,\"name\":\"capture\",\"frames\":[\n\
+                 {{\"imageOffset\":4660,\"imageIndex\":0}},\n\
+                 {{\"imageOffset\":22136,\"symbol\":\"pthread_kill\",\"symbolLocation\":8,\"imageIndex\":1}},\n\
+                 {{\"imageOffset\":99,\"imageIndex\":2}},\n\
+                 {{\"imageOffset\":7,\"imageIndex\":0}}\n\
+               ]}}\n\
+             ],\n\
+             \"usedImages\" : [\n\
+               {{\"source\":\"P\",\"arch\":\"arm64\",\"base\":4294967296,\"size\":1,\"uuid\":\"00000000-0000-0000-0000-000000000000\",\"path\":\"/Users/alice/Applications/Petal.app/Contents/MacOS/Petal\",\"name\":\"Petal\"}},\n\
+               {{\"source\":\"P\",\"arch\":\"arm64\",\"base\":1,\"size\":1,\"uuid\":\"00000000-0000-0000-0000-000000000001\",\"path\":\"/usr/lib/system/libsystem_kernel.dylib\",\"name\":\"libsystem_kernel.dylib\"}},\n\
+               {{\"source\":\"P\",\"arch\":\"arm64\",\"base\":2,\"size\":1,\"uuid\":\"00000000-0000-0000-0000-000000000002\",\"path\":\"/Users/alice/Library/Frameworks/Injected.framework/Injected\",\"name\":\"Injected\"}}\n\
+             ]{bundle}\n}}\n"
+        )
+    }
+
+    fn write_ips_crash(
+        dir: &std::path::Path,
+        pid: u32,
+        bug_type: &str,
+        build: Option<&str>,
+    ) -> PathBuf {
+        let path = dir.join("desktop-2026-09-09-024525.ips");
+        std::fs::write(&path, ips_crash_body(pid, bug_type, build)).unwrap();
+        path
+    }
+
+    /// Run the whole next-launch path for an attributed report and return
+    /// the events that reached the scrubber's output, plus the log lines.
+    fn attributed_crash_events(
+        pid_in_report: u32,
+        bug_type: &str,
+        build: Option<&str>,
+    ) -> (PreviousSessionReport, Vec<sentry::protocol::Event<'static>>) {
+        // One directory per CALL: several tests share a (pid, bug_type)
+        // shape and run in parallel, and `temp_dir` recreates its directory.
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = temp_dir(&format!("crash-cause-{pid_in_report}-{bug_type}-{call}"));
+        write_ips_crash(&dir, pid_in_report, bug_type, build);
+        let report = analyze_fixture(
+            &[FIELD_SESSION_START, FIELD_IN_MEETING, FIELD_LAST_LINE],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+        let events = match &report.crash {
+            CrashAttribution::Attributed { cause, .. } => native_crash_report_event(cause)
+                .into_iter()
+                .filter_map(scrub_event_for_sentry)
+                .collect(),
+            _ => Vec::new(),
+        };
+        (report, events)
+    }
+
+    #[test]
+    fn crash_report_cause_is_read_from_the_body_without_paths_or_symbols() {
+        let facts = crash_report_facts_from_text(&ips_crash_body(4242, "309", Some("0.9.7")));
+        let cause = facts.cause;
+        assert_eq!(cause.bug_type.as_deref(), Some("309"));
+        assert!(cause.is_crash());
+        assert_eq!(cause.exception, Some(NativeExceptionKind::BadAccess));
+        assert_eq!(cause.signal, Some(NativeSignalKind::Segv));
+        assert_eq!(cause.faulting_thread, Some(1));
+        assert_eq!(cause.crashed_build.as_deref(), Some("0.9.7"));
+        assert_eq!(
+            cause.termination_indicator.as_deref(),
+            Some("Segmentation fault: 11")
+        );
+        // The faulting thread's top three frames, by image NAME, never path.
+        assert_eq!(
+            cause.frames,
+            vec![
+                NativeCrashFrame {
+                    image: "Petal".into(),
+                    offset: 4660
+                },
+                NativeCrashFrame {
+                    image: "libsystem_kernel.dylib".into(),
+                    offset: 22136
+                },
+                NativeCrashFrame {
+                    image: "Injected".into(),
+                    offset: 99
+                },
+            ]
+        );
+        assert_eq!(
+            cause.frames_summary(),
+            "Petal+0x1234, libsystem_kernel.dylib+0x5678, Injected+0x63"
+        );
+    }
+
+    #[test]
+    fn attributed_crash_files_one_fatal_event_against_the_crashed_build() {
+        let (report, events) = attributed_crash_events(4242, "309", Some("0.9.7"));
+        assert!(matches!(report.crash, CrashAttribution::Attributed { .. }));
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one post-scrub event per attributed crash"
+        );
+        let event = &events[0];
+        assert_eq!(event.level, sentry::protocol::Level::Fatal);
+        assert_eq!(
+            event.release.as_deref(),
+            Some("0.9.7"),
+            "filed against the build that CRASHED"
+        );
+        assert_eq!(
+            event.tags.get("build_version").map(String::as_str),
+            Some("0.9.7")
+        );
+        assert_eq!(
+            event.tags.get("error_category").map(String::as_str),
+            Some("native_crash_report"),
+            "the category derives from the mechanism, like the ObjC path"
+        );
+        assert_eq!(
+            event
+                .fingerprint
+                .iter()
+                .map(|f| f.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["native-crash-report", "EXC_BAD_ACCESS"],
+            "one issue per crash shape, stable across builds"
+        );
+        assert_eq!(event.exception.len(), 1);
+        assert_eq!(event.exception[0].ty, "EXC_BAD_ACCESS");
+        assert_eq!(
+            event.exception[0].value.as_deref(),
+            Some("SIGSEGV (bug_type 309)")
+        );
+        let message = event.message.as_deref().unwrap_or_default();
+        assert!(message.contains("build 0.9.7"), "{message}");
+        assert!(
+            message.contains("EXC_BAD_ACCESS SIGSEGV on thread 1"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Petal+0x1234, libsystem_kernel.dylib+0x5678, Injected+0x63"),
+            "{message}"
+        );
+        assert!(message.len() <= CRASH_REPORT_MESSAGE_MAX_BYTES);
+        // The log line names the signal, exception, and top frame too, and
+        // stays out of the ERROR bridge so this crash opens ONE issue.
+        let (level, line) = crash_report_log_line(&report).unwrap();
+        assert_eq!(level, log::Level::Warn);
+        assert!(line.contains("CRASHED"), "{line}");
+        assert!(
+            line.contains("EXC_BAD_ACCESS SIGSEGV on thread 1"),
+            "{line}"
+        );
+        assert!(line.contains("Petal+0x1234"), "{line}");
+        assert!(line.contains("Segmentation fault: 11"), "{line}");
+        assert!(
+            !previous_session_sentry_event(&report).is_some(),
+            "the vanished-session diagnostic stays suppressed for an attributed crash"
+        );
+    }
+
+    #[test]
+    fn attributed_crash_event_carries_no_paths_usernames_or_report_free_text() {
+        let (_, events) = attributed_crash_events(4242, "309", Some("0.9.7"));
+        let event = &events[0];
+        let mut everything = event.message.clone().unwrap_or_default();
+        for exception in event.exception.iter() {
+            everything.push_str(&exception.ty);
+            everything.push_str(exception.value.as_deref().unwrap_or_default());
+        }
+        for (key, value) in event.tags.iter() {
+            everything.push_str(key);
+            everything.push_str(value);
+        }
+        for f in event.fingerprint.iter() {
+            everything.push_str(f);
+        }
+        assert!(
+            !everything.contains('/'),
+            "no path of any kind: {everything}"
+        );
+        assert!(
+            !everything.contains("alice"),
+            "no home directory user: {everything}"
+        );
+        assert!(!everything.contains("Users"), "{everything}");
+        assert!(
+            !everything.contains("secret-room-name"),
+            "termination.reasons is free text and stays local: {everything}"
+        );
+        assert!(
+            !everything.contains("KERN_INVALID_ADDRESS"),
+            "exception.subtype carries an address: {everything}"
+        );
+        assert!(
+            !everything.contains("pthread_kill"),
+            "symbols are out of scope: {everything}"
+        );
+        assert!(event.contexts.is_empty() && event.extra.is_empty() && event.user.is_none());
+    }
+
+    #[test]
+    fn a_non_crash_report_kind_is_never_labelled_a_crash() {
+        // bug_type 288 is a hang report; it shares the .ips suffix.
+        let (report, events) = attributed_crash_events(4242, "288", Some("0.9.7"));
+        assert!(
+            matches!(report.crash, CrashAttribution::Attributed { .. }),
+            "attribution is unchanged: the report is still tied to the session"
+        );
+        assert!(
+            events.is_empty(),
+            "no Fatal event for a report that is not a crash"
+        );
+        let (level, line) = crash_report_log_line(&report).unwrap();
+        assert_eq!(level, log::Level::Warn);
+        assert!(line.contains("NOT a crash report"), "{line}");
+        assert!(line.contains("bug_type 288"), "{line}");
+        assert!(!line.contains("CRASHED"), "{line}");
+    }
+
+    #[test]
+    fn a_crash_report_with_no_bundle_version_is_filed_against_unknown_not_the_current_build() {
+        let (_, events) = attributed_crash_events(4242, "309", None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].release.as_deref(), Some("unknown"));
+        assert_eq!(
+            events[0].tags.get("build_version").map(String::as_str),
+            Some("unknown")
+        );
+        // A malformed version string is treated the same way, never trusted.
+        let (_, events) = attributed_crash_events(4242, "309", Some("0.9.7 (nightly)"));
+        assert_eq!(events[0].release.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn a_crash_report_with_an_unknown_body_schema_still_files_a_bounded_event() {
+        let dir = temp_dir("crash-unknown-schema");
+        let path = dir.join("desktop-2026-09-09-024525.ips");
+        // Header says crash; body carries pid/procPath but nothing else this
+        // reader understands.
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"app_name\":\"desktop\",\"timestamp\":\"2026-09-09 02:45:25.00 +0000\",\"bug_type\":\"309\"}}\n{{\"pid\":4242,\"procPath\":\"{FIELD_EXECUTABLE}\",\"future\":{{\"deep\":[1,2,3]}}}}\n"
+            ),
+        )
+        .unwrap();
+        let report = analyze_fixture(
+            &[FIELD_SESSION_START, FIELD_IN_MEETING, FIELD_LAST_LINE],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+        let CrashAttribution::Attributed { cause, .. } = &report.crash else {
+            panic!("{:?}", report.crash);
+        };
+        let event = scrub_event_for_sentry(native_crash_report_event(cause).unwrap()).unwrap();
+        assert_eq!(event.exception[0].ty, "EXC_UNKNOWN");
+        assert_eq!(
+            event.exception[0].value.as_deref(),
+            Some("SIG_UNKNOWN (bug_type 309)")
+        );
+        assert!(event.message.as_deref().unwrap().contains("no frames"));
+        assert_eq!(event.release.as_deref(), Some("unknown"));
+
+        // A body that is not JSON at all: the header alone cannot attribute
+        // (no pid/procPath), so nothing is filed.
+        std::fs::write(
+            &path,
+            "{\"app_name\":\"desktop\",\"timestamp\":\"2026-09-09 02:45:25.00 +0000\",\"bug_type\":\"309\"}\nnot json at all\n",
+        )
+        .unwrap();
+        let report = analyze_fixture(
+            &[FIELD_SESSION_START, FIELD_IN_MEETING, FIELD_LAST_LINE],
+            Some(field_identity(4242)),
+            Some(&dir),
+            None,
+        );
+        assert!(
+            matches!(report.crash, CrashAttribution::Unattributed { .. }),
+            "{:?}",
+            report.crash
+        );
+    }
+
+    #[test]
+    fn a_pid_mismatched_crash_report_files_nothing_however_detailed_its_cause_is() {
+        // Mutation guard: if attribution ever starts reading the exception
+        // fields, this report (a perfect crash shape, wrong pid) must still
+        // be rejected.
+        let (report, events) = attributed_crash_events(9999, "309", Some("0.9.7"));
+        assert!(
+            matches!(report.crash, CrashAttribution::Unattributed { .. }),
+            "{:?}",
+            report.crash
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn native_crash_taxonomy_is_closed() {
+        assert_eq!(
+            NativeExceptionKind::classify(Some("EXC_SOMETHING_NEW")),
+            NativeExceptionKind::Other
+        );
+        assert_eq!(
+            NativeExceptionKind::classify(None),
+            NativeExceptionKind::Unknown
+        );
+        assert_eq!(
+            NativeSignalKind::classify(Some("SIGUSR1")),
+            NativeSignalKind::Other
+        );
+        assert_eq!(NativeSignalKind::classify(None), NativeSignalKind::Unknown);
+        assert!(is_strict_semver("0.9.25"));
+        assert!(!is_strict_semver("0.9"));
+        assert!(!is_strict_semver("0.9.25-rc1"));
+        assert!(!is_strict_semver("v0.9.25"));
+        assert!(!is_strict_semver("0.9.123456"));
+    }
+
     #[test]
     fn ips_timestamps_are_offset_aware_not_wall_clock() {
         // The `.ips` FILENAME stamp is local time and this log's timestamps
@@ -6192,11 +6911,13 @@ mod tests {
             }
             other => panic!("a pid-matched, correctly ordered report must attribute: {other:?}"),
         }
-        // The ERROR line already ships its own Sentry event, so this one
-        // case may report at INFO -- the ONLY case that may.
+        // The crash's own Fatal event (#168) is what reaches Sentry, so the
+        // log lines stay out of the error bridge: warn for the crash line,
+        // and the session-outcome line may report at INFO -- the ONLY case
+        // that may.
         assert_eq!(
             emitted_levels(&report),
-            (Some(log::Level::Error), Some(log::Level::Info), false)
+            (Some(log::Level::Warn), Some(log::Level::Info), false)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6394,6 +7115,7 @@ mod tests {
             crashed_at: parse_ips_timestamp("2026-09-09 02:45:25 +0000"),
             pid: None,
             proc_path: Some("/Users/USER/Library/*/desktop".to_string()),
+            cause: NativeCrashCause::default(),
         };
         let reason = attribute_crash_report(&facts, &session).unwrap_err();
         assert!(reason.contains("redacted"), "{reason}");
