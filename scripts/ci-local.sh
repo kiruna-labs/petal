@@ -16,8 +16,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [[ ! "${PETAL_SOURCE_PROVENANCE_WRAPPED:-}" =~ ^[0-9a-f]{64}$ ]] ||
-   [[ "${PETAL_SOURCE_PROVENANCE_WRAPPED:-}" != "${PETAL_OFFICIAL_SOURCE_STATE:-}" ]]; then
+# The wrapper fingerprints HEAD plus tracked content and exports a 64-hex state.
+# A tree with no git metadata (a Mutagen sync target) has no HEAD, so the wrapper
+# marks the run `unverified-no-worktree` and runs in place; accept that marker
+# once, or this script re-execs the wrapper forever.
+provenance_already_wrapped() {
+  local marker="${PETAL_SOURCE_PROVENANCE_WRAPPED:-}"
+  [[ -n "$marker" && "$marker" == "${PETAL_OFFICIAL_SOURCE_STATE:-}" ]] || return 1
+  [[ "$marker" =~ ^[0-9a-f]{64}$ || "$marker" == "unverified-no-worktree" ]]
+}
+
+if ! provenance_already_wrapped; then
   cd "$ROOT"
   exec "$ROOT/scripts/run-with-source-provenance.sh" "$ROOT/scripts/ci-local.sh" "$@"
 fi
@@ -71,9 +80,13 @@ step "CI: PR-gate path filter, both directions (#133)"
 # this script, with no separate "remember to install the hook" step. Repo
 # config (not global), so it's shared by every worktree of this repo on this
 # machine via the common .git dir.
-if [ "$(git config --get core.hooksPath || true)" != "scripts/git-hooks" ]; then
-  git config core.hooksPath scripts/git-hooks
-  step "Installed scripts/git-hooks/pre-push (core.hooksPath) -- Rust gate now runs on push automatically"
+# Repo-local config, so it needs a repo: the gate also runs in a Mutagen sync
+# target that has no .git at all.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  if [ "$(git config --get core.hooksPath || true)" != "scripts/git-hooks" ]; then
+    git config core.hooksPath scripts/git-hooks
+    step "Installed scripts/git-hooks/pre-push (core.hooksPath) -- Rust gate now runs on push automatically"
+  fi
 fi
 
 step "Frontend: svelte-check + unit tests + static build (apps/desktop)"
