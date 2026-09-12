@@ -49,7 +49,9 @@ export function buildShareOptionsMenuEntries(
   displayLike = false,
   includePosition = false,
   remoteControlAllowed = true,
-  hoverTabSide: HoverTabSide = 'right'
+  hoverTabSide: HoverTabSide = 'right',
+  shareAudioEnabled = false,
+  shareAudioAvailable = false
 ): HoverTabMenuEntry[] {
   return buildHoverTabMenuEntries(
     currentPriority,
@@ -62,6 +64,8 @@ export function buildShareOptionsMenuEntries(
     displayLike,
     includePosition,
     remoteControlAllowed,
-    hoverTabSide
+    hoverTabSide,
+    shareAudioEnabled,
+    shareAudioAvailable
   );
 }

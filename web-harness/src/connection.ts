@@ -24,6 +24,7 @@ import {
   TELEPOINTER_TOPIC,
   cameraWindowId,
   isAiTrackName,
+  isScreenAudioTrackName,
   mergeIdentityPaletteIndexMetadata,
   trackNameForCamera,
   VIEWER_DEMAND_TOPIC,
@@ -166,6 +167,27 @@ export function setupConnection(
 
   let audioPlaybackPrompt: HTMLButtonElement | null = null;
   const audioReceiverTelemetryCleanup = new Map<RemoteTrack, () => void>();
+  const audioReceiverParticipants = new Map<RemoteTrack, string>();
+
+  function cleanupRemoteAudioTrack(track: RemoteTrack) {
+    const cleanup = audioReceiverTelemetryCleanup.get(track);
+    if (cleanup) cleanup();
+    else track.detach().forEach((element) => element.remove());
+    audioReceiverTelemetryCleanup.delete(track);
+    audioReceiverParticipants.delete(track);
+  }
+
+  function cleanupRemoteAudioForParticipant(identity: string) {
+    for (const [track, participantIdentity] of audioReceiverParticipants) {
+      if (participantIdentity === identity) cleanupRemoteAudioTrack(track);
+    }
+  }
+
+  function cleanupAllRemoteAudio() {
+    for (const track of audioReceiverTelemetryCleanup.keys()) cleanupRemoteAudioTrack(track);
+    audioReceiverTelemetryCleanup.clear();
+    audioReceiverParticipants.clear();
+  }
 
   function removeAudioPlaybackPrompt() {
     audioPlaybackPrompt?.remove();
@@ -502,8 +524,7 @@ export function setupConnection(
         cb.resetRemoteControlHarnessSession?.();
         stopPipelineStats();
         stopPublicationReconcile();
-        for (const stop of audioReceiverTelemetryCleanup.values()) stop();
-        audioReceiverTelemetryCleanup.clear();
+        cleanupAllRemoteAudio();
       }
     });
 
@@ -553,6 +574,7 @@ export function setupConnection(
       // Tile teardown first: it destroys the remote-window headers, which
       // release any push-to-talk floor still held for that owner's windows.
       cb.removeParticipantTiles(p.identity);
+      cleanupRemoteAudioForParticipant(p.identity);
       // #657: the AI session runs on the owner's machine. Once they are gone
       // it cannot still be running, and the contract says a receiver clears
       // its UI on owner disconnect rather than waiting out the heartbeat.
@@ -653,24 +675,26 @@ export function setupConnection(
           // Classified explicitly here rather than falling through to the
           // human-mic branch.
           const isAssistantVoice = isAiTrackName(pub.trackName);
-          if (!isAssistantVoice) cb.setParticipantAudioActive(participant.identity, true);
+          const isScreenAudio = isScreenAudioTrackName(pub.trackName);
+          if (!isAssistantVoice && !isScreenAudio) cb.setParticipantAudioActive(participant.identity, true);
           // Audio still needs browser autoplay permission. The room-level
           // AudioPlaybackStatusChanged/startAudio flow above handles strict
           // browsers such as Safari when this async attach is blocked.
+          cleanupRemoteAudioTrack(track);
           const audioEl = document.createElement('audio');
           audioEl.autoplay = true;
           audioEl.dataset.trackSid = track.sid ?? '';
           audioEl.dataset.participant = participant.identity;
           if (isAssistantVoice) audioEl.dataset.aiChat = 'true';
+          if (isScreenAudio) audioEl.dataset.screenAudio = 'true';
           audioEl.style.display = 'none';
           document.body.appendChild(audioEl);
           track.attach(audioEl);
           diagnoseAudioPlayback(audioEl, track, participant.identity);
-          audioReceiverTelemetryCleanup.get(track)?.();
           const stopTelemetry = startAudioReceiverTelemetry(track, logEvent);
           const mediaStreamTrack = (track as { mediaStreamTrack?: MediaStreamTrack }).mediaStreamTrack;
           const stopSilence =
-            isAssistantVoice || !mediaStreamTrack
+            isAssistantVoice || isScreenAudio || !mediaStreamTrack
               ? () => undefined
               : startRemoteAudioSilenceWatchdog({
                   key: track.sid || pub.trackSid || participant.identity,
@@ -680,7 +704,9 @@ export function setupConnection(
           audioReceiverTelemetryCleanup.set(track, () => {
             stopTelemetry();
             stopSilence();
+            track.detach().forEach((element) => element.remove());
           });
+          audioReceiverParticipants.set(track, participant.identity);
         }
       }
     );
@@ -700,10 +726,10 @@ export function setupConnection(
           // #657: symmetry with the subscribe branch. An assistant track going
           // away says nothing about the owner's microphone, so it must not
           // clear their speaking indicator.
-          if (!isAiTrackName(pub.trackName)) cb.setParticipantAudioActive(participant.identity, false);
-          audioReceiverTelemetryCleanup.get(track)?.();
-          audioReceiverTelemetryCleanup.delete(track);
-          track.detach().forEach((el) => el.remove());
+          if (!isAiTrackName(pub.trackName) && !isScreenAudioTrackName(pub.trackName)) {
+            cb.setParticipantAudioActive(participant.identity, false);
+          }
+          cleanupRemoteAudioTrack(track);
         }
         if (track.kind === Track.Kind.Video && !cb.isCameraTrack(pub)) {
           const windowId = windowIdFromTrackName(pub.trackName);
@@ -783,8 +809,7 @@ export function setupConnection(
       cb.resetRemoteControlHarnessSession?.();
       stopPipelineStats();
       stopPublicationReconcile();
-      for (const stop of audioReceiverTelemetryCleanup.values()) stop();
-      audioReceiverTelemetryCleanup.clear();
+      cleanupAllRemoteAudio();
       if (state.streamStatePollTimer !== null) {
         clearInterval(state.streamStatePollTimer);
         state.streamStatePollTimer = null;

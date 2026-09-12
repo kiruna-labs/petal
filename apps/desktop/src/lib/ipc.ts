@@ -169,6 +169,8 @@ export const COMMANDS = {
   openApplicationsFolder: 'open_applications_folder',
   revealRunningBundle: 'reveal_running_bundle',
   setSharePriority: 'set_share_priority',
+  shareAudioState: 'share_audio_state',
+  setShareAudioEnabled: 'set_share_audio_enabled',
   setHoverTabTooltip: 'set_hover_tab_tooltip',
   setShareResolution: 'set_share_resolution',
   shareNoticeDismiss: 'share_notice_dismiss',
@@ -295,6 +297,7 @@ export const EVENTS = {
   roomUpdated: 'room-updated',
   shareError: 'share-error',
   shareStateChanged: 'share-state-changed',
+  shareAudioStateChanged: 'share-audio-state-changed',
   shareControlModeChanged: 'share-control-mode-changed',
   sharePickerChanged: 'share-picker-changed',
   /**
@@ -940,6 +943,17 @@ export interface ShareStateChanged {
   shared: boolean;
 }
 
+/** Consent and outcome for one exact active-share incarnation. */
+export interface ShareAudioState {
+  windowId: number;
+  enabled: boolean;
+  available: boolean;
+  publishing: boolean;
+  /** Window audio is process-wide; display/region audio is system output. */
+  scope: 'process' | 'systemOutput' | null;
+  error: string | null;
+}
+
 export type ShareControlMode = 'cursorPreserving' | 'fullControl';
 
 export interface ShareControlModeChanged {
@@ -952,6 +966,7 @@ export interface RegionShareState {
 }
 
 export interface RegionViewOptionsState {
+  windowId: number;
   shareActive: boolean;
   priority: SharePriority;
   drawActive: boolean;
@@ -1723,6 +1738,8 @@ export interface CommandArgs {
   [COMMANDS.setShareControlMode]: { windowId: number; controlMode?: string };
   [COMMANDS.setShareRemoteControlAllowed]: { windowId: number; allowed: boolean };
   [COMMANDS.shareRemoteControlAllowed]: { windowId: number };
+  [COMMANDS.shareAudioState]: { windowId: number };
+  [COMMANDS.setShareAudioEnabled]: { windowId: number; enabled: boolean };
   [COMMANDS.toggleWindowShare]: { windowId: number; frame: WindowFrame; color?: string };
   [COMMANDS.updateShareBorderFrame]: {
     borderId: number;
@@ -1865,6 +1882,8 @@ export interface CommandReturns {
   [COMMANDS.shareOverlaySetDrawActive]: void;
   [COMMANDS.setHoverTabMenuOpen]: void;
   [COMMANDS.shareWindow]: boolean;
+  [COMMANDS.shareAudioState]: ShareAudioState;
+  [COMMANDS.setShareAudioEnabled]: ShareAudioState;
   [COMMANDS.sharedWindowIds]: number[];
   [COMMANDS.toggleMenubarMic]: boolean;
   [COMMANDS.toggleWindowShare]: boolean;
@@ -1906,6 +1925,7 @@ export interface EventPayloads {
   [EVENTS.roomLeft]: RoomLeftEvent;
   [EVENTS.shareError]: ShareErrorPayload;
   [EVENTS.shareStateChanged]: ShareStateChanged;
+  [EVENTS.shareAudioStateChanged]: ShareAudioState;
   [EVENTS.shareControlModeChanged]: ShareControlModeChanged;
   [EVENTS.sharePickerChanged]: void;
   [EVENTS.sessionChanged]: { origin: string; session: Record<string, unknown> };
