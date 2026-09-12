@@ -307,7 +307,7 @@ test('Windows compositor feed consumes the connect-time events and keeps windows
   // exist for.
   assert.match(
     subscriber,
-    /TeardownDecision::RemoveWindow => \{[\s\S]{0,300}crate::windows_compositor::remove_window\(/,
+    /TeardownDecision::RemoveWindow => \{\s*log::info!\([\s\S]*?\);\s*let key = \(owner_identity\.clone\(\), window_id\);\s*crate::windows_compositor::remove_window\(&app, key\.clone\(\)\)\.await;\s*window_subscribed_at\.remove\(&key\);\s*\}/,
     'TrackUnpublished must resolve via resolve_teardown and only remove the window on the ' +
       'terminal RemoveWindow decision, not unconditionally'
   );
