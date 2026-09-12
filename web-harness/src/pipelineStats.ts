@@ -483,6 +483,12 @@ export function setupPipelineStats(ctx: HarnessContext) {
   const startupTimeline = new StartupTimelineRecorder();
   const lastStartupStats = new Map<string, StartupStatsCacheEntry>();
   let seq = 0;
+  // #164: a tick is async and the room can be torn down between its awaits.
+  // Every stop bumps this; a tick that started under an older generation
+  // stops touching the room and reports nothing. The timer is also cleared
+  // on stop, so nothing new is scheduled past teardown -- this covers the
+  // tick that was already in flight.
+  let statsGeneration = 0;
 
   function nextSeq(): number {
     seq = seq >= Number.MAX_SAFE_INTEGER ? 1 : seq + 1;
@@ -604,6 +610,7 @@ export function setupPipelineStats(ctx: HarnessContext) {
     sampledAtMs: number
   ): Promise<PipelineStatsMessage | null> {
     if (!state.room) return null;
+    const reporterId = state.room.localParticipant.identity;
     const windowId = windowIdFromTrackName(target.publication.trackName);
     if (windowId === null) return null;
     let report: RTCStatsReport | null = null;
@@ -612,7 +619,9 @@ export function setupPipelineStats(ctx: HarnessContext) {
     } catch {
       report = null;
     }
-    if (!report) return null;
+    // The room may have been cleared while the report was awaited (#164): a
+    // sample after teardown has nothing to report.
+    if (!report || !state.room) return null;
 
     const key = `${target.identity}:${windowId}:${target.publication.trackSid}`;
     const derived = deriveRemoteWindowStats(report, inboundStates.get(key) ?? null, sampledAtMs);
@@ -673,7 +682,7 @@ export function setupPipelineStats(ctx: HarnessContext) {
     return {
       v: 1,
       role: 'receiver',
-      reporterId: state.room.localParticipant.identity,
+      reporterId,
       ownerIdentity: target.identity,
       windowId,
       seq: nextSeq(),
@@ -762,23 +771,31 @@ export function setupPipelineStats(ctx: HarnessContext) {
 
   async function publishPipelineStats(): Promise<PipelineStatsMessage[]> {
     if (!state.room) return [];
+    const generation = statsGeneration;
+    // True once the room was torn down under this tick (#164). Checked after
+    // every await so a tick never reads or publishes into a cleared room.
+    const tornDown = () => generation !== statsGeneration || !state.room;
     const sampledAtMs = Date.now();
     const messages: PipelineStatsMessage[] = [];
     if (state.sharing && state.localVideoTrack) {
       const message = await collectLocalSenderMessage(state.localVideoTrack, ctx.windowId, sampledAtMs);
+      if (tornDown()) return [];
       if (message) messages.push(message);
     }
     if (state.screenSharing && state.screenTrack && state.screenWindowId !== null) {
       const message = await collectLocalSenderMessage(state.screenTrack, state.screenWindowId, sampledAtMs);
+      if (tornDown()) return [];
       if (message) messages.push(message);
     }
     for (const target of remoteShareTracks()) {
       const message = await collectReceiverMessage(target, sampledAtMs);
+      if (tornDown()) return [];
       if (message) messages.push(message);
     }
 
     for (const message of messages) {
       await publishMessage(message);
+      if (tornDown()) return [];
       pushBounded(sentMessages, message);
     }
     return messages;
@@ -810,6 +827,7 @@ export function setupPipelineStats(ctx: HarnessContext) {
   }
 
   function stopPipelineStats() {
+    statsGeneration += 1;
     if (state.pipelineStatsTimer !== null) {
       clearInterval(state.pipelineStatsTimer);
       state.pipelineStatsTimer = null;
