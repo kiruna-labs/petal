@@ -1,0 +1,18 @@
+{
+  "name": "s38-ownership-reconnect",
+  "commands": [
+    {
+      "name": "joined",
+      "type": "pollUntil",
+      "cmd": "dump_state",
+      "timeoutMs": 60000,
+      "intervalMs": 500,
+      "expr": { "path": "result.currentRoom", "notEquals": null }
+    },
+    { "name": "camera-on", "cmd": "camera_on" },
+    { "name": "state-before-reconnect", "cmd": "dump_state" },
+    { "name": "full-reconnect", "cmd": "reconnect", "mode": "full" },
+    { "name": "settle-after-reconnect", "sleepMs": 15000 },
+    { "name": "state-after-reconnect", "cmd": "dump_state" }
+  ]
+}

@@ -536,23 +536,46 @@ The coordinator re-applies the live snapshot on `Reconnected`. A leave/rejoin
 does **not** exercise that path — it only proves connect-time snapshot
 admission, which is why the A/B above is not a substitute.
 
-1. Build and launch the participant that owns the socket with
-   `PETAL_AUTOTEST_SOCK=<path>` set (debug/autotest build; the command does not
-   exist in a release build).
-2. Join the room, publish a window share, leave the microphone unmuted, and
-   enable the camera, so audio, window video, and camera video are all active.
-3. Record the baseline: the native room subscribes audio and the exact
-   `petal-window-<u32>` video; `petal-camera-*` is not subscribed natively and
-   appears only in the gallery tile.
-4. Send exactly one full-reconnect request over the socket:
-   `{"cmd":"reconnect","mode":"full"}`. A process accepts one request; restart
-   it for a second attempt.
-5. Require, in order: `Reconnecting` → `Reconnected`; window video re-admitted
+**This recipe is macOS-only.** The command server lives behind
+`#[cfg(target_os = "macos")]` in `autotest.rs` (on other platforms
+`maybe_start` is a no-op), so a Windows launch that sets `PETAL_AUTOTEST_SOCK`
+silently starts nothing and a socket client sees `connection refused`. The
+native admission code itself is shared, so the macOS run exercises the same
+coordinator the Windows receiver uses; a Windows live reconnect is not claimed.
+
+1. Build and launch the socket-owning participant with a room, an automatic
+   window share, and the debug log level:
+
+   ```sh
+   cd apps/desktop
+   RUST_LOG=debug \
+   PETAL_AUTOTEST_SOCK=/tmp/petal-owner.sock \
+   PETAL_AUTOTEST_ROOM="$PETAL_TEST_QA_KEY" \
+   PETAL_AUTOTEST_SHARE=auto \
+   PETAL_AUTOTEST_IDENTITY="$(uuidgen | tr 'A-Z' 'a-z')" \
+     npm run dev:clean
+   ```
+
+2. Join a second peer that publishes camera video, so a remote `petal-camera-*`
+   publication exists too. Record the baseline: the native room subscribes
+   audio and the exact `petal-window-<u32>` video; `petal-camera-*` is not
+   subscribed natively and appears only in the gallery tile.
+3. Run the checked-in scenario, which waits for the join, turns the meeting
+   camera on, dumps state, sends **one** `{"cmd":"reconnect","mode":"full"}`,
+   settles, and dumps state again:
+
+   ```sh
+   node scripts/autotest-run.mjs scripts/scenarios/s38-ownership-reconnect.json \
+     /tmp/petal-owner.sock
+   ```
+
+   A process accepts one reconnect request; restart it for a second attempt.
+4. Require, in order: `Reconnecting` → `Reconnected`; window video re-admitted
    with a fresh first frame; audio re-admitted and audible; still no native
    camera `TrackSubscribed`; gallery camera recovers; no subscription failure;
    and no duplicate native subscription for the same publication.
 
-**Launch with `RUST_LOG=debug` for this run.** The camera-decline line
+**Why `RUST_LOG=debug` matters here.** The camera-decline line
 (`native subscription: declining '<name>' (sid=…); the gallery bridge owns
 remote cameras`) is `debug`, while `petal.log` defaults to `info`, and the
 admission path itself logs nothing. At the default level "the native room did
