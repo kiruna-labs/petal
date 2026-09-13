@@ -767,12 +767,29 @@ pub struct PublishedTrack {
     native_publish_disabled_by_env: bool,
     native_zero_copy_latch: Mutex<NativeZeroCopyLatch>,
     push_drop_streak: Mutex<crate::logging::DropStreakDetector>,
+    /// Rate-limits source-boundary logs while guaranteeing a sample at least
+    /// every five seconds whenever frames reach the publisher.
+    last_source_boundary_log: Mutex<Option<std::time::Instant>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PublishedFrameTiming {
     pub convert_ms: f64,
     pub capture_frame_return_ms: f64,
+    /// Wall-clock age of the captured frame when it entered WebRTC's source.
+    /// This catches capture-pump queueing without changing the queue policy.
+    pub capture_age_ms: f64,
+    /// Monotonic publisher-local frame id, useful for correlating source-stage
+    /// logs with capture cadence without exposing frame content.
+    pub frame_id: u32,
+    /// Whether WebRTC's adapted source accepted the frame after applying its
+    /// current constraints. `false` is distinct from conversion failure: the
+    /// source can legally reject a frame (adaptation) that converted fine.
+    pub source_accepted: bool,
+}
+
+fn capture_age_ms(capture_wall_time_us: u64) -> f64 {
+    crate::time_util::now_us().saturating_sub(capture_wall_time_us) as f64 / 1_000.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1701,6 +1718,7 @@ impl RoomConnection<Arc<Room>> {
             native_publish_disabled_by_env: native_publish_disabled_by_env(),
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
+            last_source_boundary_log: Mutex::new(None),
         })
     }
 
@@ -1764,6 +1782,7 @@ impl RoomConnection<Arc<Room>> {
             native_publish_disabled_by_env: false,
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
+            last_source_boundary_log: Mutex::new(None),
         })
     }
 
@@ -6391,6 +6410,52 @@ impl PublishedTrack {
         self.track.sid()
     }
 
+    /// Sample the capture -> WebRTC source boundary. The periodic encoder stats
+    /// show what came out; this line shows whether frames arrived there
+    /// accepted, how old they were, and whether conversion or the source call
+    /// itself stalled. Sampling keeps a healthy 30 FPS stream quiet; unusually
+    /// old or slow frames are always logged.
+    ///
+    /// Observational only: it never changes what is pushed, converted or
+    /// published.
+    fn log_source_boundary(&self, timing: PublishedFrameTiming) {
+        let now = std::time::Instant::now();
+        let slow_or_queued = timing.capture_age_ms >= 100.0
+            || timing.convert_ms >= 10.0
+            || timing.capture_frame_return_ms >= 5.0;
+        let should_log = {
+            let mut last = self
+                .last_source_boundary_log
+                .lock()
+                .expect("source boundary log mutex poisoned");
+            let periodic = last.is_none_or(|previous| {
+                now.duration_since(previous) >= std::time::Duration::from_secs(5)
+            });
+            let slow_sample = slow_or_queued
+                && last.is_none_or(|previous| {
+                    now.duration_since(previous) >= std::time::Duration::from_secs(5)
+                });
+            if periodic || slow_sample {
+                *last = Some(now);
+                true
+            } else {
+                false
+            }
+        };
+        if !should_log {
+            return;
+        }
+        log::debug!(
+            "[DEBUG-MEDIA-FPS] publisher: source boundary track='{}' frame_id={} accepted={} age_ms={:.1} convert_ms={:.1} capture_frame_return_ms={:.1}",
+            self.track.name(),
+            timing.frame_id,
+            timing.source_accepted,
+            timing.capture_age_ms,
+            timing.convert_ms,
+            timing.capture_frame_return_ms,
+        );
+    }
+
     /// One place where a push outcome updates the drop-streak detector. A window
     /// share and a camera reach it from different entry points; the scope tag comes
     /// from the track name so the Sentry event says which one stopped (#788).
@@ -6570,6 +6635,9 @@ impl PublishedTrack {
         capture_wall_time_us: u64,
     ) -> Option<PublishedFrameTiming> {
         let result = self.push_frame_inner(captured, capture_wall_time_us);
+        if let Some(timing) = result {
+            self.log_source_boundary(timing);
+        }
         self.record_push_outcome(result.is_some());
         result
     }
@@ -6660,7 +6728,7 @@ impl PublishedTrack {
                 }),
                 buffer: &native_buffer,
             };
-            self.rtc_source.capture_frame(&frame);
+            self.rtc_source.capture_frame(&frame)
         }));
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         if result.is_err() {
@@ -6672,6 +6740,12 @@ impl PublishedTrack {
         Ok(PublishedFrameTiming {
             convert_ms: 0.0,
             capture_frame_return_ms,
+            capture_age_ms: capture_age_ms(capture_wall_time_us),
+            frame_id,
+            // The native path reports a panicked closure as Err, not as a
+            // rejection: a missing value here means the frame never reached
+            // the source at all.
+            source_accepted: result.unwrap_or(false),
         })
     }
 
@@ -6880,11 +6954,14 @@ impl PublishedTrack {
         };
 
         let capture_frame_started = std::time::Instant::now();
-        self.rtc_source.capture_frame(&frame);
+        let source_accepted = self.rtc_source.capture_frame(&frame);
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         Some(PublishedFrameTiming {
             convert_ms,
             capture_frame_return_ms,
+            capture_age_ms: capture_age_ms(capture_wall_time_us),
+            frame_id,
+            source_accepted,
         })
     }
 
@@ -7033,6 +7110,9 @@ impl PublishedTrack {
             height,
             capture_wall_time_us,
         );
+        if let Some(timing) = result {
+            self.log_source_boundary(timing);
+        }
         self.record_push_outcome(result.is_some());
         result
     }
@@ -7175,11 +7255,14 @@ impl PublishedTrack {
             }
         };
         let capture_frame_started = std::time::Instant::now();
-        self.rtc_source.capture_frame(&frame);
+        let source_accepted = self.rtc_source.capture_frame(&frame);
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         Some(PublishedFrameTiming {
             convert_ms,
             capture_frame_return_ms,
+            capture_age_ms: capture_age_ms(capture_wall_time_us),
+            frame_id,
+            source_accepted,
         })
     }
 }
