@@ -5071,7 +5071,9 @@ mod tests {
                     u.fill(128);
                     v.fill(128);
                 }
-                source.capture_frame(&VideoFrame {
+                // S0: decoder-side feed, not camera capture. Source acceptance
+                // is not meaningful for this path, so it is discarded explicitly.
+                let _ = source.capture_frame(&VideoFrame {
                     rotation: VideoRotation::VideoRotation0,
                     timestamp_us: 0,
                     frame_metadata: None,

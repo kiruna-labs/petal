@@ -1169,7 +1169,11 @@ mod tests {
             },
             false,
         );
-        source.capture_frame(&VideoFrame {
+        // S0: the source-acceptance boolean is discarded here on purpose. The
+        // physical MF reader's acceptance accounting belongs to the capture PR
+        // that consumes it; this seam only makes the wrapper's return value
+        // explicit instead of relying on it being silently ignored.
+        let _ = source.capture_frame(&VideoFrame {
             rotation: VideoRotation::VideoRotation0,
             timestamp_us: 0,
             frame_metadata: None,
