@@ -2618,6 +2618,261 @@ pub fn record_video_stream_state(
     record_video_stream_state_internal(&app, participant_identity, track_name, normalized, source);
 }
 
+/// One durable receiver-interval record from the gallery webview.
+///
+/// This is deliberately separate from `record_video_stream_state`: it is
+/// OBSERVATIONAL only. It must never create a stream-state transition, a
+/// journal entry, or a Sentry event, so a receiver interval can never be
+/// mistaken for an authoritative pause/stall signal. Every free-form field is
+/// bounded, and the record is written to the local Petal log only.
+///
+/// `decoder_implementation` is OPTIONAL because the browser's stats dictionary
+/// omits it on some platforms. It must stay optional on both sides of the
+/// boundary: the webview sends `null` when it is absent (see the matching
+/// `string | null` in `src/lib/ipc.ts`), and a required `String` here made every
+/// single receive interval fail to deserialize -- which is precisely why the
+/// receiver side produced no durable records at all.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraReceiverInterval {
+    pub participant_identity: String,
+    pub track_name: String,
+    pub track_sid: String,
+    pub route: String,
+    pub interval_sequence: u32,
+    pub interval_ms: u64,
+    pub frames_decoded: Option<u64>,
+    pub decoded_fps: Option<f64>,
+    pub decoded_width: Option<u32>,
+    pub decoded_height: Option<u32>,
+    pub frames_received: Option<u64>,
+    pub frames_rendered: Option<u64>,
+    pub frames_dropped: Option<u64>,
+    pub freeze_count: Option<u64>,
+    pub total_freezes_duration_ms: Option<f64>,
+    pub bytes_received: Option<u64>,
+    pub packets_received: Option<u64>,
+    pub packets_lost: Option<i64>,
+    pub packets_discarded: Option<u64>,
+    pub retransmitted_packets_received: Option<u64>,
+    pub key_frames_decoded: Option<u64>,
+    pub nack_count: Option<u64>,
+    pub pli_count: Option<u64>,
+    pub fir_count: Option<u64>,
+    pub jitter_ms: Option<f64>,
+    pub jitter_buffer_delay_ms: Option<f64>,
+    pub jitter_buffer_emitted_count: Option<u64>,
+    pub total_decode_time_ms: Option<f64>,
+    pub loss_pct: Option<f64>,
+    pub decoder_implementation: Option<String>,
+    pub presented_frames: Option<u64>,
+    pub presented_fps: Option<f64>,
+    pub presentation_probe_starts: Option<u64>,
+    pub presentation_rvfc_available: Option<bool>,
+    pub presentation_ready_state: Option<u32>,
+    pub presentation_paused: Option<bool>,
+    pub presentation_hidden: Option<bool>,
+    pub presentation_observing: Option<bool>,
+    pub presentation_gap_count100_ms: Option<u64>,
+    pub presentation_gap_count250_ms: Option<u64>,
+    pub presentation_max_gap_ms: Option<f64>,
+    pub presentation_excess_gap_ms: Option<f64>,
+    pub presentation_current_gap_ms: Option<f64>,
+    pub path_protocol: Option<String>,
+    pub path_local_candidate_type: Option<String>,
+    pub path_remote_candidate_type: Option<String>,
+    pub path_relay_protocol: Option<String>,
+    pub path_selected_pair_changes: Option<u64>,
+    pub path_round_trip_time_ms: Option<f64>,
+    pub path_available_incoming_kbps: Option<f64>,
+    pub stream_state: String,
+    pub stall_cause: String,
+    pub gap_since_last_frame_ms: u64,
+}
+
+/// Format an optional measurement honestly: a missing value is `unknown`, never
+/// a misleading zero, and a non-finite value counts as missing.
+fn interval_float(value: Option<f64>, digits: usize) -> String {
+    match value {
+        Some(value) if value.is_finite() => format!("{value:.digits$}"),
+        _ => String::from("unknown"),
+    }
+}
+
+fn interval_count(value: Option<u64>) -> String {
+    value.map_or_else(|| String::from("unknown"), |value| value.to_string())
+}
+
+fn interval_bool(value: Option<bool>) -> String {
+    value.map_or_else(|| String::from("unknown"), |value| value.to_string())
+}
+
+/// Bounded presentation-boundary summary: whether the WebView presented the
+/// decoded frames, and how long its gaps were. `unknown` means the browser
+/// could not report it -- never a healthy zero.
+fn camera_presentation_summary(interval: &CameraReceiverInterval) -> String {
+    format!(
+        "rvfc={} observing={} paused={} hidden={} ready_state={} probe_starts={} gaps_100ms={} gaps_250ms={} max_gap_ms={} excess_ms={} current_gap_ms={}",
+        interval_bool(interval.presentation_rvfc_available),
+        interval_bool(interval.presentation_observing),
+        interval_bool(interval.presentation_paused),
+        interval_bool(interval.presentation_hidden),
+        interval_count(interval.presentation_ready_state.map(u64::from)),
+        interval_count(interval.presentation_probe_starts),
+        interval_count(interval.presentation_gap_count100_ms),
+        interval_count(interval.presentation_gap_count250_ms),
+        interval_float(interval.presentation_max_gap_ms, 1),
+        interval_float(interval.presentation_excess_gap_ms, 1),
+        interval_float(interval.presentation_current_gap_ms, 1),
+    )
+}
+
+/// Bounded selected-path summary from the browser. Categorical candidate
+/// types and protocols only; every free-form value is capped here too.
+fn camera_receiver_path_summary(interval: &CameraReceiverInterval) -> String {
+    format!(
+        "protocol={} local={} remote={} relay={} selected_pair_changes={} rtt_ms={} available_in_kbps={}",
+        interval_text(interval.path_protocol.as_ref(), 16),
+        interval_text(interval.path_local_candidate_type.as_ref(), 16),
+        interval_text(interval.path_remote_candidate_type.as_ref(), 16),
+        interval_text(interval.path_relay_protocol.as_ref(), 16),
+        interval_count(interval.path_selected_pair_changes),
+        interval_float(interval.path_round_trip_time_ms, 2),
+        interval_float(interval.path_available_incoming_kbps, 1),
+    )
+}
+
+/// Render the record as one bounded log line.
+fn camera_receiver_interval_line(interval: &CameraReceiverInterval) -> String {
+    let field = |value: &str, max: usize| {
+        bounded_detail(value.to_string())
+            .map(|value| {
+                value
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(max)
+                    .collect::<String>()
+            })
+            .unwrap_or_else(|| String::from("unknown"))
+    };
+    let dimensions = match (interval.decoded_width, interval.decoded_height) {
+        (Some(width), Some(height)) => format!("{width}x{height}"),
+        _ => String::from("unknown"),
+    };
+    format!(
+        "diagnostics: camera receiver interval route={} t_ms={} trial_id={} track_sid={} track_name={} participant={} stream_state={} stall_cause={} interval_seq={} interval_ms={} decoded_dimensions={} frames_decoded={} decoded_fps={} frames_received={} frames_rendered={} frames_dropped={} freeze_count={} freeze_ms={} key_frames_decoded={} bytes_received={} packets_received={} packets_lost={} packets_discarded={} retransmitted_packets={} nack={} pli={} fir={} jitter_ms={} jitter_buffer_ms={} jitter_buffer_emitted={} decode_ms={} loss_pct={} presented_frames={} presented_fps={} gap_since_last_frame_ms={} decoder={} presentation={} path={}",
+        field(&interval.route, 32),
+        now_ms(),
+        field(&interval.track_sid, 64),
+        field(&interval.track_sid, 64),
+        field(&interval.track_name, 64),
+        field(&interval.participant_identity, 64),
+        field(&interval.stream_state, 16),
+        field(&interval.stall_cause, 16),
+        interval.interval_sequence,
+        interval.interval_ms,
+        dimensions,
+        interval_count(interval.frames_decoded),
+        interval_float(interval.decoded_fps, 2),
+        interval_count(interval.frames_received),
+        interval_count(interval.frames_rendered),
+        interval_count(interval.frames_dropped),
+        interval_count(interval.freeze_count),
+        interval_float(interval.total_freezes_duration_ms, 1),
+        interval_count(interval.key_frames_decoded),
+        interval_count(interval.bytes_received),
+        interval_count(interval.packets_received),
+        interval
+            .packets_lost
+            .map_or_else(|| String::from("unknown"), |value| value.to_string()),
+        interval_count(interval.packets_discarded),
+        interval_count(interval.retransmitted_packets_received),
+        interval_count(interval.nack_count),
+        interval_count(interval.pli_count),
+        interval_count(interval.fir_count),
+        interval_float(interval.jitter_ms, 2),
+        interval_float(interval.jitter_buffer_delay_ms, 2),
+        interval_count(interval.jitter_buffer_emitted_count),
+        interval_float(interval.total_decode_time_ms, 2),
+        interval_float(interval.loss_pct, 3),
+        interval_count(interval.presented_frames),
+        interval_float(interval.presented_fps, 2),
+        interval.gap_since_last_frame_ms,
+        interval_text(interval.decoder_implementation.as_ref(), 48),
+        camera_presentation_summary(interval),
+        camera_receiver_path_summary(interval),
+    )
+}
+
+/// One durable gallery-bridge receiver lifecycle edge.
+///
+/// The periodic `CameraReceiverInterval` only fires while the webview is
+/// actively sampling a subscribed camera, so an absent interval is ambiguous:
+/// it can mean "no camera was published", "the bridge never subscribed", or
+/// "the bridge never even connected". This record closes that gap -- it writes
+/// one bounded line per lifecycle edge, so the first missing phase names the
+/// boundary that actually failed instead of leaving the whole receiver side
+/// unobservable.
+///
+/// Observational only, exactly like `CameraReceiverInterval`: it must never
+/// create a stream-state transition, a journal entry, or a Sentry event. Every
+/// free-form field is bounded and the record goes to the local log only.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraReceiverLifecycle {
+    pub phase: String,
+    pub participant_identity: Option<String>,
+    pub track_name: Option<String>,
+    pub track_sid: Option<String>,
+    pub route: Option<String>,
+    pub detail: Option<String>,
+    pub bridge_age_ms: Option<u64>,
+}
+
+fn interval_text(value: Option<&String>, max: usize) -> String {
+    value.map_or_else(
+        || String::from("unknown"),
+        |value| {
+            bounded_detail(value.clone())
+                .map(|value| {
+                    value
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(max)
+                        .collect()
+                })
+                .unwrap_or_else(|| String::from("unknown"))
+        },
+    )
+}
+
+/// Render the lifecycle record as one bounded log line.
+fn camera_receiver_lifecycle_line(lifecycle: &CameraReceiverLifecycle) -> String {
+    format!(
+        "diagnostics: camera receiver lifecycle route={} t_ms={} phase={} participant={} track_sid={} track_name={} bridge_age_ms={} detail={}",
+        interval_text(lifecycle.route.as_ref(), 32),
+        now_ms(),
+        interval_text(Some(&lifecycle.phase), 32),
+        interval_text(lifecycle.participant_identity.as_ref(), 64),
+        interval_text(lifecycle.track_sid.as_ref(), 64),
+        interval_text(lifecycle.track_name.as_ref(), 64),
+        interval_count(lifecycle.bridge_age_ms),
+        interval_text(lifecycle.detail.as_ref(), 96),
+    )
+}
+
+/// Bounded webview-to-native receiver-interval sink (local `petal.log` only).
+#[tauri::command]
+pub fn record_camera_receiver_interval(interval: CameraReceiverInterval) {
+    log::info!("{}", camera_receiver_interval_line(&interval));
+}
+
+/// Bounded webview-to-native receiver-lifecycle sink (local `petal.log` only).
+#[tauri::command]
+pub fn record_camera_receiver_lifecycle(lifecycle: CameraReceiverLifecycle) {
+    log::info!("{}", camera_receiver_lifecycle_line(&lifecycle));
+}
+
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn record_glass_to_glass_frame_timing(
     _app: &tauri::AppHandle,
@@ -5299,6 +5554,280 @@ mod tests {
 
         state.record_peer_rtt(f64::NAN);
         assert_eq!(state.snapshot().peer_rtt_ms, Some(24.5));
+    }
+
+    #[test]
+    fn camera_receiver_interval_line_is_bounded_and_honest_about_unknowns() {
+        let interval = CameraReceiverInterval {
+            participant_identity: "alice".into(),
+            track_name: "petal-camera-alice".into(),
+            track_sid: "TR_abc".into(),
+            route: "gallery-webview".into(),
+            interval_sequence: 3,
+            interval_ms: 15_000,
+            frames_decoded: Some(450),
+            decoded_fps: Some(30.0),
+            decoded_width: Some(1280),
+            decoded_height: Some(720),
+            frames_received: Some(451),
+            frames_rendered: Some(448),
+            frames_dropped: None,
+            freeze_count: None,
+            total_freezes_duration_ms: None,
+            bytes_received: Some(900_000),
+            packets_received: Some(1_200),
+            packets_lost: Some(0),
+            packets_discarded: None,
+            retransmitted_packets_received: None,
+            key_frames_decoded: Some(2),
+            nack_count: Some(1),
+            pli_count: None,
+            fir_count: None,
+            jitter_ms: Some(4.5),
+            jitter_buffer_delay_ms: Some(12.25),
+            jitter_buffer_emitted_count: Some(450),
+            total_decode_time_ms: Some(310.5),
+            loss_pct: Some(0.0),
+            decoder_implementation: Some("hardware H264".into()),
+            presented_frames: Some(447),
+            presented_fps: Some(29.8),
+            presentation_rvfc_available: Some(true),
+            presentation_probe_starts: Some(1),
+            presentation_ready_state: Some(4),
+            presentation_paused: Some(false),
+            presentation_hidden: Some(false),
+            presentation_observing: Some(true),
+            presentation_gap_count100_ms: Some(1),
+            presentation_gap_count250_ms: Some(0),
+            presentation_max_gap_ms: Some(140.5),
+            presentation_excess_gap_ms: Some(40.5),
+            presentation_current_gap_ms: Some(16.0),
+            path_protocol: Some("udp".into()),
+            path_local_candidate_type: Some("srflx".into()),
+            path_remote_candidate_type: Some("relay".into()),
+            path_relay_protocol: Some("udp".into()),
+            path_selected_pair_changes: Some(1),
+            path_round_trip_time_ms: Some(24.5),
+            path_available_incoming_kbps: Some(4200.0),
+            stream_state: "active".into(),
+            stall_cause: "not_applicable".into(),
+            gap_since_last_frame_ms: 33,
+        };
+        let line = camera_receiver_interval_line(&interval);
+        assert!(line.contains("route=gallery-webview"));
+        assert!(line.contains("track_sid=TR_abc"));
+        assert!(line.contains("interval_seq=3"));
+        assert!(line.contains("interval_ms=15000"));
+        assert!(line.contains("decoded_dimensions=1280x720"));
+        assert!(line.contains("presented_fps=29.80"));
+        assert!(line.contains("decoder=hardware H264"));
+        assert!(line.contains("presentation=rvfc=true"), "{line}");
+        assert!(line.contains("probe_starts=1"), "{line}");
+        assert!(line.contains("gaps_100ms=1"), "{line}");
+        assert!(line.contains("gaps_250ms=0"), "{line}");
+        assert!(
+            line.contains("path=protocol=udp local=srflx remote=relay"),
+            "{line}"
+        );
+        // Missing measurements must read as unknown, never as a zero that a
+        // reader would take for a real measurement.
+        assert!(line.contains("frames_dropped=unknown"), "{line}");
+        assert!(line.contains("pli=unknown"), "{line}");
+        assert!(line.contains("fir=unknown"), "{line}");
+        // A measured zero is still a measurement.
+        assert!(line.contains("loss_pct=0.000"), "{line}");
+        assert!(line.contains("packets_lost=0"), "{line}");
+        assert!(!line.contains('\n'), "the record must stay one line");
+    }
+
+    #[test]
+    fn camera_receiver_interval_line_caps_free_form_fields() {
+        let interval = CameraReceiverInterval {
+            participant_identity: "i".repeat(500),
+            track_name: "t".repeat(500),
+            track_sid: "s".repeat(500),
+            route: "r".repeat(500),
+            interval_sequence: 0,
+            interval_ms: 0,
+            frames_decoded: None,
+            decoded_fps: Some(f64::NAN),
+            decoded_width: Some(0),
+            decoded_height: None,
+            frames_received: None,
+            frames_rendered: None,
+            frames_dropped: None,
+            freeze_count: None,
+            total_freezes_duration_ms: None,
+            bytes_received: None,
+            packets_received: None,
+            packets_lost: None,
+            packets_discarded: None,
+            retransmitted_packets_received: None,
+            key_frames_decoded: None,
+            nack_count: None,
+            pli_count: None,
+            fir_count: None,
+            jitter_ms: None,
+            jitter_buffer_delay_ms: None,
+            jitter_buffer_emitted_count: None,
+            total_decode_time_ms: None,
+            loss_pct: None,
+            decoder_implementation: Some("d".repeat(500)),
+            presented_frames: None,
+            presented_fps: None,
+            presentation_rvfc_available: None,
+            presentation_probe_starts: None,
+            presentation_ready_state: None,
+            presentation_paused: None,
+            presentation_hidden: None,
+            presentation_observing: None,
+            presentation_gap_count100_ms: None,
+            presentation_gap_count250_ms: None,
+            presentation_max_gap_ms: None,
+            presentation_excess_gap_ms: None,
+            presentation_current_gap_ms: None,
+            path_protocol: Some("p".repeat(500)),
+            path_local_candidate_type: None,
+            path_remote_candidate_type: None,
+            path_relay_protocol: None,
+            path_selected_pair_changes: None,
+            path_round_trip_time_ms: None,
+            path_available_incoming_kbps: None,
+            stream_state: "active".into(),
+            stall_cause: "not_applicable".into(),
+            gap_since_last_frame_ms: 0,
+        };
+        let line = camera_receiver_interval_line(&interval);
+        assert!(!line.contains(&"i".repeat(65)), "identity must be capped: {line}");
+        assert!(!line.contains(&"t".repeat(65)), "track name must be capped: {line}");
+        assert!(!line.contains(&"d".repeat(49)), "decoder must be capped: {line}");
+        assert!(
+            !line.contains(&"p".repeat(17)),
+            "path protocol must be capped: {line}"
+        );
+        assert!(line.contains("presentation=rvfc=unknown"), "{line}");
+        assert!(
+            line.contains("path=protocol=pppppppppppppppp"),
+            "path protocol is capped to 16 chars: {line}"
+        );
+        // One dimension present and one missing is not a measurement.
+        assert!(line.contains("decoded_dimensions=unknown"), "{line}");
+        // A non-finite rate is missing, not a number.
+        assert!(line.contains("decoded_fps=unknown"), "{line}");
+    }
+
+    #[test]
+    fn camera_receiver_interval_accepts_a_missing_decoder_implementation() {
+        // The webview sends `null` when the browser's stats dictionary omits the
+        // decoder name. A REQUIRED `String` here rejected the whole payload, so
+        // every receive interval failed to deserialize -- which is exactly why
+        // the receiver side produced no durable records at all despite the
+        // instrumentation appearing to be wired up.
+        let json = serde_json::json!({
+            "participantIdentity": "alice",
+            "trackName": "petal-camera-alice",
+            "trackSid": "TR_abc",
+            "route": "gallery-webview",
+            "intervalSequence": 2,
+            "intervalMs": 15_001,
+            "framesDecoded": 900,
+            "decodedFps": 59.9,
+            "decodedWidth": 1280,
+            "decodedHeight": 720,
+            "framesReceived": 900,
+            "framesRendered": 900,
+            "framesDropped": 0,
+            "freezeCount": 0,
+            "totalFreezesDurationMs": null,
+            "bytesReceived": 1,
+            "packetsReceived": 1,
+            "packetsLost": 0,
+            "packetsDiscarded": 0,
+            "retransmittedPacketsReceived": 0,
+            "keyFramesDecoded": 1,
+            "nackCount": 0,
+            "pliCount": 0,
+            "firCount": 0,
+            "jitterMs": 1.0,
+            "jitterBufferDelayMs": 1.0,
+            "jitterBufferEmittedCount": 1,
+            "totalDecodeTimeMs": 1.0,
+            "lossPct": 0.0,
+            "decoderImplementation": null,
+            "presentedFrames": 1,
+            "presentedFps": 59.0,
+            "streamState": "active",
+            "stallCause": "not_applicable",
+            "gapSinceLastFrameMs": 1
+        });
+        let interval: CameraReceiverInterval =
+            serde_json::from_value(json).expect("a null decoder_implementation must deserialize");
+        assert!(interval.decoder_implementation.is_none());
+        let line = camera_receiver_interval_line(&interval);
+        assert!(line.contains("decoder=unknown"), "{line}");
+        assert!(line.contains("interval_seq=2"), "{line}");
+    }
+
+    #[test]
+    fn camera_receiver_lifecycle_line_names_the_phase_and_stays_honest() {
+        let lifecycle = CameraReceiverLifecycle {
+            phase: "subscribed".into(),
+            participant_identity: Some("alice".into()),
+            track_name: Some("petal-camera-alice".into()),
+            track_sid: Some("TR_abc".into()),
+            route: Some("gallery-webview".into()),
+            detail: None,
+            bridge_age_ms: Some(1234),
+        };
+        let line = camera_receiver_lifecycle_line(&lifecycle);
+        assert!(line.contains("route=gallery-webview"), "{line}");
+        assert!(line.contains("phase=subscribed"), "{line}");
+        assert!(line.contains("participant=alice"), "{line}");
+        assert!(line.contains("track_sid=TR_abc"), "{line}");
+        assert!(line.contains("bridge_age_ms=1234"), "{line}");
+        // A missing detail is missing, never an empty string that reads like a
+        // value the sender actually supplied.
+        assert!(line.contains("detail=unknown"), "{line}");
+    }
+
+    #[test]
+    fn camera_receiver_lifecycle_line_caps_free_form_fields() {
+        let lifecycle = CameraReceiverLifecycle {
+            phase: "p".repeat(200),
+            participant_identity: Some("i".repeat(500)),
+            track_name: Some("t".repeat(500)),
+            track_sid: Some("s".repeat(500)),
+            route: Some("r".repeat(200)),
+            detail: Some(format!("bad\nline{}", "d".repeat(500))),
+            bridge_age_ms: None,
+        };
+        let line = camera_receiver_lifecycle_line(&lifecycle);
+        assert!(
+            !line.contains(&"p".repeat(33)),
+            "phase must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"i".repeat(65)),
+            "identity must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"t".repeat(65)),
+            "track name must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"s".repeat(65)),
+            "track sid must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"r".repeat(33)),
+            "route must be capped: {line}"
+        );
+        assert!(
+            !line.contains(&"d".repeat(97)),
+            "detail must be capped: {line}"
+        );
+        // A newline in a free-form field must never split one record in two.
+        assert!(!line.contains('\n'), "{line}");
     }
 
     #[test]

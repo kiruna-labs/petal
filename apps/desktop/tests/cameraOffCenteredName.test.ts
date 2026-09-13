@@ -33,11 +33,24 @@ test('desktop participant tile keeps video and placeholder layers mounted for cr
 });
 
 test('desktop participant tile fades real video in only after decoded-frame readiness', () => {
-  assert.match(participantTile, /requestVideoFrameCallback\?\.\(markReady\)/);
-  assert.match(participantTile, /video\.addEventListener\('loadeddata', markReady, \{ once: true \}\)/);
+  // Readiness and the presentation boundary are owned by the generation-owned
+  // probe, not by an inline rVFC loop in the tile.
+  assert.match(participantTile, /startCameraPresentationProbe\(\{/);
+  assert.match(participantTile, /onFirstFrame:/);
+  assert.match(participantTile, /probe\.stop\(\)/);
   assert.match(participantTile, /const videoReady = \$derived\(videoOn && hasVisibleVideoStream && videoFrameReady\)/);
   assert.match(participantTile, /\.video-el\s*{[\s\S]*opacity:\s*0;[\s\S]*transition:\s*opacity var\(--motion-base\)/);
   assert.match(participantTile, /\.video-el\.ready\s*{[\s\S]*opacity:\s*1;/);
+});
+
+test('desktop presentation probe is stream-reference independent but identity-scoped', () => {
+  const probeEffect = participantTile.match(
+    /\/\/ Anchored to the element rather than the stream reference[\s\S]*?probe\.stop\(\);\s*\n\s*};\s*\n\s*}\);/
+  )?.[0];
+  assert.ok(probeEffect, 'the generation-owned presentation effect must remain recognizable');
+  assert.doesNotMatch(probeEffect, /const stream = visibleVideoStream/);
+  assert.match(probeEffect, /identity: ownerIdentity \?\? tileProbeIdentity/);
+  assert.match(probeEffect, /untrack\(\(\) => markVideoFrameReady\(\)\)/);
 });
 
 test('desktop participant tile debounces name measurement during animated resize', () => {
