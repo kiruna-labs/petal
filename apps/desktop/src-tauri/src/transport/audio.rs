@@ -1336,10 +1336,11 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
     let speaking: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     tokio::spawn(async move {
         // #787: audio tracks that were ALREADY publishing when we joined are
-        // auto-subscribed during connect, so their `TrackSubscribed` fired
-        // before this logger existed -- the exact ordering of the live
-        // incident, and it left both this log line and the watchdog blind.
-        // Enumerate them at start; `watched` dedupes against a late event.
+        // admitted by the native subscription coordinator from the connect-time
+        // snapshot, so their `TrackSubscribed` may fire before this logger exists
+        // -- the exact ordering of the live incident, and it left both this log
+        // line and the watchdog blind. Enumerate them at start; `watched`
+        // dedupes against a late event.
         let mut watched: HashSet<String> = HashSet::new();
         for (_, participant) in room.remote_participants() {
             for publication in participant.track_publications().values() {
