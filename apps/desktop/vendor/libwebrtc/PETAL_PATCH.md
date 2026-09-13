@@ -82,3 +82,33 @@ bump restores the severity-discarding form.
 ### Updating
 
 Drop this patch once upstream maps severity onto `log` levels itself.
+
+## Source-acceptance return from the native video-source wrappers
+
+### Why this exists
+
+WebRTC's adapted source can *reject* a frame it will not encode (its own
+adaptation, not a conversion failure). The C++ side already returns that
+boolean through `on_captured_frame`, but both Rust wrappers discarded it:
+`capture_frame` returned `()`. Nothing downstream could therefore distinguish
+"the encoder never received this frame" from "the frame was converted but the
+source declined it" — the exact ambiguity that made a low-cadence camera look
+like an encoder problem.
+
+### The fix
+
+Purely additive and observational: both wrappers return the C++ boolean
+instead of dropping it.
+
+- `NativeVideoSource::capture_frame<T>(…) -> bool` returns
+  `on_captured_frame(…)`'s result (the returned expression, not a discarded
+  statement).
+- The safe `VideoSource::capture_frame<T>(…) -> bool` wrapper forwards it.
+
+Callers that do not consume acceptance must say so explicitly (`let _ = …`):
+`transport/publisher.rs` is the only consumer for now (it records
+`PublishedFrameTiming::source_accepted`), and the physical camera reader plus
+the decoder-side test feed discard it deliberately.
+
+No C++ change is involved, and no publish, capture, bitrate or FPS policy
+changes with it.
