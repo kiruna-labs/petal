@@ -55,6 +55,16 @@ impl AudioSourceKey {
     pub(crate) fn track_name(self) -> String {
         self.label()
     }
+
+    /// Bounded scope class for evidence lines. Deliberately drops the pid: a
+    /// support log must be able to count publications per scope without
+    /// recording which process was captured.
+    pub(crate) fn scope_label(self) -> &'static str {
+        match self {
+            Self::SystemOutput => "system",
+            Self::Process(_) => "process",
+        }
+    }
 }
 
 /// Rust-authoritative state returned by both query and mutation commands.
