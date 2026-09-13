@@ -12,6 +12,12 @@ import {
 // apps/desktop/src-tauri/src/diagnostics.rs, so a formatter change that would
 // silently break the analyzer fails here first.
 //
+// They are emitted INSIDE the real fern log prefix. An earlier revision built
+// bare `diagnostics: ...` lines while the parser required that prefix at the
+// START of a line, so every fixture passed and the parser returned zero lines
+// from a real petal.log -- caught only by the live gate. Keep the prefix here.
+const FERN_PREFIX = '2026-09-13 04:52:56.708 [INFO] [desktop_lib::diagnostics] ';
+
 // The analyzer exists because the receiver-diagnostics live gate ("one stable
 // SID, progressing decode/presentation counters, no ~1 Hz probe churn, terminal
 // cleanup") is otherwise a hand count over thousands of log lines.
@@ -89,7 +95,7 @@ function intervalLine(
     .map((key) => `${key}=${fields[key]}`);
   const p = { ...PRESENTATION_DEFAULTS, ...presentation };
   const q = { ...PATH_DEFAULTS, ...path };
-  return `diagnostics: camera receiver interval route=${fields.route} t_ms=${fields.t_ms} ${keys.join(' ')} decoder=libvpx presentation=${Object.entries(
+  return `${FERN_PREFIX}diagnostics: camera receiver interval route=${fields.route} t_ms=${fields.t_ms} ${keys.join(' ')} decoder=libvpx presentation=${Object.entries(
     p
   )
     .map(([key, value]) => `${key}=${value}`)
@@ -110,7 +116,7 @@ function lifecycleLine(overrides: Record<string, string | number> = {}): string 
     detail: 'unknown',
     ...overrides
   };
-  return `diagnostics: camera receiver lifecycle route=${fields.route} t_ms=${fields.t_ms} phase=${fields.phase} participant=${fields.participant} track_sid=${fields.track_sid} track_name=${fields.track_name} bridge_age_ms=${fields.bridge_age_ms} detail=${fields.detail}`;
+  return `${FERN_PREFIX}diagnostics: camera receiver lifecycle route=${fields.route} t_ms=${fields.t_ms} phase=${fields.phase} participant=${fields.participant} track_sid=${fields.track_sid} track_name=${fields.track_name} bridge_age_ms=${fields.bridge_age_ms} detail=${fields.detail}`;
 }
 
 test('a healthy SID parses into lifecycle, counters and categorical path', () => {
@@ -268,4 +274,58 @@ test('a window share is not misreported as a camera', () => {
   const text = intervalLine({ track_name: 'petal-window-42', track_sid: 'TR_w' });
   const summary = summarizeCameraReceiverLog(text);
   assert.equal(summary.sids[0]!.kind, 'window');
+});
+
+// Churn has to be judged on the intervals where the tile was actually being
+// OBSERVED. A real run (2026-09-13) showed bursts up to +42 per interval while
+// `observing=false paused=true hidden=true` (nothing presentable), then a flat
+// 254,254,254,254,256 with `observing=true` on the same SID, and a perfectly
+// flat 264,264,264 after the remount. Judging all intervals together reported
+// "churn" for a run whose presenting path was clean, so both directions are
+// pinned here.
+
+test('probe churn is reported when an observed tile keeps restarting the probe', () => {
+  const text = [
+    intervalLine({ t_ms: 1000, interval_seq: 1 }, { probe_starts: 5 }),
+    intervalLine({ t_ms: 16000, interval_seq: 2 }, { probe_starts: 47 }),
+    intervalLine({ t_ms: 31000, interval_seq: 3 }, { probe_starts: 49 })
+  ].join('\n');
+  const summary = summarizeCameraReceiverLog(text);
+  const sid = summary.sids[0]!;
+  assert.equal(sid.probeChurn, true, '+42 on an observed tile is churn');
+  assert.equal(sid.probeGrowthMax, 42);
+  assert.equal(summary.verdicts.anyProbeChurn, true);
+});
+
+test('probe restarts while the tile is hidden are an observation, not churn', () => {
+  // Nothing presents while hidden, so these restarts cannot reach a user; the
+  // run is still reported, just not as a gate failure.
+  const hidden = { observing: 'false', paused: 'true', hidden: 'true' };
+  const text = [
+    intervalLine({ t_ms: 1000, interval_seq: 1 }, { ...hidden, probe_starts: 5 }),
+    intervalLine({ t_ms: 16000, interval_seq: 2 }, { ...hidden, probe_starts: 47 }),
+    intervalLine({ t_ms: 31000, interval_seq: 3 }, { ...hidden, probe_starts: 49 })
+  ].join('\n');
+  const summary = summarizeCameraReceiverLog(text);
+  const sid = summary.sids[0]!;
+  assert.equal(sid.probeChurn, false, 'a hidden tile presents nothing, so this is not gate churn');
+  assert.equal(sid.hiddenProbeChurn, true, 'the hidden restarts stay visible as an observation');
+  assert.equal(sid.hiddenProbeGrowthMax, 42);
+  assert.equal(sid.observedIntervals, 0);
+  assert.equal(summary.verdicts.anyProbeChurn, false);
+  assert.equal(summary.verdicts.anyHiddenProbeChurn, true);
+});
+
+test('a real petal.log fern prefix does not hide the evidence lines', () => {
+  // The parser originally required the marker at the START of a line, so every
+  // fixture passed here while a real log parsed to zero lines. This asserts the
+  // realistic prefix explicitly.
+  const line = intervalLine({ t_ms: 16000, interval_seq: 1 });
+  assert.ok(
+    line.startsWith('2026-09-13 04:52:56.708 [INFO] [desktop_lib::diagnostics] '),
+    'filters must be exercised against the real prefixed shape'
+  );
+  const parsed = parseCameraReceiverLines(line);
+  assert.equal(parsed.intervals.length, 1);
+  assert.equal(parsed.malformed, 0);
 });

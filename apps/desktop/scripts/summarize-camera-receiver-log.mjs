@@ -20,6 +20,16 @@
 const LIFECYCLE_PREFIX = 'diagnostics: camera receiver lifecycle ';
 const INTERVAL_PREFIX = 'diagnostics: camera receiver interval ';
 
+/// Real `petal.log` lines are wrapped by the log formatter in a fern prefix --
+/// `<date> <time> UTC [LEVEL] [target] ` (see `logging.rs`) -- so the marker is
+/// located ANYWHERE in the line. Requiring it at the start silently parsed zero
+/// lines from a real run (the live gate caught it); the fixture tests now feed
+/// fully prefixed lines so a prefix change cannot hide this again.
+function markerPayload(rawLine, prefix) {
+  const at = rawLine.indexOf(prefix);
+  return at === -1 ? null : rawLine.slice(at + prefix.length);
+}
+
 /** Terminal phases: after one of these the SID must not produce more work. */
 export const TERMINAL_PHASES = new Set([
   'unsubscribed',
@@ -152,8 +162,9 @@ export function parseCameraReceiverLines(text) {
   let malformed = 0;
 
   for (const rawLine of text.split(/\r?\n/)) {
-    if (rawLine.startsWith(LIFECYCLE_PREFIX)) {
-      const fields = readFields(rawLine.slice(LIFECYCLE_PREFIX.length), LIFECYCLE_KEYS);
+    const lifecyclePayload = markerPayload(rawLine, LIFECYCLE_PREFIX);
+    if (lifecyclePayload !== null) {
+      const fields = readFields(lifecyclePayload, LIFECYCLE_KEYS);
       if (!fields.t_ms || !fields.phase) {
         malformed += 1;
         continue;
@@ -167,8 +178,9 @@ export function parseCameraReceiverLines(text) {
       });
       continue;
     }
-    if (rawLine.startsWith(INTERVAL_PREFIX)) {
-      const fields = readFields(rawLine.slice(INTERVAL_PREFIX.length), INTERVAL_KEYS);
+    const intervalPayload = markerPayload(rawLine, INTERVAL_PREFIX);
+    if (intervalPayload !== null) {
+      const fields = readFields(intervalPayload, INTERVAL_KEYS);
       if (!fields.t_ms || !fields.track_sid) {
         malformed += 1;
         continue;
@@ -230,6 +242,22 @@ export function summarizeCameraReceiverLog(text) {
       .map((interval) => interval.probeStarts)
       .filter((value) => value !== null)
       .map((value, index, values) => (index === 0 ? 0 : value - values[index - 1]));
+    // Churn is only meaningful while the tile is actually being observed. A
+    // hidden + paused element presents nothing, so probe restarts there cannot
+    // reach a user -- and a real run showed exactly that: bursts up to +42 per
+    // interval while `observing=false hidden=true`, then a flat
+    // 254,254,254,254,256 with `observing=true` on the same SID, and a
+    // perfectly flat 264,264,264 after a remount. Counting the hidden stretch
+    // made the gate verdict read "churn" for a run whose presenting path was
+    // clean, so the two are reported separately: `probeChurn` is the gating
+    // verdict, `hiddenProbeChurn` is a bounded observation.
+    const observedSteps = ownIntervals.filter(
+      (interval) => interval.probeStarts !== null && interval.observing === 'true'
+    );
+    const observedProbeDeltas = observedSteps
+      .map((interval) => interval.probeStarts)
+      .map((value, index, values) => (index === 0 ? 0 : value - values[index - 1]));
+    const hiddenProbeDeltas = probeDeltas.filter((_, index) => !observedSteps[index]);
     const sequences = ownIntervals.map((i) => i.sequence).filter((value) => value !== null);
     const kind = ownLifecycles[0]?.kind ?? first?.kind ?? 'other';
 
@@ -245,8 +273,12 @@ export function summarizeCameraReceiverLog(text) {
       decodedFps: ownIntervals.map((i) => i.decodedFps).filter((value) => value !== null),
       presentedFps: ownIntervals.map((i) => i.presentedFps).filter((value) => value !== null),
       probeStarts: ownIntervals.map((i) => i.probeStarts).filter((value) => value !== null),
-      probeGrowthMax: probeDeltas.length ? Math.max(...probeDeltas) : null,
-      probeChurn: probeDeltas.some((delta) => delta > PROBE_CHURN_PER_INTERVAL),
+      probeGrowthMax: observedProbeDeltas.length ? Math.max(...observedProbeDeltas) : null,
+      probeChurn: observedProbeDeltas.some((delta) => delta > PROBE_CHURN_PER_INTERVAL),
+      // Informational only: probe restarts while the tile was hidden/paused.
+      hiddenProbeGrowthMax: hiddenProbeDeltas.length ? Math.max(...hiddenProbeDeltas) : null,
+      hiddenProbeChurn: hiddenProbeDeltas.some((delta) => delta > PROBE_CHURN_PER_INTERVAL),
+      observedIntervals: observedSteps.length,
       sequenceMonotonic: sequences.every((value, index) => index === 0 || value >= sequences[index - 1]),
       rvfcAvailable: ownIntervals.some((i) => i.rvfc === 'true'),
       observedUnknownPresentation: ownIntervals.filter((i) => i.probeStarts === null).length,
@@ -271,6 +303,10 @@ export function summarizeCameraReceiverLog(text) {
     verdicts: {
       hasTerminalPhase: withTerminal > 0,
       anyProbeChurn: summaries.some((s) => s.probeChurn),
+      // Bounded observation, NOT a gate: probe starts that accumulated while
+      // the tile was hidden/paused (nothing was presenting). Reported so the
+      // hidden-tile behavior stays visible instead of silently ignored.
+      anyHiddenProbeChurn: summaries.some((s) => s.hiddenProbeChurn),
       allSequencesMonotonic: summaries.every((s) => s.sequenceMonotonic),
       decodedProgressed: summaries.some((s) => (s.decodedProgress?.last ?? 0) > (s.decodedProgress?.first ?? 0)),
       presentedProgressed: summaries.some((s) => (s.presentedProgress?.last ?? 0) > (s.presentedProgress?.first ?? 0)),
@@ -290,9 +326,10 @@ export function renderSummary(summary) {
     lines.push(`- ${sid.label} kind=${sid.kind}`);
     lines.push(`    lifecycle=${sid.lifecycle.join(' -> ') || 'none'}`);
     lines.push(`    terminal=${sid.terminalPhase ?? 'none'}`);
-    lines.push(`    intervals=${sid.intervals} sequenceMonotonic=${sid.sequenceMonotonic}`);
+    lines.push(`    intervals=${sid.intervals} observed=${sid.observedIntervals} sequenceMonotonic=${sid.sequenceMonotonic}`);
     lines.push(`    decoded=${sid.decodedProgress?.first ?? 'unknown'} -> ${sid.decodedProgress?.last ?? 'unknown'} presented=${sid.presentedProgress?.first ?? 'unknown'} -> ${sid.presentedProgress?.last ?? 'unknown'}`);
     lines.push(`    probeStarts=[${sid.probeStarts.join(',')}] maxGrowthPerInterval=${sid.probeGrowthMax ?? 'unknown'} churn=${sid.probeChurn}`);
+    lines.push(`    hiddenProbeGrowthMax=${sid.hiddenProbeGrowthMax ?? 'unknown'} hiddenChurn=${sid.hiddenProbeChurn} (observation only, nothing was presenting)`);
     lines.push(`    rvfcAvailable=${sid.rvfcAvailable} unknownPresentationIntervals=${sid.observedUnknownPresentation}`);
     lines.push(`    path protocols=[${sid.path.protocols.join(',')}] local=[${sid.path.local.join(',')}] remote=[${sid.path.remote.join(',')}] relay=[${sid.path.relay.join(',')}]`);
     lines.push(`    streamStates=[${sid.streamStates.join(',')}] stallCauses=[${sid.stallCauses.join(',')}]`);
