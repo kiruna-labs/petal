@@ -337,6 +337,17 @@ impl ScreenAudioTrack {
             return Err(error);
         }
 
+        // Bounded evidence line: the live acceptance for per-share audio has to
+        // prove "zero companions by default" and "exactly one after opt-in",
+        // and until now only FAILURE paths were logged, so absence of a line
+        // proved nothing. `scope` is a class, never the pid.
+        log::info!(
+            "audio: screen-audio published scope={} track={} sid={}",
+            source.scope_label(),
+            track_name,
+            track.sid()
+        );
+
         Ok(Self {
             source,
             capture,
@@ -377,6 +388,11 @@ impl ScreenAudioTrack {
                 screen_audio_publish_options(self.source),
             )
             .await?;
+        log::info!(
+            "audio: screen-audio republished after reconnect scope={} track={}",
+            self.source.scope_label(),
+            self.source.track_name()
+        );
         Ok(())
     }
 
@@ -401,6 +417,14 @@ impl ScreenAudioTrack {
         if let Err(error) = self.capture.stop() {
             log::debug!("audio: screen-audio native stop failed: {error}");
         }
+        // Paired with the `published` line above: `published - stopped` is the
+        // number of companions this process currently holds, which is what the
+        // stop/republish/reconnect case has to check for staleness.
+        log::info!(
+            "audio: screen-audio stopped scope={} track={}",
+            self.source.scope_label(),
+            self.source.track_name()
+        );
     }
 }
 
