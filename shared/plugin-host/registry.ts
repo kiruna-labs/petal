@@ -1,7 +1,7 @@
 // The plugin registry as the CLIENT sees it: a signed static `index.json`
 // plus signed `bundle.json` files at stable versioned paths. Pinned by
 // contracts/plugin-registry/ (a test keypair's public half, a signed sample
-// index and bundle) which the marketplace publisher vendors byte-for-byte.
+// index and bundle) which the registry publisher (website repo) vendors byte-for-byte.
 //
 // This module is the index MODEL: shape validation and "what can this host
 // install" -- consumed by the desktop's Settings browser on top of the index

@@ -18,7 +18,7 @@ Pinned on both clients:
 - `web-harness/tests/pluginRegistry.test.ts` — `shared/plugin-host/{minisign,registry}.ts`
 - `apps/desktop/src-tauri/src/plugins/registry.rs` tests — `minisign-verify` + serde
 
-The private marketplace repository vendors this directory byte-for-byte and
+The private website repository (`registry/`, the publisher) vendors this directory byte-for-byte and
 its publisher validates its output against it. A change here is a deliberate
 two-repo event.
 
