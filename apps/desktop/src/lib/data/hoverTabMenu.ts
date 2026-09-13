@@ -73,7 +73,16 @@ export type HoverTabMenuEntry =
 export const REMOTE_CONTROL_ALLOWED_MENU_ITEM_ID = 'share-remote-control-allowed';
 export const REMOTE_CONTROL_ALLOWED_MENU_ITEM_LABEL = 'Allow remote control';
 export const SHARE_AUDIO_MENU_ITEM_ID = 'share-audio';
-export const SHARE_AUDIO_MENU_ITEM_LABEL = 'Share audio';
+// Two short, scope-explicit labels. The share-options popup is a NATIVE Tauri
+// `Menu`/`CheckMenuItem` (see `shareOptionsPopup.ts`), so no DOM test can
+// measure whether its text fits -- the rule that UI text never truncates cannot
+// be verified on this surface the way it is for webview copy. These labels are
+// therefore kept shorter than the longest label the menu already ships
+// (`Allow remote control`), and unavailability is expressed by the disabled
+// state rather than by appended `-- unavailable` copy, which had made this the
+// longest string the popup carried. A unit test pins both properties.
+export const SHARE_APP_AUDIO_MENU_ITEM_LABEL = 'Share app audio';
+export const SHARE_SYSTEM_AUDIO_MENU_ITEM_LABEL = 'Share system audio';
 
 export function priorityMenuItemId(value: SharePriority): string {
   return `share-priority-${value}`;
@@ -164,7 +173,9 @@ export function buildHoverTabMenuEntries(
     {
       kind: 'share-audio',
       id: SHARE_AUDIO_MENU_ITEM_ID,
-      text: `${displayLike ? `${SHARE_AUDIO_MENU_ITEM_LABEL} (system output)` : `${SHARE_AUDIO_MENU_ITEM_LABEL} (app audio)`}${shared && !shareAudioAvailable ? ' — unavailable' : ''}`,
+      text: displayLike
+        ? SHARE_SYSTEM_AUDIO_MENU_ITEM_LABEL
+        : SHARE_APP_AUDIO_MENU_ITEM_LABEL,
       // Keep an errored checked item actionable so consent can always be
       // withdrawn. Otherwise unavailable sources are shown truthfully disabled.
       enabled: shared && (shareAudioAvailable || shareAudioEnabled),
