@@ -21,8 +21,13 @@
   does not reuse `Avatar`; issue #137 only adds the centered name treatment,
   with the compact Pill Avatar left unchanged.
 -->
+<script module lang="ts">
+  // Monotonic per-tile-instance key for tiles with no owner identity
+  // (filmstrip), so their presentation probes never collide.
+  let tileProbeSeq = 0;
+</script>
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { cameraOffNameLabelForFit, firstGrapheme, nameChipLabelForFit } from '$lib/data/nameChipFit';
   import { colorForIdentity, identityColorCss, identityColorFromPaletteIndex } from '$lib/data/identityColor';
@@ -36,6 +41,7 @@
     shareCountPillLabel,
     shouldShowSharePill
   } from '$lib/data/shareCountPill';
+  import { startCameraPresentationProbe, type CameraPresentationVideo } from '$lib/data/cameraPresentation';
   import ControlButton from './ControlButton.svelte';
 
   interface Props {
@@ -145,6 +151,7 @@
   const showCameraOffName = $derived(!videoOn);
   const videoReady = $derived(videoOn && hasVisibleVideoStream && videoFrameReady);
   const videoDetachDelayMs = 180;
+  const tileProbeIdentity = `tile:${tileProbeSeq++}`;
 
   function clamp01(value: number): number {
     return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
@@ -376,29 +383,27 @@
   });
 
   $effect(() => {
+    // Anchored to the element rather than the stream reference, so a stream
+    // handoff does not restart the probe or erase cumulative counters. The
+    // identity remains an intentional dependency: an identity change or real
+    // element remount starts a new generation.
     const video = videoEl;
-    const stream = visibleVideoStream;
-    if (!video || !stream) return;
+    if (!video) return;
 
     let cancelled = false;
-    const markReady = () => {
-      if (!cancelled) markVideoFrameReady(stream);
-    };
-    const frameVideo = video as HTMLVideoElement & {
-      requestVideoFrameCallback?: (callback: () => void) => number;
-      cancelVideoFrameCallback?: (handle: number) => void;
-    };
-    const callbackHandle = frameVideo.requestVideoFrameCallback?.(markReady);
-
-    video.addEventListener('loadeddata', markReady, { once: true });
-    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && typeof requestAnimationFrame !== 'undefined') {
-      requestAnimationFrame(markReady);
-    }
+    const probe = startCameraPresentationProbe({
+      identity: ownerIdentity ?? tileProbeIdentity,
+      video: video as unknown as CameraPresentationVideo,
+      onFirstFrame: () => {
+        // `markVideoFrameReady` reads visibleVideoStream/videoOn; untrack so a
+        // synchronous ready call cannot make them probe dependencies.
+        if (!cancelled) untrack(() => markVideoFrameReady());
+      }
+    });
 
     return () => {
       cancelled = true;
-      video.removeEventListener('loadeddata', markReady);
-      if (callbackHandle !== undefined) frameVideo.cancelVideoFrameCallback?.(callbackHandle);
+      probe.stop();
     };
   });
 
