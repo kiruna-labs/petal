@@ -34,6 +34,9 @@ pub mod backend_http;
 // (`camera::mf` Windows Media Foundation, `camera::avf` macOS AVFoundation —
 // each carries its own #![cfg] gate).
 pub mod camera;
+// The native room's single subscription-ownership seam: audio + shared-window
+// video in, remote cameras out (the hidden gallery bridge owns those).
+pub(crate) mod native_subscription;
 pub mod publisher;
 // Receiver-side authoritative publication reconciliation (#298).
 pub mod reconcile;

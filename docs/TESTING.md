@@ -495,6 +495,103 @@ screen-share sharer that never throttles) avoids this entirely.
   handler unwinds), which is why the overlay sync is deferred to the next
   main-thread turn.
 
+## Native subscription ownership acceptance
+
+`transport/native_subscription.rs` has the pure admission table. It must keep
+these classes explicit:
+
+| Publication | Native room | Hidden gallery bridge |
+|---|---|---|
+| Audio (including future share companions) | subscribed | not owned |
+| Exact `petal-window-<u32>` video | subscribed | not owned |
+| `petal-camera-*` video | not subscribed | subscribed |
+| Malformed/unknown video | not subscribed | not owned |
+
+A real two-peer run must cover a window already published before join, one
+published after join, stop/republish, a same-connection reconnect, remote audio
+playout, and a remote camera visible only in the gallery tile. For each window
+case, record `TrackPublished` → `TrackSubscribed` → first decoded frame plus
+initial frame dimensions and steady cadence. A call to `set_subscribed(true)` is
+a request, not acceptance evidence.
+
+**Malformed/unknown-name boundary.** A Petal product client cannot emit a
+malformed, overflowing, or unknown video track name, so that class is covered by
+the pure admission table and its source contract instead of a live publisher.
+Manufacturing one would need either a production test hook or a hand-built
+credentialed publisher; both cost more than the coverage returns. The live run
+therefore waives that class deliberately, and this document makes no claim about
+live malformed-name behaviour.
+
+Before this ownership policy was enabled, the same Windows binary compared SDK
+automatic subscription with explicit-all admission against the same 1138×774
+Mac source. Republish reached first frame in 486 ms automatic vs 539 ms explicit;
+leave/rejoin with an existing share took 946 ms vs 1050 ms. Both settled at
+29.2–29.6 FPS and 1136×772 on rejoin, with no subscription failures. That A/B
+validates the mechanism only; camera exclusion and malformed-video handling
+remain requirements of the narrower ownership run above.
+
+### Same-connection reconnect recipe (live)
+
+The coordinator re-applies the live snapshot on `Reconnected`. A leave/rejoin
+does **not** exercise that path — it only proves connect-time snapshot
+admission, which is why the A/B above is not a substitute.
+
+**This recipe is macOS-only.** The command server lives behind
+`#[cfg(target_os = "macos")]` in `autotest.rs` (on other platforms
+`maybe_start` is a no-op), so a Windows launch that sets `PETAL_AUTOTEST_SOCK`
+silently starts nothing and a socket client sees `connection refused`. The
+native admission code itself is shared, so the macOS run exercises the same
+coordinator the Windows receiver uses; a Windows live reconnect is not claimed.
+
+1. Build and launch the socket-owning participant with a room, an automatic
+   window share, and the debug log level:
+
+   ```sh
+   cd apps/desktop
+   RUST_LOG=debug \
+   PETAL_AUTOTEST_SOCK=/tmp/petal-owner.sock \
+   PETAL_AUTOTEST_ROOM="$PETAL_TEST_QA_KEY" \
+   PETAL_AUTOTEST_SHARE=auto \
+   PETAL_AUTOTEST_IDENTITY="$(uuidgen | tr 'A-Z' 'a-z')" \
+     npm run dev:clean
+   ```
+
+2. Join a second peer that publishes camera video, so a remote `petal-camera-*`
+   publication exists too. Record the baseline: the native room subscribes
+   audio and the exact `petal-window-<u32>` video; `petal-camera-*` is not
+   subscribed natively and appears only in the gallery tile.
+3. Run the checked-in scenario, which waits for the join, turns the meeting
+   camera on, dumps state, sends **one** `{"cmd":"reconnect","mode":"full"}`,
+   settles, and dumps state again:
+
+   ```sh
+   node scripts/autotest-run.mjs scripts/scenarios/s38-ownership-reconnect.json \
+     /tmp/petal-owner.sock
+   ```
+
+   A process accepts one reconnect request; restart it for a second attempt.
+4. Require, in order: `Reconnecting` → `Reconnected`; window video re-admitted
+   with a fresh first frame; audio re-admitted and audible; still no native
+   camera `TrackSubscribed`; gallery camera recovers; no subscription failure;
+   and no duplicate native subscription for the same publication.
+
+**Why `RUST_LOG=debug` matters here.** The camera-decline line
+(`native subscription: declining '<name>' (sid=…); the gallery bridge owns
+remote cameras`) is `debug`, while `petal.log` defaults to `info`, and the
+admission path itself logs nothing. At the default level "the native room did
+not subscribe the camera" would rest only on the *absence* of the warn-level
+invariant line, which is weaker evidence than a positive decline record.
+`RUST_LOG=debug` raises the app's own modules and the existing denylist keeps
+noisy third-party crates clamped to `warn`, so `petal.log` stays readable. The
+decline line names the track, so quote only the bounded class
+(`petal-camera-*`), never the identity suffix.
+
+Evidence to record: exact sender/receiver build hashes, the post-reconnect
+window's `TrackPublished` / `TrackSubscribed` / first-frame timestamps, whether
+audio was audible at the far end, and the `declining` record for the camera
+publication (or, at minimum, the absence of the `native subscription
+invariant:` warn). Quote bounded timestamps only — no raw logs.
+
 ## Manual Cross-Client Test (desktop + browser, real permissions)
 
 A repeatable manual procedure for validating cross-client camera, window

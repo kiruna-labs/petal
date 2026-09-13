@@ -54,12 +54,39 @@ Roughly `platform → capture/transport → session → chrome → diagnostics`.
     (#143), used by `token.rs` and `rooms.rs`.
   - `publisher.rs` — `RoomConnection`, `PublishedTrack`, `ShareQuality`; window
     capture → H.264 publish, focus-weighted quality (unpublish+republish).
+  - `native_subscription.rs` — the native room's single admission owner:
+    remote audio and canonical `petal-window-<u32>` video are admitted;
+    cameras, malformed window names, and unknown video are declined.
   - `subscriber.rs` — `start_compositor_feed`: remote video track → decoded
     `Native` CVPixelBuffer → compositor, no CPU copy.
   - `audio.rs` — mic capture (`PlatformAudio`/WebRTC ADM), Opus publish, real
     mute, device hot-swap.
   - `camera/` — native webcam capture: `avf.rs` (AVFoundation, macOS),
     `mf.rs` (Media Foundation, Windows), `mod.rs` (the shared surface).
+### Remote media subscription ownership
+
+The native room connects with `auto_subscribe = false`. Immediately after
+connect, `NativeSubscriptionCoordinator` applies the live publication snapshot;
+it then observes the original connect-time event stream before compositor or
+resilience consumers, and reapplies the live snapshot after `Reconnected`.
+Admission is idempotent, so a snapshot plus a buffered `TrackPublished` cannot
+create two owners. It is not, however, free: each admission sends one
+`UpdateSubscription` signal request (no coalescing in the SDK). Measured cost of
+replacing SDK automatic subscription with this explicit admission was +53 ms
+(`Reconnected` republish) and +104 ms (leave/rejoin) to first frame against the
+same source in the A/B, while the production live matrix measured 270 ms
+stop/republish and 501 ms rejoin -- i.e. inside run-to-run noise, so the
+explicit path is not a user-visible start-up regression. Record new
+first-frame numbers here if that baseline moves.
+
+The native owner admits every remote audio publication and only video named as
+an exact canonical `petal-window-<u32>`. The hidden gallery bridge remains the
+only remote-camera owner and uses its own subscribe-only LiveKit participant.
+A camera, malformed window name, or unknown video reaching the native
+compositor is therefore an invariant violation, not routine routing. Data
+channel delivery is independent of track subscription and continues on the
+native room connection.
+
 - **`native_display.rs`** — the zero-copy decode-to-display path: CVPixelBuffer
   → `CMSampleBuffer` → `AVSampleBufferDisplayLayer`.
 - **`compositor.rs`** — one borderless `NSPanel` per subscribed remote shared
