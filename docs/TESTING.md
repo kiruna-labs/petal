@@ -591,6 +591,68 @@ window's `TrackPublished` / `TrackSubscribed` / first-frame timestamps, whether
 audio was audible at the far end, and the `declining` record for the camera
 publication (or, at minimum, the absence of the `native subscription
 invariant:` warn). Quote bounded timestamps only — no raw logs.
+||||||| parent of f537632 (feat(diagnostics): summarize the camera receiver log for the live gate)
+## Camera receiver diagnostics acceptance
+
+The gallery-owned camera path writes two durable lines into `petal.log` (macOS
+`~/Library/Logs/Petal/petal.log`, Windows `%APPDATA%\Petal\logs\petal.log`):
+
+- `diagnostics: camera receiver lifecycle …` — one line per lifecycle edge
+  (`bridge_connecting` → `bridge_connected` → `subscribe_requested` →
+  `subscribed` → `first_decode`, and the terminal `unsubscribed` /
+  `bridge_disconnected` / `lifecycle_failed`);
+- `diagnostics: camera receiver interval …` — one line every 15 seconds per
+  subscribed camera, carrying decode counters, the WebView presentation
+  counters, and the categorical selected-path fields.
+
+Do not hand-count these. `scripts/summarize-camera-receiver-log.mjs` parses only
+those two line types and prints a per-SID summary:
+
+```sh
+node scripts/summarize-camera-receiver-log.mjs "$PETAL_LOG"
+node scripts/summarize-camera-receiver-log.mjs --json "$PETAL_LOG" | jq .verdicts
+```
+
+It never prints participant identities, track names, free-text `detail`, decoder
+strings, addresses, or ports — SIDs are relabelled `sid#1`, `sid#2`, … by first
+appearance, and only bounded enums and counters are reported. Feed it the
+already-redacted export if you would rather not point it at the live log.
+
+### Procedure
+
+1. Start two peers in one room; publish a camera from the remote peer. The
+   receiving peer must have the gallery tile for that camera on screen.
+2. Leave it alone for **at least 60 seconds** so four 15-second intervals are
+   recorded against a single SID before anything is toggled. Record the log's
+   absolute path and both build hashes.
+3. Run the summarizer. Required for a pass:
+   - exactly one SID with a complete lifecycle through `first_decode`;
+   - `decodedProgress` and `presentedProgress` both advance across intervals;
+   - `sequenceMonotonic` is true and `intervals` is 4+;
+   - `path.protocols` / `local` / `remote` hold categorical values only;
+   - `probeChurn` is **false** and `maxGrowthPerInterval` stays small. The
+     failure this guards against is the presentation probe restarting about
+     once per second: at 15 s per interval that reads as ~15 starts per
+     interval, which is `churn=true`.
+4. Toggle the camera off and on once, to force a real remount. Required: a new
+   SID (or a probe-start step) for the new publication, and the retiring
+   publication reaching a terminal lifecycle edge.
+5. Disconnect the room, wait past one interval, and re-run the summarizer.
+   Required: `hasTerminalPhase` is true and no interval appears for the
+   disconnected SID afterwards — an orphan interval task would keep writing.
+
+### Bounded caveats (state these, do not paper over them)
+
+- The durable interval line records `probe_starts` but **no generation counter**,
+  so a remount is evidenced by a new SID or a probe-start step, never by a
+  generation field. `verdicts.remountEvidence` means exactly that and nothing
+  more.
+- Two tiles showing the same identity replace each other's probe: this build does
+  not support duplicate simultaneous tiles for one identity.
+- Completed counters survive a replacement, but the frame/FPS baselines and an
+  open gap reset on handoff, so a single handoff is not itself a freeze.
+- The loaded-data/current-ready fallback proves readiness, not that a new stream
+  presented a frame.
 
 ## Manual Cross-Client Test (desktop + browser, real permissions)
 
