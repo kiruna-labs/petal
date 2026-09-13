@@ -571,6 +571,12 @@ pub(crate) struct RegionViewOptionsState {
     pub ai_chat_enabled: bool,
     pub ai_chat_active: bool,
     pub controller_name: Option<String>,
+    /// Output-audio consent/availability for this exact share incarnation. It
+    /// rides the same label-addressed options authority as the other title-bar
+    /// actions so the route never has to hold a capture token.
+    pub audio_enabled: bool,
+    pub audio_available: bool,
+    pub audio_error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -608,6 +614,7 @@ fn region_view_options_for_token(
     token: u32,
 ) -> RegionViewOptionsState {
     let ai_chat = crate::ai_chat::commands::ai_chat_settings();
+    let audio = crate::session::share_audio_state_for_state(state, token);
     RegionViewOptionsState {
         share_active: state.is_share_active(token),
         priority: crate::share_priority::current(),
@@ -615,6 +622,9 @@ fn region_view_options_for_token(
         ai_chat_enabled: ai_chat.enabled,
         ai_chat_active: crate::ai_chat::commands::ai_chat_is_active(token),
         controller_name: crate::remote_control::active_controller_display_name(state, token),
+        audio_enabled: audio.enabled,
+        audio_available: audio.available,
+        audio_error: audio.error,
     }
 }
 
@@ -793,6 +803,22 @@ pub async fn region_view_options_state(
     window_label: String,
 ) -> Result<RegionViewOptionsState, String> {
     let token = ensure_region_token(&app, &window_label)?;
+    Ok(region_view_options_for_token(&state, token))
+}
+
+/// Toggle the output-audio companion for the share this selector label
+/// currently names. The label is resolved per action, so a Windows stop and
+/// restart cannot be addressed through a token this route never held.
+#[tauri::command]
+pub async fn set_region_share_audio(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::session::SessionState>,
+    window_label: String,
+    enabled: bool,
+) -> Result<RegionViewOptionsState, String> {
+    let token = ensure_region_token(&app, &window_label)?;
+    crate::session::set_share_audio_enabled_for_state(&app, &state, token, enabled).await?;
+    emit_region_view_options_changed(&app, &state, token);
     Ok(region_view_options_for_token(&state, token))
 }
 

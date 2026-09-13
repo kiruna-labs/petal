@@ -126,19 +126,21 @@ pub(crate) use crate::camera_session::{
     ensure_camera_published, repair_camera_publication_after_reconnect, stop_camera_publish,
 };
 pub use commands::{
-    set_share_remote_control_allowed, share_remote_control_allowed,
-    __cmd__current_room, __cmd__join_room_command, __cmd__leave_room_command,
+    set_share_audio_enabled, set_share_remote_control_allowed, share_audio_state,
+    share_remote_control_allowed, __cmd__current_room, __cmd__join_room_command, __cmd__leave_room_command,
     __cmd__remote_control_allowed, __cmd__remote_control_policy, __cmd__room_presence,
     __cmd__set_display_name, __cmd__set_remote_control_allowed, __cmd__set_remote_control_policy,
-    __cmd__set_share_remote_control_allowed, __cmd__set_share_resolution,
-    __cmd__share_remote_control_allowed, __tauri_command_name_current_room,
+    __cmd__set_share_audio_enabled, __cmd__set_share_remote_control_allowed,
+    __cmd__set_share_resolution, __cmd__share_audio_state, __cmd__share_remote_control_allowed,
+    __tauri_command_name_current_room,
     __tauri_command_name_join_room_command, __tauri_command_name_leave_room_command,
     __tauri_command_name_remote_control_allowed, __tauri_command_name_remote_control_policy,
     __tauri_command_name_room_presence, __tauri_command_name_set_display_name,
     __tauri_command_name_set_remote_control_allowed,
     __tauri_command_name_set_remote_control_policy,
+    __tauri_command_name_set_share_audio_enabled,
     __tauri_command_name_set_share_remote_control_allowed,
-    __tauri_command_name_set_share_resolution,
+    __tauri_command_name_set_share_resolution, __tauri_command_name_share_audio_state,
     __tauri_command_name_share_remote_control_allowed,
     current_room, join_room_command, leave_room_command, remote_control_allowed,
     remote_control_policy, room_presence, set_display_name, set_remote_control_allowed,
@@ -155,8 +157,10 @@ pub(crate) use share::{
     expire_stale_viewer_demands, note_passive_viewer_demand, note_remote_interaction,
     reconcile_quality_for_window, repair_active_share_publication,
     repair_active_share_publications_after_reconnect,
-    repair_local_track_publication_after_reconnect, restart_active_shares_after_wake,
-    set_share_priority, start_share_with_system_picker_filter, ReconnectRepairGuard,
+    repair_local_track_publication_after_reconnect,
+    repair_screen_audio_publications_after_reconnect, restart_active_shares_after_wake,
+    set_share_audio_enabled_for_state, set_share_priority, share_audio_state_for_state,
+    start_share_with_system_picker_filter, ReconnectRepairGuard,
     SharedWindowScreenStatus, ViewerDemandEvent, ViewerDemandUpdate,
 };
 pub use share::{
@@ -170,7 +174,7 @@ pub(crate) use share::{stop_share_explained, StopShareAnalytics};
 pub(crate) use share::{recent_share_memory_marks, SHARE_MEMORY_SETTLE_STAGE};
 
 use crate::sync_ext::MutexExt;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use crate::remote_control_core::RemoteControlPolicy;
@@ -180,7 +184,8 @@ use crate::capture::CaptureError;
 // Re-exported so `crate::session::RoomGeneration` keeps working for the many
 // external consumers that imported it through the session module.
 pub(crate) use crate::room_generation::RoomGeneration;
-use crate::transport::audio::{AudioError, MicTrack};
+use crate::screen_audio::{AudioSourceKey, AudioSourceRegistry};
+use crate::transport::audio::{AudioError, MicTrack, ScreenAudioTrack};
 use crate::transport::publisher::{RoomConnection, RoomConnectionError};
 
 use room::RoomJoinInfo;
@@ -281,6 +286,10 @@ struct SessionInner {
     /// struct's own mutex on every poll tick -- see `MicWatchHandle::new`'s
     /// call site in `join_room` below.
     mic: Option<Arc<MicTrack>>,
+    /// Enabled references and elected companion tracks are room-scoped. A
+    /// fresh visual share does not enter this registry: consent is default-off.
+    screen_audio_sources: AudioSourceRegistry,
+    screen_audio: BTreeMap<AudioSourceKey, Arc<ScreenAudioTrack>>,
     /// Keeps this process's speaker playout enabled for as long as the room
     /// connection lives (SPEC.md §4.9). `Arc`-wrapped for the same reason as
     /// `mic`, so resilience's device-watch poll can hold a cheap clone;
@@ -415,6 +424,9 @@ pub struct SessionState {
     /// Serializes shared-window metadata writes. A stale title-clear waits,
     /// revalidates, and cannot race a new share's title publish.
     share_metadata_apply_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes opt-in/off, share teardown, and source handoffs without
+    /// holding the synchronous session mutex across native/LiveKit awaits.
+    screen_audio_control_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for SessionState {
@@ -434,6 +446,7 @@ impl Default for SessionState {
             mic_mute_apply_lock: Arc::new(tokio::sync::Mutex::new(())),
             ai_chat_ducking: AtomicBool::new(false),
             share_metadata_apply_lock: Arc::new(tokio::sync::Mutex::new(())),
+            screen_audio_control_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -506,6 +519,10 @@ impl SessionState {
     /// `SessionState::lock_camera_control`).
     pub(crate) async fn lock_camera_control(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.camera_control_lock.lock().await
+    }
+
+    pub(crate) async fn lock_screen_audio_control(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.screen_audio_control_lock.lock().await
     }
 
     pub(crate) fn is_in_room(&self) -> bool {

@@ -127,6 +127,9 @@ pub mod logging;
 mod main_window;
 mod meeting_core;
 mod menubar;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_screen_audio;
+pub(crate) mod screen_audio;
 mod network_cockpit;
 mod settings_window;
 // `pub` (not just crate-private) so `examples/compositor_probe.rs` -- a
@@ -245,6 +248,8 @@ pub mod window_source;
 mod windows_audio_device;
 #[cfg(target_os = "windows")]
 mod windows_capture_target;
+#[cfg(target_os = "windows")]
+mod windows_screen_audio;
 // `pub` (not crate-private) so `examples/windows_share_source_probe.rs` — a
 // separate crate-root binary linking against `desktop_lib` — can drive the
 // WGC live-capture session directly, same pattern as `window_source`.
@@ -1053,6 +1058,7 @@ pub fn run() {
             region_window::region_share_state,
             region_window::sync_region_window_frame,
             region_window::region_view_options_state,
+            region_window::set_region_share_audio,
             region_window::set_region_share_priority,
             region_window::set_region_draw_active,
             region_window::region_ai_chat_start,
@@ -1136,6 +1142,8 @@ pub fn run() {
             session::set_remote_control_policy,
             session::set_share_remote_control_allowed,
             session::share_remote_control_allowed,
+            session::share_audio_state,
+            session::set_share_audio_enabled,
             #[cfg(target_os = "macos")]
             session::set_share_resolution,
             #[cfg(target_os = "macos")]
@@ -1714,6 +1722,8 @@ pub fn run() {
             session::set_remote_control_policy,
             session::set_share_remote_control_allowed,
             session::share_remote_control_allowed,
+            session::share_audio_state,
+            session::set_share_audio_enabled,
             get_menubar_state,
             set_mic_muted,
             toggle_menubar_mic,
@@ -1725,6 +1735,7 @@ pub fn run() {
             region_window::region_share_state,
             region_window::sync_region_window_frame,
             region_window::region_view_options_state,
+            region_window::set_region_share_audio,
             region_window::set_region_share_priority,
             region_window::set_region_draw_active,
             region_window::region_ai_chat_start,

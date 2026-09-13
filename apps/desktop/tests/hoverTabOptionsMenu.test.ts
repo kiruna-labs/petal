@@ -73,6 +73,29 @@ test('the per-share remote-control lock is offered on every platform, and only w
   assert.equal(deniedToggle?.checked, false);
 });
 
+test('share audio is default-off, checked only from native state, and explicit about scope', () => {
+  const fresh = buildHoverTabMenuEntries('automatic', true);
+  assert.deepEqual(fresh.find((entry) => entry.kind === 'share-audio'), {
+    kind: 'share-audio',
+    id: 'share-audio',
+    text: 'Share audio (app audio) — unavailable',
+    enabled: false,
+    checked: false
+  });
+
+  const optedInDisplay = buildHoverTabMenuEntries(
+    'automatic', true, false, 'cursorPreserving', true, false, false, true,
+    false, true, 'right', true, true
+  );
+  assert.deepEqual(optedInDisplay.find((entry) => entry.kind === 'share-audio'), {
+    kind: 'share-audio',
+    id: 'share-audio',
+    text: 'Share audio (system output)',
+    enabled: true,
+    checked: true
+  });
+});
+
 test('hover-only position entries offer all four exact border labels without leaking into Petal View', () => {
   const hoverEntries = buildShareOptionsMenuEntries(
     'automatic',
@@ -229,6 +252,23 @@ test('the lock dispatches the OPPOSITE of its current state, and never while dis
     undefined
   );
   assert.deepEqual(calls, [false, true], 'a disabled entry must not dispatch');
+});
+
+test('share-audio dispatch flips authoritative consent and blocks unavailable entries', () => {
+  const calls: boolean[] = [];
+  const actions = {
+    onPriority() {}, onControlMode() {}, onDraw() {}, onAiChat() {}, onDebug() {},
+    onShareAudio(enabled: boolean) { calls.push(enabled); }
+  };
+  dispatchShareOptionsMenuEntry(
+    { kind: 'share-audio', id: 'share-audio', text: 'Share audio', enabled: true, checked: false },
+    actions
+  )?.();
+  assert.deepEqual(calls, [true]);
+  assert.equal(dispatchShareOptionsMenuEntry(
+    { kind: 'share-audio', id: 'share-audio', text: 'Share audio', enabled: false, checked: false },
+    actions
+  ), undefined);
 });
 
 test('the fixed CSS prevents copy or transparent overflow from changing the native hit surface', () => {

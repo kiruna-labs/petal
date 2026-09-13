@@ -67,10 +67,13 @@ export type HoverTabMenuEntry =
   | { kind: 'debug'; id: string; text: string }
   | { kind: 'annotation'; id: string; text: string; enabled: boolean; checked: boolean }
   | { kind: 'ai-chat'; id: string; text: string; enabled: boolean; checked: boolean }
-  | { kind: 'remote-control-allowed'; id: string; text: string; enabled: boolean; checked: boolean };
+  | { kind: 'remote-control-allowed'; id: string; text: string; enabled: boolean; checked: boolean }
+  | { kind: 'share-audio'; id: string; text: string; enabled: boolean; checked: boolean };
 
 export const REMOTE_CONTROL_ALLOWED_MENU_ITEM_ID = 'share-remote-control-allowed';
 export const REMOTE_CONTROL_ALLOWED_MENU_ITEM_LABEL = 'Allow remote control';
+export const SHARE_AUDIO_MENU_ITEM_ID = 'share-audio';
+export const SHARE_AUDIO_MENU_ITEM_LABEL = 'Share audio';
 
 export function priorityMenuItemId(value: SharePriority): string {
   return `share-priority-${value}`;
@@ -99,7 +102,9 @@ export function buildHoverTabMenuEntries(
   displayLike = false,
   includePosition = false,
   remoteControlAllowed = true,
-  hoverTabSide: HoverTabSide = 'right'
+  hoverTabSide: HoverTabSide = 'right',
+  shareAudioEnabled = false,
+  shareAudioAvailable = false
 ): HoverTabMenuEntry[] {
   const entries: HoverTabMenuEntry[] = [
     { kind: 'section-label', text: QUALITY_PRIORITY_SECTION_LABEL },
@@ -156,6 +161,15 @@ export function buildHoverTabMenuEntries(
   }
   entries.push(
     { kind: 'separator' },
+    {
+      kind: 'share-audio',
+      id: SHARE_AUDIO_MENU_ITEM_ID,
+      text: `${displayLike ? `${SHARE_AUDIO_MENU_ITEM_LABEL} (system output)` : `${SHARE_AUDIO_MENU_ITEM_LABEL} (app audio)`}${shared && !shareAudioAvailable ? ' — unavailable' : ''}`,
+      // Keep an errored checked item actionable so consent can always be
+      // withdrawn. Otherwise unavailable sources are shown truthfully disabled.
+      enabled: shared && (shareAudioAvailable || shareAudioEnabled),
+      checked: shareAudioEnabled
+    },
     {
       // Deliberately NOT behind `remoteControlSupported`: that flag gates the
       // Windows-only control MODES, whereas permission applies on every
