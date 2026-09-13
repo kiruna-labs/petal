@@ -591,7 +591,7 @@ window's `TrackPublished` / `TrackSubscribed` / first-frame timestamps, whether
 audio was audible at the far end, and the `declining` record for the camera
 publication (or, at minimum, the absence of the `native subscription
 invariant:` warn). Quote bounded timestamps only — no raw logs.
-||||||| parent of f537632 (feat(diagnostics): summarize the camera receiver log for the live gate)
+
 ## Camera receiver diagnostics acceptance
 
 The gallery-owned camera path writes two durable lines into `petal.log` (macOS
