@@ -747,6 +747,107 @@ room created by an accidental "Create" click (see Setup step 4) will persist
 in "YOUR ROOMS" forever; just avoid creating new stray ones rather than
 trying to clean up existing ones.
 
+## Screen-share output audio acceptance (live)
+
+Per-share output audio is **default off** and **per-share opt-in**, and the
+visual share never depends on it. Until this section's evidence lines existed,
+only *failure* paths were logged, so "no warning appeared" could not prove
+"no companion track was published". The sender now writes bounded lines:
+
+```
+audio: screen-audio published scope=<system|process> track=<contract name> sid=<sid>
+audio: screen-audio republished after reconnect scope=<system|process> track=<contract name>
+audio: screen-audio stopped scope=<system|process> track=<contract name>
+```
+
+- `scope` is a class, never a pid. The pid survives only inside the documented
+track-name contract (`petal-window-audio-process-<pid>`).
+- Live companions for one `(scope, track)` = `published + republished - stopped`.
+  A `republished` line is the *same* track re-published after the SDK dropped it
+  during a reconnect -- not an extra companion. A second `published` with a
+  different `sid` and no intervening `stopped` **is** a duplicate.
+- They are `info`-level on purpose: a default-level log is enough. Log paths are
+  macOS `~/Library/Logs/Petal/petal.log` and Windows
+  `%APPDATA%\Petal\logs\petal.log`.
+- `ShareAudioState` is the live view (`enabled`, `available`, `publishing`,
+  `scope`, `error`); it is per `windowId`. Read publication *counts* from the
+  log, not from the toggle's appearance.
+
+### Source applications and tones
+
+Each case needs two distinguishable tones so "the right process only" is
+observable by ear:
+
+- **Owning-process tone** -- audio played by the app whose window you share
+  (e.g. a local media file playing in that window, or a browser tab audition).
+- **Unrelated-process tone** -- audio played by a different app (e.g. a music
+  player) that is *not* the shared window's owner.
+- **System tone** -- whatever the system output is playing, including both of
+  the above.
+
+### The five cases
+
+| # | Setup | Sender evidence | Receiver observation |
+|---|---|---|---|
+| a | Fresh share, control untouched | **Zero** `screen-audio published` lines | Silence; no `petal-window-audio-*` track |
+| b | Window share, then enable | Exactly one `published scope=process track=petal-window-audio-process-<pid>` | Owning-process tone only; unrelated-process tone absent |
+| c | Display/region share, then enable | Exactly one `published scope=system track=petal-window-audio-system` | System output, but Petal's own remote playout is **not** re-broadcast (no echo loop) |
+| d | Acquisition denied/unavailable | Zero `published` lines; `available=false` with an honest `error`; video unaffected | Video keeps flowing, no audio track, UI reports unavailable |
+| e | Stop/republish + one full reconnect | `published+republished-stopped == 1` per `(scope, track)`, distinct sids | Exactly one companion; audio resumes; no stale/duplicate track |
+
+### Denied / unavailable setup
+
+- **macOS**: revoke Screen Recording for Petal (System Settings -> Privacy &
+  Security -> Screen Recording), relaunch, then enable the audio control. It
+  must report unavailable rather than publishing silence.
+- **Windows**: process loopback needs Windows 10 build 20348 or newer. On an
+  older build -- or any source the process-loopback API refuses -- the control
+  must report unavailable and keep the video share running. Falling back to
+  ordinary system loopback for a *window* source is a failure, not a fallback.
+
+### Reconnect trigger
+
+- **macOS**: the owner-only autotest socket from
+  "Same-connection reconnect recipe (live)" above --
+  `{"cmd":"reconnect","mode":"full"}`.
+- **Windows**: there is no autotest command server on this platform, so
+  interrupt the network for about five seconds (disable the active adapter, or
+  unplug Ethernet / disable Wi-Fi) until the room returns. The reconnect repair
+  path is shared, so this exercises the same generation-gated code without a
+  product test hook.
+
+### Stop / republish / reconnect sequence
+
+1. Enable the control and confirm exactly one companion (case b or c).
+2. Disable the control, or stop the share. Require a matching `stopped` line
+   and silence at the receiver -- a `published` without its `stopped` is a leak.
+3. Share again and re-enable. Require exactly one **new** `published` with a new
+   sid, and no stale publication still carrying the old sid.
+4. Trigger one full reconnect while still publishing. Require a `republished`
+   line for the same track and still exactly one live companion at the
+   receiver.
+
+### Extracting privacy-safe evidence
+
+```sh
+# macOS; on Windows use $env:APPDATA\Petal\logs\petal.log with Select-String
+PETAL_LOG="$HOME/Library/Logs/Petal/petal.log"
+grep -E 'audio: screen-audio (published|republished|stopped)' "$PETAL_LOG"
+
+# Live companion count per scope+track (published+republished-stopped).
+# Token search, not field positions: the log prefix is
+# `<date> <time> UTC [LEVEL] [target] message`.
+grep -E 'audio: screen-audio (published|republished|stopped)' "$PETAL_LOG" \
+  | awk '{st="";sc="";tr="";for(i=1;i<=NF;i++){if($i=="screen-audio")st=$(i+1);if($i~/^scope=/)sc=$i;if($i~/^track=/)tr=$i}if(st!="")n[sc" "tr]+=(st=="stopped"?-1:1)}END{for(k in n)print n[k],k}'
+```
+
+Quote only these summaries. The lines are already bounded to a scope class, the
+contract track name, and a sid -- never paste full logs, which carry room
+identities, media URLs, and error strings.
+
+This matrix makes no claim about Windows hosts older than build 20348: those
+systems are video-only by contract.
+
 ## Desktop Autotest Scenarios
 
 The desktop app has an env-gated debug command socket in `apps/desktop/src-tauri/src/autotest.rs`. It is off unless `PETAL_AUTOTEST_ROOM` or `PETAL_AUTOTEST_SOCK` is set.
