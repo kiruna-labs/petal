@@ -691,6 +691,41 @@ Checked-in scenarios:
 - `s22-hover-tab-input-preflight.json` - accessibility and hover-tab state preflight.
 - `s35-smoke.json` - state and accessibility smoke test.
 
+### #76: camera-intent margin (Settings preview vs meeting camera)
+
+The socket also drives the meeting camera and the Settings window, so the one
+measurement in the backlog that needs a physical camera is a single command
+rather than a person clicking through a runbook. Commands: `camera_on`,
+`camera_off`, `camera_state`, `list_camera_devices`,
+`set_camera_device` (`device_id`), `open_settings`, `close_settings`. Each
+takes the same path the UI does (`camera_session::start_camera_publish_intent`
+and friends), so the log lines are the production ones.
+
+On a Mac with a real camera, launch a debug build with the socket and a room:
+
+```sh
+cd apps/desktop
+PETAL_AUTOTEST_SOCK=/tmp/petal-76.sock \
+PETAL_AUTOTEST_ROOM="$PETAL_TEST_QA_KEY" \
+PETAL_AUTOTEST_IDENTITY="$(uuidgen | tr 'A-Z' 'a-z')" \
+  npm run dev:clean
+```
+
+then, once it has joined:
+
+```sh
+node scripts/measure-camera-intent.mjs --socket /tmp/petal-76.sock
+```
+
+It opens Settings, waits for the preview's own `settings: camera preview
+acquired` line (the evidence that the preview really holds the device -- an
+uncontended publish that wins looks identical to a contended one without it),
+toggles the meeting camera ON, OFF, and switches device if the Mac has two
+cameras, then runs `scripts/analyze-field-log.mjs` on the log. The verdict
+block names each episode CONTENDED, uncontended, or unknown. The output is
+paste-safe: numbers, stages and verdicts only. This cannot move to CI: the
+Tart guest has no camera and the synthetic source contends for no device.
+
 Issue #680's panel-prewarm stress harness is deliberately opt-in because it
 needs a running macOS app, a joined room, Screen Recording permission, and two
 real on-screen sacrificial windows. It sends only the existing `share`,

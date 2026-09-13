@@ -1121,6 +1121,7 @@ pub fn run() {
             camera_session::start_camera_publish_command,
             camera_session::stop_camera_publish_command,
             camera_session::camera_publish_state,
+            camera_session::log_camera_preview_state,
             #[cfg(target_os = "macos")]
             session::current_room,
             #[cfg(target_os = "macos")]
@@ -1740,6 +1741,7 @@ pub fn run() {
             camera_session::start_camera_publish_command,
             camera_session::stop_camera_publish_command,
             camera_session::camera_publish_state,
+            camera_session::log_camera_preview_state,
             #[cfg(target_os = "windows")]
             camera_self_view::next_self_view_frame,
             windows_compositor::compositor_list_windows,

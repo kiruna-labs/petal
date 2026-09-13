@@ -1062,19 +1062,31 @@
     stream?.getTracks().forEach((t) => t.stop());
   }
 
-  function clearPreviewStream() {
-    if (previewVideo) previewVideo.srcObject = null;
-    releaseStream(previewStream);
-    previewStream = null;
+  // #76: the native log cannot see this webview's getUserMedia, so report the
+  // preview's own edges to it (`settings: camera preview acquired|released|
+  // failed`). That is what lets a camera-intent episode in petal.log be read
+  // as contended -- the preview really held the device when the intent fired
+  // -- instead of an uncontended publish that merely looks the same.
+  function logPreviewState(state: 'acquired' | 'released' | 'failed', reason?: string) {
+    if (!hasTauri) return;
+    void invoke(COMMANDS.logCameraPreviewState, { state, reason: reason ?? null }).catch(() => {});
   }
 
-  function stopPreview() {
+  function clearPreviewStream(reason: string) {
+    if (previewVideo) previewVideo.srcObject = null;
+    const held = previewStream !== null;
+    releaseStream(previewStream);
+    previewStream = null;
+    if (held) logPreviewState('released', reason);
+  }
+
+  function stopPreview(reason = 'teardown') {
     previewRequestId += 1;
-    clearPreviewStream();
+    clearPreviewStream(reason);
   }
 
   async function acquirePreview(deviceId: string) {
-    stopPreview();
+    stopPreview('reacquire');
     const requestId = previewRequestId;
     acquiredCameraId = deviceId;
     previewError = null;
@@ -1136,6 +1148,7 @@
         return;
       }
       previewStream = stream;
+      logPreviewState('acquired');
       if (previewVideo) {
         previewVideo.srcObject = stream;
         void previewVideo.play().catch(() => {});
@@ -1149,8 +1162,9 @@
         .map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
     } catch (err) {
       if (requestId !== previewRequestId) return;
-      clearPreviewStream();
+      clearPreviewStream('failed');
       const name = err instanceof DOMException ? err.name : '';
+      logPreviewState('failed', name || 'unknown');
       if (name === 'NotAllowedError' && auth === 'authorized') {
         // App-level TCC says authorized but the webview still refused —
         // that points at a WebKit-helper-process attribution problem
@@ -1181,7 +1195,7 @@
     if (active) {
       if (meetingCameraOn) return;
       meetingCameraOn = true;
-      stopPreview();
+      stopPreview('meeting-camera');
       previewError = MEETING_CAMERA_REASON;
       return;
     }

@@ -253,12 +253,20 @@ test('turning the meeting camera ON releases the Settings preview before the dev
   // ON had no signal to release the device before the publish attempt --
   // the publish failed and the preview never yielded. `camera-intent-changed`
   // is that missing intent-time signal.
+  // The ordering lives in `start_camera_publish_intent`, the body shared by
+  // the Tauri command and the #76 runbook driver (autotest `camera_on`), so
+  // both take the same path; the command itself must only delegate to it.
   const startCommand = cameraSessionSource.match(
     /pub async fn start_camera_publish_command\([\s\S]*?\n\}\n/
   )?.[0];
   assert.ok(startCommand, 'could not locate start_camera_publish_command');
-  const intentIndex = startCommand.indexOf('emit_camera_intent(&app, true)');
-  const acquireIndex = startCommand.indexOf('start_camera_publish_with_device(');
+  assert.match(startCommand, /start_camera_publish_intent\(&app, preferences\.inner\(\), state\.inner\(\)\)/);
+  const startIntent = cameraSessionSource.match(
+    /pub\(crate\) async fn start_camera_publish_intent\([\s\S]*?\n\}\n/
+  )?.[0];
+  assert.ok(startIntent, 'could not locate start_camera_publish_intent');
+  const intentIndex = startIntent.indexOf('emit_camera_intent(app, true)');
+  const acquireIndex = startIntent.indexOf('start_camera_publish_with_device(');
   assert.ok(intentIndex >= 0, 'the start command must announce the camera intent');
   assert.ok(
     acquireIndex > intentIndex,

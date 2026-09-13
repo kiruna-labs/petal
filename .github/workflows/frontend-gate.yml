@@ -133,7 +133,7 @@ jobs:
       - name: Lockstep -- the test steps below must still match `npm test`
         if: env.RUN == 'true'
         run: |
-          EXPECTED="node --import tsx --test tests/*.test.ts && node --test scripts/test-remote-control-harness-preflight.mjs scripts/test-remote-control-exit-accounting.mjs scripts/test-remote-control-observation.mjs scripts/test-remote-control-held-input.mjs scripts/test-process-lease-ledger.mjs scripts/test-remote-control-share-readiness.mjs scripts/test-remote-control-share-border.mjs scripts/test-harness-timeouts.mjs && node scripts/check-panel-close.mjs && echo 'panel-close check passed'"
+          EXPECTED="node --import tsx --test tests/*.test.ts && node --test scripts/test-remote-control-harness-preflight.mjs scripts/test-remote-control-exit-accounting.mjs scripts/test-remote-control-observation.mjs scripts/test-remote-control-held-input.mjs scripts/test-process-lease-ledger.mjs scripts/test-remote-control-share-readiness.mjs scripts/test-remote-control-share-border.mjs scripts/test-harness-timeouts.mjs scripts/test-measure-camera-intent.mjs && node scripts/check-panel-close.mjs && echo 'panel-close check passed'"
           ACTUAL="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).scripts.test")"
           if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "::error::apps/desktop's \`npm test\` script changed; update the steps in .github/workflows/frontend-gate.yml to match, then update this literal."
@@ -178,6 +178,7 @@ jobs:
           scripts/test-remote-control-share-readiness.mjs
           scripts/test-remote-control-share-border.mjs
           scripts/test-harness-timeouts.mjs
+          scripts/test-measure-camera-intent.mjs
 
       - name: Panel-close lint
         if: env.RUN == 'true'

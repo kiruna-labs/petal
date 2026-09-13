@@ -47,9 +47,13 @@ test('camera_session.rs no-ops set_camera_device/set_camera_prefs when the reque
     cameraSessionSource.indexOf('pub async fn set_camera_prefs'),
     cameraSessionSource.indexOf('pub async fn set_camera_device')
   );
+  // `set_camera_device` delegates to `apply_camera_device` (shared with the
+  // #76 runbook driver), which immediately follows it in the source.
   const setCameraDevice = cameraSessionSource.slice(
-    cameraSessionSource.indexOf('pub async fn set_camera_device')
+    cameraSessionSource.indexOf('pub async fn set_camera_device'),
+    cameraSessionSource.indexOf('pub async fn start_camera_publish_command')
   );
+  assert.match(setCameraDevice, /apply_camera_device\(&app, device_id, preferences\.inner\(\), state\.inner\(\)\)/);
   for (const [name, body] of [
     ['set_camera_prefs', setCameraPrefs],
     ['set_camera_device', setCameraDevice]
@@ -60,7 +64,7 @@ test('camera_session.rs no-ops set_camera_device/set_camera_prefs when the reque
       `${name} must early-return via camera_request_is_unchanged before stop_camera_publish`
     );
     const noopIndex = body.indexOf('camera_request_is_unchanged(');
-    const stopIndex = body.indexOf('stop_camera_publish(&app, &state).await;');
+    const stopIndex = body.search(/stop_camera_publish\((&app, &state|app, state)\)\.await;/);
     assert.ok(
       noopIndex >= 0 && stopIndex >= 0 && noopIndex < stopIndex,
       `${name}: the no-op check must run BEFORE stop_camera_publish, not after`

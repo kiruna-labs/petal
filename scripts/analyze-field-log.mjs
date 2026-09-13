@@ -167,6 +167,12 @@ const CAMERA_MARKERS = [
   { test: (m) => m.startsWith('session: camera self-heal cancelled'), kind: 'heal-cancelled' },
   { test: (m) => m.startsWith('session: camera self-heal already running'), kind: 'heal-duplicate' },
   { test: (m) => m.startsWith('session: camera publish self-heal exhausted'), kind: 'heal-exhausted' },
+  // camera_session.rs log_camera_preview_state -- the Settings webview's own
+  // getUserMedia edges, the only way the log can see whether the preview was
+  // holding the device when the intent fired (#76).
+  { test: (m) => m.startsWith('settings: camera preview acquired'), kind: 'preview-acquired' },
+  { test: (m) => m.startsWith('settings: camera preview released'), kind: 'preview-released' },
+  { test: (m) => m.startsWith('settings: camera preview failed'), kind: 'preview-failed' },
 ];
 
 function classifyCamera(message) {
@@ -236,6 +242,7 @@ function newAnalysis() {
     clockRegressions: 0,
     cameraEpisodes: [],
     cameraLineCount: 0,
+    previewLineCount: 0,
     pickerEpisodes: [],
     pickerMarkCount: 0,
   };
@@ -264,6 +271,13 @@ function openCameraEpisode(state, analysis, kind, atMs) {
     healCancelled: false,
     intentClearedWhileUnresolved: false,
     crossedRestart: false,
+    // Contention, from the Settings preview's own lines: was it holding the
+    // device when the intent fired, and when did it let go? `null` when the
+    // run carries no preview line at all (Settings never open, or a build
+    // predating the line), which is "unknown", never "uncontended".
+    previewLiveAtIntent: null,
+    previewReleaseMs: null,
+    previewReleasedBeforeBegin: null,
   };
 }
 
@@ -316,6 +330,10 @@ function finalizeCameraEpisode(episode) {
     kind: episode.kind,
     atMs: episode.atMs,
     stopReleaseMs: episode.stopReleaseMs ?? null,
+    contended: episode.previewLiveAtIntent ?? null,
+    previewReleaseMs: episode.previewReleaseMs ?? null,
+    previewReleasedBeforeBegin: episode.previewReleasedBeforeBegin ?? null,
+    previewReacquireMs: episode.previewReacquireMs ?? null,
     attempts: attempts.map((attempt, index) => ({
       index: index + 1,
       outcome: attempt.outcome ?? 'no outcome logged',
@@ -364,7 +382,9 @@ function handleCamera(state, analysis, kind, atMs) {
       if (isSwitch) {
         state.camera.stopReleaseMs = state.pendingStop.doneMs - state.pendingStop.beginMs;
       }
+      state.camera.previewLiveAtIntent = state.previewLive ?? null;
       state.pendingStop = null;
+      state.awaitingPreviewReturn = null;
       return;
     }
     case 'intent-off': {
@@ -373,22 +393,52 @@ function handleCamera(state, analysis, kind, atMs) {
       if (state.camera && unresolved) state.camera.intentClearedWhileUnresolved = true;
       closeCameraEpisode(state, analysis);
       if (state.pendingStop && state.pendingStop.doneMs !== null) {
-        analysis.cameraEpisodes.push(
-          finalizeCameraEpisode({
-            kind: 'off',
-            atMs,
-            attempts: [],
-            healHandoff: false,
-            healAttemptsFailed: 0,
-            healExhausted: false,
-            healCancelled: false,
-            intentClearedWhileUnresolved: false,
-            crossedRestart: false,
-            stopReleaseMs: state.pendingStop.doneMs - state.pendingStop.beginMs,
-          })
-        );
+        const off = finalizeCameraEpisode({
+          kind: 'off',
+          atMs,
+          attempts: [],
+          healHandoff: false,
+          healAttemptsFailed: 0,
+          healExhausted: false,
+          healCancelled: false,
+          intentClearedWhileUnresolved: false,
+          crossedRestart: false,
+          stopReleaseMs: state.pendingStop.doneMs - state.pendingStop.beginMs,
+        });
+        analysis.cameraEpisodes.push(off);
+        // The OFF direction's own number: how long the preview took to come
+        // back once told the device was free. Filled in by the next
+        // `preview acquired`, if one arrives before another intent edge.
+        state.awaitingPreviewReturn = off;
       }
       state.pendingStop = null;
+      return;
+    }
+    case 'preview-acquired': {
+      analysis.previewLineCount += 1;
+      state.previewLive = true;
+      if (state.awaitingPreviewReturn) {
+        state.awaitingPreviewReturn.previewReacquireMs = atMs - state.awaitingPreviewReturn.atMs;
+        state.awaitingPreviewReturn = null;
+      }
+      return;
+    }
+    case 'preview-released':
+    case 'preview-failed': {
+      analysis.previewLineCount += 1;
+      state.previewLive = false;
+      const episode = state.camera;
+      if (
+        kind === 'preview-released' &&
+        episode &&
+        episode.previewLiveAtIntent === true &&
+        episode.previewReleaseMs === null
+      ) {
+        episode.previewReleaseMs = atMs - episode.atMs;
+        // Did the preview let go before the native side even reached for the
+        // device, or only while the acquisition was already under way?
+        episode.previewReleasedBeforeBegin = episode.attempts.length === 0;
+      }
       return;
     }
     case 'begin': {
@@ -555,6 +605,8 @@ export function feedLine(state, analysis, line) {
       closeCameraEpisode(state, analysis);
       closePickerEpisode(state, analysis, 'the app restarted mid-episode');
       state.pendingStop = null;
+      state.previewLive = null;
+      state.awaitingPreviewReturn = null;
       return;
     }
   }
@@ -571,9 +623,19 @@ export function feedLine(state, analysis, line) {
   }
 }
 
+function newState() {
+  return {
+    camera: null,
+    picker: null,
+    pendingStop: null,
+    previewLive: null,
+    awaitingPreviewReturn: null,
+  };
+}
+
 export function analyzeLines(lines) {
   const analysis = newAnalysis();
-  const state = { camera: null, picker: null, pendingStop: null };
+  const state = newState();
   for (const line of lines) feedLine(state, analysis, line);
   closeCameraEpisode(state, analysis);
   closePickerEpisode(state, analysis, 'the log ends before `prewarm_done`');
@@ -582,7 +644,7 @@ export function analyzeLines(lines) {
 
 export async function analyzeFile(path) {
   const analysis = newAnalysis();
-  const state = { camera: null, picker: null, pendingStop: null };
+  const state = newState();
   let stream = createReadStream(path);
   if (path.endsWith('.gz')) stream = stream.pipe(createGunzip());
   const reader = createInterface({ input: stream, crlfDelay: Infinity });
@@ -612,17 +674,27 @@ export function cameraVerdict(analysis) {
   const wins = measurable.filter((episode) => episode.verdict === 'first-attempt-wins');
   const retries = measurable.filter((episode) => episode.verdict === 'retry-needed');
   const failures = analysis.cameraEpisodes.filter((episode) => episode.verdict === 'failed');
+  // #76 is about the CONTENDED case. Only an episode whose run carries the
+  // Settings preview's own lines can be labelled either way; the rest are
+  // "unknown", which is not evidence in either direction.
+  const contended = measurable.filter((episode) => episode.contended === true);
+  const uncontended = measurable.filter((episode) => episode.contended === false);
+  const unknownContention = measurable.filter((episode) => episode.contended === null);
+  const summary = {
+    measurable,
+    unattributed,
+    wins,
+    retries,
+    failures,
+    contended,
+    uncontended,
+    unknownContention,
+  };
 
-  if (analysis.cameraEpisodes.length === 0) {
-    return { verdict: 'no-data', measurable, unattributed, wins, retries, failures };
-  }
-  if (measurable.length === 0) {
-    return { verdict: 'inconclusive', measurable, unattributed, wins, retries, failures };
-  }
-  if (retries.length > 0 || failures.length > 0) {
-    return { verdict: 'retry-needed', measurable, unattributed, wins, retries, failures };
-  }
-  return { verdict: 'first-attempt-wins', measurable, unattributed, wins, retries, failures };
+  if (analysis.cameraEpisodes.length === 0) return { verdict: 'no-data', ...summary };
+  if (measurable.length === 0) return { verdict: 'inconclusive', ...summary };
+  if (retries.length > 0 || failures.length > 0) return { verdict: 'retry-needed', ...summary };
+  return { verdict: 'first-attempt-wins', ...summary };
 }
 
 export function pickerVerdict(analysis) {
@@ -649,9 +721,19 @@ export function pickerVerdict(analysis) {
 export function concurrencyWarnings(analysis) {
   const warnings = [];
   if (analysis.builds.length > 1) {
-    const names = analysis.builds.map((build) => build.version ?? '?').join(', ');
+    // Same version, different commits is the ordinary dev-loop rebuild; name
+    // the commits so it does not read as an upgrade or a second instance.
+    const versions = new Set(analysis.builds.map((build) => build.version ?? '?'));
+    const names = analysis.builds
+      .map((build) =>
+        versions.size === 1 && build.commit
+          ? `${build.version ?? '?'}@${build.commit}`
+          : (build.version ?? '?')
+      )
+      .join(', ');
     warnings.push(
-      `${analysis.builds.length} DIFFERENT builds appear in this log (versions: ${names}). ` +
+      `${analysis.builds.length} DIFFERENT builds appear in this log ` +
+        `(${versions.size === 1 ? 'same version, commits' : 'versions'}: ${names}). ` +
         'That is either an upgrade mid-file or two app instances writing to the same path. ' +
         'Episodes are reported per instance and never span a restart, but do not average across builds.'
     );
@@ -735,6 +817,80 @@ const KIND_LABEL = {
   unattributed: 'publish with no intent line',
 };
 
+/**
+ * The contended case is the one #76 is about. The Settings preview holds the
+ * device from the WEBVIEW (getUserMedia), invisible to the native log until
+ * Settings started reporting its own edges (`settings: camera preview ...`).
+ * With those lines, an episode is labelled contended or not; without them it
+ * is UNKNOWN, and saying "the preview released in time" about a log that may
+ * describe an uncontended publish would be exactly the kind of inference this
+ * project has burned cycles on.
+ */
+function reportContention(summary, analysis, out) {
+  const { contended, uncontended, unknownContention, measurable } = summary;
+  if (contended.length > 0) {
+    const releases = contended
+      .map((episode) => episode.previewReleaseMs)
+      .filter((ms) => ms !== null)
+      .sort((a, b) => a - b);
+    const beforeBegin = contended.filter((episode) => episode.previewReleasedBeforeBegin).length;
+    out.push(
+      `    CONTENDED: ${contended.length} of ${measurable.length} measured episode(s) had the Settings`
+    );
+    out.push('    preview holding the device when the intent fired, and still won first try.');
+    if (releases.length > 0) {
+      out.push(
+        `    The preview let go ${fmtDuration(releases[0])}..` +
+          `${fmtDuration(releases[releases.length - 1])} after the intent; ${beforeBegin} of ` +
+          `${contended.length} released before the publish began.`
+      );
+    }
+    if (uncontended.length > 0) {
+      out.push(
+        `    ${uncontended.length} other(s) were uncontended (preview not holding the device).`
+      );
+    }
+    if (unknownContention.length > 0) {
+      out.push(`    ${unknownContention.length} carry no preview line, so contention is unknown there.`);
+    }
+    return;
+  }
+  if (uncontended.length > 0 && unknownContention.length === 0) {
+    out.push('    NOT THE RUNBOOK: the Settings preview was not holding the device in any');
+    out.push('    of these episodes, so they prove the publish path is healthy and nothing');
+    out.push('    about the contention #76 asks about. Re-run with the preview live.');
+    return;
+  }
+  out.push('    CAVEAT: nothing in a log says whether the Settings camera preview was');
+  out.push('    live at the time -- it holds the device from the webview -- unless the');
+  out.push('    build logs the preview\'s own edges (`settings: camera preview ...`), and');
+  if (analysis.previewLineCount === 0) {
+    out.push('    this log has none: Settings was never open, or the build predates them.');
+  } else {
+    out.push('    none fell inside these episodes.');
+  }
+  out.push('    A win here proves the publish path is healthy; it proves the preview');
+  out.push('    yields in time only if this log came from the #76 runbook');
+  out.push('    (Settings open with the preview running, then toggle the meeting camera).');
+}
+
+function contentionLabel(episode, analysis) {
+  if (episode.contended === true) {
+    const when = episode.previewReleasedBeforeBegin ? 'before' : 'after';
+    return episode.previewReleaseMs === null
+      ? 'live at intent; no release seen'
+      : `live at intent; released ${fmtDuration(episode.previewReleaseMs)} later (${when} the publish began)`;
+  }
+  if (episode.contended === false) {
+    return episode.kind === 'device-switch'
+      ? 'not holding the device (it did not grab it in the switch gap)'
+      : 'not holding the device (uncontended)';
+  }
+  return analysis.previewLineCount === 0
+    ? 'unknown (no preview line in this log)'
+    : 'unknown (no preview line in this run)';
+}
+
 function reportCamera(analysis, out) {
   const version = buildVersion(analysis);
   out.push('Measurement 1 -- camera-intent margin (#76)');
@@ -764,6 +920,8 @@ function reportCamera(analysis, out) {
     out.push('    2. Join a meeting, leaving Settings open.');
     out.push('    3. Toggle the meeting camera ON, then OFF, then switch camera device.');
     out.push('    4. Re-run this command against ~/Library/Logs/Petal/petal.log');
+    out.push('  Or unattended, against a debug build launched with PETAL_AUTOTEST_SOCK:');
+    out.push('    node apps/desktop/scripts/measure-camera-intent.mjs   (docs/TESTING.md)');
     out.push('');
     return;
   }
@@ -781,16 +939,7 @@ function reportCamera(analysis, out) {
     );
     out.push('    FIRST attempt, with no self-heal retry.');
     out.push('');
-    // The contended case is the one #76 is about, and the log cannot see it:
-    // the Settings preview holds the device from the WEBVIEW (getUserMedia),
-    // which emits no native line. Saying "the preview released in time" from a
-    // log that may describe an uncontended publish would be exactly the kind
-    // of inference this project has burned cycles on.
-    out.push('    CAVEAT: nothing in a log says whether the Settings camera preview was');
-    out.push('    live at the time -- it holds the device from the webview and emits no');
-    out.push('    native line. A win here proves the publish path is healthy; it proves');
-    out.push('    the preview yields in time only if this log came from the #76 runbook');
-    out.push('    (Settings open with the preview running, then toggle the meeting camera).');
+    reportContention(summary, analysis, out);
   } else if (summary.verdict === 'retry-needed') {
     const tail =
       summary.failures.length > 0
@@ -863,6 +1012,12 @@ function reportCamera(analysis, out) {
     );
     if (episode.kind === 'off') {
       out.push(`    device released in ${fmtDuration(episode.stopReleaseMs)} (no publish attempt)`);
+      if (episode.previewReacquireMs !== null) {
+        out.push(
+          `    preview came back in       ${fmtDuration(episode.previewReacquireMs)}` +
+            '   (intent cleared -> preview acquired)'
+        );
+      }
       out.push('');
       return;
     }
@@ -884,6 +1039,7 @@ function reportCamera(analysis, out) {
       `    intent -> publish begin    ${fmtDuration(episode.releaseWindowMs)}` +
         '   (the window the Settings preview has to release in)'
     );
+    out.push(`    Settings preview           ${contentionLabel(episode, analysis)}`);
     if (episode.firstAttemptMs !== null) {
       out.push(`    first attempt took         ${fmtDuration(episode.firstAttemptMs)}`);
     }
@@ -1081,6 +1237,7 @@ export function toJson(analysis) {
     warnings: concurrencyWarnings(analysis),
     camera: {
       verdict: cameraVerdict(analysis).verdict,
+      previewLines: analysis.previewLineCount,
       episodes: analysis.cameraEpisodes.map(relative),
     },
     picker: {
