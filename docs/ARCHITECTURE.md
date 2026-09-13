@@ -70,7 +70,14 @@ connect, `NativeSubscriptionCoordinator` applies the live publication snapshot;
 it then observes the original connect-time event stream before compositor or
 resilience consumers, and reapplies the live snapshot after `Reconnected`.
 Admission is idempotent, so a snapshot plus a buffered `TrackPublished` cannot
-create two owners.
+create two owners. It is not, however, free: each admission sends one
+`UpdateSubscription` signal request (no coalescing in the SDK). Measured cost of
+replacing SDK automatic subscription with this explicit admission was +53 ms
+(`Reconnected` republish) and +104 ms (leave/rejoin) to first frame against the
+same source in the A/B, while the production live matrix measured 270 ms
+stop/republish and 501 ms rejoin -- i.e. inside run-to-run noise, so the
+explicit path is not a user-visible start-up regression. Record new
+first-frame numbers here if that baseline moves.
 
 The native owner admits every remote audio publication and only video named as
 an exact canonical `petal-window-<u32>`. The hidden gallery bridge remains the

@@ -70,8 +70,24 @@ fn admit(publication: &RemoteTrackPublication) {
         );
         return;
     }
-    // Idempotent: the post-connect snapshot and the buffered TrackPublished
-    // event for the same publication both reach this call.
+    // At most one call per buffered `TrackPublished` plus one per snapshot
+    // (connect, and each `Reconnected`), so a steady-state publication is
+    // admitted at most twice. Idempotent -- the SFU ends up subscribed either
+    // way -- but NOT free: the vendored SDK spawns a task per call that sends a
+    // `proto::UpdateSubscription` signal request, with no coalescing, so a
+    // duplicate costs one round-trip.
+    //
+    // Neither cheap predicate is a safe gate here. `is_subscribed()` is
+    // `track().is_some()` (see `reconcile.rs`): "the SDK already holds the
+    // decoded track". That is false for BOTH calls in the overlap above, since
+    // `TrackSubscribed` has not run yet, so gating on it would skip only calls
+    // that are never the duplicate. `is_desired()` (`info.subscribed`) would
+    // dedupe the overlap, but on this path it cannot tell "already requested on
+    // this connection" from "requested before a full reconnect that dropped the
+    // subscription", and a surviving flag is not proof the SFU still holds it.
+    // This is the coordinator's re-admission path, so re-requesting is the safe
+    // direction: gate here only once a reconnect run measures that the flag is
+    // reliably reset.
     publication.set_subscribed(true);
 }
 
