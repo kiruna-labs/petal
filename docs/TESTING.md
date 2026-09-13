@@ -508,12 +508,19 @@ these classes explicit:
 | Malformed/unknown video | not subscribed | not owned |
 
 A real two-peer run must cover a window already published before join, one
-published after join, stop/republish, reconnect, remote audio playout, a remote
-camera visible only in the gallery tile, and malformed/unknown video remaining
-absent from the native compositor. For each window case, record
-`TrackPublished` → `TrackSubscribed` → first decoded frame plus initial frame
-dimensions and steady cadence. A call to `set_subscribed(true)` is a request,
-not acceptance evidence.
+published after join, stop/republish, a same-connection reconnect, remote audio
+playout, and a remote camera visible only in the gallery tile. For each window
+case, record `TrackPublished` → `TrackSubscribed` → first decoded frame plus
+initial frame dimensions and steady cadence. A call to `set_subscribed(true)` is
+a request, not acceptance evidence.
+
+**Malformed/unknown-name boundary.** A Petal product client cannot emit a
+malformed, overflowing, or unknown video track name, so that class is covered by
+the pure admission table and its source contract instead of a live publisher.
+Manufacturing one would need either a production test hook or a hand-built
+credentialed publisher; both cost more than the coverage returns. The live run
+therefore waives that class deliberately, and this document makes no claim about
+live malformed-name behaviour.
 
 Before this ownership policy was enabled, the same Windows binary compared SDK
 automatic subscription with explicit-all admission against the same 1138×774
@@ -522,6 +529,45 @@ leave/rejoin with an existing share took 946 ms vs 1050 ms. Both settled at
 29.2–29.6 FPS and 1136×772 on rejoin, with no subscription failures. That A/B
 validates the mechanism only; camera exclusion and malformed-video handling
 remain requirements of the narrower ownership run above.
+
+### Same-connection reconnect recipe (live)
+
+The coordinator re-applies the live snapshot on `Reconnected`. A leave/rejoin
+does **not** exercise that path — it only proves connect-time snapshot
+admission, which is why the A/B above is not a substitute.
+
+1. Build and launch the participant that owns the socket with
+   `PETAL_AUTOTEST_SOCK=<path>` set (debug/autotest build; the command does not
+   exist in a release build).
+2. Join the room, publish a window share, leave the microphone unmuted, and
+   enable the camera, so audio, window video, and camera video are all active.
+3. Record the baseline: the native room subscribes audio and the exact
+   `petal-window-<u32>` video; `petal-camera-*` is not subscribed natively and
+   appears only in the gallery tile.
+4. Send exactly one full-reconnect request over the socket:
+   `{"cmd":"reconnect","mode":"full"}`. A process accepts one request; restart
+   it for a second attempt.
+5. Require, in order: `Reconnecting` → `Reconnected`; window video re-admitted
+   with a fresh first frame; audio re-admitted and audible; still no native
+   camera `TrackSubscribed`; gallery camera recovers; no subscription failure;
+   and no duplicate native subscription for the same publication.
+
+**Launch with `RUST_LOG=debug` for this run.** The camera-decline line
+(`native subscription: declining '<name>' (sid=…); the gallery bridge owns
+remote cameras`) is `debug`, while `petal.log` defaults to `info`, and the
+admission path itself logs nothing. At the default level "the native room did
+not subscribe the camera" would rest only on the *absence* of the warn-level
+invariant line, which is weaker evidence than a positive decline record.
+`RUST_LOG=debug` raises the app's own modules and the existing denylist keeps
+noisy third-party crates clamped to `warn`, so `petal.log` stays readable. The
+decline line names the track, so quote only the bounded class
+(`petal-camera-*`), never the identity suffix.
+
+Evidence to record: exact sender/receiver build hashes, the post-reconnect
+window's `TrackPublished` / `TrackSubscribed` / first-frame timestamps, whether
+audio was audible at the far end, and the `declining` record for the camera
+publication (or, at minimum, the absence of the `native subscription
+invariant:` warn). Quote bounded timestamps only — no raw logs.
 
 ## Manual Cross-Client Test (desktop + browser, real permissions)
 
