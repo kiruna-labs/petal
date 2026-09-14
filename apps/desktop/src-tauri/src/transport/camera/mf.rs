@@ -20,6 +20,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEvent, IMFMediaSource,
     IMFSample, IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
+    IMFSourceReaderEx,
     MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateMediaType,
     MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFShutdown,
     MFStartup, MFVideoFormat_NV12, MFSTARTUP_FULL, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
@@ -743,6 +744,42 @@ fn configure_nv12_reader(
     .ok_or_else(|| CameraError::Operation("camera exposes no usable video media type".into()))?;
     let (native_type, native_format) = candidates.swap_remove(selected_index);
     let native_layout = FrameLayout::new(native_format.width, native_format.height)?;
+    // Pin the exact native media type the selection chose. Without this the
+    // call below only constrains the *output* format, and Media Foundation is
+    // free to satisfy it from a different native type -- so the mode we report
+    // and publish is not necessarily the mode the device runs. Measured on a
+    // Logitech BRIO: a 1280x720@30 request negotiated down to ~20 fps that way,
+    // while a 1280x720@60 request landed on a 60-capable type and delivered
+    // ~57.
+    //
+    // `IMFSourceReaderEx` is not guaranteed on every reader, and a device may
+    // reject the type. Neither is fatal: fall through to the baseline
+    // negotiation rather than refusing to open the camera, because a working
+    // camera at an unverified cadence beats no camera, and the log line below
+    // records which of the two happened.
+    match reader.cast::<IMFSourceReaderEx>() {
+        Ok(source_reader_ex) => {
+            match unsafe {
+                source_reader_ex
+                    .SetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, &native_type)
+            } {
+                Ok(_) => log::info!(
+                    "camera: pinned native media type {}x{} @ {}/{} fps (nv12={})",
+                    native_format.width,
+                    native_format.height,
+                    native_format.frame_rate_numerator,
+                    native_format.frame_rate_denominator,
+                    native_format.is_nv12,
+                ),
+                Err(error) => log::warn!(
+                    "camera: failed to pin camera native media type ({error}); continuing with baseline negotiation"
+                ),
+            }
+        }
+        Err(error) => log::warn!(
+            "camera: reader has no IMFSourceReaderEx ({error}); continuing with baseline negotiation"
+        ),
+    }
     let output_type = unsafe { MFCreateMediaType() }
         .map_err(|error| operation_error("failed to create NV12 camera media type", error))?;
     unsafe {
@@ -1129,6 +1166,54 @@ mod tests {
             assert!(mode.width > 0 && mode.height > 0);
             assert!(mode.frame_rate_numerator > 0 && mode.frame_rate_denominator > 0);
         }
+    }
+
+    #[test]
+    #[ignore = "requires a real Windows camera and camera permission"]
+    fn preferred_mode_is_pinned_and_keeps_producing_frames() {
+        // Drives the real open path -- activate, create the reader, pin the
+        // selected native media type, negotiate NV12 -- rather than a pure
+        // helper, because the defect this guards was the selected type never
+        // reaching the reader (#173 recovery). What the device then delivers
+        // is the operator judgement recorded in the BRIO matrix; this test
+        // proves the requested mode survives the open and keeps delivering.
+        let modes = list_modes(None).expect("camera mode enumeration should succeed");
+        let Some(mode) = modes
+            .iter()
+            .find(|mode| (mode.width, mode.height) == (1280, 720))
+        else {
+            println!("no 1280x720 mode on this device; nothing to pin");
+            return;
+        };
+        let preferred = PreferredCameraMode {
+            width: mode.width,
+            height: mode.height,
+            frame_rate: mode.frame_rate_numerator / mode.frame_rate_denominator.max(1),
+        };
+        let (sender, receiver) = mpsc::sync_channel(4);
+        let capture = CameraCapture::start_with_device(None, Some(preferred), move |frame| {
+            let _ = sender.try_send(frame);
+        })
+        .expect("open Media Foundation camera with a pinned preference");
+
+        let mut frames = 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        while frames < 3 && std::time::Instant::now() < deadline {
+            if receiver.recv_timeout(Duration::from_secs(2)).is_err() {
+                break;
+            }
+            frames += 1;
+        }
+        println!(
+            "pinned {}x{} @ {}/{} fps produced {frames} frames",
+            mode.width, mode.height, mode.frame_rate_numerator, mode.frame_rate_denominator
+        );
+        assert_eq!(
+            capture.frame_rate(),
+            (mode.frame_rate_numerator, mode.frame_rate_denominator),
+            "the reported capture cadence must be the mode the reader pinned"
+        );
+        assert!(frames >= 3, "a pinned mode must keep delivering frames");
     }
 
     use livekit::webrtc::video_frame::{NV12Buffer, VideoFrame, VideoRotation};
