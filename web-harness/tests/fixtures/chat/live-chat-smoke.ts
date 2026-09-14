@@ -9,7 +9,7 @@
 // unless there are already messages to relay.
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
-import { generateAccessCode } from '../../../../shared/logic/meetingCode.ts';
+import { generateAccessCode } from '@petal/shared/logic/meetingCode';
 
 const repoRoot = resolve(import.meta.dirname, '../../../..');
 const { chromium } = createRequire(import.meta.url)(resolve(repoRoot, 'apps/desktop/node_modules/playwright')) as typeof import('playwright');
