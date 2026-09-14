@@ -107,6 +107,10 @@
      * MeetingChrome slots its large↔small view switcher here (issue #1) so it
      * genuinely sits top-right of the gallery instead of floating over it. */
     topbarAction?: Snippet;
+    /** Meeting chat (plugins/README.md §2.7, a host surface): the drawer's
+     * open state drives the toggle; unread is the badge while it is closed. */
+    chatOpen?: boolean;
+    chatUnread?: number;
     /** Plugin toolbar buttons (plugins/README.md §2.7): the route renders
      * host-drawn `.control-cell`s here so plugin actions sit in the same row
      * as the built-in controls, before More. Undefined = no plugins. */
@@ -146,6 +150,8 @@
     /** Mirrors the open menu kind for the matching caret's aria-expanded. */
     deviceMenuKind = null,
     topbarAction,
+    chatOpen = false,
+    chatUnread = 0,
     pluginActions,
     onReportBug
   }: Props = $props();
@@ -836,6 +842,20 @@
           style={`--invite-tooltip-shift: ${inviteTooltipShift}px`}
           aria-hidden="true"
         >{inviteTooltip}</span>
+      </div>
+      <div class="control-cell chat-cell">
+        <ControlButton
+          icon="chat"
+          kind="toggle"
+          active={chatOpen}
+          label={chatOpen ? 'Close chat' : chatUnread > 0 ? `Open chat, ${chatUnread} unread` : 'Open chat'}
+          ariaExpanded={chatOpen}
+          onclick={() => onControl?.('chat')}
+        />
+        {#if chatUnread > 0 && !chatOpen}
+          <span class="chat-badge" aria-hidden="true" data-testid="chat-badge">{chatUnread > 99 ? '99+' : chatUnread}</span>
+        {/if}
+        <span class="meeting-control-label">Chat</span>
       </div>
       {@render pluginActions?.()}
       <div class="control-cell">
@@ -1904,6 +1924,24 @@
     border-top: 1px solid var(--hairline);
     background: var(--controlbar-bg);
     flex-wrap: nowrap;
+  }
+
+  .chat-cell {
+    position: relative;
+  }
+  .chat-badge {
+    position: absolute;
+    top: -2px;
+    left: calc(50% + 8px);
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: var(--radius-pill);
+    background: var(--live-bright);
+    color: var(--bg-base);
+    font: 600 10px/16px var(--font-ui);
+    text-align: center;
+    pointer-events: none;
   }
 
   .controls-cluster {

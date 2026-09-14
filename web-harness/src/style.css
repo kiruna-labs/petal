@@ -1251,6 +1251,54 @@ input[type='text']:disabled {
 }
 
 /* Tile grid — continuous reflow like Gallery.svelte (auto-fit/minmax). */
+/* Tiles + chat drawer row (plugins/README.md §2.7 "Panel"). The drawer is a
+   right column so the topbar and control bar keep their full width; under
+   640px it covers the tiles instead of crushing them. */
+.meeting-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  min-width: 0;
+}
+.chat-aside {
+  flex: none;
+  width: 320px;
+  min-width: 0;
+  height: 100%;
+}
+.chat-aside[hidden] {
+  display: none;
+}
+@media (max-width: 640px) {
+  .chat-aside {
+    position: absolute;
+    inset: 0 0 0 auto;
+    width: 100%;
+    z-index: 5;
+  }
+}
+.chat-cell {
+  position: relative;
+}
+.chat-badge {
+  position: absolute;
+  top: -2px;
+  left: calc(50% + 8px);
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--live-bright);
+  color: var(--bg-base);
+  font: 600 10px/16px var(--font-ui);
+  text-align: center;
+  pointer-events: none;
+}
+.chat-badge[hidden] {
+  display: none;
+}
+
 .tiles {
   --tile-min: 220px;
   --tile-row-min: 140px;

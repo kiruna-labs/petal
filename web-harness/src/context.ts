@@ -365,6 +365,8 @@ export interface HarnessHook {
   /** Plugin host bridge (plugins/README.md). Set by setupPlugins; connection.ts
    * calls roomConnected/roomDisconnected so plugins get meeting.* events. */
   plugins?: import('./plugins/setupPlugins.ts').PluginsHook | null;
+  /** Meeting chat host (plugins/README.md §2.7, a host surface). */
+  chat?: import('./chat/setupChat.svelte.ts').ChatHook | null;
 }
 
 export interface ActiveRemoteControl {

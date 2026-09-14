@@ -75,6 +75,7 @@ mod dev_test_pattern;
 // fabricated.
 pub mod diagnostics;
 mod draw;
+mod chat;
 // Plugin system host surface (plugins/README.md): M2 data bus.
 mod plugins;
 // UserDispatch feedback modal's opt-in, redacted log-attachment command
@@ -1181,6 +1182,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             draw::draw_send,
             plugins::bus::plugin_publish_data,
+            chat::chat_publish,
             plugins::bus::plugin_set_state,
             plugins::bus::plugin_host_log,
             plugins::registry::plugin_registry_status,
@@ -1758,6 +1760,7 @@ pub fn run() {
             windows_compositor::compositor_set_draw_active,
             draw::draw_send,
             plugins::bus::plugin_publish_data,
+            chat::chat_publish,
             plugins::bus::plugin_set_state,
             plugins::bus::plugin_host_log,
             plugins::registry::plugin_registry_status,
