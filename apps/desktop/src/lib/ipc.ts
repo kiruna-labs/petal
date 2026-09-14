@@ -69,6 +69,7 @@ export const COMMANDS = {
   debugModeSettings: 'debug_mode_settings',
   drawSend: 'draw_send',
   pluginPublishData: 'plugin_publish_data',
+  chatPublish: 'chat_publish',
   pluginSetState: 'plugin_set_state',
   pluginHostLog: 'plugin_host_log',
   pluginRegistryStatus: 'plugin_registry_status',
@@ -261,6 +262,7 @@ export const EVENTS = {
   hoverTabUpdate: 'hover-tab-update',
   drawUpdate: 'draw-update',
   pluginData: 'plugin-data',
+  chatData: 'chat-data',
   pluginStateChanged: 'plugin-state-changed',
   journalAppended: 'journal-appended',
   meetingRestorePillRequested: 'meeting-restore-pill-requested',
@@ -1038,6 +1040,14 @@ export interface PluginDataEvent {
   payloadBase64: string;
 }
 
+/** Global `chat-data` event (chat.rs, contract `chatDataEvent`): one inbound
+ * `petal.chat` packet, sender stamped from LiveKit; parsed by shared/logic/chat.ts. */
+export interface ChatDataEvent {
+  senderIdentity: string;
+  senderName: string | null;
+  payloadBase64: string;
+}
+
 /** Installed-plugin record from the Rust store (plugins::store, `plugins.json`). */
 export interface PluginInstalledRecord {
   version: string;
@@ -1529,6 +1539,8 @@ export interface CommandArgs {
     reliable: boolean;
     destinationIdentities?: string[];
   };
+  /** One `petal.chat` packet, always reliable; `destinationIdentities` only for a history reply. */
+  [COMMANDS.chatPublish]: { payloadBase64: string; destinationIdentities?: string[] };
   /** `entry` null removes this plugin's advertisement (contract `pluginStateMetadata`). */
   [COMMANDS.pluginSetState]: { pluginId: string; entry: PluginAdvertEntry | null };
   /** Plugin-host diagnostics into the Rust file log (bounded, rate-limited). */
@@ -1788,6 +1800,7 @@ export interface CommandReturns {
   [COMMANDS.setMainPillMode]: void;
   [COMMANDS.drawSend]: void;
   [COMMANDS.pluginPublishData]: void;
+  [COMMANDS.chatPublish]: void;
   [COMMANDS.pluginSetState]: void;
   [COMMANDS.pluginHostLog]: void;
   [COMMANDS.logCameraPreviewState]: void;
@@ -1888,6 +1901,7 @@ export interface EventPayloads {
   [EVENTS.hoverTabUpdate]: HoverTabUpdate;
   [EVENTS.drawUpdate]: DrawUpdate;
   [EVENTS.pluginData]: PluginDataEvent;
+  [EVENTS.chatData]: ChatDataEvent;
   [EVENTS.pluginStateChanged]: PluginStateChangedEvent;
   [EVENTS.journalAppended]: JournalEntry;
   [EVENTS.meetingRestorePillRequested]: void;
