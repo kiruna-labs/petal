@@ -639,6 +639,12 @@ where
             left_distance
                 .partial_cmp(&right_distance)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                // At the same distance from the requested rate, prefer an
+                // uncompressed NV12 type: a compressed type has to be
+                // converted on the capture thread, which is what throttled a
+                // 1280x720@30 request to ~20 fps on the BRIO. Auto already
+                // ranked NV12 this way; the explicit Settings path did not.
+                .then_with(|| right.is_nv12.cmp(&left.is_nv12))
                 .then_with(|| right.frame_rate_numerator.cmp(&left.frame_rate_numerator))
         }) {
             return Some(*index);
@@ -1027,6 +1033,34 @@ mod tests {
         };
         assert_eq!(
             select_camera_format_index(formats.iter().copied(), Some(preferred_30)).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn preferred_mode_prefers_nv12_at_the_same_cadence() {
+        // The same 1280x720@30 cadence is commonly exposed twice: once as an
+        // uncompressed NV12 type and once compressed. Choosing the compressed
+        // one costs a conversion on the capture thread and measured ~20 fps on
+        // the BRIO, so when the distance to the requested rate ties the
+        // explicit Settings path must prefer NV12 (Auto already did).
+        let formats = [
+            camera_format(1280, 720, 30, false),
+            camera_format(1280, 720, 30, true),
+        ];
+        let preferred = PreferredCameraMode {
+            width: 1280,
+            height: 720,
+            frame_rate: 30,
+        };
+        assert_eq!(
+            select_camera_format_index(formats.iter().copied(), Some(preferred)).unwrap(),
+            1
+        );
+        // Enumeration order must not decide it: NV12 wins from either side.
+        let reversed = [formats[1], formats[0]];
+        assert_eq!(
+            select_camera_format_index(reversed.iter().copied(), Some(preferred)).unwrap(),
             0
         );
     }
