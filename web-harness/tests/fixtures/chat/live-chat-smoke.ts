@@ -12,7 +12,8 @@ import { resolve } from 'node:path';
 import { generateAccessCode } from '@petal/shared/logic/meetingCode';
 
 const repoRoot = resolve(import.meta.dirname, '../../../..');
-const { chromium } = createRequire(import.meta.url)(resolve(repoRoot, 'apps/desktop/node_modules/playwright')) as typeof import('playwright');
+// Untyped on purpose: playwright is the desktop package's dependency, not this one's (same as pluginSandboxRendered.test.ts).
+const { chromium } = createRequire(import.meta.url)(resolve(repoRoot, 'apps/desktop/node_modules/playwright'));
 
 const base = process.env.PETAL_WEB_URL ?? 'http://localhost:5173';
 const code = process.argv[2] ?? generateAccessCode();
@@ -42,7 +43,7 @@ const browser = await chromium.launch({
 async function peer(name: string) {
   const context = await browser.newContext({ viewport: { width: 1000, height: 720 } });
   const page = await context.newPage();
-  page.on('console', (m) => {
+  page.on('console', (m: { type(): string; text(): string }) => {
     const t = m.text();
     if (/chat|error|unhandled/i.test(t) && !/favicon/.test(t)) console.log(`[${name}] ${m.type()} ${t.slice(0, 160)}`);
   });
