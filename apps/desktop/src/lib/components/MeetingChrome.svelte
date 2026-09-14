@@ -125,6 +125,12 @@
     onRenameRoom?: (displayName: string | null) => void | Promise<void>;
     /** Pass-through to Gallery's plugin toolbar slot (plugins/README.md §2.7). */
     pluginActions?: Snippet;
+    /** Meeting chat (a host surface, plugins/README.md §2.7): open state and
+     * unread count for the Chat control; the drawer itself is rendered by the
+     * route through `chatDrawer` beside the gallery while open. */
+    chatOpen?: boolean;
+    chatUnread?: number;
+    chatDrawer?: Snippet;
     /** Pass-through to Gallery's topbar bug-report cell (#786). Undefined on a
      * build with no UserDispatch key, which is what removes the cell. */
     onReportBug?: () => void;
@@ -173,6 +179,9 @@
     onRenameRoom,
     onReportBug,
     pluginActions,
+    chatOpen = false,
+    chatUnread = 0,
+    chatDrawer,
     frameless = false,
     pillHost,
     localVideoStream = null,
@@ -280,7 +289,7 @@
    * of appearing/disappearing as the window crosses a fit threshold. */
   const DISPLAY_ORDER = ['mic', 'camera', 'screenshare'] as const;
   const GUARANTEED_VISIBLE = DISPLAY_ORDER;
-  const PILL_MORE_ORDER = ['invite', 'region', 'remotecontrol'] as const;
+  const PILL_MORE_ORDER = ['invite', 'chat', 'region', 'remotecontrol'] as const;
   type PillIcon = (typeof DISPLAY_ORDER)[number] | (typeof PILL_MORE_ORDER)[number] | 'leave';
 
   function ariaLabelFor(icon: PillIcon): string {
@@ -297,6 +306,8 @@
         return inviteAriaLabel;
       case 'region':
         return 'Create Petal View';
+      case 'chat':
+        return chatOpen ? 'Close chat' : chatUnread > 0 ? `Open chat, ${chatUnread} unread` : 'Open chat';
       case 'leave':
         return 'Leave meeting';
     }
@@ -735,6 +746,9 @@
       <path d="M3 20a6 6 0 0 1 12 0"></path>
       <path d="M16 5.5a3.5 3.5 0 0 1 0 7"></path>
       <path d="M19 20a6 6 0 0 0-4-5.6"></path>
+    {:else if icon === 'chat'}
+      <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"></path>
+      <path d="M8.5 8.5h7M8.5 12h4.5"></path>
     {/if}
   </svg>
 {/snippet}
@@ -744,6 +758,7 @@
        its topbar. `inert` on collapse also disables the switcher inside, so
        only the pill's expand circle is interactive in small state. -->
   <div class="stage large-stage" aria-hidden={!expanded} inert={!expanded}>
+    <div class="gallery-column">
     <Gallery
       {roomName}
       {elapsed}
@@ -768,10 +783,22 @@
       {onReportBug}
       {frameless}
       {pluginActions}
+      {chatOpen}
+      {chatUnread}
       onOpenDeviceMenu={(kind, el) => openDeviceMenu(kind, el)}
       deviceMenuKind={deviceMenu}
       topbarAction={viewSwitcher}
     />
+    </div>
+    {#if chatOpen && chatDrawer}
+      <!-- Chat drawer (plugins/README.md §2.7 "Panel"): a right column beside
+           the gallery, so the gallery's own topbar and control bar keep their
+           full width; under 640 px it covers the gallery instead of crushing
+           it (the 400 px minimum window would leave 80 px of tiles). -->
+      <aside class="chat-aside" data-testid="chat-aside">
+        {@render chatDrawer()}
+      </aside>
+    {/if}
   </div>
 
   <!-- Small / thumbnail state (DESIGN.md §2): "collapsed to a minimal
@@ -978,8 +1005,30 @@
   }
 
   .large-stage {
+    position: relative;
     height: 100%;
     opacity: 1;
+    display: flex;
+    min-width: 0;
+  }
+  .gallery-column {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+  }
+  .chat-aside {
+    flex: none;
+    width: 320px;
+    height: 100%;
+    min-width: 0;
+  }
+  @media (max-width: 640px) {
+    .chat-aside {
+      position: absolute;
+      inset: 0 0 0 auto;
+      width: 100%;
+      z-index: 5;
+    }
   }
 
   .large-stage :global(.topbar) {

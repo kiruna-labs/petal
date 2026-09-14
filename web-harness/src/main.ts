@@ -25,6 +25,7 @@ import { setupConnection } from './connection';
 import { installEncodedAudioWorkaroundFromUrl } from './encodedAudioProbe';
 import { setupControls, shouldShowFirstVisitOnboarding } from './controls';
 import { setupPlugins } from './plugins/setupPlugins';
+import { setupChat } from './chat/setupChat.svelte.ts';
 import { addSentryBreadcrumb, initSentry, installGlobalErrorMirror } from './sentryReporting';
 import { initAnalytics } from './analytics';
 import { FeedbackReportController } from './feedbackReport';
@@ -608,6 +609,8 @@ const controls = setupControls(ctx, feedbackReport);
 // Plugins (plugins/README.md): after the controls exist so plugin toolbar
 // cells land in the same row; the room bridge is driven from connection.ts.
 ctx.hook.plugins = setupPlugins(ctx);
+// Meeting chat (plugins/README.md §2.7): a host surface beside the tiles.
+ctx.hook.chat = setupChat(ctx);
 Object.assign(ctx.cb, {
   resolveIdentity: controls.resolveIdentity,
   submitMeetingField: controls.submitMeetingField,

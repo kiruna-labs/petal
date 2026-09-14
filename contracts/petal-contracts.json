@@ -208,7 +208,11 @@
   },
   "windowZOrderMetadata": {
     "metadata": "{\"petalWindowZOrder\":[42,7,99],\"petalWindowKinds\":{\"42\":\"window\"}}",
-    "orderedWindowIds": [42, 7, 99],
+    "orderedWindowIds": [
+      42,
+      7,
+      99
+    ],
     "frontmostWindowId": 42,
     "middleWindowId": 7,
     "backmostWindowId": 99,
@@ -358,7 +362,8 @@
     "latencyProbe": "petal.latency-probe",
     "draw": "petal.draw",
     "aiChat": "petal.ai-chat",
-    "pluginPrefix": "plugin/"
+    "pluginPrefix": "plugin/",
+    "chat": "petal.chat"
   },
   "telepointerFields": [
     "activity",
@@ -2561,5 +2566,176 @@
         }
       }
     }
+  },
+  "chatMessages": [
+    {
+      "name": "msg",
+      "reliable": true,
+      "direct": false,
+      "message": {
+        "v": 1,
+        "type": "msg",
+        "id": "m1a2b3c4d5e6f7a8",
+        "text": "Hello, everyone",
+        "t": 1788640000000
+      },
+      "fields": [
+        "id",
+        "t",
+        "text",
+        "type",
+        "v"
+      ]
+    },
+    {
+      "name": "history-req",
+      "reliable": true,
+      "direct": false,
+      "message": {
+        "v": 1,
+        "type": "history-req"
+      },
+      "fields": [
+        "type",
+        "v"
+      ]
+    },
+    {
+      "name": "history",
+      "reliable": true,
+      "direct": true,
+      "message": {
+        "v": 1,
+        "type": "history",
+        "messages": [
+          {
+            "id": "m1a2b3c4d5e6f7a8",
+            "text": "Hello, everyone",
+            "t": 1788640000000,
+            "senderIdentity": "alex-1a2b",
+            "senderName": "Alex"
+          }
+        ]
+      },
+      "fields": [
+        "messages",
+        "type",
+        "v"
+      ],
+      "entryFields": [
+        "id",
+        "senderIdentity",
+        "senderName",
+        "t",
+        "text"
+      ]
+    }
+  ],
+  "chatRejectedPayloads": [
+    {
+      "name": "wrong version",
+      "payload": {
+        "v": 2,
+        "type": "msg",
+        "id": "m1a2b3c4d5e6f7a8",
+        "text": "hi",
+        "t": 1
+      }
+    },
+    {
+      "name": "unknown type",
+      "payload": {
+        "v": 1,
+        "type": "typing",
+        "id": "m1a2b3c4d5e6f7a8"
+      }
+    },
+    {
+      "name": "empty text",
+      "payload": {
+        "v": 1,
+        "type": "msg",
+        "id": "m1a2b3c4d5e6f7a8",
+        "text": "   ",
+        "t": 1
+      }
+    },
+    {
+      "name": "bidi override in text",
+      "payload": {
+        "v": 1,
+        "type": "msg",
+        "id": "m1a2b3c4d5e6f7a8",
+        "text": "pay ‮evil",
+        "t": 1
+      }
+    },
+    {
+      "name": "short id",
+      "payload": {
+        "v": 1,
+        "type": "msg",
+        "id": "abc",
+        "text": "hi",
+        "t": 1
+      }
+    },
+    {
+      "name": "negative timestamp",
+      "payload": {
+        "v": 1,
+        "type": "msg",
+        "id": "m1a2b3c4d5e6f7a8",
+        "text": "hi",
+        "t": -1
+      }
+    },
+    {
+      "name": "history with a bad entry",
+      "payload": {
+        "v": 1,
+        "type": "history",
+        "messages": [
+          {
+            "id": "abc",
+            "text": "hi",
+            "t": 1,
+            "senderIdentity": "x",
+            "senderName": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "not json",
+      "payload": "{not json"
+    }
+  ],
+  "chatLimits": {
+    "maxTextChars": 2000,
+    "maxPayloadBytes": 8192,
+    "historyMessages": 50,
+    "inboundPerSenderPerSecond": 10,
+    "retainedMessages": 500
+  },
+  "chatDataEvent": {
+    "name": "chat-data",
+    "fields": [
+      "payloadBase64",
+      "senderIdentity",
+      "senderName"
+    ],
+    "example": {
+      "senderIdentity": "alex-1a2b",
+      "senderName": "Alex",
+      "payloadBase64": "eyJ2IjoxLCJ0eXBlIjoibXNnIiwiaWQiOiJtMWEyYjNjNGQ1ZTZmN2E4IiwidGV4dCI6IkhlbGxvLCBldmVyeW9uZSIsInQiOjE3ODg2NDAwMDAwMDB9"
+    },
+    "rules": [
+      "senderIdentity and senderName come from the authenticated LiveKit participant, never from the payload; a payload field claiming a sender is ignored",
+      "payloads larger than chatLimits.maxPayloadBytes are dropped before parsing",
+      "a sender exceeding chatLimits.inboundPerSenderPerSecond is dropped until the window refills",
+      "the receiving host parses strictly (shared/logic/chat.ts parseChatPayload): a packet that is not exactly msg, history-req, or history is dropped whole; extra fields are ignored",
+      "history entries are a peer's claim; the store marks them relayed unless the relayer attributes them to itself, and they never count as unread"
+    ]
   }
 }
