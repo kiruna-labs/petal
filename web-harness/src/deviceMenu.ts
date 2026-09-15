@@ -22,17 +22,42 @@ export interface DeviceMenuHandlers {
 
 const DEVICE_GAP = 8;
 const VIEWPORT_PAD = 8;
+const DEFAULT_PSEUDO_DEVICE_ID = 'default';
 
 export function labelForListedDevice(device: MediaDeviceInfo, fallback: string, index: number): string {
   return device.label.trim() || `${fallback} ${index + 1}`;
 }
 
+// Chrome (and others) list the system default as its OWN MediaDeviceInfo
+// entry (deviceId 'default') alongside the concrete device it currently
+// points at, so the same physical mic/speaker shows up twice. Fold the
+// pseudo-device onto its concrete twin (same groupId) so only one row
+// remains -- mirrors livekit-client's DeviceManager.normalizeDeviceId
+// matching, reimplemented sync since we already hold the full device list.
 export function optionsFromDevices(devices: MediaDeviceInfo[], fallback: string): DeviceOption[] {
-  return devices
+  const named = devices
     .filter((device) => device.deviceId)
     .map((device, index) => ({
       id: device.deviceId,
+      groupId: device.groupId,
       label: labelForListedDevice(device, fallback, index),
+    }));
+
+  const foldedIndices = new Set<number>();
+  const systemDefaultTwins = new Set<string>();
+  named.forEach((option, index) => {
+    if (option.id !== DEFAULT_PSEUDO_DEVICE_ID || !option.groupId) return;
+    const twin = named.find((other) => other.id !== DEFAULT_PSEUDO_DEVICE_ID && other.groupId === option.groupId);
+    if (!twin) return;
+    foldedIndices.add(index);
+    systemDefaultTwins.add(twin.id);
+  });
+
+  return named
+    .filter((_, index) => !foldedIndices.has(index))
+    .map((option) => ({
+      id: option.id,
+      label: systemDefaultTwins.has(option.id) ? `${option.label} (System Default)` : option.label,
     }));
 }
 
