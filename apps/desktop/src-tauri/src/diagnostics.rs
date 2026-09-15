@@ -4223,7 +4223,15 @@ fn analyze_conditions(
                 "info",
                 "Remote video is paused or stalled",
                 format!("{} is receiving no fresh video frames.", track.name),
-                "Petal keeps the last frame visible and will resume automatically when bandwidth recovers.",
+                // Was "will resume automatically when bandwidth recovers" --
+                // not true for every sharer. A native sharer self-heals via
+                // its own repair-request consumer; a web sharer only gained
+                // that with the same fix that added this comment (a stall
+                // past the receiver's probe-failure cap now also asks it to
+                // republish). Before then, and for any future client that
+                // still doesn't consume the repair request, this text was a
+                // promise Petal could not keep.
+                "Petal keeps the last frame visible and asks the sharer to repair the stream; recovery time depends on the sharer's client.",
             ));
         }
 
