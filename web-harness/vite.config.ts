@@ -155,6 +155,9 @@ export default defineConfig({
       input: {
         meeting: resolve(import.meta.dirname, 'index.html'),
         fidelity: resolve(import.meta.dirname, 'fidelity.html'),
+        // Dev-only visual probe for shared/logic/galleryGeometry.ts (#P0) --
+        // renders Web/Native side by side off the same packing function.
+        'layout-lab': resolve(import.meta.dirname, 'layout-lab.html'),
       },
     },
   },
