@@ -2592,6 +2592,9 @@ pub(crate) fn record_native_video_stream_state(
 #[cfg(target_os = "macos")]
 pub(crate) fn record_remote_video_stalled(
     sharer_kind: crate::transport::publisher::SharerClientKind,
+    // The no-frame watchdog's recorded `held_no_frames` flag for this window
+    // (read by the caller, never assumed): `true` tags no_frame_watchdog,
+    // `false` tags not_held. Holds for other reasons are not observed here.
     held: bool,
     probe_failures_past_cap: u32,
     since_last_frame: std::time::Duration,

@@ -1622,13 +1622,18 @@ pub(crate) fn start_compositor_feed(
                                                 // `stall_diagnostic_sent`'s declaration.
                                                 if !stall_diagnostic_sent {
                                                     stall_diagnostic_sent = true;
+                                                    // Read the no-frame watchdog's own hold flag
+                                                    // rather than asserting "held" -- the tag must
+                                                    // report what the receiver recorded, not what
+                                                    // the never-black-frame rule implies.
+                                                    let held_by_no_frame_watchdog = window_states_for_frames
+                                                        .lock_unpoisoned()
+                                                        .get(&receive_key_for_frames)
+                                                        .map(|state| state.held_no_frames)
+                                                        .unwrap_or(false);
                                                     crate::diagnostics::record_remote_video_stalled(
                                                         sharer_kind_for_frames,
-                                                        // The never-black-frame guarantee means this
-                                                        // window is, by construction, still showing
-                                                        // its last decoded frame at this point -- no
-                                                        // separate compositor query needed.
-                                                        true,
+                                                        held_by_no_frame_watchdog,
                                                         consecutive_probe_failures
                                                             .saturating_sub(STARVATION_PROBE_FAILURE_CAP),
                                                         last_frame_seen.elapsed(),
