@@ -82,9 +82,14 @@ const STARVATION_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const STARVATION_PROBE_BASE: Duration = Duration::from_secs(30);
 /// Exponential backoff cap for repeated probe failures.
 const STARVATION_PROBE_MAX: Duration = Duration::from_secs(120);
-/// Consecutive failed probes before giving up on HIGH for this share
-/// (recovery then comes from a republish/reconnect, which spawns a fresh
-/// decode loop with clean state).
+/// Consecutive failed probes before this receiver treats its own probing as
+/// insufficient and additionally asks the sharer to repair the publication
+/// (`viewer_demand::publish_window_repair_request`, macOS only -- see the
+/// decode loop's post-cap `ProbeHigh` handling). Probing itself never stops
+/// at this cap (`starvation_action` keeps returning `ProbeHigh` on the
+/// backoff ceiling indefinitely); this only gates the repair-request
+/// resend, so a share that recovers on its own between probes is not
+/// pestered with repeated repair requests.
 const STARVATION_PROBE_FAILURE_CAP: u32 = 3;
 /// #907: the liveness trigger above (no frame for `STARVATION_DOWNGRADE_AFTER`)
 /// catches a dead layer, but the field incident this issue diagnoses never
@@ -1364,6 +1369,15 @@ pub(crate) fn start_compositor_feed(
                     let generation_for_frames = generation.clone();
                     let window_states_for_frames = window_states.clone();
                     let receive_key_for_frames = receive_key.clone();
+                    // Resolved once here (not re-read live per probe): a
+                    // share's sharer-client identity does not change over the
+                    // life of one publication, and re-fetching it would need
+                    // a `room` handle this per-track spawn does not
+                    // otherwise carry.
+                    let sharer_kind_for_frames =
+                        crate::transport::publisher::shared_window_sharer_client_from_metadata(
+                            &participant.metadata(),
+                        );
                     tokio::spawn(async move {
                         // #907: cloned before `.rtc_track()` below consumes
                         // `video_track` -- this handle drives the periodic
@@ -1394,6 +1408,14 @@ pub(crate) fn start_compositor_feed(
                         let mut starved_since: Option<std::time::Instant> = None;
                         let mut consecutive_probe_failures: u32 = 0;
                         let mut probe_outstanding = false;
+                        // Gates `record_remote_video_stalled` to ONCE per
+                        // stall episode (the diagnostic event, not the
+                        // repair-request resend, which still fires on every
+                        // post-cap probe). Reset alongside
+                        // `consecutive_probe_failures` when a real frame
+                        // proves the stall is over, so a LATER stall on the
+                        // same window/loop reports again.
+                        let mut stall_diagnostic_sent = false;
                         let mut last_quality_check = std::time::Instant::now();
                         let mut prev_qp_sum: u64 = 0;
                         let mut prev_frames_decoded: u32 = 0;
@@ -1558,6 +1580,13 @@ pub(crate) fn start_compositor_feed(
                                             );
                                         }
                                         StarvationAction::ProbeHigh => {
+                                            // Read before any reset below --
+                                            // this is the failure count the
+                                            // probe about to run is
+                                            // ATTEMPTING to clear, not a
+                                            // count already reset by it.
+                                            let past_repair_cap =
+                                                consecutive_probe_failures >= STARVATION_PROBE_FAILURE_CAP;
                                             probe_outstanding = true;
                                             starved = false;
                                             starved_since = None;
@@ -1573,6 +1602,44 @@ pub(crate) fn start_compositor_feed(
                                                 since_starved.unwrap_or_default().as_secs(),
                                                 consecutive_probe_failures + 1
                                             );
+                                            // `starvation_action` no longer gives up past
+                                            // STARVATION_PROBE_FAILURE_CAP -- it keeps probing on the
+                                            // STARVATION_PROBE_MAX cadence forever. A browser sharer
+                                            // does not self-heal like the native sharer does, so once
+                                            // our own probing alone has failed this many times in a
+                                            // row, also ask the sharer to repair the publication over
+                                            // the same channel `retire_no_frame_windows` uses.
+                                            if past_repair_cap {
+                                                log::warn!(
+                                                    "compositor feed: window {window_id} past {STARVATION_PROBE_FAILURE_CAP} probe failures; also asking the owner to repair the publication"
+                                                );
+                                                crate::viewer_demand::publish_window_repair_request(
+                                                    &app_for_frames,
+                                                    window_id,
+                                                );
+                                                // Once per stall episode, not once per (repeated,
+                                                // 120s-cadenced) repair request -- see
+                                                // `stall_diagnostic_sent`'s declaration.
+                                                if !stall_diagnostic_sent {
+                                                    stall_diagnostic_sent = true;
+                                                    // Read the no-frame watchdog's own hold flag
+                                                    // rather than asserting "held" -- the tag must
+                                                    // report what the receiver recorded, not what
+                                                    // the never-black-frame rule implies.
+                                                    let held_by_no_frame_watchdog = window_states_for_frames
+                                                        .lock_unpoisoned()
+                                                        .get(&receive_key_for_frames)
+                                                        .map(|state| state.held_no_frames)
+                                                        .unwrap_or(false);
+                                                    crate::diagnostics::record_remote_video_stalled(
+                                                        sharer_kind_for_frames,
+                                                        held_by_no_frame_watchdog,
+                                                        consecutive_probe_failures
+                                                            .saturating_sub(STARVATION_PROBE_FAILURE_CAP),
+                                                        last_frame_seen.elapsed(),
+                                                    );
+                                                }
+                                            }
                                         }
                                     }
                                     continue;
@@ -1599,6 +1666,7 @@ pub(crate) fn start_compositor_feed(
                                     if probe_outstanding {
                                         probe_outstanding = false;
                                         consecutive_probe_failures = 0;
+                                        stall_diagnostic_sent = false;
                                     }
                                 }
                                 _ => {}
@@ -2752,8 +2820,18 @@ pub(crate) fn start_compositor_feed(
 ///   layer is dead — downgrade to LOW so the SFU serves the live layer.
 /// - Starved on LOW long enough (probe delay with backoff): re-probe HIGH
 ///   in case the publisher's high layer recovered.
-/// - Starved but past the failure cap: stay on LOW (give up probing; a
-///   republish/reconnect restarts the loop with clean state).
+/// - Starved past the failure cap: KEEP probing HIGH, forever, at the
+///   backoff ceiling (`starvation_probe_delay` already clamps to
+///   `STARVATION_PROBE_MAX` past the cap, so this is "probe every 120s",
+///   not "probe faster"). This policy used to give up permanently here
+///   ("recovery then comes from a republish/reconnect") -- but nothing on
+///   the RECEIVER side ever
+///   triggers that republish for a browser sharer, so a receiver stuck
+///   past the cap stayed frozen forever with no path back. The macOS
+///   caller (`start_compositor_feed`'s decode loop) now also re-sends
+///   `viewer_demand::publish_window_repair_request` on every post-cap
+///   probe, so this policy no longer depends on an external reconnect to
+///   recover -- it asks for one itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StarvationAction {
     Keep,
@@ -2762,6 +2840,11 @@ enum StarvationAction {
 }
 
 /// Probe delay after `consecutive_probe_failures` (30s, 60s, 120s, capped).
+/// Deliberately has no upper bound on its INPUT: `consecutive_probe_failures`
+/// keeps incrementing past `STARVATION_PROBE_FAILURE_CAP` now that
+/// `starvation_action` probes forever, but the `.min(2)` shift clamp below
+/// already saturates the delay at `STARVATION_PROBE_MAX` regardless of how
+/// large the failure count grows, so this never needs its own cap.
 fn starvation_probe_delay(consecutive_probe_failures: u32) -> Duration {
     let multiplier = 1u32 << consecutive_probe_failures.min(2);
     STARVATION_PROBE_BASE
@@ -2779,9 +2862,12 @@ fn starvation_action(
         let Some(since_starved) = since_starved else {
             return StarvationAction::Keep;
         };
-        if consecutive_probe_failures < STARVATION_PROBE_FAILURE_CAP
-            && since_starved >= starvation_probe_delay(consecutive_probe_failures)
-        {
+        // No failure-count cutoff: past `STARVATION_PROBE_FAILURE_CAP` this
+        // keeps returning ProbeHigh, on the `STARVATION_PROBE_MAX` cadence,
+        // forever -- see the doc comment above. The caller uses
+        // `consecutive_probe_failures >= STARVATION_PROBE_FAILURE_CAP` to
+        // decide when a probe is also worth pairing with a repair request.
+        if since_starved >= starvation_probe_delay(consecutive_probe_failures) {
             StarvationAction::ProbeHigh
         } else {
             StarvationAction::Keep
@@ -3817,9 +3903,14 @@ mod tests {
     }
 
     #[test]
-    fn starvation_gives_up_after_failure_cap() {
-        // Past the failure cap: stay on LOW, never probe again (recovery is
-        // delegated to a republish/reconnect which restarts the loop).
+    fn starvation_keeps_probing_past_the_failure_cap() {
+        // Past the failure cap the policy no longer gives up: it keeps
+        // returning ProbeHigh once each backoff-ceiling interval elapses,
+        // indefinitely. A native sharer self-heals via its own
+        // republish/reconnect path, but a browser sharer does not -- see
+        // the decode loop's ProbeHigh handling, which pairs every post-cap
+        // probe with a viewer-demand repair request instead of relying on
+        // an external reconnect this policy cannot itself trigger.
         assert_eq!(
             starvation_action(
                 Duration::from_secs(600),
@@ -3827,7 +3918,31 @@ mod tests {
                 Some(STARVATION_PROBE_MAX),
                 STARVATION_PROBE_FAILURE_CAP
             ),
+            StarvationAction::ProbeHigh
+        );
+        // Still bounded by the backoff-ceiling cadence, not immediate: just
+        // short of another STARVATION_PROBE_MAX since the last probe stays
+        // Keep even with a very large failure count.
+        assert_eq!(
+            starvation_action(
+                Duration::from_secs(600),
+                true,
+                Some(STARVATION_PROBE_MAX - Duration::from_secs(1)),
+                1_000
+            ),
             StarvationAction::Keep
+        );
+        // And a failure count far past the cap still probes once the
+        // ceiling interval elapses -- there is no upper bound where it
+        // silently stops again.
+        assert_eq!(
+            starvation_action(
+                Duration::from_secs(600),
+                true,
+                Some(STARVATION_PROBE_MAX),
+                1_000
+            ),
+            StarvationAction::ProbeHigh
         );
     }
 

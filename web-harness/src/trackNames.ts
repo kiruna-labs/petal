@@ -341,6 +341,17 @@ export const PETAL_WINDOW_Z_ORDER_METADATA_KEY = 'petalWindowZOrder';
 // PETAL_WINDOW_REMOTE_CONTROL_METADATA_KEY). Only `false` is ever written, so
 // absence means "allowed" and pre-key sharers are unaffected.
 export const PETAL_WINDOW_REMOTE_CONTROL_METADATA_KEY = 'petalWindowRemoteControl';
+// Marks this participant's metadata as coming from a web (browser) sharer.
+// `remoteControllable: false` alone cannot answer "is this sharer web or
+// native" -- a native sharer can ALSO lock remote control off per-share
+// (Settings' remote-control toggle -> `set_share_remote_control_allowed`), so
+// that flag means "no control right now", not "not native". This key is a
+// plain, explicit marker instead: the native app never writes it, so its
+// absence means native and its presence (currently only ever `'web'`) means
+// this participant is a web client. Read by publisher.rs's
+// `shared_window_sharer_client_from_metadata`, which the receiver's
+// stalled-share telemetry uses to tag `sharer_kind`.
+export const PETAL_SHARER_CLIENT_METADATA_KEY = 'petalSharerClient';
 const IDENTITY_PALETTE_SIZE = 6;
 
 export interface WindowColorProfile {
@@ -387,6 +398,13 @@ export function mergeSharedSourceMetadata(
   } else {
     delete root[PETAL_WINDOW_REMOTE_CONTROL_METADATA_KEY];
   }
+  // Every caller of this function IS the web harness -- stamp the
+  // participant-level marker unconditionally (not per-window: one process is
+  // one client) so a receiver can tell a stalled web share apart from a
+  // stalled native one. Never cleared: once this participant has published
+  // ANY window share it stays known as a web client for the rest of the
+  // session, which is what it is.
+  root[PETAL_SHARER_CLIENT_METADATA_KEY] = 'web';
   return JSON.stringify(root);
 }
 

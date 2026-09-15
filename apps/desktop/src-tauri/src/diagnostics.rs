@@ -2447,7 +2447,15 @@ impl DiagnosticsState {
                     || source.contains("gallery-bridge-freeze")
                     || source.contains("native-no-frame")
                 {
-                    crate::analytics::remote_video_stalled(&source);
+                    // This generic path covers camera stalls and the gallery
+                    // bridge too, neither of which has a window sharer's
+                    // identity in hand -- only `record_remote_video_stalled`
+                    // (the starvation-probe-past-cap path) knows and reports
+                    // a real sharer_kind.
+                    crate::analytics::remote_video_stalled(
+                        &source,
+                        crate::analytics::SharerKindSource::Unknown,
+                    );
                 }
             }
         }
@@ -2564,6 +2572,74 @@ pub(crate) fn record_native_video_stream_state(
         normalized.to_string(),
         source.to_string(),
     );
+}
+
+/// Called once per stall episode from the receiver's starvation watchdog --
+/// the FIRST post-`STARVATION_PROBE_FAILURE_CAP` probe for a window, not
+/// every re-probe (`subscriber.rs`'s post-cap `ProbeHigh` handling owns the
+/// "first time" gating; this function just buckets and emits). Distinct
+/// from `record_native_video_stream_state`'s generic stall path above,
+/// which stays a warn-level log with no Sentry issue: this is specifically
+/// "our own probing has failed repeatedly AND we just asked the sharer to
+/// repair the publication," a stronger and much rarer signal worth its own
+/// issue.
+///
+/// `probe_failures_past_cap` is `consecutive_probe_failures -
+/// STARVATION_PROBE_FAILURE_CAP` (0 = exactly at the cap); kept a plain u32
+/// here rather than importing the constant so this module does not need to
+/// know `transport::subscriber`'s internal thresholds, only how far past
+/// them the caller is.
+#[cfg(target_os = "macos")]
+pub(crate) fn record_remote_video_stalled(
+    sharer_kind: crate::transport::publisher::SharerClientKind,
+    // The no-frame watchdog's recorded `held_no_frames` flag for this window
+    // (read by the caller, never assumed): `true` tags no_frame_watchdog,
+    // `false` tags not_held. Holds for other reasons are not observed here.
+    held: bool,
+    probe_failures_past_cap: u32,
+    since_last_frame: std::time::Duration,
+) {
+    use crate::logging::{
+        ProbeFailureBucketTag, RemoteVideoHoldReasonTag, RemoteVideoStalledDiagnostic,
+        SharerKindTag, SinceLastFrameBucketTag,
+    };
+    let sharer_kind_tag = match sharer_kind {
+        crate::transport::publisher::SharerClientKind::Native => SharerKindTag::Native,
+        crate::transport::publisher::SharerClientKind::Web => SharerKindTag::Web,
+    };
+    let hold_reason = if held {
+        RemoteVideoHoldReasonTag::NoFrameWatchdog
+    } else {
+        RemoteVideoHoldReasonTag::NotHeld
+    };
+    let probe_failures = match probe_failures_past_cap {
+        0 => ProbeFailureBucketTag::AtCap,
+        1 => ProbeFailureBucketTag::OneAboveCap,
+        _ => ProbeFailureBucketTag::ManyAboveCap,
+    };
+    let since_last_frame_bucket = match since_last_frame.as_secs() {
+        0..=59 => SinceLastFrameBucketTag::UnderOneMinute,
+        60..=299 => SinceLastFrameBucketTag::OneToFiveMinutes,
+        300..=899 => SinceLastFrameBucketTag::FiveToFifteenMinutes,
+        _ => SinceLastFrameBucketTag::OverFifteenMinutes,
+    };
+    crate::logging::capture_sentry_diagnostic(crate::logging::SentryDiagnosticEvent::RemoteVideoStalled(
+        RemoteVideoStalledDiagnostic {
+            sharer_kind: sharer_kind_tag,
+            hold_reason,
+            probe_failures,
+            since_last_frame: since_last_frame_bucket,
+        },
+    ));
+    let posthog_kind = match sharer_kind {
+        crate::transport::publisher::SharerClientKind::Native => {
+            crate::analytics::SharerKindSource::Native
+        }
+        crate::transport::publisher::SharerClientKind::Web => {
+            crate::analytics::SharerKindSource::Web
+        }
+    };
+    crate::analytics::remote_video_stalled("starvation-probe-past-cap", posthog_kind);
 }
 
 #[cfg(target_os = "macos")]
@@ -4150,7 +4226,15 @@ fn analyze_conditions(
                 "info",
                 "Remote video is paused or stalled",
                 format!("{} is receiving no fresh video frames.", track.name),
-                "Petal keeps the last frame visible and will resume automatically when bandwidth recovers.",
+                // Was "will resume automatically when bandwidth recovers" --
+                // not true for every sharer. A native sharer self-heals via
+                // its own repair-request consumer; a web sharer only gained
+                // that with the same fix that added this comment (a stall
+                // past the receiver's probe-failure cap now also asks it to
+                // republish). Before then, and for any future client that
+                // still doesn't consume the repair request, this text was a
+                // promise Petal could not keep.
+                "Petal keeps the last frame visible and asks the sharer to repair the stream; recovery time depends on the sharer's client.",
             ));
         }
 

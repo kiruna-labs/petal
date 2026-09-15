@@ -564,6 +564,7 @@ Object.assign(ctx.cb, {
   publishViewerDemandForPublication: viewerDemand.publishViewerDemandForPublication,
   startViewerDemandHeartbeat: viewerDemand.startViewerDemandHeartbeat,
   stopViewerDemandHeartbeat: viewerDemand.stopViewerDemandHeartbeat,
+  handleViewerDemandPayload: viewerDemand.handleViewerDemandPayload,
 });
 
 const pipelineStats = setupPipelineStats(ctx);
@@ -617,6 +618,7 @@ Object.assign(ctx.cb, {
   startCockpitAudioTone: controls.startCockpitAudioTone,
   measureCockpitRemoteAudio: controls.measureCockpitRemoteAudio,
   measureCockpitRemoteCamera: controls.measureCockpitRemoteCamera,
+  repairScreenShareForWindow: controls.repairScreenShareForWindow,
 });
 
 // Test-cockpit walking-skeleton automation hook (#254). Depends on

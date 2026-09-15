@@ -271,6 +271,29 @@ impl VideoStallSource {
     }
 }
 
+/// Which Petal client published the stalled share. `Unknown` covers every
+/// EXISTING `remote_video_stalled` call site (camera stalls, the gallery
+/// bridge, the generic no-frame watchdog) -- none of those have a window
+/// sharer's identity in hand and none is worth plumbing it through just for
+/// this. Only the starvation-probe-past-cap call site (subscriber.rs, via
+/// `diagnostics::record_remote_video_stalled`) knows and reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SharerKindSource {
+    Native,
+    Web,
+    Unknown,
+}
+
+impl SharerKindSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Web => "web",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RestartOutcome {
     Recovered,
@@ -401,6 +424,7 @@ enum Event {
     // (CLAUDE.md data honesty). Plumb a real duration before adding it back.
     RemoteVideoStalled {
         source: VideoStallSource,
+        sharer_kind: SharerKindSource,
     },
     CaptureRestarted {
         outcome: RestartOutcome,
@@ -465,8 +489,9 @@ impl Event {
             Self::RemoteAudioSilent { duration_bucket } => {
                 extras.insert("duration_bucket", duration_bucket.as_str());
             }
-            Self::RemoteVideoStalled { source } => {
+            Self::RemoteVideoStalled { source, sharer_kind } => {
                 extras.insert("source", source.as_str());
+                extras.insert("sharer_kind", sharer_kind.as_str());
             }
             Self::CaptureRestarted { outcome } | Self::Reconnect { outcome } => {
                 extras.insert("outcome", outcome.as_str());
@@ -1117,9 +1142,10 @@ pub(crate) fn remote_audio_silent(duration: Duration) {
     });
 }
 
-pub(crate) fn remote_video_stalled(source: &str) {
+pub(crate) fn remote_video_stalled(source: &str, sharer_kind: SharerKindSource) {
     capture(Event::RemoteVideoStalled {
         source: video_stall_source(source),
+        sharer_kind,
     });
 }
 
@@ -1289,6 +1315,7 @@ mod tests {
             },
             Event::RemoteVideoStalled {
                 source: VideoStallSource::Native,
+                sharer_kind: SharerKindSource::Unknown,
             },
             Event::CaptureRestarted {
                 outcome: RestartOutcome::Recovered,
@@ -1338,6 +1365,7 @@ mod tests {
             },
             Event::RemoteVideoStalled {
                 source: VideoStallSource::Gallery,
+                sharer_kind: SharerKindSource::Web,
             },
             Event::CaptureRestarted {
                 outcome: RestartOutcome::Failed,

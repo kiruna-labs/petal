@@ -257,6 +257,7 @@ pub enum SentryDiagnosticEvent {
     DescriptorPressure(DescriptorPressureDiagnostic),
     PointerReleaseNotInjected(PointerReleaseNotInjectedDiagnostic),
     WgcBorderRequestFailed(WgcBorderRequestFailedDiagnostic),
+    RemoteVideoStalled(RemoteVideoStalledDiagnostic),
 }
 
 /// Emitted (rate-limited) when a remote-control pointer RELEASE (an Up) fails
@@ -315,6 +316,23 @@ pub struct DecoderAllocationFailedDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WgcBorderRequestFailedDiagnostic {
     pub failure: WgcBorderFailureTag,
+}
+
+/// Emitted once per stall episode -- the FIRST time a receiver's starvation
+/// probe for this window passes `STARVATION_PROBE_FAILURE_CAP`
+/// (`subscriber.rs`'s post-cap `ProbeHigh` handling), not on every 120s
+/// re-probe. Before this a receiver stuck past the cap left no Sentry trail
+/// at all: `diagnostics.rs` logs the stall at warn (no issue), and
+/// PostHog's `remote_video_stalled` carried no sharer-kind breakdown, so a
+/// stalled BROWSER share (which had no self-repair path until this same
+/// change) was indistinguishable from a native one that recovers on its
+/// own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteVideoStalledDiagnostic {
+    pub sharer_kind: SharerKindTag,
+    pub hold_reason: RemoteVideoHoldReasonTag,
+    pub probe_failures: ProbeFailureBucketTag,
+    pub since_last_frame: SinceLastFrameBucketTag,
 }
 
 /// Emitted once per share (at the first extraction failure for that share --
@@ -567,10 +585,52 @@ diagnostic_enum!(WgcBorderFailureTag {
     HideOther => "hide_other",
     NotApplicable => "not_applicable"
 });
+// Which Petal client published the stalled share. Mirrors
+// `transport::publisher::SharerClientKind`, which owns the actual
+// metadata-derived decision -- this module only names the Sentry-facing
+// string for it, deliberately NOT the reverse (that module must not depend
+// on this one's Sentry machinery; same split `BrowserUrlExtractionCauseTag`
+// documents above). A native sharer self-heals a stall via its own consumer
+// of `publish_window_repair_request`; a web sharer needed this commit to
+// gain that at all -- so this tag is what tells the two failure
+// populations apart in the field.
+diagnostic_enum!(SharerKindTag { Native => "native", Web => "web", NotApplicable => "not_applicable" });
+// Whether the receiver is currently holding this window's last good frame
+// (`compositor::hold_window_last_frame`) while past the starvation
+// probe-failure cap. Mirrors the one hold reason reachable from the
+// starvation path specifically -- NOT every hold reason the compositor
+// supports (e.g. a deliberate hide has nothing to do with starvation and
+// never reaches this event).
+diagnostic_enum!(RemoteVideoHoldReasonTag {
+    NoFrameWatchdog => "no_frame_watchdog",
+    NotHeld => "not_held",
+    NotApplicable => "not_applicable"
+});
+// Bucketed `consecutive_probe_failures` at the moment this event fires.
+// Always >= STARVATION_PROBE_FAILURE_CAP by construction (the event only
+// fires past the cap) -- the bucket exists so a future change to how often
+// this refires cannot silently explode Sentry's tag cardinality.
+diagnostic_enum!(ProbeFailureBucketTag {
+    AtCap => "at_cap",
+    OneAboveCap => "cap_plus_1",
+    ManyAboveCap => "cap_plus_2_or_more",
+    NotApplicable => "not_applicable"
+});
+// Bucketed wall-clock time since the last decoded frame, at the moment this
+// event fires. Coarse on purpose: this is a stall-SEVERITY signal for triage,
+// not a latency metric (the product's real latency number is measured
+// elsewhere, see CLAUDE.md's glass-to-glass note).
+diagnostic_enum!(SinceLastFrameBucketTag {
+    UnderOneMinute => "under_1m",
+    OneToFiveMinutes => "1_5m",
+    FiveToFifteenMinutes => "5_15m",
+    OverFifteenMinutes => "over_15m",
+    NotApplicable => "not_applicable"
+});
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 18] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 19] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -589,6 +649,7 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 18] = [
     "descriptor-pressure",
     "pointer-release-not-injected",
     "wgc-border-request-failed",
+    "remote-video-stalled",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -626,6 +687,10 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "pointer_release_failure_cause",
     "memory_top_owner",
     "wgc_border_failure",
+    "sharer_kind",
+    "remote_video_hold_reason",
+    "probe_failure_bucket",
+    "since_last_frame_bucket",
     "dedup_count_bucket",
 ];
 
@@ -660,6 +725,12 @@ const DESCRIPTOR_PRESSURE_MESSAGE_TAGS: &[&str] = &["descriptor_pressure_stage"]
 const POINTER_RELEASE_NOT_INJECTED_MESSAGE_TAGS: &[&str] =
     &["pointer_button", "pointer_release_failure_cause"];
 const WGC_BORDER_REQUEST_FAILED_MESSAGE_TAGS: &[&str] = &["wgc_border_failure"];
+const REMOTE_VIDEO_STALLED_MESSAGE_TAGS: &[&str] = &[
+    "sharer_kind",
+    "remote_video_hold_reason",
+    "probe_failure_bucket",
+    "since_last_frame_bucket",
+];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
     "camera_direction",
@@ -702,6 +773,7 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "descriptor-pressure" => Some(DESCRIPTOR_PRESSURE_MESSAGE_TAGS),
         "pointer-release-not-injected" => Some(POINTER_RELEASE_NOT_INJECTED_MESSAGE_TAGS),
         "wgc-border-request-failed" => Some(WGC_BORDER_REQUEST_FAILED_MESSAGE_TAGS),
+        "remote-video-stalled" => Some(REMOTE_VIDEO_STALLED_MESSAGE_TAGS),
         _ => None,
     }
 }
@@ -1049,6 +1121,7 @@ impl SentryDiagnosticEvent {
             Self::DescriptorPressure(_) => "descriptor-pressure",
             Self::PointerReleaseNotInjected(_) => "pointer-release-not-injected",
             Self::WgcBorderRequestFailed(_) => "wgc-border-request-failed",
+            Self::RemoteVideoStalled(_) => "remote-video-stalled",
         }
     }
 }
@@ -1105,6 +1178,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::CameraHealth(value) => {
             insert("session_role", value.role.tag());
@@ -1137,6 +1214,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::CameraSizeMismatchRecovery(value) => {
             insert("session_role", value.role.tag());
@@ -1169,6 +1250,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::PlayoutDeviceRepointed(value) => {
             insert("session_role", value.role.tag());
@@ -1201,6 +1286,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::RepublishStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1233,6 +1322,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::PublishDropStreak(value) => {
             insert("session_role", value.role.tag());
@@ -1265,6 +1358,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::WatchdogRepeatStorm(value) => {
             insert("session_role", value.role.tag());
@@ -1297,6 +1394,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::UpdateInstallFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1329,6 +1430,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::ShareOverlayCursorCaptureCleared(value) => {
             insert("session_role", value.role.tag());
@@ -1361,6 +1466,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerPortDead(value) => {
             insert("session_role", value.role.tag());
@@ -1393,6 +1502,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::PreviousSessionVanished(value) => {
             insert("session_role", "not_applicable");
@@ -1425,6 +1538,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::WindowServerRestartDetected(value) => {
             insert("session_role", value.role.tag());
@@ -1457,6 +1574,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::MemoryPressure(value) => {
             insert("session_role", "not_applicable");
@@ -1489,6 +1610,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", value.top_owner.tag());
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::DecoderAllocationFailed(value) => {
             insert("session_role", value.role.tag());
@@ -1521,6 +1646,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::BrowserUrlExtractionFailed(value) => {
             insert("session_role", "not_applicable");
@@ -1553,6 +1682,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::DescriptorPressure(value) => {
             insert("session_role", "not_applicable");
@@ -1585,6 +1718,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::PointerReleaseNotInjected(value) => {
             insert("session_role", "sharer");
@@ -1617,6 +1754,10 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", value.cause.tag());
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
         }
         SentryDiagnosticEvent::WgcBorderRequestFailed(value) => {
             insert("session_role", "sharer");
@@ -1649,6 +1790,46 @@ fn build_sentry_diagnostic_event(
             insert("pointer_release_failure_cause", "not_applicable");
             insert("memory_top_owner", "not_applicable");
             insert("wgc_border_failure", value.failure.tag());
+            insert("sharer_kind", "not_applicable");
+            insert("remote_video_hold_reason", "not_applicable");
+            insert("probe_failure_bucket", "not_applicable");
+            insert("since_last_frame_bucket", "not_applicable");
+        }
+        SentryDiagnosticEvent::RemoteVideoStalled(value) => {
+            insert("session_role", "receiver");
+            insert("source_selection", "not_applicable");
+            insert("capture_geometry", "not_applicable");
+            insert("configured_geometry", "not_applicable");
+            insert("pixel_format", "not_applicable");
+            insert("scale_bucket", "not_applicable");
+            insert("encoder_implementation", "not_applicable");
+            insert("stage_code", "not_applicable");
+            insert("camera_direction", "not_applicable");
+            insert("capture_cadence", "not_applicable");
+            insert("encode_cadence", "not_applicable");
+            insert("queue_backpressure", "not_applicable");
+            insert("decoder_render_health", "not_applicable");
+            insert("stall_cause", "not_applicable");
+            insert("recovery_action", "not_applicable");
+            insert("playout_transition", "not_applicable");
+            insert("storm_scope", "not_applicable");
+            insert("install_failure_stage", "not_applicable");
+            insert("install_failure_kind", "not_applicable");
+            insert("install_volume_boundary", "not_applicable");
+            insert("install_destination_class", "not_applicable");
+            insert("overlay_clear_reason", "not_applicable");
+            insert("crash_report_status", "not_applicable");
+            insert("pressure_level", "not_applicable");
+            insert("browser_url_extraction_cause", "not_applicable");
+            insert("descriptor_pressure_stage", "not_applicable");
+            insert("pointer_button", "not_applicable");
+            insert("pointer_release_failure_cause", "not_applicable");
+            insert("memory_top_owner", "not_applicable");
+            insert("wgc_border_failure", "not_applicable");
+            insert("sharer_kind", value.sharer_kind.tag());
+            insert("remote_video_hold_reason", value.hold_reason.tag());
+            insert("probe_failure_bucket", value.probe_failures.tag());
+            insert("since_last_frame_bucket", value.since_last_frame.tag());
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
@@ -5507,6 +5688,18 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
             "stream_paused" | "decode_stale" | "decode_zero" | "not_applicable"
         ),
         "dedup_count_bucket" => matches!(value, "1" | "2_9" | "10_99" | "100_plus"),
+        "sharer_kind" => matches!(value, "native" | "web" | "not_applicable"),
+        "remote_video_hold_reason" => {
+            matches!(value, "no_frame_watchdog" | "not_held" | "not_applicable")
+        }
+        "probe_failure_bucket" => matches!(
+            value,
+            "at_cap" | "cap_plus_1" | "cap_plus_2_or_more" | "not_applicable"
+        ),
+        "since_last_frame_bucket" => matches!(
+            value,
+            "under_1m" | "1_5m" | "5_15m" | "over_15m" | "not_applicable"
+        ),
         _ => false,
     }
 }
@@ -9415,6 +9608,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn remote_video_stalled_event_carries_the_stall_tags_and_is_valid() {
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::RemoteVideoStalled(RemoteVideoStalledDiagnostic {
+                sharer_kind: SharerKindTag::Web,
+                hold_reason: RemoteVideoHoldReasonTag::NoFrameWatchdog,
+                probe_failures: ProbeFailureBucketTag::AtCap,
+                since_last_frame: SinceLastFrameBucketTag::OneToFiveMinutes,
+            }),
+            "1",
+        );
+        assert_eq!(event.tags.get("event_name").map(String::as_str), Some("remote-video-stalled"));
+        assert_eq!(event.tags.get("sharer_kind").map(String::as_str), Some("web"));
+        assert_eq!(
+            event.tags.get("remote_video_hold_reason").map(String::as_str),
+            Some("no_frame_watchdog")
+        );
+        assert_eq!(event.tags.get("probe_failure_bucket").map(String::as_str), Some("at_cap"));
+        assert_eq!(
+            event.tags.get("since_last_frame_bucket").map(String::as_str),
+            Some("1_5m")
+        );
+        assert_eq!(
+            event.message.as_deref(),
+            Some(
+                "diagnostic: remote-video-stalled sharer_kind=web remote_video_hold_reason=no_frame_watchdog \
+                 probe_failure_bucket=at_cap since_last_frame_bucket=1_5m"
+            ),
+            "the title must name all four stall tags so Sentry groups/reads it usefully"
+        );
+        assert!(valid_sentry_diagnostic_event(&event));
+        assert!(scrub_event_for_sentry(event).is_some());
+    }
+
+    /// Every OTHER event must still carry `sharer_kind` (and its stall-only
+    /// siblings), set to `not_applicable` -- same fail-closed tag-count
+    /// reasoning `every_other_diagnostic_event_reports_a_not_applicable_owner`
+    /// documents above for `memory_top_owner`.
+    #[test]
+    fn every_other_diagnostic_event_reports_not_applicable_stall_tags() {
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::DescriptorPressure(DescriptorPressureDiagnostic {
+                stage: DescriptorPressureStageTag::Exhausted,
+            }),
+            "1",
+        );
+        for key in ["sharer_kind", "remote_video_hold_reason", "probe_failure_bucket", "since_last_frame_bucket"] {
+            assert_eq!(event.tags.get(key).map(String::as_str), Some("not_applicable"));
+        }
+        assert!(valid_sentry_diagnostic_event(&event));
+    }
+
     /// Pins #915's new event by name rather than relying solely on the
     /// generic sweep above -- a future rename or removal of this specific
     /// arm should fail here with a message that names the event, not just
@@ -9432,6 +9677,26 @@ mod tests {
             )
         });
         assert_eq!(keys, ["browser_url_extraction_cause"]);
+    }
+
+    #[test]
+    fn remote_video_stalled_is_a_registered_diagnostic_event() {
+        assert!(
+            DIAGNOSTIC_EVENT_NAMES.contains(&"remote-video-stalled"),
+            "remote-video-stalled must be in DIAGNOSTIC_EVENT_NAMES"
+        );
+        let keys = diagnostic_message_tags("remote-video-stalled").unwrap_or_else(|| {
+            panic!("remote-video-stalled has no diagnostic_message_tags arm; it would ship to Sentry with no title (#788)")
+        });
+        assert_eq!(
+            keys,
+            [
+                "sharer_kind",
+                "remote_video_hold_reason",
+                "probe_failure_bucket",
+                "since_last_frame_bucket",
+            ]
+        );
     }
 
     /// Round-trips one `BrowserUrlExtractionFailed` event through the exact

@@ -424,6 +424,21 @@ test('a shared source also advertises a positive window scale (#819)', () => {
   assert.equal(JSON.parse(cleared).petalWindowScales['7'], undefined);
 });
 
+test('every share stamps the web-sharer-client marker, and it outlives a stopped share', () => {
+  // publisher.rs's shared_window_sharer_client_from_metadata reads this to
+  // tell a stalled WEB share apart from a stalled native one -- the receiver
+  // telemetry's sharer_kind tag depends on it. Unlike petalWindowKinds/
+  // petalWindowScales this is participant-level, not per-window, and must
+  // NOT be cleared when a share stops: the process is still a web client for
+  // the rest of the session, and clearing it would make the very next
+  // stall report -- the one right after this window's own share just ended
+  // -- misreport as native.
+  const started = mergeSharedSourceMetadata(undefined, 7, 'window');
+  assert.equal(JSON.parse(started).petalSharerClient, 'web');
+  const stopped = mergeSharedSourceMetadata(started, 7, null);
+  assert.equal(JSON.parse(stopped).petalSharerClient, 'web');
+});
+
 test('shared source kind metadata matches the shared native/web fixture', () => {
   const vector = contractFixture.sourceKindMetadata;
   assert.equal(sharedSourceKindFromMetadata(vector.metadata, vector.displayWindowId), 'display');

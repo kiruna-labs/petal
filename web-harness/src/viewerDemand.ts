@@ -6,6 +6,7 @@ import { VIEWER_DEMAND_TOPIC, type ViewerDemandMessage } from './trackNames';
 const HEARTBEAT_MS = 2000;
 const RESIZE_DEBOUNCE_MS = 150;
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 export function viewerDemandPixelGeometry(
   logicalWidth: number,
@@ -104,7 +105,7 @@ export function shareMediaSize(
 }
 
 export function setupViewerDemand(ctx: HarnessContext) {
-  const { state } = ctx;
+  const { state, cb } = ctx;
   const observedTargets = new WeakSet<Element>();
   const resizeTimers = new WeakMap<Element, ReturnType<typeof setTimeout>>();
   const resizeObserver = typeof ResizeObserver === 'function'
@@ -337,10 +338,40 @@ export function setupViewerDemand(ctx: HarnessContext) {
     }
   }
 
+  /**
+   * Inbound side of `petal.viewer-demand` -- a web client only ever
+   * published this topic before; now it also consumes it as a SHARER. The
+   * one packet kind that matters here is a receiver's starvation-watchdog
+   * repair request (`needsRepublish: true`, native's
+   * `publish_window_repair_request` in viewer_demand.rs, sent both from the
+   * no-frame watchdog and, past the probe-failure cap, from the recovery
+   * probe itself in subscriber.rs) -- a native sharer already self-heals via
+   * its own consumer of the same packet (#169); a web sharer did not, which
+   * is the other half of the "receiver never recovers a stalled browser
+   * share" defect. Every other packet on this topic (a viewer's own demand
+   * heartbeat, which a sharer also receives) is intentionally ignored here.
+   */
+  function handleViewerDemandPayload(payload: Uint8Array, senderIdentity?: string) {
+    if (!state.room) return;
+    let message: ViewerDemandMessage;
+    try {
+      message = JSON.parse(decoder.decode(payload)) as ViewerDemandMessage;
+    } catch {
+      return;
+    }
+    if (!message || typeof message !== 'object' || !message.needsRepublish) return;
+    if (message.targetUserId !== state.room.localParticipant.identity) return;
+    const windowId = Number(message.windowId);
+    if (!Number.isSafeInteger(windowId) || windowId < 1 || windowId > 0xffff_ffff) return;
+    const requesterIdentity = senderIdentity ?? message.viewerId ?? 'unknown';
+    void cb.repairScreenShareForWindow(windowId, requesterIdentity);
+  }
+
   return {
     publishViewerDemand,
     publishViewerDemandForPublication,
     startViewerDemandHeartbeat,
     stopViewerDemandHeartbeat,
+    handleViewerDemandPayload,
   };
 }
