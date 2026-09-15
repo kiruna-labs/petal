@@ -71,7 +71,7 @@ export function formatReadout(layout: GalleryGeometry): string {
   const tileW = Math.round(layout.tileWidth);
   const tileH = Math.round(layout.tileHeight);
   const overflow = layout.overflow ? ' · overflow' : '';
-  return `${layout.columns}x${layout.rows} · ${fillPct}% fill · ${tileW}x${tileH}px tile${overflow}`;
+  return `${layout.columns}x${layout.rows} · ${fillPct}% fill · ${tileW}x${tileH}px tile · gap ${layout.gap}px${overflow}`;
 }
 
 interface PaneDom {
@@ -118,7 +118,7 @@ function buildShell(root: HTMLElement) {
             <option value="row">row</option>
           </select>
         </label>
-        <label>Gap
+        <label>Base gap
           <input type="range" id="gap" min="4" max="40" step="1" />
           <span class="control-value" id="gap-val"></span>
         </label>
@@ -178,11 +178,14 @@ function syncTileCount(pane: PaneDom, count: number) {
   }
 }
 
-function applyPaneLayout(pane: PaneDom, layout: GalleryGeometry, gap: number) {
+function applyPaneLayout(pane: PaneDom, layout: GalleryGeometry) {
   pane.frameEl.style.padding = `${pane.skin.pad}px`;
   pane.tilesEl.style.gridTemplateColumns = `repeat(${layout.columns}, ${layout.tileWidth}px)`;
   pane.tilesEl.style.gridAutoRows = `${layout.tileHeight}px`;
-  pane.tilesEl.style.gap = `${gap}px`;
+  // The packer's OWN gap (tightened for compact/tiny cells), not the base
+  // gap the user set -- rendering the base gap here would visually disagree
+  // with the cell sizes computeGalleryLayout already assumed.
+  pane.tilesEl.style.gap = `${layout.gap}px`;
   pane.readoutEl.textContent = formatReadout(layout);
   pane.readoutEl.classList.toggle('is-overflow', layout.overflow);
 }
@@ -249,7 +252,7 @@ export function mountLayoutLab(root: HTMLElement) {
       const layout = computePaneLayout(pane.skin, controls);
       reflowControllers[i].withAnimation(() => {
         syncTileCount(pane, controls.count);
-        applyPaneLayout(pane, layout, controls.gap);
+        applyPaneLayout(pane, layout);
       });
     }
   }

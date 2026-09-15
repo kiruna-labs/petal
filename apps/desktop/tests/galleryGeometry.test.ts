@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { computeGalleryLayout, scoreGalleryCandidate } from '@petal/shared/logic/galleryGeometry';
+import {
+  computeGalleryLayout,
+  GAP_COMPACT,
+  GAP_TINY,
+  scoreGalleryCandidate
+} from '@petal/shared/logic/galleryGeometry';
 
 // #P0: apps/desktop/src/lib/galleryLayout.ts used to hard-code a 2x2 grid for
 // 3-4 participants and start its column search at 2, so a single column was
@@ -129,4 +134,50 @@ test('count <= 1 keeps the wider density thresholds', () => {
   assert.equal(computeGalleryLayout(1, 240, 165).compact, true);
   assert.equal(computeGalleryLayout(1, 260, 175).compact, false);
   assert.equal(computeGalleryLayout(1, 180, 125).tiny, true);
+});
+
+// Owner feedback: tighten the gap as tiles get small. The orchestrator's
+// suggested "4@380x360 (compact)" case does NOT land in the compact tier
+// under the real algorithm -- 4 participants there resolve to 2x2 with
+// cellWidth=181/cellHeight=171 (both above the 170/105 compact thresholds),
+// so it stays at the base gap. Verified with the real function and swapped
+// for 4@290x250, which genuinely lands compact-but-not-tiny (cell
+// 136x116 at the base gap). Not tuning the module to fit the suggested
+// numbers -- this file's own header already commits to that discipline.
+test('a compact (but not tiny) layout tightens the gap to GAP_COMPACT', () => {
+  const layout = computeGalleryLayout(4, 290, 250);
+  assert.deepEqual([layout.columns, layout.rows], [2, 2]);
+  assert.equal(layout.compact, true);
+  assert.equal(layout.tiny, false);
+  assert.equal(layout.gap, GAP_COMPACT);
+  // The tighter gap must actually enlarge the tile versus the base gap,
+  // not just report a different number -- pin the real before/after pixels.
+  const atBaseGap = scoreGalleryCandidate(4, 2, 290, 250, 18, 16 / 9);
+  assert.ok(
+    layout.tileWidth > atBaseGap.tileWidth,
+    `tile should grow once the gap tightens: ${layout.tileWidth} should exceed ${atBaseGap.tileWidth}`
+  );
+});
+
+test('a tiny layout tightens the gap all the way to GAP_TINY', () => {
+  const layout = computeGalleryLayout(9, 380, 360);
+  assert.deepEqual([layout.columns, layout.rows], [3, 3]);
+  assert.equal(layout.tiny, true);
+  assert.equal(layout.gap, GAP_TINY);
+});
+
+test('a roomy layout keeps the base gap', () => {
+  const layout = computeGalleryLayout(4, 900, 500);
+  assert.equal(layout.compact, false);
+  assert.equal(layout.tiny, false);
+  assert.equal(layout.gap, 18);
+});
+
+test("gap tiering applies to a forced 'column' arrangement too", () => {
+  const layout = computeGalleryLayout(20, 400, 600, { arrangement: 'column' });
+  assert.equal(layout.gap, GAP_TINY);
+  // Unchanged from the pre-gap-tiering behavior: the minTileHeight clamp
+  // still wins regardless of which gap tier fed into it.
+  assert.equal(layout.overflow, true);
+  assert.equal(layout.tileHeight, 96);
 });

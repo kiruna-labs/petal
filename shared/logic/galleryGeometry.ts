@@ -13,7 +13,9 @@
 export type GalleryArrangement = 'auto' | 'column' | 'row';
 
 export interface GalleryGeometryOptions {
-  /** Pixel gap between tiles, both axes. */
+  /** Base pixel gap between tiles, both axes -- the density tiering below
+   * (`GAP_COMPACT`/`GAP_TINY`) tightens this down as cells get small; it
+   * never widens it. */
   gap?: number;
   /** width / height a single tile wants to render at. */
   tileAspect?: number;
@@ -36,6 +38,12 @@ export interface GalleryGeometry {
   cellHeight: number;
   tileWidth: number;
   tileHeight: number;
+  /** The gap actually used to compute this geometry -- `opts.gap` (or its
+   * default) unless the cells came out compact/tiny, in which case this is
+   * `GAP_COMPACT`/`GAP_TINY`. Callers should render their CSS grid gap from
+   * THIS field, not from the `gap` they passed in, or the rendered spacing
+   * will disagree with what the packer assumed. */
+  gap: number;
   /** Fraction of the container area the packed tiles cover, 0..1. */
   fill: number;
   /** True when a forced column/row arrangement had to clamp tile size
@@ -64,6 +72,10 @@ const DEFAULT_SWITCH_THRESHOLD = 0.08;
 const DEFAULT_MIN_TILE_HEIGHT = 96;
 /** Fraction of a candidate's fill subtracted per empty (unfilled) cell. */
 const EMPTY_CELL_PENALTY = 0.08;
+/** Owner feedback: tighten the gap as tiles get small, rather than eating
+ * more of an already-cramped cell into whitespace. */
+export const GAP_COMPACT = 12;
+export const GAP_TINY = 8;
 
 function safeDimension(value: number, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -86,6 +98,18 @@ function densityFlags(cellWidth: number, cellHeight: number) {
     compact: cellWidth < 170 || cellHeight < 105,
     tiny: cellWidth < 132 || cellHeight < 82
   };
+}
+
+/** The effective gap for a cell of the given density tier. Deliberately a
+ * one-step lookup, not a loop: a smaller gap only enlarges a cell (never
+ * shrinks it), so re-deriving the tier from the enlarged cell could only
+ * move the same direction or stay put -- iterating to a fixed point buys
+ * nothing here and risks a gap that itself oscillates as inputs wobble by a
+ * pixel. Callers decide the tier ONCE from the base-gap cell size. */
+function tierGap(baseGap: number, flags: { compact: boolean; tiny: boolean }): number {
+  if (flags.tiny) return GAP_TINY;
+  if (flags.compact) return GAP_COMPACT;
+  return baseGap;
 }
 
 /**
@@ -157,14 +181,17 @@ function forcedLineCandidate(
   count: number,
   width: number,
   height: number,
-  gap: number,
+  baseGap: number,
   aspect: number,
   arrangement: 'column' | 'row',
   minTileHeight: number
 ): GalleryGeometry {
   const columns = arrangement === 'column' ? 1 : count;
   const rows = arrangement === 'column' ? count : 1;
-  const cell = cellSize(columns, rows, width, height, gap);
+  const baseCell = cellSize(columns, rows, width, height, baseGap);
+  const baseFlags = densityFlags(baseCell.width, baseCell.height);
+  const gap = tierGap(baseGap, baseFlags);
+  const cell = gap === baseGap ? baseCell : cellSize(columns, rows, width, height, gap);
   const tile = fittedTileSize(cell.width, cell.height, aspect);
   let overflow = false;
   let tileWidth = tile.width;
@@ -184,6 +211,7 @@ function forcedLineCandidate(
     cellHeight: cell.height,
     tileWidth,
     tileHeight,
+    gap,
     fill,
     overflow,
     ...flags
@@ -207,6 +235,8 @@ export function computeGalleryLayout(
   const safeHeight = safeDimension(height, DEFAULT_HEIGHT);
 
   if (safeCount <= 1) {
+    // A single tile has no gap to tighten -- there is nothing between it and
+    // itself -- so this is the one case where `gap` is always the base.
     const tile = fittedTileSize(safeWidth, safeHeight, aspect);
     const containerArea = safeWidth * safeHeight;
     const fill = containerArea > 0 ? (tile.width * tile.height) / containerArea : 0;
@@ -217,6 +247,7 @@ export function computeGalleryLayout(
       cellHeight: safeHeight,
       tileWidth: tile.width,
       tileHeight: tile.height,
+      gap,
       fill,
       overflow: false,
       compact: safeWidth < 250 || safeHeight < 170,
@@ -250,15 +281,26 @@ export function computeGalleryLayout(
     }
   }
 
-  const flags = densityFlags(chosen.cellWidth, chosen.cellHeight);
+  // Gap tiering: decide the tier ONCE from the winning shape's base-gap cell
+  // size, then recompute that SAME shape (same columns/rows -> same rows =
+  // ceil(count/columns)) at the tier gap. Never re-derive the tier from the
+  // recomputed (larger) cell -- see tierGap's comment for why that would be
+  // pointless to iterate, not merely undesirable.
+  const baseFlags = densityFlags(chosen.cellWidth, chosen.cellHeight);
+  const effectiveGap = tierGap(gap, baseFlags);
+  const final = effectiveGap === gap
+    ? chosen
+    : scoreGalleryCandidate(safeCount, chosen.columns, safeWidth, safeHeight, effectiveGap, aspect);
+  const flags = densityFlags(final.cellWidth, final.cellHeight);
   return {
-    columns: chosen.columns,
-    rows: chosen.rows,
-    cellWidth: chosen.cellWidth,
-    cellHeight: chosen.cellHeight,
-    tileWidth: chosen.tileWidth,
-    tileHeight: chosen.tileHeight,
-    fill: chosen.fill,
+    columns: final.columns,
+    rows: final.rows,
+    cellWidth: final.cellWidth,
+    cellHeight: final.cellHeight,
+    tileWidth: final.tileWidth,
+    tileHeight: final.tileHeight,
+    gap: effectiveGap,
+    fill: final.fill,
     overflow: false,
     ...flags
   };

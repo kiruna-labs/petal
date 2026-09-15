@@ -335,7 +335,7 @@
     return layout;
   });
   const smartGridStyle = $derived(
-    `--gallery-cols: ${smartGridLayout.columns}; --gallery-rows: ${smartGridLayout.rows}; --gallery-tail-width: ${smartGridLayout.tileWidth}px; --gallery-tile-width: ${smartGridLayout.tileWidth}px; --gallery-tile-height: ${smartGridLayout.tileHeight}px;`
+    `--gallery-cols: ${smartGridLayout.columns}; --gallery-rows: ${smartGridLayout.rows}; --gallery-tail-width: ${smartGridLayout.tileWidth}px; --gallery-tile-width: ${smartGridLayout.tileWidth}px; --gallery-tile-height: ${smartGridLayout.tileHeight}px; --gallery-gap: ${smartGridLayout.gap}px;`
   );
   const layoutToggleLabel = $derived(
     layoutMode === 'grid' ? 'Switch to spotlight' : 'Switch to gallery grid'
