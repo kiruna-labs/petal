@@ -1369,6 +1369,15 @@ pub(crate) fn start_compositor_feed(
                     let generation_for_frames = generation.clone();
                     let window_states_for_frames = window_states.clone();
                     let receive_key_for_frames = receive_key.clone();
+                    // Resolved once here (not re-read live per probe): a
+                    // share's sharer-client identity does not change over the
+                    // life of one publication, and re-fetching it would need
+                    // a `room` handle this per-track spawn does not
+                    // otherwise carry.
+                    let sharer_kind_for_frames =
+                        crate::transport::publisher::shared_window_sharer_client_from_metadata(
+                            &participant.metadata(),
+                        );
                     tokio::spawn(async move {
                         // #907: cloned before `.rtc_track()` below consumes
                         // `video_track` -- this handle drives the periodic
@@ -1399,6 +1408,14 @@ pub(crate) fn start_compositor_feed(
                         let mut starved_since: Option<std::time::Instant> = None;
                         let mut consecutive_probe_failures: u32 = 0;
                         let mut probe_outstanding = false;
+                        // Gates `record_remote_video_stalled` to ONCE per
+                        // stall episode (the diagnostic event, not the
+                        // repair-request resend, which still fires on every
+                        // post-cap probe). Reset alongside
+                        // `consecutive_probe_failures` when a real frame
+                        // proves the stall is over, so a LATER stall on the
+                        // same window/loop reports again.
+                        let mut stall_diagnostic_sent = false;
                         let mut last_quality_check = std::time::Instant::now();
                         let mut prev_qp_sum: u64 = 0;
                         let mut prev_frames_decoded: u32 = 0;
@@ -1600,6 +1617,23 @@ pub(crate) fn start_compositor_feed(
                                                     &app_for_frames,
                                                     window_id,
                                                 );
+                                                // Once per stall episode, not once per (repeated,
+                                                // 120s-cadenced) repair request -- see
+                                                // `stall_diagnostic_sent`'s declaration.
+                                                if !stall_diagnostic_sent {
+                                                    stall_diagnostic_sent = true;
+                                                    crate::diagnostics::record_remote_video_stalled(
+                                                        sharer_kind_for_frames,
+                                                        // The never-black-frame guarantee means this
+                                                        // window is, by construction, still showing
+                                                        // its last decoded frame at this point -- no
+                                                        // separate compositor query needed.
+                                                        true,
+                                                        consecutive_probe_failures
+                                                            .saturating_sub(STARVATION_PROBE_FAILURE_CAP),
+                                                        last_frame_seen.elapsed(),
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -1627,6 +1661,7 @@ pub(crate) fn start_compositor_feed(
                                     if probe_outstanding {
                                         probe_outstanding = false;
                                         consecutive_probe_failures = 0;
+                                        stall_diagnostic_sent = false;
                                     }
                                 }
                                 _ => {}

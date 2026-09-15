@@ -2317,6 +2317,14 @@ const PETAL_WINDOW_REGIONS_METADATA_KEY: &str = "petalWindowRegions";
 /// receiver's affordance -- never the authorization itself, which stays on the
 /// host (`remote_control.rs`) where a peer cannot influence it.
 pub const PETAL_WINDOW_REMOTE_CONTROL_METADATA_KEY: &str = "petalWindowRemoteControl";
+/// Marks a participant's metadata as coming from the web harness (mirrors
+/// web-harness/src/trackNames.ts's PETAL_SHARER_CLIENT_METADATA_KEY -- keep
+/// the two in sync by hand). This crate never writes it: absence means
+/// native. `remote_control_allowed` above cannot stand in for this -- a
+/// NATIVE sharer can also lock remote control off per-share
+/// (`set_share_remote_control_allowed`), so that flag means "no control
+/// right now", not "not native".
+pub const PETAL_SHARER_CLIENT_METADATA_KEY: &str = "petalSharerClient";
 pub const PETAL_IDENTITY_PALETTE_INDEX_METADATA_KEY: &str = "petalIdentityPaletteIndex";
 /// #875: the sharer's currently-shared window ids, front-to-back (index 0 =
 /// frontmost), as a JSON array. Older sharers omit this key entirely --
@@ -2722,6 +2730,34 @@ pub fn shared_window_remote_control_allowed_from_metadata(metadata: &str, window
         .and_then(|entries| entries.get(window_id.to_string()))
         .and_then(|value| value.as_bool())
         .unwrap_or(true)
+}
+
+/// Which kind of Petal client published a share, from
+/// `PETAL_SHARER_CLIENT_METADATA_KEY`. A plain, closed value owned by this
+/// module -- not the Sentry-facing tag type (`logging::SharerKindTag`),
+/// which converts from this rather than this module depending on logging's
+/// Sentry machinery (the same split `BrowserUrlExtractionCauseTag`'s doc
+/// comment documents elsewhere in this codebase).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharerClientKind {
+    Native,
+    Web,
+}
+
+/// Absence of the key means native (this crate never writes it, and every
+/// sharer predating this key IS native); a present but unrecognized value
+/// also degrades to Native, matching that same pre-key default.
+pub fn shared_window_sharer_client_from_metadata(metadata: &str) -> SharerClientKind {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata) else {
+        return SharerClientKind::Native;
+    };
+    match value
+        .get(PETAL_SHARER_CLIENT_METADATA_KEY)
+        .and_then(|value| value.as_str())
+    {
+        Some("web") => SharerClientKind::Web,
+        _ => SharerClientKind::Native,
+    }
 }
 
 /// metadata). Unknown/absent defaults to FullControl for displays and
@@ -8184,6 +8220,34 @@ mod tests {
             r#"{"petalWindowRemoteControl":{"7":false}}"#,
             7
         ));
+    }
+
+    #[test]
+    fn sharer_client_defaults_to_native_when_the_key_is_absent() {
+        // This crate never writes the key -- absence must mean native, not
+        // "unknown". Every sharer that predates this key IS native.
+        for metadata in [
+            "",
+            "not json",
+            "[]",
+            r#"{"petalWindowScales":{"7":2.0}}"#,
+            r#"{"petalSharerClient":"desktop"}"#,
+            r#"{"petalSharerClient":123}"#,
+        ] {
+            assert_eq!(
+                shared_window_sharer_client_from_metadata(metadata),
+                SharerClientKind::Native,
+                "{metadata:?} must default to Native"
+            );
+        }
+    }
+
+    #[test]
+    fn sharer_client_recognizes_the_web_harness_marker() {
+        assert_eq!(
+            shared_window_sharer_client_from_metadata(r#"{"petalSharerClient":"web"}"#),
+            SharerClientKind::Web
+        );
     }
 
     #[test]
