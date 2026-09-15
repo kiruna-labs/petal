@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Gallery layout lab</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+        background: #0a0a0b;
+        color: rgba(255, 255, 255, 0.88);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      .lab-shell {
+        /* No max-width: a frame can be sized up to the 2000/1800px slider
+           caps, and .panes below scrolls sideways rather than this shell
+           trying to squeeze two such frames into a fixed width. */
+        margin: 0 auto;
+        padding: 28px 24px 48px;
+        display: grid;
+        gap: 20px;
+      }
+      header h1 {
+        font-size: 22px;
+        margin: 0 0 6px;
+      }
+      header p {
+        margin: 0;
+        max-width: 720px;
+        line-height: 1.5;
+        color: rgba(255, 255, 255, 0.62);
+        font-size: 13px;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 14px;
+        padding: 14px 16px;
+        background: #16171a;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 12px;
+      }
+      .controls label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.75);
+        white-space: nowrap;
+      }
+      .controls input[type='range'] {
+        width: 120px;
+      }
+      .controls select {
+        font: inherit;
+        color: rgba(255, 255, 255, 0.88);
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        padding: 4px 8px;
+      }
+      .control-value {
+        font: 600 11px ui-monospace, monospace;
+        color: rgba(255, 255, 255, 0.88);
+        min-width: 2.5em;
+      }
+      .add-remove {
+        display: inline-flex;
+        gap: 6px;
+      }
+      .add-remove button,
+      .presets button {
+        font: 600 11px ui-monospace, monospace;
+        color: rgba(255, 255, 255, 0.75);
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        padding: 5px 10px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .add-remove button:hover,
+      .presets button:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+      }
+      .presets {
+        display: inline-flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .panes {
+        /* Each frame is sized directly by the width/height sliders (up to
+           2000x1800px), not by its grid cell -- an auto-fit grid track was
+           narrower than that at almost every slider/preset value, so the
+           frame overflowed its cell and the two panes visually overlapped.
+           A wrapping flex row where each pane shrink-wraps its own frame
+           can never do that; overflow-x lets a single oversized frame
+           scroll instead of pushing the page body sideways. */
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 20px;
+        overflow-x: auto;
+      }
+      .pane {
+        flex: 0 0 auto;
+      }
+      .pane h2 {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 10px;
+        font-size: 14px;
+        margin: 0 0 10px;
+      }
+      .readout {
+        font: 500 11.5px ui-monospace, monospace;
+        color: rgba(255, 255, 255, 0.62);
+      }
+      .readout.is-overflow {
+        color: #ffb37a;
+      }
+      .frame {
+        resize: both;
+        overflow: auto;
+        border: 1px dashed rgba(255, 255, 255, 0.14);
+        border-radius: 10px;
+        min-width: 220px;
+        min-height: 160px;
+      }
+      .frame-web {
+        background: #0b0c0e;
+      }
+      .frame-native {
+        background: #0b0c0e;
+      }
+      .tiles {
+        display: grid;
+        justify-content: center;
+        align-content: center;
+        min-height: 100%;
+      }
+      .tile {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+      .tile-web {
+        background: #16171a;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 16px;
+        color: rgba(255, 255, 255, 0.4);
+        font: 500 12px ui-monospace, monospace;
+      }
+      .tile-native {
+        background: linear-gradient(160deg, #202124, #17181b);
+        border-radius: 16px;
+        color: rgba(255, 255, 255, 0.85);
+        font: 600 13px -apple-system, system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="lab-app"></div>
+    <script type="module" src="/src/layoutLab.ts"></script>
+  </body>
+</html>

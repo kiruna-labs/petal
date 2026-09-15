@@ -5,6 +5,8 @@
   without a design tool. Throwaway scaffolding — fine to leave under /dev/.
 -->
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
   import ControlButton from '$lib/components/ControlButton.svelte';
   import Pill from '@petal/shared/ui/components/Pill.svelte';
   import DensityToggle from '$lib/components/DensityToggle.svelte';
@@ -60,6 +62,34 @@
 
   let galleryCount = $state(6);
   const galleryParticipants = $derived(makeGalleryParticipants(galleryCount));
+
+  // Gallery packing geometry probe (#P0): lets the frame be resized to an
+  // exact width/height (typed or a preset) instead of only free-dragging,
+  // and shows the shared packer's own numbers next to the rendered result so
+  // a bad shape is obvious without doing the arithmetic by hand.
+  let galleryFrameEl = $state<HTMLDivElement>();
+  let galleryFrameWidth = $state(960);
+  let galleryFrameHeight = $state(560);
+  const GALLERY_FRAME_PRESETS: Array<{ label: string; width: number; height: number }> = [
+    { label: '840x560', width: 840, height: 560 },
+    { label: '1100x1750', width: 1100, height: 1750 },
+    { label: '380x360', width: 380, height: 360 },
+    { label: '1600x900', width: 1600, height: 900 }
+  ];
+  const galleryReadout = $derived(computeGalleryLayout(galleryCount, galleryFrameWidth, galleryFrameHeight));
+
+  onMount(() => {
+    const frame = galleryFrameEl;
+    if (!frame || typeof ResizeObserver === 'undefined') return;
+    // Keeps the readout honest when the frame is free-dragged via its own
+    // `resize: both` handle, not just when the number inputs are used.
+    const observer = new ResizeObserver(() => {
+      galleryFrameWidth = Math.round(frame.clientWidth);
+      galleryFrameHeight = Math.round(frame.clientHeight);
+    });
+    observer.observe(frame);
+    return () => observer.disconnect();
+  });
 
   let pointerIdle = $state(false);
   let pointerPulse = $state(0);
@@ -437,7 +467,35 @@
         <button class="count-btn" onclick={() => (galleryCount = Math.min(100, galleryCount + 1))} aria-label="more participants">+</button>
       </span>
     </h2>
-    <div class="gallery-frame">
+    <div class="gallery-geometry-controls">
+      <label class="geometry-field">
+        w
+        <input type="number" min="120" max="4000" bind:value={galleryFrameWidth} />
+      </label>
+      <label class="geometry-field">
+        h
+        <input type="number" min="120" max="4000" bind:value={galleryFrameHeight} />
+      </label>
+      {#each GALLERY_FRAME_PRESETS as preset (preset.label)}
+        <button
+          class="preset-btn"
+          onclick={() => {
+            galleryFrameWidth = preset.width;
+            galleryFrameHeight = preset.height;
+          }}
+        >
+          {preset.label}
+        </button>
+      {/each}
+      <span class="geometry-readout">
+        {galleryReadout.columns}x{galleryReadout.rows} · {Math.round(galleryReadout.fill * 100)}% fill · {Math.round(galleryReadout.tileWidth)}x{Math.round(galleryReadout.tileHeight)}px tile
+      </span>
+    </div>
+    <div
+      class="gallery-frame"
+      bind:this={galleryFrameEl}
+      style="width: {galleryFrameWidth}px; height: {galleryFrameHeight}px;"
+    >
       <Gallery
         participants={galleryParticipants}
         micMuted={micMuted}
@@ -459,7 +517,7 @@
         }}
       />
     </div>
-    <p class="note">Resize the browser window to confirm the tile grid reflows without breaking at small/large widths (SPEC.md §4.7).</p>
+    <p class="note">Resize the frame (drag its corner, type width/height, or use a preset) to confirm the tile grid reflows without breaking at small/large sizes (SPEC.md §4.7).</p>
   </section>
 
   <!-- ============================================================ -->
@@ -981,12 +1039,61 @@
   }
 
   .gallery-frame {
-    width: 100%;
-    max-width: 960px;
-    height: 560px;
+    /* Width/height come from inline style (bound to the geometry-probe
+       state above) so the number inputs and presets can drive the frame
+       past its old 960px cap -- 1100x1750 is one of the presets. */
+    max-width: 4000px;
     resize: both;
     overflow: auto;
     border: 1px dashed var(--hairline-strong);
+  }
+
+  .gallery-geometry-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .geometry-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font: 500 10.5px var(--font-mono);
+    color: var(--text-muted);
+  }
+
+  .geometry-field input {
+    width: 64px;
+    font: 500 11px var(--font-mono);
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--hairline-strong);
+    border-radius: var(--radius-chip);
+    padding: 3px 6px;
+  }
+
+  .preset-btn {
+    font: 600 10.5px var(--font-mono);
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--hairline-strong);
+    border-radius: var(--radius-chip);
+    padding: 3px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .preset-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+  }
+
+  .geometry-readout {
+    font: 500 10.5px var(--font-mono);
+    color: var(--text-muted);
+    white-space: nowrap;
   }
 
   .filmstrip-frame {
