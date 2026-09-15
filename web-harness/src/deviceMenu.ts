@@ -5,6 +5,11 @@ export type DeviceMenuKind = 'audio' | 'camera';
 export interface DeviceOption {
   id: string;
   label: string;
+  // True on the concrete device optionsFromDevices folded the browser's
+  // 'default' pseudo-entry onto. Lets resolveSelectedOptionId map an active
+  // or persisted id of literally 'default' onto the row that's actually
+  // selectable (see #the 'default' id itself, not just the duplicate row).
+  systemDefault?: boolean;
 }
 
 export interface DeviceMenuHandlers {
@@ -58,6 +63,7 @@ export function optionsFromDevices(devices: MediaDeviceInfo[], fallback: string)
     .map((option) => ({
       id: option.id,
       label: systemDefaultTwins.has(option.id) ? `${option.label} (System Default)` : option.label,
+      ...(systemDefaultTwins.has(option.id) ? { systemDefault: true } : {}),
     }));
 }
 
@@ -70,8 +76,19 @@ export function resolvePreferredDeviceId(activeId: string, persistedId: string):
   return activeId || persistedId;
 }
 
+// The active/persisted id can itself BE the literal string 'default' --
+// Chrome reports it from a track opened with deviceId 'default', from
+// room.getActiveDevice(), and older sessions persisted it before this file
+// folded the duplicate row away. Map it onto the folded twin (if one
+// exists) before checking the id is still a real option, or this falls
+// through to options[0] again -- the exact guess this file removes, for the
+// single most common setup (nothing manually chosen).
 export function resolveSelectedOptionId(options: DeviceOption[], preferredId: string): string {
-  return options.some((option) => option.id === preferredId) ? preferredId : options[0]?.id ?? '';
+  const mappedId =
+    preferredId === DEFAULT_PSEUDO_DEVICE_ID
+      ? (options.find((option) => option.systemDefault)?.id ?? preferredId)
+      : preferredId;
+  return options.some((option) => option.id === mappedId) ? mappedId : options[0]?.id ?? '';
 }
 
 export function placeDeviceMenu(

@@ -122,9 +122,9 @@ test('the browser default pseudo-device folds onto its concrete twin', () => {
     ],
     'Microphone'
   );
-  // Exactly one row for the twinned device, relabeled -- not two.
+  // Exactly one row for the twinned device, relabeled and flagged -- not two.
   assert.deepEqual(options, [
-    { id: 'usb-mic', label: 'USB Mic (System Default)' },
+    { id: 'usb-mic', label: 'USB Mic (System Default)', systemDefault: true },
     { id: 'builtin-mic', label: 'Built-in Mic' },
   ]);
 });
@@ -175,5 +175,46 @@ test('picker selection prefers the active device over the persisted id, and pers
   assert.equal(
     resolveSelectedOptionId(options as any, resolvePreferredDeviceId('unplugged-mic', '')),
     'mic-a'
+  );
+});
+
+test('an active or persisted id of literally "default" selects the folded twin, not options[0]', () => {
+  // Same shape optionsFromDevices produces once it folds default(g1) onto B.
+  // The twin is deliberately NOT options[0] here: if the 'default'->twin
+  // mapping were missing, resolveSelectedOptionId's own options[0] fallback
+  // would land on 'mic-A' by coincidence in a twin-first list and mask the
+  // bug -- putting the twin second makes a missing mapping observably wrong.
+  const optionsWithTwin = [
+    { id: 'mic-A', label: 'Mic A' },
+    { id: 'mic-B', label: 'Mic B', systemDefault: true },
+  ];
+
+  // Active device reported as 'default' (e.g. a track opened with
+  // deviceId 'default', or room.getActiveDevice() echoing the last request).
+  assert.equal(
+    resolveSelectedOptionId(optionsWithTwin, resolvePreferredDeviceId('default', '')),
+    'mic-B'
+  );
+  // Persisted 'default' from an older session, no active device this time.
+  assert.equal(
+    resolveSelectedOptionId(optionsWithTwin, resolvePreferredDeviceId('', 'default')),
+    'mic-B'
+  );
+  // A real active device still wins over a stale persisted 'default'.
+  assert.equal(
+    resolveSelectedOptionId(optionsWithTwin, resolvePreferredDeviceId('mic-A', 'default')),
+    'mic-A'
+  );
+
+  // No twin was folded (unmatched groupId) -- the 'default' row itself is
+  // still a real, selectable option, so it stays selected rather than
+  // falling back to options[0].
+  const optionsNoTwin = [
+    { id: 'default', label: 'Default - Headset' },
+    { id: 'mic-B', label: 'Mic B' },
+  ];
+  assert.equal(
+    resolveSelectedOptionId(optionsNoTwin, resolvePreferredDeviceId('default', '')),
+    'default'
   );
 });

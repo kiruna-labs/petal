@@ -14,15 +14,22 @@ const repoRoot = resolve(import.meta.dirname, '../..');
 const webRoot = resolve(repoRoot, 'web-harness');
 const { chromium } = createRequire(import.meta.url)(resolve(repoRoot, 'apps/desktop/node_modules/playwright'));
 
+interface FakeDevice {
+  deviceId: string;
+  groupId: string;
+  kind: string;
+  label: string;
+}
+
 // Four fake mics + two fake speakers -- realistic-length labels so the
 // UI-text-never-truncates check (below) is actually exercising something.
-const AUDIO_INPUTS = [
+const AUDIO_INPUTS: FakeDevice[] = [
   { deviceId: 'mic-array', groupId: 'g-array', kind: 'audioinput', label: 'Built-in Microphone Array' },
   { deviceId: 'mic-usb', groupId: 'g-usb', kind: 'audioinput', label: 'External USB Conference Microphone' },
   { deviceId: 'mic-headset', groupId: 'g-headset', kind: 'audioinput', label: 'Wireless Headset Microphone' },
   { deviceId: 'mic-line', groupId: 'g-line', kind: 'audioinput', label: 'Line-In Audio Interface Input' },
 ];
-const AUDIO_OUTPUTS = [
+const AUDIO_OUTPUTS: FakeDevice[] = [
   { deviceId: 'spk-builtin', groupId: 'g-spk1', kind: 'audiooutput', label: 'Built-in Speakers' },
   { deviceId: 'spk-headset', groupId: 'g-spk2', kind: 'audiooutput', label: 'Wireless Headset Speakers' },
 ];
@@ -31,6 +38,16 @@ const AUDIO_OUTPUTS = [
 // tracks the persisted/active selection, not enumeration order (options[0]).
 const PERSISTED_MIC_ID = 'mic-headset';
 const PERSISTED_SPEAKER_ID = 'spk-headset';
+
+// A browser 'default' pseudo-entry twinned (by groupId) with mic-headset,
+// listed first the way Chrome typically enumerates it. After folding, the
+// twin (mic-headset) is NOT options[0] -- mic-array is -- so a picker that
+// forgot to map a persisted 'default' id onto the twin would visibly land
+// on the wrong row instead of coincidentally matching.
+const AUDIO_INPUTS_WITH_DEFAULT: FakeDevice[] = [
+  { deviceId: 'default', groupId: 'g-headset', kind: 'audioinput', label: 'Default - Wireless Headset Microphone' },
+  ...AUDIO_INPUTS,
+];
 
 interface RenderedOption {
   deviceId: string;
@@ -64,24 +81,31 @@ async function buildHarness(buildDir: string) {
   });
 }
 
-test('web meeting device picker checks exactly the persisted device in each section, never every row', { timeout: 60_000 }, async () => {
-  const buildDir = await mkdtemp(join(tmpdir(), 'petal-browser-device-checkmark-build-'));
+// Builds the app, fakes navigator.mediaDevices.enumerateDevices with the
+// given devices, persists the given ids (simulating an earlier session --
+// there's no live room/track in this headless harness, so controls.ts's
+// activeDeviceId() is always '' and render() falls through to storedId;
+// that's the same code path an active id would combine through, so a
+// persisted 'default' exercises the same mapping in resolveSelectedOptionId
+// that an active 'default' would), opens the audio picker, and returns each
+// section's rendered rows.
+async function openAudioPickerFields(
+  buildDir: string,
+  opts: { audioInputs: FakeDevice[]; audioOutputs: FakeDevice[]; persistedMicId?: string; persistedSpeakerId?: string }
+): Promise<RenderedField[]> {
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
-
   try {
-    await buildHarness(buildDir);
-
     browser = await chromium.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-gpu', '--allow-file-access-from-files']
     });
     const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
 
-    // Fake device enumeration -- no getUserMedia prompt needed since
-    // controls.ts lists via Room.getLocalDevices(kind, false), which only
-    // calls navigator.mediaDevices.enumerateDevices().
+    // No getUserMedia prompt needed since controls.ts lists via
+    // Room.getLocalDevices(kind, false), which only calls
+    // navigator.mediaDevices.enumerateDevices().
     await page.addInitScript(
-      ({ audioInputs, audioOutputs }: { audioInputs: typeof AUDIO_INPUTS; audioOutputs: typeof AUDIO_OUTPUTS }) => {
+      ({ audioInputs, audioOutputs }: { audioInputs: FakeDevice[]; audioOutputs: FakeDevice[] }) => {
         const fakeDevices = [...audioInputs, ...audioOutputs];
         // @ts-expect-error -- test-only stub, not a real MediaDeviceInfo
         navigator.mediaDevices.enumerateDevices = async () => fakeDevices;
@@ -92,18 +116,28 @@ test('web meeting device picker checks exactly the persisted device in each sect
           HTMLMediaElement.prototype.setSinkId = async () => undefined;
         }
       },
-      { audioInputs: AUDIO_INPUTS, audioOutputs: AUDIO_OUTPUTS }
+      { audioInputs: opts.audioInputs, audioOutputs: opts.audioOutputs }
     );
     await page.addInitScript(
-      ({ micKey, micId, speakerKey, speakerId }: { micKey: string; micId: string; speakerKey: string; speakerId: string }) => {
-        localStorage.setItem(micKey, micId);
-        localStorage.setItem(speakerKey, speakerId);
+      ({
+        micKey,
+        micId,
+        speakerKey,
+        speakerId
+      }: {
+        micKey: string;
+        micId?: string;
+        speakerKey: string;
+        speakerId?: string;
+      }) => {
+        if (micId) localStorage.setItem(micKey, micId);
+        if (speakerId) localStorage.setItem(speakerKey, speakerId);
       },
       {
         micKey: HARNESS_AUDIO_INPUT_STORAGE_KEY,
-        micId: PERSISTED_MIC_ID,
+        micId: opts.persistedMicId,
         speakerKey: HARNESS_AUDIO_OUTPUT_STORAGE_KEY,
-        speakerId: PERSISTED_SPEAKER_ID
+        speakerId: opts.persistedSpeakerId
       }
     );
 
@@ -118,7 +152,7 @@ test('web meeting device picker checks exactly the persisted device in each sect
     await page.waitForFunction(() => !document.querySelector('#devices-menu')?.hasAttribute('hidden'));
     await page.waitForSelector('#devices-menu-body .device-option');
 
-    const fields: RenderedField[] = await page.evaluate(() => {
+    return await page.evaluate(() => {
       return Array.from(document.querySelectorAll<HTMLElement>('#devices-menu-body .device-field')).map((field) => {
         const sectionLabel = field.querySelector('.device-field-label')?.textContent ?? '';
         const options = Array.from(field.querySelectorAll<HTMLButtonElement>('.device-option')).map((option) => {
@@ -133,6 +167,21 @@ test('web meeting device picker checks exactly the persisted device in each sect
         });
         return { sectionLabel, options };
       });
+    });
+  } finally {
+    await browser?.close();
+  }
+}
+
+test('web meeting device picker checks exactly the persisted device in each section, never every row', { timeout: 60_000 }, async () => {
+  const buildDir = await mkdtemp(join(tmpdir(), 'petal-browser-device-checkmark-build-'));
+  try {
+    await buildHarness(buildDir);
+    const fields = await openAudioPickerFields(buildDir, {
+      audioInputs: AUDIO_INPUTS,
+      audioOutputs: AUDIO_OUTPUTS,
+      persistedMicId: PERSISTED_MIC_ID,
+      persistedSpeakerId: PERSISTED_SPEAKER_ID
     });
 
     assert.equal(fields.length, 2, 'expected a Microphone section and a Speaker section');
@@ -167,7 +216,45 @@ test('web meeting device picker checks exactly the persisted device in each sect
     assert.equal(checkedSpeaker?.deviceId, PERSISTED_SPEAKER_ID);
     assert.notEqual(checkedSpeaker?.deviceId, AUDIO_OUTPUTS[0].deviceId);
   } finally {
-    await browser?.close();
+    await rm(buildDir, { recursive: true, force: true });
+  }
+});
+
+test('web meeting device picker maps a persisted "default" id onto its folded twin, not options[0]', { timeout: 60_000 }, async () => {
+  const buildDir = await mkdtemp(join(tmpdir(), 'petal-browser-device-checkmark-default-build-'));
+  try {
+    await buildHarness(buildDir);
+    const fields = await openAudioPickerFields(buildDir, {
+      audioInputs: AUDIO_INPUTS_WITH_DEFAULT,
+      audioOutputs: [AUDIO_OUTPUTS[0]],
+      // Simulates an older session that persisted the literal id 'default'
+      // before this file folded the duplicate row away.
+      persistedMicId: 'default'
+    });
+
+    const micSection = fields.find((f: RenderedField) => f.sectionLabel === 'Microphone');
+    assert.ok(micSection, 'Microphone section not found');
+
+    // The 'default' pseudo-device row itself must not survive the fold
+    // (it has a concrete twin), and there must be exactly one option per
+    // physical device.
+    assert.equal(micSection!.options.length, AUDIO_INPUTS.length);
+    assert.ok(!micSection!.options.some((o) => o.deviceId === 'default'), '"default" row should have been folded');
+
+    const visibleChecks = micSection!.options.filter((o: RenderedOption) => o.checkDisplay !== 'none');
+    assert.equal(visibleChecks.length, 1, `expected exactly one visible checkmark, got ${JSON.stringify(micSection!.options)}`);
+    for (const option of micSection!.options) {
+      assert.equal(option.rowFits, true, `option row for ${option.deviceId} overflows its container`);
+      assert.equal(option.textFits, true, `option label for ${option.deviceId} is clipped`);
+    }
+
+    const checkedMic = visibleChecks[0];
+    // mic-array is options[0] after the fold -- the mapped selection must
+    // land on the folded twin (mic-headset) instead, or this is exactly the
+    // enumeration-order guess this branch removed.
+    assert.equal(checkedMic.deviceId, 'mic-headset');
+    assert.notEqual(checkedMic.deviceId, 'mic-array');
+  } finally {
     await rm(buildDir, { recursive: true, force: true });
   }
 });
