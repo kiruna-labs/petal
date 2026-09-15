@@ -28,7 +28,7 @@
   import ParticipantTile from './ParticipantTile.svelte';
   import ControlButton, { type ControlIcon } from './ControlButton.svelte';
   import MediaSplitControl from './MediaSplitControl.svelte';
-  import { computeSmartGalleryLayout } from '$lib/galleryLayout';
+  import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
   import { chooseSpotlightHero } from '@petal/shared/logic/tileLayoutMode';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
   import { tileLayoutDuration, tileTransitionDuration } from '$lib/motion';
@@ -163,6 +163,7 @@
   let tileSurface = $state<HTMLElement>();
   let tileSurfaceWidth = $state(0);
   let tileSurfaceHeight = $state(0);
+  let lastGalleryLayout: { count: number; columns: number; rows: number } | null = null;
   let inviteTooltipElement = $state<HTMLSpanElement>();
   let inviteTooltipShift = $state(0);
   const activeGalleryTileAnimations = new Map<string, Animation>();
@@ -322,9 +323,17 @@
       : participantEntries
   );
   const gridOverflowScroll = $derived(false);
-  const smartGridLayout = $derived(
-    computeSmartGalleryLayout(participantEntries.length, tileSurfaceWidth, tileSurfaceHeight)
-  );
+  // `lastGalleryLayout` is a plain (non-reactive) closure variable, not
+  // `$state` -- it feeds `previous` back into computeGalleryLayout for
+  // hysteresis (keep the current shape unless another clears it by a
+  // margin) without itself triggering a re-derive.
+  const smartGridLayout = $derived.by(() => {
+    const layout = computeGalleryLayout(participantEntries.length, tileSurfaceWidth, tileSurfaceHeight, {
+      previous: lastGalleryLayout
+    });
+    lastGalleryLayout = { count: participantEntries.length, columns: layout.columns, rows: layout.rows };
+    return layout;
+  });
   const smartGridStyle = $derived(
     `--gallery-cols: ${smartGridLayout.columns}; --gallery-rows: ${smartGridLayout.rows}; --gallery-tail-width: ${smartGridLayout.tileWidth}px; --gallery-tile-width: ${smartGridLayout.tileWidth}px; --gallery-tile-height: ${smartGridLayout.tileHeight}px;`
   );
