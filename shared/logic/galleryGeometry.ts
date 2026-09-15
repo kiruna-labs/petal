@@ -1,8 +1,7 @@
 // SINGLE SOURCE OF TRUTH for gallery tile packing geometry. Shared by the
-// desktop gallery (apps/desktop/src/lib/components/Gallery.svelte, via
-// apps/desktop/src/lib/galleryLayout.ts having been folded into this module)
-// and the web client's layout lab (web-harness/src/layoutLab.ts). Pure: no
-// DOM, no framework -- callers own the container measurement and CSS.
+// desktop gallery (apps/desktop/src/lib/components/Gallery.svelte) and the
+// web client's layout lab (web-harness/src/layoutLab.ts). Pure: no DOM, no
+// framework -- callers own the container measurement and CSS.
 //
 // The desktop gallery used to hard-code a 2x2 grid for 3-4 participants and
 // start its column search at 2, making a single column unreachable for any

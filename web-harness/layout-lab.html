@@ -18,7 +18,9 @@
         margin: 0;
       }
       .lab-shell {
-        max-width: 1400px;
+        /* No max-width: a frame can be sized up to the 2000/1800px slider
+           caps, and .panes below scrolls sideways rather than this shell
+           trying to squeeze two such frames into a fixed width. */
         margin: 0 auto;
         padding: 28px 24px 48px;
         display: grid;
@@ -95,9 +97,21 @@
         flex-wrap: wrap;
       }
       .panes {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+        /* Each frame is sized directly by the width/height sliders (up to
+           2000x1800px), not by its grid cell -- an auto-fit grid track was
+           narrower than that at almost every slider/preset value, so the
+           frame overflowed its cell and the two panes visually overlapped.
+           A wrapping flex row where each pane shrink-wraps its own frame
+           can never do that; overflow-x lets a single oversized frame
+           scroll instead of pushing the page body sideways. */
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
         gap: 20px;
+        overflow-x: auto;
+      }
+      .pane {
+        flex: 0 0 auto;
       }
       .pane h2 {
         display: flex;
@@ -110,7 +124,6 @@
       .readout {
         font: 500 11.5px ui-monospace, monospace;
         color: rgba(255, 255, 255, 0.62);
-        white-space: nowrap;
       }
       .readout.is-overflow {
         color: #ffb37a;
