@@ -284,7 +284,7 @@ test('affinity is per selector, not a global recording switch', () => {
 
 test('selector lifecycle contracts cover failure, leave, close, and independent selectors', () => {
   assert.match(sessionSource, /start_share_loss_monitor/);
-  assert.match(sessionSource, /stop_share\(&app, share, room_connection\.clone\(\)\)/);
+  assert.match(sessionSource, /stop_share\(&app, state\.inner\(\), share, room_connection\.clone\(\)\)/);
   assert.match(sessionSource, /CaptureFailed|capture failed/);
   assert.match(sessionSource, /close_all_region_windows\(app\)/);
   assert.match(regionNativeSource, /cleanup_region_window_state/);

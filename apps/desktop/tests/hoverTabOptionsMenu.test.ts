@@ -73,6 +73,74 @@ test('the per-share remote-control lock is offered on every platform, and only w
   assert.equal(deniedToggle?.checked, false);
 });
 
+test('share audio is default-off, checked only from native state, and explicit about scope', () => {
+  const fresh = buildHoverTabMenuEntries('automatic', true);
+  // Unavailable is a DISABLED state, never appended copy: appending
+  // `-- unavailable` made this the longest string the native share-options
+  // popup carried, and a native Tauri menu cannot be width-tested in a DOM
+  // harness, so the label budget has to be enforced structurally instead.
+  assert.deepEqual(fresh.find((entry) => entry.kind === 'share-audio'), {
+    kind: 'share-audio',
+    id: 'share-audio',
+    text: 'Share app audio',
+    enabled: false,
+    checked: false
+  });
+
+  const optedInDisplay = buildHoverTabMenuEntries(
+    'automatic', true, false, 'cursorPreserving', true, false, false, true,
+    false, true, 'right', true, true
+  );
+  assert.deepEqual(optedInDisplay.find((entry) => entry.kind === 'share-audio'), {
+    kind: 'share-audio',
+    id: 'share-audio',
+    text: 'Share system audio',
+    enabled: true,
+    checked: true
+  });
+
+  // An errored-but-checked item stays actionable so consent can always be
+  // withdrawn -- also with the short label, no appended "unavailable".
+  const errored = buildHoverTabMenuEntries(
+    'automatic', true, false, 'cursorPreserving', true, false, false, true,
+    false, true, 'right', true, false
+  );
+  assert.deepEqual(errored.find((entry) => entry.kind === 'share-audio'), {
+    kind: 'share-audio',
+    id: 'share-audio',
+    text: 'Share system audio',
+    enabled: true,
+    checked: true
+  });
+});
+
+test('the audio label is never the widest string in the native share-options menu', () => {
+  // The repo rule is that UI text never truncates. This menu is a native OS
+  // menu, so instead of a pixel measurement we bound it structurally: the audio
+  // item must not be longer than the longest label the popup already ships, so
+  // it can never be the item that introduces a width regression.
+  for (const displayLike of [false, true]) {
+    const entries = buildShareOptionsMenuEntries(
+      'automatic', true, false, 'cursorPreserving', true, false, false,
+      displayLike, true
+    );
+    const audio = entries.find((entry) => entry.kind === 'share-audio');
+    const others = entries
+      .filter((entry) => 'text' in entry && entry.kind !== 'share-audio')
+      .map((entry) => (entry as { text: string }).text);
+    const widestOther = Math.max(...others.map((text) => text.length));
+    assert.ok(
+      audio && 'text' in audio && audio.text.length <= widestOther,
+      `audio label ${JSON.stringify(audio && 'text' in audio ? audio.text : audio)} must not be wider than the widest existing label (${widestOther} chars)`
+    );
+    assert.doesNotMatch(
+      audio && 'text' in audio ? audio.text : '',
+      /unavailable|\.\.\.|…/,
+      'unavailability must be the disabled state, not appended label text'
+    );
+  }
+});
+
 test('hover-only position entries offer all four exact border labels without leaking into Petal View', () => {
   const hoverEntries = buildShareOptionsMenuEntries(
     'automatic',
@@ -229,6 +297,23 @@ test('the lock dispatches the OPPOSITE of its current state, and never while dis
     undefined
   );
   assert.deepEqual(calls, [false, true], 'a disabled entry must not dispatch');
+});
+
+test('share-audio dispatch flips authoritative consent and blocks unavailable entries', () => {
+  const calls: boolean[] = [];
+  const actions = {
+    onPriority() {}, onControlMode() {}, onDraw() {}, onAiChat() {}, onDebug() {},
+    onShareAudio(enabled: boolean) { calls.push(enabled); }
+  };
+  dispatchShareOptionsMenuEntry(
+    { kind: 'share-audio', id: 'share-audio', text: 'Share audio', enabled: true, checked: false },
+    actions
+  )?.();
+  assert.deepEqual(calls, [true]);
+  assert.equal(dispatchShareOptionsMenuEntry(
+    { kind: 'share-audio', id: 'share-audio', text: 'Share audio', enabled: false, checked: false },
+    actions
+  ), undefined);
 });
 
 test('the fixed CSS prevents copy or transparent overflow from changing the native hit surface', () => {
