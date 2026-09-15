@@ -137,11 +137,15 @@ export function setupConnection(
   topics.onPrefix(PLUGIN_TOPIC_PREFIX, (payload, participant, topic, senderIdentity) =>
     ctx.hook?.plugins?.onData(payload, participant, topic, senderIdentity),
   );
-  // `petal.viewer-demand` is the heartbeat VIEWERS send to a sharer; this web
-  // client only sends it (viewerDemand.ts) and never consumed it, and the old
-  // fall-through swallowed it silently. Register a no-op so a web SHARER does
-  // not get an "unhandled data topic" warning from every native viewer.
-  topics.on(VIEWER_DEMAND_TOPIC, () => {});
+  // `petal.viewer-demand` is the heartbeat VIEWERS send to a sharer. A web
+  // client sends it (viewerDemand.ts) and now also consumes it as a
+  // sharer: a `needsRepublish` packet is a receiver's starvation-watchdog
+  // repair request (native's `publish_window_repair_request`), which a web
+  // sharer must honor by republishing -- see viewerDemand.ts's
+  // `handleViewerDemandPayload`. Every other kind/packet (a viewer's own
+  // demand heartbeat, echoed back to a web SHARER) is a documented no-op
+  // there so it doesn't log an "unhandled data topic" warning.
+  topics.on(VIEWER_DEMAND_TOPIC, (payload, _p, _t, senderIdentity) => cb.handleViewerDemandPayload(payload, senderIdentity));
   const { dom, state, cb } = ctx;
   const { shareBtn, micCheckbox, cameraTrackNameDisplay, displayNameInput } = dom;
   const {

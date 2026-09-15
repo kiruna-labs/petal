@@ -29,6 +29,45 @@ function makePublicationDemandHarness(localIdentity = 'web-riley') {
   return { published, viewerDemand: setupViewerDemand(ctx) };
 }
 
+function makeInboundRepairHarness(localIdentity = 'web-riley') {
+  const repairCalls: Array<{ windowId: number; requesterIdentity: string }> = [];
+  const ctx = {
+    state: {
+      room: {
+        localParticipant: { identity: localIdentity },
+      },
+      viewerDemandSeq: 0,
+    },
+    cb: {
+      repairScreenShareForWindow: async (windowId: number, requesterIdentity: string) => {
+        repairCalls.push({ windowId, requesterIdentity });
+        return true;
+      },
+    },
+  } as unknown as HarnessContext;
+  return { repairCalls, viewerDemand: setupViewerDemand(ctx) };
+}
+
+function repairRequestPayload(overrides: Partial<Record<string, unknown>> = {}): Uint8Array {
+  const message = {
+    v: 2,
+    kind: 'heartbeat',
+    targetUserId: 'web-riley',
+    viewerId: 'native-quinn',
+    windowId: 42,
+    seq: 9,
+    visible: true,
+    width: 0,
+    height: 0,
+    scale: 1,
+    pixelWidth: 0,
+    pixelHeight: 0,
+    needsRepublish: true,
+    ...overrides,
+  };
+  return new TextEncoder().encode(JSON.stringify(message));
+}
+
 function publication(kind: Track.Kind, trackName: string): RemoteTrackPublication {
   return { kind, trackName } as RemoteTrackPublication;
 }
@@ -305,4 +344,60 @@ test('#627: a metadata gap no longer inflates the demand above the steady-state 
     unguarded.pixelWidth > steady.pixelWidth,
     `premise check: raw-box demand ${unguarded.pixelWidth} must exceed contained demand ${steady.pixelWidth}`
   );
+});
+
+// --- inbound side: a receiver's starvation-watchdog repair request -------
+//
+// A native receiver that gives up probing for HIGH sends
+// `publish_window_repair_request` (needsRepublish: true) over this same
+// topic. A web client must route that into `cb.repairScreenShareForWindow`
+// so a stalled browser share actually recovers -- before this it was one of
+// several packet kinds silently swallowed by `handleViewerDemandPayload`'s
+// no-op registration in connection.ts.
+
+test('a repair request for this client targets repairScreenShareForWindow exactly once', () => {
+  const { repairCalls, viewerDemand } = makeInboundRepairHarness();
+
+  viewerDemand.handleViewerDemandPayload(repairRequestPayload(), 'native-quinn');
+
+  assert.equal(repairCalls.length, 1);
+  assert.deepEqual(repairCalls[0], { windowId: 42, requesterIdentity: 'native-quinn' });
+});
+
+test('a repair request falls back to the payload viewerId when the SFU sender identity is missing', () => {
+  const { repairCalls, viewerDemand } = makeInboundRepairHarness();
+
+  viewerDemand.handleViewerDemandPayload(repairRequestPayload(), undefined);
+
+  assert.equal(repairCalls.length, 1);
+  assert.equal(repairCalls[0]!.requesterIdentity, 'native-quinn');
+});
+
+test('a demand packet without needsRepublish is not treated as a repair request', () => {
+  const { repairCalls, viewerDemand } = makeInboundRepairHarness();
+
+  viewerDemand.handleViewerDemandPayload(repairRequestPayload({ needsRepublish: false }), 'native-quinn');
+  viewerDemand.handleViewerDemandPayload(repairRequestPayload({ needsRepublish: undefined }), 'native-quinn');
+
+  assert.equal(repairCalls.length, 0);
+});
+
+test('a repair request addressed to a different participant is ignored', () => {
+  const { repairCalls, viewerDemand } = makeInboundRepairHarness();
+
+  viewerDemand.handleViewerDemandPayload(
+    repairRequestPayload({ targetUserId: 'someone-else' }),
+    'native-quinn'
+  );
+
+  assert.equal(repairCalls.length, 0);
+});
+
+test('a malformed repair payload is dropped without throwing', () => {
+  const { repairCalls, viewerDemand } = makeInboundRepairHarness();
+
+  assert.doesNotThrow(() => {
+    viewerDemand.handleViewerDemandPayload(new TextEncoder().encode('not json'), 'native-quinn');
+  });
+  assert.equal(repairCalls.length, 0);
 });

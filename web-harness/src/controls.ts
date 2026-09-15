@@ -1427,9 +1427,7 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
           return;
         }
         const mediaTrack = stream.getVideoTracks()[0];
-        mediaTrack.contentHint = 'detail';
         const windowId = randomWindowId();
-        const track = new LocalVideoTrack(mediaTrack);
         // Size the encoding from what we actually captured, not from what we
         // asked for -- the browser/user picks the real source, and a display
         // is often far larger than the `ideal` above.
@@ -1439,28 +1437,9 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
           `screen share encoding: ${captured.width ?? '?'}x${captured.height ?? '?'} -> ` +
             `${Math.round(shareEncoding.maxBitrate / 1_000_000)}Mbps @${shareEncoding.maxFramerate}fps`
         );
+        let track: LocalVideoTrack;
         try {
-          await state.room.localParticipant.publishTrack(track, {
-            name: trackNameForWindow(windowId),
-            source: Track.Source.ScreenShare,
-            // H.264 is load-bearing -- see verifyH264Negotiated's doc comment.
-            videoCodec: 'h264',
-            // Without these the default preset (2.5Mbps/15fps) starves a
-            // desktop-sized capture and the encoder sheds RESOLUTION to cope --
-            // a 2560x1600 share reached a receiver as 320x180. 'maintain-
-            // resolution' is what keeps text legible: drop frames, not pixels.
-            screenShareEncoding: shareEncoding,
-            degradationPreference: 'maintain-resolution',
-            frameMetadata: { timestamp: true, frameId: true },
-          });
-          await localParticipantMetadata.update((current) =>
-            mergeSharedSourceMetadata(current, windowId, 'display', {
-              // A browser cannot inject OS input: advertise this share as
-              // NOT controllable so native receivers hide the affordance
-              // instead of offering a button that always times out.
-              remoteControllable: false,
-            })
-          );
+          track = await publishScreenShareTrack(state.room, mediaTrack, windowId);
         } catch (err) {
           showError(`Screen share publish failed: ${(err as Error).message ?? err}`);
           mediaTrack.stop();
@@ -1635,6 +1614,47 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     });
   }
 
+  /**
+   * Publish a screen-share MediaStreamTrack under Petal's window-share
+   * contract (H.264, `screenShareEncoding`, maintain-resolution, frame
+   * metadata) and merge the matching 'display' source metadata. Shared by
+   * the getDisplayMedia picker path above and `repairScreenShareForWindow`
+   * below so a viewer-demand republish gets byte-identical publish options
+   * to the original share -- do not let the two paths drift apart.
+   */
+  async function publishScreenShareTrack(
+    room: Room,
+    mediaTrack: MediaStreamTrack,
+    windowId: number
+  ): Promise<LocalVideoTrack> {
+    mediaTrack.contentHint = 'detail';
+    const track = new LocalVideoTrack(mediaTrack);
+    const captured = mediaTrack.getSettings();
+    const shareEncoding = screenSharePublishEncoding(captured.width, captured.height);
+    await room.localParticipant.publishTrack(track, {
+      name: trackNameForWindow(windowId),
+      source: Track.Source.ScreenShare,
+      // H.264 is load-bearing -- see verifyH264Negotiated's doc comment.
+      videoCodec: 'h264',
+      // Without these the default preset (2.5Mbps/15fps) starves a
+      // desktop-sized capture and the encoder sheds RESOLUTION to cope --
+      // a 2560x1600 share reached a receiver as 320x180. 'maintain-
+      // resolution' is what keeps text legible: drop frames, not pixels.
+      screenShareEncoding: shareEncoding,
+      degradationPreference: 'maintain-resolution',
+      frameMetadata: { timestamp: true, frameId: true },
+    });
+    await localParticipantMetadata.update((current) =>
+      mergeSharedSourceMetadata(current, windowId, 'display', {
+        // A browser cannot inject OS input: advertise this share as
+        // NOT controllable so native receivers hide the affordance
+        // instead of offering a button that always times out.
+        remoteControllable: false,
+      })
+    );
+    return track;
+  }
+
   async function stopScreenShare(reason: 'button' | 'browser') {
     if (!state.screenSharing) return;
     const track = state.screenTrack;
@@ -1670,6 +1690,74 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     shareStopped('user');
   }
 
+  // windowId -> last repair timestamp (ms). The receiver's starvation
+  // watchdog re-probes (and re-sends its repair request) every
+  // `STARVATION_PROBE_MAX` (120s) once past the failure cap
+  // (subscriber.rs's post-cap `ProbeHigh` arm) -- without this floor a
+  // slow-to-recover receiver could otherwise retrigger a republish on every
+  // probe tick instead of giving the first one a chance to land.
+  const lastScreenShareRepairAtByWindowId = new Map<number, number>();
+  const SCREEN_SHARE_REPAIR_RATE_LIMIT_MS = 10_000;
+
+  /**
+   * Republish a stalled screen share on an explicit viewer-demand repair
+   * request (`petal.viewer-demand`, `needsRepublish: true` -- see
+   * `viewerDemand.ts`'s `handleViewerDemandPayload`). Reuses the SAME
+   * MediaStreamTrack so the browser's getDisplayMedia capture keeps running
+   * with no new picker prompt; only the LiveKit publication is torn down
+   * and recreated under the identical track name/options via
+   * `publishScreenShareTrack`.
+   *
+   * Returns false (and does nothing) for a window this client is not
+   * currently publishing as a real screen share, or while rate-limited --
+   * do not add a case here for the synthetic test-pattern share, which has
+   * no real capture to keep alive across a republish.
+   */
+  async function repairScreenShareForWindow(
+    windowId: number,
+    requesterIdentity: string
+  ): Promise<boolean> {
+    const room = state.room;
+    if (!room || !state.screenSharing || state.screenWindowId !== windowId || !state.screenTrack) {
+      logEvent(
+        `viewer-demand repair request for window ${windowId} from '${requesterIdentity}': not currently publishing this window as a screen share, ignoring`,
+        'warn'
+      );
+      return false;
+    }
+    const now = Date.now();
+    const last = lastScreenShareRepairAtByWindowId.get(windowId) ?? 0;
+    if (now - last < SCREEN_SHARE_REPAIR_RATE_LIMIT_MS) {
+      logEvent(
+        `viewer-demand repair request for window ${windowId} from '${requesterIdentity}': rate-limited (last republish ${now - last}ms ago)`,
+        'warn'
+      );
+      return false;
+    }
+    lastScreenShareRepairAtByWindowId.set(windowId, now);
+    const oldTrack = state.screenTrack;
+    const mediaTrack = oldTrack.mediaStreamTrack;
+    logEvent(
+      `viewer-demand repair request for window ${windowId} from '${requesterIdentity}': republishing stalled screen share`
+    );
+    try {
+      // stopOnUnpublish=false: tear down only the LiveKit publication, not
+      // the browser's getDisplayMedia capture grant -- the whole point is to
+      // avoid a second picker prompt.
+      await room.localParticipant.unpublishTrack(oldTrack, false);
+      const track = await publishScreenShareTrack(room, mediaTrack, windowId);
+      state.screenTrack = track;
+      logEvent(`viewer-demand repair request for window ${windowId}: republish succeeded`, 'ok');
+      return true;
+    } catch (err) {
+      logEvent(
+        `viewer-demand repair request for window ${windowId}: republish failed: ${(err as Error).message ?? err}`,
+        'error'
+      );
+      return false;
+    }
+  }
+
   return {
     installControls,
     resolveIdentity,
@@ -1681,5 +1769,6 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     startCockpitAudioTone,
     measureCockpitRemoteAudio,
     measureCockpitRemoteCamera,
+    repairScreenShareForWindow,
   };
 }

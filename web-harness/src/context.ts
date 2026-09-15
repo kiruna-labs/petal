@@ -631,6 +631,12 @@ export interface HarnessCallbacks {
   publishViewerDemandForPublication: (ownerIdentity: string, publication: import('livekit-client').RemoteTrackPublication) => void;
   startViewerDemandHeartbeat: () => void;
   stopViewerDemandHeartbeat: () => void;
+  handleViewerDemandPayload: (payload: Uint8Array, senderIdentity?: string) => void;
+  // controls: republish a stalled screen share on a viewer-demand repair
+  // request (see viewerDemand.ts's handleViewerDemandPayload). Returns
+  // whether a republish was actually attempted (false for a window this
+  // client does not publish, or while rate-limited).
+  repairScreenShareForWindow: (windowId: number, requesterIdentity: string) => Promise<boolean>;
   // tiles
   ensureBaseTile: (identity: string, isLocal: boolean) => HTMLDivElement;
   setTileCamera: (
