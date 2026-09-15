@@ -32,6 +32,18 @@ const AUDIO_OUTPUTS = [
 const PERSISTED_MIC_ID = 'mic-headset';
 const PERSISTED_SPEAKER_ID = 'spk-headset';
 
+interface RenderedOption {
+  deviceId: string;
+  checkDisplay: string;
+  rowFits: boolean;
+  textFits: boolean;
+}
+
+interface RenderedField {
+  sectionLabel: string;
+  options: RenderedOption[];
+}
+
 async function buildHarness(buildDir: string) {
   await build({
     root: webRoot,
@@ -106,7 +118,7 @@ test('web meeting device picker checks exactly the persisted device in each sect
     await page.waitForFunction(() => !document.querySelector('#devices-menu')?.hasAttribute('hidden'));
     await page.waitForSelector('#devices-menu-body .device-option');
 
-    const fields = await page.evaluate(() => {
+    const fields: RenderedField[] = await page.evaluate(() => {
       return Array.from(document.querySelectorAll<HTMLElement>('#devices-menu-body .device-field')).map((field) => {
         const sectionLabel = field.querySelector('.device-field-label')?.textContent ?? '';
         const options = Array.from(field.querySelectorAll<HTMLButtonElement>('.device-option')).map((option) => {
@@ -124,13 +136,13 @@ test('web meeting device picker checks exactly the persisted device in each sect
     });
 
     assert.equal(fields.length, 2, 'expected a Microphone section and a Speaker section');
-    const micSection = fields.find((f) => f.sectionLabel === 'Microphone');
-    const speakerSection = fields.find((f) => f.sectionLabel === 'Speaker');
+    const micSection = fields.find((f: RenderedField) => f.sectionLabel === 'Microphone');
+    const speakerSection = fields.find((f: RenderedField) => f.sectionLabel === 'Speaker');
     assert.ok(micSection, 'Microphone section not found');
     assert.ok(speakerSection, 'Speaker section not found');
 
     for (const section of [micSection!, speakerSection!]) {
-      const visibleChecks = section.options.filter((o) => o.checkDisplay !== 'none');
+      const visibleChecks = section.options.filter((o: RenderedOption) => o.checkDisplay !== 'none');
       assert.equal(
         visibleChecks.length,
         1,
@@ -146,8 +158,8 @@ test('web meeting device picker checks exactly the persisted device in each sect
     assert.equal(micSection!.options.length, AUDIO_INPUTS.length);
     assert.equal(speakerSection!.options.length, AUDIO_OUTPUTS.length);
 
-    const checkedMic = micSection!.options.find((o) => o.checkDisplay !== 'none');
-    const checkedSpeaker = speakerSection!.options.find((o) => o.checkDisplay !== 'none');
+    const checkedMic = micSection!.options.find((o: RenderedOption) => o.checkDisplay !== 'none');
+    const checkedSpeaker = speakerSection!.options.find((o: RenderedOption) => o.checkDisplay !== 'none');
     // Persisted ids are deliberately not the first enumerated device --
     // this would fail if the picker fell back to options[0].
     assert.equal(checkedMic?.deviceId, PERSISTED_MIC_ID);
