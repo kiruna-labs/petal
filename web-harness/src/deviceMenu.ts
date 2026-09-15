@@ -12,6 +12,10 @@ export interface DeviceMenuHandlers {
   applyAudioInput: (deviceId: string) => Promise<void>;
   applyAudioOutput: (deviceId: string) => Promise<void>;
   applyVideoInput: (deviceId: string) => Promise<void>;
+  // The device actually in use right now (published track's capture
+  // settings, else the room's active device) -- '' if none. Takes priority
+  // over `storedId` so the check mark reflects reality, not a guess.
+  activeDeviceId: (key: 'audioinput' | 'audiooutput' | 'videoinput') => string;
   storedId: (key: 'audioinput' | 'audiooutput' | 'videoinput') => string;
   supportsAudioOutput: () => boolean;
 }
@@ -30,6 +34,19 @@ export function optionsFromDevices(devices: MediaDeviceInfo[], fallback: string)
       id: device.deviceId,
       label: labelForListedDevice(device, fallback, index),
     }));
+}
+
+// Priority for the picker's checked row: what's actually active beats a
+// guess. `activeId` is already the caller's own active>persisted>first
+// mini-chain (track capture settings, else the room's active device); this
+// only adds the final "does it still exist in the list" fallback to
+// options[0] -- never enumeration order alone (#the P0 this file fixes).
+export function resolvePreferredDeviceId(activeId: string, persistedId: string): string {
+  return activeId || persistedId;
+}
+
+export function resolveSelectedOptionId(options: DeviceOption[], preferredId: string): string {
+  return options.some((option) => option.id === preferredId) ? preferredId : options[0]?.id ?? '';
 }
 
 export function placeDeviceMenu(
@@ -111,14 +128,20 @@ export function setupDeviceMenu(
         if (openKind !== 'audio') return;
         body.replaceChildren();
         body.append(
-          field('Microphone', optionsFromDevices(mics, 'Microphone'), handlers.storedId('audioinput'), (id) =>
-            handlers.applyAudioInput(id)
+          field(
+            'Microphone',
+            optionsFromDevices(mics, 'Microphone'),
+            resolvePreferredDeviceId(handlers.activeDeviceId('audioinput'), handlers.storedId('audioinput')),
+            (id) => handlers.applyAudioInput(id)
           )
         );
         if (handlers.supportsAudioOutput()) {
           body.append(
-            field('Speaker', optionsFromDevices(speakers, 'Speaker'), handlers.storedId('audiooutput'), (id) =>
-              handlers.applyAudioOutput(id)
+            field(
+              'Speaker',
+              optionsFromDevices(speakers, 'Speaker'),
+              resolvePreferredDeviceId(handlers.activeDeviceId('audiooutput'), handlers.storedId('audiooutput')),
+              (id) => handlers.applyAudioOutput(id)
             )
           );
         }
@@ -130,7 +153,7 @@ export function setupDeviceMenu(
           field(
             'Camera',
             optionsFromDevices(cameras, 'Camera'),
-            handlers.storedId('videoinput'),
+            resolvePreferredDeviceId(handlers.activeDeviceId('videoinput'), handlers.storedId('videoinput')),
             (id) => handlers.applyVideoInput(id),
             false
           )
@@ -173,7 +196,7 @@ export function setupDeviceMenu(
     list.className = 'device-option-list';
     list.setAttribute('role', 'listbox');
     list.setAttribute('aria-label', `${label} devices`);
-    const selected = options.some((option) => option.id === selectedId) ? selectedId : options[0]?.id ?? '';
+    const selected = resolveSelectedOptionId(options, selectedId);
     const status = document.createElement('p');
     status.className = 'device-note device-status';
     status.setAttribute('role', 'status');

@@ -252,6 +252,22 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     await state.room.switchActiveDevice(kind, deviceId, false);
   }
 
+  // What's actually in use right now, not a guess: the published track's own
+  // capture settings beat the room's last-requested device, which beats
+  // nothing. Used to pick the picker's checked row instead of options[0]
+  // (the picker used to default to enumeration order -- #see deviceMenu.ts).
+  function activeDeviceId(key: 'audioinput' | 'audiooutput' | 'videoinput'): string {
+    if (key === 'audioinput') {
+      const trackId = state.micTrack?.mediaStreamTrack.getSettings().deviceId;
+      return trackId || state.room?.getActiveDevice('audioinput') || '';
+    }
+    if (key === 'audiooutput') {
+      return state.room?.getActiveDevice('audiooutput') || '';
+    }
+    const trackId = state.localCameraTrack?.mediaStreamTrack.getSettings().deviceId;
+    return trackId || state.room?.getActiveDevice('videoinput') || '';
+  }
+
   async function applyAudioInputDevice(deviceId: string) {
     if (deviceId) localStorage.setItem(HARNESS_AUDIO_INPUT_STORAGE_KEY, deviceId);
     else localStorage.removeItem(HARNESS_AUDIO_INPUT_STORAGE_KEY);
@@ -1249,6 +1265,7 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
             showToast('Camera switch failed');
             throw err;
           }),
+        activeDeviceId,
         storedId: (key) => {
           if (key === 'audioinput') return localStorage.getItem(HARNESS_AUDIO_INPUT_STORAGE_KEY)?.trim() ?? '';
           if (key === 'audiooutput') return localStorage.getItem(HARNESS_AUDIO_OUTPUT_STORAGE_KEY)?.trim() ?? '';
