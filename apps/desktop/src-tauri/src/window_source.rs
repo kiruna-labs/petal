@@ -411,37 +411,124 @@ mod macos {
     ///   CGImageForProposedRect ->   +4.7MB,             peak    7MB,   74ms
     /// ```
     ///
-    /// `CGImageForProposedRect:` asks the icon for a raster at the size we
-    /// actually want and never materialises the other representations. It
-    /// still handles vector/PDF-backed icons (verified: 60/60 running apps
-    /// produced a PNG on both paths, off the main thread). Ask for pixels at
-    /// `APP_ICON_MAX_EDGE`, not for the whole icon.
+    /// `CGImageForProposedRect:` asked the icon for a raster at the size we
+    /// actually want and never materialised the other representations, but
+    /// **"the size we want" is a lie on a 2x display**: passed a 128pt rect
+    /// with no context, AppKit picks the best backing image *for that rect
+    /// on whatever screen it assumes* -- 128x128px at 1x, 256x256px at 2x
+    /// (128pt * 2x scale). The picker ceiling is a PIXEL budget
+    /// (`APP_ICON_MAX_EDGE`'s own doc comment above), so asking AppKit for a
+    /// *point*-sized rect and letting it choose the scale is the wrong side
+    /// of that contract -- confirmed failing on a 2x host:
+    /// `app_icon_is_rasterized_at_picker_size_not_native_size` came back
+    /// 256x256 for pid 397 (the login window process) rather than <=128.
+    ///
+    /// `rasterize_app_icon` below replaces it: it builds its own
+    /// `NSBitmapImageRep` at the exact pixel size wanted and draws into an
+    /// offscreen 1.0-scale context derived from that bitmap, so the pixel
+    /// ceiling is enforced by construction and never depends on which
+    /// display happens to be in front. Still handles vector/PDF-backed icons
+    /// (verified: 60/60 running apps produced a PNG on both paths, off the
+    /// main thread) and keeps the #106 memory property this replaced:
+    ///
+    /// ```text
+    ///   TIFFRepresentation  ->  +1370MB phys_footprint, peak 1858MB,  833ms
+    ///   CGImageForProposedRect ->   +4.7MB,             peak    7MB,   74ms
+    /// ```
+    /// Fit `(src_w, src_h)` (an icon's native point size) inside a
+    /// `max_edge`-pixel square on its longest edge, preserving aspect ratio,
+    /// rounded to whole pixels and never below 1px. A degenerate source size
+    /// (zero, negative, or non-finite -- AppKit has never been observed to
+    /// hand back one, but nothing enforces it) falls back to a square at the
+    /// ceiling rather than propagating a NaN/zero bitmap size.
+    fn fit_within_edge(src_w: f64, src_h: f64, max_edge: f64) -> (u32, u32) {
+        let ceiling = max_edge.max(1.0);
+        if !(src_w.is_finite() && src_h.is_finite()) || src_w <= 0.0 || src_h <= 0.0 {
+            let side = ceiling.round() as u32;
+            return (side, side);
+        }
+        let scale = ceiling / src_w.max(src_h);
+        let w = (src_w * scale).round().max(1.0) as u32;
+        let h = (src_h * scale).round().max(1.0) as u32;
+        (w, h)
+    }
+
+    /// Rasterize `icon` into a bitmap whose longest edge is exactly
+    /// `max_edge` **pixels**, on any display, regardless of backing scale.
+    ///
+    /// The replaced `CGImageForProposedRect:context:hints:` route asked
+    /// AppKit for "the best representation for roughly this point-sized
+    /// rect," which resolves through whatever screen AppKit assumes --
+    /// 128x128px at 1x, 256x256px at 2x, for the same 128pt request. This
+    /// route never asks a screen at all: it allocates its own
+    /// `NSBitmapImageRep` at the exact pixel dimensions wanted, gives that
+    /// bitmap a *point* size equal to its *pixel* size (a 1.0 scale-factor
+    /// drawing context by construction), and draws the icon into an
+    /// `NSGraphicsContext` derived from that bitmap -- so the pixel ceiling
+    /// is enforced by the bitmap's own geometry, never by which display
+    /// happens to be frontmost.
+    fn rasterize_app_icon(
+        icon: &objc2_app_kit::NSImage,
+        max_edge: f64,
+    ) -> Option<Retained<objc2_app_kit::NSBitmapImageRep>> {
+        use objc2::AnyThread;
+        use objc2_app_kit::{
+            NSBitmapImageRep, NSCompositingOperation, NSDeviceRGBColorSpace, NSGraphicsContext,
+        };
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+        let native = icon.size();
+        let (px_w, px_h) = fit_within_edge(native.width, native.height, max_edge);
+
+        // SAFETY: `planes` is null, which tells AppKit to allocate and own
+        // the backing store itself (standard "give me a blank bitmap"
+        // usage) -- there is no caller-supplied buffer whose length could
+        // mismatch `bytesPerRow`/`bitsPerPixel`.
+        let bitmap = unsafe {
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                std::ptr::null_mut(),
+                px_w as isize,
+                px_h as isize,
+                8,
+                4,
+                true,
+                false,
+                NSDeviceRGBColorSpace,
+                0,
+                0,
+            )
+        }?;
+        // Point size == pixel size: the context this bitmap backs draws at
+        // scale 1.0 no matter what display owns the current screen.
+        bitmap.setSize(NSSize::new(px_w as f64, px_h as f64));
+
+        let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&bitmap)?;
+        let previous = NSGraphicsContext::currentContext();
+        NSGraphicsContext::setCurrentContext(Some(&context));
+        icon.drawInRect_fromRect_operation_fraction(
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(px_w as f64, px_h as f64)),
+            // A zero-size `fromRect` means "the image's entire bounds" --
+            // standard NSImage drawing usage, not a truncated/cropped draw.
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+            NSCompositingOperation::Copy,
+            1.0,
+        );
+        NSGraphicsContext::setCurrentContext(previous.as_deref());
+
+        Some(bitmap)
+    }
+
     fn app_icon_png_base64(pid: i32) -> Option<String> {
         use objc2::rc::autoreleasepool;
-        use objc2::AnyThread;
-        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSRunningApplication};
-        use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
+        use objc2_app_kit::{NSBitmapImageFileType, NSRunningApplication};
+        use objc2_foundation::{NSDictionary, NSString};
 
         autoreleasepool(|_| {
             let running_app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
             let icon = running_app.icon()?;
 
-            // NSImage -> PNG at picker size. AppKit writes the rect it
-            // actually chose back through `proposed_rect`; we don't need it,
-            // but the parameter is in/out so it has to be a real `&mut`.
-            let mut proposed_rect = NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(APP_ICON_MAX_EDGE, APP_ICON_MAX_EDGE),
-            );
-            // SAFETY: `proposed_rect` is a valid pointer to a live `NSRect`,
-            // and both optional arguments are `None` -- no reference context
-            // to match against, no hints dictionary whose generic type could
-            // be wrong.
-            let cg_image = unsafe {
-                icon.CGImageForProposedRect_context_hints(&mut proposed_rect, None, None)
-            }?;
-            let bitmap =
-                NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg_image);
+            let bitmap = rasterize_app_icon(&icon, APP_ICON_MAX_EDGE)?;
             let properties: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
             // SAFETY: `properties` is an empty dictionary, which is a valid
             // (if minimal) properties argument for PNG representation — PNG
@@ -466,6 +553,7 @@ mod macos {
 
     #[cfg(test)]
     mod tests {
+        use super::Retained;
         use crate::share_target::{
             classify, mac_window_facts, ShareTargetDecision, ShareTargetKind, ShareTargetRejection,
         };
@@ -527,6 +615,22 @@ mod macos {
                      ceiling -- TIFFRepresentation()/the full-size icon is back, and with it \
                      ~70MB per enumerated window"
                 );
+                // Stronger than the ceiling check above: on a 2x display the
+                // replaced `CGImageForProposedRect:context:hints:` route came
+                // back at exactly 2x the ceiling (256x256 for a 128pt
+                // request) -- still "<= max" is not a fair description of
+                // that failure, since 256 is NOT <= 128, but a looser
+                // "close enough" reading of this bug undersells it: the
+                // rasterizer must land the icon's longest edge EXACTLY on
+                // the ceiling (for the square icons every running app in
+                // practice has), not merely under it.
+                assert_eq!(
+                    w.max(h),
+                    max,
+                    "#106: app icon for pid {pid} came back {w}x{h}; its longest edge must land \
+                     exactly on the {max}px picker ceiling -- a display's backing scale factor \
+                     (2x, 3x, ...) must never change the rasterized pixel size"
+                );
                 assert!(
                     bytes.len() <= 64 * 1024,
                     "#106: app icon for pid {pid} encoded to {} bytes; a picker icon drawn at \
@@ -546,6 +650,123 @@ mod macos {
                      application produced an icon; nothing verified on this host"
                 );
             }
+        }
+
+        /// Build a synthetic app icon: an `NSImage` whose point size is the
+        /// picker ceiling (128x128pt, matching what `NSRunningApplication`
+        /// hands back for a real app) but whose ONLY representation is a
+        /// bitmap `native_px` pixels square -- i.e. a `native_px / 128`
+        /// scale-factor variant, exactly the shape of a real app icon's
+        /// @1x/@2x/@3x representations. This is what actually distinguishes
+        /// the fix from the bug: the replaced `CGImageForProposedRect`
+        /// route picked WHICH representation to use based on the *screen's*
+        /// backing scale factor, so its output pixel size tracked whichever
+        /// representation existed near that scale. This route never
+        /// consults a representation's own pixel size at all -- it always
+        /// draws into a bitmap it allocated itself at the exact ceiling -- so
+        /// the output must be 128x128 for every `native_px` tried here, on
+        /// any display.
+        fn synthetic_icon_with_representation(native_px: usize) -> Retained<objc2_app_kit::NSImage> {
+            use objc2::AnyThread;
+            use objc2_app_kit::{NSBitmapImageRep, NSDeviceRGBColorSpace, NSImage};
+            use objc2_foundation::NSSize;
+
+            let point_size = NSSize::new(super::APP_ICON_MAX_EDGE, super::APP_ICON_MAX_EDGE);
+            // SAFETY: `planes` is null (AppKit allocates its own backing
+            // store); see `rasterize_app_icon`'s identical call for the same
+            // justification.
+            let rep = unsafe {
+                NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                    NSBitmapImageRep::alloc(),
+                    std::ptr::null_mut(),
+                    native_px as isize,
+                    native_px as isize,
+                    8,
+                    4,
+                    true,
+                    false,
+                    NSDeviceRGBColorSpace,
+                    0,
+                    0,
+                )
+            }
+            .unwrap_or_else(|| panic!("NSBitmapImageRep::init must succeed for {native_px}px"));
+            // The representation's own point size is what makes it a
+            // "{native_px}/128 scale-factor" variant of a 128x128pt icon --
+            // the exact shape CGImageForProposedRect used to key its
+            // representation choice on.
+            rep.setSize(point_size);
+
+            let image = NSImage::initWithSize(NSImage::alloc(), point_size);
+            image.addRepresentation(&rep);
+            image
+        }
+
+        /// #106 (2x-display regression): pins the actual defect this issue
+        /// filed against -- pid 397 (the login window process) came back
+        /// 256x256, exactly 2x the 128px ceiling, on a 2x host. Runs the
+        /// synthetic icon through the real production rasterizer (not a
+        /// reimplementation of it) at several representation resolutions
+        /// that bracket the failure (64 = under, 256 = the exact observed
+        /// 2x failure, 512/1024 = 4x/8x) and requires exactly 128x128 every
+        /// time, with 1pt == 1px in the output regardless of which pixel
+        /// resolution backed the source representation.
+        #[test]
+        fn synthetic_icon_rasterizes_to_the_ceiling_at_every_representation_scale() {
+            let max = super::APP_ICON_MAX_EDGE as u32;
+            for native_px in [64usize, 256, 512, 1024] {
+                let icon = objc2::rc::autoreleasepool(|_| synthetic_icon_with_representation(native_px));
+                let bitmap = objc2::rc::autoreleasepool(|_| {
+                    super::rasterize_app_icon(&icon, super::APP_ICON_MAX_EDGE)
+                        .unwrap_or_else(|| panic!("rasterize_app_icon must succeed for a {native_px}px representation"))
+                });
+                let properties: Retained<
+                    objc2_foundation::NSDictionary<objc2_foundation::NSString, objc2::runtime::AnyObject>,
+                > = objc2_foundation::NSDictionary::new();
+                // SAFETY: `properties` is an empty dictionary; see
+                // `app_icon_png_base64`'s identical call for the same
+                // justification.
+                let png_data = unsafe {
+                    bitmap.representationUsingType_properties(
+                        objc2_app_kit::NSBitmapImageFileType::PNG,
+                        &properties,
+                    )
+                }
+                .expect("PNG encoding must succeed for a freshly rasterized bitmap");
+                let bytes = png_data.to_vec();
+                let (w, h) = png_dimensions(&bytes)
+                    .expect("rasterize_app_icon's output must encode to a valid PNG");
+                assert_eq!(
+                    (w, h),
+                    (max, max),
+                    "a {native_px}px-backed 128pt icon rasterized to {w}x{h}, not {max}x{max} -- \
+                     the representation's own pixel resolution must never leak into the picker \
+                     output"
+                );
+            }
+        }
+
+        /// Pure arithmetic, no AppKit: `fit_within_edge` must preserve
+        /// aspect ratio, land the longest edge exactly on the ceiling, round
+        /// to whole pixels, and never hand back a degenerate (zero) size for
+        /// a degenerate input.
+        #[test]
+        fn fit_within_edge_preserves_aspect_and_hits_the_ceiling() {
+            // Square icon (the overwhelming common case): both edges land
+            // exactly on the ceiling.
+            assert_eq!(super::fit_within_edge(1024.0, 1024.0, 128.0), (128, 128));
+            assert_eq!(super::fit_within_edge(32.0, 32.0, 128.0), (128, 128));
+
+            // Wide/tall icons: the LONGEST edge hits the ceiling, the other
+            // edge scales down proportionally.
+            assert_eq!(super::fit_within_edge(256.0, 128.0, 128.0), (128, 64));
+            assert_eq!(super::fit_within_edge(128.0, 256.0, 128.0), (64, 128));
+
+            // Degenerate source size: fall back to a square at the ceiling
+            // rather than a zero-area bitmap.
+            assert_eq!(super::fit_within_edge(0.0, 0.0, 128.0), (128, 128));
+            assert_eq!(super::fit_within_edge(-4.0, 10.0, 128.0), (128, 128));
+            assert_eq!(super::fit_within_edge(f64::NAN, 10.0, 128.0), (128, 128));
         }
 
         /// #106, source-level: `list()` must enclose its ObjC work in an
