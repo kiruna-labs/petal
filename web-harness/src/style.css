@@ -3059,7 +3059,11 @@ input[type='text']:disabled {
   white-space: normal;
 }
 
-.device-option-check {
+/* The `:not([hidden])` guard is load-bearing, same pitfall as
+   .feedback-meeting-trigger above: an author `display` beats the UA's
+   `[hidden] { display: none }`, so every row's check showed a mark
+   regardless of `.hidden` (all mics/speakers appeared "selected"). */
+.device-option-check:not([hidden]) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
