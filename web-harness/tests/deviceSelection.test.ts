@@ -9,7 +9,7 @@ import {
   videoConstraintsForDeviceId,
 } from '../src/controls.ts';
 import { CAMERA_VIDEO_CONSTRAINTS } from '../src/constants.ts';
-import { optionsFromDevices, placeDeviceMenu } from '../src/deviceMenu.ts';
+import { optionsFromDevices, placeDeviceMenu, resolvePreferredDeviceId, resolveSelectedOptionId } from '../src/deviceMenu.ts';
 
 const indexSource = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -111,4 +111,69 @@ test('listed device options skip empty ids and wrap unlabeled devices', () => {
 test('speaker output selection remains feature-gated', () => {
   assert.equal(typeof supportsAudioOutputSelection(), 'boolean');
   assert.match(controlsSource, /supportsAudioOutput: supportsAudioOutputSelection/);
+});
+
+test('the browser default pseudo-device folds onto its concrete twin', () => {
+  const options = optionsFromDevices(
+    [
+      { deviceId: 'default', label: 'Default - USB Mic', kind: 'audioinput', groupId: 'g1' } as MediaDeviceInfo,
+      { deviceId: 'usb-mic', label: 'USB Mic', kind: 'audioinput', groupId: 'g1' } as MediaDeviceInfo,
+      { deviceId: 'builtin-mic', label: 'Built-in Mic', kind: 'audioinput', groupId: 'g2' } as MediaDeviceInfo,
+    ],
+    'Microphone'
+  );
+  // Exactly one row for the twinned device, relabeled -- not two.
+  assert.deepEqual(options, [
+    { id: 'usb-mic', label: 'USB Mic (System Default)' },
+    { id: 'builtin-mic', label: 'Built-in Mic' },
+  ]);
+});
+
+test('a default pseudo-device with no concrete twin (unmatched groupId) is kept as its own row', () => {
+  const options = optionsFromDevices(
+    [
+      { deviceId: 'default', label: 'Default - Headset', kind: 'audioinput', groupId: 'g9' } as MediaDeviceInfo,
+      { deviceId: 'other-mic', label: 'Other Mic', kind: 'audioinput', groupId: 'g2' } as MediaDeviceInfo,
+    ],
+    'Microphone'
+  );
+  assert.deepEqual(options, [
+    { id: 'default', label: 'Default - Headset' },
+    { id: 'other-mic', label: 'Other Mic' },
+  ]);
+});
+
+test('a default pseudo-device with no groupId at all is never folded (empty string is not a match key)', () => {
+  const options = optionsFromDevices(
+    [
+      { deviceId: 'default', label: 'Default', kind: 'audioinput', groupId: '' } as MediaDeviceInfo,
+      { deviceId: 'usb-mic', label: 'USB Mic', kind: 'audioinput', groupId: '' } as MediaDeviceInfo,
+    ],
+    'Microphone'
+  );
+  assert.deepEqual(options, [
+    { id: 'default', label: 'Default' },
+    { id: 'usb-mic', label: 'USB Mic' },
+  ]);
+});
+
+test('picker selection prefers the active device over the persisted id, and persisted over options[0]', () => {
+  const options = [{ id: 'mic-a' }, { id: 'mic-b' }, { id: 'mic-c' }] as { id: string; label: string }[];
+
+  // Active device wins even when a different id is persisted.
+  assert.equal(
+    resolveSelectedOptionId(options as any, resolvePreferredDeviceId('mic-c', 'mic-b')),
+    'mic-c'
+  );
+  // No active device -- falls back to persisted.
+  assert.equal(resolveSelectedOptionId(options as any, resolvePreferredDeviceId('', 'mic-b')), 'mic-b');
+  // Neither active nor persisted -- falls back to the first option, never a
+  // device absent from the current list.
+  assert.equal(resolveSelectedOptionId(options as any, resolvePreferredDeviceId('', '')), 'mic-a');
+  // A stale active/persisted id that no longer exists in the list also falls
+  // back to the first option rather than selecting nothing.
+  assert.equal(
+    resolveSelectedOptionId(options as any, resolvePreferredDeviceId('unplugged-mic', '')),
+    'mic-a'
+  );
 });
