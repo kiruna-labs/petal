@@ -885,6 +885,32 @@ block names each episode CONTENDED, uncontended, or unknown. The output is
 paste-safe: numbers, stages and verdicts only. This cannot move to CI: the
 Tart guest has no camera and the synthetic source contends for no device.
 
+### Windows camera: the pinned native mode
+
+The Windows capture path enumerates the camera's native media types, picks one,
+and **pins** it with `IMFSourceReaderEx::SetNativeMediaType` before asking the
+reader for NV12. Without the pin, `SetCurrentMediaType` constrains only the
+*output* format, so Media Foundation may satisfy it from a different native
+type -- and then the mode the app reports (and publishes) need not be the mode
+the device runs. Measured on a Logitech BRIO: a `1280x720@30` request negotiated
+down to ~20 fps that way, while `1280x720@60` landed on a 60-capable type and
+delivered ~57.
+
+`petal.log` says which of the two happened, once per activation:
+
+- `camera: pinned native media type WxH @ N/D fps (nv12=…)` -- the selection was
+  enforced, so the `camera: capturing …` line describes the mode the device is
+  actually in;
+- `camera: reader has no IMFSourceReaderEx (…)` or `camera: failed to pin camera
+  native media type (…)` -- the open fell back to baseline negotiation, so the
+  cadence in that `capturing` line is *not* verified for that activation. A
+  pinning failure never blocks the camera.
+
+Read it next to `session: camera publish health …`, which reports the cadence the
+device delivered. A mode can be pinned and still deliver less than it advertises:
+**the device owns exposure**, and low light legitimately lowers the delivered
+rate. That is reported, never "fixed" by reopening the camera.
+
 Issue #680's panel-prewarm stress harness is deliberately opt-in because it
 needs a running macOS app, a joined room, Screen Recording permission, and two
 real on-screen sacrificial windows. It sends only the existing `share`,
