@@ -5,6 +5,11 @@ export type DeviceMenuKind = 'audio' | 'camera';
 export interface DeviceOption {
   id: string;
   label: string;
+  // True on the concrete device optionsFromDevices folded the browser's
+  // 'default' pseudo-entry onto. Lets resolveSelectedOptionId map an active
+  // or persisted id of literally 'default' onto the row that's actually
+  // selectable (see #the 'default' id itself, not just the duplicate row).
+  systemDefault?: boolean;
 }
 
 export interface DeviceMenuHandlers {
@@ -12,24 +17,78 @@ export interface DeviceMenuHandlers {
   applyAudioInput: (deviceId: string) => Promise<void>;
   applyAudioOutput: (deviceId: string) => Promise<void>;
   applyVideoInput: (deviceId: string) => Promise<void>;
+  // The device actually in use right now (published track's capture
+  // settings, else the room's active device) -- '' if none. Takes priority
+  // over `storedId` so the check mark reflects reality, not a guess.
+  activeDeviceId: (key: 'audioinput' | 'audiooutput' | 'videoinput') => string;
   storedId: (key: 'audioinput' | 'audiooutput' | 'videoinput') => string;
   supportsAudioOutput: () => boolean;
 }
 
 const DEVICE_GAP = 8;
 const VIEWPORT_PAD = 8;
+const DEFAULT_PSEUDO_DEVICE_ID = 'default';
 
 export function labelForListedDevice(device: MediaDeviceInfo, fallback: string, index: number): string {
   return device.label.trim() || `${fallback} ${index + 1}`;
 }
 
+// Chrome (and others) list the system default as its OWN MediaDeviceInfo
+// entry (deviceId 'default') alongside the concrete device it currently
+// points at, so the same physical mic/speaker shows up twice. Fold the
+// pseudo-device onto its concrete twin (same groupId) so only one row
+// remains -- mirrors livekit-client's DeviceManager.normalizeDeviceId
+// matching, reimplemented sync since we already hold the full device list.
 export function optionsFromDevices(devices: MediaDeviceInfo[], fallback: string): DeviceOption[] {
-  return devices
+  const named = devices
     .filter((device) => device.deviceId)
     .map((device, index) => ({
       id: device.deviceId,
+      groupId: device.groupId,
       label: labelForListedDevice(device, fallback, index),
     }));
+
+  const foldedIndices = new Set<number>();
+  const systemDefaultTwins = new Set<string>();
+  named.forEach((option, index) => {
+    if (option.id !== DEFAULT_PSEUDO_DEVICE_ID || !option.groupId) return;
+    const twin = named.find((other) => other.id !== DEFAULT_PSEUDO_DEVICE_ID && other.groupId === option.groupId);
+    if (!twin) return;
+    foldedIndices.add(index);
+    systemDefaultTwins.add(twin.id);
+  });
+
+  return named
+    .filter((_, index) => !foldedIndices.has(index))
+    .map((option) => ({
+      id: option.id,
+      label: systemDefaultTwins.has(option.id) ? `${option.label} (System Default)` : option.label,
+      ...(systemDefaultTwins.has(option.id) ? { systemDefault: true } : {}),
+    }));
+}
+
+// Priority for the picker's checked row: what's actually active beats a
+// guess. `activeId` is already the caller's own active>persisted>first
+// mini-chain (track capture settings, else the room's active device); this
+// only adds the final "does it still exist in the list" fallback to
+// options[0] -- never enumeration order alone (#the P0 this file fixes).
+export function resolvePreferredDeviceId(activeId: string, persistedId: string): string {
+  return activeId || persistedId;
+}
+
+// The active/persisted id can itself BE the literal string 'default' --
+// Chrome reports it from a track opened with deviceId 'default', from
+// room.getActiveDevice(), and older sessions persisted it before this file
+// folded the duplicate row away. Map it onto the folded twin (if one
+// exists) before checking the id is still a real option, or this falls
+// through to options[0] again -- the exact guess this file removes, for the
+// single most common setup (nothing manually chosen).
+export function resolveSelectedOptionId(options: DeviceOption[], preferredId: string): string {
+  const mappedId =
+    preferredId === DEFAULT_PSEUDO_DEVICE_ID
+      ? (options.find((option) => option.systemDefault)?.id ?? preferredId)
+      : preferredId;
+  return options.some((option) => option.id === mappedId) ? mappedId : options[0]?.id ?? '';
 }
 
 export function placeDeviceMenu(
@@ -111,14 +170,20 @@ export function setupDeviceMenu(
         if (openKind !== 'audio') return;
         body.replaceChildren();
         body.append(
-          field('Microphone', optionsFromDevices(mics, 'Microphone'), handlers.storedId('audioinput'), (id) =>
-            handlers.applyAudioInput(id)
+          field(
+            'Microphone',
+            optionsFromDevices(mics, 'Microphone'),
+            resolvePreferredDeviceId(handlers.activeDeviceId('audioinput'), handlers.storedId('audioinput')),
+            (id) => handlers.applyAudioInput(id)
           )
         );
         if (handlers.supportsAudioOutput()) {
           body.append(
-            field('Speaker', optionsFromDevices(speakers, 'Speaker'), handlers.storedId('audiooutput'), (id) =>
-              handlers.applyAudioOutput(id)
+            field(
+              'Speaker',
+              optionsFromDevices(speakers, 'Speaker'),
+              resolvePreferredDeviceId(handlers.activeDeviceId('audiooutput'), handlers.storedId('audiooutput')),
+              (id) => handlers.applyAudioOutput(id)
             )
           );
         }
@@ -130,7 +195,7 @@ export function setupDeviceMenu(
           field(
             'Camera',
             optionsFromDevices(cameras, 'Camera'),
-            handlers.storedId('videoinput'),
+            resolvePreferredDeviceId(handlers.activeDeviceId('videoinput'), handlers.storedId('videoinput')),
             (id) => handlers.applyVideoInput(id),
             false
           )
@@ -173,7 +238,7 @@ export function setupDeviceMenu(
     list.className = 'device-option-list';
     list.setAttribute('role', 'listbox');
     list.setAttribute('aria-label', `${label} devices`);
-    const selected = options.some((option) => option.id === selectedId) ? selectedId : options[0]?.id ?? '';
+    const selected = resolveSelectedOptionId(options, selectedId);
     const status = document.createElement('p');
     status.className = 'device-note device-status';
     status.setAttribute('role', 'status');
