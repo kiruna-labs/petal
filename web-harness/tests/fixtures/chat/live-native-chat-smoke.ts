@@ -24,22 +24,8 @@ if (!code) {
 const base = process.env.PETAL_WEB_URL ?? 'http://localhost:5173';
 const T = Number(secsArg) * 1000;
 
-type Msg = { id: string; text: string; sender: { identity: string; name: string | null }; self: boolean; relayed: boolean; t: number };
-type Packet = { at: string; from: string; name: string; type: string; text?: string; count?: number };
-declare global {
-  interface Window {
-    __petalHarness: {
-      room: {
-        state: string;
-        localParticipant: { identity: string };
-        remoteParticipants: Map<string, { identity: string; name?: string }>;
-        on(event: string, cb: (...args: unknown[]) => void): unknown;
-      } | null;
-      chat: { open: boolean; setOpen(o: boolean): void; messages(): readonly Msg[]; send(t: string): Promise<void> } | null;
-    };
-    __chatPackets: Packet[];
-  }
-}
+type Msg = ChatSmokeMsg;
+type Packet = ChatSmokePacket;
 
 let failed = false;
 function step(name: string, ok: boolean, detail = ''): void {
@@ -78,20 +64,19 @@ const remotes = (await page.evaluate(() => [...window.__petalHarness.room!.remot
 console.log(`[web] connected as ${me} in ${code}; remotes: ${remotes.join(', ') || 'none'}`);
 const native = remotes.find((r) => isNative(r.split(' ')[0]));
 step('a native participant is in the meeting', !!native, native ?? 'none; start the desktop dev app on this branch and join first');
-const before = (await page.evaluate(() => window.__petalHarness.chat!.messages().length)) as number;
+// Only messages that arrive LIVE from a native identity after this point count
+// (history relayed on join is marked relayed and excluded).
+const liveNativeCount = () => window.__petalHarness.chat!.messages().filter((m) => !m.self && !m.relayed && !m.sender.identity.startsWith('web-')).length;
+const before = (await page.evaluate(liveNativeCount)) as number;
 
 // 1. native sends while our drawer is closed.
 prompt(`Step 1: on the DESKTOP, open Chat and send any message now (waiting up to ${secsArg}s).`);
-await page.waitForFunction(
-  (n: number) => window.__petalHarness.chat!.messages().filter((m) => !m.self && !m.relayed && !m.sender.identity.startsWith('web-')).length > n,
-  before === 0 ? 0 : (await page.evaluate(() => window.__petalHarness.chat!.messages().filter((m) => !m.self && !m.relayed && !m.sender.identity.startsWith('web-')).length)) as number,
-  { timeout: T },
-);
+await page.waitForFunction((n: number) => window.__petalHarness.chat!.messages().filter((m) => !m.self && !m.relayed && !m.sender.identity.startsWith('web-')).length > n, before, { timeout: T });
 const live = (await page.evaluate(() => window.__petalHarness.chat!.messages().filter((m) => !m.self && !m.relayed && !m.sender.identity.startsWith('web-')).at(-1))) as Msg;
 step('web receives the native message live', !!live, `${live.sender.name}: ${live.text}`);
 const badge = await page.evaluate(() => {
   const el = document.getElementById('ctl-chat-badge')!;
-  return { hidden: el.hidden, text: el.textContent, label: document.getElementById('ctl-chat')!.getAttribute('aria-label'), notice: document.body.innerText.includes(`${[...document.querySelectorAll('.chat-name')].length ? '' : ''}`) };
+  return { hidden: el.hidden, text: el.textContent, label: document.getElementById('ctl-chat')!.getAttribute('aria-label') };
 });
 step('web Chat control shows unread', !badge.hidden && /^\d+$/.test(badge.text ?? '') && (badge.label ?? '').startsWith('Open chat, '), JSON.stringify({ badge: badge.text, label: badge.label }));
 const notice = (await page.evaluate((t: string) => document.body.innerText.includes(t), `${live.sender.name}: ${live.text}`.slice(0, 40))) as boolean;

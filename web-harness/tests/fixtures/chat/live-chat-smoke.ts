@@ -19,15 +19,7 @@ const base = process.env.PETAL_WEB_URL ?? 'http://localhost:5173';
 const code = process.argv[2] ?? generateAccessCode();
 const T = 60_000;
 
-type Msg = { id: string; text: string; sender: { identity: string; name: string | null }; self: boolean; relayed: boolean };
-declare global {
-  interface Window {
-    __petalHarness: {
-      room: { state: string; localParticipant: { identity: string }; remoteParticipants: Map<string, { identity: string; name?: string }> } | null;
-      chat: { open: boolean; setOpen(o: boolean): void; messages(): readonly Msg[]; send(t: string): Promise<void> } | null;
-    };
-  }
-}
+type Msg = ChatSmokeMsg;
 
 let failed = false;
 function step(name: string, ok: boolean, detail = ''): void {
