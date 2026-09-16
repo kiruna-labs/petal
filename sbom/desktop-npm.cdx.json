@@ -3599,17 +3599,17 @@
       "version": "1.33.0"
     },
     {
-      "bom-ref": "livekit-client@2.22.2",
+      "bom-ref": "livekit-client@2.22.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/livekit-client/-/livekit-client-2.22.2.tgz"
+          "url": "https://registry.npmjs.org/livekit-client/-/livekit-client-2.22.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a37c8b6281f6787551fc3988673802f7a14cbed478fa0fc38dea8dc12e73a75d848eaaea89150bc66e8eabf62c4c4f7b5a703a7e1cb6dfe6b684691b71ee523c"
+          "content": "8f0f7304a5d8e46b6be4c67bbc438ddd084c35c72e0ef607724d4f152c86d5a69ab5e40faa02991413206641596971c87fd455e0c0d6e71a532b66fffaa6f03a"
         }
       ],
       "licenses": [
@@ -3620,10 +3620,10 @@
         }
       ],
       "name": "livekit-client",
-      "purl": "pkg:npm/livekit-client@2.22.2",
+      "purl": "pkg:npm/livekit-client@2.22.3",
       "scope": "required",
       "type": "library",
-      "version": "2.22.2"
+      "version": "2.22.3"
     },
     {
       "bom-ref": "locate-character@3.0.0",
@@ -3812,17 +3812,17 @@
       "version": "2.0.1"
     },
     {
-      "bom-ref": "nanoid@3.3.18",
+      "bom-ref": "nanoid@3.3.19",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz"
+          "url": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.19.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "0d38383096c631691f8ba55915d36ddbf71a31b432e0ebbe3a9fe1250bc611672755fa00d5003ec7344a033c3d8c3ebe19538e798aff98872e0d276e83a17afb"
+          "content": "636b54372e28bb0eadab9a0348a7906063b286450184d39c195ff4d8a0beea477d7831aa75977efa68cc8880e296b058be3127098bd5b6cb870ae3fea2449fba"
         }
       ],
       "licenses": [
@@ -3839,10 +3839,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/nanoid@3.3.18",
+      "purl": "pkg:npm/nanoid@3.3.19",
       "scope": "optional",
       "type": "library",
-      "version": "3.3.18"
+      "version": "3.3.19"
     },
     {
       "bom-ref": "obug@2.1.4",
@@ -4010,17 +4010,17 @@
       "version": "1.63.0"
     },
     {
-      "bom-ref": "postcss@8.5.26",
+      "bom-ref": "postcss@8.5.28",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/postcss/-/postcss-8.5.26.tgz"
+          "url": "https://registry.npmjs.org/postcss/-/postcss-8.5.28.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "bbcd8def82c5cc6f1c6be743f29b8f9e99535e8187e1f4cfa551ae21bb77e86deabcd964bdf0f49440194b16a5cb7297f134bf2f503582c0849af2a605c55b91"
+          "content": "451bb3a83b6de58f61deabb3e615a12be4cf9ec995b3a5b0494e8b90931e6381ecb54103b984c6f1425275ac0c4739b302d57e284a06f0ddd0836a8bcb9bccfc"
         }
       ],
       "licenses": [
@@ -4037,10 +4037,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/postcss@8.5.26",
+      "purl": "pkg:npm/postcss@8.5.28",
       "scope": "optional",
       "type": "library",
-      "version": "8.5.26"
+      "version": "8.5.28"
     },
     {
       "bom-ref": "readdirp@4.1.2",
@@ -4574,17 +4574,17 @@
       "version": "6.0.3"
     },
     {
-      "bom-ref": "vite@8.2.2",
+      "bom-ref": "vite@8.3.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/vite/-/vite-8.2.2.tgz"
+          "url": "https://registry.npmjs.org/vite/-/vite-8.3.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "70528b57f3d18005252119b95a332327cea3adfb73a6a7201fe52cf834bc988dc20cd887df45a1af3f2e1cbdfe30e2cf020a9b30102a59d00702984e00cfb3fd"
+          "content": "96164156f10779f804f874190bd3bb101260094fe757314d97bbe44b8444d003ed58b3f4dbff10548910b730713eaba1ee5ab9ffbf0d1e2a538fb38343a5eec9"
         }
       ],
       "licenses": [
@@ -4601,10 +4601,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/vite@8.2.2",
+      "purl": "pkg:npm/vite@8.3.0",
       "scope": "optional",
       "type": "library",
-      "version": "8.2.2"
+      "version": "8.3.0"
     },
     {
       "bom-ref": "vitefu@1.1.3",
@@ -4712,7 +4712,7 @@
         "@tauri-apps/plugin-process@2.3.1",
         "@tauri-apps/plugin-updater@2.11.0",
         "@userdispatch/sdk@1.0.1",
-        "livekit-client@2.22.2",
+        "livekit-client@2.22.3",
         "@sveltejs/adapter-static@3.0.10",
         "@sveltejs/kit@2.70.3",
         "@sveltejs/vite-plugin-svelte@7.3.0",
@@ -4722,9 +4722,9 @@
         "svelte-check@4.7.6",
         "tsx@4.23.13",
         "typescript@6.0.3",
-        "vite@8.2.2"
+        "vite@8.3.0"
       ],
-      "ref": "desktop@0.9.25"
+      "ref": "desktop@0.9.27"
     },
     {
       "dependsOn": [],
@@ -4977,7 +4977,7 @@
       "dependsOn": [
         "@sveltejs/vite-plugin-svelte@7.3.0",
         "svelte@5.57.0",
-        "vite@8.2.2",
+        "vite@8.3.0",
         "typescript@6.0.3",
         "@standard-schema/spec@1.1.0",
         "@sveltejs/acorn-typescript@1.0.10",
@@ -5001,7 +5001,7 @@
     {
       "dependsOn": [
         "svelte@5.57.0",
-        "vite@8.2.2",
+        "vite@8.3.0",
         "deepmerge@4.3.1",
         "magic-string@1.2.3",
         "obug@2.1.4",
@@ -5301,7 +5301,7 @@
         "typed-emitter@2.1.0",
         "webrtc-adapter@9.0.6"
       ],
-      "ref": "livekit-client@2.22.2"
+      "ref": "livekit-client@2.22.3"
     },
     {
       "dependsOn": [],
@@ -5331,7 +5331,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "nanoid@3.3.18"
+      "ref": "nanoid@3.3.19"
     },
     {
       "dependsOn": [],
@@ -5357,11 +5357,11 @@
     },
     {
       "dependsOn": [
-        "nanoid@3.3.18",
+        "nanoid@3.3.19",
         "picocolors@1.1.1",
         "source-map-js@1.2.1"
       ],
-      "ref": "postcss@8.5.26"
+      "ref": "postcss@8.5.28"
     },
     {
       "dependsOn": [],
@@ -5496,16 +5496,16 @@
         "tsx@4.23.13",
         "lightningcss@1.33.0",
         "picomatch@4.0.7",
-        "postcss@8.5.26",
+        "postcss@8.5.28",
         "rolldown@1.2.7",
         "tinyglobby@0.2.17",
         "fsevents@2.3.3"
       ],
-      "ref": "vite@8.2.2"
+      "ref": "vite@8.3.0"
     },
     {
       "dependsOn": [
-        "vite@8.2.2"
+        "vite@8.3.0"
       ],
       "ref": "vitefu@1.1.3"
     },
@@ -5522,7 +5522,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "desktop@0.9.25",
+      "bom-ref": "desktop@0.9.27",
       "description": "Petal desktop app - low-latency, multi-window screensharing for macOS and Windows",
       "licenses": [
         {
@@ -5532,10 +5532,10 @@
         }
       ],
       "name": "desktop",
-      "purl": "pkg:npm/desktop@0.9.25",
+      "purl": "pkg:npm/desktop@0.9.27",
       "scope": "required",
       "type": "library",
-      "version": "0.9.25"
+      "version": "0.9.27"
     },
     "lifecycles": [
       {
