@@ -142,7 +142,7 @@
 
 use crate::sync_ext::MutexExt;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -150,6 +150,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
+use livekit::track::TrackKind;
 use livekit::webrtc::audio_frame::AudioFrame;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::AudioSourceOptions;
@@ -411,8 +412,11 @@ impl ScreenAudioTrack {
         .await
         {
             Ok(Ok(_)) => {}
-            Ok(Err(error)) => log::debug!("audio: screen-audio unpublish failed: {error}"),
-            Err(_) => log::debug!("audio: screen-audio unpublish timed out"),
+            // A failed unpublish is a *privacy* failure, not a cosmetic one:
+            // unchecking share audio must take the audio off the wire, so this
+            // cannot be invisible in a default-level log.
+            Ok(Err(error)) => log::warn!("audio: screen-audio unpublish failed: {error}"),
+            Err(_) => log::warn!("audio: screen-audio unpublish timed out"),
         }
         if let Err(error) = self.capture.stop() {
             log::debug!("audio: screen-audio native stop failed: {error}");
@@ -1549,11 +1553,16 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
         // line and the watchdog blind. Enumerate them at start; `watched`
         // dedupes against a late event.
         let mut watched: HashSet<String> = HashSet::new();
+        // One end-signal per watched sid. The SFU's `TrackUnpublished` is the
+        // authoritative statement that the publication is gone, and the #787
+        // watchdog has to stop there instead of cycling on a subscription that
+        // no longer exists.
+        let mut endings: HashMap<String, tokio::sync::watch::Sender<bool>> = HashMap::new();
         for (_, participant) in room.remote_participants() {
             for publication in participant.track_publications().values() {
                 if let Some(RemoteTrack::Audio(audio_track)) = publication.track() {
                     let sid = audio_track.sid().to_string();
-                    if watched.insert(sid) {
+                    if watched.insert(sid.clone()) {
                         log::info!(
                             "audio: subscribed to remote audio track from '{}' (sid={}, muted={}) -- pre-existing at join",
                             participant.identity(),
@@ -1563,9 +1572,17 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                         let identity = participant.identity().to_string();
                         let speaking = speaking.clone();
                         let generation = generation.clone();
+                        let (end_tx, end_rx) = tokio::sync::watch::channel(false);
+                        endings.insert(sid, end_tx);
                         tokio::spawn(async move {
-                            watch_remote_audio_track(identity, audio_track, speaking, generation)
-                                .await;
+                            watch_remote_audio_track(
+                                identity,
+                                audio_track,
+                                speaking,
+                                generation,
+                                end_rx,
+                            )
+                            .await;
                         });
                     }
                 }
@@ -1581,7 +1598,8 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                     track, participant, ..
                 } => {
                     if let RemoteTrack::Audio(audio_track) = track {
-                        if !watched.insert(audio_track.sid().to_string()) {
+                        let sid = audio_track.sid().to_string();
+                        if !watched.insert(sid.clone()) {
                             continue;
                         }
                         log::info!(
@@ -1593,9 +1611,17 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                         let identity = participant.identity().to_string();
                         let speaking = speaking.clone();
                         let generation = generation.clone();
+                        let (end_tx, end_rx) = tokio::sync::watch::channel(false);
+                        endings.insert(sid, end_tx);
                         tokio::spawn(async move {
-                            watch_remote_audio_track(identity, audio_track, speaking, generation)
-                                .await;
+                            watch_remote_audio_track(
+                                identity,
+                                audio_track,
+                                speaking,
+                                generation,
+                                end_rx,
+                            )
+                            .await;
                         });
                     }
                 }
@@ -1604,7 +1630,31 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                     // that re-subscribes the SAME sid within one room
                     // generation would be deduped into permanent blindness
                     // -- recreating the exact gap this logger closes.
-                    watched.remove(publication.sid().to_string().as_str());
+                    let sid = publication.sid().to_string();
+                    watched.remove(sid.as_str());
+                    if let Some(end) = endings.remove(&sid) {
+                        let _ = end.send(true);
+                    }
+                }
+                RoomEvent::TrackUnpublished { publication, .. } => {
+                    // Receiver-side proof that a sender's `stopped` reached the
+                    // wire. Without it, the #787 watchdog's post-stop alarms
+                    // read identically whether the publication was removed
+                    // correctly or the unpublish failed silently -- the exact
+                    // run where that distinction is a privacy question.
+                    // Mirrors the video path's "unpublished ... removing".
+                    if publication.kind() == TrackKind::Audio {
+                        let sid = publication.sid().to_string();
+                        watched.remove(sid.as_str());
+                        if let Some(end) = endings.remove(&sid) {
+                            let _ = end.send(true);
+                        }
+                        log::info!(
+                            "audio: remote audio publication unpublished track={} sid={} -- removing",
+                            publication.name(),
+                            sid
+                        );
+                    }
                 }
                 RoomEvent::ActiveSpeakersChanged { speakers } => {
                     let mut guard = speaking.lock_unpoisoned();
@@ -1864,6 +1914,7 @@ async fn watch_remote_audio_track(
     track: RemoteAudioTrack,
     speaking: Arc<Mutex<HashSet<String>>>,
     generation: RoomGeneration,
+    mut ended: tokio::sync::watch::Receiver<bool>,
 ) {
     let sid = track.sid();
     let mut stream =
@@ -1883,6 +1934,11 @@ async fn watch_remote_audio_track(
 
     loop {
         tokio::select! {
+            // The publication was unpublished or the subscription dropped:
+            // stop here rather than reporting alarms for a track the SFU has
+            // already removed. `changed()` also resolves when the sender is
+            // dropped, which means the same "no longer watched" condition.
+            _ = ended.changed() => break,
             frame = stream.next() => {
                 let Some(frame) = frame else { break };
                 frames += 1;

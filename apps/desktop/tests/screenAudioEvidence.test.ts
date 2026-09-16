@@ -26,6 +26,10 @@ const SCREEN_AUDIO_SOURCE = readFileSync(
 const PUBLISHED = 'audio: screen-audio published scope={} track={} sid={}';
 const STOPPED = 'audio: screen-audio stopped scope={} track={}';
 const REPUBLISHED = 'audio: screen-audio republished after reconnect scope={} track={}';
+const UNPUBLISH_FAILED = 'audio: screen-audio unpublish failed: {error}';
+const UNPUBLISH_TIMED_OUT = 'audio: screen-audio unpublish timed out';
+const RECEIVER_UNPUBLISHED =
+  'audio: remote audio publication unpublished track={} sid={} -- removing';
 
 /** The `log::<level>!` call that owns a format string. */
 function logLevelFor(source: string, format: string): string | null {
@@ -90,4 +94,42 @@ test('publishing and stopping are paired, and stop is idempotent', () => {
     stop.indexOf('swap(true') < stop.indexOf(STOPPED),
     'the idempotence guard must precede the evidence line'
   );
+});
+
+test('a failed unpublish is a warn, not a debug', () => {
+  // `stopped` is written after the unpublish call *returns*, so it is
+  // bookkeeping. Unchecking share audio is a privacy boundary: a silent
+  // unpublish failure must not be invisible in a default-level log.
+  assert.equal(logLevelFor(AUDIO_SOURCE, UNPUBLISH_FAILED), 'warn');
+  assert.equal(logLevelFor(AUDIO_SOURCE, UNPUBLISH_TIMED_OUT), 'warn');
+});
+
+test('the receiver-side unpublish proof exists at info level', () => {
+  // The only evidence that a sender's `stopped` reached the wire. It is
+  // written from the SFU's own `TrackUnpublished`, not from a timer, so a
+  // late-does-not-happen run cannot be read as noise.
+  assert.equal(logLevelFor(AUDIO_SOURCE, RECEIVER_UNPUBLISHED), 'info');
+  assert.match(AUDIO_SOURCE, /RoomEvent::TrackUnpublished \{ publication, \.\. \}/);
+  assert.match(AUDIO_SOURCE, /publication\.kind\(\) == TrackKind::Audio/);
+});
+
+test('the removal line stays correlation-only', () => {
+  // sid plus the contract track name pair it with the sender's `published`
+  // line; participant identity is not needed here and must not be added.
+  const start = AUDIO_SOURCE.indexOf(RECEIVER_UNPUBLISHED);
+  assert.ok(start >= 0, 'receiver unpublish line must exist');
+  const call = AUDIO_SOURCE.slice(start, start + RECEIVER_UNPUBLISHED.length + 120);
+  assert.match(call, /publication\.name\(\)/);
+  assert.match(call, /\bsid\b/);
+  assert.doesNotMatch(call, /identity/, 'the removal line must not add participant identity');
+});
+
+test('the watchdog ends when the publication is unpublished', () => {
+  // Without this the post-stop alarms read identically whether the track was
+  // removed or the unpublish failed silently -- the exact ambiguity the
+  // receiver line exists to remove.
+  assert.match(AUDIO_SOURCE, /_ = ended\.changed\(\) => break/);
+  assert.match(AUDIO_SOURCE, /endings\.remove\(&sid\)/);
+  const signals = AUDIO_SOURCE.match(/tokio::sync::watch::channel\(false\)/g) ?? [];
+  assert.equal(signals.length, 2, 'both watchdog spawn sites must own an end signal');
 });
