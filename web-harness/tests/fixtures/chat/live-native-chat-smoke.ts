@@ -52,18 +52,23 @@ await page.evaluate(() => {
   window.__petalHarness.room!.on('dataReceived', (payload: unknown, participant: unknown, _kind: unknown, topic: unknown) => {
     if (topic !== 'petal.chat') return;
     const p = participant as { identity: string; name?: string } | undefined;
-    if (!p || p.identity.startsWith('web-')) return;
+    // A packet from a participant the client has not resolved yet still carries
+    // its identity through the SFU; log it as unresolved rather than dropping it.
+    const identity = p?.identity ?? 'unresolved';
+    if (identity.startsWith('web-')) return;
     try {
       const wire = JSON.parse(new TextDecoder().decode(payload as Uint8Array));
-      window.__chatPackets.push({ at: new Date().toISOString().slice(11, 19), from: p.identity, name: p.name ?? '', type: wire.type, text: wire.text, count: wire.messages?.length });
+      window.__chatPackets.push({ at: new Date().toISOString().slice(11, 19), from: identity, name: p?.name ?? '', type: wire.type, text: wire.text, count: wire.messages?.length });
     } catch {}
   });
 });
 const me = (await page.evaluate(() => window.__petalHarness.room!.localParticipant.identity)) as string;
 const remotes = (await page.evaluate(() => [...window.__petalHarness.room!.remoteParticipants.values()].map((p) => `${p.identity} (${p.name ?? 'no name'})`))) as string[];
 console.log(`[web] connected as ${me} in ${code}; remotes: ${remotes.join(', ') || 'none'}`);
-const native = remotes.find((r) => isNative(r.split(' ')[0]));
-step('a native participant is in the meeting', !!native, native ?? 'none; start the desktop dev app on this branch and join first');
+if (!remotes.some((r) => isNative(r.split(' ')[0]))) prompt(`No native participant yet: join ${code} from the desktop dev app (waiting up to ${secsArg}s).`);
+await page.waitForFunction(() => [...window.__petalHarness.room!.remoteParticipants.values()].some((p) => !p.identity.startsWith('web-')), null, { timeout: T });
+const native = (await page.evaluate(() => [...window.__petalHarness.room!.remoteParticipants.values()].find((p) => !p.identity.startsWith('web-'))!.identity)) as string;
+step('a native participant is in the meeting', true, native);
 // Only messages that arrive LIVE from a native identity after this point count
 // (history relayed on join is marked relayed and excluded).
 const liveNativeCount = () => window.__petalHarness.chat!.messages().filter((m) => !m.self && !m.relayed && !m.sender.identity.startsWith('web-')).length;
@@ -103,11 +108,12 @@ const nativeId = live.sender.identity;
 prompt(`Step 3: on the DESKTOP, leave the meeting and rejoin ${code} (waiting up to ${secsArg}s for the rejoin).`);
 await page.waitForFunction((id: string) => ![...window.__petalHarness.room!.remoteParticipants.values()].some((p) => p.identity === id), nativeId, { timeout: T });
 console.log('[web] native participant left');
+const packetsBeforeRejoin = (await page.evaluate(() => window.__chatPackets.length)) as number;
 await page.waitForFunction(() => [...window.__petalHarness.room!.remoteParticipants.values()].some((p) => !p.identity.startsWith('web-')), null, { timeout: T });
 console.log('[web] a native participant is back');
-await page.waitForFunction(() => window.__chatPackets.some((p) => p.type === 'history-req'), null, { timeout: 30_000 }).catch(() => {});
+await page.waitForFunction((n: number) => window.__chatPackets.slice(n).some((p) => p.type === 'history-req'), packetsBeforeRejoin, { timeout: 30_000 }).catch(() => {});
 const packets = (await page.evaluate(() => window.__chatPackets)) as Packet[];
-const req = packets.filter((p) => p.type === 'history-req');
+const req = packets.slice(packetsBeforeRejoin).filter((p) => p.type === 'history-req');
 const ours = (await page.evaluate(() => window.__petalHarness.chat!.messages().length)) as number;
 step('native asked for history after rejoining', req.length > 0, `${req.length} request(s); this peer holds ${ours} message(s) to relay`);
 console.log('[web] packets from native:', packets.map((p) => `${p.at} ${p.type}${p.text ? ` "${p.text}"` : ''}${p.count !== undefined ? ` x${p.count}` : ''}`).join(' | '));
