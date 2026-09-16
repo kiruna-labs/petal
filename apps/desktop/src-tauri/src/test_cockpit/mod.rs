@@ -5069,6 +5069,55 @@ fn recv_camera_track(
     })
 }
 
+/// What the native side can prove about a remote camera, post-#188.
+///
+/// The native room no longer subscribes camera video (the hidden gallery bridge
+/// owns it), so a native recv camera track exists only if that ownership ever
+/// changes back. What the native room DOES still observe is the publication on
+/// its own event stream, which the coordinator records as it declines it. Either
+/// is an independent native observation that the web peer's `ok=true` is not.
+/// `expected_name` (the web report's `trackName`) makes the second form an
+/// exact match, so a stale publication from an earlier peer cannot satisfy it.
+struct CameraNativeEvidence {
+    detail: String,
+    delivered_fps: f64,
+    delivered_width: u32,
+    delivered_height: u32,
+}
+
+fn camera_native_evidence(
+    recv: Option<&crate::diagnostics::TrackHealth>,
+    declined: &[crate::transport::native_subscription::DeclinedCameraPublication],
+    expected_name: Option<&str>,
+) -> Option<CameraNativeEvidence> {
+    if let Some(track) = recv {
+        if track.fps > 0.0 || track.frames_decoded > 0 {
+            return Some(CameraNativeEvidence {
+                detail: format!(
+                    "camera recv track active {} fps={:.1} framesDecoded={}",
+                    track.name, track.fps, track.frames_decoded
+                ),
+                delivered_fps: track.fps,
+                delivered_width: track.width,
+                delivered_height: track.height,
+            });
+        }
+    }
+    let observed = declined.iter().rev().find(|entry| match expected_name {
+        Some(expected) => entry.name == expected,
+        None => entry.name.starts_with(crate::transport::publisher::CAMERA_TRACK_PREFIX),
+    })?;
+    Some(CameraNativeEvidence {
+        detail: format!(
+            "camera publication observed by the native room name={} sid={} -- declined to the gallery bridge by policy (#188); decode is the bridge's to prove, not native's",
+            observed.name, observed.sid
+        ),
+        delivered_fps: 0.0,
+        delivered_width: 0,
+        delivered_height: 0,
+    })
+}
+
 fn sent_camera_track(
     snapshot: &crate::diagnostics::NetworkSnapshot,
 ) -> Option<&crate::diagnostics::TrackHealth> {
@@ -5874,37 +5923,43 @@ async fn assert_reported_scenario(
                     format!("{detail}; refusing to trust generic web ok=true"),
                 );
             }
+            let expected_name = report
+                .payload
+                .get("trackName")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             let deadline = Instant::now() + ASSERT_TIMEOUT;
             while Instant::now() < deadline {
                 if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
                     let snapshot = diagnostics.snapshot();
                     let _ = writer.write("metrics", Some(scenario.id), &snapshot);
-                    if let Some(track) = recv_camera_track(&snapshot) {
-                        if track.fps > 0.0 || track.frames_decoded > 0 {
-                            return ScenarioOutcome {
-                                scenario_id: scenario.id.to_string(),
-                                verdict: ScenarioVerdict::Pass,
-                                message: format!(
-                                    "{} PASS camera recv track active fps={:.1} framesDecoded={}",
-                                    scenario.id, track.fps, track.frames_decoded
-                                ),
-                                delivered_fps: track.fps,
-                                delivered_width: track.width,
-                                delivered_height: track.height,
-                                assertions: vec![
-                                    AssertionOutcome {
-                                        name: "web-cockpit-report".to_string(),
-                                        passed: report_ok(&report.payload),
-                                        detail: report.payload.to_string(),
-                                    },
-                                    AssertionOutcome {
-                                        name: "native-camera-telemetry".to_string(),
-                                        passed: true,
-                                        detail: format!("{} fps={:.1}", track.name, track.fps),
-                                    },
-                                ],
-                            };
-                        }
+                    let declined =
+                        crate::transport::native_subscription::declined_camera_publications();
+                    if let Some(evidence) = camera_native_evidence(
+                        recv_camera_track(&snapshot),
+                        &declined,
+                        expected_name.as_deref(),
+                    ) {
+                        return ScenarioOutcome {
+                            scenario_id: scenario.id.to_string(),
+                            verdict: ScenarioVerdict::Pass,
+                            message: format!("{} PASS {}", scenario.id, evidence.detail),
+                            delivered_fps: evidence.delivered_fps,
+                            delivered_width: evidence.delivered_width,
+                            delivered_height: evidence.delivered_height,
+                            assertions: vec![
+                                AssertionOutcome {
+                                    name: "web-cockpit-report".to_string(),
+                                    passed: report_ok(&report.payload),
+                                    detail: report.payload.to_string(),
+                                },
+                                AssertionOutcome {
+                                    name: "native-camera-telemetry".to_string(),
+                                    passed: true,
+                                    detail: evidence.detail,
+                                },
+                            ],
+                        };
                     }
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
@@ -5914,8 +5969,8 @@ async fn assert_reported_scenario(
                 report,
                 "native-camera-telemetry",
                 format!(
-                    "camera publication was not observed in native recv telemetry within {:?}; refusing to trust web ok=true alone",
-                    ASSERT_TIMEOUT
+                    "camera publication was observed neither as a native recv track nor as a camera publication the native room declined (expected name {:?}) within {:?}; refusing to trust web ok=true alone",
+                    expected_name, ASSERT_TIMEOUT
                 ),
             )
         }
@@ -12032,6 +12087,53 @@ mod tests {
 
         assert!(validate_scenario_web_report(named_scenario("CAM"), &generic_ok).is_err());
         assert!(validate_scenario_web_report(named_scenario("CAM"), &camera_ok).is_ok());
+    }
+
+    /// CAM's native evidence after #188: the native room declines cameras, so
+    /// a declined publication with the EXACT reported name is the independent
+    /// native observation; a recv track still counts if ownership ever
+    /// changes back; a stale or differently-named publication does not.
+    #[test]
+    fn cam_native_evidence_accepts_a_declined_camera_by_exact_name_or_an_active_recv_track() {
+        use crate::transport::native_subscription::DeclinedCameraPublication;
+        let declined = vec![
+            DeclinedCameraPublication {
+                name: "petal-camera-web-old".to_string(),
+                sid: "TR_old".to_string(),
+            },
+            DeclinedCameraPublication {
+                name: "petal-camera-web-now".to_string(),
+                sid: "TR_now".to_string(),
+            },
+        ];
+        let hit = camera_native_evidence(None, &declined, Some("petal-camera-web-now"))
+            .expect("the declined publication with the reported name is evidence");
+        assert!(hit.detail.contains("TR_now"), "{}", hit.detail);
+        assert!(hit.detail.contains("declined"), "{}", hit.detail);
+        assert_eq!(hit.delivered_fps, 0.0, "a declined publication proves no decode");
+
+        assert!(
+            camera_native_evidence(None, &declined, Some("petal-camera-web-other")).is_none(),
+            "a different peer's publication must not satisfy this scenario"
+        );
+        assert!(camera_native_evidence(None, &[], Some("petal-camera-web-now")).is_none());
+        assert!(
+            camera_native_evidence(None, &declined, None).is_some(),
+            "without a reported name any declined camera counts (older web peers)"
+        );
+
+        let mut track = crate::diagnostics::TrackHealth::default();
+        track.name = "petal-camera-web-now".to_string();
+        track.direction = "recv".to_string();
+        track.kind = "video".to_string();
+        assert!(
+            camera_native_evidence(Some(&track), &[], Some("petal-camera-web-now")).is_none(),
+            "a recv track with no frames proves nothing"
+        );
+        track.frames_decoded = 12;
+        let active = camera_native_evidence(Some(&track), &[], Some("petal-camera-web-now"))
+            .expect("an active recv track is still evidence");
+        assert!(active.detail.contains("recv track active"), "{}", active.detail);
     }
 
     #[test]

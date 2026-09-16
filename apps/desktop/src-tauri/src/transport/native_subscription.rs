@@ -15,9 +15,11 @@
 //! a routine case.
 
 use livekit::prelude::*;
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::publisher::{window_id_from_track_name, CAMERA_TRACK_PREFIX};
+use crate::sync_ext::MutexExt;
 
 /// Whether the native room owns `name`. Video is admitted only when the name
 /// is an exact canonical `petal-window-<u32>`; cameras, malformed window
@@ -60,13 +62,64 @@ impl NativeSubscriptionCoordinator {
     }
 }
 
+/// A camera publication the native room observed on its event stream and
+/// declined by policy. Since the coordinator never subscribes cameras, this is
+/// the independent native observation that remains for a camera: the
+/// publication reached the SFU and this client's room events. The Test
+/// Cockpit's CAM scenario reads it (`test_cockpit::camera_native_evidence`),
+/// where the pre-#188 assertion waited for a native recv track that can no
+/// longer exist. Decode evidence belongs to the gallery bridge, which owns the
+/// camera; this record deliberately claims nothing about frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeclinedCameraPublication {
+    pub(crate) name: String,
+    pub(crate) sid: String,
+}
+
+/// Bounded so a long meeting with many camera republishes cannot grow it;
+/// the CAM scenario matches by exact name, so old entries are inert.
+const DECLINED_CAMERA_CAPACITY: usize = 32;
+
+fn declined_cameras() -> &'static Mutex<VecDeque<DeclinedCameraPublication>> {
+    static REGISTRY: OnceLock<Mutex<VecDeque<DeclinedCameraPublication>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// Record a declined publication if it is camera video. Pure with respect to
+/// the SDK so both directions are unit-testable without a `RemoteTrackPublication`.
+fn record_declined_if_camera(kind: TrackKind, name: &str, sid: &str) -> bool {
+    if kind != TrackKind::Video || !name.starts_with(CAMERA_TRACK_PREFIX) {
+        return false;
+    }
+    let mut registry = declined_cameras().lock_unpoisoned();
+    if registry.iter().any(|entry| entry.sid == sid) {
+        return true;
+    }
+    if registry.len() >= DECLINED_CAMERA_CAPACITY {
+        registry.pop_front();
+    }
+    registry.push_back(DeclinedCameraPublication {
+        name: name.to_string(),
+        sid: sid.to_string(),
+    });
+    true
+}
+
+/// Every camera publication the native room has observed and declined, oldest
+/// first. Read by the Test Cockpit; never by media code.
+pub(crate) fn declined_camera_publications() -> Vec<DeclinedCameraPublication> {
+    declined_cameras().lock_unpoisoned().iter().cloned().collect()
+}
+
 fn admit(publication: &RemoteTrackPublication) {
     let name = publication.name();
     if !native_owns_track(publication.kind(), &name) {
+        let sid = publication.sid();
+        record_declined_if_camera(publication.kind(), &name, &sid.to_string());
         log::debug!(
             "native subscription: declining '{}' (sid={}); the gallery bridge owns remote cameras",
             name,
-            publication.sid()
+            sid
         );
         return;
     }
@@ -108,6 +161,33 @@ pub(crate) fn log_unexpected_native_video(track_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Cockpit's CAM evidence after #188: a declined camera is recorded
+    /// (once per sid), a declined window or audio name is not, and the
+    /// registry stays bounded.
+    #[test]
+    fn declined_camera_publications_are_recorded_once_per_sid_and_bounded() {
+        assert!(record_declined_if_camera(TrackKind::Video, "petal-camera-alice", "TR_cam_a"));
+        assert!(record_declined_if_camera(TrackKind::Video, "petal-camera-alice", "TR_cam_a"));
+        assert!(!record_declined_if_camera(TrackKind::Video, "petal-window-", "TR_bad_window"));
+        assert!(!record_declined_if_camera(TrackKind::Audio, "petal-camera-alice", "TR_audio"));
+        let recorded = declined_camera_publications();
+        assert_eq!(
+            recorded.iter().filter(|e| e.sid == "TR_cam_a").count(),
+            1,
+            "the snapshot and the buffered event both reach admit(); one record"
+        );
+        assert!(recorded.iter().all(|e| e.name.starts_with(CAMERA_TRACK_PREFIX)));
+
+        for i in 0..(DECLINED_CAMERA_CAPACITY + 8) {
+            record_declined_if_camera(
+                TrackKind::Video,
+                &format!("petal-camera-bulk-{i}"),
+                &format!("TR_bulk_{i}"),
+            );
+        }
+        assert!(declined_camera_publications().len() <= DECLINED_CAMERA_CAPACITY);
+    }
 
     #[test]
     fn admission_table_covers_audio_camera_window_and_unknown_video() {
