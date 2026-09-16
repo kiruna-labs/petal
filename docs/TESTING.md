@@ -820,14 +820,35 @@ only *failure* paths were logged, so "no warning appeared" could not prove
 audio: screen-audio published scope=<system|process> track=<contract name> sid=<sid>
 audio: screen-audio republished after reconnect scope=<system|process> track=<contract name>
 audio: screen-audio stopped scope=<system|process> track=<contract name>
+audio: screen-audio unpublish failed: <error>   (warn, failure only)
+audio: screen-audio unpublish timed out         (warn, failure only)
+```
+
+The receiving peer writes the other half of the proof:
+
+```
+audio: remote audio publication unpublished track=<contract name> sid=<sid> -- removing
+audio: remote audio watchdog for '<identity>' (sid=<sid>) ended
 ```
 
 - `scope` is a class, never a pid. The pid survives only inside the documented
 track-name contract (`petal-window-audio-process-<pid>`).
+- **`stopped` alone is only bookkeeping.** It is written after the unpublish
+  call returns, not after the SFU confirms anything, so "the audio is off the
+  wire" needs the receiver's `unpublished ... removing` line for the same `sid`
+  within ten seconds. A failed or timed-out unpublish is a `warn` for the same
+  reason: unchecking the control is a privacy boundary, not a cosmetic state.
+- The receiver's `unpublished` line comes from the SFU's own
+  `TrackUnpublished`, and the watchdog for that `sid` ends with it. Alarms for a
+  `sid` that has already been reported unpublished are therefore never evidence
+  of live audio.
 - Live companions for one `(scope, track)` = `published + republished - stopped`.
   A `republished` line is the *same* track re-published after the SDK dropped it
-  during a reconnect -- not an extra companion. A second `published` with a
-  different `sid` and no intervening `stopped` **is** a duplicate.
+  during a reconnect -- not an extra companion. Not every reconnect produces one:
+  when the app comes back `healthy-current-sid` with no replacement needed, the
+  SDK republishes in place, so read that path from the receiver's
+  `subscribed`/`unpublished` pair for the new `sid` instead. A second `published`
+  with a different `sid` and no intervening `stopped` **is** a duplicate.
 - They are `info`-level on purpose: a default-level log is enough. Log paths are
   macOS `~/Library/Logs/Petal/petal.log` and Windows
   `%APPDATA%\Petal\logs\petal.log`.
@@ -855,7 +876,7 @@ observable by ear:
 | b | Window share, then enable | Exactly one `published scope=process track=petal-window-audio-process-<pid>` | Owning-process tone only; unrelated-process tone absent |
 | c | Display/region share, then enable | Exactly one `published scope=system track=petal-window-audio-system` | System output, but Petal's own remote playout is **not** re-broadcast (no echo loop) |
 | d | Acquisition denied/unavailable | Zero `published` lines; `available=false` with an honest `error`; video unaffected | Video keeps flowing, no audio track, UI reports unavailable |
-| e | Stop/republish + one full reconnect | `published+republished-stopped == 1` per `(scope, track)`, distinct sids | Exactly one companion; audio resumes; no stale/duplicate track |
+| e | Stop/republish + one full reconnect | `published+republished-stopped == 1` per `(scope, track)`, distinct sids (or one unchanged `published` when the SDK republished in place) | Exactly one companion; audio resumes; **every removed sid gets `unpublished ... removing` plus a watchdog `ended`**, and no later frames for it |
 
 ### Denied / unavailable setup
 
@@ -882,12 +903,17 @@ observable by ear:
 
 1. Enable the control and confirm exactly one companion (case b or c).
 2. Disable the control, or stop the share. Require a matching `stopped` line
-   and silence at the receiver -- a `published` without its `stopped` is a leak.
+   **and** the receiver's `unpublished ... removing` plus watchdog `ended` for
+   the same `sid` within ten seconds -- a `published` without its `stopped` is a
+   leak, and a `stopped` without the receiver line leaves the unpublish
+   unconfirmed.
 3. Share again and re-enable. Require exactly one **new** `published` with a new
    sid, and no stale publication still carrying the old sid.
-4. Trigger one full reconnect while still publishing. Require a `republished`
-   line for the same track and still exactly one live companion at the
-   receiver.
+4. Trigger one full reconnect while still publishing. Require either a
+   `republished` line for the same track, or -- when the app comes back
+   `healthy-current-sid` and the SDK republishes in place -- the receiver's
+   post-reconnect `subscribed` pair for the SFU's new `sid`. Either way, still
+   exactly one live companion at the receiver.
 
 ### Extracting privacy-safe evidence
 
@@ -901,6 +927,9 @@ grep -E 'audio: screen-audio (published|republished|stopped)' "$PETAL_LOG"
 # `<date> <time> UTC [LEVEL] [target] message`.
 grep -E 'audio: screen-audio (published|republished|stopped)' "$PETAL_LOG" \
   | awk '{st="";sc="";tr="";for(i=1;i<=NF;i++){if($i=="screen-audio")st=$(i+1);if($i~/^scope=/)sc=$i;if($i~/^track=/)tr=$i}if(st!="")n[sc" "tr]+=(st=="stopped"?-1:1)}END{for(k in n)print n[k],k}'
+
+# Receiver side of case (e): the removal proof, and any failed unpublish.
+grep -E 'audio: (remote audio publication unpublished|remote audio watchdog .* ended|screen-audio unpublish (failed|timed out))' "$PETAL_LOG"
 ```
 
 Quote only these summaries. The lines are already bounded to a scope class, the
