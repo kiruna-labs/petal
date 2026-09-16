@@ -62,6 +62,8 @@
   let optionsStateVersion = $state(0);
   let optionsPending = $state(false);
   let priority = $state<SharePriority>('automatic');
+  let shareAudioEnabled = $state(false);
+  let shareAudioAvailable = $state(false);
   let drawActive = $state(false);
   let aiChatEnabled = $state(false);
   let aiChatActive = $state(false);
@@ -132,6 +134,8 @@
     aiChatEnabled = next.aiChatEnabled;
     aiChatActive = next.aiChatActive;
     controllerName = next.controllerName;
+    shareAudioEnabled = next.audioEnabled;
+    shareAudioAvailable = next.audioAvailable;
   }
 
   async function seedRegionOptionsState() {
@@ -214,9 +218,32 @@
     }
   }
 
+  async function setRegionShareAudio(enabled: boolean) {
+    if (!appWindow || optionsPending || !regionWindowLabel) return;
+    optionsPending = true;
+    try {
+      // The native side resolves this label to the CURRENT token, so a
+      // stop/restart between opening the menu and clicking the item cannot be
+      // addressed through a stale token.
+      applyRegionOptions(
+        await invoke<RegionViewOptionsState>(COMMANDS.setRegionShareAudio, {
+          windowLabel: regionWindowLabel,
+          enabled
+        })
+      );
+    } catch (error) {
+      console.error(`set_region_share_audio(${regionWindowLabel}) failed`, error);
+    } finally {
+      optionsPending = false;
+    }
+  }
+
   async function openRegionOptionsMenu(event: MouseEvent) {
     event.stopPropagation();
     if (!appWindow || optionsPending || placementActive || placementSettlementPending) return;
+    // Resolve the label immediately before opening: Windows stop/restart mints
+    // a fresh token, and the native side must resolve it again per action.
+    await seedRegionOptionsState();
     const entries = buildShareOptionsMenuEntries(
       priority,
       shareActive,
@@ -225,14 +252,22 @@
       false,
       aiChatEnabled,
       aiChatActive,
-      true
+      true,
+      false,
+      true,
+      'right',
+      shareAudioEnabled,
+      shareAudioAvailable
     );
     await popupShareOptionsMenu(entries, {
       onPriority: (value) => void setRegionPriority(value),
       onControlMode: () => {},
       onDraw: (active) => void setRegionDrawActive(active),
       onAiChat: () => void toggleRegionAiChat(),
-      onDebug: () => void openRegionDebugCockpit()
+      onDebug: () => void openRegionDebugCockpit(),
+      onShareAudio: (enabled) => {
+        void setRegionShareAudio(enabled);
+      }
     });
   }
 
@@ -565,6 +600,8 @@
           shareActive = event.payload.active;
           if (!event.payload.active) {
             sharePending = false;
+            shareAudioEnabled = false;
+            shareAudioAvailable = false;
             drawActive = false;
             aiChatActive = false;
             controllerName = null;

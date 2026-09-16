@@ -116,6 +116,7 @@ export const COMMANDS = {
   regionShareState: 'region_share_state',
   syncRegionWindowFrame: 'sync_region_window_frame',
   regionViewOptionsState: 'region_view_options_state',
+  setRegionShareAudio: 'set_region_share_audio',
   setRegionSharePriority: 'set_region_share_priority',
   setRegionDrawActive: 'set_region_draw_active',
   regionAiChatStart: 'region_ai_chat_start',
@@ -169,6 +170,8 @@ export const COMMANDS = {
   openApplicationsFolder: 'open_applications_folder',
   revealRunningBundle: 'reveal_running_bundle',
   setSharePriority: 'set_share_priority',
+  shareAudioState: 'share_audio_state',
+  setShareAudioEnabled: 'set_share_audio_enabled',
   setHoverTabTooltip: 'set_hover_tab_tooltip',
   setShareResolution: 'set_share_resolution',
   shareNoticeDismiss: 'share_notice_dismiss',
@@ -295,6 +298,7 @@ export const EVENTS = {
   roomUpdated: 'room-updated',
   shareError: 'share-error',
   shareStateChanged: 'share-state-changed',
+  shareAudioStateChanged: 'share-audio-state-changed',
   shareControlModeChanged: 'share-control-mode-changed',
   sharePickerChanged: 'share-picker-changed',
   /**
@@ -940,6 +944,17 @@ export interface ShareStateChanged {
   shared: boolean;
 }
 
+/** Consent and outcome for one exact active-share incarnation. */
+export interface ShareAudioState {
+  windowId: number;
+  enabled: boolean;
+  available: boolean;
+  publishing: boolean;
+  /** Window audio is process-wide; display/region audio is system output. */
+  scope: 'process' | 'systemOutput' | null;
+  error: string | null;
+}
+
 export type ShareControlMode = 'cursorPreserving' | 'fullControl';
 
 export interface ShareControlModeChanged {
@@ -958,6 +973,13 @@ export interface RegionViewOptionsState {
   aiChatEnabled: boolean;
   aiChatActive: boolean;
   controllerName: string | null;
+  /**
+   * Output-audio consent/availability for the share this selector label names.
+   * Carried here so the Petal View route never holds a capture token.
+   */
+  audioEnabled: boolean;
+  audioAvailable: boolean;
+  audioError: string | null;
 }
 
 export interface RegionViewOptionsChanged {
@@ -1714,6 +1736,7 @@ export interface CommandArgs {
   [COMMANDS.regionShareState]: { windowLabel: string };
   [COMMANDS.syncRegionWindowFrame]: { windowLabel: string };
   [COMMANDS.regionViewOptionsState]: { windowLabel: string };
+  [COMMANDS.setRegionShareAudio]: { windowLabel: string; enabled: boolean };
   [COMMANDS.setRegionSharePriority]: { windowLabel: string; priority: SharePriority };
   [COMMANDS.setRegionDrawActive]: { windowLabel: string; active: boolean };
   [COMMANDS.regionAiChatStart]: { windowLabel: string };
@@ -1723,6 +1746,8 @@ export interface CommandArgs {
   [COMMANDS.setShareControlMode]: { windowId: number; controlMode?: string };
   [COMMANDS.setShareRemoteControlAllowed]: { windowId: number; allowed: boolean };
   [COMMANDS.shareRemoteControlAllowed]: { windowId: number };
+  [COMMANDS.shareAudioState]: { windowId: number };
+  [COMMANDS.setShareAudioEnabled]: { windowId: number; enabled: boolean };
   [COMMANDS.toggleWindowShare]: { windowId: number; frame: WindowFrame; color?: string };
   [COMMANDS.updateShareBorderFrame]: {
     borderId: number;
@@ -1838,6 +1863,7 @@ export interface CommandReturns {
   [COMMANDS.regionShareState]: RegionShareState;
   [COMMANDS.syncRegionWindowFrame]: void;
   [COMMANDS.regionViewOptionsState]: RegionViewOptionsState;
+  [COMMANDS.setRegionShareAudio]: RegionViewOptionsState;
   [COMMANDS.setRegionSharePriority]: SharePriority;
   [COMMANDS.setRegionDrawActive]: boolean;
   [COMMANDS.regionAiChatStart]: AiChatStartOutcome;
@@ -1865,6 +1891,8 @@ export interface CommandReturns {
   [COMMANDS.shareOverlaySetDrawActive]: void;
   [COMMANDS.setHoverTabMenuOpen]: void;
   [COMMANDS.shareWindow]: boolean;
+  [COMMANDS.shareAudioState]: ShareAudioState;
+  [COMMANDS.setShareAudioEnabled]: ShareAudioState;
   [COMMANDS.sharedWindowIds]: number[];
   [COMMANDS.toggleMenubarMic]: boolean;
   [COMMANDS.toggleWindowShare]: boolean;
@@ -1906,6 +1934,7 @@ export interface EventPayloads {
   [EVENTS.roomLeft]: RoomLeftEvent;
   [EVENTS.shareError]: ShareErrorPayload;
   [EVENTS.shareStateChanged]: ShareStateChanged;
+  [EVENTS.shareAudioStateChanged]: ShareAudioState;
   [EVENTS.shareControlModeChanged]: ShareControlModeChanged;
   [EVENTS.sharePickerChanged]: void;
   [EVENTS.sessionChanged]: { origin: string; session: Record<string, unknown> };

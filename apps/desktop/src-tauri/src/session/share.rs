@@ -11,6 +11,9 @@ use crate::logging::{
     CaptureLayoutDiagnostic, CaptureLayoutStage, DiagnosticRole, EncoderImplementationClass,
     GeometryBucket, PixelFormatClass, ScaleBucket, SentryDiagnosticEvent, SourceSelectionClass,
 };
+use crate::screen_audio::{
+    AudioSourceKey, AudioSourceTransition, ShareAudioState,
+};
 use crate::share_priority::SharePriority;
 use crate::time_util::now_us;
 use crate::transport::publisher::{
@@ -19,6 +22,7 @@ use crate::transport::publisher::{
 };
 use crate::video_color::VideoColorProfile;
 use screencapturekit::stream::content_filter::SCContentFilter;
+use tauri::Manager;
 
 use super::{RoomGeneration, SessionInner, SessionState, ShareSessionError};
 
@@ -405,6 +409,11 @@ pub(super) struct ActiveShare {
     /// calling `CGWindowListCopyWindowInfo` per event.
     known_closed: AtomicBool,
     source_kind: crate::transport::publisher::SharedSourceKind,
+    /// Consent and outcome belong to this exact `started_seq` incarnation.
+    /// They are never copied into a stop/re-share or room rejoin.
+    audio_enabled: bool,
+    audio_available: bool,
+    audio_error: Option<String>,
     source_title: String,
     /// The share border's color, snapshotted when this share started. #764:
     /// the post-wake restart must redraw the border in the user's own color,
@@ -2985,6 +2994,257 @@ impl SessionState {
     }
 }
 
+fn audio_source_for_share(share: &ActiveShare) -> Option<AudioSourceKey> {
+    AudioSourceKey::for_share(
+        share.source_kind,
+        share.pid.and_then(|pid| u32::try_from(pid).ok()),
+    )
+}
+
+fn share_audio_state_locked(inner: &SessionInner, window_id: u32) -> ShareAudioState {
+    let Some(share) = inner.shares.get(&window_id) else {
+        return ShareAudioState::inactive(window_id);
+    };
+    let source = audio_source_for_share(share);
+    let publishing = source.is_some_and(|source| {
+        inner.screen_audio_sources.is_active(source)
+            && inner
+                .screen_audio
+                .get(&source)
+                .is_some_and(|track| !track.is_stopped() && !track.failed())
+    });
+    ShareAudioState {
+        window_id,
+        enabled: share.audio_enabled,
+        available: share.audio_available,
+        publishing,
+        scope: source.map(|source| match source {
+            AudioSourceKey::SystemOutput => "systemOutput".to_string(),
+            AudioSourceKey::Process(_) => "process".to_string(),
+        }),
+        error: share.audio_error.clone(),
+    }
+}
+
+pub(crate) fn share_audio_state(state: &SessionState, window_id: u32) -> ShareAudioState {
+    share_audio_state_locked(&state.inner.lock_unpoisoned(), window_id)
+}
+
+/// Token-addressed audio state for native surfaces that already resolved a
+/// live token from a selector label, so no token crosses into their payloads.
+pub(crate) fn share_audio_state_for_state(state: &SessionState, window_id: u32) -> ShareAudioState {
+    share_audio_state(state, window_id)
+}
+
+/// Token-addressed enable/disable shared by the share-owned command and the
+/// label-addressed Petal View command, which resolves the token per action.
+pub(crate) async fn set_share_audio_enabled_for_state(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    window_id: u32,
+    enabled: bool,
+) -> Result<ShareAudioState, String> {
+    Ok(set_share_audio_enabled(app, state, window_id, enabled).await)
+}
+
+async fn apply_audio_transitions(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    room_connection: &Arc<RoomConnection>,
+    generation: &RoomGeneration,
+    transitions: Vec<AudioSourceTransition>,
+) {
+    for transition in transitions {
+        match transition {
+            AudioSourceTransition::Stop(source) => {
+                let old = state.inner.lock_unpoisoned().screen_audio.remove(&source);
+                if let Some(old) = old {
+                    old.stop().await;
+                }
+            }
+            AudioSourceTransition::Start(source) => {
+                if !generation.is_current() {
+                    continue;
+                }
+                let room = room_connection.room();
+                let error_app = app.clone();
+                let error_generation = generation.clone();
+                match crate::transport::audio::ScreenAudioTrack::publish(
+                    room,
+                    source,
+                    move |error| {
+                        log::warn!("audio: source '{}' failed: {error}", source.label());
+                        let Some(state) = error_app.try_state::<SessionState>() else {
+                            return;
+                        };
+                        if !error_generation.is_current() {
+                            return;
+                        }
+                        let updates = {
+                            let mut inner = state.inner.lock_unpoisoned();
+                            let ids = inner
+                                .shares
+                                .iter_mut()
+                                .filter_map(|(window_id, share)| {
+                                    (share.audio_enabled
+                                        && audio_source_for_share(share) == Some(source))
+                                    .then(|| {
+                                        share.audio_available = false;
+                                        share.audio_error = Some(error.clone());
+                                        *window_id
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            ids.into_iter()
+                                .map(|window_id| share_audio_state_locked(&inner, window_id))
+                                .collect::<Vec<_>>()
+                        };
+                        for update in updates {
+                            let _ = tauri::Emitter::emit(
+                                &error_app,
+                                "share-audio-state-changed",
+                                update,
+                            );
+                        }
+                    },
+                )
+                .await
+                {
+                    Ok(track) => {
+                        let track = Arc::new(track);
+                        let committed = {
+                            let mut inner = state.inner.lock_unpoisoned();
+                            let current_room = generation.is_current()
+                                && inner.joined.as_ref().is_some_and(|joined| {
+                                    Arc::ptr_eq(&joined.room_connection, room_connection)
+                                });
+                            let still_enabled = inner.shares.values().any(|share| {
+                                share.audio_enabled && audio_source_for_share(share) == Some(source)
+                            });
+                            if current_room
+                                && still_enabled
+                                && inner.screen_audio_sources.is_active(source)
+                                && !inner.screen_audio.contains_key(&source)
+                            {
+                                inner.screen_audio.insert(source, track.clone());
+                                for share in inner.shares.values_mut() {
+                                    if share.audio_enabled
+                                        && audio_source_for_share(share) == Some(source)
+                                    {
+                                        share.audio_available = true;
+                                        share.audio_error = None;
+                                    }
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if !committed {
+                            track.stop().await;
+                        }
+                    }
+                    Err(error) => {
+                        let mut inner = state.inner.lock_unpoisoned();
+                        if generation.is_current()
+                            && inner.screen_audio_sources.is_active(source)
+                        {
+                            for share in inner.shares.values_mut() {
+                                if share.audio_enabled
+                                    && audio_source_for_share(share) == Some(source)
+                                {
+                                    share.audio_available = false;
+                                    share.audio_error = Some(error.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply consent to one exact active-share incarnation. The audio control lock
+/// serializes this entire handoff, while the synchronous session mutex is
+/// dropped before every native/LiveKit await. Visual sharing is never stopped
+/// or failed by an audio error.
+pub(crate) async fn set_share_audio_enabled(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    window_id: u32,
+    enabled: bool,
+) -> ShareAudioState {    let generation = state.current_room_generation();
+    // Record intent BEFORE waiting for an in-flight native start. Off therefore
+    // invalidates that start's commit immediately, even though it still waits
+    // for serialized cleanup before returning.
+    let prepared = {
+        let mut inner = state.inner.lock_unpoisoned();
+        let Some(share) = inner.shares.get(&window_id) else {
+            return ShareAudioState::inactive(window_id);
+        };
+        let share_id = share.started_seq;
+        let source = audio_source_for_share(share);
+        let Some(room_connection) = inner
+            .joined
+            .as_ref()
+            .map(|joined| joined.room_connection.clone())
+        else {
+            return ShareAudioState::inactive(window_id);
+        };
+        if source.is_none() || (enabled && crate::transport::audio::audio_disabled_by_env()) {
+            let share = inner.shares.get_mut(&window_id).expect("share still active");
+            share.audio_enabled = false;
+            share.audio_available = false;
+            share.audio_error = enabled.then(|| {
+                if source.is_none() {
+                    "Process audio is unavailable for this window".to_string()
+                } else {
+                    "Audio capture is disabled for this Petal run".to_string()
+                }
+            });
+            return share_audio_state_locked(&inner, window_id);
+        }
+        let source = source.expect("checked eligible active share audio source");
+        let share = inner.shares.get_mut(&window_id).expect("share still active");
+        share.audio_enabled = enabled;
+        share.audio_available = true;
+        share.audio_error = None;
+        (room_connection, share_id, source)
+    };
+
+    let _audio_control = state.lock_screen_audio_control().await;
+    let transitions = {
+        let mut inner = state.inner.lock_unpoisoned();
+        let current = generation.is_current()
+            && inner.joined.as_ref().is_some_and(|joined| {
+                Arc::ptr_eq(&joined.room_connection, &prepared.0)
+            })
+            && inner.shares.get(&window_id).is_some_and(|share| {
+                share.started_seq == prepared.1 && share.audio_enabled == enabled
+            });
+        if !current {
+            return share_audio_state_locked(&inner, window_id);
+        }
+        if enabled {
+            let mut transitions = inner.screen_audio_sources.acquire(prepared.1, prepared.2);
+            if transitions.is_empty()
+                && inner.screen_audio_sources.is_active(prepared.2)
+                && !inner.screen_audio.contains_key(&prepared.2)
+            {
+                // A deduped source whose earlier start failed gets one fresh
+                // user-driven attempt; this still cannot create duplicates.
+                transitions.push(AudioSourceTransition::Start(prepared.2));
+            }
+            transitions
+        } else {
+            inner.screen_audio_sources.release(prepared.1)
+        }
+    };
+    apply_audio_transitions(app, state, &prepared.0, &generation, transitions).await;
+    share_audio_state(state, window_id)
+}
+
 /// Start sharing `window_id`: requires this process to already be joined to
 /// a room (`join_room` -- see module doc comment; this NO LONGER connects a
 /// room lazily on first share), starts a real `SCStream` capture via
@@ -4656,6 +4916,14 @@ async fn start_share_with_capture_source(
         visible_on_screen: AtomicBool::new(true),
         known_closed: AtomicBool::new(false),
         source_kind,
+        audio_enabled: false,
+        audio_available: AudioSourceKey::for_share(
+            source_kind,
+            owner_pid.and_then(|pid| u32::try_from(pid).ok()),
+        )
+        .is_some()
+            && !crate::transport::audio::audio_disabled_by_env(),
+        audio_error: None,
         source_title,
         border_color: crate::hover_core::share_color_or_default(None),
         priority,
@@ -6267,6 +6535,12 @@ fn spawn_pump_failure_recovery(
                     let visible_on_screen = current.visible_on_screen.load(Ordering::Relaxed);
                     let known_closed = current.known_closed.load(Ordering::Relaxed);
                     let source_kind = current.source_kind;
+                    // Internal visual repair preserves consent only because
+                    // `started_seq` is unchanged. A new share never reaches
+                    // this replacement path.
+                    let audio_enabled = current.audio_enabled;
+                    let audio_available = current.audio_available;
+                    let audio_error = current.audio_error.clone();
                     let source_title = current.source_title.clone();
                     let border_color = current.border_color.clone();
                     let resolution = current.resolution;
@@ -6295,6 +6569,9 @@ fn spawn_pump_failure_recovery(
                             visible_on_screen: AtomicBool::new(visible_on_screen),
                             known_closed: AtomicBool::new(known_closed),
                             source_kind,
+                            audio_enabled,
+                            audio_available,
+                            audio_error,
                             source_title,
                             border_color,
                             priority: snapshot.priority.clone(),
@@ -6488,7 +6765,7 @@ async fn stop_share_with_started_seq_inner(
     // fresh share of the same window starts with a clean slate.
     clear_layout_roi_ack_failures(window_id);
     clear_pump_recovery_failures(window_id);
-    let (share, promote_id, room_connection_at_removal) = {
+    let (share, promote_id, room_connection_at_removal, audio_transitions) = {
         let mut guard = state.inner.lock_unpoisoned();
         if reconnect_guard
             .is_some_and(|reconnect_guard| !reconnect_guard.is_current_with_inner(&guard))
@@ -6514,6 +6791,13 @@ async fn stop_share_with_started_seq_inner(
             .as_ref()
             .map(|joined| joined.room_connection.clone());
         let share = guard.shares.remove(&window_id);
+        // Invalidate audio intent in the same synchronous critical section as
+        // the visual incarnation removal. A delayed publish can no longer
+        // commit, while visual teardown never waits for native audio cleanup.
+        let audio_transitions = share
+            .as_ref()
+            .map(|share| guard.screen_audio_sources.release(share.started_seq))
+            .unwrap_or_default();
         // A stopped share must not carry its #841 limiter cooldown into the
         // next start of the same window.
         republish_reconcile_last_by_window()
@@ -6538,7 +6822,7 @@ async fn stop_share_with_started_seq_inner(
         } else {
             None
         };
-        (share, promote_id, room_connection_at_removal)
+        (share, promote_id, room_connection_at_removal, audio_transitions)
     };
     let Some(share) = share else {
         // Idempotent no-op -- but LOG it (issue #13): the crash-evidence
@@ -6553,6 +6837,25 @@ async fn stop_share_with_started_seq_inner(
         );
         return Ok(false);
     };
+    if let Some(room_connection) = room_connection_at_removal.as_ref() {
+        let app = app.clone();
+        let room_connection = room_connection.clone();
+        let generation = state.current_room_generation();
+        tauri::async_runtime::spawn(async move {
+            let Some(state) = app.try_state::<SessionState>() else {
+                return;
+            };
+            let _audio_control = state.lock_screen_audio_control().await;
+            apply_audio_transitions(
+                &app,
+                state.inner(),
+                &room_connection,
+                &generation,
+                audio_transitions,
+            )
+            .await;
+        });
+    }
     unregister_interaction_signal(window_id, &share.interaction_signal);
     clear_interaction_burst_state(window_id);
     use tauri::Manager;
@@ -6850,6 +7153,89 @@ async fn restart_active_shares_after_wake_with<
                     on_terminal_failure(window_id, error);
                     break;
                 }
+            }
+        }
+    }
+}
+
+pub(crate) async fn repair_screen_audio_publications_after_reconnect(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    reconnect_guard: &ReconnectRepairGuard,
+) {
+    let _audio_control = state.lock_screen_audio_control().await;
+    let (room_connection, sources) = {
+        let inner = state.inner.lock_unpoisoned();
+        if !reconnect_guard.is_current_with_inner(&inner) {
+            return;
+        }
+        let Some(joined) = inner.joined.as_ref() else {
+            return;
+        };
+        let sources = inner
+            .screen_audio_sources
+            .active_source_keys()
+            .into_iter()
+            .map(|source| (source, inner.screen_audio.get(&source).cloned()))
+            .collect::<Vec<_>>();
+        (joined.room_connection.clone(), sources)
+    };
+
+    for (source, track) in sources {
+        if !reconnect_guard.is_current_with_inner(&state.inner.lock_unpoisoned()) {
+            return;
+        }
+        let Some(track) = track else {
+            apply_audio_transitions(
+                app,
+                state,
+                &room_connection,
+                &reconnect_guard.room_generation,
+                vec![AudioSourceTransition::Start(source)],
+            )
+            .await;
+            continue;
+        };
+        if track.failed() {
+            let removed = state.inner.lock_unpoisoned().screen_audio.remove(&source);
+            if let Some(removed) = removed {
+                removed.stop().await;
+            }
+            apply_audio_transitions(
+                app,
+                state,
+                &room_connection,
+                &reconnect_guard.room_generation,
+                vec![AudioSourceTransition::Start(source)],
+            )
+            .await;
+            continue;
+        }
+
+        let current_sid = track.track_sid().to_string();
+        let expected_name = track.track_name();
+        let publications = room_connection
+            .room()
+            .local_participant()
+            .track_publications()
+            .values()
+            .map(|publication| (publication.sid().to_string(), publication.name()))
+            .collect::<Vec<_>>();
+        if matches!(
+            crate::screen_audio::screen_audio_publication_health(
+                &current_sid,
+                &expected_name,
+                publications
+                    .iter()
+                    .map(|(sid, name)| (sid.as_str(), name.as_str())),
+            ),
+            crate::screen_audio::ScreenAudioPublicationHealth::Missing
+        ) {
+            if let Err(error) = track.republish_after_reconnect().await {
+                log::warn!(
+                    "audio: reconnect repair failed for source '{}': {error}",
+                    source.label()
+                );
             }
         }
     }

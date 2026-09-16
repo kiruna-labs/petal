@@ -676,6 +676,12 @@ fn verify_shares_after_reconnect(
                 &reconnect_guard,
             )
             .await;
+            crate::session::repair_screen_audio_publications_after_reconnect(
+                &app,
+                state.inner(),
+                &reconnect_guard,
+            )
+            .await;
             crate::session::repair_active_share_publications_after_reconnect(
                 &app,
                 state.inner(),

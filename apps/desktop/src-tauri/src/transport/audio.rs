@@ -141,7 +141,8 @@
 //! made under `DEV_IDENTITY`. No new identity concept introduced for audio.
 
 use crate::sync_ext::MutexExt;
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -149,6 +150,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
+use livekit::track::TrackKind;
 use livekit::webrtc::audio_frame::AudioFrame;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::audio_source::AudioSourceOptions;
@@ -157,6 +159,10 @@ use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use livekit::{AudioProcessingOptions, PlatformAudio};
 use serde::Serialize;
 
+use crate::screen_audio::{
+    AudioSourceKey, ScreenAudioCapture, SCREEN_AUDIO_CHANNELS, SCREEN_AUDIO_SAMPLES_PER_CHANNEL,
+    SCREEN_AUDIO_SAMPLE_RATE,
+};
 use crate::session::RoomGeneration;
 
 #[derive(Debug, thiserror::Error)]
@@ -236,6 +242,207 @@ fn audio_publish_summary(options: &TrackPublishOptions) -> String {
         on_off(options.dtx),
         on_off(options.red)
     )
+}
+
+/// Publish policy for a share's output-audio companion. Output audio is
+/// already processed program audio, so microphone AEC/NS/AGC, DTX, and RED
+/// are deliberately disabled.
+fn screen_audio_publish_options(source: AudioSourceKey) -> TrackPublishOptions {
+    TrackPublishOptions {
+        audio_encoding: Some(livekit::options::AudioEncoding {
+            max_bitrate: 128_000,
+        }),
+        source: TrackSource::ScreenshareAudio,
+        stream: source.label(),
+        dtx: false,
+        red: false,
+        ..Default::default()
+    }
+}
+
+/// One elected logical output source. Native capture, queue pump, and LiveKit
+/// publication have one owner so every off/handoff path can stop them in a
+/// deterministic order without touching microphone or visual-share owners.
+pub(crate) struct ScreenAudioTrack {
+    source: AudioSourceKey,
+    capture: ScreenAudioCapture,
+    track: LocalAudioTrack,
+    room: Arc<Room>,
+    pump: tauri::async_runtime::JoinHandle<()>,
+    delivery_failed: Arc<AtomicBool>,
+    stopped: AtomicBool,
+}
+
+impl ScreenAudioTrack {
+    pub(crate) async fn publish(
+        room: Arc<Room>,
+        source: AudioSourceKey,
+        on_error: impl Fn(String) + Send + Sync + 'static,
+    ) -> Result<Self, String> {
+        let on_error: Arc<dyn Fn(String) + Send + Sync> = Arc::new(on_error);
+        let capture_callback = on_error.clone();
+        let capture = ScreenAudioCapture::start(source, move |error| capture_callback(error))?;
+        let queue = capture.queue();
+        let native_source = NativeAudioSource::new(
+            AudioSourceOptions {
+                echo_cancellation: false,
+                noise_suppression: false,
+                auto_gain_control: false,
+            },
+            SCREEN_AUDIO_SAMPLE_RATE,
+            SCREEN_AUDIO_CHANNELS as u32,
+            0,
+        );
+        let pump_source = native_source.clone();
+        let delivery_failed = Arc::new(AtomicBool::new(false));
+        let pump_delivery_failed = delivery_failed.clone();
+        let pump = tauri::async_runtime::spawn(async move {
+            while let Some(frame) = queue.pop().await {
+                let audio_frame = AudioFrame {
+                    data: Cow::Owned(frame.into_samples()),
+                    sample_rate: SCREEN_AUDIO_SAMPLE_RATE,
+                    num_channels: SCREEN_AUDIO_CHANNELS as u32,
+                    samples_per_channel: SCREEN_AUDIO_SAMPLES_PER_CHANNEL as u32,
+                };
+                if let Err(error) = pump_source.capture_frame(&audio_frame).await {
+                    let detail = format!("screen audio delivery failed: {error:?}");
+                    pump_delivery_failed.store(true, Ordering::Release);
+                    queue.close();
+                    on_error(detail);
+                    break;
+                }
+            }
+        });
+
+        let track_name = source.track_name();
+        let track =
+            LocalAudioTrack::create_audio_track(&track_name, RtcAudioSource::Native(native_source));
+        let local_participant = room.local_participant();
+        let publish = local_participant.publish_track(
+            LocalTrack::Audio(track.clone()),
+            screen_audio_publish_options(source),
+        );
+        let publish_error = match tokio::time::timeout(Duration::from_secs(10), publish).await {
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => Some(format!(
+                "failed to publish screen audio '{track_name}': {error}"
+            )),
+            Err(_) => Some(format!(
+                "timed out publishing screen audio '{track_name}'"
+            )),
+        };
+        if let Some(error) = publish_error {
+            capture.close_queue();
+            pump.abort();
+            let _ = capture.stop();
+            return Err(error);
+        }
+
+        // Bounded evidence line: the live acceptance for per-share audio has to
+        // prove "zero companions by default" and "exactly one after opt-in",
+        // and until now only FAILURE paths were logged, so absence of a line
+        // proved nothing. `scope` is a class, never the pid.
+        log::info!(
+            "audio: screen-audio published scope={} track={} sid={}",
+            source.scope_label(),
+            track_name,
+            track.sid()
+        );
+
+        Ok(Self {
+            source,
+            capture,
+            track,
+            room,
+            pump,
+            delivery_failed,
+            stopped: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn track_sid(&self) -> TrackSid {
+        self.track.sid()
+    }
+
+    pub(crate) fn track_name(&self) -> String {
+        self.source.track_name()
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.capture.failed() || self.delivery_failed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn republish_after_reconnect(&self) -> Result<(), livekit::RoomError> {
+        if self.is_stopped() {
+            return Err(livekit::RoomError::Internal(
+                "screen-audio track is stopped".to_string(),
+            ));
+        }
+        self.room
+            .local_participant()
+            .publish_track(
+                LocalTrack::Audio(self.track.clone()),
+                screen_audio_publish_options(self.source),
+            )
+            .await?;
+        log::info!(
+            "audio: screen-audio republished after reconnect scope={} track={}",
+            self.source.scope_label(),
+            self.source.track_name()
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn stop(&self) {
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.capture.close_queue();
+        self.pump.abort();
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            self.room
+                .local_participant()
+                .unpublish_track(&self.track.sid()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            // A failed unpublish is a *privacy* failure, not a cosmetic one:
+            // unchecking share audio must take the audio off the wire, so this
+            // cannot be invisible in a default-level log.
+            Ok(Err(error)) => log::warn!("audio: screen-audio unpublish failed: {error}"),
+            Err(_) => log::warn!("audio: screen-audio unpublish timed out"),
+        }
+        if let Err(error) = self.capture.stop() {
+            log::debug!("audio: screen-audio native stop failed: {error}");
+        }
+        // Paired with the `published` line above: `published - stopped` is the
+        // number of companions this process currently holds, which is what the
+        // stop/republish/reconnect case has to check for staleness.
+        log::info!(
+            "audio: screen-audio stopped scope={} track={}",
+            self.source.scope_label(),
+            self.source.track_name()
+        );
+    }
+}
+
+impl Drop for ScreenAudioTrack {
+    fn drop(&mut self) {
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.capture.close_queue();
+        self.pump.abort();
+        if let Err(error) = self.capture.stop() {
+            log::debug!("audio: screen-audio drop stop failed: {error}");
+        }
+    }
 }
 
 /// This process's published microphone track: the live `PlatformAudio`
@@ -802,6 +1009,10 @@ pub(crate) fn audio_is_disabled(value: Option<&str>) -> bool {
     })
 }
 
+pub(crate) fn audio_disabled_by_env() -> bool {
+    audio_is_disabled(std::env::var("PETAL_DISABLE_AUDIO").ok().as_deref())
+}
+
 /// #812 (journey AUD-04): substitute a deterministic 440Hz tone for the
 /// machine's microphone INPUT, while leaving every other part of the publish
 /// path untouched -- same track name, same `TrackPublishOptions`, same
@@ -1342,11 +1553,16 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
         // line and the watchdog blind. Enumerate them at start; `watched`
         // dedupes against a late event.
         let mut watched: HashSet<String> = HashSet::new();
+        // One end-signal per watched sid. The SFU's `TrackUnpublished` is the
+        // authoritative statement that the publication is gone, and the #787
+        // watchdog has to stop there instead of cycling on a subscription that
+        // no longer exists.
+        let mut endings: HashMap<String, tokio::sync::watch::Sender<bool>> = HashMap::new();
         for (_, participant) in room.remote_participants() {
             for publication in participant.track_publications().values() {
                 if let Some(RemoteTrack::Audio(audio_track)) = publication.track() {
                     let sid = audio_track.sid().to_string();
-                    if watched.insert(sid) {
+                    if watched.insert(sid.clone()) {
                         log::info!(
                             "audio: subscribed to remote audio track from '{}' (sid={}, muted={}) -- pre-existing at join",
                             participant.identity(),
@@ -1356,9 +1572,17 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                         let identity = participant.identity().to_string();
                         let speaking = speaking.clone();
                         let generation = generation.clone();
+                        let (end_tx, end_rx) = tokio::sync::watch::channel(false);
+                        endings.insert(sid, end_tx);
                         tokio::spawn(async move {
-                            watch_remote_audio_track(identity, audio_track, speaking, generation)
-                                .await;
+                            watch_remote_audio_track(
+                                identity,
+                                audio_track,
+                                speaking,
+                                generation,
+                                end_rx,
+                            )
+                            .await;
                         });
                     }
                 }
@@ -1374,7 +1598,8 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                     track, participant, ..
                 } => {
                     if let RemoteTrack::Audio(audio_track) = track {
-                        if !watched.insert(audio_track.sid().to_string()) {
+                        let sid = audio_track.sid().to_string();
+                        if !watched.insert(sid.clone()) {
                             continue;
                         }
                         log::info!(
@@ -1386,9 +1611,17 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                         let identity = participant.identity().to_string();
                         let speaking = speaking.clone();
                         let generation = generation.clone();
+                        let (end_tx, end_rx) = tokio::sync::watch::channel(false);
+                        endings.insert(sid, end_tx);
                         tokio::spawn(async move {
-                            watch_remote_audio_track(identity, audio_track, speaking, generation)
-                                .await;
+                            watch_remote_audio_track(
+                                identity,
+                                audio_track,
+                                speaking,
+                                generation,
+                                end_rx,
+                            )
+                            .await;
                         });
                     }
                 }
@@ -1397,7 +1630,31 @@ pub(crate) fn start_audio_track_logger(room: Arc<Room>, generation: RoomGenerati
                     // that re-subscribes the SAME sid within one room
                     // generation would be deduped into permanent blindness
                     // -- recreating the exact gap this logger closes.
-                    watched.remove(publication.sid().to_string().as_str());
+                    let sid = publication.sid().to_string();
+                    watched.remove(sid.as_str());
+                    if let Some(end) = endings.remove(&sid) {
+                        let _ = end.send(true);
+                    }
+                }
+                RoomEvent::TrackUnpublished { publication, .. } => {
+                    // Receiver-side proof that a sender's `stopped` reached the
+                    // wire. Without it, the #787 watchdog's post-stop alarms
+                    // read identically whether the publication was removed
+                    // correctly or the unpublish failed silently -- the exact
+                    // run where that distinction is a privacy question.
+                    // Mirrors the video path's "unpublished ... removing".
+                    if publication.kind() == TrackKind::Audio {
+                        let sid = publication.sid().to_string();
+                        watched.remove(sid.as_str());
+                        if let Some(end) = endings.remove(&sid) {
+                            let _ = end.send(true);
+                        }
+                        log::info!(
+                            "audio: remote audio publication unpublished track={} sid={} -- removing",
+                            publication.name(),
+                            sid
+                        );
+                    }
                 }
                 RoomEvent::ActiveSpeakersChanged { speakers } => {
                     let mut guard = speaking.lock_unpoisoned();
@@ -1657,6 +1914,7 @@ async fn watch_remote_audio_track(
     track: RemoteAudioTrack,
     speaking: Arc<Mutex<HashSet<String>>>,
     generation: RoomGeneration,
+    mut ended: tokio::sync::watch::Receiver<bool>,
 ) {
     let sid = track.sid();
     let mut stream =
@@ -1676,6 +1934,11 @@ async fn watch_remote_audio_track(
 
     loop {
         tokio::select! {
+            // The publication was unpublished or the subscription dropped:
+            // stop here rather than reporting alarms for a track the SFU has
+            // already removed. `changed()` also resolves when the sender is
+            // dropped, which means the same "no longer watched" condition.
+            _ = ended.changed() => break,
             frame = stream.next() => {
                 let Some(frame) = frame else { break };
                 frames += 1;
@@ -1810,6 +2073,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn screen_audio_publish_contract_is_output_specific() {
+        let options = screen_audio_publish_options(AudioSourceKey::SystemOutput);
+        assert_eq!(options.source, TrackSource::ScreenshareAudio);
+        assert_eq!(options.stream, "petal-window-audio-system");
+        assert_eq!(options.audio_encoding.unwrap().max_bitrate, 128_000);
+        assert!(!options.dtx);
+        assert!(!options.red);
+    }
 
     // Same lesson as `resilience.rs`'s own serde tests (which caught a real
     // `rename_all` vs `rename_all_fields` bug): assert the exact wire field
