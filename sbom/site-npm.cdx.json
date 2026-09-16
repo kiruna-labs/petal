@@ -4192,17 +4192,17 @@
       "version": "5.3.2"
     },
     {
-      "bom-ref": "astro@7.3.1",
+      "bom-ref": "astro@7.3.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/astro/-/astro-7.3.1.tgz"
+          "url": "https://registry.npmjs.org/astro/-/astro-7.3.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "03f6c9607b5cea7d1401d44e63d5bde3c7d6ea55f4a67500f8958a5be2060974720c818dd8cb170b43a54bca27646263afeb2ff21b5e9b039cf56e4f0515c293"
+          "content": "cac4dc76918feb55d9a47a0c4580bf08ad7d0d0f78aa406fcd732d5c4a34804a8f36498e53f4effbe0ad5a6cda2389c5d8293c45715d896bdd95359ada83abf7"
         }
       ],
       "licenses": [
@@ -4213,10 +4213,10 @@
         }
       ],
       "name": "astro",
-      "purl": "pkg:npm/astro@7.3.1",
+      "purl": "pkg:npm/astro@7.3.2",
       "scope": "required",
       "type": "library",
-      "version": "7.3.1"
+      "version": "7.3.2"
     },
     {
       "bom-ref": "astro-expressive-code@0.44.2",
@@ -4244,6 +4244,33 @@
       "scope": "required",
       "type": "library",
       "version": "0.44.2"
+    },
+    {
+      "bom-ref": "@astrojs/markdown-satteri@0.4.1",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@astrojs/markdown-satteri/-/markdown-satteri-0.4.1.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "1278876c535ae924070e287b267a4fa2cdcd5973ba85db78ada05c3a8b1f1a695f73780ff4223fb04480dd539fd4f80967b4857dec25656f4b8af9f426e80466"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@astrojs/markdown-satteri",
+      "purl": "pkg:npm/%40astrojs/markdown-satteri@0.4.1",
+      "scope": "required",
+      "type": "library",
+      "version": "0.4.1"
     },
     {
       "bom-ref": "axobject-query@4.1.0",
@@ -10625,7 +10652,7 @@
     {
       "dependsOn": [
         "@astrojs/starlight@0.42.0",
-        "astro@7.3.1",
+        "astro@7.3.2",
         "sharp@0.35.4",
         "starlight-links-validator@0.26.0"
       ],
@@ -10713,7 +10740,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.3.1",
+        "astro@7.3.2",
         "@astrojs/internal-helpers@0.11.0",
         "@astrojs/markdown-satteri@0.4.0",
         "es-module-lexer@2.3.2"
@@ -10735,7 +10762,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.3.1",
+        "astro@7.3.2",
         "@astrojs/markdown-satteri@0.4.0",
         "@astrojs/mdx@8.0.0",
         "@astrojs/sitemap@3.7.4",
@@ -11455,7 +11482,7 @@
       "dependsOn": [
         "@astrojs/compiler-rs@0.4.0",
         "@astrojs/internal-helpers@0.11.0",
-        "@astrojs/markdown-satteri@0.4.0",
+        "@astrojs/markdown-satteri@0.4.1",
         "@astrojs/telemetry@3.3.3",
         "@capsizecss/unpack@4.0.1",
         "@clack/prompts@1.7.0",
@@ -11508,15 +11535,24 @@
         "zod@4.5.4",
         "sharp@0.35.4"
       ],
-      "ref": "astro@7.3.1"
+      "ref": "astro@7.3.2"
     },
     {
       "dependsOn": [
-        "astro@7.3.1",
+        "astro@7.3.2",
         "rehype-expressive-code@0.44.2",
         "url-extras@0.1.0"
       ],
       "ref": "astro-expressive-code@0.44.2"
+    },
+    {
+      "dependsOn": [
+        "@astrojs/internal-helpers@0.11.0",
+        "@astrojs/prism@4.0.2",
+        "github-slugger@2.0.0",
+        "satteri@0.10.5"
+      ],
+      "ref": "@astrojs/markdown-satteri@0.4.1"
     },
     {
       "dependsOn": [],
@@ -12788,7 +12824,7 @@
     {
       "dependsOn": [
         "@astrojs/starlight@0.42.0",
-        "astro@7.3.1",
+        "astro@7.3.2",
         "@astrojs/markdown-satteri@0.4.0",
         "@types/picomatch@4.0.3",
         "github-slugger@2.0.0",
