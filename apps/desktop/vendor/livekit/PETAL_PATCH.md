@@ -326,3 +326,32 @@ rather than per-republish in production.
 
 Upstream: report both to livekit/rust-sdks (same FFI core as
 livekit/python-sdks#449's report).
+
+# Petal patch: native screen-share quality policy
+
+The native sender exposes the minimal WebRTC controls needed for web parity:
+`RtcVideoTrack::set_content_hint(ContentHint::Detailed)` and
+`RtpSender::set_degradation_preference(DegradationPreference::MaintainResolution)`.
+LiveKit applies them only when creating a native `Screenshare` sender. Cameras
+and audio retain their existing behavior. Remove this patch when the upstream
+Rust SDK exposes equivalent screen-share publishing options.
+
+# Petal patch: `TrackPublishOptions::min_bitrate`
+
+**Problem:** same Windows screenshare startup window as the libwebrtc
+`RtpEncodingParameters::min_bitrate` patch. The floor has to reach the encoding
+`into_rtp_encodings` builds, but `VideoEncoding` is constructed as a
+field-exhaustive literal at several sites, and `PublishingLayerParameters` is
+documented as live-tunable for only two fields. Adding the field to either would
+have forced unrelated edits.
+
+**Fix:** put `min_bitrate: Option<u64>` on `TrackPublishOptions` (which every
+caller already builds with `..Default::default()`), rename the existing
+`compute_video_encodings` body to `compute_video_encodings_inner`, and apply the
+floor in a thin wrapper to the top encoding (the one with the largest
+`max_bitrate`). `None` leaves the computed encodings untouched.
+
+**Revert:** `git checkout -- src/room/options.rs`, or unset
+`PETAL_SHARE_MIN_BITRATE`, which alone restores prior behaviour.
+
+**Updating:** drop once upstream exposes an allocation floor on the publish path.

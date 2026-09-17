@@ -112,3 +112,28 @@ the decoder-side test feed discard it deliberately.
 
 No C++ change is involved, and no publish, capture, bitrate or FPS policy
 changes with it.
+## Publish-time encoding `min_bitrate` (allocation floor)
+
+### Why this exists
+
+The vendored cxx bridge already carries `has_min_bitrate_bps` /
+`min_bitrate_bps` -- `webrtc-sys/src/rtp_parameters.cpp` reads and writes both --
+but `src/native/rtp_parameters.rs` hardcoded `has_min_bitrate_bps: false,
+min_bitrate_bps: 0` in the Rust -> native `From`, so no caller could set an
+allocation floor. Without it there is no way to raise what WebRTC's bitrate
+allocator spends while the congestion controller's estimate is still low, which
+is the Windows screenshare startup window (measured 10-40 s).
+
+### The fix
+
+Add `min_bitrate: Option<u64>` to the public `RtpEncodingParameters` (and its
+`Default`), forward it in the Rust -> native `From`, and read it back in the
+native -> Rust `From`. `None` maps to `has_min_bitrate_bps: false`, which is
+byte-for-byte the previous wire output, so this patch is inert unless a caller
+opts in (`TrackPublishOptions::min_bitrate`, then `PETAL_SHARE_MIN_BITRATE`).
+
+### Updating
+
+Fold away once upstream carries the field through directly. To revert,
+`git checkout -- src/rtp_parameters.rs src/native/rtp_parameters.rs`; unsetting
+`PETAL_SHARE_MIN_BITRATE` restores prior behaviour without reverting anything.

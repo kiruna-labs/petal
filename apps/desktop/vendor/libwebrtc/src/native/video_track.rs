@@ -19,6 +19,8 @@ use parking_lot::Mutex;
 use sys_vt::ffi::video_to_media;
 use webrtc_sys::video_track as sys_vt;
 
+pub use sys_vt::ffi::ContentHint;
+
 use super::media_stream_track::impl_media_stream_track;
 use super::packet_trailer::PacketTrailerHandler;
 use crate::media_stream_track::RtcTrackState;
@@ -38,6 +40,10 @@ impl RtcVideoTrack {
 
     pub fn sys_handle(&self) -> SharedPtr<sys_vt::ffi::MediaStreamTrack> {
         video_to_media(self.sys_handle.clone())
+    }
+
+    pub fn set_content_hint(&self, hint: ContentHint) {
+        self.sys_handle.set_content_hint(hint);
     }
 
     /// Set the packet trailer handler for this track.

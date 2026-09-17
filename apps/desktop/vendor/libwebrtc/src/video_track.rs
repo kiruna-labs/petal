@@ -20,6 +20,9 @@ use crate::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
+pub use crate::imp::video_track::ContentHint;
+
+#[cfg(not(target_arch = "wasm32"))]
 use crate::native::packet_trailer::PacketTrailerHandler;
 
 #[derive(Clone)]
@@ -35,6 +38,11 @@ impl RtcVideoTrack {
     /// When set, any `NativeVideoStream` created from this track will
     /// automatically use this handler to populate `user_timestamp`
     /// on each decoded frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_content_hint(&self, hint: ContentHint) {
+        self.handle.set_content_hint(hint);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_packet_trailer_handler(&self, handler: PacketTrailerHandler) {
         self.handle.set_packet_trailer_handler(handler);
