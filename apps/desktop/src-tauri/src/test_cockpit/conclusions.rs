@@ -19,6 +19,10 @@ pub fn for_scenario(id: &str) -> EvidenceBasis {
     match id {
         // The native/web media oracle checks decoded content dimensions and fps.
         "SHARE-W2N-Q" => EvidenceBasis::ContentVerified,
+        // SHARE-W2N-STALL samples the receiver's SCREEN REGION (mean luma +
+        // content hash) across a forced source freeze and resume, alongside
+        // the decoder counters -- the pixels are the evidence (#202/#627).
+        "SHARE-W2N-STALL" => EvidenceBasis::ContentVerified,
         // These currently prove delivery/heartbeat shape, not the user-visible effect.
         "SHARE-N2W-Q" | "DRAW-N" | "TELE" => EvidenceBasis::WireShape,
         // SHARE-DESKTOP's receiver oracle is the same delivery/liveness shape

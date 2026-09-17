@@ -435,7 +435,13 @@ function verifyH264Negotiated(track: import('livekit-client').LocalVideoTrack, l
   return verifyH264NegotiatedForHook(track, label, harnessHook, logEvent);
 }
 
-const { startCanvasAnimation, getFrameCount: getPatternFrameCount } = createTestPattern(canvas);
+const {
+  startCanvasAnimation,
+  pauseCanvasAnimation,
+  resumeCanvasAnimation,
+  isAnimating: isPatternAnimating,
+  getFrameCount: getPatternFrameCount,
+} = createTestPattern(canvas);
 startCanvasAnimation();
 
 const {
@@ -613,6 +619,10 @@ Object.assign(ctx.cb, {
   submitMeetingField: controls.submitMeetingField,
   renameRoomDisplayName: controls.renameRoomDisplayName,
   startTestPatternShare: controls.startTestPatternShare,
+  // #202 / SHARE-W2N-STALL: the cockpit's freeze/animate commands.
+  pauseTestPattern: () => pauseCanvasAnimation(),
+  resumeTestPattern: () => resumeCanvasAnimation(),
+  isTestPatternAnimating: () => isPatternAnimating(),
   startCockpitWebcam: controls.startCockpitWebcam,
   stopCockpitWebcam: controls.stopCockpitWebcam,
   startCockpitAudioTone: controls.startCockpitAudioTone,

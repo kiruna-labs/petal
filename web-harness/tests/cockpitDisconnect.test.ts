@@ -162,3 +162,101 @@ test('parseCockpitCommandMessage accepts only the v1 disconnect command shape', 
   assert.equal(parseCockpitCommandMessage(null), null);
   assert.equal(parseCockpitCommandMessage('disconnect'), null);
 });
+
+// ---------------------------------------------------------------------------
+// #202 / SHARE-W2N-STALL: the freeze / animate commands.
+// ---------------------------------------------------------------------------
+
+function patternContext(localIdentity: string) {
+  const published: CockpitReportMessage[] = [];
+  const decoder = new TextDecoder();
+  let animating = true;
+  let frameCount = 0;
+  const state = {
+    room: {
+      localParticipant: {
+        identity: localIdentity,
+        publishData: async (data: Uint8Array) => {
+          published.push(JSON.parse(decoder.decode(data)) as CockpitReportMessage);
+        },
+      },
+      disconnect: async () => {},
+    },
+  };
+  const ctx = {
+    state,
+    hook: {},
+    cb: {
+      connectToMeeting: async () => {},
+      resolveIdentity: () => localIdentity,
+      startTestPatternShare: async () => {},
+      pauseTestPattern: () => {
+        animating = false;
+      },
+      resumeTestPattern: () => {
+        animating = true;
+      },
+      isTestPatternAnimating: () => animating,
+    },
+  } as unknown as HarnessContext;
+  return {
+    ctx,
+    published,
+    animating: () => animating,
+    frames: () => {
+      if (animating) frameCount += 1;
+      return frameCount;
+    },
+  };
+}
+
+test('pattern-freeze stops the source and acknowledges with the frame counter; pattern-animate restarts it', async () => {
+  const { ctx, published, animating, frames } = patternContext('web-abc');
+  const cockpit = setupCockpit(ctx, frames);
+
+  const froze = await cockpit.handleCockpitCommand(
+    commandBytes({ command: 'pattern-freeze', target: 'web-abc' }),
+    'p-cockpit-1234'
+  );
+  assert.equal(froze, true);
+  assert.equal(animating(), false, 'the canvas loop is paused: the share goes static');
+  assert.equal(published.length, 1);
+  assert.equal(published[0].step, 'pattern-frozen');
+  assert.equal(published[0].ok, true);
+  assert.equal(typeof published[0].patternFrameCount, 'number');
+  assert.match(published[0].detail, /animating=false/);
+
+  const resumed = await cockpit.handleCockpitCommand(
+    commandBytes({ command: 'pattern-animate', target: 'web-abc' }),
+    'p-cockpit-1234'
+  );
+  assert.equal(resumed, true);
+  assert.equal(animating(), true);
+  assert.equal(published[1].step, 'pattern-animated');
+  assert.match(published[1].detail, /animating=true/);
+});
+
+test('a pattern command addressed to another peer is ignored', async () => {
+  const { ctx, published, animating } = patternContext('web-abc');
+  const cockpit = setupCockpit(ctx, () => 0);
+  const acted = await cockpit.handleCockpitCommand(
+    commandBytes({ command: 'pattern-freeze', target: 'web-other' }),
+    'p-cockpit-1234'
+  );
+  assert.equal(acted, false);
+  assert.equal(animating(), true);
+  assert.equal(published.length, 0);
+});
+
+test('parseCockpitCommandMessage accepts every cockpit command and nothing else', () => {
+  for (const command of ['disconnect', 'pattern-freeze', 'pattern-animate'] as const) {
+    assert.deepEqual(parseCockpitCommandMessage({ v: 1, kind: 'command', command, sentAtMs: 5 }), {
+      v: 1,
+      kind: 'command',
+      command,
+      target: undefined,
+      sentAtMs: 5,
+    });
+  }
+  assert.equal(parseCockpitCommandMessage({ v: 1, kind: 'command', command: 'pattern-explode', sentAtMs: 5 }), null);
+});

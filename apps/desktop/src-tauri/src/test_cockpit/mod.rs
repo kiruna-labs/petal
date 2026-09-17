@@ -1997,6 +1997,11 @@ fn current_status(state: &CockpitRuntimeState) -> CockpitStatus {
 enum ScenarioKind {
     NativeToWebShare,
     WebToNativeShare,
+    /// SHARE-W2N-STALL (#202): a browser sharer whose SOURCE stops producing
+    /// frames (a static canvas -> `captureStream` emits nothing) for longer
+    /// than every receiver watchdog, then resumes. The native receiver must
+    /// keep the window, never show black, and resume live pixels.
+    WebShareStallRecovery,
     Draw,
     Camera,
     /// CAM-N2W (journey CAM-05, #815): the reverse of `Camera`. The NATIVE
@@ -2090,6 +2095,20 @@ const SCENARIO_TABLE: &[ScenarioSpec] = &[
         id: "SHARE-W2N-Q",
         tier: "quick",
         kind: ScenarioKind::WebToNativeShare,
+        requires_native_share: false,
+    },
+    ScenarioSpec {
+        // #202: the browser sharer freezes its source for longer than every
+        // receiver watchdog (5s LOW downgrade, 30s no-frame hold, three probe
+        // failures -> repair request), then animates again. Gate-sized by
+        // default (90s freeze / 30s resume); PETAL_COCKPIT_STALL_FREEZE_MS
+        // and PETAL_COCKPIT_STALL_RESUME_MS stretch it into a soak
+        // measurement. Oracle: window survives, content region never black
+        // (screen REGION pixels, not the backing store), decoding AND pixels
+        // resume once the source does.
+        id: "SHARE-W2N-STALL",
+        tier: "quick",
+        kind: ScenarioKind::WebShareStallRecovery,
         requires_native_share: false,
     },
     ScenarioSpec {
@@ -2510,6 +2529,22 @@ const JOURNEY_TABLE: &[Journey] = &[
         depth: "short",
         status: "partial",
         runnable: Some("SHARE-DESKTOP"),
+        legacy: &[],
+    },
+    // SHARE-11 (#202): a browser sharer's SOURCE pauses (tab throttled,
+    // static page, captureStream idle) for longer than every receiver
+    // watchdog, then resumes. Field signature: "sharing is pausing", the
+    // remote window going away or black, no recovery when the page moves
+    // again. Covered by SHARE-W2N-STALL's freeze/animate drive.
+    Journey {
+        id: "SHARE-11",
+        title: "Source pause recovery",
+        feature: "A",
+        direction: "web-nat",
+        priority: "P0",
+        depth: "short-long",
+        status: "covered",
+        runnable: Some("SHARE-W2N-STALL"),
         legacy: &[],
     },
     // B · Camera
@@ -3036,7 +3071,7 @@ const PHASE_TABLE: &[Phase] = &[
         title: "Share windows and desktops",
         journeys: &[
             "SHARE-01", "SHARE-02", "SHARE-03", "SHARE-04", "SHARE-05", "SHARE-06", "SHARE-07",
-            "SHARE-08", "SHARE-09", "SHARE-10",
+            "SHARE-08", "SHARE-09", "SHARE-10", "SHARE-11",
         ],
     },
     Phase {
@@ -4544,14 +4579,51 @@ impl Drop for WebPeer {
 /// that module is macOS-only. `cockpit_topic_constant_matches_receiver` pins it.
 const COCKPIT_TOPIC: &str = "petal.cockpit";
 
-fn cockpit_disconnect_command_payload(target: &str, sent_at_ms: u64) -> serde_json::Value {
+/// One targeted `petal.cockpit` command. The web peer acts only when
+/// `target` is its own identity (`handleCockpitCommand`): `disconnect` tears
+/// it down; `pattern-freeze` / `pattern-animate` (#202) stop and restart its
+/// test-pattern source in place, acknowledged by a `pattern-frozen` /
+/// `pattern-animated` report carrying `patternFrameCount`.
+fn cockpit_command_payload(command: &str, target: &str, sent_at_ms: u64) -> serde_json::Value {
     serde_json::json!({
         "v": 1,
         "kind": "command",
-        "command": "disconnect",
+        "command": command,
         "target": target,
         "sentAtMs": sent_at_ms,
     })
+}
+
+fn cockpit_disconnect_command_payload(target: &str, sent_at_ms: u64) -> serde_json::Value {
+    cockpit_command_payload("disconnect", target, sent_at_ms)
+}
+
+/// Publish one command to one web peer, reliably, on the cockpit topic.
+async fn publish_cockpit_command(
+    app: &AppHandle,
+    target: &str,
+    command: &str,
+) -> Result<(), String> {
+    let state = app
+        .try_state::<crate::session::SessionState>()
+        .ok_or("session state is unavailable")?;
+    let (room_connection, _) = state
+        .control_channel_snapshot()
+        .ok_or("not joined to the cockpit room")?;
+    let room = room_connection.room();
+    let sent_at_ms = unix_ms_from_system_time(SystemTime::now()).unwrap_or(0);
+    let payload = serde_json::to_vec(&cockpit_command_payload(command, target, sent_at_ms))
+        .map_err(|error| error.to_string())?;
+    let packet = livekit::DataPacket {
+        payload,
+        topic: Some(COCKPIT_TOPIC.to_string()),
+        reliable: true,
+        destination_identities: vec![livekit::prelude::ParticipantIdentity(target.to_string())],
+    };
+    room.local_participant()
+        .publish_data(packet)
+        .await
+        .map_err(|error| format!("{command} command to '{target}' failed: {error}"))
 }
 
 /// Web-harness peers identify as `web-<suffix>` (`resolveHarnessIdentity`);
@@ -5609,6 +5681,47 @@ async fn await_web_report(
     None
 }
 
+/// Wait for one NON-terminal report step (`pattern-frozen`, `pattern-animated`)
+/// from the scenario's web peer, journalled at or after `not_before_ms` (unix
+/// ms, taken before the command that provokes it was sent). Returns the
+/// report and its journal timestamp. `await_web_report` cannot serve this: it
+/// only returns terminal steps, and the peer's `done` already went by.
+async fn await_web_step(
+    app: &AppHandle,
+    scenario: ScenarioSpec,
+    step: &str,
+    not_before_ms: u64,
+    timeout: Duration,
+) -> Option<(WebCockpitReport, u64)> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
+            // Oldest-first journal, walked newest-first; stop at the cursor.
+            for entry in diagnostics.journal().into_iter().rev() {
+                if entry.t_ms < not_before_ms {
+                    break;
+                }
+                let Some(report) = parse_web_cockpit_report_line(&entry.message) else {
+                    continue;
+                };
+                if !report_matches_scenario(&report, scenario) {
+                    continue;
+                }
+                let matches = report_text_field(&report.payload, "step")
+                    .map(|reported| reported.eq_ignore_ascii_case(step))
+                    .unwrap_or(false);
+                if matches {
+                    return Some((report, entry.t_ms));
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 fn collect_distinct_terminal_reports_from_journal<I, S>(
     messages: I,
     scenario: ScenarioSpec,
@@ -6403,6 +6516,7 @@ async fn assert_reported_scenario(
         | ScenarioKind::MultiPeer
         | ScenarioKind::RemoteControlScaled
         | ScenarioKind::SoakStallWatch
+        | ScenarioKind::WebShareStallRecovery
         | ScenarioKind::NativeToNativeShare
         | ScenarioKind::RemoteControlNativeToNative
         | ScenarioKind::RemoteControlNativeToWeb
@@ -10241,6 +10355,729 @@ async fn run_soak_stall_watch_scenario(
     outcome
 }
 
+// ---------------------------------------------------------------------------
+// SHARE-W2N-STALL (#202): source-pause recovery for a browser sharer.
+//
+// The web peer publishes its animated test pattern, exactly as SHARE-W2N-Q,
+// and the SAME oracle establishes live video first. Then the engine commands
+// the sharer to FREEZE its canvas (a static canvas makes `captureStream`
+// emit nothing, so the SFU stops receiving frames -- the field signature
+// behind "sharing is pausing"), samples the receiver through the freeze,
+// commands it to ANIMATE again, and requires the receiver to resume. Every
+// sample reads the panel's on-screen content REGION (never the window's
+// backing store: CLAUDE.md "test the pixels, and only the pixels").
+// ---------------------------------------------------------------------------
+
+const STALL_FREEZE_MS_ENV: &str = "PETAL_COCKPIT_STALL_FREEZE_MS";
+const STALL_RESUME_MS_ENV: &str = "PETAL_COCKPIT_STALL_RESUME_MS";
+/// Gate-sized defaults. The freeze outlasts every receiver watchdog
+/// (`STARVATION_DOWNGRADE_AFTER` 5s, `NO_FRAME_RETIRE_AFTER` 30s, then three
+/// failed HIGH probes -> a repair request) so the hold-and-repair path runs;
+/// the resume window covers a probe cadence that has only partly elapsed.
+const STALL_FREEZE_DEFAULT: Duration = Duration::from_secs(90);
+const STALL_RESUME_DEFAULT: Duration = Duration::from_secs(30);
+const STALL_PHASE_MIN: Duration = Duration::from_secs(10);
+const STALL_PHASE_MAX: Duration = Duration::from_secs(900);
+const STALL_FREEZE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+const STALL_RESUME_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+const STALL_ACK_TIMEOUT: Duration = Duration::from_secs(20);
+/// Mean luma (0..255) of the content region below which the window is
+/// black. A held test-pattern frame reads far above this; an empty/cleared
+/// panel reads near zero.
+const STALL_BLACK_LUMA: f64 = 8.0;
+/// The compositor panel's header strip (`compositor::HEADER_HEIGHT`),
+/// excluded from the sampled region so its never-black chrome cannot mask a
+/// black content area.
+const STALL_PANEL_HEADER_POINTS: f64 = 44.0;
+/// Fraction of the sampled lattice that must change, against the last
+/// frozen capture, before the on-screen content counts as resumed. The web
+/// peer's telepointer keeps moving over a held frame (first runner run: the
+/// "Guest" pointer touched 1-2 of 576 cells per sample, which changed a
+/// whole-region hash every time); the animated pattern moves dozens.
+const STALL_CONTENT_CHANGE_FRACTION: f64 = 0.05;
+const STALL_LATTICE_COLS: u32 = 32;
+const STALL_LATTICE_ROWS: u32 = 18;
+
+/// Parse a phase length from its env var (milliseconds), bounded to
+/// `STALL_PHASE_MIN..=STALL_PHASE_MAX`; anything unparsable is the default.
+fn stall_phase_duration(raw: Option<&str>, default: Duration) -> Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .map(|duration| duration.clamp(STALL_PHASE_MIN, STALL_PHASE_MAX))
+        .unwrap_or(default)
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StallPhaseConfig {
+    freeze_ms: u64,
+    resume_ms: u64,
+}
+
+impl StallPhaseConfig {
+    fn from_env() -> Self {
+        let freeze = stall_phase_duration(
+            env::var(STALL_FREEZE_MS_ENV).ok().as_deref(),
+            STALL_FREEZE_DEFAULT,
+        );
+        let resume = stall_phase_duration(
+            env::var(STALL_RESUME_MS_ENV).ok().as_deref(),
+            STALL_RESUME_DEFAULT,
+        );
+        Self {
+            freeze_ms: freeze.as_millis() as u64,
+            resume_ms: resume.as_millis() as u64,
+        }
+    }
+
+    fn freeze(&self) -> Duration {
+        Duration::from_millis(self.freeze_ms)
+    }
+
+    fn resume(&self) -> Duration {
+        Duration::from_millis(self.resume_ms)
+    }
+}
+
+/// One receiver observation during the freeze or resume phase.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StallSample {
+    phase: &'static str,
+    /// Milliseconds since the sharer acknowledged the freeze.
+    offset_ms: u64,
+    track_present: bool,
+    fps: f64,
+    frames_decoded: u32,
+    stream_state: String,
+    /// The receiver still has an OPEN, ON-SCREEN window for the sharer.
+    window_present: bool,
+    mean_luma: Option<f64>,
+    content_hash: Option<u64>,
+    /// Resume phase only: fraction of lattice cells changed against the last
+    /// frozen capture (`STALL_CONTENT_CHANGE_FRACTION` is the bar).
+    changed_vs_frozen: Option<f64>,
+    capture_path: Option<String>,
+    capture_error: Option<String>,
+    #[serde(skip)]
+    cells: Option<Vec<u8>>,
+}
+
+/// A "media" journal entry (the receiver's own stall/recovery transitions,
+/// `diagnostics::journal_media`) seen since the freeze command was sent.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StallTransition {
+    /// Milliseconds relative to the freeze acknowledgement (negative: the
+    /// receiver reacted between the command and the ack).
+    offset_ms: i64,
+    t_ms: u64,
+    message: String,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StallEvidence {
+    freeze: Vec<StallSample>,
+    resume: Vec<StallSample>,
+    transitions: Vec<StallTransition>,
+    frames_decoded_at_freeze: u32,
+    /// The counter when the sharer acknowledged the animate command: the
+    /// resume oracle needs it to move past THIS value, so frames that
+    /// trickled in during the freeze do not count as recovery.
+    frames_decoded_at_animate: u32,
+    animate_ack_offset_ms: u64,
+    resumed_frames_offset_ms: Option<u64>,
+    resumed_content_offset_ms: Option<u64>,
+}
+
+/// What one capture of the content region looks like: mean luma, a coarse
+/// hash (for the record), and the per-cell quantised luma of a 32x18
+/// lattice (for change measurement). Pure over the image so both directions
+/// are unit-tested.
+struct RegionSignature {
+    mean_luma: f64,
+    hash: u64,
+    cells: Vec<u8>,
+}
+
+fn region_signature(image: &image::RgbImage) -> Option<RegionSignature> {
+    let (width, height) = (image.width(), image.height());
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut luma_sum = 0.0;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut cells = Vec::with_capacity((STALL_LATTICE_COLS * STALL_LATTICE_ROWS) as usize);
+    for gy in 0..STALL_LATTICE_ROWS {
+        for gx in 0..STALL_LATTICE_COLS {
+            let x = (((gx as f64 + 0.5) / STALL_LATTICE_COLS as f64) * width as f64) as u32;
+            let y = (((gy as f64 + 0.5) / STALL_LATTICE_ROWS as f64) * height as f64) as u32;
+            let [r, g, b] = image.get_pixel(x.min(width - 1), y.min(height - 1)).0;
+            let luma = 0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64;
+            luma_sum += luma;
+            // Quantise to 16 levels so encoder noise on a held frame does
+            // not read as new content.
+            cells.push((luma / 16.0) as u8);
+            for channel in [r, g, b] {
+                hash ^= (channel >> 4) as u64;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    Some(RegionSignature {
+        mean_luma: luma_sum / (STALL_LATTICE_COLS * STALL_LATTICE_ROWS) as f64,
+        hash,
+        cells,
+    })
+}
+
+/// Fraction of lattice cells whose quantised luma moved by two or more
+/// levels between two captures (one level is encoder/scaler noise).
+fn changed_cell_fraction(before: &[u8], after: &[u8]) -> f64 {
+    if before.is_empty() || before.len() != after.len() {
+        return 0.0;
+    }
+    let changed = before
+        .iter()
+        .zip(after)
+        .filter(|(a, b)| a.abs_diff(**b) >= 2)
+        .count();
+    changed as f64 / before.len() as f64
+}
+
+#[derive(Debug)]
+struct StallVerdict {
+    verdict: ScenarioVerdict,
+    summary: String,
+    assertions: Vec<AssertionOutcome>,
+}
+
+/// Pure verdict over the evidence. Product failures (the window vanished,
+/// the content went black, decoding or pixels never resumed) are TEST-FAIL;
+/// a run in which no region capture ever succeeded cannot check the
+/// never-black rule and is INFRA-FAIL, never a pass.
+fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
+    let all: Vec<&StallSample> = evidence.freeze.iter().chain(evidence.resume.iter()).collect();
+    let mut assertions = Vec::new();
+
+    let vanished: Vec<u64> = all
+        .iter()
+        .filter(|sample| !sample.window_present)
+        .map(|sample| sample.offset_ms)
+        .collect();
+    let window_survived = !all.is_empty() && vanished.is_empty();
+    assertions.push(AssertionOutcome {
+        name: "stall-window-survived".to_string(),
+        passed: window_survived,
+        detail: if all.is_empty() {
+            "no samples were taken".to_string()
+        } else if vanished.is_empty() {
+            format!("remote window on screen in all {} samples", all.len())
+        } else {
+            format!("remote window missing at offsets {vanished:?} ms")
+        },
+    });
+
+    let lumas: Vec<(u64, f64)> = all
+        .iter()
+        .filter_map(|sample| sample.mean_luma.map(|luma| (sample.offset_ms, luma)))
+        .collect();
+    let black: Vec<String> = lumas
+        .iter()
+        .filter(|(_, luma)| *luma < STALL_BLACK_LUMA)
+        .map(|(offset, luma)| format!("{offset}ms={luma:.1}"))
+        .collect();
+    let captures_available = !lumas.is_empty();
+    let never_black = captures_available && black.is_empty();
+    let min_luma = lumas
+        .iter()
+        .map(|(_, luma)| *luma)
+        .fold(f64::INFINITY, f64::min);
+    assertions.push(AssertionOutcome {
+        name: "stall-never-black".to_string(),
+        passed: never_black,
+        detail: if !captures_available {
+            "no region capture succeeded; the never-black rule could not be checked".to_string()
+        } else if black.is_empty() {
+            format!(
+                "min mean luma {min_luma:.1} over {} captures (black threshold {STALL_BLACK_LUMA})",
+                lumas.len()
+            )
+        } else {
+            format!("black content region at {black:?} (luma < {STALL_BLACK_LUMA})")
+        },
+    });
+
+    let resumed = evidence.resumed_frames_offset_ms.is_some();
+    assertions.push(AssertionOutcome {
+        name: "stall-resumed-decoding".to_string(),
+        passed: resumed,
+        detail: match evidence.resumed_frames_offset_ms {
+            Some(at) => format!(
+                "framesDecoded advanced past {} within {}ms of the animate ack",
+                evidence.frames_decoded_at_animate,
+                at.saturating_sub(evidence.animate_ack_offset_ms)
+            ),
+            None => format!(
+                "framesDecoded never advanced past {} in the resume window ({} samples)",
+                evidence.frames_decoded_at_animate,
+                evidence.resume.len()
+            ),
+        },
+    });
+
+    let content_check_possible = evidence.freeze.iter().any(|s| s.content_hash.is_some())
+        && evidence.resume.iter().any(|s| s.content_hash.is_some());
+    let content_resumed = evidence.resumed_content_offset_ms.is_some();
+    assertions.push(AssertionOutcome {
+        name: "stall-resumed-pixels".to_string(),
+        passed: !content_check_possible || content_resumed,
+        detail: match (content_check_possible, evidence.resumed_content_offset_ms) {
+            (false, _) => "not checked: no captures on one side of the resume".to_string(),
+            (true, Some(at)) => format!(
+                "on-screen content changed within {}ms of the animate ack",
+                at.saturating_sub(evidence.animate_ack_offset_ms)
+            ),
+            (true, None) => "on-screen content never changed after the source resumed".to_string(),
+        },
+    });
+
+    let product_failure = !window_survived
+        || (captures_available && !never_black)
+        || !resumed
+        || (content_check_possible && !content_resumed);
+    let verdict = if product_failure {
+        ScenarioVerdict::TestFail
+    } else if !captures_available {
+        ScenarioVerdict::InfraFail
+    } else {
+        ScenarioVerdict::Pass
+    };
+    let failed: Vec<&str> = assertions
+        .iter()
+        .filter(|assertion| !assertion.passed)
+        .map(|assertion| assertion.name.as_str())
+        .collect();
+    let summary = match verdict {
+        ScenarioVerdict::Pass => format!(
+            "window held through a {}s source freeze (min luma {min_luma:.1}, {} transitions), decoding resumed {}ms after the source did",
+            evidence
+                .freeze
+                .last()
+                .map(|s| s.offset_ms / 1000)
+                .unwrap_or(0),
+            evidence.transitions.len(),
+            evidence
+                .resumed_frames_offset_ms
+                .unwrap_or(0)
+                .saturating_sub(evidence.animate_ack_offset_ms)
+        ),
+        ScenarioVerdict::InfraFail => {
+            "no screen-region capture succeeded, so the never-black rule is unverified".to_string()
+        }
+        _ => format!("failed assertions {failed:?}"),
+    };
+    StallVerdict {
+        verdict,
+        summary,
+        assertions,
+    }
+}
+
+/// The on-screen content region of the receiver's window for `owner`:
+/// `(window_id, x, y, width, height)` in global top-left points with the
+/// header excluded. `None` when no window is open AND visible for the
+/// sharer -- a held window stays in the open set (#627); a retired one does
+/// not, and a hidden panel is skipped. Keyed by the REMOTE window id (the
+/// first runner run looked that id up as a local CG window and found nothing
+/// at every sample), so the panel's own frame is the source.
+fn stall_window_content_region(app: &AppHandle, owner: &str) -> Option<(u32, i64, i64, u32, u32)> {
+    #[cfg(target_os = "macos")]
+    {
+        for (window_id, x, y, w, h) in
+            crate::compositor::visible_window_frames_for_participant(app, owner)
+        {
+            let content_h = h - STALL_PANEL_HEADER_POINTS;
+            if w < 1.0 || content_h < 1.0 {
+                continue;
+            }
+            return Some((
+                window_id,
+                x.round() as i64,
+                (y + STALL_PANEL_HEADER_POINTS).round() as i64,
+                w.round() as u32,
+                content_h.round() as u32,
+            ));
+        }
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, owner);
+        None
+    }
+}
+
+fn stall_current_frames_decoded(app: &AppHandle) -> u32 {
+    app.try_state::<crate::diagnostics::DiagnosticsState>()
+        .and_then(|diagnostics| {
+            recv_window_track(&diagnostics.snapshot()).map(|track| track.frames_decoded)
+        })
+        .unwrap_or(0)
+}
+
+fn stall_take_sample(
+    app: &AppHandle,
+    scenario: ScenarioSpec,
+    writer: &ResultsWriter,
+    owner: &str,
+    phase: &'static str,
+    offset_ms: u64,
+    index: usize,
+) -> StallSample {
+    let mut sample = StallSample {
+        phase,
+        offset_ms,
+        track_present: false,
+        fps: 0.0,
+        frames_decoded: 0,
+        stream_state: String::new(),
+        window_present: false,
+        mean_luma: None,
+        content_hash: None,
+        changed_vs_frozen: None,
+        capture_path: None,
+        capture_error: None,
+        cells: None,
+    };
+    if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
+        let snapshot = diagnostics.snapshot();
+        if let Some(track) = recv_window_track(&snapshot) {
+            sample.track_present = true;
+            sample.fps = track.fps;
+            sample.frames_decoded = track.frames_decoded;
+            sample.stream_state = track.stream_state.clone();
+        }
+    }
+    let Some((_window_id, x, y, width, height)) = stall_window_content_region(app, owner) else {
+        sample.capture_error = Some("no open on-screen remote window for the sharer".to_string());
+        return sample;
+    };
+    sample.window_present = true;
+    let relative = PathBuf::from("stall").join(format!(
+        "{}-{phase}-{index:03}.png",
+        artifact_name_component(scenario.id)
+    ));
+    let path = writer.dir.join(&relative);
+    // #211: a blank capture is re-taken before it is judged. Unlike a
+    // backing-store read, a black REGION is real, but a capture racing a
+    // display flip is not -- retry the same way the verdict captures do.
+    for attempt in 0..BLANK_CAPTURE_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(BLANK_CAPTURE_RETRY_DELAY);
+        }
+        let captured = crate::test_cockpit_bridge::capture_screen_region_png(
+            x, y, width, height, &path,
+        )
+        .and_then(|()| image::open(&path).map_err(|error| error.to_string()));
+        match captured {
+            Ok(image) => match region_signature(&image.to_rgb8()) {
+                Some(signature) => {
+                    sample.mean_luma = Some(signature.mean_luma);
+                    sample.content_hash = Some(signature.hash);
+                    sample.cells = Some(signature.cells);
+                    sample.capture_path = Some(relative.display().to_string());
+                    sample.capture_error = None;
+                    if signature.mean_luma >= STALL_BLACK_LUMA {
+                        break;
+                    }
+                }
+                None => sample.capture_error = Some("empty capture".to_string()),
+            },
+            Err(error) => sample.capture_error = Some(error),
+        }
+    }
+    sample
+}
+
+/// New "media" journal entries since `since_ms`, offset against the freeze
+/// acknowledgement. `seen` de-duplicates across calls.
+fn stall_collect_transitions(
+    app: &AppHandle,
+    since_ms: u64,
+    freeze_ack_ms: u64,
+    seen: &mut HashSet<(u64, String)>,
+) -> Vec<StallTransition> {
+    let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in diagnostics.journal() {
+        if entry.category != "media" || entry.t_ms < since_ms {
+            continue;
+        }
+        if !seen.insert((entry.t_ms, entry.message.clone())) {
+            continue;
+        }
+        out.push(StallTransition {
+            offset_ms: entry.t_ms as i64 - freeze_ack_ms as i64,
+            t_ms: entry.t_ms,
+            message: entry.message,
+        });
+    }
+    out
+}
+
+fn write_stall_timeline(
+    writer: &mut ResultsWriter,
+    scenario: ScenarioSpec,
+    config: StallPhaseConfig,
+    owner: &str,
+    evidence: &StallEvidence,
+    verdict: Option<&StallVerdict>,
+    note: &str,
+) {
+    let _ = writer.write(
+        "stall-timeline",
+        Some(scenario.id),
+        serde_json::json!({
+            "config": config,
+            "owner": owner,
+            "evidence": evidence,
+            "verdict": verdict.map(|v| &v.verdict),
+            "summary": verdict.map(|v| v.summary.as_str()),
+            "note": note,
+        }),
+    );
+}
+
+async fn run_web_share_stall_scenario(
+    app: &AppHandle,
+    scenario: ScenarioSpec,
+    access_code: &str,
+    writer: &mut ResultsWriter,
+    children: &mut RunChildren,
+) -> ScenarioOutcome {
+    #[cfg(target_os = "macos")]
+    if console_is_locked() {
+        return infra_fail_outcome(
+            scenario,
+            "the console session is LOCKED -- the receiver's window region cannot be \
+             sampled from the display; unlock the Mac and re-run",
+        );
+    }
+    let config = StallPhaseConfig::from_env();
+    let _ = writer.write(
+        "stall-config",
+        Some(scenario.id),
+        serde_json::json!({
+            "freezeMs": config.freeze_ms,
+            "resumeMs": config.resume_ms,
+            "freezeEnv": STALL_FREEZE_MS_ENV,
+            "resumeEnv": STALL_RESUME_MS_ENV,
+        }),
+    );
+
+    record_web_peer_navigation(scenario, access_code, writer).await;
+    let web_peer = match spawn_web_peer(scenario, access_code, &writer.dir) {
+        Ok(peer) => peer,
+        Err(error) => return infra_fail_outcome(scenario, error),
+    };
+    let _ = writer.write(
+        "web-peer",
+        Some(scenario.id),
+        serde_json::json!({ "mode": web_peer.mode, "url": web_peer.url, "pid": web_peer.pid() }),
+    );
+    children.record_web_peer(&web_peer);
+    children.adopt_web_peer(web_peer);
+
+    let Some(report) = await_web_report(app, scenario, writer).await else {
+        return infra_fail_outcome(
+            scenario,
+            "web harness did not report that it published the test-pattern share",
+        );
+    };
+    if !report_ok(&report.payload) {
+        // A peer that says it could not run the scenario at all (#821) -- a
+        // web-harness deployment that predates the scenario, a browser that
+        // cannot capture -- is infrastructure, not a stalled share.
+        if web_report_declares_infra_failure(&report) {
+            return infra_fail_outcome(
+                scenario,
+                format!(
+                    "the web sharer reported an infrastructure failure before sharing: {}",
+                    report_text_field(&report.payload, "detail").unwrap_or("(no detail)")
+                ),
+            );
+        }
+        let mut outcome = web_report_outcome(scenario, &report);
+        outcome.verdict = ScenarioVerdict::TestFail;
+        outcome.message = format!(
+            "{} TEST-FAIL the web sharer could not publish the test pattern: {}",
+            scenario.id, report.payload
+        );
+        return outcome;
+    }
+    let owner = report.sender.clone();
+
+    // Baseline: the SAME oracle as SHARE-W2N-Q. Without live video first a
+    // freeze proves nothing.
+    let baseline = assert_web_to_native_video(app, scenario, writer).await;
+    if baseline.verdict != ScenarioVerdict::Pass {
+        return baseline;
+    }
+    let (baseline_fps, baseline_width, baseline_height) = (
+        baseline.delivered_fps,
+        baseline.delivered_width,
+        baseline.delivered_height,
+    );
+    let mut assertions = baseline.assertions;
+
+    // Freeze the source and wait for the sharer to say it did.
+    let freeze_sent_ms = crate::time_util::now_ms();
+    if let Err(error) = publish_cockpit_command(app, &owner, "pattern-freeze").await {
+        return infra_fail_outcome(scenario, error);
+    }
+    let Some((freeze_ack, freeze_ack_ms)) =
+        await_web_step(app, scenario, "pattern-frozen", freeze_sent_ms, STALL_ACK_TIMEOUT).await
+    else {
+        return infra_fail_outcome(
+            scenario,
+            format!(
+                "the web sharer '{owner}' never acknowledged pattern-freeze within {:?}",
+                STALL_ACK_TIMEOUT
+            ),
+        );
+    };
+    let freeze_ack_at = Instant::now();
+    let mut evidence = StallEvidence {
+        frames_decoded_at_freeze: stall_current_frames_decoded(app),
+        ..StallEvidence::default()
+    };
+    let _ = writer.write(
+        "stall-freeze",
+        Some(scenario.id),
+        serde_json::json!({
+            "owner": owner,
+            "ack": freeze_ack.payload,
+            "framesDecoded": evidence.frames_decoded_at_freeze,
+        }),
+    );
+
+    let mut seen = HashSet::new();
+    let mut index = 0usize;
+    let freeze_deadline = freeze_ack_at + config.freeze();
+    loop {
+        let offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
+        let sample = stall_take_sample(app, scenario, writer, &owner, "freeze", offset_ms, index);
+        index += 1;
+        let _ = writer.write("stall-sample", Some(scenario.id), &sample);
+        evidence.freeze.push(sample);
+        for transition in stall_collect_transitions(app, freeze_sent_ms, freeze_ack_ms, &mut seen) {
+            let _ = writer.write("stall-transition", Some(scenario.id), &transition);
+            evidence.transitions.push(transition);
+        }
+        let now = Instant::now();
+        if now >= freeze_deadline {
+            break;
+        }
+        tokio::time::sleep(STALL_FREEZE_SAMPLE_INTERVAL.min(freeze_deadline - now)).await;
+    }
+
+    // Animate again and wait for the ack; then the receiver must resume.
+    let animate_sent_ms = crate::time_util::now_ms();
+    if let Err(error) = publish_cockpit_command(app, &owner, "pattern-animate").await {
+        write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "animate command failed");
+        return infra_fail_outcome(scenario, error);
+    }
+    let Some((animate_ack, _)) =
+        await_web_step(app, scenario, "pattern-animated", animate_sent_ms, STALL_ACK_TIMEOUT).await
+    else {
+        write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "no animate ack");
+        return infra_fail_outcome(
+            scenario,
+            format!(
+                "the web sharer '{owner}' never acknowledged pattern-animate within {:?}",
+                STALL_ACK_TIMEOUT
+            ),
+        );
+    };
+    evidence.animate_ack_offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
+    evidence.frames_decoded_at_animate = stall_current_frames_decoded(app);
+    let frozen_cells: Option<Vec<u8>> =
+        evidence.freeze.iter().rev().find_map(|sample| sample.cells.clone());
+    let _ = writer.write(
+        "stall-animate",
+        Some(scenario.id),
+        serde_json::json!({
+            "ack": animate_ack.payload,
+            "offsetMs": evidence.animate_ack_offset_ms,
+            "framesDecoded": evidence.frames_decoded_at_animate,
+        }),
+    );
+
+    let resume_deadline = Instant::now() + config.resume();
+    index = 0;
+    loop {
+        let offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
+        let mut sample =
+            stall_take_sample(app, scenario, writer, &owner, "resume", offset_ms, index);
+        index += 1;
+        if evidence.resumed_frames_offset_ms.is_none()
+            && sample.track_present
+            && sample.frames_decoded > evidence.frames_decoded_at_animate
+        {
+            evidence.resumed_frames_offset_ms = Some(sample.offset_ms);
+        }
+        if let (Some(cells), Some(frozen)) = (sample.cells.as_deref(), frozen_cells.as_deref()) {
+            let changed = changed_cell_fraction(frozen, cells);
+            sample.changed_vs_frozen = Some(changed);
+            if evidence.resumed_content_offset_ms.is_none()
+                && changed >= STALL_CONTENT_CHANGE_FRACTION
+            {
+                evidence.resumed_content_offset_ms = Some(sample.offset_ms);
+            }
+        }
+        let _ = writer.write("stall-sample", Some(scenario.id), &sample);
+        evidence.resume.push(sample);
+        for transition in stall_collect_transitions(app, freeze_sent_ms, freeze_ack_ms, &mut seen) {
+            let _ = writer.write("stall-transition", Some(scenario.id), &transition);
+            evidence.transitions.push(transition);
+        }
+        let settled = evidence.resumed_frames_offset_ms.is_some()
+            && (frozen_cells.is_none() || evidence.resumed_content_offset_ms.is_some());
+        let now = Instant::now();
+        if settled || now >= resume_deadline {
+            break;
+        }
+        tokio::time::sleep(STALL_RESUME_SAMPLE_INTERVAL.min(resume_deadline - now)).await;
+    }
+
+    let verdict = stall_verdict(&evidence);
+    write_stall_timeline(writer, scenario, config, &owner, &evidence, Some(&verdict), "complete");
+    let label = match verdict.verdict {
+        ScenarioVerdict::Pass => "PASS",
+        ScenarioVerdict::InfraFail => "INFRA-FAIL",
+        _ => "TEST-FAIL",
+    };
+    let delivered_fps = evidence
+        .resume
+        .last()
+        .map(|sample| sample.fps)
+        .unwrap_or(baseline_fps);
+    assertions.extend(verdict.assertions);
+    ScenarioOutcome {
+        scenario_id: scenario.id.to_string(),
+        verdict: verdict.verdict,
+        message: format!("{} {label} {}", scenario.id, verdict.summary),
+        delivered_fps,
+        delivered_width: baseline_width,
+        delivered_height: baseline_height,
+        assertions,
+    }
+}
+
 async fn run_scenario(
     app: &AppHandle,
     scenario: ScenarioSpec,
@@ -10326,6 +11163,10 @@ async fn run_scenario(
         }
         ScenarioKind::PluginFrameBoot => {
             return run_plugin_frame_boot_scenario(app, scenario, writer).await
+        }
+        ScenarioKind::WebShareStallRecovery => {
+            return run_web_share_stall_scenario(app, scenario, access_code, writer, children)
+                .await
         }
         ScenarioKind::FullDesktopShare => {
             return run_full_desktop_share_scenario(app, scenario, access_code, writer, children)
@@ -11632,6 +12473,253 @@ mod tests {
         assert_eq!(spec, None);
     }
 
+    // ---- SHARE-W2N-STALL (#202) ----
+
+    fn stall_sample(phase: &'static str, offset_ms: u64, frames: u32, luma: Option<f64>, hash: Option<u64>, present: bool) -> StallSample {
+        StallSample {
+            phase,
+            offset_ms,
+            track_present: true,
+            fps: if phase == "resume" { 30.0 } else { 0.0 },
+            frames_decoded: frames,
+            stream_state: "active".to_string(),
+            window_present: present,
+            mean_luma: luma,
+            content_hash: hash,
+            changed_vs_frozen: None,
+            capture_path: None,
+            capture_error: None,
+            cells: None,
+        }
+    }
+
+    fn healthy_stall_evidence() -> StallEvidence {
+        StallEvidence {
+            freeze: vec![
+                stall_sample("freeze", 0, 900, Some(120.0), Some(1), true),
+                stall_sample("freeze", 5_000, 900, Some(118.0), Some(1), true),
+                stall_sample("freeze", 10_000, 900, Some(118.0), Some(1), true),
+            ],
+            resume: vec![
+                stall_sample("resume", 10_500, 900, Some(118.0), Some(1), true),
+                stall_sample("resume", 12_500, 960, Some(121.0), Some(2), true),
+            ],
+            transitions: vec![],
+            frames_decoded_at_freeze: 900,
+            frames_decoded_at_animate: 900,
+            animate_ack_offset_ms: 10_200,
+            resumed_frames_offset_ms: Some(12_500),
+            resumed_content_offset_ms: Some(12_500),
+        }
+    }
+
+    #[test]
+    fn stall_phase_duration_defaults_and_clamps() {
+        assert_eq!(stall_phase_duration(None, STALL_FREEZE_DEFAULT), STALL_FREEZE_DEFAULT);
+        assert_eq!(stall_phase_duration(Some(""), STALL_FREEZE_DEFAULT), STALL_FREEZE_DEFAULT);
+        assert_eq!(stall_phase_duration(Some("abc"), STALL_FREEZE_DEFAULT), STALL_FREEZE_DEFAULT);
+        assert_eq!(
+            stall_phase_duration(Some(" 300000 "), STALL_FREEZE_DEFAULT),
+            Duration::from_secs(300)
+        );
+        assert_eq!(stall_phase_duration(Some("1"), STALL_FREEZE_DEFAULT), STALL_PHASE_MIN);
+        assert_eq!(
+            stall_phase_duration(Some("99999999"), STALL_FREEZE_DEFAULT),
+            STALL_PHASE_MAX
+        );
+    }
+
+    #[test]
+    fn region_signature_reads_black_as_low_luma_and_content_as_distinct_hashes() {
+        let black = image::RgbImage::from_pixel(64, 36, image::Rgb([0, 0, 0]));
+        let black = region_signature(&black).unwrap();
+        assert!(black.mean_luma < STALL_BLACK_LUMA, "black luma {}", black.mean_luma);
+
+        let pattern = image::RgbImage::from_fn(64, 36, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 7) as u8, 200])
+        });
+        let pattern = region_signature(&pattern).unwrap();
+        assert!(pattern.mean_luma > STALL_BLACK_LUMA, "pattern luma {}", pattern.mean_luma);
+        assert_ne!(pattern.hash, black.hash);
+        assert_eq!(pattern.cells.len(), (STALL_LATTICE_COLS * STALL_LATTICE_ROWS) as usize);
+
+        let same = image::RgbImage::from_fn(64, 36, |x, y| {
+            image::Rgb([(x * 4) as u8, (y * 7) as u8, 200])
+        });
+        let same = region_signature(&same).unwrap();
+        assert_eq!(same.hash, pattern.hash, "hash is deterministic");
+        assert_eq!(changed_cell_fraction(&pattern.cells, &same.cells), 0.0);
+
+        let shifted = image::RgbImage::from_fn(64, 36, |x, y| {
+            image::Rgb([(x * 4 + 64) as u8, (y * 7) as u8, 200])
+        });
+        let shifted = region_signature(&shifted).unwrap();
+        assert_ne!(shifted.hash, pattern.hash, "moved content re-hashes");
+        assert!(
+            changed_cell_fraction(&pattern.cells, &shifted.cells) > STALL_CONTENT_CHANGE_FRACTION,
+            "a moved pattern changes most cells"
+        );
+        assert!(region_signature(&image::RgbImage::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn a_telepointer_sized_change_over_a_held_frame_is_not_resumed_content() {
+        // 960x600 like the real panel: a held frame with the pointer + name
+        // chip (~40x20 px) moving touches at most a couple of lattice cells,
+        // which a whole-region hash flagged as "new content" on the runner.
+        let held = image::RgbImage::from_fn(960, 600, |x, y| {
+            let v = if (x / 40 + y / 40) % 2 == 0 { 200 } else { 40 };
+            image::Rgb([v, v, v])
+        });
+        let mut pointed = held.clone();
+        for x in 300..340 {
+            for y in 200..220 {
+                pointed.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+        let held = region_signature(&held).unwrap();
+        let pointed = region_signature(&pointed).unwrap();
+        assert_ne!(held.hash, pointed.hash, "the hash does move");
+        let fraction = changed_cell_fraction(&held.cells, &pointed.cells);
+        assert!(
+            fraction < STALL_CONTENT_CHANGE_FRACTION,
+            "pointer-sized change {fraction} must stay under the bar"
+        );
+        // Mismatched or empty lattices never count as change.
+        assert_eq!(changed_cell_fraction(&held.cells, &held.cells[..10]), 0.0);
+        assert_eq!(changed_cell_fraction(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn stall_verdict_passes_when_the_window_holds_never_blacks_and_resumes() {
+        let verdict = stall_verdict(&healthy_stall_evidence());
+        assert_eq!(verdict.verdict, ScenarioVerdict::Pass, "{}", verdict.summary);
+        assert!(verdict.assertions.iter().all(|a| a.passed), "{:?}", verdict.assertions);
+        assert!(verdict.summary.contains("resumed 2300ms after"), "{}", verdict.summary);
+    }
+
+    #[test]
+    fn stall_verdict_fails_when_the_remote_window_vanishes() {
+        let mut evidence = healthy_stall_evidence();
+        evidence.freeze[2].window_present = false;
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::TestFail);
+        let failed = verdict.assertions.iter().find(|a| !a.passed).unwrap();
+        assert_eq!(failed.name, "stall-window-survived");
+        assert!(failed.detail.contains("10000"), "{}", failed.detail);
+    }
+
+    #[test]
+    fn stall_verdict_fails_when_the_content_region_goes_black() {
+        let mut evidence = healthy_stall_evidence();
+        evidence.freeze[1].mean_luma = Some(2.5);
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::TestFail);
+        let failed = verdict.assertions.iter().find(|a| !a.passed).unwrap();
+        assert_eq!(failed.name, "stall-never-black");
+        assert!(failed.detail.contains("5000ms=2.5"), "{}", failed.detail);
+    }
+
+    #[test]
+    fn stall_verdict_fails_when_decoding_never_resumes() {
+        let mut evidence = healthy_stall_evidence();
+        evidence.resumed_frames_offset_ms = None;
+        evidence.resumed_content_offset_ms = None;
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::TestFail);
+        let names: Vec<&str> = verdict
+            .assertions
+            .iter()
+            .filter(|a| !a.passed)
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["stall-resumed-decoding", "stall-resumed-pixels"]);
+    }
+
+    #[test]
+    fn stall_verdict_fails_when_frames_decode_but_pixels_never_change() {
+        let mut evidence = healthy_stall_evidence();
+        evidence.resumed_content_offset_ms = None;
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::TestFail);
+        let failed = verdict.assertions.iter().find(|a| !a.passed).unwrap();
+        assert_eq!(failed.name, "stall-resumed-pixels");
+    }
+
+    #[test]
+    fn stall_verdict_is_infra_when_no_region_capture_ever_succeeded() {
+        let mut evidence = healthy_stall_evidence();
+        for sample in evidence.freeze.iter_mut().chain(evidence.resume.iter_mut()) {
+            sample.mean_luma = None;
+            sample.content_hash = None;
+            sample.capture_error = Some("screencapture failed".to_string());
+        }
+        evidence.resumed_content_offset_ms = None;
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
+        let never_black = verdict
+            .assertions
+            .iter()
+            .find(|a| a.name == "stall-never-black")
+            .unwrap();
+        assert!(!never_black.passed);
+        // The pixel-resume check is honestly "not checked", not failed.
+        let pixels = verdict
+            .assertions
+            .iter()
+            .find(|a| a.name == "stall-resumed-pixels")
+            .unwrap();
+        assert!(pixels.passed);
+        assert!(pixels.detail.contains("not checked"));
+    }
+
+    #[test]
+    fn stall_verdict_prefers_a_product_failure_over_missing_captures() {
+        let mut evidence = healthy_stall_evidence();
+        for sample in evidence.freeze.iter_mut().chain(evidence.resume.iter_mut()) {
+            sample.mean_luma = None;
+            sample.content_hash = None;
+        }
+        evidence.resumed_content_offset_ms = None;
+        evidence.resumed_frames_offset_ms = None;
+        assert_eq!(stall_verdict(&evidence).verdict, ScenarioVerdict::TestFail);
+    }
+
+    #[test]
+    fn cockpit_pattern_commands_share_the_disconnect_envelope() {
+        let freeze = cockpit_command_payload("pattern-freeze", "web-4f9a", 7);
+        assert_eq!(freeze["command"], "pattern-freeze");
+        assert_eq!(freeze["target"], "web-4f9a");
+        assert_eq!(freeze["kind"], "command");
+        assert_eq!(freeze["v"], 1);
+        assert_eq!(
+            cockpit_command_payload("disconnect", "web-4f9a", 7),
+            cockpit_disconnect_command_payload("web-4f9a", 7)
+        );
+        let as_report = WebCockpitReport {
+            sender: "p-cockpit-1".to_string(),
+            payload: freeze,
+        };
+        assert!(!report_matches_scenario(&as_report, SCENARIO_TABLE[0]));
+    }
+
+    #[test]
+    fn share_w2n_stall_is_a_quick_tier_web_to_native_scenario() {
+        let spec = SCENARIO_TABLE
+            .iter()
+            .find(|scenario| scenario.id == "SHARE-W2N-STALL")
+            .expect("SHARE-W2N-STALL in the table");
+        assert_eq!(spec.tier, "quick");
+        assert_eq!(spec.kind, ScenarioKind::WebShareStallRecovery);
+        assert!(!spec.requires_native_share);
+        let journey = JOURNEY_TABLE
+            .iter()
+            .find(|journey| journey.runnable == Some("SHARE-W2N-STALL"))
+            .expect("a journey runs SHARE-W2N-STALL");
+        assert_eq!(journey.id, "SHARE-11");
+    }
+
+
     #[test]
     fn resolves_quick_tier_to_all_phase_three_scenarios() {
         let scenarios = resolve_scenarios("quick").unwrap();
@@ -11645,6 +12733,7 @@ mod tests {
                 "PLUGIN-BOOT",
                 "SHARE-N2W-Q",
                 "SHARE-W2N-Q",
+                "SHARE-W2N-STALL",
                 "DRAW-N",
                 "CAM",
                 "AUD",

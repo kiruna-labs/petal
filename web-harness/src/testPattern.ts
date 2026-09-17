@@ -161,6 +161,33 @@ export function createTestPattern(canvas: HTMLCanvasElement) {
     }
   }
 
+  // #202 / SHARE-W2N-STALL: the Test Cockpit freezes the pattern on command
+  // to make the browser share go STATIC -- the canvas keeps its last frame,
+  // nothing redraws, so `captureStream` delivers whatever a static browser
+  // capture delivers. That cadence is the measurement, not something the
+  // harness fakes: no keepalive, no re-push, no track mute.
+  function pauseCanvasAnimation() {
+    if (timerHandle !== null) {
+      clearInterval(timerHandle);
+      timerHandle = null;
+    }
+  }
+
+  function resumeCanvasAnimation() {
+    if (canvasCtx === null) {
+      startCanvasAnimation();
+      return;
+    }
+    if (timerHandle === null) {
+      drawFrame();
+      timerHandle = setInterval(drawFrame, Math.round(1000 / TARGET_DRAW_FPS));
+    }
+  }
+
+  function isAnimating(): boolean {
+    return timerHandle !== null;
+  }
+
   // Exposed for the test-cockpit self-check (#254): "is this headless
   // renderer's repaint loop actually advancing" is measured by sampling this
   // counter's delta over a short window, before anything joins a room -- a
@@ -170,5 +197,5 @@ export function createTestPattern(canvas: HTMLCanvasElement) {
     return frameCount;
   }
 
-  return { startCanvasAnimation, getFrameCount };
+  return { startCanvasAnimation, pauseCanvasAnimation, resumeCanvasAnimation, isAnimating, getFrameCount };
 }

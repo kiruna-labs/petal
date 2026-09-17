@@ -53,9 +53,11 @@ jobs:
             echo "::error::VERCEL_TOKEN is not available to this repository."; exit 1
           fi
 
-      - name: Web-harness typecheck + tests
+      # Typecheck only: the full suite (rendered tests need playwright from
+      # apps/desktop/node_modules) is the PR gate's job, not staging's.
+      - name: Web-harness typecheck
         working-directory: web-harness
-        run: npm ci && npx tsc --noEmit -p . && npm test
+        run: npm ci && npx tsc --noEmit -p .
 
       - name: Install Vercel CLI
         run: npm i -g vercel@59

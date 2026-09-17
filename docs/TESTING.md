@@ -2013,6 +2013,40 @@ and `docs/PRE-RELEASE-TESTING.md`'s human checklist for anything needing a
 human end-to-end pass (issue #28, the old running live-validation tracker,
 is closed). Don't recreate a third parallel tracking doc for this.
 
+### SHARE-W2N-STALL: browser source-pause recovery (#202)
+
+Quick tier, right after `SHARE-W2N-Q`. The web peer publishes its test
+pattern and the SAME oracle as `SHARE-W2N-Q` establishes live video. The
+engine then sends the sharer a `pattern-freeze` cockpit command (the canvas
+stops drawing, so `captureStream` emits nothing -- the field signature behind
+"sharing is pausing"), samples the receiver every 5 s for
+`PETAL_COCKPIT_STALL_FREEZE_MS` (default 90 s, longer than every receiver
+watchdog: the 5 s LOW downgrade, the 30 s no-frame hold, three failed HIGH
+probes and the repair request), sends `pattern-animate`, and samples every 2 s
+until the receiver resumes or `PETAL_COCKPIT_STALL_RESUME_MS` elapses.
+
+Each sample reads the recv track (fps, `framesDecoded`, stream state), whether
+the receiver still has an open ON-SCREEN window for the sharer, and the mean
+luma + a coarse content hash of that window's on-screen content REGION
+(`screencapture -R`, never the backing store -- see "Never show a black
+frame"). The receiver's own transitions (`stall:` lines journalled by
+`transport/subscriber.rs` and the compositor: LOW downgrade, HIGH probe,
+repair request, no-frame hold, resumed live media) are collected from the
+diagnostics journal as `stall-transition` records.
+
+Verdict (`stall_verdict`, unit-tested): TEST-FAIL if the window vanished, the
+content region ever read black (luma < 8), `framesDecoded` never advanced past
+its value at the animate ack, or the on-screen pixels never changed after the
+source resumed; INFRA-FAIL if no region capture ever succeeded (the
+never-black rule cannot be checked, so it is never a pass); else PASS. The
+full timeline is the `stall-timeline` record in `run.jsonl`, with the
+per-sample PNGs under `stall/`.
+
+Soak-length measurement (#202): dispatch `nightly-loopback.yml` with
+`cockpit_selector=SHARE-W2N-STALL`, `stall_freeze_ms=300000`,
+`stall_resume_ms=300000`, or locally
+`PETAL_COCKPIT_STALL_FREEZE_MS=300000 ... --test-case=SHARE-W2N-STALL`.
+
 ### SHARE-W2N-Q walking skeleton and Rust engine (#254/#257)
 
 **Status: the SHARE-W2N-Q proof is implemented, and the
@@ -3010,6 +3044,8 @@ still rejects translated execution for release evidence, and that stays true.
 | `PETAL_BUILD_DATE`, `PETAL_GIT_COMMIT`, `PETAL_RELEASE_BUNDLE_ID` | `build.rs` / `lib.rs` | Build-time bakes shown in Settings → Updates and used by the release identity checks. |
 | `PETAL_BACKEND_URL` | `apps/desktop/scripts/cockpit.mjs`, `test_cockpit` engine | Backend to mint tokens against; default `https://app.petal.live`. The release e2e gate points it at the STAGED backend deployment (#42). |
 | `PETAL_HARNESS_URL` | `apps/desktop/scripts/cockpit.mjs`, `test_cockpit` engine | web-harness origin the headless Chrome peer navigates to; default `https://meet.petal.live`. The release e2e gate points it at the STAGED web-harness deployment (#42). |
+| `PETAL_COCKPIT_STALL_FREEZE_MS` | `test_cockpit` engine (`SHARE-W2N-STALL`, #202) | How long the browser sharer freezes its test-pattern source, in ms; clamped to 10000–900000, default 90000 (gate-sized). Stretch it (e.g. 300000) for a soak measurement: `nightly-loopback.yml`'s `stall_freeze_ms` dispatch input sets it. |
+| `PETAL_COCKPIT_STALL_RESUME_MS` | `test_cockpit` engine (`SHARE-W2N-STALL`, #202) | How long the native receiver gets to resume decoding AND on-screen pixels after the source animates again, in ms; clamped to 10000–900000, default 30000. |
 | `PETAL_VERCEL_BYPASS_SECRET` | `transport/backend_http.rs`, `test_cockpit` engine | Vercel "Protection Bypass for Automation" secret, used ONLY when `PETAL_BACKEND_URL`/`PETAL_HARNESS_URL` point at a protected staged deployment. The Rust backend client sends it as the `x-vercel-protection-bypass` header; the Chrome web peer cannot set a header, so it rides the first navigation as `&x-vercel-protection-bypass=…&x-vercel-set-bypass-cookie=true` and is exchanged for a `_vercel_jwt` cookie. Unset in every normal build, and never recorded in `run.jsonl` (`WebPeer.url` keeps the plain URL). |
 | `PETAL_CHROME_BIN` | `apps/desktop/scripts/cockpit.mjs`, `scripts/verify-no-black-frame.mjs`, `scripts/verify-web-harness-browser.mjs`, `scripts/verify-speaker-playout.sh`, `test_cockpit/mod.rs`, the browser-driven `apps/desktop/tests/*.test.ts` | Path to the branded Google Chrome binary to launch headless; default `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`. |
 | `PETAL_COCKPIT_ARTIFACT_RETENTION_DAYS` | `test_cockpit` engine | Max age for pruning video/audio artifacts referenced by `run.jsonl`; default `14`. Structured `run.jsonl` and `scorecard.json` are never pruned. |

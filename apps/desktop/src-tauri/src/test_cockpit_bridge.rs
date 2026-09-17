@@ -211,3 +211,47 @@ mod tests {
         );
     }
 }
+
+/// Capture a SCREEN REGION -- `x,y,width,height` in global top-left-origin
+/// points, the space `platform::cg::frame_for_window_id_raw` reports -- to
+/// a PNG. Unlike `-l<window>` (a window's BACKING STORE, which reads back a
+/// hidden window's last frame and, on the runner, an occasional blank store,
+/// #211) this reads what is actually on the display, the only evidence the
+/// never-black-frame rule accepts (#627).
+#[cfg_attr(not(feature = "cockpit-privileged"), allow(dead_code))]
+pub(crate) fn capture_screen_region_png(
+    x: i64,
+    y: i64,
+    width: u32,
+    height: u32,
+    output_path: &Path,
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("capture region width and height must be positive".to_string());
+    }
+    if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create capture output directory: {e}"))?;
+    }
+    let output = Command::new("screencapture")
+        .arg("-x")
+        .arg(format!("-R{x},{y},{width},{height}"))
+        .arg("-t")
+        .arg("png")
+        .arg(output_path)
+        .output()
+        .map_err(|e| format!("failed to launch screencapture: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "screencapture -R{x},{y},{width},{height} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    if !output_path.exists() {
+        return Err(format!(
+            "screencapture -R produced no file at {}",
+            output_path.display()
+        ));
+    }
+    Ok(())
+}
