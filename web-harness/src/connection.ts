@@ -36,6 +36,7 @@ import { displayNameFromInput, inviteLinkForCredential, tokenRequestBody } from 
 import { displayNameForParticipant } from './tiles.ts';
 import { createTopicDispatcher } from './dataTopics.ts';
 import { PLUGIN_TOPIC_PREFIX } from '@petal/shared/plugin-host/topics';
+import { CHAT_TOPIC } from '@petal/shared/logic/chat';
 import { commitLayoutModeTransition, layoutModeStateOf } from './tileLayout.ts';
 import { endAutoSpotlight } from '@petal/shared/logic/tileLayoutMode';
 import { sensitiveStringRegistry, type SensitiveStringRegistry } from './sensitiveStrings.ts';
@@ -138,6 +139,8 @@ export function setupConnection(
   topics.onPrefix(PLUGIN_TOPIC_PREFIX, (payload, participant, topic, senderIdentity) =>
     ctx.hook?.plugins?.onData(payload, participant, topic, senderIdentity),
   );
+  // Meeting chat (plugins/README.md §2.7): the host surface's own topic.
+  topics.on(CHAT_TOPIC, (payload, participant, _t, senderIdentity) => ctx.hook?.chat?.onData(payload, participant, senderIdentity));
   // `petal.viewer-demand` is the heartbeat VIEWERS send to a sharer. A web
   // client sends it (viewerDemand.ts) and now also consumes it as a
   // sharer: a `needsRepublish` packet is a receiver's starvation-watchdog
@@ -294,6 +297,7 @@ export function setupConnection(
     state.room = null;
     localParticipantMetadata.detach();
     ctx.hook?.plugins?.roomDisconnected();
+    ctx.hook?.chat?.roomDisconnected();
     state.sharing = false;
     state.screenSharing = false;
     setShareState('not sharing', false);
@@ -503,6 +507,7 @@ export function setupConnection(
     // plugin host's connect-time advert can reach it.
     localParticipantMetadata.attach(newRoom.localParticipant ?? null);
     ctx.hook?.plugins?.roomConnected(newRoom);
+    ctx.hook?.chat?.roomConnected(newRoom);
     state.currentMeetingCode = meetingCode;
     // kiruna-labs/petal#2: a peer's packets arrive with `participant`
     // undefined for the whole gap between its full reconnect and the next
@@ -807,6 +812,7 @@ export function setupConnection(
       state.room = null;
       localParticipantMetadata.detach();
       ctx.hook?.plugins?.roomDisconnected();
+      ctx.hook?.chat?.roomDisconnected();
       ctx.hook.pipelineStats?.resetSession();
       cb.stopViewerDemandHeartbeat();
       cb.stopLatencyProbe();

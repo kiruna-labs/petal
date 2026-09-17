@@ -33,7 +33,14 @@ especially for development.
 2. **First-party plugins, wave one.** Emoji reactions, text chat, a local-only
    webhook notifier, and `window-link`, which **migrates the existing native
    "Open URL" remote-window header button into a default-on built-in plugin**
-   so the core actually shrinks.
+   so the core actually shrinks. **Amended 2026-09-14: chat is a HOST
+   surface, not a plugin.** Plugins cannot build on other plugins (isolated
+   frames, per-plugin topic namespaces, no plugin-to-plugin API), so a chat
+   that other plugins post into, listen to, and add slash commands to has to
+   be owned by the host. The core grows by one drawer, a message list, and
+   one topic; in return chat is the cheapest plugin surface there is (a
+   plugin can be useful with no frame at all). See §2.7 "Panel", §2.4
+   `chat`, §2.8 `chat:*`, and I-7a/I-7b.
 3. **Propagation.** When a peer uses a meeting-scoped plugin you lack, a
    non-blocking toast offers to install it from the verified registry only.
    Sideloaded plugins never prompt.
@@ -233,6 +240,7 @@ manifest type, and the frame-side bridge. The `petal` object handed to
 | `shares` | `shares:read` | `list()` and `on(cb)` of `{ownerIdentity, windowId, title, sourceUrl, kind}` |
 | `net` | `net:fetch:<host>` or `net:fetch:user-urls` | `fetch(url, init)` through the host |
 | `clipboard` | `clipboard:write` | `writeText` |
+| `chat` (I-7b) | `chat:post`, `chat:commands`, `chat:read` | `post(text)` posts as the plugin (host stamps `via <plugin>` and draws the puzzle badge; a plugin can never post as a person); `registerCommand(name, handler)` owns `/name …` and receives only its own arguments; `on('message', cb)` needs `chat:read`, the rare one. Cards with buttons and message reactions come later. |
 | `frames` | `frames:read` | reserved, not built |
 | `log` | none | `debug`, `info`, `warn`, `error` |
 
@@ -302,7 +310,7 @@ packet for an uninstalled id goes through the same gate as a fallback.
 | Toolbar button | `Gallery.svelte` control bar and pill overflow | `controls.ts` | button model and fit rules in `shared/plugin-host/surfaces.ts`; icons in `shared/ui/icons.ts` |
 | Popover | anchored through `shared/ui/dismissibleLayer.ts` | same | frame loader |
 | Overlay | transparent `pointer-events: none` iframe over the gallery or pill | `tiles.ts` container | same |
-| Panel (drawer) | right drawer, 320 px, gallery mode only; pill mode shows a badge | right drawer | `PluginDrawer.svelte` and `plugin-drawer.css` |
+| Panel (drawer) | the meeting **chat** is the drawer (I-7a, a host surface): a 320 px right column beside the gallery in `MeetingChrome`, covering the gallery under 640 px; "Chat" control with an unread badge in the gallery bar and the pill's More menu; a toast while closed | same column beside the tiles (`.meeting-body`), "Chat" control with badge | `shared/ui/components/ChatDrawer.svelte`, `shared/logic/chat.ts` (wire model, store, history); Rust `chat.rs` transports and stamps; contract `chatMessages`/`chatLimits`/`chatDataEvent`. A generic plugin-owned panel frame is not built; plugins reach the drawer through the `chat` API (I-7b). |
 | Header button | `RemoteWindowHeader.svelte` reserved slot, fed by `window.__petalPluginHeaderButtons` from Rust; click invokes `plugin_header_action` | `remoteWindowHeader.ts`, click goes to the broker | button model, label fit (14 chars, icon-only under 520 px) |
 | Toast | existing toast host | existing shared toast | `Toast.svelte` |
 | Settings | new "Plugins" section in `Settings.svelte`: installed list, permissions, enable/disable, Remove, "Get plugins", Developer mode with sideload path or URL | Plugins sheet from the home-screen menu | `settingsModel.ts` |
@@ -354,7 +362,10 @@ The chat panel is an in-window drawer in wave one. A detached native panel
 `ui:popover`, `ui:panel`, `ui:settings`, `ui:toast`, `shares:read`,
 `clipboard:write`, `net:fetch:<host>` (exact host or `*.example.com`),
 `net:fetch:user-urls`, `frames:read` (reserved; refused with "not supported
-by this host").
+by this host"), and, with the `chat` API (I-7b): `chat:post` ("Post messages
+in the chat"), `chat:commands` ("Add slash commands"), `chat:read` ("Read the
+meeting chat", the sensitive one; commands do not need it because a plugin
+only ever sees the arguments of its own command).
 
 `net:fetch:user-urls` means the plugin never picks the host. Its
 `contributes.settings` declares a `{type: "url", netAllow: true}` field, the
@@ -436,7 +447,7 @@ built the bundle.
 | Plugin | id / scope | Permissions | Wire | UI |
 |---|---|---|---|---|
 | Reactions | `petal.reactions` / meeting | meeting:read, data:publish, ui:toolbar-button, ui:popover, ui:overlay | `plugin/petal.reactions/emoji`, lossy, `{e, t}`, 4 per second per sender | "React" button opens an 8-emoji popover; overlay floats the emoji with the sender's first name |
-| Chat | `petal.chat` / meeting | meeting:read, data:publish, storage, ui:toolbar-button, ui:panel, ui:toast | `plugin/petal.chat/msg`, reliable, `{id, text ≤2000, t}`; a joiner sends `history-req` and peers answer directly with the last 50 | "Chat" button with unread badge opens the drawer; toast while closed |
+| ~~Chat~~ (host surface since 2026-09-14, see decision 2) | host topic `petal.chat` | n/a | `{v:1,type:'msg',id,text ≤2000,t}` reliable; a joiner sends `history-req` and peers answer directly with their newest 50 (`docs/CONTRACTS.md` "Chat") | "Chat" control with unread badge opens the drawer; toast while closed. I-7b adds the `chat` plugin API with a first-party `/poll` or `/timer` consumer. |
 | Webhook notifier | `petal.webhook-notifier` / local | meeting:read, storage, net:fetch:user-urls, ui:settings | none | settings surface with URL and "Send test"; posts `{event, room, count, at}` for meeting started, ended, participant joined; off until a URL is set |
 | Window link | `petal.window-link` / local | shares:read, ui:header-button | none | header button "Open URL", hidden when the share has no source URL; the native button is removed in the same PR |
 
@@ -518,8 +529,8 @@ Three homes, one artifact:
 
 **Our plugins** are source in the plugins repo, depending on the published
 SDK like any third party. A change to Reactions is a plugins-repo PR, then a
-bump PR here that replaces the vendored bundle. Chat (I-7) is the first plugin
-written there.
+bump PR here that replaces the vendored bundle. The I-7b chat consumer
+(`/poll` or `/timer`) is the first plugin written there.
 
 **Community plugins are pointers, not merged source** (the Zed extensions
 model): `community/<id>/plugin.json` = `{repo, subdir, commit}`.
@@ -581,8 +592,19 @@ Definition of done and the usual labels.
   vendored bundle; `docs/PLUGINS.md` describes the source-based submission.
 - I-6 Suggestion toast and consent sheet. DoD: rendered tests; sideload
   never prompts.
-- I-7 `plugins/chat`, written in the plugins repo. DoD: native-to-web chat
-  journey; drawer text-fit tests.
+- I-7a Host chat (decision 2 as amended): `shared/logic/chat.ts` (wire
+  model, strict parser, store with ordering, dedupe, unread, history relay),
+  `shared/ui/components/ChatDrawer.svelte`, Rust `chat.rs` transport +
+  `chat-data` event, "Chat" control with unread badge in both clients, the
+  drawer beside the gallery/tiles, toast while closed, `history-req` on join,
+  contract `chatMessages`/`chatLimits`/`chatDataEvent`. DoD: contract
+  vectors pinned on every side; drawer rendered test at 400 and 720 px;
+  native-to-web live smoke both directions.
+- I-7b `petal.chat` plugin API: `chat:post`, `chat:commands`, `chat:read`
+  permissions with consent copy; `post` stamps `via <plugin>` + puzzle badge;
+  `registerCommand` routes `/name …` to its owner only; a first-party
+  `/poll` or `/timer` plugin in the plugins repo as the consumer, so no
+  surface ships dormant. Cards with buttons and message reactions later.
 
 **M4 — Local plugins, developer mode**
 - I-8 `plugins/webhook-notifier`, `plugin_net_fetch`, `net:fetch:user-urls`,
@@ -672,7 +694,8 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-5b | M3 | registry publisher + hosting (`kiruna-labs/petal-website` `registry/`) | seinfish | publisher, keygen, signer, vendored contracts + drift guard done 2026-09-08; moved into the website repo 2026-09-09 (petal-website PR #1); hosting, protected publish workflow and review tooling still to do |
 | I-5c | M3 | plugin source repo split (`kiruna-labs/petal-plugins`), vendored built-in bundles, community pointer contract | seinfish | plugins repo live 2026-09-10 (reactions source, packer, build CI, `community/README.md`); monorepo vendors `plugins/builtins/` on feature/plugin-system-i5c; still to do: publish `@petal/plugin-sdk` to npm (owner: npm scope), signed vendored bundles once the production key exists |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |
-| I-7 | M3 | chat plugin (first plugin written in the plugins repo) | unassigned | not started |
+| I-7a | M3 | host chat: shared model + drawer, Rust transport, both clients, contracts | seinfish | implemented on feature/chat-i7a (2026-09-14): contract vectors pinned (web, Rust), drawer rendered test at 400/720 px, desktop + web wired; live smoke pending |
+| I-7b | M3 | `petal.chat` plugin API (`chat:post`, `chat:commands`, `chat:read`) + first-party `/poll` or `/timer` consumer in the plugins repo | unassigned | not started |
 | I-8 | M4 | webhook notifier + net fetch | unassigned | not started |
 | I-9 | M4 | window-link + header slot, native button removed | unassigned | not started |
 | I-10 | M4 | developer mode | unassigned | not started |
