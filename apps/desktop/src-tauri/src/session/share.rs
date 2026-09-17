@@ -4981,7 +4981,7 @@ async fn start_share_with_capture_source(
             seed_startup_grace_demand(&mut guard, demote_id, Instant::now());
         }
         demote
-    });
+    })
     } else {
         None
     };
