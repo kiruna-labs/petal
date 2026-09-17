@@ -10389,6 +10389,14 @@ const STALL_BLACK_LUMA: f64 = 8.0;
 /// excluded from the sampled region so its never-black chrome cannot mask a
 /// black content area.
 const STALL_PANEL_HEADER_POINTS: f64 = 44.0;
+/// Fraction of the sampled lattice that must change, against the last
+/// frozen capture, before the on-screen content counts as resumed. The web
+/// peer's telepointer keeps moving over a held frame (first runner run: the
+/// "Guest" pointer touched 1-2 of 576 cells per sample, which changed a
+/// whole-region hash every time); the animated pattern moves dozens.
+const STALL_CONTENT_CHANGE_FRACTION: f64 = 0.05;
+const STALL_LATTICE_COLS: u32 = 32;
+const STALL_LATTICE_ROWS: u32 = 18;
 
 /// Parse a phase length from its env var (milliseconds), bounded to
 /// `STALL_PHASE_MIN..=STALL_PHASE_MAX`; anything unparsable is the default.
@@ -10446,8 +10454,13 @@ struct StallSample {
     window_present: bool,
     mean_luma: Option<f64>,
     content_hash: Option<u64>,
+    /// Resume phase only: fraction of lattice cells changed against the last
+    /// frozen capture (`STALL_CONTENT_CHANGE_FRACTION` is the bar).
+    changed_vs_frozen: Option<f64>,
     capture_path: Option<String>,
     capture_error: Option<String>,
+    #[serde(skip)]
+    cells: Option<Vec<u8>>,
 }
 
 /// A "media" journal entry (the receiver's own stall/recovery transitions,
@@ -10478,32 +10491,59 @@ struct StallEvidence {
     resumed_content_offset_ms: Option<u64>,
 }
 
-/// Mean luma and a coarse content hash over a 32x18 lattice of the
-/// captured region. Pure over the image so both directions are unit-tested.
-fn region_signature(image: &image::RgbImage) -> Option<(f64, u64)> {
+/// What one capture of the content region looks like: mean luma, a coarse
+/// hash (for the record), and the per-cell quantised luma of a 32x18
+/// lattice (for change measurement). Pure over the image so both directions
+/// are unit-tested.
+struct RegionSignature {
+    mean_luma: f64,
+    hash: u64,
+    cells: Vec<u8>,
+}
+
+fn region_signature(image: &image::RgbImage) -> Option<RegionSignature> {
     let (width, height) = (image.width(), image.height());
     if width == 0 || height == 0 {
         return None;
     }
-    const COLS: u32 = 32;
-    const ROWS: u32 = 18;
     let mut luma_sum = 0.0;
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for gy in 0..ROWS {
-        for gx in 0..COLS {
-            let x = (((gx as f64 + 0.5) / COLS as f64) * width as f64) as u32;
-            let y = (((gy as f64 + 0.5) / ROWS as f64) * height as f64) as u32;
+    let mut cells = Vec::with_capacity((STALL_LATTICE_COLS * STALL_LATTICE_ROWS) as usize);
+    for gy in 0..STALL_LATTICE_ROWS {
+        for gx in 0..STALL_LATTICE_COLS {
+            let x = (((gx as f64 + 0.5) / STALL_LATTICE_COLS as f64) * width as f64) as u32;
+            let y = (((gy as f64 + 0.5) / STALL_LATTICE_ROWS as f64) * height as f64) as u32;
             let [r, g, b] = image.get_pixel(x.min(width - 1), y.min(height - 1)).0;
-            luma_sum += 0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64;
+            let luma = 0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64;
+            luma_sum += luma;
+            // Quantise to 16 levels so encoder noise on a held frame does
+            // not read as new content.
+            cells.push((luma / 16.0) as u8);
             for channel in [r, g, b] {
-                // Quantise to 16 levels so encoder noise on a held frame does
-                // not read as new content.
                 hash ^= (channel >> 4) as u64;
                 hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
         }
     }
-    Some((luma_sum / (COLS * ROWS) as f64, hash))
+    Some(RegionSignature {
+        mean_luma: luma_sum / (STALL_LATTICE_COLS * STALL_LATTICE_ROWS) as f64,
+        hash,
+        cells,
+    })
+}
+
+/// Fraction of lattice cells whose quantised luma moved by two or more
+/// levels between two captures (one level is encoder/scaler noise).
+fn changed_cell_fraction(before: &[u8], after: &[u8]) -> f64 {
+    if before.is_empty() || before.len() != after.len() {
+        return 0.0;
+    }
+    let changed = before
+        .iter()
+        .zip(after)
+        .filter(|(a, b)| a.abs_diff(**b) >= 2)
+        .count();
+    changed as f64 / before.len() as f64
 }
 
 #[derive(Debug)]
@@ -10706,8 +10746,10 @@ fn stall_take_sample(
         window_present: false,
         mean_luma: None,
         content_hash: None,
+        changed_vs_frozen: None,
         capture_path: None,
         capture_error: None,
+        cells: None,
     };
     if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
         let snapshot = diagnostics.snapshot();
@@ -10741,12 +10783,13 @@ fn stall_take_sample(
         .and_then(|()| image::open(&path).map_err(|error| error.to_string()));
         match captured {
             Ok(image) => match region_signature(&image.to_rgb8()) {
-                Some((luma, hash)) => {
-                    sample.mean_luma = Some(luma);
-                    sample.content_hash = Some(hash);
+                Some(signature) => {
+                    sample.mean_luma = Some(signature.mean_luma);
+                    sample.content_hash = Some(signature.hash);
+                    sample.cells = Some(signature.cells);
                     sample.capture_path = Some(relative.display().to_string());
                     sample.capture_error = None;
-                    if luma >= STALL_BLACK_LUMA {
+                    if signature.mean_luma >= STALL_BLACK_LUMA {
                         break;
                     }
                 }
@@ -10962,7 +11005,8 @@ async fn run_web_share_stall_scenario(
     };
     evidence.animate_ack_offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
     evidence.frames_decoded_at_animate = stall_current_frames_decoded(app);
-    let last_freeze_hash = evidence.freeze.iter().rev().find_map(|sample| sample.content_hash);
+    let frozen_cells: Option<Vec<u8>> =
+        evidence.freeze.iter().rev().find_map(|sample| sample.cells.clone());
     let _ = writer.write(
         "stall-animate",
         Some(scenario.id),
@@ -10977,7 +11021,8 @@ async fn run_web_share_stall_scenario(
     index = 0;
     loop {
         let offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
-        let sample = stall_take_sample(app, scenario, writer, &owner, "resume", offset_ms, index);
+        let mut sample =
+            stall_take_sample(app, scenario, writer, &owner, "resume", offset_ms, index);
         index += 1;
         if evidence.resumed_frames_offset_ms.is_none()
             && sample.track_present
@@ -10985,11 +11030,13 @@ async fn run_web_share_stall_scenario(
         {
             evidence.resumed_frames_offset_ms = Some(sample.offset_ms);
         }
-        if evidence.resumed_content_offset_ms.is_none() {
-            if let (Some(hash), Some(last)) = (sample.content_hash, last_freeze_hash) {
-                if hash != last {
-                    evidence.resumed_content_offset_ms = Some(sample.offset_ms);
-                }
+        if let (Some(cells), Some(frozen)) = (sample.cells.as_deref(), frozen_cells.as_deref()) {
+            let changed = changed_cell_fraction(frozen, cells);
+            sample.changed_vs_frozen = Some(changed);
+            if evidence.resumed_content_offset_ms.is_none()
+                && changed >= STALL_CONTENT_CHANGE_FRACTION
+            {
+                evidence.resumed_content_offset_ms = Some(sample.offset_ms);
             }
         }
         let _ = writer.write("stall-sample", Some(scenario.id), &sample);
@@ -10999,7 +11046,7 @@ async fn run_web_share_stall_scenario(
             evidence.transitions.push(transition);
         }
         let settled = evidence.resumed_frames_offset_ms.is_some()
-            && (last_freeze_hash.is_none() || evidence.resumed_content_offset_ms.is_some());
+            && (frozen_cells.is_none() || evidence.resumed_content_offset_ms.is_some());
         let now = Instant::now();
         if settled || now >= resume_deadline {
             break;
@@ -12439,8 +12486,10 @@ mod tests {
             window_present: present,
             mean_luma: luma,
             content_hash: hash,
+            changed_vs_frozen: None,
             capture_path: None,
             capture_error: None,
+            cells: None,
         }
     }
 
@@ -12483,26 +12532,62 @@ mod tests {
     #[test]
     fn region_signature_reads_black_as_low_luma_and_content_as_distinct_hashes() {
         let black = image::RgbImage::from_pixel(64, 36, image::Rgb([0, 0, 0]));
-        let (luma, black_hash) = region_signature(&black).unwrap();
-        assert!(luma < STALL_BLACK_LUMA, "black luma {luma}");
+        let black = region_signature(&black).unwrap();
+        assert!(black.mean_luma < STALL_BLACK_LUMA, "black luma {}", black.mean_luma);
 
         let pattern = image::RgbImage::from_fn(64, 36, |x, y| {
             image::Rgb([(x * 4) as u8, (y * 7) as u8, 200])
         });
-        let (luma, pattern_hash) = region_signature(&pattern).unwrap();
-        assert!(luma > STALL_BLACK_LUMA, "pattern luma {luma}");
-        assert_ne!(pattern_hash, black_hash);
+        let pattern = region_signature(&pattern).unwrap();
+        assert!(pattern.mean_luma > STALL_BLACK_LUMA, "pattern luma {}", pattern.mean_luma);
+        assert_ne!(pattern.hash, black.hash);
+        assert_eq!(pattern.cells.len(), (STALL_LATTICE_COLS * STALL_LATTICE_ROWS) as usize);
 
         let same = image::RgbImage::from_fn(64, 36, |x, y| {
             image::Rgb([(x * 4) as u8, (y * 7) as u8, 200])
         });
-        assert_eq!(region_signature(&same).unwrap().1, pattern_hash, "hash is deterministic");
+        let same = region_signature(&same).unwrap();
+        assert_eq!(same.hash, pattern.hash, "hash is deterministic");
+        assert_eq!(changed_cell_fraction(&pattern.cells, &same.cells), 0.0);
 
         let shifted = image::RgbImage::from_fn(64, 36, |x, y| {
             image::Rgb([(x * 4 + 64) as u8, (y * 7) as u8, 200])
         });
-        assert_ne!(region_signature(&shifted).unwrap().1, pattern_hash, "moved content re-hashes");
+        let shifted = region_signature(&shifted).unwrap();
+        assert_ne!(shifted.hash, pattern.hash, "moved content re-hashes");
+        assert!(
+            changed_cell_fraction(&pattern.cells, &shifted.cells) > STALL_CONTENT_CHANGE_FRACTION,
+            "a moved pattern changes most cells"
+        );
         assert!(region_signature(&image::RgbImage::new(0, 0)).is_none());
+    }
+
+    #[test]
+    fn a_telepointer_sized_change_over_a_held_frame_is_not_resumed_content() {
+        // 960x600 like the real panel: a held frame with the pointer + name
+        // chip (~40x20 px) moving touches at most a couple of lattice cells,
+        // which a whole-region hash flagged as "new content" on the runner.
+        let held = image::RgbImage::from_fn(960, 600, |x, y| {
+            let v = if (x / 40 + y / 40) % 2 == 0 { 200 } else { 40 };
+            image::Rgb([v, v, v])
+        });
+        let mut pointed = held.clone();
+        for x in 300..340 {
+            for y in 200..220 {
+                pointed.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+        let held = region_signature(&held).unwrap();
+        let pointed = region_signature(&pointed).unwrap();
+        assert_ne!(held.hash, pointed.hash, "the hash does move");
+        let fraction = changed_cell_fraction(&held.cells, &pointed.cells);
+        assert!(
+            fraction < STALL_CONTENT_CHANGE_FRACTION,
+            "pointer-sized change {fraction} must stay under the bar"
+        );
+        // Mismatched or empty lattices never count as change.
+        assert_eq!(changed_cell_fraction(&held.cells, &held.cells[..10]), 0.0);
+        assert_eq!(changed_cell_fraction(&[], &[]), 0.0);
     }
 
     #[test]
