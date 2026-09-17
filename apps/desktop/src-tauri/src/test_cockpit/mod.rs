@@ -10647,17 +10647,17 @@ fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
 
 /// The on-screen content region of the receiver's window for `owner`:
 /// `(window_id, x, y, width, height)` in global top-left points with the
-/// header excluded. `None` when no window is open AND on screen for the
+/// header excluded. `None` when no window is open AND visible for the
 /// sharer -- a held window stays in the open set (#627); a retired one does
-/// not, and a hidden one has no on-screen CG frame.
-fn stall_window_content_region(owner: &str) -> Option<(u32, i64, i64, u32, u32)> {
+/// not, and a hidden panel is skipped. Keyed by the REMOTE window id (the
+/// first runner run looked that id up as a local CG window and found nothing
+/// at every sample), so the panel's own frame is the source.
+fn stall_window_content_region(app: &AppHandle, owner: &str) -> Option<(u32, i64, i64, u32, u32)> {
     #[cfg(target_os = "macos")]
     {
-        for window_id in crate::compositor::window_ids_for_participant(owner) {
-            let Some((x, y, w, h)) = crate::platform::cg::frame_for_window_id_raw(window_id)
-            else {
-                continue;
-            };
+        for (window_id, x, y, w, h) in
+            crate::compositor::visible_window_frames_for_participant(app, owner)
+        {
             let content_h = h - STALL_PANEL_HEADER_POINTS;
             if w < 1.0 || content_h < 1.0 {
                 continue;
@@ -10674,7 +10674,7 @@ fn stall_window_content_region(owner: &str) -> Option<(u32, i64, i64, u32, u32)>
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = owner;
+        let _ = (app, owner);
         None
     }
 }
@@ -10718,7 +10718,7 @@ fn stall_take_sample(
             sample.stream_state = track.stream_state.clone();
         }
     }
-    let Some((_window_id, x, y, width, height)) = stall_window_content_region(owner) else {
+    let Some((_window_id, x, y, width, height)) = stall_window_content_region(app, owner) else {
         sample.capture_error = Some("no open on-screen remote window for the sharer".to_string());
         return sample;
     };
