@@ -130,7 +130,9 @@ Add `min_bitrate: Option<u64>` to the public `RtpEncodingParameters` (and its
 `Default`), forward it in the Rust -> native `From`, and read it back in the
 native -> Rust `From`. `None` maps to `has_min_bitrate_bps: false`, which is
 byte-for-byte the previous wire output, so this patch is inert unless a caller
-opts in (`TrackPublishOptions::min_bitrate`, then `PETAL_SHARE_MIN_BITRATE`).
+opts in (`TrackPublishOptions::min_bitrate`, then `PETAL_SHARE_MIN_BITRATE`
+for a window share or `PETAL_CAMERA_MIN_BITRATE` for the camera; either
+variable set to `0` disables only its own floor).
 
 ### Updating
 
