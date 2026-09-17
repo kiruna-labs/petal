@@ -310,6 +310,29 @@ fn canonical_subscription_dimensions(width: u32, height: u32) -> Option<(u32, u3
     (width > 0 && height > 0).then_some((width, height))
 }
 
+/// Ask the SFU for the top simulcast layer as soon as a shared-window
+/// publication is announced, before auto-subscribe completes. This mirrors the
+/// web viewer's pre-first-frame HIGH request and avoids making the first decoded
+/// frame the trigger for the quality change.
+///
+/// A receiver that wants the lower layer still sets it itself afterwards
+/// (`set_video_quality(VideoQuality::Low)`), which is a receiver-local decision:
+/// this request only removes the wait for the first frame, it does not pin the
+/// subscription to HIGH.
+fn request_shared_window_high_before_subscribe(
+    publication: &RemoteTrackPublication,
+    owner_identity: &str,
+    window_id: u32,
+) {
+    if !publication.simulcasted() {
+        return;
+    }
+    publication.set_video_quality(VideoQuality::High);
+    log::info!(
+        "compositor feed: pre-subscribe HIGH request for window {window_id} from '{owner_identity}'"
+    );
+}
+
 fn register_and_request_shared_window_subscription(
     publication: &RemoteTrackPublication,
     owner_identity: &str,
@@ -1980,9 +2003,16 @@ pub(crate) fn start_compositor_feed(
                         continue;
                     }
                     let track_name = publication.name();
-                    let is_window_share =
-                        crate::transport::publisher::window_id_from_track_name(&track_name)
-                            .is_some();
+                    let window_id =
+                        crate::transport::publisher::window_id_from_track_name(&track_name);
+                    let is_window_share = window_id.is_some();
+                    if let Some(window_id) = window_id {
+                        request_shared_window_high_before_subscribe(
+                            &publication,
+                            &owner_identity,
+                            window_id,
+                        );
+                    }
                     log::info!(
                         "compositor feed: track published sid={} name='{track_name}' kind={:?} from '{owner_identity}' (window_share={is_window_share}); awaiting native subscription",
                         publication.sid(),
@@ -2773,9 +2803,16 @@ pub(crate) fn start_compositor_feed(
                         continue;
                     }
                     let track_name = publication.name();
-                    let is_window_share =
-                        crate::transport::publisher::window_id_from_track_name(&track_name)
-                            .is_some();
+                    let window_id =
+                        crate::transport::publisher::window_id_from_track_name(&track_name);
+                    let is_window_share = window_id.is_some();
+                    if let Some(window_id) = window_id {
+                        request_shared_window_high_before_subscribe(
+                            &publication,
+                            &owner_identity,
+                            window_id,
+                        );
+                    }
                     log::info!(
                         "windows compositor feed: track published sid={} name='{track_name}' from '{owner_identity}' (window_share={is_window_share}); awaiting native subscription",
                         publication.sid()
@@ -3223,7 +3260,7 @@ fn spawn_windows_decode_loop(
             if !decoded_frame_dimensions_valid(frame_width, frame_height) {
                 invalid_dimension_frames += 1;
                 if invalid_dimension_frames == 1
-                    || invalid_dimension_frames % INVALID_DIMENSION_LOG_EVERY == 0
+                    || invalid_dimension_frames.is_multiple_of(INVALID_DIMENSION_LOG_EVERY)
                 {
                     log::warn!(
                         "windows compositor feed: window {key:?} dropping decoded frame with invalid dimensions {frame_width}x{frame_height} (count {invalid_dimension_frames}) -- to_i420 on such a frame aborts the process"
@@ -3600,7 +3637,7 @@ fn mark_frame_received(
         Some(state.color_profile)
     } else {
         let misses = record_window_frame_miss(key);
-        if misses == 1 || misses % 300 == 0 {
+        if misses == 1 || misses.is_multiple_of(300) {
             log::warn!(
                 "compositor feed: decoded frame arrived without receive state for window {} from '{}' (retired/replaced subscription); retired_receive_state_frame_misses={misses}",
                 key.window_id,

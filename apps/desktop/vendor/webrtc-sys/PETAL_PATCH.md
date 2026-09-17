@@ -65,19 +65,20 @@ resolves exactly one rate-control policy from it, in one place
 
 | Source | Default | Rationale |
 | --- | --- | --- |
-| Screensharing | driver default (set nothing) | honours WebRTC's bitrate target; text crispness comes from the link budget, not from overriding it |
+| Screensharing | CBR at the target | the startup defect on this route was the ALLOCATION, not the mode: WebRTC's estimate sat near 600 kbps for 10-35 s against a path sustaining ~14 Mbps, and with that little per-frame budget the encoder clamped QP at its ceiling (`interval_qp` 50.0) for the whole ramp. Raising the allocation (see the libwebrtc `RtpEncodingParameters::min_bitrate` patch) removed the ramp; CBR is kept as the explicit mode because "driver default" is whatever each GPU vendor decides, which a cross-vendor validation cannot reason about |
 | Realtime camera | CBR at the target | QUALITY starves camera frames, and the driver's untouched mode (unconstrained VBR) overshot WebRTC's target by 2.0x measured; explicit CBR on the same route cut renderer freezes from 11 to 2 |
 
-Overrides, both strict (an unrecognized value is ignored, never silently
-substituted):
+`eAVEncCommonRateControlMode_Quality` is unreachable now and both it and the
+`PETAL_MF_QUALITY_MODE` / `PETAL_MF_SCREEN_QUALITY[_VS_SPEED]` knobs are
+deleted: the driver rejected the underlying controls (`quality_hr` =
+`0x80004001`, `E_NOTIMPL`), so the arm could never have taken effect on this
+hardware regardless.
 
-- `PETAL_MF_QUALITY_MODE=1` forces QUALITY for either source (explicit
-experiment). `=0` forces the non-QUALITY path, which is now the default for both
-sources -- redundant, but still honoured exactly rather than ignored.
-- `PETAL_MF_CAMERA_RATE_CONTROL=default|cbr|peak-vbr` applies to **realtime
-camera encoders only**. It is deliberately NOT consulted for screensharing:
-letting a camera selector run for screen content is what coupled the two
-policies in the first place.
+The only remaining rate-control override is
+`PETAL_MF_CAMERA_RATE_CONTROL=default|cbr|peak-vbr`, which applies to
+**realtime camera encoders only**. It is deliberately NOT consulted for
+screensharing: letting a camera selector run for screen content is what coupled
+the two policies in the first place.
 
 The policy is a STATIC MFT property, so it is applied before the media types are
 negotiated (an older encoder ignores a mode set afterwards). One line per
@@ -92,6 +93,82 @@ masquerade as a healthy encoder.
 
 Drop this patch once upstream exposes a per-encoder rate-control policy the
 caller can select.
+
+## Patch 4: shallow low-latency input for the Windows MF H.264 encoder
+
+The encoder's input arrives from an async MFT with a needs-input/have-output
+queue, so its pending frame window was unbounded. For an interactive screen
+share a stale frame is worth less than the newest one: a backlog turns into
+latency the receiver cannot recover, and it is the hardware-only behaviour a
+synchronous software encoder has no equivalent of.
+
+### The fix
+
+When the codec mode is `kScreensharing` the pending input window is capped at
+`kMaxPendingLowLatencyInputs` (2). When the window is full:
+
+- a new **keyframe** displaces the oldest pending frame, so a keyframe is never
+  dropped for a delta;
+- a new **delta** frame displaces the oldest pending delta, or, if the window
+  holds keyframes only, the new delta is dropped outright (prefer recent delta
+  frames without discarding a pending keyframe).
+
+The window never reorders what it keeps: pending frames are appended and the
+MFT drains them in order, so the shallow window costs latency, not correctness.
+
+`InitMft` also applies the static hints that keep the MFT itself shallow,
+before the media types are negotiated: the `MF_LOW_LATENCY` attribute (an
+attribute rather than a CODECAPI property, so a rejection is silent and is
+logged) plus `CODECAPI_AVEncCommonRealTime`,
+`CODECAPI_AVEncMPVDefaultBPictureCount = 0` and
+`CODECAPI_AVEncVideoMaxNumRefFrame = 1`. The three CODECAPI sets are
+best-effort by design -- a driver is free to refuse them, and this one refuses
+the B-picture count -- so all four results are logged once as hex HRESULTs at
+encoder creation.
+
+Cameras are unaffected: the cap and the hints are gated on the screenshare
+codec mode, so the realtime-video path keeps the unbounded window and the rate
+control documented in Patch 3.
+
+### Updating
+
+Fold away if WebRTC's MF encoder ever bounds its own pending input, or if the
+upstream MFT stops being an async needs-input transform. There is no runtime
+toggle: this is one defined policy, not an A/B arm.
+
+## Patch 5: a zero Rust frame timestamp uses a real capture-clock sample
+
+The Rust side of the bridge leaves `VideoFrame::timestamp_us` at its `0`
+default for a Windows window share. `0` is not a valid capture-clock sample for
+`webrtc::TimestampAligner`: feeding it repeatedly makes the translated
+timestamps advance at roughly the aligner's 1 ms floor instead of the real
+frame cadence, and the receiver reconstructs motion from exactly those
+timestamps (`video_render_frames.cc` reports the consequence directly as
+"Frame scheduled out of order").
+
+### The fix
+
+`VideoTrackSource::InternalSource::on_captured_frame` takes one
+`webrtc::TimeMicros()` sample per frame and uses it for both the aligner's
+`now` argument and, when `frame.timestamp_us() <= 0`, as the aligned timestamp
+itself. A frame that does carry a real capture instant is still translated
+exactly as before, so the zero-timestamp path is the only behaviour change.
+
+### Revert
+
+`git checkout -- src/video_track.cpp`. There is no runtime toggle: the
+pre-existing wire behaviour (a zero stamp, i.e. libwebrtc stamping the moment
+the frame reached the media source) is the wrong behaviour here, not an
+alternative one worth keeping.
+
+### Updating
+
+Fold away once the capture path publishes a real per-frame capture instant on
+every platform, which makes the zero fallback unreachable.
+
+The same commit adds the missing `#include <cstdint>` to
+`include/livekit/video_track.h`, which uses `int64_t` and was relying on a
+transitive include for it.
 
 ## #886: per-frame autorelease leak in `objc_video_frame_buffer.mm`
 

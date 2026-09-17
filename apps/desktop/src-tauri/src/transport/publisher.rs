@@ -78,6 +78,7 @@ use livekit::webrtc::video_frame::native::NativeBuffer;
 use livekit::webrtc::video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
+use tokio_util::sync::CancellationToken;
 
 use crate::capture::{CaptureBufferPool, CapturedFrame, CapturedFramePayload};
 
@@ -287,32 +288,26 @@ const FULL_SIMULCAST_TOP_MAX_BITRATE_BPS: u64 = 16_000_000;
 /// carried 2.6 Mbps; independently-computed per-layer ceilings had no
 /// awareness of each other at all.
 ///
-/// 8 Mbps, not 6: an adversarial review (counselors #907, two independent
-/// models) measured that a tighter 6 Mbps budget, combined with an earlier
-/// version of this function's "never cap the top rung below a lower rung's
-/// own ceiling" floor, produced a WORSE regression than the bug it fixed --
-/// see `budgeted_top_bitrate`'s doc comment for the full accounting. 8 Mbps
-/// is chosen so that, once that floor is gone, ordinary two-rung ladders
-/// converge to exactly this number rather than being squeezed by the
-/// absolute floor below, AND so the small-share case this formula's raw bpp
-/// scaling was written to rescue (a 1708x732 share, previously starved at a
-/// flat 4 Mbps bucket) keeps meaningfully more headroom than that 4 Mbps
-/// floor (4.3 Mbps at 6 Mbps budget vs 6.3 Mbps at 8 Mbps budget) instead of
-/// being squeezed back down toward the exact number this codebase already
-/// diagnosed as insufficient (`publisher.rs`'s `FULL_SIMULCAST_TOP_BITS_PER_PIXEL_FRAME_NUM`
-/// doc comment).
+/// 9.25 Mbps: the web contract for the default ladder is an 8 Mbps
+/// source-sized top layer plus a 1.25 Mbps half-resolution lower layer, so
+/// this is exactly their sum. That is what the two rungs' ceilings are set
+/// from below, so a share converges to the web shape and no further. It is
+/// deliberately not tighter: an earlier 6 Mbps budget combined with a
+/// since-removed "never cap the top rung below a lower rung's own ceiling"
+/// floor produced a WORSE regression than the bug it fixed -- see
+/// `budgeted_top_bitrate`'s doc comment for the full accounting.
 ///
 /// This is a per-layer ceiling HINT fed to the congestion controller, not a
 /// guarantee of delivery, and for the exact field-reported 1080p/TwoRung
-/// incident it is close to cosmetic: the lower rung alone (2.8125 Mbps)
-/// already exceeds that day's measured 2.58 Mbps link and is funded first
-/// regardless of what this budget sets the top rung's ceiling to -- shrinking
-/// the top rung's ASK does not change the allocator's funding PRIORITY. What
-/// actually recovers a link too constrained even for this budget is #907
-/// steps 2/3 (the sender starvation guard and the receiver's rung
-/// downgrade), not this number. Do not present this budget alone as "the
-/// fix" for the reported incident in future work on this area.
-const FULL_SIMULCAST_TOTAL_BUDGET_BPS: u64 = 8_000_000;
+/// incident it is close to cosmetic: the lower rung alone already exceeds
+/// that day's measured 2.58 Mbps link and is funded first regardless of what
+/// this budget sets the top rung's ceiling to -- shrinking the top rung's
+/// ASK does not change the allocator's funding PRIORITY. What actually
+/// recovers a link too constrained even for this budget is #907 steps 2/3
+/// (the sender starvation guard and the receiver's rung downgrade), not this
+/// number. Do not present this budget alone as "the fix" for the reported
+/// incident in future work on this area.
+const FULL_SIMULCAST_TOTAL_BUDGET_BPS: u64 = 9_250_000;
 /// Absolute floor for the top rung once the total budget above has been
 /// applied, for the case a single lower rung's own ceiling already consumes
 /// the whole budget (e.g. a very large/4K source, where the lower rung alone
@@ -343,7 +338,9 @@ const FULL_SIMULCAST_TOP_BUDGETED_MIN_BITRATE_BPS: u64 = 1_500_000;
 pub const VIDEO_TOOLBOX_H264_MAX_LONG_EDGE: u32 = 4096;
 
 /// Full-window-share simulcast layouts. `TwoRung` is the default: measured 89.7ms p95
-/// end-to-end, below the 100ms target, with the least encoder work.
+/// end-to-end, below the 100ms target, with the least encoder work. Its lower
+/// rung is the web viewer's half-resolution layer, so a native share and a
+/// browser share of the same window ask the SFU for the same shape.
 /// Do not accept `default`; silently remapping it reports the wrong ladder (#613).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FullShareSimulcastLadder {
@@ -355,7 +352,6 @@ enum FullShareSimulcastLadder {
     LegacyBottom30,
     Raised,
     TwoRung,
-    TwoRungHalf,
 }
 
 impl FullShareSimulcastLadder {
@@ -364,7 +360,7 @@ impl FullShareSimulcastLadder {
             Ok(value) => Self::from_env_value(&value),
             Err(std::env::VarError::NotPresent) => Ok(Self::TwoRung),
             Err(std::env::VarError::NotUnicode(_)) => Err(RoomConnectionError::InvalidVideoConfig(
-                format!("{PETAL_SHARE_LADDER_ENV} must be unset, legacy, legacy-bottom30, raised, two-rung, or two-rung-half"),
+                format!("{PETAL_SHARE_LADDER_ENV} must be unset, legacy, legacy-bottom30, raised, or two-rung"),
             )),
         }
     }
@@ -375,12 +371,11 @@ impl FullShareSimulcastLadder {
             "legacy-bottom30" => Ok(Self::LegacyBottom30),
             "raised" => Ok(Self::Raised),
             "two-rung" => Ok(Self::TwoRung),
-            "two-rung-half" => Ok(Self::TwoRungHalf),
             "default" => Err(RoomConnectionError::InvalidVideoConfig(format!(
                 "{PETAL_SHARE_LADDER_ENV}=default is no longer accepted; pick legacy or two-rung explicitly"
             ))),
             _ => Err(RoomConnectionError::InvalidVideoConfig(format!(
-                "unsupported {PETAL_SHARE_LADDER_ENV}={value:?}; expected unset, legacy, legacy-bottom30, raised, two-rung, or two-rung-half"
+                "unsupported {PETAL_SHARE_LADDER_ENV}={value:?}; expected unset, legacy, legacy-bottom30, raised, or two-rung"
             ))),
         }
     }
@@ -391,21 +386,20 @@ impl FullShareSimulcastLadder {
             Self::LegacyBottom30 => "legacy-bottom30",
             Self::Raised => "raised",
             Self::TwoRung => "two-rung",
-            Self::TwoRungHalf => "two-rung-half",
         }
     }
 
     const fn lower_rids(self) -> &'static [&'static str] {
         match self {
             Self::Legacy | Self::LegacyBottom30 | Self::Raised => &["q", "h"],
-            Self::TwoRung | Self::TwoRungHalf => &["q"],
+            Self::TwoRung => &["q"],
         }
     }
 
     const fn top_rid(self) -> &'static str {
         match self {
             Self::Legacy | Self::LegacyBottom30 | Self::Raised => "f",
-            Self::TwoRung | Self::TwoRungHalf => "h",
+            Self::TwoRung => "h",
         }
     }
 }
@@ -770,6 +764,10 @@ pub struct PublishedTrack {
     /// Rate-limits source-boundary logs while guaranteeing a sample at least
     /// every five seconds whenever frames reach the publisher.
     last_source_boundary_log: Mutex<Option<std::time::Instant>>,
+    /// Cancels the detached background tasks this publication owns. Introduced
+    /// for the startup allocation floor's release task; `unpublish` and `Drop`
+    /// also drive it so no task outlives its sender.
+    background_cancel: CancellationToken,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1630,6 +1628,9 @@ impl RoomConnection<Arc<Room>> {
         );
         let publish_codec = publish_opts.video_codec;
         let requested_encoder = publish_opts.video_encoder;
+        // Captured before `publish_track` consumes `publish_opts`; the startup
+        // allocation floor's release task below needs the applied value.
+        let startup_floor_bps = publish_opts.min_bitrate;
         let simulcast_ladder_log =
             full_share_ladder_log(simulcast_ladder, width, height, &publish_opts);
 
@@ -1659,6 +1660,7 @@ impl RoomConnection<Arc<Room>> {
             quality
         );
 
+        let background_cancel = CancellationToken::new();
         // Background task: log the actual negotiated encoder implementation
         // once stats are available, so we *confirm* VideoToolbox rather than
         // assume the preference took effect (see module doc comment).
@@ -1700,6 +1702,18 @@ impl RoomConnection<Arc<Room>> {
             });
         }
 
+        // The publish-time allocation floor must not stay pinned: see
+        // `release_startup_min_bitrate` for why it exists and how it is
+        // released. `publish_opts.min_bitrate` is the value actually applied
+        // (already clamped to half the share's ceiling).
+        if let Some(floor_bps) = startup_floor_bps {
+            let track_for_floor = track.clone();
+            let cancel = background_cancel.clone();
+            tokio::spawn(async move {
+                release_startup_min_bitrate(track_for_floor, floor_bps, cancel).await;
+            });
+        }
+
         Ok(PublishedTrack {
             room: self.room.clone(),
             rtc_source,
@@ -1719,6 +1733,7 @@ impl RoomConnection<Arc<Room>> {
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
             last_source_boundary_log: Mutex::new(None),
+            background_cancel,
         })
     }
 
@@ -1755,6 +1770,7 @@ impl RoomConnection<Arc<Room>> {
             "Published camera track '{track_name}' {width}x{height} (H.264, requested encoder: {requested_encoder:?})"
         );
 
+        let background_cancel = CancellationToken::new();
         {
             let track_for_stats = track.clone();
             tokio::spawn(async move {
@@ -1783,6 +1799,7 @@ impl RoomConnection<Arc<Room>> {
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
             last_source_boundary_log: Mutex::new(None),
+            background_cancel,
         })
     }
 
@@ -1817,11 +1834,7 @@ fn validate_video_toolbox_h264_size(width: u32, height: u32) -> Result<(), RoomC
 /// 720p30 stays exactly 2.5 Mbps so defaults are unchanged; 1080p30 gets
 /// ~5.6 Mbps, 4K30 clamps at 16 Mbps, and a low 480p15 request floors at
 /// 500 kbps.
-fn camera_video_encoding(
-    width: u32,
-    height: u32,
-    frame_rate: f64,
-) -> livekit::options::VideoEncoding {
+fn camera_video_encoding(width: u32, height: u32, frame_rate: f64) -> livekit::options::VideoEncoding {
     const CAMERA_BASELINE_PIXELS: u64 = 1280 * 720;
     const CAMERA_BASELINE_FPS: f64 = 30.0;
     const CAMERA_MIN_BITRATE_BPS: u64 = 500_000;
@@ -1868,6 +1881,99 @@ fn window_publish_options(
     window_publish_options_for_region(width, height, quality, simulcast_ladder, false)
 }
 
+/// Default publish-time allocation floor (bps) for window shares.
+///
+/// 4 Mbps is ~0.086 bits/pixel/frame at 1595x969@30, the rate at which the
+/// Windows hardware H.264 rate controller stops clamping QP at its ceiling
+/// (measured: `interval_qp` 50.0 -> ~30, and a 25-30 s quality ramp plus the
+/// associated motion ramp both disappear).
+///
+/// This is a FLOOR, so it raises what WebRTC's bitrate allocator is willing to
+/// spend while the congestion controller's estimate is still low -- and the
+/// pacer drains faster with it. That is the whole point: an encoder-side
+/// target override (the removed `PETAL_MF_SCREEN_STARTUP_BITRATE` knob) left
+/// the pacer draining at the estimate, so the surplus became send queue
+/// (measured: 1773 ms of it) instead of bandwidth, and the share stuttered.
+const SHARE_MIN_BITRATE_DEFAULT_BPS: u64 = 4_000_000;
+
+/// Divisor that keeps a floor from consuming the whole budget.
+///
+/// The congestion controller must keep room to back off, so at most this
+/// fraction of a track's published `max_bitrate` is ever pinned. Without it a
+/// small share is the pathological case: `FULL_SIMULCAST_TOP_MIN_BITRATE_BPS`
+/// gives even a tiny window a 4 Mbps ceiling, so the 4 Mbps default would pin
+/// 100% of its budget and leave the allocator no way to react to loss. Applied
+/// per track kind through `min_bitrate_floor` so the guard cannot be
+/// reimplemented slightly differently for a second caller.
+const MIN_BITRATE_CEILING_DIVISOR: u64 = 2;
+
+/// Override for [`SHARE_MIN_BITRATE_DEFAULT_BPS`].
+///
+/// Accepts a non-negative integer number of bits per second; `0` disables the
+/// floor entirely (and is the only way to get the pre-default wire output back,
+/// since the field then stays unset).
+const PETAL_SHARE_MIN_BITRATE_ENV: &str = "PETAL_SHARE_MIN_BITRATE";
+
+/// Resolve a publish-time allocation floor for one track kind.
+///
+/// `label` and `env_key` exist only for logs and the override; the clamp lives
+/// here so a later caller with a different ceiling cannot reimplement it
+/// slightly differently -- the one rule that matters is that a floor must never
+/// consume the whole budget.
+///
+/// Returns `None` when the floor is explicitly disabled or the ceiling leaves
+/// no usable room, which leaves the vendored RTP parameter's
+/// `has_min_bitrate_bps` unset and the wire output byte-for-byte as it was
+/// before any of this existed.
+fn min_bitrate_floor(
+    label: &str,
+    env_key: &str,
+    default_bps: u64,
+    max_bitrate_bps: u64,
+) -> Option<u64> {
+    let requested = match std::env::var(env_key) {
+        Err(std::env::VarError::NotPresent) | Err(std::env::VarError::NotUnicode(_)) => default_bps,
+        Ok(raw) if raw.trim().is_empty() => default_bps,
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(bps) => bps,
+            Err(_) => {
+                log::warn!(
+                    "publisher: ignoring invalid {env_key}={raw:?} (expected a non-negative integer number of bits per second; 0 disables the floor); using the {default_bps} bps default"
+                );
+                default_bps
+            }
+        },
+    };
+    if requested == 0 {
+        log::info!("publisher: {label} min bitrate floor disabled by {env_key}=0");
+        return None;
+    }
+    let ceiling = max_bitrate_bps / MIN_BITRATE_CEILING_DIVISOR;
+    let applied = requested.min(ceiling);
+    if applied == 0 {
+        return None;
+    }
+    if applied != requested {
+        log::warn!(
+            "publisher: {label} min bitrate floor={requested}bps exceeds half of the {max_bitrate_bps}bps ceiling; clamping to {applied}bps so the congestion controller keeps room to back off"
+        );
+    } else {
+        log::info!(
+            "publisher: {label} min bitrate floor={applied}bps ceiling={max_bitrate_bps}bps"
+        );
+    }
+    Some(applied)
+}
+
+fn window_share_min_bitrate_bps(max_bitrate_bps: u64) -> Option<u64> {
+    min_bitrate_floor(
+        "window-share",
+        PETAL_SHARE_MIN_BITRATE_ENV,
+        SHARE_MIN_BITRATE_DEFAULT_BPS,
+        max_bitrate_bps,
+    )
+}
+
 fn window_publish_options_for_region(
     width: u32,
     height: u32,
@@ -1893,7 +1999,10 @@ fn window_publish_options_for_region(
             let lower_rungs_bitrate_bps: u64 =
                 layers.iter().map(|layer| layer.encoding.max_bitrate).sum();
             livekit::options::VideoEncoding {
-                max_bitrate: budgeted_top_bitrate(raw_top_encoding.max_bitrate, lower_rungs_bitrate_bps),
+                max_bitrate: budgeted_top_bitrate(
+                    raw_top_encoding.max_bitrate,
+                    lower_rungs_bitrate_bps,
+                ),
                 max_framerate: raw_top_encoding.max_framerate,
             }
         }
@@ -1901,13 +2010,15 @@ fn window_publish_options_for_region(
         None => raw_top_encoding,
     };
 
+    // Resolve before the struct literal consumes `top_encoding`.
+    let min_bitrate = window_share_min_bitrate_bps(top_encoding.max_bitrate);
+
     TrackPublishOptions {
         source: TrackSource::Screenshare,
         video_codec,
         video_encoder: select_encoder_backend(),
-        // LiveKit 0.7.49's public Rust API does not expose the native
-        // contentHint or sender degradationPreference setters. Keep this
-        // limitation scoped to #382; do not patch the vendored SDK here.
+        // The vendored LiveKit sender applies Detailed content and
+        // MaintainResolution for this Screenshare source during creation.
         // #181: macOS screencast low-latency RC/QP cap only engage on a
         // High-family H.264 profile; keep 42e01f after it as browser fallback.
         h264_profile_preference: H264ProfilePreference::HighFirst,
@@ -1916,6 +2027,7 @@ fn window_publish_options_for_region(
         simulcast,
         simulcast_layers,
         video_encoding: Some(top_encoding),
+        min_bitrate,
         frame_metadata_features: frame_metadata_features(),
         ..Default::default()
     }
@@ -2079,10 +2191,7 @@ fn full_share_simulcast_layers(
     let quarter_height = half_dimension(half_height);
     let three_quarter_width = three_quarter_dimension(width);
     let three_quarter_height = three_quarter_dimension(height);
-
     match ladder {
-        // Keep this branch byte-for-byte equivalent in values to the former
-        // fixed ladder: a quarter rung at 15fps and a half rung at 30fps.
         FullShareSimulcastLadder::Legacy => vec![
             VideoPreset::new(
                 quarter_width,
@@ -2097,10 +2206,6 @@ fn full_share_simulcast_layers(
                 FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
             ),
         ],
-        // Identical to Legacy except the bottom rung's framerate cap.
-        // Measured 2026-07-28 (#613, n=6): p50 175.2ms vs legacy's 138.0ms
-        // and encoder utilisation 74%->~90% -- cadence is NOT the lever, the
-        // rung spread is. Kept so that verdict stays re-measurable.
         FullShareSimulcastLadder::LegacyBottom30 => vec![
             VideoPreset::new(
                 quarter_width,
@@ -2129,13 +2234,11 @@ fn full_share_simulcast_layers(
                 FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
             ),
         ],
+        // The default lower rung matches the web viewer: scale the source by 2,
+        // then let maintain-resolution shed cadence before spatial detail. The
+        // retired `two-rung-half` ladder named exactly this shape, so it is
+        // gone rather than kept as a second name for the default.
         FullShareSimulcastLadder::TwoRung => vec![VideoPreset::new(
-            three_quarter_width,
-            three_quarter_height,
-            full_share_half_layer_max_bitrate(three_quarter_width, three_quarter_height),
-            FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
-        )],
-        FullShareSimulcastLadder::TwoRungHalf => vec![VideoPreset::new(
             half_width,
             half_height,
             full_share_half_layer_max_bitrate(half_width, half_height),
@@ -3895,12 +3998,13 @@ mod track_name_tests {
         // #907/#383: dropped from 60 -> 30. 60fps on the top rung was
         // cosmetic for this product's content and directly inflated the
         // top-rung bitrate ask that starved on a constrained link.
-        assert_eq!(ShareQuality::Full.capture_fps(), 30);
+        let expected_full_fps = 30;
+        assert_eq!(ShareQuality::Full.capture_fps(), expected_full_fps);
         assert_eq!(ShareQuality::Reduced.capture_fps(), 4);
 
         assert_eq!(
             ShareQuality::Full.video_encoding(1280, 720).max_framerate,
-            30.0
+            expected_full_fps as f64
         );
         assert_eq!(
             ShareQuality::Reduced
@@ -3925,17 +4029,14 @@ mod track_name_tests {
                 FullShareSimulcastLadder::Raised,
                 vec![(960, 540, 1_250_000, 30.0), (1440, 810, 2_812_500, 30.0)],
             ),
-            (
-                FullShareSimulcastLadder::TwoRung,
-                vec![(1440, 810, 2_812_500, 30.0)],
-            ),
-            (
-                FullShareSimulcastLadder::TwoRungHalf,
-                vec![(960, 540, 1_250_000, 30.0)],
-            ),
+            (FullShareSimulcastLadder::TwoRung, vec![(960, 540, 1_250_000, 30.0)]),
         ] {
             let options = window_publish_options(1920, 1080, ShareQuality::Full, ladder);
 
+            // Pure web/native parity contract: screen content keeps its
+            // source-sized top rung and 30fps cadence, and the default ladder's
+            // adaptive rung is the web viewer's half-resolution layer.
+            assert_eq!(options.source, TrackSource::Screenshare);
             assert_eq!(options.video_codec, VideoCodec::H264);
             assert_eq!(options.video_encoder, select_encoder_backend());
             assert_eq!(
@@ -3951,20 +4052,15 @@ mod track_name_tests {
                 .video_encoding
                 .as_ref()
                 .expect("full share must keep an explicit top-layer ceiling");
-            // #907: top-layer ceiling is now one formula on both platforms,
-            // then budgeted against this ladder's own lower rungs so the
-            // COMBINED ask stays inside `FULL_SIMULCAST_TOTAL_BUDGET_BPS`
-            // (8 Mbps) -- see `budgeted_top_bitrate`. Raw (pre-budget) top at
-            // 1920x1080/30fps is 11,197,440; every ladder below converges to
-            // exactly the 8 Mbps budget (none of these lower-rung totals are
-            // large enough to hit the absolute floor).
+            // The raw top ceiling is budgeted with the lower rungs so the
+            // combined ask is the web contract's 8 Mbps top plus the ladder's
+            // own lower layers, inside `FULL_SIMULCAST_TOTAL_BUDGET_BPS`.
             let expected_top: u64 = match ladder {
                 FullShareSimulcastLadder::Legacy | FullShareSimulcastLadder::LegacyBottom30 => {
-                    6_125_000
+                    7_375_000
                 }
-                FullShareSimulcastLadder::Raised => 3_937_500,
-                FullShareSimulcastLadder::TwoRung => 5_187_500,
-                FullShareSimulcastLadder::TwoRungHalf => 6_750_000,
+                FullShareSimulcastLadder::Raised => 5_187_500,
+                FullShareSimulcastLadder::TwoRung => 8_000_000,
             };
             assert_eq!(full_encoding.max_bitrate, expected_top, "{ladder:?}");
             assert_eq!(full_encoding.max_framerate, 30.0);
@@ -3998,24 +4094,6 @@ mod track_name_tests {
         assert!(log.contains("rid=native 752x852"));
         assert!(options.frame_metadata_features.user_timestamp);
         assert!(options.frame_metadata_features.frame_id);
-    }
-
-    #[test]
-    fn two_rung_half_publish_log_uses_the_resolved_shape() {
-        let options = window_publish_options(
-            1920,
-            1080,
-            ShareQuality::Full,
-            FullShareSimulcastLadder::TwoRungHalf,
-        );
-        let log =
-            full_share_ladder_log(FullShareSimulcastLadder::TwoRungHalf, 1920, 1080, &options);
-
-        assert!(log.contains("ladder=two-rung-half"));
-        assert!(log.contains("rid=q 960x540 30fps 1250000bps"));
-        // #907: one formula on both platforms now, budgeted against the
-        // 1,250,000bps lower rung (8,000,000 - 1,250,000 = 6,750,000).
-        assert!(log.contains("rid=h 1920x1080 30fps 6750000bps"));
     }
 
     #[test]
@@ -4101,16 +4179,16 @@ mod track_name_tests {
             "4K shares need a stronger half-res layer than 1080p shares"
         );
         // #907: 4K's Legacy ladder asks 625,000 + 5,000,000 = 5,625,000 from
-        // its OWN lower rungs, leaving 2,375,000 of the 8 Mbps total budget
-        // for the top rung -- comfortably above the absolute 1.5 Mbps floor,
-        // so the budget is hit exactly rather than clamped.
-        assert_eq!(uhd_top.max_bitrate, 2_375_000);
+        // its OWN lower rungs, leaving 3,625,000 of the 9.25 Mbps total
+        // budget for the top rung -- comfortably above the absolute 1.5 Mbps
+        // floor, so the budget is hit exactly rather than clamped.
+        assert_eq!(uhd_top.max_bitrate, 3_625_000);
         // #907 review (counselors): the top rung is deliberately NOT floored
         // at "never below a lower rung's own ceiling" -- an earlier version
         // of `budgeted_top_bitrate` did exactly that and it doubled the
         // total ask at 4K on ladders including the shipped default
         // (`TwoRung`). At this size the nominal top rung's configured
-        // ceiling (2,375,000) is genuinely BELOW the half rung's own
+        // ceiling (3,625,000) is genuinely BELOW the half rung's own
         // (5,000,000); this is a known, accepted limitation for 4K-class
         // shares now that the runtime starvation guards, not a static
         // ceiling ordering, are what protect a viewer from a badly-funded
@@ -4129,9 +4207,8 @@ mod track_name_tests {
 
     #[test]
     fn budgeted_top_bitrate_fits_inside_the_total_budget_when_room_allows() {
-        // Plenty of budget left after the lower rung: top gets the smaller of
-        // its raw ceiling and the remaining budget.
-        assert_eq!(budgeted_top_bitrate(11_197_440, 2_812_500), 5_187_500);
+        // The web-shaped lower rung leaves the web-shaped 8 Mbps top ceiling.
+        assert_eq!(budgeted_top_bitrate(11_197_440, 1_250_000), 8_000_000);
     }
 
     #[test]
@@ -4146,43 +4223,23 @@ mod track_name_tests {
     fn budgeted_top_bitrate_floors_at_the_budgeted_minimum() {
         // Lower rungs alone already consume the whole budget: top still gets
         // a usable floor rather than being squeezed toward zero.
-        assert_eq!(budgeted_top_bitrate(16_000_000, 8_000_000), 1_500_000);
-        assert_eq!(budgeted_top_bitrate(16_000_000, 7_800_000), 1_500_000);
+        assert_eq!(budgeted_top_bitrate(16_000_000, 10_000_000), 1_500_000);
+        assert_eq!(budgeted_top_bitrate(16_000_000, 9_100_000), 1_500_000);
     }
 
     #[test]
     fn budgeted_top_bitrate_can_land_below_a_lower_rungs_own_ceiling() {
-        // #907 review (counselors): deliberately NOT floored at "never below
-        // a lower rung's own ceiling" -- see `budgeted_top_bitrate`'s doc
-        // comment for why an earlier version's floor there caused a WORSE
-        // regression (a 2x total-budget blowout at 4K on the shipped default
-        // ladder) than the top/lower ordering inversion it was meant to
-        // prevent. This is the exact 4K Legacy-ladder case: a lower rung at
-        // 5,000,000 leaves only 2,375,000 of the 8 Mbps budget for the top
-        // rung, and that is what it gets, even though it is now nominally
-        // "worse" than the lower rung.
-        assert_eq!(budgeted_top_bitrate(16_000_000, 5_625_000), 2_375_000);
+        // The top may be below a large lower rung; preserving the combined
+        // budget is more important than static layer ordering. This is the
+        // 4K Legacy-ladder case.
+        assert_eq!(budgeted_top_bitrate(16_000_000, 5_625_000), 3_625_000);
     }
 
     #[test]
-    fn full_share_ladder_total_ask_is_bounded_for_the_field_incident_geometry() {
-        // #907's exact reported geometry: a 1920x1080 full share on the
-        // default TwoRung ladder. Before this fix the combined ask was
-        // 2,812,500 + 8,000,000 = 10,812,500 (10.8 Mbps) on a link that
-        // carried ~2.6 Mbps.
-        //
-        // #907 review (counselors, two independent models): for THIS exact
-        // case, shrinking the top rung's ceiling alone is close to cosmetic
-        // -- the lower rung (2,812,500) already exceeds that day's measured
-        // 2.58 Mbps link on its own and is funded first regardless of what
-        // the top rung's ceiling says, so this budget does not change
-        // allocation PRIORITY. It still meaningfully reduces the total
-        // WASTED ask (what gets asked for, not what gets funded), and it is
-        // the receiver/sender starvation guards (#907 steps 2/3), not this
-        // number, that actually recover a link this constrained. Both facts
-        // are asserted here so neither gets lost: the total ask really did
-        // shrink, and the lower rung's own share of that ask is unchanged
-        // (still above the measured link on its own).
+    fn full_share_ladder_total_ask_matches_the_web_default_shape() {
+        // The default 1080p ladder is a source-sized top plus a half-resolution
+        // lower layer. Its configured ceilings match the web's 8 Mbps top and
+        // 1.25 Mbps lower-layer contract.
         let options = window_publish_options(
             1920,
             1080,
@@ -4199,20 +4256,10 @@ mod track_name_tests {
             .as_ref()
             .expect("full share must keep an explicit top-layer ceiling");
         let total_ask = lower_sum + top.max_bitrate;
-        assert_eq!(lower_sum, 2_812_500);
-        assert_eq!(top.max_bitrate, 5_187_500);
+        assert_eq!(lower_sum, 1_250_000);
+        assert_eq!(top.max_bitrate, 8_000_000);
         assert_eq!(total_ask, FULL_SIMULCAST_TOTAL_BUDGET_BPS);
-        assert!(
-            total_ask < 10_812_500,
-            "the ladder's combined ask must be well under the field-measured 10.8 Mbps overshoot"
-        );
-        const FIELD_MEASURED_LINK_BPS: u64 = 2_580_000;
-        assert!(
-            lower_sum > FIELD_MEASURED_LINK_BPS,
-            "documents why step 1 alone is close to cosmetic for this exact case: \
-             the lower rung already exceeds the measured link and is funded first \
-             regardless of the top rung's budgeted ceiling"
-        );
+
     }
 
     // ---- #907 step 2/7: top-rung starvation guard --------------------------
@@ -4227,6 +4274,11 @@ mod track_name_tests {
         // Exactly at the threshold is not (yet) starved -- strictly below.
         assert!(!rung_is_starved(2_000_000, 8_000_000));
         assert!(rung_is_starved(1_999_999, 8_000_000));
+        // A zero target means the allocator has no current demand for this
+        // layer, not that the layer is congested. Never let that transient
+        // no-demand state trigger the sender throttle, even when a lower
+        // layer is active.
+        assert!(!rung_is_starved(0, 8_000_000));
         // An unconfigured (zero-ceiling) rung is never reported starved --
         // nothing to compare against.
         assert!(!rung_is_starved(0, 0));
@@ -4299,7 +4351,11 @@ mod track_name_tests {
             count = next_count;
             state = next_state;
         }
-        assert_eq!(state, RungFundingState::Probing, "should enter Probing after the interval");
+        assert_eq!(
+            state,
+            RungFundingState::Probing,
+            "should enter Probing after the interval"
+        );
 
         // Still starved once probed: back to Throttled, one more failure
         // recorded.
@@ -4443,9 +4499,9 @@ mod track_name_tests {
         ];
         assert!(lower_rung_activity(&funded, guarded).worth_protecting());
 
-        // Funded but not yet delivering a frame still counts -- it is being
-        // allocated bandwidth, which is the contention the guard exists to
-        // relieve.
+        // Funding can briefly precede encoder output during convergence. It is
+        // useful diagnostic evidence, but not enough to justify reducing the
+        // only rung that is actually delivering.
         let funded_only = [
             RungSample { rid: "h".into(), target_bitrate_bps: 288_000.0, frames_per_second: 0.0 },
             RungSample { rid: "q".into(), target_bitrate_bps: 900_000.0, frames_per_second: 0.0 },
@@ -4454,7 +4510,7 @@ mod track_name_tests {
             lower_rung_activity(&funded_only, guarded),
             LowerRungActivity { funded: true, delivering: false }
         );
-        assert!(lower_rung_activity(&funded_only, guarded).worth_protecting());
+        assert!(!lower_rung_activity(&funded_only, guarded).worth_protecting());
 
         // The guarded rung's own numbers are never mistaken for a lower
         // rung's.
@@ -4479,9 +4535,8 @@ mod track_name_tests {
         // largest bitrate" -- at 4K Reduced quality `q`'s halved ceiling
         // (3,000,000) exceeds `h`'s (2,985,984), which a largest-bitrate
         // heuristic would have picked instead of the real top rung.
-        let guard =
-            RungStarvationGuard::for_rid(FullShareSimulcastLadder::TwoRung.top_rid(), 2)
-                .expect("two layers must be guarded");
+        let guard = RungStarvationGuard::for_rid(FullShareSimulcastLadder::TwoRung.top_rid(), 2)
+            .expect("two layers must be guarded");
         assert_eq!(guard.rid, "h");
         assert_eq!(guard.state, RungFundingState::Funded);
     }
@@ -4511,7 +4566,11 @@ mod track_name_tests {
             "sample 3: sustained -- transitions and reports it"
         );
         assert_eq!(
-            RungStarvationGuard::live_parameters_for(RungFundingState::Throttled, configured_bitrate_bps, 30.0),
+            RungStarvationGuard::live_parameters_for(
+                RungFundingState::Throttled,
+                configured_bitrate_bps,
+                30.0
+            ),
             (RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS, 30.0)
         );
         // No further transition until the probe interval elapses.
@@ -4666,6 +4725,54 @@ mod track_name_tests {
     }
 
     #[test]
+    fn guard_chain_does_not_throttle_a_zero_target_top() {
+        // A zero target on the top means there is no current demand for that
+        // layer. It is not sender evidence that freeing its bandwidth would
+        // help, even when a lower rung is delivering.
+        let mut harness = GuardHarness::new(3_000_000);
+        let zero_top = (0.0, 0.0);
+        let delivering_lower = (900_000.0, 30.0);
+        harness.poll(zero_top, delivering_lower);
+        assert_eq!(harness.guard.state, RungFundingState::Funded);
+        assert!(
+            harness.applied.is_empty(),
+            "one zero target sample must not immediately throttle the top rung"
+        );
+
+        let funded_silent_lower = (900_000.0, 0.0);
+        harness.poll_n(
+            RUNG_STARVATION_GUARD_TRIGGER_SAMPLES * 2,
+            zero_top,
+            funded_silent_lower,
+        );
+        assert_eq!(harness.guard.state, RungFundingState::Funded);
+        assert!(
+            harness.applied.is_empty(),
+            "a transient zero target must not pin the top rung at 50kbps"
+        );
+
+        // Even while the lower rung is producing frames, a zero target still
+        // means the top has no current demand. It is not congestion evidence
+        // and must never pin the top ceiling before a capable receiver asks
+        // for it.
+        harness.poll_n(
+            RUNG_STARVATION_GUARD_TRIGGER_SAMPLES * 2,
+            zero_top,
+            delivering_lower,
+        );
+        assert_eq!(harness.guard.state, RungFundingState::Funded);
+        assert!(
+            harness.applied.is_empty(),
+            "zero-demand samples must never pin the top rung at 50kbps"
+        );
+        assert_eq!(
+            harness.guard.reported_delivery,
+            RungDelivery::DegradedUnfunded,
+            "zero target must not be reported as funded"
+        );
+    }
+
+    #[test]
     fn guard_chain_refuses_to_throttle_when_no_lower_rung_is_funded_or_demanded() {
         // #107's field trajectory, replayed: `rid=h` starved at 681kbps of a
         // configured 3000kbps ceiling, `rid=q` at `target=0kbps
@@ -4813,7 +4920,7 @@ mod track_name_tests {
         )
         .expect("TwoRung's top rid must be present");
         assert_eq!(rid, "h");
-        assert_eq!(max_bitrate, 5_187_500);
+        assert_eq!(max_bitrate, 8_000_000);
         assert_eq!(max_framerate, 30.0);
 
         // Reduced quality must also be reflected, exercising the same path
@@ -4830,6 +4937,67 @@ mod track_name_tests {
         assert_eq!(reduced_framerate, 4.0);
     }
 
+    #[test]
+    fn min_bitrate_floor_clamps_to_half_the_ceiling() {
+        // A private key nothing else sets, so these assertions cannot depend on
+        // whatever the ambient environment happens to carry.
+        const KEY: &str = "PETAL_TEST_MIN_BITRATE_FLOOR_UNUSED";
+
+        // Unset: the caller's default passes through untouched.
+        assert_eq!(min_bitrate_floor("t", KEY, 4_000_000, 16_000_000), Some(4_000_000));
+        // Above half the ceiling: clamped, never rejected, so the congestion
+        // controller always keeps room to back off.
+        assert_eq!(min_bitrate_floor("t", KEY, 9_000_000, 8_000_000), Some(4_000_000));
+        // A small ceiling scales the floor down with it.
+        assert_eq!(min_bitrate_floor("t", KEY, 4_000_000, 1_000_000), Some(500_000));
+        // A ceiling too small to halve yields no floor at all, which leaves the
+        // wire output exactly as it was before any floor existed.
+        assert_eq!(min_bitrate_floor("t", KEY, 4_000_000, 1), None);
+    }
+
+    #[test]
+    fn window_share_publish_options_carry_a_bounded_allocation_floor() {
+        let options = window_publish_options(
+            1920,
+            1080,
+            ShareQuality::Full,
+            FullShareSimulcastLadder::TwoRung,
+        );
+        let ceiling = options
+            .video_encoding
+            .as_ref()
+            .expect("share ceiling")
+            .max_bitrate;
+        assert_eq!(ceiling, 8_000_000);
+        // Only assert the shipped default when no override is in the
+        // environment, so this documents the value without being env-flaky.
+        if std::env::var(PETAL_SHARE_MIN_BITRATE_ENV).is_err() {
+            assert_eq!(options.min_bitrate, Some(SHARE_MIN_BITRATE_DEFAULT_BPS));
+        }
+        assert!(options.min_bitrate.unwrap_or(0) <= ceiling / MIN_BITRATE_CEILING_DIVISOR);
+
+        // A Petal View region publishes a single non-simulcast encoding, so its
+        // floor is budgeted against that encoding's own (unbudgeted, higher)
+        // ceiling rather than the simulcast top rung's budgeted one.
+        let region = window_publish_options_for_region(
+            1920,
+            1080,
+            ShareQuality::Full,
+            FullShareSimulcastLadder::TwoRung,
+            true,
+        );
+        let region_ceiling = region
+            .video_encoding
+            .as_ref()
+            .expect("region ceiling")
+            .max_bitrate;
+        assert!(region_ceiling > ceiling);
+        let floor = region.min_bitrate.expect("a region share keeps its floor");
+        if std::env::var(PETAL_SHARE_MIN_BITRATE_ENV).is_err() {
+            assert_eq!(floor, SHARE_MIN_BITRATE_DEFAULT_BPS);
+        }
+        assert!(floor <= region_ceiling / MIN_BITRATE_CEILING_DIVISOR, "{floor}");
+    }
 
     #[test]
     fn camera_publish_options_pin_single_source_encoding() {
@@ -4885,7 +5053,6 @@ mod track_name_tests {
             (FullShareSimulcastLadder::Legacy, 2),
             (FullShareSimulcastLadder::Raised, 2),
             (FullShareSimulcastLadder::TwoRung, 1),
-            (FullShareSimulcastLadder::TwoRungHalf, 1),
         ] {
             let layers = window_publish_options(1280, 720, ShareQuality::Full, ladder)
                 .simulcast_layers
@@ -4933,7 +5100,6 @@ mod track_name_tests {
             (FullShareSimulcastLadder::Legacy, 2),
             (FullShareSimulcastLadder::Raised, 2),
             (FullShareSimulcastLadder::TwoRung, 1),
-            (FullShareSimulcastLadder::TwoRungHalf, 1),
         ] {
             let options = window_publish_options(1920, 1080, ShareQuality::Reduced, ladder);
 
@@ -5023,10 +5189,7 @@ mod track_name_tests {
 
     #[test]
     fn two_rung_quality_updates_only_name_published_rids() {
-        for ladder in [
-            FullShareSimulcastLadder::TwoRung,
-            FullShareSimulcastLadder::TwoRungHalf,
-        ] {
+        for ladder in [FullShareSimulcastLadder::TwoRung] {
             let updates = ShareQuality::Full.layer_parameters(1920, 1080, ladder);
             assert_eq!(
                 updates
@@ -5068,10 +5231,6 @@ mod track_name_tests {
             FullShareSimulcastLadder::from_env_value("two-rung").unwrap(),
             FullShareSimulcastLadder::TwoRung
         );
-        assert_eq!(
-            FullShareSimulcastLadder::from_env_value("two-rung-half").unwrap(),
-            FullShareSimulcastLadder::TwoRungHalf
-        );
         let default_error = FullShareSimulcastLadder::from_env_value("default")
             .expect_err("default must not silently select a different ladder");
         assert!(default_error
@@ -5085,7 +5244,7 @@ mod track_name_tests {
         assert!(error.to_string().contains(PETAL_SHARE_LADDER_ENV));
         assert!(error
             .to_string()
-            .contains("legacy, legacy-bottom30, raised, two-rung, or two-rung-half"));
+            .contains("legacy, legacy-bottom30, raised, or two-rung"));
     }
 
     #[test]
@@ -7502,10 +7661,10 @@ enum RungFundingState {
 /// the guard, so no cross-module plumbing is needed to answer it:
 ///
 /// * `funded` -- some other rung has a nonzero allocator-granted
-///   `target_bitrate`. The SFU only allocates to a rung something is
-///   subscribed to, so publisher-side funding is the honest proxy for
-///   demand available at this point in the code.
-/// * `delivering` -- some other rung reports nonzero `frames_per_second`.
+///   `target_bitrate`. This is retained for diagnostics, but is not enough
+///   to justify a top-rung throttle while the lower encoder is still silent.
+/// * `delivering` -- some other rung reports nonzero `frames_per_second`;
+///   this is the sender/output evidence required before reducing the top.
 ///
 /// `frame_width`/`frame_height` are deliberately NOT used: they latch at the
 /// last encoded size and would keep a long-idle rung looking alive.
@@ -7519,10 +7678,13 @@ impl LowerRungActivity {
     /// Is there a lower rung whose bandwidth is worth protecting? Field case
     /// (#107): `rid=q` read `target=0kbps encoded=0x0 fps=0.0` in all 122
     /// samples -> `false`, so the top rung's ceiling must be left alone.
-    /// Original case (#907): `q` was funded at ~2.58Mbps of its 2.8125Mbps
-    /// ceiling over a 2.58Mbps link -> `true`, so the throttle still fires.
+    /// Require actual lower-rung delivery, not merely allocator funding:
+    /// funding can briefly precede encoder output during convergence, and
+    /// throttling the only delivering rung during that window is harmful.
+    /// Original case (#907): `q` was funded at ~2.58Mbps and delivering 30fps
+    /// over a 2.58Mbps link -> `true`, so the throttle still fires.
     fn worth_protecting(self) -> bool {
-        self.funded || self.delivering
+        self.delivering
     }
 }
 
@@ -7560,12 +7722,16 @@ fn lower_rung_activity(samples: &[RungSample], guarded_rid: &str) -> LowerRungAc
 
 /// Is this one sample starved, relative to the rung's CURRENT configured
 /// ceiling (looked up fresh every poll -- see `log_window_share_encoder_stats`)?
+/// A zero target is no current receiver demand for this layer, not evidence
+/// that an active layer is congested; it must not start the throttle streak.
 /// Comparing against the live, possibly-throttled ceiling instead would make
 /// "starved" trivially true forever once throttled; the caller always passes
 /// the fresh CONFIGURED value, never whatever this guard last wrote.
 fn rung_is_starved(target_bitrate_bps: u64, configured_max_bitrate_bps: u64) -> bool {
-    configured_max_bitrate_bps > 0
-        && (target_bitrate_bps as f64) < RUNG_STARVATION_GUARD_FRACTION * configured_max_bitrate_bps as f64
+    target_bitrate_bps > 0
+        && configured_max_bitrate_bps > 0
+        && (target_bitrate_bps as f64)
+            < RUNG_STARVATION_GUARD_FRACTION * configured_max_bitrate_bps as f64
 }
 
 /// Probe interval after `consecutive_probe_failures` (30s, 60s, 120s,
@@ -7587,12 +7753,12 @@ fn rung_starvation_probe_interval_samples(consecutive_probe_failures: u32) -> u3
 /// `apply_rung_starvation_guard_sample`).
 ///
 /// `lower_rung_worth_protecting == false` is a hard override in EVERY state:
-/// with nothing to protect, throttling the top rung is pure loss, so the
-/// machine both refuses to enter `Throttled` and leaves it (and `GivenUp`)
-/// immediately if the lower rung goes dark mid-throttle. That second
-/// direction is also a real recovery route -- a subscriber dropping off the
-/// low rung is exactly the kind of condition change #107 requires the guard
-/// to notice.
+/// with no lower-rung delivery to protect, throttling the top rung is pure
+/// loss, so the machine both refuses to enter `Throttled` and leaves it (and
+/// `GivenUp`) immediately if the lower rung goes dark mid-throttle. That
+/// second direction is also a real recovery route -- a subscriber dropping
+/// off the low rung, or a transient before its encoder produces output, is
+/// exactly the kind of condition #107 requires the guard to notice.
 fn rung_starvation_next_state(
     current: RungFundingState,
     sample_starved: bool,
@@ -7634,7 +7800,11 @@ fn rung_starvation_next_state(
             if count >= interval {
                 (0, consecutive_probe_failures, RungFundingState::Probing)
             } else {
-                (count, consecutive_probe_failures, RungFundingState::Throttled)
+                (
+                    count,
+                    consecutive_probe_failures,
+                    RungFundingState::Throttled,
+                )
             }
         }
         // The probe sample decides immediately: no need to re-accumulate the
@@ -7801,7 +7971,10 @@ impl RungStarvationGuard {
             self.consecutive_low_fps_samples = 0;
         }
         let delivery = if self.consecutive_low_fps_samples >= RUNG_STARVATION_GUARD_TRIGGER_SAMPLES {
-            if starved {
+            // A zero target is intentionally not `starved` (it means no
+            // current demand), but it is still not funded. Keep the bounded
+            // diagnostic honest instead of reporting "funded at 0kbps".
+            if !sample.is_funded() || starved {
                 RungDelivery::DegradedUnfunded
             } else {
                 RungDelivery::DegradedFunded
@@ -7833,9 +8006,10 @@ impl RungStarvationGuard {
             RungFundingState::Funded | RungFundingState::Probing => {
                 (configured_bitrate_bps, configured_framerate)
             }
-            RungFundingState::Throttled | RungFundingState::GivenUp => {
-                (RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS, configured_framerate)
-            }
+            RungFundingState::Throttled | RungFundingState::GivenUp => (
+                RUNG_STARVATION_GUARD_THROTTLED_BITRATE_BPS,
+                configured_framerate,
+            ),
         }
     }
 }
@@ -7867,7 +8041,7 @@ fn apply_rung_starvation_guard_sample(
 
     if observation.premise_refused {
         log::warn!(
-            "publisher: window-share top rung rid={} is starved (target {:.0}kbps < {:.0}% of its configured {}kbps ceiling) but NOT throttling it: no other rung is funded or delivering (lower rungs funded={} delivering={}), so throttling would protect nothing and would degrade the only rung with demand -- reporting the link as degraded instead (#107)",
+            "publisher: window-share top rung rid={} is starved (target {:.0}kbps < {:.0}% of its configured {}kbps ceiling) but NOT throttling it: no lower rung is delivering (lower rungs funded={} delivering={}), so throttling would protect nothing and would degrade the only rung with demand -- reporting the link as degraded instead (#107)",
             guard.rid,
             sample.target_bitrate_bps / 1000.0,
             RUNG_STARVATION_GUARD_FRACTION * 100.0,
@@ -7988,6 +8162,100 @@ fn current_top_rid_parameters(
 /// state `PublishedTrack::set_quality` mutates, so the guard always compares
 /// against (and restores) the CURRENT configured ceiling, never a stale one
 /// from whenever this task started.
+/// The selected candidate pair's congestion-controller estimate (bps) and
+/// round-trip time (ms). `None` until a succeeded pair exists.
+///
+/// One source of truth for "what does WebRTC think the path can carry": both
+/// the diagnostic probe and the startup-floor release act on it, and picking
+/// the pair differently between them would let the floor outlive the estimate
+/// that justified it.
+fn selected_pair_estimate(stats: &[livekit::webrtc::stats::RtcStats]) -> Option<(f64, f64)> {
+    stats
+        .iter()
+        .filter_map(|stat| match stat {
+            livekit::webrtc::stats::RtcStats::CandidatePair(pair) => {
+                let pair = &pair.candidate_pair;
+                (pair.state == Some(livekit::webrtc::stats::IceCandidatePairState::Succeeded))
+                    .then_some((
+                        pair.nominated,
+                        pair.available_outgoing_bitrate,
+                        pair.current_round_trip_time,
+                    ))
+            }
+            _ => None,
+        })
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(_, bitrate_bps, rtt_s)| (bitrate_bps, rtt_s * 1000.0))
+}
+
+/// Hard cap on how long the startup allocation floor may stay pinned.
+///
+/// The release normally fires as soon as the estimate clears the floor, so
+/// this is the fallback for links that never get there. It has to exist: on a
+/// genuinely slow link `available_outgoing_bitrate` may never reach the floor,
+/// and an unbounded floor would stay pinned for the whole call -- which is the
+/// exact failure (allocator unable to back off) the startup-only design exists
+/// to avoid.
+const STARTUP_MIN_BITRATE_MAX_HOLD: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How often to re-check the estimate while the floor is held.
+const STARTUP_MIN_BITRATE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Release the window-share allocation floor once it has done its job.
+///
+/// The floor lifts the congestion controller off its conservative startup
+/// estimate (measured: ~600 kbps for 10-35 s against a path sustaining
+/// ~14 Mbps) so the pacer drains fast enough for the hardware encoder to stop
+/// clamping QP at its ceiling. It is then cleared, either because the estimate
+/// has cleared it or because [`STARTUP_MIN_BITRATE_MAX_HOLD`] expired, so the
+/// controller regains its full range for the rest of the call.
+///
+/// Logs the release reason at `info`, and warns when the cap was the reason,
+/// since that means the floor was pinned longer than the path justified.
+async fn release_startup_min_bitrate(
+    track: LocalVideoTrack,
+    floor_bps: u64,
+    cancel: CancellationToken,
+) {
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() >= STARTUP_MIN_BITRATE_MAX_HOLD {
+            log::warn!(
+                "publisher: window-share min bitrate floor={floor_bps}bps still held after {}s without the estimate clearing it; releasing so the congestion controller regains control",
+                STARTUP_MIN_BITRATE_MAX_HOLD.as_secs()
+            );
+            break;
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(STARTUP_MIN_BITRATE_POLL) => {},
+        }
+        let stats = match track.get_stats().await {
+            Ok(stats) => stats,
+            Err(_) => continue,
+        };
+        let Some((estimate_bps, _)) = selected_pair_estimate(&stats) else {
+            continue;
+        };
+        if estimate_bps >= floor_bps as f64 {
+            log::info!(
+                "publisher: window-share min bitrate floor={floor_bps}bps released after {}ms (estimate={estimate_bps:.0}bps)",
+                started.elapsed().as_millis()
+            );
+            break;
+        }
+    }
+    match track.clear_publishing_min_bitrate() {
+        Ok(true) => {
+            log::info!("publisher: window-share allocation floor cleared; congestion controller has full range")
+        }
+        Ok(false) => log::info!("publisher: window-share allocation floor was already clear"),
+        Err(error) => {
+            log::warn!("publisher: failed to clear the window-share allocation floor: {error}")
+        }
+    }
+}
+
 async fn log_window_share_encoder_stats(
     track: LocalVideoTrack,
     quality: Arc<Mutex<ShareQuality>>,
