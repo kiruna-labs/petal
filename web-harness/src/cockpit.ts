@@ -1,6 +1,6 @@
 import type { CockpitScenarioResult, CockpitStepResult, HarnessContext } from './context.ts';
 import { meetingCredentialFromInviteInput } from '@petal/shared/logic/meetingCode';
-import { COCKPIT_TOPIC, type CockpitCommandMessage, type CockpitReportMessage } from './trackNames.ts';
+import { COCKPIT_COMMANDS, COCKPIT_TOPIC, type CockpitCommand, type CockpitCommandMessage, type CockpitReportMessage } from './trackNames.ts';
 import { cockpitOwnerFromSearch } from './cockpitShareTarget.ts';
 
 // ---------------------------------------------------------------------------
@@ -42,13 +42,14 @@ const decoder = new TextDecoder();
 export function parseCockpitCommandMessage(value: unknown): CockpitCommandMessage | null {
   if (typeof value !== 'object' || value === null) return null;
   const record = value as Record<string, unknown>;
-  if (record.v !== 1 || record.kind !== 'command' || record.command !== 'disconnect') return null;
+  if (record.v !== 1 || record.kind !== 'command') return null;
+  if (!(COCKPIT_COMMANDS as readonly unknown[]).includes(record.command)) return null;
   if (record.target !== undefined && typeof record.target !== 'string') return null;
   if (typeof record.sentAtMs !== 'number') return null;
   return {
     v: 1,
     kind: 'command',
-    command: 'disconnect',
+    command: record.command as CockpitCommand,
     target: record.target as string | undefined,
     sentAtMs: record.sentAtMs,
   };
@@ -89,6 +90,7 @@ type ReportFields = Partial<
     | 'windowId'
     | 'participantCount'
     | 'remoteParticipantCount'
+    | 'patternFrameCount'
     | 'remoteAudioAudible'
     | 'remoteAudioRms'
     | 'remoteAudioEnergyDelta'
@@ -201,6 +203,22 @@ export function setupCockpit(
     if (!command) return false;
     if (command.target !== undefined && command.target !== reporterId()) return false;
     if (!state.room) return false;
+    if (command.command === 'pattern-freeze' || command.command === 'pattern-animate') {
+      // #202 / SHARE-W2N-STALL: the acknowledgement carries the pattern's
+      // frame counter so the native side can prove the source really stopped
+      // (and later resumed) rather than trusting the ack alone.
+      const freeze = command.command === 'pattern-freeze';
+      if (freeze) cb.pauseTestPattern();
+      else cb.resumeTestPattern();
+      await reportStep(
+        activeScenarioId ?? 'teardown',
+        freeze ? 'pattern-frozen' : 'pattern-animated',
+        true,
+        `${command.command} requested by ${senderIdentity ?? 'unknown'}; animating=${cb.isTestPatternAnimating()}`,
+        { patternFrameCount: getPatternFrameCount() }
+      );
+      return true;
+    }
     await reportStep(
       activeScenarioId ?? 'teardown',
       'disconnect',
@@ -423,6 +441,11 @@ export function setupCockpit(
 
   async function runScenarioAction(scenarioId: string): Promise<CockpitStepResult & { fields?: ReportFields }> {
     switch (scenarioId.toUpperCase()) {
+      // SHARE-W2N-STALL (#202): the same publish as SHARE-W2N-Q; the stall and
+      // the recovery are driven afterwards by the native engine's
+      // `pattern-freeze` / `pattern-animate` commands (handleCockpitCommand),
+      // and the native side owns every verdict from there.
+      case 'SHARE-W2N-STALL':
       case 'SHARE-W2N-Q': {
         await sharePattern();
         return { step: 'sharePattern', ok: true, detail: 'test-pattern publish started' };

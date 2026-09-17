@@ -1578,6 +1578,10 @@ pub(crate) fn start_compositor_feed(
                                                 "compositor feed: window {window_id} downgrading subscription to LOW (no frame for >= {}s, or sustained high QP >= {consecutive_high_qp_samples} consecutive samples); probe failures so far: {consecutive_probe_failures} (#907)",
                                                 STARVATION_DOWNGRADE_AFTER.as_secs()
                                             );
+                                            crate::diagnostics::journal_media(
+                                                &app_for_frames,
+                                                format!("stall: window {window_id} downgraded subscription to LOW (probe failures so far {consecutive_probe_failures})"),
+                                            );
                                         }
                                         StarvationAction::ProbeHigh => {
                                             // Read before any reset below --
@@ -1602,6 +1606,13 @@ pub(crate) fn start_compositor_feed(
                                                 since_starved.unwrap_or_default().as_secs(),
                                                 consecutive_probe_failures + 1
                                             );
+                                            crate::diagnostics::journal_media(
+                                                &app_for_frames,
+                                                format!(
+                                                    "stall: window {window_id} recovery probe re-requesting HIGH (probe failure {})",
+                                                    consecutive_probe_failures + 1
+                                                ),
+                                            );
                                             // `starvation_action` no longer gives up past
                                             // STARVATION_PROBE_FAILURE_CAP -- it keeps probing on the
                                             // STARVATION_PROBE_MAX cadence forever. A browser sharer
@@ -1612,6 +1623,10 @@ pub(crate) fn start_compositor_feed(
                                             if past_repair_cap {
                                                 log::warn!(
                                                     "compositor feed: window {window_id} past {STARVATION_PROBE_FAILURE_CAP} probe failures; also asking the owner to repair the publication"
+                                                );
+                                                crate::diagnostics::journal_media(
+                                                    &app_for_frames,
+                                                    format!("stall: window {window_id} asked the owner to repair the publication"),
                                                 );
                                                 crate::viewer_demand::publish_window_repair_request(
                                                     &app_for_frames,
@@ -3741,6 +3756,13 @@ fn retire_no_frame_windows(
                      holding its last frame and asking the owner to repair the publication (#627)",
                     state.owner_identity,
                     NO_FRAME_RETIRE_AFTER.as_secs()
+                );
+                crate::diagnostics::journal_media(
+                    app,
+                    format!(
+                        "stall: window {window_id} from '{}' held its last frame (no-frame watchdog, #627)",
+                        state.owner_identity
+                    ),
                 );
                 crate::diagnostics::record_native_video_stream_state(
                     app,

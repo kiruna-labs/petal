@@ -4084,6 +4084,13 @@ fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey)
             key.window_id,
             key.owner_identity
         );
+        crate::diagnostics::journal_media(
+            app,
+            format!(
+                "stall: window {} from '{}' resumed live media",
+                key.window_id, key.owner_identity
+            ),
+        );
         set_window_media_paused(app, &key.owner_identity, key.window_id, false);
     }
     if should_reveal {

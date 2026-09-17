@@ -827,3 +827,16 @@ test('runScenario: CAM-N2W treats a measurement that throws as INFRA-FAIL', asyn
   assert.equal(result.ok, false);
   assert.equal(result.classification, 'INFRA-FAIL');
 });
+
+test('runScenario: SHARE-W2N-STALL publishes the pattern and reports done; the stall is driven by commands afterwards', async () => {
+  const { ctx, published } = cockpitContext({ hasRoomInitially: false });
+  const cockpit = setupCockpit(ctx, advancingFrameCounter());
+  const result = await cockpit.runScenario('share-w2n-stall', 'abc-defg-hjk');
+  assert.equal(result.ok, true);
+  assert.equal(result.classification, 'PASS');
+  assert.deepEqual(
+    result.steps.map((step) => step.step),
+    ['self-check', 'join', 'sharePattern', 'done']
+  );
+  assert.deepEqual(published.map((message) => message.step), ['join', 'sharePattern', 'done']);
+});

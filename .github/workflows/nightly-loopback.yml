@@ -52,6 +52,21 @@ on:
         required: false
         default: "https://app.petal.live"
         type: string
+      cockpit_selector:
+        description: "Test Cockpit selector for the QA-featured tier: a tier (quick) or a comma-separated scenario id list (e.g. SHARE-W2N-STALL for #202's soak measurement)"
+        required: false
+        default: "quick"
+        type: string
+      stall_freeze_ms:
+        description: "SHARE-W2N-STALL: how long the browser sharer freezes its source, ms (10000-900000; default 90000)"
+        required: false
+        default: ""
+        type: string
+      stall_resume_ms:
+        description: "SHARE-W2N-STALL: how long the receiver gets to resume after the source does, ms (10000-900000; default 30000)"
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       ref:
@@ -67,6 +82,21 @@ on:
         description: "Petal backend the Test Cockpit's native peer mints tokens from (default: production app.petal.live)"
         required: false
         default: "https://app.petal.live"
+        type: string
+      cockpit_selector:
+        description: "Test Cockpit selector for the QA-featured tier: a tier (quick) or a comma-separated scenario id list (e.g. SHARE-W2N-STALL for #202's soak measurement)"
+        required: false
+        default: "quick"
+        type: string
+      stall_freeze_ms:
+        description: "SHARE-W2N-STALL: how long the browser sharer freezes its source, ms (10000-900000; default 90000)"
+        required: false
+        default: ""
+        type: string
+      stall_resume_ms:
+        description: "SHARE-W2N-STALL: how long the receiver gets to resume after the source does, ms (10000-900000; default 30000)"
+        required: false
+        default: ""
         type: string
     secrets:
       vercel_bypass_secret:
@@ -198,6 +228,12 @@ jobs:
         env:
           COCKPIT_HARNESS_URL: ${{ inputs.harness_url || 'https://meet.petal.live' }}
           COCKPIT_BACKEND_URL: ${{ inputs.backend_url || 'https://app.petal.live' }}
+          # #202: which scenarios the QA-featured tier runs (the release gate
+          # always runs the Quick tier), and SHARE-W2N-STALL's phase lengths.
+          # Empty means the engine's gate-sized defaults.
+          COCKPIT_SELECTOR: ${{ inputs.cockpit_selector || 'quick' }}
+          PETAL_COCKPIT_STALL_FREEZE_MS: ${{ inputs.stall_freeze_ms || '' }}
+          PETAL_COCKPIT_STALL_RESUME_MS: ${{ inputs.stall_resume_ms || '' }}
           # The `||` is what makes a protected staged target reproducible BY
           # HAND. A `workflow_call` from release.yml supplies
           # `vercel_bypass_secret`; a `workflow_dispatch` cannot (a secret must
@@ -227,6 +263,7 @@ jobs:
           # (localhost:7880, refused -- first VM run, #916).
           echo "cockpit web target: $COCKPIT_HARNESS_URL"
           echo "cockpit backend target: $COCKPIT_BACKEND_URL"
+          echo "cockpit selector: $COCKPIT_SELECTOR (stall freeze/resume ms: '${PETAL_COCKPIT_STALL_FREEZE_MS}'/'${PETAL_COCKPIT_STALL_RESUME_MS}')"
           set +e
           # PETAL_BACKEND_URL is read at RUNTIME first (transport/token.rs);
           # an EMPTY value means "no backend" (the loopback tier's setting), so
@@ -258,7 +295,7 @@ jobs:
               -u PETAL_WEB_HARNESS_URL_MATCH \
             PETAL_BACKEND_URL="$COCKPIT_BACKEND_URL" PETAL_HARNESS_URL="$COCKPIT_HARNESS_URL" \
             PETAL_DISABLE_AUDIO=1 RUST_LOG=info \
-            apps/desktop/src-tauri/target/debug/desktop --test-case=quick
+            apps/desktop/src-tauri/target/debug/desktop --test-case="$COCKPIT_SELECTOR"
           engine_exit=$?
           set -e
           # The engine's exit code does not carry the verdicts; run.jsonl does.
