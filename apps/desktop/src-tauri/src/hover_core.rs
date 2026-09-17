@@ -365,11 +365,19 @@ fn hover_tab_perimeter_center(
     }
 }
 
-/// Pure, monitor-bounded layout for a complete perimeter position. Clamping
-/// the resulting rectangle (rather than snapping its side) keeps the native
-/// and frontend projections aligned when a menu bar, dock, or taskbar blocks
-/// one side of the work area. Attachment describes whether work-area
-/// containment forced that rectangle inward.
+/// Pure, monitor-bounded layout for a complete perimeter position. The tab
+/// hangs OUTSIDE the window on the edge it is attached to; when the work area
+/// (menu bar, Dock, taskbar) has no room for it there, it is INSET: moved
+/// fully inside the window, flush with that same edge from the inside, and
+/// the frontend flips its shadow/radii to match (`attachment`).
+///
+/// #201: the inset used to be a plain clamp to the work-area boundary, which
+/// left the tab STRADDLING the edge whenever the window sat less than one tab
+/// height below the menu bar -- half over the titlebar, half above it, with
+/// the "attached" corners of the pill meeting nothing. No shape can seal that
+/// seam, so an inset tab now snaps to the window edge (still inside the work
+/// area). Along the edge's own length the rectangle is only clamped, and that
+/// never changes the attachment.
 pub fn hover_tab_presentation_with_position_and_size(
     window_id: u32,
     frame: WindowFrame,
@@ -420,6 +428,43 @@ pub fn hover_tab_presentation_with_position_and_size(
     let pushed_across_edge = match side {
         HoverTabSide::Top | HoverTabSide::Bottom => clamped(rect.y, raw.y),
         HoverTabSide::Left | HoverTabSide::Right => clamped(rect.x, raw.x),
+    };
+    // #201: an inset tab sits flush INSIDE the window edge, not wherever the
+    // work-area boundary happened to stop it. Still work-area clamped, so a
+    // window whose edge is itself under the menu bar keeps the tab visible.
+    let rect = if pushed_across_edge {
+        let frame_left = frame.x as f64;
+        let frame_top = frame.y as f64;
+        let frame_right = frame_left + frame.width as f64;
+        let frame_bottom = frame_top + frame.height as f64;
+        match side {
+            HoverTabSide::Top => HoverTabRect {
+                y: clamp_origin(frame_top, monitor.top, (monitor.bottom - height).max(monitor.top)),
+                ..rect
+            },
+            HoverTabSide::Bottom => HoverTabRect {
+                y: clamp_origin(
+                    frame_bottom - height,
+                    monitor.top,
+                    (monitor.bottom - height).max(monitor.top),
+                ),
+                ..rect
+            },
+            HoverTabSide::Left => HoverTabRect {
+                x: clamp_origin(frame_left, monitor.left, (monitor.right - width).max(monitor.left)),
+                ..rect
+            },
+            HoverTabSide::Right => HoverTabRect {
+                x: clamp_origin(
+                    frame_right - width,
+                    monitor.left,
+                    (monitor.right - width).max(monitor.left),
+                ),
+                ..rect
+            },
+        }
+    } else {
+        rect
     };
     let attachment = if pushed_across_edge {
         HoverTabAttachment::Inset
@@ -1178,6 +1223,72 @@ mod tests {
             hover_tab_position_for_side_offset(HoverTabSide::Top, 0.5),
         );
         assert_eq!(top_pushed.attachment, HoverTabAttachment::Inset);
+    }
+
+    /// #201: the reporter's geometry -- a window whose top edge sits 23px
+    /// below the menu bar (work area starts at y=25), tab 40px tall. Hanging
+    /// outside would put the tab at y=8, inside the menu bar; the old clamp
+    /// stopped it at y=25, straddling the window's top edge by 17px. Inset
+    /// now means flush inside: the tab's top IS the window's top.
+    #[test]
+    fn inset_tab_sits_flush_inside_the_window_edge_not_straddling_it() {
+        let frame = WindowFrame {
+            x: 300,
+            y: 48,
+            width: 800,
+            height: 600,
+        };
+        let monitor = MonitorBounds::new(0.0, 25.0, 1440.0, 900.0);
+        let top = hover_tab_presentation_with_position(
+            42,
+            frame,
+            monitor,
+            hover_tab_position_for_side_offset(HoverTabSide::Top, 0.5),
+        );
+        assert_eq!(top.attachment, HoverTabAttachment::Inset);
+        assert_eq!(top.rect.y, 48.0, "flush with the window's top edge, from the inside");
+        assert!(top.rect.y >= monitor.top, "never over the menu bar");
+        assert_eq!(top.rect.bottom(), 48.0 + HOVER_TAB_COMPACT_HEIGHT);
+
+        // The same window one tab-height lower has room outside again.
+        let lower = WindowFrame { y: 70, ..frame };
+        let outside = hover_tab_presentation_with_position(
+            42,
+            lower,
+            monitor,
+            hover_tab_position_for_side_offset(HoverTabSide::Top, 0.5),
+        );
+        assert_eq!(outside.attachment, HoverTabAttachment::Outside);
+        assert_eq!(outside.rect.bottom(), 70.0, "hanging off the edge, seam at the titlebar");
+
+        // A window whose top is itself under the menu bar: inset, and the
+        // work area still wins so the tab stays visible.
+        let under = WindowFrame { y: 10, ..frame };
+        let clamped = hover_tab_presentation_with_position(
+            42,
+            under,
+            monitor,
+            hover_tab_position_for_side_offset(HoverTabSide::Top, 0.5),
+        );
+        assert_eq!(clamped.attachment, HoverTabAttachment::Inset);
+        assert_eq!(clamped.rect.y, monitor.top);
+
+        // Every side snaps flush to its own edge when it cannot hang outside.
+        let flush = WindowFrame {
+            x: 0,
+            y: 25,
+            width: 1440,
+            height: 875,
+        };
+        let bottom = hover_tab_presentation_with_side_offset(7, flush, monitor, HoverTabSide::Bottom, 0.5);
+        assert_eq!(bottom.attachment, HoverTabAttachment::Inset);
+        assert_eq!(bottom.rect.bottom(), 900.0);
+        let left = hover_tab_presentation_with_side_offset(7, flush, monitor, HoverTabSide::Left, 0.5);
+        assert_eq!(left.attachment, HoverTabAttachment::Inset);
+        assert_eq!(left.rect.x, 0.0);
+        let right = hover_tab_presentation_with_side_offset(7, flush, monitor, HoverTabSide::Right, 0.5);
+        assert_eq!(right.attachment, HoverTabAttachment::Inset);
+        assert_eq!(right.rect.right(), 1440.0);
     }
 
     #[test]
