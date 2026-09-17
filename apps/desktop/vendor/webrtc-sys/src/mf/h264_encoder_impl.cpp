@@ -41,6 +41,28 @@ namespace webrtc {
 
 namespace {
 
+constexpr size_t kMaxPendingLowLatencyInputs = 2;
+
+HRESULT SetCodecApiBool(ICodecAPI* codec_api, const GUID& key, bool value) {
+  if (!codec_api) {
+    return E_NOINTERFACE;
+  }
+  VARIANT var = {};
+  var.vt = VT_BOOL;
+  var.boolVal = value ? VARIANT_TRUE : VARIANT_FALSE;
+  return codec_api->SetValue(&key, &var);
+}
+
+HRESULT SetCodecApiUint(ICodecAPI* codec_api, const GUID& key, ULONG value) {
+  if (!codec_api) {
+    return E_NOINTERFACE;
+  }
+  VARIANT var = {};
+  var.vt = VT_UI4;
+  var.ulVal = value;
+  return codec_api->SetValue(&key, &var);
+}
+
 // Routes IMFMediaEventGenerator events from the OS callback thread to the
 // encoder thread via a shared AsyncState. Never touches the encoder directly,
 // so the encoder may be destroyed while an event is in flight.
@@ -130,6 +152,7 @@ int32_t MfH264EncoderImpl::InitEncode(const VideoCodec* codec_settings,
   max_framerate_ = codec_settings->maxFramerate > 0 ? codec_settings->maxFramerate : 30;
   target_bps_ = codec_settings->startBitrate * 1000;
   codec_mode_ = codec_settings->mode;
+  low_latency_ = codec_mode_ == VideoCodecMode::kScreensharing;
 
   if (width_ <= 0 || height_ <= 0) {
     RTC_LOG(LS_ERROR) << "MF H264 encoder: unsupported dimensions " << width_
@@ -223,6 +246,11 @@ int32_t MfH264EncoderImpl::InitMft(int width, int height) {
     mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
   }
 
+  // These are static low-latency hints, so apply them before media types are
+  // negotiated. A driver is free to refuse any of them, so the result is logged
+  // once rather than assumed.
+  ApplyLowLatencySettings();
+
   // Rate control is a STATIC MFT property: it has to be set before the media
   // types are negotiated, or an older encoder ignores it. One resolution, one
   // application point -- see ResolveRateControlPolicy for why the codec mode is
@@ -298,6 +326,33 @@ int32_t MfH264EncoderImpl::ReconfigureMft(int new_width, int new_height) {
     return rc;
   }
   return WEBRTC_VIDEO_CODEC_OK;
+}
+
+void MfH264EncoderImpl::ApplyLowLatencySettings() {
+  if (!low_latency_) {
+    return;
+  }
+
+  HRESULT attribute_hr = E_NOINTERFACE;
+  Microsoft::WRL::ComPtr<IMFAttributes> attributes;
+  if (mft_ && SUCCEEDED(mft_->GetAttributes(&attributes))) {
+    attribute_hr = attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
+  }
+  const HRESULT realtime_hr =
+      SetCodecApiBool(codec_api_.Get(), CODECAPI_AVEncCommonRealTime, true);
+  const HRESULT b_picture_hr = SetCodecApiUint(
+      codec_api_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+  const HRESULT ref_frame_hr =
+      SetCodecApiUint(codec_api_.Get(), CODECAPI_AVEncVideoMaxNumRefFrame, 1);
+  // MF_LOW_LATENCY is an attribute rather than a CODECAPI property, so a
+  // rejection here would be silent otherwise; the three CODECAPI sets above
+  // are best-effort by design (the driver is free to refuse them).
+  RTC_LOG(LS_WARNING)
+      << "MF H264 encoder: low latency applied"
+      << " mf_low_latency_hr=0x" << std::hex << attribute_hr
+      << " codecapi_realtime_hr=0x" << realtime_hr
+      << " b_picture_hr=0x" << b_picture_hr
+      << " ref_frame_hr=0x" << ref_frame_hr << std::dec;
 }
 
 int32_t MfH264EncoderImpl::ConfigureMft(int width, int height,
@@ -565,16 +620,41 @@ int32_t MfH264EncoderImpl::Encode(
     return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
   }
 
+  bool dropped_new_input = false;
   {
     std::lock_guard<std::mutex> lock(input_mutex_);
-    pending_input_queue_.push_back(
-        PendingInput{sample, input_frame.rtp_timestamp(), send_key_frame});
-    pending_input_count_.fetch_add(1, std::memory_order_release);
+    if (low_latency_ && pending_input_queue_.size() >= kMaxPendingLowLatencyInputs) {
+      // A screen share wants the newest image, not the latency of an unbounded
+      // backlog, so the pending window is capped at two frames. A pending
+      // keyframe is never dropped for a delta (that would cost the receiver a
+      // decode stall), and a new keyframe displaces the oldest delta.
+      if (send_key_frame) {
+        pending_input_queue_.pop_front();
+        pending_input_count_.fetch_sub(1, std::memory_order_release);
+      } else {
+        const auto delta = std::find_if(
+            pending_input_queue_.begin(), pending_input_queue_.end(),
+            [](const PendingInput& input) { return !input.keyframe; });
+        if (delta == pending_input_queue_.end()) {
+          dropped_new_input = true;
+        } else {
+          pending_input_queue_.erase(delta);
+          pending_input_count_.fetch_sub(1, std::memory_order_release);
+        }
+      }
+    }
+    if (!dropped_new_input) {
+      pending_input_queue_.push_back(
+          PendingInput{sample, input_frame.rtp_timestamp(), send_key_frame});
+      pending_input_count_.fetch_add(1, std::memory_order_release);
+    }
   }
   // Wake the encoder thread: if the MFT is already waiting for input (a
   // NeedInput event was consumed with an empty queue), feed immediately
   // instead of waiting for a fresh event (Chromium's FeedInputs kick).
-  async_state_->cv.notify_all();
+  if (!dropped_new_input) {
+    async_state_->cv.notify_all();
+  }
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
@@ -857,42 +937,35 @@ void MfH264EncoderImpl::SetRates(const RateControlParameters& parameters) {
 //   * QUALITY mode  -> receiver rendered a median ~5.6 fps (766 frames / 137 s)
 //   * driver default -> receiver rendered a median ~29.5 fps (5170 / 317 s)
 //
-// So the defaults are:
+// So the defaults are now Cbr for BOTH sources:
 //
-//   * Screensharing -> DriverDefault: set nothing and let the encoder honour
-//     the bitrate target WebRTC's own estimate produces. Text crispness is
-//     recovered by the link budget, not by overriding the target.
+//   * Screensharing -> Cbr. Moved here from DriverDefault. On the Windows
+//     hardware-encoder route the real startup defect was the ALLOCATION, not the
+//     rate-control mode: WebRTC's estimate sat near 600 kbps for 10-35 s against
+//     a path sustaining ~14 Mbps, and with that little per-frame budget the
+//     encoder clamped QP at its ceiling (`interval_qp` 50.0) for the whole ramp.
+//     Raising the allocation (`TrackPublishOptions::min_bitrate`, 4 Mbps,
+//     released once the estimate clears it) removed the ramp outright. CBR is
+//     kept as the explicit mode because "driver default" is whatever each GPU
+//     vendor decides, which a cross-vendor validation cannot reason about.
 //   * Realtime camera -> Cbr. QUALITY starves camera frames, and the driver's
 //     untouched mode (unconstrained VBR) overshot WebRTC's target by 2.0x,
 //     measured, which cost loss and retransmits; explicit CBR on the same route
 //     cut renderer freezes from 11 to 2.
 //
-// QUALITY stays available to BOTH sources as an explicit experiment via
-// PETAL_MF_QUALITY_MODE=1, because it does make static text measurably crisper
-// (QP 26 -> 16) when the link can afford it. PETAL_MF_CAMERA_RATE_CONTROL is
-// consulted for realtime camera encoders ONLY: letting a camera selector run for
-// screen content is what coupled the two policies in the first place.
+// PETAL_MF_CAMERA_RATE_CONTROL is consulted for realtime camera encoders ONLY:
+// letting a camera selector run for screen content is what coupled the two
+// policies in the first place. The QUALITY policy and its
+// PETAL_MF_QUALITY_MODE / PETAL_MF_SCREEN_QUALITY[_VS_SPEED] knobs were removed
+// after the driver rejected the underlying controls (`quality_hr` 0x80004001,
+// i.e. E_NOTIMPL), so they could never have taken effect.
 MfH264EncoderImpl::RateControlPolicy
 MfH264EncoderImpl::ResolveRateControlPolicy(const char** source) const {
-  const char* quality_override = std::getenv("PETAL_MF_QUALITY_MODE");
-  if (quality_override != nullptr && std::strcmp(quality_override, "1") == 0) {
-    if (source != nullptr) {
-      *source = "env-quality-override";
-    }
-    return RateControlPolicy::Quality;
-  }
-  // "0" forces the non-QUALITY path. That is now the default for both sources,
-  // so this is redundant rather than load-bearing -- it is still honoured
-  // exactly (not ignored) so an existing script keeps a defined meaning.
-  const bool quality_forbidden =
-      quality_override != nullptr && std::strcmp(quality_override, "0") == 0;
-
   if (codec_mode_ == VideoCodecMode::kScreensharing) {
     if (source != nullptr) {
-      *source =
-          quality_forbidden ? "env-nonquality-override" : "screenshare-default";
+      *source = "screenshare-default";
     }
-    return RateControlPolicy::DriverDefault;
+    return RateControlPolicy::Cbr;
   }
 
   const char* camera_arm = std::getenv("PETAL_MF_CAMERA_RATE_CONTROL");
@@ -949,24 +1022,6 @@ void MfH264EncoderImpl::ApplyRateControlPolicy(RateControlPolicy policy,
   switch (policy) {
     case RateControlPolicy::DriverDefault:
       break;
-    case RateControlPolicy::Quality: {
-      policy_name = "quality";
-      VARIANT mode = {};
-      mode.vt = VT_UI4;
-      mode.ulVal = eAVEncCommonRateControlMode_Quality;
-      mode_hr =
-          codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
-      VARIANT quality = {};
-      quality.vt = VT_UI4;
-      quality.ulVal = 100;
-      codec_api_->SetValue(&CODECAPI_AVEncCommonQuality, &quality);
-      VARIANT quality_vs_speed = {};
-      quality_vs_speed.vt = VT_UI4;
-      quality_vs_speed.ulVal = 100;
-      codec_api_->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed,
-                           &quality_vs_speed);
-      break;
-    }
     case RateControlPolicy::Cbr:
     case RateControlPolicy::PeakVbr: {
       const bool peak_constrained = policy == RateControlPolicy::PeakVbr;

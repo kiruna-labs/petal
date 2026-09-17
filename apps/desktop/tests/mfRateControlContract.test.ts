@@ -13,6 +13,14 @@ import test from 'node:test';
 // a fraction of its configured cadence while capture was perfectly healthy.
 // Measured: QUALITY rendered a median ~5.6 fps where the driver default
 // rendered ~29.5 fps against the same 30 fps ceiling.
+//
+// Both sources now default to CBR and the QUALITY policy is gone: the driver
+// rejected the controls it set (`quality_hr` = 0x80004001, E_NOTIMPL), so the
+// arm could never have taken effect. Screen shares moved off the driver
+// default once the real startup defect turned out to be the ALLOCATION rather
+// than the rate-control mode (`TrackPublishOptions::min_bitrate`); CBR is kept
+// because "driver default" is whatever each GPU vendor decides, which a
+// cross-vendor validation cannot reason about.
 
 const encoderCpp = readFileSync(
   new URL('../vendor/webrtc-sys/src/mf/h264_encoder_impl.cpp', import.meta.url),
@@ -41,42 +49,61 @@ test('the codec mode is captured from InitEncode, not guessed', () => {
   assert.match(encoderHeader, /VideoCodecMode codec_mode_/);
 });
 
-test('screensharing defaults to the driver mode, never to QUALITY', () => {
-  const screenBranch = resolvePolicy.indexOf(
+test('screensharing defaults to CBR, never to QUALITY', () => {
+  const screenBranchAt = resolvePolicy.indexOf(
     'codec_mode_ == VideoCodecMode::kScreensharing'
   );
-  assert.notEqual(screenBranch, -1, 'the resolver must branch on the codec mode');
-  const branchBody = resolvePolicy.slice(screenBranch, screenBranch + 400);
+  assert.notEqual(screenBranchAt, -1, 'the resolver must branch on the codec mode');
+  // The screen arm runs until the camera selector is read; slice to that
+  // boundary rather than a fixed width so prose in the resolver cannot
+  // silently push an assertion out of range.
+  const cameraArmAt = resolvePolicy.indexOf('PETAL_MF_CAMERA_RATE_CONTROL', screenBranchAt);
+  assert.notEqual(cameraArmAt, -1, 'the camera arm must close the screen branch');
+  const branchBody = resolvePolicy.slice(screenBranchAt, cameraArmAt);
   assert.match(
     branchBody,
-    /return RateControlPolicy::DriverDefault;/,
-    'a screen share must leave the driver default standing so the bitrate target is honoured'
+    /return RateControlPolicy::Cbr;/,
+    'a screen share must pin an explicit mode so the result is vendor-independent'
   );
   assert.doesNotMatch(
     branchBody,
     /RateControlPolicy::Quality/,
     'QUALITY must not be reachable as a screen-share default'
   );
+  assert.doesNotMatch(
+    branchBody,
+    /RateControlPolicy::DriverDefault/,
+    'the driver default must not be selectable for a screen share at all'
+  );
 });
 
-test('QUALITY is reachable only through the explicit opt-in', () => {
-  const qualityUses = resolvePolicy.match(/RateControlPolicy::Quality/g) ?? [];
-  assert.equal(
-    qualityUses.length,
-    1,
-    'exactly one return may select QUALITY, and it must be the env opt-in'
+test('the QUALITY policy is removed outright', () => {
+  assert.doesNotMatch(
+    encoderCpp,
+    /RateControlPolicy::Quality/,
+    'QUALITY is unreachable and must not linger: the driver rejects its controls'
   );
-  const qualityAt = resolvePolicy.indexOf('RateControlPolicy::Quality');
-  const overrideGuard = resolvePolicy.lastIndexOf(
+  assert.doesNotMatch(
+    encoderHeader,
+    /Quality,/,
+    'the enum variant must be gone, not merely unused'
+  );
+  for (const retired of [
     'PETAL_MF_QUALITY_MODE',
-    qualityAt
-  );
-  assert.notEqual(overrideGuard, -1);
-  assert.match(
-    resolvePolicy.slice(overrideGuard, qualityAt),
-    /std::strcmp\(quality_override, "1"\) == 0/,
-    'QUALITY must require PETAL_MF_QUALITY_MODE=1'
-  );
+    'PETAL_MF_SCREEN_QUALITY',
+    'PETAL_MF_SCREEN_QUALITY_VS_SPEED',
+    'PETAL_MF_SCREEN_RATE_CONTROL',
+    'PETAL_MF_LOW_LATENCY',
+  ]) {
+    // Assert the knob is no longer READ, not that the identifier never appears:
+    // the removal is worth documenting in a comment, and that must not look
+    // like a live configuration path.
+    assert.doesNotMatch(
+      encoderCpp,
+      new RegExp(`getenv\\("${retired}"`),
+      `${retired} must be removed: one defined policy, no A/B arm`
+    );
+  }
 });
 
 test('the camera selector cannot run for a screen encoder', () => {
@@ -162,7 +189,6 @@ test('ApplyRateControlPolicy sets at most one policy per call', () => {
     encoderCpp.indexOf('VideoEncoder::EncoderInfo', start)
   );
   assert.match(body, /case RateControlPolicy::DriverDefault:/);
-  assert.match(body, /case RateControlPolicy::Quality: \{/);
   assert.match(body, /case RateControlPolicy::Cbr:/);
   assert.match(body, /case RateControlPolicy::PeakVbr: \{/);
   // DriverDefault's case body must be empty: it means "set nothing".

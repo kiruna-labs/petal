@@ -97,6 +97,10 @@ class MfH264EncoderImpl : public VideoEncoder {
   void HandleEvent(MediaEventType event_type, HRESULT status);
   void FeedInputs();
   void ProcessOutput();
+  // Best-effort static hints that keep a screen-share MFT shallow (see the
+  // implementation for why each is applied and why a rejection is only
+  // logged). Called from InitMft before the media types are negotiated.
+  void ApplyLowLatencySettings();
   // Complete async-MFT teardown (Chromium MFVEA Reset() sequence).
   void TeardownMft();
 
@@ -104,11 +108,18 @@ class MfH264EncoderImpl : public VideoEncoder {
   // mode (plus documented env overrides), then applied in exactly one place, so
   // that one source's policy can never fall through into the other's.
   enum class RateControlPolicy {
-    // Set nothing and leave the driver's own mode alone. Screensharing default.
+    // Set nothing and leave the driver's own mode alone. No source defaults
+    // here; the screenshare arm returns Cbr unconditionally.
     DriverDefault,
-    // Minimize QP and ignore the bitrate target. Explicit experiment only.
-    Quality,
-    // Constant bitrate at the target. Realtime-camera default.
+    // Constant bitrate at the target. Default for BOTH sources.
+    //
+    // Screensharing moved here from DriverDefault: with the driver's own mode
+    // the hardware encoder clamped QP at its ceiling while the congestion
+    // controller ramped, which was the startup screen-text quality ramp. The
+    // fix that actually removed it was raising the allocation (see
+    // `TrackPublishOptions::min_bitrate`); CBR is kept as the explicit mode
+    // because a driver default is whatever each GPU vendor chooses, which is
+    // not something a cross-vendor validation can reason about.
     Cbr,
     // Bounded VBR: mean at the target, peak at 2x. Camera experiment arm.
     PeakVbr,
@@ -156,6 +167,10 @@ class MfH264EncoderImpl : public VideoEncoder {
   // content want opposite rate control, so the codec mode is a real input to
   // the policy rather than a caller-side detail.
   VideoCodecMode codec_mode_ = VideoCodecMode::kRealtimeVideo;
+  // Screen-share MFTs are kept deliberately shallow: stale frames are less
+  // useful than the newest frame for an interactive share. Enabled whenever
+  // the codec mode is kScreensharing (see InitEncode).
+  bool low_latency_ = false;
   // Bounded `set_rates` diagnostic cadence: the first call proves the MFT
   // accepts a mid-stream target change, then one sample per ~60 updates keeps
   // requested-vs-accepted visible without flooding the log.
