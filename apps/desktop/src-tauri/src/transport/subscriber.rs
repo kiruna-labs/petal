@@ -24,7 +24,7 @@
 //! and asserts/logs what it actually gets back on real subscribed H.264
 //! frames (see its own doc comment below for exactly what was verified).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -3597,15 +3597,15 @@ fn stale_publication_should_retire(silence: Duration) -> bool {
     silence >= STALE_PUBLICATION_RETIRE_AFTER
 }
 
-/// Whether `owner_identity` shares from a browser (participant metadata,
-/// `shared_window_sharer_client_from_metadata`); absent or native reads
-/// false. Looked up live because the watchdog only holds the receive state,
-/// not the participant.
-fn owner_is_web_sharer(room: &Room, owner_identity: &str) -> bool {
+/// The identities in the room that share from a browser (participant
+/// metadata, `shared_window_sharer_client_from_metadata`); absent or native
+/// metadata is not listed. Resolved once per watchdog tick, before the
+/// receive-state lock is taken, because the watchdog only holds receive
+/// state, not participants.
+fn web_sharer_identities(room: &Room) -> HashSet<String> {
     room.remote_participants()
         .values()
-        .find(|participant| participant.identity().to_string() == owner_identity)
-        .is_some_and(|participant| {
+        .filter(|participant| {
             matches!(
                 crate::transport::publisher::shared_window_sharer_client_from_metadata(
                     &participant.metadata()
@@ -3613,6 +3613,8 @@ fn owner_is_web_sharer(room: &Room, owner_identity: &str) -> bool {
                 crate::transport::publisher::SharerClientKind::Web
             )
         })
+        .map(|participant| participant.identity().to_string())
+        .collect()
 }
 
 /// Record that a frame arrived for `key`, or -- #682's item 3 -- signal that
@@ -3743,6 +3745,7 @@ fn retire_no_frame_windows(
     states: &Arc<Mutex<HashMap<ReceiveWindowKey, ReceiveWindowState>>>,
 ) {
     let now = Instant::now();
+    let web_sharers = web_sharer_identities(room);
     let mut retire = Vec::new();
     {
         let guard = states.lock_unpoisoned();
@@ -3754,7 +3757,7 @@ fn retire_no_frame_windows(
                 state.track_muted,
                 state.reconnecting,
                 state.held_no_frames,
-                owner_is_web_sharer(room, &state.owner_identity),
+                web_sharers.contains(&state.owner_identity),
             ) == NoFrameDecision::Retire
             {
                 retire.push((key.clone(), state.clone()));
@@ -3776,7 +3779,7 @@ fn retire_no_frame_windows(
         let silence = now.duration_since(state.last_frame_at.unwrap_or(state.subscribed_at));
         // #202: a browser sharer's silence never reaches the stale backstop --
         // hold for as long as the publication exists.
-        let hard_retire_exempt = owner_is_web_sharer(room, &key.owner_identity);
+        let hard_retire_exempt = web_sharers.contains(&key.owner_identity);
         if publication_exists && (hard_retire_exempt || !stale_publication_should_retire(silence)) {
             let held = crate::compositor::hold_window_last_frame(
                 app,
