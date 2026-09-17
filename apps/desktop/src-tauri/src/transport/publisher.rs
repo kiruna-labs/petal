@@ -238,6 +238,11 @@ pub enum CaptureResolution {
 
 const CAMERA_MAX_BITRATE_BPS: u64 = 2_500_000;
 const CAMERA_MAX_FRAMERATE_FPS: f64 = 30.0;
+/// Highest frame rate `publish_camera` will accept from its caller. The camera
+/// path is the only place a caller-supplied rate reaches an encoding, and the
+/// ceiling formula multiplies by it, so an unclamped value from a capture
+/// backend would raise the published bitrate ask without bound.
+const CAMERA_CAPTURE_FPS_CAP: f64 = 60.0;
 const FULL_SIMULCAST_HALF_MIN_BITRATE_BPS: u64 = 1_250_000;
 const FULL_SIMULCAST_HALF_BASE_PIXELS: u64 = 960 * 540;
 const FULL_SIMULCAST_HALF_MAX_BITRATE_BPS: u64 = 6_000_000;
@@ -1710,7 +1715,8 @@ impl RoomConnection<Arc<Room>> {
             let track_for_floor = track.clone();
             let cancel = background_cancel.clone();
             tokio::spawn(async move {
-                release_startup_min_bitrate(track_for_floor, floor_bps, cancel).await;
+                release_startup_min_bitrate("window-share", track_for_floor, floor_bps, cancel)
+                    .await;
             });
         }
 
@@ -1760,6 +1766,13 @@ impl RoomConnection<Arc<Room>> {
 
         let publish_opts = camera_publish_options(width, height, frame_rate);
         let requested_encoder = publish_opts.video_encoder;
+        // Captured before `publish_track` consumes `publish_opts`; the startup
+        // allocation floor's release task below needs the applied value.
+        let camera_floor_bps = publish_opts.min_bitrate;
+        let configured_bitrate = publish_opts
+            .video_encoding
+            .as_ref()
+            .map(|encoding| encoding.max_bitrate);
 
         self.room
             .local_participant()
@@ -1767,10 +1780,23 @@ impl RoomConnection<Arc<Room>> {
             .await?;
 
         log::info!(
-            "Published camera track '{track_name}' {width}x{height} (H.264, requested encoder: {requested_encoder:?})"
+            "Published camera track '{track_name}' {width}x{height} (H.264, requested encoder: {requested_encoder:?}, max bitrate: {} kbps)",
+            configured_bitrate.unwrap_or_default() / 1000,
         );
 
         let background_cancel = CancellationToken::new();
+        // Same startup-only release as the window share: the camera floor lifts
+        // the congestion controller off its conservative startup estimate and
+        // must not stay pinned afterwards. The release mechanism -- and its
+        // bounds -- are shared so the two policies cannot drift apart on the
+        // rule that a floor is temporary.
+        if let Some(floor_bps) = camera_floor_bps {
+            let track_for_floor = track.clone();
+            let cancel = background_cancel.clone();
+            tokio::spawn(async move {
+                release_startup_min_bitrate("camera", track_for_floor, floor_bps, cancel).await;
+            });
+        }
         {
             let track_for_stats = track.clone();
             tokio::spawn(async move {
@@ -1839,6 +1865,7 @@ fn camera_video_encoding(width: u32, height: u32, frame_rate: f64) -> livekit::o
     const CAMERA_BASELINE_FPS: f64 = 30.0;
     const CAMERA_MIN_BITRATE_BPS: u64 = 500_000;
     const CAMERA_MAX_CEILING_BPS: u64 = 16_000_000;
+    let frame_rate = frame_rate.clamp(0.0, CAMERA_CAPTURE_FPS_CAP);
     let pixels = u64::from(width) * u64::from(height);
     let scaled = CAMERA_MAX_BITRATE_BPS as f64
         * (pixels as f64 / CAMERA_BASELINE_PIXELS as f64)
@@ -1855,13 +1882,15 @@ fn camera_video_encoding(width: u32, height: u32, frame_rate: f64) -> livekit::o
 /// receiver requested HIGH; a single 2.5 Mbps/30 fps encoding keeps startup at
 /// source resolution on every native platform.
 fn camera_publish_options(width: u32, height: u32, frame_rate: f64) -> TrackPublishOptions {
+    let encoding = camera_video_encoding(width, height, frame_rate);
     TrackPublishOptions {
         source: TrackSource::Camera,
         video_codec: VideoCodec::H264,
         video_encoder: select_encoder_backend(),
         simulcast: false,
         simulcast_layers: None,
-        video_encoding: Some(camera_video_encoding(width, height, frame_rate)),
+        min_bitrate: camera_min_bitrate_bps(encoding.max_bitrate),
+        video_encoding: Some(encoding),
         frame_metadata_features: {
             let mut f = livekit::options::FrameMetadataFeatures::default();
             f.user_timestamp = true;
@@ -1913,6 +1942,13 @@ const MIN_BITRATE_CEILING_DIVISOR: u64 = 2;
 /// floor entirely (and is the only way to get the pre-default wire output back,
 /// since the field then stays unset).
 const PETAL_SHARE_MIN_BITRATE_ENV: &str = "PETAL_SHARE_MIN_BITRATE";
+
+/// Override for the camera allocation floor (see [`camera_min_bitrate_bps`]).
+///
+/// Same syntax as [`PETAL_SHARE_MIN_BITRATE_ENV`]: bits per second, `0` to
+/// disable. Bounded by the same half-the-ceiling guard, so this can tune the
+/// camera floor DOWN for an A/B but cannot push it past the guard.
+const PETAL_CAMERA_MIN_BITRATE_ENV: &str = "PETAL_CAMERA_MIN_BITRATE";
 
 /// Resolve a publish-time allocation floor for one track kind.
 ///
@@ -1970,6 +2006,29 @@ fn window_share_min_bitrate_bps(max_bitrate_bps: u64) -> Option<u64> {
         "window-share",
         PETAL_SHARE_MIN_BITRATE_ENV,
         SHARE_MIN_BITRATE_DEFAULT_BPS,
+        max_bitrate_bps,
+    )
+}
+
+/// Camera allocation floor.
+///
+/// Defaults to the most the ceiling guard allows (`max_bitrate_bps / 2`, i.e.
+/// 1.25 Mbps at the normal 720p30 ceiling) rather than to a fixed bps:
+/// `camera_video_encoding` derives the ceiling from resolution and frame rate
+/// (~2.5 Mbps at 720p30, ~0.09 bits/pixel/frame), so one flat default would be
+/// meaningless across 480p..4K. This is the same defect the share floor fixes
+/// -- the encoder clamps QP at its ceiling while WebRTC's estimate is still low
+/// -- on the same MF H.264 encoder, so it takes the same fix.
+///
+/// Note the guard binds much sooner here than for a share: half of ~0.09 bpp is
+/// ~0.045 bpp, so a camera floor cannot reach the ~0.086 bpp that removed the
+/// share's ramp. If this only partly helps, the next lever is the camera
+/// ceiling itself, not this floor.
+fn camera_min_bitrate_bps(max_bitrate_bps: u64) -> Option<u64> {
+    min_bitrate_floor(
+        "camera",
+        PETAL_CAMERA_MIN_BITRATE_ENV,
+        max_bitrate_bps / MIN_BITRATE_CEILING_DIVISOR,
         max_bitrate_bps,
     )
 }
@@ -5000,6 +5059,170 @@ mod track_name_tests {
     }
 
     #[test]
+    fn camera_publish_options_carry_a_bounded_allocation_floor() {
+        let options = camera_publish_options(1280, 720, 30.0);
+        let ceiling = options
+            .video_encoding
+            .as_ref()
+            .expect("camera ceiling")
+            .max_bitrate;
+        assert_eq!(ceiling, CAMERA_MAX_BITRATE_BPS);
+        // Only assert the shipped default when no override is in the
+        // environment, so this documents the value without being env-flaky.
+        if std::env::var(PETAL_CAMERA_MIN_BITRATE_ENV).is_err() {
+            // Half the ceiling, which is the largest value the guard allows.
+            assert_eq!(options.min_bitrate, Some(1_250_000));
+        }
+        assert!(options.min_bitrate.unwrap_or(0) <= ceiling / MIN_BITRATE_CEILING_DIVISOR);
+    }
+
+    #[test]
+    fn camera_floor_default_scales_with_the_ceiling_and_disables_at_zero() {
+        const KEY: &str = "PETAL_TEST_CAMERA_FLOOR_UNUSED";
+        // The default is derived from the ceiling, not pinned to a constant, so
+        // a 1080p camera is not floored at half of a 720p budget.
+        assert_eq!(
+            min_bitrate_floor("camera", KEY, 2_500_000 / 2, 2_500_000),
+            Some(1_250_000)
+        );
+        assert_eq!(
+            min_bitrate_floor("camera", KEY, 5_600_000 / 2, 5_600_000),
+            Some(2_800_000)
+        );
+        // A floor at or above the whole ceiling is clamped, so the allocator
+        // always keeps room to back off.
+        assert_eq!(
+            min_bitrate_floor("camera", KEY, 2_500_000, 2_500_000),
+            Some(1_250_000)
+        );
+        // A ceiling too small to halve leaves no floor at all.
+        assert_eq!(min_bitrate_floor("camera", KEY, 2_500_000, 1), None);
+    }
+
+    #[test]
+    fn the_camera_floor_can_be_disabled_and_the_value_is_validated() {
+        // The real key, so this pins the documented rollback rather than a
+        // stand-in. Restored on the way out so no other test inherits it.
+        let previous = std::env::var_os(PETAL_CAMERA_MIN_BITRATE_ENV);
+
+        std::env::set_var(PETAL_CAMERA_MIN_BITRATE_ENV, "0");
+        assert_eq!(camera_min_bitrate_bps(CAMERA_MAX_BITRATE_BPS), None);
+        assert_eq!(camera_publish_options(1280, 720, 30.0).min_bitrate, None);
+
+        // A value the guard would exceed is clamped, not rejected.
+        std::env::set_var(PETAL_CAMERA_MIN_BITRATE_ENV, "9000000");
+        assert_eq!(
+            camera_min_bitrate_bps(CAMERA_MAX_BITRATE_BPS),
+            Some(CAMERA_MAX_BITRATE_BPS / MIN_BITRATE_CEILING_DIVISOR)
+        );
+
+        // An unparseable value falls back to the default instead of silently
+        // meaning "off" or becoming a nonsense floor.
+        std::env::set_var(PETAL_CAMERA_MIN_BITRATE_ENV, "fast");
+        assert_eq!(
+            camera_min_bitrate_bps(CAMERA_MAX_BITRATE_BPS),
+            Some(CAMERA_MAX_BITRATE_BPS / MIN_BITRATE_CEILING_DIVISOR)
+        );
+
+        match previous {
+            Some(previous) => std::env::set_var(PETAL_CAMERA_MIN_BITRATE_ENV, previous),
+            None => std::env::remove_var(PETAL_CAMERA_MIN_BITRATE_ENV),
+        }
+    }
+
+    // Tiny poll/hold so these exercise the real control flow without making the
+    // suite wait out the shipped 1s/20s bounds.
+    const TEST_FLOOR_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+    const TEST_FLOOR_HOLD: std::time::Duration = std::time::Duration::from_millis(60);
+
+    #[tokio::test]
+    async fn the_startup_floor_is_released_only_once_the_estimate_clears_it() {
+        let cancel = CancellationToken::new();
+        assert_eq!(
+            wait_for_startup_floor_release(4_000_000, TEST_FLOOR_POLL, TEST_FLOOR_HOLD, &cancel, || async {
+                Some(4_000_000.0)
+            })
+            .await,
+            Some(StartupFloorRelease::EstimateCleared),
+            "an estimate at the floor releases it"
+        );
+
+        // One bps short of the floor is not the floor.
+        let cancel = CancellationToken::new();
+        assert_eq!(
+            wait_for_startup_floor_release(4_000_000, TEST_FLOOR_POLL, TEST_FLOOR_HOLD, &cancel, || async {
+                Some(3_999_999.0)
+            })
+            .await,
+            Some(StartupFloorRelease::HoldExpired),
+            "a sub-floor estimate never clears it; the bounded hold does"
+        );
+
+        // No succeeded candidate pair yet is not evidence either way, so it
+        // holds rather than releasing a floor nothing has justified. The hold
+        // still bounds it: a link that never reports a pair cannot pin the
+        // allocator for the whole call.
+        let cancel = CancellationToken::new();
+        assert_eq!(
+            wait_for_startup_floor_release(4_000_000, TEST_FLOOR_POLL, TEST_FLOOR_HOLD, &cancel, || async {
+                None
+            })
+            .await,
+            Some(StartupFloorRelease::HoldExpired),
+            "a missing estimate holds, then expires"
+        );
+
+        // A poll that errors out is retried rather than treated as an estimate.
+        let cancel = CancellationToken::new();
+        let polls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let polls_for_task = polls.clone();
+        assert_eq!(
+            wait_for_startup_floor_release(4_000_000, TEST_FLOOR_POLL, TEST_FLOOR_HOLD, &cancel, || {
+                let polls = polls_for_task.clone();
+                async move {
+                    polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Some(500_000.0)
+                }
+            })
+            .await,
+            Some(StartupFloorRelease::HoldExpired)
+        );
+        assert!(
+            polls.load(std::sync::atomic::Ordering::Relaxed) > 1,
+            "the estimate must be re-read every poll"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_startup_floor_stops_polling_without_releasing_it() {
+        // The publication this floor belonged to is gone, so the waiter must
+        // return without touching the (now dead) sender, and without waiting
+        // out the hold.
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        let polls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let polls_for_task = polls.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_startup_floor_release(4_000_000, TEST_FLOOR_POLL, TEST_FLOOR_HOLD, &cancel_for_task, || {
+                let polls = polls_for_task.clone();
+                async move {
+                    polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Some(1.0)
+                }
+            })
+            .await
+        });
+        cancel.cancel();
+        let released = tokio::time::timeout(TEST_FLOOR_HOLD * 20, waiter)
+            .await
+            .expect("cancellation must not wait out the hold")
+            .expect("the waiter must not panic");
+        assert_eq!(released, None, "a cancelled floor is never released");
+        // At most the poll already in flight when the token was cancelled.
+        assert!(polls.load(std::sync::atomic::Ordering::Relaxed) <= 1);
+    }
+
+    #[test]
     fn camera_publish_options_pin_single_source_encoding() {
         let options = camera_publish_options(1280, 720, 30.0);
 
@@ -5391,6 +5614,22 @@ mod track_name_tests {
         assert_eq!(camera_video_encoding(640, 480, 15.0).max_bitrate, 500_000);
         assert_eq!(camera_video_encoding(1920, 1080, 30.0).max_framerate, 30.0);
         assert_eq!(camera_video_encoding(1280, 720, 60.0).max_framerate, 60.0);
+    }
+
+    #[test]
+    fn camera_frame_rate_is_capped_at_the_accepted_ceiling() {
+        // A capture backend reporting an absurd rate must not raise the
+        // published ask: the ceiling formula multiplies by the frame rate, so
+        // an unclamped 240 would quadruple it.
+        assert_eq!(
+            camera_video_encoding(1280, 720, 240.0).max_bitrate,
+            camera_video_encoding(1280, 720, CAMERA_CAPTURE_FPS_CAP).max_bitrate
+        );
+        assert_eq!(camera_video_encoding(1280, 720, 240.0).max_framerate, 60.0);
+        // The cap is an upper bound only: anything at or below it is unchanged,
+        // and a nonsensical negative rate floors at zero rather than wrapping.
+        assert_eq!(camera_video_encoding(1280, 720, 30.0).max_framerate, 30.0);
+        assert_eq!(camera_video_encoding(1280, 720, -5.0).max_framerate, 0.0);
     }
 
     #[test]
@@ -8201,7 +8440,59 @@ const STARTUP_MIN_BITRATE_MAX_HOLD: std::time::Duration = std::time::Duration::f
 /// How often to re-check the estimate while the floor is held.
 const STARTUP_MIN_BITRATE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Release the window-share allocation floor once it has done its job.
+/// Why a startup allocation floor stopped being held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupFloorRelease {
+    /// The congestion controller's own estimate reached the floor.
+    EstimateCleared,
+    /// The bounded hold expired without the estimate ever clearing it.
+    HoldExpired,
+}
+
+/// Hold a startup allocation floor until it has done its job, the caller gives
+/// up, or the bounded hold expires.
+///
+/// `estimate_bps` is called once per `poll` and returns the selected candidate
+/// pair's congestion-controller estimate, or `None` while no succeeded pair
+/// exists. `None` is not evidence either way, so it keeps holding.
+///
+/// Returns `None` when `cancel` fires: the publication this floor belonged to is
+/// gone, so there is nothing left to release and no reason to keep polling its
+/// stats.
+///
+/// Split out from the release itself, and with `poll`/`hold` as parameters
+/// rather than constants, so the estimate threshold, the bounded hold and the
+/// cancellation are deterministically testable without a live sender or a
+/// multi-second test run.
+async fn wait_for_startup_floor_release<F, Fut>(
+    floor_bps: u64,
+    poll: std::time::Duration,
+    hold: std::time::Duration,
+    cancel: &CancellationToken,
+    mut estimate_bps: F,
+) -> Option<StartupFloorRelease>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<f64>>,
+{
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() >= hold {
+            return Some(StartupFloorRelease::HoldExpired);
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return None,
+            _ = tokio::time::sleep(poll) => {},
+        }
+        if let Some(estimate_bps) = estimate_bps().await {
+            if estimate_bps >= floor_bps as f64 {
+                return Some(StartupFloorRelease::EstimateCleared);
+            }
+        }
+    }
+}
+
+/// Release a publication's allocation floor once it has done its job.
 ///
 /// The floor lifts the congestion controller off its conservative startup
 /// estimate (measured: ~600 kbps for 10-35 s against a path sustaining
@@ -8212,46 +8503,46 @@ const STARTUP_MIN_BITRATE_POLL: std::time::Duration = std::time::Duration::from_
 ///
 /// Logs the release reason at `info`, and warns when the cap was the reason,
 /// since that means the floor was pinned longer than the path justified.
+/// `label` names the track kind in those lines and nothing else.
 async fn release_startup_min_bitrate(
+    label: &str,
     track: LocalVideoTrack,
     floor_bps: u64,
     cancel: CancellationToken,
 ) {
     let started = std::time::Instant::now();
-    loop {
-        if started.elapsed() >= STARTUP_MIN_BITRATE_MAX_HOLD {
-            log::warn!(
-                "publisher: window-share min bitrate floor={floor_bps}bps still held after {}s without the estimate clearing it; releasing so the congestion controller regains control",
-                STARTUP_MIN_BITRATE_MAX_HOLD.as_secs()
-            );
-            break;
-        }
-        tokio::select! {
-            _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(STARTUP_MIN_BITRATE_POLL) => {},
-        }
-        let stats = match track.get_stats().await {
-            Ok(stats) => stats,
-            Err(_) => continue,
-        };
-        let Some((estimate_bps, _)) = selected_pair_estimate(&stats) else {
-            continue;
-        };
-        if estimate_bps >= floor_bps as f64 {
-            log::info!(
-                "publisher: window-share min bitrate floor={floor_bps}bps released after {}ms (estimate={estimate_bps:.0}bps)",
-                started.elapsed().as_millis()
-            );
-            break;
-        }
+    let release = wait_for_startup_floor_release(
+        floor_bps,
+        STARTUP_MIN_BITRATE_POLL,
+        STARTUP_MIN_BITRATE_MAX_HOLD,
+        &cancel,
+        || {
+            let track = track.clone();
+            async move {
+                let stats = track.get_stats().await.ok()?;
+                selected_pair_estimate(&stats).map(|(estimate_bps, _)| estimate_bps)
+            }
+        },
+    )
+    .await;
+    match release {
+        None => return,
+        Some(StartupFloorRelease::EstimateCleared) => log::info!(
+            "publisher: {label} min bitrate floor={floor_bps}bps released after {}ms (the congestion controller's estimate cleared it)",
+            started.elapsed().as_millis()
+        ),
+        Some(StartupFloorRelease::HoldExpired) => log::warn!(
+            "publisher: {label} min bitrate floor={floor_bps}bps still held after {}s without the estimate clearing it; releasing so the congestion controller regains control",
+            STARTUP_MIN_BITRATE_MAX_HOLD.as_secs()
+        ),
     }
     match track.clear_publishing_min_bitrate() {
-        Ok(true) => {
-            log::info!("publisher: window-share allocation floor cleared; congestion controller has full range")
-        }
-        Ok(false) => log::info!("publisher: window-share allocation floor was already clear"),
+        Ok(true) => log::info!(
+            "publisher: {label} allocation floor cleared; congestion controller has full range"
+        ),
+        Ok(false) => log::info!("publisher: {label} allocation floor was already clear"),
         Err(error) => {
-            log::warn!("publisher: failed to clear the window-share allocation floor: {error}")
+            log::warn!("publisher: failed to clear the {label} allocation floor: {error}")
         }
     }
 }
