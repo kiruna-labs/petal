@@ -1671,8 +1671,9 @@ impl RoomConnection<Arc<Room>> {
         // assume the preference took effect (see module doc comment).
         {
             let track_for_stats = track.clone();
+            let cancel = background_cancel.clone();
             tokio::spawn(async move {
-                log_encoder_once(track_for_stats, encoder_origin, encoder_recovery).await;
+                log_encoder_once(track_for_stats, encoder_origin, encoder_recovery, cancel).await;
             });
         }
         // #907 review finding 4/6: shared (not per-task-snapshotted) state so
@@ -1695,6 +1696,7 @@ impl RoomConnection<Arc<Room>> {
             let quality_for_stats = shared_quality.clone();
             let width_for_stats = published_width.clone();
             let height_for_stats = published_height.clone();
+            let cancel = background_cancel.clone();
             tokio::spawn(async move {
                 log_window_share_encoder_stats(
                     track_for_stats,
@@ -1702,6 +1704,7 @@ impl RoomConnection<Arc<Room>> {
                     width_for_stats,
                     height_for_stats,
                     simulcast_ladder,
+                    cancel,
                 )
                 .await;
             });
@@ -1799,8 +1802,15 @@ impl RoomConnection<Arc<Room>> {
         }
         {
             let track_for_stats = track.clone();
+            let cancel = background_cancel.clone();
             tokio::spawn(async move {
-                log_encoder_once(track_for_stats, EncoderPublishOrigin::Ordinary, None).await;
+                log_encoder_once(
+                    track_for_stats,
+                    EncoderPublishOrigin::Ordinary,
+                    None,
+                    cancel,
+                )
+                .await;
             });
         }
 
@@ -2802,6 +2812,19 @@ pub fn identity_palette_index_from_metadata(metadata: &str) -> Option<u8> {
     (raw < 6).then_some(raw as u8)
 }
 
+/// Whether `metadata` contains Petal's authoritative shared-window title
+/// map. An empty map is meaningful: it is the metadata state after the last
+/// share stopped. Callers use this distinction to avoid treating unrelated or
+/// legacy participant metadata as a teardown signal.
+pub fn has_shared_window_title_metadata(metadata: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata) else {
+        return false;
+    };
+    value
+        .get(PETAL_WINDOW_TITLES_METADATA_KEY)
+        .is_some_and(serde_json::Value::is_object)
+}
+
 pub fn shared_window_title_from_metadata(metadata: &str, window_id: u32) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(metadata).ok()?;
     value
@@ -3670,6 +3693,23 @@ mod track_name_tests {
             Some("Terminal"),
             "other keys still round-trip beside plugins"
         );
+    }
+
+    #[test]
+    fn shared_window_title_metadata_map_distinguishes_active_and_cleared_shares() {
+        let mut metadata = ShareMetadata::default();
+        metadata.titles.insert(7, "Terminal".to_string());
+        assert!(has_shared_window_title_metadata(&encode_window_metadata(
+            &metadata
+        )));
+
+        metadata.titles.remove(&7);
+        let cleared = encode_window_metadata(&metadata);
+        assert!(has_shared_window_title_metadata(&cleared));
+        assert_eq!(shared_window_title_from_metadata(&cleared, 7), None);
+
+        assert!(!has_shared_window_title_metadata("{}"));
+        assert!(!has_shared_window_title_metadata("not json"));
     }
 
     #[test]
@@ -6947,6 +6987,10 @@ impl PublishedTrack {
     /// republishes on a stable resize (its VideoToolbox encoder lifecycle
     /// tolerates re-creation; the MF/NVENC path on Windows must not).
     pub async fn unpublish(&self) -> Result<(), RoomConnectionError> {
+        // Diagnostics are local to this publication. Stop them before the
+        // network tail so a failed/delayed unpublish cannot leave a poller
+        // querying a dead sender.
+        self.background_cancel.cancel();
         // Debug/test-only fault injection for the real hover-tab toggle path.
         // This lets the cockpit hold or fail the network tail after the local
         // capture/border boundary without changing release behavior (#420).
@@ -7701,19 +7745,31 @@ impl PublishedTrack {
     }
 }
 
+impl Drop for PublishedTrack {
+    fn drop(&mut self) {
+        // Idempotent fallback for any path that drops a publication without
+        // going through `unpublish` (a failed connect, a replaced share, a
+        // panic in the caller). Cancelling twice is a no-op.
+        self.background_cancel.cancel();
+    }
+}
+
 async fn log_encoder_once(
     track: LocalVideoTrack,
     origin: EncoderPublishOrigin,
     recovery: Option<PostWakeEncoderFallbackRecovery>,
+    cancel: CancellationToken,
 ) {
     let track_name = track.name().to_string();
     log_encoder_once_with(
         &track_name,
         || {
             let track = track.clone();
+            let cancel = cancel.clone();
             async move {
-                let Ok(stats) = track.get_stats().await else {
-                    return None;
+                let stats = tokio::select! {
+                    _ = cancel.cancelled() => return None,
+                    result = track.get_stats() => result.ok()?,
                 };
                 let sender_parameters = track.publishing_layer_parameters();
                 log::info!(
@@ -7744,7 +7800,15 @@ async fn log_encoder_once(
                 })
             }
         },
-        || tokio::time::sleep(std::time::Duration::from_millis(500)),
+        || {
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    _ = cancel.cancelled() => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {},
+                }
+            }
+        },
         origin,
         recovery,
     )
@@ -8553,6 +8617,7 @@ async fn log_window_share_encoder_stats(
     published_width: Arc<std::sync::atomic::AtomicU32>,
     published_height: Arc<std::sync::atomic::AtomicU32>,
     ladder: FullShareSimulcastLadder,
+    cancel: CancellationToken,
 ) {
     let mut guard: Option<RungStarvationGuard> = None;
     let mut guard_initialized = false;
@@ -8563,21 +8628,30 @@ async fn log_window_share_encoder_stats(
     let mut last_stats_error_logged: Option<std::time::Instant> = None;
     const STATS_ERROR_LOG_THROTTLE: std::time::Duration = std::time::Duration::from_secs(60);
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let stats = match track.get_stats().await {
-            Ok(stats) => stats,
-            Err(error) => {
-                let should_log = last_stats_error_logged
-                    .is_none_or(|last| last.elapsed() >= STATS_ERROR_LOG_THROTTLE);
-                if should_log {
-                    last_stats_error_logged = Some(std::time::Instant::now());
-                    log::warn!(
-                        "publisher: window-share encoder stats poll failed for '{}': {error:?} (throttled to once per {}s; the #907 starvation guard riding on this poll cannot observe funding while this persists)",
-                        track.name(),
-                        STATS_ERROR_LOG_THROTTLE.as_secs()
-                    );
+        // A publication that no longer exists must not keep polling: the guard
+        // riding on this poll has nothing left to observe, and libwebrtc would
+        // be asked for RTP parameters of a retired SSRC.
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
+        }
+        let stats = tokio::select! {
+            _ = cancel.cancelled() => break,
+            result = track.get_stats() => match result {
+                Ok(stats) => stats,
+                Err(error) => {
+                    let should_log = last_stats_error_logged
+                        .is_none_or(|last| last.elapsed() >= STATS_ERROR_LOG_THROTTLE);
+                    if should_log {
+                        last_stats_error_logged = Some(std::time::Instant::now());
+                        log::warn!(
+                            "publisher: window-share encoder stats poll failed for '{}': {error:?} (throttled to once per {}s; the #907 starvation guard riding on this poll cannot observe funding while this persists)",
+                            track.name(),
+                            STATS_ERROR_LOG_THROTTLE.as_secs()
+                        );
+                    }
+                    continue;
                 }
-                continue;
             }
         };
         if !guard_initialized {

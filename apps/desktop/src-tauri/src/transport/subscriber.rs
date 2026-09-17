@@ -2672,11 +2672,34 @@ pub(crate) fn start_compositor_feed(
                             continue;
                         }
                         let window_id = window.window_id;
+                        // The pinned SDK can fail to deliver the remote
+                        // TrackUnpublished event when the sharer's sender
+                        // teardown negotiation fails or races with a leave.
+                        // The sender still clears this authoritative Petal
+                        // metadata after stopping the share, so use that
+                        // update as a visual-teardown fallback. Restrict it
+                        // to metadata carrying Petal's title map; arbitrary
+                        // or legacy participant metadata must not close a
+                        // live compositor window.
+                        let has_title_metadata =
+                            crate::transport::publisher::has_shared_window_title_metadata(
+                                &metadata,
+                            );
                         let source_title =
                             crate::transport::publisher::shared_window_title_from_metadata(
                                 &metadata, window_id,
-                            )
-                            .unwrap_or_else(|| window.source_title.clone());
+                            );
+                        if has_title_metadata && source_title.is_none() {
+                            log::info!(
+                                "windows compositor feed: metadata no longer declares window {window_id} from '{owner_identity}', removing stale window"
+                            );
+                            let key = (owner_identity.clone(), window_id);
+                            crate::windows_compositor::remove_window(&app, key.clone()).await;
+                            window_subscribed_at.remove(&key);
+                            continue;
+                        }
+                        let source_title =
+                            source_title.unwrap_or_else(|| window.source_title.clone());
                         let source_kind =
                             crate::transport::publisher::shared_window_kind_from_metadata(
                                 &metadata, window_id,
@@ -3751,12 +3774,12 @@ fn retire_no_frame_windows(
     for (key, state) in retire {
         let window_id = key.window_id;
         // #627: decide BEFORE touching the receive state. A stall is not an
-        // ended share: while the SFU still holds a publication the share is
-        // real and merely not arriving, so hiding the window would make a live
-        // share vanish. Hold its last frame and KEEP the receive state, so this
-        // watchdog can re-arm if the stall later becomes a real disappearance.
-        // (Removing it made the watchdog one-shot and, combined with the
-        // registry drop, left the window with no teardown path at all.)
+        // ended share during the initial recovery window: while the SFU still
+        // holds a publication the share may be real and merely not arriving,
+        // so hiding it immediately would make a live share vanish. Hold its
+        // last frame and KEEP the receive state, but only until the hard
+        // stale-publication deadline. A source crash can leave the publication
+        // present with no sender able to negotiate its removal.
         let publication_exists =
             window_publication_exists(room, &key.owner_identity, window_id, &[]);
         let silence = now.duration_since(state.last_frame_at.unwrap_or(state.subscribed_at));
@@ -3860,6 +3883,148 @@ mod tests {
             no_frame_decision(hard_stale, subscribed, Some(subscribed), false, true, false),
             NoFrameDecision::Keep
         );
+    }
+
+    #[test]
+    fn low_fps_does_not_trigger_receiver_downgrade() {
+        // A low decoded rate is ambiguous: capture, source adaptation, and
+        // encoding can all cause it. Only a silent subscription is eligible
+        // for the deliberate lower-layer fallback.
+        assert_eq!(
+            starvation_action(Duration::from_secs(4), false, None, 0),
+            StarvationAction::Keep
+        );
+        assert_eq!(
+            starvation_action(STARVATION_DOWNGRADE_AFTER, false, None, 0),
+            StarvationAction::DowngradeToLow
+        );
+    }
+
+    #[test]
+    fn windows_media_lifecycle_acceptance_matrix_covers_weak_receiver_and_republish() {
+        assert_eq!(
+            teardown_decision(Some("old"), "old", true),
+            TeardownDecision::HoldForReplacement
+        );
+        assert_eq!(
+            teardown_decision(Some("old"), "old", false),
+            TeardownDecision::RemoveWindow
+        );
+        assert_eq!(
+            teardown_decision(Some("new"), "old", false),
+            TeardownDecision::IgnoreSuperseded
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_media_lifecycle_runtime_matrix_drives_terminal_events() {
+        // Drive the production lifecycle helpers in the same order as the
+        // Windows SDK events: delayed unpublish, replacement, terminal stop,
+        // then reconnect/leave. This is intentionally an executable matrix,
+        // not a source-shape assertion.
+        let states: Arc<Mutex<HashMap<ReceiveWindowKey, ReceiveWindowState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let key = ReceiveWindowKey::new("windows-runtime-owner".to_string(), 9001);
+        let old_cancel = CancellationToken::new();
+        insert_window_state(
+            &states,
+            key.clone(),
+            ReceiveWindowState::new(
+                "windows-runtime-owner".to_string(),
+                "petal-window-9001".to_string(),
+                VideoColorProfile::BT601_VIDEO,
+                Instant::now(),
+                old_cancel.clone(),
+            ),
+        );
+
+        // A transient unsubscribe holds the state; it is not a terminal
+        // removal while the SFU can still deliver a replacement publication.
+        assert_eq!(
+            teardown_decision(Some("sid-old"), "sid-old", true),
+            TeardownDecision::HoldForReplacement
+        );
+        let old_task = tokio::spawn({
+            let cancel = old_cancel.clone();
+            async move {
+                let mut stream = futures::stream::pending::<()>();
+                assert!(matches!(
+                    next_frame_or_cancelled(&mut stream, &cancel).await,
+                    FrameOrCancelled::Cancelled
+                ));
+            }
+        });
+        tokio::task::yield_now().await;
+
+        // The real replacement path inserts through this helper. It must
+        // cancel the old decoder even when no explicit remove event arrived.
+        let new_cancel = CancellationToken::new();
+        insert_window_state(
+            &states,
+            key.clone(),
+            ReceiveWindowState::new(
+                "windows-runtime-owner".to_string(),
+                "petal-window-9001-replacement".to_string(),
+                VideoColorProfile::BT601_VIDEO,
+                Instant::now(),
+                new_cancel.clone(),
+            ),
+        );
+        tokio::time::timeout(Duration::from_secs(2), old_task)
+            .await
+            .expect("replacement must cancel the old decoder")
+            .expect("old decoder task must not panic");
+        assert!(!new_cancel.is_cancelled());
+
+        // A genuine terminal unpublish removes the successor and cancels its
+        // decoder; a stale old event cannot remove it first.
+        assert_eq!(
+            teardown_decision(Some("sid-new"), "sid-old", false),
+            TeardownDecision::IgnoreSuperseded
+        );
+        assert_eq!(
+            teardown_decision(Some("sid-new"), "sid-new", false),
+            TeardownDecision::RemoveWindow
+        );
+        assert!(remove_window_state(&states, &key).is_some());
+        assert!(new_cancel.is_cancelled());
+        assert!(states.lock_unpoisoned().is_empty());
+
+        // Reconnect/leave drains every remaining decode loop through the same
+        // production helper used by the feed loop.
+        let mut handles = Vec::new();
+        for window_id in [9002_u32, 9003_u32] {
+            let reconnect_key =
+                ReceiveWindowKey::new("windows-runtime-owner".to_string(), window_id);
+            let cancel = CancellationToken::new();
+            insert_window_state(
+                &states,
+                reconnect_key,
+                ReceiveWindowState::new(
+                    "windows-runtime-owner".to_string(),
+                    format!("petal-window-{window_id}"),
+                    VideoColorProfile::BT601_VIDEO,
+                    Instant::now(),
+                    cancel.clone(),
+                ),
+            );
+            handles.push(tokio::spawn(async move {
+                let mut stream = futures::stream::pending::<()>();
+                assert!(matches!(
+                    next_frame_or_cancelled(&mut stream, &cancel).await,
+                    FrameOrCancelled::Cancelled
+                ));
+            }));
+        }
+        tokio::task::yield_now().await;
+        cancel_all_window_states(&states);
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("reconnect must terminate every decoder")
+                .expect("reconnect decoder task must not panic");
+        }
+        assert!(states.lock_unpoisoned().is_empty());
     }
 
     // ---- Starvation watchdog policy --------------------------------------

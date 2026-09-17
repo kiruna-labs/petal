@@ -4552,6 +4552,11 @@ async fn start_share_with_capture_source(
         };
         joined.room_connection.clone()
     };
+    // Capture the room generation alongside the connection. The rest of this
+    // function can await capture startup, a network publish and metadata
+    // reconciliation for seconds; a leave/rejoin during that gap must not let
+    // the old start commit a share -- or start its audio -- in the new room.
+    let share_generation = state.current_room_generation();
 
     let priority_value = crate::share_priority::current();
     let priority = Arc::new(Mutex::new(priority_value));
@@ -4742,24 +4747,35 @@ async fn start_share_with_capture_source(
             .await
         }
     };
-    // A layout failure can race the network publish. Never construct or insert
-    // an ActiveShare for that track: retire a just-published track locally,
-    // stop capture, and surface the same stable code as first-frame failure.
-    if layout_gate.is_failed() {
+    // Two independent refusals can race the network publish: the layout never
+    // became valid, or the room this share belongs to was left/rejoined while
+    // capture and signaling were in flight. Neither may construct or insert an
+    // ActiveShare for that track, so both retire a just-published track
+    // locally, stop capture, and clear the metadata they just wrote.
+    //
+    // A stale generation reports `NotInRoom` rather than a capture failure:
+    // there is no share to surface a layout error for, and the caller's toast
+    // map already has a truthful arm for "this window's room is gone".
+    let room_generation_stale = !share_generation.is_current();
+    if layout_gate.is_failed() || room_generation_stale {
         if let Ok(track) = &published_result {
             let _ = track.unpublish().await;
         }
         let _ = stop_capture_with_timeout(
             Arc::new(capture),
-            format!(
-                "session: start_share(window {window_id}) capture-layout-invalid during publish"
-            ),
+            format!("session: start_share(window {window_id}) abandoned during publish"),
         )
         .await;
         clear_failed_start_metadata(&state.share_metadata_apply_lock, || {
             room_connection.clear_shared_window_title_for_generation(window_id, started_seq)
         })
         .await;
+        if room_generation_stale {
+            log::warn!(
+                "session: start_share(window {window_id}) abandoned -- the room generation changed while capture and signaling were in flight"
+            );
+            return Err(ShareSessionError::NotInRoom);
+        }
         emit_capture_layout_invalid(diagnostic_source, CaptureLayoutStage::Publish);
         return Err(ShareSessionError::Capture(
             crate::capture::CAPTURE_LAYOUT_INVALID.to_string(),
@@ -4933,7 +4949,12 @@ async fn start_share_with_capture_source(
         republish_intent,
         url_refresh,
     });
-    let window_id_to_demote = layout_gate.activate_if_valid(|| {
+    // `activate_if_valid` only knows about the layout gate, so a stale room
+    // generation is refused before it is consulted. This closure is what
+    // inserts the ActiveShare -- and therefore what starts the pump, the
+    // monitor and the share's audio -- so skipping it is the whole fix.
+    let window_id_to_demote = if share_generation.is_current() {
+        layout_gate.activate_if_valid(|| {
         let mut guard = state.inner.lock_unpoisoned();
         let previously_focused = guard.focused_window();
         guard.shares.insert(
@@ -4960,7 +4981,10 @@ async fn start_share_with_capture_source(
             seed_startup_grace_demand(&mut guard, demote_id, Instant::now());
         }
         demote
-    });
+    })
+    } else {
+        None
+    };
     let window_id_to_demote = match window_id_to_demote {
         Some(demote) => demote,
         None => {
@@ -4986,6 +5010,12 @@ async fn start_share_with_capture_source(
                 room_connection.clear_shared_window_title_for_generation(window_id, started_seq)
             })
             .await;
+            if !share_generation.is_current() {
+                log::warn!(
+                    "session: start_share(window {window_id}) abandoned -- the room generation changed before activation"
+                );
+                return Err(ShareSessionError::NotInRoom);
+            }
             emit_capture_layout_invalid(diagnostic_source, CaptureLayoutStage::Publish);
             return Err(ShareSessionError::Capture(
                 crate::capture::CAPTURE_LAYOUT_INVALID.to_string(),
