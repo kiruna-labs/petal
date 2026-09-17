@@ -24,23 +24,41 @@ test('camera-off tiles hide the bottom-left name chip', async () => {
   assert.match(body, /display\s*:\s*none/i);
 });
 
-test('meeting tile grid has responsive breakpoints through phone widths', async () => {
+test('#204 the meeting tile grid places cells from the shared packer and never decides columns itself', async () => {
   const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
   const tilesMatch = /\.tiles\s*\{(?<body>[^}]+)\}/.exec(css);
   const tilesBody = tilesMatch?.groups?.body ?? '';
 
-  assert.match(
-    tilesBody,
-    /grid-template-columns\s*:\s*repeat\(auto-fit,\s*minmax\(min\(100%,\s*var\(--tile-min\)\),\s*1fr\)\)/i
-  );
+  assert.match(tilesBody, /grid-template-columns\s*:\s*repeat\(var\(--gallery-cols\),\s*minmax\(0,\s*1fr\)\)/i);
+  assert.match(tilesBody, /grid-template-rows\s*:\s*repeat\(var\(--gallery-rows\),\s*minmax\(0,\s*1fr\)\)/i);
+  assert.match(tilesBody, /place-items\s*:\s*center/i);
+  assert.match(tilesBody, /gap\s*:\s*var\(--gallery-gap\)/i);
+  assert.doesNotMatch(css, /auto-fit/i, 'CSS must not pick a column count of its own');
+  assert.doesNotMatch(css, /--tile-min\b/, 'the minmax breakpoint knobs are gone with the packer');
+  assert.doesNotMatch(css, /--tile-row-min\b/);
 
+  const tileSizing = /\.tiles\.layout-grid\s*>\s*\.tile\s*\{(?<body>[^}]+)\}/.exec(css)?.groups?.body ?? '';
+  assert.match(tileSizing, /width\s*:\s*min\(100%,\s*var\(--gallery-tile-width\)\)/i);
+  assert.match(tileSizing, /height\s*:\s*min\(100%,\s*var\(--gallery-tile-height\)\)/i);
+  assert.match(tileSizing, /aspect-ratio\s*:\s*16\s*\/\s*9/i);
+});
+
+test('meeting tile breakpoints still tighten gap and padding through phone widths', async () => {
+  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
   for (const width of [1024, 760, 560, 420]) {
     assert.match(css, new RegExp(`@media\\s*\\(max-width:\\s*${width}px\\)`, 'i'));
   }
-
-  const phoneMatch = /@media\s*\(max-width:\s*560px\)\s*\{(?<body>[\s\S]+?)@media\s*\(max-width:\s*420px\)/i.exec(
-    css
-  );
+  const phoneMatch = /@media\s*\(max-width:\s*560px\)\s*\{(?<body>[\s\S]+?)@media\s*\(max-width:\s*420px\)/i.exec(css);
   const phoneBody = phoneMatch?.groups?.body ?? '';
-  assert.match(phoneBody, /\.tiles\s*\{[\s\S]*grid-template-columns\s*:\s*minmax\(0,\s*1fr\)/i);
+  // Several `.tiles {` blocks can sit inside that region; the phone override
+  // is the one with the 10px gap, and none of them may set a column count.
+  const phoneTilesBodies = [...phoneBody.matchAll(/\.tiles\s*\{(?<body>[^}]+)\}/g)].map((m) => m.groups?.body ?? '');
+  assert.ok(phoneTilesBodies.length > 0, 'the 560px block still tunes .tiles');
+  assert.ok(
+    phoneTilesBodies.some((body) => /--tile-gap\s*:\s*10px/i.test(body) && /--tile-pad\s*:\s*12px/i.test(body)),
+    'the phone override keeps the tighter gap and padding'
+  );
+  for (const body of phoneTilesBodies) {
+    assert.doesNotMatch(body, /grid-template-columns/i, 'a phone width is a packer input, not a CSS override');
+  }
 });

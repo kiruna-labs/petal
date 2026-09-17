@@ -1250,22 +1250,35 @@ input[type='text']:disabled {
   color: var(--text-primary);
 }
 
-/* Tile grid — continuous reflow like Gallery.svelte (auto-fit/minmax). */
+/* Tile grid (#204 PR2): the shape comes from the shared packer
+   (shared/logic/galleryGeometry.ts via tileLayout.ts) as --gallery-* vars, the
+   same source the desktop gallery uses. This CSS only places the computed
+   cells and keeps the 16:9 tile box; it never decides columns itself. */
 .tiles {
-  --tile-min: 220px;
-  --tile-row-min: 140px;
   --tile-gap: 16px;
   --tile-pad: 20px;
+  --gallery-cols: 1;
+  --gallery-rows: 1;
+  --gallery-tile-width: 100%;
+  --gallery-tile-height: 100%;
+  --gallery-gap: var(--tile-gap);
 
   flex: 1;
   min-height: 0;
   padding: var(--tile-pad);
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--tile-min)), 1fr));
-  grid-auto-rows: minmax(var(--tile-row-min), 1fr);
-  gap: var(--tile-gap);
+  grid-template-columns: repeat(var(--gallery-cols), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--gallery-rows), minmax(0, 1fr));
+  place-items: center;
+  gap: var(--gallery-gap);
   overflow: auto;
   align-content: start;
+}
+
+.tiles.layout-grid > .tile {
+  width: min(100%, var(--gallery-tile-width));
+  height: min(100%, var(--gallery-tile-height));
+  aspect-ratio: 16 / 9;
 }
 
 .tiles.layout-spotlight {
@@ -1307,7 +1320,7 @@ input[type='text']:disabled {
 .tile {
   position: relative;
   min-width: 0;
-  min-height: var(--tile-row-min);
+  min-height: 0;
   border-radius: var(--radius-tile);
   overflow: hidden;
   background: var(--surface);
@@ -3534,8 +3547,6 @@ canvas#test-canvas.p613-presentation-source {
 
 @media (max-width: 1024px) {
   .tiles {
-    --tile-min: 190px;
-    --tile-row-min: 132px;
     --tile-gap: 14px;
     --tile-pad: 16px;
   }
@@ -3560,8 +3571,6 @@ canvas#test-canvas.p613-presentation-source {
   }
 
   .tiles {
-    --tile-min: 170px;
-    --tile-row-min: 128px;
     --tile-gap: 12px;
     --tile-pad: 14px;
   }
@@ -3606,12 +3615,8 @@ canvas#test-canvas.p613-presentation-source {
   }
 
   .tiles {
-    --tile-min: 0px;
-    --tile-row-min: 176px;
     --tile-gap: 10px;
     --tile-pad: 12px;
-
-    grid-template-columns: minmax(0, 1fr);
   }
 
   .tiles.layout-spotlight {
@@ -3649,7 +3654,6 @@ canvas#test-canvas.p613-presentation-source {
   }
 
   .tiles {
-    --tile-row-min: 152px;
     --tile-gap: 9px;
     --tile-pad: 10px;
   }
