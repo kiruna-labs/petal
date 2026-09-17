@@ -2523,6 +2523,46 @@ pub(crate) fn open_window_frames(app: &AppHandle) -> Vec<(u32, f64, f64, f64, f6
     out
 }
 
+/// `open_window_frames` narrowed to `owner_identity`'s windows whose panel
+/// is actually VISIBLE (a held window stays open, #627; a retired or hidden
+/// one is not on screen). The Test Cockpit's SHARE-W2N-STALL (#202) samples
+/// these regions from the display -- keyed by the REMOTE window id, which is
+/// not a CG window number on this machine, so `platform::cg` cannot answer
+/// this; only the panel's own frame can.
+pub(crate) fn visible_window_frames_for_participant(
+    app: &AppHandle,
+    owner_identity: &str,
+) -> Vec<(u32, f64, f64, f64, f64)> {
+    let keys: Vec<RemoteWindowKey> = with_state(|s| {
+        s.windows
+            .keys()
+            .filter(|key| key.owner_identity == owner_identity)
+            .cloned()
+            .collect()
+    });
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let Some(window) = app.get_webview_window(&panel_label_for_key(&key)) else {
+            continue;
+        };
+        if !window.is_visible().unwrap_or(false) {
+            continue;
+        }
+        let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+            continue;
+        };
+        let scale = window.scale_factor().unwrap_or(1.0);
+        out.push((
+            key.window_id,
+            pos.x as f64 / scale,
+            pos.y as f64 / scale,
+            size.width as f64 / scale,
+            size.height as f64 / scale,
+        ));
+    }
+    out
+}
+
 fn content_frame_from_panel_bounds(x: f64, y: f64, width: f64, height: f64) -> Option<WindowFrame> {
     let content_height = height - HEADER_HEIGHT;
     if width <= 0.0 || content_height <= 0.0 {
@@ -4083,6 +4123,13 @@ fn drain_pending_display_samples_on_main(app: &AppHandle, key: &RemoteWindowKey)
             "compositor: window {} from '{}' resumed live media; clearing held-frame state",
             key.window_id,
             key.owner_identity
+        );
+        crate::diagnostics::journal_media(
+            app,
+            format!(
+                "stall: window {} from '{}' resumed live media",
+                key.window_id, key.owner_identity
+            ),
         );
         set_window_media_paused(app, &key.owner_identity, key.window_id, false);
     }

@@ -683,6 +683,11 @@ export interface HarnessCallbacks {
   submitMeetingField: () => Promise<void>;
   // controls
   startTestPatternShare: () => Promise<void>;
+  /** #202 / SHARE-W2N-STALL: freeze / resume the synthetic pattern so the
+   * published share goes static and comes back. */
+  pauseTestPattern: () => void;
+  resumeTestPattern: () => void;
+  isTestPatternAnimating: () => boolean;
   startCockpitWebcam: () => Promise<{ trackName: string }>;
   stopCockpitWebcam: () => Promise<{ trackName: string; stopped: boolean }>;
   startCockpitAudioTone: () => Promise<{ trackName: string }>;

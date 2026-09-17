@@ -2554,6 +2554,18 @@ pub(crate) fn record_video_stream_state_internal(
 }
 
 #[cfg(target_os = "macos")]
+/// Journal a receive-side stall/recovery transition under the "media"
+/// category so an in-process observer (the Test Cockpit's SHARE-W2N-STALL,
+/// #202) can read the receiver's timeline off `DiagnosticsState::journal()`
+/// instead of the log file. Callers keep their own `log::` line; this is the
+/// machine-readable copy, prefixed `stall:`.
+pub(crate) fn journal_media(app: &tauri::AppHandle, message: String) {
+    use tauri::Manager as _;
+    if let Some(state) = app.try_state::<DiagnosticsState>() {
+        state.journal_append(app, "media", message);
+    }
+}
+
 pub(crate) fn record_native_video_stream_state(
     app: &tauri::AppHandle,
     participant_identity: &str,

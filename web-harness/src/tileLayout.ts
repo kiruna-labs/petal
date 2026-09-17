@@ -1,6 +1,7 @@
 import type { HarnessContext, HarnessState, TileLayoutMode } from './context';
 import { HARNESS_TILE_LAYOUT_STORAGE_KEY } from './constants';
 import { getTileReflowController } from './tileReflow.ts';
+import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
 import {
   autoSpotlight,
   chooseSpotlightHero,
@@ -47,6 +48,68 @@ export function setupTileLayout(ctx: HarnessContext) {
   let nextTileOrder = 0;
   let spotlightStrip: HTMLDivElement | null = null;
   const tileReflow = getTileReflowController(tilesEl);
+  // #204 PR2: the web grid packs tiles with the SAME shared geometry the
+  // desktop gallery uses (shared/logic/galleryGeometry.ts). CSS only places
+  // the computed cells; the shape (columns x rows, tile px, gap) comes from
+  // here. `lastGalleryLayout` feeds hysteresis so a near-tied shape does not
+  // flip during a drag-resize.
+  let lastGalleryLayout: { count: number; columns: number; rows: number } | null = null;
+
+  function cssPx(value: string | null | undefined): number {
+    const parsed = parseFloat(value ?? '');
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  /** The surface the packer may use: the grid's client box minus its padding
+   * (the same measurement Gallery.svelte takes). */
+  function tileSurfaceSize(): { width: number; height: number; gap: number | undefined } {
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(tilesEl) : null;
+    const width = Math.max(
+      0,
+      (tilesEl.clientWidth ?? 0) - cssPx(style?.paddingLeft) - cssPx(style?.paddingRight)
+    );
+    const height = Math.max(
+      0,
+      (tilesEl.clientHeight ?? 0) - cssPx(style?.paddingTop) - cssPx(style?.paddingBottom)
+    );
+    const gapValue = style?.getPropertyValue('--tile-gap');
+    const gap = gapValue ? cssPx(gapValue) : undefined;
+    return { width, height, gap: gap && gap > 0 ? gap : undefined };
+  }
+
+  /**
+   * Pack the grid: count x surface -> `--gallery-*` on the tiles element.
+   * Spotlight mode owns its own template (`.tiles.layout-spotlight`), so it
+   * is left alone. Safe with no layout engine (zero surface): nothing is set.
+   */
+  function applyGridGeometry() {
+    if (tilesEl.classList.contains('layout-spotlight')) return;
+    const count = tilesEl.querySelectorAll('.tile').length;
+    const { width, height, gap } = tileSurfaceSize();
+    if (count === 0 || width <= 0 || height <= 0) return;
+    const layout = computeGalleryLayout(count, width, height, {
+      gap,
+      arrangement: 'auto',
+      previous: lastGalleryLayout,
+    });
+    lastGalleryLayout = { count, columns: layout.columns, rows: layout.rows };
+    tilesEl.style.setProperty('--gallery-cols', String(layout.columns));
+    tilesEl.style.setProperty('--gallery-rows', String(layout.rows));
+    tilesEl.style.setProperty('--gallery-tile-width', `${layout.tileWidth}px`);
+    tilesEl.style.setProperty('--gallery-tile-height', `${layout.tileHeight}px`);
+    tilesEl.style.setProperty('--gallery-gap', `${layout.gap}px`);
+  }
+
+  // A pure resize repacks without FLIP (the tiles are not moving between
+  // slots, the slots are moving); joins, leaves and mode changes repack
+  // inside `applyTileLayout`'s animated mutation below. Guarded like
+  // viewerDemand.ts: the harness also runs under node tests with no layout.
+  if (typeof ResizeObserver === 'function') {
+    const observer = new ResizeObserver(() => {
+      tileReflow.withoutAnimation(applyGridGeometry);
+    });
+    observer.observe(tilesEl);
+  }
 
   function rememberTileOrder(tile: HTMLDivElement) {
     if (tileOrder.has(tile)) return;
@@ -160,6 +223,7 @@ export function setupTileLayout(ctx: HarnessContext) {
         ? (tiles.find((tile) => tile.id === state.pinnedTileId) ?? null)
         : null;
       arrangeSpotlightTiles(tiles, spotlight);
+      applyGridGeometry();
     });
     tiles.forEach((tile) => {
       const pinned = spotlightActive && tile.id === state.pinnedTileId;
@@ -295,6 +359,7 @@ export function setupTileLayout(ctx: HarnessContext) {
 
   return {
     applyTileLayout,
+    applyGridGeometry,
     applySpeakingRings,
     startSpeakerSmoothing,
     smoothSpeakingScores,

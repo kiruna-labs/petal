@@ -241,6 +241,10 @@
       "tier": "quick"
     },
     {
+      "id": "SHARE-W2N-STALL",
+      "tier": "quick"
+    },
+    {
       "id": "DRAW-N",
       "tier": "quick"
     },
@@ -1838,6 +1842,17 @@
       "depth": "short",
       "status": "partial",
       "runnable": "SHARE-DESKTOP",
+      "legacy": []
+    },
+    {
+      "id": "SHARE-11",
+      "title": "Source pause recovery",
+      "feature": "A",
+      "direction": "web-nat",
+      "priority": "P0",
+      "depth": "short-long",
+      "status": "covered",
+      "runnable": "SHARE-W2N-STALL",
       "legacy": []
     },
     {

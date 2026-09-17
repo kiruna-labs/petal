@@ -1,3 +1,40 @@
+# Petal patch: roll back a rejected publisher answer and re-offer (#169)
+
+## Why this exists
+
+`PeerTransport::set_remote_description` propagated any libwebrtc rejection of
+an answer and left the transport in `HaveLocalOffer`. Every later
+`create_and_send_offer` then saw that state, set `renegotiate = true` and
+returned `Ok` without sending, and `renegotiate` was consumed only after a
+SUCCESSFUL remote description -- which never came. Reconnect triggers only on
+ICE failure or signal close, so with healthy ICE the publisher was wedged for
+the rest of the call: every later share or camera publish returned Ok and sent
+nothing (Sentry PETAL-DESKTOP-19; the trigger was a pruned-simulcast answer on
+a just-stopped sender, "Cannot disable encodings on a stopped sender").
+
+The pre-patch `renegotiate` branch also called `create_and_send_offer` with the
+transport's async mutex still held, and that function locks the same mutex --
+a self-deadlock the first time the branch ran.
+
+## The fix
+
+`set_remote_description` returns `RemoteDescriptionOutcome`. When libwebrtc
+rejects a description while a local offer is outstanding, the offer is rolled
+back (`SdpType::Rollback`; Unified Plan keeps locally added transceivers) and
+one replacement offer is created and sent through `on_offer`; the caller gets
+`RolledBackAndRenegotiating` and `RtcSession` keeps waiting for the
+replacement's answer instead of treating the rejection as "answer received".
+Recovery is bounded (`MAX_CONSECUTIVE_ROLLBACKS`); past it the error
+propagates and the session's reconnect owns it. The lock is released before
+every re-offer. `peer_transport` is `pub` so the desktop crate's test suite
+drives the real transport against two in-process peer connections
+(`transport::negotiation_recovery` tests).
+
+## Updating
+
+Drop this patch once upstream rolls back and re-offers on a rejected answer
+(or otherwise never leaves the publisher in `HaveLocalOffer` after a failure).
+
 # Petal patch: transceiver direction for unpublish teardown
 
 ## Why this exists

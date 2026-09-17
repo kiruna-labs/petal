@@ -70,6 +70,7 @@ python3 -c "import json;[print(o['payload']['scenarioId'],o['payload']['verdict'
 ```
 
 Expected green: `PLUGIN-BOOT`, `SHARE-N2W-Q`, `SHARE-W2N-Q` (29–31fps),
+`SHARE-W2N-STALL` (~2.5 min: a 90 s browser-source freeze plus resume, #202),
 `DRAW-N`, `CAM` (~19–22fps), `AUD`, `TELE`, `SHARE-DESKTOP`.
 
 `SHARE-DESKTOP` runs last and takes ~60s on its own: it is the only scenario

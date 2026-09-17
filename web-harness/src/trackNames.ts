@@ -246,6 +246,9 @@ export interface CockpitReportMessage {
   strokeDelivered?: boolean;
   telepointerMoved?: boolean;
   heartbeatCount?: number;
+  /** #202 / SHARE-W2N-STALL: the sharer's pattern frame counter at a
+   * `pattern-frozen` / `pattern-animated` acknowledgement. */
+  patternFrameCount?: number;
   heartbeatOk?: boolean;
   stallWatchOk?: boolean;
   participantCount?: number;
@@ -312,10 +315,19 @@ export interface CockpitReportMessage {
  * other web peers of a multi-peer scenario also receive on this topic); a
  * `target` identity, when present, must equal the receiving peer's own.
  */
+export const COCKPIT_COMMANDS = ['disconnect', 'pattern-freeze', 'pattern-animate'] as const;
+export type CockpitCommand = (typeof COCKPIT_COMMANDS)[number];
+
+/**
+ * `pattern-freeze` / `pattern-animate` (#202, SHARE-W2N-STALL): stop and
+ * restart the synthetic test-pattern animation so this peer's published share
+ * goes static and then changes again. The peer acknowledges with a
+ * `pattern-frozen` / `pattern-animated` report step.
+ */
 export interface CockpitCommandMessage {
   v: 1;
   kind: 'command';
-  command: 'disconnect';
+  command: CockpitCommand;
   target?: string;
   sentAtMs: number;
 }
