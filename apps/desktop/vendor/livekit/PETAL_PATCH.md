@@ -351,7 +351,10 @@ caller already builds with `..Default::default()`), rename the existing
 floor in a thin wrapper to the top encoding (the one with the largest
 `max_bitrate`). `None` leaves the computed encodings untouched.
 
-**Revert:** `git checkout -- src/room/options.rs`, or unset
-`PETAL_SHARE_MIN_BITRATE`, which alone restores prior behaviour.
+**Revert:** `git checkout -- src/room/options.rs`. Unsetting the floor's own
+overrides restores prior behaviour without reverting anything: both
+`PETAL_SHARE_MIN_BITRATE` (window share) and `PETAL_CAMERA_MIN_BITRATE`
+(camera) default to an applied floor, so every caller that opts in needs its
+own variable set to `0`.
 
 **Updating:** drop once upstream exposes an allocation floor on the publish path.
