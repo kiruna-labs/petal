@@ -56,7 +56,7 @@ use crate::{
     room::{e2ee::manager::E2eeManager, DisconnectReason},
     rtc_engine::{
         lk_runtime::LkRuntime,
-        peer_transport::PeerTransport,
+        peer_transport::{PeerTransport, RemoteDescriptionOutcome},
         rtc_events::{RtcEvent, RtcEvents},
     },
     track::LocalTrack,
@@ -1290,7 +1290,19 @@ impl SessionInner {
 
                 let answer =
                     SessionDescription::parse(&answer.sdp, answer.r#type.parse().unwrap()).unwrap(); // Unwrap is ok, the server shouldn't give us an invalid sdp
-                self.publisher_pc.set_remote_description(answer).await?;
+                match self.publisher_pc.set_remote_description(answer).await? {
+                    RemoteDescriptionOutcome::Applied => {}
+                    RemoteDescriptionOutcome::RolledBackAndRenegotiating => {
+                        // Petal patch (#169): the answer was rejected and a
+                        // replacement offer is in flight. This is not the
+                        // answer the negotiation loop is waiting for; leave
+                        // `waiting_for_answer` armed for the replacement's.
+                        log::warn!(
+                            "publisher answer rejected; replacement offer sent, still waiting for its answer (#169)"
+                        );
+                        return Ok(());
+                    }
+                }
 
                 if self.single_pc_mode {
                     self.process_remote_track_addition(&self.publisher_pc.peer_connection());

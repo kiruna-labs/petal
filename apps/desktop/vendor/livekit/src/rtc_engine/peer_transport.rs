@@ -18,6 +18,7 @@ use std::{
 };
 
 use libwebrtc::prelude::*;
+
 use livekit_protocol as proto;
 use parking_lot::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
@@ -25,6 +26,29 @@ use tokio::sync::Mutex as AsyncMutex;
 use super::EngineResult;
 
 pub type OnOfferCreated = Box<dyn FnMut(SessionDescription) + Send + Sync>;
+
+/// Petal patch (#169): `PeerTransport::new` takes the signal target, and the
+/// crate's `proto` module does not re-export it; the desktop crate's
+/// transport tests need it to build a real transport.
+pub use proto::SignalTarget;
+
+/// Petal patch (#169): what `set_remote_description` did with the description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDescriptionOutcome {
+    /// The description was applied.
+    Applied,
+    /// libwebrtc rejected the description while this transport had a local
+    /// offer outstanding. The offer was rolled back and a replacement offer was
+    /// created and handed to `on_offer`; the caller must keep waiting for the
+    /// replacement's answer and must NOT treat this as the answer arriving.
+    RolledBackAndRenegotiating,
+}
+
+/// Petal patch (#169): consecutive rejected answers that were each rolled
+/// back and re-offered. A duplicate or stale answer to a replacement offer
+/// fails the same way, so recovery is bounded rather than a loop; past the
+/// bound the error propagates and the session's reconnect owns it.
+const MAX_CONSECUTIVE_ROLLBACKS: u32 = 3;
 
 struct TransportInner {
     pending_candidates: Vec<IceCandidate>,
@@ -34,6 +58,7 @@ struct TransportInner {
     // Publish-side target bitrate (bps) for offer munging
     max_send_bitrate_bps: Option<u64>,
     pending_initial_offer: Option<SessionDescription>,
+    consecutive_rollbacks: u32,
 }
 
 pub struct PeerTransport {
@@ -66,6 +91,7 @@ impl PeerTransport {
                 single_pc_mode,
                 max_send_bitrate_bps: None,
                 pending_initial_offer: None,
+                consecutive_rollbacks: 0,
             })),
         }
     }
@@ -107,30 +133,83 @@ impl PeerTransport {
         Ok(())
     }
 
+    /// Petal patch (#169): a remote description libwebrtc rejects while a
+    /// local offer is outstanding used to leave this transport in
+    /// `HaveLocalOffer` for the rest of the call. Every later
+    /// `create_and_send_offer` then saw that state, set `renegotiate` and
+    /// returned Ok without sending -- and `renegotiate` is only consumed after
+    /// a SUCCESSFUL remote description, which never came. Reconnect triggers
+    /// only on ICE failure or signal close, so a healthy-ICE wedge was
+    /// permanent: every later publish reported success and sent nothing
+    /// (Sentry PETAL-DESKTOP-19, "Cannot disable encodings on a stopped
+    /// sender" from a pruned-simulcast answer).
+    ///
+    /// Now the rejected offer is rolled back (`SdpType::Rollback`, which keeps
+    /// locally added transceivers under Unified Plan) and one replacement
+    /// offer is created and sent. The replacement carries the current
+    /// transceiver state, so the next answer cannot fail the same way.
+    ///
+    /// The lock is released before any re-offer: `create_and_send_offer`
+    /// takes `inner` itself, and the pre-patch `renegotiate` branch called it
+    /// with the guard held -- a self-deadlock on the async mutex the first
+    /// time that branch ran.
     pub async fn set_remote_description(
         &self,
         remote_description: SessionDescription,
-    ) -> EngineResult<()> {
+    ) -> EngineResult<RemoteDescriptionOutcome> {
         let mut inner = self.inner.lock().await;
 
         if let Some(pending_offer) = inner.pending_initial_offer.take() {
             self.peer_connection.set_local_description(pending_offer).await?;
         }
 
-        self.peer_connection.set_remote_description(remote_description).await?;
+        let had_local_offer =
+            self.peer_connection.signaling_state() == SignalingState::HaveLocalOffer;
+
+        if let Err(error) = self.peer_connection.set_remote_description(remote_description).await {
+            if !had_local_offer {
+                return Err(error.into());
+            }
+            inner.consecutive_rollbacks += 1;
+            let rollbacks = inner.consecutive_rollbacks;
+            if rollbacks > MAX_CONSECUTIVE_ROLLBACKS {
+                log::error!(
+                    "peer transport {:?}: remote description rejected {rollbacks} times in a row; giving up on rollback recovery: {error:?}",
+                    self.signal_target
+                );
+                return Err(error.into());
+            }
+            log::warn!(
+                "peer transport {:?}: remote description rejected while a local offer was outstanding ({error:?}); rolling the offer back and re-offering (attempt {rollbacks}/{MAX_CONSECUTIVE_ROLLBACKS}, #169)",
+                self.signal_target
+            );
+            inner.restarting_ice = false;
+            inner.renegotiate = false;
+            drop(inner);
+            let rollback = SessionDescription::parse("", SdpType::Rollback).map_err(|parse| {
+                super::EngineError::Internal(
+                    format!("could not build an SDP rollback: {parse}").into(),
+                )
+            })?;
+            self.peer_connection.set_local_description(rollback).await?;
+            self.create_and_send_offer(OfferOptions::default()).await?;
+            return Ok(RemoteDescriptionOutcome::RolledBackAndRenegotiating);
+        }
 
         for ic in inner.pending_candidates.drain(..) {
             self.peer_connection.add_ice_candidate(ic).await?;
         }
 
         inner.restarting_ice = false;
+        inner.consecutive_rollbacks = 0;
+        let renegotiate = std::mem::take(&mut inner.renegotiate);
+        drop(inner);
 
-        if inner.renegotiate {
-            inner.renegotiate = false;
+        if renegotiate {
             self.create_and_send_offer(OfferOptions::default()).await?;
         }
 
-        Ok(())
+        Ok(RemoteDescriptionOutcome::Applied)
     }
 
     pub async fn create_anwser(

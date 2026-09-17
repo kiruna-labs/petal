@@ -41,7 +41,9 @@ use crate::{ChatMessage, E2eeManager, TranscriptionSegment};
 
 mod dc_sender;
 pub mod lk_runtime;
-mod peer_transport;
+/// Petal patch (#169): public so the desktop crate can drive the real
+/// transport against two in-process peer connections in its test suite.
+pub mod peer_transport;
 mod reconnect_strategy;
 mod rtc_events;
 mod rtc_session;
