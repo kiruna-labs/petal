@@ -24,7 +24,7 @@
 //! and asserts/logs what it actually gets back on real subscribed H.264
 //! frames (see its own doc comment below for exactly what was verified).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -60,6 +60,18 @@ const NO_FRAME_RETIRE_AFTER: Duration = Duration::from_secs(30);
 /// dedup-aware, a live-but-parked share starts being retired a minute later.
 /// Keep the parked refresh period far below this value, or teach the
 /// retirement path that the source is intentionally parked rather than dead.
+///
+/// A BROWSER sharer has no such re-push (#202): a static canvas or page
+/// (`captureStream`) and a throttled background tab emit nothing, so media
+/// silence is its normal parked state, not a crash signature. The runner
+/// reproduced the field report from that: a web share frozen for 60 s was
+/// retired here with the publication still live and never restored when
+/// frames resumed, because the receive state (and decode loop) were gone.
+/// Web sharers are therefore EXEMPT from this deadline: the window holds its
+/// last frame while the SFU holds the publication, the starvation loop keeps
+/// probing and requesting repair, and the decode loop clears the hold when
+/// frames resume. A dead browser loses its participant and publication,
+/// which the reconcile `Orphaned` path retires.
 const STALE_PUBLICATION_RETIRE_AFTER: Duration = Duration::from_secs(60);
 const FRAME_HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// Receiver-side starvation policy (Windows decode loop): once a window has
@@ -3542,6 +3554,11 @@ fn no_frame_decision(
     track_muted: bool,
     reconnecting: bool,
     already_held: bool,
+    // #202: the owner is a browser sharer, whose silence is not a crash
+    // signature -- see `STALE_PUBLICATION_RETIRE_AFTER`. A held (or muted)
+    // window from such a sharer is never re-evaluated by this watchdog; the
+    // publication going away is what retires it.
+    hard_retire_exempt: bool,
 ) -> NoFrameDecision {
     let last_media_at = last_frame_at.unwrap_or(subscribed_at);
     let silence = now.duration_since(last_media_at);
@@ -3559,14 +3576,14 @@ fn no_frame_decision(
     // mute -- for example an occlusion optimisation -- cannot silently
     // suppress this deadline; that change should revisit the bound below
     // rather than inherit it.
-    if track_muted && silence < STALE_PUBLICATION_RETIRE_AFTER {
+    if track_muted && (hard_retire_exempt || silence < STALE_PUBLICATION_RETIRE_AFTER) {
         return NoFrameDecision::Keep;
     }
     // A normal hold is one-shot so it does not repeatedly request repair, but
     // it must become eligible again at the hard stale-publication deadline.
     // Otherwise a source crash after the initial hold leaves the window held
     // forever because the receive state is intentionally retained.
-    if already_held && silence < STALE_PUBLICATION_RETIRE_AFTER {
+    if already_held && (hard_retire_exempt || silence < STALE_PUBLICATION_RETIRE_AFTER) {
         return NoFrameDecision::Keep;
     }
     if silence >= NO_FRAME_RETIRE_AFTER {
@@ -3578,6 +3595,26 @@ fn no_frame_decision(
 
 fn stale_publication_should_retire(silence: Duration) -> bool {
     silence >= STALE_PUBLICATION_RETIRE_AFTER
+}
+
+/// The identities in the room that share from a browser (participant
+/// metadata, `shared_window_sharer_client_from_metadata`); absent or native
+/// metadata is not listed. Resolved once per watchdog tick, before the
+/// receive-state lock is taken, because the watchdog only holds receive
+/// state, not participants.
+fn web_sharer_identities(room: &Room) -> HashSet<String> {
+    room.remote_participants()
+        .values()
+        .filter(|participant| {
+            matches!(
+                crate::transport::publisher::shared_window_sharer_client_from_metadata(
+                    &participant.metadata()
+                ),
+                crate::transport::publisher::SharerClientKind::Web
+            )
+        })
+        .map(|participant| participant.identity().to_string())
+        .collect()
 }
 
 /// Record that a frame arrived for `key`, or -- #682's item 3 -- signal that
@@ -3708,6 +3745,7 @@ fn retire_no_frame_windows(
     states: &Arc<Mutex<HashMap<ReceiveWindowKey, ReceiveWindowState>>>,
 ) {
     let now = Instant::now();
+    let web_sharers = web_sharer_identities(room);
     let mut retire = Vec::new();
     {
         let guard = states.lock_unpoisoned();
@@ -3719,6 +3757,7 @@ fn retire_no_frame_windows(
                 state.track_muted,
                 state.reconnecting,
                 state.held_no_frames,
+                web_sharers.contains(&state.owner_identity),
             ) == NoFrameDecision::Retire
             {
                 retire.push((key.clone(), state.clone()));
@@ -3738,7 +3777,10 @@ fn retire_no_frame_windows(
         let publication_exists =
             window_publication_exists(room, &key.owner_identity, window_id, &[]);
         let silence = now.duration_since(state.last_frame_at.unwrap_or(state.subscribed_at));
-        if publication_exists && !stale_publication_should_retire(silence) {
+        // #202: a browser sharer's silence never reaches the stale backstop --
+        // hold for as long as the publication exists.
+        let hard_retire_exempt = web_sharers.contains(&key.owner_identity);
+        if publication_exists && (hard_retire_exempt || !stale_publication_should_retire(silence)) {
             let held = crate::compositor::hold_window_last_frame(
                 app,
                 &key.owner_identity,
@@ -3833,16 +3875,16 @@ mod tests {
         let subscribed = Instant::now();
         let hard_stale = subscribed + STALE_PUBLICATION_RETIRE_AFTER;
         assert_eq!(
-            no_frame_decision(hard_stale, subscribed, Some(subscribed), false, false, true),
+            no_frame_decision(hard_stale, subscribed, Some(subscribed), false, false, true, false),
             NoFrameDecision::Retire
         );
         assert_eq!(
-            no_frame_decision(hard_stale, subscribed, Some(subscribed), true, false, false),
+            no_frame_decision(hard_stale, subscribed, Some(subscribed), true, false, false, false),
             NoFrameDecision::Retire
         );
         // A reconnect is never terminal, at any silence.
         assert_eq!(
-            no_frame_decision(hard_stale, subscribed, Some(subscribed), false, true, false),
+            no_frame_decision(hard_stale, subscribed, Some(subscribed), false, true, false, false),
             NoFrameDecision::Keep
         );
     }
@@ -4559,7 +4601,7 @@ mod tests {
         let subscribed = Instant::now();
         let now = subscribed + NO_FRAME_RETIRE_AFTER + Duration::from_secs(1);
         assert_eq!(
-            no_frame_decision(now, subscribed, Some(subscribed), false, false, false),
+            no_frame_decision(now, subscribed, Some(subscribed), false, false, false, false),
             NoFrameDecision::Retire
         );
     }
@@ -4569,16 +4611,16 @@ mod tests {
         let subscribed = Instant::now();
         let recent = subscribed + Duration::from_secs(10);
         assert_eq!(
-            no_frame_decision(recent, subscribed, Some(subscribed), false, false, false),
+            no_frame_decision(recent, subscribed, Some(subscribed), false, false, false, false),
             NoFrameDecision::Keep
         );
         let stale = subscribed + NO_FRAME_RETIRE_AFTER + Duration::from_secs(1);
         assert_eq!(
-            no_frame_decision(stale, subscribed, Some(subscribed), true, false, false),
+            no_frame_decision(stale, subscribed, Some(subscribed), true, false, false, false),
             NoFrameDecision::Keep
         );
         assert_eq!(
-            no_frame_decision(stale, subscribed, Some(subscribed), false, true, false),
+            no_frame_decision(stale, subscribed, Some(subscribed), false, true, false, false),
             NoFrameDecision::Keep
         );
     }
@@ -4792,12 +4834,49 @@ mod tests {
         let subscribed = Instant::now();
         let stale = subscribed + NO_FRAME_RETIRE_AFTER + Duration::from_secs(1);
         assert_eq!(
-            no_frame_decision(stale, subscribed, Some(subscribed), false, false, true),
+            no_frame_decision(stale, subscribed, Some(subscribed), false, false, true, false),
             NoFrameDecision::Keep
         );
         // ...and still fires the first time.
         assert_eq!(
-            no_frame_decision(stale, subscribed, Some(subscribed), false, false, false),
+            no_frame_decision(stale, subscribed, Some(subscribed), false, false, false, false),
+            NoFrameDecision::Retire
+        );
+    }
+
+    /// #202: a browser sharer's media silence is its normal parked state
+    /// (no static re-push, throttled tabs), so once held it is never handed
+    /// back to the retire path by this watchdog -- at the hard deadline or
+    /// long past it -- while a native sharer still is. The first stall still
+    /// fires (so the hold + repair request happen); the publication going
+    /// away is what retires a web window.
+    #[test]
+    fn a_web_sharer_held_window_outlives_the_hard_stale_deadline() {
+        let subscribed = Instant::now();
+        let hard_stale = subscribed + STALE_PUBLICATION_RETIRE_AFTER;
+        let hours_later = subscribed + Duration::from_secs(4 * 3600);
+        for now in [hard_stale, hours_later] {
+            assert_eq!(
+                no_frame_decision(now, subscribed, Some(subscribed), false, false, true, true),
+                NoFrameDecision::Keep,
+                "held web window must stay held"
+            );
+            assert_eq!(
+                no_frame_decision(now, subscribed, Some(subscribed), true, false, false, true),
+                NoFrameDecision::Keep,
+                "muted web window must stay"
+            );
+            assert_eq!(
+                no_frame_decision(now, subscribed, Some(subscribed), false, false, true, false),
+                NoFrameDecision::Retire,
+                "a native sharer is still bounded by the backstop"
+            );
+        }
+        // The first observation of the stall still fires for a web sharer, so
+        // the hold + repair request happen at NO_FRAME_RETIRE_AFTER as before.
+        let first_stall = subscribed + NO_FRAME_RETIRE_AFTER + Duration::from_secs(1);
+        assert_eq!(
+            no_frame_decision(first_stall, subscribed, Some(subscribed), false, false, false, true),
             NoFrameDecision::Retire
         );
     }
