@@ -1,0 +1,89 @@
+# Stage the web-harness from ANY ref as a production-target Vercel deployment
+# that keeps its unique URL and does NOT take meet.petal.live (`--prod
+# --skip-domain`, exactly what release.yml's deploy-web job does for a tag).
+#
+# Why this exists: the Test Cockpit's web peers load whatever web-harness the
+# gate points them at, and `nightly-loopback.yml` dispatches against
+# production by default. A PR that adds or changes a web-side scenario
+# (SHARE-W2N-STALL, #202, was the first to need this) cannot be exercised on
+# the runner until its web half is deployed somewhere -- and that must never
+# be production from an unmerged branch. Stage it here, then dispatch
+# `nightly-loopback.yml` with `harness_url` set to the URL this prints.
+#
+# Runs on CI credentials (the org VERCEL_TOKEN), never a developer's local
+# `vercel` login. The staged URL is protected; the gate's peers pass the
+# repository's VERCEL_AUTOMATION_BYPASS_SECRET as they do for a release.
+name: Stage web-harness (no domain)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "What this staging is for (recorded in the run summary)"
+        required: true
+
+concurrency:
+  group: stage-web-harness-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  stage:
+    name: Stage web-harness on Vercel
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VERCEL_ORG_ID: team_HUx56nXbsbsz2jLQAtSu9AUa
+      VERCEL_PROJECT_ID: prj_OwXNV8ZFq9moT4jWcNVa1bxlz1lk
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Check the token is configured
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::error::VERCEL_TOKEN is not available to this repository."; exit 1
+          fi
+
+      - name: Web-harness typecheck + tests
+        working-directory: web-harness
+        run: npm ci && npx tsc --noEmit -p . && npm test
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel@59
+
+      - name: Stage web-harness
+        id: web
+        env:
+          PETAL_DEPLOY_URL_FILE: ${{ runner.temp }}/web-harness-url.txt
+        run: |
+          set -euo pipefail
+          bash scripts/deploy-web-harness.sh --prod --skip-domain --yes --token "$VERCEL_TOKEN"
+          URL="$(tail -n1 "$PETAL_DEPLOY_URL_FILE" | tr -d '[:space:]')"
+          case "$URL" in https://*) ;; *) echo "::error::deploy-web-harness.sh did not yield a deployment URL (got '$URL')"; exit 1 ;; esac
+          echo "staged web-harness: $URL"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          REASON: ${{ inputs.reason }}
+        run: |
+          {
+            echo "### Staged web-harness (not on meet.petal.live)"
+            echo "- ref: \`${{ github.ref }}\` @ \`${{ github.sha }}\`"
+            echo "- url: ${{ steps.web.outputs.url }}"
+            echo "- reason: $REASON"
+            echo
+            echo "Run the gate against it:"
+            echo '```'
+            echo "gh workflow run nightly-loopback.yml --ref ${{ github.ref_name }} -f harness_url=${{ steps.web.outputs.url }} -f cockpit_selector=quick"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
