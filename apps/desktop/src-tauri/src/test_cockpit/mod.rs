@@ -10856,6 +10856,18 @@ async fn run_web_share_stall_scenario(
         );
     };
     if !report_ok(&report.payload) {
+        // A peer that says it could not run the scenario at all (#821) -- a
+        // web-harness deployment that predates the scenario, a browser that
+        // cannot capture -- is infrastructure, not a stalled share.
+        if web_report_declares_infra_failure(&report) {
+            return infra_fail_outcome(
+                scenario,
+                format!(
+                    "the web sharer reported an infrastructure failure before sharing: {}",
+                    report_text_field(&report.payload, "detail").unwrap_or("(no detail)")
+                ),
+            );
+        }
         let mut outcome = web_report_outcome(scenario, &report);
         outcome.verdict = ScenarioVerdict::TestFail;
         outcome.message = format!(
