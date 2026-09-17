@@ -51,6 +51,8 @@ class FakeElement {
   id = '';
   className = '';
   title = '';
+  clientWidth = 0;
+  clientHeight = 0;
   dataset: Record<string, string | undefined> = {};
   parentElement: FakeElement | null = null;
   readonly children: FakeElement[] = [];
@@ -566,4 +568,103 @@ test('spotlight thumbnails scroll horizontally and keep a fixed media aspect, ne
   assert.doesNotMatch(thumbnailInitials, /transform\s*:\s*none/i);
   assert.doesNotMatch(thumbnailInitials, /max-width\s*:\s*none/i);
   assert.match(thumbnailInitials, /font-size/i);
+});
+
+// ---------------------------------------------------------------------------
+// #204 PR2: the web grid packs with the shared geometry. A fake
+// ResizeObserver hands the callback back so a resize can be fired, and a
+// fake getComputedStyle supplies the padding/gap the packer subtracts.
+// ---------------------------------------------------------------------------
+
+function installFakeLayoutEngine(surface: FakeElement, pad: number, gap: number) {
+  const originalRO = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+  const originalGCS = (globalThis as { getComputedStyle?: unknown }).getComputedStyle;
+  let resizeCallback: (() => void) | null = null;
+  class FakeResizeObserver {
+    constructor(callback: () => void) {
+      resizeCallback = callback;
+    }
+    observe() {}
+    disconnect() {}
+  }
+  Object.defineProperty(globalThis, 'ResizeObserver', { configurable: true, value: FakeResizeObserver });
+  Object.defineProperty(globalThis, 'getComputedStyle', {
+    configurable: true,
+    value: (el: unknown) => {
+      if (el !== surface) return { paddingLeft: '0px', paddingRight: '0px', paddingTop: '0px', paddingBottom: '0px', getPropertyValue: () => '' };
+      return {
+        paddingLeft: `${pad}px`,
+        paddingRight: `${pad}px`,
+        paddingTop: `${pad}px`,
+        paddingBottom: `${pad}px`,
+        getPropertyValue: (name: string) => (name === '--tile-gap' ? `${gap}px` : ''),
+      };
+    },
+  });
+  return {
+    fireResize() {
+      resizeCallback?.();
+    },
+    restore() {
+      if (originalRO === undefined) delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+      else Object.defineProperty(globalThis, 'ResizeObserver', { configurable: true, value: originalRO });
+      if (originalGCS === undefined) delete (globalThis as { getComputedStyle?: unknown }).getComputedStyle;
+      else Object.defineProperty(globalThis, 'getComputedStyle', { configurable: true, value: originalGCS });
+    },
+  };
+}
+
+test('#204 the web grid packs tiles with the shared geometry and repacks on resize', () => {
+  const fakeDom = installFakeDom();
+  const tilesEl = fakeDom.document.createElement('div');
+  const engine = installFakeLayoutEngine(tilesEl, 20, 16);
+  try {
+    const topbarRight = fakeDom.document.createElement('div');
+    fakeDom.document.root.appendChild(tilesEl);
+    fakeDom.document.root.appendChild(topbarRight);
+    for (let index = 0; index < 4; index += 1) {
+      const tile = fakeDom.document.createElement('div');
+      tile.id = `tile-${index}`;
+      tile.className = 'tile';
+      tile.dataset.owner = `Peer ${index}`;
+      tilesEl.appendChild(tile);
+    }
+    const ctx = {
+      dom: { tilesEl, topbarRight },
+      state: { tileLayoutMode: 'grid', pinnedTileId: null, layoutModeButtons: null, speakerSmoothingTimer: null },
+      ui: { logEvent: () => {} },
+      cb: { activeRemoteControlForTile: () => null, fitTileLabels: () => {} },
+      speakerScores: new Map(),
+      activeSpeakerTargets: new Set(),
+    } as unknown as HarnessContext;
+    const layout = setupTileLayout(ctx);
+
+    // The issue's headline case: four tiles in a tall 1100x1750 window pack
+    // as one column (66% fill), not the 2x2 the old auto-fit produced.
+    tilesEl.clientWidth = 1100 + 40;
+    tilesEl.clientHeight = 1750 + 40;
+    layout.applyTileLayout();
+    const vars = tilesEl.style.values;
+    assert.equal(vars.get('--gallery-cols'), '1');
+    assert.equal(vars.get('--gallery-rows'), '4');
+    assert.match(vars.get('--gallery-tile-width') ?? '', /^\d+(\.\d+)?px$/);
+    assert.equal(vars.get('--gallery-gap'), '16px', 'the packer keeps the CSS gap when tiles are not compact');
+
+    // A drag-resize to a wide window repacks without a mode/count change.
+    tilesEl.clientWidth = 900 + 40;
+    tilesEl.clientHeight = 500 + 40;
+    engine.fireResize();
+    assert.equal(vars.get('--gallery-cols'), '2');
+    assert.equal(vars.get('--gallery-rows'), '2');
+
+    // Spotlight owns its own template: the packer leaves it alone.
+    (ctx.state as { tileLayoutMode: string; pinnedTileId: string | null }).tileLayoutMode = 'spotlight';
+    (ctx.state as { pinnedTileId: string | null }).pinnedTileId = 'tile-0';
+    vars.delete('--gallery-cols');
+    layout.applyTileLayout();
+    assert.equal(vars.get('--gallery-cols'), undefined);
+  } finally {
+    engine.restore();
+    fakeDom.restore();
+  }
 });
