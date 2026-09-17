@@ -4133,6 +4133,75 @@ fn record_window_screenshot_artifact(
     }
 }
 
+/// #211: the class a failed verdict capture belongs to. A `screencapture -l`
+/// snapshot returns the window's BACKING STORE, and on the runner that came
+/// back all-black once while ScreenCaptureKit was delivering the same window
+/// at 29 fps with a stable content hash (v0.9.27 gate, run 35118397571). A
+/// blank screenshot is evidence about the screenshot tool, not the share;
+/// it is retried and, if persistent, reported as capture infrastructure --
+/// never as a product test-fail. A non-blank mismatch is still test-fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentCheckFailureClass {
+    /// Every sampled pixel is the same colour: nothing was captured.
+    BlankCapture,
+    /// Real content that does not match the expected pattern.
+    ContentMismatch,
+}
+
+/// How many verdict captures to attempt before calling a blank one persistent.
+const BLANK_CAPTURE_RETRIES: usize = 3;
+const BLANK_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(400);
+
+/// Classify a failed content check by re-reading the capture: uniform across
+/// a coarse grid (corners, centre, and a 8x5 lattice) means blank. Pure over
+/// the PNG so both directions are unit-tested.
+fn classify_content_check_failure(path: &Path) -> ContentCheckFailureClass {
+    let Ok(image) = image::open(path) else {
+        return ContentCheckFailureClass::BlankCapture;
+    };
+    let image = image.to_rgb8();
+    if image.width() == 0 || image.height() == 0 {
+        return ContentCheckFailureClass::BlankCapture;
+    }
+    let mut first: Option<[u8; 3]> = None;
+    for gy in 0..5u32 {
+        for gx in 0..8u32 {
+            let x = ((gx as f64 + 0.5) / 8.0 * image.width() as f64) as u32;
+            let y = ((gy as f64 + 0.5) / 5.0 * image.height() as f64) as u32;
+            let px = image.get_pixel(x.min(image.width() - 1), y.min(image.height() - 1)).0;
+            match first {
+                None => first = Some(px),
+                Some(f) if f != px => return ContentCheckFailureClass::ContentMismatch,
+                Some(_) => {}
+            }
+        }
+    }
+    ContentCheckFailureClass::BlankCapture
+}
+
+/// The verdict the content check produces given the classes seen across the
+/// capture attempts (#211): a match anywhere passes; a real mismatch is
+/// test-fail; only-blank across every attempt is infra-fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentCheckOutcome {
+    Pass,
+    TestFail,
+    InfraFail,
+}
+
+fn content_check_outcome(attempts: &[Result<(), ContentCheckFailureClass>]) -> ContentCheckOutcome {
+    if attempts.iter().any(Result::is_ok) {
+        return ContentCheckOutcome::Pass;
+    }
+    if attempts
+        .iter()
+        .any(|a| matches!(a, Err(ContentCheckFailureClass::ContentMismatch)))
+    {
+        return ContentCheckOutcome::TestFail;
+    }
+    ContentCheckOutcome::InfraFail
+}
+
 fn test_pattern_content_check(path: &Path) -> Result<(), String> {
     let image = image::open(path)
         .map_err(|error| format!("could not decode captured frame: {error}"))?
@@ -10440,31 +10509,76 @@ async fn run_scenario(
                 "verdict",
                 share.window_id,
             ));
-            let content = test_pattern_content_check(&path);
-            let passed = content.is_ok();
-            let detail = match content {
-                Ok(()) => {
+            // #211: a blank screenshot is re-taken before it is judged. The
+            // first capture above already exists; each retry overwrites it.
+            let mut attempts: Vec<Result<(), ContentCheckFailureClass>> = Vec::new();
+            let mut last_error = String::new();
+            for attempt in 0..BLANK_CAPTURE_RETRIES {
+                if attempt > 0 {
+                    std::thread::sleep(BLANK_CAPTURE_RETRY_DELAY);
+                    record_window_screenshot_artifact(writer, scenario, "verdict", share.window_id);
+                }
+                match test_pattern_content_check(&path) {
+                    Ok(()) => {
+                        attempts.push(Ok(()));
+                        break;
+                    }
+                    Err(error) => {
+                        let class = classify_content_check_failure(&path);
+                        last_error = error;
+                        attempts.push(Err(class));
+                        if class == ContentCheckFailureClass::ContentMismatch {
+                            break;
+                        }
+                        log::warn!(
+                            "test-cockpit: {} verdict capture {}/{} for window {} is blank (screencapture backing store); retrying (#211)",
+                            scenario.id,
+                            attempt + 1,
+                            BLANK_CAPTURE_RETRIES,
+                            share.window_id
+                        );
+                    }
+                }
+            }
+            let check = content_check_outcome(&attempts);
+            let passed = check == ContentCheckOutcome::Pass;
+            let detail = match check {
+                ContentCheckOutcome::Pass => {
                     "calibration squares and sampled pixels matched the expected test pattern"
                         .to_string()
                 }
-                Err(error) => error,
+                ContentCheckOutcome::TestFail => last_error.clone(),
+                ContentCheckOutcome::InfraFail => format!(
+                    "screencapture returned a blank backing store on {} consecutive verdict captures while the share pipeline was delivering the window (#211); last: {last_error}",
+                    attempts.len()
+                ),
             };
             let _ = writer.write(
                 "content-check",
                 Some(scenario.id),
-                serde_json::json!({ "passed": passed, "detail": detail, "path": path }),
+                serde_json::json!({ "passed": passed, "detail": detail, "path": path, "attempts": attempts.len(), "class": format!("{check:?}") }),
             );
             outcome.assertions.push(AssertionOutcome {
                 name: "test-pattern-content".to_string(),
                 passed,
-                detail,
+                detail: detail.clone(),
             });
-            if !passed {
-                outcome.verdict = ScenarioVerdict::TestFail;
-                outcome.message = format!(
-                    "{} TEST-FAIL captured test-pattern content check failed",
-                    scenario.id
-                );
+            match check {
+                ContentCheckOutcome::Pass => {}
+                ContentCheckOutcome::TestFail => {
+                    outcome.verdict = ScenarioVerdict::TestFail;
+                    outcome.message = format!(
+                        "{} TEST-FAIL captured test-pattern content check failed",
+                        scenario.id
+                    );
+                }
+                ContentCheckOutcome::InfraFail => {
+                    outcome.verdict = ScenarioVerdict::InfraFail;
+                    outcome.message = format!(
+                        "{} INFRA-FAIL verdict screenshot was blank on every attempt; the share itself was not judged (#211)",
+                        scenario.id
+                    );
+                }
             }
         }
     }
@@ -12087,6 +12201,54 @@ mod tests {
 
         assert!(validate_scenario_web_report(named_scenario("CAM"), &generic_ok).is_err());
         assert!(validate_scenario_web_report(named_scenario("CAM"), &camera_ok).is_ok());
+    }
+
+    /// #211: a blank capture is capture infrastructure, a wrong pattern is a
+    /// real failure, and one good capture among retries passes.
+    #[test]
+    fn blank_verdict_captures_are_infra_not_test_failures() {
+        use ContentCheckFailureClass::{BlankCapture, ContentMismatch};
+        use ContentCheckOutcome::{InfraFail, Pass, TestFail};
+        assert_eq!(content_check_outcome(&[Err(BlankCapture)]), InfraFail);
+        assert_eq!(
+            content_check_outcome(&[Err(BlankCapture), Err(BlankCapture), Err(BlankCapture)]),
+            InfraFail
+        );
+        assert_eq!(content_check_outcome(&[Err(ContentMismatch)]), TestFail);
+        assert_eq!(
+            content_check_outcome(&[Err(BlankCapture), Err(ContentMismatch)]),
+            TestFail,
+            "a real mismatch after a blank attempt is still a product failure"
+        );
+        assert_eq!(content_check_outcome(&[Err(BlankCapture), Ok(())]), Pass);
+        assert_eq!(content_check_outcome(&[]), InfraFail, "no capture at all is not a pass");
+
+        let dir = std::env::temp_dir().join(format!("petal-211-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blank = dir.join("blank.png");
+        image::RgbImage::from_pixel(960, 600, image::Rgb([0, 0, 0]))
+            .save(&blank)
+            .unwrap();
+        assert_eq!(classify_content_check_failure(&blank), BlankCapture);
+        let wrong = dir.join("wrong.png");
+        let mut img = image::RgbImage::from_pixel(960, 600, image::Rgb([30, 30, 60]));
+        for x in 0..480 {
+            for y in 0..300 {
+                img.put_pixel(x, y, image::Rgb([200, 200, 200]));
+            }
+        }
+        img.save(&wrong).unwrap();
+        assert_eq!(classify_content_check_failure(&wrong), ContentMismatch);
+        assert!(
+            test_pattern_content_check(&wrong).is_err(),
+            "the wrong pattern must still fail the content check itself"
+        );
+        assert_eq!(
+            classify_content_check_failure(&dir.join("missing.png")),
+            BlankCapture,
+            "an unreadable capture is a capture problem, not a content verdict"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// CAM's native evidence after #188: the native room declines cameras, so
