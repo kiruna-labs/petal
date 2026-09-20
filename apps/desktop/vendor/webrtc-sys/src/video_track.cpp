@@ -141,9 +141,16 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
     const FrameMetadata& frame_metadata) {
   webrtc::MutexLock lock(&mutex_);
 
-  int64_t aligned_timestamp_us = timestamp_aligner_.TranslateTimestamp(
-      frame.timestamp_us(), webrtc::TimeMicros());
-
+  // Rust's VideoFrame default timestamp is zero when the capture source does
+  // not provide one. Zero is not a valid capture-clock sample for
+  // TimestampAligner: feeding it repeatedly makes translated timestamps
+  // advance at roughly the aligner's 1 ms minimum instead of the real frame
+  // cadence, which causes receiver render reordering and stalls.
+  const int64_t now_us = webrtc::TimeMicros();
+  const int64_t aligned_timestamp_us =
+      frame.timestamp_us() > 0
+          ? timestamp_aligner_.TranslateTimestamp(frame.timestamp_us(), now_us)
+          : now_us;
   // If a packet trailer was provided on this frame and we have a handler,
   // store the mapping keyed by the aligned timestamp.  This is the value
   // that CaptureTime() will return in TransformSend, so the lookup will

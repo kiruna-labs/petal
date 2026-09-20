@@ -134,3 +134,28 @@ each function in `@autoreleasepool` (these run on pool-less Rust threads --
 the same hazard as this file's sibling `objc_video_frame_buffer.mm` #886
 patch). Verify with `leaks <pid>` after several share/unshare cycles: the
 `ObjCVideoEncoderFactory` roots must not accumulate.
+
+## Capture-clock fallback for a frame with no Rust timestamp
+
+### Why this exists
+
+`VideoTrackSource::InternalSource::on_captured_frame` translated
+`frame.timestamp_us()` through `webrtc::TimestampAligner` unconditionally. Rust's
+`VideoFrame` timestamp defaults to zero when a capture source does not supply
+one, and zero is not a usable capture-clock sample for the aligner: feeding it
+repeatedly makes translated timestamps advance at roughly the aligner's 1 ms
+minimum instead of the real frame cadence. The receiver renders by timestamp, so
+it reproduced that spacing as reordering and stalls -- the out-of-order-frame
+reports this was diagnosed from.
+
+### The fix
+
+Use the current WebRTC clock (`webrtc::TimeMicros()`, already read for the
+aligner's `now` argument) as the aligned timestamp when
+`frame.timestamp_us() <= 0`, and keep the aligner for every real timestamp. No
+other behaviour changes; a source that always supplies a timestamp is unaffected.
+
+### Updating
+
+Drop once the vendored frame type cannot carry a zero timestamp (a non-optional
+capture clock), or once `TimestampAligner` handles a zero sample itself.
