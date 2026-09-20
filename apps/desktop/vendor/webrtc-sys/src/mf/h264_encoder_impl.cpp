@@ -25,7 +25,9 @@
 #include <cstring>
 #include <ios>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "api/video/encoded_image.h"
 #include "api/video/video_frame.h"
@@ -40,6 +42,122 @@
 namespace webrtc {
 
 namespace {
+
+constexpr size_t kMaxPendingLowLatencyInputs = 2;
+
+// Keyframe schedule.
+//
+// Why the schedule needs sizing at all: an intra frame is coded with no
+// prediction, so it costs many times a P-frame, and this MFT's mean-bitrate CBR
+// does not cap any single frame. Measured at 1511x914 / 49fps / 12.5Mbps: intra
+// 402 kB against a 31.9 kB per-frame budget, i.e. 12.5 frame intervals of drain
+// time for one frame. At the driver's own ~1.15s schedule that is a ~256 ms
+// freeze every 1.15s (duty ~22%) and it was plainly visible; at 245 frames it is
+// the same 256 ms freeze every 5.37s (duty 4.8%) and the user could no longer
+// see it. So the rule is a DUTY CYCLE, and the interval is what buys it:
+//
+//   intra_bytes ~= bytes_per_pixel * width * height
+//   stall_s      = intra_bytes * 8 / target_bps
+//   gop_frames   = stall_s / kAutoGopDutyTarget * fps
+//
+// Calibration: 402 kB / 1.38 Mpx = 0.29 bytes/pixel at qp ~20 on the test
+// content. The default carries a margin over that, because complex content costs
+// more per pixel and a higher qp only partly compensates. The measurement below
+// replaces this estimate as soon as a real refresh has been seen.
+constexpr double kIntraBytesPerPixelDefault = 0.45;
+constexpr double kAutoGopDutyTarget = 0.05;
+constexpr double kAutoGopMinSeconds = 2.0;
+// Deliberately capped. At 4K the duty rule asks for ~30s, which is not
+// shippable -- error recovery, join latency, and a receiver holding a corrupted
+// picture all scale with the interval. Hitting this cap means the operating
+// point is unsupportable and the answer is a resolution bound, not a longer
+// keyframe interval, so it is reported rather than silently absorbed.
+constexpr double kAutoGopMaxSeconds = 10.0;
+
+// How fast the measured intra size replaces the estimated one. One refresh is
+// the natural unit, because the measurement only exists when a refresh happens:
+// 0.5 gives a half-life of one refresh and converges in about four. Slower is
+// safer against a single odd intra frame, faster follows a content change
+// sooner. The loop cannot oscillate either way -- intra size depends on the rate
+// and qp, not on the interval, so changing the interval does not move the
+// measurement.
+constexpr double kIntraEmaAlpha = 0.5;
+
+// Detecting an intra refresh when the MFT supplies no clean point: a size cut
+// relative to the previous window's mean, with the absolute minimum below it so
+// a small frame never clears the cut on the reference alone.
+constexpr uint32_t kIntraFallbackMinBytes = 200000;
+constexpr double kIntraFallbackMeanMultiple = 5.0;
+// The reference window, in frames: 10s at the 30fps this app publishes, long
+// enough that the window's mean is not dominated by its opening intra frame.
+constexpr uint32_t kIntraReferenceWindowFrames = 300;
+
+// The intra size the duty rule should use: measured when a refresh has been
+// seen, otherwise the estimate. `measured <= 0` means "nothing measured yet".
+double ResolveIntraBytes(double measured_intra_bytes, uint32_t width,
+                         uint32_t height) {
+  if (measured_intra_bytes > 0.0) {
+    return measured_intra_bytes;
+  }
+  return kIntraBytesPerPixelDefault * static_cast<double>(width) *
+         static_cast<double>(height);
+}
+
+// The automatic interval, in frames. Pure arithmetic so every number in the log
+// can be checked by hand.
+//
+// `capped` reports whether the duty rule wanted more than kAutoGopMaxSeconds,
+// which is the signal that no keyframe interval can rescue this operating point.
+uint32_t ComputeAutoGopFrames(double intra_bytes, uint32_t fps,
+                              uint32_t target_bps, bool* capped) {
+  if (capped != nullptr) {
+    *capped = false;
+  }
+  if (intra_bytes <= 0.0 || fps == 0 || target_bps == 0) {
+    return 0;
+  }
+  const double stall_s = intra_bytes * 8.0 / static_cast<double>(target_bps);
+  const double wanted_s = stall_s / kAutoGopDutyTarget;
+  const bool over = wanted_s > kAutoGopMaxSeconds;
+  const double gop_s = wanted_s < kAutoGopMinSeconds
+                           ? kAutoGopMinSeconds
+                           : (over ? kAutoGopMaxSeconds : wanted_s);
+  if (capped != nullptr) {
+    *capped = over;
+  }
+  return static_cast<uint32_t>(gop_s * static_cast<double>(fps));
+}
+
+uint32_t HResultBits(HRESULT hr) {
+  return static_cast<uint32_t>(hr);
+}
+
+std::string FormatHResult(HRESULT hr) {
+  char formatted[11] = {};
+  std::snprintf(formatted, sizeof(formatted), "0x%08x",
+                static_cast<unsigned int>(HResultBits(hr)));
+  return formatted;
+}
+
+HRESULT SetCodecApiBool(ICodecAPI* codec_api, const GUID& key, bool value) {
+  if (!codec_api) {
+    return E_NOINTERFACE;
+  }
+  VARIANT var = {};
+  var.vt = VT_BOOL;
+  var.boolVal = value ? VARIANT_TRUE : VARIANT_FALSE;
+  return codec_api->SetValue(&key, &var);
+}
+
+HRESULT SetCodecApiUint(ICodecAPI* codec_api, const GUID& key, ULONG value) {
+  if (!codec_api) {
+    return E_NOINTERFACE;
+  }
+  VARIANT var = {};
+  var.vt = VT_UI4;
+  var.ulVal = value;
+  return codec_api->SetValue(&key, &var);
+}
 
 // Routes IMFMediaEventGenerator events from the OS callback thread to the
 // encoder thread via a shared AsyncState. Never touches the encoder directly,
@@ -81,7 +199,7 @@ class MfAsyncCallbackProxy
     }
     {
       std::lock_guard<std::mutex> lock(state_->mutex);
-      state_->events.emplace_back(event_type, status);
+      state_->events.push_back({event_type, status});
     }
     state_->cv.notify_one();
     return S_OK;
@@ -130,6 +248,10 @@ int32_t MfH264EncoderImpl::InitEncode(const VideoCodec* codec_settings,
   max_framerate_ = codec_settings->maxFramerate > 0 ? codec_settings->maxFramerate : 30;
   target_bps_ = codec_settings->startBitrate * 1000;
   codec_mode_ = codec_settings->mode;
+  // A screen share is interactive, so its MFT is kept shallow: a stale frame is
+  // less useful than the newest one. A camera keeps the unbounded default.
+  low_latency_ = codec_mode_ == VideoCodecMode::kScreensharing;
+  set_rates_calls_ = 0;
 
   if (width_ <= 0 || height_ <= 0) {
     RTC_LOG(LS_ERROR) << "MF H264 encoder: unsupported dimensions " << width_
@@ -223,6 +345,10 @@ int32_t MfH264EncoderImpl::InitMft(int width, int height) {
     mft_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
   }
 
+  // These are static low-latency hints, so apply them before media types are
+  // negotiated. Unsupported hints are harmless and are logged for the A/B.
+  ApplyLowLatencySettings();
+
   // Rate control is a STATIC MFT property: it has to be set before the media
   // types are negotiated, or an older encoder ignores it. One resolution, one
   // application point -- see ResolveRateControlPolicy for why the codec mode is
@@ -300,6 +426,65 @@ int32_t MfH264EncoderImpl::ReconfigureMft(int new_width, int new_height) {
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
+void MfH264EncoderImpl::ApplyLowLatencySettings() {
+  const double intra_bytes =
+      ResolveIntraBytes(intra_bytes_ema_, static_cast<uint32_t>(width_),
+                        static_cast<uint32_t>(height_));
+  const bool intra_measured = intra_bytes_ema_ > 0.0;
+  bool gop_capped = false;
+  const uint32_t gop_frames = ComputeAutoGopFrames(
+      intra_bytes, static_cast<uint32_t>(max_framerate_), target_bps_,
+      &gop_capped);
+  if (gop_frames > 0) {
+    const HRESULT gop_hr =
+        SetCodecApiUint(codec_api_.Get(), CODECAPI_AVEncMPVGOPSize, gop_frames);
+    applied_gop_frames_ = gop_frames;
+    RTC_LOG(LS_WARNING)
+        << "MF H264 encoder: gop frames=" << gop_frames
+        << " width=" << width_ << " height=" << height_
+        << " fps=" << max_framerate_ << " target_bps=" << target_bps_
+        << " intra_bytes=" << static_cast<uint64_t>(intra_bytes)
+        << " intra_source=" << (intra_measured ? "measured" : "estimate")
+        << " gop_hr=" << FormatHResult(gop_hr);
+    if (gop_capped) {
+      // No keyframe interval can hold the duty target here: the intra frame
+      // needs more than kAutoGopMaxSeconds of the link. Sizing the share down
+      // is the real answer, so say so instead of quietly taking the cap.
+      RTC_LOG(LS_WARNING)
+          << "MF H264 encoder: gop duty target needs more than "
+          << kAutoGopMaxSeconds << "s at " << width_ << "x" << height_
+          << " / " << target_bps_
+          << "bps -- capped. This operating point cannot be made smooth by the "
+          << "keyframe interval alone; bound the shared resolution or raise the "
+          << "rate.";
+    }
+  }
+  if (!low_latency_) {
+    return;
+  }
+
+  HRESULT attribute_hr = E_NOINTERFACE;
+  Microsoft::WRL::ComPtr<IMFAttributes> attributes;
+  if (mft_ && SUCCEEDED(mft_->GetAttributes(&attributes))) {
+    attribute_hr = attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
+  }
+  const HRESULT realtime_hr =
+      SetCodecApiBool(codec_api_.Get(), CODECAPI_AVEncCommonRealTime, true);
+  const HRESULT b_picture_hr = SetCodecApiUint(
+      codec_api_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+  const HRESULT ref_frame_hr =
+      SetCodecApiUint(codec_api_.Get(), CODECAPI_AVEncVideoMaxNumRefFrame, 1);
+  // MF_LOW_LATENCY is an attribute rather than a CODECAPI property, so a
+  // rejection here would be silent otherwise; the three CODECAPI sets above
+  // are best-effort by design (the driver is free to refuse them).
+  RTC_LOG(LS_WARNING)
+      << "MF H264 encoder: low latency applied"
+      << " mf_low_latency_hr=" << FormatHResult(attribute_hr)
+      << " codecapi_realtime_hr=" << FormatHResult(realtime_hr)
+      << " b_picture_hr=" << FormatHResult(b_picture_hr)
+      << " ref_frame_hr=" << FormatHResult(ref_frame_hr);
+}
+
 int32_t MfH264EncoderImpl::ConfigureMft(int width, int height,
                                         int max_framerate,
                                         uint32_t target_bps) {
@@ -331,9 +516,12 @@ int32_t MfH264EncoderImpl::ConfigureMft(int width, int height,
                                 MFVideoInterlace_Progressive);
   }
   if (SUCCEEDED(hr)) {
-    // Baseline profile (42e01f in SDP). The H.264 encoder MFT derives the
-    // SPS from the configured size (verified by probe at 720p/960p/976p), so
-    // no padding or fixed-size workaround is needed.
+    // Constrained Baseline, the profile this app has always sent: CAVLC only, so
+    // it is the cheapest to decode and the most widely negotiated. The LEVEL is
+    // deliberately never set here: the MFT derives it from the frame geometry
+    // and writes it into the SPS (measured: 1080p30 -> Level 4.0, 4K30 -> Level
+    // 5.1, 4K60 -> Level 5.2), so pinning one could only make the stream wrong.
+    // `MaybeLogEmittedSps` reports what the MFT actually wrote.
     hr = output_type->SetUINT32(MF_MT_MPEG2_PROFILE, 66);
   }
   if (SUCCEEDED(hr)) {
@@ -565,16 +753,40 @@ int32_t MfH264EncoderImpl::Encode(
     return WEBRTC_VIDEO_CODEC_ENCODER_FAILURE;
   }
 
+  bool dropped_new_input = false;
   {
     std::lock_guard<std::mutex> lock(input_mutex_);
-    pending_input_queue_.push_back(
-        PendingInput{sample, input_frame.rtp_timestamp(), send_key_frame});
-    pending_input_count_.fetch_add(1, std::memory_order_release);
+    if (low_latency_ &&
+        pending_input_queue_.size() >= kMaxPendingLowLatencyInputs) {
+      // ponytail: keep only a two-frame pending window; a screen share wants
+      // the newest image, not latency from an unbounded backlog.
+      if (send_key_frame) {
+        pending_input_queue_.pop_front();
+        pending_input_count_.fetch_sub(1, std::memory_order_release);
+      } else {
+        const auto delta = std::find_if(
+            pending_input_queue_.begin(), pending_input_queue_.end(),
+            [](const PendingInput& input) { return !input.keyframe; });
+        if (delta == pending_input_queue_.end()) {
+          dropped_new_input = true;
+        } else {
+          pending_input_queue_.erase(delta);
+          pending_input_count_.fetch_sub(1, std::memory_order_release);
+        }
+      }
+    }
+    if (!dropped_new_input) {
+      pending_input_queue_.push_back(
+          PendingInput{sample, input_frame.rtp_timestamp(), send_key_frame});
+      pending_input_count_.fetch_add(1, std::memory_order_release);
+    }
   }
   // Wake the encoder thread: if the MFT is already waiting for input (a
   // NeedInput event was consumed with an empty queue), feed immediately
   // instead of waiting for a fresh event (Chromium's FeedInputs kick).
-  async_state_->cv.notify_all();
+  if (!dropped_new_input) {
+    async_state_->cv.notify_all();
+  }
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
@@ -595,8 +807,9 @@ void MfH264EncoderImpl::EncoderThreadMain() {
         break;
       }
       if (!async_state_->events.empty()) {
-        event_type = async_state_->events.front().first;
-        status = async_state_->events.front().second;
+        const auto event = async_state_->events.front();
+        event_type = event.first;
+        status = event.second;
         async_state_->events.pop_front();
         has_event = true;
       }
@@ -618,6 +831,7 @@ void MfH264EncoderImpl::HandleEvent(MediaEventType event_type,
     encode_failed_.store(true);
     return;
   }
+
   switch (event_type) {
     case METransformNeedInput: {
       ++need_input_counter_;
@@ -642,6 +856,7 @@ void MfH264EncoderImpl::HandleEvent(MediaEventType event_type,
       break;
     }
   }
+
   // Re-arm the event request after handling (Chromium does the same). A
   // transient MF_E_INVALIDREQUEST (re-arm raced an in-flight EndGetEvent) is
   // retried once; a persistent failure is fatal so WebRTC tears down and
@@ -694,6 +909,42 @@ void MfH264EncoderImpl::FeedInputs() {
   if (need_input_counter_ > 0) {
     --need_input_counter_;
   }
+}
+
+void MfH264EncoderImpl::MaybeLogEmittedSps() {
+  // The SPS only ever arrives with an IDR, so gate the scan on keyframes: at
+  // most one scan per GOP instead of one per frame, and a resolution change
+  // (which re-derives the level) is still caught because it re-emits both.
+  if (encoded_image_._frameType != VideoFrameType::kVideoFrameKey) {
+    return;
+  }
+  const petal_sps::SpsProfileLevel sps = petal_sps::FindSpsProfileLevel(
+      encoded_image_.data(), encoded_image_.size());
+  if (!sps.found) {
+    return;
+  }
+  if (emitted_sps_logged_ && sps.profile_idc == emitted_sps_profile_ &&
+      sps.constraints == emitted_sps_constraints_ &&
+      sps.level_idc == emitted_sps_level_) {
+    return;
+  }
+  emitted_sps_logged_ = true;
+  emitted_sps_profile_ = sps.profile_idc;
+  emitted_sps_constraints_ = sps.constraints;
+  emitted_sps_level_ = sps.level_idc;
+
+  char constraints_hex[8];
+  std::snprintf(constraints_hex, sizeof(constraints_hex), "0x%02x",
+                static_cast<unsigned>(sps.constraints));
+  RTC_LOG(LS_WARNING)
+      << "MF H264 encoder: emitted SPS profile="
+      << static_cast<unsigned>(sps.profile_idc) << " ("
+      << petal_sps::ProfileNameForIdc(sps.profile_idc) << ")"
+      << " constraints=" << constraints_hex << " level="
+      << static_cast<unsigned>(sps.level_idc) << " (Level "
+      << petal_sps::LevelNameForIdc(sps.level_idc) << ")"
+      << " at " << width_ << "x" << height_ << "@" << max_framerate_
+      << "fps";
 }
 
 void MfH264EncoderImpl::ProcessOutput() {
@@ -789,6 +1040,10 @@ void MfH264EncoderImpl::ProcessOutput() {
 
   encoded_image_._encodedWidth = width_;
   encoded_image_._encodedHeight = height_;
+  // Report what profile/level this stream actually carries, once per distinct
+  // SPS -- see `MaybeLogEmittedSps` for why the bitstream, not the MFT's own
+  // attributes, is the source of truth.
+  MaybeLogEmittedSps();
   encoded_image_.SetRtpTimestamp(metadata.rtp_timestamp);
   encoded_image_.SetSimulcastIndex(0);
   encoded_image_.ntp_time_ms_ = 0;
@@ -805,6 +1060,59 @@ void MfH264EncoderImpl::ProcessOutput() {
   codec_info.codecSpecific.H264.packetization_mode =
       H264PacketizationMode::NonInterleaved;
 
+  // Is this an intra refresh? The duty rule learns from real refreshes, and the
+  // exact signal is the MFT's own MFSampleExtension_CleanPoint -- its statement
+  // that this frame starts a new GOP, which is resolution- and rate-free and so
+  // preferred wherever it is supplied.
+  //
+  // Without a flag it falls back to a RELATIVE size cut against the previous
+  // window's mean, not an absolute one: an absolute cut was tried first and
+  // worked at 1511x914, where ordinary frames topped out near 60 kB and only
+  // true intra frames (392-414 kB) cleared it, but at 1920x1080 the same cut
+  // flagged 8-10 frames per window when only ~4 were GOP boundaries, because
+  // the ordinary tail grows with pixel count at a fixed rate.
+  uint32_t clean_point = 0;
+  const bool clean_point_known = SUCCEEDED(
+      output_sample->GetUINT32(MFSampleExtension_CleanPoint, &clean_point));
+  const double reference_mean =
+      last_window_mean_bytes_ > 0
+          ? static_cast<double>(last_window_mean_bytes_)
+          : (window_frame_count_ > 0
+                 ? static_cast<double>(window_bytes_sum_) /
+                       static_cast<double>(window_frame_count_)
+                 : 0.0);
+  const double relative_cut = kIntraFallbackMeanMultiple * reference_mean;
+  const uint32_t fallback_cut = static_cast<uint32_t>(
+      relative_cut > static_cast<double>(kIntraFallbackMinBytes)
+          ? relative_cut
+          : static_cast<double>(kIntraFallbackMinBytes));
+  const bool is_intra =
+      clean_point_known ? clean_point != 0 : current_length >= fallback_cut;
+
+  window_frame_count_ += 1;
+  window_bytes_sum_ += current_length;
+  if (is_intra) {
+    // Feed the duty rule's input. Seeded by the first refresh (a stream always
+    // opens on one), so the estimate is only used before any refresh has been
+    // observed at all.
+    intra_bytes_ema_ =
+        intra_bytes_ema_ > 0.0
+            ? kIntraEmaAlpha * static_cast<double>(current_length) +
+                  (1.0 - kIntraEmaAlpha) * intra_bytes_ema_
+            : static_cast<double>(current_length);
+  }
+  // Roll the fallback reference window. The reference is the PREVIOUS window's
+  // mean, not a running one, because a running mean is dominated by its first
+  // frames -- and for a stream's first window that first frame IS an intra
+  // frame, the largest in the stream, so a running-mean threshold would start
+  // out enormous and miss the next refresh.
+  if (window_frame_count_ >= kIntraReferenceWindowFrames) {
+    last_window_mean_bytes_ = static_cast<uint32_t>(window_bytes_sum_ /
+                                                    window_frame_count_);
+    window_bytes_sum_ = 0;
+    window_frame_count_ = 0;
+  }
+
   if (encoded_image_callback_) {
     const auto result =
         encoded_image_callback_->OnEncodedImage(encoded_image_, &codec_info);
@@ -819,13 +1127,13 @@ void MfH264EncoderImpl::SetRates(const RateControlParameters& parameters) {
   if (parameters.framerate_fps >= 1.0) {
     max_framerate_ = static_cast<int>(parameters.framerate_fps);
   }
-  const uint32_t target_bps = parameters.bitrate.get_sum_bps();
-  if (target_bps > 0) {
-    target_bps_ = target_bps;
+  const uint32_t requested_bps = parameters.bitrate.get_sum_bps();
+  if (requested_bps > 0) {
+    target_bps_ = requested_bps;
     if (codec_api_) {
       VARIANT var;
       var.vt = VT_UI4;
-      var.ulVal = target_bps;
+      var.ulVal = target_bps_;
       // Best-effort; some MFTs reject mid-stream bitrate changes.
       const HRESULT mean_hr =
           codec_api_->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
@@ -837,9 +1145,45 @@ void MfH264EncoderImpl::SetRates(const RateControlParameters& parameters) {
       if (set_rates_calls_ <= 1 || set_rates_calls_ % 60 == 0) {
         RTC_LOG(LS_WARNING)
             << "MF H264 encoder: set_rates call=" << set_rates_calls_
-            << " requested_bps=" << target_bps
+            << " requested_bps=" << requested_bps
+            << " effective_bps=" << target_bps_
             << " framerate=" << parameters.framerate_fps
-            << " mean_bitrate_hr=0x" << std::hex << mean_hr << std::dec;
+            << " mean_bitrate_hr=" << FormatHResult(mean_hr);
+      }
+      // Keep the keyframe schedule sized to the CURRENT rate. The duty rule is
+      // linear in 1/rate, so a target that halves doubles the interval the duty
+      // target needs, and an interval left over from startup would quietly
+      // reintroduce the stall this exists to remove. Only a MATERIAL change is
+      // pushed, so a per-100ms rate wobble cannot spam the driver.
+      //
+      // Whether this MFT honours a MID-STREAM GOP update is not known -- it
+      // honours the attribute at configure time. Every actual change is logged
+      // with its HR, and `big_every_frames` in the output-cadence probe is what
+      // proves or refutes it either way.
+      const double want_intra_bytes =
+          ResolveIntraBytes(intra_bytes_ema_, static_cast<uint32_t>(width_),
+                            static_cast<uint32_t>(height_));
+      const uint32_t want_frames = ComputeAutoGopFrames(
+          want_intra_bytes, static_cast<uint32_t>(max_framerate_), target_bps_,
+          nullptr);
+      if (want_frames > 0 && applied_gop_frames_ > 0) {
+        const uint32_t delta = want_frames > applied_gop_frames_
+                                   ? want_frames - applied_gop_frames_
+                                   : applied_gop_frames_ - want_frames;
+        if (delta * 5 > applied_gop_frames_) {
+          VARIANT gop_var;
+          gop_var.vt = VT_UI4;
+          gop_var.ulVal = want_frames;
+          const HRESULT gop_hr =
+              codec_api_->SetValue(&CODECAPI_AVEncMPVGOPSize, &gop_var);
+          RTC_LOG(LS_WARNING)
+              << "MF H264 encoder: gop resized frames=" << want_frames
+              << " from=" << applied_gop_frames_
+              << " target_bps=" << target_bps_
+              << " call=" << set_rates_calls_
+              << " gop_hr=" << FormatHResult(gop_hr);
+          applied_gop_frames_ = want_frames;
+        }
       }
     }
   }
@@ -857,42 +1201,40 @@ void MfH264EncoderImpl::SetRates(const RateControlParameters& parameters) {
 //   * QUALITY mode  -> receiver rendered a median ~5.6 fps (766 frames / 137 s)
 //   * driver default -> receiver rendered a median ~29.5 fps (5170 / 317 s)
 //
-// So the defaults are:
+// So the defaults are now Cbr for BOTH sources:
 //
-//   * Screensharing -> DriverDefault: set nothing and let the encoder honour
-//     the bitrate target WebRTC's own estimate produces. Text crispness is
-//     recovered by the link budget, not by overriding the target.
+//   * Screensharing -> Cbr. Moved here from DriverDefault. On the Windows
+//     hardware-encoder route the real startup defect was the ALLOCATION, not
+//     the rate-control mode: WebRTC's estimate sat near 600 kbps for 10-35 s
+//     against a path sustaining ~14 Mbps, and with that little per-frame budget
+//     the encoder clamped QP at its ceiling (`interval_qp` 50.0) for the whole
+//     ramp. Raising the allocation (`TrackPublishOptions::min_bitrate`, the
+//     window share's 12 Mbps floor, released once the path shows it cannot take
+//     it) removed the ramp outright; with that in place the mode itself is no
+//     longer load-bearing, and CBR is kept as the explicit choice because
+//     "driver default" is whatever each GPU vendor decides -- not something a
+//     cross-vendor validation can reason about.
 //   * Realtime camera -> Cbr. QUALITY starves camera frames, and the driver's
 //     untouched mode (unconstrained VBR) overshot WebRTC's target by 2.0x,
 //     measured, which cost loss and retransmits; explicit CBR on the same route
 //     cut renderer freezes from 11 to 2.
 //
-// QUALITY stays available to BOTH sources as an explicit experiment via
-// PETAL_MF_QUALITY_MODE=1, because it does make static text measurably crisper
-// (QP 26 -> 16) when the link can afford it. PETAL_MF_CAMERA_RATE_CONTROL is
-// consulted for realtime camera encoders ONLY: letting a camera selector run for
-// screen content is what coupled the two policies in the first place.
+// PETAL_MF_CAMERA_RATE_CONTROL is consulted for realtime camera encoders ONLY:
+// letting a camera selector run for screen content is what coupled the two
+// policies in the first place. The QUALITY policy and its
+// PETAL_MF_QUALITY_MODE / PETAL_MF_SCREEN_QUALITY[_VS_SPEED] knobs were removed
+// after the driver rejected the underlying controls (`quality_hr` 0x80004001,
+// i.e. E_NOTIMPL), so they could never have taken effect.
 MfH264EncoderImpl::RateControlPolicy
 MfH264EncoderImpl::ResolveRateControlPolicy(const char** source) const {
-  const char* quality_override = std::getenv("PETAL_MF_QUALITY_MODE");
-  if (quality_override != nullptr && std::strcmp(quality_override, "1") == 0) {
-    if (source != nullptr) {
-      *source = "env-quality-override";
-    }
-    return RateControlPolicy::Quality;
-  }
-  // "0" forces the non-QUALITY path. That is now the default for both sources,
-  // so this is redundant rather than load-bearing -- it is still honoured
-  // exactly (not ignored) so an existing script keeps a defined meaning.
-  const bool quality_forbidden =
-      quality_override != nullptr && std::strcmp(quality_override, "0") == 0;
-
   if (codec_mode_ == VideoCodecMode::kScreensharing) {
+    // CBR, unconditionally: the mode this replaced was whatever the driver's own
+    // default happened to be, which is not something a cross-vendor validation
+    // can reason about.
     if (source != nullptr) {
-      *source =
-          quality_forbidden ? "env-nonquality-override" : "screenshare-default";
+      *source = "screenshare-default";
     }
-    return RateControlPolicy::DriverDefault;
+    return RateControlPolicy::Cbr;
   }
 
   const char* camera_arm = std::getenv("PETAL_MF_CAMERA_RATE_CONTROL");
@@ -949,24 +1291,6 @@ void MfH264EncoderImpl::ApplyRateControlPolicy(RateControlPolicy policy,
   switch (policy) {
     case RateControlPolicy::DriverDefault:
       break;
-    case RateControlPolicy::Quality: {
-      policy_name = "quality";
-      VARIANT mode = {};
-      mode.vt = VT_UI4;
-      mode.ulVal = eAVEncCommonRateControlMode_Quality;
-      mode_hr =
-          codec_api_->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
-      VARIANT quality = {};
-      quality.vt = VT_UI4;
-      quality.ulVal = 100;
-      codec_api_->SetValue(&CODECAPI_AVEncCommonQuality, &quality);
-      VARIANT quality_vs_speed = {};
-      quality_vs_speed.vt = VT_UI4;
-      quality_vs_speed.ulVal = 100;
-      codec_api_->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed,
-                           &quality_vs_speed);
-      break;
-    }
     case RateControlPolicy::Cbr:
     case RateControlPolicy::PeakVbr: {
       const bool peak_constrained = policy == RateControlPolicy::PeakVbr;
@@ -996,11 +1320,13 @@ void MfH264EncoderImpl::ApplyRateControlPolicy(RateControlPolicy policy,
     }
   }
 
-  RTC_LOG(LS_WARNING) << "MF H264 encoder: rate control selected=" << policy_name
-                      << " codec_mode=" << codec_mode_name
-                      << " source=" << source << " target_bps=" << target_bps_
-                      << " mode_hr=0x" << std::hex << mode_hr << " mean_hr=0x"
-                      << mean_hr << " max_hr=0x" << max_hr << std::dec;
+  RTC_LOG(LS_WARNING)
+      << "MF H264 encoder: rate control selected=" << policy_name
+      << " codec_mode=" << codec_mode_name << " source=" << source
+      << " target_bps=" << target_bps_
+      << " mode_hr=" << FormatHResult(mode_hr)
+      << " mean_hr=" << FormatHResult(mean_hr)
+      << " max_hr=" << FormatHResult(max_hr);
 }
 
 VideoEncoder::EncoderInfo MfH264EncoderImpl::GetEncoderInfo() const {
