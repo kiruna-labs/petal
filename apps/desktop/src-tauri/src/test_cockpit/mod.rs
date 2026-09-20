@@ -5994,11 +5994,65 @@ async fn start_native_test_pattern_share(
 
 #[cfg(not(target_os = "macos"))]
 async fn start_native_test_pattern_share(
-    _app: &AppHandle,
-    _scenario: ScenarioSpec,
-    _writer: &mut ResultsWriter,
+    app: &AppHandle,
+    scenario: ScenarioSpec,
+    writer: &mut ResultsWriter,
 ) -> Result<NativeTestPatternShare, String> {
-    Err("INFRA-FAIL native test-pattern sharing is macOS-only".to_string())
+    // Windows has no synthetic test-pattern window: use an operator-selected
+    // real HWND so this cockpit leg exercises the production WGC/session/share
+    // path rather than a model or source-shape assertion. The HWND is kept as
+    // an input-only setup value; the app converts it to the same opaque token
+    // the picker uses before calling the real session coordinator.
+    let raw_handle = std::env::var("PETAL_COCKPIT_WINDOWS_HWND")
+        .map_err(|_| {
+            "INFRA-FAIL set PETAL_COCKPIT_WINDOWS_HWND to a visible target HWND".to_string()
+        })?
+        .parse::<usize>()
+        .map_err(|_| "INFRA-FAIL PETAL_COCKPIT_WINDOWS_HWND must be a decimal HWND".to_string())?;
+    let hwnd = windows::Win32::Foundation::HWND(raw_handle as *mut std::ffi::c_void);
+    let mut owner_pid = 0_u32;
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            hwnd,
+            Some(&mut owner_pid),
+        );
+    }
+    if owner_pid == 0 {
+        return Err("INFRA-FAIL selected Windows HWND has no live owner process".to_string());
+    }
+    let window_id = crate::windows_capture_target::register(raw_handle, owner_pid)
+        .map_err(|error| format!("INFRA-FAIL registering Windows cockpit HWND: {error}"))?;
+    let state = app.state::<crate::session::SessionState>();
+    crate::session::start_share_token(
+        app.clone(),
+        state.inner(),
+        window_id,
+        crate::remote_control_core::RemoteControlMode::CursorPreserving,
+        "#ffffff".to_string(),
+    )
+    .await
+    .map_err(|error| format!("INFRA-FAIL starting production Windows share: {error}"))?;
+    if !state.inner().is_share_active(window_id) {
+        return Err(
+            "INFRA-FAIL production Windows share returned without an active share".to_string(),
+        );
+    }
+    let visible_source = register_cockpit_visible_source(window_id);
+    let _ = writer.write(
+        "native-share-source",
+        Some(scenario.id),
+        serde_json::json!({
+            "windowId": window_id,
+            "source": "PETAL_COCKPIT_WINDOWS_HWND",
+            "ownerPid": owner_pid,
+            "capture": "Windows.Graphics.Capture",
+            "publication": "production session::start_share_token",
+        }),
+    );
+    Ok(NativeTestPatternShare {
+        window_id,
+        _visible_source: visible_source,
+    })
 }
 
 fn report_payload_bool(payload: &serde_json::Value, fields: &[&str]) -> bool {
