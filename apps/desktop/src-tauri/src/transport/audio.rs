@@ -591,19 +591,75 @@ impl MicTrack {
         let Some(target) = devices.iter().find(|d| d.id.as_str() == device_id) else {
             return Err(format!("recording device not found: {device_id}"));
         };
-        self.audio
-            .switch_recording_device(&target.id)
-            .map_err(|e| format!("failed to switch recording device: {e}"))?;
-        self.user_pinned.store(true, Ordering::SeqCst);
-        let mut guard = self.current_device.lock_unpoisoned();
-        *guard = Some(DeviceSnapshot {
-            id: target.id.clone(),
-        });
-        log::info!(
-            "audio: mic hot-swapped to '{}' (user-selected)",
-            target.name
+        // Same rule as the speaker side (see `device_switch_decision`): the
+        // attempt is the only evidence available that the device we are leaving is
+        // unusable, and a pin we cannot leave must not survive it. The body mirrors
+        // `SpeakerPlayout::set_playout_device` rather than sharing a helper: the
+        // two differ in their ADM call, their device list and their snapshot type,
+        // so a generic helper would need five parameters and read worse.
+        let attempted = self.audio.switch_recording_device(&target.id);
+        let default = default_recording_device(&devices);
+        let decision = device_switch_decision(
+            target.id.as_str(),
+            attempted.is_ok(),
+            default.map(|device| device.id.as_str()),
         );
-        Ok(target.name.clone())
+        match decision {
+            DeviceSwitchDecision::Pin => {
+                self.user_pinned.store(true, Ordering::SeqCst);
+                *self.current_device.lock_unpoisoned() = Some(DeviceSnapshot {
+                    id: target.id.clone(),
+                });
+                log::info!(
+                    "audio: mic hot-swapped to '{}' (user-selected)",
+                    target.name
+                );
+                Ok(target.name.clone())
+            }
+            decision => {
+                let error = attempted
+                    .as_ref()
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default();
+                // Clear the pin FIRST -- see the playout equivalent for why, and
+                // note this never touches the muted state: a failed switch must not
+                // be able to alter what the microphone is transmitting.
+                self.user_pinned.store(false, Ordering::SeqCst);
+                log::warn!(
+                    "audio: could not switch microphone to '{}': {error}",
+                    target.name
+                );
+                let fallback = (decision == DeviceSwitchDecision::UnpinAndTryDefault)
+                    .then_some(default)
+                    .flatten();
+                let Some(fallback) = fallback else {
+                    return Err(format!("could not switch to '{}': {error}", target.name));
+                };
+                match self.audio.switch_recording_device(&fallback.id) {
+                    Ok(()) => {
+                        *self.current_device.lock_unpoisoned() = Some(DeviceSnapshot {
+                            id: fallback.id.clone(),
+                        });
+                        log::warn!(
+                            "audio: fell back to system default '{}' after that failure",
+                            fallback.name
+                        );
+                        Err(format!(
+                            "could not switch to '{}': {error}; using the system default '{}' instead",
+                            target.name, fallback.name
+                        ))
+                    }
+                    Err(fallback_error) => {
+                        log::warn!(
+                            "audio: fallback to system default '{}' also failed: {fallback_error}",
+                            fallback.name
+                        );
+                        Err(format!("could not switch to '{}': {error}", target.name))
+                    }
+                }
+            }
+        }
     }
 
     pub fn use_default_recording_device(&self) -> Result<String, String> {
@@ -743,13 +799,13 @@ pub enum PlayoutDeviceRefresh {
     Failed(String),
 }
 
-/// What a playout switch attempt should leave behind.
+/// What a device switch attempt should leave behind.
 ///
 /// Carries no borrowed device data on purpose: the caller already holds the
 /// candidates, so this stays a pure decision that is testable without
 /// constructing SDK device types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlayoutSwitchDecision {
+pub(crate) enum DeviceSwitchDecision {
     /// The requested device took effect and becomes the pinned selection.
     Pin,
     /// The request failed: clear the pin and try the system default instead.
@@ -759,30 +815,34 @@ pub(crate) enum PlayoutSwitchDecision {
     UnpinAndReport,
 }
 
-/// Decide what a playout switch attempt means for the selection state.
+/// Decide what a device switch attempt means for the selection state. Shared by
+/// the microphone (`MicTrack`) and the speaker (`SpeakerPlayout`), because the
+/// trap is identical on both sides.
 ///
 /// Pure, and extracted for a specific reason: the case that motivated it is
 /// invisible to every other signal we have. A wireless headset's USB dongle
 /// stays `DEVICE_STATE_ACTIVE` while the headset itself is powered off, so the
 /// device we are trying to leave still enumerates as healthy -- the FAILED
-/// switch is the only evidence available that it is unusable. A pin we cannot
-/// leave must not survive that evidence, or remote audio keeps rendering into a
-/// dead endpoint and the user has no way out: every later selection bounces off
-/// a device the app still believes is fine.
+/// switch is the only evidence available that it is unusable. (A capture
+/// endpoint has its own version of this: it enumerates fine while another
+/// process holds it exclusively, so opening it fails.) A pin we cannot leave
+/// must not survive that evidence, or audio keeps rendering into a dead or
+/// unreachable endpoint and the user has no way out: every later selection
+/// bounces off a device the app still believes is fine.
 ///
 /// Retrying the requested device as its own fallback is not a recovery, so when
 /// the request WAS the system default there is nothing to fall back to.
-pub(crate) fn playout_switch_decision(
+pub(crate) fn device_switch_decision(
     requested_id: &str,
     requested_took_effect: bool,
     default_id: Option<&str>,
-) -> PlayoutSwitchDecision {
+) -> DeviceSwitchDecision {
     if requested_took_effect {
-        return PlayoutSwitchDecision::Pin;
+        return DeviceSwitchDecision::Pin;
     }
     match default_id {
-        Some(id) if id != requested_id => PlayoutSwitchDecision::UnpinAndTryDefault,
-        _ => PlayoutSwitchDecision::UnpinAndReport,
+        Some(id) if id != requested_id => DeviceSwitchDecision::UnpinAndTryDefault,
+        _ => DeviceSwitchDecision::UnpinAndReport,
     }
 }
 
@@ -845,18 +905,18 @@ impl SpeakerPlayout {
             return Err(format!("playout device not found: {device_id}"));
         };
         // `switch_playout_device` can fail while the device we are leaving still
-        // enumerates (see `playout_switch_decision`). Decide the state change from
+        // enumerates (see `device_switch_decision`). Decide the state change from
         // the attempt alone, then act -- never leave the pin pointing at a device
         // we could not leave.
         let attempted = self.audio.switch_playout_device(&target.id);
         let default = default_playout_device(&devices);
-        let decision = playout_switch_decision(
+        let decision = device_switch_decision(
             target.id.as_str(),
             attempted.is_ok(),
             default.map(|device| device.id.as_str()),
         );
         match decision {
-            PlayoutSwitchDecision::Pin => {
+            DeviceSwitchDecision::Pin => {
                 self.user_pinned.store(true, Ordering::SeqCst);
                 *self.current_device.lock_unpoisoned() = Some(PlayoutDeviceSnapshot {
                     id: target.id.clone(),
@@ -881,7 +941,7 @@ impl SpeakerPlayout {
                     "audio: could not switch playout to '{}': {error}",
                     target.name
                 );
-                let fallback = (decision == PlayoutSwitchDecision::UnpinAndTryDefault)
+                let fallback = (decision == DeviceSwitchDecision::UnpinAndTryDefault)
                     .then_some(default)
                     .flatten();
                 let Some(fallback) = fallback else {
@@ -2178,21 +2238,21 @@ mod tests {
         }
     }
 
-    /// The trap this policy exists for: `switch_playout_device` can FAIL while
-    /// the device we are leaving still enumerates as healthy (a wireless
-    /// headset's USB dongle reports ACTIVE with the headset powered off), so the
-    /// failed switch is the only evidence available. A successful switch pins;
-    /// a failed one must NOT, or every later selection bounces off a device the
-    /// app still believes is fine and the user has no way to move remote audio.
+    /// The trap this policy exists for: a switch can FAIL while the device we are
+    /// leaving still enumerates as healthy (a wireless headset's USB dongle reports
+    /// ACTIVE with the headset powered off), so the failed switch is the only
+    /// evidence available. A successful switch pins; a failed one must NOT, or
+    /// every later selection bounces off a device the app still believes is fine
+    /// and the user has no way to move audio. Shared by both directions.
     #[test]
-    fn a_failed_playout_switch_never_keeps_the_pin() {
+    fn a_failed_device_switch_never_keeps_the_pin() {
         assert_eq!(
-            playout_switch_decision("corsair", true, Some("speakers")),
-            PlayoutSwitchDecision::Pin
+            device_switch_decision("corsair", true, Some("speakers")),
+            DeviceSwitchDecision::Pin
         );
         assert_eq!(
-            playout_switch_decision("corsair", false, Some("speakers")),
-            PlayoutSwitchDecision::UnpinAndTryDefault,
+            device_switch_decision("corsair", false, Some("speakers")),
+            DeviceSwitchDecision::UnpinAndTryDefault,
             "a failed request must unpin and fall back somewhere the user can hear"
         );
     }
@@ -2204,8 +2264,8 @@ mod tests {
     fn a_failed_request_for_the_default_has_nothing_to_fall_back_to() {
         for default in [Some("speakers"), None] {
             assert_eq!(
-                playout_switch_decision("speakers", false, default),
-                PlayoutSwitchDecision::UnpinAndReport
+                device_switch_decision("speakers", false, default),
+                DeviceSwitchDecision::UnpinAndReport
             );
         }
     }
