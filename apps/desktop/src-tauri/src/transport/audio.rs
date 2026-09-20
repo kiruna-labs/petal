@@ -119,6 +119,35 @@
 //! true`. This is automatic, not something this module has to opt into --
 //! documented here so it's clear it was verified, not assumed.
 //!
+//! ## Windows: remote-audio playout is a communications stream, and the OS
+//! treats it as one
+//!
+//! The ADM renders remote audio through a WASAPI *communications* endpoint
+//! (that stream category is what WebRTC's ADM asks for, and it is also what
+//! keeps the AEC/reference path valid). Windows therefore applies
+//! communications ducking: while a peer is audible, other apps' audio is
+//! attenuated -- by default to 80%, so a user listening to music while sharing
+//! hears their own music drop. This is not a Petal bug in the routing sense; it
+//! is our own audio stack telling Windows we are a call.
+//!
+//! The OS knob is per-user, at
+//! `HKCU\Software\Microsoft\Multimedia\Audio` -> `UserDuckingPreference`
+//! (0 = mute others, 1 = reduce others 80%, 2 = reduce 50%, 3 = do nothing).
+//! It has been observed to be **necessary but not sufficient**: one host with
+//! `1` ducked its own playback, while another host with no value at all (i.e.
+//! the 80% default) did not duck. Ducking is evidently also endpoint- and
+//! driver-scoped, so the registry value cannot be used to predict, detect or
+//! warn about this behavior.
+//!
+//! So: no UI notice (a false alarm on every host whose driver ignores the
+//! preference is worse than the silence), and no category change. Owning the
+//! playout stream with a non-communications category would stop the AEC
+//! reference from being the same stream the far end hears, which invalidates
+//! the echo-cancellation assumptions documented above -- that is a design
+//! change with its own validation, not a fix. Recorded here so the next report
+//! of "Petal lowers my other audio" is answered from this note instead of
+//! re-derived from scratch.
+//!
 //! ## Mute semantics: `LocalAudioTrack::mute()`/`unmute()`, not
 //! unpublish/republish
 //!
