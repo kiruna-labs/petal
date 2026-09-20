@@ -15,8 +15,11 @@
 use std::fmt::Debug;
 
 use crate::{
-    imp::rtp_sender as imp_rs, media_stream_track::MediaStreamTrack, rtp_parameters::RtpParameters,
-    stats::RtcStats, RtcError,
+    imp::rtp_sender as imp_rs,
+    media_stream_track::MediaStreamTrack,
+    rtp_parameters::{DegradationPreference, RtpParameters},
+    stats::RtcStats,
+    RtcError,
 };
 
 /// Preferred backend for video encoding on an [`RtpSender`].
@@ -80,6 +83,16 @@ impl RtpSender {
 
     pub fn set_parameters(&self, parameters: RtpParameters) -> Result<(), RtcError> {
         self.handle.set_parameters(parameters)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_degradation_preference(
+        &self,
+        preference: DegradationPreference,
+    ) -> Result<(), RtcError> {
+        let mut parameters = self.parameters();
+        parameters.set_degradation_preference(preference);
+        self.set_parameters(parameters)
     }
 
     /// Sets the preferred video encoder backend for this sender.

@@ -52,7 +52,7 @@ use crate::{
 use crate::{
     id::ParticipantSid,
     options::{self, TrackPublishOptions},
-    prelude::TrackKind,
+    prelude::{TrackKind, TrackSource},
     room::{e2ee::manager::E2eeManager, DisconnectReason},
     rtc_engine::{
         lk_runtime::LkRuntime,
@@ -1842,6 +1842,25 @@ impl SessionInner {
             self.publisher_pc.peer_connection().add_transceiver(track.rtc_track(), init)?;
 
         if track.kind() == TrackKind::Video {
+            // Petal patch: a native screen share asks the encoder for detail
+            // and for resolution over frame rate when a sender is constrained,
+            // which is what the web sender does. Cameras keep the defaults.
+            #[cfg(not(target_arch = "wasm32"))]
+            if options.source == TrackSource::Screenshare {
+                if let LocalTrack::Video(video) = &track {
+                    video
+                        .rtc_track()
+                        .set_content_hint(libwebrtc::video_track::ContentHint::Detailed);
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            if options.source == TrackSource::Screenshare {
+                transceiver.sender().set_degradation_preference(
+                    libwebrtc::rtp_parameters::DegradationPreference::MaintainResolution,
+                )?;
+            }
+
             transceiver.sender().set_video_encoder_backend(options.video_encoder);
 
             let capabilities = LkRuntime::instance().pc_factory().get_rtp_sender_capabilities(
