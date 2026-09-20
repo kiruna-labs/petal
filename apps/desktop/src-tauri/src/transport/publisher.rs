@@ -240,6 +240,12 @@ pub enum CaptureResolution {
 
 const CAMERA_MAX_BITRATE_BPS: u64 = 2_500_000;
 const CAMERA_MAX_FRAMERATE_FPS: f64 = 30.0;
+/// The camera path is the only place a caller-supplied frame rate reaches an
+/// encoding, and the ceiling formula multiplies by it, so the accepted rate is
+/// capped rather than trusted.
+const CAMERA_CAPTURE_FPS_CAP: f64 = 60.0;
+const CAMERA_MIN_BITRATE_BPS: u64 = 500_000;
+const CAMERA_MAX_CEILING_BPS: u64 = 16_000_000;
 const FULL_SIMULCAST_HALF_MIN_BITRATE_BPS: u64 = 1_250_000;
 const FULL_SIMULCAST_HALF_BASE_PIXELS: u64 = 960 * 540;
 const FULL_SIMULCAST_HALF_MAX_BITRATE_BPS: u64 = 6_000_000;
@@ -306,6 +312,16 @@ const FULL_SIMULCAST_TOTAL_BUDGET_BPS: u64 = 9_250_000;
 /// combined budget. It is intentionally below the raw 4 Mbps floor because
 /// the total-budget invariant is more important than layer ordering.
 const FULL_SIMULCAST_TOP_BUDGETED_MIN_BITRATE_BPS: u64 = 1_500_000;
+
+/// Divisor that keeps an allocation floor from consuming the whole budget.
+///
+/// The congestion controller must keep room to back off, so at most this
+/// fraction of a track's published `max_bitrate` is ever pinned. The camera is
+/// the caller this exists for: its ceiling is derived from resolution and frame
+/// rate (~0.09 bits/pixel/frame at 720p30), so one flat default would be
+/// meaningless across 480p..4K and the floor has to be expressed as a fraction
+/// of whatever ceiling the geometry produced.
+const MIN_BITRATE_CEILING_DIVISOR: u64 = 2;
 /// Top-rung asks at 1920x1080/30 that [`FULL_SIMULCAST_TOTAL_BUDGET_BPS`]
 /// implies for each ladder, pinned per platform instead of derived from that
 /// constant: a change to either platform's ladder must fail a fixture rather
@@ -2111,6 +2127,9 @@ impl RoomConnection<Arc<Room>> {
 
         let publish_opts = camera_publish_options(width, height, frame_rate);
         let requested_encoder = publish_opts.video_encoder;
+        // Captured before `publish_track` consumes `publish_opts`; the startup
+        // allocation floor's release task below needs the applied value.
+        let startup_floor_bps = publish_opts.min_bitrate;
         let configured_bitrate = publish_opts
             .video_encoding
             .as_ref()
@@ -2127,6 +2146,19 @@ impl RoomConnection<Arc<Room>> {
         );
 
         let background_cancel = CancellationToken::new();
+        // The camera carries the same startup defect the window share had, on
+        // the same MF H.264 encoder, so it takes the same fix and the same
+        // release: `release_startup_min_bitrate` polls WebRTC's selected pair
+        // for loss and queueing and clears the floor on either, or after the
+        // bounded hold. Nothing keeps polling a dead sender, because the task
+        // observes this token.
+        if let Some(floor_bps) = startup_floor_bps {
+            let track_for_floor = track.clone();
+            let cancel = background_cancel.clone();
+            tokio::spawn(async move {
+                release_startup_min_bitrate(track_for_floor, floor_bps, cancel).await;
+            });
+        }
         {
             let track_for_stats = track.clone();
             let cancel = background_cancel.clone();
@@ -2208,6 +2240,11 @@ fn validate_video_toolbox_h264_size(width: u32, height: u32) -> Result<(), RoomC
 /// 720p30 stays exactly 2.5 Mbps so defaults are unchanged; 1080p30 gets
 /// ~5.6 Mbps, 4K30 clamps at 16 Mbps, and a low 480p15 request floors at
 /// 500 kbps.
+///
+/// The frame rate is clamped first: the ceiling formula multiplies by it, and
+/// the camera path is the only place a caller-supplied rate reaches an
+/// encoding, so an unclamped value from a capture backend would raise the
+/// published ask without bound.
 fn camera_video_encoding(
     width: u32,
     height: u32,
@@ -2215,8 +2252,7 @@ fn camera_video_encoding(
 ) -> livekit::options::VideoEncoding {
     const CAMERA_BASELINE_PIXELS: u64 = 1280 * 720;
     const CAMERA_BASELINE_FPS: f64 = 30.0;
-    const CAMERA_MIN_BITRATE_BPS: u64 = 500_000;
-    const CAMERA_MAX_CEILING_BPS: u64 = 16_000_000;
+    let frame_rate = frame_rate.clamp(0.0, CAMERA_CAPTURE_FPS_CAP);
     let pixels = u64::from(width) * u64::from(height);
     let scaled = CAMERA_MAX_BITRATE_BPS as f64
         * (pixels as f64 / CAMERA_BASELINE_PIXELS as f64)
@@ -2233,13 +2269,15 @@ fn camera_video_encoding(
 /// receiver requested HIGH; a single 2.5 Mbps/30 fps encoding keeps startup at
 /// source resolution on every native platform.
 fn camera_publish_options(width: u32, height: u32, frame_rate: f64) -> TrackPublishOptions {
+    let encoding = camera_video_encoding(width, height, frame_rate);
     TrackPublishOptions {
         source: TrackSource::Camera,
         video_codec: VideoCodec::H264,
         video_encoder: select_encoder_backend(),
         simulcast: false,
         simulcast_layers: None,
-        video_encoding: Some(camera_video_encoding(width, height, frame_rate)),
+        min_bitrate: camera_min_bitrate_bps(encoding.max_bitrate),
+        video_encoding: Some(encoding),
         frame_metadata_features: {
             let mut f = livekit::options::FrameMetadataFeatures::default();
             f.user_timestamp = true;
@@ -2307,20 +2345,113 @@ const SHARE_MIN_BITRATE_DEFAULT_BPS: u64 = 12_000_000;
 /// vendored RTP parameter's `has_min_bitrate_bps` unset, i.e. the wire output
 /// byte-for-byte as it was before this default existed.
 fn window_share_min_bitrate_bps(max_bitrate_bps: u64) -> Option<u64> {
-    let applied = SHARE_MIN_BITRATE_DEFAULT_BPS.min(max_bitrate_bps);
+    clamp_min_bitrate_floor(
+        "window-share",
+        SHARE_MIN_BITRATE_DEFAULT_BPS,
+        max_bitrate_bps,
+        // The share may pin its whole ceiling: the 12 Mbps default is the value
+        // measured to hold the allocation above the controller's low
+        // equilibrium, and a `/2` guard would clamp it to a value the encoder
+        // already achieves.
+        1,
+    )
+}
+
+/// Override for the camera allocation floor (see [`camera_min_bitrate_bps`]).
+///
+/// Bits per second, `0` to disable. Bounded by the same half-the-ceiling guard
+/// the shipped default uses, so this can tune the camera floor DOWN but cannot
+/// push it past the guard.
+const PETAL_CAMERA_MIN_BITRATE_ENV: &str = "PETAL_CAMERA_MIN_BITRATE";
+
+/// Resolve a publish-time allocation floor from an environment override.
+///
+/// Only the camera has one; the window share's override is retired, so its
+/// floor goes through [`clamp_min_bitrate_floor`] directly.
+///
+/// Returns `None` when the floor is explicitly disabled, which leaves the
+/// vendored RTP parameter's `has_min_bitrate_bps` unset.
+fn min_bitrate_floor(
+    label: &str,
+    env_key: &str,
+    default_bps: u64,
+    max_bitrate_bps: u64,
+    divisor: u64,
+) -> Option<u64> {
+    let requested = match std::env::var(env_key) {
+        Err(std::env::VarError::NotPresent) | Err(std::env::VarError::NotUnicode(_)) => default_bps,
+        Ok(raw) if raw.trim().is_empty() => default_bps,
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(bps) => bps,
+            Err(_) => {
+                log::warn!(
+                    "publisher: ignoring invalid {env_key}={raw:?} (expected a non-negative integer number of bits per second; 0 disables the floor); using the {default_bps} bps default"
+                );
+                default_bps
+            }
+        },
+    };
+    if requested == 0 {
+        log::info!("publisher: {label} min bitrate floor disabled by {env_key}=0");
+        return None;
+    }
+    clamp_min_bitrate_floor(label, requested, max_bitrate_bps, divisor)
+}
+
+/// Clamp one requested allocation floor to its caller's guard, and report it.
+///
+/// Separate from the override lookup above so a caller with no override (the
+/// window share) applies the SAME rule the camera does -- the one thing that
+/// matters being that a floor must never consume the whole budget, or the
+/// congestion controller has nothing left to back off to.
+///
+/// Returns `None` when the ceiling leaves no usable room, which leaves the
+/// vendored RTP parameter's `has_min_bitrate_bps` unset and the wire output
+/// byte-for-byte as it was before any of this existed.
+fn clamp_min_bitrate_floor(
+    label: &str,
+    requested_bps: u64,
+    max_bitrate_bps: u64,
+    divisor: u64,
+) -> Option<u64> {
+    let ceiling = max_bitrate_bps / divisor.max(1);
+    let applied = requested_bps.min(ceiling);
     if applied == 0 {
         return None;
     }
-    if applied != SHARE_MIN_BITRATE_DEFAULT_BPS {
+    if applied != requested_bps {
         log::warn!(
-            "publisher: window-share min bitrate floor={SHARE_MIN_BITRATE_DEFAULT_BPS}bps exceeds the {max_bitrate_bps}bps ceiling; clamping to {applied}bps so the congestion controller keeps room to back off"
+            "publisher: {label} min bitrate floor={requested_bps}bps exceeds the guard ceiling of {applied}bps (1/{divisor} of the {max_bitrate_bps}bps ceiling); clamping to {applied}bps so the congestion controller keeps room to back off"
         );
     } else {
         log::info!(
-            "publisher: window-share min bitrate floor={applied}bps ceiling={max_bitrate_bps}bps"
+            "publisher: {label} min bitrate floor={applied}bps ceiling={max_bitrate_bps}bps"
         );
     }
     Some(applied)
+}
+
+/// Camera allocation floor.
+///
+/// Defaults to the most the ceiling guard allows rather than to a fixed bps:
+/// `camera_video_encoding` derives the ceiling from resolution and frame rate
+/// (~2.5 Mbps at 720p30), so one flat default would be meaningless across
+/// 480p..4K. This is the same defect the share floor fixes -- the encoder clamps
+/// QP at its ceiling while WebRTC's estimate is still low -- on the same MF
+/// H.264 encoder, so it takes the same fix.
+///
+/// The guard binds sooner here than for a share: the camera ceiling is about
+/// 0.09 bits/pixel/frame at 720p30, so half of it is about 0.045. If the ramp
+/// only partly clears, the next lever is the camera ceiling itself, not this
+/// floor.
+fn camera_min_bitrate_bps(max_bitrate_bps: u64) -> Option<u64> {
+    min_bitrate_floor(
+        "camera",
+        PETAL_CAMERA_MIN_BITRATE_ENV,
+        max_bitrate_bps / MIN_BITRATE_CEILING_DIVISOR,
+        max_bitrate_bps,
+        MIN_BITRATE_CEILING_DIVISOR,
+    )
 }
 
 #[cfg(test)]
@@ -5863,6 +5994,85 @@ mod track_name_tests {
         assert_eq!(camera_video_encoding(640, 480, 15.0).max_bitrate, 500_000);
         assert_eq!(camera_video_encoding(1920, 1080, 30.0).max_framerate, 30.0);
         assert_eq!(camera_video_encoding(1280, 720, 60.0).max_framerate, 60.0);
+        assert_eq!(camera_video_encoding(1280, 720, 120.0).max_framerate, 60.0);
+    }
+
+    #[test]
+    fn the_camera_frame_rate_is_capped_at_the_accepted_ceiling() {
+        // The ceiling formula multiplies by the frame rate, so an unclamped
+        // value from a capture backend would raise the published ask without
+        // bound. A negative rate floors at zero rather than wrapping.
+        let capped = camera_video_encoding(1280, 720, CAMERA_CAPTURE_FPS_CAP);
+        let over = camera_video_encoding(1280, 720, 240.0);
+        assert_eq!(over.max_framerate, capped.max_framerate);
+        assert_eq!(over.max_bitrate, capped.max_bitrate);
+        assert_eq!(camera_video_encoding(1280, 720, -30.0).max_framerate, 0.0);
+    }
+
+    #[test]
+    fn min_bitrate_floor_clamps_to_its_guard() {
+        // A private key nothing else sets, so these assertions cannot depend on
+        // whatever the ambient environment happens to carry.
+        const KEY: &str = "PETAL_TEST_MIN_BITRATE_FLOOR_UNUSED";
+
+        // Unset: the caller's default passes through untouched.
+        assert_eq!(
+            min_bitrate_floor("t", KEY, 4_000_000, 16_000_000, 2),
+            Some(4_000_000)
+        );
+        // Above the guard: clamped, never rejected, so the congestion
+        // controller always keeps room to back off.
+        assert_eq!(
+            min_bitrate_floor("t", KEY, 9_000_000, 8_000_000, 2),
+            Some(4_000_000)
+        );
+        // A small ceiling scales the floor down with it.
+        assert_eq!(
+            min_bitrate_floor("t", KEY, 4_000_000, 1_000_000, 2),
+            Some(500_000)
+        );
+        // A ceiling too small to halve yields no floor at all, which leaves the
+        // wire output exactly as it was before any floor existed.
+        assert_eq!(min_bitrate_floor("t", KEY, 4_000_000, 1, 2), None);
+        // A divisor of 1 lets the floor reach the ceiling: that is the window
+        // share's own guard, and the camera must not be able to reach it.
+        assert_eq!(
+            clamp_min_bitrate_floor("t", 12_000_000, 16_000_000, 1),
+            Some(12_000_000)
+        );
+        assert_eq!(
+            clamp_min_bitrate_floor("t", 12_000_000, 16_000_000, 2),
+            Some(8_000_000)
+        );
+    }
+
+    #[test]
+    fn camera_publish_options_carry_a_bounded_allocation_floor() {
+        let options = camera_publish_options(1280, 720, 30.0);
+        let ceiling = options
+            .video_encoding
+            .as_ref()
+            .expect("camera ceiling")
+            .max_bitrate;
+        assert_eq!(ceiling, CAMERA_MAX_BITRATE_BPS);
+        // Only assert the default when no override is in the environment, so
+        // this documents the shipped value without being env-flaky.
+        if std::env::var(PETAL_CAMERA_MIN_BITRATE_ENV).is_err() {
+            assert_eq!(
+                options.min_bitrate,
+                Some(ceiling / MIN_BITRATE_CEILING_DIVISOR)
+            );
+        }
+        assert!(options.min_bitrate.unwrap_or(0) <= ceiling / MIN_BITRATE_CEILING_DIVISOR);
+    }
+
+    #[test]
+    fn a_camera_ceiling_too_small_to_halve_carries_no_floor() {
+        // A 500 kbps floor is useful; a 0 bps one would read as "enabled" while
+        // pinning nothing, so the ceiling that cannot be halved yields None.
+        assert_eq!(camera_min_bitrate_bps(1), None);
+        assert_eq!(camera_min_bitrate_bps(0), None);
+        assert_eq!(camera_min_bitrate_bps(1_000_000), Some(500_000));
     }
 
     #[test]
