@@ -4955,33 +4955,33 @@ async fn start_share_with_capture_source(
     // monitor and the share's audio -- so skipping it is the whole fix.
     let window_id_to_demote = if share_generation.is_current() {
         layout_gate.activate_if_valid(|| {
-        let mut guard = state.inner.lock_unpoisoned();
-        let previously_focused = guard.focused_window();
-        guard.shares.insert(
-            window_id,
-            candidate.take().expect("active share candidate available"),
-        );
-        // The new share is the highest `started_seq` by construction, so it
-        // is now the focused one -- demote whichever share was focused
-        // before it (if any, and if different from this one -- can't happen
-        // in practice since this window_id was just inserted, but the
-        // `!=` guard makes the invariant explicit rather than assumed).
-        let demote = match previously_focused {
-            Some(id) if id != window_id => Some(id),
-            _ => None,
-        };
-        // Seed a self-expiring startup-grace demand for the window we're about
-        // to demote so it holds `Full` if a viewer is already watching it but
-        // their first Open/Heartbeat hasn't reached us yet. Without this, a
-        // rapid second share can drop a still-watched window to 4fps for up to
-        // ~2s until the next heartbeat repromotes it. Expires via the normal
-        // `expire_stale_viewer_demands` loop if no real demand ever refreshes
-        // it, so an unwatched window still drops to `Reduced` correctly.
-        if let Some(demote_id) = demote {
-            seed_startup_grace_demand(&mut guard, demote_id, Instant::now());
-        }
-        demote
-    });
+            let mut guard = state.inner.lock_unpoisoned();
+            let previously_focused = guard.focused_window();
+            guard.shares.insert(
+                window_id,
+                candidate.take().expect("active share candidate available"),
+            );
+            // The new share is the highest `started_seq` by construction, so it
+            // is now the focused one -- demote whichever share was focused
+            // before it (if any, and if different from this one -- can't happen
+            // in practice since this window_id was just inserted, but the
+            // `!=` guard makes the invariant explicit rather than assumed).
+            let demote = match previously_focused {
+                Some(id) if id != window_id => Some(id),
+                _ => None,
+            };
+            // Seed a self-expiring startup-grace demand for the window we're about
+            // to demote so it holds `Full` if a viewer is already watching it but
+            // their first Open/Heartbeat hasn't reached us yet. Without this, a
+            // rapid second share can drop a still-watched window to 4fps for up to
+            // ~2s until the next heartbeat repromotes it. Expires via the normal
+            // `expire_stale_viewer_demands` loop if no real demand ever refreshes
+            // it, so an unwatched window still drops to `Reduced` correctly.
+            if let Some(demote_id) = demote {
+                seed_startup_grace_demand(&mut guard, demote_id, Instant::now());
+            }
+            demote
+        })
     } else {
         None
     };
