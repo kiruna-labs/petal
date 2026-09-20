@@ -8168,6 +8168,9 @@ impl PublishedTrack {
 
 impl Drop for PublishedTrack {
     fn drop(&mut self) {
+        // Idempotent fallback for any path that drops a publication without
+        // going through `unpublish` (a failed connect, a replaced share, a
+        // panic in the caller). Cancelling twice is a no-op.
         self.background_cancel.cancel();
     }
 }
@@ -9094,6 +9097,9 @@ async fn log_window_share_encoder_stats(
     }
     let mut wire_prev: Option<(std::time::Instant, OutboundTotals)> = None;
     loop {
+        // A publication that no longer exists must not keep polling: the guard
+        // riding on this poll has nothing left to observe, and libwebrtc would
+        // be asked for RTP parameters of a retired SSRC.
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {},
