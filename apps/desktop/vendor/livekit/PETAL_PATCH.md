@@ -327,6 +327,20 @@ rather than per-republish in production.
 Upstream: report both to livekit/rust-sdks (same FFI core as
 livekit/python-sdks#449's report).
 
+# Petal patch: native screen-share quality policy
+
+The native sender needs the two WebRTC controls the web sender already uses on a
+screen share: `RtcVideoTrack::set_content_hint(ContentHint::Detailed)` (this is
+text and UI, so detail beats smoothness) and
+`RtpSender::set_degradation_preference(DegradationPreference::MaintainResolution)`
+(when a sender is constrained, drop frame rate before resolution -- a blurry
+window is worse than a stuttering one). LiveKit applies both only when creating a
+native `Screenshare` sender; cameras and audio retain their existing behavior.
+
+Revert: `git checkout -- src/rtc_engine/rtc_session.rs`, or stop publishing with
+`TrackSource::Screenshare`. Updating: remove this patch when the upstream Rust SDK
+exposes equivalent screen-share publishing options.
+
 # Petal patch: `TrackPublishOptions::min_bitrate`
 
 ## Why this exists

@@ -22,6 +22,17 @@ pub enum Priority {
     High,
 }
 
+/// Controls whether the video adaptation logic prefers preserving frame rate
+/// or spatial resolution when a sender is constrained.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(i32)]
+pub enum DegradationPreference {
+    Disabled = 0,
+    MaintainFramerate = 1,
+    MaintainResolution = 2,
+    Balanced = 3,
+}
+
 #[derive(Debug, Clone)]
 pub struct RtpHeaderExtensionParameters {
     pub uri: String,
@@ -41,6 +52,13 @@ pub struct RtpParameters {
     pub(crate) mid: String,
     pub(crate) has_degradation_preference: bool,
     pub(crate) degradation_preference: i32,
+}
+
+impl RtpParameters {
+    pub fn set_degradation_preference(&mut self, preference: DegradationPreference) {
+        self.has_degradation_preference = true;
+        self.degradation_preference = preference as i32;
+    }
 }
 
 /// Mirrors webrtc_sys RtcpFeedback for round-trip fidelity.
