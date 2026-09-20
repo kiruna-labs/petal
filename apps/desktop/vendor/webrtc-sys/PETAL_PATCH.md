@@ -63,21 +63,25 @@ ceiling, so the loss was entirely in the encoder.
 resolves exactly one rate-control policy from it, in one place
 (`ResolveRateControlPolicy` / `ApplyRateControlPolicy`):
 
-| Source | Default | Rationale |
+| Source | Policy | Rationale |
 | --- | --- | --- |
-| Screensharing | driver default (set nothing) | honours WebRTC's bitrate target; text crispness comes from the link budget, not from overriding it |
+| Screensharing | CBR at the target | an explicit mode is vendor-independent; a driver default is whatever each GPU vendor chooses, which a cross-vendor validation cannot reason about |
 | Realtime camera | CBR at the target | QUALITY starves camera frames, and the driver's untouched mode (unconstrained VBR) overshot WebRTC's target by 2.0x measured; explicit CBR on the same route cut renderer freezes from 11 to 2 |
 
-Overrides, both strict (an unrecognized value is ignored, never silently
-substituted):
+Screen shares moved off the driver default once the real startup defect was
+identified as the ALLOCATION rather than the rate-control mode: WebRTC's
+estimate sat near 600 kbps for 10-35 s against a path sustaining ~14 Mbps, and
+with that little per-frame budget the encoder clamped QP at its ceiling for the
+whole ramp. The fix for that is `TrackPublishOptions::min_bitrate` plus the
+publisher's release policy, not this mode. The QUALITY policy and the
+`PETAL_MF_QUALITY_MODE` / `PETAL_MF_SCREEN_QUALITY[_VS_SPEED]` knobs are gone
+outright: the driver rejected the controls QUALITY set (`quality_hr`
+0x80004001, E_NOTIMPL), so the policy could never have taken effect.
 
-- `PETAL_MF_QUALITY_MODE=1` forces QUALITY for either source (explicit
-experiment). `=0` forces the non-QUALITY path, which is now the default for both
-sources -- redundant, but still honoured exactly rather than ignored.
-- `PETAL_MF_CAMERA_RATE_CONTROL=default|cbr|peak-vbr` applies to **realtime
-camera encoders only**. It is deliberately NOT consulted for screensharing:
-letting a camera selector run for screen content is what coupled the two
-policies in the first place.
+One override remains, `PETAL_MF_CAMERA_RATE_CONTROL=default|cbr|peak-vbr`, and
+it applies to **realtime camera encoders only** -- letting a camera selector run
+for screen content is what coupled the two policies in the first place. There is
+deliberately no screen-side override: the shipped screen policy is CBR.
 
 The policy is a STATIC MFT property, so it is applied before the media types are
 negotiated (an older encoder ignores a mode set afterwards). One line per
@@ -92,6 +96,92 @@ masquerade as a healthy encoder.
 
 Drop this patch once upstream exposes a per-encoder rate-control policy the
 caller can select.
+
+## Patch 4: a shallow screen-share MFT and a duty-cycled keyframe interval
+
+### Why this exists
+
+Two properties of this MFT are wrong for an interactive window share and cannot
+be set from WebRTC's own `VideoEncoder` surface:
+
+- **Its input depth is unbounded.** A stale frame is less useful than the newest
+  one for a share, and the async MFT's needs-input/have-output queue is where
+  staleness accumulates.
+- **Its keyframe interval is whatever the driver chose (~1.15 s here).** An
+  intra frame is coded with no prediction, so it costs many frame-times of drain
+  time: at 1511x914 / 49 fps / 12.5 Mbps the measured intra frame was 402 kB
+  against a 31.9 kB per-frame budget. A mean-bitrate CBR does not cap any single
+  frame, so the interval is what decides the fraction of the time a receiver
+  spends waiting for one.
+
+### The fix
+
+`ApplyLowLatencySettings` runs before the media types are negotiated and, for
+`VideoCodecMode::kScreensharing` only, sets `MF_LOW_LATENCY`,
+`CODECAPI_AVEncCommonRealTime`, zero B-pictures, one reference frame, and a
+bounded pending-input window of `kMaxPendingLowLatencyInputs = 2`. The three
+CODECAPI results are logged with their HRESULTs, because this MFT refuses some
+of what it claims to support and a silent refusal is exactly what an A/B cannot
+see.
+
+The keyframe interval is sized from a **duty cycle** rather than left to the
+driver. An initial estimate of 0.45 bytes per pixel (0.29 was measured at
+qp ~20; the default carries a margin for more complex content) gives
+
+```
+intra_bytes ~= bytes_per_pixel * width * height
+stall_s      = intra_bytes * 8 / target_bps
+gop_frames   = stall_s / 0.05 * fps        clamped to [2 s, 10 s]
+```
+
+The interval is then refined from what the MFT actually emits: an intra frame is
+identified by `MFSampleExtension_CleanPoint` where the MFT supplies it, and
+thereafter by a size cut relative to the previous reference window's mean (an
+absolute size cut does not survive a resolution change -- the ordinary tail
+grows with pixel count at a fixed rate). Its size feeds an EMA with
+`kIntraEmaAlpha = 0.5`, seeded by the first refresh, which replaces the estimate
+within a few refreshes. `SetRates` re-derives the interval when the target moves
+by more than 20%, so a halved target cannot leave a startup interval in place.
+
+The 10 s cap is reported rather than silently absorbed: hitting it means no
+keyframe interval can hold the duty target at this operating point, and the
+answer is a resolution bound, not a longer interval.
+
+### Updating
+
+Drop the interval sizing if upstream exposes a keyframe schedule with a duty
+parameter, and the low-latency block if `VideoEncoder::Settings` grows an input-
+depth knob. Both are inert for a camera encoder.
+
+## Patch 5: report the SPS the MF encoder actually emits
+
+### Why this exists
+
+The MFT's own media-type attributes are not evidence of what it encodes
+(measured: `GetOutputAvailableType` reports `profile=Main`, `frame=0x0`, and a
+`0xFFFFFFFF` level sentinel). A hardware MFT that accepts the configured profile
+and then writes a different one into its SPS would otherwise be undetectable,
+and the stream would not match what the SDP advertised.
+
+### The fix
+
+`h264_sps.h` carries a dependency-free Annex-B scan for `nal_unit_type 7` and
+reads `profile_idc`, the constraint flags and `level_idc` straight after the NAL
+header (all three precede any emulation-prevention byte, so no bit reader is
+needed). `MaybeLogEmittedSps` runs that scan on keyframes only -- an SPS only
+ever accompanies an IDR, so it costs at most one pass per GOP -- and logs one
+line per DISTINCT triple: the first, plus any later change, which a reconfigure
+to a new geometry produces because the MFT re-derives the level from the frame
+size. Bounded by construction, so it cannot become a per-frame line.
+
+The level is deliberately never set: the MFT derives it from geometry
+(measured: 1080p30 -> Level 4.0, 4K30 -> Level 5.1, 4K60 -> Level 5.2), so
+pinning one could only make the stream wrong.
+
+### Updating
+
+Safe to drop on any vendor bump; it changes no published behaviour. Fold away if
+the MFT ever reports a trustworthy emitted profile through stats instead.
 
 ## #886: per-frame autorelease leak in `objc_video_frame_buffer.mm`
 
