@@ -414,13 +414,12 @@
       ? selectedCamera
       : (cameraOptions[0]?.id ?? '')
   );
-  const micValue = $derived(
-    micOptions.some((m) => m.id === selectedMic) ? selectedMic : (micOptions[0]?.id ?? '')
-  );
+  // Same rule as the in-call picker: a stored id that is not in the list must not
+  // be replaced by the first device, or the control names a device the audio is
+  // not playing through. Empty means "not in this list".
+  const micValue = $derived(micOptions.some((m) => m.id === selectedMic) ? selectedMic : '');
   const speakerValue = $derived(
-    speakerOptions.some((s) => s.id === selectedSpeaker)
-      ? selectedSpeaker
-      : (speakerOptions[0]?.id ?? '')
+    speakerOptions.some((s) => s.id === selectedSpeaker) ? selectedSpeaker : ''
   );
   const showTestCockpit = $derived(Boolean(buildInfo?.cockpitPrivileged));
   const cockpitMessage = $derived(latestCockpitMessage(cockpitStatus, cockpitProgress));

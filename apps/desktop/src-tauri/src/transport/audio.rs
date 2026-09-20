@@ -743,6 +743,49 @@ pub enum PlayoutDeviceRefresh {
     Failed(String),
 }
 
+/// What a playout switch attempt should leave behind.
+///
+/// Carries no borrowed device data on purpose: the caller already holds the
+/// candidates, so this stays a pure decision that is testable without
+/// constructing SDK device types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlayoutSwitchDecision {
+    /// The requested device took effect and becomes the pinned selection.
+    Pin,
+    /// The request failed: clear the pin and try the system default instead.
+    UnpinAndTryDefault,
+    /// The request failed and there is nothing better to try: clear the pin and
+    /// report it.
+    UnpinAndReport,
+}
+
+/// Decide what a playout switch attempt means for the selection state.
+///
+/// Pure, and extracted for a specific reason: the case that motivated it is
+/// invisible to every other signal we have. A wireless headset's USB dongle
+/// stays `DEVICE_STATE_ACTIVE` while the headset itself is powered off, so the
+/// device we are trying to leave still enumerates as healthy -- the FAILED
+/// switch is the only evidence available that it is unusable. A pin we cannot
+/// leave must not survive that evidence, or remote audio keeps rendering into a
+/// dead endpoint and the user has no way out: every later selection bounces off
+/// a device the app still believes is fine.
+///
+/// Retrying the requested device as its own fallback is not a recovery, so when
+/// the request WAS the system default there is nothing to fall back to.
+pub(crate) fn playout_switch_decision(
+    requested_id: &str,
+    requested_took_effect: bool,
+    default_id: Option<&str>,
+) -> PlayoutSwitchDecision {
+    if requested_took_effect {
+        return PlayoutSwitchDecision::Pin;
+    }
+    match default_id {
+        Some(id) if id != requested_id => PlayoutSwitchDecision::UnpinAndTryDefault,
+        _ => PlayoutSwitchDecision::UnpinAndReport,
+    }
+}
+
 /// Retains the shared ADM's speaker side and owns its default-vs-explicit
 /// selection state for one joined media session on either platform.
 pub struct SpeakerPlayout {
@@ -801,18 +844,76 @@ impl SpeakerPlayout {
         else {
             return Err(format!("playout device not found: {device_id}"));
         };
-        self.audio
-            .switch_playout_device(&target.id)
-            .map_err(|error| format!("failed to switch playout device: {error}"))?;
-        self.user_pinned.store(true, Ordering::SeqCst);
-        *self.current_device.lock_unpoisoned() = Some(PlayoutDeviceSnapshot {
-            id: target.id.clone(),
-        });
-        log::info!(
-            "audio: playout hot-swapped to '{}' (user-selected)",
-            target.name
+        // `switch_playout_device` can fail while the device we are leaving still
+        // enumerates (see `playout_switch_decision`). Decide the state change from
+        // the attempt alone, then act -- never leave the pin pointing at a device
+        // we could not leave.
+        let attempted = self.audio.switch_playout_device(&target.id);
+        let default = default_playout_device(&devices);
+        let decision = playout_switch_decision(
+            target.id.as_str(),
+            attempted.is_ok(),
+            default.map(|device| device.id.as_str()),
         );
-        Ok(target.name.clone())
+        match decision {
+            PlayoutSwitchDecision::Pin => {
+                self.user_pinned.store(true, Ordering::SeqCst);
+                *self.current_device.lock_unpoisoned() = Some(PlayoutDeviceSnapshot {
+                    id: target.id.clone(),
+                });
+                log::info!(
+                    "audio: playout hot-swapped to '{}' (user-selected)",
+                    target.name
+                );
+                Ok(target.name.clone())
+            }
+            decision => {
+                let error = attempted
+                    .as_ref()
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default();
+                // Clear the pin FIRST: it is the claim that a chosen device is in
+                // use, the attempt just disproved it, and clearing it lets the
+                // resilience poll act even if the fallback below also fails.
+                self.user_pinned.store(false, Ordering::SeqCst);
+                log::warn!(
+                    "audio: could not switch playout to '{}': {error}",
+                    target.name
+                );
+                let fallback = (decision == PlayoutSwitchDecision::UnpinAndTryDefault)
+                    .then_some(default)
+                    .flatten();
+                let Some(fallback) = fallback else {
+                    return Err(format!("could not switch to '{}': {error}", target.name));
+                };
+                match self.audio.switch_playout_device(&fallback.id) {
+                    Ok(()) => {
+                        *self.current_device.lock_unpoisoned() = Some(PlayoutDeviceSnapshot {
+                            id: fallback.id.clone(),
+                        });
+                        log::warn!(
+                            "audio: fell back to system default '{}' after that failure",
+                            fallback.name
+                        );
+                        // Reported as an error because the REQUEST did not take
+                        // effect, but the message says where the audio went -- the
+                        // UI must never claim the requested device is in use.
+                        Err(format!(
+                            "could not switch to '{}': {error}; playing through the system default '{}'",
+                            target.name, fallback.name
+                        ))
+                    }
+                    Err(fallback_error) => {
+                        log::warn!(
+                            "audio: fallback to system default '{}' also failed: {fallback_error}",
+                            fallback.name
+                        );
+                        Err(format!("could not switch to '{}': {error}", target.name))
+                    }
+                }
+            }
+        }
     }
 
     pub fn use_default_playout_device(&self) -> Result<String, String> {
@@ -1323,7 +1424,7 @@ impl AudioDevicePreferences {
 /// `id` is the stable per-device GUID (`RecordingDeviceId`/`PlayoutDeviceId`
 /// -- "stable across device hot-plug events on desktop" per the SDK's own
 /// doc comment), NOT the index (which the SDK documents as unstable).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioDeviceInfo {
     pub id: String,
@@ -1375,14 +1476,67 @@ fn with_system_default(devices: Vec<AudioDeviceInfo>) -> Vec<AudioDeviceInfo> {
     devices
 }
 
+/// Drop devices Windows reports as gone, so a stale selection cannot be re-made
+/// from the list. `active_ids` is empty when we have no information (a
+/// non-Windows build, or the endpoint query failed) -- and an empty set fails
+/// OPEN, keeping the ADM's list untouched, because hiding every device is worse
+/// than showing one that has gone away.
+///
+/// See `windows_audio_device::active_endpoint_ids` for why this cannot catch a
+/// powered-off wireless headset, and `SpeakerPlayout::set_playout_device` for
+/// what does.
+fn keep_active_devices(
+    devices: Vec<AudioDeviceInfo>,
+    active_ids: &[String],
+) -> Vec<AudioDeviceInfo> {
+    if active_ids.is_empty() {
+        return devices;
+    }
+    let active: std::collections::HashSet<&str> =
+        active_ids.iter().map(String::as_str).collect();
+    devices
+        .into_iter()
+        .filter(|device| active.contains(device.id.as_str()))
+        .collect()
+}
+
+/// Endpoint ids Windows still reports as ACTIVE, per direction. Empty means
+/// "no information" (see `keep_active_devices`); a failed query is logged
+/// rather than silent.
+fn active_endpoints() -> (Vec<String>, Vec<String>) {
+    #[cfg(target_os = "windows")]
+    {
+        let recording = crate::windows_audio_device::active_recording_endpoint_ids()
+            .unwrap_or_else(|error| {
+                log::warn!(
+                    "audio: could not list active recording endpoints ({error}); showing every enumerated device"
+                );
+                Vec::new()
+            });
+        let playout = crate::windows_audio_device::active_playout_endpoint_ids()
+            .unwrap_or_else(|error| {
+                log::warn!(
+                    "audio: could not list active playout endpoints ({error}); showing every enumerated device"
+                );
+                Vec::new()
+            });
+        (recording, playout)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        (Vec::new(), Vec::new())
+    }
+}
+
 /// Enumerate the machine's real recording + playout devices (issue #28).
 /// Errors (no audio hardware, ADM init failure) surface as a string so the
 /// frontend can show an honest "audio devices unavailable" state.
 #[tauri::command]
 pub fn list_audio_devices() -> Result<AudioDeviceLists, String> {
     let audio = PlatformAudio::new().map_err(|e| format!("audio devices unavailable: {e}"))?;
+    let (active_recording, active_playout) = active_endpoints();
     Ok(AudioDeviceLists {
-        recording: with_system_default(
+        recording: with_system_default(keep_active_devices(
             audio
                 .recording_devices()
                 .map(|device| AudioDeviceInfo {
@@ -1390,8 +1544,9 @@ pub fn list_audio_devices() -> Result<AudioDeviceLists, String> {
                     name: device.name,
                 })
                 .collect(),
-        ),
-        playout: with_system_default(
+            &active_recording,
+        )),
+        playout: with_system_default(keep_active_devices(
             audio
                 .playout_devices()
                 .map(|device| AudioDeviceInfo {
@@ -1399,7 +1554,8 @@ pub fn list_audio_devices() -> Result<AudioDeviceLists, String> {
                     name: device.name,
                 })
                 .collect(),
-        ),
+            &active_playout,
+        )),
     })
 }
 
@@ -2015,6 +2171,67 @@ async fn watch_remote_audio_track(
 
 #[cfg(test)]
 mod tests {
+    fn device(id: &str, name: &str) -> AudioDeviceInfo {
+        AudioDeviceInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// The trap this policy exists for: `switch_playout_device` can FAIL while
+    /// the device we are leaving still enumerates as healthy (a wireless
+    /// headset's USB dongle reports ACTIVE with the headset powered off), so the
+    /// failed switch is the only evidence available. A successful switch pins;
+    /// a failed one must NOT, or every later selection bounces off a device the
+    /// app still believes is fine and the user has no way to move remote audio.
+    #[test]
+    fn a_failed_playout_switch_never_keeps_the_pin() {
+        assert_eq!(
+            playout_switch_decision("corsair", true, Some("speakers")),
+            PlayoutSwitchDecision::Pin
+        );
+        assert_eq!(
+            playout_switch_decision("corsair", false, Some("speakers")),
+            PlayoutSwitchDecision::UnpinAndTryDefault,
+            "a failed request must unpin and fall back somewhere the user can hear"
+        );
+    }
+
+    /// Retrying the requested device as its own fallback is not a recovery: when
+    /// the request WAS the system default there is nothing better to try, and
+    /// the caller must report the failure instead of pretending to recover.
+    #[test]
+    fn a_failed_request_for_the_default_has_nothing_to_fall_back_to() {
+        for default in [Some("speakers"), None] {
+            assert_eq!(
+                playout_switch_decision("speakers", false, default),
+                PlayoutSwitchDecision::UnpinAndReport
+            );
+        }
+    }
+
+    /// Devices Windows reports as gone must be dropped from the lists we offer,
+    /// so a stale choice cannot be re-made from the UI.
+    #[test]
+    fn gone_devices_are_dropped_from_the_offered_lists() {
+        let devices = vec![
+            device("speakers", "Speakers"),
+            device("bt", "Bluetooth headset"),
+        ];
+        assert_eq!(
+            keep_active_devices(devices.clone(), &["speakers".to_string()])
+                .iter()
+                .map(|device| device.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["speakers"],
+            "a NOTPRESENT/UNPLUGGED device must not be offered"
+        );
+        // Fail OPEN: no information keeps the ADM's list, because hiding every
+        // device is worse than showing one that has gone away.
+        for no_information in [Vec::new(), Vec::new()] {
+            assert_eq!(keep_active_devices(devices.clone(), &no_information).len(), 2);
+        }
+    }
     /// Env-var tests mutate process-global state; serialize them so a sibling
     /// test cannot observe a half-set pair (mutation-check trap: a racing test
     /// writing the same globals can rescue a broken guard).
