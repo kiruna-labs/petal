@@ -430,6 +430,44 @@ impl LocalVideoTrack {
             .map_err(|e| RoomError::Internal(format!("failed to set sender parameters: {e}")))
     }
 
+    /// Clear the publish-time allocation floor on every encoding that carries
+    /// one, returning whether anything changed.
+    ///
+    /// The floor exists to lift the congestion controller off its conservative
+    /// startup estimate. Keeping it pinned afterwards would remove the
+    /// controller's ability to back off, so the app releases it once the
+    /// estimate has cleared the floor (or a bounded startup window has
+    /// expired).
+    ///
+    /// `min_bitrate` deliberately does NOT go on [`PublishingLayerParameters`]:
+    /// that type is the SDK's documented live-tuning surface for
+    /// max-bitrate/framerate, and this is a one-shot release of a value this
+    /// crate set itself, not a general caller knob.
+    pub fn clear_publishing_min_bitrate(&self) -> RoomResult<bool> {
+        let transceiver = self.transceiver().ok_or_else(|| {
+            RoomError::Internal("cannot clear min bitrate: no transceiver".into())
+        })?;
+        let sender = transceiver.sender();
+        let mut params = sender.parameters();
+
+        let mut changed = false;
+        for encoding in &mut params.encodings {
+            if encoding.min_bitrate.is_some() {
+                encoding.min_bitrate = None;
+                changed = true;
+            }
+        }
+
+        if !changed {
+            return Ok(false);
+        }
+
+        sender
+            .set_parameters(params)
+            .map_err(|e| RoomError::Internal(format!("failed to set sender parameters: {e}")))?;
+        Ok(true)
+    }
+
     /// Toggle simulcast encoding layers on/off based on subscriber demand.
     /// Used by dynacast: the SFU tells us which quality levels are needed,
     /// and we set `encoding.active` accordingly on the RTP sender.
