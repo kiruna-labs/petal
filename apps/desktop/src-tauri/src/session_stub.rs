@@ -40,6 +40,207 @@ const SHARE_LOSS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// Per-interval push-cadence log from the share frame pump (the plan's
 /// "measured rather than inferred" capture-to-push gate).
 const SHARE_PUMP_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Publish-side push cadence for window shares.
+///
+/// The gate's interval is the share's OWN effective encode cadence
+/// ([`crate::transport::publisher::PublishedTrack::cadence_fps`]), which is the
+/// cadence the encoder was configured with -- one number, so the gate and the
+/// encoder cannot disagree, and nothing in the environment can compete with it.
+///
+/// Windows deliberately has no CAPTURE fps ceiling here (unlike macOS, whose
+/// share drives ScreenCaptureKit to `ShareQuality::capture_fps()`): a capable
+/// host should capture as fast as it can, so each encode instant can pick the
+/// FRESHEST available frame.
+///
+/// What this bounds is the push. Measured on a 1458x935 share (003A): the pump
+/// pushed 227-258 frames per 5s (45.4-51.6 fps) while libwebrtc's adaptation
+/// accepted exactly 149-151 (30.0 fps) and discarded the other 38% in its frame
+/// dropper, whose leaky bucket admits bursts of frames and then drops bursts.
+/// That arbitrary selection -- not the frame count -- is what moves the
+/// source-phase of the frames that survive, and it is why the capture rate
+/// wandered with no effect on the delivered rate.
+///
+/// At the declared cadence in, the dropper has nothing to discard, and the frame
+/// that survives is the freshest one at each grid instant: the selection the
+/// "no capture ceiling" design wanted in the first place.
+///
+/// The result is visible in the 5s health line: `source_rejected` falls from ~90
+/// per 5s to ~0, with `gate_skipped` taking its place and `pump_pushed`
+/// settling at ~150.
+///
+/// The gate's configured interval for a share publishing at `cadence_fps`.
+/// Extracted so "the gate IS the share's own cadence" is a testable rule rather
+/// than something only a 5s health line reveals.
+fn push_gate_interval_us(cadence_fps: u32) -> Option<u64> {
+    Some(1_000_000 / u64::from(cadence_fps.max(1)))
+}
+
+/// Which instant becomes the published frame clock: the push gate's own ladder
+/// point, one interval ahead of the frame that was admitted.
+///
+/// The gate already runs on a uniform ladder on the capture timeline, but the
+/// frames that pass it belong to the source, and the source is not on that
+/// ladder. Measured on a shared window: the source offers ~52 fps
+/// (`gate_skipped=110` against `pump_pushed=150` per 5s), so the gate admits the
+/// first source frame at or after each 33333us ladder point and each admitted
+/// frame sits up to one source period (19.2ms) past its point -- and that phase
+/// error walks frame to frame, because 19.2ms and 33.33ms are incommensurate.
+///
+/// The push cadence shows it directly: intervals of ~20ms (25%), ~34-42ms (69%)
+/// and ~51-56ms (5%) around a correct 33.26ms mean. Correct rate, wrong
+/// spacing, which is what judder is, and a receiver renders by timestamp, so it
+/// reproduces exactly that spacing. It also explains why every bandwidth arm
+/// plateaued: queueing jitter shrinks, this does not.
+///
+/// Publishing the ladder point instead makes the receiver's spacing exactly
+/// 1/fps while the claim about *when* the content was captured moves by up to
+/// one source period (<=19.2ms here). The rate, the selection and the wire cost
+/// are all unchanged.
+///
+/// Verified by eye before it became the default: with the allocation floor held,
+/// this was what turned "smoother, but the stutter returns" into "smooth overall
+/// with occasional slight stutter", on a window share and a full-display share
+/// alike. `clock_delta_ms` in the per-frame push log is the numeric check.
+#[cfg(test)]
+mod push_gate_cadence_tests {
+    use super::*;
+
+    #[test]
+    fn the_gate_is_derived_from_the_shares_own_cadence() {
+        // The gate's configured interval is the cadence the publisher declared,
+        // so a 60fps share gates at 16.67ms rather than at a fixed default.
+        assert_eq!(push_gate_interval_us(60), Some(1_000_000 / 60));
+        assert_eq!(push_gate_interval_us(30), Some(1_000_000 / 30));
+        // A degenerate cadence still gates rather than flooding the encoder.
+        assert_eq!(push_gate_interval_us(0), Some(1_000_000));
+    }
+
+    /// The published ladder must be exactly 1/fps apart even though the frames
+    /// that pass the gate are not: the grid instant is the frame's own instant
+    /// rounded up to the ladder, so the phase error becomes a bounded offset
+    /// from the content instead of spacing the receiver has to render.
+    #[test]
+    fn the_grid_clock_is_uniform_where_the_source_cadence_is_not() {
+        const INTERVAL_US: u64 = 33_333;
+        let mut grid = None;
+        // A ~52fps source: 19231us apart, incommensurate with the ladder.
+        let source: Vec<u64> = (0..12).map(|i| 1_000_000 + i * 19_231).collect();
+        let mut published = Vec::new();
+        let mut kept_source = Vec::new();
+        for t in source {
+            if push_gate_allows(&mut grid, t, INTERVAL_US) {
+                published.push(grid.expect("gate sets the grid") - INTERVAL_US);
+                kept_source.push(t);
+            }
+        }
+        assert!(published.len() >= 5, "published {published:?}");
+        for pair in published.windows(2) {
+            assert_eq!(pair[1] - pair[0], INTERVAL_US, "published {published:?}");
+        }
+        // The frames the gate kept are NOT evenly spaced, so the uniformity
+        // above comes from the ladder and not from the source.
+        assert!(
+            kept_source.windows(2).any(|p| p[1] - p[0] != INTERVAL_US),
+            "source gaps {kept_source:?}"
+        );
+    }
+}
+
+/// Whether this frame should be pushed, advancing `grid_us` when it is.
+///
+/// The grid lives on the CAPTURE timeline (`capture_wall_time_us`, epoch
+/// microseconds) rather than on `Instant`, because the timeline being converted
+/// is the content's, and the frame clock already uses it.
+///
+/// Pure so the cadence is testable: this decides which frames reach the encoder,
+/// and getting it wrong is invisible in every 5s aggregate.
+fn push_gate_allows(
+    grid_us: &mut Option<u64>,
+    capture_wall_time_us: u64,
+    interval_us: u64,
+) -> bool {
+    let Some(grid) = *grid_us else {
+        // The first frame anchors the phase to the capture timeline rather than
+        // to whenever the pump happened to start.
+        *grid_us = Some(capture_wall_time_us.saturating_add(interval_us));
+        return true;
+    };
+    if capture_wall_time_us < grid {
+        return false;
+    }
+    // Advance by exactly one interval so the long-run rate IS the target;
+    // re-anchoring to the frame each time would add the capture period to every
+    // interval and land the rate below the target, which starves the receiver's
+    // jitter buffer instead of feeding it.
+    //
+    // The exception is a frame already more than one interval past the grid: a
+    // stalled or minimized stream must not repay its backlog as a burst of
+    // catch-up pushes, because that would hand the dropper exactly the burst
+    // this exists to avoid. Re-anchor instead.
+    let advanced = grid.saturating_add(interval_us);
+    *grid_us = Some(if capture_wall_time_us >= advanced {
+        capture_wall_time_us.saturating_add(interval_us)
+    } else {
+        advanced
+    });
+    true
+}
+
+#[cfg(test)]
+mod push_gate_tests {
+    use super::*;
+
+    const INTERVAL_US: u64 = 33_333;
+
+    fn pushes(captures: &[u64]) -> Vec<bool> {
+        let mut grid = None;
+        captures
+            .iter()
+            .map(|t| push_gate_allows(&mut grid, *t, INTERVAL_US))
+            .collect()
+    }
+
+    #[test]
+    fn the_first_frame_anchors_the_grid_and_is_pushed() {
+        assert_eq!(pushes(&[1_000_000]), vec![true]);
+        // The anchor is one interval ahead, so an immediately-following frame
+        // is not also admitted.
+        assert_eq!(pushes(&[1_000_000, 1_000_001]), vec![true, false]);
+    }
+
+    #[test]
+    fn a_50fps_capture_becomes_a_30fps_push_cadence() {
+        // 20ms capture period against a 33.3ms target. The 2,2,1 pattern is what
+        // ANY rate conversion between these two rates has to produce; pinned
+        // because the A/B rests on this being ~30fps and not drifting off it.
+        let captures: Vec<u64> = (0..10).map(|i| 1_000_000 + i * 20_000).collect();
+        assert_eq!(
+            pushes(&captures),
+            vec![true, false, true, false, true, true, false, true, false, true]
+        );
+    }
+
+    #[test]
+    fn the_long_run_rate_is_the_target_and_not_below_it() {
+        // 60 captures at 20ms = 1.2s of capture, so a 30fps grid must push 36.
+        // Exactly 36: a rate below the target would starve the receiver.
+        let captures: Vec<u64> = (0..60).map(|i| 1_000_000 + i * 20_000).collect();
+        assert_eq!(pushes(&captures).iter().filter(|p| **p).count(), 36);
+    }
+
+    #[test]
+    fn a_stalled_stream_does_not_repay_its_backlog_as_a_burst() {
+        // A 10s hole (minimized window). The frame after it is pushed, and the
+        // grid re-anchors so the next 20ms frame is NOT also admitted -- i.e.
+        // one push, not a catch-up burst the dropper would then have to absorb.
+        let mut grid = None;
+        assert!(push_gate_allows(&mut grid, 1_000_000, INTERVAL_US));
+        assert!(!push_gate_allows(&mut grid, 1_020_000, INTERVAL_US));
+        assert!(push_gate_allows(&mut grid, 11_020_000, INTERVAL_US));
+        assert!(!push_gate_allows(&mut grid, 11_040_000, INTERVAL_US));
+    }
+}
 /// WGC only delivers frames when the captured content CHANGES (verified
 /// live: a static window delivers its initial frame(s), then silence). The
 /// pump re-pushes the last frame on this idle timer so receivers keep
@@ -300,7 +501,11 @@ impl SessionState {
     /// Same contract as the macOS session's `joined_room_for_rename`.
     fn joined_room_for_rename(
         &self,
-    ) -> Option<(Arc<livekit::Room>, Arc<crate::presence::PresenceState>, String)> {
+    ) -> Option<(
+        Arc<livekit::Room>,
+        Arc<crate::presence::PresenceState>,
+        String,
+    )> {
         self.joined.lock_unpoisoned().as_ref().map(|joined| {
             (
                 joined.room_connection.room(),
@@ -1724,6 +1929,9 @@ pub(crate) async fn start_share_token(
     // Local replay gate: the mode routes cursor-preserving vs full-control.
     crate::windows_remote_control::set_share_mode(token, control_mode);
 
+    // Resolved once, from the publication's own effective cadence, so the push
+    // gate and the encoder are guaranteed to agree on the rate for this share.
+    let published_cadence_fps = published.cadence_fps();
     let shared = Arc::new(SharePumpShared {
         published: Mutex::new(published),
     });
@@ -1746,6 +1954,7 @@ pub(crate) async fn start_share_token(
         shared.clone(),
         token,
         kind,
+        published_cadence_fps,
         #[cfg(debug_assertions)]
         status.clone(),
     );
@@ -1956,6 +2165,7 @@ fn start_share_frame_pump(
     shared: Arc<SharePumpShared>,
     token: u32,
     kind: SharedSourceKind,
+    cadence_fps: u32,
     #[cfg(debug_assertions)] capture_status: crate::windows_screen_capture::CaptureStatus,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
@@ -1963,6 +2173,22 @@ fn start_share_frame_pump(
         let mut first_frame_logged = false;
         let mut minimized_hold_logged = false;
         let mut pushed_this_interval = 0u64;
+        let mut accepted_this_interval = 0u64;
+        let mut push_failed_this_interval = 0u64;
+        let mut source_rejected_this_interval = 0u64;
+        let mut convert_ms_this_interval = 0.0f64;
+        let mut capture_return_ms_this_interval = 0.0f64;
+        let mut max_capture_age_ms_this_interval = 0.0f64;
+        let mut max_convert_ms_this_interval = 0.0f64;
+        let mut max_capture_return_ms_this_interval = 0.0f64;
+        let mut gate_skipped_this_interval = 0u64;
+        // Push-gate state: the gate's interval IS this share's effective encode
+        // cadence, so the encoder and the gate cannot disagree about the rate.
+        let push_interval_us = push_gate_interval_us(cadence_fps);
+        let mut next_push_grid_us: Option<u64> = None;
+        log::info!(
+            "windows session: share {token} frame clock=grid ({cadence_fps} fps: publishing the push gate's ladder point, not the frame's capture instant)"
+        );
         // Last successfully pushed frame: re-pushed by the idle-refresh timer
         // when WGC goes silent on static content (see the constant's doc).
         let mut last_pushed: Option<crate::windows_screen_capture::BgraFrame> = None;
@@ -1999,12 +2225,33 @@ fn start_share_frame_pump(
                     if !generation.is_current() {
                         break;
                     }
+                    // Bounded, once per SHARE_PUMP_HEALTH_INTERVAL. The gate counters
+                    // are what make the rate decision auditable without a per-frame
+                    // log: `pump_pushed` is the post-gate rate, `gate_skipped` the
+                    // frames the gate withheld, and `source_rejected` what WebRTC's
+                    // own dropper then discarded (which the gate exists to bring to
+                    // ~0). `push_gate_fps` is the cadence the gate was derived from.
                     log::info!(
-                        "windows session: share {token} pushed {pushed_this_interval} frame(s) in the last {}s ({:.1} fps)",
+                        "windows session: share {token} pump_pushed={pushed_this_interval} accepted={accepted_this_interval} frame(s) in the last {}s ({:.1} fps), push_failed={push_failed_this_interval} source_rejected={source_rejected_this_interval} gate_skipped={gate_skipped_this_interval} avg_convert_ms={:.2} avg_capture_frame_return_ms={:.2} max_capture_age_ms={:.1} max_convert_ms={:.2} max_capture_frame_return_ms={:.2} push_gate_fps={}",
                         SHARE_PUMP_HEALTH_INTERVAL.as_secs(),
-                        pushed_this_interval as f64 / SHARE_PUMP_HEALTH_INTERVAL.as_secs() as f64
+                        pushed_this_interval as f64 / SHARE_PUMP_HEALTH_INTERVAL.as_secs() as f64,
+                        if pushed_this_interval > 0 { convert_ms_this_interval / pushed_this_interval as f64 } else { 0.0 },
+                        if pushed_this_interval > 0 { capture_return_ms_this_interval / pushed_this_interval as f64 } else { 0.0 },
+                        max_capture_age_ms_this_interval,
+                        max_convert_ms_this_interval,
+                        max_capture_return_ms_this_interval,
+                        cadence_fps,
                     );
                     pushed_this_interval = 0;
+                    accepted_this_interval = 0;
+                    push_failed_this_interval = 0;
+                    source_rejected_this_interval = 0;
+                    gate_skipped_this_interval = 0;
+                    convert_ms_this_interval = 0.0;
+                    capture_return_ms_this_interval = 0.0;
+                    max_capture_age_ms_this_interval = 0.0;
+                    max_convert_ms_this_interval = 0.0;
+                    max_capture_return_ms_this_interval = 0.0;
                     continue;
                 }
                 _ = tokio::time::sleep(refresh_interval) => {
@@ -2036,15 +2283,37 @@ fn start_share_frame_pump(
                     sequence += 1;
                     let captured = share_captured_frame(previous, sequence);
                     let published = shared.published.lock_unpoisoned().clone();
-                    if published
-                        .push_frame(&captured, previous.capture_wall_time_us)
-                        .is_some()
-                    {
+                    // A refresh re-push is not a capture: `previous` is a frame
+                    // whose `capture_wall_time_us` is frozen at the LAST real
+                    // capture, so reusing it would hand webrtc the same frame
+                    // clock on every tick. A repeated (or backward) clock is
+                    // exactly what its encoder drops as a duplicate, and this
+                    // branch exists to keep producing encodable frames during
+                    // remote-input boost (33ms) and idle static content (2s).
+                    // The frame is encoded now, so its instant is now.
+                    let refresh_at_us = crate::time_util::now_us();
+                    if let Some(timing) = published.push_frame(&captured, refresh_at_us) {
                         pushed_this_interval += 1;
+                        convert_ms_this_interval += timing.convert_ms;
+                        capture_return_ms_this_interval += timing.capture_frame_return_ms;
+                        max_capture_age_ms_this_interval =
+                            max_capture_age_ms_this_interval.max(timing.capture_age_ms);
+                        max_convert_ms_this_interval =
+                            max_convert_ms_this_interval.max(timing.convert_ms);
+                        max_capture_return_ms_this_interval = max_capture_return_ms_this_interval
+                            .max(timing.capture_frame_return_ms);
+                        if timing.source_accepted {
+                            accepted_this_interval += 1;
+                        } else {
+                            source_rejected_this_interval += 1;
+                        }
+
                         last_push_at = std::time::Instant::now();
                         log::debug!(
                             "windows session: share {token} idle-refresh pushed last frame (static content)"
                         );
+                    } else {
+                        push_failed_this_interval += 1;
                     }
                     continue;
                 }
@@ -2073,6 +2342,29 @@ fn start_share_frame_pump(
                 }
                 continue;
             }
+            let mut published_wall_time_us = frame.capture_wall_time_us;
+            if let Some(interval_us) = push_interval_us {
+                if !push_gate_allows(
+                    &mut next_push_grid_us,
+                    frame.capture_wall_time_us,
+                    interval_us,
+                ) {
+                    // Not this frame's turn on the grid. Dropping it here is what
+                    // keeps the encoder's input uniform, and it also skips the
+                    // BGRA clone and the ~9ms D3D copy + libyuv convert below for
+                    // a frame we would have thrown away at the encoder anyway.
+                    gate_skipped_this_interval += 1;
+                    continue;
+                }
+                // See `push_gate_interval_us`'s doc. The grid holds the NEXT
+                // ladder point, so the one this frame was admitted for is one
+                // interval behind it -- which on the very first frame is exactly
+                // the frame's own instant, so the ladder stays anchored to the
+                // content rather than to whenever the pump happened to start.
+                if let Some(grid) = next_push_grid_us {
+                    published_wall_time_us = grid.saturating_sub(interval_us);
+                }
+            }
             if minimized_hold_logged {
                 minimized_hold_logged = false;
                 log::info!("windows session: share {token} resumed pushing (window restored)");
@@ -2088,11 +2380,21 @@ fn start_share_frame_pump(
             }
             let captured = share_captured_frame(&frame, sequence);
             let published = shared.published.lock_unpoisoned().clone();
-            let pushed = published
-                .push_frame(&captured, frame.capture_wall_time_us)
-                .is_some();
-            if pushed {
+            let push_result = published.push_frame(&captured, published_wall_time_us);
+            if let Some(timing) = push_result {
                 pushed_this_interval += 1;
+                convert_ms_this_interval += timing.convert_ms;
+                capture_return_ms_this_interval += timing.capture_frame_return_ms;
+                max_capture_age_ms_this_interval =
+                    max_capture_age_ms_this_interval.max(timing.capture_age_ms);
+                max_convert_ms_this_interval = max_convert_ms_this_interval.max(timing.convert_ms);
+                max_capture_return_ms_this_interval =
+                    max_capture_return_ms_this_interval.max(timing.capture_frame_return_ms);
+                if timing.source_accepted {
+                    accepted_this_interval += 1;
+                } else {
+                    source_rejected_this_interval += 1;
+                }
                 last_pushed = Some(frame);
                 last_push_at = std::time::Instant::now();
                 continue;
@@ -2102,6 +2404,7 @@ fn start_share_frame_pump(
             // handled inside the publisher: frames are letterboxed to the
             // published size during the gesture and the size is re-anchored
             // once it settles — no track republish on Windows.
+            push_failed_this_interval += 1;
             continue;
         }
     })
@@ -2607,7 +2910,11 @@ pub async fn join_room_command(
     // Plugin data bus (plugins/README.md §2.6), Windows parity with
     // session/room.rs: without this the bus is send-only here -- publishes go
     // out but no `plugin-data` / `plugin-state-changed` event ever arrives.
-    crate::plugins::start_receiver_for_room(&app, room_connection.room().clone(), generation.clone());
+    crate::plugins::start_receiver_for_room(
+        &app,
+        room_connection.room().clone(),
+        generation.clone(),
+    );
     crate::remote_control::start_receiver_for_room(
         &app,
         room_connection.room().clone(),
@@ -3358,6 +3665,7 @@ mod tests {
         assert!(media.camera.is_none());
         assert!(media.shares.is_empty());
     }
+
 
     #[test]
     fn share_error_kinds_match_the_frontend_toast_map() {
