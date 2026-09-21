@@ -16,7 +16,7 @@ function extractArrayLiteral(name: string): string[] {
 
 test('compact controls keep the essential row fixed and move secondary actions to More', () => {
   assert.deepEqual(extractArrayLiteral('DISPLAY_ORDER'), ['mic', 'camera', 'screenshare']);
-  assert.deepEqual(extractArrayLiteral('PILL_MORE_ORDER'), ['invite', 'region', 'remotecontrol']);
+  assert.deepEqual(extractArrayLiteral('PILL_MORE_ORDER'), ['invite', 'chat', 'region', 'remotecontrol']);
   assert.doesNotMatch(source, /DeviceCaret/);
 });
 

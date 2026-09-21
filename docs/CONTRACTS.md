@@ -1229,6 +1229,48 @@ Native: `apps/desktop/src-tauri/src/plugins/bus.rs`
 Shared: `shared/plugin-host/topics.ts`, `shared/plugin-host/metadata.ts`,
 `shared/plugin-host/rateLimit.ts`.
 
+### Chat
+
+Meeting chat is a HOST surface (plugins/README.md §2.7): one exact topic,
+`petal.chat` (`topics.chat`), carried by both clients the way the plugin bus
+is. Native transports and stamps (`apps/desktop/src-tauri/src/chat.rs`:
+`chat_publish`, `start_receiver_for_room`, global `chat-data` event =
+`chatDataEvent`: `senderIdentity`, `senderName`, `payloadBase64`); the wire
+model, validation, ordering, history, and rendering live in
+`shared/logic/chat.ts` and run in the trusted main webview and the web
+client alike.
+
+Three shapes, all `v: 1`, all reliable (`chatMessages` pins each with its
+exact field list):
+
+```
+{ "v": 1, "type": "msg", "id": "<8..64 url-safe chars>", "text": "<1..2000 chars>", "t": <unix ms> }
+{ "v": 1, "type": "history-req" }
+{ "v": 1, "type": "history", "messages": [ { id, text, t, senderIdentity, senderName } ] }   -> destinationIdentities: [requester]
+```
+
+**Sender identity is stamped by the receiving host** from the authenticated
+LiveKit participant; a payload field claiming a sender is ignored (extra
+fields are tolerated, never read). `t` is the sender's clock and only an
+ordering hint. `text` is refused when empty, over `maxTextChars`, or
+carrying C0/C1 controls or bidi overrides/isolates (the drawer's layout must
+never be rearranged by a peer). Parsing is strict: a packet that is not
+exactly one of the three shapes is dropped whole (`chatRejectedPayloads`
+pins the cases on both sides: `web-harness/tests/chat.test.ts`, `chat.rs`
+tests).
+
+**History.** A joiner publishes `history-req` once when connected; every
+peer with messages answers with its newest `historyMessages` (50), trimmed
+oldest-first until the packet fits `maxPayloadBytes`, sent to the requester
+only. Duplicates (by `id`) from several responders collapse. Relayed entries
+are the responder's claim about who said what, so the store marks them
+`relayed` unless the responder attributes them to itself; they never count as
+unread.
+
+**Limits** (`chatLimits`): `maxTextChars` 2000, `maxPayloadBytes` 8192,
+`historyMessages` 50, `inboundPerSenderPerSecond` 10 (native and web drop
+beyond it), `retainedMessages` 500 in memory per meeting.
+
 ### Pipeline Stats
 
 - Topic: `petal.pipeline-stats`

@@ -162,7 +162,11 @@
         </div>
       </div>
 
-      <div id="tiles" class="tiles"></div>
+      <!-- Tiles and the chat drawer share a row (plugins/README.md §2.7 "Panel");
+           chat/setupChat.svelte.ts appends <aside id="chat-drawer"> here. -->
+      <div class="meeting-body">
+        <div id="tiles" class="tiles"></div>
+      </div>
 
       <div class="controlbar">
         <div class="controls-left">
@@ -226,6 +230,16 @@
             </button>
             <span class="meeting-control-label">Draw</span>
             <span id="ctl-draw-label" class="control-tooltip" aria-hidden="true">Nothing to draw on</span>
+          </div>
+          <div class="control-cell chat-cell">
+            <button id="ctl-chat" class="control-button" type="button" aria-label="Open chat" aria-pressed="false" aria-expanded="false" title="Chat">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"></path>
+                <path d="M8.5 8.5h7M8.5 12h4.5"></path>
+              </svg>
+            </button>
+            <span id="ctl-chat-badge" class="chat-badge" aria-hidden="true" hidden></span>
+            <span class="meeting-control-label">Chat</span>
           </div>
         </div>
         <div class="control-cell leave-cell">
