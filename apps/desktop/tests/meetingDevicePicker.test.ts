@@ -24,7 +24,7 @@ function extractArrayLiteral(name: string): string[] {
 
 test('the compact pill has a fixed essential hierarchy and stable More overflow', () => {
   assert.deepEqual(extractArrayLiteral('DISPLAY_ORDER'), ['mic', 'camera', 'screenshare']);
-  assert.deepEqual(extractArrayLiteral('PILL_MORE_ORDER'), ['invite', 'region', 'remotecontrol']);
+  assert.deepEqual(extractArrayLiteral('PILL_MORE_ORDER'), ['invite', 'chat', 'region', 'remotecontrol']);
   assert.match(meetingChromeSource, /icon="more"/);
   assert.match(meetingChromeSource, /overflow: \[\.\.\.PILL_MORE_ORDER\]/);
 });

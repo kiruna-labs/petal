@@ -42,6 +42,8 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import MeetingChrome from '$lib/components/MeetingChrome.svelte';
+  import ChatDrawer from '@petal/shared/ui/components/ChatDrawer.svelte';
+  import { createChatHost } from '$lib/chat/chatHost.svelte';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
   import type { ControlIcon } from '$lib/components/ControlButton.svelte';
@@ -628,10 +630,33 @@
       }
     } else if (icon === 'invite') {
       await copyInviteLink();
+    } else if (icon === 'chat') {
+      chat.toggle();
+      // The drawer lives beside the gallery; opening it from the pill's More
+      // menu means expanding first, or nothing would appear.
+      if (chat.open && !pill.expanded) pill.expanded = true;
     } else if (icon === 'leave') {
       await meeting.handleLeave();
     }
   }
+
+  // Meeting chat (plugins/README.md §2.7, a host surface). Sender identity
+  // comes from Rust's stamp; names fall back to the presence roster.
+  const chatToast = createLocalToast(4000);
+  const chat = createChatHost({
+    selfIdentity: () => meeting.presence.find((p) => p.isLocal)?.identity ?? session.participantId ?? null,
+    selfName: () => meeting.presence.find((p) => p.isLocal)?.name ?? null,
+    participantName: (identity) => meeting.presence.find((p) => p.identity === identity)?.name ?? null,
+    onNotice: (text) => chatToast.show(text)
+  });
+  $effect(() => {
+    if (meeting.meetingPhase === 'connected') chat.onConnected();
+    else chat.onDisconnected();
+  });
+  onDestroy(() => {
+    chat.dispose();
+    chatToast.dispose();
+  });
 
   // Plugins (plugins/README.md §2.7): the shared host lives in
   // PluginSurfaces; the route only renders the host-drawn toolbar cells into
@@ -650,6 +675,15 @@
     return () => pluginToast.dispose();
   });
 </script>
+
+{#snippet chatDrawer()}
+  <ChatDrawer
+    messages={chat.messages}
+    canSend={meeting.meetingPhase === 'connected'}
+    onSend={(text) => chat.send(text)}
+    onClose={() => chat.setOpen(false)}
+  />
+{/snippet}
 
 {#snippet pluginActions()}
   <PluginToolbarButtons
@@ -700,6 +734,9 @@
         onRenameRoom={meeting.handleRenameRoom}
         onReportBug={feedbackEnabled ? () => (feedbackOpen = true) : undefined}
         {pluginActions}
+        chatOpen={chat.open}
+        chatUnread={chat.unread}
+        {chatDrawer}
       />
 
       <PluginSurfaces
@@ -718,6 +755,12 @@
       {#if pluginToast.visible}
         <div class="toast-anchor" transition:toastTransition>
           <Toast variant={pluginToastVariant} message={pluginToast.message} />
+        </div>
+      {/if}
+
+      {#if chatToast.visible}
+        <div class="toast-anchor" transition:toastTransition>
+          <Toast variant="info" message={chatToast.message} />
         </div>
       {/if}
 

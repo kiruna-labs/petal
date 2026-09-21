@@ -835,6 +835,7 @@ pub async fn join_room(
     // `plugin/*` topics, emitting a global `plugin-data` event the main
     // webview's plugin host routes to the right sandboxed plugin frame.
     crate::plugins::start_receiver_for_room(app, room_connection.room(), room_generation.clone());
+    crate::chat::start_receiver_for_room(app, room_connection.room(), room_generation.clone());
 
     // AI chat (#657): start/stop requests, push-to-talk floor claims, and
     // remote session state. Every inbound message is authorized against the
