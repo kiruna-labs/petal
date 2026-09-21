@@ -20,6 +20,7 @@
     | 'region'
     | 'remotecontrol'
     | 'invite'
+    | 'chat'
     | 'leave'
     | 'more'
     | 'expand'
@@ -94,6 +95,7 @@
     region: 'Petal View',
     remotecontrol: 'Remote control',
     invite: 'Invite',
+    chat: 'Chat',
     leave: 'Leave',
     more: 'More',
     expand: 'Expand',
@@ -194,6 +196,13 @@
       <svg width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"></path>
         <rect x="7" y="7" width="10" height="10" rx="1"></rect>
+      </svg>
+    {:else if icon === 'chat'}
+      <!-- Speech bubble; the open drawer is the toggle's active state, so the
+           glyph itself carries no on/off variant. -->
+      <svg width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"></path>
+        <path d="M8.5 8.5h7M8.5 12h4.5"></path>
       </svg>
     {:else if icon === 'remotecontrol'}
       <!-- Remote control stays neutral like camera; active means enabled, so
