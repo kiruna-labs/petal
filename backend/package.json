@@ -12,13 +12,13 @@
     "test:local": "node --import tsx test/local.ts"
   },
   "dependencies": {
-    "@google/genai": "^2.22.0",
-    "@sentry/node": "^10.74.0",
+    "@google/genai": "^2.23.0",
+    "@sentry/node": "^10.75.0",
     "@vercel/blob": "^2.8.0",
     "livekit-server-sdk": "^2.19.0"
   },
   "devDependencies": {
-    "@types/node": "^26.5.1",
+    "@types/node": "^26.6.1",
     "tsx": "^4.23.13",
     "typescript": "~7.0.2",
     "undici": "^8.10.2"
