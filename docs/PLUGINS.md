@@ -80,6 +80,15 @@ in your participant metadata that everyone with your plugin can read via
 for events. Petal also uses this metadata to tell peers you are running the
 plugin, which is what powers the install prompt in M3.
 
+## Chat *(I-7a host surface; plugin API in I-7b)*
+
+Petal's meeting chat is part of the host, not a plugin, so that plugins can
+build on it. Today users send and read messages in the Chat drawer (the
+"Chat" control in the meeting bar); the wire format is documented in
+`docs/CONTRACTS.md` "Chat". The `petal.chat` API for plugins (`chat.post`,
+`chat.registerCommand`, `chat.on('message')`, behind `chat:post`,
+`chat:commands`, `chat:read`) lands with I-7b and will be described here.
+
 ## How users see your plugin
 
 Every control Petal draws for you carries a small puzzle badge whose tooltip
