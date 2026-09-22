@@ -435,17 +435,17 @@
       "version": "3.7.4"
     },
     {
-      "bom-ref": "@astrojs/starlight@0.42.0",
+      "bom-ref": "@astrojs/starlight@0.42.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/starlight/-/starlight-0.42.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/starlight/-/starlight-0.42.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "115b069f2189eab44dc06459158986001a34a93439e45ece4a67d22f454afb996ca83faee8659c07cb45a97113714bcff24ca7f745be4012d22f669eafd8cd25"
+          "content": "ac3020bf740224ea3417812859eb851b7d4e76140eadc8a901397dfa00a43aaa5088eeeeec547cb956a6f871cd24ef12976d5338040a512504bc25eff2312024"
         }
       ],
       "licenses": [
@@ -456,10 +456,10 @@
         }
       ],
       "name": "@astrojs/starlight",
-      "purl": "pkg:npm/%40astrojs/starlight@0.42.0",
+      "purl": "pkg:npm/%40astrojs/starlight@0.42.2",
       "scope": "required",
       "type": "library",
-      "version": "0.42.0"
+      "version": "0.42.2"
     },
     {
       "bom-ref": "@astrojs/telemetry@3.3.3",
@@ -4192,17 +4192,17 @@
       "version": "5.3.2"
     },
     {
-      "bom-ref": "astro@7.3.2",
+      "bom-ref": "astro@7.3.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/astro/-/astro-7.3.2.tgz"
+          "url": "https://registry.npmjs.org/astro/-/astro-7.3.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "cac4dc76918feb55d9a47a0c4580bf08ad7d0d0f78aa406fcd732d5c4a34804a8f36498e53f4effbe0ad5a6cda2389c5d8293c45715d896bdd95359ada83abf7"
+          "content": "345d3c864dde7459159abf5abdff475bfad0c9fe8dae96d50f2623d9c54ddc97e28c385f2588758af5954d8e4f51de7ead1667fd5b6ee2269ec8d94fd08bfa9a"
         }
       ],
       "licenses": [
@@ -4213,10 +4213,10 @@
         }
       ],
       "name": "astro",
-      "purl": "pkg:npm/astro@7.3.2",
+      "purl": "pkg:npm/astro@7.3.3",
       "scope": "required",
       "type": "library",
-      "version": "7.3.2"
+      "version": "7.3.3"
     },
     {
       "bom-ref": "astro-expressive-code@0.44.2",
@@ -5743,17 +5743,17 @@
       "version": "6.5.0"
     },
     {
-      "bom-ref": "find-proc@0.1.0",
+      "bom-ref": "find-proc@0.2.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/find-proc/-/find-proc-0.1.0.tgz"
+          "url": "https://registry.npmjs.org/find-proc/-/find-proc-0.2.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "39a3a9118bf63e243b490e4b22b97e75e0355da59cc448e7a4ce95b965d352f9feb5e217c5e1532c39aed7cff30d0a45987378a37a03057f814f4006c0485e9a"
+          "content": "6ba8769d3ae00778395ab9f86aef54c7890c93b209b7217aa00f2e1a7fa6937c1e2d9b2c52d735729ea6787233cee5b6a35b2bac1031ce49972dbaa3464801eb"
         }
       ],
       "licenses": [
@@ -5764,10 +5764,10 @@
         }
       ],
       "name": "find-proc",
-      "purl": "pkg:npm/find-proc@0.1.0",
+      "purl": "pkg:npm/find-proc@0.2.0",
       "scope": "required",
       "type": "library",
-      "version": "0.1.0"
+      "version": "0.2.0"
     },
     {
       "bom-ref": "flattie@1.1.1",
@@ -10312,6 +10312,33 @@
       "version": "1.0.2"
     },
     {
+      "bom-ref": "verkit@0.4.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/verkit/-/verkit-0.4.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b1733037a0cc1dea2e3df0b19315a42809b1a6158a11e9c7618e47d67201cd4dcf983b26269ea405725db218d5769319b960a62fd487eca151c76f40ca5a4fea"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "verkit",
+      "purl": "pkg:npm/verkit@0.4.0",
+      "scope": "required",
+      "type": "library",
+      "version": "0.4.0"
+    },
+    {
       "bom-ref": "vfile@6.0.3",
       "externalReferences": [
         {
@@ -10651,8 +10678,8 @@
   "dependencies": [
     {
       "dependsOn": [
-        "@astrojs/starlight@0.42.0",
-        "astro@7.3.2",
+        "@astrojs/starlight@0.42.2",
+        "astro@7.3.3",
         "sharp@0.35.4",
         "starlight-links-validator@0.26.0"
       ],
@@ -10740,7 +10767,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.3.2",
+        "astro@7.3.3",
         "@astrojs/internal-helpers@0.11.0",
         "@astrojs/markdown-satteri@0.4.0",
         "es-module-lexer@2.3.2"
@@ -10762,7 +10789,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.3.2",
+        "astro@7.3.3",
         "@astrojs/markdown-satteri@0.4.0",
         "@astrojs/mdx@8.0.0",
         "@astrojs/sitemap@3.7.4",
@@ -10792,7 +10819,7 @@
         "unist-util-visit@5.1.0",
         "vfile@6.0.3"
       ],
-      "ref": "@astrojs/starlight@0.42.0"
+      "ref": "@astrojs/starlight@0.42.2"
     },
     {
       "dependsOn": [
@@ -11499,7 +11526,7 @@
         "dset@3.1.4",
         "es-module-lexer@2.3.2",
         "esbuild@0.28.2",
-        "find-proc@0.1.0",
+        "find-proc@0.2.0",
         "flattie@1.1.1",
         "fontace@0.4.1",
         "get-tsconfig@5.0.0-beta.4",
@@ -11518,7 +11545,6 @@
         "package-manager-detector@1.8.0",
         "piccolore@0.1.3",
         "picomatch@4.0.7",
-        "semver@7.8.5",
         "shiki@4.4.3",
         "smol-toml@1.8.0",
         "svgo@4.1.0",
@@ -11528,6 +11554,7 @@
         "ultrahtml@1.7.0",
         "unifont@0.7.5",
         "unstorage@1.17.5",
+        "verkit@0.4.0",
         "vite@8.2.2",
         "vitefu@1.1.3",
         "xxhash-wasm@1.1.0",
@@ -11535,11 +11562,11 @@
         "zod@4.5.4",
         "sharp@0.35.4"
       ],
-      "ref": "astro@7.3.2"
+      "ref": "astro@7.3.3"
     },
     {
       "dependsOn": [
-        "astro@7.3.2",
+        "astro@7.3.3",
         "rehype-expressive-code@0.44.2",
         "url-extras@0.1.0"
       ],
@@ -11848,7 +11875,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "find-proc@0.1.0"
+      "ref": "find-proc@0.2.0"
     },
     {
       "dependsOn": [],
@@ -12823,8 +12850,8 @@
     },
     {
       "dependsOn": [
-        "@astrojs/starlight@0.42.0",
-        "astro@7.3.2",
+        "@astrojs/starlight@0.42.2",
+        "astro@7.3.3",
         "@astrojs/markdown-satteri@0.4.0",
         "@types/picomatch@4.0.3",
         "github-slugger@2.0.0",
@@ -13008,6 +13035,10 @@
     {
       "dependsOn": [],
       "ref": "util-deprecate@1.0.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "verkit@0.4.0"
     },
     {
       "dependsOn": [
