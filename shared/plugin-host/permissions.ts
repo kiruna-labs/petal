@@ -21,6 +21,9 @@ export const METHOD_PERMISSIONS: Record<BridgeMethod, Permission | 'net' | null>
   'net.fetch': 'net',
   'clipboard.writeText': 'clipboard:write',
   log: null,
+  'chat.post': 'chat:post',
+  // Answering one's OWN command privately; the broker also requires a live commandId.
+  'chat.respond': 'chat:commands',
 };
 
 /** Events the host only forwards when the plugin holds the permission. */
@@ -36,6 +39,7 @@ export const EVENT_PERMISSIONS: Record<HostEvent, Permission | null> = {
   'ui.action': null,
   'ui.surface-opened': null,
   'ui.surface-closed': null,
+  'chat.command': 'chat:commands',
 };
 
 export function hasPermission(granted: readonly Permission[], permission: Permission): boolean {

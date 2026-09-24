@@ -2644,6 +2644,69 @@
         "t",
         "text"
       ]
+    },
+    {
+      "name": "post",
+      "reliable": true,
+      "direct": false,
+      "message": {
+        "v": 1,
+        "type": "post",
+        "id": "p1a2b3c4d5e6f7a8",
+        "text": "Timer started: standup, 5 min",
+        "t": 1788640060000,
+        "via": {
+          "id": "petal.timer",
+          "name": "Timer"
+        }
+      },
+      "fields": [
+        "id",
+        "t",
+        "text",
+        "type",
+        "v",
+        "via"
+      ],
+      "viaFields": [
+        "id",
+        "name"
+      ]
+    },
+    {
+      "name": "history-posts",
+      "reliable": true,
+      "direct": true,
+      "message": {
+        "v": 1,
+        "type": "history-posts",
+        "messages": [
+          {
+            "id": "p1a2b3c4d5e6f7a8",
+            "text": "Timer started: standup, 5 min",
+            "t": 1788640060000,
+            "senderIdentity": "alex-1a2b",
+            "senderName": "Alex",
+            "via": {
+              "id": "petal.timer",
+              "name": "Timer"
+            }
+          }
+        ]
+      },
+      "fields": [
+        "messages",
+        "type",
+        "v"
+      ],
+      "entryFields": [
+        "id",
+        "senderIdentity",
+        "senderName",
+        "t",
+        "text",
+        "via"
+      ]
     }
   ],
   "chatRejectedPayloads": [
@@ -2681,7 +2744,7 @@
         "v": 1,
         "type": "msg",
         "id": "m1a2b3c4d5e6f7a8",
-        "text": "pay ‮evil",
+        "text": "pay \u202eevil",
         "t": 1
       }
     },
@@ -2724,6 +2787,74 @@
     {
       "name": "not json",
       "payload": "{not json"
+    },
+    {
+      "name": "post without via",
+      "payload": {
+        "v": 1,
+        "type": "post",
+        "id": "p1a2b3c4d5e6f7a8",
+        "text": "hi",
+        "t": 1
+      }
+    },
+    {
+      "name": "post with a malformed plugin id",
+      "payload": {
+        "v": 1,
+        "type": "post",
+        "id": "p1a2b3c4d5e6f7a8",
+        "text": "hi",
+        "t": 1,
+        "via": {
+          "id": "Timer",
+          "name": "Timer"
+        }
+      }
+    },
+    {
+      "name": "post with a bidi override in the plugin name",
+      "payload": {
+        "v": 1,
+        "type": "post",
+        "id": "p1a2b3c4d5e6f7a8",
+        "text": "hi",
+        "t": 1,
+        "via": {
+          "id": "petal.timer",
+          "name": "Tim\u202eer"
+        }
+      }
+    },
+    {
+      "name": "post with a plugin name over 24 chars",
+      "payload": {
+        "v": 1,
+        "type": "post",
+        "id": "p1a2b3c4d5e6f7a8",
+        "text": "hi",
+        "t": 1,
+        "via": {
+          "id": "petal.timer",
+          "name": "xxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      }
+    },
+    {
+      "name": "history-posts entry without via",
+      "payload": {
+        "v": 1,
+        "type": "history-posts",
+        "messages": [
+          {
+            "id": "p1a2b3c4d5e6f7a8",
+            "text": "hi",
+            "t": 1,
+            "senderIdentity": "alex-1a2b",
+            "senderName": "Alex"
+          }
+        ]
+      }
     }
   ],
   "chatLimits": {
@@ -2731,7 +2862,8 @@
     "maxPayloadBytes": 8192,
     "historyMessages": 50,
     "inboundPerSenderPerSecond": 10,
-    "retainedMessages": 500
+    "retainedMessages": 500,
+    "viaNameMaxChars": 24
   },
   "chatDataEvent": {
     "name": "chat-data",
@@ -2750,7 +2882,8 @@
       "payloads larger than chatLimits.maxPayloadBytes are dropped before parsing",
       "a sender exceeding chatLimits.inboundPerSenderPerSecond is dropped until the window refills",
       "the receiving host parses strictly (shared/logic/chat.ts parseChatPayload): a packet that is not exactly msg, history-req, or history is dropped whole; extra fields are ignored",
-      "history entries are a peer's claim; the store marks them relayed unless the relayer attributes them to itself, and they never count as unread"
+      "history entries are a peer's claim; the store marks them relayed unless the relayer attributes them to itself, and they never count as unread",
+      "a plugin's message is its own type, post, always carrying via {id, name} as the POSTING client stamped it; history relays posts in a separate history-posts packet, so a client that predates plugin posts drops them instead of showing a plugin's text as the person's own"
     ]
   }
 }

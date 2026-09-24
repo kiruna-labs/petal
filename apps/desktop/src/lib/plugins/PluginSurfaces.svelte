@@ -9,7 +9,9 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import type { MeetingPhase, Participant } from '@petal/shared/plugin-host/api';
-  import { createPluginHost, type PluginHost } from '@petal/shared/plugin-host/host';
+  import { createPluginHost, type PluginHost, type PluginHostAdapter } from '@petal/shared/plugin-host/host';
+  import { bridgeFailure } from '@petal/shared/plugin-host/broker';
+  import type { ChatCommandOption, ChatCommandResult } from '@petal/shared/logic/chat';
   import { hostCompatibility } from '@petal/shared/plugin-host/manifest';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
   import { invoke } from '@tauri-apps/api/core';
@@ -32,9 +34,22 @@
     hostVersion: string | null;
     onToast: (text: string, variant: 'info' | 'degraded') => void;
     buttons?: ToolbarButtonModel[];
+    /** The meeting chat host (a host surface): where `petal.chat` posts and private answers go. */
+    chat?: PluginHostAdapter['chat'];
+    /** Slash commands the chat composer can run, one owner per name. */
+    chatCommands?: ChatCommandOption[];
   }
 
-  let { participants, roomLabel, phase, hostVersion, onToast, buttons = $bindable([]) }: Props = $props();
+  let {
+    participants,
+    roomLabel,
+    phase,
+    hostVersion,
+    onToast,
+    buttons = $bindable([]),
+    chat,
+    chatCommands = $bindable([])
+  }: Props = $props();
 
   let logicEl: HTMLDivElement;
   let overlayEl: HTMLDivElement;
@@ -43,6 +58,12 @@
 
   export function activate(pluginId: string, buttonId: string, anchor: HTMLElement) {
     host?.activateButton(pluginId, buttonId, anchor);
+  }
+
+  /** The composer ran `/name args`; routed to the owning plugin only. */
+  export function runChatCommand(name: string, args: string): ChatCommandResult {
+    if (!host) return { ok: false, message: 'Plugins are still starting. Try again in a moment.' };
+    return host.runChatCommand(name, args);
   }
 
   // Plugin menu (right-click on a plugin control or popover caption).
@@ -88,14 +109,25 @@
   async function bootAsync(version: string) {
     host = createPluginHost({
       document,
-      adapter: createTauriAdapter({
-        // $state proxies cannot be structured-cloned into a plugin frame
-        // (DataCloneError); hand the host plain snapshots.
-        participants: () => $state.snapshot(participants) as Participant[],
-        roomLabel: () => roomLabel,
-        phase: () => phase,
-        toast: onToast
-      }),
+      adapter: {
+        ...createTauriAdapter({
+          // $state proxies cannot be structured-cloned into a plugin frame
+          // (DataCloneError); hand the host plain snapshots.
+          participants: () => $state.snapshot(participants) as Participant[],
+          roomLabel: () => roomLabel,
+          phase: () => phase,
+          toast: onToast
+        }),
+        // Resolved per call: the route owns the chat host and may pass it after boot.
+        chat: {
+          post: async (via, text) => {
+            if (!chat) throw bridgeFailure('unavailable', 'this client has no meeting chat');
+            await chat.post(via, text);
+          },
+          notice: (via, text) => chat?.notice(via, text)
+        }
+      },
+      onChatCommandsChanged: (next) => (chatCommands = next),
       hostVersion: version,
       mounts: { logic: logicEl, overlay: overlayEl, popoverLayer: popoverEl },
       onButtonsChanged: (next) => (buttons = next),

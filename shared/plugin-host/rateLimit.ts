@@ -21,6 +21,9 @@ export const PLUGIN_LIMITS = {
   netResponseMaxBytes: 1024 * 1024,
   logPerSecond: 20,
   uiPerSecond: 30,
+  /** `chat.post`: a message everyone reads. A timer's start and finish fit the burst; a flood does not. */
+  chatPostPerSecond: 0.5,
+  chatPostBurst: 3,
 } as const;
 
 export interface RateLimiter {

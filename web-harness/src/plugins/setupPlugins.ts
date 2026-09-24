@@ -19,6 +19,8 @@ import { createWebAdapter, participantFromLiveKit } from './webAdapter.ts';
 import { PLUGIN_LIMITS, createRateLimiter } from '@petal/shared/plugin-host/rateLimit';
 import { parsePluginTopic } from '@petal/shared/plugin-host/topics';
 import { pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
+import type { ChatCommandOption } from '@petal/shared/logic/chat';
+import { bridgeFailure } from '@petal/shared/plugin-host/broker';
 
 export interface PluginsHook {
   host: PluginHost;
@@ -29,6 +31,8 @@ export interface PluginsHook {
   onData(payload: Uint8Array, participant: LkParticipant | undefined, topic: string, senderIdentity: string | undefined): void;
   /** A participant's metadata changed; diff its `plugins` key into state.changed events. */
   onMetadata(participant: LkParticipant): void;
+  /** The runnable slash commands changed (a plugin loaded or was turned off). */
+  onChatCommandsChanged(cb: (commands: ChatCommandOption[]) => void): () => void;
 }
 
 declare const __PETAL_BUILD_INFO__: { version: string } | undefined;
@@ -69,12 +73,25 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
   const controlsLeft = dom.ctlDraw.closest('.controls-left') as HTMLElement | null;
   const cells = new Map<string, HTMLElement>();
 
-  const adapter = createWebAdapter({
-    room: () => state.room,
-    roomLabel: () => dom.roomNameEl.textContent?.trim() ?? '',
-    toast: (text) => ui.showToast(text),
-    log: (line, kind) => ui.logEvent(line, kind),
-  });
+  const adapter = {
+    ...createWebAdapter({
+      room: () => state.room,
+      roomLabel: () => dom.roomNameEl.textContent?.trim() ?? '',
+      toast: (text) => ui.showToast(text),
+      log: (line, kind) => ui.logEvent(line, kind),
+    }),
+    // The meeting chat is a host surface owned by chat/setupChat.svelte.ts,
+    // created after this; resolved per call so the order does not matter.
+    chat: {
+      post: async (via: { id: string; name: string }, text: string) => {
+        const chat = ctx.hook.chat;
+        if (!chat) throw bridgeFailure('unavailable', 'this client has no meeting chat');
+        await chat.postAsPlugin(via, text);
+      },
+      notice: (via: { id: string; name: string }, text: string) => ctx.hook.chat?.notice(via, text),
+    },
+  };
+  const chatCommandListeners = new Set<(commands: ChatCommandOption[]) => void>();
 
   function renderButtons(buttons: ToolbarButtonModel[]): void {
     if (!controlsLeft) return;
@@ -143,6 +160,9 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     hostVersion: hostVersion(),
     mounts: { logic, overlay, popoverLayer },
     onButtonsChanged: renderButtons,
+    onChatCommandsChanged: (commands) => {
+      for (const cb of chatCommandListeners) cb(commands);
+    },
     onPluginMenu: (pluginId, at) => openPluginMenu(pluginId, at),
     warn: (message) => ui.logEvent(message, 'warn'),
   });
@@ -362,5 +382,10 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     host.deliverData(parsed.pluginId, { sub: parsed.sub, sender: participantFromLiveKit(sender, false), payload });
   }
 
-  return { host, installed, roomConnected, roomDisconnected, onData, onMetadata };
+  function onChatCommandsChanged(cb: (commands: ChatCommandOption[]) => void): () => void {
+    chatCommandListeners.add(cb);
+    return () => chatCommandListeners.delete(cb);
+  }
+
+  return { host, installed, roomConnected, roomDisconnected, onData, onMetadata, onChatCommandsChanged };
 }

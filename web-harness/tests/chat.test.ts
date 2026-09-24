@@ -9,6 +9,11 @@ import {
   CHAT_TOPIC,
   chatMessageWire,
   chatNoticeText,
+  chatPostWire,
+  chatPrivateNoticeText,
+  classifyChatInput,
+  matchingChatCommands,
+  type ChatCommandOption,
   chatPublishOptions,
   createChatStore,
   encodeChatWire,
@@ -43,7 +48,7 @@ test('topic and limits match the contract', () => {
 test('every contract vector parses back to itself with exactly the pinned fields', () => {
   assert.deepEqual(
     contracts.chatMessages.map((v) => v.name),
-    ['msg', 'history-req', 'history'],
+    ['msg', 'history-req', 'history', 'post', 'history-posts'],
   );
   for (const vector of contracts.chatMessages) {
     assert.deepEqual(Object.keys(vector.message).sort(), vector.fields, vector.name);
@@ -146,11 +151,11 @@ test('store: sent() records locally first and the echo is a duplicate', () => {
 
 test('store: history reply relays the newest messages within the byte cap; merge marks relayed claims', () => {
   const store = createChatStore(() => alex.identity);
-  assert.equal(store.historyReply(), null, 'nothing to relay yet');
+  assert.deepEqual(store.historyReply(), { history: null, posts: null }, 'nothing to relay yet');
   for (let i = 0; i < CHAT_LIMITS.historyMessages + 10; i++) {
     store.receive(msg(`m-mira-${String(i).padStart(4, '0')}`, `message ${i}`, 1000 + i), mira);
   }
-  const reply = store.historyReply();
+  const reply = store.historyReply().history;
   assert.ok(reply);
   assert.equal(reply.messages.length, CHAT_LIMITS.historyMessages);
   assert.equal(reply.messages[0].text, 'message 10', 'oldest dropped first');
@@ -160,7 +165,7 @@ test('store: history reply relays the newest messages within the byte cap; merge
   // Long texts: the reply trims until it fits rather than exceeding the packet cap.
   const big = createChatStore(() => alex.identity);
   for (let i = 0; i < 20; i++) big.receive(msg(`m-big-${String(i).padStart(6, '0')}`, 'y'.repeat(1500), 1 + i), mira);
-  const bigReply = big.historyReply();
+  const bigReply = big.historyReply().history;
   assert.ok(bigReply);
   assert.ok(bigReply.messages.length < 20 && bigReply.messages.length >= 4);
   assert.ok(encodeChatWire(bigReply).length <= CHAT_LIMITS.maxPayloadBytes);
@@ -207,4 +212,93 @@ test('chatNoticeText is one line, names the sender, and never exceeds the budget
   const long = chatNoticeText(mira, 'w'.repeat(500));
   assert.ok(long.length <= 80, `${long.length}`);
   assert.ok(long.endsWith('…'));
+});
+
+const timer = { id: 'petal.timer', name: 'Timer' };
+
+test('plugin posts: received with via, count as unread from others, never from self', () => {
+  const store = createChatStore(() => alex.identity);
+  const fromMira = chatPostWire('⏱ Timer started: 5 min', timer, 100);
+  assert.equal(store.receive(fromMira, mira), 'added');
+  assert.deepEqual(store.messages[0]!.via, timer);
+  assert.equal(store.messages[0]!.local, false);
+  assert.equal(store.unread, 1);
+  const mine = chatPostWire("⏱ Time's up", timer, 200);
+  store.sent(mine, alex);
+  assert.equal(store.messages[1]!.self, true);
+  assert.deepEqual(store.messages[1]!.via, timer);
+  assert.equal(store.unread, 1, 'our own plugin post is not unread');
+  assert.equal(store.receive(mine, alex), 'duplicate', 'the echo of our own post collapses');
+  // Round trip through the strict parser keeps the stamp.
+  assert.deepEqual(parseChatPayload(encodeChatWire(fromMira)), fromMira);
+});
+
+test('private answers are local: shown, never relayed, never unread', () => {
+  const store = createChatStore(() => alex.identity);
+  store.receive(msg('m-mira-0001', 'typed by mira', 100), mira);
+  store.setOpen(true);
+  store.setOpen(false);
+  const answer = store.notice('Usage: /timer 5m', timer, alex, 150);
+  assert.equal(answer.local, true);
+  assert.equal(answer.self, true);
+  assert.deepEqual(answer.via, timer);
+  assert.equal(store.unread, 0);
+  store.sent(chatPostWire('⏱ Timer started: 5 min', timer, 200), alex);
+  const reply = store.historyReply();
+  assert.deepEqual(reply.history?.messages.map((m) => m.text), ['typed by mira'], 'typed messages only');
+  assert.deepEqual(reply.posts?.messages.map((m) => [m.text, m.via.id]), [['⏱ Timer started: 5 min', 'petal.timer']], 'posts, without the private answer');
+  assert.ok(encodeChatWire(reply.posts!).length <= CHAT_LIMITS.maxPayloadBytes);
+});
+
+test('history-posts merge keeps the via stamp and the relayed rule; a history packet never carries posts', () => {
+  const joiner = createChatStore(() => 'theo-0000');
+  const posts = {
+    v: 1 as const,
+    type: 'history-posts' as const,
+    messages: [
+      { id: 'p-mira-0001', text: 'Timer started: standup, 5 min', t: 5, senderIdentity: mira.identity, senderName: 'Mira', via: timer },
+      { id: 'p-alex-0001', text: 'Timer cancelled: review', t: 6, senderIdentity: alex.identity, senderName: 'Alex', via: timer },
+    ],
+  };
+  assert.equal(joiner.mergeHistory(posts, mira), 2);
+  assert.deepEqual(joiner.messages.map((m) => [m.via?.id, m.relayed]), [['petal.timer', false], ['petal.timer', true]]);
+  assert.equal(joiner.unread, 0);
+  // A `history` entry with a via field is read as typed (the field is
+  // ignored), which is why posts travel in their own packet.
+  const parsed = parseChatPayload(JSON.stringify({ v: 1, type: 'history', messages: [{ ...posts.messages[0], via: timer }] }));
+  assert.ok(parsed && parsed.type === 'history');
+  assert.equal('via' in parsed.messages[0]!, false);
+});
+
+test('composer: /name args is a command, // escapes a leading slash, and an unknown /word is refused', () => {
+  assert.deepEqual(classifyChatInput('   '), { kind: 'empty' });
+  assert.deepEqual(classifyChatInput('hello'), { kind: 'message', text: 'hello' });
+  assert.deepEqual(classifyChatInput('/timer 5m  standup '), { kind: 'command', name: 'timer', args: '5m  standup' });
+  assert.deepEqual(classifyChatInput('/timer'), { kind: 'command', name: 'timer', args: '' });
+  assert.deepEqual(classifyChatInput('  /timer\n5m'), { kind: 'command', name: 'timer', args: '5m' });
+  assert.deepEqual(classifyChatInput('//shrug'), { kind: 'message', text: '/shrug' });
+  assert.deepEqual(classifyChatInput('//usr/local/bin'), { kind: 'message', text: '/usr/local/bin' });
+  assert.deepEqual(classifyChatInput('/usr/local/bin'), { kind: 'invalid-command', token: 'usr/local/bin' });
+  assert.deepEqual(classifyChatInput('/Timer 5m'), { kind: 'invalid-command', token: 'Timer' });
+  assert.deepEqual(classifyChatInput('/ spaced out'), { kind: 'message', text: '/ spaced out' }, 'a lone slash then a space is text');
+  assert.equal(classifyChatInput('/timer ' + 'x'.repeat(501)).kind, 'invalid');
+  assert.equal(classifyChatInput('/timer \u202eevil').kind, 'invalid');
+  assert.equal(classifyChatInput('x'.repeat(2001)).kind, 'invalid');
+});
+
+test('autocomplete lists matching commands only while the draft is a bare /prefix', () => {
+  const option = (name: string): ChatCommandOption => ({ name, usage: '', description: name, pluginId: 'p.x', pluginName: 'X', source: 'builtin' });
+  const options = [option('timer'), option('poll'), option('tip')];
+  assert.deepEqual(matchingChatCommands(options, '/').map((o) => o.name), ['poll', 'timer', 'tip']);
+  assert.deepEqual(matchingChatCommands(options, '/ti').map((o) => o.name), ['timer', 'tip']);
+  assert.deepEqual(matchingChatCommands(options, '/timer').map((o) => o.name), ['timer']);
+  assert.deepEqual(matchingChatCommands(options, '/timer '), [], 'arguments started: no list');
+  assert.deepEqual(matchingChatCommands(options, 'hi /ti'), []);
+  assert.deepEqual(matchingChatCommands(options, '//'), []);
+});
+
+test('notices for plugin posts and private answers name the plugin', () => {
+  assert.equal(chatNoticeText(mira, "⏱ Time's up", 80, timer), "Timer (Mira): ⏱ Time's up");
+  assert.equal(chatPrivateNoticeText(timer, 'Usage: /timer 5m'), 'Timer: Usage: /timer 5m');
+  assert.ok(chatPrivateNoticeText(timer, 'w'.repeat(500)).length <= 80);
 });

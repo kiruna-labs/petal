@@ -80,14 +80,43 @@ in your participant metadata that everyone with your plugin can read via
 for events. Petal also uses this metadata to tell peers you are running the
 plugin, which is what powers the install prompt in M3.
 
-## Chat *(I-7a host surface; plugin API in I-7b)*
+## Chat *(I-7b)*
 
-Petal's meeting chat is part of the host, not a plugin, so that plugins can
-build on it. Today users send and read messages in the Chat drawer (the
-"Chat" control in the meeting bar); the wire format is documented in
-`docs/CONTRACTS.md` "Chat". The `petal.chat` API for plugins (`chat.post`,
-`chat.registerCommand`, `chat.on('message')`, behind `chat:post`,
-`chat:commands`, `chat:read`) lands with I-7b and will be described here.
+Petal's meeting chat is part of the host, not a plugin, so plugins can build
+on it. Declare your slash commands in the manifest and ask for the two
+permissions:
+
+```json
+"permissions": ["chat:commands", "chat:post"],
+"contributes": {
+  "chatCommands": [{ "name": "timer", "description": "Start a countdown everyone can see", "usage": "5m [label]" }]
+}
+```
+
+```ts
+activate(petal) {
+  petal.chat.onCommand('timer', async ({ args }) => {
+    if (!args) return 'Usage: /timer 5m [label]';   // a private answer, only the person who ran it sees it
+    await petal.chat.post(`⏱ Timer started: ${args}`); // everyone sees "<person> · via Timer"
+  });
+}
+```
+
+- `onCommand` fires only when the local user runs `/name` and your plugin
+  owns it; you receive that command's text and nothing else from the chat.
+  Return a string to answer privately (once, within 60 seconds); return
+  nothing to stay silent.
+- `post(text)` needs `chat:post`, which is meeting-scope only. Petal labels
+  every post with your plugin's name and the puzzle badge, so a plugin can
+  never speak as a person. Posts are plain text up to 2000 characters, at
+  most 3 in a burst and then one every 2 seconds.
+- Command names are lowercase (`^[a-z][a-z0-9-]{0,19}$`), at most 8 per
+  plugin. If two plugins declare the same name, one owns it by a fixed rule
+  (built-in, then installed, then dev; then plugin id).
+- Reading everyone's messages (`chat:read`) is not available yet.
+
+`plugins/timer` in `kiruna-labs/petal-plugins` is a complete example. The
+wire format is in `docs/CONTRACTS.md` "Chat".
 
 ## How users see your plugin
 

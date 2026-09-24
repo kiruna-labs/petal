@@ -1,8 +1,11 @@
 // Live smoke driver (not a test): three headless web peers on the local dev
 // server (`VITE_PETAL_BACKEND_URL=https://app.petal.live npx vite --port 5173`)
 // exercise meeting chat over the real backend and SFU: A sends, B sees the
-// badge, opens the drawer, reads and replies; C joins late and receives the
-// history. Prints PASS/FAIL per step and exits non-zero on the first failure.
+// badge, opens the drawer, reads and replies; A runs `/timer` from the
+// composer and B sees the Timer plugin's posts labelled "via Timer" while A's
+// private usage answer stays with A; C joins late and receives both the typed
+// history and the plugin posts. Prints PASS/FAIL per step and exits non-zero
+// on the first failure.
 //   node --import tsx web-harness/tests/fixtures/chat/live-chat-smoke.ts [access-code]
 // With an access code, peers join an existing meeting (e.g. one the desktop
 // app created) instead of a fresh one, and the late-joiner step is skipped
@@ -101,15 +104,48 @@ try {
   const reply = aGot.at(-1)!;
   step('A receives B\'s reply sent from the composer', reply.text === 'hi from B' && reply.sender.name === 'Peer B' && !reply.self, `${reply.sender.name}: ${reply.text}`);
   step('A\'s own message is marked self', aGot.some((m) => m.text === 'hello from A' && m.self));
+  // A runs /timer from the real composer (autocomplete, Enter). The Timer
+  // built-in answers privately when the command is empty, and posts for
+  // everyone when it starts and ends.
+  await a.page.click('#ctl-chat');
+  const aInput = a.page.locator('[data-testid="chat-input"]');
+  await aInput.click();
+  await a.page.keyboard.type('/ti');
+  const suggestion = await a.page.locator('[data-testid="chat-suggestion"]').first().textContent({ timeout: 10_000 });
+  step('A\'s composer offers /timer from the Timer built-in', /\/timer/.test(suggestion ?? '') && /Timer$/.test((suggestion ?? '').trim()), (suggestion ?? '').replace(/\s+/g, ' ').trim());
+  await a.page.keyboard.press('Tab');
+  await a.page.keyboard.press('Enter');
+  await a.page.waitForFunction(() => window.__petalHarness.chat!.messages().some((m) => m.local), null, { timeout: T });
+  const privateAnswer = (await a.page.evaluate(() => window.__petalHarness.chat!.messages().find((m) => m.local))) as Msg;
+  step('an empty /timer gets a private usage answer from Timer', privateAnswer.via?.name === 'Timer' && /^Usage: \/timer/.test(privateAnswer.text), privateAnswer.text);
+  await aInput.fill('/timer 3s smoke');
+  await a.page.keyboard.press('Enter');
+  const started = '⏱ Timer started: smoke, 3 s';
+  const ended = "⏱ Time's up: smoke (3 s)";
+  await b.page.waitForFunction((t: string) => window.__petalHarness.chat!.messages().some((m) => m.text === t), started, { timeout: T });
+  const bStart = (await b.page.evaluate((t: string) => window.__petalHarness.chat!.messages().find((m) => m.text === t), started)) as Msg;
+  step('B sees the Timer post as Peer A via Timer', bStart.sender.name === 'Peer A' && bStart.via?.id === 'petal.timer' && bStart.via?.name === 'Timer' && !bStart.local, `${bStart.sender.name} via ${bStart.via?.name}: ${bStart.text}`);
+  await b.page.waitForFunction((t: string) => window.__petalHarness.chat!.messages().some((m) => m.text === t), ended, { timeout: T });
+  step("B sees Time's up after the timer ends", true, ended);
+  const bLeak = (await b.page.evaluate(() => window.__petalHarness.chat!.messages().some((m) => m.local || /^Usage:/.test(m.text)))) as boolean;
+  step('the private answer never reached B', !bLeak);
+  const bVia = await b.page.evaluate(() =>
+    [...document.querySelectorAll('[data-testid="chat-via"]')].map((el) => el.textContent?.replace(/\s+/g, ' ').trim()),
+  );
+  step('B\'s drawer draws the via line', bVia.includes('via Timer'), JSON.stringify(bVia));
   await b.page.screenshot({ path: '/tmp/petal-chat-b-drawer.png' });
+  await a.page.screenshot({ path: '/tmp/petal-chat-a-timer.png' });
 
-  // C joins late and gets the history from the peers.
+  // C joins late and gets the history from the peers: typed messages and plugin posts.
   const c = await peer('Peer C');
-  const cGot = await waitMessages(c, preexisting + 2);
-  const texts = cGot.map((m) => m.text);
+  const cGot = await waitMessages(c, preexisting + 4);
+  const typed = cGot.filter((m) => !m.via);
+  const texts = typed.map((m) => m.text);
   step('late joiner C receives the history in order', texts.slice(-2).join(' | ') === 'hello from A | hi from B', texts.join(' | '));
-  const relayed = cGot.slice(-2).map((m) => `${m.sender.name}:${m.relayed}`);
-  step('history entries carry their original senders', cGot.slice(-2).every((m) => m.sender.name === 'Peer A' || m.sender.name === 'Peer B'), relayed.join(', '));
+  const relayed = typed.slice(-2).map((m) => `${m.sender.name}:${m.relayed}`);
+  step('history entries carry their original senders', typed.slice(-2).every((m) => m.sender.name === 'Peer A' || m.sender.name === 'Peer B'), relayed.join(', '));
+  const cPosts = cGot.filter((m) => m.via).map((m) => `${m.sender.name} via ${m.via!.name}: ${m.text}`);
+  step('C receives the Timer posts with their via stamp, and no private answer', cPosts.length === 2 && cPosts.every((p) => p.startsWith('Peer A via Timer: ⏱')) && !cGot.some((m) => m.local), cPosts.join(' | '));
   const cUnread = await c.page.evaluate(() => document.getElementById('ctl-chat-badge')!.hidden);
   step('history does not count as unread for C', cUnread);
   await c.page.click('#ctl-chat');

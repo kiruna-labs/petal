@@ -1,10 +1,17 @@
 // Meeting chat: wire model, validation, and the in-memory store both clients
 // render from. Chat is a HOST surface (plugins/README.md §2.7, decision 2 as
 // amended 2026-09-14): the host owns the topic, stamps every sender from the
-// authenticated LiveKit participant, and in I-7b exposes `petal.chat` to
-// plugins on top of this model. Wire shapes and limits are pinned in
+// authenticated LiveKit participant, and exposes `petal.chat` to plugins on
+// top of this model (I-7b). Wire shapes and limits are pinned in
 // contracts/petal-contracts.json (`topics.chat`, `chatMessages`, `chatLimits`,
 // `chatDataEvent`) and mirrored by apps/desktop/src-tauri/src/chat.rs.
+//
+// Plugin posts (I-7b) are their own wire type, `post`, never a field on `msg`:
+// a client that predates them drops the unknown type instead of showing a
+// plugin's words as if the person had typed them. History relays them in a
+// separate `history-posts` packet for the same reason.
+
+import { CHAT_COMMAND_NAME_RE, PLUGIN_ID_RE, isPrintableDisplayText } from '../plugin-host/manifest.ts';
 
 export const CHAT_TOPIC = 'petal.chat';
 export const CHAT_WIRE_VERSION = 1;
@@ -24,12 +31,22 @@ export const CHAT_LIMITS = {
   maxTextChars: 2000,
   /** Bytes of one data packet; a history reply is trimmed to fit. */
   maxPayloadBytes: 8192,
-  /** Messages a peer relays to a late joiner. */
+  /** Messages a peer relays to a late joiner (per history packet). */
   historyMessages: 50,
   /** Inbound packets accepted per sender per second before dropping. */
   inboundPerSenderPerSecond: 10,
   /** Messages kept in memory per meeting; the oldest fall off. */
   retainedMessages: 500,
+  /** A plugin name carried in `via`; the same budget as a manifest name. */
+  viaNameMaxChars: 24,
+} as const;
+
+/** Local, never on the wire: slash commands typed in the composer. */
+export const CHAT_COMMAND_LIMITS = {
+  /** Characters of the text after `/name`. */
+  argsMaxChars: 500,
+  /** How long a plugin may answer one invocation privately (`chat.respond`). */
+  respondWindowMs: 60_000,
 } as const;
 
 const MESSAGE_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
@@ -38,6 +55,12 @@ const MESSAGE_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 // drawer shows around it (same rule as plugin manifest names).
 const FORBIDDEN_RE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/;
 
+/** Which plugin posted a message, as the POSTING client stamped it. */
+export interface ChatVia {
+  id: string;
+  name: string;
+}
+
 export interface ChatMsgWire {
   v: 1;
   type: 'msg';
@@ -45,6 +68,16 @@ export interface ChatMsgWire {
   text: string;
   /** Sender's clock, unix ms. Ordering hint only; the receiver's arrival order wins ties. */
   t: number;
+}
+
+/** A message a plugin posted on its user's behalf. Always carries `via`. */
+export interface ChatPostWire {
+  v: 1;
+  type: 'post';
+  id: string;
+  text: string;
+  t: number;
+  via: ChatVia;
 }
 
 export interface ChatHistoryReqWire {
@@ -60,13 +93,23 @@ export interface ChatHistoryEntry {
   senderName: string | null;
 }
 
+export interface ChatHistoryPostEntry extends ChatHistoryEntry {
+  via: ChatVia;
+}
+
 export interface ChatHistoryWire {
   v: 1;
   type: 'history';
   messages: ChatHistoryEntry[];
 }
 
-export type ChatWire = ChatMsgWire | ChatHistoryReqWire | ChatHistoryWire;
+export interface ChatHistoryPostsWire {
+  v: 1;
+  type: 'history-posts';
+  messages: ChatHistoryPostEntry[];
+}
+
+export type ChatWire = ChatMsgWire | ChatPostWire | ChatHistoryReqWire | ChatHistoryWire | ChatHistoryPostsWire;
 
 export interface ChatSender {
   identity: string;
@@ -81,10 +124,42 @@ export interface ChatMessage {
   self: boolean;
   /** Arrived in a peer's history reply: the sender fields are that peer's claim, not an authenticated stamp. */
   relayed: boolean;
+  /** Posted by a plugin on `sender`'s behalf; null for what a person typed. */
+  via: ChatVia | null;
+  /** A plugin's private answer to this user's own command: shown here only, never sent or relayed. */
+  local: boolean;
 }
+
+/** One slash command the composer can run, as the host resolved it (host.ts `chatCommands`). */
+export interface ChatCommandOption {
+  name: string;
+  usage: string;
+  description: string;
+  pluginId: string;
+  pluginName: string;
+  source: 'builtin' | 'registry' | 'dev';
+}
+
+export type ChatCommandResult = { ok: true } | { ok: false; message: string };
 
 export function isChatMessageId(value: unknown): value is string {
   return typeof value === 'string' && MESSAGE_ID_RE.test(value);
+}
+
+export function isChatVia(value: unknown): value is ChatVia {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.id === 'string' &&
+    v.id.length <= 64 &&
+    PLUGIN_ID_RE.test(v.id) &&
+    typeof v.name === 'string' &&
+    v.name.trim().length > 0 &&
+    v.name.length <= CHAT_LIMITS.viaNameMaxChars &&
+    // The manifest-name rule: one line, no bidi controls, so a `via` sits
+    // beside the sender's name exactly as written.
+    isPrintableDisplayText(v.name)
+  );
 }
 
 export function newChatMessageId(): string {
@@ -106,6 +181,51 @@ export function normalizeChatText(input: string): string | null {
   if (text.length === 0 || text.length > CHAT_LIMITS.maxTextChars) return null;
   if (FORBIDDEN_RE.test(text)) return null;
   return text;
+}
+
+export type ChatInput =
+  | { kind: 'empty' }
+  | { kind: 'message'; text: string }
+  | { kind: 'command'; name: string; args: string }
+  /** Starts with `/` but the word after it cannot be a command name. */
+  | { kind: 'invalid-command'; token: string }
+  /** Too long, or carries control/bidi characters. */
+  | { kind: 'invalid'; reason: string };
+
+/**
+ * How the composer reads what was typed. `/name args` is a command; a leading
+ * `//` sends a message that starts with one `/` (the IRC convention), so a
+ * path or a literal slash never becomes a command by accident, and an
+ * unknown command is never sent to everyone as text.
+ */
+export function classifyChatInput(raw: string): ChatInput {
+  const trimmed = raw.replace(/\r\n?/g, '\n').trim();
+  if (trimmed.length === 0) return { kind: 'empty' };
+  if (trimmed.startsWith('//')) {
+    const text = normalizeChatText(trimmed.slice(1));
+    return text ? { kind: 'message', text } : { kind: 'invalid', reason: 'Messages are up to 2000 characters of plain text.' };
+  }
+  if (trimmed.startsWith('/') && trimmed.length > 1 && !/\s/.test(trimmed[1]!)) {
+    const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed)!;
+    const token = match[1]!;
+    if (!CHAT_COMMAND_NAME_RE.test(token)) return { kind: 'invalid-command', token };
+    const args = (match[2] ?? '').replace(/\t/g, ' ').trim();
+    if (args.length > CHAT_COMMAND_LIMITS.argsMaxChars) {
+      return { kind: 'invalid', reason: `Command text is up to ${CHAT_COMMAND_LIMITS.argsMaxChars} characters.` };
+    }
+    if (FORBIDDEN_RE.test(args)) return { kind: 'invalid', reason: 'Commands take plain text only.' };
+    return { kind: 'command', name: token, args };
+  }
+  const text = normalizeChatText(trimmed);
+  return text ? { kind: 'message', text } : { kind: 'invalid', reason: 'Messages are up to 2000 characters of plain text.' };
+}
+
+/** Autocomplete: while the draft is `/` plus a partial name (no space yet), the commands it could become. */
+export function matchingChatCommands(options: readonly ChatCommandOption[], draft: string): ChatCommandOption[] {
+  const match = /^\/([a-z0-9-]*)$/.exec(draft.trimStart());
+  if (!match) return [];
+  const prefix = match[1]!;
+  return options.filter((o) => o.name.startsWith(prefix)).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function isValidTimestamp(value: unknown): value is number {
@@ -136,7 +256,25 @@ function parseHistoryEntry(value: unknown): ChatHistoryEntry | null {
   return { id: e.id, text: e.text, t: e.t, senderIdentity: e.senderIdentity, senderName };
 }
 
-/** Strict: anything not exactly one of the three shapes is null (dropped, never partially trusted). */
+function parseHistoryPostEntry(value: unknown): ChatHistoryPostEntry | null {
+  const base = parseHistoryEntry(value);
+  const via = (value as { via?: unknown } | null)?.via;
+  if (!base || !isChatVia(via)) return null;
+  return { ...base, via: { id: via.id, name: via.name } };
+}
+
+function parseEntries<T>(value: unknown, parse: (v: unknown) => T | null): T[] | null {
+  if (!Array.isArray(value) || value.length > CHAT_LIMITS.historyMessages) return null;
+  const out: T[] = [];
+  for (const entry of value) {
+    const parsed = parse(entry);
+    if (!parsed) return null;
+    out.push(parsed);
+  }
+  return out;
+}
+
+/** Strict: anything not exactly one of the known shapes is null (dropped, never partially trusted). */
 export function parseChatPayload(payload: Uint8Array | string): ChatWire | null {
   let raw: unknown;
   try {
@@ -152,17 +290,18 @@ export function parseChatPayload(payload: Uint8Array | string): ChatWire | null 
     case 'msg':
       if (!isChatMessageId(m.id) || !isValidText(m.text) || !isValidTimestamp(m.t)) return null;
       return { v: 1, type: 'msg', id: m.id, text: m.text, t: m.t };
+    case 'post':
+      if (!isChatMessageId(m.id) || !isValidText(m.text) || !isValidTimestamp(m.t) || !isChatVia(m.via)) return null;
+      return { v: 1, type: 'post', id: m.id, text: m.text, t: m.t, via: { id: m.via.id, name: m.via.name } };
     case 'history-req':
       return { v: 1, type: 'history-req' };
     case 'history': {
-      if (!Array.isArray(m.messages) || m.messages.length > CHAT_LIMITS.historyMessages) return null;
-      const messages: ChatHistoryEntry[] = [];
-      for (const entry of m.messages) {
-        const parsed = parseHistoryEntry(entry);
-        if (!parsed) return null;
-        messages.push(parsed);
-      }
-      return { v: 1, type: 'history', messages };
+      const messages = parseEntries(m.messages, parseHistoryEntry);
+      return messages ? { v: 1, type: 'history', messages } : null;
+    }
+    case 'history-posts': {
+      const messages = parseEntries(m.messages, parseHistoryPostEntry);
+      return messages ? { v: 1, type: 'history-posts', messages } : null;
     }
     default:
       return null;
@@ -178,7 +317,7 @@ export function chatPublishOptions(
   wire: ChatWire,
   requester?: string,
 ): { topic: string; reliable: true; destinationIdentities?: string[] } {
-  return wire.type === 'history' && requester
+  return (wire.type === 'history' || wire.type === 'history-posts') && requester
     ? { topic: CHAT_TOPIC, reliable: true, destinationIdentities: [requester] }
     : { topic: CHAT_TOPIC, reliable: true };
 }
@@ -187,13 +326,26 @@ export function chatMessageWire(text: string, now = Date.now()): ChatMsgWire {
   return { v: 1, type: 'msg', id: newChatMessageId(), text, t: now };
 }
 
-/** One-line notice for the toast shown while the drawer is closed. */
-export function chatNoticeText(sender: ChatSender, text: string, maxChars = 80): string {
-  const name = sender.name?.trim() || 'Someone';
+export function chatPostWire(text: string, via: ChatVia, now = Date.now()): ChatPostWire {
+  return { v: 1, type: 'post', id: newChatMessageId(), text, t: now, via: { id: via.id, name: via.name } };
+}
+
+function oneLineNotice(name: string, text: string, maxChars: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   const room = Math.max(8, maxChars - name.length - 2);
   const body = flat.length > room ? `${flat.slice(0, room - 1).trimEnd()}…` : flat;
   return `${name}: ${body}`;
+}
+
+/** One-line notice for the toast shown while the drawer is closed: "Mira: hello", or "Timer (Mira): …" for a plugin post. */
+export function chatNoticeText(sender: ChatSender, text: string, maxChars = 80, via: ChatVia | null = null): string {
+  const person = sender.name?.trim() || 'Someone';
+  return oneLineNotice(via ? `${via.name} (${person})` : person, text, maxChars);
+}
+
+/** The toast for a plugin's private answer to your own command while the drawer is closed: "Timer: …". */
+export function chatPrivateNoticeText(via: ChatVia, text: string, maxChars = 80): string {
+  return oneLineNotice(via.name, text, maxChars);
 }
 
 export function formatChatTime(t: number, now = Date.now(), locale?: string): string {
@@ -206,21 +358,35 @@ export function formatChatTime(t: number, now = Date.now(), locale?: string): st
 
 export type ChatReceiveResult = 'added' | 'duplicate';
 
+export interface ChatHistoryReply {
+  history: ChatHistoryWire | null;
+  posts: ChatHistoryPostsWire | null;
+}
+
 export interface ChatStore {
   readonly messages: readonly ChatMessage[];
   readonly unread: number;
   readonly open: boolean;
-  /** An authenticated inbound `msg` (or one of our own echoed back). */
-  receive(wire: ChatMsgWire, sender: ChatSender): ChatReceiveResult;
-  /** What we send; recorded locally at once so the drawer never waits on the network. */
-  sent(wire: ChatMsgWire, self: ChatSender): ChatMessage;
-  /** The reply to a peer's `history-req`, or null when we have nothing to relay. */
-  historyReply(): ChatHistoryWire | null;
-  /** A peer's `history` reply; returns how many messages were new. */
-  mergeHistory(wire: ChatHistoryWire, relayer: ChatSender): number;
+  /** An authenticated inbound `msg` or `post` (or one of our own echoed back). */
+  receive(wire: ChatMsgWire | ChatPostWire, sender: ChatSender): ChatReceiveResult;
+  /** What we send (typed, or posted by one of our plugins); recorded locally at once. */
+  sent(wire: ChatMsgWire | ChatPostWire, self: ChatSender): ChatMessage;
+  /** A plugin's private answer to one of our commands. Local only: never sent, relayed, or unread. */
+  notice(text: string, via: ChatVia, self: ChatSender, now?: number): ChatMessage;
+  /** The replies to a peer's `history-req`: typed messages and plugin posts in separate packets. */
+  historyReply(): ChatHistoryReply;
+  /** A peer's `history` or `history-posts` reply; returns how many messages were new. */
+  mergeHistory(wire: ChatHistoryWire | ChatHistoryPostsWire, relayer: ChatSender): number;
   setOpen(open: boolean): void;
   clear(): void;
   onChange(cb: () => void): () => void;
+}
+
+function trimToPacket<W extends ChatHistoryWire | ChatHistoryPostsWire>(build: (entries: W['messages']) => W, entries: W['messages']): W | null {
+  let kept = entries;
+  // Oldest first, until the packet fits the byte cap.
+  while (kept.length > 0 && encodeChatWire(build(kept)).length > CHAT_LIMITS.maxPayloadBytes) kept = kept.slice(1) as W['messages'];
+  return kept.length > 0 ? build(kept) : null;
 }
 
 export function createChatStore(selfIdentity: () => string | null): ChatStore {
@@ -239,13 +405,17 @@ export function createChatStore(selfIdentity: () => string | null): ChatStore {
     // Sorted by the sender's clock, arrival order as the tiebreaker; a late
     // history merge lands where it belongs instead of at the bottom.
     let i = messages.length;
-    while (i > 0 && messages[i - 1].t > message.t) i--;
+    while (i > 0 && messages[i - 1]!.t > message.t) i--;
     messages = [...messages.slice(0, i), message, ...messages.slice(i)];
     if (messages.length > CHAT_LIMITS.retainedMessages) {
       const dropped = messages.slice(0, messages.length - CHAT_LIMITS.retainedMessages);
       messages = messages.slice(dropped.length);
       for (const d of dropped) ids.delete(d.id);
     }
+  }
+
+  function entry(m: ChatMessage): ChatHistoryEntry {
+    return { id: m.id, text: m.text, t: m.t, senderIdentity: m.sender.identity, senderName: m.sender.name };
   }
 
   return {
@@ -261,34 +431,47 @@ export function createChatStore(selfIdentity: () => string | null): ChatStore {
     receive(wire, sender) {
       if (ids.has(wire.id)) return 'duplicate';
       const self = sender.identity === selfIdentity();
-      insert({ id: wire.id, text: wire.text, t: wire.t, sender, self, relayed: false });
+      const via = wire.type === 'post' ? { id: wire.via.id, name: wire.via.name } : null;
+      insert({ id: wire.id, text: wire.text, t: wire.t, sender, self, relayed: false, via, local: false });
       if (!self && !open) unread++;
       notify();
       return 'added';
     },
     sent(wire, self) {
-      const message: ChatMessage = { id: wire.id, text: wire.text, t: wire.t, sender: self, self: true, relayed: false };
+      const via = wire.type === 'post' ? { id: wire.via.id, name: wire.via.name } : null;
+      const message: ChatMessage = { id: wire.id, text: wire.text, t: wire.t, sender: self, self: true, relayed: false, via, local: false };
       if (!ids.has(wire.id)) {
         insert(message);
         notify();
       }
       return message;
     },
+    notice(text, via, self, now = Date.now()) {
+      const message: ChatMessage = {
+        id: `local-${newChatMessageId()}`,
+        text,
+        t: now,
+        sender: self,
+        self: true,
+        relayed: false,
+        via: { id: via.id, name: via.name },
+        local: true,
+      };
+      insert(message);
+      notify();
+      return message;
+    },
     historyReply() {
-      if (messages.length === 0) return null;
-      const recent = messages.slice(-CHAT_LIMITS.historyMessages);
-      let entries: ChatHistoryEntry[] = recent.map((m) => ({
-        id: m.id,
-        text: m.text,
-        t: m.t,
-        senderIdentity: m.sender.identity,
-        senderName: m.sender.name,
-      }));
-      // Trim oldest-first until the packet fits the byte cap.
-      while (entries.length > 0 && encodeChatWire({ v: 1, type: 'history', messages: entries }).length > CHAT_LIMITS.maxPayloadBytes) {
-        entries = entries.slice(1);
-      }
-      return entries.length > 0 ? { v: 1, type: 'history', messages: entries } : null;
+      const shared = messages.filter((m) => !m.local);
+      const typed = shared.filter((m) => !m.via).slice(-CHAT_LIMITS.historyMessages);
+      const posted = shared.filter((m) => m.via).slice(-CHAT_LIMITS.historyMessages);
+      return {
+        history: trimToPacket<ChatHistoryWire>((e) => ({ v: 1, type: 'history', messages: e }), typed.map(entry)),
+        posts: trimToPacket<ChatHistoryPostsWire>(
+          (e) => ({ v: 1, type: 'history-posts', messages: e }),
+          posted.map((m) => ({ ...entry(m), via: { id: m.via!.id, name: m.via!.name } })),
+        ),
+      };
     },
     mergeHistory(wire, relayer) {
       let added = 0;
@@ -297,14 +480,16 @@ export function createChatStore(selfIdentity: () => string | null): ChatStore {
         if (ids.has(e.id)) continue;
         // A relayed entry is that peer's claim about who said what. Entries
         // the relayer attributes to ITSELF are as good as authenticated.
-        const relayed = e.senderIdentity !== relayer.identity;
+        const via = 'via' in e ? { id: (e as ChatHistoryPostEntry).via.id, name: (e as ChatHistoryPostEntry).via.name } : null;
         insert({
           id: e.id,
           text: e.text,
           t: e.t,
           sender: { identity: e.senderIdentity, name: e.senderName },
           self: e.senderIdentity === me,
-          relayed,
+          relayed: e.senderIdentity !== relayer.identity,
+          via,
+          local: false,
         });
         added++;
       }

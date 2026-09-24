@@ -26,17 +26,24 @@ export const STATIC_PERMISSIONS = [
   'shares:read',
   'clipboard:write',
   'net:fetch:user-urls',
+  'chat:post',
+  'chat:commands',
 ] as const;
 export type StaticPermission = (typeof STATIC_PERMISSIONS)[number];
 /** `net:fetch:<host>` — exact host or `*.example.com`. Never `net:fetch:*`. */
 export type NetHostPermission = `net:fetch:${string}`;
 export type Permission = StaticPermission | NetHostPermission;
 
-/** Known to the vocabulary, refused by this host until the feature ships. */
-export const RESERVED_PERMISSIONS = ['frames:read'] as const;
+/**
+ * Known to the vocabulary, refused by this host until the feature ships with a
+ * first-party consumer: `frames:read` (frame tap, I-13) and `chat:read`
+ * (reading everyone's chat messages; the `chat` API ships `post` and
+ * `commands` first, plugins/README.md §2.4).
+ */
+export const RESERVED_PERMISSIONS = ['frames:read', 'chat:read'] as const;
 
 /** Only a meeting-scoped plugin may talk to other participants. */
-export const MEETING_ONLY_PERMISSIONS: readonly Permission[] = ['data:publish', 'state:write'];
+export const MEETING_ONLY_PERMISSIONS: readonly Permission[] = ['data:publish', 'state:write', 'chat:post'];
 
 export const MANIFEST_LIMITS = {
   idMaxLength: 64,
@@ -47,6 +54,14 @@ export const MANIFEST_LIMITS = {
   buttonLabelMaxLength: 14,
   contributionIdMaxLength: 32,
   bundleMaxBytes: 2 * 1024 * 1024,
+  /** Slash commands one plugin may declare. */
+  chatCommandsMax: 8,
+  /** `/name` after the slash; see CHAT_COMMAND_NAME_RE. */
+  chatCommandNameMaxLength: 20,
+  /** One line in the composer's autocomplete, wrapping (never clipped) in a 320 px drawer. */
+  chatCommandDescriptionMaxLength: 60,
+  /** The argument hint shown after `/name`, e.g. `5m [label]`. */
+  chatCommandUsageMaxLength: 40,
 } as const;
 
 export const PLUGIN_ID_RE = /^[a-z0-9]+(\.[a-z0-9-]+)+$/;
@@ -55,6 +70,8 @@ const RELEASE_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const ENTRY_RE = /^[A-Za-z0-9_.-]+\.js$/;
 const NET_HOST_RE = /^(\*\.)?([a-z0-9-]+\.)*[a-z0-9-]+(:\d{1,5})?$/;
 const ICON_RE = /^[a-z][a-z0-9-]{0,31}$/;
+/** A slash command name: `/timer`, `/poll`. Lowercase so `/Timer` is never a second command. */
+export const CHAT_COMMAND_NAME_RE = /^[a-z][a-z0-9-]{0,19}$/;
 
 export type SurfaceKind = 'overlay' | 'popover' | 'panel' | 'settings';
 export const SURFACE_KINDS: readonly SurfaceKind[] = ['overlay', 'popover', 'panel', 'settings'];
@@ -91,11 +108,21 @@ export interface SettingsFieldContribution {
   /** `url` fields only: the value's origin joins the plugin's fetch allowlist. */
   netAllow?: boolean;
 }
+/** A slash command the plugin owns (needs `chat:commands`); only the owner sees its arguments. */
+export interface ChatCommandContribution {
+  /** Typed as `/name`; see CHAT_COMMAND_NAME_RE. */
+  name: string;
+  /** One line shown in the composer's autocomplete. */
+  description: string;
+  /** Argument hint shown after the name, e.g. `5m [label]`; empty when the command takes none. */
+  usage?: string;
+}
 export interface PluginContributions {
   toolbarButtons?: ToolbarButtonContribution[];
   headerButtons?: HeaderButtonContribution[];
   surfaces?: Partial<Record<SurfaceKind, SurfaceContribution | null>>;
   settings?: SettingsFieldContribution[];
+  chatCommands?: ChatCommandContribution[];
 }
 /** Reserved for the future Rust-hosted WASM tier. Accepted, never executed, by this host. */
 export interface NativeSlot {
@@ -381,6 +408,46 @@ export function validateManifest(input: unknown): ManifestValidation {
           });
         }
       }
+    }
+  }
+
+  const chatCommands = isRecord(contributes) ? contributes.chatCommands : undefined;
+  if (chatCommands !== undefined) {
+    if (!Array.isArray(chatCommands)) {
+      errors.push('contributes.chatCommands must be an array');
+    } else {
+      if (chatCommands.length > 0 && !has('chat:commands')) errors.push('contributes.chatCommands requires permission "chat:commands"');
+      if (chatCommands.length > MANIFEST_LIMITS.chatCommandsMax) {
+        errors.push(`contributes.chatCommands: at most ${MANIFEST_LIMITS.chatCommandsMax} commands`);
+      }
+      const seen = new Set<string>();
+      chatCommands.forEach((command, i) => {
+        const where = `contributes.chatCommands[${i}]`;
+        if (!isRecord(command)) {
+          errors.push(`${where}: must be an object`);
+          return;
+        }
+        if (typeof command.name !== 'string' || !CHAT_COMMAND_NAME_RE.test(command.name)) {
+          errors.push(`${where}.name must match ${CHAT_COMMAND_NAME_RE} (typed as /name)`);
+        } else if (seen.has(command.name)) {
+          errors.push(`${where}: duplicate command "/${command.name}"`);
+        } else {
+          seen.add(command.name);
+        }
+        if (
+          !isPrintableDisplayText(command.description) ||
+          command.description.trim().length === 0 ||
+          command.description.length > MANIFEST_LIMITS.chatCommandDescriptionMaxLength
+        ) {
+          errors.push(`${where}.description must be 1..${MANIFEST_LIMITS.chatCommandDescriptionMaxLength} printable chars`);
+        }
+        if (
+          command.usage !== undefined &&
+          (!isPrintableDisplayText(command.usage) || command.usage.length > MANIFEST_LIMITS.chatCommandUsageMaxLength)
+        ) {
+          errors.push(`${where}.usage must be at most ${MANIFEST_LIMITS.chatCommandUsageMaxLength} printable chars`);
+        }
+      });
     }
   }
 
