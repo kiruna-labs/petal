@@ -29,9 +29,17 @@
 # remote-control suite drives TextEdit with. So the click is permitted here
 # and nowhere else.
 #
-# It only clicks Allow on a window whose own text mentions screen capture, so
-# an unrelated dialog cannot be answered by accident. It logs every window it
-# considered, so a run that still fails says what was on screen.
+# TWO alerts occlude the region, not one. Dismissing the screen-capture
+# consent revealed a second in the same position: "Allow <client> to find
+# devices on local networks?". The gate needs both -- the app discovers peers
+# on the local network -- and the first run with only the capture consent
+# answered still failed `stall-resumed-pixels` with the network prompt sitting
+# over the pattern.
+#
+# Matching is an explicit allowlist of those two consents, never "any dialog
+# with an Allow button", so an unexpected dialog is logged and left alone. It
+# logs every window it considered, so a run that still fails says what was on
+# screen.
 set -uo pipefail
 
 LOG="${1:-${RUNNER_TEMP:-/tmp}/capture-consent-dismisser.log}"
@@ -58,10 +66,18 @@ tell application "System Events"
         end try
         if txt is not "" then
           set report to report & "SAW[" & (name of p) & "]: " & txt & linefeed
-          if (txt contains "screen" or txt contains "window picker" or txt contains "Screen") then
+          -- An explicit allowlist, not "any dialog with an Allow button".
+          -- Both of these are consents this guest is provisioned to hold and
+          -- both have been observed occluding the capture region (#234).
+          set wanted to false
+          if txt contains "window picker" then set wanted to true
+          if txt contains "record your screen" then set wanted to true
+          if txt contains "find devices on local networks" then set wanted to true
+          if txt contains "devices on your networks" then set wanted to true
+          if wanted then
             try
               click (first button of w whose name is "Allow")
-              set report to report & "CLICKED[" & (name of p) & "]" & linefeed
+              set report to report & "CLICKED[" & (name of p) & "]: " & txt & linefeed
             end try
           end if
         end if
