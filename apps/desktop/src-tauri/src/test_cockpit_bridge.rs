@@ -219,6 +219,30 @@ mod tests {
 /// #211) this reads what is actually on the display, the only evidence the
 /// never-black-frame rule accepts (#627).
 #[cfg_attr(not(feature = "cockpit-privileged"), allow(dead_code))]
+/// Whole-screen capture, for telling "the share did not resume" apart from
+/// "the region was aimed beside the window" (#234). A region capture alone
+/// cannot show where the window actually is.
+pub(crate) fn capture_full_screen_png(output_path: &Path) -> Result<(), String> {
+    if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create capture output directory: {e}"))?;
+    }
+    let output = Command::new("screencapture")
+        .arg("-x")
+        .arg("-t")
+        .arg("png")
+        .arg(output_path)
+        .output()
+        .map_err(|e| format!("failed to run screencapture: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "screencapture failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn capture_screen_region_png(
     x: i64,
     y: i64,

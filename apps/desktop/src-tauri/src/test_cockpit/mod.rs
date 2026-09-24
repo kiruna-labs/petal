@@ -10791,6 +10791,17 @@ fn stall_take_sample(
         "{}-{phase}-{index:03}.png",
         artifact_name_component(scenario.id)
     ));
+    // One whole-screen frame per phase: the region captures cannot show where
+    // the window actually sits relative to the frame it was aimed with (#234).
+    if index == 0 {
+        let full = writer.dir.join(PathBuf::from("stall").join(format!(
+            "{}-{phase}-fullscreen.png",
+            artifact_name_component(scenario.id)
+        )));
+        if let Err(error) = crate::test_cockpit_bridge::capture_full_screen_png(&full) {
+            log::warn!("stall: full-screen reference capture failed: {error}");
+        }
+    }
     let path = writer.dir.join(&relative);
     // #211: a blank capture is re-taken before it is judged. Unlike a
     // backing-store read, a black REGION is real, but a capture racing a
