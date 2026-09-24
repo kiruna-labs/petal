@@ -690,13 +690,6 @@ Definition of done and the usual labels.
   drift test pins an upstream commit so a schema change is a deliberate
   two-PR event.
 - Feature branch vs trunk rule: never hold more than one milestone unmerged.
-- Registry forward compatibility: a new permission (as `chat:post` and
-  `chat:commands` in I-7b) is an unknown string to every older client, and
-  the index validator fails the WHOLE index on one unknown permission, so
-  once the registry is live, listing a plugin that uses a newer permission
-  would blank "Get plugins" for every older client. Harmless today (the
-  registry is unlisted and no release bakes a registry key), but the entry,
-  not the index, has to become the unit of rejection before launch.
 - Community build supply chain: a pointer entry runs the author's build in
   our CI. Mitigations in §2.13: isolated job, no secrets, lockfiles pinned,
   signing separated from building, forked source, `verified: false` until
