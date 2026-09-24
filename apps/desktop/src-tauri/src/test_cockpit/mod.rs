@@ -10641,8 +10641,23 @@ fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
     let content_check_possible = evidence.freeze.iter().any(|s| s.content_hash.is_some())
         && evidence.resume.iter().any(|s| s.content_hash.is_some());
     let content_resumed = evidence.resumed_content_offset_ms.is_some();
+    // ADVISORY, not gating (#234). Measured on one unoccluded run, the change
+    // fraction of a HELD frame (0.7-2.8%, median 1.6%) OVERLAPS that of the
+    // resumed, animating share (1.7-3.3%, median 2.8%): the held frame's
+    // maximum exceeds the resumed minimum, so no threshold separates the two
+    // states this assertion exists to tell apart. It only ever "passed"
+    // because the region was photographing the web peer's own window, whose
+    // full-window animation cleared 5% easily.
+    //
+    // It stays recorded -- a run that never changes a pixel is still worth
+    // seeing -- but it cannot fail the gate while it cannot discriminate.
+    // Gating returns when the sampler measures something that separates the
+    // states (a finer lattice, or the frame counter region alone), with the
+    // bar set from measured separation. The other assertions here are
+    // unaffected and still gate: the window surviving, never going black, and
+    // decoding resuming are what the no-black-frame rule actually asks for.
     assertions.push(AssertionOutcome {
-        name: "stall-resumed-pixels".to_string(),
+        name: "stall-resumed-pixels (advisory, #234)".to_string(),
         passed: !content_check_possible || content_resumed,
         detail: match (content_check_possible, evidence.resumed_content_offset_ms) {
             (false, _) => "not checked: no captures on one side of the resume".to_string(),
@@ -10650,14 +10665,16 @@ fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
                 "on-screen content changed within {}ms of the animate ack",
                 at.saturating_sub(evidence.animate_ack_offset_ms)
             ),
-            (true, None) => "on-screen content never changed after the source resumed".to_string(),
+            (true, None) => {
+                "on-screen content never changed after the source resumed -- ADVISORY: this check cannot currently separate a held frame from a resumed one (#234)"
+                    .to_string()
+            }
         },
     });
 
-    let product_failure = !window_survived
-        || (captures_available && !never_black)
-        || !resumed
-        || (content_check_possible && !content_resumed);
+    // `content_resumed` is deliberately absent: see the advisory note above.
+    let product_failure =
+        !window_survived || (captures_available && !never_black) || !resumed;
     let verdict = if product_failure {
         ScenarioVerdict::TestFail
     } else if !captures_available {
@@ -12556,6 +12573,8 @@ mod tests {
             changed_vs_frozen: None,
             capture_path: None,
             capture_error: None,
+            capture_region: None,
+            raw_panel_frame: None,
             cells: None,
         }
     }
@@ -12700,17 +12719,49 @@ mod tests {
             .filter(|a| !a.passed)
             .map(|a| a.name.as_str())
             .collect();
-        assert_eq!(names, vec!["stall-resumed-decoding", "stall-resumed-pixels"]);
+        assert_eq!(
+            names,
+            vec!["stall-resumed-decoding", "stall-resumed-pixels (advisory, #234)"]
+        );
     }
 
+    /// #234: the pixel check is ADVISORY. Measured on an unoccluded run, a held
+    /// frame changes 0.7-2.8% of the lattice and a resumed one 1.7-3.3% -- the
+    /// ranges overlap, so it cannot separate the two states and must not fail
+    /// the gate. It is still reported.
     #[test]
-    fn stall_verdict_fails_when_frames_decode_but_pixels_never_change() {
+    fn stall_verdict_reports_but_does_not_fail_when_pixels_never_change() {
         let mut evidence = healthy_stall_evidence();
         evidence.resumed_content_offset_ms = None;
         let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::Pass, "{}", verdict.summary);
+        let pixels = verdict
+            .assertions
+            .iter()
+            .find(|a| a.name == "stall-resumed-pixels (advisory, #234)")
+            .unwrap();
+        assert!(!pixels.passed, "the advisory check must still REPORT the failure");
+        assert!(pixels.detail.contains("ADVISORY"));
+    }
+
+    /// The gating half of the same scenario must be untouched: a window that
+    /// vanishes or goes black is still a product failure.
+    #[test]
+    fn stall_verdict_still_fails_on_the_gating_assertions() {
+        let mut evidence = healthy_stall_evidence();
+        evidence.resumed_content_offset_ms = None;
+        if let Some(sample) = evidence.resume.last_mut() {
+            sample.window_present = false;
+        }
+        let verdict = stall_verdict(&evidence);
         assert_eq!(verdict.verdict, ScenarioVerdict::TestFail);
-        let failed = verdict.assertions.iter().find(|a| !a.passed).unwrap();
-        assert_eq!(failed.name, "stall-resumed-pixels");
+
+        let mut black = healthy_stall_evidence();
+        black.resumed_content_offset_ms = None;
+        if let Some(sample) = black.resume.last_mut() {
+            sample.mean_luma = Some(0.0);
+        }
+        assert_eq!(stall_verdict(&black).verdict, ScenarioVerdict::TestFail);
     }
 
     #[test]
@@ -12734,7 +12785,7 @@ mod tests {
         let pixels = verdict
             .assertions
             .iter()
-            .find(|a| a.name == "stall-resumed-pixels")
+            .find(|a| a.name == "stall-resumed-pixels (advisory, #234)")
             .unwrap();
         assert!(pixels.passed);
         assert!(pixels.detail.contains("not checked"));
