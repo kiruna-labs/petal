@@ -2529,6 +2529,103 @@ pub(crate) fn open_window_frames(app: &AppHandle) -> Vec<(u32, f64, f64, f64, f6
 /// these regions from the display -- keyed by the REMOTE window id, which is
 /// not a CG window number on this machine, so `platform::cg` cannot answer
 /// this; only the panel's own frame can.
+/// Diagnostic mirror of [`visible_window_frames_for_participant`] that also
+/// reports the RAW values it derived each frame from: the physical outer
+/// position and size Tauri returned and the scale factor it divided by.
+/// A capture aimed with the converted frame that lands beside the window
+/// cannot be told apart from a window that moved without these (#234).
+/// Raise `owner_identity`'s visible remote panel above other windows without
+/// keying it, activating the app, or touching focus.
+///
+/// The Test Cockpit's SHARE-W2N-STALL samples this window's region from the
+/// display, and the web peer's own browser window sits at overlapping
+/// coordinates on the CI display -- so the capture photographed Chrome, not
+/// the share, and the scenario failed `stall-resumed-pixels` while the media
+/// was healthy (#234). docs/TESTING.md's rule for region captures is to
+/// re-raise immediately before every capture rather than once at the start.
+///
+/// Focus is deliberately untouched: keying the panel would background the
+/// web peer, and a backgrounded browser throttles its animation, which is
+/// the very thing the scenario measures.
+pub(crate) fn release_capture_hold_for_participant(app: &AppHandle, owner_identity: &str) {
+    let keys: Vec<RemoteWindowKey> = with_state(|s| {
+        s.windows
+            .keys()
+            .filter(|key| key.owner_identity == owner_identity)
+            .cloned()
+            .collect()
+    });
+    for key in keys {
+        let Some(window) = app.get_webview_window(&panel_label_for_key(&key)) else {
+            continue;
+        };
+        let _ = app.run_on_main_thread(move || {
+            if let Err(error) = crate::platform::appkit::clear_capture_hold_level(&window) {
+                log::warn!("compositor: could not clear the capture hold level: {error}");
+            }
+        });
+    }
+}
+
+pub(crate) fn raise_visible_window_for_participant(app: &AppHandle, owner_identity: &str) {
+    let keys: Vec<RemoteWindowKey> = with_state(|s| {
+        s.windows
+            .keys()
+            .filter(|key| key.owner_identity == owner_identity)
+            .cloned()
+            .collect()
+    });
+    for key in keys {
+        let Some(window) = app.get_webview_window(&panel_label_for_key(&key)) else {
+            continue;
+        };
+        // `orderFrontRegardless` un-hides an ordered-out window (#445), so
+        // only ever raise one that is already on screen.
+        if !window.is_visible().unwrap_or(false) {
+            continue;
+        }
+        let _ = app.run_on_main_thread(move || {
+            if let Err(error) = crate::platform::appkit::hold_panel_above_for_capture(&window) {
+                log::warn!("compositor: could not raise remote panel for capture: {error}");
+            }
+        });
+    }
+}
+
+pub(crate) fn visible_window_frames_raw_for_participant(
+    app: &AppHandle,
+    owner_identity: &str,
+) -> Vec<(u32, i32, i32, u32, u32, f64)> {
+    let keys: Vec<RemoteWindowKey> = with_state(|s| {
+        s.windows
+            .keys()
+            .filter(|key| key.owner_identity == owner_identity)
+            .cloned()
+            .collect()
+    });
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let Some(window) = app.get_webview_window(&panel_label_for_key(&key)) else {
+            continue;
+        };
+        if !window.is_visible().unwrap_or(false) {
+            continue;
+        }
+        let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+            continue;
+        };
+        out.push((
+            key.window_id,
+            pos.x,
+            pos.y,
+            size.width,
+            size.height,
+            window.scale_factor().unwrap_or(1.0),
+        ));
+    }
+    out
+}
+
 pub(crate) fn visible_window_frames_for_participant(
     app: &AppHandle,
     owner_identity: &str,

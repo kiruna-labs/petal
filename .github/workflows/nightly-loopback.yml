@@ -255,6 +255,19 @@ jobs:
 
           echo "==> Run QA-featured Test Cockpit Quick tier"
           CRASH_MARK="$RUNNER_TEMP/cockpit-start.mark"; touch "$CRASH_MARK"
+          # macOS re-asks for screen-capture consent on its own schedule, and
+          # the alert OCCLUDES the capture region rather than failing the job
+          # (#234: it scored SHARE-W2N-STALL test-fail on the 0.9.28 release
+          # while the media half was healthy). Answer it for as long as the
+          # scenarios run; the script explains why here is the only place the
+          # click is permitted.
+          CONSENT_LOG="$RUNNER_TEMP/capture-consent-dismisser.log"
+          CONSENT_STOP="$RUNNER_TEMP/capture-consent-dismisser.stop"
+          bash scripts/ci/dismiss-capture-consent.sh "$CONSENT_LOG" "$CONSENT_STOP" &
+          CONSENT_PID=$!
+          # Stop it however this step ends, and never let its teardown mask the
+          # engine's own exit code.
+          trap 'touch "$CONSENT_STOP" 2>/dev/null || true; kill "$CONSENT_PID" 2>/dev/null || true' EXIT
           # The Cockpit runs against a REAL deployment (backend-minted tokens,
           # web peer served over https) -- production by default, the staged
           # pre-promotion deployments when release.yml passes them (#42). The
@@ -299,6 +312,15 @@ jobs:
           engine_exit=$?
           set -e
           # The engine's exit code does not carry the verdicts; run.jsonl does.
+          touch "$CONSENT_STOP" 2>/dev/null || true
+          kill "$CONSENT_PID" 2>/dev/null || true
+          if [ -s "$CONSENT_LOG" ]; then
+            if grep -q "CLICKED\[" "$CONSENT_LOG"; then
+              echo "::warning::A screen-capture consent alert appeared during the cockpit run and was answered (#234). Captures before the click may be occluded."
+            fi
+            mkdir -p "$RUNNER_TEMP/petal-cockpit"
+            cp "$CONSENT_LOG" "$RUNNER_TEMP/petal-cockpit/" 2>/dev/null || true
+          fi
           RUN_DIR="$(ls -dt "$HOME/Library/Logs/Petal/test-runs/"*/ 2>/dev/null | head -1)"
           echo "cockpit results dir: ${RUN_DIR:-<none>} (engine exit $engine_exit)"
           mkdir -p "$RUNNER_TEMP/petal-cockpit"

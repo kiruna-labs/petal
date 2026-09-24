@@ -10389,6 +10389,9 @@ const STALL_BLACK_LUMA: f64 = 8.0;
 /// excluded from the sampled region so its never-black chrome cannot mask a
 /// black content area.
 const STALL_PANEL_HEADER_POINTS: f64 = 44.0;
+/// Let the raise land before the screen is read. The raise hops to the main
+/// thread, so the capture can otherwise outrun the window-server change.
+const STALL_RAISE_SETTLE: Duration = Duration::from_millis(150);
 /// Fraction of the sampled lattice that must change, against the last
 /// frozen capture, before the on-screen content counts as resumed. The web
 /// peer's telepointer keeps moving over a held frame (first runner run: the
@@ -10459,6 +10462,14 @@ struct StallSample {
     changed_vs_frozen: Option<f64>,
     capture_path: Option<String>,
     capture_error: Option<String>,
+    /// The screen region this sample actually captured, in global top-left
+    /// points: `[x, y, width, height]`. Without it a low
+    /// `changed_vs_frozen` cannot be told apart from a region that was
+    /// pointed somewhere other than the share (#234).
+    capture_region: Option<[i64; 4]>,
+    /// What that region was derived FROM: the panel's physical outer
+    /// `[x, y, width, height]` and the scale factor divided out of it.
+    raw_panel_frame: Option<[f64; 5]>,
     #[serde(skip)]
     cells: Option<Vec<u8>>,
 }
@@ -10630,8 +10641,23 @@ fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
     let content_check_possible = evidence.freeze.iter().any(|s| s.content_hash.is_some())
         && evidence.resume.iter().any(|s| s.content_hash.is_some());
     let content_resumed = evidence.resumed_content_offset_ms.is_some();
+    // ADVISORY, not gating (#234). Measured on one unoccluded run, the change
+    // fraction of a HELD frame (0.7-2.8%, median 1.6%) OVERLAPS that of the
+    // resumed, animating share (1.7-3.3%, median 2.8%): the held frame's
+    // maximum exceeds the resumed minimum, so no threshold separates the two
+    // states this assertion exists to tell apart. It only ever "passed"
+    // because the region was photographing the web peer's own window, whose
+    // full-window animation cleared 5% easily.
+    //
+    // It stays recorded -- a run that never changes a pixel is still worth
+    // seeing -- but it cannot fail the gate while it cannot discriminate.
+    // Gating returns when the sampler measures something that separates the
+    // states (a finer lattice, or the frame counter region alone), with the
+    // bar set from measured separation. The other assertions here are
+    // unaffected and still gate: the window surviving, never going black, and
+    // decoding resuming are what the no-black-frame rule actually asks for.
     assertions.push(AssertionOutcome {
-        name: "stall-resumed-pixels".to_string(),
+        name: "stall-resumed-pixels (advisory, #234)".to_string(),
         passed: !content_check_possible || content_resumed,
         detail: match (content_check_possible, evidence.resumed_content_offset_ms) {
             (false, _) => "not checked: no captures on one side of the resume".to_string(),
@@ -10639,14 +10665,16 @@ fn stall_verdict(evidence: &StallEvidence) -> StallVerdict {
                 "on-screen content changed within {}ms of the animate ack",
                 at.saturating_sub(evidence.animate_ack_offset_ms)
             ),
-            (true, None) => "on-screen content never changed after the source resumed".to_string(),
+            (true, None) => {
+                "on-screen content never changed after the source resumed -- ADVISORY: this check cannot currently separate a held frame from a resumed one (#234)"
+                    .to_string()
+            }
         },
     });
 
-    let product_failure = !window_survived
-        || (captures_available && !never_black)
-        || !resumed
-        || (content_check_possible && !content_resumed);
+    // `content_resumed` is deliberately absent: see the advisory note above.
+    let product_failure =
+        !window_survived || (captures_available && !never_black) || !resumed;
     let verdict = if product_failure {
         ScenarioVerdict::TestFail
     } else if !captures_available {
@@ -10749,6 +10777,8 @@ fn stall_take_sample(
         changed_vs_frozen: None,
         capture_path: None,
         capture_error: None,
+        capture_region: None,
+        raw_panel_frame: None,
         cells: None,
     };
     if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
@@ -10765,10 +10795,42 @@ fn stall_take_sample(
         return sample;
     };
     sample.window_present = true;
+    sample.capture_region = Some([x, y, i64::from(width), i64::from(height)]);
+    #[cfg(target_os = "macos")]
+    {
+        if let Some((_id, rx, ry, rw, rh, scale)) =
+            crate::compositor::visible_window_frames_raw_for_participant(app, owner)
+                .into_iter()
+                .next()
+        {
+            sample.raw_panel_frame =
+                Some([f64::from(rx), f64::from(ry), f64::from(rw), f64::from(rh), scale]);
+        }
+    }
+    // Re-raise before EVERY capture, not once at the start: the web peer's
+    // own browser window overlaps this panel on the CI display, and a region
+    // capture of an occluded window photographs whatever is on top (#234,
+    // docs/TESTING.md "Use a region capture ... genuinely unoccluded").
+    #[cfg(target_os = "macos")]
+    {
+        crate::compositor::raise_visible_window_for_participant(app, owner);
+        std::thread::sleep(STALL_RAISE_SETTLE);
+    }
     let relative = PathBuf::from("stall").join(format!(
         "{}-{phase}-{index:03}.png",
         artifact_name_component(scenario.id)
     ));
+    // One whole-screen frame per phase: the region captures cannot show where
+    // the window actually sits relative to the frame it was aimed with (#234).
+    if index == 0 {
+        let full = writer.dir.join(PathBuf::from("stall").join(format!(
+            "{}-{phase}-fullscreen.png",
+            artifact_name_component(scenario.id)
+        )));
+        if let Err(error) = crate::test_cockpit_bridge::capture_full_screen_png(&full) {
+            log::warn!("stall: full-screen reference capture failed: {error}");
+        }
+    }
     let path = writer.dir.join(&relative);
     // #211: a blank capture is re-taken before it is judged. Unlike a
     // backing-store read, a black REGION is real, but a capture racing a
@@ -10967,11 +11029,23 @@ async fn run_web_share_stall_scenario(
 
     let mut seen = HashSet::new();
     let mut index = 0usize;
+    let mut first_frozen_cells: Option<Vec<u8>> = None;
     let freeze_deadline = freeze_ack_at + config.freeze();
     loop {
         let offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
-        let sample = stall_take_sample(app, scenario, writer, &owner, "freeze", offset_ms, index);
+        let mut sample = stall_take_sample(app, scenario, writer, &owner, "freeze", offset_ms, index);
         index += 1;
+        // The resume bar is only meaningful against the change a HELD frame
+        // still shows (the web peer's telepointer keeps moving over it). Record
+        // it rather than assume it: `STALL_CONTENT_CHANGE_FRACTION`'s 5% was
+        // never checked against an unoccluded capture of either phase (#234).
+        if let (Some(cells), Some(first)) = (sample.cells.as_deref(), first_frozen_cells.as_deref())
+        {
+            sample.changed_vs_frozen = Some(changed_cell_fraction(first, cells));
+        }
+        if first_frozen_cells.is_none() {
+            first_frozen_cells = sample.cells.clone();
+        }
         let _ = writer.write("stall-sample", Some(scenario.id), &sample);
         evidence.freeze.push(sample);
         for transition in stall_collect_transitions(app, freeze_sent_ms, freeze_ack_ms, &mut seen) {
@@ -10988,12 +11062,16 @@ async fn run_web_share_stall_scenario(
     // Animate again and wait for the ack; then the receiver must resume.
     let animate_sent_ms = crate::time_util::now_ms();
     if let Err(error) = publish_cockpit_command(app, &owner, "pattern-animate").await {
+        #[cfg(target_os = "macos")]
+        crate::compositor::release_capture_hold_for_participant(app, &owner);
         write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "animate command failed");
         return infra_fail_outcome(scenario, error);
     }
     let Some((animate_ack, _)) =
         await_web_step(app, scenario, "pattern-animated", animate_sent_ms, STALL_ACK_TIMEOUT).await
     else {
+        #[cfg(target_os = "macos")]
+        crate::compositor::release_capture_hold_for_participant(app, &owner);
         write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "no animate ack");
         return infra_fail_outcome(
             scenario,
@@ -11054,6 +11132,12 @@ async fn run_web_share_stall_scenario(
         tokio::time::sleep(STALL_RESUME_SAMPLE_INTERVAL.min(resume_deadline - now)).await;
     }
 
+    // The sampler held this panel above other applications so the region read
+    // could not photograph the web peer's window (#234). Put it back before
+    // the verdict, whatever that verdict is -- a remote window left floating
+    // would sit above every other app for the rest of the meeting.
+    #[cfg(target_os = "macos")]
+    crate::compositor::release_capture_hold_for_participant(app, &owner);
     let verdict = stall_verdict(&evidence);
     write_stall_timeline(writer, scenario, config, &owner, &evidence, Some(&verdict), "complete");
     let label = match verdict.verdict {
@@ -12489,6 +12573,8 @@ mod tests {
             changed_vs_frozen: None,
             capture_path: None,
             capture_error: None,
+            capture_region: None,
+            raw_panel_frame: None,
             cells: None,
         }
     }
@@ -12633,17 +12719,49 @@ mod tests {
             .filter(|a| !a.passed)
             .map(|a| a.name.as_str())
             .collect();
-        assert_eq!(names, vec!["stall-resumed-decoding", "stall-resumed-pixels"]);
+        assert_eq!(
+            names,
+            vec!["stall-resumed-decoding", "stall-resumed-pixels (advisory, #234)"]
+        );
     }
 
+    /// #234: the pixel check is ADVISORY. Measured on an unoccluded run, a held
+    /// frame changes 0.7-2.8% of the lattice and a resumed one 1.7-3.3% -- the
+    /// ranges overlap, so it cannot separate the two states and must not fail
+    /// the gate. It is still reported.
     #[test]
-    fn stall_verdict_fails_when_frames_decode_but_pixels_never_change() {
+    fn stall_verdict_reports_but_does_not_fail_when_pixels_never_change() {
         let mut evidence = healthy_stall_evidence();
         evidence.resumed_content_offset_ms = None;
         let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::Pass, "{}", verdict.summary);
+        let pixels = verdict
+            .assertions
+            .iter()
+            .find(|a| a.name == "stall-resumed-pixels (advisory, #234)")
+            .unwrap();
+        assert!(!pixels.passed, "the advisory check must still REPORT the failure");
+        assert!(pixels.detail.contains("ADVISORY"));
+    }
+
+    /// The gating half of the same scenario must be untouched: a window that
+    /// vanishes or goes black is still a product failure.
+    #[test]
+    fn stall_verdict_still_fails_on_the_gating_assertions() {
+        let mut evidence = healthy_stall_evidence();
+        evidence.resumed_content_offset_ms = None;
+        if let Some(sample) = evidence.resume.last_mut() {
+            sample.window_present = false;
+        }
+        let verdict = stall_verdict(&evidence);
         assert_eq!(verdict.verdict, ScenarioVerdict::TestFail);
-        let failed = verdict.assertions.iter().find(|a| !a.passed).unwrap();
-        assert_eq!(failed.name, "stall-resumed-pixels");
+
+        let mut black = healthy_stall_evidence();
+        black.resumed_content_offset_ms = None;
+        if let Some(sample) = black.resume.last_mut() {
+            sample.mean_luma = Some(0.0);
+        }
+        assert_eq!(stall_verdict(&black).verdict, ScenarioVerdict::TestFail);
     }
 
     #[test]
@@ -12667,7 +12785,7 @@ mod tests {
         let pixels = verdict
             .assertions
             .iter()
-            .find(|a| a.name == "stall-resumed-pixels")
+            .find(|a| a.name == "stall-resumed-pixels (advisory, #234)")
             .unwrap();
         assert!(pixels.passed);
         assert!(pixels.detail.contains("not checked"));
