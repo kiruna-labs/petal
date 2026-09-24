@@ -10459,6 +10459,11 @@ struct StallSample {
     changed_vs_frozen: Option<f64>,
     capture_path: Option<String>,
     capture_error: Option<String>,
+    /// The screen region this sample actually captured, in global top-left
+    /// points: `[x, y, width, height]`. Without it a low
+    /// `changed_vs_frozen` cannot be told apart from a region that was
+    /// pointed somewhere other than the share (#234).
+    capture_region: Option<[i64; 4]>,
     #[serde(skip)]
     cells: Option<Vec<u8>>,
 }
@@ -10749,6 +10754,7 @@ fn stall_take_sample(
         changed_vs_frozen: None,
         capture_path: None,
         capture_error: None,
+        capture_region: None,
         cells: None,
     };
     if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
@@ -10765,6 +10771,7 @@ fn stall_take_sample(
         return sample;
     };
     sample.window_present = true;
+    sample.capture_region = Some([x, y, i64::from(width), i64::from(height)]);
     let relative = PathBuf::from("stall").join(format!(
         "{}-{phase}-{index:03}.png",
         artifact_name_component(scenario.id)
