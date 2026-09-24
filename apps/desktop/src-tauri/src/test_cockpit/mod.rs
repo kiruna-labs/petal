@@ -11033,12 +11033,16 @@ async fn run_web_share_stall_scenario(
     // Animate again and wait for the ack; then the receiver must resume.
     let animate_sent_ms = crate::time_util::now_ms();
     if let Err(error) = publish_cockpit_command(app, &owner, "pattern-animate").await {
+        #[cfg(target_os = "macos")]
+        crate::compositor::release_capture_hold_for_participant(app, &owner);
         write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "animate command failed");
         return infra_fail_outcome(scenario, error);
     }
     let Some((animate_ack, _)) =
         await_web_step(app, scenario, "pattern-animated", animate_sent_ms, STALL_ACK_TIMEOUT).await
     else {
+        #[cfg(target_os = "macos")]
+        crate::compositor::release_capture_hold_for_participant(app, &owner);
         write_stall_timeline(writer, scenario, config, &owner, &evidence, None, "no animate ack");
         return infra_fail_outcome(
             scenario,
@@ -11099,6 +11103,12 @@ async fn run_web_share_stall_scenario(
         tokio::time::sleep(STALL_RESUME_SAMPLE_INTERVAL.min(resume_deadline - now)).await;
     }
 
+    // The sampler held this panel above other applications so the region read
+    // could not photograph the web peer's window (#234). Put it back before
+    // the verdict, whatever that verdict is -- a remote window left floating
+    // would sit above every other app for the rest of the meeting.
+    #[cfg(target_os = "macos")]
+    crate::compositor::release_capture_hold_for_participant(app, &owner);
     let verdict = stall_verdict(&evidence);
     write_stall_timeline(writer, scenario, config, &owner, &evidence, Some(&verdict), "complete");
     let label = match verdict.verdict {
