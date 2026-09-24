@@ -10464,6 +10464,9 @@ struct StallSample {
     /// `changed_vs_frozen` cannot be told apart from a region that was
     /// pointed somewhere other than the share (#234).
     capture_region: Option<[i64; 4]>,
+    /// What that region was derived FROM: the panel's physical outer
+    /// `[x, y, width, height]` and the scale factor divided out of it.
+    raw_panel_frame: Option<[f64; 5]>,
     #[serde(skip)]
     cells: Option<Vec<u8>>,
 }
@@ -10755,6 +10758,7 @@ fn stall_take_sample(
         capture_path: None,
         capture_error: None,
         capture_region: None,
+        raw_panel_frame: None,
         cells: None,
     };
     if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
@@ -10772,6 +10776,17 @@ fn stall_take_sample(
     };
     sample.window_present = true;
     sample.capture_region = Some([x, y, i64::from(width), i64::from(height)]);
+    #[cfg(target_os = "macos")]
+    {
+        if let Some((_id, rx, ry, rw, rh, scale)) =
+            crate::compositor::visible_window_frames_raw_for_participant(app, owner)
+                .into_iter()
+                .next()
+        {
+            sample.raw_panel_frame =
+                Some([f64::from(rx), f64::from(ry), f64::from(rw), f64::from(rh), scale]);
+        }
+    }
     let relative = PathBuf::from("stall").join(format!(
         "{}-{phase}-{index:03}.png",
         artifact_name_component(scenario.id)

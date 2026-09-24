@@ -2529,6 +2529,45 @@ pub(crate) fn open_window_frames(app: &AppHandle) -> Vec<(u32, f64, f64, f64, f6
 /// these regions from the display -- keyed by the REMOTE window id, which is
 /// not a CG window number on this machine, so `platform::cg` cannot answer
 /// this; only the panel's own frame can.
+/// Diagnostic mirror of [`visible_window_frames_for_participant`] that also
+/// reports the RAW values it derived each frame from: the physical outer
+/// position and size Tauri returned and the scale factor it divided by.
+/// A capture aimed with the converted frame that lands beside the window
+/// cannot be told apart from a window that moved without these (#234).
+pub(crate) fn visible_window_frames_raw_for_participant(
+    app: &AppHandle,
+    owner_identity: &str,
+) -> Vec<(u32, i32, i32, u32, u32, f64)> {
+    let keys: Vec<RemoteWindowKey> = with_state(|s| {
+        s.windows
+            .keys()
+            .filter(|key| key.owner_identity == owner_identity)
+            .cloned()
+            .collect()
+    });
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let Some(window) = app.get_webview_window(&panel_label_for_key(&key)) else {
+            continue;
+        };
+        if !window.is_visible().unwrap_or(false) {
+            continue;
+        }
+        let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+            continue;
+        };
+        out.push((
+            key.window_id,
+            pos.x,
+            pos.y,
+            size.width,
+            size.height,
+            window.scale_factor().unwrap_or(1.0),
+        ));
+    }
+    out
+}
+
 pub(crate) fn visible_window_frames_for_participant(
     app: &AppHandle,
     owner_identity: &str,
