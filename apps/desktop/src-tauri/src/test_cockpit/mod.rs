@@ -10389,9 +10389,6 @@ const STALL_BLACK_LUMA: f64 = 8.0;
 /// excluded from the sampled region so its never-black chrome cannot mask a
 /// black content area.
 const STALL_PANEL_HEADER_POINTS: f64 = 44.0;
-/// Let the raise land before the screen is read. The raise hops to the main
-/// thread, so the capture can otherwise outrun the window-server change.
-const STALL_RAISE_SETTLE: Duration = Duration::from_millis(150);
 /// Fraction of the sampled lattice that must change, against the last
 /// frozen capture, before the on-screen content counts as resumed. The web
 /// peer's telepointer keeps moving over a held frame (first runner run: the
@@ -10789,15 +10786,6 @@ fn stall_take_sample(
             sample.raw_panel_frame =
                 Some([f64::from(rx), f64::from(ry), f64::from(rw), f64::from(rh), scale]);
         }
-    }
-    // Re-raise before EVERY capture, not once at the start: the web peer's
-    // own browser window overlaps this panel on the CI display, and a region
-    // capture of an occluded window photographs whatever is on top (#234,
-    // docs/TESTING.md "Use a region capture ... genuinely unoccluded").
-    #[cfg(target_os = "macos")]
-    {
-        crate::compositor::raise_visible_window_for_participant(app, owner);
-        std::thread::sleep(STALL_RAISE_SETTLE);
     }
     let relative = PathBuf::from("stall").join(format!(
         "{}-{phase}-{index:03}.png",
