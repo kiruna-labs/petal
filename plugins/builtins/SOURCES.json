@@ -3,5 +3,10 @@
     "repo": "kiruna-labs/petal-plugins",
     "commit": "4c4502e7280ac84c1add71b56e310fb80b90319f",
     "version": "1.0.0"
+  },
+  "petal.timer": {
+    "repo": "kiruna-labs/petal-plugins",
+    "commit": "60487e4071012673e2310be9016fa931a278568c",
+    "version": "1.0.0"
   }
 }

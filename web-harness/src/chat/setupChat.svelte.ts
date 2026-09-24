@@ -14,14 +14,20 @@ import {
   CHAT_HISTORY_REQUEST_DELAYS_MS,
   chatMessageWire,
   chatNoticeText,
+  chatPostWire,
+  chatPrivateNoticeText,
   chatPublishOptions,
   createChatStore,
   encodeChatWire,
   parseChatPayload,
+  type ChatCommandOption,
+  type ChatCommandResult,
   type ChatMessage,
   type ChatSender,
+  type ChatVia,
   type ChatWire,
 } from '@petal/shared/logic/chat';
+import { bridgeFailure } from '@petal/shared/plugin-host/broker';
 import type { HarnessContext } from '../context.ts';
 import { displayNameForParticipant } from '../tiles.ts';
 
@@ -35,6 +41,12 @@ export interface ChatHook {
   /** Automation seam (live smoke driver): what the drawer currently shows. */
   messages(): readonly ChatMessage[];
   send(text: string): Promise<void>;
+  /** A loaded plugin posts for everyone (plugin host `chat.post`); always stamped with `via`. */
+  postAsPlugin(via: ChatVia, text: string): Promise<void>;
+  /** A plugin's private answer to the local user's command; shown here only. */
+  notice(via: ChatVia, text: string): void;
+  /** Automation seam: run `/name args` exactly as the composer would. */
+  runCommand(name: string, args: string): ChatCommandResult;
 }
 
 export function setupChat(ctx: HarnessContext): ChatHook {
@@ -82,6 +94,14 @@ export function setupChat(ctx: HarnessContext): ChatHook {
   let view = $state.raw<{ messages: readonly ChatMessage[]; canSend: boolean }>({ messages: [], canSend: false });
   function refreshView(): void {
     view = { messages: store.messages, canSend: room?.state === 'connected' };
+  }
+  // Slash commands come from the plugin host (setupPlugins runs first in main.ts).
+  let commands = $state.raw<readonly ChatCommandOption[]>(ctx.hook.plugins?.host.chatCommands() ?? []);
+  ctx.hook.plugins?.onChatCommandsChanged((next) => (commands = next));
+  function runCommand(name: string, args: string): ChatCommandResult {
+    const host = ctx.hook.plugins?.host;
+    if (!host) return { ok: false, message: 'Plugins are not running in this client.' };
+    return host.runChatCommand(name, args);
   }
 
   let drawer: Record<string, unknown> | null = null;
@@ -145,6 +165,10 @@ export function setupChat(ctx: HarnessContext): ChatHook {
           get canSend() {
             return view.canSend;
           },
+          get commands() {
+            return commands;
+          },
+          onCommand: (name: string, args: string) => runCommand(name, args),
           onSend: (text: string) => send(text),
           onClose: () => store.setOpen(false),
         },
@@ -183,19 +207,22 @@ export function setupChat(ctx: HarnessContext): ChatHook {
       if (!wire) return;
       const sender: ChatSender = { identity, name: nameFor(participant, identity) };
       switch (wire.type) {
-        case 'msg': {
+        case 'msg':
+        case 'post': {
           const result = store.receive(wire, sender);
           if (result === 'added' && identity !== room?.localParticipant.identity && !store.open) {
-            ui.showToast(chatNoticeText(sender, wire.text));
+            ui.showToast(chatNoticeText(sender, wire.text, 80, wire.type === 'post' ? wire.via : null));
           }
           break;
         }
         case 'history-req': {
           const reply = store.historyReply();
-          if (reply) void publish(reply, identity).catch(() => {});
+          if (reply.history) void publish(reply.history, identity).catch(() => {});
+          if (reply.posts) void publish(reply.posts, identity).catch(() => {});
           break;
         }
         case 'history':
+        case 'history-posts':
           historyAnswered = true;
           stopHistoryRequests();
           store.mergeHistory(wire, sender);
@@ -212,5 +239,16 @@ export function setupChat(ctx: HarnessContext): ChatHook {
       return store.messages;
     },
     send,
+    async postAsPlugin(via, text) {
+      if (!room || room.state !== 'connected') throw bridgeFailure('unavailable', 'not connected to a meeting');
+      const wire = chatPostWire(text, via);
+      store.sent(wire, self());
+      await publish(wire);
+    },
+    notice(via, text) {
+      store.notice(text, via, self());
+      if (!store.open) ui.showToast(chatPrivateNoticeText(via, text));
+    },
+    runCommand,
   };
 }

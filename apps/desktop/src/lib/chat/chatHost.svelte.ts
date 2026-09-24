@@ -11,13 +11,17 @@ import {
   CHAT_HISTORY_REQUEST_DELAYS_MS,
   chatMessageWire,
   chatNoticeText,
+  chatPostWire,
+  chatPrivateNoticeText,
   createChatStore,
   encodeChatWire,
   parseChatPayload,
   type ChatMessage,
   type ChatSender,
+  type ChatVia,
   type ChatWire,
 } from '@petal/shared/logic/chat';
+import { bridgeFailure } from '@petal/shared/plugin-host/broker';
 import { base64ToBytes, bytesToBase64 } from '@petal/shared/plugin-host/topics';
 
 export interface ChatHostDeps {
@@ -36,6 +40,10 @@ export interface ChatHost {
   setOpen(open: boolean): void;
   toggle(): void;
   send(text: string): Promise<void>;
+  /** A loaded plugin posts for everyone (plugin host `chat.post`); always stamped with `via`. */
+  post(via: ChatVia, text: string): Promise<void>;
+  /** A plugin's private answer to the local user's command; shown here only. */
+  notice(via: ChatVia, text: string): void;
   /** The room is connected: ask peers for what was said before we arrived (once per connection). */
   onConnected(): void;
   onDisconnected(): void;
@@ -70,9 +78,10 @@ export function createChatHost(deps: ChatHostDeps): ChatHost {
 
   async function publish(wire: ChatWire, requester?: string): Promise<void> {
     if (!hasTauriBridge()) return;
+    const direct = (wire.type === 'history' || wire.type === 'history-posts') && requester;
     await invoke(COMMANDS.chatPublish, {
       payloadBase64: bytesToBase64(encodeChatWire(wire)),
-      destinationIdentities: wire.type === 'history' && requester ? [requester] : undefined,
+      destinationIdentities: direct ? [requester] : undefined,
     });
   }
 
@@ -84,19 +93,22 @@ export function createChatHost(deps: ChatHostDeps): ChatHost {
       name: event.senderName ?? deps.participantName(event.senderIdentity),
     };
     switch (wire.type) {
-      case 'msg': {
+      case 'msg':
+      case 'post': {
         const result = store.receive(wire, sender);
         if (result === 'added' && sender.identity !== deps.selfIdentity() && !store.open) {
-          deps.onNotice(chatNoticeText(sender, wire.text));
+          deps.onNotice(chatNoticeText(sender, wire.text, 80, wire.type === 'post' ? wire.via : null));
         }
         break;
       }
       case 'history-req': {
         const reply = store.historyReply();
-        if (reply) void publish(reply, sender.identity).catch(() => {});
+        if (reply.history) void publish(reply.history, sender.identity).catch(() => {});
+        if (reply.posts) void publish(reply.posts, sender.identity).catch(() => {});
         break;
       }
       case 'history':
+      case 'history-posts':
         historyAnswered = true;
         stopHistoryRequests();
         store.mergeHistory(wire, sender);
@@ -138,6 +150,16 @@ export function createChatHost(deps: ChatHostDeps): ChatHost {
         console.error('chat_publish failed', e);
         deps.onNotice("Couldn't send your message. Check your connection and try again.");
       }
+    },
+    async post(via, text) {
+      if (!connected) throw bridgeFailure('unavailable', 'not connected to a meeting');
+      const wire = chatPostWire(text, via);
+      store.sent(wire, self());
+      await publish(wire);
+    },
+    notice(via, text) {
+      store.notice(text, via, self());
+      if (!store.open) deps.onNotice(chatPrivateNoticeText(via, text));
     },
     onConnected() {
       if (connected) return;

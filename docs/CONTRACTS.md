@@ -1259,17 +1259,35 @@ exactly one of the three shapes is dropped whole (`chatRejectedPayloads`
 pins the cases on both sides: `web-harness/tests/chat.test.ts`, `chat.rs`
 tests).
 
-**History.** A joiner publishes `history-req` once when connected; every
-peer with messages answers with its newest `historyMessages` (50), trimmed
-oldest-first until the packet fits `maxPayloadBytes`, sent to the requester
-only. Duplicates (by `id`) from several responders collapse. Relayed entries
+**Plugin posts (I-7b)** are their own type, never a field on `msg`:
+
+```
+{ "v": 1, "type": "post", "id": ..., "text": ..., "t": ..., "via": { "id": "petal.timer", "name": "Timer" } }
+{ "v": 1, "type": "history-posts", "messages": [ { id, text, t, senderIdentity, senderName, via } ] }   -> destinationIdentities: [requester]
+```
+
+`via.id` is a plugin id, `via.name` 1..`viaNameMaxChars` (24) printable
+characters with no line breaks or bidi controls. The sender is still the
+authenticated participant who ran the plugin; `via` is that client's stamp,
+and it can only ever make a message read as LESS personal ("<person> · via
+<plugin>"). Keeping posts out of `msg` and `history` means a client that
+predates them drops them instead of showing a plugin's text as the person's
+own. A plugin's private answer to its own user's command never touches the
+wire.
+
+**History.** A joiner publishes `history-req` on connect (repeated at 0, 1.5
+and 4 s until a reply arrives); every peer with messages answers with its
+newest `historyMessages` (50) typed messages in `history` and, separately,
+its newest 50 plugin posts in `history-posts`, each trimmed oldest-first
+until the packet fits `maxPayloadBytes`, sent to the requester only. Duplicates (by `id`) from several responders collapse. Relayed entries
 are the responder's claim about who said what, so the store marks them
 `relayed` unless the responder attributes them to itself; they never count as
 unread.
 
 **Limits** (`chatLimits`): `maxTextChars` 2000, `maxPayloadBytes` 8192,
-`historyMessages` 50, `inboundPerSenderPerSecond` 10 (native and web drop
-beyond it), `retainedMessages` 500 in memory per meeting.
+`historyMessages` 50 per history packet, `inboundPerSenderPerSecond` 10
+(native and web drop beyond it), `retainedMessages` 500 in memory per
+meeting, `viaNameMaxChars` 24.
 
 ### Pipeline Stats
 

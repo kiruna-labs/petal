@@ -141,6 +141,8 @@ const STATIC_PERMISSIONS: &[&str] = &[
     "shares:read",
     "clipboard:write",
     "net:fetch:user-urls",
+    "chat:post",
+    "chat:commands",
 ];
 
 fn is_net_host(host: &str) -> bool {
@@ -161,7 +163,7 @@ fn is_net_host(host: &str) -> bool {
 }
 
 /// Same vocabulary as `isPermission` in shared/plugin-host/manifest.ts. Reserved
-/// (`frames:read`) and wildcard (`net:fetch:*`) are not permissions.
+/// (`frames:read`, `chat:read`) and wildcard (`net:fetch:*`) are not permissions.
 pub fn is_permission(value: &str) -> bool {
     if STATIC_PERMISSIONS.contains(&value) {
         return true;
@@ -949,6 +951,12 @@ mod tests {
         assert!(is_permission("net:fetch:*.example.com"));
         assert!(is_permission("net:fetch:localhost:8787"));
         assert!(!is_permission("frames:read"));
+        assert!(is_permission("chat:post"));
+        assert!(is_permission("chat:commands"));
+        assert!(
+            !is_permission("chat:read"),
+            "reserved until it has a first-party consumer"
+        );
         assert!(!is_permission("net:fetch:*"));
         assert!(!is_permission("totally:made:up"));
         assert!(!is_permission("net:fetch:https://x.com"));

@@ -25,6 +25,8 @@ export const BRIDGE_METHODS = [
   'net.fetch',
   'clipboard.writeText',
   'log',
+  'chat.post',
+  'chat.respond',
 ] as const;
 export type BridgeMethod = (typeof BRIDGE_METHODS)[number];
 
@@ -45,6 +47,7 @@ export const HOST_EVENTS = [
   'ui.action',
   'ui.surface-opened',
   'ui.surface-closed',
+  'chat.command',
 ] as const;
 export type HostEvent = (typeof HOST_EVENTS)[number];
 
@@ -133,6 +136,19 @@ export interface PublishParams {
   payload: Uint8Array<ArrayBuffer>;
   reliable: boolean;
   to?: string[];
+}
+
+/**
+ * The local user ran one of this plugin's slash commands (`chat.command`,
+ * logic frame only). `commandId` lets the plugin answer privately once, within
+ * CHAT_COMMAND_LIMITS.respondWindowMs, through `chat.respond`.
+ */
+export interface ChatCommandPayload {
+  commandId: string;
+  name: string;
+  args: string;
+  /** The local user; null unless the plugin holds `meeting:read`. */
+  invoker: Participant | null;
 }
 
 export interface FetchParams {

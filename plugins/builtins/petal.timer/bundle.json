@@ -1,0 +1,30 @@
+{
+  "files": {
+    "plugin.js": "// Timer — a built-in Petal plugin, and the first consumer of the chat API\n// (petal.chat, plugins/README.md §2.4). One file, no imports: built-ins are\n// buildless so both clients can compile them in with a `?raw` import.\n//\n//   /timer 5m standup    post \"Timer started: standup, 5 min\" for everyone,\n//                        then \"Time's up: standup (5 min)\" when it ends\n//   /timer 90s           durations: 90s, 5m, 1h, 1h30m, 2m30s, 1:30, or a\n//                        bare number of minutes; 1 second to 4 hours\n//   /timer list          a private answer listing your running timers\n//   /timer cancel [label]  cancel your newest (or the matching) timer\n//\n// Anything else gets a private usage answer. Timers run in this client, so\n// they stop if you leave the meeting; everyone else only sees the chat posts.\n// Nothing here reads chat: the plugin sees its own command's text and nothing\n// else (permissions: chat:commands, chat:post).\n\nconst MAX_MS = 4 * 60 * 60 * 1000;\nconst MAX_ACTIVE = 3;\nconst MAX_LABEL = 60;\nconst USAGE = 'Usage: /timer 5m [label], /timer list, /timer cancel [label]. Durations: 90s, 5m, 1h30m, 1:30, or minutes.';\n\n/** Milliseconds for \"90s\", \"5m\", \"1h30m\", \"2m30s\", \"1:30\", or \"5\" (minutes); null when it is not a duration. */\nexport function parseDuration(token) {\n  const text = String(token || '').trim().toLowerCase();\n  let ms = null;\n  let m = /^(\\d{1,3})$/.exec(text);\n  if (m) ms = Number(m[1]) * 60000;\n  if (ms === null && (m = /^(\\d{1,3}):([0-5]\\d)$/.exec(text))) ms = Number(m[1]) * 60000 + Number(m[2]) * 1000;\n  if (ms === null && (m = /^(?:(\\d{1,2})h)?(?:(\\d{1,3})m)?(?:(\\d{1,5})s)?$/.exec(text)) && (m[1] || m[2] || m[3])) {\n    ms = (Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0)) * 1000;\n  }\n  if (ms === null || ms < 1000 || ms > MAX_MS) return null;\n  return ms;\n}\n\n/** \"45 s\", \"5 min\", \"1 min 30 s\", \"1 h 30 min\". */\nexport function humanDuration(ms) {\n  const total = Math.round(ms / 1000);\n  const h = Math.floor(total / 3600);\n  const min = Math.floor((total % 3600) / 60);\n  const s = total % 60;\n  const parts = [];\n  if (h) parts.push(h + ' h');\n  if (min) parts.push(min + ' min');\n  if (s || parts.length === 0) parts.push(s + ' s');\n  return parts.join(' ');\n}\n\n/** @type {import('@petal/plugin-sdk').PluginDefinition} */\nconst definition = {\n  activate(petal) {\n    /** Newest last. */\n    const active = [];\n\n    function labelled(t) {\n      return t.label ? t.label + ', ' + humanDuration(t.ms) : humanDuration(t.ms);\n    }\n\n    function remove(t) {\n      clearTimeout(t.handle);\n      const i = active.indexOf(t);\n      if (i !== -1) active.splice(i, 1);\n    }\n\n    async function start(ms, label) {\n      if (active.length >= MAX_ACTIVE) {\n        return 'You already have ' + MAX_ACTIVE + ' timers running. Cancel one with /timer cancel.';\n      }\n      const t = { ms, label, endsAt: Date.now() + ms, handle: null };\n      try {\n        await petal.chat.post('⏱ Timer started: ' + labelled(t));\n      } catch (e) {\n        return \"Couldn't start the timer: \" + ((e && e.message) || 'not in a meeting') + '.';\n      }\n      t.handle = setTimeout(() => {\n        remove(t);\n        petal.chat.post(\"⏱ Time's up: \" + (t.label ? t.label + ' (' + humanDuration(t.ms) + ')' : humanDuration(t.ms))).catch(() => {});\n      }, ms);\n      active.push(t);\n      return undefined;\n    }\n\n    function list() {\n      if (active.length === 0) return 'No timers running. Start one with /timer 5m [label].';\n      const now = Date.now();\n      return active\n        .map((t) => (t.label || 'Timer') + ': ' + humanDuration(Math.max(1000, t.endsAt - now)) + ' left')\n        .join(' · ');\n    }\n\n    async function cancel(label) {\n      const t = label ? [...active].reverse().find((x) => x.label.toLowerCase() === label.toLowerCase()) : active[active.length - 1];\n      if (!t) return label ? 'No running timer called \"' + label + '\".' : 'No timers running.';\n      remove(t);\n      try {\n        await petal.chat.post('⏱ Timer cancelled: ' + labelled(t));\n      } catch {\n        return 'Timer cancelled.';\n      }\n      return undefined;\n    }\n\n    petal.chat.onCommand('timer', (command) => {\n      const args = command.args.trim();\n      if (args === '' || args === 'help') return USAGE;\n      const [first, ...rest] = args.split(/\\s+/);\n      const word = first.toLowerCase();\n      if (word === 'list') return list();\n      if (word === 'cancel' || word === 'stop') return cancel(rest.join(' ').trim());\n      const ms = parseDuration(first);\n      if (ms === null) return 'Not a duration: \"' + first + '\". ' + USAGE;\n      return start(ms, rest.join(' ').trim().slice(0, MAX_LABEL));\n    });\n  },\n};\n\nexport default (globalThis.__petalRegister ? globalThis.__petalRegister(definition) : definition);\n"
+  },
+  "manifest": {
+    "apiVersion": 1,
+    "contributes": {
+      "chatCommands": [
+        {
+          "description": "Start a countdown everyone can see",
+          "name": "timer",
+          "usage": "5m [label] | list | cancel"
+        }
+      ]
+    },
+    "description": "Start a countdown with /timer. Everyone in the meeting sees when it starts and when time is up.",
+    "entry": "plugin.js",
+    "id": "petal.timer",
+    "manifestVersion": 1,
+    "minHostVersion": "0.9.29",
+    "name": "Timer",
+    "native": null,
+    "permissions": [
+      "chat:commands",
+      "chat:post"
+    ],
+    "scope": "meeting",
+    "version": "1.0.0"
+  }
+}

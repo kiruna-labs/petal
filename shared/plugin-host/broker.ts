@@ -24,6 +24,7 @@ import {
   okResponse,
 } from './protocol.ts';
 import { PLUGIN_LIMITS, createRateLimiter, jsonByteLength, type RateLimiter } from './rateLimit.ts';
+import { CHAT_COMMAND_LIMITS, normalizeChatText } from '../logic/chat.ts';
 
 export type PluginSource = 'builtin' | 'registry' | 'dev';
 
@@ -66,6 +67,16 @@ export interface HostAdapter {
   fetch(plugin: LoadedPlugin, params: FetchParams): Promise<FetchResponse>;
   clipboardWriteText(text: string): Promise<void>;
   log(pluginId: string, level: LogLevel, args: string[]): void;
+  /**
+   * The meeting chat (a host surface). Absent where the client has no chat;
+   * the plugin then gets 'unavailable'. `text` is already normalized.
+   */
+  chat?: {
+    /** Post for everyone as "<person> · via <plugin>". */
+    post(plugin: LoadedPlugin, text: string): Promise<void>;
+    /** Show only to the local user, as this plugin's answer to their command. */
+    respond(plugin: LoadedPlugin, text: string): void;
+  };
   /** Lifecycle observations (frame reported ready/activated/error). */
   onFrameEvent?(pluginId: string, event: 'ready' | 'activated' | 'error' | 'dismiss', payload: unknown): void;
 }
@@ -97,6 +108,12 @@ export interface PluginBroker {
   broadcast(event: HostEvent, payload?: unknown): void;
   /** Deliver an inbound data packet already parsed to `plugin/<id>[/<sub>]`. */
   deliverData(pluginId: string, message: { sub: string | null; sender: Participant; payload: Uint8Array }): void;
+  /**
+   * The local user ran `/name args` and `pluginId` owns it. Delivered to the
+   * LOGIC frame only; returns the command id the plugin may answer once, or
+   * null when the plugin has no attached logic frame or lacks `chat:commands`.
+   */
+  deliverChatCommand(pluginId: string, command: { name: string; args: string; invoker: Participant | null }): string | null;
   instances(): PluginInstance[];
   pluginIds(): string[];
 }
@@ -273,7 +290,27 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
     net: createRateLimiter({ perSecond: PLUGIN_LIMITS.netFetchPerSecond, now }),
     log: createRateLimiter({ perSecond: PLUGIN_LIMITS.logPerSecond, now }),
     ui: createRateLimiter({ perSecond: PLUGIN_LIMITS.uiPerSecond, now }),
+    chat: createRateLimiter({ perSecond: PLUGIN_LIMITS.chatPostPerSecond, burst: PLUGIN_LIMITS.chatPostBurst, now }),
   };
+  // Commands a plugin may still answer privately (chat.respond): one answer
+  // per invocation, within the window, and only by the plugin that owns it.
+  // Anything else would let a plugin with `chat:commands` print private
+  // "plugin says" lines in the user's chat whenever it liked.
+  const pendingCommands = new Map<string, { pluginId: string; issuedAt: number }>();
+  let nextCommandId = 1;
+  function prunePendingCommands(): void {
+    const cutoff = now() - CHAT_COMMAND_LIMITS.respondWindowMs;
+    for (const [id, p] of pendingCommands) if (p.issuedAt < cutoff) pendingCommands.delete(id);
+  }
+
+  function chatText(params: Record<string, unknown>): string {
+    const raw = params.text;
+    if (typeof raw !== 'string') throw new BridgeError('invalid', 'text is missing');
+    const text = normalizeChatText(raw);
+    // Never clipped: an over-long or control-laden message is the plugin's bug, reported as such.
+    if (text === null) throw new BridgeError('invalid', 'text must be 1..2000 chars of plain text (no control or bidi characters)');
+    return text;
+  }
 
   function take(bucket: keyof typeof limiters, pluginId: string): void {
     if (!limiters[bucket]!.tryTake(pluginId)) throw new BridgeError('rate-limited', `${bucket} quota exceeded`);
@@ -449,6 +486,28 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
         await adapter.clipboardWriteText(text);
         return undefined;
       }
+      case 'chat.post': {
+        const text = chatText(params);
+        if (!adapter.chat) throw new BridgeError('unavailable', 'this host has no meeting chat');
+        take('chat', id);
+        await adapter.chat.post(plugin, text);
+        return undefined;
+      }
+      case 'chat.respond': {
+        const commandId = expectString(params, 'commandId');
+        prunePendingCommands();
+        const pending = pendingCommands.get(commandId);
+        if (!pending || pending.pluginId !== id) {
+          throw new BridgeError('invalid', 'no command of this plugin is waiting for an answer (answer once, within 60 s)');
+        }
+        const text = chatText(params);
+        // Spent before anything can fail later, so a second answer is refused even mid-flight.
+        pendingCommands.delete(commandId);
+        if (!adapter.chat) throw new BridgeError('unavailable', 'this host has no meeting chat');
+        take('ui', id);
+        adapter.chat.respond(plugin, text);
+        return undefined;
+      }
       case 'log': {
         const level = params.level;
         if (level !== 'debug' && level !== 'info' && level !== 'warn' && level !== 'error') throw new BridgeError('invalid', 'bad level');
@@ -534,6 +593,16 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
         if (inst.plugin.manifest.id !== pluginId || inst.surface) continue;
         sendGated(inst, 'data.message', message);
       }
+    },
+    deliverChatCommand(pluginId, command) {
+      const logic = [...byFrame.values()].find((i) => i.plugin.manifest.id === pluginId && !i.surface);
+      if (!logic || !hasPermission(logic.plugin.granted, 'chat:commands')) return null;
+      prunePendingCommands();
+      const commandId = `cmd-${nextCommandId++}`;
+      pendingCommands.set(commandId, { pluginId, issuedAt: now() });
+      const invoker = hasPermission(logic.plugin.granted, 'meeting:read') ? command.invoker : null;
+      sendGated(logic, 'chat.command', { commandId, name: command.name, args: command.args, invoker });
+      return commandId;
     },
     instances() {
       return [...byFrame.values()];

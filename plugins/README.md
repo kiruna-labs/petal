@@ -240,7 +240,7 @@ manifest type, and the frame-side bridge. The `petal` object handed to
 | `shares` | `shares:read` | `list()` and `on(cb)` of `{ownerIdentity, windowId, title, sourceUrl, kind}` |
 | `net` | `net:fetch:<host>` or `net:fetch:user-urls` | `fetch(url, init)` through the host |
 | `clipboard` | `clipboard:write` | `writeText` |
-| `chat` (I-7b) | `chat:post`, `chat:commands`, `chat:read` | `post(text)` posts as the plugin (host stamps `via <plugin>` and draws the puzzle badge; a plugin can never post as a person); `registerCommand(name, handler)` owns `/name …` and receives only its own arguments; `on('message', cb)` needs `chat:read`, the rare one. Cards with buttons and message reactions come later. |
+| `chat` (I-7b) | `chat:post` (meeting scope), `chat:commands` | `post(text)` publishes for everyone as "<person> · via <plugin>" (the host stamps `via` and draws the puzzle badge; a plugin can never post as a person). `onCommand(name, handler)` receives `{name, args, invoker}` for a command the plugin declared in `contributes.chatCommands`, only when the local user runs it, and only that command's text; a string returned (or resolved) is the plugin's one private answer, shown to that user only, within 60 s. `chat:read` (`on('message')`) is reserved until a first-party consumer needs it; cards with buttons and message reactions come later. |
 | `frames` | `frames:read` | reserved, not built |
 | `log` | none | `debug`, `info`, `warn`, `error` |
 
@@ -362,10 +362,28 @@ The chat panel is an in-window drawer in wave one. A detached native panel
 `ui:popover`, `ui:panel`, `ui:settings`, `ui:toast`, `shares:read`,
 `clipboard:write`, `net:fetch:<host>` (exact host or `*.example.com`),
 `net:fetch:user-urls`, `frames:read` (reserved; refused with "not supported
-by this host"), and, with the `chat` API (I-7b): `chat:post` ("Post messages
-in the chat"), `chat:commands` ("Add slash commands"), `chat:read` ("Read the
-meeting chat", the sensitive one; commands do not need it because a plugin
-only ever sees the arguments of its own command).
+by this host"), and, with the `chat` API (I-7b): `chat:post` (meeting scope
+only; "Post in the meeting chat, marked as coming from this plugin") and
+`chat:commands` ("Add slash commands to the chat"). `chat:read` ("Read the
+meeting chat", the sensitive one) is reserved like `frames:read` until a
+first-party consumer needs it; commands never need it, because a plugin only
+ever sees the text of its own command.
+
+Slash commands (I-7b) are declared, not registered at runtime:
+`contributes.chatCommands: [{name, description, usage?}]` (at most 8; name
+`^[a-z][a-z0-9-]{0,19}$`; description 1..60 printable chars; usage up to 40),
+so the composer can offer them without running plugin code. A name declared
+by two loaded plugins has one owner by a fixed rule (built-in, then installed,
+then dev; then plugin id), so a sideloaded plugin can never shadow a
+built-in's command; the loser's command is unreachable and the host logs it
+(`shared/plugin-host/chatCommands.ts`). The composer refuses an unknown
+`/word` under the draft instead of sending it to everyone; `//` sends a
+message that starts with `/`.
+
+Plugin posts travel as their own wire type, `post` (with `via: {id, name}`),
+and history relays them in a separate `history-posts` packet: a client that
+predates plugin posts drops unknown types, so it never shows a plugin's text
+as the person's own words (`docs/CONTRACTS.md` "Chat").
 
 `net:fetch:user-urls` means the plugin never picks the host. Its
 `contributes.settings` declares a `{type: "url", netAllow: true}` field, the
@@ -447,7 +465,8 @@ built the bundle.
 | Plugin | id / scope | Permissions | Wire | UI |
 |---|---|---|---|---|
 | Reactions | `petal.reactions` / meeting | meeting:read, data:publish, ui:toolbar-button, ui:popover, ui:overlay | `plugin/petal.reactions/emoji`, lossy, `{e, t}`, 4 per second per sender | "React" button opens an 8-emoji popover; overlay floats the emoji with the sender's first name |
-| ~~Chat~~ (host surface since 2026-09-14, see decision 2) | host topic `petal.chat` | n/a | `{v:1,type:'msg',id,text ≤2000,t}` reliable; a joiner sends `history-req` and peers answer directly with their newest 50 (`docs/CONTRACTS.md` "Chat") | "Chat" control with unread badge opens the drawer; toast while closed. I-7b adds the `chat` plugin API with a first-party `/poll` or `/timer` consumer. |
+| ~~Chat~~ (host surface since 2026-09-14, see decision 2) | host topic `petal.chat` | n/a | `{v:1,type:'msg',id,text ≤2000,t}` reliable; a joiner sends `history-req` and peers answer directly with their newest 50 (`docs/CONTRACTS.md` "Chat") | "Chat" control with unread badge opens the drawer; toast while closed. |
+| Timer (I-7b, the `chat` API's first consumer) | `petal.timer` / meeting | chat:commands, chat:post | chat `post` only | `/timer 5m standup` posts "⏱ Timer started: standup, 5 min" and "⏱ Time's up: standup (5 min)"; `/timer list`, `/timer cancel [label]`; bad input gets a private usage answer. Built-in, on by default, never reads chat. |
 | Webhook notifier | `petal.webhook-notifier` / local | meeting:read, storage, net:fetch:user-urls, ui:settings | none | settings surface with URL and "Send test"; posts `{event, room, count, at}` for meeting started, ended, participant joined; off until a URL is set |
 | Window link | `petal.window-link` / local | shares:read, ui:header-button | none | header button "Open URL", hidden when the share has no source URL; the native button is removed in the same PR |
 
@@ -529,8 +548,8 @@ Three homes, one artifact:
 
 **Our plugins** are source in the plugins repo, depending on the published
 SDK like any third party. A change to Reactions is a plugins-repo PR, then a
-bump PR here that replaces the vendored bundle. The I-7b chat consumer
-(`/poll` or `/timer`) is the first plugin written there.
+bump PR here that replaces the vendored bundle. Timer (I-7b) is the first
+plugin written there.
 
 **Community plugins are pointers, not merged source** (the Zed extensions
 model): `community/<id>/plugin.json` = `{repo, subdir, commit}`.
@@ -600,11 +619,16 @@ Definition of done and the usual labels.
   contract `chatMessages`/`chatLimits`/`chatDataEvent`. DoD: contract
   vectors pinned on every side; drawer rendered test at 400 and 720 px;
   native-to-web live smoke both directions.
-- I-7b `petal.chat` plugin API: `chat:post`, `chat:commands`, `chat:read`
-  permissions with consent copy; `post` stamps `via <plugin>` + puzzle badge;
-  `registerCommand` routes `/name …` to its owner only; a first-party
-  `/poll` or `/timer` plugin in the plugins repo as the consumer, so no
-  surface ships dormant. Cards with buttons and message reactions later.
+- I-7b `petal.chat` plugin API: `chat:post` and `chat:commands` with
+  consent copy (`chat:read` reserved until it has a consumer);
+  `contributes.chatCommands`; `post` as its own wire type stamped with `via`
+  + puzzle badge; commands routed to their one owner with a single private
+  answer; composer autocomplete and refusal of unknown commands; the
+  first-party `petal.timer` built-in in the plugins repo as the consumer, so
+  no surface ships dormant. DoD: broker, runtime, resolver, manifest, and
+  wire tests; drawer rendered test with plugin posts, private answers, and
+  autocomplete at 400/720 px; live smoke of `/timer` across peers. Cards with
+  buttons, `chat:read`, and message reactions later.
 
 **M4 — Local plugins, developer mode**
 - I-8 `plugins/webhook-notifier`, `plugin_net_fetch`, `net:fetch:user-urls`,
@@ -666,6 +690,13 @@ Definition of done and the usual labels.
   drift test pins an upstream commit so a schema change is a deliberate
   two-PR event.
 - Feature branch vs trunk rule: never hold more than one milestone unmerged.
+- Registry forward compatibility: a new permission (as `chat:post` and
+  `chat:commands` in I-7b) is an unknown string to every older client, and
+  the index validator fails the WHOLE index on one unknown permission, so
+  once the registry is live, listing a plugin that uses a newer permission
+  would blank "Get plugins" for every older client. Harmless today (the
+  registry is unlisted and no release bakes a registry key), but the entry,
+  not the index, has to become the unit of rejection before launch.
 - Community build supply chain: a pointer entry runs the author's build in
   our CI. Mitigations in §2.13: isolated job, no secrets, lockfiles pinned,
   signing separated from building, forked source, `verified: false` until
@@ -692,10 +723,10 @@ Update this table on the branch. Owner is a GitHub handle or "unassigned".
 | I-4b | M2 | plugin provenance badge, popover caption, right-click "Turn off" | seinfish | merged (kiruna-labs/petal#71) |
 | I-5a | M3 | registry client | seinfish | merged (kiruna-labs/petal#99, 2026-09-10; review fixes: compile-time key, anti-rollback, permission intersection, streaming client; web loads registry installs in I-6) |
 | I-5b | M3 | registry publisher + hosting (`kiruna-labs/petal-website` `registry/`) | seinfish | publisher, keygen, signer, vendored contracts + drift guard done 2026-09-08; moved into the website repo 2026-09-09 (petal-website PR #1); hosting, protected publish workflow and review tooling still to do |
-| I-5c | M3 | plugin source repo split (`kiruna-labs/petal-plugins`), vendored built-in bundles, community pointer contract | seinfish | plugins repo live 2026-09-10 (reactions source, packer, build CI, `community/README.md`); monorepo vendors `plugins/builtins/` on feature/plugin-system-i5c; still to do: publish `@petal/plugin-sdk` to npm (owner: npm scope), signed vendored bundles once the production key exists |
+| I-5c | M3 | plugin source repo split (`kiruna-labs/petal-plugins`), vendored built-in bundles, community pointer contract | seinfish | merged (kiruna-labs/petal#167, 2026-09-12); still to do: publish `@petal/plugin-sdk` to npm (owner: npm scope), signed vendored bundles once the production key exists |
 | I-6 | M3 | suggestion toast + consent sheet | unassigned | not started |
-| I-7a | M3 | host chat: shared model + drawer, Rust transport, both clients, contracts | seinfish | implemented on feature/chat-i7a (2026-09-14): contract vectors pinned (web, Rust), drawer rendered test at 400/720 px, desktop + web wired; live smoke pending |
-| I-7b | M3 | `petal.chat` plugin API (`chat:post`, `chat:commands`, `chat:read`) + first-party `/poll` or `/timer` consumer in the plugins repo | unassigned | not started |
+| I-7a | M3 | host chat: shared model + drawer, Rust transport, both clients, contracts | seinfish | merged (kiruna-labs/petal#200, 2026-09-21) after a recorded native-to-web live smoke |
+| I-7b | M3 | `petal.chat` plugin API (`chat:post`, `chat:commands`; `chat:read` reserved) + `petal.timer` built-in from the plugins repo | seinfish | implemented on feature/chat-i7b (2026-09-24); Timer source on kiruna-labs/petal-plugins feat/timer |
 | I-8 | M4 | webhook notifier + net fetch | unassigned | not started |
 | I-9 | M4 | window-link + header slot, native button removed | unassigned | not started |
 | I-10 | M4 | developer mode | unassigned | not started |
