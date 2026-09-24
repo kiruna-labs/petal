@@ -307,7 +307,7 @@ jobs:
               -u PETAL_AUTOTEST_FRESH_ROOM -u PETAL_ACCESSORY_UI \
               -u PETAL_WEB_HARNESS_URL_MATCH \
             PETAL_BACKEND_URL="$COCKPIT_BACKEND_URL" PETAL_HARNESS_URL="$COCKPIT_HARNESS_URL" \
-            PETAL_DISABLE_AUDIO=1 RUST_LOG=info PETAL_TRACE_PANEL_GEOMETRY=1 \
+            PETAL_DISABLE_AUDIO=1 RUST_LOG=info \
             apps/desktop/src-tauri/target/debug/desktop --test-case="$COCKPIT_SELECTOR"
           engine_exit=$?
           set -e
