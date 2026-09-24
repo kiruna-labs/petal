@@ -433,50 +433,6 @@ unsafe fn raise_via_level_bump(ns: *mut AnyObject) {
 /// function's click-path contract. Callers MUST have confirmed the window is
 /// currently open/visible: `orderFrontRegardless` un-hides an ordered-out
 /// window (#445), so passing a retired window would resurrect it.
-/// Hold a panel above other applications' normal-level windows, for the
-/// duration of a screen read, and restore it with
-/// [`clear_capture_hold_level`].
-///
-/// `raise_panel_to_front`'s level bump returns the window to the normal level
-/// immediately, which is enough when nothing competes for the front. It is
-/// NOT enough against an application that is active and being driven: the
-/// Test Cockpit animates the web peer over CDP, and Chrome came back on top
-/// between the raise and the capture every time (#234).
-///
-/// Focus is still untouched -- this only changes ordering, so the web peer
-/// keeps key status and keeps animating.
-///
-/// SAFETY contract as `raise_panel_to_front`: the window must already be
-/// on screen, since `orderFrontRegardless` un-hides an ordered-out one.
-pub fn hold_panel_above_for_capture(window: &tauri::WebviewWindow) -> Result<(), String> {
-    let ns_ptr = window
-        .ns_window()
-        .map_err(|e| format!("ns_window unavailable: {e}"))?;
-    // SAFETY: `ns_ptr` is the live AppKit `NSWindow*` backing `window`, on the
-    // main thread via the caller's hop.
-    unsafe {
-        let ns = ns_ptr as *mut AnyObject;
-        let _: () = msg_send![ns, setLevel: NS_FLOATING_WINDOW_LEVEL];
-        let _: () = msg_send![ns, orderFrontRegardless];
-    }
-    Ok(())
-}
-
-/// Undo [`hold_panel_above_for_capture`], returning the panel to the normal
-/// window level. Always call it: leaving a remote window floating would put
-/// it above every other application for the rest of the meeting.
-pub fn clear_capture_hold_level(window: &tauri::WebviewWindow) -> Result<(), String> {
-    let ns_ptr = window
-        .ns_window()
-        .map_err(|e| format!("ns_window unavailable: {e}"))?;
-    // SAFETY: as above.
-    unsafe {
-        let ns = ns_ptr as *mut AnyObject;
-        let _: () = msg_send![ns, setLevel: NS_NORMAL_WINDOW_LEVEL];
-    }
-    Ok(())
-}
-
 pub fn raise_panel_to_front(window: &tauri::WebviewWindow) -> Result<(), String> {
     let ns_ptr = window
         .ns_window()
