@@ -11012,11 +11012,23 @@ async fn run_web_share_stall_scenario(
 
     let mut seen = HashSet::new();
     let mut index = 0usize;
+    let mut first_frozen_cells: Option<Vec<u8>> = None;
     let freeze_deadline = freeze_ack_at + config.freeze();
     loop {
         let offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
-        let sample = stall_take_sample(app, scenario, writer, &owner, "freeze", offset_ms, index);
+        let mut sample = stall_take_sample(app, scenario, writer, &owner, "freeze", offset_ms, index);
         index += 1;
+        // The resume bar is only meaningful against the change a HELD frame
+        // still shows (the web peer's telepointer keeps moving over it). Record
+        // it rather than assume it: `STALL_CONTENT_CHANGE_FRACTION`'s 5% was
+        // never checked against an unoccluded capture of either phase (#234).
+        if let (Some(cells), Some(first)) = (sample.cells.as_deref(), first_frozen_cells.as_deref())
+        {
+            sample.changed_vs_frozen = Some(changed_cell_fraction(first, cells));
+        }
+        if first_frozen_cells.is_none() {
+            first_frozen_cells = sample.cells.clone();
+        }
         let _ = writer.write("stall-sample", Some(scenario.id), &sample);
         evidence.freeze.push(sample);
         for transition in stall_collect_transitions(app, freeze_sent_ms, freeze_ack_ms, &mut seen) {
