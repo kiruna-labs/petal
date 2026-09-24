@@ -1,0 +1,64 @@
+{
+  "$comment": "Mutations of index.json that BOTH registry implementations must ACCEPT: each sets the permissions of /plugins/0/versions/0 to `value`, a list that is well formed but names at least one permission this client does not support (a future one, or a reserved one it knows and refuses). The index still parses, that version entry reports exactly `unsupported` and is not installable (the desktop shows \"Needs newer Petal\"), and every other entry is unaffected. Keeps an older client's \"Get plugins\" working when the registry lists a plugin that needs a newer Petal.",
+  "path": "/plugins/0/versions/0/permissions",
+  "cases": [
+    {
+      "name": "a future permission",
+      "value": [
+        "meeting:read",
+        "future:thing"
+      ],
+      "unsupported": [
+        "future:thing"
+      ]
+    },
+    {
+      "name": "several future permissions keep their order",
+      "value": [
+        "zeta:b",
+        "meeting:read",
+        "alpha:a"
+      ],
+      "unsupported": [
+        "zeta:b",
+        "alpha:a"
+      ]
+    },
+    {
+      "name": "a bare future word",
+      "value": [
+        "telepathy"
+      ],
+      "unsupported": [
+        "telepathy"
+      ]
+    },
+    {
+      "name": "a future permission with a host-like argument",
+      "value": [
+        "future:fetch:hooks.example.com"
+      ],
+      "unsupported": [
+        "future:fetch:hooks.example.com"
+      ]
+    },
+    {
+      "name": "a reserved permission is known and refused, per entry",
+      "value": [
+        "frames:read"
+      ],
+      "unsupported": [
+        "frames:read"
+      ]
+    },
+    {
+      "name": "a permission at exactly 64 chars is well formed",
+      "value": [
+        "future:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      ],
+      "unsupported": [
+        "future:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      ]
+    }
+  ]
+}

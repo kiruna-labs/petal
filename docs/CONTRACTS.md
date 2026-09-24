@@ -1362,7 +1362,20 @@ sample `index.json` and `bundle.json` signed with a throwaway test key
 (`test.pub`), plus `invalid-index-cases.json`, mutations that BOTH index
 validators (`plugins::registry::validate_index` and
 `shared/plugin-host/registry.ts` `parseRegistryIndex`, which the desktop
-Settings browser runs over the Rust-verified index) must reject case by case.
+Settings browser runs over the Rust-verified index) must reject case by case,
+and `unsupported-permission-cases.json`, mutations both must ACCEPT while
+marking that one version entry uninstallable.
+
+Permissions in an entry are classified, identically on both sides: `known`
+(this client implements it), `unsupported` (well formed,
+`^[a-z][a-z0-9-]*(:[a-z0-9.*-]+)*$` within 64 chars, but not implemented
+here: a newer Petal's permission or a reserved one like `frames:read`), or
+`malformed` (anything else, the `net:fetch:*` wildcard, or `net:fetch:` with
+a bad host). A `malformed` or duplicate permission fails the whole index like
+every other shape error; an `unsupported` one only makes its entry
+uninstallable ("Needs newer Petal"; Rust `check_installable` refuses it before
+any fetch). This is what lets the registry list plugins that use permissions
+added after a client shipped without blanking that client's "Get plugins".
 Verify chain: minisign(index) → `generatedAt`/signature `timestamp:` not
 older than the last accepted index (anti-rollback, persisted in
 `plugins.json`) → `sha256(bundle) == entry.sha256` and `size` →
