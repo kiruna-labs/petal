@@ -1485,8 +1485,8 @@ html:has(> body > #meeting-screen:not(.hidden)) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: var(--topbar-control-height);
+  height: var(--topbar-control-height);
   padding: 0;
   flex-shrink: 0;
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -1517,8 +1517,8 @@ html:has(> body > #meeting-screen:not(.hidden)) {
    a coarse pointer the picker's segments and the full-screen button keep
    their size and reach further: the full-screen button 44px square, the
    picker 44px tall (and wider at its outer edges, where no neighbour's
-   target overlaps). The literals track #241's top-bar control height; the
-   insets count from the padding box, inside the button's 1px border. */
+   target overlaps). The insets assume #241's 32px --topbar-control-height;
+   they count from the padding box, inside the button's 1px border. */
 @media (pointer: coarse) {
   .layout-mode-button,
   .topbar-fullscreen {
@@ -4117,6 +4117,13 @@ canvas#test-canvas.p613-presentation-source {
 
   .room-title {
     gap: 4px;
+  }
+
+  /* Nor is there room for it beside the "Enable audio" prompt: the name,
+     the prompt, the picker and the bug report keep one line (#241) and
+     full screen steps out until the prompt is answered. */
+  .topbar-right:has(> .audio-playback-prompt) > .topbar-fullscreen {
+    display: none;
   }
 
   .elapsed {
