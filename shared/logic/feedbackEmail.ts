@@ -15,7 +15,7 @@
 export const FEEDBACK_EMAIL_MAX_CHARS = 254;
 
 // Characters no deliverable address the form should accept contains: list
-// separators and display-name/comment syntax (`a@b.org, c@d.org`,
+// separators and display-name/comment syntax (`riley@example.org, sam@example.org`,
 // `Riley <riley@example.org>`, `riley(work)@example.org`), path separators,
 // and invisible format characters (zero-width spaces pasted along with an
 // address).
