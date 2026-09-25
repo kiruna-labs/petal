@@ -23,7 +23,7 @@
   (window as unknown as { __closed: () => number }).__closed = () => closed;
 </script>
 
-<div style="height: 560px; width: 100%; display: flex;">
+<div style="height: min(560px, 100vh); width: 100%; display: flex;">
   <div style="flex: 1; min-width: 0; background: #0b0c0e;"></div>
   <aside style="flex: none; width: min(320px, 60%); height: 100%;" data-testid="chat-aside">
     <ChatDrawer
