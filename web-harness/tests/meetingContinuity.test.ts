@@ -91,14 +91,21 @@ test('the guard entry carries the state key the invite page looks for', () => {
   assert.ok((page.history.state as Record<string, unknown>)[MEETING_GUARD_STATE_KEY]);
 });
 
-test('a disconnect for a join that never entered the meeting is left to the join (LiveKit reports it before connect() rejects)', async () => {
+test('a disconnect for a join that never entered the meeting is left to the caller', async () => {
   const { page, notice, calls, continuity } = setup();
   page.hide();
   page.show(); // an earlier tab switch: a drop now would rejoin by itself
   let settled = 0;
 
-  continuity.disconnected(CREDENTIAL, { requested: false, clientInitiated: false, reason: DisconnectReason.JOIN_FAILURE }, () => (settled += 1));
+  // connection.ts: dropped while the join was finishing, before entered().
+  const handled = continuity.disconnected(
+    CREDENTIAL,
+    { requested: false, clientInitiated: false, reason: DisconnectReason.DUPLICATE_IDENTITY },
+    () => (settled += 1)
+  );
   await settle();
+
+  assert.equal(handled, false, 'the caller shows the home screen (or the rejoin its notice)');
 
   assert.equal(calls.notices, 0, 'no notice over "Joining…"');
   assert.equal(notice.announcer.textContent, '', 'nothing announced');
@@ -285,6 +292,22 @@ test('Back then Leave disconnects as a deliberate leave: home, rejoin code clear
   assert.equal(page.location.href, `${ORIGIN}/`);
   assert.equal(settled, 1);
   assert.ok(!page.history.calls.some(([kind]) => kind === 'back'), 'Back already popped the guard');
+});
+
+test('a drop keeps the scrub registry while the notice keeps the invite link, and settles once it goes home', async () => {
+  const { page, notice, calls, continuity } = setup();
+  continuity.entered(CREDENTIAL);
+  const urlsWhenSettled: string[] = [];
+
+  assert.equal(continuity.disconnected(CREDENTIAL, KICKED, () => urlsWhenSettled.push(page.location.href)), true);
+  await settle();
+  assert.equal(calls.notices, 1);
+  assert.deepEqual(urlsWhenSettled, [], 'the address bar still holds the invite link');
+
+  notice.home.click();
+  await settle();
+  assert.equal(calls.home, 1);
+  assert.deepEqual(urlsWhenSettled, [`${ORIGIN}/`]);
 });
 
 test('the Leave button unwinds the guard, and reports settled only once the invite link is gone', async () => {

@@ -123,8 +123,9 @@ export interface MeetingContinuity {
   entered: (meetingCode: string) => void;
   /** The room disconnected: back to the home screen when the user left,
    * otherwise the notice (and maybe one automatic rejoin). `settled` runs
-   * once the address bar no longer holds the invite link. */
-  disconnected: (meetingCode: string | null, disconnect: MeetingDisconnect, settled: () => void) => void;
+   * once the address bar no longer holds the invite link. False, and nothing
+   * done, for a room that never entered the meeting: the caller handles it. */
+  disconnected: (meetingCode: string | null, disconnect: MeetingDisconnect, settled: () => void) => boolean;
   /** A join failed. True when it was a rejoin from the notice, which then
    * shows `message` instead of the caller falling back to the home screen. */
   rejoinFailed: (message: string) => boolean;
@@ -167,6 +168,9 @@ export function setupMeetingContinuity(options: MeetingContinuityOptions): Meeti
   let awaitingGesture = false;
   let unwound: (() => void) | null = null; // runs once history.back() lands
   let dropped: { meetingCode: string; cause: DropCause } | null = null;
+  // The drop's scrub-registry reset: the notice keeps the invite link in the
+  // address bar, so the reset waits until the notice goes home.
+  let droppedSettled: (() => void) | null = null;
   let autoRejoin: string | null = null; // rejoin when the page is visible again
   let autoRejoinsLeft = 0; // one per return of the page
   let rejoining = false;
@@ -218,10 +222,11 @@ export function setupMeetingContinuity(options: MeetingContinuityOptions): Meeti
 
   function hideNotice() {
     dropped = null;
+    droppedSettled = null;
     notice.announcer.textContent = '';
   }
 
-  function returnHome(settled: () => void = () => {}) {
+  function returnHome(settled: () => void = droppedSettled ?? (() => {})) {
     hideNotice();
     autoRejoin = null;
     rememberMeeting(null);
@@ -318,11 +323,10 @@ export function setupMeetingContinuity(options: MeetingContinuityOptions): Meeti
     meetingCode: string | null,
     { requested, clientInitiated, reason }: MeetingDisconnect,
     settled: () => void
-  ) {
-    // LiveKit also reports Disconnected for a connect attempt that failed,
-    // before connect() rejects: a join (or rejoin) that never entered. The
-    // join's own failure handling reports that one.
-    if (meeting === null) return;
+  ): boolean {
+    // Connected, but dropped before the join finished: there is no meeting
+    // to explain or rejoin.
+    if (meeting === null) return false;
     const pageLeft = pageLeave;
     pageLeave = null;
     meeting = null;
@@ -332,18 +336,19 @@ export function setupMeetingContinuity(options: MeetingContinuityOptions): Meeti
     // unless LiveKit did it because the page was frozen, cached or unloaded.
     if (requested || meetingCode === null || (clientInitiated && pageLeft === null)) {
       returnHome(settled);
-      return;
+      return true;
     }
-    settled();
     const cause = dropCause(reason, clientInitiated);
     logEvent(`disconnected without leaving (${cause})`, 'warn');
     showNotice(meetingCode, cause, DROP_NOTICES[cause].detail);
+    droppedSettled = settled;
     // An unloading page is being reloaded or closed: the next page rejoins.
-    if (!AUTO_REJOIN_CAUSES.has(cause) || pageLeft === 'unloading') return;
+    if (!AUTO_REJOIN_CAUSES.has(cause) || pageLeft === 'unloading') return true;
     if (doc.visibilityState === 'hidden') autoRejoin = meetingCode;
     // The first drop after the page came back is the background's doing, even
     // when LiveKit takes its time to give up reconnecting.
     else if (autoRejoinsLeft > 0) autoRejoinNow(meetingCode, 'disconnected after the page came back');
+    return true;
   }
 
   function rejoinFailed(message: string): boolean {
