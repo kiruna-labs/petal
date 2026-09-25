@@ -293,6 +293,10 @@ test('invite URL waits for a display name instead of auto-joining with a generat
   assert.equal(joinHint.textContent, 'Enter your name to join this invite.');
   assert.equal(joinHint.classList.contains('hidden'), false);
   assert.match(events.join('\n'), /waiting for display name/);
+  // #245: the session log can go out with a feedback report, and nothing has
+  // registered this invite's credential for redaction yet.
+  assert.doesNotMatch(events.join('\n'), /room-[0-9a-f]{32}/);
+  assert.equal(events.join('\n').includes(ACCESS_CODE), false);
 });
 
 test('invite URL auto-joins when a display name is already stored', async () => {

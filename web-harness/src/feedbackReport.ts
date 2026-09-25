@@ -1,5 +1,14 @@
 import type { SubmitData } from '@userdispatch/sdk';
+import {
+  feedbackEmailError,
+  normalizedFeedbackEmail,
+  rememberedFeedbackEmail,
+  rememberFeedbackEmail,
+  type FeedbackEmailStorage,
+} from '@petal/shared/logic/feedbackEmail';
 
+import { HARNESS_FEEDBACK_EMAIL_STORAGE_KEY } from './constants.ts';
+import { escapeRegExp } from './escapeRegExp.mjs';
 import type { SensitiveStringRegistry } from './sensitiveStrings.ts';
 import { sessionLogCollector } from './ui/sessionLogCollector.ts';
 
@@ -28,6 +37,7 @@ export const FEEDBACK_MAX_MESSAGE_CHARS = 2_000;
 /** Separates the closed-schema header from the scrubbed log tail. Exported so
  * the boundary tests split on the same string production writes. */
 export const FEEDBACK_LOG_SECTION_HEADING = '=== session log (redacted) ===';
+const FEEDBACK_EMAIL_LABEL = '<redacted:email>';
 const DIAGNOSTICS_SCHEMA_VERSION = 2;
 
 export type FeedbackEventCode = 'feedback_opened' | 'feedback_submitted';
@@ -115,13 +125,20 @@ export function buildFeedbackAttachment(
   state: FeedbackRuntimeState,
   eventCodes: readonly string[],
   registry: SensitiveStringRegistry,
-  options: { timestamp?: string; logText?: string } = {}
+  options: { timestamp?: string; logText?: string; email?: string } = {}
 ): Blob {
   const diagnostics = buildFeedbackDiagnostics(state, eventCodes, options.timestamp);
   // Injectable so the scrubbing invariant is testable without a live
   // collector; defaults to the real session log in production.
   const rawLog = options.logText ?? sessionLogCollector.exportText();
-  const logTail = buildScrubbedLogTail(rawLog, registry);
+  // #245: the reporter's address travels only as the SDK's `email` field.
+  // Nothing logs it, but it could still be in the log if it was typed
+  // somewhere that is (a display name, a room label), so it is scrubbed here
+  // too -- whole text, before the tail cut, like every other value.
+  const logText = options.email
+    ? rawLog.replace(new RegExp(escapeRegExp(options.email), 'gi'), FEEDBACK_EMAIL_LABEL)
+    : rawLog;
+  const logTail = buildScrubbedLogTail(logText, registry);
   const document = logTail.trim()
     ? `${diagnostics}\n\n${FEEDBACK_LOG_SECTION_HEADING}\n${logTail}\n`
     : `${diagnostics}\n`;
@@ -150,6 +167,8 @@ export type SubmitFeedbackReportOptions = {
   isCurrent: () => boolean;
   includeDiagnostics: boolean;
   message: string;
+  /** Required reply address (#245), format-checked but never verified. */
+  email: string;
   registry: SensitiveStringRegistry;
   eventCodes: readonly string[];
   adapter: FeedbackAdapter;
@@ -165,15 +184,18 @@ export async function submitFeedbackReport(options: SubmitFeedbackReportOptions)
   if (firstState.sharing || firstState.screenSharing) return false;
   const cleanMessage = sanitizeFeedbackMessage(options.message, options.registry);
   if (!cleanMessage) return false;
+  const email = normalizedFeedbackEmail(options.email);
+  if (!email) return false;
 
   const attachment = options.includeDiagnostics
-    ? buildFeedbackAttachment(firstState, options.eventCodes, options.registry)
+    ? buildFeedbackAttachment(firstState, options.eventCodes, options.registry, { email })
     : null;
   const finalState = options.getState();
   if (!options.isCurrent() || finalState.sharing || finalState.screenSharing) return false;
   await options.adapter.submit(options.publicKey, {
     type: 'feedback',
     subject: 'Petal feedback',
+    email,
     message: cleanMessage,
     metadata: { schema_version: DIAGNOSTICS_SCHEMA_VERSION },
     ...(attachment
@@ -189,6 +211,8 @@ type FeedbackDom = {
   dialog: HTMLDialogElement;
   form: HTMLFormElement;
   message: HTMLTextAreaElement;
+  email: HTMLInputElement;
+  emailError: HTMLElement;
   consent: HTMLInputElement;
   submit: HTMLButtonElement;
   cancel: HTMLButtonElement;
@@ -202,26 +226,41 @@ export type FeedbackReportControllerOptions = {
   getState: () => FeedbackRuntimeState;
   registry: SensitiveStringRegistry;
   adapter?: FeedbackAdapter;
+  /** Where the last reply address is remembered (#245). Defaults to
+   * `localStorage`; `null` remembers nothing. */
+  storage?: FeedbackEmailStorage | null;
 };
+
+function browserStorage(): FeedbackEmailStorage | null {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
 
 /** Petal-owned DOM dialog; no third-party widget/script is ever loaded. */
 export class FeedbackReportController {
   private readonly options: FeedbackReportControllerOptions;
   private readonly publicKey: string | null;
   private readonly adapter: FeedbackAdapter;
+  private readonly storage: FeedbackEmailStorage | null;
   private readonly events: FeedbackEventCode[] = [];
   private epoch = 0;
   private shareIntentActive = false;
   private lastTrigger: HTMLButtonElement | null = null;
+  // The inline email error waits until the field has been left once.
+  private emailTouched = false;
 
   constructor(options: FeedbackReportControllerOptions) {
     this.options = options;
     this.publicKey = isValidUserDispatchPublicKey(options.publicKey) ? options.publicKey.trim() : null;
     this.adapter = options.adapter ?? userDispatchAdapter;
+    this.storage = options.storage === undefined ? browserStorage() : options.storage;
   }
 
   install(): void {
-    const { homeTrigger, meetingTrigger, dialog, form, message, consent, cancel } = this.options.dom;
+    const { homeTrigger, meetingTrigger, dialog, form, message, email, consent, cancel } = this.options.dom;
     if (!this.publicKey) {
       homeTrigger.hidden = true;
       meetingTrigger.hidden = true;
@@ -241,6 +280,21 @@ export class FeedbackReportController {
     });
     dialog.addEventListener('close', () => this.clearForm());
     message.addEventListener('input', () => this.refreshSubmit());
+    email.addEventListener('input', () => {
+      this.refreshEmailError();
+      this.refreshSubmit();
+    });
+    email.addEventListener('blur', () => {
+      this.emailTouched = true;
+      this.refreshEmailError();
+    });
+    // Send is disabled while the address is bad, so Enter would otherwise
+    // do nothing at all: say why instead.
+    email.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      this.emailTouched = true;
+      this.refreshEmailError();
+    });
     consent.addEventListener('change', () => this.refreshSubmit());
     form.addEventListener('submit', (event) => {
       event.preventDefault();
@@ -294,6 +348,7 @@ export class FeedbackReportController {
     this.lastTrigger = trigger;
     this.events.push('feedback_opened');
     this.options.dom.status.textContent = '';
+    this.options.dom.email.value = rememberedFeedbackEmail(this.storage, HARNESS_FEEDBACK_EMAIL_STORAGE_KEY);
     this.options.dom.dialog.showModal();
     this.options.dom.message.focus();
     this.refreshSubmit();
@@ -307,10 +362,21 @@ export class FeedbackReportController {
   }
 
   private clearForm(): void {
-    const { message, consent, submit } = this.options.dom;
+    const { message, email, consent, submit } = this.options.dom;
     message.value = '';
+    email.value = '';
+    this.emailTouched = false;
+    this.refreshEmailError();
     consent.checked = false;
     submit.disabled = true;
+  }
+
+  private refreshEmailError(): void {
+    const { email, emailError } = this.options.dom;
+    const error = this.emailTouched ? feedbackEmailError(email.value) : null;
+    emailError.textContent = error ?? '';
+    emailError.hidden = error === null;
+    email.setAttribute('aria-invalid', error === null ? 'false' : 'true');
   }
 
   private isShareActive(): boolean {
@@ -319,13 +385,14 @@ export class FeedbackReportController {
   }
 
   private refreshSubmit(): void {
-    const { message, submit } = this.options.dom;
+    const { message, email, submit } = this.options.dom;
     const state = this.options.getState();
     submit.disabled =
       !this.publicKey ||
       state.sharing ||
       state.screenSharing ||
-      normalizedBoundedText(message.value, FEEDBACK_MAX_MESSAGE_CHARS).length === 0;
+      normalizedBoundedText(message.value, FEEDBACK_MAX_MESSAGE_CHARS).length === 0 ||
+      normalizedFeedbackEmail(email.value) === null;
   }
 
   private canSubmit(epoch: number): boolean {
@@ -334,12 +401,13 @@ export class FeedbackReportController {
   }
 
   private async submit(): Promise<void> {
-    const { message, consent, submit, status } = this.options.dom;
+    const { message, email, consent, submit, status } = this.options.dom;
     const epoch = this.epoch;
     if (!this.canSubmit(epoch)) return;
 
     submit.disabled = true;
     status.textContent = '';
+    const address = email.value;
 
     try {
       // The state/epoch checks intentionally bracket Blob creation, then the
@@ -350,11 +418,15 @@ export class FeedbackReportController {
         isCurrent: () => this.canSubmit(epoch),
         includeDiagnostics: consent.checked,
         message: message.value,
+        email: address,
         registry: this.options.registry,
         eventCodes: [...this.events, 'feedback_submitted'],
         adapter: this.adapter,
       });
       if (!sent) return;
+      // Remembered once it was actually sent, even if the dialog has since
+      // closed: next time the form opens with it filled in.
+      rememberFeedbackEmail(this.storage, HARNESS_FEEDBACK_EMAIL_STORAGE_KEY, address);
       if (!this.canSubmit(epoch)) return;
       status.textContent = 'Feedback sent.';
       message.value = '';
