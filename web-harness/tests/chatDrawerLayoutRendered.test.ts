@@ -6,7 +6,8 @@
 // above it) the input stays in view and the rail, Leave included, stays too.
 // Portrait and wide windows keep the drawer between the top bar and the
 // control bar. On a touch screen, opening chat does not focus the input (that
-// would raise the keyboard over the messages).
+// would raise the keyboard over the messages). Where the rail has no room for
+// Chat, it is opened from the ⋯ menu (#247).
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -67,6 +68,18 @@ async function openMeeting(page: Page, url: string): Promise<void> {
   });
 }
 
+/** Chat's own button -- or, on a rail too short for it (#247's ⋯ overflow on
+ * #239's landscape rail), its row in the ⋯ menu. */
+async function toggleChat(page: Page): Promise<void> {
+  const inMenu = await page.evaluate(() => document.querySelector('#ctl-chat')!.closest('.control-cell')!.classList.contains('overflowed'));
+  if (inMenu) {
+    await page.locator('#ctl-more').click();
+    await page.locator('#overflow-menu .overflow-menu-row >> text=Chat').click();
+  } else {
+    await page.locator('#ctl-chat').click();
+  }
+}
+
 function composerFocusCalls(page: Page): Promise<number> {
   return page.evaluate(() => (window as unknown as { __composerFocus: number }).__composerFocus);
 }
@@ -78,6 +91,8 @@ function layout(page: Page): Promise<Layout> {
     await document.fonts.ready;
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     // No named helpers in here: tsx would wrap them in a __name() the page lacks.
+    // Chat's button, or ⋯ while Chat is in its menu (#247).
+    const chatControl = document.querySelector('#ctl-chat')!.closest('.control-cell')!.classList.contains('overflowed') ? '#ctl-more' : '#ctl-chat';
     const [aside, topbar, controlbar, list, input, send, chatButton] = [
       '#chat-drawer',
       '.topbar',
@@ -85,7 +100,7 @@ function layout(page: Page): Promise<Layout> {
       '[data-testid="chat-list"]',
       '[data-testid="chat-input"]',
       '[data-testid="chat-send"]',
-      '#ctl-chat'
+      chatControl
     ].map((selector) => {
       const { left, right, top, bottom, width } = document.querySelector(selector)!.getBoundingClientRect();
       return { left, right, top, bottom, width };
@@ -118,7 +133,7 @@ function layout(page: Page): Promise<Layout> {
       send,
       tiles,
       textLines,
-      chatButtonClear: !!document.elementFromPoint((chatButton.left + chatButton.right) / 2, (chatButton.top + chatButton.bottom) / 2)?.closest('#ctl-chat'),
+      chatButtonClear: !!document.elementFromPoint((chatButton.left + chatButton.right) / 2, (chatButton.top + chatButton.bottom) / 2)?.closest(chatControl),
       inputClear: document.elementFromPoint(input.left + 12, (input.top + input.bottom) / 2) === document.querySelector('[data-testid="chat-input"]'),
       pageScrollsX: document.scrollingElement!.scrollWidth > window.innerWidth + 1
     };
@@ -166,7 +181,7 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
     await openMeeting(page, url);
 
     // Open chat (a mouse user gets the caret) and fill it the way a peer would.
-    await page.locator('#ctl-chat').click();
+    await toggleChat(page);
     assert.equal(await composerFocusCalls(page), 1, 'with a fine pointer, opening chat focuses the input');
     await page.evaluate(() => {
       type Hook = { chat: { onData(payload: Uint8Array, participant: unknown, identity: string): void } };
@@ -241,7 +256,7 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
       prompt.textContent = 'Enable audio';
       document.querySelector('.topbar-right')!.prepend(prompt);
     });
-    await page.locator('#ctl-chat').click();
+    await toggleChat(page);
     const withPrompt = await layout(page);
     assert.equal(withPrompt.topbarShown, true, 'the top bar stays while it holds the Enable audio prompt');
     assert.ok(withPrompt.topbar.right <= withPrompt.aside.left + 0.5, 'and stays clear of the drawer');
@@ -275,7 +290,7 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
     const touchPage: Page = await phoneContext.newPage();
     await openMeeting(touchPage, url);
     assert.equal(await touchPage.evaluate(() => matchMedia('(pointer: coarse)').matches), true);
-    await touchPage.locator('#ctl-chat').click();
+    await toggleChat(touchPage);
     await touchPage.waitForFunction(() => !!document.querySelector('[data-testid="chat-input"]'));
     assert.equal(await composerFocusCalls(touchPage), 0, 'with a coarse pointer, opening chat does not focus the input');
     const touch = await layout(touchPage);
