@@ -1,13 +1,12 @@
-// The browser meeting's chat drawer on a landscape phone (#246): the body row
-// between the top bar, the control bar and the dev tools is too short to read
-// in, so while chat is open those step out and the drawer column takes the
-// full height beside the tiles (no tile under it), with Send beside the input
-// and at least four lines of message text. With the soft keyboard up (#239's
-// interactive-widget=resizes-content shrinks the page to what is left above
-// it) the control bar steps out too and the input stays in view. Closing chat
-// brings everything back; portrait and wide windows keep today's layout. On a
-// touch screen, opening chat does not focus the input (that would raise the
-// keyboard over the messages).
+// The browser meeting's chat drawer on a landscape phone (#246): the drawer
+// column takes the full height beside the tiles (no tile under it) and #239's
+// control rail, with Send beside the input and at least four lines of message
+// text; #239's floating top bar stops short of it. With the soft keyboard up
+// (#239's interactive-widget=resizes-content shrinks the page to what is left
+// above it) the input stays in view and the rail, Leave included, stays too.
+// Portrait and wide windows keep the drawer between the top bar and the
+// control bar. On a touch screen, opening chat does not focus the input (that
+// would raise the keyboard over the messages).
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -28,6 +27,7 @@ type Layout = {
   topbar: Box;
   topbarShown: boolean;
   controlbar: Box;
+  controlbarShown: boolean;
   input: Box;
   send: Box;
   tiles: Box[];
@@ -113,6 +113,7 @@ function layout(page: Page): Promise<Layout> {
       topbar,
       topbarShown: getComputedStyle(document.querySelector('.topbar')!).display !== 'none',
       controlbar,
+      controlbarShown: getComputedStyle(document.querySelector('.controlbar')!).display !== 'none',
       input,
       send,
       tiles,
@@ -179,14 +180,18 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
     });
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="chat-msg"]').length === 20);
 
-    // Landscape phone, keyboard closed: top bar and dev tools out, the
-    // drawer column runs from the top to the control bar, beside the tiles.
+    // Landscape, keyboard closed (#239's layout): the drawer column runs from
+    // the top as far as the control rail beside it does -- the whole height
+    // on a phone (below); this mouse-driven window keeps its developer row
+    // under both -- between the tiles and the rail, with the floating top bar
+    // stopping short of it.
     const phone = await layout(page);
-    assert.equal(phone.topbarShown, false, 'the top bar steps out while chat is open');
-    assert.equal(phone.aside.top, 0);
-    assertNear(phone.aside.bottom, phone.controlbar.top, 'the drawer stops at the control bar');
-    assert.equal(phone.aside.right, 800);
+    assert.equal(phone.aside.top, 0, 'the drawer starts at the top of the screen');
+    assertNear(phone.aside.bottom, phone.controlbar.bottom, 'the drawer runs as far down as the rail');
+    assertNear(phone.aside.right, phone.controlbar.left, 'the drawer sits beside the rail');
+    assert.ok(phone.controlbar.bottom - phone.controlbar.top >= phone.aside.bottom - phone.aside.top - 0.5, 'the rail is full height');
     assert.equal(phone.aside.width, 320);
+    assert.ok(phone.topbar.right <= phone.aside.left + 0.5, `the top bar (right ${phone.topbar.right}) stops short of the drawer (left ${phone.aside.left})`);
     assert.equal(phone.tiles.length, 4);
     for (const [i, tile] of phone.tiles.entries()) {
       assert.ok(tile.right <= phone.aside.left + 0.5, `tile ${i} (right ${tile.right}) is not under the drawer (left ${phone.aside.left})`);
@@ -197,10 +202,16 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
     assert.ok(phone.textLines >= 4, `at least four lines of message text visible, got ${phone.textLines}`);
     assert.equal(phone.pageScrollsX, false);
 
-    // Soft keyboard up: the page shrinks to what is left above it.
+    // Soft keyboard up: the page shrinks to what is left above it. The rail
+    // stays (Leave with it) and the input stays in view beside it.
     await page.setViewportSize({ width: 800, height: 172 });
     const keyboard = await layout(page);
     assert.ok(keyboard.input.top >= 0 && keyboard.input.bottom <= 172, `input in view with the keyboard up (${keyboard.input.top}-${keyboard.input.bottom})`);
+    assert.equal(keyboard.controlbarShown, true, 'the rail stays with the keyboard up');
+    assertNear(keyboard.aside.right, keyboard.controlbar.left, 'keyboard up: the drawer sits beside the rail');
+    for (const [i, tile] of keyboard.tiles.entries()) {
+      assert.ok(tile.right <= keyboard.aside.left + 0.5, `keyboard up: tile ${i} is not under the drawer`);
+    }
     assert.ok(keyboard.send.bottom <= 172);
     assert.equal(keyboard.inputClear, true, 'nothing covers the input');
     assertBeside(keyboard, 'keyboard up');
@@ -216,14 +227,14 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
     });
     assert.equal(draft.clipped, false, 'a two-line draft is not clipped with the keyboard up');
 
-    // Closing chat brings the top bar back.
+    // Closing chat: the top bar spans the tiles again.
     await page.setViewportSize({ width: 800, height: 360 });
     await page.locator('.chat-close').click();
     assert.equal(await page.evaluate(() => (document.querySelector('#chat-drawer') as HTMLElement).hidden), true);
     assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('.topbar')!).display !== 'none'), true, 'the top bar is back');
 
-    // The top bar stays while it holds the "Enable audio" prompt
-    // (connection.ts puts it there when the browser blocks playback).
+    // The "Enable audio" prompt (connection.ts puts it in the top bar when
+    // the browser blocks playback) stays on screen and tappable with chat open.
     await page.evaluate(() => {
       const prompt = document.createElement('button');
       prompt.className = 'audio-playback-prompt';
@@ -231,9 +242,18 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
       document.querySelector('.topbar-right')!.prepend(prompt);
     });
     await page.locator('#ctl-chat').click();
-    assert.equal((await layout(page)).topbarShown, true, 'the top bar stays while it holds the Enable audio prompt');
+    const withPrompt = await layout(page);
+    assert.equal(withPrompt.topbarShown, true, 'the top bar stays while it holds the Enable audio prompt');
+    assert.ok(withPrompt.topbar.right <= withPrompt.aside.left + 0.5, 'and stays clear of the drawer');
+    assert.equal(
+      await page.evaluate(() => {
+        const r = document.querySelector('.audio-playback-prompt')!.getBoundingClientRect();
+        return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('.audio-playback-prompt') !== null;
+      }),
+      true,
+      'the Enable audio prompt is tappable with chat open'
+    );
     await page.evaluate(() => document.querySelector('.audio-playback-prompt')!.remove());
-    assert.equal((await layout(page)).topbarShown, false);
 
     // Portrait (keyboard up) and wide windows: unchanged, the drawer sits
     // between the top bar and the control bar.
@@ -248,7 +268,9 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
       assertBeside(other, `${width}x${height}`);
     }
 
-    // A touch screen: opening chat leaves the keyboard down.
+    // A touch screen: opening chat leaves the keyboard down, and on a phone
+    // (developer tools parked below the screen, #239) the drawer and the
+    // rail both take the whole height.
     const phoneContext = await browser.newContext({ viewport: { width: 800, height: 360 }, hasTouch: true, isMobile: true });
     const touchPage: Page = await phoneContext.newPage();
     await openMeeting(touchPage, url);
@@ -256,6 +278,14 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
     await touchPage.locator('#ctl-chat').click();
     await touchPage.waitForFunction(() => !!document.querySelector('[data-testid="chat-input"]'));
     assert.equal(await composerFocusCalls(touchPage), 0, 'with a coarse pointer, opening chat does not focus the input');
+    const touch = await layout(touchPage);
+    assert.equal(touch.aside.top, 0, 'phone: the drawer starts at the top');
+    assertNear(touch.aside.bottom, 360, 'phone: the drawer runs to the bottom of the screen');
+    assertNear(touch.controlbar.bottom, 360, 'phone: so does the rail');
+    assertNear(touch.aside.right, touch.controlbar.left, 'phone: the drawer sits beside the rail');
+    for (const [i, tile] of touch.tiles.entries()) {
+      assert.ok(tile.right <= touch.aside.left + 0.5, `phone: tile ${i} is not under the drawer`);
+    }
     await phoneContext.close();
   } finally {
     await browser?.close();

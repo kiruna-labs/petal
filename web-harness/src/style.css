@@ -1580,26 +1580,10 @@ html:has(> body > #meeting-screen:not(.hidden)) {
     z-index: 5;
   }
 }
-/* A phone in landscape (#246): the body row the top bar, control bar and
-   dev tools leave is too short to read chat in, so while chat is open the
-   top bar and dev tools step out and the drawer column gets the full height
-   beside the tiles (the drawer's close button brings them back). The top
-   bar stays while it holds the "Enable audio" prompt. With the soft keyboard
-   up (at most 300 px left, given #239's interactive-widget=resizes-content)
-   the control bar steps out too, so the input stays in view. #239's
-   landscape layout (control rail, overlay top bar, dev tools below the fold)
-   makes these rules unnecessary; delete them when it lands. */
-@media (orientation: landscape) and (max-height: 500px) {
-  .meeting.chat-open > .topbar:not(:has(.audio-playback-prompt)),
-  .meeting.chat-open > .dev-panel {
-    display: none;
-  }
-}
-@media (orientation: landscape) and (max-height: 300px) {
-  .meeting.chat-open > .controlbar {
-    display: none;
-  }
-}
+/* A phone in landscape (#246): the chat drawer is a full-height column
+   beside the tiles and the control rail, and the floating top bar stops
+   short of it -- #239's landscape block (MEETING_RAIL_QUERY, below) does
+   both, so chat needs no rules of its own here. */
 .chat-cell {
   position: relative;
 }
