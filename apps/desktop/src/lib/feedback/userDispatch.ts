@@ -7,6 +7,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { COMMANDS, type FeedbackDiagnostics } from '$lib/ipc';
 import { userDispatchPublicKey } from './config';
+import { normalizedFeedbackEmail } from './email';
 import { normalizedFeedbackMessage, FEEDBACK_MAX_MESSAGE_CHARS } from './messageSanitizer';
 
 export { normalizedFeedbackMessage, FEEDBACK_MAX_MESSAGE_CHARS };
@@ -45,32 +46,35 @@ export async function prepareDiagnosticsAttachment(): Promise<PreparedDiagnostic
 
 export interface SubmitFeedbackOptions {
   message: string;
+  /** Required reply address (#245), format-checked but never verified. */
+  email: string;
   attachment?: PreparedDiagnosticsAttachment | null;
 }
 
-/**
- * The only UserDispatch network boundary in this app. Sends exactly the
- * public key, a fixed subject, the sanitized message, and (only when the
- * caller opted in and preparation succeeded) one attachment -- no room
- * name, identity, join URL, or other session metadata is ever added to the
- * payload. Throws on failure; callers must not log the error content
- * (may echo back user-typed text) -- surface a generic message instead.
- */
-export async function submitFeedback(options: SubmitFeedbackOptions): Promise<void> {
-  const publicKey = userDispatchPublicKey();
-  if (!publicKey) throw new Error('feedback is not configured for this build');
+/** What `submitFeedback` hands the SDK -- a subset of its `SubmitData`. */
+export interface FeedbackSubmission {
+  type: 'feedback';
+  subject: string;
+  email: string;
+  message: string;
+  files?: { name: string; content: Blob; type: string }[];
+}
 
+/**
+ * The exact payload `submitFeedback` sends, as a pure function so it is
+ * testable without a build-time key or a network. Throws on an empty message
+ * or a malformed email; the error never carries either value.
+ */
+export function feedbackSubmission(options: SubmitFeedbackOptions): FeedbackSubmission {
   const message = normalizedFeedbackMessage(options.message);
   if (!message) throw new Error('feedback message is empty');
+  const email = normalizedFeedbackEmail(options.email);
+  if (!email) throw new Error('feedback email is not a well-formed address');
 
-  // Dynamic import: keeps the SDK entirely out of the startup bundle graph
-  // evaluation for every build that doesn't configure a public key.
-  const { UserDispatchClient } = await import('@userdispatch/sdk');
-  const client = new UserDispatchClient({ apiKey: publicKey });
-
-  await client.submit({
+  return {
     type: 'feedback',
     subject: 'Petal feedback',
+    email,
     message,
     ...(options.attachment
       ? {
@@ -83,5 +87,28 @@ export async function submitFeedback(options: SubmitFeedbackOptions): Promise<vo
           ]
         }
       : {})
-  });
+  };
+}
+
+/**
+ * The only UserDispatch network boundary in this app. Sends exactly the
+ * public key, a fixed subject, the reporter's email address, the sanitized
+ * message, and (only when the caller opted in and preparation succeeded) one
+ * attachment -- no room name, identity, join URL, or other session metadata
+ * is ever added to the payload. Throws on failure; callers must not log the
+ * error content (may echo back user-typed text) -- surface a generic message
+ * instead.
+ */
+export async function submitFeedback(options: SubmitFeedbackOptions): Promise<void> {
+  const publicKey = userDispatchPublicKey();
+  if (!publicKey) throw new Error('feedback is not configured for this build');
+
+  const submission = feedbackSubmission(options);
+
+  // Dynamic import: keeps the SDK entirely out of the startup bundle graph
+  // evaluation for every build that doesn't configure a public key.
+  const { UserDispatchClient } = await import('@userdispatch/sdk');
+  const client = new UserDispatchClient({ apiKey: publicKey });
+
+  await client.submit(submission);
 }

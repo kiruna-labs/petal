@@ -61,10 +61,12 @@ contact any of these.
   `PETAL_SENTRY_DSN` for the desktop app, `VITE_SENTRY_DSN` for the browser
   client at `meet.petal.live`.
 - **What is sent:** stack traces, app version, OS version, and Petal's own log
-  breadcrumbs. Log output is passed through an allowlist-based scrubber
-  (`redact_for_export` on desktop; the sensitive-string registry in the browser
-  client) that masks window titles, participant identities, room names, and
-  anything matching an email or URL shape before it leaves the machine.
+  breadcrumbs, scrubbed before they leave the machine. On desktop,
+  `redact_for_export` masks room credentials, participant names and
+  identities, room names, window titles, and any email address. The browser
+  client masks the exact values it has registered: room names, invite codes,
+  participant identities, and display names. It does not mask other email
+  addresses or URLs by their shape.
 - **Not collected:** no session replay, no screen recording, and no performance
   tracing. This is deliberate and enforced in code — Petal's UI displays other
   people's shared screens, so recording it would be a serious breach.
@@ -79,14 +81,19 @@ contact any of these.
   Nothing is sent unless you press submit.
 - **Where:** the feedback provider (UserDispatch) configured via a public key
   at build time.
-- **What is sent:** the message you typed, and — only if you tick the box — a
-  diagnostic attachment. On **both** clients that attachment is a redacted
-  excerpt of Petal's own log: the desktop app sends the last 256 KiB, the
-  browser client the last 128 KiB, each passed through the same scrubber
-  described above before it leaves your machine. The browser attachment also
-  carries a small fixed header (connection state, a timestamp, and a closed set
-  of UI event codes). Untick the box and no log or header is attached at all —
-  only your message is sent.
+- **What is sent:** the message you typed, your email address, and — only if
+  you tick the box — a diagnostic attachment. On **both** clients that
+  attachment is a redacted excerpt of Petal's own log: the desktop app sends
+  the last 256 KiB, the browser client the last 128 KiB, each passed through
+  the same scrubber described above before it leaves your machine. The browser
+  attachment also carries a small fixed header (connection state, a timestamp,
+  and a closed set of UI event codes). Untick the box and no log or header is
+  attached at all — only your message and email address are sent.
+- **Your email address** is required on every feedback form so we can reply
+  to you. It is only checked to look like an address; it is never verified,
+  and nothing is sent to it to confirm it. It travels only in UserDispatch's
+  own email field — never inside the diagnostic attachment, and Petal does not
+  write it to its logs, crash reports, or analytics.
 - Neither client can ship a half-redacted fragment at the point the log is
   trimmed: the browser scrubs the whole text before trimming it, and the desktop
   excerpt always begins on a line boundary, so no line is ever cut through the
@@ -104,6 +111,9 @@ contact any of these.
 
 - Room favorites and recent rooms.
 - Window layout and app preferences.
+- The email address you last sent feedback with, so the form can fill it in
+  next time (you can change it there). The desktop app clears it on a factory
+  reset; in the browser it goes when you clear the site's data.
 - Logs at `~/Library/Logs/Petal/petal.log` (desktop) and the in-memory session
   log (browser), which stay local unless you tick the diagnostics box on a
   feedback submission or a crash report is sent.
