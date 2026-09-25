@@ -101,6 +101,25 @@
     </div>
 
     <!-- =================================================================
+         Disconnected notice (#244, meetingContinuity.ts): a meeting the
+         user did not leave ended. Says why when that is known, and offers
+         Rejoin instead of silently dropping them on the join screen. The
+         announcer sits outside it: a live region must already be rendered
+         when its text changes.
+         ================================================================= -->
+    <div id="disconnected-screen" class="join-screen hidden">
+      <div class="join-card connecting-card">
+        <h1 id="disconnected-title" class="connecting-title">You were disconnected</h1>
+        <p id="disconnected-detail" class="connecting-status" hidden></p>
+        <div class="disconnected-actions">
+          <button id="disconnected-rejoin" class="btn primary" type="button">Rejoin</button>
+          <button id="disconnected-home" class="btn ghost" type="button">Back to home</button>
+        </div>
+      </div>
+    </div>
+    <p id="disconnected-announcer" class="sr-only" aria-live="assertive"></p>
+
+    <!-- =================================================================
          Meeting screen (desktop Gallery register: topbar, tile grid,
          bottom control bar with circular feature-labeled controls)
          ================================================================= -->
@@ -370,6 +389,18 @@
         <div class="feedback-actions">
           <button id="feedback-cancel" class="btn secondary" type="button">Cancel</button>
           <button id="feedback-submit" class="btn primary" type="submit" disabled>Send feedback</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- #244: Back during a meeting pops a guard history entry and asks
+         first (meetingContinuity.ts). The button values are the answer. -->
+    <dialog id="leave-confirm" class="leave-confirm" aria-labelledby="leave-confirm-title">
+      <form method="dialog" class="leave-confirm-form">
+        <h2 id="leave-confirm-title">Leave meeting?</h2>
+        <div class="leave-confirm-actions">
+          <button id="leave-confirm-leave" class="btn ghost" value="leave">Leave</button>
+          <button id="leave-confirm-stay" class="btn primary" value="stay" autofocus>Stay</button>
         </div>
       </form>
     </dialog>
