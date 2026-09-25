@@ -259,6 +259,19 @@
             <span id="ctl-chat-badge" class="chat-badge" aria-hidden="true" hidden></span>
             <span class="meeting-control-label">Chat</span>
           </div>
+          <!-- ⋯ More (#247): shown only while controls that do not fit are in
+               #overflow-menu (controlOverflow.ts). Plugin cells go before it. -->
+          <div class="control-cell overflow-cell" hidden>
+            <button id="ctl-more" class="control-button" type="button" aria-label="More controls" aria-haspopup="menu" aria-expanded="false" aria-controls="overflow-menu">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                <circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"></circle>
+                <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"></circle>
+                <circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"></circle>
+              </svg>
+            </button>
+            <span class="overflow-dot" aria-hidden="true" hidden></span>
+            <span class="meeting-control-label">More</span>
+          </div>
         </div>
         <div class="control-cell leave-cell">
           <button id="ctl-leave" class="control-button danger" type="button" aria-label="Leave meeting">
@@ -270,6 +283,8 @@
           <span class="meeting-control-label">Leave</span>
         </div>
       </div>
+
+      <div id="overflow-menu" class="overflow-menu meeting-menu" role="menu" aria-label="More controls" hidden></div>
 
           <div id="devices-menu" class="devices-menu" hidden>
         <div class="device-picker">

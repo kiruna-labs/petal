@@ -19,6 +19,7 @@ import { createWebAdapter, participantFromLiveKit } from './webAdapter.ts';
 import { PLUGIN_LIMITS, createRateLimiter } from '@petal/shared/plugin-host/rateLimit';
 import { parsePluginTopic } from '@petal/shared/plugin-host/topics';
 import { pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
+import { controlAnchor } from '../controlOverflow.ts';
 
 export interface PluginsHook {
   host: PluginHost;
@@ -91,7 +92,8 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
         const btn = doc.createElement('button');
         btn.type = 'button';
         btn.className = 'control-button plugin-control-button';
-        btn.addEventListener('click', () => host.activateButton(button.pluginId, button.buttonId, btn));
+        // Anchored to ⋯ while the button is in the overflow menu (#247).
+        btn.addEventListener('click', () => host.activateButton(button.pluginId, button.buttonId, controlAnchor(btn)));
         const icon = doc.createElement('span');
         icon.className = 'plugin-control-icon';
         const badge = doc.createElement('span');
@@ -110,7 +112,8 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
         const label = doc.createElement('span');
         label.className = 'meeting-control-label';
         cell.append(btn, label);
-        controlsLeft.appendChild(cell);
+        // Before ⋯, which stays the last control of the row (#247).
+        controlsLeft.insertBefore(cell, controlsLeft.querySelector(':scope > .overflow-cell'));
         cells.set(key, cell);
       }
       const btn = cell.querySelector('button')!;

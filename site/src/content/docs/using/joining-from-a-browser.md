@@ -74,6 +74,12 @@ bottom:
   everyone in the meeting sees your strokes in your profile color.
 - **Leave** — disconnects and returns to the join screen.
 
+When the controls don't all fit — on a phone, or in a narrow browser
+window — the ones that don't fit move into a **⋯ More** menu, least-used
+first. **Mic**, **Camera** and **Leave** always stay in the bar. A dot on
+**⋯** means something in the menu needs a look, like unread chat messages
+or your screen share while it's live.
+
 ### Staying in the meeting
 
 A meeting in the browser doesn't end by accident:

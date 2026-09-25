@@ -370,6 +370,8 @@ export interface HarnessHook {
   /** #244 Back guard, reload rejoin and disconnect notice. Set by main.ts;
    * connection.ts reports joins, failed rejoins and disconnects to it. */
   continuity?: import('./meetingContinuity.ts').MeetingContinuity | null;
+  /** The control bar's ⋯ overflow (#247, controlOverflow.ts). */
+  controlOverflow?: import('./controlOverflow.ts').ControlOverflowHook | null;
 }
 
 export interface ActiveRemoteControl {
