@@ -113,7 +113,9 @@ contact any of these.
 - While a browser tab is in a meeting, that meeting's access code in the
   tab's session storage, so reloading the tab rejoins. It stays in that tab,
   is never sent anywhere, and is cleared when you leave the meeting; the
-  browser drops it with the tab's session.
+  browser drops it with the tab's session. After a disconnect you did not
+  ask for, it is kept while the disconnect notice is up (a reload then
+  rejoins), and cleared when you go back to the home screen.
 - Window layout and app preferences.
 - The email address you last sent feedback with, so the form can fill it in
   next time (you can change it there). The desktop app clears it on a factory

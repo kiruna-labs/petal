@@ -649,12 +649,13 @@ function installNoticePage(ctx: HarnessContext, connection: ReturnType<typeof se
   const title = new FakeElement();
   const detail = new FakeElement();
   const rejoin = new FakeElement('btn primary');
+  const home = new FakeElement('btn ghost');
   const announcer = new FakeElement('sr-only');
   const notices: string[] = [];
   const rejoins: string[] = [];
   ctx.hook.continuity = setupMeetingContinuity({
     leaveDialog: new FakeDialog() as unknown as HTMLDialogElement,
-    notice: { title, detail, rejoin, home: new FakeElement('btn ghost'), announcer } as unknown as Parameters<
+    notice: { title, detail, rejoin, home, announcer } as unknown as Parameters<
       typeof setupMeetingContinuity
     >[0]['notice'],
     showJoinScreen: () => ctx.ui.showJoinScreen(),
@@ -668,7 +669,7 @@ function installNoticePage(ctx: HarnessContext, connection: ReturnType<typeof se
     logEvent: () => {},
     win: page.window as unknown as Window,
   });
-  return { page, title, detail, rejoin, announcer, notices, rejoins };
+  return { page, title, detail, rejoin, home, announcer, notices, rejoins };
 }
 
 test('a first connect attempt that fails and is retried never shows the notice or starts a second join', async () => {
@@ -923,6 +924,91 @@ test('Leave while connecting (CLIENT_INITIATED, then Cancelled) ends on the join
   assert.equal(state.currentMeetingCode, null);
   assert.deepEqual(historyCalls, [[null, '', ORIGIN]], 'the address bar drops the invite path, as Leave does');
   assert.equal(registry.scrub(CREDENTIAL), CREDENTIAL, 'the session is over: the scrub list is cleared, as Leave does');
+});
+
+// connect() resolved; the SFU drops the session while the identity-colour
+// metadata write is in flight. `dropOnJoin` picks which rooms do that.
+function makeDropWhileJoiningRoomFactory(dropOnJoin: (index: number) => boolean) {
+  const { createRoom, rooms } = makeFakeRoomFactory();
+  const factory = () => {
+    const index = rooms.length;
+    const room = createRoom() as unknown as FakeRoom & { localParticipant?: unknown };
+    room.localParticipant = {
+      metadata: '{}',
+      setMetadata: async () => {
+        if (dropOnJoin(index)) room.emit(RoomEvent.Disconnected, DisconnectReason.DUPLICATE_IDENTITY);
+      },
+    };
+    return room as unknown as Room;
+  };
+  return { createRoom: factory, rooms };
+}
+
+test('with the #244 layer wired, a join that drops while finishing goes home instead of leaving "Connecting…" up', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const { createRoom, rooms } = makeDropWhileJoiningRoomFactory(() => true);
+  const connection = setupConnection(ctx, createRoom);
+  const { notices, page } = installNoticePage(ctx, connection);
+
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  await settle();
+  const pollTimer = state.streamStatePollTimer;
+  if (pollTimer !== null) clearInterval(pollTimer);
+
+  assert.equal(rooms.length, 1);
+  assert.deepEqual(uiCalls.meetingScreens, []);
+  assert.equal(uiCalls.joinScreens, 1, 'off the connecting interstitial');
+  assert.deepEqual(notices, [], 'never in the meeting: nothing to explain');
+  assert.equal(state.room, null);
+  assert.equal(page.location.href, `${ORIGIN}/`);
+});
+
+test('a Rejoin that drops while finishing goes back to its notice, not home or a dead spinner', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const { createRoom, rooms } = makeDropWhileJoiningRoomFactory((index) => index === 1);
+  const connection = setupConnection(ctx, createRoom);
+  const { title, detail, rejoin, notices } = installNoticePage(ctx, connection);
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+  rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.PARTICIPANT_REMOVED);
+  await settle();
+
+  rejoin.click();
+  await settle(20);
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+
+  assert.equal(rooms.length, 2);
+  assert.deepEqual(uiCalls.meetingScreens, [CREDENTIAL], 'the rejoin never showed the meeting');
+  assert.equal(uiCalls.joinScreens, 0);
+  assert.equal(notices.length, 2, 'the notice is back');
+  assert.equal(title.textContent, 'Removed from the meeting');
+  assert.equal(detail.textContent, 'Disconnected while rejoining.');
+});
+
+test('after a drop the invite code stays scrubbed while the notice keeps it in the address bar', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state } = makeConnectionContext('Riley', 'Design Review');
+  const { createRoom, rooms } = makeFakeRoomFactory();
+  const registry = new SensitiveStringRegistry();
+  const connection = setupConnection(ctx, createRoom, registry);
+  const { page, home } = installNoticePage(ctx, connection);
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+
+  rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.PARTICIPANT_REMOVED);
+  await settle();
+  assert.match(page.location.href, new RegExp(`/${ACCESS_CODE}$`));
+  assert.equal(registry.scrub(ACCESS_CODE), "<redacted:room>");
+
+  home.click(); // "Back to home"
+  await settle();
+  assert.equal(page.location.href, `${ORIGIN}/`);
+  assert.equal(registry.scrub(ACCESS_CODE), ACCESS_CODE, 'reset once the invite link is gone');
 });
 
 test('a room that disconnects while the join is finishing does not show the meeting screen', async () => {

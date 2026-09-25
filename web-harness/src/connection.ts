@@ -916,15 +916,17 @@ export function setupConnection(
       const resetRegistry = () => {
         if (joinCount === joinsAtDisconnect) registry.reset();
       };
+      // #244: home when the user left; otherwise the disconnect notice.
       const continuity = ctx.hook?.continuity;
-      if (continuity) {
-        // #244: home when the user left; otherwise the disconnect notice.
-        continuity.disconnected(meetingCode, { requested: leaveRequested, clientInitiated, reason }, resetRegistry);
-      } else {
-        history.replaceState(null, '', location.origin);
-        showJoinScreen();
-        resetRegistry();
-      }
+      if (continuity?.disconnected(meetingCode, { requested: leaveRequested, clientInitiated, reason }, resetRegistry)) return;
+      // Dropped while the join was finishing (continuity had no meeting yet;
+      // connectToMeeting then stops short of the meeting screen): a rejoin
+      // goes back to its notice, anything else to the home screen -- never a
+      // connecting spinner left up.
+      if (continuity?.rejoinFailed('Disconnected while rejoining.')) return;
+      history.replaceState(null, '', location.origin);
+      showJoinScreen();
+      resetRegistry();
     });
 
     try {
