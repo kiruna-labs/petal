@@ -61,6 +61,21 @@ test('#204 the meeting tile grid places cells from the shared packer and never d
   assert.match(tileSizing, /grid-column-end\s*:\s*span 2/i);
 });
 
+test('#248 camera video crops only where cameraFit.ts says so; shares always letterbox', async () => {
+  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
+  const base = /\.tile video,\s*\.tile canvas\.full-range-canvas\s*\{(?<body>[^}]+)\}/.exec(css)?.groups?.body ?? '';
+  assert.match(base, /object-fit\s*:\s*contain/i, 'every tile video letterboxes by default');
+  const cover = /\.tile video\.camera-video\[data-fit='cover'\]\s*\{(?<body>[^}]+)\}/.exec(css)?.groups?.body ?? '';
+  assert.match(cover, /object-fit\s*:\s*cover/i);
+  // No other rule may crop tile media: a share must never be cropped.
+  const uncommented = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const coverRules = [...uncommented.matchAll(/(?<selector>[^{}]+)\{[^}]*object-fit\s*:\s*cover[^}]*\}/gi)].map((m) =>
+    (m.groups?.selector ?? '').trim()
+  );
+  const tileCoverRules = coverRules.filter((selector) => /\.tile\b/.test(selector));
+  assert.deepEqual(tileCoverRules, [".tile video.camera-video[data-fit='cover']"]);
+});
+
 test('meeting tile breakpoints still tighten gap and padding through phone widths', async () => {
   const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
   for (const width of [1024, 760, 560, 420]) {

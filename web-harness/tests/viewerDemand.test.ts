@@ -309,6 +309,24 @@ test('a tile with a presented frame still sends real contained geometry', () => 
   assert.equal(message.pixelHeight, 400);
 });
 
+test('#248: a zoomed share asks for its committed zoom, not the frame being painted', () => {
+  // The share's video rect as the browser reports it mid-pinch: painted at
+  // 3x (1800x1200), with 2x committed when the last gesture ended.
+  const { tile, published, viewerDemand } = makeShareTileHarness(1200, 800);
+  const video = tile.querySelector('video') as unknown as { getBoundingClientRect: () => DOMRect };
+  video.getBoundingClientRect = () => ({ left: -600, top: -400, width: 1800, height: 1200 }) as DOMRect;
+  Object.assign(tile, { classList: { contains: (name: string) => name === 'is-share-zoomed' } });
+  tile.dataset.shareZoomPaintedScale = '3.0000';
+  tile.dataset.shareZoomDemandScale = '2.0000';
+
+  viewerDemand.publishViewerDemand(tile, 'heartbeat');
+
+  const message = JSON.parse(new TextDecoder().decode(published[0]!.payload));
+  // The 600x400 box at the committed 2x, not the painted 3x.
+  assert.equal(message.pixelWidth, 1200);
+  assert.equal(message.pixelHeight, 800);
+});
+
 test('#627: a metadata gap no longer inflates the demand above the steady-state value', () => {
   // A letterboxed share in a wide tile: the contained media rect is much
   // narrower than the element box, so the demand the sender acts on differs a

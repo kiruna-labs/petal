@@ -16,6 +16,13 @@
  */
 
 import type { TransitionConfig } from 'svelte/transition';
+import type { AnimationConfig } from 'svelte/animate';
+import { cubicOut } from 'svelte/easing';
+import {
+	uniformFlip,
+	uniformFlipClipPath,
+	uniformFlipTransform
+} from '@petal/shared/logic/tileFlip';
 
 const MOTION_FEEDBACK_MS = 120;
 const MOTION_EXIT_MS = 120;
@@ -110,5 +117,47 @@ export function toastTransition(_node: Element): TransitionConfig {
 			transform: translateX(-50%) translateY(${u * distance}px);
 			filter: blur(${u * 2}px);
 		`
+	};
+}
+
+/** When each node's keyed-list FLIP ends (performance.now() ms). */
+const uniformTileFlipEnds = new WeakMap<Element, number>();
+
+/**
+ * True while `uniformTileFlip` is animating `node`. Svelte owns those
+ * animations (no WAAPI handle to ask), so a layout pass that interrupts one
+ * asks here whether the tile is clipped and must be retargeted from its
+ * visible box (`visibleFlipRect`) rather than its larger painted one.
+ */
+export function uniformTileFlipInFlight(node: Element, now = performance.now()): boolean {
+	const end = uniformTileFlipEnds.get(node);
+	return end !== undefined && now < end;
+}
+
+/**
+ * Keyed-list FLIP for gallery tiles (#248): a drop-in for `svelte/animate`'s
+ * `flip`, whose `scale(sx, sy)` squashes live video whenever a join or leave
+ * changes the tile's shape (camera tiles crop, so they now do). Uses the
+ * shared `uniformFlip` frame -- one uniform scale plus a clip of the box --
+ * that web-harness/src/tileReflow.ts uses too.
+ */
+export function uniformTileFlip(
+	node: Element,
+	{ from, to }: { from: DOMRect; to: DOMRect },
+	params: { duration?: number; easing?: (t: number) => number } = {}
+): AnimationConfig {
+	const flip = uniformFlip(from, to);
+	if (!flip) return { duration: 0 };
+	const radius =
+		typeof getComputedStyle === 'function' ? parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0 : 0;
+	const duration = params.duration ?? layoutDuration();
+	uniformTileFlipEnds.set(node, performance.now() + duration);
+	return {
+		duration,
+		easing: params.easing ?? cubicOut,
+		css: (_t, u) => {
+			const clipPath = uniformFlipClipPath(flip, u, radius);
+			return `transform: ${uniformFlipTransform(flip, u)}; transform-origin: top left;${clipPath ? ` clip-path: ${clipPath};` : ''}`;
+		}
 	};
 }

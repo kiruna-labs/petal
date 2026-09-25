@@ -1607,10 +1607,12 @@ input[type='text']:disabled {
 /* Tile grid (#204 PR2): the shape comes from the shared packer
    (shared/logic/galleryGeometry.ts via tileLayout.ts) as --gallery-* vars, the
    same source the desktop gallery uses. This CSS only places the computed
-   cells and keeps the 16:9 tile box; it never decides columns itself.
+   cells and sizes the tile box the packer chose (16:9, or down to ~7:6 for a
+   camera-only grid, #248 -- width and height are both definite, so the
+   `aspect-ratio` below never applies); it never decides columns itself.
    #239: a track is no larger than the packed tile, and the block of tracks is
-   centred (`safe`: never clipped at the start), so the space the 16:9 tiles
-   cannot use collects around the group instead of as dead bands between
+   centred (`safe`: never clipped at the start), so the space the tiles cannot
+   use collects around the group instead of as dead bands between
    neighbours. Columns run on HALF tracks, each tile spanning two, so an
    incomplete last row can start half a column in and sit centred under the
    full rows (tileLayout.ts sets the first tail tile's grid-column-start). */
@@ -1769,6 +1771,15 @@ input[type='text']:disabled {
   opacity: 0;
 }
 
+/* #248: a camera fills its tile by cropping, within the shared caps
+   (shared/logic/cameraCrop.ts via cameraFit.ts, which sets `data-fit`): up to
+   about a third of the width off the sides, at most 10% off the top and
+   bottom. Past either cap it stays `contain` above. Shares never get
+   `data-fit` and are never cropped. */
+.tile video.camera-video[data-fit='cover'] {
+  object-fit: cover;
+}
+
 /* Hold-last-frame (#627). A share video must never render black: the moment it
    has no frame to present -- source swap on republish, track mute, resubscribe,
    decoder reconfigure -- the held copy underneath shows through instead. Two
@@ -1796,6 +1807,146 @@ input[type='text']:disabled {
 
 .tile canvas.share-hold-canvas--holding {
   z-index: 3;
+}
+
+/* #248: zoom and pan a shared window in View mode (shareZoomUi.ts). A share
+   still FITS by default; a zoom is one transform on the tile, applied to
+   every media layer of the share (video, full-range canvas, held frame) so
+   they stay registered, clipped back to the layer's own box so the picture
+   never spills under the docked header or out of a menu-open tile.
+   Telepointers and drawings follow because they read the transformed video
+   rect. A rail thumbnail always shows the whole window. */
+.tile.share-tile.is-share-zoomed:not(.is-spotlight-thumbnail) video,
+.tile.share-tile.is-share-zoomed:not(.is-spotlight-thumbnail) canvas.full-range-canvas,
+.tile.share-tile.is-share-zoomed:not(.is-spotlight-thumbnail) canvas.share-hold-canvas {
+  transform: var(--share-zoom-transform);
+  transform-origin: 0 0;
+  clip-path: var(--share-zoom-clip);
+}
+
+/* Discrete zoom changes (double-tap, keys, menu, chip) ease; pinch, pan and
+   wheel zoom track the fingers exactly and never do. */
+.tile.share-tile.is-share-zoom-easing video,
+.tile.share-tile.is-share-zoom-easing canvas.full-range-canvas,
+.tile.share-tile.is-share-zoom-easing canvas.share-hold-canvas {
+  transition:
+    transform 180ms var(--ease-standard),
+    clip-path 180ms var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile.share-tile.is-share-zoom-easing video,
+  .tile.share-tile.is-share-zoom-easing canvas.full-range-canvas,
+  .tile.share-tile.is-share-zoom-easing canvas.share-hold-canvas {
+    transition: none;
+  }
+}
+
+/* Overlays cover the whole tile; while zoomed, clip them to the video's box
+   and hide the ones anchored on the part of the window that is off screen. */
+.tile.share-tile.is-share-zoomed:not(.is-spotlight-thumbnail) .telepointer-layer,
+.tile.share-tile.is-share-zoomed:not(.is-spotlight-thumbnail) .remote-draw-layer {
+  clip-path: var(--share-zoom-media-clip);
+}
+
+.remote-telepointer.is-outside-media,
+.remote-draw-text.is-outside-media {
+  visibility: hidden;
+}
+
+/* Touch in View mode: every touch that STARTS on a share tile is the zoom
+   controller's -- a pinch zooms the share, not the page (iOS gets a
+   touchmove guard as well), a drag pans it once zoomed, a double-tap toggles
+   fit/fill. The trade-off, accepted: a one-finger swipe that starts on a
+   share tile does not scroll the tile surface or the page; start it on a
+   camera tile or the gutter instead. `pan-x pan-y` would keep that scroll,
+   but the browser then claims a pinch's first drift as a pan and cancels
+   the pointers mid-gesture. Control and Draw modes keep their own touch
+   handling. */
+.tiles:not(.draw-mode-active) .tile.share-tile:not(.remote-control-active):not(.is-spotlight-thumbnail) {
+  touch-action: none;
+}
+
+.tiles:not(.draw-mode-active) .tile.share-tile.is-share-zoomed:not(.remote-control-active):not(.is-spotlight-thumbnail) {
+  cursor: grab;
+}
+
+.tiles:not(.draw-mode-active) .tile.share-tile.is-share-panning {
+  cursor: grabbing;
+}
+
+/* At fit a mouse user gets a hint that the window zooms (double-click, or
+   Ctrl/⌘ + wheel); touch has no hover to show it on. */
+@media (pointer: fine) {
+  .tiles:not(.draw-mode-active)
+    .tile.share-tile:not(.is-share-zoomed):not(.remote-control-active):not(.is-spotlight-thumbnail)
+    video {
+    cursor: zoom-in;
+  }
+}
+
+.share-zoom-chip {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: rgba(8, 10, 12, 0.72);
+  color: rgba(255, 255, 255, 0.84);
+  font: 700 11px var(--font-ui);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+}
+
+/* A finger needs ~44px; the chip stays visually small and grows an invisible
+   hit area instead. */
+@media (pointer: coarse) {
+  .share-zoom-chip::after {
+    content: '';
+    position: absolute;
+    inset: -12px -8px;
+  }
+}
+
+.share-zoom-chip[hidden] {
+  display: none;
+}
+
+.share-zoom-chip:hover {
+  background: rgba(8, 10, 12, 0.86);
+  color: var(--text-primary);
+}
+
+.share-zoom-chip:focus-visible {
+  outline: 2px solid var(--id-blue);
+  outline-offset: 2px;
+}
+
+.share-zoom-chip__value {
+  font-variant-numeric: tabular-nums;
+}
+
+.share-zoom-chip__action {
+  color: var(--text-faint);
+}
+
+.tile.has-remote-window-header .share-zoom-chip {
+  top: 54px;
+}
+
+/* The zoom persists in Control and Draw, so the chip does too -- it is the
+   way back to fit there (its own events never reach the remote window or the
+   pen). A rail thumbnail shows the whole window and has no room for it. */
+.tile.is-spotlight-thumbnail .share-zoom-chip {
+  display: none;
 }
 
 /* Native ScreenCaptureKit shares arrive as video-range 420v. The pinned

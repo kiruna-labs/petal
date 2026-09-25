@@ -3,6 +3,7 @@ import { DRAW_TOPIC, identityPaletteIndexFromMetadata, type DrawMessage, type Dr
 import { colorForIdentity, containedMediaRect, mediaContentRectRelativeToTile } from './telepointer.ts';
 import { parseDrawPayload } from './draw.ts';
 import { isStrokeExpired, strokeFadeOpacity } from '@petal/shared/logic/strokeExpiry';
+import { pointVisibleInZoomedShare } from './shareZoom.ts';
 
 /** #670: how often the fade/expiry sweep re-checks stroke ages -- matches
  * the native compositor pointer overlay's telepointer/draw sweep cadence
@@ -124,6 +125,8 @@ export function setupDrawDisplay(ctx: HarnessContext) {
       tile.appendChild(text.element);
     }
     text.element.textContent = text.text;
+    // #248: text anchored on the part of a zoomed share that is off screen.
+    text.element.classList.toggle('is-outside-media', !pointVisibleInZoomedShare(tile, point));
     text.element.style.setProperty('left', `${point.x}px`);
     text.element.style.setProperty('top', `${point.y}px`);
     const rect = tile.getBoundingClientRect();

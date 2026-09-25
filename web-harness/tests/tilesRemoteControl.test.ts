@@ -814,7 +814,16 @@ test('web tile grid reflow animates existing tiles when participant count change
     harness.tiles.ensureBaseTile('native-1', false);
 
     assert.equal(localTile.animations.length, 1);
-    assert.match(String(localTile.animations[0]?.[0]?.transform), /translate\(0px,\s*0px\) scale\(/);
+    // #248: the tile changes shape (400x260 -> 190x140), so the inverted frame
+    // is one uniform scale plus a clip back to the old box -- not a
+    // `scale(x, y)` that would squash the live video.
+    // s = max(400/190, 260/140) = 2.10526; the scaled 190x140 box is clipped
+    // by (140 - 260/s)/2 = 8.25px top and bottom to exactly the old 400x260.
+    assert.deepEqual(localTile.animations[0]?.[0], {
+      transform: 'translate(0px, -17.368px) scale(2.10526)',
+      transformOrigin: 'top left',
+      clipPath: 'inset(8.25px 0px 8.25px 0px)',
+    });
   } finally {
     harness.restore();
   }
