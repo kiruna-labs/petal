@@ -7,6 +7,7 @@ import { mount, unmount } from 'svelte';
 import Toast from '@petal/shared/ui/components/Toast.svelte';
 
 let mounted: ReturnType<typeof mount> | null = null;
+let mountedMessage: string | null = null;
 let dismissTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** Optional inline action (e.g. "Bring to foreground" on the #679 remote
@@ -31,6 +32,7 @@ export function showSharedToast(
 ): void {
   clearTimeout(dismissTimer);
   if (mounted !== null) unmount(mounted);
+  mountedMessage = message;
   mounted = mount(Toast, {
     target: host,
     props: {
@@ -41,9 +43,19 @@ export function showSharedToast(
     }
   });
   host.classList.remove('hidden');
-  dismissTimer = setTimeout(() => {
-    if (mounted !== null) unmount(mounted);
-    mounted = null;
-    host.classList.add('hidden');
-  }, dismissMs);
+  dismissTimer = setTimeout(() => dismissSharedToast(host), dismissMs);
+}
+
+/**
+ * Takes the toast down now. With `message`, only when that is the toast
+ * showing, so a caller never dismisses someone else's toast (#246: opening
+ * chat takes down the notice for a message the drawer now shows).
+ */
+export function dismissSharedToast(host: HTMLElement, message?: string): void {
+  if (message !== undefined && message !== mountedMessage) return;
+  clearTimeout(dismissTimer);
+  if (mounted !== null) unmount(mounted);
+  mounted = null;
+  mountedMessage = null;
+  host.classList.add('hidden');
 }
