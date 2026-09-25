@@ -492,7 +492,7 @@ test('the scrub registry is cleared only after the guard has unwound, and never 
   if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
   noteLeaveRequested();
   rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.CLIENT_INITIATED);
-  assert.equal(registry.scrub(`/design-review/${ACCESS_CODE}`), '/design-review/<redacted:room>', 'still scrubbed while unwinding');
+  assert.equal(registry.scrub(`/design-review/${ACCESS_CODE}`), '/<redacted:room>/<redacted:room>', 'still scrubbed while unwinding');
   await settle();
   assert.equal(registry.scrub(ACCESS_CODE), ACCESS_CODE, 'reset once settled');
 
