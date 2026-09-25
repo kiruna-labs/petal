@@ -625,6 +625,26 @@ test('#239 the rail full-screen button enters and leaves real full screen, and f
   }
 });
 
+test('#239 x #247 a phone browser\'s 863x360 rail (no screen share, #240) keeps Chat and Full screen', { timeout: 60_000 }, async () => {
+  const page = await openMeeting(LANDSCAPE_PHONE, 1, {
+    setup: (p) => p.addInitScript(() => { delete (MediaDevices.prototype as Partial<MediaDevices>).getDisplayMedia; }),
+  });
+  try {
+    await page.waitForFunction(() => document.querySelector('#ctl-more')?.closest<HTMLElement>('.control-cell')?.hidden === false);
+    const state = await page.evaluate(() => {
+      const cells = [...document.querySelectorAll<HTMLElement>('.controlbar .control-cell')];
+      const shown = cells.filter((c) => !c.classList.contains('overflowed') && c.getClientRects().length > 0);
+      return { shown: shown.map((c) => c.querySelector('button')?.id ?? ''), share: cells.some((c) => c.querySelector('#ctl-share') && c.getClientRects().length > 0) };
+    });
+    assert.equal(state.share, false, 'no Share cell without getDisplayMedia');
+    for (const id of ['ctl-audio', 'ctl-video', 'ctl-chat', 'ctl-more', 'ctl-fullscreen', 'ctl-leave']) {
+      assert.ok(state.shown.includes(id), `${id} is in the rail (${state.shown.join(', ')})`);
+    }
+  } finally {
+    await page.context().close();
+  }
+});
+
 test('#239 x #247 full screen is the last control to leave the rail, and its ⋯ row enters real full screen', { timeout: 60_000 }, async () => {
   const page = await openMeeting(LANDSCAPE_PHONE, 1);
   try {
