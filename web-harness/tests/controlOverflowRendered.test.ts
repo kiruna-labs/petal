@@ -3,7 +3,7 @@
 // at phone widths no two buttons overlap, none is squashed or off the bar,
 // Mic, Camera and Leave stay, and exactly the controls that left the bar are
 // in the ⋯ menu, carrying their state. With room for everything there is no ⋯.
-// A stand-in for #239's landscape rail proves the same along the bar's height.
+// #239's landscape rail proves the same along the bar's height.
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -24,27 +24,6 @@ type Page = Awaited<ReturnType<Browser['newPage']>>;
 /** Lowest priority first: the order the issue fixes for giving way. */
 const COLLAPSE_PRIORITY = ['React', 'Draw', 'Invite', 'Chat', 'Share'];
 const PINNED = ['Mic', 'Camera', 'Leave'];
-
-// #239's landscape-phone rail, cut down to the rules that shape the bar: a
-// column on the right edge whose height is the meeting's, icon-only, with a
-// Full screen cell that only the rail shows. A stand-in until #239 lands; the
-// query is its MEETING_RAIL_QUERY.
-const RAIL_STAND_IN = `.control-cell.fullscreen-cell { display: none; }
-@media (orientation: landscape) and (max-height: 500px) {
-  .control-cell.fullscreen-cell { display: flex; }
-  .meeting { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); }
-  .meeting > .topbar, .meeting > .meeting-body { grid-area: 1 / 1; }
-  .topbar { align-self: start; z-index: 7; }
-  .dev-panel { position: absolute; top: 100%; left: 0; right: 0; }
-  .controlbar { grid-area: 1 / 2; flex-direction: column; align-items: center; gap: 6px; min-height: 0;
-    padding: 8px 4px; border-top: 0; border-left: 1px solid var(--hairline); }
-  .controls-left { flex-direction: column; align-items: center; gap: 6px; min-height: 0; margin-bottom: auto; }
-  .leave-cell { margin-left: 0; }
-  .controlbar .meeting-control-label { display: none; }
-  .controlbar .meeting-split { flex-direction: column; }
-  .controlbar .meeting-split-options { flex: 0 0 22px; width: var(--control-size); min-width: 0; min-height: 0;
-    border-left: 0; border-top: 1px solid var(--hairline); }
-}`;
 
 // #240's rule for a control hidden as unsupported (Share without
 // getDisplayMedia). A stand-in until #240 lands.
@@ -163,6 +142,9 @@ function readBar(): BarState {
   const barBox = bar.getBoundingClientRect();
   const cells = Array.from(bar.querySelectorAll('.control-cell'))
     .filter((cell) => !cell.classList.contains('overflow-cell'))
+    // #239's Full screen cell belongs to the landscape rail only: anywhere
+    // else it is in neither the bar nor the menu (not part of the layout).
+    .filter((cell) => !cell.classList.contains('fullscreen-cell') || cell.classList.contains('overflowed') || cell.getClientRects().length > 0)
     .map((cell) => ({
       label: cell.querySelector('.meeting-control-label')?.textContent?.trim() ?? '?',
       rendered: cell.getClientRects().length > 0,
@@ -265,14 +247,16 @@ function assertInside(box: Box | null, viewport: { width: number; height: number
   assert.ok(box.left >= 0 && box.top >= 0 && box.right <= viewport.width && box.bottom <= viewport.height, `${where}: menu off screen ${JSON.stringify(box)}`);
 }
 
-test('at 320, 360 and 412 px the bar fits: no overlap, no squash, and exactly the hidden controls are in the ⋯ menu', { timeout: 60_000 }, async () => {
+test('at 280, 320, 360 and 412 px the bar fits: no overlap, no squash, and exactly the hidden controls are in the ⋯ menu', { timeout: 60_000 }, async () => {
   const expected: Record<number, string[]> = {
-    // Lowest priority first, and only as many as the width needs.
-    320: ['React', 'Draw', 'Invite', 'Chat', 'Share'],
+    // Lowest priority first, and only as many as the width needs (in #239's
+    // tighter phone bar). 280: a folding phone's cover screen.
+    280: ['React', 'Draw', 'Invite', 'Chat', 'Share'],
+    320: ['React', 'Draw', 'Invite', 'Chat'],
     360: ['React', 'Draw', 'Invite', 'Chat'],
     412: ['React', 'Draw', 'Invite'],
   };
-  for (const viewport of [{ width: 320, height: 568 }, { width: 360, height: 780 }, { width: 412, height: 915 }]) {
+  for (const viewport of [{ width: 280, height: 653 }, { width: 320, height: 568 }, { width: 360, height: 780 }, { width: 412, height: 915 }]) {
     const where = `${viewport.width}px`;
     const { page, errors, close } = await openMeeting(viewport);
     try {
@@ -297,7 +281,7 @@ test('at 320, 360 and 412 px the bar fits: no overlap, no squash, and exactly th
   }
 });
 
-test('menu rows follow the order the bar shows, not the DOM (#239 lifts Chat with CSS `order`)', { timeout: 60_000 }, async () => {
+test('menu rows follow the order the bar shows, not the DOM (a layout may reorder cells with CSS `order`)', { timeout: 60_000 }, async () => {
   const { page, errors, close } = await openMeeting({ width: 360, height: 780 }, [
     '.controls-left > .control-cell:has(> .meeting-split) { order: -2; } .controls-left > .chat-cell { order: -1; }',
   ]);
@@ -330,7 +314,8 @@ test('with room for every control there is no ⋯: at 1280, and at 500 -- measur
 });
 
 test('the menu carries each hidden control\'s state, and a dot on ⋯ flags a hidden one that needs attention', { timeout: 60_000 }, async () => {
-  const { page, errors, close } = await openMeeting({ width: 320, height: 568 });
+  // 280: narrow enough that Share is in the menu too.
+  const { page, errors, close } = await openMeeting({ width: 280, height: 653 });
   try {
     let state = await barOf(page);
     assert.equal(state.dot, false);
@@ -514,7 +499,8 @@ test('a plugin popover opened from the menu anchors to ⋯, not to its hidden bu
 });
 
 test('a menu row clicks its control inside the user\'s own click, so the user activation getDisplayMedia and full screen need carries over', { timeout: 60_000 }, async () => {
-  const { page, errors, close } = await openMeeting({ width: 320, height: 568 });
+  // 280: narrow enough that Share is in the menu.
+  const { page, errors, close } = await openMeeting({ width: 280, height: 653 });
   try {
     await page.evaluate(() => {
       const w = window as unknown as { inRowClick: boolean; shareClicks: Array<{ active: boolean; inRowClick: boolean }> };
@@ -855,8 +841,8 @@ test('a row the menu offers of its own (#239\'s "Developer & test tools") brings
 
 test('a control hidden as unsupported (Share on phones, #240) is in neither the bar nor the menu, and its room is reused', { timeout: 60_000 }, async () => {
   const expected: Record<number, string[]> = {
-    320: ['Invite', 'Draw', 'Chat', 'React'],
-    // Share's room lets Invite back in.
+    // Share's room keeps Chat in the bar at 320, and Invite too at 412.
+    320: ['Invite', 'Draw', 'React'],
     412: ['Draw', 'React'],
   };
   for (const viewport of [{ width: 320, height: 568 }, { width: 412, height: 915 }]) {
@@ -879,31 +865,15 @@ test('a control hidden as unsupported (Share on phones, #240) is in neither the 
   }
 });
 
-test('on a vertical rail (a stand-in for #239\'s landscape layout) it measures the height, and re-fits on rotation', { timeout: 60_000 }, async () => {
+test('on #239\'s landscape rail it measures the height, and re-fits on rotation', { timeout: 60_000 }, async () => {
+  // A phone: the developer tools are a sheet parked off screen, so the rail
+  // runs the whole height.
   const landscape = { width: 915, height: 412 };
-  const { page, errors, close } = await openMeeting(landscape, [RAIL_STAND_IN]);
+  const { page, errors, close } = await openMeeting(landscape, [], { hasTouch: true, isMobile: true });
   try {
-    // #239's Full screen cell, placed as meetingViewport.ts places it: in the
-    // bar itself, just before Leave.
-    await page.evaluate(() => {
-      const bar = document.querySelector('.controlbar')!;
-      const cell = document.createElement('div');
-      cell.className = 'control-cell fullscreen-cell';
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.id = 'ctl-fullscreen';
-      button.className = 'control-button';
-      button.setAttribute('aria-label', 'Enter full screen');
-      button.setAttribute('aria-pressed', 'false');
-      const label = document.createElement('span');
-      label.className = 'meeting-control-label';
-      label.textContent = 'Full screen';
-      cell.append(button, label);
-      bar.insertBefore(cell, bar.querySelector('.leave-cell'));
-    });
     await settle(page);
     let state = await barOf(page);
-    assert.equal(state.vertical, true, 'the stand-in lays the bar out as a column');
+    assert.equal(state.vertical, true, 'the rail lays the bar out as a column');
     assertFits(state, 'rail');
     // A 915px-wide bottom bar would fit everything: only the height hides
     // these. Full screen outlasts Draw and Invite; Share and Chat stay too.
@@ -925,8 +895,10 @@ test('on a vertical rail (a stand-in for #239\'s landscape layout) it measures t
     state = await barOf(page);
     assert.equal(state.vertical, false);
     assertFits(state, 'rotated to portrait');
-    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React', 'Full screen']);
-    // Full screen is not part of this layout at all: not offered in the menu.
+    // Full screen is not part of this layout at all: in neither the bar nor
+    // the menu.
+    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React']);
+    assert.ok(!state.shown.includes('Full screen'));
     assert.deepEqual((await openMenu(page)).rows.map((row) => row.label), ['Invite', 'Draw', 'React']);
     await page.keyboard.press('Escape');
 
