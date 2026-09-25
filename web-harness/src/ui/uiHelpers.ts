@@ -2,7 +2,7 @@ import type { LogKind } from './logging';
 import { inviteCopyAriaLabel, inviteCopyTooltip } from '../inviteCopy.ts';
 import { roomDisplayLabelForCredentialWithDisplayName } from '../roomLabels.ts';
 import { colorForIdentity, inkForIdentity } from '../telepointer.ts';
-import { showSharedToast, type SharedToastAction } from '../toastMount.ts';
+import { dismissSharedToast, showSharedToast, type SharedToastAction } from '../toastMount.ts';
 
 interface UiHelperOptions {
   joinScreen: HTMLDivElement;
@@ -156,6 +156,10 @@ export function setupUiHelpers(options: UiHelperOptions) {
     showSharedToast(options.toastEl, message, dismissMs, action);
   }
 
+  function dismissToast(message?: string) {
+    dismissSharedToast(options.toastEl, message);
+  }
+
   function setShareState(text: string, on: boolean) {
     options.shareState.textContent = text;
     options.shareState.className = `state ${on ? 'state-on' : 'state-idle'}`;
@@ -235,6 +239,7 @@ export function setupUiHelpers(options: UiHelperOptions) {
     showDisconnectedScreen,
     showToast,
     showActionableToast,
+    dismissToast,
     setShareState,
     setMicState,
     setScreenShareState,
