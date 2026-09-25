@@ -72,7 +72,8 @@ LIVEKIT_URL=ws://localhost:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret
    drops the browser's URL bar wherever the browser supports it.
 4. **Developer & test tools** (collapsible drawer, closed by default; the
    meeting's bottom row on desktop, a sheet parked below the screen on a
-   phone — open it there with `?dev=1`, which the tab remembers):
+   phone — open it there from the **⋯ More** menu, or with `?dev=1`, which
+   the tab remembers):
    Network diagnostics (nested, also closed by default), the synthetic
    test-pattern share + 440Hz tone, raw state readouts, and the live
    session log (connection / participant / track lifecycle, newest first).

@@ -4419,10 +4419,12 @@ canvas#test-canvas.p613-presentation-source {
 /* =========================================================================
    Phones (#239): the developer drawer is a sheet parked below the screen,
    so it takes none of a phone's height -- touch screens only: a short
-   desktop window keeps its row. `?dev=1` (kept for the tab) or
-   meetingViewport.ts's openDevTools() adds .is-open; closing the drawer's
-   summary puts it away again. `visibility` keeps it out of the tab order
-   while parked; a script's `#share-btn.click()` still works.
+   desktop window keeps its row. `?dev=1` (kept for the tab) or the ⋯
+   menu's "Developer & test tools" row (main.ts, openDevTools()) adds
+   .is-open; closing the drawer's summary puts it away again. `visibility`
+   keeps it out of the tab order while parked; a script's
+   `#share-btn.click()` still works. The query is DEV_SHEET_QUERY in
+   meetingViewport.ts: keep them in step.
    ========================================================================= */
 @media (orientation: landscape) and (max-height: 500px) and (min-aspect-ratio: 3/2) and (pointer: coarse),
   (pointer: coarse) and (max-width: 560px) {

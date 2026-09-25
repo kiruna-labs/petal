@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { after, before, test } from 'node:test';
 import { build } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
-import { MEETING_RAIL_QUERY } from '../src/meetingViewport.ts';
+import { DEV_SHEET_QUERY, MEETING_RAIL_QUERY } from '../src/meetingViewport.ts';
 
 // #239: the phone meeting layout, checked on REAL rendered geometry (the
 // node tests have no layout engine, so a collapsed hero or an off-screen
@@ -166,6 +166,14 @@ test('#239 the landscape rail CSS and the top bar idle clock answer to the same 
   assert.ok(css.includes(`@media ${MEETING_RAIL_QUERY} {`), `style.css has no @media ${MEETING_RAIL_QUERY} block`);
 });
 
+test('#239 x #247 the developer sheet CSS and the ⋯ menu\'s developer row answer to the same media query', async () => {
+  // main.ts offers the ⋯ row only while DEV_SHEET_QUERY matches; if
+  // style.css's sheet block drifted, the row would show where the drawer is
+  // a visible row (a ⋯ for nothing), or be missing where it is parked.
+  const css = (await readFile(new URL('../src/style.css', import.meta.url), 'utf8')).replace(/\s+/g, ' ');
+  assert.ok(css.includes(`@media ${DEV_SHEET_QUERY} {`), `style.css has no @media ${DEV_SHEET_QUERY} block`);
+});
+
 test('#239 the spotlight hero fills its track beside the strip instead of collapsing to its border', { timeout: 60_000 }, async () => {
   const page = await openMeeting(DESKTOP, 4);
   try {
@@ -234,6 +242,53 @@ test('#239 on a phone ?dev=1 slides the developer sheet up, and closing it parks
     assert.ok((await rect(page, '#dev-panel')).top >= 839 - 1, 'closed, it is parked below the screen');
   } finally {
     await page.context().close();
+  }
+});
+
+test('#239 x #247 on a phone the ⋯ menu slides the developer sheet up; where the drawer is a row it offers none', { timeout: 60_000 }, async () => {
+  for (const [label, device] of [
+    ['portrait phone', PORTRAIT_PHONE],
+    ['landscape phone', LANDSCAPE_PHONE],
+  ] as const) {
+    const page = await openMeeting(device, 2);
+    try {
+      const { height } = device.viewport;
+      assert.ok((await rect(page, '#dev-panel')).top >= height - 1, `${label}: the sheet starts parked`);
+      await page.click('#ctl-more');
+      await page.waitForSelector('#overflow-menu.placed');
+      const rows = await page.evaluate(() =>
+        [...document.querySelectorAll('#overflow-menu .overflow-menu-row')].map((row) => row.textContent!.trim())
+      );
+      assert.equal(rows.at(-1), 'Developer & test tools', `${label}: the menu ends with the developer row (${rows.join(', ')})`);
+      await page.click('#overflow-menu .overflow-menu-row >> text=Developer & test tools');
+      await page.waitForTimeout(400); // the sheet's slide
+      const sheet = await rect(page, '#dev-panel');
+      assert.ok(sheet.top < height && sheet.bottom <= height + 1, `${label}: the sheet is up (${sheet.top}-${sheet.bottom})`);
+      assert.equal(await page.evaluate(() => (document.querySelector('#dev-panel') as HTMLDetailsElement).open), true);
+      assert.equal(await page.evaluate(() => document.querySelector<HTMLElement>('#overflow-menu')!.hidden), true, `${label}: the menu closed`);
+    } finally {
+      await page.context().close();
+    }
+  }
+
+  // Desktop: the drawer is the meeting's bottom row, so no ⋯ at all at
+  // 1280; a short desktop window (the rail, with a mouse) keeps its row too,
+  // and its ⋯ holds only controls.
+  const desktop = await openMeeting(DESKTOP, 2);
+  try {
+    assert.equal(await desktop.evaluate(() => document.querySelector('#ctl-more')!.getClientRects().length), 0, 'desktop: no ⋯');
+  } finally {
+    await desktop.context().close();
+  }
+  const short = await openMeeting({ viewport: { width: 1280, height: 480 } }, 2);
+  try {
+    const rows = await short.evaluate(() => {
+      document.querySelector<HTMLButtonElement>('#ctl-more')!.click();
+      return [...document.querySelectorAll('#overflow-menu .overflow-menu-row')].map((row) => row.textContent!.trim());
+    });
+    assert.ok(!rows.includes('Developer & test tools'), `short desktop window: no developer row (${rows.join(', ')})`);
+  } finally {
+    await short.context().close();
   }
 });
 

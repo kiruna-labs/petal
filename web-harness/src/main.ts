@@ -10,7 +10,7 @@ import { createTelepointerSender } from './telepointerSender';
 import { autoJoinFromUrl } from './deepLink';
 import type { HarnessContext, HarnessHook } from './context';
 import { setupTileLayout } from './tileLayout';
-import { setupMeetingViewport } from './meetingViewport';
+import { DEV_SHEET_QUERY, openDevTools, setupMeetingViewport } from './meetingViewport';
 import { setupTelepointerDisplay } from './telepointerDisplay';
 import { setupDrawDisplay } from './drawDisplay';
 import { setupDrawSender } from './drawSender';
@@ -695,6 +695,16 @@ tileLayout.installLayoutPicker();
 // itself FIRST in the top bar's right cluster, so the full-screen toggle
 // ends the cluster.
 setupMeetingViewport(ctx);
+// #239 x #247: on a phone the developer drawer is a sheet parked below the
+// screen; the ⋯ menu offers a row that slides it up. Only there: wherever
+// the drawer is the meeting's bottom row, it needs no menu row (and brings
+// no ⋯).
+ctx.hook.controlOverflow!.addMenuItem({
+  label: 'Developer & test tools',
+  icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"></path></svg>',
+  available: () => window.matchMedia(DEV_SHEET_QUERY).matches,
+  run: () => openDevTools(),
+});
 
 // Home screen wires the unified Create/Join CTA; capture its callbacks.
 const {

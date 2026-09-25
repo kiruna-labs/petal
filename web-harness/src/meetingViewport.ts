@@ -25,6 +25,12 @@ import type { HarnessContext } from './context';
  * that must not flip into the rail; a phone on its side is 1.6:1 or wider. */
 export const MEETING_RAIL_QUERY = '(orientation: landscape) and (max-height: 500px) and (min-aspect-ratio: 3/2)';
 
+/** style.css's phone block that parks the developer drawer as a sheet below
+ * the screen: touch screens only, in the landscape rail or a phone-width
+ * portrait. Everywhere else the drawer is the meeting's bottom row, in plain
+ * sight. Keep the two in step. */
+export const DEV_SHEET_QUERY = `${MEETING_RAIL_QUERY} and (pointer: coarse), (pointer: coarse) and (max-width: 560px)`;
+
 /** How long the landscape top bar stays after the last interaction. */
 export const MEETING_CHROME_IDLE_MS = 3000;
 

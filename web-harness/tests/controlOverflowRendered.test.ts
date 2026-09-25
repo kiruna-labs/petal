@@ -881,8 +881,10 @@ test('on #239\'s landscape rail it measures the height, and re-fits on rotation'
     assert.equal(state.moreShown, true);
     for (const label of ['Share', 'Chat', 'Full screen']) assert.ok(state.shown.includes(label), `${label} stays in the rail`);
 
+    // A phone's menu ends with main.ts's developer row (#239's parked sheet).
+    const DEV = 'Developer & test tools';
     const menu = await openMenu(page);
-    assert.deepEqual(menu.rows.map((row) => row.label), ['Invite', 'Draw', 'React']);
+    assert.deepEqual(menu.rows.map((row) => row.label), ['Invite', 'Draw', 'React', DEV]);
     assertInside(menu.box, landscape, 'rail');
     assert.ok(menu.box.right <= state.bar.left + 0.5, 'the menu opens beside the rail, not over it');
     await page.keyboard.press('ArrowDown');
@@ -899,7 +901,7 @@ test('on #239\'s landscape rail it measures the height, and re-fits on rotation'
     // the menu.
     assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React']);
     assert.ok(!state.shown.includes('Full screen'));
-    assert.deepEqual((await openMenu(page)).rows.map((row) => row.label), ['Invite', 'Draw', 'React']);
+    assert.deepEqual((await openMenu(page)).rows.map((row) => row.label), ['Invite', 'Draw', 'React', DEV]);
     await page.keyboard.press('Escape');
 
     await page.setViewportSize(landscape);
@@ -916,7 +918,7 @@ test('on #239\'s landscape rail it measures the height, and re-fits on rotation'
     state = await barOf(page);
     assertFits(state, '375px rail');
     assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React', 'Full screen']);
-    assert.deepEqual((await openMenu(page)).rows.map((row) => row.label), ['Invite', 'Draw', 'React', 'Full screen']);
+    assert.deepEqual((await openMenu(page)).rows.map((row) => row.label), ['Invite', 'Draw', 'React', 'Full screen', DEV]);
     assert.deepEqual(errors, []);
   } finally {
     await close();
