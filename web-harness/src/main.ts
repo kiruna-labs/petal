@@ -566,9 +566,10 @@ Object.assign(ctx.cb, {
 });
 
 // #248: pinch / Ctrl-or-Cmd+wheel zoom, drag pan and double-tap fit/fill on
-// shared windows in View mode. Delegated on the tile surface, like draw.
+// shared windows in View mode. Delegated on the tile surface, like draw, but
+// for the wheel/touchmove listeners tiles.ts binds on each share tile.
 const shareZoom = setupShareZoom(ctx);
-Object.assign(ctx.cb, { shareZoomCommand: shareZoom.command });
+Object.assign(ctx.cb, { shareZoomCommand: shareZoom.command, bindShareZoomTile: shareZoom.bindTile });
 
 const harnessApi = setupHarnessApi(ctx, {
   nextRemoteControlSeq: remoteControlUi.nextRemoteControlSeq,

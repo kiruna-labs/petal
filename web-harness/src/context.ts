@@ -644,6 +644,9 @@ export interface HarnessCallbacks {
   /** #248: zoom a shared window in / out / back to fit (shareZoomUi.ts) --
    * the share header's overflow menu. Absent = not wired (tests). */
   shareZoomCommand?: (tile: HTMLElement, command: 'in' | 'out' | 'fit') => void;
+  /** #248: the zoom's non-passive wheel/touchmove listeners, bound per share
+   * tile rather than on the whole surface. Absent = not wired (tests). */
+  bindShareZoomTile?: (tile: HTMLElement) => void;
   publishViewerDemandForPublication: (ownerIdentity: string, publication: import('livekit-client').RemoteTrackPublication) => void;
   startViewerDemandHeartbeat: () => void;
   stopViewerDemandHeartbeat: () => void;

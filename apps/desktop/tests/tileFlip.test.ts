@@ -7,6 +7,7 @@ import {
   uniformFlipClipPath,
   uniformFlipKeyframes,
   uniformFlipTransform,
+  uniformFlipVisibleRect,
   visibleFlipRect,
   type FlipRect,
   type UniformFlip
@@ -110,6 +111,79 @@ test('an interrupted FLIP retargets from its visible, clipped box', () => {
   });
   assert.deepEqual(visibleFlipRect(painted, 200, 'none'), painted);
   assert.deepEqual(visibleFlipRect(painted, 0, 'inset(10px)'), painted);
+});
+
+/** Where a tile laid out at `next` paints `remaining` of the way back through
+ * `flip`, as getBoundingClientRect() reports it: transform in, clip out. */
+function paintedAt(next: FlipRect, flip: UniformFlip, remaining: number): FlipRect {
+  const scale = 1 + (flip.scale - 1) * remaining;
+  return {
+    left: next.left + flip.dx * remaining,
+    top: next.top + flip.dy * remaining,
+    width: next.width * scale,
+    height: next.height * scale
+  };
+}
+
+test('the visible box of a known FLIP frame is its painted box minus that frame\'s clip', () => {
+  const previous = { left: 10, top: 20, width: 391, height: 280 };
+  const next = { left: 12, top: 60, width: 258, height: 218 };
+  const flip = uniformFlip(previous, next)!;
+  assert.ok(flip.insetY > 0);
+  // The first frame shows exactly the old box, the last the new one.
+  assertRectClose(uniformFlipVisibleRect(paintedAt(next, flip, 1), flip, 1), previous);
+  assertRectClose(uniformFlipVisibleRect(paintedAt(next, flip, 0), flip, 0), next);
+  // Mid-flight it agrees with reading the same frame's clip-path back.
+  for (const remaining of [0.8, 0.5, 0.15]) {
+    const painted = paintedAt(next, flip, remaining);
+    const read = visibleFlipRect(painted, next.width, uniformFlipClipPath(flip, remaining, 16));
+    const known = uniformFlipVisibleRect(painted, flip, remaining);
+    for (const key of ['left', 'top', 'width', 'height'] as const) {
+      assert.ok(Math.abs(known[key] - read[key]) < 1e-2, `${remaining} ${key}: ${known[key]} vs ${read[key]}`);
+    }
+    assert.ok(known.height < painted.height - 1, 'the clip is really taken off');
+  }
+});
+
+/** The box a keyed-list FLIP's first frame shows, read off its css(). */
+function firstFrameVisible(css: string, next: FlipRect): FlipRect {
+  const transform = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(css)!;
+  const [x, y, scale] = [Number(transform[1]), Number(transform[2]), Number(transform[3])];
+  const clip = /clip-path: inset\((-?[\d.]+)px (-?[\d.]+)px (-?[\d.]+)px (-?[\d.]+)px/.exec(css);
+  const [top, right, bottom, left] = clip ? clip.slice(1, 5).map(Number) : [0, 0, 0, 0];
+  return {
+    left: next.left + x + scale * left,
+    top: next.top + y + scale * top,
+    width: scale * (next.width - left - right),
+    height: scale * (next.height - top - bottom)
+  };
+}
+
+test('a keyed-list FLIP interrupted by another starts from the box its last frame showed', () => {
+  const node = {} as Element;
+  const a = { left: 0, top: 0, width: 400, height: 225 } as DOMRect;
+  const b = { left: 0, top: 0, width: 240, height: 240 } as DOMRect;
+  const c = { left: 20, top: 10, width: 300, height: 150 } as DOMRect;
+  const first = uniformTileFlip(node, { from: a, to: b }, { duration: 60_000 });
+  const firstFlip = uniformFlip(a, b)!;
+  assert.ok(firstFlip.insetY > 20, 'a shape change, so the tile is clipped mid-flight');
+  // Svelte ticks the running animation to 60% of the way back...
+  first.tick!(0.4, 0.6);
+  // ...then a second join measures its painted (unclipped) box and cancels it.
+  const painted = paintedAt(b, firstFlip, 0.6) as DOMRect;
+  const visible = uniformFlipVisibleRect(painted, firstFlip, 0.6);
+  assert.ok(painted.height - visible.height > 40, 'painted and visible differ by the in-flight clip');
+  const second = uniformTileFlip(node, { from: painted, to: c }, { duration: 60_000 });
+  const shown = firstFrameVisible(second.css!(0, 1), c);
+  for (const key of ['left', 'top', 'width', 'height'] as const) {
+    assert.ok(Math.abs(shown[key] - visible[key]) < 0.01, `${key}: ${shown[key]} vs visible ${visible[key]}`);
+  }
+
+  // Once a FLIP has finished, the next one starts from the rect as measured.
+  second.tick!(1, 0);
+  assert.equal(uniformTileFlipInFlight(node), false);
+  const third = uniformTileFlip(node, { from: c, to: a }, { duration: 60_000 });
+  assertRectClose(firstFrameVisible(third.css!(0, 1), a), c);
 });
 
 test('a keyed-list FLIP registers its node as in flight for exactly its duration', () => {
