@@ -3036,7 +3036,9 @@ input[type='text']:disabled {
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
-  min-width: 0;
+  /* Never squashed: a cell narrower than its 44px button let the button
+     overlap the next one. What does not fit goes to the ⋯ menu instead. */
+  flex-shrink: 0;
 }
 
 .meeting-control-label.on {
@@ -3306,6 +3308,153 @@ input[type='text']:disabled {
 
 .control-button.slashed .slash {
   stroke-dashoffset: 0;
+}
+
+/* =========================================================================
+   Control-bar overflow (#247, controlOverflow.ts): the controls that do not
+   fit leave the bar for the ⋯ menu, drawn in the shared .meeting-menu
+   register (meeting-controls.css) like the desktop's More menus.
+   ========================================================================= */
+/* `!important`, like the `.hidden` utility: a layout that shows a cell with
+   its own `display` (the landscape rail's Full screen cell, #239) must not
+   bring it back while it is in the menu. */
+.control-cell.overflowed {
+  display: none !important;
+}
+
+/* Load-bearing, the `[hidden]` vs author `display` trap again: ⋯ is hidden
+   whenever everything fits. */
+.control-cell.overflow-cell[hidden] {
+  display: none !important;
+}
+
+/* A control in the menu wants attention (unread chat, a plugin badge): the
+   chat badge's color, as a dot on ⋯ -- or the sharer's identity color while
+   the screen share in there is live, as on the Share button itself. */
+.overflow-dot {
+  position: absolute;
+  top: 1px;
+  left: calc(50% + 10px);
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border: 2px solid var(--bg-base);
+  border-radius: var(--radius-pill);
+  background: var(--live-bright);
+  pointer-events: none;
+}
+
+.overflow-dot.live {
+  background: var(--control-live-bg, var(--live-bright));
+}
+
+/* Touch only (controlOverflow.ts): takes the tap that dismisses the menu, so
+   it cannot also land on a control, Leave included. */
+.overflow-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+/* Fixed and placed by measurement (placeOverflowMenu), like the device
+   menus; invisible until placed, so it never flashes at 0,0. */
+.overflow-menu {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 21;
+  width: max-content;
+  visibility: hidden;
+}
+
+.overflow-menu.placed {
+  visibility: visible;
+}
+
+.overflow-menu[hidden] {
+  display: none;
+}
+
+/* Between the hidden controls and the menu's own rows (dev tools, #239). */
+.overflow-menu-divider {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 4px;
+  background: var(--hairline);
+}
+
+.overflow-menu-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.overflow-menu-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-soft);
+}
+
+.overflow-menu-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Why a control is unavailable (Draw's "Nothing to draw on"). */
+.overflow-menu-note {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+/* aria-disabled, not :disabled -- the row stays focusable (controlOverflow.ts). */
+.overflow-menu-row[aria-disabled='true'] {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.overflow-menu-row[aria-disabled='true'] .overflow-menu-icon {
+  opacity: var(--disabled-opacity);
+}
+
+/* A finger's target, like the controls themselves. */
+@media (pointer: coarse) {
+  .overflow-menu-row {
+    min-height: 44px;
+  }
+}
+
+/* The state the button showed in the bar, as Gallery.svelte's
+   .more-item-state: "On", a live share, an unread count. */
+.overflow-menu-state {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font: 700 10px / 1 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.overflow-menu-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: var(--radius-pill);
+  background: var(--live-bright);
+  color: var(--bg-base);
+  font: 600 10px / 16px var(--font-ui);
+  letter-spacing: 0;
+  text-align: center;
+}
+
+/* Same colors as the live Share button: the sharer's identity color. */
+.overflow-menu-live {
+  padding: 3px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--control-live-bg, var(--live-tint));
+  color: var(--control-live-fg, var(--live-bright));
 }
 
 /* =========================================================================

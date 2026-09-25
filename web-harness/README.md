@@ -59,6 +59,10 @@ LIVEKIT_URL=ws://localhost:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret
      `petal-window-<random u32>` name with H.264 forced. Green = live.
    - **Invite** — copies the `?code=` join link, confirms with a toast.
    - **Leave** — disconnects and returns to the join screen.
+   - **⋯ More** — only when the controls do not fit the bar (measured, not a
+     breakpoint): everything but Audio, Video and Leave moves into its menu,
+     least-used first, carrying each control's state; a dot on ⋯ flags
+     unread chat or a live share in there (`src/controlOverflow.ts`).
 4. **Developer & test tools** (collapsible drawer, closed by default):
    Network diagnostics (nested, also closed by default), the synthetic
    test-pattern share + 440Hz tone, raw state readouts, and the live
