@@ -348,16 +348,24 @@
     <div id="toast" class="toast hidden" role="status"></div>
 
     <dialog id="feedback-dialog" class="feedback-dialog" aria-labelledby="feedback-dialog-title" aria-describedby="feedback-dialog-description">
-      <form id="feedback-form" method="dialog" class="feedback-form">
+      <!-- novalidate: the shared feedbackEmail.ts rule decides, not the browser's own type=email check (#245). -->
+      <form id="feedback-form" method="dialog" class="feedback-form" novalidate>
         <div>
           <h2 id="feedback-dialog-title">Send feedback</h2>
-          <p id="feedback-dialog-description">Your message is sent to UserDispatch. You can also explicitly include a redacted diagnostics file.</p>
+          <p id="feedback-dialog-description">Your message and email address are sent to UserDispatch. You can also explicitly include a redacted diagnostics file.</p>
         </div>
         <label class="feedback-field" for="feedback-message">What happened?</label>
         <textarea id="feedback-message" name="message" maxlength="2000" required rows="5" aria-describedby="feedback-message-disclosure"></textarea>
         <p id="feedback-message-disclosure" class="feedback-disclosure">Do not include sensitive information. UserDispatch and your browser may receive request metadata such as IP address, Origin, or Referrer. <a href="https://userdispatch.com/privacy" target="_blank" rel="noreferrer">Privacy Policy</a></p>
+        <label class="feedback-field" for="feedback-email">Your email</label>
+        <input id="feedback-email" name="email" type="email" required autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" aria-describedby="feedback-email-error feedback-email-hint" />
+        <!-- Always-rendered live region: only the error inside it toggles, so it is announced; the static hint never is. -->
+        <div class="feedback-email-notes" aria-live="polite">
+          <p id="feedback-email-error" class="feedback-field-error" hidden></p>
+          <p id="feedback-email-hint" class="feedback-disclosure">So we can reply. We won't verify it. Remembered on this device.</p>
+        </div>
         <label class="feedback-consent"><input id="feedback-consent" type="checkbox" /> Send the attached redacted diagnostics file to UserDispatch</label>
-        <p class="feedback-disclosure">The attachment contains only fixed diagnostic codes and connection state. It never includes screen or window content, screenshots, room names, identities, chat, console output, or raw session logs.</p>
+        <p class="feedback-disclosure">The attachment is a small fixed header (connection state, a timestamp, event codes) plus the end of this tab's Petal log, with the room names, invite codes, identities and display names of every meeting in it redacted. It never includes screenshots, video, or chat messages.</p>
         <p id="feedback-status" class="feedback-status" role="status" aria-live="polite"></p>
         <div class="feedback-actions">
           <button id="feedback-cancel" class="btn secondary" type="button">Cancel</button>

@@ -363,15 +363,18 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       location.origin,
       cb.roomDisplayLabelForCredential(state.currentMeetingCode)
     );
+    // The link itself is never logged (#245): it carries the joinable access
+    // code and the room's label, and the session log can be attached to a
+    // feedback report. The toast shows it.
     try {
       await navigator.clipboard.writeText(url);
       showToast(inviteLinkCopiedToastMessage(url));
-      logEvent(`invite link copied: ${url}`, 'ok');
+      logEvent('invite link copied', 'ok');
     } catch {
       // Clipboard API unavailable (e.g. insecure context) -- surface the link
-      // in the toast + log instead of failing silently.
+      // in the toast instead of failing silently.
       showToast(inviteLinkCopiedToastMessage(url));
-      logEvent(`clipboard unavailable -- invite link: ${url}`, 'warn');
+      logEvent('clipboard unavailable -- invite link shown in the toast', 'warn');
     }
   }
 
