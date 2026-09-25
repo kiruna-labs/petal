@@ -30,6 +30,7 @@ import { addSentryBreadcrumb, initSentry, installGlobalErrorMirror } from './sen
 import { initAnalytics } from './analytics';
 import { FeedbackReportController } from './feedbackReport';
 import { sensitiveStringRegistry } from './sensitiveStrings';
+import { isPhoneOrTablet } from './mobileDevice';
 import {
   HARNESS_COLOR_STORAGE_KEY,
   HARNESS_DEBUG_MODE_STORAGE_KEY,
@@ -187,6 +188,8 @@ displayNameInput.value = localStorage.getItem(HARNESS_NAME_STORAGE_KEY) ?? '';
 const storedProfileColor = localStorage.getItem(HARNESS_COLOR_STORAGE_KEY);
 meetingCodeInput.value = localStorage.getItem(HARNESS_ROOM_STORAGE_KEY) ?? '';
 if (desktopDownload) {
+  // A phone or tablet has no desktop app to install (#243).
+  desktopDownload.classList.toggle('hidden', isPhoneOrTablet(navigator));
   const platform = /Windows/i.test(`${navigator.userAgent} ${navigator.platform}`) ? 'windows' : 'macos';
   desktopDownload.href = `https://app.petal.live/api/download?platform=${platform}`;
   desktopDownload.textContent = platform === 'windows'
