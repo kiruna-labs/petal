@@ -664,6 +664,33 @@ test('#239 the rail full-screen button enters and leaves real full screen, and f
   }
 });
 
+test('#239 a toast with an action keeps its width on a phone instead of wrapping a few letters per line', { timeout: 60_000 }, async () => {
+  const page = await openMeeting(PORTRAIT_PHONE, 1);
+  try {
+    // The shared Toast pill's layout (icon, a message that may shrink, an
+    // action that may not), in the real #toast host and stylesheet.
+    const box = await page.evaluate(() => {
+      const host = document.querySelector<HTMLElement>('#toast')!;
+      host.innerHTML =
+        '<div style="display:inline-flex;align-items:center;gap:10px;padding:9px 16px;box-sizing:border-box">' +
+        '<span style="width:16px;height:16px;flex-shrink:0"></span>' +
+        '<span class="probe-message" style="flex:1 1 auto;min-width:0;font:500 13px/1.35 sans-serif">Alice Chen is sharing a window</span>' +
+        '<button style="flex-shrink:0;white-space:nowrap;font:600 13px sans-serif;padding:4px 10px">Bring to front</button></div>';
+      host.classList.remove('hidden');
+      const message = host.querySelector<HTMLElement>('.probe-message')!;
+      const lineHeight = parseFloat(getComputedStyle(message).lineHeight);
+      const r = host.getBoundingClientRect();
+      return { width: r.width, left: r.left, right: r.right, lines: Math.round(message.getBoundingClientRect().height / lineHeight) };
+    });
+    assert.ok(box.lines <= 2, `the message takes ${box.lines} lines`);
+    assert.ok(box.width > 412 / 2, `the toast is ${Math.round(box.width)}px wide, more than half the screen`);
+    assert.ok(box.left >= 0 && box.right <= 412, 'on screen');
+    assert.ok(Math.abs((box.left + box.right) / 2 - 206) <= 1, 'centred');
+  } finally {
+    await page.context().close();
+  }
+});
+
 test('#239 full screen is one tap, hides the navigation UI, and is absent where unsupported', { timeout: 60_000 }, async () => {
   const page = await openMeeting(PORTRAIT_PHONE, 1, {
     setup: (p) =>
