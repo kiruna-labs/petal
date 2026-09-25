@@ -4091,6 +4091,12 @@ input[type='text']:disabled {
   left: 50%;
   bottom: 92px;
   transform: translateX(-50%);
+  /* Without an explicit width a box at left: 50% shrinks to fit the half
+     of the screen right of its left edge: on a phone a toast with an action
+     ("... is sharing a window" + Bring to front) squeezed its message to a
+     few letters per line. max-content up to the cap gives it the width it
+     needs, then it wraps. */
+  width: max-content;
   max-width: min(360px, calc(100vw - 48px));
   overflow-wrap: anywhere;
   white-space: pre-line;
