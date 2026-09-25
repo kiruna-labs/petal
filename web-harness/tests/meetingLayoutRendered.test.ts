@@ -339,6 +339,48 @@ test('#239 a landscape phone gets a slim control rail and two tiles covering ove
   }
 });
 
+test('#239 a short last row sits centred under the full rows: 5 tiles as 3+2, 7 as 4+3', { timeout: 60_000 }, async () => {
+  // The grid runs on half tracks (--gallery-half-tracks, an integer from
+  // tileLayout.ts), and the tail row's first tile starts half a column in.
+  // Were the template dropped, every tile would stack in one column.
+  for (const [label, device, count, expected] of [
+    ['desktop', DESKTOP, 5, [3, 2]],
+    ['landscape phone', LANDSCAPE_PHONE, 5, [3, 2]],
+    ['landscape phone', LANDSCAPE_PHONE, 7, [4, 3]],
+  ] as const) {
+    const page = await openMeeting(device, count);
+    try {
+      await setLayout(page, 'Grid view');
+      type Cell = { left: number; right: number; width: number };
+      const { tracks, rows }: { tracks: number; rows: Cell[][] } = await page.evaluate(() => {
+        const tiles = document.querySelector<HTMLElement>('#tiles')!;
+        const byTop = new Map<number, { left: number; right: number; width: number }[]>();
+        for (const tile of tiles.querySelectorAll<HTMLElement>(':scope > .tile')) {
+          const r = tile.getBoundingClientRect();
+          const top = Math.round(r.top);
+          byTop.set(top, [...(byTop.get(top) ?? []), { left: r.left, right: r.right, width: r.width }]);
+        }
+        return {
+          tracks: getComputedStyle(tiles).gridTemplateColumns.split(' ').length,
+          rows: [...byTop.entries()].sort(([a], [b]) => a - b).map(([, cells]) => cells.sort((a, b) => a.left - b.left)),
+        };
+      });
+      const what = `${label}, ${count} tiles`;
+      assert.equal(tracks, expected[0] * 2, `${what}: two half tracks per column`);
+      assert.deepEqual(rows.map((cells) => cells.length), expected, `${what}: rows of ${expected.join('+')}`);
+      const widths = rows.flat().map((cell) => Math.round(cell.width));
+      assert.equal(new Set(widths).size, 1, `${what}: every tile one size (${widths.join(', ')})`);
+      const centre = (cells: readonly Cell[]) => (cells[0].left + cells[cells.length - 1].right) / 2;
+      assert.ok(
+        Math.abs(centre(rows[1]) - centre(rows[0])) <= 1,
+        `${what}: the last row is centred (${centre(rows[1]).toFixed(1)} vs ${centre(rows[0]).toFixed(1)})`
+      );
+    } finally {
+      await page.context().close();
+    }
+  }
+});
+
 test('#239 landscape spotlight strip is a side column that scrolls to every participant', { timeout: 60_000 }, async () => {
   const page = await openMeeting(LANDSCAPE_PHONE, 8);
   try {
