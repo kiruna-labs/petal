@@ -72,8 +72,8 @@ test('planOverflow keeps room for a ⋯ that shows anyway (the menu has items of
   assert.deepEqual([...planOverflow(phoneBar(), 484, PHONE_CANDIDATES, 'more', true)], ['react']);
 });
 
-test('collapse order: plugins and unknown cells first (furthest along first), then Draw, Invite, Full screen, Chat, Share; never Mic, Camera or Leave', () => {
-  assert.deepEqual(COLLAPSE_ORDER, ['ctl-draw', 'ctl-invite', 'ctl-fullscreen', 'ctl-chat', 'ctl-share']);
+test('collapse order: plugins and unknown cells first (furthest along first), then Draw, Invite, Chat, Share, Full screen; never Mic, Camera or Leave', () => {
+  assert.deepEqual(COLLAPSE_ORDER, ['ctl-draw', 'ctl-invite', 'ctl-chat', 'ctl-share', 'ctl-fullscreen']);
   const bar = [
     { cell: 'mic', controlId: 'ctl-audio' },
     { cell: 'camera', controlId: 'ctl-video' },
@@ -86,8 +86,8 @@ test('collapse order: plugins and unknown cells first (furthest along first), th
     { cell: 'fullscreen', controlId: 'ctl-fullscreen' },
     { cell: 'leave', controlId: 'ctl-leave' },
   ];
-  // Full screen (#239's rail) outlasts Draw and Invite.
-  assert.deepEqual(collapseCandidates(bar), ['poll', 'react', 'draw', 'invite', 'fullscreen', 'chat', 'share']);
+  // Full screen (#239's rail) is the last to give way.
+  assert.deepEqual(collapseCandidates(bar), ['poll', 'react', 'draw', 'invite', 'chat', 'share', 'fullscreen']);
 });
 
 test('the menu opens above a bottom bar, right-aligned with ⋯, and inside the viewport', () => {

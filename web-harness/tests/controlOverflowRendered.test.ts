@@ -906,7 +906,7 @@ test('on a vertical rail (a stand-in for #239\'s landscape layout) it measures t
     assert.equal(state.vertical, true, 'the stand-in lays the bar out as a column');
     assertFits(state, 'rail');
     // A 915px-wide bottom bar would fit everything: only the height hides
-    // these. Full screen outlasts Draw and Invite; Share and Chat stay too.
+    // these. Share, Chat and Full screen stay (Full screen is the last to go).
     assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React']);
     assert.equal(state.moreShown, true);
     for (const label of ['Share', 'Chat', 'Full screen']) assert.ok(state.shown.includes(label), `${label} stays in the rail`);
@@ -937,14 +937,25 @@ test('on a vertical rail (a stand-in for #239\'s landscape layout) it measures t
     assertFits(state, 'rotated back');
     assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React']);
 
-    // A shorter phone (iPhone SE landscape): Full screen goes too, and stays
-    // gone although the rail's own rule shows that cell.
+    // A shorter phone (iPhone SE landscape): Chat goes before Full screen,
+    // which is the only way to hide a phone browser's address bar.
     await page.setViewportSize({ width: 667, height: 375 });
     await settle(page);
     state = await barOf(page);
     assertFits(state, '375px rail');
-    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React', 'Full screen']);
-    assert.deepEqual((await openMenu(page)).rows.map((row) => row.label), ['Invite', 'Draw', 'React', 'Full screen']);
+    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'Chat', 'React']);
+    assert.ok(state.shown.includes('Full screen'), 'Full screen stays in a 375px rail');
+    assert.deepEqual((await openMenu(page)).rows.map((row) => row.label), ['Invite', 'Draw', 'Chat', 'React']);
+    await page.keyboard.press('Escape');
+
+    // Shorter still: Full screen goes too, and stays gone although the rail's
+    // own rule shows that cell.
+    await page.setViewportSize({ width: 667, height: 290 });
+    await settle(page);
+    state = await barOf(page);
+    assertFits(state, '290px rail');
+    assert.ok(state.hidden.includes('Full screen'), 'Full screen is in the ⋯ menu on a 290px rail');
+    assert.ok((await openMenu(page)).rows.map((row) => row.label).includes('Full screen'));
     assert.deepEqual(errors, []);
   } finally {
     await close();
