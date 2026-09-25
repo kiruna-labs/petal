@@ -462,31 +462,8 @@ body {
   background: radial-gradient(58% 80% at 82% 24%, rgba(52, 199, 89, 0.1), transparent 70%);
 }
 
-.quiet-eyebrow,
 .quiet-title {
   position: relative;
-}
-
-.quiet-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font: 500 10.5px var(--font-mono);
-  letter-spacing: 0.06em;
-  color: rgba(255, 255, 255, 0.4);
-  margin-bottom: 8px;
-}
-
-.quiet-ring {
-  width: 7px;
-  height: 7px;
-  border-radius: var(--radius-pill);
-  border: 1.5px solid rgba(255, 255, 255, 0.4);
-  box-sizing: border-box;
-  flex-shrink: 0;
-}
-
-.quiet-title {
   margin: 0;
   max-width: 280px;
   font: 600 22px var(--font-ui);
@@ -576,8 +553,9 @@ input[type='text'] {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
-  width: min(212px, calc(100vw - 48px), 100%);
-  max-inline-size: 100%;
+  /* Sized from the viewport, not the picker: the picker is now just the
+     bubble's width, beside Save (#243). */
+  width: min(212px, calc(100vw - 48px));
   padding: 8px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 12px;
@@ -631,18 +609,21 @@ input[type='text'] {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
 }
 
+/* Name and colour card. Shell as the desktop IdentitySetup card (popover
+   radius, 16px padding); heading, name, then one row with the colour bubble
+   left and Save right (#243). */
 .profile-onboarding {
   display: grid;
   gap: 12px;
   margin-bottom: 14px;
-  padding: 12px;
+  padding: 16px;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 12px;
+  border-radius: var(--radius-popover);
   background: rgba(255, 255, 255, 0.055);
 }
 
 .profile-onboarding h2 {
-  margin: 0 0 4px;
+  margin: 0;
   font: 700 14px var(--font-ui);
   color: var(--text-primary);
 }
@@ -655,8 +636,18 @@ input[type='text'] {
 
 .profile-onboarding-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* The bubble's 3px halo lines up with the name field's edge above it. */
+.profile-onboarding-actions .color-bubble {
+  margin-inline-start: 3px;
+}
+
+.profile-onboarding-actions .btn {
+  min-width: 96px;
 }
 
 .meeting-field input[type='text'] {
@@ -982,7 +973,31 @@ input[type='text']:disabled {
   border-radius: 3px;
 }
 
-@media (max-width: 420px) {
+/* Phones, both orientations (#243): the home screen is the whole screen.
+   - Full-bleed card at the dynamic viewport height. 100vh alone is the
+     tallest viewport on Android and iOS (URL bar hidden), which pushed the
+     footer below the fold; 100dvh follows the URL bar.
+   - The quiet hero stops being a band: its gradient and green bloom become
+     the backdrop of the whole screen.
+   - One column, capped at 440px. Top bar at the top, footer at the bottom,
+     and the free space between them split 1:2 by three auto margins (above
+     the title, below the fields, above the footer): the title lands at the
+     optical centre and the fields sit high, clear of the on-screen keyboard.
+     The margins collapse when the name card or recent rooms need the room:
+     the page scrolls, nothing overlaps.
+   - The gutters include the safe-area insets, for the notch once the
+     viewport is `viewport-fit=cover`.
+   Landscape phones get two columns below. */
+@media (max-width: 600px), (max-height: 500px) {
+  /* Rubber-banding past the top shows the canvas: paint it the backdrop's
+     top colour (the --hero-gradient start), not the darker --bg-base. No
+     single colour matches both ends of the gradient, so a bounce past the
+     bottom shows this against the darker #0b0c0e; the top, where pull-down
+     happens, is the edge that matters. */
+  :root:has(.join-screen:not(.hidden)) {
+    background-color: #16181b;
+  }
+
   .join-screen {
     align-items: stretch;
     padding: 0;
@@ -991,15 +1006,95 @@ input[type='text']:disabled {
   .join-card {
     width: 100%;
     min-height: 100vh;
+    min-height: 100dvh;
     max-height: none;
+    overflow: visible;
+    padding-left: max(20px, env(safe-area-inset-left, 0px), calc((100% - 440px) / 2));
+    padding-right: max(20px, env(safe-area-inset-right, 0px), calc((100% - 440px) / 2));
+    border: 0;
     border-radius: 0;
-    border-inline: 0;
+    box-shadow: none;
+    background:
+      radial-gradient(360px 300px at 88% 0%, rgba(52, 199, 89, 0.1), transparent 70%),
+      var(--hero-gradient);
+  }
+
+  .home-topbar,
+  .home-body,
+  .web-status-bar {
+    padding-inline: 0;
+  }
+
+  .home-topbar {
+    height: auto;
+    min-height: 52px;
+    padding-top: calc(6px + env(safe-area-inset-top, 0px));
+  }
+
+  .hero-quiet {
+    height: auto;
+    margin-top: auto;
+    padding: 24px 0 20px;
+    overflow: visible;
+    background: none;
+  }
+
+  .quiet-bloom {
+    display: none;
+  }
+
+  .quiet-title {
+    max-width: 320px;
+    font-size: var(--text-hero);
+  }
+
+  .home-body {
+    flex: 0 0 auto;
+    margin-bottom: auto;
+  }
+}
+
+/* Landscape phones (#243): one column cannot fit the title, the name card
+   and the fields in ~360px of height, so the title takes the left column
+   and the fields the right, both centred between the top bar and the
+   footer. Not the connecting card, which stays one centred stack. */
+@media (max-height: 500px) and (min-width: 640px) {
+  .join-card:not(.connecting-card) {
+    display: grid;
+    grid-template-columns: minmax(0, min(380px, 42%)) minmax(0, 440px);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    justify-content: center;
+    column-gap: 40px;
+    padding-left: max(24px, env(safe-area-inset-left, 0px));
+    padding-right: max(24px, env(safe-area-inset-right, 0px));
+  }
+
+  .home-topbar,
+  .web-status-bar {
+    grid-column: 1 / -1;
+  }
+
+  .hero-quiet {
+    margin: 0;
+    padding: 0;
+    align-self: center;
+  }
+
+  .home-body {
+    margin: 0;
+    align-self: center;
+    min-width: 0;
   }
 
   .web-status-bar {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .web-status-bar {
     flex-direction: column;
     gap: 2px;
-    padding-inline: 12px;
   }
 }
 
