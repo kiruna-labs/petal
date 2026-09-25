@@ -10,9 +10,9 @@
   long words break, long names ellipsize, nothing scrolls horizontally. The
   composer is one row, Send beside the input, and the character count only
   shows near the limit, so short viewports keep their height for messages
-  (#246). Enter sends, Shift+Enter inserts a line break. The list pins to the
-  bottom while the reader is at the bottom and stays put when they have
-  scrolled up to read.
+  (#246); a screen reader hears only going over it. Enter sends, Shift+Enter
+  inserts a line break. The list pins to the bottom while the reader is at
+  the bottom and stays put when they have scrolled up to read.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -151,7 +151,11 @@
       data-testid="chat-input"
     ></textarea>
     <div class="chat-compose-side">
-      <span class="chat-count" class:over={overLimit} aria-live="polite">{remaining < 200 ? remaining : ''}</span>
+      <span class="chat-count" class:over={overLimit}>{remaining < 200 ? remaining : ''}</span>
+      <!-- Only going over the limit is announced, once: a live count would
+           read out every keystroke. Always rendered (visually hidden, never
+           display: none) so screen readers track it before it first speaks. -->
+      <span class="chat-limit-status" role="status">{overLimit ? `Too long to send: ${CHAT_LIMITS.maxTextChars} characters at most` : ''}</span>
       <!-- Keep focus in the input on tap, so the soft keyboard stays up
            between messages; click still submits. -->
       <button type="submit" class="chat-send" disabled={!sendable} data-testid="chat-send" onpointerdown={(e) => e.preventDefault()}>Send</button>
@@ -320,6 +324,17 @@
   }
   .chat-count.over {
     color: var(--warning, #f0b429);
+  }
+  .chat-limit-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
   .chat-send {
     height: 36px;
