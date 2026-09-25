@@ -251,6 +251,8 @@ export function inviteInterstitialHtml(args: {
     line-height: 1.06;
     font-weight: 760;
     text-wrap: balance;
+    /* A long label with no spaces (a slug) wraps instead of widening the page. */
+    overflow-wrap: anywhere;
   }
   .copy {
     max-width: 36rem;
@@ -259,6 +261,7 @@ export function inviteInterstitialHtml(args: {
     line-height: 1.55;
     color: rgba(245, 246, 247, 0.72);
     text-wrap: pretty;
+    overflow-wrap: anywhere;
   }
   .actions {
     display: grid;
