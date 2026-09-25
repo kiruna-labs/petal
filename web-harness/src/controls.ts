@@ -44,6 +44,7 @@ import {
 } from './cameraFrameAdvance.ts';
 import { AUDIBILITY_RMS_BAR, assertRemoteAudioOraclesAgree } from './audioOracleAgreement.ts';
 import { setRoomDisplayLabel } from './roomLabels.ts';
+import { registerMeetingAliases, sensitiveStringRegistry } from './sensitiveStrings.ts';
 import { inviteLinkCopiedToastMessage } from './inviteToast.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
 import { PresentationSourceHost } from './presentationSourceHost.ts';
@@ -124,6 +125,19 @@ export function supportsAudioOutputSelection(): boolean {
     typeof HTMLMediaElement !== 'undefined' &&
     'setSinkId' in HTMLMediaElement.prototype
   );
+}
+
+/**
+ * Whether this browser can share its screen at all. Phones cannot: Chrome for
+ * Android and iPhone Safari have no `getDisplayMedia`, and no browser exposes
+ * `navigator.mediaDevices` outside a secure context. Feature detection, not
+ * the user agent, so a browser that gains the API gets Share back unchanged.
+ * Every surface that offers Share must ask this first (#240).
+ */
+export function supportsScreenShare(
+  mediaDevices: Partial<MediaDevices> | undefined = globalThis.navigator?.mediaDevices
+): boolean {
+  return typeof mediaDevices?.getDisplayMedia === 'function';
 }
 
 export function resolvePersistedDeviceId(devices: Pick<MediaDeviceInfo, 'deviceId'>[], storedId: string | null): string {
@@ -294,7 +308,11 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
   }
 
   function renameRoomDisplayName(code: string, displayName: string | null): string {
-    return setRoomDisplayLabel(code, displayName);
+    const label = setRoomDisplayLabel(code, displayName);
+    // #245: the meeting's new label and invite slug are redacted like the
+    // ones registered when it connected.
+    if (state.currentMeetingCode === code) registerMeetingAliases(sensitiveStringRegistry, code, label);
+    return label;
   }
 
   function credentialForNewMeeting(label?: string): string {
@@ -329,6 +347,17 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     await runWebMeetingAction(action, task, { showError, showToast, logEvent });
   }
 
+  // Leave: full disconnect (the Disconnected handler resets state + returns
+  // to the join screen). Also the "Leave" of the #244 Back confirm.
+  async function leaveMeeting() {
+    await runMeetingAction('leave', async () => {
+      if (state.room) {
+        noteLeaveRequested();
+        await state.room.disconnect();
+      }
+    });
+  }
+
   async function submitMeetingField() {
     await submitWebCreateJoinAction({
       clearError,
@@ -350,15 +379,18 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       location.origin,
       cb.roomDisplayLabelForCredential(state.currentMeetingCode)
     );
+    // The link itself is never logged (#245): it carries the joinable access
+    // code and the room's label, and the session log can be attached to a
+    // feedback report. The toast shows it.
     try {
       await navigator.clipboard.writeText(url);
       showToast(inviteLinkCopiedToastMessage(url));
-      logEvent(`invite link copied: ${url}`, 'ok');
+      logEvent('invite link copied', 'ok');
     } catch {
       // Clipboard API unavailable (e.g. insecure context) -- surface the link
-      // in the toast + log instead of failing silently.
+      // in the toast instead of failing silently.
       showToast(inviteLinkCopiedToastMessage(url));
-      logEvent(`clipboard unavailable -- invite link: ${url}`, 'warn');
+      logEvent('clipboard unavailable -- invite link shown in the toast', 'warn');
     }
   }
 
@@ -1126,15 +1158,8 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       void submitMeetingField();
     });
 
-    // Leave: full disconnect (the Disconnected handler resets state + returns
-    // to the join screen).
-    ctlLeave.addEventListener('click', async () => {
-      await runMeetingAction('leave', async () => {
-        if (state.room) {
-          noteLeaveRequested();
-          await state.room.disconnect();
-        }
-      });
+    ctlLeave.addEventListener('click', () => {
+      void leaveMeeting();
     });
 
     // Invite: copy a click-to-join web link for this meeting. The path carries
@@ -1417,11 +1442,24 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     // this comment claims. NOTE: the getDisplayMedia picker cannot be
     // clicked by unattended automation -- that is exactly why the synthetic
     // test-pattern share in the dev panel is kept as a first-class option.
+    // Where there is no getDisplayMedia (phones) the whole cell is hidden: a
+    // Share button there could only ever fail. The dev panel's test-pattern
+    // share needs no display capture and stays.
     // -----------------------------------------------------------------------
+    const ctlShareCell = ctlShare.closest<HTMLElement>('.control-cell');
+    if (ctlShareCell) ctlShareCell.hidden = !supportsScreenShare();
+
     ctlShare.addEventListener('click', async () => {
       if (!state.room) return;
 
       if (!state.screenSharing) {
+        // The cell is hidden on such browsers; if a click lands anyway, say
+        // what is wrong. There is no picker, so nothing was "cancelled".
+        if (!supportsScreenShare()) {
+          logEvent('screen share unavailable: no getDisplayMedia', 'error');
+          showToast("Screen sharing isn't available in this browser");
+          return;
+        }
         let stream: MediaStream;
         feedbackReport?.onShareStartIntent();
         logEvent('requesting screen capture (watch for the browser picker)…');
@@ -1779,6 +1817,7 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     installControls,
     resolveIdentity,
     submitMeetingField,
+    leaveMeeting,
     renameRoomDisplayName,
     startTestPatternShare,
     startCockpitWebcam,

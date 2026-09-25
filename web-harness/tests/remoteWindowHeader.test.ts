@@ -540,6 +540,50 @@ test('#497: small-tile overflow menu keeps full labels and invokes all three mod
   }
 });
 
+test('#248: the overflow menu offers Zoom in / Zoom out / Fit when the zoom controller is wired', () => {
+  const commands: string[] = [];
+  const harness = createHarness({}, {
+    shareZoomCommand: (_tile: HTMLElement, command: string) => {
+      commands.push(command);
+      (harness.tile as unknown as FakeElement).classList.toggle('is-share-zoomed', command !== 'fit');
+      harness.controller.syncMode();
+    },
+  });
+  try {
+    const overflow = buttonByAria(harness.root, 'More remote window modes');
+    const menu = harness.root.querySelector('.remote-window-header__overflow-menu') as unknown as FakeElement;
+    const items = menu.querySelectorAll('.remote-window-header__overflow-item') as unknown as FakeElement[];
+    assert.deepEqual(items.map(elementText), [
+      'View shared window',
+      'Request remote control',
+      'Draw on shared window',
+      'Zoom in',
+      'Zoom out',
+      'Fit window',
+    ]);
+    const [zoomIn, zoomOut, fit] = items.slice(3);
+    assert.equal(zoomIn.getAttribute('role'), 'menuitem');
+    // At fit there is nothing to zoom out of or fit back to.
+    assert.equal(zoomOut.getAttribute('aria-disabled'), 'true');
+    assert.equal(fit.getAttribute('aria-disabled'), 'true');
+
+    overflow.click();
+    zoomIn.click();
+    assert.deepEqual(commands, ['in']);
+    assert.equal(menu.hidden, true, 'a command closes the menu');
+    assert.equal(zoomOut.getAttribute('aria-disabled'), 'false');
+    assert.equal(fit.getAttribute('aria-disabled'), 'false');
+
+    overflow.click();
+    fit.click();
+    assert.deepEqual(commands, ['in', 'fit']);
+    assert.equal(fit.getAttribute('aria-disabled'), 'true');
+  } finally {
+    harness.controller.destroy();
+    harness.restore();
+  }
+});
+
 test('#497: small-tile overflow menu escapes tile clipping and closes on outside click', () => {
   const harness = createHarness();
   try {
@@ -578,8 +622,12 @@ test('remote window header CSS pins native silhouette and responsive contract', 
   assert.match(indicator, /width\s*:\s*var\(--segment-width\)/i);
   assert.match(indicator, /transform\s*:\s*translateX\(calc\(var\(--active-mode-index\) \* var\(--segment-width\)\)\)/i);
 
-  for (const width of [720, 640, 560, 470, 300]) {
+  // #239 folded the switcher at 640px of TILE width (a landscape phone's
+  // spotlight hero); the viewport fallback keeps 470px.
+  for (const width of [720, 640, 560, 300]) {
     assert.match(css, new RegExp(`@container\\s*\\(max-width:\\s*${width}px\\)`, 'i'));
+  }
+  for (const width of [720, 640, 560, 470, 300]) {
     assert.match(css, new RegExp(`@media\\s*\\(max-width:\\s*${width}px\\)`, 'i'));
   }
 });
@@ -587,9 +635,9 @@ test('remote window header CSS pins native silhouette and responsive contract', 
 test('#497: small tiles replace the segmented switcher with a full-label overflow menu', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
 
-  for (const rule of ['@container', '@media']) {
+  for (const [rule, width] of [['@container', 640], ['@media', 470]]) {
     const narrow = new RegExp(
-      `${rule} \\(max-width: 470px\\) \\{([\\s\\S]*?)\\n\\}`
+      `${rule} \\(max-width: ${width}px\\) \\{([\\s\\S]*?)\\n\\}`
     ).exec(css)?.[1] ?? '';
     assert.match(narrow, /\.remote-window-header__mode-switcher\s*\{\s*display:\s*none;/);
     assert.match(narrow, /\.remote-window-header__overflow-button\s*\{\s*display:\s*inline-flex;/);

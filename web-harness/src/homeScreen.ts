@@ -71,13 +71,15 @@ export async function copyRecentRoomInviteLink({
   logEvent,
 }: RecentRoomInviteCopyOptions): Promise<string> {
   const url = inviteLinkForCredential(credential, origin, displayLabel);
+  // Never log the link itself (#245): it carries the joinable access code and
+  // the room's label, and the session log can go out with a feedback report.
   try {
     await clipboard.writeText(url);
     showToast?.(inviteLinkCopiedToastMessage(url));
-    logEvent?.(`invite link copied: ${url}`, 'ok');
+    logEvent?.('invite link copied', 'ok');
   } catch {
     showToast?.(inviteLinkCopiedToastMessage(url));
-    logEvent?.(`clipboard unavailable -- invite link: ${url}`, 'warn');
+    logEvent?.('clipboard unavailable -- invite link shown in the toast', 'warn');
   }
   return url;
 }
@@ -512,6 +514,18 @@ export function setupHomeScreen(options: HomeScreenOptions): HomeScreenApi {
     const name = displayNameInput.value.trim();
     if (name) localStorage.setItem(HARNESS_NAME_STORAGE_KEY, name);
     updateProfileAvatarInitial();
+  });
+  // #243: on a phone, Save sits under the keyboard, whose Enter key reads
+  // "done" (enterkeyhint): let it save. Blur first, as a tap on Save would,
+  // so `change` stores the name and the keyboard closes. WebKit delivers the
+  // Enter that confirms an IME composition after compositionend, with
+  // isComposing false but keyCode 229: that Enter must not save mid-name.
+  displayNameInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
+    if (!profileOnboardingDone || profileOnboardingDone.disabled) return;
+    event.preventDefault();
+    displayNameInput.blur();
+    profileOnboardingDone.click();
   });
   profileColorSwatches.forEach((swatch) => {
     swatch.addEventListener('click', () => {

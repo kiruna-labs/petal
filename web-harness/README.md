@@ -57,9 +57,23 @@ LIVEKIT_URL=ws://localhost:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret
    - **Screensharing** — real capture via `getDisplayMedia` (the browser
      shows its own window/tab/screen picker), published under a fresh
      `petal-window-<random u32>` name with H.264 forced. Green = live.
+     Needs a desktop browser: phone browsers have no `getDisplayMedia`, so
+     the control is hidden wherever the API is missing.
    - **Invite** — copies the `?code=` join link, confirms with a toast.
    - **Leave** — disconnects and returns to the join screen.
-4. **Developer & test tools** (collapsible drawer, closed by default):
+   - **⋯ More** — only when the controls do not fit the bar (measured, not a
+     breakpoint): everything but Audio, Video and Leave moves into its menu,
+     least-used first, carrying each control's state; a dot on ⋯ flags
+     unread chat or a live share in there (`src/controlOverflow.ts`).
+
+   On a phone in landscape the control bar becomes an icon-only rail on the
+   right edge and the top bar fades after a few idle seconds (a tap brings
+   it back); a **Full screen** button (top bar, or the rail in landscape)
+   drops the browser's URL bar wherever the browser supports it.
+4. **Developer & test tools** (collapsible drawer, closed by default; the
+   meeting's bottom row on desktop, a sheet parked below the screen on a
+   phone — open it there from the **⋯ More** menu, or with `?dev=1`, which
+   the tab remembers):
    Network diagnostics (nested, also closed by default), the synthetic
    test-pattern share + 440Hz tone, raw state readouts, and the live
    session log (connection / participant / track lifecycle, newest first).
@@ -161,14 +175,20 @@ checks). Test-only; never shipped in the real app.
   bar), dev drawer, toast, feedback dialog.
 - `api/j.ts` — the deployed serverless join-link interstitial
   (`meet.petal.live/<label>/<code>`): Open Petal, platform downloads, Join in
-  browser, and the `petal://` handoff. `api/_lib/slug.ts` is its copy of the
-  slug contract.
+  browser, and the `petal://` handoff. Phones and tablets get Join in browser
+  only, with no handoff and one line linking the desktop apps.
+  `api/_lib/slug.ts` is its copy of the slug contract.
 - `src/main.ts` — the entry point: wires the modules below together.
 - `src/homeScreen.ts`, `src/createJoinAction.ts`, `src/deepLink.ts` — join
   screen, recents/favorites, `?code=` auto-join.
 - `src/connection.ts`, `src/controls.ts`, `src/tiles.ts` — LiveKit
   connect/publish/subscribe, the control bar (mic/camera/share/draw/invite),
   and the tile grid + spotlight layout.
+- `src/meetingContinuity.ts` — keeps a meeting from ending by accident: Back
+  asks "Leave meeting?", a reload rejoins (the tab keeps the meeting's access
+  code in `sessionStorage`, which `api/j.ts`'s invite page checks on a
+  reload), a drop while the page was in the background rejoins once, and any
+  other disconnect the user didn't ask for shows why, with Rejoin (#244).
 - `src/remoteControl*.ts`, `src/draw*.ts`, `src/telepointer*.ts`,
   `src/aiChat*.ts` — the collaboration features' web halves.
 - `src/analytics.ts` — the PostHog allowlist pipe

@@ -29,9 +29,31 @@ test('#204 the meeting tile grid places cells from the shared packer and never d
   const tilesMatch = /\.tiles\s*\{(?<body>[^}]+)\}/.exec(css);
   const tilesBody = tilesMatch?.groups?.body ?? '';
 
-  assert.match(tilesBody, /grid-template-columns\s*:\s*repeat\(var\(--gallery-cols\),\s*minmax\(0,\s*1fr\)\)/i);
-  assert.match(tilesBody, /grid-template-rows\s*:\s*repeat\(var\(--gallery-rows\),\s*minmax\(0,\s*1fr\)\)/i);
+  // #239: each track is at most the packed tile, and the block of tracks is
+  // centred -- the space 16:9 tiles cannot use surrounds the group instead
+  // of opening dead bands between neighbours. Columns are half tracks (a
+  // tile spans two) so a short last row can be centred.
+  assert.match(
+    tilesBody,
+    /grid-template-columns\s*:\s*repeat\(\s*var\(--gallery-half-tracks\),\s*minmax\(0,\s*calc\(\(var\(--gallery-tile-width\)\s*-\s*var\(--gallery-gap\)\)\s*\/\s*2\)\)\s*\)/i
+  );
+  // The half-track count arrives as an integer (tileLayout.ts), defaulting to
+  // one column's two: older WebKit rejects calc() as repeat()'s count, which
+  // drops the whole template and stacks every tile in one column.
+  assert.match(tilesBody, /--gallery-half-tracks\s*:\s*2\s*;/i);
+  assert.doesNotMatch(css, /repeat\(\s*calc\(/i, 'no repeat() count is a calc()');
+  assert.match(
+    tilesBody,
+    /grid-template-rows\s*:\s*repeat\(var\(--gallery-rows\),\s*minmax\(0,\s*var\(--gallery-tile-height\)\)\)/i
+  );
   assert.match(tilesBody, /place-items\s*:\s*center/i);
+  assert.match(tilesBody, /place-content\s*:\s*safe center/i);
+  // An engine without the `safe` keyword drops that declaration: each one
+  // follows a plain `center` to fall back on.
+  const safeCentres = css.match(/place-content\s*:\s*safe center/gi) ?? [];
+  const withFallback = css.match(/place-content\s*:\s*center;\s*place-content\s*:\s*safe center/gi) ?? [];
+  assert.ok(safeCentres.length >= 2, 'the grid and the spotlight both centre safely');
+  assert.equal(withFallback.length, safeCentres.length, 'every `safe center` has a plain `center` before it');
   assert.match(tilesBody, /gap\s*:\s*var\(--gallery-gap\)/i);
   assert.doesNotMatch(css, /auto-fit/i, 'CSS must not pick a column count of its own');
   assert.doesNotMatch(css, /--tile-min\b/, 'the minmax breakpoint knobs are gone with the packer');
@@ -41,6 +63,22 @@ test('#204 the meeting tile grid places cells from the shared packer and never d
   assert.match(tileSizing, /width\s*:\s*min\(100%,\s*var\(--gallery-tile-width\)\)/i);
   assert.match(tileSizing, /height\s*:\s*min\(100%,\s*var\(--gallery-tile-height\)\)/i);
   assert.match(tileSizing, /aspect-ratio\s*:\s*16\s*\/\s*9/i);
+  assert.match(tileSizing, /grid-column-end\s*:\s*span 2/i);
+});
+
+test('#248 camera video crops only where cameraFit.ts says so; shares always letterbox', async () => {
+  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
+  const base = /\.tile video,\s*\.tile canvas\.full-range-canvas\s*\{(?<body>[^}]+)\}/.exec(css)?.groups?.body ?? '';
+  assert.match(base, /object-fit\s*:\s*contain/i, 'every tile video letterboxes by default');
+  const cover = /\.tile video\.camera-video\[data-fit='cover'\]\s*\{(?<body>[^}]+)\}/.exec(css)?.groups?.body ?? '';
+  assert.match(cover, /object-fit\s*:\s*cover/i);
+  // No other rule may crop tile media: a share must never be cropped.
+  const uncommented = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const coverRules = [...uncommented.matchAll(/(?<selector>[^{}]+)\{[^}]*object-fit\s*:\s*cover[^}]*\}/gi)].map((m) =>
+    (m.groups?.selector ?? '').trim()
+  );
+  const tileCoverRules = coverRules.filter((selector) => /\.tile\b/.test(selector));
+  assert.deepEqual(tileCoverRules, [".tile video.camera-video[data-fit='cover']"]);
 });
 
 test('meeting tile breakpoints still tighten gap and padding through phone widths', async () => {

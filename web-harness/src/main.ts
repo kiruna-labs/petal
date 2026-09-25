@@ -10,9 +10,11 @@ import { createTelepointerSender } from './telepointerSender';
 import { autoJoinFromUrl } from './deepLink';
 import type { HarnessContext, HarnessHook } from './context';
 import { setupTileLayout } from './tileLayout';
+import { DEV_SHEET_QUERY, openDevTools, setupMeetingViewport } from './meetingViewport';
 import { setupTelepointerDisplay } from './telepointerDisplay';
 import { setupDrawDisplay } from './drawDisplay';
 import { setupDrawSender } from './drawSender';
+import { setupShareZoom } from './shareZoomUi';
 import { setupAiChat } from './aiChatSession';
 import { setupRemoteControlUi } from './remoteControlUi';
 import { setupViewerDemand } from './viewerDemand';
@@ -22,14 +24,17 @@ import { setupHarnessApi } from './harnessApi';
 import { setupCockpit } from './cockpit';
 import { setupTiles } from './tiles';
 import { setupConnection } from './connection';
+import { setupMeetingContinuity } from './meetingContinuity';
 import { installEncodedAudioWorkaroundFromUrl } from './encodedAudioProbe';
 import { setupControls, shouldShowFirstVisitOnboarding } from './controls';
 import { setupPlugins } from './plugins/setupPlugins';
 import { setupChat } from './chat/setupChat.svelte.ts';
+import { setupControlOverflow } from './controlOverflow';
 import { addSentryBreadcrumb, initSentry, installGlobalErrorMirror } from './sentryReporting';
 import { initAnalytics } from './analytics';
 import { FeedbackReportController } from './feedbackReport';
 import { sensitiveStringRegistry } from './sensitiveStrings';
+import { isPhoneOrTablet } from './mobileDevice';
 import {
   HARNESS_COLOR_STORAGE_KEY,
   HARNESS_DEBUG_MODE_STORAGE_KEY,
@@ -67,6 +72,13 @@ const joinCard = joinScreen.querySelector<HTMLDivElement>('.join-card')!;
 const connectingScreen = document.querySelector<HTMLDivElement>('#connecting-screen');
 const connectingTitle = document.querySelector<HTMLElement>('#connecting-title');
 const connectingStatus = document.querySelector<HTMLElement>('#connecting-status');
+const disconnectedScreen = document.querySelector<HTMLDivElement>('#disconnected-screen');
+const disconnectedTitle = document.querySelector<HTMLElement>('#disconnected-title')!;
+const disconnectedDetail = document.querySelector<HTMLElement>('#disconnected-detail')!;
+const disconnectedRejoin = document.querySelector<HTMLButtonElement>('#disconnected-rejoin')!;
+const disconnectedHome = document.querySelector<HTMLButtonElement>('#disconnected-home')!;
+const disconnectedAnnouncer = document.querySelector<HTMLElement>('#disconnected-announcer')!;
+const leaveConfirm = document.querySelector<HTMLDialogElement>('#leave-confirm')!;
 
 const displayNameInput = document.querySelector<HTMLInputElement>('#display-name')!;
 const profileAvatarInitial = document.querySelector<HTMLElement>('#profile-avatar-initial');
@@ -156,6 +168,8 @@ const feedbackMeetingTrigger = document.querySelector<HTMLButtonElement>('#feedb
 const feedbackDialog = document.querySelector<HTMLDialogElement>('#feedback-dialog')!;
 const feedbackForm = document.querySelector<HTMLFormElement>('#feedback-form')!;
 const feedbackMessage = document.querySelector<HTMLTextAreaElement>('#feedback-message')!;
+const feedbackEmail = document.querySelector<HTMLInputElement>('#feedback-email')!;
+const feedbackEmailError = document.querySelector<HTMLElement>('#feedback-email-error')!;
 const feedbackConsent = document.querySelector<HTMLInputElement>('#feedback-consent')!;
 const feedbackSubmit = document.querySelector<HTMLButtonElement>('#feedback-submit')!;
 const feedbackCancel = document.querySelector<HTMLButtonElement>('#feedback-cancel')!;
@@ -187,6 +201,8 @@ displayNameInput.value = localStorage.getItem(HARNESS_NAME_STORAGE_KEY) ?? '';
 const storedProfileColor = localStorage.getItem(HARNESS_COLOR_STORAGE_KEY);
 meetingCodeInput.value = localStorage.getItem(HARNESS_ROOM_STORAGE_KEY) ?? '';
 if (desktopDownload) {
+  // A phone or tablet has no desktop app to install (#243).
+  desktopDownload.classList.toggle('hidden', isPhoneOrTablet(navigator));
   const platform = /Windows/i.test(`${navigator.userAgent} ${navigator.platform}`) ? 'windows' : 'macos';
   desktopDownload.href = `https://app.petal.live/api/download?platform=${platform}`;
   desktopDownload.textContent = platform === 'windows'
@@ -368,6 +384,8 @@ const feedbackReport = new FeedbackReportController({
     dialog: feedbackDialog,
     form: feedbackForm,
     message: feedbackMessage,
+    email: feedbackEmail,
+    emailError: feedbackEmailError,
     consent: feedbackConsent,
     submit: feedbackSubmit,
     cancel: feedbackCancel,
@@ -395,6 +413,7 @@ ctx.ui = {
     connectingScreen,
     connectingTitle,
     connectingStatus,
+    disconnectedScreen,
     displayNameInput,
     meetingCodeInput,
     joinBtn,
@@ -546,6 +565,12 @@ Object.assign(ctx.cb, {
   ensureRemoteControlAffordance: remoteControlUi.ensureRemoteControlAffordance,
 });
 
+// #248: pinch / Ctrl-or-Cmd+wheel zoom, drag pan and double-tap fit/fill on
+// shared windows in View mode. Delegated on the tile surface, like draw, but
+// for the wheel/touchmove listeners tiles.ts binds on each share tile.
+const shareZoom = setupShareZoom(ctx);
+Object.assign(ctx.cb, { shareZoomCommand: shareZoom.command, bindShareZoomTile: shareZoom.bindTile });
+
 const harnessApi = setupHarnessApi(ctx, {
   nextRemoteControlSeq: remoteControlUi.nextRemoteControlSeq,
   publishRemoteControl: remoteControlUi.publishRemoteControl,
@@ -606,6 +631,28 @@ Object.assign(ctx.cb, {
   syncRemoteWindowHeaders: tiles.syncRemoteWindowHeaders,
 });
 
+// #244: Back guard, rejoin on reload and the disconnect notice. Its
+// callbacks run only on user/room events, after everything below is wired.
+ctx.hook.continuity = setupMeetingContinuity({
+  leaveDialog: leaveConfirm,
+  notice: {
+    title: disconnectedTitle,
+    detail: disconnectedDetail,
+    rejoin: disconnectedRejoin,
+    home: disconnectedHome,
+    announcer: disconnectedAnnouncer,
+  },
+  showJoinScreen: () => ctx.ui.showJoinScreen(),
+  showDisconnectedScreen: () => ctx.ui.showDisconnectedScreen?.(),
+  leave: () => controls.leaveMeeting(),
+  rejoin: async (code) => {
+    ctx.ui.showConnectingScreen?.(ctx.cb.roomDisplayLabelForCredential(code));
+    await ctx.cb.connectToMeeting(code, ctx.cb.resolveIdentity());
+    return ctx.state.room !== null;
+  },
+  logEvent,
+});
+
 const connection = setupConnection(ctx, undefined, sensitiveStringRegistry, feedbackReport);
 Object.assign(ctx.cb, {
   connectToMeeting: connection.connectToMeeting,
@@ -617,6 +664,11 @@ const controls = setupControls(ctx, feedbackReport);
 ctx.hook.plugins = setupPlugins(ctx);
 // Meeting chat (plugins/README.md §2.7): a host surface beside the tiles.
 ctx.hook.chat = setupChat(ctx);
+// #247: the ⋯ overflow for controls that do not fit the bar. It re-fits on
+// its own whenever cells come and go, so plugin buttons added later count.
+// `addMenuItem` gives its menu rows of its own (the phone layout's developer
+// drawer, #239).
+ctx.hook.controlOverflow = setupControlOverflow();
 Object.assign(ctx.cb, {
   resolveIdentity: controls.resolveIdentity,
   submitMeetingField: controls.submitMeetingField,
@@ -645,6 +697,21 @@ Object.assign(ctx.cb, { handleCockpitPayload: cockpit.handleCockpitPayload });
 // The layout picker installs itself into the topbar; do this after the layout
 // callbacks are wired (installLayoutPicker -> applyTileLayout).
 tileLayout.installLayoutPicker();
+// #239: the phone meeting's behaviour -- full-screen toggle, the landscape
+// top bar's idle fade, the developer sheet. After the picker, which inserts
+// itself FIRST in the top bar's right cluster, so the full-screen toggle
+// ends the cluster.
+setupMeetingViewport(ctx);
+// #239 x #247: on a phone the developer drawer is a sheet parked below the
+// screen; the ⋯ menu offers a row that slides it up. Only there: wherever
+// the drawer is the meeting's bottom row, it needs no menu row (and brings
+// no ⋯).
+ctx.hook.controlOverflow!.addMenuItem({
+  label: 'Developer & test tools',
+  icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"></path></svg>',
+  available: () => window.matchMedia(DEV_SHEET_QUERY).matches,
+  run: () => openDevTools(),
+});
 
 // Home screen wires the unified Create/Join CTA; capture its callbacks.
 const {

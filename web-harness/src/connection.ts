@@ -13,7 +13,7 @@ import {
   type Participant,
 } from 'livekit-client';
 import type { HarnessContext } from './context.ts';
-import { livekitRoomName } from '@petal/shared/logic/meetingCode';
+import { accessCodeForCredential, livekitRoomName } from '@petal/shared/logic/meetingCode';
 import {
   AI_CHAT_TOPIC,
   COCKPIT_TOPIC,
@@ -39,7 +39,7 @@ import { PLUGIN_TOPIC_PREFIX } from '@petal/shared/plugin-host/topics';
 import { CHAT_TOPIC } from '@petal/shared/logic/chat';
 import { commitLayoutModeTransition, layoutModeStateOf } from './tileLayout.ts';
 import { endAutoSpotlight } from '@petal/shared/logic/tileLayoutMode';
-import { sensitiveStringRegistry, type SensitiveStringRegistry } from './sensitiveStrings.ts';
+import { registerMeetingAliases, sensitiveStringRegistry, type SensitiveStringRegistry } from './sensitiveStrings.ts';
 import { createSfuSenderIdentityResolver } from './sfuSenderIdentity.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
 import { startAudioReceiverTelemetry } from './audioReceiverTelemetry.ts';
@@ -173,6 +173,9 @@ export function setupConnection(
   localParticipantMetadata.setLogger((line, kind) => logEvent(line, kind));
 
   let audioPlaybackPrompt: HTMLButtonElement | null = null;
+  // Counts connectToMeeting calls, so a deferred registry reset never wipes a
+  // newer join's registrations.
+  let joinCount = 0;
   const audioReceiverTelemetryCleanup = new Map<RemoteTrack, () => void>();
   const audioReceiverParticipants = new Map<RemoteTrack, string>();
 
@@ -289,7 +292,9 @@ export function setupConnection(
     }
   }
 
-  function resetFailedJoinUi() {
+  /** `message` is the error to show; null for a join the user cancelled.
+   * Returns true when a #244 rejoin took the failure back onto its notice. */
+  function resetFailedJoinUi(message: string | null): boolean {
     setJoinControlsEnabled(true);
     shareBtn.disabled = true;
     shareBtn.textContent = 'Share test pattern';
@@ -304,10 +309,18 @@ export function setupConnection(
     setScreenShareState('not sharing', false);
     setShareControl(false);
     cb.syncHarnessHook();
+    // #244: a rejoin from the disconnect notice fails back onto the notice,
+    // which shows this message, instead of flashing the home screen.
+    if (ctx.hook?.continuity?.rejoinFailed(message ?? 'Rejoin cancelled.')) {
+      if (message !== null) logEvent(message, 'error');
+      return true;
+    }
     // A join-link auto-join runs behind the connecting interstitial; a failed
     // join must land back on the menu (which also dismisses the interstitial)
     // with the error visible, never leave a dead spinner up.
+    if (message !== null) showError(message);
     showJoinScreen();
+    return false;
   }
 
   function startPipelineStats() {
@@ -453,7 +466,8 @@ export function setupConnection(
   function syncAddressBar(meetingCode: string) {
     const url = inviteLinkForCredential(meetingCode, location.origin, cb.roomDisplayLabelForCredential(meetingCode));
     if (url === `${location.origin}/` || url === location.origin || url === '/') return;
-    history.replaceState(null, '', url);
+    // Keep the entry's state: on a rejoin it is still the #244 Back guard.
+    history.replaceState(history.state, '', url);
   }
 
   async function fetchToken(meetingCode: string, identity: string, displayName: string): Promise<TokenResponse> {
@@ -470,12 +484,19 @@ export function setupConnection(
 
   async function connectToMeeting(meetingCode: string, identity: string) {
     const displayName = displayNameFromInput(displayNameInput.value);
+    joinCount += 1;
     clearError();
     setJoinControlsEnabled(false);
     setConnState('connecting', 'connecting');
     // Register room + local identity with the Sentry PII-scrub registry
     // before any log line that could embed them is emitted (#283).
     registry.registerRoom(meetingCode);
+    // #245: and the forms a user sees and shares -- the access code, the
+    // room's label and its invite-URL slug.
+    registerMeetingAliases(registry, meetingCode, cb.roomDisplayLabelForCredential(meetingCode));
+    // The public access code is in the address bar (and the #244 guard entry)
+    // for the whole meeting; scrub it like the internal credential.
+    registry.registerRoom(accessCodeForCredential(meetingCode));
     registry.registerParticipant(identity);
     registry.registerReportingValue(displayName);
     logEvent(`connecting to meeting "${meetingCode}" as "${displayName}"...`);
@@ -494,9 +515,8 @@ export function setupConnection(
     } catch (err) {
       setConnState('error', 'error');
       logEvent(`token request failed: ${(err as Error).message ?? err}`, 'error');
-      showError(`Token request failed: ${(err as Error).message ?? err}`);
       joinFailedFromError(err);
-      resetFailedJoinUi();
+      resetFailedJoinUi(`Token request failed: ${(err as Error).message ?? err}`);
       return;
     }
 
@@ -800,9 +820,20 @@ export function setupConnection(
       }
     });
 
+    // Whether this room finished joining (`connect()` resolved). livekit-
+    // client's `Room.connect()` emits `Disconnected` for a failed or
+    // cancelled attempt BEFORE it rejects, while `connectWithRetry` may still
+    // retry that attempt. Tearing the session down then would null
+    // `state.room`, show the join screen and reset the scrub registry under a
+    // retry that goes on to succeed. Until the join completes, a failure or
+    // a cancel is handled once, by the catch around `connectWithRetry`.
+    let joined = false;
+
     newRoom.on(RoomEvent.Disconnected, (reason?: unknown) => {
-      const userLeft = consumeLeaveRequested() || isClientInitiatedDisconnect(reason);
-      if (!userLeft && inMeeting()) reconnectFailed();
+      if (!joined) return;
+      const leaveRequested = consumeLeaveRequested();
+      const clientInitiated = isClientInitiatedDisconnect(reason);
+      if (!leaveRequested && !clientInitiated && inMeeting()) reconnectFailed();
       meetingLeft();
       setConnState('disconnected', 'idle');
       logEvent('disconnected', 'warn');
@@ -874,13 +905,28 @@ export function setupConnection(
       cb.updateParticipantCount();
       cb.applyTileLayout();
       removeAudioPlaybackPrompt();
+      const meetingCode = state.currentMeetingCode;
       state.currentMeetingCode = null;
       feedbackReport?.onDisconnect();
+      // Session ended -- clear the Sentry PII-scrub registry so a future
+      // session's breadcrumbs never keep an old room/identity around. Not
+      // before the address bar has left the invite link (the #244 guard
+      // unwinds asynchronously), and never over a newer join's values.
+      const joinsAtDisconnect = joinCount;
+      const resetRegistry = () => {
+        if (joinCount === joinsAtDisconnect) registry.reset();
+      };
+      // #244: home when the user left; otherwise the disconnect notice.
+      const continuity = ctx.hook?.continuity;
+      if (continuity?.disconnected(meetingCode, { requested: leaveRequested, clientInitiated, reason }, resetRegistry)) return;
+      // Dropped while the join was finishing (continuity had no meeting yet;
+      // connectToMeeting then stops short of the meeting screen): a rejoin
+      // goes back to its notice, anything else to the home screen -- never a
+      // connecting spinner left up.
+      if (continuity?.rejoinFailed('Disconnected while rejoining.')) return;
       history.replaceState(null, '', location.origin);
       showJoinScreen();
-      // Session ended -- clear the Sentry PII-scrub registry so a future
-      // session's breadcrumbs never keep an old room/identity around.
-      registry.reset();
+      resetRegistry();
     });
 
     try {
@@ -894,6 +940,7 @@ export function setupConnection(
           ctx.ui.setConnectingStatus?.('Connection hiccup — retrying…');
         },
       });
+      joined = true;
       // `Room.connect()` recreates a closed engine; re-attach (idempotent).
       sfuSender.attach(newRoom.engine);
       // #709: `ParticipantConnected` only fires for participants who join
@@ -915,9 +962,13 @@ export function setupConnection(
         await localParticipantMetadata
           .update((current) => mergeIdentityPaletteIndexMetadata(current, localStoredPaletteIndex()))
           .catch((err) => logEvent(`identity color metadata publish failed: ${(err as Error).message ?? err}`, 'warn'));
+        // Disconnected during that await: the handler above has already torn
+        // the session down, so there is no meeting to show.
+        if (state.room !== newRoom) return;
       }
       setConnState('connected', 'connected');
       syncAddressBar(meetingCode);
+      ctx.hook?.continuity?.entered(meetingCode);
       logEvent(`connected to "${meetingCode}" as "${displayName}"`, 'ok');
       meetingJoined();
       localStorage.setItem(HARNESS_ROOM_STORAGE_KEY, meetingCode);
@@ -937,10 +988,26 @@ export function setupConnection(
       startPipelineStats();
       startPublicationReconcile(newRoom);
     } catch (err) {
-      setConnState('error', 'error');
-      showError(`Connect failed: ${(err as Error).message ?? err}`);
-      emitJoinFailed(err);
-      resetFailedJoinUi();
+      // Leave while connecting: `disconnect()` cancels the attempt (the SDK
+      // reports CLIENT_INITIATED, which the handler above ignores before the
+      // join completes). End where Leave ends -- the join screen, the bare
+      // origin, a cleared scrub registry -- without a "Connect failed" error;
+      // a cancelled #244 rejoin goes back to its notice instead.
+      const userCancelled = consumeLeaveRequested();
+      if (userCancelled) {
+        setConnState('disconnected', 'idle');
+        logEvent('connect cancelled', 'warn');
+      } else {
+        setConnState('error', 'error');
+        emitJoinFailed(err);
+      }
+      const backOnNotice = resetFailedJoinUi(userCancelled ? null : `Connect failed: ${(err as Error).message ?? err}`);
+      state.currentMeetingCode = null;
+      if (userCancelled && !backOnNotice) {
+        // Keep the entry's state: it may still be the #244 Back guard.
+        history.replaceState(history.state, '', location.origin);
+        registry.reset();
+      }
       if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
       state.streamStatePollTimer = null;
       state.frameMetadataWorker?.terminate();

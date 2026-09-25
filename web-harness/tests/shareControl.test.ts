@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+import { supportsScreenShare } from '../src/controls.ts';
+
 const index = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const style = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
 const sharedStyle = readFileSync(new URL('../../shared/ui/meeting-controls.css', import.meta.url), 'utf8');
@@ -34,4 +36,27 @@ test('web harness keeps the existing ctl-share behavior and identity color state
   assert.match(uiHelpers, /options\.ctlShare\.style\.setProperty\('--control-live-bg', colorForIdentity\(trimmedIdentity, paletteIndex\)\)/);
   assert.match(uiHelpers, /options\.ctlShare\.setAttribute\('aria-label', on \? 'Stop sharing your screen' : 'Share your screen'\)/);
   assert.match(style, /\.control-button\.live\s*\{[\s\S]*var\(--control-live-bg/);
+});
+
+test('Share is offered only where the browser has getDisplayMedia (#240)', () => {
+  assert.equal(supportsScreenShare({ getDisplayMedia: () => Promise.reject(new Error('never called')) }), true);
+  // Chrome for Android / iPhone Safari: mediaDevices exists, getDisplayMedia does not.
+  assert.equal(supportsScreenShare({}), false);
+  // Node, like a page outside a secure context, has no navigator.mediaDevices.
+  assert.equal(supportsScreenShare(), false);
+});
+
+test('an unsupported browser is told so before any picker is attempted (#240)', () => {
+  // Source-level because the click handler returns before this point with no
+  // live Room. The guard must come before the picker log and the capture
+  // call, and must never claim a cancellation: nothing was offered.
+  const startShare = controls.slice(controls.indexOf("ctlShare.addEventListener('click'"));
+  const guardAt = startShare.indexOf('if (!supportsScreenShare()) {');
+  assert.ok(guardAt > 0, 'the start-share branch must check supportsScreenShare()');
+  assert.ok(guardAt < startShare.indexOf('watch for the browser picker'));
+  assert.ok(guardAt < startShare.indexOf('onShareStartIntent()'));
+  assert.ok(guardAt < startShare.indexOf('getDisplayMedia('));
+  const guard = startShare.slice(guardAt, startShare.indexOf('return;', guardAt));
+  assert.match(guard, /showToast\("Screen sharing isn't available in this browser"\)/);
+  assert.doesNotMatch(guard, /cancel/i);
 });

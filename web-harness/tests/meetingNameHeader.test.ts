@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const indexSource = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const styleSource = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+const tokensSource = readFileSync(new URL('../../shared/ui/tokens.css', import.meta.url), 'utf8');
 const controlsSource = readFileSync(new URL('../src/controls.ts', import.meta.url), 'utf8');
 const uiHelpersSource = readFileSync(new URL('../src/ui/uiHelpers.ts', import.meta.url), 'utf8');
 const createJoinActionSource = readFileSync(new URL('../src/createJoinAction.ts', import.meta.url), 'utf8');
@@ -30,6 +31,8 @@ test('web meeting-name header actions and elapsed time are reserved and reveal o
     styleSource,
     /\.topbar:hover \.elapsed,\s*\.room-title:focus-within \.elapsed\s*{[\s\S]*opacity:\s*1;/
   );
+  // #241: a touch screen cannot hover, so the time shows there outright.
+  assert.match(styleSource, /@media \(hover: none\)\s*{\s*\.elapsed\s*{\s*opacity:\s*1;\s*}\s*}/);
   assert.match(styleSource, /color:\s*rgba\(255,\s*255,\s*255,\s*0\.5\);/);
   assert.match(
     styleSource,
@@ -41,6 +44,23 @@ test('web meeting-name header actions and elapsed time are reserved and reveal o
     styleSource,
     /\.room-name\.renaming \+ \.room-title-actions\s*{[\s\S]*opacity:\s*0;[\s\S]*pointer-events:\s*none;/
   );
+});
+
+// #241: tests/topbarAlignmentRendered.test.ts measures the rendered result;
+// these pin the rules it depends on.
+test('web top bar centres the title row and sizes its controls from one token', () => {
+  assert.match(tokensSource, /--control-size-compact:\s*32px;/);
+  assert.match(tokensSource, /--topbar-control-height:\s*var\(--control-size-compact\);/);
+  assert.match(styleSource, /\.room-title\s*{[^}]*align-items:\s*center;/);
+  assert.match(styleSource, /\.room-name\s*{[^}]*font:\s*600 14\.5px \/ 1\.12 var\(--font-ui\);/);
+  assert.match(styleSource, /\.elapsed\s*{[^}]*font:\s*500 12\.5px \/ 1\.12 var\(--font-mono\);/);
+  assert.match(styleSource, /\.layout-picker\s*{[^}]*height:\s*var\(--topbar-control-height\);[^}]*padding:\s*2px;/);
+  assert.match(styleSource, /\.layout-mode-button\s*{[^}]*height:\s*100%;/);
+  assert.match(
+    styleSource,
+    /\.feedback-meeting-trigger\s*{[^}]*width:\s*var\(--topbar-control-height\);\s*height:\s*var\(--topbar-control-height\);\s*min-height:\s*var\(--topbar-control-height\);/
+  );
+  assert.match(styleSource, /\.audio-playback-prompt\s*{[^}]*min-height:\s*var\(--topbar-control-height\);[^}]*padding:\s*0 11px;/);
 });
 
 test('web room title icon buttons remain matching square controls', () => {
@@ -55,6 +75,11 @@ test('web rename icon is backed by the existing room rename flow', () => {
   assert.match(controlsSource, /input\.className = 'room-name-input'/);
   assert.match(controlsSource, /roomRenameButton\.addEventListener\('click', startRoomRename\)/);
   assert.match(controlsSource, /cb\.renameRoomDisplayName\(code, input\.value\)/);
+  // #245: renaming the meeting redacts its new label and invite slug too.
+  assert.match(
+    controlsSource,
+    /function renameRoomDisplayName[\s\S]*?const label = setRoomDisplayLabel\(code, displayName\);\s*[\s\S]*?if \(state\.currentMeetingCode === code\) registerMeetingAliases\(sensitiveStringRegistry, code, label\);/
+  );
 });
 
 test('web create-from-name stores the human label before connecting', () => {

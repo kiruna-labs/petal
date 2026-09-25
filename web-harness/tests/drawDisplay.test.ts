@@ -25,6 +25,15 @@ class FakeClassList {
   contains(name: string): boolean {
     return this.values().includes(name);
   }
+
+  toggle(name: string, force?: boolean): boolean {
+    const next = force ?? !this.contains(name);
+    const values = new Set(this.values());
+    if (next) values.add(name);
+    else values.delete(name);
+    this.element.className = Array.from(values).join(' ');
+    return next;
+  }
 }
 
 class FakeStyle {

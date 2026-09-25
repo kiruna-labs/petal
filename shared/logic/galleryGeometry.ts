@@ -1,7 +1,8 @@
 // SINGLE SOURCE OF TRUTH for gallery tile packing geometry. Shared by the
-// desktop gallery (apps/desktop/src/lib/components/Gallery.svelte) and the
-// web client's layout lab (web-harness/src/layoutLab.ts). Pure: no DOM, no
-// framework -- callers own the container measurement and CSS.
+// desktop gallery (apps/desktop/src/lib/components/Gallery.svelte), the web
+// meeting grid (web-harness/src/tileLayout.ts) and the web layout lab
+// (web-harness/src/layoutLab.ts). Pure: no DOM, no framework -- callers own
+// the container measurement and CSS.
 //
 // The desktop gallery used to hard-code a 2x2 grid for 3-4 participants and
 // start its column search at 2, making a single column unreachable for any
@@ -12,6 +13,14 @@
 
 export type GalleryArrangement = 'auto' | 'column' | 'row';
 
+/** #248: a band of tile aspects (width / height) instead of one fixed
+ * aspect. Each candidate's tile takes its cell's own aspect clamped into
+ * [min, max], so the packer scores the area a cropping tile really fills. */
+export interface GalleryTileAspectRange {
+  min: number;
+  max: number;
+}
+
 export interface GalleryGeometryOptions {
   /** Base pixel gap between tiles, both axes -- the density tiering below
    * (`GAP_COMPACT`/`GAP_TINY`) tightens this down as cells get small; it
@@ -19,6 +28,11 @@ export interface GalleryGeometryOptions {
   gap?: number;
   /** width / height a single tile wants to render at. */
   tileAspect?: number;
+  /** #248: camera-only layouts may crop, so their tiles can take any aspect
+   * in this range (see shared/logic/cameraCrop.ts CAMERA_TILE_ASPECT_RANGE)
+   * -- e.g. two people on a landscape phone fill the height instead of
+   * letterboxing. Overrides `tileAspect` when set. */
+  tileAspectRange?: GalleryTileAspectRange | null;
   /** 'auto' searches every shape; 'column'/'row' force a single line. */
   arrangement?: GalleryArrangement;
   /** The layout last returned for this container, for hysteresis. */
@@ -40,7 +54,8 @@ export interface GalleryGeometry {
   tileHeight: number;
   /** The gap actually used to compute this geometry -- `opts.gap` (or its
    * default) unless the cells came out compact/tiny, in which case this is
-   * `GAP_COMPACT`/`GAP_TINY`. Callers should render their CSS grid gap from
+   * at most `GAP_COMPACT`/`GAP_TINY` (`tierGap` only tightens: a smaller
+   * base gap is kept). Callers should render their CSS grid gap from
    * THIS field, not from the `gap` they passed in, or the rendered spacing
    * will disagree with what the packer assumed. */
   gap: number;
@@ -88,9 +103,20 @@ function cellSize(columns: number, rows: number, width: number, height: number, 
   };
 }
 
-function fittedTileSize(cellWidth: number, cellHeight: number, aspect: number) {
-  const tileWidth = Math.min(cellWidth, cellHeight * aspect);
-  return { width: tileWidth, height: tileWidth / aspect };
+function fittedTileSize(cellWidth: number, cellHeight: number, aspect: number | GalleryTileAspectRange) {
+  const tileAspect = typeof aspect === 'number' ? aspect : rangedTileAspect(cellWidth, cellHeight, aspect);
+  const tileWidth = Math.min(cellWidth, cellHeight * tileAspect);
+  return { width: tileWidth, height: tileWidth / tileAspect, aspect: tileAspect };
+}
+
+/** The aspect a ranged tile takes in a cell: the cell's own shape, clamped
+ * into the range. A degenerate cell (zero height) takes the range's wide end,
+ * which is what the fixed-aspect path would have used. */
+function rangedTileAspect(cellWidth: number, cellHeight: number, range: GalleryTileAspectRange): number {
+  const min = Math.min(range.min, range.max);
+  const max = Math.max(range.min, range.max);
+  if (!(cellWidth > 0) || !(cellHeight > 0)) return max;
+  return Math.min(max, Math.max(min, cellWidth / cellHeight));
 }
 
 function densityFlags(cellWidth: number, cellHeight: number) {
@@ -105,10 +131,13 @@ function densityFlags(cellWidth: number, cellHeight: number) {
  * shrinks it), so re-deriving the tier from the enlarged cell could only
  * move the same direction or stay put -- iterating to a fixed point buys
  * nothing here and risks a gap that itself oscillates as inputs wobble by a
- * pixel. Callers decide the tier ONCE from the base-gap cell size. */
-function tierGap(baseGap: number, flags: { compact: boolean; tiny: boolean }): number {
-  if (flags.tiny) return GAP_TINY;
-  if (flags.compact) return GAP_COMPACT;
+ * pixel. Callers decide the tier ONCE from the base-gap cell size.
+ *
+ * Only ever tightens (#239): a base gap already below the tier's constant
+ * (the web client's 10px/9px phone breakpoints) is kept, not widened to 12. */
+export function tierGap(baseGap: number, flags: { compact: boolean; tiny: boolean }): number {
+  if (flags.tiny) return Math.min(baseGap, GAP_TINY);
+  if (flags.compact) return Math.min(baseGap, GAP_COMPACT);
   return baseGap;
 }
 
@@ -124,7 +153,7 @@ export function scoreGalleryCandidate(
   width: number,
   height: number,
   gap: number,
-  aspect: number
+  aspect: number | GalleryTileAspectRange
 ): ScoredCandidate {
   const rows = Math.ceil(count / columns);
   const cell = cellSize(columns, rows, width, height, gap);
@@ -161,7 +190,7 @@ function searchBestCandidate(
   width: number,
   height: number,
   gap: number,
-  aspect: number
+  aspect: number | GalleryTileAspectRange
 ): ScoredCandidate {
   let best = scoreGalleryCandidate(count, 1, width, height, gap, aspect);
   for (let columns = 2; columns <= count; columns += 1) {
@@ -182,7 +211,7 @@ function forcedLineCandidate(
   width: number,
   height: number,
   baseGap: number,
-  aspect: number,
+  aspect: number | GalleryTileAspectRange,
   arrangement: 'column' | 'row',
   minTileHeight: number
 ): GalleryGeometry {
@@ -198,8 +227,8 @@ function forcedLineCandidate(
   let tileHeight = tile.height;
   if (tileHeight < minTileHeight) {
     overflow = true;
+    tileWidth = minTileHeight * tile.aspect;
     tileHeight = minTileHeight;
-    tileWidth = minTileHeight * aspect;
   }
   const containerArea = width * height;
   const fill = containerArea > 0 ? Math.min(1, (count * tileWidth * tileHeight) / containerArea) : 0;
@@ -225,7 +254,7 @@ export function computeGalleryLayout(
   opts: GalleryGeometryOptions = {}
 ): GalleryGeometry {
   const gap = opts.gap ?? DEFAULT_GAP;
-  const aspect = opts.tileAspect ?? DEFAULT_TILE_ASPECT;
+  const aspect = opts.tileAspectRange ?? opts.tileAspect ?? DEFAULT_TILE_ASPECT;
   const arrangement = opts.arrangement ?? 'auto';
   const switchThreshold = opts.switchThreshold ?? DEFAULT_SWITCH_THRESHOLD;
   const minTileHeight = opts.minTileHeight ?? DEFAULT_MIN_TILE_HEIGHT;

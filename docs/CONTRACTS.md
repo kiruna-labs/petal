@@ -1410,11 +1410,28 @@ Canonical HTTPS invite links:
 - Opening the HTTPS route returns a small interstitial that attempts
   `petal://join/<access-code>` on load, keeps an explicit Open Petal link for
   browsers that require a user gesture, offers `/api/download`, and offers a
-  browser join URL carrying `?code=<access-code>`.
+  browser join URL carrying `?code=<access-code>`. Phones and tablets (an
+  Android, iPhone, iPad, iPod or `Mobile` user agent, `Sec-CH-UA-Mobile: ?1`,
+  or a touch-capable `Macintosh` detected by the page) get the browser join
+  URL as the only action: no `petal://` attempt and no `/api/download`
+  buttons. The response is `Cache-Control: private, no-cache` because it
+  varies by device.
 - Browser join target is configured with `PETAL_WEB_JOIN_URL`, treated as an
   origin/base only: any configured path is discarded before adding `?code=`.
   The default is the production browser client, `https://meet.petal.live`
   (`DEFAULT_WEB_JOIN_BASE_URL` in `web-harness/api/j.ts`).
+- A browser meeting keeps its invite link in the address bar, so reloading it
+  requests this route. The interstitial's first script (in `<head>`) sends
+  such a tab back into the browser client: when the navigation is a reload,
+  `document.wasDiscarded` is true, or `history.state.petalMeetingGuard` is
+  set (the meeting's Back guard entry, whose state survives a session
+  restore), and the tab's `sessionStorage` `petal-harness-rejoin` equals this
+  page's access code, it stops the page and replaces the location with the
+  same-origin `/?code=<access-code>`, so the `petal://` attempt never runs.
+  Any other visit (a new tab, the link opened again) gets the interstitial
+  as before; a Back to it (`back_forward`, or a back-forward cache restore)
+  also removes `petal-harness-rejoin`, so the meeting the user backed out of
+  is not rejoined by a later reload (#244).
 
 Native deep link (accepted compatibility vector, not the primary copied invite):
 

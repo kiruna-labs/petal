@@ -367,6 +367,11 @@ export interface HarnessHook {
   plugins?: import('./plugins/setupPlugins.ts').PluginsHook | null;
   /** Meeting chat host (plugins/README.md §2.7, a host surface). */
   chat?: import('./chat/setupChat.svelte.ts').ChatHook | null;
+  /** #244 Back guard, reload rejoin and disconnect notice. Set by main.ts;
+   * connection.ts reports joins, failed rejoins and disconnects to it. */
+  continuity?: import('./meetingContinuity.ts').MeetingContinuity | null;
+  /** The control bar's ⋯ overflow (#247, controlOverflow.ts). */
+  controlOverflow?: import('./controlOverflow.ts').ControlOverflowHook | null;
 }
 
 export interface ActiveRemoteControl {
@@ -521,11 +526,17 @@ export interface HarnessUi {
   /** Live sub-status on the connecting interstitial ("Requesting access…",
    * retry notices). No-op when the interstitial is not up. */
   setConnectingStatus?: (text: string) => void;
+  /** #244: the disconnect notice screen (meetingContinuity.ts fills it in).
+   * Optional like the connecting interstitial. */
+  showDisconnectedScreen?: () => void;
   showToast: (message: string) => void;
   /** #679: like `showToast`, but forwards an optional inline action
    * (e.g. "Bring to front") and a custom auto-dismiss duration -- used by
    * the remote-share-started notice. */
   showActionableToast: (message: string, dismissMs: number, action?: SharedToastAction) => void;
+  /** Takes the toast down now; with `message`, only if that toast is the one
+   * showing (#246). Optional so test contexts need not provide it. */
+  dismissToast?: (message?: string) => void;
   setShareState: (text: string, on: boolean) => void;
   setMicState: (text: string, on: boolean) => void;
   setScreenShareState: (text: string, on: boolean) => void;
@@ -630,6 +641,12 @@ export interface HarnessCallbacks {
   ensureRemoteControlAffordance: (tile: HTMLDivElement) => void;
   // viewerDemand
   publishViewerDemand: (tile: HTMLDivElement, kind: 'open' | 'closed' | 'heartbeat') => void;
+  /** #248: zoom a shared window in / out / back to fit (shareZoomUi.ts) --
+   * the share header's overflow menu. Absent = not wired (tests). */
+  shareZoomCommand?: (tile: HTMLElement, command: 'in' | 'out' | 'fit') => void;
+  /** #248: the zoom's non-passive wheel/touchmove listeners, bound per share
+   * tile rather than on the whole surface. Absent = not wired (tests). */
+  bindShareZoomTile?: (tile: HTMLElement) => void;
   publishViewerDemandForPublication: (ownerIdentity: string, publication: import('livekit-client').RemoteTrackPublication) => void;
   startViewerDemandHeartbeat: () => void;
   stopViewerDemandHeartbeat: () => void;

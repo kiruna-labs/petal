@@ -12,6 +12,10 @@
 // unit-testable core -- no Sentry import, no DOM.
 // ---------------------------------------------------------------------------
 
+import { accessCodeForCredential, slugify } from '@petal/shared/logic/meetingCode';
+
+import { roomFallbackLabelForCredential } from './roomLabels.ts';
+
 const ROOM_LABEL = '<redacted:room>';
 
 /**
@@ -104,12 +108,20 @@ export class SensitiveStringRegistry {
     if (this.participantLabels.delete(trimmed)) this.values.delete(trimmed);
   }
 
-  /** Clears everything -- called when the room session ends. */
+  /**
+   * Clears the live Sentry map -- called when the room session ends, so a
+   * later session's breadcrumbs never keep an old room/identity around.
+   *
+   * The reporting snapshot is deliberately KEPT for the tab's lifetime
+   * (#245): the session log outlives the meeting, so a feedback report sent
+   * from the home screen afterwards still carries that meeting's lines, and
+   * they must stay scrubbed.
+   */
   reset(): void {
     this.values.clear();
-    this.reportingValues.clear();
     this.participantLabels.clear();
-    this.participantCounter = 0;
+    // Not the counter: the kept snapshot still maps earlier identities to
+    // their numbers, and a label must name one identity per report.
   }
 
   scrub(text: string): string {
@@ -125,6 +137,28 @@ export class SensitiveStringRegistry {
   get size(): number {
     return this.values.size;
   }
+}
+
+/**
+ * Registers the user-facing forms of one meeting (#245) under the room label:
+ * the joinable access code, and the room's display label plus the slug it
+ * takes in an invite URL (`/<slug>/<access-code>`). The internal credential
+ * and wire room names are registered by connection.ts itself. Registering a
+ * value twice is harmless -- it is a map keyed by the value.
+ */
+export function registerMeetingAliases(
+  registry: SensitiveStringRegistry,
+  credential: string,
+  displayLabel: string | null | undefined
+): void {
+  registry.registerRoom(accessCodeForCredential(credential));
+  const label = displayLabel?.trim();
+  // The friendly fallback and slugify's own fallback are Petal's words, not
+  // the user's; redacting them would only mangle unrelated log text.
+  if (!label || label === roomFallbackLabelForCredential(credential)) return;
+  registry.registerRoom(label);
+  const slug = slugify(label);
+  if (slug !== 'room') registry.registerRoom(slug);
 }
 
 // Single app-wide registry -- connection.ts registers/unregisters into this

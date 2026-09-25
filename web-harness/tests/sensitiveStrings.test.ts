@@ -125,7 +125,7 @@ test('SensitiveStringRegistry reproduces the PETAL-WEB-HARNESS-3 leak shape: a "
   assert.doesNotMatch(registry.scrub(latencyProbeLine), /1ab294e1-7ed8-4a11-9c2e-abcdef012345/);
 });
 
-test('SensitiveStringRegistry.reset clears rooms and participants', () => {
+test('SensitiveStringRegistry.reset clears the live Sentry map of rooms and participants', () => {
   const registry = new SensitiveStringRegistry();
   registry.registerRoom('acme-standup-77');
   registry.registerParticipant('web-alex-9f2');
@@ -133,6 +133,29 @@ test('SensitiveStringRegistry.reset clears rooms and participants', () => {
 
   assert.equal(registry.scrub('acme-standup-77 / web-alex-9f2'), 'acme-standup-77 / web-alex-9f2');
   assert.equal(registry.size, 0);
+});
+
+test('#245: SensitiveStringRegistry.reset keeps the reporting snapshot for the tab -- the session log outlives the meeting', () => {
+  const registry = new SensitiveStringRegistry();
+  registry.registerRoom('acme-standup-77');
+  registry.registerParticipant('web-alex-9f2');
+  registry.registerReportingValue('Alex Example');
+  registry.reset();
+
+  assert.equal(
+    registry.scrubForReporting('acme-standup-77 / web-alex-9f2 / Alex Example'),
+    '<redacted:room> / <redacted:participant-1> / <redacted:session-value>'
+  );
+});
+
+test('#245: participant labels are not reused after reset, so one label names one identity in a report', () => {
+  const registry = new SensitiveStringRegistry();
+  registry.registerParticipant('web-alex-9f2');
+  registry.reset();
+  registry.registerParticipant('web-sam-4c1');
+
+  assert.equal(registry.scrub('web-sam-4c1'), '<redacted:participant-2>');
+  assert.equal(registry.scrubForReporting('web-alex-9f2 then web-sam-4c1'), '<redacted:participant-1> then <redacted:participant-2>');
 });
 
 test('SensitiveStringRegistry ignores empty/blank room and participant values', () => {
