@@ -3402,9 +3402,10 @@ input[type='text']:disabled {
 /* Load-bearing, same pitfall as .feedback-meeting-trigger: the `display`
    above beats the UA's `[hidden] { display: none }`, so without this rule
    the Share cell that controls.ts hides where there is no getDisplayMedia
-   (#240) would stay on screen. `!important`, like the `.hidden` utility, so
-   no later or more specific layout rule that sets a cell's `display` (a
-   landscape rail, a narrow-width variant) can bring it back. */
+   (#240) would stay on screen, and so would ⋯ (#247), hidden whenever every
+   control fits. `!important`, like the `.hidden` utility, so no later or
+   more specific layout rule that sets a cell's `display` (a landscape rail,
+   a narrow-width variant) can bring it back. */
 .control-cell[hidden] {
   display: none !important;
 }
@@ -3687,12 +3688,6 @@ input[type='text']:disabled {
    its own `display` (the landscape rail's Full screen cell, #239) must not
    bring it back while it is in the menu. */
 .control-cell.overflowed {
-  display: none !important;
-}
-
-/* Load-bearing, the `[hidden]` vs author `display` trap again: ⋯ is hidden
-   whenever everything fits. */
-.control-cell.overflow-cell[hidden] {
   display: none !important;
 }
 

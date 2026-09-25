@@ -25,10 +25,6 @@ type Page = Awaited<ReturnType<Browser['newPage']>>;
 const COLLAPSE_PRIORITY = ['React', 'Draw', 'Invite', 'Chat', 'Share'];
 const PINNED = ['Mic', 'Camera', 'Leave'];
 
-// #240's rule for a control hidden as unsupported (Share without
-// getDisplayMedia). A stand-in until #240 lands.
-const UNSUPPORTED_STAND_IN = '.control-cell[hidden] { display: none !important; }';
-
 interface Box {
   left: number;
   top: number;
@@ -847,7 +843,8 @@ test('a control hidden as unsupported (Share on phones, #240) is in neither the 
   };
   for (const viewport of [{ width: 320, height: 568 }, { width: 412, height: 915 }]) {
     const where = `${viewport.width}px`;
-    const { page, errors, close } = await openMeeting(viewport, [UNSUPPORTED_STAND_IN]);
+    // style.css's own `.control-cell[hidden]` rule (#240) hides the cell.
+    const { page, errors, close } = await openMeeting(viewport);
     try {
       await page.evaluate(() => {
         document.querySelector('#ctl-share')!.closest<HTMLElement>('.control-cell')!.hidden = true;
