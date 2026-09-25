@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 
 import type { HarnessContext } from '../src/context.ts';
 import { TILE_REFLOW_ANIMATION_MS } from '../src/tileReflow.ts';
-import { computeSpotlightGeometry, setupTileLayout } from '../src/tileLayout.ts';
+import { computeSpotlightGeometry, setupTileLayout, spotlightHeroMedia } from '../src/tileLayout.ts';
+import { cameraFit, coverCropFractions } from '@petal/shared/logic/cameraCrop';
 
 type Listener = (event: Event) => void;
 
@@ -415,6 +416,12 @@ test('grid and spotlight layout changes FLIP persistent tiles and retarget the l
     assert.ok(animationRecords.every((record) => record.options.duration === TILE_REFLOW_ANIMATION_MS));
     assert.ok(animationRecords.every((record) => record.options.fill === 'none'));
     assert.ok(animationRecords.every((record) => String(record.keyframes[0]?.transform).includes('translate')));
+    // #248: the inverted frame scales uniformly -- `scale(s)`, never
+    // `scale(sx, sy)`, which would squash live video when a tile changes shape.
+    assert.ok(
+      animationRecords.every((record) => /scale\([\d.]+\)$/.test(String(record.keyframes[0]?.transform))),
+      animationRecords.map((record) => String(record.keyframes[0]?.transform)).join(' | ')
+    );
     assert.equal(drawOverlay.parentElement, share);
 
     // A second request before the first pair finishes cancels the old handles
@@ -676,6 +683,31 @@ test('#239 a phone camera held upright is a tall hero, not a sliver in a 16:9 bo
   assert.ok(Math.abs(share.heroHeight - (392 / 1.6 + 44)) < 0.5, `${share.heroHeight}`);
 });
 
+test('#248 a camera spotlight hero shows its whole frame: covered, never cropped, never letterboxed', () => {
+  for (const [shape, video] of [
+    ['16:9 camera', { width: 1280, height: 720 }],
+    ['9:16 phone camera', { width: 720, height: 1280 }],
+    ['4:3 webcam', { width: 640, height: 480 }],
+  ] as const) {
+    const tile = {
+      classList: { contains: () => false },
+      querySelector: () => ({ videoWidth: video.width, videoHeight: video.height }),
+    } as unknown as HTMLElement;
+    const hero = spotlightHeroMedia(tile);
+    assert.ok(Math.abs(hero.aspect - video.width / video.height) < 1e-9, `${shape}: the aspect it shows`);
+    for (const [surface, width, height, gap] of SURFACES) {
+      for (const count of [0, 1, 3, 6]) {
+        const g = computeSpotlightGeometry(count, width, height, gap, hero);
+        const label = `${surface}, ${shape}, ${count} thumbnails`;
+        const box = { width: g.heroWidth, height: g.heroHeight };
+        assert.equal(cameraFit(video, box), 'cover', `${label}: fills its box`);
+        const crop = coverCropFractions(video, box);
+        assert.ok(crop.sides < 0.01 && crop.vertical < 0.01, `${label}: crops nothing (${JSON.stringify(crop)})`);
+      }
+    }
+  }
+});
+
 test('#239 the spotlight hero has an explicit box, so a centred grid cell cannot collapse it', async () => {
   // Root cause of the empty spotlight hero (0.9.27-0.9.29): #204 gave
   // `.tiles` `place-items: center`, and the hero -- `width: 100%` but
@@ -817,17 +849,18 @@ test('#239 a short last row is centred under the full rows, and spotlight clears
       activeSpeakerTargets: new Set(),
     } as unknown as HarnessContext;
     const layout = setupTileLayout(ctx);
-    // Seven on a wide surface pack 3x3: the last row holds one tile, which
-    // starts on half-track 3 of 6 -- the middle column.
+    // Seven cameras on a wide surface pack 4x2 (#248: camera tiles may crop,
+    // and 4x2 of ~7:6 tiles beats 3x3 of 16:9): the last row holds three
+    // tiles, which start on half-track 2 of 8 -- centred under the four.
     tilesEl.clientWidth = 1240 + 40;
     tilesEl.clientHeight = 634 + 40;
     layout.applyTileLayout();
-    assert.equal(tilesEl.style.values.get('--gallery-cols'), '3');
+    assert.equal(tilesEl.style.values.get('--gallery-cols'), '4');
     // The half tracks the start counts in, handed to CSS as a plain integer:
     // older WebKit rejects `repeat(calc(...), ...)` and drops the template.
-    assert.equal(tilesEl.style.values.get('--gallery-half-tracks'), '6');
+    assert.equal(tilesEl.style.values.get('--gallery-half-tracks'), '8');
     const starts = () => tiles.map((tile) => tile.style.values.get('grid-column-start') ?? '');
-    assert.deepEqual(starts(), ['', '', '', '', '', '', '3']);
+    assert.deepEqual(starts(), ['', '', '', '', '2', '', '']);
 
     (ctx.state as { tileLayoutMode: string }).tileLayoutMode = 'spotlight';
     layout.applyTileLayout();
@@ -910,6 +943,59 @@ test('#204 the web grid packs tiles with the shared geometry and repacks on resi
     (ctx.state as { tileLayoutMode: string }).tileLayoutMode = 'grid';
     layout.applyTileLayout();
     assert.equal(tilesEl.classList.contains('spotlight-side'), false);
+  } finally {
+    engine.restore();
+    fakeDom.restore();
+  }
+});
+
+test('#248 a camera-only grid packs cropping tiles that fill a landscape phone; a share keeps 16:9', () => {
+  const fakeDom = installFakeDom();
+  const tilesEl = fakeDom.document.createElement('div');
+  const engine = installFakeLayoutEngine(tilesEl, 12, 10);
+  try {
+    const topbarRight = fakeDom.document.createElement('div');
+    fakeDom.document.root.appendChild(tilesEl);
+    fakeDom.document.root.appendChild(topbarRight);
+    for (let index = 0; index < 2; index += 1) {
+      const tile = fakeDom.document.createElement('div');
+      tile.id = `tile-${index}`;
+      tile.className = 'tile';
+      tile.dataset.owner = `Peer ${index}`;
+      tilesEl.appendChild(tile);
+    }
+    const ctx = {
+      dom: { tilesEl, topbarRight },
+      state: { tileLayoutMode: 'grid', pinnedTileId: null, layoutModeButtons: null, speakerSmoothingTimer: null },
+      ui: { logEvent: () => {} },
+      cb: { activeRemoteControlForTile: () => null, fitTileLabels: () => {} },
+      speakerScores: new Map(),
+      activeSpeakerTargets: new Set(),
+    } as unknown as HarnessContext;
+    const layout = setupTileLayout(ctx);
+
+    // A landscape phone's tile surface: 780x300 inside 12px padding.
+    tilesEl.clientWidth = 780 + 24;
+    tilesEl.clientHeight = 300 + 24;
+    layout.applyTileLayout();
+    const vars = tilesEl.style.values;
+    assert.equal(vars.get('--gallery-cols'), '2');
+    assert.equal(vars.get('--gallery-rows'), '1');
+    // Each 385x300 cell is filled by a ~1.28:1 tile (16:9 would be 385x217).
+    assert.equal(vars.get('--gallery-tile-width'), '385px');
+    assert.equal(vars.get('--gallery-tile-height'), '300px', 'two cameras fill the whole height');
+
+    // A share joins: nothing in the grid may crop now, so every cell is 16:9
+    // -- 3x1 cells of 253.33x300 hold 253.33x142.5 tiles.
+    const share = fakeDom.document.createElement('div');
+    share.id = 'share';
+    share.className = 'tile share-tile';
+    share.dataset.owner = 'Peer 0';
+    tilesEl.appendChild(share);
+    layout.applyTileLayout();
+    assert.equal(vars.get('--gallery-cols'), '3');
+    assert.equal(vars.get('--gallery-tile-height'), '142.5px');
+    assert.ok(Math.abs(parseFloat(vars.get('--gallery-tile-width') ?? '') - 760 / 3) < 1e-9);
   } finally {
     engine.restore();
     fakeDom.restore();

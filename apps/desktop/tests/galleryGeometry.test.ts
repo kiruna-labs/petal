@@ -208,3 +208,72 @@ test('gap tiering only ever tightens the base gap, never widens it', () => {
   assert.equal(tinyPhone.tiny, true);
   assert.equal(tinyPhone.gap, GAP_TINY, 'a base gap above GAP_TINY still tightens to it');
 });
+
+// #248: camera-only layouts may crop, so the packer scores tiles whose aspect
+// runs from ~7:6 to 16:9 (`tileAspectRange`). The fixed-16:9 default above is
+// unchanged -- every case in the table still packs identically.
+const CAMERA_RANGE = { min: (16 / 9) * (2 / 3), max: 16 / 9 };
+
+test('2 participants on a landscape phone fill the tile area height once tiles may crop', () => {
+  // A landscape phone's tile surface: wide and short.
+  const fixed = computeGalleryLayout(2, 780, 300, { gap: 10 });
+  const ranged = computeGalleryLayout(2, 780, 300, { gap: 10, tileAspectRange: CAMERA_RANGE });
+  assert.deepEqual([ranged.columns, ranged.rows], [2, 1]);
+  assert.ok(fixed.tileHeight < 0.75 * 300, `16:9 letterboxes the height (${fixed.tileHeight}px of 300)`);
+  assert.equal(ranged.tileHeight, 300, 'the cropping tiles fill the whole height');
+  assert.ok(ranged.fill > 0.95, `fill ${ranged.fill}`);
+  assert.ok(ranged.fill > fixed.fill + 0.2);
+});
+
+test('2 participants on a portrait phone fill the height as a column of cropping tiles', () => {
+  const ranged = computeGalleryLayout(2, 360, 560, { gap: 10, tileAspectRange: CAMERA_RANGE });
+  assert.deepEqual([ranged.columns, ranged.rows], [1, 2]);
+  assert.equal(ranged.tileWidth, 360);
+  assert.equal(ranged.tileHeight, (560 - 10) / 2);
+});
+
+test('a ranged tile takes its cell shape clamped into the range, never outside it', () => {
+  // Wide cells clamp at 16:9 (no top/bottom crop is ever planned)...
+  const wide = computeGalleryLayout(2, 2000, 300, { gap: 10, tileAspectRange: CAMERA_RANGE });
+  assert.ok(Math.abs(wide.tileWidth / wide.tileHeight - 16 / 9) < 1e-9);
+  // ...tall cells clamp at the side-crop cap (~7:6).
+  const tall = computeGalleryLayout(1, 360, 800, { tileAspectRange: CAMERA_RANGE });
+  assert.ok(Math.abs(tall.tileWidth / tall.tileHeight - CAMERA_RANGE.min) < 1e-9);
+  assert.equal(tall.tileWidth, 360);
+  // The candidate scorer takes the range too (the lab and tests use it).
+  const scored = scoreGalleryCandidate(2, 2, 780, 300, 10, CAMERA_RANGE);
+  assert.equal(scored.tileHeight, 300);
+});
+
+test('the range never packs the table worse, and repacks where a cropping shape fills more', () => {
+  for (const [count, width, height] of TABLE) {
+    const fixed = computeGalleryLayout(count, width, height);
+    const ranged = computeGalleryLayout(count, width, height, { tileAspectRange: CAMERA_RANGE });
+    assert.ok(ranged.fill >= fixed.fill - 1e-9, `${count}@${width}x${height}: ${ranged.fill} < ${fixed.fill}`);
+  }
+  // 6 in a tall narrow 460x900 window: 16:9 needs a 1x6 column (47% fill);
+  // cropping lets a 2x3 grid of ~7:6 tiles fill ~60%.
+  const six = computeGalleryLayout(6, 460, 900, { tileAspectRange: CAMERA_RANGE });
+  assert.deepEqual([six.columns, six.rows], [2, 3]);
+  assert.ok(six.fill > computeGalleryLayout(6, 460, 900).fill + 0.1);
+});
+
+test('hysteresis scores the previous shape with the same range', () => {
+  // 2@560x400: a ranged 1x2 (score ~0.579) narrowly beats a ranged 2x1
+  // (~0.553, inside the 8% band) -- so a previous 2x1 must stick. Scored at a
+  // fixed 16:9 instead, that 2x1 would drop to ~0.369 and be thrown away.
+  const fresh = computeGalleryLayout(2, 560, 400, { tileAspectRange: CAMERA_RANGE });
+  assert.deepEqual([fresh.columns, fresh.rows], [1, 2]);
+  const kept = computeGalleryLayout(2, 560, 400, {
+    tileAspectRange: CAMERA_RANGE,
+    previous: { count: 2, columns: 2, rows: 1 }
+  });
+  assert.deepEqual([kept.columns, kept.rows], [2, 1]);
+});
+
+test("a forced line with a range keeps the clamped tile's own aspect when it overflows", () => {
+  const layout = computeGalleryLayout(20, 400, 600, { arrangement: 'column', tileAspectRange: CAMERA_RANGE });
+  assert.equal(layout.overflow, true);
+  assert.equal(layout.tileHeight, 96);
+  assert.ok(Math.abs(layout.tileWidth - 96 * (16 / 9)) < 1e-9);
+});

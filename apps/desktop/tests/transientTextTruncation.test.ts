@@ -1329,9 +1329,11 @@ test('menubar utility row fits all three actions at the real 280px popover width
 test('desktop gallery grid reflow uses restrained list motion and FLIP', () => {
   const tileWrapStyles = cssBlock(gallerySource, '.tile-wrap');
 
-  assert.match(gallerySource, /import \{ flip \} from 'svelte\/animate';/);
+  // #248: the keyed-list FLIP is the uniform one from $lib/motion (tiles
+  // change shape as cameras crop), not svelte/animate's `scale(sx, sy)` flip.
+  assert.doesNotMatch(gallerySource, /from 'svelte\/animate'/);
   assert.match(gallerySource, /import \{ fade \} from 'svelte\/transition';/);
-  assert.match(gallerySource, /import \{ tileLayoutDuration, tileTransitionDuration \} from '\$lib\/motion';/);
+  assert.match(gallerySource, /import \{ tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight \} from '\$lib\/motion';/);
   assert.match(gallerySource, /function transitionGalleryLayout\(mutate: \(\) => void\)/);
   assert.match(gallerySource, /tile\.animate\(/);
   assert.match(gallerySource, /data-participant-key=\{p\.key\}/);

@@ -23,15 +23,16 @@
 -->
 <script lang="ts">
   import { onMount, tick, type Snippet } from 'svelte';
-  import { flip } from 'svelte/animate';
   import { fade } from 'svelte/transition';
   import ParticipantTile from './ParticipantTile.svelte';
   import ControlButton, { type ControlIcon } from './ControlButton.svelte';
   import MediaSplitControl from './MediaSplitControl.svelte';
   import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
+  import { CAMERA_TILE_ASPECT_RANGE } from '@petal/shared/logic/cameraCrop';
+  import { uniformFlip, uniformFlipKeyframes, visibleFlipRect, type FlipRect } from '@petal/shared/logic/tileFlip';
   import { chooseSpotlightHero } from '@petal/shared/logic/tileLayoutMode';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
-  import { tileLayoutDuration, tileTransitionDuration } from '$lib/motion';
+  import { tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight } from '$lib/motion';
   import type { DrawUpdate } from '$lib/ipc';
 
   export interface GalleryParticipant {
@@ -181,12 +182,19 @@
 
   const INVITE_TOOLTIP_GUTTER_PX = 12;
 
-  function captureGalleryTileRects(): Map<string, DOMRect> {
-    const rects = new Map<string, DOMRect>();
+  function captureGalleryTileRects(): Map<string, FlipRect> {
+    const rects = new Map<string, FlipRect>();
     if (!tileSurface || typeof window === 'undefined') return rects;
     tileSurface.querySelectorAll<HTMLElement>('[data-participant-key]').forEach((tile) => {
       const key = tile.dataset.participantKey;
-      const rect = tile.getBoundingClientRect();
+      const painted = tile.getBoundingClientRect();
+      // #248: a tile mid-FLIP -- this pass's WAAPI one or Svelte's keyed-list
+      // one -- may be clipped smaller than it paints; retarget from what is
+      // visible so the next move starts without a jump.
+      const inFlight = (key && activeGalleryTileAnimations.has(key)) || uniformTileFlipInFlight(tile);
+      const rect = inFlight
+        ? visibleFlipRect(painted, tile.offsetWidth, getComputedStyle(tile).clipPath)
+        : painted;
       if (key && rect.width > 0 && rect.height > 0) rects.set(key, rect);
     });
     return rects;
@@ -199,7 +207,7 @@
     }
   }
 
-  function animateGalleryLayoutFrom(previousRects: Map<string, DOMRect>, generation: number) {
+  function animateGalleryLayoutFrom(previousRects: Map<string, FlipRect>, generation: number) {
     const duration = tileLayoutDuration();
     if (previousRects.size === 0 || duration === 0 || typeof requestAnimationFrame !== 'function') return;
 
@@ -215,29 +223,14 @@
         for (const [key, previous] of previousRects) {
           const tile = tiles.get(key);
           if (!tile || typeof tile.animate !== 'function') continue;
-          const next = tile.getBoundingClientRect();
-          if (next.width <= 0 || next.height <= 0) continue;
+          // #248: tiles change shape as cameras crop; the shared frame scales
+          // uniformly and clips the box instead of squashing the video.
+          const flip = uniformFlip(previous, tile.getBoundingClientRect());
+          if (!flip) continue;
 
-          const deltaX = previous.left - next.left;
-          const deltaY = previous.top - next.top;
-          const scaleX = previous.width / next.width;
-          const scaleY = previous.height / next.height;
-          if (
-            Math.abs(deltaX) < 0.5 &&
-            Math.abs(deltaY) < 0.5 &&
-            Math.abs(scaleX - 1) < 0.01 &&
-            Math.abs(scaleY - 1) < 0.01
-          ) continue;
-
+          const radius = parseFloat(getComputedStyle(tile).borderTopLeftRadius) || 0;
           const animation = tile.animate(
-            [
-              {
-                opacity: 1,
-                transform: `translate(${deltaX}px, ${deltaY}px) scale(${scaleX}, ${scaleY})`,
-                transformOrigin: 'top left'
-              },
-              { opacity: 1, transform: 'translate(0, 0) scale(1, 1)', transformOrigin: 'top left' }
-            ],
+            uniformFlipKeyframes(flip, radius).map((frame) => ({ opacity: 1, ...frame })),
             { duration, easing: 'cubic-bezier(0.2, 0, 0, 1)', fill: 'none' }
           );
           activeGalleryTileAnimations.set(key, animation);
@@ -334,14 +327,17 @@
   // hysteresis (keep the current shape unless another clears it by a
   // margin) without itself triggering a re-derive.
   const smartGridLayout = $derived.by(() => {
+    // #248: the gallery holds camera tiles only (native shares are separate
+    // compositor windows), so every layout may crop within the shared caps.
     const layout = computeGalleryLayout(participantEntries.length, tileSurfaceWidth, tileSurfaceHeight, {
-      previous: lastGalleryLayout
+      previous: lastGalleryLayout,
+      tileAspectRange: CAMERA_TILE_ASPECT_RANGE
     });
     lastGalleryLayout = { count: participantEntries.length, columns: layout.columns, rows: layout.rows };
     return layout;
   });
   const smartGridStyle = $derived(
-    `--gallery-cols: ${smartGridLayout.columns}; --gallery-rows: ${smartGridLayout.rows}; --gallery-tail-width: ${smartGridLayout.tileWidth}px; --gallery-tile-width: ${smartGridLayout.tileWidth}px; --gallery-tile-height: ${smartGridLayout.tileHeight}px; --gallery-gap: ${smartGridLayout.gap}px;`
+    `--gallery-cols: ${smartGridLayout.columns}; --gallery-rows: ${smartGridLayout.rows}; --gallery-tail-width: ${smartGridLayout.tileWidth}px; --gallery-tile-width: ${smartGridLayout.tileWidth}px; --gallery-tile-height: ${smartGridLayout.tileHeight}px; --gallery-gap: ${smartGridLayout.gap}px; --camera-tile-min-aspect: ${CAMERA_TILE_ASPECT_RANGE.min};`
   );
   const layoutToggleLabel = $derived(
     layoutMode === 'grid' ? 'Switch to spotlight' : 'Switch to gallery grid'
@@ -746,7 +742,7 @@
                explicit Gallery FLIP pass suppresses keyed-list FLIP during
                mode/pin changes; ordinary participant-count reflow retains it. -->
           <div
-            animate:flip={{ duration: suppressSvelteFlip ? 0 : tileLayoutDuration() }}
+            animate:uniformTileFlip={{ duration: suppressSvelteFlip ? 0 : tileLayoutDuration() }}
             class="tile-wrap"
             data-participant-key={p.key}
             class:spotlight-main={spotlightActive && p.key === spotlightEntry?.key}
@@ -1656,21 +1652,37 @@
     overscroll-behavior-y: none;
     white-space: nowrap;
     font-size: 0;
+    /* #248: a size container so the hero below can be sized in cqw/cqh. */
+    container-type: size;
   }
 
+  /* #248: the hero is its area clamped to the camera tile range (~7:6 up to
+     16:9, the same band the grid packer uses), centred. The old full-width
+     hero was ~2.2-2.7:1 in a wide window, which a 16:9 camera can only fill
+     by cutting ~19-35% of its height -- past the 10% head cap, so it would
+     letterbox INSIDE the tile; in a narrow window it was portrait and lost
+     over half the width. Clamped, a 16:9 camera always fills it within the
+     caps, and the space around it is the page. The area is the one this hero
+     always had (rail minus the thumbnail row), written in cqh/cqw so the box
+     can be fitted to both. --camera-tile-min-aspect comes from the shared
+     CAMERA_TILE_ASPECT_RANGE via the .tiles style. */
   .tiles.spotlight .spotlight-main {
+    --hero-area-height: max(100px, calc(100cqh - clamp(64px, 22cqh, 104px) - 14px));
+    --hero-width: min(100cqw, calc(var(--hero-area-height) * 16 / 9));
     display: block;
     position: sticky;
-    left: 1px;
+    /* A sticky inset resolves against the scrollport (the rail's padding
+       box), so this is exactly the centred position: the hero stays put
+       while the thumbnails scroll beneath it. */
+    left: calc((100% - var(--hero-width)) / 2);
     z-index: 1;
-    width: 100%;
-    height: calc(100% - clamp(64px, 22%, 104px) - 14px);
-    min-height: 100px;
-    margin: 0 0 14px;
+    width: var(--hero-width);
+    height: min(var(--hero-area-height), calc(var(--hero-width) / var(--camera-tile-min-aspect, 1.185)));
+    margin: 0 auto 14px;
   }
 
   .tiles.spotlight .spotlight-layout.solo .spotlight-main {
-    height: 100%;
+    --hero-area-height: 100cqh;
     margin-bottom: 0;
   }
 
@@ -1684,8 +1696,7 @@
 
   @media (max-width: 620px) {
     .tiles.spotlight .spotlight-main {
-      height: calc(100% - clamp(56px, 24%, 92px) - 12px);
-      min-height: 100px;
+      --hero-area-height: max(100px, calc(100cqh - clamp(56px, 24cqh, 92px) - 12px));
     }
 
     .tiles.spotlight .spotlight-thumb {
@@ -1695,8 +1706,7 @@
 
   @media (max-height: 560px) {
     .tiles.spotlight .spotlight-main {
-      height: calc(100% - clamp(48px, 16%, 64px) - 8px);
-      min-height: 80px;
+      --hero-area-height: max(80px, calc(100cqh - clamp(48px, 16cqh, 64px) - 8px));
     }
 
     .tiles.spotlight .spotlight-thumb {

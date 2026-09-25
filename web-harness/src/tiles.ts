@@ -41,6 +41,7 @@ import {
 } from './holdLastFrame.ts';
 import { noteVideoFrames } from './analytics.ts';
 import { getTileReflowController } from './tileReflow.ts';
+import { bindCameraFit } from './cameraFit.ts';
 
 // ---------------------------------------------------------------------------
 // Tiles. One BASE tile per participant (camera video, or an initials
@@ -896,6 +897,8 @@ export function setupTiles(
       video.muted = isLocal; // avoid local echo when previewing our own media
       tile.insertBefore(video, tile.querySelector('.name-chip'));
     }
+    // #248: crop to fill the tile within the shared caps, else letterbox.
+    bindCameraFit(video);
     const attachedNewTrack = attachVideoTrackIfChanged(video, track);
     if (attachedNewTrack || !video.classList.contains('camera-video-ready')) {
       waitForCameraVideoReady(tile, video);
@@ -1049,6 +1052,7 @@ export function setupTiles(
     tile.dataset.trackSid = key;
     shareTilesByTrack.set(trackKey, tile);
     cb.bindTileInteractions(tile);
+    cb.bindShareZoomTile?.(tile);
     let video = tile.querySelector('video');
     if (!video) {
       video = document.createElement('video');

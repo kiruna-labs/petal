@@ -42,6 +42,7 @@
     shouldShowSharePill
   } from '$lib/data/shareCountPill';
   import { startCameraPresentationProbe, type CameraPresentationVideo } from '$lib/data/cameraPresentation';
+  import { cameraFit, renderedMediaRect, type CameraFit } from '@petal/shared/logic/cameraCrop';
   import ControlButton from './ControlButton.svelte';
 
   interface Props {
@@ -142,6 +143,12 @@
   let measuredCenteredNameLabel = $state<string | null>(null);
   let visibleVideoStream = $state<MediaStream | null>(null);
   let videoFrameReady = $state(false);
+  // #248: `cover` fills the tile only while the crop stays inside the shared
+  // caps (a third of the width off the sides, 10% off top and bottom); past
+  // them the camera letterboxes. Decided from the real video and tile shapes.
+  let videoFit = $state<CameraFit>('contain');
+  let videoIntrinsicSize = $state({ width: 0, height: 0 });
+  let tileBoxSize = $state({ width: 0, height: 0 });
   let measureFrame: number | null = null;
   const nameChipLabel = $derived(measuredNameChipLabel ?? firstGrapheme(name));
   const centeredNameLabel = $derived(measuredCenteredNameLabel ?? firstGrapheme(name));
@@ -256,6 +263,37 @@
     }
     return visible;
   });
+
+  // Camera drawings arrive normalized to the PICTURE (the web sender maps
+  // through the rendered media rect), so the layer must sit on the picture,
+  // not the tile: with `cover` it overhangs the tile, with `contain` it is
+  // inset. Unknown shapes fall back to the whole tile.
+  const drawLayerStyle = $derived.by(() => {
+    const box = { left: 0, top: 0, width: tileBoxSize.width, height: tileBoxSize.height };
+    if (box.width <= 0 || box.height <= 0 || videoIntrinsicSize.width <= 0 || videoIntrinsicSize.height <= 0) {
+      return null;
+    }
+    const rect = renderedMediaRect(box, videoIntrinsicSize, videoFit);
+    const percent = (value: number, of: number) => `${((value / of) * 100).toFixed(3)}%`;
+    return {
+      left: percent(rect.left, box.width),
+      top: percent(rect.top, box.height),
+      width: percent(rect.width, box.width),
+      height: percent(rect.height, box.height)
+    };
+  });
+
+  function syncVideoFit() {
+    if (!tileEl || !videoEl) return;
+    const media = { width: videoEl.videoWidth, height: videoEl.videoHeight };
+    const box = { width: tileEl.clientWidth, height: tileEl.clientHeight };
+    if (media.width !== videoIntrinsicSize.width || media.height !== videoIntrinsicSize.height) {
+      videoIntrinsicSize = media;
+    }
+    if (box.width !== tileBoxSize.width || box.height !== tileBoxSize.height) tileBoxSize = box;
+    const next = cameraFit(media, box);
+    if (next !== videoFit) videoFit = next;
+  }
 
   function px(value: string): number {
     const parsed = parseFloat(value);
@@ -435,6 +473,27 @@
   });
 
   $effect(() => {
+    const tile = tileEl;
+    const video = videoEl;
+    if (!tile || !video) return;
+
+    // A new track, a rotated phone camera (`resize`) or a new tile box (grid
+    // repack, spotlight hero, rail thumbnail) can each move the crop past a cap.
+    const sync = () => untrack(syncVideoFit);
+    sync();
+    video.addEventListener('loadedmetadata', sync);
+    video.addEventListener('resize', sync);
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(sync);
+    observer?.observe(tile);
+
+    return () => {
+      video.removeEventListener('loadedmetadata', sync);
+      video.removeEventListener('resize', sync);
+      observer?.disconnect();
+    };
+  });
+
+  $effect(() => {
     if (typeof document === 'undefined' || !('fonts' in document)) return;
 
     let cancelled = false;
@@ -467,6 +526,7 @@
     class="video-el"
     class:mirrored
     class:ready={videoReady}
+    class:contain={videoFit === 'contain'}
     bind:this={videoEl}
     autoplay
     muted
@@ -475,7 +535,12 @@
   ></video>
 
   {#if drawStrokes.length > 0}
-    <svg class="draw-layer" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+    <svg class="draw-layer" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true"
+      style:left={drawLayerStyle?.left}
+      style:top={drawLayerStyle?.top}
+      style:width={drawLayerStyle?.width}
+      style:height={drawLayerStyle?.height}
+    >
       {#each drawStrokes as stroke (stroke.id)}
         {#if stroke.points.length > 0}
           <path d={pathFor(stroke.points)} stroke={stroke.color} style:opacity={stroke.opacity}></path>
@@ -617,6 +682,16 @@
 
   .video-el.ready {
     opacity: 1;
+  }
+
+  /* #248: past the shared crop caps the camera letterboxes instead of losing
+     the face -- e.g. a portrait phone camera in a landscape tile. The bars
+     are the near-black base token, matching the web client's black
+     (`.tile video { background: #000 }`), not the graphite tile showing
+     through: a letterbox reads as the video's own frame on both clients. */
+  .video-el.contain {
+    object-fit: contain;
+    background: var(--bg-base);
   }
 
   .video-el.mirrored {

@@ -3,11 +3,21 @@
  *
  * Layout code moves tiles between grid, hero, and spotlight-rail parents. This
  * controller captures the currently painted bounds, cancels any superseded
- * animation, lets layout settle, then animates only transform back to the new
- * bounds. A WeakMap shares one controller per tile surface so participant
- * insertion/removal and layout-mode changes cannot fight with separate WAAPI
- * handles.
+ * animation, lets layout settle, then animates only transform (and, when a
+ * tile changes shape, its clip) back to the new bounds. A WeakMap shares one
+ * controller per tile surface so participant insertion/removal and
+ * layout-mode changes cannot fight with separate WAAPI handles.
+ *
+ * #248: camera tiles change shape as they crop, so the inverted frame comes
+ * from the shared `uniformFlip` -- one uniform scale plus a clip of the box --
+ * never a `scale(x, y)` that would squash the live video mid-move.
  */
+import {
+  uniformFlip,
+  uniformFlipKeyframes,
+  visibleFlipRect,
+  type FlipRect,
+} from '@petal/shared/logic/tileFlip';
 
 export const TILE_REFLOW_ANIMATION_MS = 220;
 const TILE_REFLOW_EASING = 'cubic-bezier(0.2, 0, 0, 1)';
@@ -29,11 +39,26 @@ function animationsAllowed(): boolean {
   );
 }
 
-function captureRects(surface: TileSurface): Map<HTMLElement, DOMRect> {
-  const rects = new Map<HTMLElement, DOMRect>();
+/** The tile's own corner radius, so a shape-changing clip keeps it rounded. */
+function tileCornerRadius(tile: HTMLElement): number {
+  if (typeof getComputedStyle !== 'function') return 0;
+  const radius = parseFloat(getComputedStyle(tile).borderTopLeftRadius);
+  return Number.isFinite(radius) ? radius : 0;
+}
+
+function captureRects(
+  surface: TileSurface,
+  inFlight: ReadonlyMap<HTMLElement, Animation>
+): Map<HTMLElement, FlipRect> {
+  const rects = new Map<HTMLElement, FlipRect>();
   if (!animationsAllowed()) return rects;
   surface.querySelectorAll<HTMLElement>('.tile').forEach((tile) => {
-    const rect = tile.getBoundingClientRect();
+    const painted = tile.getBoundingClientRect();
+    // A tile mid-FLIP may be clipped to a smaller box than it paints; retarget
+    // from what is visible, or the next move starts with a jump.
+    const rect = inFlight.has(tile) && typeof getComputedStyle === 'function'
+      ? visibleFlipRect(painted, tile.offsetWidth, getComputedStyle(tile).clipPath)
+      : painted;
     if (rect.width > 0 && rect.height > 0) rects.set(tile, rect);
   });
   return rects;
@@ -54,7 +79,7 @@ export function getTileReflowController(surface: TileSurface): TileReflowControl
     }
   }
 
-  function animateFrom(previousRects: Map<HTMLElement, DOMRect>, expectedGeneration: number) {
+  function animateFrom(previousRects: Map<HTMLElement, FlipRect>, expectedGeneration: number) {
     if (previousRects.size === 0 || !animationsAllowed()) return;
 
     requestAnimationFrame(() => {
@@ -64,30 +89,11 @@ export function getTileReflowController(surface: TileSurface): TileReflowControl
         const previous = previousRects.get(tile);
         if (!previous || typeof tile.animate !== 'function') return;
 
-        const next = tile.getBoundingClientRect();
-        if (next.width <= 0 || next.height <= 0) return;
-
-        const deltaX = previous.left - next.left;
-        const deltaY = previous.top - next.top;
-        const scaleX = previous.width / next.width;
-        const scaleY = previous.height / next.height;
-        if (
-          Math.abs(deltaX) < 0.5 &&
-          Math.abs(deltaY) < 0.5 &&
-          Math.abs(scaleX - 1) < 0.01 &&
-          Math.abs(scaleY - 1) < 0.01
-        ) {
-          return;
-        }
+        const flip = uniformFlip(previous, tile.getBoundingClientRect());
+        if (!flip) return;
 
         const animation = tile.animate(
-          [
-            {
-              transform: `translate(${deltaX}px, ${deltaY}px) scale(${scaleX}, ${scaleY})`,
-              transformOrigin: 'top left',
-            },
-            { transform: 'translate(0, 0) scale(1, 1)', transformOrigin: 'top left' },
-          ],
+          uniformFlipKeyframes(flip, tileCornerRadius(tile)),
           {
             duration: TILE_REFLOW_ANIMATION_MS,
             easing: TILE_REFLOW_EASING,
@@ -111,7 +117,7 @@ export function getTileReflowController(surface: TileSurface): TileReflowControl
       if (depth > 0) return mutate();
 
       depth += 1;
-      const previousRects = captureRects(surface);
+      const previousRects = captureRects(surface, activeAnimations);
       // Capture first, then cancel: getBoundingClientRect() includes the
       // currently painted WAAPI transform, which is the correct retargeting
       // origin for a rapid second layout request.
