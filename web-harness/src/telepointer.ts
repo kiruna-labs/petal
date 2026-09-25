@@ -1,4 +1,5 @@
 import { isAiTrackName, type TelepointerMessage } from './trackNames.ts';
+import { renderedMediaRect } from '@petal/shared/logic/cameraCrop';
 
 export interface RectLike {
   left: number;
@@ -214,13 +215,21 @@ export interface MediaTileLike {
  * local echo, and receive-side render) must go through this, not
  * `tile.getBoundingClientRect()` directly -- that was the #892 bug.
  * Viewport-absolute, matching `event.clientX/clientY`.
+ *
+ * #248: a camera cropped to fill its tile (`data-fit="cover"`, cameraFit.ts)
+ * paints a picture LARGER than its element. `bounds` is then that picture's
+ * rect, overhang included, which already has the media's aspect -- so the
+ * `containedMediaRect` every consumer applies next is the identity and a
+ * camera-tile drawing stays on the face it was drawn on.
  */
 export function mediaContentRect(tile: MediaTileLike): { bounds: RectLike; media: SizeLike } {
   const video = tile.querySelector<HTMLVideoElement>('video');
   const rect = (video ?? tile).getBoundingClientRect();
+  const bounds = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+  const media = { width: video?.videoWidth ?? 0, height: video?.videoHeight ?? 0 };
   return {
-    bounds: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-    media: { width: video?.videoWidth ?? 0, height: video?.videoHeight ?? 0 },
+    bounds: video?.dataset?.fit === 'cover' ? renderedMediaRect(bounds, media, 'cover') : bounds,
+    media,
   };
 }
 
