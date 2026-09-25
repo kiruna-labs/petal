@@ -116,8 +116,9 @@ recognized by an Android, iPhone, iPad or iPod User-Agent (or any User-Agent
 containing `Mobile`), or by the `Sec-CH-UA-Mobile: ?1` hint Chromium browsers
 send. An iPad whose browser identifies as a Mac (Safari's default) is
 recognized by the page itself from its touch screen, before the hand-off
-would fire. A phone in "Request desktop site" mode and a computer with a
-touch screen get the computer page.
+would fire; so is an iPhone asking for the desktop site, which also
+identifies as a Mac. An Android phone in "Request desktop site" mode and a
+Windows or Linux computer with a touch screen get the computer page.
 
 ### Skipping the interstitial: direct browser-join link
 
