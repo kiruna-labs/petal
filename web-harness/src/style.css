@@ -1389,10 +1389,12 @@ html:has(> body > #meeting-screen:not(.hidden)) {
 /* Tile grid (#204 PR2): the shape comes from the shared packer
    (shared/logic/galleryGeometry.ts via tileLayout.ts) as --gallery-* vars, the
    same source the desktop gallery uses. This CSS only places the computed
-   cells and keeps the 16:9 tile box; it never decides columns itself.
+   cells and sizes the tile box the packer chose (16:9, or down to ~7:6 for a
+   camera-only grid, #248 -- width and height are both definite, so the
+   `aspect-ratio` below never applies); it never decides columns itself.
    #239: a track is no larger than the packed tile, and the block of tracks is
-   centred (`safe`: never clipped at the start), so the space the 16:9 tiles
-   cannot use collects around the group instead of as dead bands between
+   centred (`safe`: never clipped at the start), so the space the tiles cannot
+   use collects around the group instead of as dead bands between
    neighbours. Columns run on HALF tracks, each tile spanning two, so an
    incomplete last row can start half a column in and sit centred under the
    full rows (tileLayout.ts sets the first tail tile's grid-column-start). */
@@ -1549,6 +1551,15 @@ html:has(> body > #meeting-screen:not(.hidden)) {
 
 .tile video.full-range-source-video {
   opacity: 0;
+}
+
+/* #248: a camera fills its tile by cropping, within the shared caps
+   (shared/logic/cameraCrop.ts via cameraFit.ts, which sets `data-fit`): up to
+   about a third of the width off the sides, at most 10% off the top and
+   bottom. Past either cap it stays `contain` above. Shares never get
+   `data-fit` and are never cropped. */
+.tile video.camera-video[data-fit='cover'] {
+  object-fit: cover;
 }
 
 /* Hold-last-frame (#627). A share video must never render black: the moment it
