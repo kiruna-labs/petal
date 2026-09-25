@@ -630,6 +630,9 @@ export interface HarnessCallbacks {
   ensureRemoteControlAffordance: (tile: HTMLDivElement) => void;
   // viewerDemand
   publishViewerDemand: (tile: HTMLDivElement, kind: 'open' | 'closed' | 'heartbeat') => void;
+  /** #248: zoom a shared window in / out / back to fit (shareZoomUi.ts) --
+   * the share header's overflow menu. Absent = not wired (tests). */
+  shareZoomCommand?: (tile: HTMLElement, command: 'in' | 'out' | 'fit') => void;
   publishViewerDemandForPublication: (ownerIdentity: string, publication: import('livekit-client').RemoteTrackPublication) => void;
   startViewerDemandHeartbeat: () => void;
   stopViewerDemandHeartbeat: () => void;
