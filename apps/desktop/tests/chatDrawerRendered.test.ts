@@ -5,7 +5,8 @@
 // consecutive lines from one sender group under one name, the composer is one
 // row with Send beside the input, Enter sends and Shift+Enter does not,
 // clicking Send keeps focus in the input, the empty/over-limit composer
-// cannot send, Escape closes, and at least four lines of message text stay
+// cannot send, going over the limit is announced once (and typing near it is
+// not), Escape closes, and at least four lines of message text stay
 // readable. The browser's landscape-phone layout is
 // web-harness/tests/chatDrawerLayoutRendered.test.ts.
 import assert from 'node:assert/strict';
@@ -34,6 +35,26 @@ async function composerBoxes(page: Page): Promise<{ input: Box; send: Box; count
     }),
   );
   return { input: input!, send: send!, count };
+}
+
+/** The over-limit status as the accessibility tree has it: null when it is
+ * not in the tree (display: none, say), so a screen reader would not be
+ * tracking it when it first speaks. */
+async function limitStatus(page: Page): Promise<{ role: string; live: string; text: string } | null> {
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const { root } = await cdp.send('DOM.getDocument', { depth: 0 });
+    const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector: '.chat-limit-status' });
+    if (!nodeId) return null;
+    const { nodes } = await cdp.send('Accessibility.getPartialAXTree', { nodeId, fetchRelatives: false });
+    const node = nodes[0];
+    if (!node || node.ignored) return null;
+    const live = node.properties?.find((property) => property.name === 'live')?.value.value;
+    const text = await page.locator('.chat-limit-status').textContent();
+    return { role: String(node.role?.value ?? ''), live: String(live ?? ''), text: text ?? '' };
+  } finally {
+    await cdp.detach();
+  }
 }
 
 /** Send sits to the right of the input and overlaps it vertically: one row. */
@@ -150,11 +171,26 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
       });
       assert.equal(pinned, true, 'the list follows the newest message');
 
-      // Over the limit: the counter warns (above Send, beside the input) and
-      // Send is disabled; Escape closes.
+      // Screen readers: the count is not a live region (it would read out
+      // every keystroke); a status region, in the tree before it ever
+      // speaks, says only that the draft went over the limit.
+      assert.equal(await page.locator('.chat-count').getAttribute('aria-live'), null, 'the count itself is not announced');
+      assert.deepEqual(await limitStatus(page), { role: 'status', live: 'polite', text: '' }, `${width}x${height}: a silent status region is in the tree`);
+      await input.fill('x'.repeat(1850));
+      assert.equal(await page.locator('.chat-count').textContent(), '150', 'near the limit the count shows');
+      assert.equal((await limitStatus(page))?.text, '', 'near the limit nothing is announced');
+
+      // Over the limit: the counter warns (above Send, beside the input),
+      // Send is disabled and the status speaks, once: another character over
+      // leaves its text as it was. Escape closes.
       await input.fill('x'.repeat(2001));
       assert.equal(await send.isDisabled(), true);
       assert.equal(await page.locator('.chat-count.over').textContent(), '-1');
+      const overStatus = await limitStatus(page);
+      assert.match(overStatus?.text ?? '', /too long to send: 2000 characters at most/i);
+      await input.fill('x'.repeat(2002));
+      assert.equal(await page.locator('.chat-count.over').textContent(), '-2');
+      assert.deepEqual(await limitStatus(page), overStatus, 'a second character over is not announced again');
       const over = await composerBoxes(page);
       assertSendBesideInput(over, `${width}x${height} over the limit`);
       assert.ok(over.count && over.count.bottom <= over.send.top && over.count.left >= over.input.right - 1, `${width}x${height}: the count sits above Send`);
