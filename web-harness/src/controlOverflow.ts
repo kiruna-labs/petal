@@ -24,9 +24,12 @@ const PINNED_CONTROLS: ReadonlySet<string> = new Set(['ctl-audio', 'ctl-video', 
  * The order the other controls give way in, lowest priority first. A control
  * not listed here (a plugin's, or any cell added later) goes before all of
  * them; among those, the one furthest along the bar goes first. Full screen
- * is the landscape rail's (#239): it outlasts Draw and Invite there.
+ * is the landscape rail's (#239) and goes last: it is the only way to hide a
+ * phone browser's address bar, and in full screen the rail has room for the
+ * controls that gave way (a Pixel 8 in Chrome is about 360px tall in
+ * landscape, 412px in full screen).
  */
-export const COLLAPSE_ORDER: readonly string[] = ['ctl-draw', 'ctl-invite', 'ctl-fullscreen', 'ctl-chat', 'ctl-share'];
+export const COLLAPSE_ORDER: readonly string[] = ['ctl-draw', 'ctl-invite', 'ctl-chat', 'ctl-share', 'ctl-fullscreen'];
 
 /** A badge showing on a hidden control is what puts the dot on ⋯. */
 const ATTENTION_BADGE_SELECTOR = '.chat-badge, .plugin-control-badge';

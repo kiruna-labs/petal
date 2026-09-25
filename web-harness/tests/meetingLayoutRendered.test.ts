@@ -625,10 +625,16 @@ test('#239 the rail full-screen button enters and leaves real full screen, and f
   }
 });
 
-test('#239 x #247 where the rail has no room for full screen, its ⋯ row enters real full screen', { timeout: 60_000 }, async () => {
+test('#239 x #247 full screen is the last control to leave the rail, and its ⋯ row enters real full screen', { timeout: 60_000 }, async () => {
   const page = await openMeeting(LANDSCAPE_PHONE, 1);
   try {
-    assert.equal(await page.locator('.fullscreen-cell.overflowed').count(), 1, 'full screen is in the ⋯ menu on an 863x360 rail');
+    // A phone browser's landscape height (863x360): Chat gives way first.
+    await page.waitForFunction(() => document.querySelector('#ctl-chat')?.closest('.control-cell')?.classList.contains('overflowed'));
+    assert.equal(await page.locator('.fullscreen-cell.overflowed').count(), 0, 'full screen stays in an 863x360 rail');
+    assert.ok((await page.locator('#ctl-fullscreen').boundingBox())!.width > 0);
+    // Shorter still, it goes to the ⋯ menu too.
+    await page.setViewportSize({ width: 863, height: 290 });
+    await page.waitForFunction(() => document.querySelector('.fullscreen-cell')?.classList.contains('overflowed'));
     await page.click('#ctl-more');
     await page.waitForSelector('#overflow-menu.placed');
     // The row clicks the rail button inside the user's own tap, so
