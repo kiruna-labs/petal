@@ -5,7 +5,8 @@ import {
   computeGalleryLayout,
   GAP_COMPACT,
   GAP_TINY,
-  scoreGalleryCandidate
+  scoreGalleryCandidate,
+  tierGap
 } from '@petal/shared/logic/galleryGeometry';
 
 // #P0: apps/desktop/src/lib/galleryLayout.ts used to hard-code a 2x2 grid for
@@ -180,4 +181,30 @@ test("gap tiering applies to a forced 'column' arrangement too", () => {
   // still wins regardless of which gap tier fed into it.
   assert.equal(layout.overflow, true);
   assert.equal(layout.tileHeight, 96);
+});
+
+// #239: the web client's phone breakpoints pass a 10px/9px base gap. The
+// tiers used to return their constant unconditionally, so a compact phone
+// cell was WIDENED to 12px -- the opposite of the header comment's promise.
+test('gap tiering only ever tightens the base gap, never widens it', () => {
+  for (const baseGap of [0, 4, 8, 9, 10, 12, 16, 18, 24]) {
+    for (const flags of [
+      { compact: false, tiny: false },
+      { compact: true, tiny: false },
+      { compact: true, tiny: true }
+    ]) {
+      assert.ok(
+        tierGap(baseGap, flags) <= baseGap,
+        `tierGap(${baseGap}, ${JSON.stringify(flags)}) = ${tierGap(baseGap, flags)} exceeds the base gap`
+      );
+    }
+  }
+  // The same compact phone layout the web client packs at its 560px
+  // breakpoint: the cells are compact, and the 10px gap it asked for holds.
+  const phone = computeGalleryLayout(4, 290, 250, { gap: 10 });
+  assert.equal(phone.compact, true);
+  assert.equal(phone.gap, 10);
+  const tinyPhone = computeGalleryLayout(9, 380, 360, { gap: 9 });
+  assert.equal(tinyPhone.tiny, true);
+  assert.equal(tinyPhone.gap, GAP_TINY, 'a base gap above GAP_TINY still tightens to it');
 });

@@ -1456,11 +1456,19 @@
     overscroll-behavior: none;
   }
 
+  /* #239 (parity with the browser client): a track is no larger than the
+     packed tile and the block of tracks is centred, so the space the 16:9
+     tiles cannot use surrounds the group instead of opening dead bands
+     between neighbours. `safe` falls back to start rather than clip. */
   .tiles.grid {
     display: grid;
-    grid-template-columns: repeat(var(--gallery-cols), minmax(0, 1fr));
-    grid-template-rows: repeat(var(--gallery-rows), minmax(0, 1fr));
+    grid-template-columns: repeat(var(--gallery-cols), minmax(0, var(--gallery-tile-width)));
+    grid-template-rows: repeat(var(--gallery-rows), minmax(0, var(--gallery-tile-height)));
     place-items: center;
+    /* `center` first: WebKit before 17.6 (older macOS WKWebView) drops the
+       `safe` declaration. */
+    place-content: center;
+    place-content: safe center;
     gap: var(--gallery-gap);
   }
 
@@ -1475,7 +1483,7 @@
        indefinite-height rows and `min(100%, var(--gallery-tile-height))`
        resolved against auto rows — visibly broken whenever a state card
        coexisted with participants. */
-    grid-template-rows: auto repeat(var(--gallery-rows), minmax(0, 1fr));
+    grid-template-rows: auto repeat(var(--gallery-rows), minmax(0, var(--gallery-tile-height)));
   }
 
   .gallery-state {
