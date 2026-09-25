@@ -17,8 +17,8 @@ desktop app uses.
 
 Petal invite links look like
 `https://meet.petal.live/design-review/abc-defg-hjk` — a readable label
-plus the meeting's access code. Opening one shows a small Petal page with
-platform-aware desktop choices:
+plus the meeting's access code. Opening one on a computer shows a small
+Petal page with platform-aware desktop choices:
 
 - **Open Petal** — hands off to the desktop app if it's installed.
 - **Download Petal for macOS** — the universal signed and notarized DMG.
@@ -28,8 +28,13 @@ platform-aware desktop choices:
   to the meeting. If you've never set a display name here before, it asks
   for your name first, then joins.
 
-Both download buttons are always shown; the one matching your operating
-system is the primary.
+Both download buttons are always shown on a computer; the one matching your
+operating system comes first.
+
+On a phone or tablet the page skips the desktop choices: **Join in browser**
+is the only button, the page doesn't try to open the desktop app, and one
+line under the meeting code, "On a computer? **Download Petal for Windows or
+macOS**", links to the install page for later.
 
 ## Joining or creating a meeting by hand
 
