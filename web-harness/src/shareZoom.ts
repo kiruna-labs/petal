@@ -36,10 +36,13 @@ export const SHARE_ZOOM_FIT: ShareZoom = Object.freeze({ scale: 1, centerX: 0.5,
 export const SHARE_ZOOM_MAX = 5;
 /** Double-tap on a window whose fit already fills its tile zooms this far. */
 const SHARE_ZOOM_DOUBLE_TAP = 2;
-/** One double-tap never zooms further than this: a tall window's "fill" can
- * be ~4x, too big a jump to keep your place. A further double-tap steps on to
+/** One double-tap zooms at most this far: a tall window's "fill" can be
+ * ~4x, too big a jump to keep your place. A further double-tap steps on to
  * fill. */
 export const SHARE_ZOOM_DOUBLE_TAP_MAX = 2.5;
+/** ...unless that step would stop within this factor of fill: then it goes
+ * all the way, since 6.25x and then 6.38x is a tap that barely moves. */
+const SHARE_ZOOM_FILL_SNAP = 1.1;
 const SCALE_EPSILON = 1e-3;
 
 function contentIn(box: SizeLike, media: SizeLike): RectLike {
@@ -143,8 +146,9 @@ export function panShare(box: SizeLike, media: SizeLike, zoom: ShareZoom, dx: nu
 /**
  * Double-tap, around the tapped point: at fit -> fill the tile (crop the
  * letterbox away), at most SHARE_ZOOM_DOUBLE_TAP_MAX per tap, so a tall
- * window steps 2.5x -> fill; once at (or past) fill -> back to fit. A window
- * whose fit already fills the tile has no letterbox to remove, so it zooms 2x.
+ * window steps 2.5x -> fill -- snapping to fill when a step would stop just
+ * short of it; once at (or past) fill -> back to fit. A window whose fit
+ * already fills the tile has no letterbox to remove, so it zooms 2x.
  */
 export function toggleShareFitFill(
   box: SizeLike,
@@ -155,7 +159,8 @@ export function toggleShareFitFill(
   const fill = shareFillScale(box, media);
   const hasLetterbox = fill > 1 + 0.02;
   if (isShareZoomed(zoom) && (!hasLetterbox || zoom.scale >= fill - SCALE_EPSILON)) return SHARE_ZOOM_FIT;
-  const target = hasLetterbox ? Math.min(fill, zoom.scale * SHARE_ZOOM_DOUBLE_TAP_MAX) : SHARE_ZOOM_DOUBLE_TAP;
+  const step = zoom.scale * SHARE_ZOOM_DOUBLE_TAP_MAX;
+  const target = hasLetterbox ? (fill <= step * SHARE_ZOOM_FILL_SNAP ? fill : step) : SHARE_ZOOM_DOUBLE_TAP;
   return zoomShareAt(box, media, zoom, anchor, target / zoom.scale);
 }
 

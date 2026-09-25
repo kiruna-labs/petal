@@ -163,3 +163,25 @@ export function visibleFlipRect(painted: FlipRect, layoutWidth: number, clipPath
     height: Math.max(0, painted.height - (top + bottom) * scale)
   };
 }
+
+/**
+ * `visibleFlipRect` for a FLIP whose frame is known rather than read back
+ * from computed style: `painted` is the tile's transformed box `remaining` of
+ * the way back through `flip` (what getBoundingClientRect() reported), and
+ * the clip that frame drew is taken off it. Svelte's keyed-list `animate:`
+ * cancels the running animation before it hands over the rect it measured,
+ * so by then there is no clip-path left to read.
+ */
+export function uniformFlipVisibleRect(painted: FlipRect, flip: UniformFlip, remaining: number): FlipRect {
+  const u = Math.min(1, Math.max(0, remaining));
+  // The inset is in the tile's own px; on screen it is scaled with the tile.
+  const scale = 1 + (flip.scale - 1) * u;
+  const insetX = flip.insetX * u * scale;
+  const insetY = flip.insetY * u * scale;
+  return {
+    left: painted.left + insetX,
+    top: painted.top + insetY,
+    width: Math.max(0, painted.width - 2 * insetX),
+    height: Math.max(0, painted.height - 2 * insetY)
+  };
+}

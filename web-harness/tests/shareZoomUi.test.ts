@@ -53,10 +53,11 @@ class FakeElement {
   parentElement: FakeElement | null = null;
   readonly dataset: Record<string, string | undefined> = {};
   readonly children: FakeElement[] = [];
-  readonly listeners = new Map<string, Array<{ listener: Listener; capture: boolean }>>();
+  readonly listeners = new Map<string, Array<{ listener: Listener; capture: boolean; passive: boolean | undefined }>>();
   readonly styles = new Map<string, string>();
   readonly attributes = new Map<string, string>();
   attributeWrites = 0;
+  readonly focusOptions: unknown[] = [];
   readonly style = {
     setProperty: (name: string, value: string) => this.styles.set(name, value),
     removeProperty: (name: string) => this.styles.delete(name),
@@ -125,7 +126,13 @@ class FakeElement {
 
   addEventListener(type: string, listener: Listener, options?: boolean | { capture?: boolean; passive?: boolean }) {
     const capture = typeof options === 'object' ? options.capture === true : options === true;
-    this.listeners.set(type, [...(this.listeners.get(type) ?? []), { listener, capture }]);
+    const passive = typeof options === 'object' ? options.passive : undefined;
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), { listener, capture, passive }]);
+  }
+
+  focus(options?: unknown) {
+    this.focusOptions.push(options);
+    (globalThis.document as unknown as { activeElement: FakeElement }).activeElement = this;
   }
 
   fire(type: string) {
@@ -171,14 +178,22 @@ function makeEvent(type: string, target: FakeElement, init: Partial<FakeEvent> =
   };
 }
 
-/** Capture-phase listeners on the surface run first, then the target's own
- * (the chip, or a pinning click handler standing in for tileLayout.ts), then
- * the surface's bubble listeners -- unless something stopped propagation. */
+/** Capture-phase listeners on the surface run first, then those of the
+ * target and each ancestor up to the surface (the chip, the share tile's own
+ * wheel/touchmove, a pinning click handler standing in for tileLayout.ts),
+ * then the surface's bubble listeners -- unless something stopped
+ * propagation. An event outside the surface never reaches it. */
 function dispatch(surface: FakeElement, event: FakeEvent, onTileClick?: () => void) {
-  for (const { listener } of (surface.listeners.get(event.type) ?? []).filter((entry) => entry.capture)) listener(event);
+  const inside = surface.contains(event.target);
+  if (inside) {
+    for (const { listener } of (surface.listeners.get(event.type) ?? []).filter((entry) => entry.capture)) listener(event);
+  }
   if (event.propagationStopped) return event;
-  for (const { listener } of event.target.listeners.get(event.type) ?? []) listener(event);
-  if (event.propagationStopped) return event;
+  for (let node: FakeElement | null = event.target; node && node !== surface; node = node.parentElement) {
+    for (const { listener } of node.listeners.get(event.type) ?? []) listener(event);
+    if (event.propagationStopped) return event;
+  }
+  if (!inside) return event;
   if (event.type === 'click') onTileClick?.();
   for (const { listener } of (surface.listeners.get(event.type) ?? []).filter((entry) => !entry.capture)) listener(event);
   return event;
@@ -187,10 +202,9 @@ function dispatch(surface: FakeElement, event: FakeEvent, onTileClick?: () => vo
 function setup(options: { activeRemoteControl?: boolean; media?: { width: number; height: number } } = {}) {
   const originalDocument = globalThis.document;
   const originalRaf = (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame;
-  Object.defineProperty(globalThis, 'document', {
-    configurable: true,
-    value: { createElement: (tag: string) => new FakeElement(tag.toLowerCase()) },
-  });
+  const body = new FakeElement('body');
+  const fakeDocument = { createElement: (tag: string) => new FakeElement(tag.toLowerCase()), activeElement: body };
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: fakeDocument });
   delete (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame;
 
   const surface = new FakeElement('div');
@@ -234,8 +248,12 @@ function setup(options: { activeRemoteControl?: boolean; media?: { width: number
     },
   } as unknown as HarnessContext;
   const zoom = setupShareZoom(ctx);
+  // As tiles.ts does for every share tile.
+  zoom.bindTile(tile as unknown as HTMLElement);
   const h = {
     surface,
+    body,
+    focused: () => fakeDocument.activeElement,
     tile,
     header,
     video,
@@ -627,6 +645,82 @@ test('keyboard on a focused share tile: + / = zoom in, - zooms out, 0 fits', () 
     close(h.scale(), 1.25);
     key('0');
     assert.equal(h.scale(), 1);
+  } finally {
+    h.restore();
+  }
+});
+
+test('a press on a View-mode share focuses it, so + / - / 0 work without Tab', () => {
+  const h = setup();
+  try {
+    // Zoomed, a press is preventDefault-ed, which cancels the browser's own
+    // focus-on-press: the tile has to take focus itself.
+    h.wheel({ ctrlKey: true, deltaY: -40 });
+    h.wheel({ ctrlKey: true, deltaY: -40 });
+    const down = h.pointer('pointerdown', { clientX: 400, clientY: 260 });
+    assert.equal(down.defaultPrevented, true);
+    h.pointer('pointerup', { clientX: 400, clientY: 260 });
+    assert.equal(h.focused(), h.tile, 'the pressed share tile has focus');
+    assert.deepEqual(h.tile.focusOptions, [{ preventScroll: true }]);
+    // Keys go to the focused element.
+    dispatch(h.surface, makeEvent('keydown', h.focused(), { key: '0' }));
+    assert.equal(h.scale(), 1);
+    dispatch(h.surface, makeEvent('keydown', h.focused(), { key: '+' }));
+    close(h.scale(), 1.25);
+  } finally {
+    h.restore();
+  }
+});
+
+test('a share press never takes focus from a text field, the header, or Control and Draw', () => {
+  const h = setup();
+  try {
+    // Typing in the chat: panning the share keeps the draft focused.
+    const chatInput = h.body.appendChild(new FakeElement('input'));
+    chatInput.focus();
+    h.wheel({ ctrlKey: true, deltaY: -40 });
+    h.pointer('pointerdown', { clientX: 400, clientY: 260 });
+    h.pointer('pointerup', { clientX: 400, clientY: 260 });
+    assert.equal(h.focused(), chatInput);
+    h.body.focus();
+    dispatch(h.surface, makeEvent('pointerdown', h.header, { clientX: 400, clientY: 20 }));
+    assert.equal(h.focused(), h.body, 'the header owns its own presses');
+    for (const mode of ['draw', 'control'] as const) {
+      if (mode === 'draw') h.surface.classList.add('draw-mode-active');
+      else h.tile.classList.add('remote-control-active');
+      h.pointer('pointerdown', { clientX: 400, clientY: 260, timeStamp: 5000 });
+      h.pointer('pointerup', { clientX: 400, clientY: 260, timeStamp: 5050 });
+      assert.equal(h.focused(), h.body, `${mode}: not the zoom controller's press`);
+      h.surface.classList.remove('draw-mode-active');
+      h.tile.classList.remove('remote-control-active');
+    }
+  } finally {
+    h.restore();
+  }
+});
+
+test('wheel and touchmove are non-passive on share tiles only, never on the whole surface', () => {
+  const h = setup();
+  try {
+    // Bound once however often tiles.ts re-binds a reused share tile.
+    h.zoom.bindTile(h.tile as unknown as HTMLElement);
+    for (const type of ['wheel', 'touchmove']) {
+      assert.deepEqual(
+        (h.tile.listeners.get(type) ?? []).map((entry) => entry.passive),
+        [false],
+        `${type}: one non-passive listener on the share tile`
+      );
+      assert.deepEqual(
+        (h.surface.listeners.get(type) ?? []).filter((entry) => entry.passive !== true),
+        [],
+        `${type}: the surface's camera tiles and rail keep compositor scrolling`
+      );
+    }
+    // Every share tile gets them, wherever tiles.ts creates or reuses one.
+    const tilesSource = readFileSync(new URL('../src/tiles.ts', import.meta.url), 'utf8');
+    assert.match(tilesSource, /cb\.bindTileInteractions\(tile\);\n\s*cb\.bindShareZoomTile\?\.\(tile\);/);
+    const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+    assert.match(mainSource, /bindShareZoomTile: shareZoom\.bindTile/);
   } finally {
     h.restore();
   }
