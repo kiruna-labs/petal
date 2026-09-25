@@ -3,12 +3,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import type { VercelRequest, VercelResponse } from '../api/_lib/vercel.js';
 import joinHandler, {
   desktopDownloadPlatformForUserAgent,
   downloadUrlForPlatform,
   webJoinUrlForAccessCode,
 } from '../api/j.ts';
+import { HARNESS_REJOIN_SESSION_KEY } from '../src/constants.ts';
 
 const contractFixture = JSON.parse(
   readFileSync(new URL('../../contracts/petal-contracts.json', import.meta.url), 'utf8'),
@@ -240,4 +242,146 @@ test('web join URL strips stale login path from configured base', async () => {
       process.env.PETAL_WEB_JOIN_URL = original;
     }
   }
+});
+
+// #244: the address bar of a web meeting holds the invite link, so reloading
+// the meeting (or a browser restoring the tab) loads this page. Its first
+// script sends the tab that was in the meeting back into the app.
+type RejoinVisit = {
+  navigationType: 'navigate' | 'reload' | 'back_forward';
+  wasDiscarded?: boolean;
+  /** history.state of the entry being loaded; the meeting's Back guard entry keeps its own. */
+  historyState?: Record<string, unknown> | null;
+  stored?: string | null;
+  storageThrows?: boolean;
+};
+
+const GUARD_STATE = { petalMeetingGuard: 'k3x9' };
+
+// Runs the page's inline scripts in document order against a minimal browser,
+// the way a parser would: window.stop() ends parsing, so no later script runs.
+// Then any timers they set. Reports where the visitor ends up, and what is
+// left in this tab's sessionStorage.
+function visitInvitePage(html: string, visit: RejoinVisit) {
+  const replaced: string[] = [];
+  const timers: Array<() => void> = [];
+  const listeners = new Map<string, Array<(event: { persisted: boolean }) => void>>();
+  const storage = new Map<string, string>();
+  if (visit.stored) storage.set(HARNESS_REJOIN_SESSION_KEY, visit.stored);
+  let stopped = false;
+  const location = {
+    href: 'https://meet.petal.live/design-review/abc-defg-hjk',
+    replace: (url: string) => replaced.push(url),
+  };
+  const window = {
+    location,
+    stop: () => {
+      stopped = true;
+    },
+    setTimeout(fn: () => void) {
+      timers.push(fn);
+      return timers.length;
+    },
+    addEventListener(type: string, listener: (event: { persisted: boolean }) => void) {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+  };
+  const guardStorage = () => {
+    if (visit.storageThrows) throw new Error('SecurityError');
+  };
+  const context = {
+    window,
+    location,
+    history: { state: visit.historyState ?? null },
+    performance: { getEntriesByType: (type: string) => (type === 'navigation' ? [{ type: visit.navigationType }] : []) },
+    sessionStorage: {
+      getItem(key: string) {
+        guardStorage();
+        return storage.get(key) ?? null;
+      },
+      removeItem(key: string) {
+        guardStorage();
+        storage.delete(key);
+      },
+    },
+    document: {
+      wasDiscarded: visit.wasDiscarded ?? false,
+      documentElement: { classList: { add() {}, contains: () => false } },
+      getElementById: () => null,
+    },
+    navigator: { userAgent: '', maxTouchPoints: 0 },
+  };
+  for (const [, source] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+    runInNewContext(source, context);
+    if (stopped) break;
+  }
+  if (!stopped) for (const fn of timers) fn();
+  return {
+    replaced,
+    stopped,
+    href: location.href,
+    stored: () => storage.get(HARNESS_REJOIN_SESSION_KEY) ?? null,
+    // Back to this page out of the back-forward cache: no script runs again.
+    restoreFromBackForwardCache: () => {
+      for (const listener of listeners.get('pageshow') ?? []) listener({ persisted: true });
+    },
+  };
+}
+
+test('reloading or restoring the tab that was in this meeting goes back into the web app, never to the desktop app', async () => {
+  const body = (await call('GET', { label: 'design-review', code: 'abc-defg-hjk' })).body as string;
+  const rejoinScript = body.indexOf('sessionStorage');
+  assert.ok(rejoinScript > -1 && rejoinScript < body.indexOf('<body>'), 'decided in <head>, before the invite page paints');
+
+  for (const visit of [
+    { navigationType: 'reload', stored: 'abc-defg-hjk' },
+    // Chrome restoring a discarded tab reports back_forward, but says so.
+    { navigationType: 'back_forward', wasDiscarded: true, stored: 'abc-defg-hjk' },
+    // Safari/Firefox session restore: back_forward, but on the meeting's guard entry.
+    { navigationType: 'back_forward', historyState: GUARD_STATE, stored: 'abc-defg-hjk' },
+  ] satisfies RejoinVisit[]) {
+    const result = visitInvitePage(body, visit);
+    assert.deepEqual(result.replaced, ['/?code=abc-defg-hjk'], JSON.stringify(visit));
+    assert.equal(result.stopped, true, 'the rest of the page never runs');
+    assert.equal(result.href, 'https://meet.petal.live/design-review/abc-defg-hjk', 'no petal:// hand-off');
+  }
+});
+
+test('the invite page stays the invite page for a new visit, a Back, another meeting, or no storage', async () => {
+  const body = (await call('GET', { label: 'design-review', code: 'abc-defg-hjk' })).body as string;
+
+  for (const visit of [
+    { navigationType: 'navigate', stored: 'abc-defg-hjk' }, // the link opened again, e.g. from chat
+    { navigationType: 'back_forward', stored: 'abc-defg-hjk' }, // Back with no guard: the user wanted out
+    { navigationType: 'reload', stored: 'def-ghjk-mnp' }, // this tab was in another meeting
+    { navigationType: 'reload', stored: 'ABC-DEFG-HJK' }, // exactly what the client writes, nothing looser
+    { navigationType: 'reload', stored: null }, // a new tab, or the user left
+    { navigationType: 'reload', historyState: GUARD_STATE, stored: null },
+    { navigationType: 'reload', storageThrows: true },
+  ] satisfies RejoinVisit[]) {
+    const result = visitInvitePage(body, visit);
+    assert.deepEqual(result.replaced, [], JSON.stringify(visit));
+    assert.equal(result.stopped, false, JSON.stringify(visit));
+    assert.equal(result.href, 'petal://join/abc-defg-hjk', `${JSON.stringify(visit)}: the page carries on as before`);
+  }
+});
+
+test('backing out of the meeting to this page forgets it, so a later reload shows the invite page', async () => {
+  const body = (await call('GET', { label: 'design-review', code: 'abc-defg-hjk' })).body as string;
+
+  const back = visitInvitePage(body, { navigationType: 'back_forward', stored: 'abc-defg-hjk' });
+  assert.equal(back.stored(), null, 'Back (not a restore) clears the tab\'s meeting');
+  assert.deepEqual(visitInvitePage(body, { navigationType: 'reload', stored: back.stored() }).replaced, []);
+
+  const fresh = visitInvitePage(body, { navigationType: 'navigate', stored: 'abc-defg-hjk' });
+  assert.equal(fresh.stored(), 'abc-defg-hjk', 'opening the link again leaves the meeting tab alone');
+  fresh.restoreFromBackForwardCache();
+  assert.equal(fresh.stored(), null, 'Back into this page from the back-forward cache clears it too');
+});
+
+test('the rejoin target is this origin and this page\'s own normalized code', async () => {
+  const body = (await call('GET', undefined, {}, '/ABC-DEFG-HJK')).body as string;
+
+  assert.deepEqual(visitInvitePage(body, { navigationType: 'reload', stored: 'abc-defg-hjk' }).replaced, ['/?code=abc-defg-hjk']);
+  assert.doesNotMatch(body, /Set-Cookie|document\.cookie/i, 'nothing leaves this tab');
 });

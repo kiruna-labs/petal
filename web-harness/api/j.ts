@@ -126,6 +126,13 @@ export function credentialFromJoinQuery(
   return accessCode ? credentialForAccessCode(accessCode) : null;
 }
 
+// #244: sessionStorage key the browser client sets (this tab only) while it is
+// in a meeting, and the history.state key of the meeting's Back guard entry.
+// Lockstep with HARNESS_REJOIN_SESSION_KEY (src/constants.ts) and
+// MEETING_GUARD_STATE_KEY (src/meetingContinuity.ts).
+export const REJOIN_SESSION_KEY = 'petal-harness-rejoin';
+export const MEETING_GUARD_STATE_KEY = 'petalMeetingGuard';
+
 export function inviteInterstitialHtml(args: {
   credential: string;
   accessCode?: string;
@@ -154,6 +161,38 @@ export function inviteInterstitialHtml(args: {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escapeHtml(title)} | Petal</title>
+<script>
+  // #244: a web meeting's address bar holds this invite link, so reloading
+  // the meeting (or a browser restoring the tab) lands here. Only the tab that
+  // was in this meeting goes straight back into the web app: on a reload, a
+  // discarded tab's restore, or on the meeting's own Back guard entry, whose
+  // state survives a session restore. stop() keeps the rest of the page, and
+  // its hand-off to the desktop app, from ever running. Backing out to this
+  // page forgets the meeting, so a later reload shows the invite page. The
+  // code is this page's own, and the target is this origin.
+  (function () {
+    try {
+      var key = ${JSON.stringify(REJOIN_SESSION_KEY)};
+      var code = ${JSON.stringify(accessCode)};
+      var navigation = performance.getEntriesByType('navigation')[0];
+      var type = navigation && navigation.type;
+      var guardEntry = !!(history.state && history.state[${JSON.stringify(MEETING_GUARD_STATE_KEY)}]);
+      var restored = type === 'reload' || document.wasDiscarded === true || guardEntry;
+      if (restored && sessionStorage.getItem(key) === code) {
+        window.stop();
+        location.replace('/?code=' + encodeURIComponent(code));
+        return;
+      }
+      if (type === 'back_forward' && !restored) sessionStorage.removeItem(key);
+      // Back to this page out of the back-forward cache runs no script again.
+      window.addEventListener('pageshow', function (event) {
+        try {
+          if (event.persisted) sessionStorage.removeItem(key);
+        } catch (e) {}
+      });
+    } catch (e) {}
+  })();
+</script>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }

@@ -24,6 +24,13 @@ body {
   height: 100%;
 }
 
+/* #244: no pull-to-refresh (or overscroll bounce) while a meeting is on
+   screen -- on Android a stray downward swipe reloaded the page. */
+html:has(#meeting-screen:not(.hidden)),
+html:has(#meeting-screen:not(.hidden)) body {
+  overscroll-behavior-y: none;
+}
+
 body {
   margin: 0;
   background: var(--bg-base);
@@ -109,6 +116,15 @@ body {
   color: var(--text-dim);
   overflow-wrap: anywhere;
   max-width: 100%;
+}
+
+/* #244 disconnect notice: the connecting card's shell, plus its choices. */
+.disconnected-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
 }
 
 @keyframes connecting-spin {
@@ -324,6 +340,38 @@ body {
 
 .feedback-dialog::backdrop {
   background: rgba(0, 0, 0, 0.58);
+}
+
+/* #244: the Back guard's "Leave meeting?" -- the feedback dialog's surface. */
+.leave-confirm {
+  width: min(320px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-card);
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-panel);
+}
+
+.leave-confirm::backdrop {
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.leave-confirm-form {
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+}
+
+.leave-confirm-form h2 {
+  margin: 0;
+  font: 700 19px var(--font-display);
+}
+
+.leave-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .feedback-form {

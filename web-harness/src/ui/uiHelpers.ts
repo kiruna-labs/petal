@@ -10,6 +10,7 @@ interface UiHelperOptions {
   connectingScreen: HTMLDivElement | null;
   connectingTitle: HTMLElement | null;
   connectingStatus: HTMLElement | null;
+  disconnectedScreen: HTMLDivElement | null;
   displayNameInput: HTMLInputElement;
   meetingCodeInput: HTMLInputElement;
   joinBtn: HTMLButtonElement;
@@ -77,6 +78,10 @@ export function setupUiHelpers(options: UiHelperOptions) {
     options.connectingScreen?.classList.add('hidden');
   }
 
+  function hideDisconnectedScreen() {
+    options.disconnectedScreen?.classList.add('hidden');
+  }
+
   /** Join-link auto-join path (#deepLink): swap the home screen for a
    * "Joining <label>" card immediately, so the menu never flashes before the
    * meeting appears. Every exit -- success (`showMeetingScreen`) or failure
@@ -85,6 +90,7 @@ export function setupUiHelpers(options: UiHelperOptions) {
     if (!options.connectingScreen) return;
     if (options.connectingTitle) options.connectingTitle.textContent = `Joining ${label}`;
     if (options.connectingStatus) options.connectingStatus.textContent = 'Connecting…';
+    hideDisconnectedScreen();
     options.joinScreen.classList.add('hidden');
     options.meetingScreen.classList.add('hidden');
     options.connectingScreen.classList.remove('hidden');
@@ -96,6 +102,7 @@ export function setupUiHelpers(options: UiHelperOptions) {
 
   function showMeetingScreen(code: string, roomDisplayName?: string | null) {
     hideConnectingScreen();
+    hideDisconnectedScreen();
     options.joinScreen.classList.add('hidden');
     options.meetingScreen.classList.remove('hidden');
     options.roomNameEl.textContent = roomDisplayLabelForCredentialWithDisplayName(code, roomDisplayName);
@@ -109,16 +116,33 @@ export function setupUiHelpers(options: UiHelperOptions) {
     }
   }
 
-  function showJoinScreen() {
+  function leaveMeetingScreen() {
     hideConnectingScreen();
+    hideDisconnectedScreen();
     options.meetingScreen.classList.add('hidden');
-    options.joinScreen.classList.remove('hidden');
     if (elapsedTimer !== null) {
       clearInterval(elapsedTimer);
       elapsedTimer = null;
     }
     connectedAt = null;
     setInviteCopyControls(null);
+  }
+
+  function showJoinScreen() {
+    leaveMeetingScreen();
+    options.joinScreen.classList.remove('hidden');
+  }
+
+  /** #244: a meeting the user did not leave ended. Replaces the silent jump
+   * to the home screen; meetingContinuity.ts fills in what happened. */
+  function showDisconnectedScreen() {
+    if (!options.disconnectedScreen) {
+      showJoinScreen();
+      return;
+    }
+    leaveMeetingScreen();
+    options.joinScreen.classList.add('hidden');
+    options.disconnectedScreen.classList.remove('hidden');
   }
 
   function showToast(message: string) {
@@ -208,6 +232,7 @@ export function setupUiHelpers(options: UiHelperOptions) {
     showJoinScreen,
     showConnectingScreen,
     setConnectingStatus,
+    showDisconnectedScreen,
     showToast,
     showActionableToast,
     setShareState,

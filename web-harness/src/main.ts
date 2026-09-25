@@ -22,6 +22,7 @@ import { setupHarnessApi } from './harnessApi';
 import { setupCockpit } from './cockpit';
 import { setupTiles } from './tiles';
 import { setupConnection } from './connection';
+import { setupMeetingContinuity } from './meetingContinuity';
 import { installEncodedAudioWorkaroundFromUrl } from './encodedAudioProbe';
 import { setupControls, shouldShowFirstVisitOnboarding } from './controls';
 import { setupPlugins } from './plugins/setupPlugins';
@@ -67,6 +68,13 @@ const joinCard = joinScreen.querySelector<HTMLDivElement>('.join-card')!;
 const connectingScreen = document.querySelector<HTMLDivElement>('#connecting-screen');
 const connectingTitle = document.querySelector<HTMLElement>('#connecting-title');
 const connectingStatus = document.querySelector<HTMLElement>('#connecting-status');
+const disconnectedScreen = document.querySelector<HTMLDivElement>('#disconnected-screen');
+const disconnectedTitle = document.querySelector<HTMLElement>('#disconnected-title')!;
+const disconnectedDetail = document.querySelector<HTMLElement>('#disconnected-detail')!;
+const disconnectedRejoin = document.querySelector<HTMLButtonElement>('#disconnected-rejoin')!;
+const disconnectedHome = document.querySelector<HTMLButtonElement>('#disconnected-home')!;
+const disconnectedAnnouncer = document.querySelector<HTMLElement>('#disconnected-announcer')!;
+const leaveConfirm = document.querySelector<HTMLDialogElement>('#leave-confirm')!;
 
 const displayNameInput = document.querySelector<HTMLInputElement>('#display-name')!;
 const profileAvatarInitial = document.querySelector<HTMLElement>('#profile-avatar-initial');
@@ -395,6 +403,7 @@ ctx.ui = {
     connectingScreen,
     connectingTitle,
     connectingStatus,
+    disconnectedScreen,
     displayNameInput,
     meetingCodeInput,
     joinBtn,
@@ -604,6 +613,28 @@ Object.assign(ctx.cb, {
   ensureFrameMetadataWorker: tiles.ensureFrameMetadataWorker,
   fitTileLabels: tiles.fitTileLabels,
   syncRemoteWindowHeaders: tiles.syncRemoteWindowHeaders,
+});
+
+// #244: Back guard, rejoin on reload and the disconnect notice. Its
+// callbacks run only on user/room events, after everything below is wired.
+ctx.hook.continuity = setupMeetingContinuity({
+  leaveDialog: leaveConfirm,
+  notice: {
+    title: disconnectedTitle,
+    detail: disconnectedDetail,
+    rejoin: disconnectedRejoin,
+    home: disconnectedHome,
+    announcer: disconnectedAnnouncer,
+  },
+  showJoinScreen: () => ctx.ui.showJoinScreen(),
+  showDisconnectedScreen: () => ctx.ui.showDisconnectedScreen?.(),
+  leave: () => controls.leaveMeeting(),
+  rejoin: async (code) => {
+    ctx.ui.showConnectingScreen?.(ctx.cb.roomDisplayLabelForCredential(code));
+    await ctx.cb.connectToMeeting(code, ctx.cb.resolveIdentity());
+    return ctx.state.room !== null;
+  },
+  logEvent,
 });
 
 const connection = setupConnection(ctx, undefined, sensitiveStringRegistry, feedbackReport);

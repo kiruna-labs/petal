@@ -15,6 +15,10 @@ export const HARNESS_LOCAL_ECHO_STORAGE_KEY = 'petal-harness-local-echo-enabled'
 // button (mirrors desktop's Rust-owned debug_settings.rs, minus the
 // cross-webview propagation problem localStorage has no way to solve there).
 export const HARNESS_DEBUG_MODE_STORAGE_KEY = 'petal-harness-debug-mode-enabled';
+// #244: sessionStorage (this tab only), the access code of the meeting this
+// tab is in. Lockstep with REJOIN_SESSION_KEY in api/j.ts, whose invite page
+// reads it on a reload to send the tab back into the meeting.
+export const HARNESS_REJOIN_SESSION_KEY = 'petal-harness-rejoin';
 export const MAX_RECENT_ROOMS = 8;
 
 export const CAMERA_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
