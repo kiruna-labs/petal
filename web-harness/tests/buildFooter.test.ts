@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { resolveBuildVersion } from '../src/buildInfo';
 import { escapeRegExp } from '../src/escapeRegExp.mjs';
+import { isPhoneOrTablet } from '../src/mobileDevice';
 
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -41,6 +42,46 @@ test('main updates the version child and selects a deterministic desktop downloa
   assert.match(main, /Download Petal for macOS/);
   assert.match(main, /buildVersion\.textContent\s*=\s*`v\$\{buildInfo\.version\} · \$\{buildInfo\.commit\} · \$\{buildInfo\.buildDate\}`/);
   assert.doesNotMatch(main, /querySelector<HTMLElement>\('#build-version'\)[\s\S]*?textContent/);
+});
+
+// #243: a phone or tablet cannot install the desktop app, so the footer
+// offers it no download. The link stays in the markup (and visible on every
+// desktop browser, at any width -- the browser verifier checks 320-420px).
+test('the desktop download is hidden on phones and tablets only', () => {
+  const phonesAndTablets = [
+    // Android phone and tablet (a tablet has no "Mobile" token).
+    'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36',
+    'Mozilla/5.0 (Linux; Android 13; SM-X710) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (iPad; CPU OS 12_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+    'Mozilla/5.0 (iPod touch; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+  ];
+  for (const userAgent of phonesAndTablets) assert.equal(isPhoneOrTablet({ userAgent }), true, userAgent);
+
+  const mac = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15';
+  // iPadOS Safari asks for the desktop site with a Mac user agent; only the
+  // touch screen gives it away.
+  assert.equal(isPhoneOrTablet({ userAgent: mac, maxTouchPoints: 5 }), true);
+  assert.equal(isPhoneOrTablet({ userAgent: mac, maxTouchPoints: 0 }), false);
+  const windowsTouchLaptop =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36';
+  assert.equal(isPhoneOrTablet({ userAgent: windowsTouchLaptop, maxTouchPoints: 10 }), false);
+  const linuxDesktop = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36';
+  assert.equal(isPhoneOrTablet({ userAgent: linuxDesktop }), false);
+  // Chromium's client hints: a "mobile" answer wins over a desktop-shaped
+  // user agent; a "not mobile" one falls back to the rules above, because an
+  // Android tablet says it too.
+  assert.equal(isPhoneOrTablet({ userAgent: linuxDesktop, userAgentData: { mobile: true } }), true);
+  assert.equal(isPhoneOrTablet({ userAgent: phonesAndTablets[1], userAgentData: { mobile: false } }), true);
+  assert.equal(isPhoneOrTablet({ userAgent: windowsTouchLaptop, userAgentData: { mobile: false } }), false);
+
+  // The repo's `.hidden` utility (`display: none !important`), so the link's
+  // own `display: inline-flex` cannot bring it back.
+  assert.match(
+    main,
+    /if \(desktopDownload\) \{[^}]*?desktopDownload\.classList\.toggle\('hidden', isPhoneOrTablet\(navigator\)\);/
+  );
+  assert.match(style, /\.hidden\s*\{\s*display:\s*none !important;\s*\}/);
 });
 
 test('web and desktop release mirrors are equal and nonzero', () => {
