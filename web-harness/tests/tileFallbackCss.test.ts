@@ -35,8 +35,13 @@ test('#204 the meeting tile grid places cells from the shared packer and never d
   // tile spans two) so a short last row can be centred.
   assert.match(
     tilesBody,
-    /grid-template-columns\s*:\s*repeat\(\s*calc\(var\(--gallery-cols\)\s*\*\s*2\),\s*minmax\(0,\s*calc\(\(var\(--gallery-tile-width\)\s*-\s*var\(--gallery-gap\)\)\s*\/\s*2\)\)\s*\)/i
+    /grid-template-columns\s*:\s*repeat\(\s*var\(--gallery-half-tracks\),\s*minmax\(0,\s*calc\(\(var\(--gallery-tile-width\)\s*-\s*var\(--gallery-gap\)\)\s*\/\s*2\)\)\s*\)/i
   );
+  // The half-track count arrives as an integer (tileLayout.ts), defaulting to
+  // one column's two: older WebKit rejects calc() as repeat()'s count, which
+  // drops the whole template and stacks every tile in one column.
+  assert.match(tilesBody, /--gallery-half-tracks\s*:\s*2\s*;/i);
+  assert.doesNotMatch(css, /repeat\(\s*calc\(/i, 'no repeat() count is a calc()');
   assert.match(
     tilesBody,
     /grid-template-rows\s*:\s*repeat\(var\(--gallery-rows\),\s*minmax\(0,\s*var\(--gallery-tile-height\)\)\)/i

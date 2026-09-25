@@ -1395,11 +1395,16 @@ html:has(> body > #meeting-screen:not(.hidden)) {
    cannot use collects around the group instead of as dead bands between
    neighbours. Columns run on HALF tracks, each tile spanning two, so an
    incomplete last row can start half a column in and sit centred under the
-   full rows (tileLayout.ts sets the first tail tile's grid-column-start). */
+   full rows (tileLayout.ts sets the first tail tile's grid-column-start).
+   The half-track count comes from tileLayout.ts as a plain integer
+   (--gallery-half-tracks, twice --gallery-cols): older WebKit rejects calc()
+   as repeat()'s count, which drops the whole template and stacks every tile
+   in one column. */
 .tiles {
   --tile-gap: 16px;
   --tile-pad: 20px;
   --gallery-cols: 1;
+  --gallery-half-tracks: 2;
   --gallery-rows: 1;
   --gallery-tile-width: 100%;
   --gallery-tile-height: 100%;
@@ -1410,7 +1415,7 @@ html:has(> body > #meeting-screen:not(.hidden)) {
   padding: var(--tile-pad);
   display: grid;
   grid-template-columns: repeat(
-    calc(var(--gallery-cols) * 2),
+    var(--gallery-half-tracks),
     minmax(0, calc((var(--gallery-tile-width) - var(--gallery-gap)) / 2))
   );
   grid-template-rows: repeat(var(--gallery-rows), minmax(0, var(--gallery-tile-height)));

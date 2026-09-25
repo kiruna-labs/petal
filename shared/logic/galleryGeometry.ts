@@ -40,7 +40,8 @@ export interface GalleryGeometry {
   tileHeight: number;
   /** The gap actually used to compute this geometry -- `opts.gap` (or its
    * default) unless the cells came out compact/tiny, in which case this is
-   * `GAP_COMPACT`/`GAP_TINY`. Callers should render their CSS grid gap from
+   * at most `GAP_COMPACT`/`GAP_TINY` (`tierGap` only tightens: a smaller
+   * base gap is kept). Callers should render their CSS grid gap from
    * THIS field, not from the `gap` they passed in, or the rendered spacing
    * will disagree with what the packer assumed. */
   gap: number;

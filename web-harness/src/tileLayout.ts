@@ -332,6 +332,9 @@ export function setupTileLayout(ctx: HarnessContext) {
     });
     lastGalleryLayout = { count, columns: layout.columns, rows: layout.rows };
     tilesEl.style.setProperty('--gallery-cols', String(layout.columns));
+    // The half-column track count (style.css `.tiles`), precomputed: older
+    // WebKit rejects `repeat(calc(...), ...)` and would drop the template.
+    tilesEl.style.setProperty('--gallery-half-tracks', String(layout.columns * 2));
     tilesEl.style.setProperty('--gallery-rows', String(layout.rows));
     tilesEl.style.setProperty('--gallery-tile-width', `${layout.tileWidth}px`);
     tilesEl.style.setProperty('--gallery-tile-height', `${layout.tileHeight}px`);
