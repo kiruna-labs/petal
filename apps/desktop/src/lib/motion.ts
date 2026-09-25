@@ -21,7 +21,9 @@ import { cubicOut } from 'svelte/easing';
 import {
 	uniformFlip,
 	uniformFlipClipPath,
-	uniformFlipTransform
+	uniformFlipTransform,
+	uniformFlipVisibleRect,
+	type UniformFlip
 } from '@petal/shared/logic/tileFlip';
 
 const MOTION_FEEDBACK_MS = 120;
@@ -120,8 +122,16 @@ export function toastTransition(_node: Element): TransitionConfig {
 	};
 }
 
-/** When each node's keyed-list FLIP ends (performance.now() ms). */
-const uniformTileFlipEnds = new WeakMap<Element, number>();
+/** Each node's running keyed-list FLIP: its frame, how far back from rest
+ * it last painted (`remaining`, 1 -> 0), and when it ends (performance.now()
+ * ms). */
+interface TileFlipInFlight {
+	flip: UniformFlip;
+	remaining: number;
+	end: number;
+}
+
+const uniformTileFlips = new WeakMap<Element, TileFlipInFlight>();
 
 /**
  * True while `uniformTileFlip` is animating `node`. Svelte owns those
@@ -130,8 +140,8 @@ const uniformTileFlipEnds = new WeakMap<Element, number>();
  * visible box (`visibleFlipRect`) rather than its larger painted one.
  */
 export function uniformTileFlipInFlight(node: Element, now = performance.now()): boolean {
-	const end = uniformTileFlipEnds.get(node);
-	return end !== undefined && now < end;
+	const flight = uniformTileFlips.get(node);
+	return flight !== undefined && flight.remaining > 0 && now < flight.end;
 }
 
 /**
@@ -146,15 +156,31 @@ export function uniformTileFlip(
 	{ from, to }: { from: DOMRect; to: DOMRect },
 	params: { duration?: number; easing?: (t: number) => number } = {}
 ): AnimationConfig {
-	const flip = uniformFlip(from, to);
+	// Interrupting another keyed-list FLIP: Svelte measured `from` with
+	// getBoundingClientRect() -- that FLIP's transform but not its clip -- and
+	// has cancelled it before calling here, so start from the box its last
+	// frame actually showed, or the tile pops out to its unclipped size.
+	const interrupted = uniformTileFlipInFlight(node) ? uniformTileFlips.get(node) : undefined;
+	uniformTileFlips.delete(node);
+	const flip = uniformFlip(
+		interrupted ? uniformFlipVisibleRect(from, interrupted.flip, interrupted.remaining) : from,
+		to
+	);
 	if (!flip) return { duration: 0 };
 	const radius =
 		typeof getComputedStyle === 'function' ? parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0 : 0;
 	const duration = params.duration ?? layoutDuration();
-	uniformTileFlipEnds.set(node, performance.now() + duration);
+	const flight: TileFlipInFlight = { flip, remaining: 1, end: performance.now() + duration };
+	if (duration > 0) uniformTileFlips.set(node, flight);
 	return {
 		duration,
 		easing: params.easing ?? cubicOut,
+		// Svelte calls this every frame with the animation's own progress (it
+		// starts a frame or two after this call), so an interruption knows the
+		// exact frame the tile was showing.
+		tick: (_t, u) => {
+			flight.remaining = u;
+		},
 		css: (_t, u) => {
 			const clipPath = uniformFlipClipPath(flip, u, radius);
 			return `transform: ${uniformFlipTransform(flip, u)}; transform-origin: top left;${clipPath ? ` clip-path: ${clipPath};` : ''}`;

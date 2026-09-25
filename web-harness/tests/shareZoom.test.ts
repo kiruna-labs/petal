@@ -202,6 +202,24 @@ test('double-tap on a tall window steps 2.5x, then fill, then fit', () => {
   closePoint(sharePointToPicture(BOX, tall, stepped, anchor), before, 'anchor');
 });
 
+test('a double-tap step that would stop just short of fill goes on to fill', () => {
+  // A very tall window: fill is ~6.38x, so 2.5x -> 6.25x would leave a last
+  // tap that moves 2%.
+  const veryTall = { width: 300, height: 1077 };
+  const fill = shareFillScale(BOX, veryTall);
+  assert.ok(fill > 6.25 && fill < 6.25 * 1.1, `fill ${fill}`);
+  const first = toggleShareFitFill(BOX, veryTall, SHARE_ZOOM_FIT);
+  close(first.scale, SHARE_ZOOM_DOUBLE_TAP_MAX);
+  const second = toggleShareFitFill(BOX, veryTall, first);
+  close(second.scale, fill);
+  assert.deepEqual(toggleShareFitFill(BOX, veryTall, second), SHARE_ZOOM_FIT);
+  // The first tap too: a fill of 2.7x is one tap, not 2.5x and then 2.7x.
+  const tallish = { width: 800, height: 1215 };
+  const nearFill = shareFillScale(BOX, tallish);
+  assert.ok(nearFill > 2.5 && nearFill < 2.5 * 1.1, `fill ${nearFill}`);
+  close(toggleShareFitFill(BOX, tallish, SHARE_ZOOM_FIT).scale, nearFill);
+});
+
 function zoomTile(classes: string[], dataset: Record<string, string> = {}, video?: Partial<HTMLVideoElement>) {
   return {
     classList: { contains: (name: string) => classes.includes(name) },

@@ -1052,6 +1052,7 @@ export function setupTiles(
     tile.dataset.trackSid = key;
     shareTilesByTrack.set(trackKey, tile);
     cb.bindTileInteractions(tile);
+    cb.bindShareZoomTile?.(tile);
     let video = tile.querySelector('video');
     if (!video) {
       video = document.createElement('video');

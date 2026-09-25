@@ -13,17 +13,19 @@ import {
 } from './shareZoom.ts';
 
 // ---------------------------------------------------------------------------
-// Zoom and pan a shared window in View mode (#248). One delegated listener
-// set on the tile surface (like drawSender.ts), so share tiles need no wiring
-// of their own:
+// Zoom and pan a shared window in View mode (#248). Listeners are delegated
+// on the tile surface (like drawSender.ts), except the non-passive `wheel`
+// and `touchmove`, which `bindTile` puts on each share tile so the rest of
+// the surface still scrolls on the compositor:
 //   - pinch (two touch pointers), Ctrl/⌘ + wheel, and a trackpad pinch
 //     (Chromium/Firefox send it as Ctrl+wheel; Safari as gesture events) zoom
 //     around the gesture point;
 //   - a drag, or a plain wheel/two-finger scroll, pans while zoomed;
 //   - a double-tap / double-click steps fit -> fill (at most 2.5x a tap) ->
 //     fit;
-//   - on a focused share tile `+`/`=` zoom in, `-` zoom out, `0` fits, and
-//     the header's overflow menu has the same three commands;
+//   - on a focused share tile (a press focuses it) `+`/`=` zoom in, `-`
+//     zoom out, `0` fits, and the header's overflow menu has the same three
+//     commands;
 //   - a small chip shows the zoom and resets to fit.
 // Control and Draw modes keep every gesture for the remote window. A zoom
 // made in View mode stays in place when the mode changes -- all input mapping
@@ -49,6 +51,8 @@ const ZOOM_EASE_MS = 180;
 /** Elements inside a share tile that own their own pointer input. */
 const INTERACTIVE_SELECTOR =
   'button, a, input, textarea, select, label, summary, [contenteditable], .remote-window-header, .ai-chat-panel, .share-zoom-chip';
+/** Fields that keep keyboard focus when a share tile is pressed. */
+const TEXT_ENTRY_SELECTOR = 'input, textarea, select';
 
 export type ShareZoomCommand = 'in' | 'out' | 'fit';
 
@@ -84,6 +88,7 @@ export function setupShareZoom(ctx: HarnessContext) {
   const watchedVideos = new WeakSet<HTMLVideoElement>();
   const wheelCommitTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
   const easeTimers = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
+  const boundTiles = new WeakSet<HTMLElement>();
   let gesture: PointerGesture | null = null;
   let webkitGesture: { tile: HTMLElement; anchor: PointLike; zoom: ShareZoom } | null = null;
   let lastTap: { tile: HTMLElement; at: number; point: PointLike } | null = null;
@@ -140,6 +145,19 @@ export function setupShareZoom(ctx: HarnessContext) {
   function viewModeTileFromEvent(event: Event): HTMLElement | null {
     const tile = shareTileFromEvent(event);
     return tile && inViewMode(tile) ? tile : null;
+  }
+
+  /**
+   * `+` / `-` / `0` act on the focused share tile, but a press on a zoomed
+   * share is preventDefault-ed (no text selection, no image drag), which also
+   * cancels the browser's focus-on-press -- so a mouse user could only reach
+   * the keys with Tab. Focus the tile, as Control mode does; never away from
+   * a field someone is typing in (the chat, a rename).
+   */
+  function focusShareTile(tile: HTMLElement) {
+    const active = document.activeElement as HTMLElement | null | undefined;
+    if (active && active !== tile && (active.isContentEditable || active.matches?.(TEXT_ENTRY_SELECTOR))) return;
+    tile.focus?.({ preventScroll: true });
   }
 
   function prefersReducedMotion(): boolean {
@@ -355,6 +373,7 @@ export function setupShareZoom(ctx: HarnessContext) {
     const tile = viewModeTileFromEvent(event);
     if (!tile) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    focusShareTile(tile);
     if (!geometry(tile)) return;
     stopEasing(tile);
     const point = { x: event.clientX, y: event.clientY };
@@ -589,16 +608,29 @@ export function setupShareZoom(ctx: HarnessContext) {
   tilesEl.addEventListener('pointerup', handlePointerEnd);
   tilesEl.addEventListener('pointercancel', handlePointerEnd);
   tilesEl.addEventListener('click', handleClickCapture, { capture: true });
-  tilesEl.addEventListener('wheel', handleWheel, { passive: false });
   tilesEl.addEventListener('keydown', handleKeyDown);
-  tilesEl.addEventListener('touchmove', handleTouchMove, { passive: false });
   tilesEl.addEventListener('gesturestart', handleGestureStart);
   tilesEl.addEventListener('gesturechange', handleGestureChange);
   tilesEl.addEventListener('gestureend', handleGestureEnd);
 
+  /**
+   * A non-passive `wheel` or `touchmove` listener makes the browser wait on
+   * script before it scrolls whatever is under it, so these two sit on each
+   * share tile (tiles.ts binds every one) -- not on the whole surface, whose
+   * camera tiles and rail then scroll on the compositor. Idempotent.
+   */
+  function bindTile(tile: HTMLElement) {
+    if (boundTiles.has(tile)) return;
+    boundTiles.add(tile);
+    tile.addEventListener('wheel', handleWheel, { passive: false });
+    tile.addEventListener('touchmove', handleTouchMove, { passive: false });
+  }
+
   return {
     /** Zoom in / out / back to fit (the header's overflow menu). */
     command: applyCommand,
+    /** Give a share tile its non-passive wheel/touch listeners. */
+    bindTile,
     /** The current zoom of a share tile -- for tests and the harness. */
     shareZoomFor: zoomFor,
   };
