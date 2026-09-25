@@ -239,6 +239,33 @@ class FakeRoom {
   }
 }
 
+/**
+ * A room whose `connect()` fails the way livekit-client's does: for each
+ * scripted failure it emits `RoomEvent.Disconnected` (the reason
+ * `getDisconnectReasonFromConnectionError` maps the error to) and THEN
+ * rejects; once the script runs out it connects.
+ */
+function makeFailingConnectRoomFactory(failures: Array<{ reason: DisconnectReason; error: ConnectionError }>) {
+  const rooms: FakeRoom[] = [];
+  let attempts = 0;
+  return {
+    rooms,
+    attempts: () => attempts,
+    createRoom: () => {
+      const room = new FakeRoom();
+      room.connect = async () => {
+        const failure = failures[attempts];
+        attempts += 1;
+        if (!failure) return;
+        room.emit(RoomEvent.Disconnected, failure.reason);
+        throw failure.error;
+      };
+      rooms.push(room);
+      return room as unknown as Room;
+    },
+  };
+}
+
 function makeFakeRoomFactory() {
   const rooms: FakeRoom[] = [];
   return {
@@ -660,6 +687,32 @@ test('a first connect attempt that fails and is retried never shows the notice o
   assert.equal(rooms.length, 1);
   assert.equal(uiCalls.joinScreens, 0);
   assert.deepEqual(uiCalls.meetingScreens, [CREDENTIAL]);
+  assert.equal(state.room, rooms[0], 'the retried join keeps its room');
+});
+
+test('a Rejoin whose first connect attempt fails and is retried ends in the meeting, not on "Could not rejoin"', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const { rooms, createRoom } = makeScriptedRoomFactory(['ok', 'fail-transient', 'ok']);
+  const connection = setupConnection(ctx, createRoom);
+  const { title, rejoin, notices } = installNoticePage(ctx, connection);
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+  rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.PARTICIPANT_REMOVED);
+  await settle();
+  const shown = notices.length;
+
+  rejoin.click(); // the rejoin's first attempt fails, the retry (after 1 s) connects
+  for (let i = 0; i < 50 && uiCalls.meetingScreens.length < 2; i++) await new Promise((done) => setTimeout(done, 100));
+  await settle();
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+
+  assert.equal(rooms.length, 2);
+  assert.deepEqual(uiCalls.meetingScreens, [CREDENTIAL, CREDENTIAL], 'back in the meeting');
+  assert.equal(state.room, rooms[1], 'the rejoin reports success: its room is kept');
+  assert.equal(notices.length, shown, `no "Could not rejoin" notice (${title.textContent})`);
+  assert.equal(uiCalls.joinScreens, 0);
 });
 
 test('a Rejoin after a kick whose LiveKit connect fails keeps "Removed from the meeting" and shows the error', async () => {
@@ -778,4 +831,123 @@ test('invite URL takes precedence over a legacy persisted credential without dis
 
   assert.equal(meetingCodeInput.value, ACCESS_CODE);
   assert.doesNotMatch(meetingCodeInput.value, /^room-[0-9a-f]{32}$/);
+});
+
+test('a retried first connect attempt keeps the meeting: no join-screen flash, the room kept, the credential still scrubbed', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const historyCalls = installHistoryMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const errors: string[] = [];
+  (ctx.ui as { showError: (message: string) => void }).showError = (message) => errors.push(message);
+  const registry = new SensitiveStringRegistry();
+  const factory = makeFailingConnectRoomFactory([
+    {
+      reason: DisconnectReason.JOIN_FAILURE,
+      error: ConnectionError.serverUnreachable('could not establish signal connection'),
+    },
+  ]);
+
+  await setupConnection(ctx, factory.createRoom, registry).connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+
+  assert.equal(factory.attempts(), 2, 'the transient failure was retried');
+  assert.equal(uiCalls.joinScreens, 0, 'the join screen never showed during the retry');
+  assert.deepEqual(uiCalls.meetingScreens, [CREDENTIAL]);
+  assert.equal(state.room, factory.rooms[0], 'Leave, mic and share act on the connected room');
+  assert.equal(state.currentMeetingCode, CREDENTIAL);
+  assert.equal(registry.scrub(CREDENTIAL), '<redacted:room>');
+  assert.deepEqual(errors, []);
+  assert.deepEqual(historyCalls, [[null, '', inviteLinkForCredential(CREDENTIAL, ORIGIN, 'Design Review')]]);
+
+  // The room's real disconnect after the join still ends the session.
+  factory.rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.CLIENT_INITIATED);
+  assert.equal(state.room, null);
+  assert.equal(uiCalls.joinScreens, 1);
+});
+
+test('a connect that fails for good lands on the join screen once, with the error', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const historyCalls = installHistoryMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const errors: string[] = [];
+  (ctx.ui as { showError: (message: string) => void }).showError = (message) => errors.push(message);
+  const registry = new SensitiveStringRegistry();
+  const factory = makeFailingConnectRoomFactory([
+    { reason: DisconnectReason.USER_REJECTED, error: ConnectionError.notAllowed('not allowed', 401) },
+  ]);
+
+  await setupConnection(ctx, factory.createRoom, registry).connectToMeeting(CREDENTIAL, 'web-riley');
+
+  assert.equal(factory.attempts(), 1, 'NotAllowed is not retried');
+  assert.equal(uiCalls.joinScreens, 1);
+  assert.deepEqual(uiCalls.meetingScreens, []);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /Connect failed: not allowed/);
+  assert.equal(state.room, null);
+  assert.equal(state.currentMeetingCode, null);
+  // A failed join keeps scrubbing what it registered.
+  assert.equal(registry.scrub(CREDENTIAL), '<redacted:room>');
+  assert.deepEqual(historyCalls, []);
+});
+
+test('Leave while connecting (CLIENT_INITIATED, then Cancelled) ends on the join screen without an error', async () => {
+  installBrowserGlobals(`${ORIGIN}/abc-defg-hjk`, 'Riley');
+  installFetchMock();
+  const historyCalls = installHistoryMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const errors: string[] = [];
+  (ctx.ui as { showError: (message: string) => void }).showError = (message) => errors.push(message);
+  const registry = new SensitiveStringRegistry();
+  const factory = makeFailingConnectRoomFactory([
+    {
+      reason: DisconnectReason.CLIENT_INITIATED,
+      error: ConnectionError.cancelled('Client initiated disconnect'),
+    },
+  ]);
+  // The Leave button notes the request before `room.disconnect()`.
+  noteLeaveRequested();
+
+  await setupConnection(ctx, factory.createRoom, registry).connectToMeeting(CREDENTIAL, 'web-riley');
+
+  assert.equal(factory.attempts(), 1, 'a cancel is not retried');
+  assert.equal(uiCalls.joinScreens, 1, 'back on the join screen: no dead spinner');
+  assert.deepEqual(uiCalls.meetingScreens, []);
+  assert.deepEqual(errors, [], 'a cancel the user asked for is not an error');
+  assert.equal(state.room, null);
+  assert.equal(state.currentMeetingCode, null);
+  assert.deepEqual(historyCalls, [[null, '', ORIGIN]], 'the address bar drops the invite path, as Leave does');
+  assert.equal(registry.scrub(CREDENTIAL), CREDENTIAL, 'the session is over: the scrub list is cleared, as Leave does');
+});
+
+test('a room that disconnects while the join is finishing does not show the meeting screen', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  installHistoryMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const { createRoom, rooms } = makeFakeRoomFactory();
+  const factory = () => {
+    const room = createRoom() as unknown as FakeRoom & { localParticipant?: unknown };
+    // connect() resolved; the SFU drops the session while the identity-colour
+    // metadata write is in flight.
+    room.localParticipant = {
+      metadata: '{}',
+      setMetadata: async () => {
+        room.emit(RoomEvent.Disconnected, DisconnectReason.DUPLICATE_IDENTITY);
+      },
+    };
+    return room as unknown as Room;
+  };
+
+  await setupConnection(ctx, factory).connectToMeeting(CREDENTIAL, 'web-riley');
+  // Clear before asserting, so a regression fails instead of hanging.
+  const pollTimer = state.streamStatePollTimer;
+  if (pollTimer !== null) clearInterval(pollTimer);
+
+  assert.equal(rooms.length, 1);
+  assert.deepEqual(uiCalls.meetingScreens, [], 'no meeting screen for a room that is already gone');
+  assert.equal(uiCalls.joinScreens, 1);
+  assert.equal(state.room, null);
+  assert.equal(pollTimer, null, 'no stream-state polling for a gone room');
 });

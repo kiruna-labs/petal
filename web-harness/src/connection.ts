@@ -292,7 +292,9 @@ export function setupConnection(
     }
   }
 
-  function resetFailedJoinUi(message: string) {
+  /** `message` is the error to show; null for a join the user cancelled.
+   * Returns true when a #244 rejoin took the failure back onto its notice. */
+  function resetFailedJoinUi(message: string | null): boolean {
     setJoinControlsEnabled(true);
     shareBtn.disabled = true;
     shareBtn.textContent = 'Share test pattern';
@@ -309,15 +311,16 @@ export function setupConnection(
     cb.syncHarnessHook();
     // #244: a rejoin from the disconnect notice fails back onto the notice,
     // which shows this message, instead of flashing the home screen.
-    if (ctx.hook?.continuity?.rejoinFailed(message)) {
-      logEvent(message, 'error');
-      return;
+    if (ctx.hook?.continuity?.rejoinFailed(message ?? 'Rejoin cancelled.')) {
+      if (message !== null) logEvent(message, 'error');
+      return true;
     }
     // A join-link auto-join runs behind the connecting interstitial; a failed
     // join must land back on the menu (which also dismisses the interstitial)
     // with the error visible, never leave a dead spinner up.
-    showError(message);
+    if (message !== null) showError(message);
     showJoinScreen();
+    return false;
   }
 
   function startPipelineStats() {
@@ -814,7 +817,17 @@ export function setupConnection(
       }
     });
 
+    // Whether this room finished joining (`connect()` resolved). livekit-
+    // client's `Room.connect()` emits `Disconnected` for a failed or
+    // cancelled attempt BEFORE it rejects, while `connectWithRetry` may still
+    // retry that attempt. Tearing the session down then would null
+    // `state.room`, show the join screen and reset the scrub registry under a
+    // retry that goes on to succeed. Until the join completes, a failure or
+    // a cancel is handled once, by the catch around `connectWithRetry`.
+    let joined = false;
+
     newRoom.on(RoomEvent.Disconnected, (reason?: unknown) => {
+      if (!joined) return;
       const leaveRequested = consumeLeaveRequested();
       const clientInitiated = isClientInitiatedDisconnect(reason);
       if (!leaveRequested && !clientInitiated && inMeeting()) reconnectFailed();
@@ -922,6 +935,7 @@ export function setupConnection(
           ctx.ui.setConnectingStatus?.('Connection hiccup — retrying…');
         },
       });
+      joined = true;
       // `Room.connect()` recreates a closed engine; re-attach (idempotent).
       sfuSender.attach(newRoom.engine);
       // #709: `ParticipantConnected` only fires for participants who join
@@ -943,6 +957,9 @@ export function setupConnection(
         await localParticipantMetadata
           .update((current) => mergeIdentityPaletteIndexMetadata(current, localStoredPaletteIndex()))
           .catch((err) => logEvent(`identity color metadata publish failed: ${(err as Error).message ?? err}`, 'warn'));
+        // Disconnected during that await: the handler above has already torn
+        // the session down, so there is no meeting to show.
+        if (state.room !== newRoom) return;
       }
       setConnState('connected', 'connected');
       syncAddressBar(meetingCode);
@@ -966,9 +983,26 @@ export function setupConnection(
       startPipelineStats();
       startPublicationReconcile(newRoom);
     } catch (err) {
-      setConnState('error', 'error');
-      emitJoinFailed(err);
-      resetFailedJoinUi(`Connect failed: ${(err as Error).message ?? err}`);
+      // Leave while connecting: `disconnect()` cancels the attempt (the SDK
+      // reports CLIENT_INITIATED, which the handler above ignores before the
+      // join completes). End where Leave ends -- the join screen, the bare
+      // origin, a cleared scrub registry -- without a "Connect failed" error;
+      // a cancelled #244 rejoin goes back to its notice instead.
+      const userCancelled = consumeLeaveRequested();
+      if (userCancelled) {
+        setConnState('disconnected', 'idle');
+        logEvent('connect cancelled', 'warn');
+      } else {
+        setConnState('error', 'error');
+        emitJoinFailed(err);
+      }
+      const backOnNotice = resetFailedJoinUi(userCancelled ? null : `Connect failed: ${(err as Error).message ?? err}`);
+      state.currentMeetingCode = null;
+      if (userCancelled && !backOnNotice) {
+        // Keep the entry's state: it may still be the #244 Back guard.
+        history.replaceState(history.state, '', location.origin);
+        registry.reset();
+      }
       if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
       state.streamStatePollTimer = null;
       state.frameMetadataWorker?.terminate();
