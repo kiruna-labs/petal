@@ -103,6 +103,10 @@ contact any of these.
 ## Stored on your machine only
 
 - Room favorites and recent rooms.
+- While a browser tab is in a meeting, that meeting's access code in the
+  tab's session storage, so reloading the tab rejoins. It stays in that tab,
+  is never sent anywhere, and is cleared when you leave the meeting; the
+  browser drops it with the tab's session.
 - Window layout and app preferences.
 - Logs at `~/Library/Logs/Petal/petal.log` (desktop) and the in-memory session
   log (browser), which stay local unless you tick the diagnostics box on a

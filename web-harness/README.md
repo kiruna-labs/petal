@@ -169,6 +169,11 @@ checks). Test-only; never shipped in the real app.
 - `src/connection.ts`, `src/controls.ts`, `src/tiles.ts` — LiveKit
   connect/publish/subscribe, the control bar (mic/camera/share/draw/invite),
   and the tile grid + spotlight layout.
+- `src/meetingContinuity.ts` — keeps a meeting from ending by accident: Back
+  asks "Leave meeting?", a reload rejoins (the tab keeps the meeting's access
+  code in `sessionStorage`, which `api/j.ts`'s invite page checks on a
+  reload), a drop while the page was in the background rejoins once, and any
+  other disconnect the user didn't ask for shows why, with Rejoin (#244).
 - `src/remoteControl*.ts`, `src/draw*.ts`, `src/telepointer*.ts`,
   `src/aiChat*.ts` — the collaboration features' web halves.
 - `src/analytics.ts` — the PostHog allowlist pipe

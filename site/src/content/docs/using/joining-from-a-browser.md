@@ -69,6 +69,34 @@ bottom:
   everyone in the meeting sees your strokes in your profile color.
 - **Leave** — disconnects and returns to the join screen.
 
+### Staying in the meeting
+
+A meeting in the browser doesn't end by accident:
+
+- **Back** (the button, or the back gesture on a phone) asks **Leave
+  meeting?** first. **Stay** keeps you in; **Leave** is the same as the Leave
+  button.
+- **Reloading** the page, including pulling down on a phone, rejoins the
+  meeting instead of showing the invite page, and so does coming back to a
+  tab the browser unloaded in the background. Pull-to-refresh is switched
+  off while you're in a meeting. This only applies to the tab that was in
+  the meeting: the same link opened in another tab still shows the invite
+  page, and so does a reload after you've left, or backed out to the invite
+  page.
+- If the connection drops while the page is in the background, it rejoins
+  on its own once, when you come back to it.
+- Any other disconnect you didn't ask for shows what happened when Petal
+  knows (for example **Removed from the meeting** or **Connection lost**)
+  with a **Rejoin** button, instead of dropping you on the join screen.
+
+A few browser rules shape this. In desktop Chrome, the toolbar's Back
+button doesn't stop at the **Leave meeting?** box: pressing Back a second
+time while it's open leaves. On Android, the back gesture closes the box
+instead, the same as **Stay**, but the next Back then leaves without asking
+until you tap something in the meeting. And after joining straight from an
+invite link, Back only asks once you've tapped or clicked something in the
+meeting; until then it leaves like any other page.
+
 The top bar shows the room name (click the pencil to rename it for
 everyone), an elapsed timer, a layout switch between the grid and a
 **spotlight** view that enlarges one share, and a bug-report button.

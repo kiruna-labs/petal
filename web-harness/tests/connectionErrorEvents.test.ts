@@ -428,6 +428,9 @@ test('connecting registers the room and local identity in the sensitive-string r
     if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
 
     assert.equal(registry.scrub(CREDENTIAL), '<redacted:room>');
+    // #244: the public access code rides in the address bar (and the Back
+    // guard's history entry) for the whole meeting.
+    assert.equal(registry.scrub(`/design-review/${ACCESS_CODE}`), '/design-review/<redacted:room>');
     assert.equal(registry.scrub('web-riley-secret'), '<redacted:participant-1>');
   } finally {
     fakeDom.restore();

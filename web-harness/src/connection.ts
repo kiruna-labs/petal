@@ -13,7 +13,7 @@ import {
   type Participant,
 } from 'livekit-client';
 import type { HarnessContext } from './context.ts';
-import { livekitRoomName } from '@petal/shared/logic/meetingCode';
+import { accessCodeForCredential, livekitRoomName } from '@petal/shared/logic/meetingCode';
 import {
   AI_CHAT_TOPIC,
   COCKPIT_TOPIC,
@@ -173,6 +173,9 @@ export function setupConnection(
   localParticipantMetadata.setLogger((line, kind) => logEvent(line, kind));
 
   let audioPlaybackPrompt: HTMLButtonElement | null = null;
+  // Counts connectToMeeting calls, so a deferred registry reset never wipes a
+  // newer join's registrations.
+  let joinCount = 0;
   const audioReceiverTelemetryCleanup = new Map<RemoteTrack, () => void>();
   const audioReceiverParticipants = new Map<RemoteTrack, string>();
 
@@ -289,7 +292,7 @@ export function setupConnection(
     }
   }
 
-  function resetFailedJoinUi() {
+  function resetFailedJoinUi(message: string) {
     setJoinControlsEnabled(true);
     shareBtn.disabled = true;
     shareBtn.textContent = 'Share test pattern';
@@ -304,9 +307,16 @@ export function setupConnection(
     setScreenShareState('not sharing', false);
     setShareControl(false);
     cb.syncHarnessHook();
+    // #244: a rejoin from the disconnect notice fails back onto the notice,
+    // which shows this message, instead of flashing the home screen.
+    if (ctx.hook?.continuity?.rejoinFailed(message)) {
+      logEvent(message, 'error');
+      return;
+    }
     // A join-link auto-join runs behind the connecting interstitial; a failed
     // join must land back on the menu (which also dismisses the interstitial)
     // with the error visible, never leave a dead spinner up.
+    showError(message);
     showJoinScreen();
   }
 
@@ -453,7 +463,8 @@ export function setupConnection(
   function syncAddressBar(meetingCode: string) {
     const url = inviteLinkForCredential(meetingCode, location.origin, cb.roomDisplayLabelForCredential(meetingCode));
     if (url === `${location.origin}/` || url === location.origin || url === '/') return;
-    history.replaceState(null, '', url);
+    // Keep the entry's state: on a rejoin it is still the #244 Back guard.
+    history.replaceState(history.state, '', url);
   }
 
   async function fetchToken(meetingCode: string, identity: string, displayName: string): Promise<TokenResponse> {
@@ -470,12 +481,16 @@ export function setupConnection(
 
   async function connectToMeeting(meetingCode: string, identity: string) {
     const displayName = displayNameFromInput(displayNameInput.value);
+    joinCount += 1;
     clearError();
     setJoinControlsEnabled(false);
     setConnState('connecting', 'connecting');
     // Register room + local identity with the Sentry PII-scrub registry
     // before any log line that could embed them is emitted (#283).
     registry.registerRoom(meetingCode);
+    // The public access code is in the address bar (and the #244 guard entry)
+    // for the whole meeting; scrub it like the internal credential.
+    registry.registerRoom(accessCodeForCredential(meetingCode));
     registry.registerParticipant(identity);
     registry.registerReportingValue(displayName);
     logEvent(`connecting to meeting "${meetingCode}" as "${displayName}"...`);
@@ -494,9 +509,8 @@ export function setupConnection(
     } catch (err) {
       setConnState('error', 'error');
       logEvent(`token request failed: ${(err as Error).message ?? err}`, 'error');
-      showError(`Token request failed: ${(err as Error).message ?? err}`);
       joinFailedFromError(err);
-      resetFailedJoinUi();
+      resetFailedJoinUi(`Token request failed: ${(err as Error).message ?? err}`);
       return;
     }
 
@@ -801,8 +815,9 @@ export function setupConnection(
     });
 
     newRoom.on(RoomEvent.Disconnected, (reason?: unknown) => {
-      const userLeft = consumeLeaveRequested() || isClientInitiatedDisconnect(reason);
-      if (!userLeft && inMeeting()) reconnectFailed();
+      const leaveRequested = consumeLeaveRequested();
+      const clientInitiated = isClientInitiatedDisconnect(reason);
+      if (!leaveRequested && !clientInitiated && inMeeting()) reconnectFailed();
       meetingLeft();
       setConnState('disconnected', 'idle');
       logEvent('disconnected', 'warn');
@@ -874,13 +889,26 @@ export function setupConnection(
       cb.updateParticipantCount();
       cb.applyTileLayout();
       removeAudioPlaybackPrompt();
+      const meetingCode = state.currentMeetingCode;
       state.currentMeetingCode = null;
       feedbackReport?.onDisconnect();
-      history.replaceState(null, '', location.origin);
-      showJoinScreen();
       // Session ended -- clear the Sentry PII-scrub registry so a future
-      // session's breadcrumbs never keep an old room/identity around.
-      registry.reset();
+      // session's breadcrumbs never keep an old room/identity around. Not
+      // before the address bar has left the invite link (the #244 guard
+      // unwinds asynchronously), and never over a newer join's values.
+      const joinsAtDisconnect = joinCount;
+      const resetRegistry = () => {
+        if (joinCount === joinsAtDisconnect) registry.reset();
+      };
+      const continuity = ctx.hook?.continuity;
+      if (continuity) {
+        // #244: home when the user left; otherwise the disconnect notice.
+        continuity.disconnected(meetingCode, { requested: leaveRequested, clientInitiated, reason }, resetRegistry);
+      } else {
+        history.replaceState(null, '', location.origin);
+        showJoinScreen();
+        resetRegistry();
+      }
     });
 
     try {
@@ -918,6 +946,7 @@ export function setupConnection(
       }
       setConnState('connected', 'connected');
       syncAddressBar(meetingCode);
+      ctx.hook?.continuity?.entered(meetingCode);
       logEvent(`connected to "${meetingCode}" as "${displayName}"`, 'ok');
       meetingJoined();
       localStorage.setItem(HARNESS_ROOM_STORAGE_KEY, meetingCode);
@@ -938,9 +967,8 @@ export function setupConnection(
       startPublicationReconcile(newRoom);
     } catch (err) {
       setConnState('error', 'error');
-      showError(`Connect failed: ${(err as Error).message ?? err}`);
       emitJoinFailed(err);
-      resetFailedJoinUi();
+      resetFailedJoinUi(`Connect failed: ${(err as Error).message ?? err}`);
       if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
       state.streamStatePollTimer = null;
       state.frameMetadataWorker?.terminate();

@@ -329,6 +329,17 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     await runWebMeetingAction(action, task, { showError, showToast, logEvent });
   }
 
+  // Leave: full disconnect (the Disconnected handler resets state + returns
+  // to the join screen). Also the "Leave" of the #244 Back confirm.
+  async function leaveMeeting() {
+    await runMeetingAction('leave', async () => {
+      if (state.room) {
+        noteLeaveRequested();
+        await state.room.disconnect();
+      }
+    });
+  }
+
   async function submitMeetingField() {
     await submitWebCreateJoinAction({
       clearError,
@@ -1126,15 +1137,8 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       void submitMeetingField();
     });
 
-    // Leave: full disconnect (the Disconnected handler resets state + returns
-    // to the join screen).
-    ctlLeave.addEventListener('click', async () => {
-      await runMeetingAction('leave', async () => {
-        if (state.room) {
-          noteLeaveRequested();
-          await state.room.disconnect();
-        }
-      });
+    ctlLeave.addEventListener('click', () => {
+      void leaveMeeting();
     });
 
     // Invite: copy a click-to-join web link for this meeting. The path carries
@@ -1779,6 +1783,7 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     installControls,
     resolveIdentity,
     submitMeetingField,
+    leaveMeeting,
     renameRoomDisplayName,
     startTestPatternShare,
     startCockpitWebcam,

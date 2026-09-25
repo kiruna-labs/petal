@@ -1,13 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { RoomEvent, type Room } from 'livekit-client';
+import { ConnectionError, DisconnectReason, RoomEvent, type Room } from 'livekit-client';
 
 import { autoJoinFromUrl } from '../src/deepLink.ts';
-import { HARNESS_NAME_STORAGE_KEY, HARNESS_ROOM_STORAGE_KEY } from '../src/constants.ts';
+import { HARNESS_NAME_STORAGE_KEY, HARNESS_REJOIN_SESSION_KEY, HARNESS_ROOM_STORAGE_KEY } from '../src/constants.ts';
 import { internalCredentialForAccessCode } from '@petal/shared/logic/meetingCode';
 import { setupConnection } from '../src/connection.ts';
 import { inviteLinkForCredential } from '../src/controls.ts';
 import type { HarnessContext } from '../src/context.ts';
+import { noteLeaveRequested } from '../src/analytics.ts';
+import { SensitiveStringRegistry } from '../src/sensitiveStrings.ts';
+import { setupMeetingContinuity } from '../src/meetingContinuity.ts';
+import { FakeBrowserPage, FakeDialog, FakeElement, settle } from './fixtures/fakeBrowserPage.ts';
 
 const ACCESS_CODE = 'abc-defg-hjk';
 const CREDENTIAL = internalCredentialForAccessCode(ACCESS_CODE);
@@ -60,6 +64,7 @@ function installHistoryMock() {
   Object.defineProperty(globalThis, 'history', {
     configurable: true,
     value: {
+      state: null,
       replaceState(state: unknown, title: string, url: string) {
         calls.push([state, title, url]);
       },
@@ -227,9 +232,9 @@ class FakeRoom {
 
   async connect() {}
 
-  emit(event: string) {
+  emit(event: string, ...args: unknown[]) {
     for (const handler of this.handlers.get(event) ?? []) {
-      handler();
+      handler(...args);
     }
   }
 }
@@ -244,6 +249,34 @@ function makeFakeRoomFactory() {
       return room as unknown as Room;
     },
   };
+}
+
+// #244: the Back guard / reload rejoin / disconnect notice layer, wired the
+// way main.ts does (ctx.hook.continuity), on a fake page whose location +
+// history are the globals connection.ts writes to.
+function installMeetingPage(url: string, ctx: HarnessContext) {
+  const page = new FakeBrowserPage(url);
+  page.installGlobals();
+  const title = new FakeElement();
+  const notices: string[] = [];
+  ctx.hook.continuity = setupMeetingContinuity({
+    leaveDialog: new FakeDialog() as unknown as HTMLDialogElement,
+    notice: {
+      title,
+      detail: new FakeElement(),
+      rejoin: new FakeElement('btn primary'),
+      home: new FakeElement('btn ghost'),
+      announcer: new FakeElement('sr-only'),
+    } as unknown as Parameters<typeof setupMeetingContinuity>[0]['notice'],
+    showJoinScreen: () => ctx.ui.showJoinScreen(),
+    showDisconnectedScreen: () => notices.push(title.textContent),
+    leave: async () => {},
+    rejoin: async () => true,
+    logEvent: () => {},
+    win: page.window as unknown as Window,
+  });
+  const stored = () => page.sessionStorage.getItem(HARNESS_REJOIN_SESSION_KEY);
+  return { page, notices, stored };
 }
 
 function installFetchMock() {
@@ -396,22 +429,280 @@ test('a failed join lands back on the join screen with the error surfaced', asyn
   assert.match(errors[0]!, /invalid room credential/);
 });
 
-test('successful connection replaces the address bar with the shareable invite URL', async () => {
+test('successful connection puts the shareable invite URL in the address bar, under a Back guard', async () => {
   installBrowserGlobals(`${ORIGIN}/`, 'Riley');
   installFetchMock();
-  const historyCalls = installHistoryMock();
   const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const { page, stored } = installMeetingPage(`${ORIGIN}/`, ctx);
   const { createRoom } = makeFakeRoomFactory();
   const expectedUrl = inviteLinkForCredential(CREDENTIAL, ORIGIN, 'Design Review');
 
   await setupConnection(ctx, createRoom).connectToMeeting(CREDENTIAL, 'web-riley');
 
   if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
-  assert.deepEqual(historyCalls, [[null, '', expectedUrl]]);
+  assert.deepEqual(
+    page.history.calls.map(([kind, , url]) => [kind, url]),
+    [
+      ['replace', expectedUrl],
+      ['push', expectedUrl],
+    ]
+  );
+  assert.equal(page.history.index, 1);
+  // #244: this tab now rejoins when that URL is reloaded (api/j.ts).
+  assert.equal(stored(), ACCESS_CODE);
   assert.deepEqual(uiCalls.meetingScreens, [CREDENTIAL]);
 });
 
-test('disconnect resets the address bar to the bare origin', async () => {
+test('leaving resets the address bar to the bare origin and steps off the Back guard', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const { page, notices, stored } = installMeetingPage(`${ORIGIN}/`, ctx);
+  const { createRoom, rooms } = makeFakeRoomFactory();
+
+  await setupConnection(ctx, createRoom).connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+
+  noteLeaveRequested();
+  rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.CLIENT_INITIATED);
+  await settle();
+
+  assert.deepEqual(page.history.urls(), [`${ORIGIN}/`, `${ORIGIN}/`]);
+  assert.equal(page.history.index, 0, 'Back from home goes where it went before the meeting');
+  assert.equal(stored(), null);
+  assert.equal(state.currentMeetingCode, null);
+  assert.equal(uiCalls.joinScreens, 1);
+  assert.deepEqual(notices, []);
+});
+
+test('the scrub registry is cleared only after the guard has unwound, and never over a newer join', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state } = makeConnectionContext('Riley', 'Design Review');
+  installMeetingPage(`${ORIGIN}/`, ctx);
+  const { createRoom, rooms } = makeFakeRoomFactory();
+  const registry = new SensitiveStringRegistry();
+  const connection = setupConnection(ctx, createRoom, registry);
+
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+  noteLeaveRequested();
+  rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.CLIENT_INITIATED);
+  assert.equal(registry.scrub(`/design-review/${ACCESS_CODE}`), '/design-review/<redacted:room>', 'still scrubbed while unwinding');
+  await settle();
+  assert.equal(registry.scrub(ACCESS_CODE), ACCESS_CODE, 'reset once settled');
+
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+  noteLeaveRequested();
+  rooms[1]!.emit(RoomEvent.Disconnected, DisconnectReason.CLIENT_INITIATED);
+  const nextJoin = connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  await settle();
+  await nextJoin;
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+  assert.equal(registry.scrub(ACCESS_CODE), '<redacted:room>', 'a join that started meanwhile keeps its registrations');
+});
+
+test('a disconnect the user did not ask for keeps the invite URL and explains itself instead of going home', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const { page, notices, stored } = installMeetingPage(`${ORIGIN}/`, ctx);
+  const { createRoom, rooms } = makeFakeRoomFactory();
+  const expectedUrl = inviteLinkForCredential(CREDENTIAL, ORIGIN, 'Design Review');
+
+  await setupConnection(ctx, createRoom).connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+
+  rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.PARTICIPANT_REMOVED);
+  await settle();
+
+  assert.deepEqual(notices, ['Removed from the meeting']);
+  assert.equal(uiCalls.joinScreens, 0, 'no silent jump to the home screen');
+  assert.equal(page.location.href, expectedUrl, 'a reload still rejoins');
+  assert.equal(stored(), ACCESS_CODE, 'the rejoin code is kept');
+  assert.equal(state.currentMeetingCode, null);
+});
+
+test('a failed rejoin from the notice stays on the notice with the real error, never the home screen', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const errors: string[] = [];
+  (ctx.ui as { showError: (message: string) => void }).showError = (message) => errors.push(message);
+  const page = new FakeBrowserPage(`${ORIGIN}/`);
+  page.installGlobals();
+  const title = new FakeElement();
+  const detail = new FakeElement();
+  const rejoinButton = new FakeElement('btn primary');
+  const { createRoom, rooms } = makeFakeRoomFactory();
+  const connection = setupConnection(ctx, createRoom);
+  let rejoined: Promise<void> | null = null;
+  ctx.hook.continuity = setupMeetingContinuity({
+    leaveDialog: new FakeDialog() as unknown as HTMLDialogElement,
+    notice: {
+      title,
+      detail,
+      rejoin: rejoinButton,
+      home: new FakeElement('btn ghost'),
+      announcer: new FakeElement('sr-only'),
+    } as unknown as Parameters<typeof setupMeetingContinuity>[0]['notice'],
+    showJoinScreen: () => ctx.ui.showJoinScreen(),
+    showDisconnectedScreen: () => {},
+    leave: async () => {},
+    // As main.ts wires it.
+    rejoin: async (code) => {
+      rejoined = connection.connectToMeeting(code, 'web-riley');
+      await rejoined;
+      return state.room !== null;
+    },
+    logEvent: () => {},
+    win: page.window as unknown as Window,
+  });
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+  rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.PARTICIPANT_REMOVED);
+  await settle();
+
+  // The backend now refuses (non-transient, so no retry ladder).
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    value: async () => ({ ok: false, status: 403, json: async () => ({ error: 'invalid room credential' }) }),
+  });
+  rejoinButton.click();
+  await settle();
+  await rejoined;
+  await settle();
+
+  assert.equal(uiCalls.joinScreens, 0, 'the home screen never flashes');
+  assert.deepEqual(errors, [], 'the error is not parked on the hidden home screen');
+  assert.equal(title.textContent, 'Removed from the meeting');
+  assert.equal(detail.textContent, 'Token request failed: invalid room credential');
+
+  // Outside a rejoin the same failure still lands on the home screen with the error.
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  assert.equal(uiCalls.joinScreens, 1);
+  assert.deepEqual(errors, ['Token request failed: invalid room credential']);
+});
+
+// livekit-client's Room.connect() tears the room down, emitting Disconnected,
+// before it rejects a failed attempt. Each room takes the next step of the plan.
+type ConnectPlan = 'ok' | 'fail-transient' | 'fail-final';
+function makeScriptedRoomFactory(plan: ConnectPlan[]) {
+  const rooms: FakeRoom[] = [];
+  class ScriptedRoom extends FakeRoom {
+    async connect() {
+      const step = plan.shift() ?? 'ok';
+      if (step === 'ok') return;
+      const transient = step === 'fail-transient';
+      this.emit(RoomEvent.Disconnected, transient ? DisconnectReason.JOIN_FAILURE : DisconnectReason.UNKNOWN_REASON);
+      throw transient
+        ? ConnectionError.serverUnreachable('could not establish signal connection')
+        : ConnectionError.notAllowed('could not establish signal connection', 403);
+    }
+  }
+  return {
+    rooms,
+    createRoom: () => {
+      const room = new ScriptedRoom();
+      rooms.push(room);
+      return room as unknown as Room;
+    },
+  };
+}
+
+// The notice and rejoin wiring main.ts uses, over a real setupConnection.
+function installNoticePage(ctx: HarnessContext, connection: ReturnType<typeof setupConnection>) {
+  const page = new FakeBrowserPage(`${ORIGIN}/`);
+  page.installGlobals();
+  const title = new FakeElement();
+  const detail = new FakeElement();
+  const rejoin = new FakeElement('btn primary');
+  const announcer = new FakeElement('sr-only');
+  const notices: string[] = [];
+  const rejoins: string[] = [];
+  ctx.hook.continuity = setupMeetingContinuity({
+    leaveDialog: new FakeDialog() as unknown as HTMLDialogElement,
+    notice: { title, detail, rejoin, home: new FakeElement('btn ghost'), announcer } as unknown as Parameters<
+      typeof setupMeetingContinuity
+    >[0]['notice'],
+    showJoinScreen: () => ctx.ui.showJoinScreen(),
+    showDisconnectedScreen: () => notices.push(title.textContent),
+    leave: async () => {},
+    rejoin: async (code) => {
+      rejoins.push(code);
+      await connection.connectToMeeting(code, 'web-riley');
+      return ctx.state.room !== null;
+    },
+    logEvent: () => {},
+    win: page.window as unknown as Window,
+  });
+  return { page, title, detail, rejoin, announcer, notices, rejoins };
+}
+
+test('a first connect attempt that fails and is retried never shows the notice or starts a second join', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const { rooms, createRoom } = makeScriptedRoomFactory(['fail-transient', 'ok']);
+  const connection = setupConnection(ctx, createRoom);
+  const { page, notices, rejoins, announcer } = installNoticePage(ctx, connection);
+  page.hide();
+  page.show(); // an earlier tab switch: a real drop now would rejoin by itself
+
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley'); // retries after 1 s
+  await settle();
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+
+  assert.deepEqual(notices, [], 'no notice over "Joining…"');
+  assert.equal(announcer.textContent, '');
+  assert.deepEqual(rejoins, [], 'no automatic rejoin racing the retry ladder');
+  assert.equal(rooms.length, 1);
+  assert.equal(uiCalls.joinScreens, 0);
+  assert.deepEqual(uiCalls.meetingScreens, [CREDENTIAL]);
+});
+
+test('a Rejoin after a kick whose LiveKit connect fails keeps "Removed from the meeting" and shows the error', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, state, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const { rooms, createRoom } = makeScriptedRoomFactory(['ok', 'fail-final']);
+  const connection = setupConnection(ctx, createRoom);
+  const { title, detail, rejoin, notices } = installNoticePage(ctx, connection);
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
+  rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.PARTICIPANT_REMOVED);
+  await settle();
+
+  rejoin.click();
+  await settle(20);
+
+  assert.equal(title.textContent, 'Removed from the meeting');
+  assert.equal(detail.textContent, 'Connect failed: could not establish signal connection');
+  assert.ok(notices.every((shown) => shown === 'Removed from the meeting'), JSON.stringify(notices));
+  assert.equal(uiCalls.joinScreens, 0);
+});
+
+test('a join from home whose connect fails goes back home with the error and no notice', async () => {
+  installBrowserGlobals(`${ORIGIN}/`, 'Riley');
+  installFetchMock();
+  const { ctx, uiCalls } = makeConnectionContext('Riley', 'Design Review');
+  const errors: string[] = [];
+  (ctx.ui as { showError: (message: string) => void }).showError = (message) => errors.push(message);
+  const { createRoom } = makeScriptedRoomFactory(['fail-final']);
+  const connection = setupConnection(ctx, createRoom);
+  const { notices, announcer } = installNoticePage(ctx, connection);
+
+  await connection.connectToMeeting(CREDENTIAL, 'web-riley');
+  await settle();
+
+  assert.deepEqual(notices, []);
+  assert.equal(announcer.textContent, '', 'nothing announced');
+  assert.equal(uiCalls.joinScreens, 1);
+  assert.deepEqual(errors, ['Connect failed: could not establish signal connection']);
+});
+
+test('without the #244 layer wired (partial contexts), a disconnect still resets to the bare origin', async () => {
   installBrowserGlobals(`${ORIGIN}/`, 'Riley');
   installFetchMock();
   const historyCalls = installHistoryMock();
@@ -420,6 +711,7 @@ test('disconnect resets the address bar to the bare origin', async () => {
   const expectedUrl = inviteLinkForCredential(CREDENTIAL, ORIGIN, 'Design Review');
 
   await setupConnection(ctx, createRoom).connectToMeeting(CREDENTIAL, 'web-riley');
+  if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
 
   rooms[0]!.emit(RoomEvent.Disconnected);
 
@@ -435,11 +727,11 @@ test('loading an invite URL and auto-joining preserves the same shareable URL', 
   const sharedUrl = inviteLinkForCredential(CREDENTIAL, ORIGIN, 'Design Review');
   installBrowserGlobals(sharedUrl, 'Riley');
   installFetchMock();
-  const historyCalls = installHistoryMock();
   const displayNameInput = makeInput('Riley');
   const meetingCodeInput = makeInput();
   const joinHint = makeHint();
   const { ctx, state } = makeConnectionContext('Riley', 'Design Review');
+  const { page } = installMeetingPage(sharedUrl, ctx);
   const { createRoom } = makeFakeRoomFactory();
   const connection = setupConnection(ctx, createRoom);
   const joins: Promise<void>[] = [];
@@ -462,7 +754,8 @@ test('loading an invite URL and auto-joining preserves the same shareable URL', 
 
   if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
   assert.equal(meetingCodeInput.value, ACCESS_CODE);
-  assert.deepEqual(historyCalls, [[null, '', sharedUrl]]);
+  assert.deepEqual(page.history.urls(), [sharedUrl, sharedUrl]);
+  assert.equal(page.location.href, sharedUrl);
 });
 
 test('invite URL takes precedence over a legacy persisted credential without displaying it', () => {
