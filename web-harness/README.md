@@ -161,8 +161,9 @@ checks). Test-only; never shipped in the real app.
   bar), dev drawer, toast, feedback dialog.
 - `api/j.ts` — the deployed serverless join-link interstitial
   (`meet.petal.live/<label>/<code>`): Open Petal, platform downloads, Join in
-  browser, and the `petal://` handoff. `api/_lib/slug.ts` is its copy of the
-  slug contract.
+  browser, and the `petal://` handoff. Phones and tablets get Join in browser
+  only, with no handoff and one line linking the desktop apps.
+  `api/_lib/slug.ts` is its copy of the slug contract.
 - `src/main.ts` — the entry point: wires the modules below together.
 - `src/homeScreen.ts`, `src/createJoinAction.ts`, `src/deepLink.ts` — join
   screen, recents/favorites, `?code=` auto-join.
