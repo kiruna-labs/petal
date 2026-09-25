@@ -600,7 +600,7 @@ test('the page ships the confirm, the notice with an always-rendered announcer, 
   assert.ok(announcer.start > html.indexOf('</div>', elementWithId(html, 'disconnected-home').start), 'outside the notice');
 
   assert.match(
-    cssRuleFor(css, ['html:has(#meeting-screen:not(.hidden))', 'html:has(#meeting-screen:not(.hidden)) body']),
-    /overscroll-behavior-y: none/
+    cssRuleFor(css, ['html:has(> body > #meeting-screen:not(.hidden))', 'html:has(> body > #meeting-screen:not(.hidden)) body']),
+    /overscroll-behavior(?:-y)?: none/
   );
 });

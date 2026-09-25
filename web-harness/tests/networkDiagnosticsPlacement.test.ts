@@ -53,7 +53,8 @@ test('the developer drawer is the desktop bottom row and a parked sheet on phone
   const meeting = /\n\.meeting\s*\{(?<body>[^}]+)\}/.exec(style)?.groups?.body ?? '';
   assert.match(meeting, /position\s*:\s*fixed/);
   assert.match(meeting, /inset\s*:\s*0/);
-  const lock = /html:has\(> body > #meeting-screen:not\(\.hidden\)\)\s*\{(?<body>[^}]*)\}/.exec(style)?.groups?.body ?? '';
+  // (The rule's selector list also takes in body: #244's no-pull-to-refresh.)
+  const lock = /html:has\(> body > #meeting-screen:not\(\.hidden\)\)[^{]*\{(?<body>[^}]*)\}/.exec(style)?.groups?.body ?? '';
   assert.match(lock, /overflow\s*:\s*hidden/);
   // Pull-to-refresh must not reload the page mid-call.
   assert.match(lock, /overscroll-behavior\s*:\s*none/);

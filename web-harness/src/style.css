@@ -24,11 +24,17 @@ body {
   height: 100%;
 }
 
-/* #244: no pull-to-refresh (or overscroll bounce) while a meeting is on
-   screen -- on Android a stray downward swipe reloaded the page. */
-html:has(#meeting-screen:not(.hidden)),
-html:has(#meeting-screen:not(.hidden)) body {
-  overscroll-behavior-y: none;
+/* While a meeting is on screen the document under it is locked: no
+   pull-to-refresh or overscroll bounce (#244 -- on Android a stray downward
+   swipe reloaded the page), and no page scroll at all, so no swipe, wheel
+   notch or restored scroll position can slide the top bar or the controls
+   off screen (#239; the meeting itself is pinned to the viewport, .meeting
+   below). Only while #meeting-screen shows: the home screen still scrolls. */
+html:has(> body > #meeting-screen:not(.hidden)),
+html:has(> body > #meeting-screen:not(.hidden)) body {
+  overflow: hidden;
+  overscroll-behavior: none;
+  height: 100%;
 }
 
 body {
@@ -1202,17 +1208,10 @@ input[type='text']:disabled {
 /* =========================================================================
    Meeting screen — Gallery register
    ========================================================================= */
-/* #239: the meeting is pinned to the viewport and the document under it is
-   locked, so no swipe, wheel notch or restored scroll position can slide the
-   top bar or the controls off screen. `inset: 0` tracks the layout viewport,
+/* #239: the meeting is pinned to the viewport (the document under it is
+   locked: see the top of this file). `inset: 0` tracks the layout viewport,
    which index.html's interactive-widget=resizes-content shrinks for the
    on-screen keyboard. */
-html:has(> body > #meeting-screen:not(.hidden)) {
-  overflow: hidden;
-  overscroll-behavior: none;
-  height: 100%;
-}
-
 .meeting {
   position: fixed;
   inset: 0;
