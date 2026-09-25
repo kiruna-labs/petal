@@ -367,6 +367,8 @@ export interface HarnessHook {
   plugins?: import('./plugins/setupPlugins.ts').PluginsHook | null;
   /** Meeting chat host (plugins/README.md §2.7, a host surface). */
   chat?: import('./chat/setupChat.svelte.ts').ChatHook | null;
+  /** The control bar's ⋯ overflow (#247, controlOverflow.ts). */
+  controlOverflow?: import('./controlOverflow.ts').ControlOverflowHook | null;
 }
 
 export interface ActiveRemoteControl {
