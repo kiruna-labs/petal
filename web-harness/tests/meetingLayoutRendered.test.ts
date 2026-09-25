@@ -269,6 +269,48 @@ test('#239 a landscape phone gets a slim control rail and two tiles covering ove
   }
 });
 
+test('#239 a short last row sits centred under the full rows: 5 tiles as 3+2, 7 as 4+3', { timeout: 60_000 }, async () => {
+  // The grid runs on half tracks (--gallery-half-tracks, an integer from
+  // tileLayout.ts), and the tail row's first tile starts half a column in.
+  // Were the template dropped, every tile would stack in one column.
+  for (const [label, device, count, expected] of [
+    ['desktop', DESKTOP, 5, [3, 2]],
+    ['landscape phone', LANDSCAPE_PHONE, 5, [3, 2]],
+    ['landscape phone', LANDSCAPE_PHONE, 7, [4, 3]],
+  ] as const) {
+    const page = await openMeeting(device, count);
+    try {
+      await setLayout(page, 'Grid view');
+      type Cell = { left: number; right: number; width: number };
+      const { tracks, rows }: { tracks: number; rows: Cell[][] } = await page.evaluate(() => {
+        const tiles = document.querySelector<HTMLElement>('#tiles')!;
+        const byTop = new Map<number, { left: number; right: number; width: number }[]>();
+        for (const tile of tiles.querySelectorAll<HTMLElement>(':scope > .tile')) {
+          const r = tile.getBoundingClientRect();
+          const top = Math.round(r.top);
+          byTop.set(top, [...(byTop.get(top) ?? []), { left: r.left, right: r.right, width: r.width }]);
+        }
+        return {
+          tracks: getComputedStyle(tiles).gridTemplateColumns.split(' ').length,
+          rows: [...byTop.entries()].sort(([a], [b]) => a - b).map(([, cells]) => cells.sort((a, b) => a.left - b.left)),
+        };
+      });
+      const what = `${label}, ${count} tiles`;
+      assert.equal(tracks, expected[0] * 2, `${what}: two half tracks per column`);
+      assert.deepEqual(rows.map((cells) => cells.length), expected, `${what}: rows of ${expected.join('+')}`);
+      const widths = rows.flat().map((cell) => Math.round(cell.width));
+      assert.equal(new Set(widths).size, 1, `${what}: every tile one size (${widths.join(', ')})`);
+      const centre = (cells: readonly Cell[]) => (cells[0].left + cells[cells.length - 1].right) / 2;
+      assert.ok(
+        Math.abs(centre(rows[1]) - centre(rows[0])) <= 1,
+        `${what}: the last row is centred (${centre(rows[1]).toFixed(1)} vs ${centre(rows[0]).toFixed(1)})`
+      );
+    } finally {
+      await page.context().close();
+    }
+  }
+});
+
 test('#239 controls that do not fit scroll with the next one peeking, Chat always on screen', { timeout: 60_000 }, async () => {
   // Stopgap until the ⋯ overflow (#247): Chat is lifted next to Camera, and
   // the scroller is cut so the first hidden control shows a sliver -- where
@@ -659,6 +701,33 @@ test('#239 the rail full-screen button enters and leaves real full screen, and f
     await page.evaluate(() => document.exitFullscreen());
     await labelIs('Enter full screen');
     assert.equal(await page.locator('#topbar-fullscreen').getAttribute('aria-pressed'), 'false');
+  } finally {
+    await page.context().close();
+  }
+});
+
+test('#239 a toast with an action keeps its width on a phone instead of wrapping a few letters per line', { timeout: 60_000 }, async () => {
+  const page = await openMeeting(PORTRAIT_PHONE, 1);
+  try {
+    // The shared Toast pill's layout (icon, a message that may shrink, an
+    // action that may not), in the real #toast host and stylesheet.
+    const box = await page.evaluate(() => {
+      const host = document.querySelector<HTMLElement>('#toast')!;
+      host.innerHTML =
+        '<div style="display:inline-flex;align-items:center;gap:10px;padding:9px 16px;box-sizing:border-box">' +
+        '<span style="width:16px;height:16px;flex-shrink:0"></span>' +
+        '<span class="probe-message" style="flex:1 1 auto;min-width:0;font:500 13px/1.35 sans-serif">Alice Chen is sharing a window</span>' +
+        '<button style="flex-shrink:0;white-space:nowrap;font:600 13px sans-serif;padding:4px 10px">Bring to front</button></div>';
+      host.classList.remove('hidden');
+      const message = host.querySelector<HTMLElement>('.probe-message')!;
+      const lineHeight = parseFloat(getComputedStyle(message).lineHeight);
+      const r = host.getBoundingClientRect();
+      return { width: r.width, left: r.left, right: r.right, lines: Math.round(message.getBoundingClientRect().height / lineHeight) };
+    });
+    assert.ok(box.lines <= 2, `the message takes ${box.lines} lines`);
+    assert.ok(box.width > 412 / 2, `the toast is ${Math.round(box.width)}px wide, more than half the screen`);
+    assert.ok(box.left >= 0 && box.right <= 412, 'on screen');
+    assert.ok(Math.abs((box.left + box.right) / 2 - 206) <= 1, 'centred');
   } finally {
     await page.context().close();
   }

@@ -856,6 +856,9 @@ test('#239 a short last row is centred under the full rows, and spotlight clears
     tilesEl.clientHeight = 634 + 40;
     layout.applyTileLayout();
     assert.equal(tilesEl.style.values.get('--gallery-cols'), '4');
+    // The half tracks the start counts in, handed to CSS as a plain integer:
+    // older WebKit rejects `repeat(calc(...), ...)` and drops the template.
+    assert.equal(tilesEl.style.values.get('--gallery-half-tracks'), '8');
     const starts = () => tiles.map((tile) => tile.style.values.get('grid-column-start') ?? '');
     assert.deepEqual(starts(), ['', '', '', '', '2', '', '']);
 
@@ -900,6 +903,7 @@ test('#204 the web grid packs tiles with the shared geometry and repacks on resi
     layout.applyTileLayout();
     const vars = tilesEl.style.values;
     assert.equal(vars.get('--gallery-cols'), '1');
+    assert.equal(vars.get('--gallery-half-tracks'), '2');
     assert.equal(vars.get('--gallery-rows'), '4');
     assert.match(vars.get('--gallery-tile-width') ?? '', /^\d+(\.\d+)?px$/);
     assert.equal(vars.get('--gallery-gap'), '16px', 'the packer keeps the CSS gap when tiles are not compact');
@@ -909,6 +913,7 @@ test('#204 the web grid packs tiles with the shared geometry and repacks on resi
     tilesEl.clientHeight = 500 + 40;
     engine.fireResize();
     assert.equal(vars.get('--gallery-cols'), '2');
+    assert.equal(vars.get('--gallery-half-tracks'), '4');
     assert.equal(vars.get('--gallery-rows'), '2');
 
     // Spotlight owns its own template: the packer leaves it alone.
