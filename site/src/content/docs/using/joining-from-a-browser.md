@@ -7,9 +7,9 @@ If someone in your meeting doesn't have the Petal desktop app installed —
 or is on Linux, or simply prefers not to install it — they can join from a
 browser at
 [meet.petal.live](https://meet.petal.live) instead. It's a real participant
-in the same meeting, not a limited guest mode: real screen sharing, a real
-camera, and a real microphone, over the same underlying connection the
-desktop app uses.
+in the same meeting, not a limited guest mode: real screen sharing (from a
+desktop browser), a real camera, and a real microphone, over the same
+underlying connection the desktop app uses.
 
 ![The browser client's join screen](../../../assets/screenshots/web-join.png)
 
@@ -89,7 +89,9 @@ renders as a tile in the grid, not a floating window. This is a limitation
 of what a browser can render, not of what gets shared: a browser
 participant's screen share is the same real capture as a desktop share, and
 desktop-app participants watching that same share still see it as a native
-movable window on their machines.
+movable window on their machines. Sharing does need a desktop browser,
+though: phone browsers can't capture the screen, so **Share** isn't shown
+there.
 
 Two more things a browser can't do: nobody can remote-control a window you
 share from a browser (browsers can't inject input into your operating
