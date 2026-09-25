@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 
 import type { HarnessContext } from '../src/context.ts';
 import { TILE_REFLOW_ANIMATION_MS } from '../src/tileReflow.ts';
-import { setupTileLayout } from '../src/tileLayout.ts';
+import { computeSpotlightGeometry, setupTileLayout } from '../src/tileLayout.ts';
 
 type Listener = (event: Event) => void;
 
@@ -218,7 +218,7 @@ function installMotionApis() {
   };
 }
 
-test('spotlight mode keeps one hero and moves every other tile into the top strip', () => {
+test('spotlight mode keeps one hero and moves every other tile into the strip', () => {
   const fakeDom = installFakeDom();
   try {
     const tilesEl = fakeDom.document.createElement('div');
@@ -498,26 +498,200 @@ test('#785 the spotlight fallback skips the local self-view and takes a remote t
   }
 });
 
-test('small spotlight layouts reserve at least three quarters of their height for the hero', async () => {
-  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
-  const narrowMedia =
-    /@media\s*\(max-width:\s*760px\)\s*\{(?<body>[\s\S]+?)@media\s*\(max-width:\s*560px\)/i.exec(
-      css
-    )?.groups?.body ?? '';
-  const narrowSpotlight =
-    /\.tiles\.layout-spotlight\s*\{(?<body>[^}]+)\}/i.exec(narrowMedia)?.groups?.body ?? '';
+test('#239 your own camera leads the spotlight strip, ahead of tiles that joined before it', () => {
+  // Remote tiles usually exist before the local one (they are in the room
+  // when you join), so join order put the self-view LAST -- below the fold
+  // of a side strip with seven people on a landscape phone.
+  const fakeDom = installFakeDom();
+  try {
+    const tilesEl = fakeDom.document.createElement('div');
+    const topbarRight = fakeDom.document.createElement('div');
+    fakeDom.document.root.appendChild(tilesEl);
+    fakeDom.document.root.appendChild(topbarRight);
+    const make = (id: string, owner: string, share = false) => {
+      const tile = fakeDom.document.createElement('div');
+      tile.id = id;
+      tile.className = share ? 'tile share-tile' : 'tile';
+      tile.dataset.owner = owner;
+      tilesEl.appendChild(tile);
+      return tile;
+    };
+    const alice = make('alice', 'alice');
+    const bob = make('bob', 'bob');
+    const myShare = make('my-share', 'me', true);
+    const selfView = make('self-view', 'me');
+    const share = make('share', 'carol', true);
 
-  assert.match(narrowSpotlight, /--spotlight-strip-height\s*:\s*min\(72px,\s*16%\)/i);
-  assert.match(narrowSpotlight, /--spotlight-strip-gap\s*:\s*8px/i);
+    const state = {
+      room: { localParticipant: { identity: 'me' } },
+      tileLayoutMode: 'spotlight',
+      pinnedTileId: null,
+      layoutModeButtons: null,
+      speakerSmoothingTimer: null,
+    };
+    const ctx = {
+      dom: { tilesEl, topbarRight },
+      state,
+      ui: { logEvent: () => {} },
+      cb: { activeRemoteControlForTile: () => null, fitTileLabels: () => {} },
+      speakerScores: new Map(),
+      activeSpeakerTargets: new Set(),
+    } as unknown as HarnessContext;
+    const layout = setupTileLayout(ctx);
+    layout.applyTileLayout();
 
-  for (const availableHeight of [160, 240, 400, 640]) {
-    const stripHeight = Math.min(72, availableHeight * 0.16);
-    const heroShare = (availableHeight - stripHeight - 8) / availableHeight;
-    assert.ok(heroShare >= 0.75, `${availableHeight}px leaves only ${heroShare * 100}% for the hero`);
+    assert.equal(tilesEl.children[1], share, 'the remote share is the hero');
+    const strip = tilesEl.children[0]!;
+    // Only the camera self-view moves up; your own share keeps its place.
+    assert.deepEqual(strip.children, [selfView, alice, bob, myShare]);
+  } finally {
+    fakeDom.restore();
   }
 });
 
-test('spotlight thumbnails scroll horizontally and keep a fixed media aspect, never a label-driven width', async () => {
+// #239: the strip used to be a horizontal band above the hero whose height
+// had no floor (min(72px, 16%)), so on a landscape phone it collapsed to
+// ~24px and showed one thumbnail. Surfaces below are the tiles' content box
+// the real client measures on each device (viewport minus chrome and pad).
+test('#239 spotlight puts the strip beside the hero on wide surfaces and under it on tall ones', () => {
+  const landscapePhone = computeSpotlightGeometry(3, 794, 348, 6); // Pixel 8, toolbar showing
+  assert.equal(landscapePhone.placement, 'side');
+  assert.ok(Math.abs(landscapePhone.heroHeight - 348) < 0.5, 'the hero takes the full height');
+  assert.ok(landscapePhone.stripSize >= 112, 'the strip never collapses below the thumbnail floor');
+  assert.ok(landscapePhone.heroWidth + 6 + landscapePhone.stripSize <= 794 + 0.5, 'hero + strip fit the width');
+
+  for (const [label, width, height] of [
+    ['desktop 1280x800', 1240, 634],
+    ['desktop 1920x1080', 1880, 914],
+    ['iPad mini landscape', 992, 610],
+    ['iPhone SE landscape', 598, 363],
+  ] as const) {
+    assert.equal(computeSpotlightGeometry(3, width, height, 14).placement, 'side', label);
+  }
+  for (const [label, width, height] of [
+    ['Pixel 8 portrait', 392, 689],
+    ['iPhone SE portrait', 355, 520],
+    ['iPad mini portrait', 736, 866],
+  ] as const) {
+    const portrait = computeSpotlightGeometry(3, width, height, 8);
+    assert.equal(portrait.placement, 'below', label);
+    assert.ok(Math.abs(portrait.heroWidth - width) < 0.5, `${label}: the hero takes the full width`);
+    assert.ok(portrait.thumbnailWidth <= width * 0.7 + 0.5, `${label}: the hero stays the biggest tile`);
+    assert.ok(portrait.heroHeight + 8 + portrait.stripSize <= height + 0.5, `${label}: hero + rows fit`);
+  }
+});
+
+test('#239 under the hero, thumbnails grow into the room they have instead of staying a sliver', () => {
+  // Pixel 8 portrait: three thumbnails stack one per row at 262px -- the
+  // self-view is nearly twice the area of a fixed two-per-row 191px grid.
+  const three = computeSpotlightGeometry(3, 392, 689, 8);
+  assert.ok(three.thumbnailWidth > 250, `${three.thumbnailWidth}px`);
+  assert.ok(3 * three.thumbnailHeight + 2 * 8 <= three.stripSize, 'all three fit without scrolling');
+  // Six only fit two per row; the block stays compact, never a tower.
+  const six = computeSpotlightGeometry(6, 392, 689, 8);
+  assert.ok(six.thumbnailWidth * 2 + 8 <= 392 && six.thumbnailWidth > 180, `${six.thumbnailWidth}px`);
+});
+
+test('#239 spotlight thumbnails share one size with a floor, and a crowded strip scrolls instead of shrinking', () => {
+  const few = computeSpotlightGeometry(2, 794, 348, 6);
+  const many = computeSpotlightGeometry(12, 794, 348, 6);
+  // One width for every thumbnail, whatever the count: the self-view is
+  // never smaller than anyone else's, with or without a shared window hero.
+  assert.equal(many.thumbnailWidth, few.thumbnailWidth);
+  assert.ok(many.thumbnailWidth >= 110, `thumbnails keep a usable size (${many.thumbnailWidth}px)`);
+  assert.ok(Math.abs(many.thumbnailHeight * (16 / 9) - many.thumbnailWidth) < 0.01, '16:9');
+
+  // Tall surface, many thumbnails: the rows get what the hero leaves, and
+  // past the floor the rest is reachable by scrolling the strip -- the
+  // thumbnails never shrink below it.
+  const portraitFew = computeSpotlightGeometry(2, 392, 689, 8);
+  const portraitMany = computeSpotlightGeometry(20, 392, 689, 8);
+  assert.ok(portraitMany.thumbnailWidth >= 112, `floor holds (${portraitMany.thumbnailWidth}px)`);
+  assert.ok(portraitMany.stripSize <= 689 - 8 - portraitMany.heroHeight + 0.5);
+  const perRow = Math.floor((392 + 8) / (portraitMany.thumbnailWidth + 8));
+  const rowsNeeded = Math.ceil(20 / perRow) * (portraitMany.thumbnailHeight + 8);
+  assert.ok(rowsNeeded > portraitMany.stripSize, 'the strip scrolls for the rest');
+  assert.ok(portraitFew.stripSize < portraitMany.stripSize, 'a short strip only takes the rows it needs');
+
+  // Alone with the hero: no strip at all, the hero fits the whole surface.
+  const solo = computeSpotlightGeometry(0, 800, 450, 6);
+  assert.equal(solo.stripSize, 0);
+  assert.equal(solo.heroWidth, 800);
+});
+
+// Surfaces the real client measures (tiles' content box), and the shapes a
+// hero really shows: cameras either way up, shared windows of any shape
+// with their 44px docked header.
+const SURFACES = [
+  ['Pixel 8 landscape', 794, 352, 6],
+  ['iPhone SE landscape', 606, 363, 6],
+  ['Pixel 8 portrait', 392, 689, 8],
+  ['iPad mini portrait', 736, 866, 10],
+  ['iPad mini landscape', 992, 610, 14],
+  ['desktop 1280x800', 1240, 634, 14],
+] as const;
+const HEROES = [
+  ['16:9 camera', { aspect: 16 / 9, header: 0 }],
+  ['9:16 phone camera', { aspect: 9 / 16, header: 0 }],
+  ['16:10 window', { aspect: 16 / 10, header: 44 }],
+  ['4:3 window', { aspect: 4 / 3, header: 44 }],
+  ['phone-shaped window', { aspect: 9 / 19.5, header: 44 }],
+  ['ultrawide window', { aspect: 32 / 9, header: 44 }],
+] as const;
+
+test('#239 the spotlight hero is always the biggest picture: its video beats every thumbnail', () => {
+  // The review case: on a Pixel 8 in portrait a 16:9 hero BOX left a shared
+  // window ~392x177 of video while thumbnails were 260x146. The hero now
+  // takes its media's own shape, and thumbnails are capped against it.
+  for (const [surface, width, height, gap] of SURFACES) {
+    for (const [shape, hero] of HEROES) {
+      for (const count of [1, 3, 4, 6]) {
+        const g = computeSpotlightGeometry(count, width, height, gap, hero);
+        const video = g.heroWidth * (g.heroHeight - hero.header);
+        const thumbnail = g.thumbnailWidth * g.thumbnailHeight;
+        assert.ok(
+          video >= 2 * thumbnail,
+          `${surface}, ${shape}, ${count} thumbnails: hero video ${Math.round(video)} vs thumbnail ${Math.round(thumbnail)}`
+        );
+        assert.ok(g.heroWidth <= width + 0.5 && g.heroHeight <= height + 0.5, `${surface}, ${shape}: the hero fits`);
+        assert.ok(Math.abs(g.heroWidth / (g.heroHeight - hero.header) - hero.aspect) < 0.01, `${surface}, ${shape}: no letterbox`);
+      }
+    }
+  }
+});
+
+test('#239 a phone camera held upright is a tall hero, not a sliver in a 16:9 box', () => {
+  const upright = { aspect: 9 / 16, header: 0 };
+  // Portrait phone: all the height but one floor row of thumbnails (the
+  // strip scrolls for the rest). It was a 124px-wide sliver in a 16:9 box.
+  const portrait = computeSpotlightGeometry(4, 392, 689, 8, upright);
+  assert.ok(portrait.heroWidth > 330, `${portrait.heroWidth}px wide`);
+  assert.ok(portrait.heroHeight > 600, `${portrait.heroHeight}px tall`);
+  // Landscape phone: the full height, the strip beside it.
+  const landscape = computeSpotlightGeometry(4, 794, 352, 6, upright);
+  assert.equal(landscape.placement, 'side');
+  assert.ok(Math.abs(landscape.heroHeight - 352) < 0.5);
+  // A shared window's header is part of its box, over its video.
+  const share = computeSpotlightGeometry(4, 392, 689, 8, { aspect: 16 / 10, header: 44 });
+  assert.ok(Math.abs(share.heroHeight - (392 / 1.6 + 44)) < 0.5, `${share.heroHeight}`);
+});
+
+test('#239 the spotlight hero has an explicit box, so a centred grid cell cannot collapse it', async () => {
+  // Root cause of the empty spotlight hero (0.9.27-0.9.29): #204 gave
+  // `.tiles` `place-items: center`, and the hero -- `width: 100%` but
+  // `height: auto`, with only absolutely positioned children -- shrank to its
+  // 2px border. Only the strip rendered ("I only see Bob").
+  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
+  const hero = /\.tile\.is-spotlight\s*\{(?<body>[^}]+)\}/i.exec(css)?.groups?.body ?? '';
+  assert.match(hero, /height\s*:\s*min\(100%,\s*var\(--spotlight-hero-height,\s*100%\)\)/i);
+  assert.match(hero, /width\s*:\s*min\(100%,\s*var\(--spotlight-hero-width,\s*100%\)\)/i);
+  const spotlight = /\.tiles\.layout-spotlight\s*\{(?<body>[^}]+)\}/i.exec(css)?.groups?.body ?? '';
+  assert.match(spotlight, /place-items\s*:\s*stretch/i, 'the strip fills its track');
+  const side = /\.tiles\.layout-spotlight\.spotlight-side\s*\{(?<body>[^}]+)\}/i.exec(css)?.groups?.body ?? '';
+  assert.match(side, /grid-template-columns\s*:[^;]*var\(--spotlight-strip-size/i, 'the side strip is a column');
+});
+
+test('spotlight thumbnails scroll inside the strip and keep a fixed media aspect, never a label-driven width', async () => {
   // The 2026-07-30 E1 regression: `width: max-content` sized each thumbnail
   // to its NAME CHIP (the video is absolutely positioned and contributes no
   // intrinsic width), so tile shape was driven by name length instead of the
@@ -545,9 +719,13 @@ test('spotlight thumbnails scroll horizontally and keep a fixed media aspect, ne
     )?.groups?.body ?? '';
 
   assert.match(strip, /display\s*:\s*flex/i);
-  assert.match(strip, /overflow-x\s*:\s*auto/i);
-  assert.match(strip, /overflow-y\s*:\s*hidden/i);
+  // #239: one scroll axis whatever the placement (a side column, or rows
+  // under the hero), and a fling at its end never drags the page along.
+  assert.match(strip, /overflow-x\s*:\s*hidden/i);
+  assert.match(strip, /overflow-y\s*:\s*auto/i);
+  assert.match(strip, /overscroll-behavior\s*:\s*contain/i);
   assert.match(thumbnail, /aspect-ratio\s*:\s*16\s*\/\s*9/i);
+  assert.match(thumbnail, /width\s*:\s*min\(100%,\s*var\(--spotlight-thumbnail-width/i);
   assert.doesNotMatch(thumbnail, /width\s*:\s*max-content/i);
   // #894: the camera-ON chip is positioned bottom-right by flex-end on the
   // tile — must stay, it's unrelated to (and does not fight) initials centering.
@@ -614,6 +792,49 @@ function installFakeLayoutEngine(surface: FakeElement, pad: number, gap: number)
   };
 }
 
+test('#239 a short last row is centred under the full rows, and spotlight clears the offset', () => {
+  const fakeDom = installFakeDom();
+  const tilesEl = fakeDom.document.createElement('div');
+  const engine = installFakeLayoutEngine(tilesEl, 20, 16);
+  try {
+    const topbarRight = fakeDom.document.createElement('div');
+    fakeDom.document.root.appendChild(tilesEl);
+    fakeDom.document.root.appendChild(topbarRight);
+    const tiles = Array.from({ length: 7 }, (_, index) => {
+      const tile = fakeDom.document.createElement('div');
+      tile.id = `tile-${index}`;
+      tile.className = 'tile';
+      tile.dataset.owner = `Peer ${index}`;
+      tilesEl.appendChild(tile);
+      return tile;
+    });
+    const ctx = {
+      dom: { tilesEl, topbarRight },
+      state: { tileLayoutMode: 'grid', pinnedTileId: null, layoutModeButtons: null, speakerSmoothingTimer: null },
+      ui: { logEvent: () => {} },
+      cb: { activeRemoteControlForTile: () => null, fitTileLabels: () => {} },
+      speakerScores: new Map(),
+      activeSpeakerTargets: new Set(),
+    } as unknown as HarnessContext;
+    const layout = setupTileLayout(ctx);
+    // Seven on a wide surface pack 3x3: the last row holds one tile, which
+    // starts on half-track 3 of 6 -- the middle column.
+    tilesEl.clientWidth = 1240 + 40;
+    tilesEl.clientHeight = 634 + 40;
+    layout.applyTileLayout();
+    assert.equal(tilesEl.style.values.get('--gallery-cols'), '3');
+    const starts = () => tiles.map((tile) => tile.style.values.get('grid-column-start') ?? '');
+    assert.deepEqual(starts(), ['', '', '', '', '', '', '3']);
+
+    (ctx.state as { tileLayoutMode: string }).tileLayoutMode = 'spotlight';
+    layout.applyTileLayout();
+    assert.deepEqual(starts(), ['', '', '', '', '', '', ''], 'spotlight places its own tiles');
+  } finally {
+    engine.restore();
+    fakeDom.restore();
+  }
+});
+
 test('#204 the web grid packs tiles with the shared geometry and repacks on resize', () => {
   const fakeDom = installFakeDom();
   const tilesEl = fakeDom.document.createElement('div');
@@ -663,6 +884,27 @@ test('#204 the web grid packs tiles with the shared geometry and repacks on resi
     vars.delete('--gallery-cols');
     layout.applyTileLayout();
     assert.equal(vars.get('--gallery-cols'), undefined);
+
+    // #239: it has a geometry of its own instead -- on this wide surface the
+    // strip goes beside the hero, one thumbnail width for all.
+    assert.equal(tilesEl.classList.contains('spotlight-side'), true);
+    assert.match(vars.get('--spotlight-strip-size') ?? '', /^\d+(\.\d+)?px$/);
+    assert.match(vars.get('--spotlight-thumbnail-width') ?? '', /^\d+(\.\d+)?px$/);
+    assert.match(vars.get('--spotlight-hero-height') ?? '', /^\d+(\.\d+)?px$/);
+    // Rotating to a tall surface moves the strip under the hero, without a
+    // mode change.
+    tilesEl.clientWidth = 400 + 40;
+    tilesEl.clientHeight = 800 + 40;
+    engine.fireResize();
+    assert.equal(tilesEl.classList.contains('spotlight-side'), false);
+    // And back to grid, the placement class leaves with the strip.
+    tilesEl.clientWidth = 900 + 40;
+    tilesEl.clientHeight = 500 + 40;
+    layout.applyTileLayout();
+    assert.equal(tilesEl.classList.contains('spotlight-side'), true);
+    (ctx.state as { tileLayoutMode: string }).tileLayoutMode = 'grid';
+    layout.applyTileLayout();
+    assert.equal(tilesEl.classList.contains('spotlight-side'), false);
   } finally {
     engine.restore();
     fakeDom.restore();

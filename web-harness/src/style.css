@@ -1202,9 +1202,20 @@ input[type='text']:disabled {
 /* =========================================================================
    Meeting screen — Gallery register
    ========================================================================= */
-.meeting {
-  position: relative;
+/* #239: the meeting is pinned to the viewport and the document under it is
+   locked, so no swipe, wheel notch or restored scroll position can slide the
+   top bar or the controls off screen. `inset: 0` tracks the layout viewport,
+   which index.html's interactive-widget=resizes-content shrinks for the
+   on-screen keyboard. */
+html:has(> body > #meeting-screen:not(.hidden)) {
+  overflow: hidden;
+  overscroll-behavior: none;
   height: 100%;
+}
+
+.meeting {
+  position: fixed;
+  inset: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1218,7 +1229,8 @@ input[type='text']:disabled {
   gap: 12px;
   min-height: 50px;
   height: auto;
-  padding: 8px 22px;
+  padding: max(8px, env(safe-area-inset-top)) max(22px, env(safe-area-inset-right)) 8px
+    max(22px, env(safe-area-inset-left));
   border-bottom: 1px solid var(--hairline);
   background: rgba(255, 255, 255, 0.015);
 }
@@ -1465,6 +1477,82 @@ input[type='text']:disabled {
   color: var(--text-primary);
 }
 
+/* Full screen (#239, meetingViewport.ts): the one way to get a phone
+   browser's URL bar off the meeting. Built only where
+   document.fullscreenEnabled (never iPhone Safari). A top-bar button, and a
+   rail cell that only the landscape-phone block below shows. */
+.topbar-fullscreen {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.topbar-fullscreen:hover,
+.topbar-fullscreen:focus-visible {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+
+.topbar-fullscreen:focus-visible {
+  outline: 2px solid var(--id-blue);
+  outline-offset: 2px;
+}
+
+/* Beats `.control-cell { display: flex }`; only the rail shows the cell. */
+.control-cell.fullscreen-cell {
+  display: none;
+}
+
+/* A fingertip needs 44px, but a 44px control would grow the top bar. Under
+   a coarse pointer the picker's segments and the full-screen button keep
+   their size and reach further: the full-screen button 44px square, the
+   picker 44px tall (and wider at its outer edges, where no neighbour's
+   target overlaps). The literals track #241's top-bar control height; the
+   insets count from the padding box, inside the button's 1px border. */
+@media (pointer: coarse) {
+  .layout-mode-button,
+  .topbar-fullscreen {
+    position: relative;
+  }
+
+  .layout-mode-button::after,
+  .topbar-fullscreen::after {
+    content: '';
+    position: absolute;
+    inset: -7px;
+  }
+
+  .layout-mode-button::after {
+    inset: -10px 0;
+  }
+
+  .layout-mode-button:first-child::after {
+    left: -8px;
+  }
+
+  .layout-mode-button:last-child::after {
+    right: -8px;
+  }
+}
+
+/* No hover on a touch screen: copy and rename stay visible, not hover-only. */
+@media (hover: none) {
+  .room-title-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 /* Tiles + chat drawer row (plugins/README.md §2.7 "Panel"). The drawer is a
    right column so the topbar and control bar keep their full width; under
    640px it covers the tiles instead of crushing them. */
@@ -1536,7 +1624,13 @@ input[type='text']:disabled {
 /* Tile grid (#204 PR2): the shape comes from the shared packer
    (shared/logic/galleryGeometry.ts via tileLayout.ts) as --gallery-* vars, the
    same source the desktop gallery uses. This CSS only places the computed
-   cells and keeps the 16:9 tile box; it never decides columns itself. */
+   cells and keeps the 16:9 tile box; it never decides columns itself.
+   #239: a track is no larger than the packed tile, and the block of tracks is
+   centred (`safe`: never clipped at the start), so the space the 16:9 tiles
+   cannot use collects around the group instead of as dead bands between
+   neighbours. Columns run on HALF tracks, each tile spanning two, so an
+   incomplete last row can start half a column in and sit centred under the
+   full rows (tileLayout.ts sets the first tail tile's grid-column-start). */
 .tiles {
   --tile-gap: 16px;
   --tile-pad: 20px;
@@ -1550,50 +1644,84 @@ input[type='text']:disabled {
   min-height: 0;
   padding: var(--tile-pad);
   display: grid;
-  grid-template-columns: repeat(var(--gallery-cols), minmax(0, 1fr));
-  grid-template-rows: repeat(var(--gallery-rows), minmax(0, 1fr));
+  grid-template-columns: repeat(
+    calc(var(--gallery-cols) * 2),
+    minmax(0, calc((var(--gallery-tile-width) - var(--gallery-gap)) / 2))
+  );
+  grid-template-rows: repeat(var(--gallery-rows), minmax(0, var(--gallery-tile-height)));
   place-items: center;
+  /* `center` first: WebKit before 17.6 drops the `safe` declaration. */
+  place-content: center;
+  place-content: safe center;
   gap: var(--gallery-gap);
   overflow: auto;
-  align-content: start;
 }
 
 .tiles.layout-grid > .tile {
+  grid-column-end: span 2;
   width: min(100%, var(--gallery-tile-width));
   height: min(100%, var(--gallery-tile-height));
   aspect-ratio: 16 / 9;
 }
 
+/* Spotlight (#239): the hero plus a strip of equal thumbnails, which goes ON
+   THE SIDE (as the picker icon draws it) when that costs the hero little, and
+   BELOW the hero on a tall surface. tileLayout.ts's computeSpotlightGeometry
+   measures the surface and sets the class and the --spotlight-* sizes; this
+   CSS only places them. The var() fallbacks cover the frame before the first
+   measurement.
+
+   The hero's explicit height (`.tile.is-spotlight` below) is load-bearing:
+   `.tiles` centres its packed grid cells (#204), and a centred hero with
+   `height: auto` -- every child of which is absolutely positioned -- shrinks
+   to its 2px border. That was the empty spotlight hero on 0.9.27-0.9.29:
+   only the strip rendered. The strip, likewise, must stretch. */
 .tiles.layout-spotlight {
-  --spotlight-strip-height: minmax(96px, 22%);
   --spotlight-strip-gap: 14px;
-  --spotlight-thumbnail-min: 132px;
 
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--spotlight-strip-height) minmax(0, 1fr);
-  grid-auto-rows: unset;
+  grid-template-rows: minmax(0, var(--spotlight-hero-height, 1fr)) var(--spotlight-strip-size, 96px);
+  place-items: stretch;
+  place-content: center;
+  place-content: safe center;
   gap: var(--spotlight-strip-gap);
   overflow: hidden;
-  align-content: stretch;
 }
 
-.tiles.layout-spotlight.spotlight-solo {
+.tiles.layout-spotlight.spotlight-side {
+  grid-template-columns: minmax(0, var(--spotlight-hero-width, 1fr)) var(--spotlight-strip-size, 160px);
   grid-template-rows: minmax(0, 1fr);
 }
 
+.tiles.layout-spotlight.spotlight-solo {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+/* Scrolls on its own axis, never the page: `overscroll-behavior: contain`
+   keeps a fling at the end of the strip from dragging the document (and the
+   dev tools below the fold) along. */
 .spotlight-strip {
   grid-column: 1;
-  grid-row: 1;
+  grid-row: 2;
   min-width: 0;
   min-height: 0;
   display: flex;
-  align-items: stretch;
-  gap: 12px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  align-content: flex-start;
+  justify-content: center;
+  gap: var(--spotlight-strip-gap);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
-  padding: 1px 1px 6px;
+  padding: 1px;
+}
+
+.tiles.layout-spotlight.spotlight-side > .spotlight-strip {
+  grid-column: 2;
+  grid-row: 1;
 }
 
 .spotlight-strip:empty {
@@ -1626,15 +1754,15 @@ input[type='text']:disabled {
   cursor: pointer;
 }
 
+/* The hero keeps the 16:9 box computeSpotlightGeometry sized for it, centred
+   in its track; with no measurement yet it fills the track. */
 .tile.is-spotlight {
   grid-column: 1;
-  grid-row: 2;
-  width: 100%;
-  min-height: 0;
-}
-
-.tiles.layout-spotlight.spotlight-solo > .tile.is-spotlight {
   grid-row: 1;
+  place-self: center;
+  width: min(100%, var(--spotlight-hero-width, 100%));
+  height: min(100%, var(--spotlight-hero-height, 100%));
+  min-height: 0;
 }
 
 .tile.is-speaking {
@@ -1753,8 +1881,11 @@ input[type='text']:disabled {
   background: currentColor;
 }
 
-/* Strip thumbnails keep a fixed 16:9 box derived from the strip height —
-   never `width: max-content` (#629 regression): with the video absolutely
+/* Strip thumbnails keep a fixed 16:9 box of ONE shared width
+   (computeSpotlightGeometry), so your own self-view is never smaller than
+   anyone else's thumbnail, with or without a shared window as hero (#239).
+   `min(100%, …)` gives way to a desktop scrollbar instead of clipping.
+   Never `width: max-content` (#629 regression): with the video absolutely
    positioned, max-content sized each tile to its NAME CHIP, so tile shape
    was decoupled from the media entirely (a long name produced a wide box, a
    short one a square) and the contained video floated in arbitrary black
@@ -1762,11 +1893,10 @@ input[type='text']:disabled {
    keeps `object-fit: contain` — letterbox deliberately, never distort. */
 .spotlight-strip > .tile.is-spotlight-thumbnail {
   flex: 0 0 auto;
-  width: auto;
+  width: min(100%, var(--spotlight-thumbnail-width, 132px));
+  height: auto;
   aspect-ratio: 16 / 9;
-  min-width: var(--spotlight-thumbnail-min);
   min-height: 0;
-  height: 100%;
   justify-content: flex-end;
 }
 
@@ -2595,21 +2725,15 @@ input[type='text']:disabled {
   }
 }
 
+/* #497: replace squeezed icon-only segments with one accessible menu whose
+   items keep their full text at realistic small-tile widths. #239 raised it
+   from 470px: a landscape phone's spotlight hero (480-630px) left the title
+   a few pixels, and it wrapped one letter per line. */
 @container (max-width: 640px) {
   .remote-window-header__debug {
     display: none;
   }
-}
 
-@container (max-width: 560px) {
-  .remote-window-header__open-url {
-    display: none;
-  }
-}
-
-/* #497: replace squeezed icon-only segments with one accessible menu whose
-   items keep their full text at realistic small-tile widths. */
-@container (max-width: 470px) {
   .remote-window-header__mode-switcher {
     display: none;
   }
@@ -2623,9 +2747,25 @@ input[type='text']:disabled {
   }
 }
 
+@container (max-width: 560px) {
+  .remote-window-header__open-url {
+    display: none;
+  }
+}
+
 @container (max-width: 300px) {
   .remote-window-header__owner-label {
     display: none;
+  }
+
+  /* #239: a phone's one-column grid tile (~230px) left the title ~30px, one
+     letter per line. The AI chat button keeps its name as its aria-label. */
+  .remote-window-header__ai-chat .remote-window-header__button-label {
+    display: none;
+  }
+
+  .remote-window-header__ai-chat {
+    padding: 0 8px;
   }
 
   .remote-window-header {
@@ -3682,6 +3822,12 @@ input[type='text']:disabled {
 /* =========================================================================
    Dev / test drawer
    ========================================================================= */
+/* The drawer is the meeting column's last row on desktop (testers live in
+   it). On a phone it costs too much height, so there it is a sheet parked
+   below the screen (see the phone block further down): `?dev=1` or
+   meetingViewport.ts's openDevTools() slides it up. IDs and DOM order stay
+   put for automation that clicks #share-btn and for
+   networkDiagnosticsPlacement.test.ts. */
 .dev-panel {
   flex-shrink: 0;
   border-top: 1px solid var(--hairline);
@@ -3696,6 +3842,24 @@ input[type='text']:disabled {
   color: var(--text-faint);
   cursor: pointer;
   user-select: none;
+  list-style: none;
+}
+
+/* Our own disclosure arrow: the UA marker cannot be spaced from its label. */
+.dev-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.dev-panel summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  transition: rotate var(--motion-fast) var(--ease-standard);
+}
+
+.dev-panel details[open] > summary::before,
+.dev-panel[open] > summary::before {
+  rotate: 90deg;
 }
 
 .dev-body {
@@ -3844,11 +4008,6 @@ canvas#test-canvas.p613-presentation-source {
     --tile-pad: 16px;
   }
 
-  .tiles.layout-spotlight {
-    --spotlight-strip-height: minmax(92px, 22%);
-    --spotlight-thumbnail-min: 124px;
-  }
-
   .tile .initials {
     font-size: 24px;
   }
@@ -3873,9 +4032,7 @@ canvas#test-canvas.p613-presentation-source {
   }
 
   .tiles.layout-spotlight {
-    --spotlight-strip-height: min(72px, 16%);
-    --spotlight-strip-gap: 8px;
-    --spotlight-thumbnail-min: 112px;
+    --spotlight-strip-gap: 10px;
   }
 
   .tile .initials {
@@ -3895,7 +4052,7 @@ canvas#test-canvas.p613-presentation-source {
     min-height: 50px;
     flex-wrap: wrap;
     row-gap: 7px;
-    padding-block: 8px;
+    padding-block: max(8px, env(safe-area-inset-top)) 8px;
   }
 
   .room-title {
@@ -3913,28 +4070,69 @@ canvas#test-canvas.p613-presentation-source {
   }
 
   .tiles.layout-spotlight {
-    --spotlight-strip-height: min(64px, 16%);
-    --spotlight-strip-gap: 6px;
-    --spotlight-thumbnail-min: 104px;
+    --spotlight-strip-gap: 8px;
   }
 
+  /* #239: tighter on a phone. Whatever still does not fit scrolls sideways,
+     with Leave pinned, rather than squashing the controls into each other --
+     a stopgap until the control bar's ⋯ overflow menu (#247) collapses it.
+     meetingViewport.ts cuts the scroller so the next control peeks. */
   .controlbar {
     justify-content: center;
-    padding: 12px;
+    gap: 6px;
+    padding: 4px 10px max(8px, env(safe-area-inset-bottom));
   }
-}
 
-@media (max-height: 700px) {
-  .tiles.layout-spotlight {
-    --spotlight-strip-height: min(72px, 16%);
-    --spotlight-strip-gap: 6px;
+  /* The padding keeps the chat badge (top: -2px) inside the clip. */
+  .controls-left {
+    gap: 6px;
+    padding-top: 4px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .controls-left > .control-cell,
+  .controlbar > .control-cell {
+    flex-shrink: 0;
+  }
+
+  /* Level with the scroller's padded row. */
+  .controlbar > .control-cell {
+    margin-top: 4px;
+  }
+
+  /* Chat right after Mic and Camera, so it is on screen on every phone. */
+  .controls-left > .control-cell:has(> .meeting-split) {
+    order: -2;
+  }
+
+  .controls-left > .chat-cell {
+    order: -1;
+  }
+
+  /* A scroller clips them anyway; the names are aria-labels. */
+  .controls-left .control-tooltip {
+    display: none;
+  }
+
+  /* A control the scroller cuts shows no half-label ("Ir"); it reappears
+     once the control scrolls fully into view (meetingViewport.ts). */
+  .controls-left > .control-cell.is-clipped .meeting-control-label {
+    visibility: hidden;
   }
 }
 
 @media (max-width: 420px) {
+  /* #239: the full-screen button's room comes out of the gaps, so a
+     default room name ("Petal meeting") stays one line at 360px. */
   .topbar {
-    column-gap: 8px;
-    padding-inline: 10px;
+    column-gap: 6px;
+    padding-inline: 8px;
+  }
+
+  .room-title {
+    gap: 4px;
   }
 
   .elapsed {
@@ -3958,6 +4156,210 @@ canvas#test-canvas.p613-presentation-source {
   .tile .name-chip {
     gap: 5px;
     padding: 4px 8px;
+  }
+}
+
+/* =========================================================================
+   Landscape phone (#239): the control bar becomes an icon-only rail on the
+   right edge, the top bar an overlay that fades after a few idle seconds
+   (meetingViewport.ts toggles .chrome-idle), and the tiles get the rest.
+   The query is MEETING_RAIL_QUERY in meetingViewport.ts: keep them in step.
+   ========================================================================= */
+@media (orientation: landscape) and (max-height: 500px) and (min-aspect-ratio: 3/2) {
+  /* One row: tiles, then the rail. The top bar shares the tiles' cell and
+     floats over them instead of taking a row of its own. */
+  .meeting {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .meeting > .topbar,
+  .meeting > .meeting-body {
+    grid-area: 1 / 1;
+  }
+
+  /* A short desktop window keeps its developer row (phones park it as a
+     sheet, below): under the tiles and the rail, full width. */
+  .meeting > .dev-panel {
+    grid-column: 1 / -1;
+  }
+
+  .meeting-body {
+    padding-left: env(safe-area-inset-left);
+  }
+
+  /* Only the bar's own controls take taps; the gradient between them lets
+     a tap through to the tile (a share's header sits right under it). */
+  .topbar {
+    align-self: start;
+    z-index: 7;
+    min-height: 0;
+    padding: max(6px, env(safe-area-inset-top)) 12px 18px max(14px, env(safe-area-inset-left));
+    border-bottom: 0;
+    background: linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--bg-base) 88%, transparent),
+      color-mix(in srgb, var(--bg-base) 56%, transparent) 60%,
+      transparent
+    );
+    pointer-events: none;
+    transition: opacity var(--motion-base) var(--ease-standard);
+  }
+
+  .meeting:not(.chrome-idle) > .topbar :is(button, a, input) {
+    pointer-events: auto;
+  }
+
+  /* A shared window's own header names it; the room title would only cover
+     that header's controls. */
+  .meeting:has(.tile.share-tile.is-spotlight) > .topbar .room-title {
+    display: none;
+  }
+
+  .meeting.chrome-idle > .topbar {
+    opacity: 0;
+  }
+
+  /* An open chat keeps its header, and its close button, clear of the
+     overlay (the drawer is .chat-aside's 320px column). */
+  .meeting:has(> .meeting-body > .chat-aside:not([hidden])) > .topbar {
+    margin-right: 320px;
+  }
+
+  .controlbar {
+    grid-area: 1 / 2;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-height: 0;
+    padding: max(4px, env(safe-area-inset-top)) env(safe-area-inset-right) max(8px, env(safe-area-inset-bottom)) 0;
+    border-top: 0;
+    border-left: 1px solid var(--hairline);
+  }
+
+  /* Mic, Camera and Chat lead; what does not fit scrolls inside the rail,
+     cut so the next control peeks (meetingViewport.ts), while Full screen
+     and Leave stay pinned at the bottom. A stopgap: the rail needs the ⋯
+     overflow (#247) to collapse the middle. The padding is the rail's side
+     margin, and keeps the chat badge inside the clip. */
+  .controls-left {
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-height: 0;
+    margin-bottom: auto;
+    padding: 4px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+  }
+
+  .controls-left > .control-cell,
+  .controlbar > .control-cell {
+    flex-shrink: 0;
+  }
+
+  .controls-left > .control-cell:has(> .meeting-split) {
+    order: -2;
+  }
+
+  .controls-left > .chat-cell {
+    order: -1;
+  }
+
+  .controls-left .control-tooltip {
+    display: none;
+  }
+
+  .leave-cell {
+    margin-left: 0;
+  }
+
+  /* Icon-only: each control keeps its name as its aria-label. */
+  .controlbar .meeting-control-label {
+    display: none;
+  }
+
+  /* Split controls stand upright, the options caret under its button, so
+     the rail stays one button wide. */
+  .controlbar .meeting-split {
+    flex-direction: column;
+  }
+
+  .controlbar .meeting-split > .control-button:first-child {
+    border-radius: var(--radius-pill) var(--radius-pill) 0 0;
+  }
+
+  .controlbar .meeting-split-options {
+    flex: 0 0 22px;
+    width: var(--control-size);
+    min-width: 0;
+    min-height: 0;
+    border-left: 0;
+    border-top: 1px solid var(--hairline);
+  }
+
+  /* The tiles run nearly to the screen edge: every pixel here is video. */
+  .tiles {
+    --tile-gap: 6px;
+    --tile-pad: 4px;
+  }
+
+  .tiles.layout-spotlight {
+    --spotlight-strip-gap: 6px;
+  }
+
+  .topbar-fullscreen {
+    display: none;
+  }
+
+  .control-cell.fullscreen-cell {
+    display: flex;
+  }
+}
+
+/* Under 640px the chat drawer covers the tiles instead of taking a column
+   (.chat-aside), so the floating top bar would sit on the drawer's own
+   header: while the drawer is open the header is the drawer's. */
+@media (orientation: landscape) and (max-height: 500px) and (min-aspect-ratio: 3/2) and (max-width: 640px) {
+  .meeting:has(> .meeting-body > .chat-aside:not([hidden])) > .topbar {
+    display: none;
+  }
+}
+
+/* =========================================================================
+   Phones (#239): the developer drawer is a sheet parked below the screen,
+   so it takes none of a phone's height -- touch screens only: a short
+   desktop window keeps its row. `?dev=1` (kept for the tab) or
+   meetingViewport.ts's openDevTools() adds .is-open; closing the drawer's
+   summary puts it away again. `visibility` keeps it out of the tab order
+   while parked; a script's `#share-btn.click()` still works.
+   ========================================================================= */
+@media (orientation: landscape) and (max-height: 500px) and (min-aspect-ratio: 3/2) and (pointer: coarse),
+  (pointer: coarse) and (max-width: 560px) {
+  .dev-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    max-height: 45dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-bottom: env(safe-area-inset-bottom);
+    box-shadow: var(--shadow-panel);
+    translate: 0 100%;
+    visibility: hidden;
+    transition:
+      translate var(--motion-base) var(--ease-standard),
+      visibility 0s linear var(--motion-base);
+  }
+
+  .dev-panel.is-open {
+    translate: 0 0;
+    visibility: visible;
+    transition: translate var(--motion-base) var(--ease-standard);
   }
 }
 

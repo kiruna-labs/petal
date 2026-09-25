@@ -29,9 +29,26 @@ test('#204 the meeting tile grid places cells from the shared packer and never d
   const tilesMatch = /\.tiles\s*\{(?<body>[^}]+)\}/.exec(css);
   const tilesBody = tilesMatch?.groups?.body ?? '';
 
-  assert.match(tilesBody, /grid-template-columns\s*:\s*repeat\(var\(--gallery-cols\),\s*minmax\(0,\s*1fr\)\)/i);
-  assert.match(tilesBody, /grid-template-rows\s*:\s*repeat\(var\(--gallery-rows\),\s*minmax\(0,\s*1fr\)\)/i);
+  // #239: each track is at most the packed tile, and the block of tracks is
+  // centred -- the space 16:9 tiles cannot use surrounds the group instead
+  // of opening dead bands between neighbours. Columns are half tracks (a
+  // tile spans two) so a short last row can be centred.
+  assert.match(
+    tilesBody,
+    /grid-template-columns\s*:\s*repeat\(\s*calc\(var\(--gallery-cols\)\s*\*\s*2\),\s*minmax\(0,\s*calc\(\(var\(--gallery-tile-width\)\s*-\s*var\(--gallery-gap\)\)\s*\/\s*2\)\)\s*\)/i
+  );
+  assert.match(
+    tilesBody,
+    /grid-template-rows\s*:\s*repeat\(var\(--gallery-rows\),\s*minmax\(0,\s*var\(--gallery-tile-height\)\)\)/i
+  );
   assert.match(tilesBody, /place-items\s*:\s*center/i);
+  assert.match(tilesBody, /place-content\s*:\s*safe center/i);
+  // An engine without the `safe` keyword drops that declaration: each one
+  // follows a plain `center` to fall back on.
+  const safeCentres = css.match(/place-content\s*:\s*safe center/gi) ?? [];
+  const withFallback = css.match(/place-content\s*:\s*center;\s*place-content\s*:\s*safe center/gi) ?? [];
+  assert.ok(safeCentres.length >= 2, 'the grid and the spotlight both centre safely');
+  assert.equal(withFallback.length, safeCentres.length, 'every `safe center` has a plain `center` before it');
   assert.match(tilesBody, /gap\s*:\s*var\(--gallery-gap\)/i);
   assert.doesNotMatch(css, /auto-fit/i, 'CSS must not pick a column count of its own');
   assert.doesNotMatch(css, /--tile-min\b/, 'the minmax breakpoint knobs are gone with the packer');
@@ -41,6 +58,7 @@ test('#204 the meeting tile grid places cells from the shared packer and never d
   assert.match(tileSizing, /width\s*:\s*min\(100%,\s*var\(--gallery-tile-width\)\)/i);
   assert.match(tileSizing, /height\s*:\s*min\(100%,\s*var\(--gallery-tile-height\)\)/i);
   assert.match(tileSizing, /aspect-ratio\s*:\s*16\s*\/\s*9/i);
+  assert.match(tileSizing, /grid-column-end\s*:\s*span 2/i);
 });
 
 test('meeting tile breakpoints still tighten gap and padding through phone widths', async () => {
