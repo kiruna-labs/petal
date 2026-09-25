@@ -5,9 +5,10 @@
 // and at least four lines of message text. With the soft keyboard up (#239's
 // interactive-widget=resizes-content shrinks the page to what is left above
 // it) the control bar steps out too and the input stays in view. Closing chat
-// brings everything back; portrait and wide windows keep today's layout. On a
-// touch screen, opening chat does not focus the input (that would raise the
-// keyboard over the messages).
+// brings everything back; portrait and wide windows keep today's layout, and
+// so do short desktop windows (a mouse), and a portrait phone with the
+// keyboard up keeps Leave. On a touch screen, opening chat does not focus the
+// input (that would raise the keyboard over the messages).
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -27,7 +28,11 @@ type Layout = {
   aside: Box;
   topbar: Box;
   topbarShown: boolean;
+  devPanelShown: boolean;
   controlbar: Box;
+  controlbarShown: boolean;
+  leave: Box;
+  leaveClear: boolean;
   input: Box;
   send: Box;
   tiles: Box[];
@@ -78,14 +83,15 @@ function layout(page: Page): Promise<Layout> {
     await document.fonts.ready;
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     // No named helpers in here: tsx would wrap them in a __name() the page lacks.
-    const [aside, topbar, controlbar, list, input, send, chatButton] = [
+    const [aside, topbar, controlbar, list, input, send, chatButton, leave] = [
       '#chat-drawer',
       '.topbar',
       '.controlbar',
       '[data-testid="chat-list"]',
       '[data-testid="chat-input"]',
       '[data-testid="chat-send"]',
-      '#ctl-chat'
+      '#ctl-chat',
+      '#ctl-leave'
     ].map((selector) => {
       const { left, right, top, bottom, width } = document.querySelector(selector)!.getBoundingClientRect();
       return { left, right, top, bottom, width };
@@ -112,7 +118,11 @@ function layout(page: Page): Promise<Layout> {
       aside,
       topbar,
       topbarShown: getComputedStyle(document.querySelector('.topbar')!).display !== 'none',
+      devPanelShown: getComputedStyle(document.querySelector('#dev-panel')!).display !== 'none',
       controlbar,
+      controlbarShown: getComputedStyle(document.querySelector('.controlbar')!).display !== 'none',
+      leave,
+      leaveClear: !!document.elementFromPoint((leave.left + leave.right) / 2, (leave.top + leave.bottom) / 2)?.closest('#ctl-leave'),
       input,
       send,
       tiles,
@@ -161,13 +171,33 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
       headless: true,
       args: ['--no-sandbox', '--disable-gpu', '--allow-file-access-from-files']
     });
+    // A mouse: opening chat puts the caret in the input.
     const page: Page = await browser.newPage({ viewport: { width: 800, height: 360 } });
     await openMeeting(page, url);
-
-    // Open chat (a mouse user gets the caret) and fill it the way a peer would.
     await page.locator('#ctl-chat').click();
     assert.equal(await composerFocusCalls(page), 1, 'with a fine pointer, opening chat focuses the input');
-    await page.evaluate(() => {
+
+    // A short desktop window is not a phone: with chat open it keeps its top
+    // bar, dev tools and control bar, however short or wide.
+    for (const [width, height] of [[1280, 480], [800, 360], [900, 280]]) {
+      await page.setViewportSize({ width, height });
+      const desk = await layout(page);
+      assert.equal(desk.topbarShown, true, `${width}x${height} with a mouse: the top bar stays`);
+      assert.equal(desk.devPanelShown, true, `${width}x${height} with a mouse: the dev tools stay`);
+      assert.equal(desk.controlbarShown, true, `${width}x${height} with a mouse: the control bar stays`);
+      assertNear(desk.aside.top, desk.topbar.bottom, `${width}x${height}: drawer starts under the top bar`);
+    }
+
+    // A touch screen: opening chat leaves the keyboard down.
+    const phoneContext = await browser.newContext({ viewport: { width: 800, height: 360 }, hasTouch: true, isMobile: true });
+    const touchPage: Page = await phoneContext.newPage();
+    await openMeeting(touchPage, url);
+    assert.equal(await touchPage.evaluate(() => matchMedia('(pointer: coarse)').matches), true);
+    await touchPage.locator('#ctl-chat').click();
+    await touchPage.waitForFunction(() => !!document.querySelector('[data-testid="chat-input"]'));
+    assert.equal(await composerFocusCalls(touchPage), 0, 'with a coarse pointer, opening chat does not focus the input');
+    // Fill it the way a peer would.
+    await touchPage.evaluate(() => {
       type Hook = { chat: { onData(payload: Uint8Array, participant: unknown, identity: string): void } };
       const { chat } = (window as unknown as { __petalHarness: Hook }).__petalHarness;
       const encoder = new TextEncoder();
@@ -177,12 +207,13 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
         chat.onData(encoder.encode(JSON.stringify(wire)), { identity: `peer-${i % 3}`, name: ['Mira', 'Theo', 'Ada'][i % 3] }, `peer-${i % 3}`);
       }
     });
-    await page.waitForFunction(() => document.querySelectorAll('[data-testid="chat-msg"]').length === 20);
+    await touchPage.waitForFunction(() => document.querySelectorAll('[data-testid="chat-msg"]').length === 20);
 
     // Landscape phone, keyboard closed: top bar and dev tools out, the
     // drawer column runs from the top to the control bar, beside the tiles.
-    const phone = await layout(page);
+    const phone = await layout(touchPage);
     assert.equal(phone.topbarShown, false, 'the top bar steps out while chat is open');
+    assert.equal(phone.devPanelShown, false, 'the dev tools step out while chat is open');
     assert.equal(phone.aside.top, 0);
     assertNear(phone.aside.bottom, phone.controlbar.top, 'the drawer stops at the control bar');
     assert.equal(phone.aside.right, 800);
@@ -198,15 +229,16 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
     assert.equal(phone.pageScrollsX, false);
 
     // Soft keyboard up: the page shrinks to what is left above it.
-    await page.setViewportSize({ width: 800, height: 172 });
-    const keyboard = await layout(page);
+    await touchPage.setViewportSize({ width: 800, height: 172 });
+    const keyboard = await layout(touchPage);
+    assert.equal(keyboard.controlbarShown, false, 'the control bar steps out with the keyboard up');
     assert.ok(keyboard.input.top >= 0 && keyboard.input.bottom <= 172, `input in view with the keyboard up (${keyboard.input.top}-${keyboard.input.bottom})`);
     assert.ok(keyboard.send.bottom <= 172);
     assert.equal(keyboard.inputClear, true, 'nothing covers the input');
     assertBeside(keyboard, 'keyboard up');
     assert.ok(keyboard.textLines >= 2, `message text still readable above the input, got ${keyboard.textLines}`);
     // A two-line draft shows both lines whole, even this short.
-    const draft = await page.evaluate(async () => {
+    const draft = await touchPage.evaluate(async () => {
       const input = document.querySelector('[data-testid="chat-input"]') as HTMLTextAreaElement;
       input.value = 'first line\nsecond line';
       await new Promise((done) => requestAnimationFrame(done));
@@ -216,30 +248,22 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
     });
     assert.equal(draft.clipped, false, 'a two-line draft is not clipped with the keyboard up');
 
-    // Closing chat brings the top bar back.
-    await page.setViewportSize({ width: 800, height: 360 });
-    await page.locator('.chat-close').click();
-    assert.equal(await page.evaluate(() => (document.querySelector('#chat-drawer') as HTMLElement).hidden), true);
-    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('.topbar')!).display !== 'none'), true, 'the top bar is back');
-
-    // The top bar stays while it holds the "Enable audio" prompt
-    // (connection.ts puts it there when the browser blocks playback).
-    await page.evaluate(() => {
-      const prompt = document.createElement('button');
-      prompt.className = 'audio-playback-prompt';
-      prompt.textContent = 'Enable audio';
-      document.querySelector('.topbar-right')!.prepend(prompt);
-    });
-    await page.locator('#ctl-chat').click();
-    assert.equal((await layout(page)).topbarShown, true, 'the top bar stays while it holds the Enable audio prompt');
-    await page.evaluate(() => document.querySelector('.audio-playback-prompt')!.remove());
-    assert.equal((await layout(page)).topbarShown, false);
+    // A portrait phone with the keyboard up is short and wider than tall
+    // too, but nowhere near 2:1: its control bar, Leave included, stays.
+    await touchPage.setViewportSize({ width: 360, height: 294 });
+    const portraitKeyboard = await layout(touchPage);
+    assert.equal(portraitKeyboard.controlbarShown, true, '360x294: the control bar stays');
+    const { leave } = portraitKeyboard;
+    assert.ok(leave.width > 0 && leave.left >= 0 && leave.right <= 360 && leave.top >= 0 && leave.bottom <= 294, `360x294: Leave is on screen (${leave.left},${leave.top})-(${leave.right},${leave.bottom})`);
+    assert.equal(portraitKeyboard.leaveClear, true, '360x294: nothing covers Leave');
+    assert.ok(portraitKeyboard.input.top >= 0 && portraitKeyboard.input.bottom <= 294, '360x294: the input is in view');
+    assert.equal(portraitKeyboard.inputClear, true, '360x294: nothing covers the input');
 
     // Portrait (keyboard up) and wide windows: unchanged, the drawer sits
     // between the top bar and the control bar.
     for (const [width, height] of [[375, 400], [1280, 800]]) {
-      await page.setViewportSize({ width, height });
-      const other = await layout(page);
+      await touchPage.setViewportSize({ width, height });
+      const other = await layout(touchPage);
       assert.equal(other.topbarShown, true, `${width}x${height}: top bar stays`);
       assertNear(other.aside.top, other.topbar.bottom, `${width}x${height}: drawer starts under the top bar`);
       assertNear(other.aside.bottom, other.controlbar.top, `${width}x${height}: drawer stops at the control bar`);
@@ -248,14 +272,24 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
       assertBeside(other, `${width}x${height}`);
     }
 
-    // A touch screen: opening chat leaves the keyboard down.
-    const phoneContext = await browser.newContext({ viewport: { width: 800, height: 360 }, hasTouch: true, isMobile: true });
-    const touchPage: Page = await phoneContext.newPage();
-    await openMeeting(touchPage, url);
-    assert.equal(await touchPage.evaluate(() => matchMedia('(pointer: coarse)').matches), true);
+    // Closing chat brings the top bar back.
+    await touchPage.setViewportSize({ width: 800, height: 360 });
+    await touchPage.locator('.chat-close').click();
+    assert.equal(await touchPage.evaluate(() => (document.querySelector('#chat-drawer') as HTMLElement).hidden), true);
+    assert.equal(await touchPage.evaluate(() => getComputedStyle(document.querySelector('.topbar')!).display !== 'none'), true, 'the top bar is back');
+
+    // The top bar stays while it holds the "Enable audio" prompt
+    // (connection.ts puts it there when the browser blocks playback).
+    await touchPage.evaluate(() => {
+      const prompt = document.createElement('button');
+      prompt.className = 'audio-playback-prompt';
+      prompt.textContent = 'Enable audio';
+      document.querySelector('.topbar-right')!.prepend(prompt);
+    });
     await touchPage.locator('#ctl-chat').click();
-    await touchPage.waitForFunction(() => !!document.querySelector('[data-testid="chat-input"]'));
-    assert.equal(await composerFocusCalls(touchPage), 0, 'with a coarse pointer, opening chat does not focus the input');
+    assert.equal((await layout(touchPage)).topbarShown, true, 'the top bar stays while it holds the Enable audio prompt');
+    await touchPage.evaluate(() => document.querySelector('.audio-playback-prompt')!.remove());
+    assert.equal((await layout(touchPage)).topbarShown, false);
 
     // A message that arrives while chat is closed shows a toast; opening chat
     // shows that message in the drawer, so its toast goes instead of sitting
