@@ -105,10 +105,13 @@ function densityFlags(cellWidth: number, cellHeight: number) {
  * shrinks it), so re-deriving the tier from the enlarged cell could only
  * move the same direction or stay put -- iterating to a fixed point buys
  * nothing here and risks a gap that itself oscillates as inputs wobble by a
- * pixel. Callers decide the tier ONCE from the base-gap cell size. */
-function tierGap(baseGap: number, flags: { compact: boolean; tiny: boolean }): number {
-  if (flags.tiny) return GAP_TINY;
-  if (flags.compact) return GAP_COMPACT;
+ * pixel. Callers decide the tier ONCE from the base-gap cell size.
+ *
+ * Only ever tightens (#239): a base gap already below the tier's constant
+ * (the web client's 10px/9px phone breakpoints) is kept, not widened to 12. */
+export function tierGap(baseGap: number, flags: { compact: boolean; tiny: boolean }): number {
+  if (flags.tiny) return Math.min(baseGap, GAP_TINY);
+  if (flags.compact) return Math.min(baseGap, GAP_COMPACT);
   return baseGap;
 }
 
