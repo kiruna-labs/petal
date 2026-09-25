@@ -119,6 +119,12 @@ impl AudioPreset {
 pub struct TrackPublishOptions {
     // If the encodings aren't set, LiveKit will compute the most appropriate ones
     pub video_encoding: Option<VideoEncoding>,
+    /// Opt-in floor for the top video encoding's allocation, in bps.
+    ///
+    /// Applied by WebRTC's bitrate allocator at publish time, so raising it
+    /// also raises the pacer's drain rate. `None` (the default) leaves the
+    /// computed encodings untouched and reproduces upstream wire output.
+    pub min_bitrate: Option<u64>,
     pub audio_encoding: Option<AudioEncoding>,
     pub video_codec: VideoCodec,
     pub dtx: bool,
@@ -150,6 +156,7 @@ impl Default for TrackPublishOptions {
     fn default() -> Self {
         Self {
             video_encoding: None,
+            min_bitrate: None,
             audio_encoding: None,
             video_codec: VideoCodec::VP8,
             dtx: true,
@@ -301,6 +308,30 @@ impl VideoPreset {
 /// Compute appropriate RtpEncodingParameters from the video resolution.
 /// TrackPublishOptions helps to find the most appropriate encodings
 pub fn compute_video_encodings(
+    width: u32,
+    height: u32,
+    options: &TrackPublishOptions,
+) -> Vec<RtpEncodingParameters> {
+    let mut encodings = compute_video_encodings_inner(width, height, options);
+    // Publish-time floor, applied to the TOP encoding only (the full-resolution
+    // one). WebRTC clamps each stream's allocation to
+    // [min_bitrate_bps, max_bitrate_bps], so this raises what the allocator --
+    // and therefore the pacer -- is willing to spend while the congestion
+    // controller's estimate is still low. An encoder-side floor cannot do that:
+    // the pacer keeps draining at the estimate, so the difference becomes send
+    // queue (measured: 1773 ms) instead of bandwidth.
+    if let Some(min_bitrate) = options.min_bitrate {
+        if let Some(top) = encodings
+            .iter_mut()
+            .max_by_key(|encoding| encoding.max_bitrate.unwrap_or(0))
+        {
+            top.min_bitrate = Some(min_bitrate);
+        }
+    }
+    encodings
+}
+
+fn compute_video_encodings_inner(
     width: u32,
     height: u32,
     options: &TrackPublishOptions,

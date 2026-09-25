@@ -9236,4 +9236,89 @@ mod tests {
             "scaled content must be centered and preserve source luma"
         );
     }
+
+    /// A screen share published with the vendor seams this PR adds, at the
+    /// geometry the Windows share uses.
+    fn screen_share_publish_options(
+        min_bitrate: Option<u64>,
+    ) -> livekit::options::TrackPublishOptions {
+        livekit::options::TrackPublishOptions {
+            source: livekit::prelude::TrackSource::Screenshare,
+            min_bitrate,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_publish_min_bitrate_lands_on_the_top_encoding_only() {
+        let encodings = livekit::options::compute_video_encodings(
+            1920,
+            1080,
+            &screen_share_publish_options(Some(12_000_000)),
+        );
+        // Without a ladder "top encoding only" would be vacuous.
+        assert!(
+            encodings.len() > 1,
+            "expected a multi-rung ladder, got {encodings:?}"
+        );
+
+        let top_max = encodings
+            .iter()
+            .map(|encoding| encoding.max_bitrate.unwrap_or(0))
+            .max()
+            .expect("a ladder has a top rung");
+        for encoding in &encodings {
+            let expected = (encoding.max_bitrate.unwrap_or(0) == top_max).then_some(12_000_000);
+            assert_eq!(
+                encoding.min_bitrate, expected,
+                "only the top encoding carries the floor"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_publish_min_bitrate_leaves_the_computed_ladder_alone() {
+        let with_floor = livekit::options::compute_video_encodings(
+            1920,
+            1080,
+            &screen_share_publish_options(Some(12_000_000)),
+        );
+        let without = livekit::options::compute_video_encodings(
+            1920,
+            1080,
+            &screen_share_publish_options(None),
+        );
+
+        assert_eq!(with_floor.len(), without.len());
+        assert!(without
+            .iter()
+            .all(|encoding| encoding.min_bitrate.is_none()));
+        // The floor must not change any rung's ceiling either: it is an
+        // allocator bound, not a second bitrate guess.
+        let ceilings = |encodings: &[livekit::webrtc::rtp_parameters::RtpEncodingParameters]| {
+            encodings
+                .iter()
+                .map(|encoding| encoding.max_bitrate)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ceilings(&with_floor), ceilings(&without));
+    }
+
+    #[test]
+    fn a_min_bitrate_survives_the_bridge_into_webrtc() {
+        use webrtc_sys::rtp_parameters as sys_rp;
+
+        let unset: sys_rp::ffi::RtpEncodingParameters =
+            livekit::webrtc::rtp_parameters::RtpEncodingParameters::default().into();
+        assert!(!unset.has_min_bitrate_bps);
+        assert_eq!(unset.min_bitrate_bps, 0);
+
+        let set = livekit::webrtc::rtp_parameters::RtpEncodingParameters {
+            min_bitrate: Some(12_000_000),
+            ..Default::default()
+        };
+        let native_min: sys_rp::ffi::RtpEncodingParameters = set.into();
+        assert!(native_min.has_min_bitrate_bps);
+        assert_eq!(native_min.min_bitrate_bps, 12_000_000);
+    }
 }
