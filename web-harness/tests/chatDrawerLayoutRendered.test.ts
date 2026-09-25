@@ -256,6 +256,22 @@ test('browser chat drawer takes the full height beside the tiles on a landscape 
     await touchPage.locator('#ctl-chat').click();
     await touchPage.waitForFunction(() => !!document.querySelector('[data-testid="chat-input"]'));
     assert.equal(await composerFocusCalls(touchPage), 0, 'with a coarse pointer, opening chat does not focus the input');
+
+    // A message that arrives while chat is closed shows a toast; opening chat
+    // shows that message in the drawer, so its toast goes instead of sitting
+    // on the composer.
+    await touchPage.locator('#ctl-chat').click();
+    await touchPage.waitForFunction(() => !document.querySelector('[data-testid="chat-input"]'));
+    await touchPage.evaluate(() => {
+      const hook = (window as unknown as { __petalHarness: { chat: { onData(p: Uint8Array, participant: unknown, identity: string): void } } }).__petalHarness.chat;
+      const wire = { v: 1, type: 'msg', id: 'a'.repeat(32), text: 'Can we zoom into the timeline table?', t: Date.now() };
+      hook.onData(new TextEncoder().encode(JSON.stringify(wire)), { identity: 'bob', name: 'Bob Okafor' }, 'bob');
+    });
+    await touchPage.waitForFunction(() => !document.querySelector('#toast')!.classList.contains('hidden'));
+    assert.match(await touchPage.evaluate(() => document.querySelector('#toast')!.textContent ?? ''), /Bob Okafor: Can we zoom/);
+    await touchPage.locator('#ctl-chat').click();
+    await touchPage.waitForFunction(() => !!document.querySelector('[data-testid="chat-input"]'));
+    assert.equal(await touchPage.evaluate(() => document.querySelector('#toast')!.classList.contains('hidden')), true, 'opening chat takes the message toast down');
     await phoneContext.close();
   } finally {
     await browser?.close();

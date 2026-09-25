@@ -159,7 +159,16 @@ export function setupChat(ctx: HarnessContext): ChatHook {
     }
   }
 
+  // The toast for the last message that arrived while the drawer was
+  // closed: opening the drawer shows that message, so the toast goes (on a
+  // phone it would sit on the composer, #246).
+  let lastNotice: string | null = null;
+
   store.onChange(() => {
+    if (store.open && lastNotice !== null) {
+      ui.dismissToast?.(lastNotice);
+      lastNotice = null;
+    }
     renderControl();
     renderDrawer();
   });
@@ -191,7 +200,8 @@ export function setupChat(ctx: HarnessContext): ChatHook {
         case 'msg': {
           const result = store.receive(wire, sender);
           if (result === 'added' && identity !== room?.localParticipant.identity && !store.open) {
-            ui.showToast(chatNoticeText(sender, wire.text));
+            lastNotice = chatNoticeText(sender, wire.text);
+            ui.showToast(lastNotice);
           }
           break;
         }
