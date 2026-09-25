@@ -11,8 +11,9 @@
 //     strip / grid away) and, in spotlight, that your own thumbnail is no
 //     smaller than anyone else's;
 //   - controls clipped off screen or overlapping, and whether Mic, Camera and
-//     Leave are all on screen; a control the scroller cuts must not show a
-//     half-label;
+//     Leave are all on screen (what does not fit is in the ⋯ menu, #247; a
+//     rail too short even for Mic, Camera and ⋯ scrolls them above Leave),
+//     and no control cut by a scroller showing a half-label;
 //   - on a portrait phone, that the top bar stays one slim row (<= 52px, the
 //     room name on one line), also with the keyboard up (the chat composer
 //     focused, the viewport cut to 82% of its width: short, but no rail);
@@ -319,7 +320,8 @@ async function measure(page) {
     window.scrollTo(0, scrollBefore);
     const fullscreenButton = [...document.querySelectorAll('#topbar-fullscreen, #ctl-fullscreen')].find(shown);
     const roomName = document.querySelector('#room-name');
-    // A control the scroller cuts, still showing its name ("Ir").
+    // A control a scroller cuts, still showing its name ("Ir"). Only a rail
+    // shorter than its pinned controls scrolls now, and it shows no names.
     const cutLabels = [...document.querySelectorAll('.controls-left > .control-cell')]
       .filter((cell) => {
         const label = cell.querySelector('.meeting-control-label');

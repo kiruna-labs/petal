@@ -645,6 +645,50 @@ test('#239 x #247 a phone browser\'s 863x360 rail (no screen share, #240) keeps 
   }
 });
 
+test('#239 x #247 a rail too short for Mic, Camera, ⋯ and Leave scrolls above a pinned Leave instead of overlapping it', { timeout: 60_000 }, async () => {
+  const page = await openMeeting(LANDSCAPE_PHONE, 1);
+  try {
+    // A landscape phone with the soft keyboard up (resizes-content).
+    await page.setViewportSize({ width: 863, height: 172 });
+    await page.waitForFunction(() => document.querySelector('.fullscreen-cell')?.classList.contains('overflowed'));
+    type RailCell = { id: string; top: number; bottom: number; whole: boolean };
+    const cells = (): Promise<RailCell[]> =>
+      page.evaluate(() =>
+        [...document.querySelectorAll<HTMLElement>('.controlbar .control-cell')]
+          .filter((cell) => cell.getClientRects().length > 0)
+          .map((cell) => {
+            const r = cell.getBoundingClientRect();
+            const line = cell.closest<HTMLElement>('.controls-left');
+            // What the rail shows of the cell: a scroller clips what it has
+            // scrolled out; anything else paints where it lies.
+            const clip = line && getComputedStyle(line).overflowY !== 'visible' ? line.getBoundingClientRect() : null;
+            const top = Math.max(r.top, clip?.top ?? r.top);
+            const bottom = Math.min(r.bottom, clip?.bottom ?? r.bottom);
+            return { id: cell.querySelector('button')?.id ?? '', top, bottom, whole: top === r.top && bottom === r.bottom };
+          })
+      );
+    const assertApart = (shown: RailCell[], when: string) => {
+      const visible = shown.filter((cell) => cell.bottom > cell.top).sort((a, b) => a.top - b.top);
+      for (let i = 1; i < visible.length; i += 1) {
+        assert.ok(visible[i]!.top >= visible[i - 1]!.bottom - 0.5, `${when}: ${visible[i - 1]!.id} and ${visible[i]!.id} overlap`);
+      }
+    };
+    const before = await cells();
+    const leave = before.find((cell) => cell.id === 'ctl-leave')!;
+    assert.ok(leave.whole && leave.top >= 0 && leave.bottom <= 172, `Leave is whole and on screen (${leave.top}-${leave.bottom})`);
+    assert.ok(before.find((cell) => cell.id === 'ctl-audio')!.whole, 'Mic leads, whole');
+    assertApart(before, 'at rest');
+    // ⋯ is reachable: scrolled into view, whole, still clear of Leave.
+    await page.evaluate(() => document.querySelector('#ctl-more')!.scrollIntoView({ block: 'nearest' }));
+    const after = await cells();
+    assert.ok(after.find((cell) => cell.id === 'ctl-more')!.whole, '⋯ scrolls into view');
+    assertApart(after, 'scrolled');
+    assert.equal(await documentScrolls(page), false, 'the page itself does not scroll');
+  } finally {
+    await page.context().close();
+  }
+});
+
 test('#239 x #247 full screen is the last control to leave the rail, and its ⋯ row enters real full screen', { timeout: 60_000 }, async () => {
   const page = await openMeeting(LANDSCAPE_PHONE, 1);
   try {

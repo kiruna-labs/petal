@@ -4496,8 +4496,11 @@ canvas#test-canvas.p613-presentation-source {
 
   /* Mic and Camera lead, Full screen and Leave sit at the bottom; what
      does not fit the rail's height goes to the ⋯ menu (#247:
-     controlOverflow.ts measures a column bar along its height). The padding
-     is the rail's side margin. */
+     controlOverflow.ts measures a column bar along its height). Mic, Camera
+     and ⋯ never collapse, so a rail shorter than they and Leave need (a
+     landscape phone with the keyboard up) scrolls them above a pinned Leave
+     instead of running them into it. The padding is the rail's side margin,
+     and keeps focus rings and the chat badge inside the scroller's clip. */
   .controls-left {
     flex-direction: column;
     align-items: center;
@@ -4505,6 +4508,9 @@ canvas#test-canvas.p613-presentation-source {
     min-height: 0;
     margin-bottom: auto;
     padding: 4px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
   }
 
   /* The tooltips open upward and centred: in an icon-only rail on the
