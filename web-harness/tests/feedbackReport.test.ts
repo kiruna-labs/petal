@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
@@ -13,17 +13,24 @@ import {
   FeedbackReportController,
   isValidUserDispatchPublicKey,
   submitFeedbackReport,
+  userDispatchAdapter,
   type FeedbackAdapter,
   type FeedbackRuntimeState,
 } from '../src/feedbackReport.ts';
-import { SensitiveStringRegistry } from '../src/sensitiveStrings.ts';
+import type { FeedbackEmailStorage } from '@petal/shared/logic/feedbackEmail';
+import { HARNESS_FEEDBACK_EMAIL_STORAGE_KEY } from '../src/constants.ts';
+import { inviteLinkForCredential } from '../src/controls.ts';
+import { registerMeetingAliases, SensitiveStringRegistry } from '../src/sensitiveStrings.ts';
+import { internalCredentialForAccessCode } from '@petal/shared/logic/meetingCode';
 import { sessionLogCollector } from '../src/ui/sessionLogCollector.ts';
 
 const validKey = 'pk_abcdefghijk_123456';
+const validEmail = 'riley@example.org';
 const connected: FeedbackRuntimeState = { connected: true, sharing: false, screenSharing: false };
 
 const indexHtml = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const styleSource = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+const feedbackReportSource = readFileSync(new URL('../src/feedbackReport.ts', import.meta.url), 'utf8');
 const tileLayoutSource = readFileSync(new URL('../src/tileLayout.ts', import.meta.url), 'utf8');
 
 /** The static `.topbar-right` markup, before tileLayout.ts inserts the picker. */
@@ -85,8 +92,8 @@ function fakeElement<T extends object>(initial: T) {
     addEventListener(type: string, listener: (event: Event) => void) {
       listeners.set(type, [...(listeners.get(type) ?? []), listener]);
     },
-    dispatch(type: string) {
-      for (const listener of listeners.get(type) ?? []) listener(new Event(type));
+    dispatch(type: string, event: Event = new Event(type)) {
+      for (const listener of listeners.get(type) ?? []) listener(event);
     },
   });
 }
@@ -123,6 +130,8 @@ test('missing key removes both UI triggers and does not initialize a provider cl
       dialog: { remove: () => { removed = true; } } as unknown as HTMLDialogElement,
       form: {} as HTMLFormElement,
       message: {} as HTMLTextAreaElement,
+      email: {} as HTMLInputElement,
+      emailError: {} as HTMLElement,
       consent: {} as HTMLInputElement,
       submit: {} as HTMLButtonElement,
       cancel: {} as HTMLButtonElement,
@@ -147,6 +156,8 @@ test('#895: home feedback works while disconnected, and share intent marks both 
     setAttribute(name: string, value: string) { this.attributes.set(name, value); }, focus() {} }) as unknown as HTMLButtonElement;
   const dialog = fakeElement({ open: false, removed: false, showModal() { this.open = true; }, close() { this.open = false; }, remove() { this.removed = true; } }) as unknown as HTMLDialogElement;
   const message = fakeElement({ value: '', focus() {} }) as unknown as HTMLTextAreaElement;
+  const email = fakeElement({ value: '', setAttribute() {} }) as unknown as HTMLInputElement;
+  const emailError = { hidden: true, textContent: '' } as HTMLElement;
   const consent = fakeElement({ checked: false }) as unknown as HTMLInputElement;
   const submit = fakeElement({ disabled: false }) as unknown as HTMLButtonElement;
   const cancel = fakeElement({}) as unknown as HTMLButtonElement;
@@ -155,10 +166,11 @@ test('#895: home feedback works while disconnected, and share intent marks both 
   const shareReason = { id: 'feedback-share-reason', hidden: true } as HTMLElement;
   const controller = new FeedbackReportController({
     publicKey: validKey,
-    dom: { homeTrigger, meetingTrigger, dialog, form, message, consent, submit, cancel, status, shareReason },
+    dom: { homeTrigger, meetingTrigger, dialog, form, message, email, emailError, consent, submit, cancel, status, shareReason },
     getState: () => state,
     registry: new SensitiveStringRegistry(),
     adapter: { async submit() {} },
+    storage: null,
   });
 
   controller.install();
@@ -405,6 +417,7 @@ test('an unscrubbed collector export can never reach the adapter', async () => {
     isCurrent: () => true,
     includeDiagnostics: true,
     message: 'audio broke',
+    email: validEmail,
     registry,
     eventCodes: ['feedback_opened'],
     adapter,
@@ -435,6 +448,7 @@ test('adapter boundary receives only a generic redacted Blob and fixed payload',
     isCurrent: () => true,
     includeDiagnostics: true,
     message: 'Room room-acme-77 with web-riley and Riley Example failed.',
+    email: validEmail,
     registry,
     eventCodes: ['feedback_opened', 'feedback_submitted', 'room-acme-77'],
     adapter,
@@ -444,9 +458,10 @@ test('adapter boundary receives only a generic redacted Blob and fixed payload',
   assert.equal(calls.length, 1);
   const [key, payload] = calls[0];
   assert.equal(key, validKey);
-  assert.deepEqual(Object.keys(payload).sort(), ['files', 'message', 'metadata', 'subject', 'type']);
+  assert.deepEqual(Object.keys(payload).sort(), ['email', 'files', 'message', 'metadata', 'subject', 'type']);
   assert.equal(payload.type, 'feedback');
   assert.equal(payload.subject, 'Petal feedback');
+  assert.equal(payload.email, validEmail);
   assert.equal(payload.files?.[0]?.name, FEEDBACK_DIAGNOSTICS_FILENAME);
   assert.equal(payload.files?.[0]?.type, FEEDBACK_DIAGNOSTICS_TYPE);
   const bytes = await (payload.files?.[0]?.content as Blob).text();
@@ -476,6 +491,7 @@ test('missing key, invalid key, and active share never call the SDK', async () =
       isCurrent: () => true,
       includeDiagnostics: true,
       message: 'A bounded feedback message.',
+      email: validEmail,
       registry: new SensitiveStringRegistry(),
       eventCodes: ['feedback_opened'],
       adapter,
@@ -493,6 +509,7 @@ test('unchecked diagnostics still sends the intentional message but attaches no 
     isCurrent: () => true,
     includeDiagnostics: false,
     message: 'Feedback is available from the join screen too.',
+    email: validEmail,
     registry: new SensitiveStringRegistry(),
     eventCodes: ['feedback_opened'],
     adapter,
@@ -514,6 +531,7 @@ test('share-start race after Blob preparation prevents the adapter invocation', 
     isCurrent: () => true,
     includeDiagnostics: true,
     message: 'The picker race should cancel this report.',
+    email: validEmail,
     registry: new SensitiveStringRegistry(),
     eventCodes: ['feedback_opened'],
     adapter,
@@ -527,4 +545,418 @@ test('attachment uses the fixed generic content type and cannot inherit a user f
   assert.equal(blob.type, FEEDBACK_DIAGNOSTICS_TYPE);
   assert.equal(FEEDBACK_DIAGNOSTICS_FILENAME, 'petal-diagnostics.txt');
   assert.ok(blob.size > 0);
+});
+
+// ---------------------------------------------------------------------------
+// #245: every report carries a required, format-checked (never verified)
+// reply address, sent as the SDK's `email` field and nowhere else.
+// ---------------------------------------------------------------------------
+
+test('#245: a missing or malformed email never reaches the SDK', async () => {
+  for (const email of ['', '   ', 'riley', 'riley@example', 'riley@@example.org', 'ri ley@example.org']) {
+    const { adapter, calls } = recordingAdapter();
+    const sent = await submitFeedbackReport({
+      publicKey: validKey,
+      getState: () => connected,
+      isCurrent: () => true,
+      includeDiagnostics: false,
+      message: 'Audio dropped for everyone.',
+      email,
+      registry: new SensitiveStringRegistry(),
+      eventCodes: ['feedback_opened'],
+      adapter,
+    });
+    assert.equal(sent, false, `${JSON.stringify(email)} must be refused`);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test('#245: the bundled SDK carries the trimmed address on both wire paths -- JSON, and multipart when diagnostics are attached', async () => {
+  // The real `@userdispatch/sdk` behind the real adapter; only `fetch` is
+  // stubbed, so nothing leaves the process. The SDK builds the multipart body
+  // field by field, so this is what proves `email` survives an attachment.
+  const realFetch = globalThis.fetch;
+  const requests: Array<{ url: string; body: RequestInit['body'] }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: init?.body });
+    return new Response(JSON.stringify({ data: { id: 'sub_test', status: 'new', created_at: '2026-09-25T00:00:00Z' } }), { status: 201 });
+  }) as typeof fetch;
+  try {
+    for (const includeDiagnostics of [false, true]) {
+      const sent = await submitFeedbackReport({
+        publicKey: validKey,
+        getState: () => connected,
+        isCurrent: () => true,
+        includeDiagnostics,
+        message: 'Audio dropped for everyone.',
+        email: `  ${validEmail} `,
+        registry: new SensitiveStringRegistry(),
+        eventCodes: ['feedback_opened'],
+        adapter: userDispatchAdapter,
+      });
+      assert.equal(sent, true);
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  assert.equal(requests.length, 2);
+  assert.match(requests[0].url, /^https:\/\/userdispatch\.com\/api\/v1\/submissions$/);
+  const json = JSON.parse(requests[0].body as string);
+  assert.equal(json.email, validEmail);
+  assert.equal(json.message, 'Audio dropped for everyone.');
+
+  const form = requests[1].body;
+  assert.ok(form instanceof FormData, 'an attachment switches the SDK to multipart');
+  assert.equal(form.get('email'), validEmail);
+  const file = form.get('files');
+  assert.ok(file instanceof Blob);
+  assert.doesNotMatch(await file.text(), /riley@example\.org/i);
+});
+
+test('#245: the address never reaches the attachment, even when the session log holds it', async () => {
+  sessionLogCollector.record({
+    ts: '2026-09-25T00:00:00.000Z',
+    kind: 'info',
+    message: `display name set to ${validEmail}; retrying as RILEY@EXAMPLE.ORG`,
+  });
+  const { adapter, calls } = recordingAdapter();
+
+  const sent = await submitFeedbackReport({
+    publicKey: validKey,
+    getState: () => connected,
+    isCurrent: () => true,
+    includeDiagnostics: true,
+    message: 'audio broke',
+    email: validEmail,
+    registry: new SensitiveStringRegistry(),
+    eventCodes: ['feedback_opened'],
+    adapter,
+  });
+
+  assert.equal(sent, true);
+  const [, payload] = calls[0];
+  assert.equal(payload.email, validEmail);
+  const uploaded = await (payload.files?.[0]?.content as Blob).text();
+  // Non-vacuity: the line itself is attached; only the address is gone, in
+  // any letter case.
+  assert.match(uploaded, /display name set to <redacted:email>; retrying as <redacted:email>/);
+  assert.doesNotMatch(uploaded, /riley@example\.org/i);
+});
+
+test('#245: the address is scrubbed before the tail cut, so no fragment of it survives the cut', async () => {
+  // Same arrangement as the room-name straddle test above: the 128 KiB cut
+  // falls inside the address, eight characters before its end.
+  const log = `${'filler line\n'.repeat(12_000)}${validEmail}${'x'.repeat(128 * 1024 - 8)}`;
+  const blob = buildFeedbackAttachment(connected, ['feedback_opened'], new SensitiveStringRegistry(), {
+    logText: log,
+    email: validEmail,
+  });
+  const text = await blob.text();
+  assert.match(text, /earlier log lines omitted/, 'the fixture must actually be cut');
+  // Scrub-after-cut would ship `mple.org`, the address's last eight characters.
+  assert.doesNotMatch(text, /mple\.org/);
+});
+
+test('#245: the feedback module never writes to the console or the session log', () => {
+  assert.doesNotMatch(feedbackReportSource, /console\.|sessionLogCollector\.record|logEvent\(/);
+});
+
+function memoryStorage(initial: Record<string, string> = {}) {
+  const values = new Map(Object.entries(initial));
+  const storage: FeedbackEmailStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => void values.set(key, value),
+  };
+  return { storage, values };
+}
+
+/** The controller over minimal DOM fakes, opened from the home trigger. */
+function emailHarness(storage: FeedbackEmailStorage | null, adapter: FeedbackAdapter = { async submit() {} }) {
+  const trigger = () =>
+    fakeElement({ hidden: true, disabled: false, setAttribute() {}, focus() {} }) as unknown as HTMLButtonElement;
+  const homeTrigger = trigger();
+  const dialog = fakeElement({ open: false, showModal() { this.open = true; }, close() { this.open = false; }, remove() {} }) as unknown as HTMLDialogElement;
+  const message = fakeElement({ value: '', focus() {} }) as unknown as HTMLTextAreaElement;
+  const email = fakeElement({
+    value: '',
+    attributes: new Map<string, string>(),
+    setAttribute(name: string, value: string) { this.attributes.set(name, value); },
+  }) as unknown as HTMLInputElement & { attributes: Map<string, string> };
+  const emailError = { hidden: true, textContent: '' } as HTMLElement;
+  const consent = fakeElement({ checked: false }) as unknown as HTMLInputElement;
+  const submit = fakeElement({ disabled: false }) as unknown as HTMLButtonElement;
+  const cancel = fakeElement({}) as unknown as HTMLButtonElement;
+  const form = fakeElement({}) as unknown as HTMLFormElement;
+  const status = { textContent: '' } as HTMLElement;
+  const controller = new FeedbackReportController({
+    publicKey: validKey,
+    dom: {
+      homeTrigger,
+      meetingTrigger: trigger(),
+      dialog,
+      form,
+      message,
+      email,
+      emailError,
+      consent,
+      submit,
+      cancel,
+      status,
+      shareReason: { id: 'feedback-share-reason', hidden: true } as HTMLElement,
+    },
+    getState: () => connected,
+    registry: new SensitiveStringRegistry(),
+    adapter,
+    storage,
+  });
+  controller.install();
+  const fire = (element: unknown, type: string) => (element as { dispatch(type: string): void }).dispatch(type);
+  const type = (element: HTMLInputElement | HTMLTextAreaElement, value: string) => {
+    element.value = value;
+    fire(element, 'input');
+  };
+  const open = () => fire(homeTrigger, 'click');
+  const send = async () => {
+    fire(form, 'submit');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  const press = (element: unknown, key: string) =>
+    (element as { dispatch(type: string, event: Event): void }).dispatch('keydown', Object.assign(new Event('keydown'), { key }));
+  return { dialog, message, email, emailError, submit, cancel, status, fire, type, open, send, press };
+}
+
+test('#245: Send stays disabled until the message AND a well-formed email are present; the inline error waits for blur', () => {
+  const ui = emailHarness(null);
+  ui.open();
+  assert.equal(ui.email.value, '', 'nothing remembered yet');
+  ui.type(ui.message, 'Audio dropped for everyone.');
+  assert.equal(ui.submit.disabled, true, 'a message alone is not enough');
+
+  ui.type(ui.email, 'riley@example');
+  assert.equal(ui.submit.disabled, true);
+  assert.equal(ui.emailError.hidden, true, 'no error while the field is still being typed in');
+
+  ui.fire(ui.email, 'blur');
+  assert.equal(ui.emailError.hidden, false);
+  assert.equal(ui.emailError.textContent, 'Enter a valid email address, like name@example.com.');
+  assert.equal(ui.email.attributes.get('aria-invalid'), 'true');
+
+  ui.type(ui.email, ` ${validEmail} `);
+  assert.equal(ui.emailError.hidden, true, 'the error clears as soon as the address is fixed');
+  assert.equal(ui.emailError.textContent, '');
+  assert.equal(ui.email.attributes.get('aria-invalid'), 'false');
+  assert.equal(ui.submit.disabled, false);
+
+  ui.type(ui.email, '');
+  assert.equal(ui.submit.disabled, true);
+  assert.equal(ui.emailError.textContent, 'Enter your email address.');
+
+  // Closing resets the touched state: a reopened form starts without an error.
+  ui.fire(ui.cancel, 'click');
+  ui.open();
+  assert.equal(ui.emailError.hidden, true);
+});
+
+test('#245: Enter on a bad address explains itself instead of doing nothing', () => {
+  const ui = emailHarness(null);
+  ui.open();
+  ui.type(ui.message, 'Audio dropped for everyone.');
+  ui.type(ui.email, 'riley@example');
+  ui.press(ui.email, 'a');
+  assert.equal(ui.emailError.hidden, true, 'ordinary typing never shows the error');
+  // Send is disabled, so the browser's implicit submission does nothing; the
+  // keydown is the only thing that can tell the user why.
+  ui.press(ui.email, 'Enter');
+  assert.equal(ui.emailError.hidden, false);
+  assert.equal(ui.emailError.textContent, 'Enter a valid email address, like name@example.com.');
+  assert.equal(ui.email.attributes.get('aria-invalid'), 'true');
+});
+
+test('#245: the address last sent is remembered on the device, prefilled on the next open, and still editable', async () => {
+  const { storage, values } = memoryStorage();
+  const { adapter, calls } = recordingAdapter();
+  const ui = emailHarness(storage, adapter);
+
+  ui.open();
+  ui.type(ui.message, 'First report.');
+  ui.type(ui.email, `  ${validEmail}`);
+  ui.fire(ui.email, 'blur');
+  assert.equal(values.size, 0, 'typing alone remembers nothing');
+  await ui.send();
+  assert.equal(ui.status.textContent, 'Feedback sent.');
+  assert.equal(calls[0][1].email, validEmail);
+  assert.equal(values.get(HARNESS_FEEDBACK_EMAIL_STORAGE_KEY), validEmail, 'stored trimmed');
+  assert.equal(ui.email.value, `  ${validEmail}`, 'the field keeps the address after a send');
+
+  ui.fire(ui.cancel, 'click');
+  assert.equal(ui.email.value, '');
+  ui.open();
+  assert.equal(ui.email.value, validEmail, 'prefilled on reopen');
+  assert.equal(ui.emailError.hidden, true);
+  ui.type(ui.message, 'Second report.');
+  assert.equal(ui.submit.disabled, false, 'a remembered address is enough to send');
+
+  // A pasted `<mailto:…>` is unwrapped: the NORMALIZED address is what is
+  // sent and what is remembered, never the raw field text.
+  ui.type(ui.email, ' <mailto:riley@work.example.com> ');
+  await ui.send();
+  assert.equal(calls[1][1].email, 'riley@work.example.com');
+  assert.equal(values.get(HARNESS_FEEDBACK_EMAIL_STORAGE_KEY), 'riley@work.example.com');
+});
+
+test('#245: an address that was not sent is not remembered, and a bad stored value is never prefilled', async () => {
+  const { storage, values } = memoryStorage({ [HARNESS_FEEDBACK_EMAIL_STORAGE_KEY]: 'not an address' });
+  const failing: FeedbackAdapter = { async submit() { throw new Error('offline'); } };
+  const ui = emailHarness(storage, failing);
+  ui.open();
+  assert.equal(ui.email.value, '');
+  ui.type(ui.message, 'Report.');
+  ui.type(ui.email, validEmail);
+  await ui.send();
+  assert.equal(ui.status.textContent, 'Could not send feedback. Please try again later.');
+  assert.equal(values.get(HARNESS_FEEDBACK_EMAIL_STORAGE_KEY), 'not an address');
+});
+
+test('#245: storage that throws (blocked site data) never breaks the form', async () => {
+  const throwing: FeedbackEmailStorage = {
+    getItem() { throw new Error('SecurityError'); },
+    setItem() { throw new Error('QuotaExceededError'); },
+  };
+  const { adapter, calls } = recordingAdapter();
+  const ui = emailHarness(throwing, adapter);
+  ui.open();
+  assert.equal(ui.email.value, '');
+  ui.type(ui.message, 'Report.');
+  ui.type(ui.email, validEmail);
+  await ui.send();
+  assert.equal(calls.length, 1);
+  assert.equal(ui.status.textContent, 'Feedback sent.');
+});
+
+test('#245: the dialog asks for a required email with its hint, styled explicitly and validated only by the shared rule', () => {
+  const input = indexHtml.match(/<input id="feedback-email"[^>]*>/)?.[0];
+  assert.ok(input, 'missing #feedback-email');
+  assert.match(input, /\stype="email"/);
+  assert.match(input, /\srequired(\s|\/|>)/);
+  assert.match(input, /\sautocomplete="email"/);
+  assert.match(input, /\sinputmode="email"/);
+  assert.match(input, /\saria-describedby="feedback-email-error feedback-email-hint"/);
+  assert.doesNotMatch(input, /maxlength/, 'a cap would silently truncate a pasted address into a different one');
+  assert.match(indexHtml, /<label class="feedback-field" for="feedback-email">Your email<\/label>/);
+  assert.match(
+    indexHtml,
+    /<p id="feedback-email-hint" class="feedback-disclosure">So we can reply\. We won't verify it\. Remembered on this device\.<\/p>/
+  );
+  // The error sits inside an ALWAYS-rendered polite live region and only it
+  // toggles -- a region that is itself hidden until it speaks is unreliable.
+  // aria-describedby still points at the error element.
+  const notes = divBlock(indexHtml, 'feedback-email-notes');
+  assert.match(notes, /^<div class="feedback-email-notes" aria-live="polite">/);
+  assert.match(notes, /<p id="feedback-email-error" class="feedback-field-error" hidden><\/p>/);
+  assert.match(notes, /<p id="feedback-email-hint" class="feedback-disclosure">/);
+  assert.match(indexHtml, /<form id="feedback-form"[^>]*\snovalidate>/);
+  assert.match(indexHtml, /Your message and email address are sent to UserDispatch\./);
+
+  // The shared `input[type='text']` rule does not reach an email input.
+  const emailStyles = cssBlock(styleSource, ".feedback-form input[type='email']");
+  assert.match(emailStyles, /width:\s*100%;/);
+  assert.match(emailStyles, /border:/);
+  assert.match(styleSource, /\.feedback-form input\[type='email'\]\[aria-invalid='true'\] \{/);
+});
+
+test('#245: the attachment disclosure describes what the attachment really carries', async () => {
+  // The old copy promised "only fixed diagnostic codes and connection state
+  // ... never ... raw session logs" while the attachment has carried a
+  // redacted session-log excerpt since #788. Pin the corrected copy, and pin
+  // each claim in it against the real builder.
+  assert.match(
+    indexHtml,
+    /<p class="feedback-disclosure">The attachment is a small fixed header \(connection state, a timestamp, event codes\) plus the end of this tab's Petal log, with the room names, invite codes, identities and display names of every meeting in it redacted\. It never includes screenshots, video, or chat messages\.<\/p>/
+  );
+  assert.doesNotMatch(indexHtml, /only fixed diagnostic codes|raw session logs/);
+
+  const registry = new SensitiveStringRegistry();
+  registry.registerRoom('room-acme-77');
+  registry.registerParticipant('web-riley');
+  registry.registerReportingValue('Riley Example');
+  const text = await buildFeedbackAttachment(connected, ['feedback_opened'], registry, {
+    logText: 'room-acme-77: web-riley (Riley Example) joined\n',
+    timestamp: '2026-09-25T00:00:00.000Z',
+  }).text();
+  const [header, log] = text.split(`\n\n${FEEDBACK_LOG_SECTION_HEADING}\n`);
+  // "a small fixed header (connection state, a timestamp, event codes)"
+  assert.deepEqual(Object.keys(JSON.parse(header)).sort(), ['connection_state', 'event_codes', 'schema_version', 'timestamp']);
+  // "plus the end of this tab's Petal log, with ... redacted"
+  assert.equal(log, '<redacted:room>: <redacted:participant-1> (<redacted:session-value>) joined\n\n');
+});
+
+test('#245: a real invite link and room label never survive into the attachment -- access code and label slug are registered with the room', async () => {
+  const accessCode = 'vds-quyc-aqv';
+  const credential = internalCredentialForAccessCode(accessCode);
+  const label = 'Acme Board Meeting';
+  const url = inviteLinkForCredential(credential, 'https://petal.example', label);
+  assert.equal(url, `https://petal.example/acme-board-meeting/${accessCode}`, 'non-vacuity: the real link carries both');
+
+  const registry = new SensitiveStringRegistry();
+  // What connectToMeeting registers (credential and wire names, then the
+  // user-facing aliases).
+  registry.registerRoom(credential);
+  registerMeetingAliases(registry, credential, label);
+  // Registering the same values again (e.g. #244's own access-code
+  // registration) is harmless.
+  const before = registry.size;
+  registerMeetingAliases(registry, credential, label);
+  registry.registerRoom(accessCode);
+  assert.equal(registry.size, before);
+
+  const text = await buildFeedbackAttachment(connected, ['feedback_opened'], registry, {
+    logText: `old build line: invite link copied: ${url}\nrenamed room to "${label}" for ${credential}\n`,
+  }).text();
+  assert.match(text, /invite link copied: https:\/\/petal\.example\/<redacted:room>\/<redacted:room>/);
+  assert.equal(text.includes(accessCode), false);
+  assert.equal(text.includes('acme-board-meeting'), false);
+  assert.equal(text.includes(label), false);
+  assert.equal(text.includes(credential), false);
+});
+
+test('#245: the friendly fallback label is Petal wording, not user data, and is never registered', () => {
+  const registry = new SensitiveStringRegistry();
+  registerMeetingAliases(registry, internalCredentialForAccessCode('abc-defg-hjk'), 'Petal meeting');
+  assert.equal(registry.scrubForReporting('Petal meeting / petal-meeting'), 'Petal meeting / petal-meeting');
+  assert.equal(registry.scrubForReporting('abc-defg-hjk'), '<redacted:room>');
+});
+
+test('#245: a report sent after leaving a meeting still scrubs that meeting -- leaving resets only the live Sentry map', async () => {
+  const registry = new SensitiveStringRegistry();
+  registry.registerRoom('room-acme-77');
+  registry.registerParticipant('web-riley');
+  registry.registerReportingValue('Riley Example');
+  const log = 'joined room-acme-77 as web-riley (Riley Example)\n';
+  // connection.ts calls reset() on disconnect; the user then files feedback
+  // from the home screen with the diagnostics box ticked.
+  registry.reset();
+
+  assert.equal(registry.scrub(log), log, 'the live Sentry map is cleared as before');
+  const text = await buildFeedbackAttachment(connected, ['feedback_opened'], registry, { logText: log }).text();
+  assert.match(text, /joined <redacted:room> as <redacted:participant-1> \(<redacted:session-value>\)/);
+  assert.doesNotMatch(text, /room-acme-77|web-riley|Riley Example/);
+});
+
+test('#245: no web log line interpolates an invite link -- it carries the access code and the label slug', () => {
+  const offenders: string[] = [];
+  const walk = (dir: URL) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, dir);
+      if (entry.isDirectory()) walk(child);
+      else if (/\.(ts|svelte)$/.test(entry.name)) {
+        const source = readFileSync(child, 'utf8');
+        for (const match of source.matchAll(/logEvent\??\.?\(\s*`[^`]*\$\{(url|inviteUrl|inviteLink|link)\}[^`]*`/g)) {
+          offenders.push(`${entry.name}: ${match[0]}`);
+        }
+      }
+    }
+  };
+  walk(new URL('../src/', import.meta.url));
+  assert.deepEqual(offenders, []);
 });

@@ -44,6 +44,7 @@ import {
 } from './cameraFrameAdvance.ts';
 import { AUDIBILITY_RMS_BAR, assertRemoteAudioOraclesAgree } from './audioOracleAgreement.ts';
 import { setRoomDisplayLabel } from './roomLabels.ts';
+import { registerMeetingAliases, sensitiveStringRegistry } from './sensitiveStrings.ts';
 import { inviteLinkCopiedToastMessage } from './inviteToast.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
 import { PresentationSourceHost } from './presentationSourceHost.ts';
@@ -294,7 +295,11 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
   }
 
   function renameRoomDisplayName(code: string, displayName: string | null): string {
-    return setRoomDisplayLabel(code, displayName);
+    const label = setRoomDisplayLabel(code, displayName);
+    // #245: the meeting's new label and invite slug are redacted like the
+    // ones registered when it connected.
+    if (state.currentMeetingCode === code) registerMeetingAliases(sensitiveStringRegistry, code, label);
+    return label;
   }
 
   function credentialForNewMeeting(label?: string): string {
@@ -350,15 +355,18 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
       location.origin,
       cb.roomDisplayLabelForCredential(state.currentMeetingCode)
     );
+    // The link itself is never logged (#245): it carries the joinable access
+    // code and the room's label, and the session log can be attached to a
+    // feedback report. The toast shows it.
     try {
       await navigator.clipboard.writeText(url);
       showToast(inviteLinkCopiedToastMessage(url));
-      logEvent(`invite link copied: ${url}`, 'ok');
+      logEvent('invite link copied', 'ok');
     } catch {
       // Clipboard API unavailable (e.g. insecure context) -- surface the link
-      // in the toast + log instead of failing silently.
+      // in the toast instead of failing silently.
       showToast(inviteLinkCopiedToastMessage(url));
-      logEvent(`clipboard unavailable -- invite link: ${url}`, 'warn');
+      logEvent('clipboard unavailable -- invite link shown in the toast', 'warn');
     }
   }
 
