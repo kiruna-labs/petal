@@ -691,10 +691,9 @@ Object.assign(ctx.cb, { handleCockpitPayload: cockpit.handleCockpitPayload });
 // callbacks are wired (installLayoutPicker -> applyTileLayout).
 tileLayout.installLayoutPicker();
 // #239: the phone meeting's behaviour -- full-screen toggle, the landscape
-// top bar's idle fade, the developer sheet, the controls' scroll peek. After
-// the picker, which inserts itself FIRST in the top bar's right cluster, so
-// the full-screen toggle ends the cluster; and after setupPlugins, whose
-// toolbar cells the peek measures.
+// top bar's idle fade, the developer sheet. After the picker, which inserts
+// itself FIRST in the top bar's right cluster, so the full-screen toggle
+// ends the cluster.
 setupMeetingViewport(ctx);
 
 // Home screen wires the unified Create/Join CTA; capture its callbacks.

@@ -244,10 +244,25 @@ test('#239 a landscape phone gets a slim control rail and two tiles covering ove
     const rail = await rect(page, '.controlbar');
     assert.ok(rail.right >= 863 - 1 && rail.top <= 0 && rail.bottom >= 360 - 1, 'a full-height rail on the right edge');
     assert.ok(rail.width <= 64, `the rail is one button wide (${rail.width}px)`);
-    for (const id of ['#ctl-audio', '#ctl-video', '#ctl-chat', '#ctl-leave', '#ctl-fullscreen']) {
+    // Mic, Camera and Leave never leave the rail, and ⋯ (#247) holds what
+    // does not fit its height: every other control is in the rail on
+    // screen, or in the ⋯ menu.
+    for (const id of ['#ctl-audio', '#ctl-video', '#ctl-leave', '#ctl-more']) {
       const r = await rect(page, id);
       assert.ok(r.width > 0 && r.top >= 0 && r.bottom <= 360 && r.left >= rail.left, `${id} is in the rail, on screen`);
     }
+    const unreachable = await page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>('.controlbar .control-cell')]
+        .filter((cell) => !cell.hidden && !cell.classList.contains('overflowed'))
+        .filter((cell) => {
+          const r = cell.getBoundingClientRect();
+          // window.*: a bare `innerHeight` here makes tsx rename another test's
+          // `const { innerHeight }`, inside page code that then cannot find it.
+          return !(r.height > 0 && r.top >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth);
+        })
+        .map((cell) => cell.querySelector('button')?.id ?? cell.className)
+    );
+    assert.deepEqual(unreachable, [], 'every control is in the rail on screen or in the ⋯ menu');
     const labelsShown = await page.evaluate(
       () => [...document.querySelectorAll('.controlbar .meeting-control-label')].filter((el) => getComputedStyle(el).display !== 'none').length
     );
@@ -266,42 +281,6 @@ test('#239 a landscape phone gets a slim control rail and two tiles covering ove
     assert.ok(fraction >= 0.55, `two tiles cover ${(fraction * 100).toFixed(1)}% of the viewport`);
   } finally {
     await page.context().close();
-  }
-});
-
-test('#239 controls that do not fit scroll with the next one peeking, Chat always on screen', { timeout: 60_000 }, async () => {
-  // Stopgap until the ⋯ overflow (#247): Chat is lifted next to Camera, and
-  // the scroller is cut so the first hidden control shows a sliver -- where
-  // that costs no control that fits (see the next-but-one test; on an 863px
-  // rail the first hidden control starts past the edge, so nothing peeks).
-  for (const [label, device, axis] of [
-    ['landscape rail', { ...LANDSCAPE_PHONE, viewport: { width: 734, height: 343 } }, 'y'],
-    ['portrait bar', { ...PORTRAIT_PHONE, viewport: { width: 360, height: 780 } }, 'x'],
-  ] as const) {
-    const page = await openMeeting(device, 2);
-    try {
-      await setLayout(page, 'Grid view');
-      await page.waitForTimeout(200);
-      const peek = await page.evaluate((vertical: boolean) => {
-        const scroller = document.querySelector<HTMLElement>('.controls-left')!;
-        const box = scroller.getBoundingClientRect();
-        const chat = document.querySelector('#ctl-chat')!.getBoundingClientRect();
-        const cut = [...scroller.children]
-          .map((child) => child.getBoundingClientRect())
-          .filter((r) => (vertical ? r.top < box.bottom && r.bottom > box.bottom : r.left < box.right && r.right > box.right));
-        return {
-          scrolls: vertical ? scroller.scrollHeight > scroller.clientHeight : scroller.scrollWidth > scroller.clientWidth,
-          chatVisible: vertical ? chat.bottom <= box.bottom : chat.right <= box.right,
-          peek: cut.map((r) => (vertical ? box.bottom - r.top : box.right - r.left)),
-        };
-      }, axis === 'y');
-      assert.ok(peek.scrolls, `${label}: this layout needs the scroll`);
-      assert.ok(peek.chatVisible, `${label}: Chat is on screen`);
-      assert.equal(peek.peek.length, 1, `${label}: exactly one control is cut`);
-      assert.ok(peek.peek[0] >= 8 && peek.peek[0] <= 16, `${label}: it peeks ${peek.peek[0]}px`);
-    } finally {
-      await page.context().close();
-    }
   }
 });
 
@@ -504,76 +483,6 @@ test('#239 the portrait top bar stays one slim row, with fingertip-sized hit are
   }
 });
 
-test('#239 the scroll peek never cuts a control that fits, and a cut control shows no half-label', { timeout: 60_000 }, async () => {
-  for (const [label, viewport] of [
-    ['Galaxy S24 portrait', { width: 360, height: 780 }],
-    ['iPhone 15 portrait', { width: 393, height: 659 }],
-    ['Pixel 8 portrait', { width: 412, height: 839 }],
-    ['iPhone 15 Pro Max portrait', { width: 430, height: 739 }],
-    ['iPhone 15 landscape', { width: 734, height: 343 }],
-    ['Pixel 8 landscape', { width: 863, height: 360 }],
-  ] as const) {
-    const page = await openMeeting({ ...PORTRAIT_PHONE, viewport }, 2);
-    try {
-      await page.waitForTimeout(200);
-      // Measured twice: as cut, then at the scroller's natural size (which
-      // controls fit anyway?). No named inner functions: see the hit probes.
-      const state = await page.evaluate(() => {
-        const scroller = document.querySelector<HTMLElement>('.controls-left')!;
-        const vertical = getComputedStyle(scroller).flexDirection === 'column';
-        const inline = scroller.getAttribute('style') ?? '';
-        const [cut, natural] = [false, true].map((uncut) => {
-          if (uncut) {
-            scroller.style.removeProperty('max-height');
-            scroller.style.removeProperty('max-width');
-          }
-          const box = scroller.getBoundingClientRect();
-          return [...scroller.children].map((child) => {
-            const r = child.getBoundingClientRect();
-            return {
-              child,
-              end: vertical ? r.bottom - box.top : r.right - box.left,
-              size: vertical ? box.height : box.width,
-            };
-          });
-        });
-        scroller.setAttribute('style', inline);
-        const fitting = natural.filter((s) => s.end <= s.size + 0.5).map((s) => s.child);
-        const clipped = cut.filter((s) => s.end > s.size + 0.5);
-        return {
-          cutFitting: clipped.filter((s) => fitting.includes(s.child)).length,
-          clipped: clipped.length,
-          halfLabels: clipped.filter((s) => {
-            const name = s.child.querySelector('.meeting-control-label');
-            return name && getComputedStyle(name).display !== 'none' && getComputedStyle(name).visibility !== 'hidden';
-          }).length,
-        };
-      });
-      assert.equal(state.cutFitting, 0, `${label}: a control that fits was cut`);
-      assert.equal(state.halfLabels, 0, `${label}: a cut control shows its label`);
-      // Scrolled fully into view, the last control gets its label back.
-      if (state.clipped > 0) {
-        await page.evaluate(() => {
-          const scroller = document.querySelector<HTMLElement>('.controls-left')!;
-          scroller.scrollTo({ left: scroller.scrollWidth, top: scroller.scrollHeight });
-        });
-        await page.waitForTimeout(150);
-        const lastClipped = await page.evaluate(() => {
-          const scroller = document.querySelector<HTMLElement>('.controls-left')!;
-          const vertical = getComputedStyle(scroller).flexDirection === 'column';
-          const last = [...scroller.children].reduce((a, b) =>
-            (vertical ? b.getBoundingClientRect().bottom > a.getBoundingClientRect().bottom : b.getBoundingClientRect().right > a.getBoundingClientRect().right) ? b : a
-          );
-          return last.classList.contains('is-clipped');
-        });
-        assert.equal(lastClipped, false, `${label}: the last control is whole once scrolled to`);
-      }
-    } finally {
-      await page.context().close();
-    }
-  }
-});
-
 test('#239 a short desktop window gets the rail but keeps its top bar and developer row', { timeout: 60_000 }, async () => {
   const page = await openMeeting({ viewport: { width: 1280, height: 480 } }, 4, { setup: (p) => p.clock.install() });
   try {
@@ -611,17 +520,12 @@ test('#239 portrait phone: strip under the hero, controls side by side without o
     assert.ok(strip.top >= hero.bottom, 'the strip sits under the hero on a tall surface');
     assert.ok(hero.width >= 380, `the hero takes the width (${hero.width}px)`);
 
-    // Visible cells only: what the scrolling middle clips is scrolled away,
-    // not overlapped.
+    // What does not fit is in the ⋯ menu (#247): every cell in the bar is
+    // whole and on its own.
     const overlaps = await page.evaluate(() => {
-      const scroller = document.querySelector('.controls-left')!.getBoundingClientRect();
       const shown = [...document.querySelectorAll<HTMLElement>('.controlbar .control-cell')].flatMap((cell) => {
         const r = cell.getBoundingClientRect();
-        if (getComputedStyle(cell).display === 'none' || r.width === 0) return [];
-        if (!cell.parentElement!.classList.contains('controls-left')) return [{ id: cell.textContent!.trim(), r }];
-        const left = Math.max(r.left, scroller.left);
-        const right = Math.min(r.right, scroller.right);
-        return right - left > 1 ? [{ id: cell.textContent!.trim(), r: { ...r.toJSON(), left, right } }] : [];
+        return getComputedStyle(cell).display === 'none' || r.width === 0 ? [] : [{ id: cell.textContent!.trim(), r }];
       });
       const found: string[] = [];
       for (let i = 0; i < shown.length; i += 1) {
@@ -636,9 +540,9 @@ test('#239 portrait phone: strip under the hero, controls side by side without o
       return found;
     });
     assert.deepEqual(overlaps, [], 'no control cell overlaps another');
-    for (const id of ['#ctl-audio', '#ctl-video', '#ctl-leave']) {
+    for (const id of ['#ctl-audio', '#ctl-video', '#ctl-leave', '#ctl-more']) {
       const r = await rect(page, id);
-      assert.ok(r.left >= 0 && r.right <= 412 && r.bottom <= 839, `${id} on screen`);
+      assert.ok(r.width > 0 && r.left >= 0 && r.right <= 412 && r.bottom <= 839, `${id} on screen`);
     }
     assert.ok((await rect(page, '#topbar-fullscreen')).width > 0, 'full screen lives in the top bar in portrait');
   } finally {
@@ -647,7 +551,9 @@ test('#239 portrait phone: strip under the hero, controls side by side without o
 });
 
 test('#239 the rail full-screen button enters and leaves real full screen, and follows the document', { timeout: 60_000 }, async () => {
-  const page = await openMeeting(LANDSCAPE_PHONE, 1);
+  // A landscape phone with the height for it in the rail (a shorter one puts
+  // it in the ⋯ menu, #247: the next test).
+  const page = await openMeeting({ ...LANDSCAPE_PHONE, viewport: { width: 932, height: 430 } }, 1);
   try {
     const button = page.locator('#ctl-fullscreen');
     const labelIs = (label: string) =>
@@ -659,6 +565,25 @@ test('#239 the rail full-screen button enters and leaves real full screen, and f
     await page.evaluate(() => document.exitFullscreen());
     await labelIs('Enter full screen');
     assert.equal(await page.locator('#topbar-fullscreen').getAttribute('aria-pressed'), 'false');
+  } finally {
+    await page.context().close();
+  }
+});
+
+test('#239 x #247 where the rail has no room for full screen, its ⋯ row enters real full screen', { timeout: 60_000 }, async () => {
+  const page = await openMeeting(LANDSCAPE_PHONE, 1);
+  try {
+    assert.equal(await page.locator('.fullscreen-cell.overflowed').count(), 1, 'full screen is in the ⋯ menu on an 863x360 rail');
+    await page.click('#ctl-more');
+    await page.waitForSelector('#overflow-menu.placed');
+    // The row clicks the rail button inside the user's own tap, so
+    // requestFullscreen keeps the user activation it needs.
+    await page.click('#overflow-menu .overflow-menu-row >> text=Full screen');
+    await page.waitForFunction(() => document.fullscreenElement !== null);
+    // The buttons follow `fullscreenchange`, which lands just after.
+    await page.waitForFunction(() => document.querySelector('#ctl-fullscreen')?.getAttribute('aria-label') === 'Exit full screen');
+    await page.evaluate(() => document.exitFullscreen());
+    await page.waitForFunction(() => document.querySelector('#ctl-fullscreen')?.getAttribute('aria-label') === 'Enter full screen');
   } finally {
     await page.context().close();
   }

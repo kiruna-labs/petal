@@ -11,9 +11,9 @@ import type { HarnessContext } from './context';
 //    and comes back on any tap or key.
 //  - The developer drawer: a parked sheet on phones, opened by `?dev=1` or
 //    openDevTools().
-//  - Until the control bar's ⋯ overflow (#247) lands, controls that do not
-//    fit scroll, cut so the next one visibly peeks where that cuts no
-//    control that fits, and a cut control hides its half-label.
+//
+// Controls that do not fit the bar or the rail are the ⋯ overflow's
+// (#247, controlOverflow.ts).
 //
 // The landscape layout itself (icon rail, overlay top bar) is style.css's
 // MEETING_RAIL_QUERY block; this module only toggles classes and sizes.
@@ -27,9 +27,6 @@ export const MEETING_RAIL_QUERY = '(orientation: landscape) and (max-height: 500
 
 /** How long the landscape top bar stays after the last interaction. */
 export const MEETING_CHROME_IDLE_MS = 3000;
-
-/** How far the first control that does not fit shows past a scroller's edge. */
-export const CONTROL_PEEK_PX = 12;
 
 /** `?dev=1` asks for the developer drawer; remembered for the tab. */
 const DEV_TOOLS_SESSION_KEY = 'petal.devTools';
@@ -66,8 +63,8 @@ function installFullscreenToggle(
   topbarRight.appendChild(topbarButton);
   const buttons: Array<[button: HTMLButtonElement, iconSize: number]> = [[topbarButton, 15]];
 
-  // The rail cell sits between the scrolling controls and Leave, so it stays
-  // pinned with Leave instead of scrolling away with the rest.
+  // The rail cell sits between the other controls and Leave, so it sits at
+  // the foot of the rail with Leave.
   const controlbar = meetingScreen.querySelector<HTMLElement>('.controlbar');
   if (controlbar) {
     const railButton = doc.createElement('button');
@@ -238,76 +235,9 @@ function installDevTools(win: Window = window, doc: Document = document) {
   if (requested) openDevTools(doc);
 }
 
-/**
- * Stopgap until the ⋯ overflow (#247): when the controls do not all fit, the
- * scrolling middle of the bar (portrait) or rail (landscape) is cut so the
- * first control that does not fit peeks by CONTROL_PEEK_PX -- an unmistakable
- * "there is more" -- instead of wherever the screen edge falls, where half a
- * button reads as a rendering glitch and none at all hides that it scrolls.
- * A control that fits is never cut for it: when the first one that does not
- * fit starts too near the edge to peek, the scroller keeps its size. Any
- * control the edge cuts hides its label (.is-clipped) until scrolled to.
- */
-function installControlPeek(meetingScreen: HTMLElement, win: Window = window) {
-  const controlbar = meetingScreen.querySelector<HTMLElement>('.controlbar');
-  const scroller = meetingScreen.querySelector<HTMLElement>('.controls-left');
-  if (!controlbar || !scroller || typeof ResizeObserver !== 'function') return;
-
-  function fit() {
-    scroller!.style.removeProperty('max-height');
-    scroller!.style.removeProperty('max-width');
-    const style = win.getComputedStyle(scroller!);
-    const vertical = style.flexDirection === 'column';
-    const box = scroller!.getBoundingClientRect();
-    const size = vertical ? box.height : box.width;
-    const scrolls =
-      /auto|scroll/.test(vertical ? style.overflowY : style.overflowX) &&
-      (vertical ? scroller!.scrollHeight : scroller!.scrollWidth) > size + 1;
-    if (scrolls) {
-      const scrolled = vertical ? scroller!.scrollTop : scroller!.scrollLeft;
-      // Each control's span inside the scroller, in VISUAL order (CSS `order`
-      // lifts Chat up in the scrolling layouts).
-      const spans = Array.from(scroller!.children, (child) => {
-        const rect = child.getBoundingClientRect();
-        const start = (vertical ? rect.top - box.top : rect.left - box.left) + scrolled;
-        return { start, end: start + (vertical ? rect.height : rect.width), shown: rect.width > 0 };
-      })
-        .filter((span) => span.shown)
-        .sort((a, b) => a.start - b.start);
-      // Only ever shorten into the first control that does not fit, and only
-      // if that leaves it a full peek: a control that fits is never cut.
-      const firstCut = spans.find((span) => span.end > size + 0.5);
-      if (firstCut && firstCut.start + CONTROL_PEEK_PX <= size) {
-        scroller!.style.setProperty(vertical ? 'max-height' : 'max-width', `${firstCut.start + CONTROL_PEEK_PX}px`);
-      }
-    }
-    markClipped();
-  }
-
-  /** A clipped control's label would show as cut text ("Ir"): hide it until
-   * the control scrolls fully into view. */
-  function markClipped() {
-    const box = scroller!.getBoundingClientRect();
-    for (const child of Array.from(scroller!.children)) {
-      const rect = child.getBoundingClientRect();
-      const clipped =
-        rect.width > 0 &&
-        (rect.left < box.left - 0.5 || rect.right > box.right + 0.5 || rect.top < box.top - 0.5 || rect.bottom > box.bottom + 0.5);
-      child.classList.toggle('is-clipped', clipped);
-    }
-  }
-
-  // The bar's own size follows the viewport; the scroller's contents change
-  // when plugins add or remove toolbar cells; scrolling moves the clip.
-  new ResizeObserver(fit).observe(controlbar);
-  new MutationObserver(fit).observe(scroller, { childList: true });
-  scroller.addEventListener('scroll', () => win.requestAnimationFrame(markClipped), { passive: true });
-}
-
 export function setupMeetingViewport(ctx: HarnessContext) {
   const { dom, ui } = ctx;
   installFullscreenToggle(dom.meetingScreen, dom.topbarRight, ui.logEvent);
   installChromeIdle(dom.meetingScreen, dom.tilesEl);
   installDevTools();
-  installControlPeek(dom.meetingScreen);
 }

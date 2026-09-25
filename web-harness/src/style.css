@@ -4205,53 +4205,16 @@ canvas#test-canvas.p613-presentation-source {
     --spotlight-strip-gap: 8px;
   }
 
-  /* #239: tighter on a phone. Whatever still does not fit scrolls sideways,
-     with Leave pinned, rather than squashing the controls into each other --
-     a stopgap until the control bar's ⋯ overflow menu (#247) collapses it.
-     meetingViewport.ts cuts the scroller so the next control peeks. */
+  /* #239: tighter on a phone. What still does not fit goes to the ⋯ menu
+     (#247, controlOverflow.ts); no control is ever squashed. */
   .controlbar {
     justify-content: center;
     gap: 6px;
-    padding: 4px 10px max(8px, env(safe-area-inset-bottom));
+    padding: 8px 10px max(8px, env(safe-area-inset-bottom));
   }
 
-  /* The padding keeps the chat badge (top: -2px) inside the clip. */
   .controls-left {
     gap: 6px;
-    padding-top: 4px;
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-    scrollbar-width: none;
-  }
-
-  .controls-left > .control-cell,
-  .controlbar > .control-cell {
-    flex-shrink: 0;
-  }
-
-  /* Level with the scroller's padded row. */
-  .controlbar > .control-cell {
-    margin-top: 4px;
-  }
-
-  /* Chat right after Mic and Camera, so it is on screen on every phone. */
-  .controls-left > .control-cell:has(> .meeting-split) {
-    order: -2;
-  }
-
-  .controls-left > .chat-cell {
-    order: -1;
-  }
-
-  /* A scroller clips them anyway; the names are aria-labels. */
-  .controls-left .control-tooltip {
-    display: none;
-  }
-
-  /* A control the scroller cuts shows no half-label ("Ir"); it reappears
-     once the control scrolls fully into view (meetingViewport.ts). */
-  .controls-left > .control-cell.is-clipped .meeting-control-label {
-    visibility: hidden;
   }
 }
 
@@ -4377,11 +4340,10 @@ canvas#test-canvas.p613-presentation-source {
     border-left: 1px solid var(--hairline);
   }
 
-  /* Mic, Camera and Chat lead; what does not fit scrolls inside the rail,
-     cut so the next control peeks (meetingViewport.ts), while Full screen
-     and Leave stay pinned at the bottom. A stopgap: the rail needs the ⋯
-     overflow (#247) to collapse the middle. The padding is the rail's side
-     margin, and keeps the chat badge inside the clip. */
+  /* Mic and Camera lead, Full screen and Leave sit at the bottom; what
+     does not fit the rail's height goes to the ⋯ menu (#247:
+     controlOverflow.ts measures a column bar along its height). The padding
+     is the rail's side margin. */
   .controls-left {
     flex-direction: column;
     align-items: center;
@@ -4389,24 +4351,11 @@ canvas#test-canvas.p613-presentation-source {
     min-height: 0;
     margin-bottom: auto;
     padding: 4px;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    scrollbar-width: none;
   }
 
-  .controls-left > .control-cell,
-  .controlbar > .control-cell {
-    flex-shrink: 0;
-  }
-
-  .controls-left > .control-cell:has(> .meeting-split) {
-    order: -2;
-  }
-
-  .controls-left > .chat-cell {
-    order: -1;
-  }
-
+  /* The tooltips open upward and centred: in an icon-only rail on the
+     screen's right edge they would cover the control above and run off the
+     screen. Each control keeps its name as its aria-label. */
   .controls-left .control-tooltip {
     display: none;
   }
