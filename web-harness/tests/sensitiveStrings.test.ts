@@ -148,6 +148,16 @@ test('#245: SensitiveStringRegistry.reset keeps the reporting snapshot for the t
   );
 });
 
+test('#245: participant labels are not reused after reset, so one label names one identity in a report', () => {
+  const registry = new SensitiveStringRegistry();
+  registry.registerParticipant('web-alex-9f2');
+  registry.reset();
+  registry.registerParticipant('web-sam-4c1');
+
+  assert.equal(registry.scrub('web-sam-4c1'), '<redacted:participant-2>');
+  assert.equal(registry.scrubForReporting('web-alex-9f2 then web-sam-4c1'), '<redacted:participant-1> then <redacted:participant-2>');
+});
+
 test('SensitiveStringRegistry ignores empty/blank room and participant values', () => {
   const registry = new SensitiveStringRegistry();
   registry.registerRoom('');

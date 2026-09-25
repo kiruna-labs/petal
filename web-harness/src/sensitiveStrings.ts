@@ -120,7 +120,8 @@ export class SensitiveStringRegistry {
   reset(): void {
     this.values.clear();
     this.participantLabels.clear();
-    this.participantCounter = 0;
+    // Not the counter: the kept snapshot still maps earlier identities to
+    // their numbers, and a label must name one identity per report.
   }
 
   scrub(text: string): string {

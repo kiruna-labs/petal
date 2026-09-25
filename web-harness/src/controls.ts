@@ -44,6 +44,7 @@ import {
 } from './cameraFrameAdvance.ts';
 import { AUDIBILITY_RMS_BAR, assertRemoteAudioOraclesAgree } from './audioOracleAgreement.ts';
 import { setRoomDisplayLabel } from './roomLabels.ts';
+import { registerMeetingAliases, sensitiveStringRegistry } from './sensitiveStrings.ts';
 import { inviteLinkCopiedToastMessage } from './inviteToast.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
 import { PresentationSourceHost } from './presentationSourceHost.ts';
@@ -294,7 +295,11 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
   }
 
   function renameRoomDisplayName(code: string, displayName: string | null): string {
-    return setRoomDisplayLabel(code, displayName);
+    const label = setRoomDisplayLabel(code, displayName);
+    // #245: the meeting's new label and invite slug are redacted like the
+    // ones registered when it connected.
+    if (state.currentMeetingCode === code) registerMeetingAliases(sensitiveStringRegistry, code, label);
+    return label;
   }
 
   function credentialForNewMeeting(label?: string): string {
