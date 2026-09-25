@@ -233,8 +233,9 @@ body {
 }
 
 .feedback-meeting-trigger {
-  width: 32px;
-  min-height: 32px;
+  width: var(--topbar-control-height);
+  height: var(--topbar-control-height);
+  min-height: var(--topbar-control-height); /* replaces .feedback-trigger's 32px floor */
   padding: 0;
   flex-shrink: 0;
   color: var(--text-faint);
@@ -1036,9 +1037,11 @@ input[type='text']:disabled {
   flex-shrink: 0;
 }
 
+/* Centred, not top-aligned (#241): the name and time share the centre line
+   of the 24px title actions and of the top-bar controls. */
 .room-title {
   display: inline-flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 6px;
   min-width: 0;
 }
@@ -1135,12 +1138,20 @@ input[type='text']:disabled {
 }
 
 .elapsed {
-  font: 500 12.5px var(--font-mono);
+  font: 500 12.5px / 1.12 var(--font-mono);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
   opacity: 0;
   color: rgba(255, 255, 255, 0.5);
   transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+/* A touch screen has no hover, so the reveal above only fired after a tap
+   (#241). Show the time outright there. */
+@media (hover: none) {
+  .elapsed {
+    opacity: 1;
+  }
 }
 
 .topbar-right {
@@ -1188,13 +1199,18 @@ input[type='text']:disabled {
   font: 600 12px var(--font-mono);
 }
 
+/* Sits in .topbar-right (connection.ts), so it takes the top-bar control
+   height (#241); min-height, not height, so a wrapped label still fits. */
 .audio-playback-prompt {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--topbar-control-height);
   border: 1px solid rgba(232, 184, 75, 0.34);
   border-radius: var(--radius-chip);
   background: rgba(232, 184, 75, 0.14);
   color: var(--warning);
   font: 700 12px var(--font-ui);
-  padding: 7px 11px;
+  padding: 0 11px;
   cursor: pointer;
   transition:
     background var(--motion-fast) var(--ease-standard),
@@ -1218,6 +1234,7 @@ input[type='text']:disabled {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  height: var(--topbar-control-height);
   padding: 2px;
   border-radius: var(--radius-pill);
   border: 1px solid var(--hairline);
@@ -1229,7 +1246,10 @@ input[type='text']:disabled {
   align-items: center;
   justify-content: center;
   width: 28px;
-  height: 24px;
+  /* Fills the pill: the top-bar control height less its 2px padding and
+     1px border on each side (26px), so the pill matches the bug-report
+     button beside it (#241). */
+  height: 100%;
   padding: 0;
   border: 0;
   border-radius: var(--radius-pill);

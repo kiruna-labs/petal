@@ -143,6 +143,9 @@
   /* ---- Sizing ---- */
   --control-size:      44px;  /* the one circular control, comfortable density */
   --control-size-compact: 32px;
+  /* #241: the web meeting top bar's controls and the desktop Gallery's top-bar
+     buttons. The compact ControlButton beside them sizes itself inline. */
+  --topbar-control-height: var(--control-size-compact);
   --menubar-max-height: 24px; /* HARD cap for interactive menubar content (macOS) */
 
   /* ---- Motion (functional, subtle) ----
