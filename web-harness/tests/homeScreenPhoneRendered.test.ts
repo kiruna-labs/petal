@@ -5,11 +5,11 @@
 // card fills the screen, where the free space goes and whether a first visit
 // fits a landscape phone cannot be read off the CSS source.
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { extname, join, normalize, resolve } from 'node:path';
 import test from 'node:test';
 import { build } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
@@ -17,6 +17,37 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 const repoRoot = resolve(import.meta.dirname, '../..');
 const webRoot = resolve(repoRoot, 'web-harness');
 const { chromium } = createRequire(import.meta.url)(resolve(repoRoot, 'apps/desktop/node_modules/playwright'));
+
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+};
+
+// Served from http://127.0.0.1/ as in production: from a file:// path the
+// client reads the path as an invite link and shows an "Invite link problem"
+// line a real first visit never has.
+async function serve(dir: string): Promise<{ origin: string; close: () => Promise<void> }> {
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+    const file = join(dir, normalize(path === '/' ? '/index.html' : path).replace(/^(\.\.[/\\])+/, ''));
+    readFile(file).then(
+      (body) => {
+        res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' });
+        res.end(body);
+      },
+      () => {
+        res.writeHead(404);
+        res.end();
+      }
+    );
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('server did not bind a port');
+  return { origin: `http://127.0.0.1:${address.port}`, close: () => new Promise<void>((done) => server.close(() => done())) };
+}
 
 const ANDROID_UA =
   'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36';
@@ -60,6 +91,7 @@ const centerY = (box: Box) => box.top + box.height / 2;
 test('#243: the home screen fills a phone in both orientations', { timeout: 120_000 }, async () => {
   const buildDir = await mkdtemp(join(tmpdir(), 'petal-home-phone-build-'));
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  let server: Awaited<ReturnType<typeof serve>> | undefined;
 
   try {
     await build({
@@ -82,21 +114,28 @@ test('#243: the home screen fills a phone in both orientations', { timeout: 120_
 
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-gpu', '--allow-file-access-from-files']
+      args: ['--no-sandbox', '--disable-gpu']
     });
-    const url = pathToFileURL(join(buildDir, 'index.html')).href;
+    server = await serve(buildDir);
+    const url = `${server.origin}/`;
+    // Nothing leaves the machine.
+    const localOnly = (route: { request: () => { url: () => string }; abort: () => Promise<void>; continue: () => Promise<void> }) =>
+      route.request().url().startsWith(server!.origin) ? route.continue() : route.abort();
 
-    // Pixel 8 with the browser toolbar showing, portrait then landscape.
-    for (const viewport of [{ width: 412, height: 839 }, { width: 863, height: 360 }]) {
+    // Pixel 8 with the browser toolbar showing, portrait then landscape; then
+    // the smallest two-column landscape, an iPhone SE's 667x375.
+    for (const viewport of [{ width: 412, height: 839 }, { width: 863, height: 360 }, { width: 667, height: 375 }]) {
       const landscape = viewport.width > viewport.height;
       const at = (message: string) => `${viewport.width}x${viewport.height}: ${message}`;
       const context = await browser.newContext({ viewport, userAgent: ANDROID_UA, isMobile: true, hasTouch: true });
+      await context.route('**/*', localOnly);
       const page = await context.newPage();
       await page.goto(url, { waitUntil: 'load' });
       // A first visit opens the name and colour card by itself.
       await page.waitForSelector('#profile-onboarding:not(.hidden)');
       await page.evaluate(() => document.fonts.ready);
 
+      assert.equal(await page.textContent('#conn-error'), '', at('a first visit shows an error'));
       const first = await boxes(page);
       assert.ok(Math.abs(centerY(first.bubble) - centerY(first.save)) <= 1, at('the colour bubble and Save are not on one row'));
       assert.ok(first.bubble.right < first.save.left, at('the colour bubble must sit left of Save'));
@@ -160,6 +199,7 @@ test('#243: the home screen fills a phone in both orientations', { timeout: 120_
 
     // Desktop keeps the floating 380px card and the download link.
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await page.route('**/*', localOnly);
     await page.goto(url, { waitUntil: 'load' });
     await page.waitForSelector('#profile-onboarding:not(.hidden)');
     const desktop = await boxes(page);
@@ -169,6 +209,7 @@ test('#243: the home screen fills a phone in both orientations', { timeout: 120_
     assert.ok(Math.abs(centerY(desktop.bubble) - centerY(desktop.save)) <= 1, 'desktop: bubble and Save share a row');
   } finally {
     await browser?.close();
+    await server?.close();
     await rm(buildDir, { recursive: true, force: true });
   }
 });
