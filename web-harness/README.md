@@ -57,6 +57,8 @@ LIVEKIT_URL=ws://localhost:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret
    - **Screensharing** — real capture via `getDisplayMedia` (the browser
      shows its own window/tab/screen picker), published under a fresh
      `petal-window-<random u32>` name with H.264 forced. Green = live.
+     Needs a desktop browser: phone browsers have no `getDisplayMedia`, so
+     the control is hidden wherever the API is missing.
    - **Invite** — copies the `?code=` join link, confirms with a toast.
    - **Leave** — disconnects and returns to the join screen.
 
@@ -168,8 +170,9 @@ checks). Test-only; never shipped in the real app.
   bar), dev drawer, toast, feedback dialog.
 - `api/j.ts` — the deployed serverless join-link interstitial
   (`meet.petal.live/<label>/<code>`): Open Petal, platform downloads, Join in
-  browser, and the `petal://` handoff. `api/_lib/slug.ts` is its copy of the
-  slug contract.
+  browser, and the `petal://` handoff. Phones and tablets get Join in browser
+  only, with no handoff and one line linking the desktop apps.
+  `api/_lib/slug.ts` is its copy of the slug contract.
 - `src/main.ts` — the entry point: wires the modules below together.
 - `src/homeScreen.ts`, `src/createJoinAction.ts`, `src/deepLink.ts` — join
   screen, recents/favorites, `?code=` auto-join.

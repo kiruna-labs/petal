@@ -50,10 +50,12 @@ export function autoJoinFromUrl({
       joinHint.textContent = 'Enter your name to join this invite.';
       joinHint.classList.remove('hidden');
       displayNameInput.focus();
-      logEvent(`invite URL loaded "${parsed.code}" -- waiting for display name`);
+      // No credential in the log line (#245): nothing has registered it for
+      // redaction yet, and the log can go out with a feedback report.
+      logEvent('invite URL loaded -- waiting for display name');
       return;
     }
-    logEvent(`auto-joining "${parsed.code}" from invite URL`);
+    logEvent('auto-joining from invite URL');
     // The name is known, so the user has nothing to do on the menu -- go
     // straight to a joining view instead of flashing the home screen while
     // the token fetch + connect run (user request, 2026-08-11). Shows the

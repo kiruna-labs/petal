@@ -16,6 +16,9 @@
     #298's exclusive session/share.rs lock.
   - Never logs the message text or submission errors to the console -- only
     a generic, user-facing status string.
+  - A reply address is required (#245): format-checked by the shared rule,
+    never verified, sent only as the SDK's `email` field, and remembered on
+    this device (prefilled, editable) once a report goes out.
 -->
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
@@ -24,6 +27,14 @@
   import Button from './Button.svelte';
   import Checkbox from '@petal/shared/ui/components/Checkbox.svelte';
   import { COMMANDS } from '$lib/ipc';
+  import { STORAGE_KEYS } from '$lib/data/storageKeys';
+  import {
+    feedbackEmailError,
+    feedbackEmailStorage,
+    isValidFeedbackEmail,
+    rememberFeedbackEmail,
+    rememberedFeedbackEmail
+  } from '$lib/feedback/email';
   import {
     FEEDBACK_MAX_MESSAGE_CHARS,
     prepareDiagnosticsAttachment,
@@ -38,6 +49,9 @@
   let { onClose }: Props = $props();
 
   let message = $state('');
+  let email = $state(rememberedFeedbackEmail(feedbackEmailStorage(), STORAGE_KEYS.feedbackEmail));
+  // The inline error waits until the field has been left once.
+  let emailTouched = $state(false);
   let attachDiagnostics = $state(false);
   let status = $state<'idle' | 'preparing' | 'submitting' | 'success' | 'error'>('idle');
   let statusMessage = $state<string | null>(null);
@@ -49,7 +63,8 @@
 
   const trimmedLength = $derived(message.trim().length);
   const busy = $derived(status === 'preparing' || status === 'submitting');
-  const submitDisabled = $derived(busy || sharing || trimmedLength === 0);
+  const emailError = $derived(emailTouched ? feedbackEmailError(email) : null);
+  const submitDisabled = $derived(busy || sharing || trimmedLength === 0 || !isValidFeedbackEmail(email));
 
   async function checkSharing(): Promise<boolean> {
     try {
@@ -126,8 +141,12 @@
     }
 
     status = 'submitting';
+    const address = email;
     try {
-      await submitFeedback({ message, attachment });
+      await submitFeedback({ message, email: address, attachment });
+      // Remembered once it was actually sent, even if the modal has since
+      // closed: next time the form opens with it filled in.
+      rememberFeedbackEmail(feedbackEmailStorage(), STORAGE_KEYS.feedbackEmail, address);
       if (destroyed) return;
       status = 'success';
       statusMessage = 'Feedback sent. Thank you!';
@@ -147,7 +166,8 @@
       Feedback isn't available while you're sharing a window. This will close automatically.
     </p>
   {:else}
-    <form class="feedback-form" onsubmit={handleSubmit}>
+    <!-- novalidate: the shared feedbackEmail.ts rule decides, not the webview's own type=email check. -->
+    <form class="feedback-form" onsubmit={handleSubmit} novalidate>
       <label class="field">
         <span class="field-label">What's on your mind?</span>
         <textarea
@@ -159,6 +179,34 @@
           disabled={busy}
         ></textarea>
       </label>
+
+      <div class="field">
+        <label class="field-label" for="feedback-email">Your email</label>
+        <input
+          id="feedback-email"
+          type="email"
+          bind:value={email}
+          required
+          autocomplete="email"
+          inputmode="email"
+          autocapitalize="off"
+          spellcheck="false"
+          aria-invalid={emailError ? 'true' : 'false'}
+          aria-describedby="feedback-email-error feedback-email-hint"
+          disabled={busy}
+          onblur={() => (emailTouched = true)}
+          onkeydown={(event) => {
+            // Send is disabled while the address is bad, so Enter would
+            // otherwise do nothing at all: say why instead.
+            if (event.key === 'Enter') emailTouched = true;
+          }}
+        />
+        <!-- Always-rendered live region: only the error inside it toggles, so it is announced; the static hint never is. -->
+        <div class="field-notes" aria-live="polite">
+          <span id="feedback-email-error" class="field-error" hidden={!emailError}>{emailError ?? ''}</span>
+          <span id="feedback-email-hint" class="field-hint">So we can reply. We won't verify it. Remembered on this device.</span>
+        </div>
+      </div>
 
       <label class="checkbox-row">
         <Checkbox bind:checked={attachDiagnostics} disabled={busy} />
@@ -184,7 +232,7 @@
       {/if}
 
       <p class="disclosure">
-        Sent to UserDispatch, our feedback provider.
+        Your message and email address are sent to UserDispatch, our feedback provider.
         <a href="https://userdispatch.com/privacy" target="_blank" rel="noreferrer">Privacy policy</a>
       </p>
 
@@ -233,6 +281,43 @@
   textarea:focus-visible {
     outline: 2px solid var(--id-blue);
     outline-offset: 1px;
+  }
+
+  input[type='email'] {
+    width: 100%;
+    box-sizing: border-box;
+    height: 34px;
+    border-radius: var(--radius-input);
+    border: 1px solid var(--hairline);
+    background: var(--surface);
+    color: var(--text-primary);
+    font: 400 12.5px var(--font-ui);
+    padding: 0 11px;
+  }
+
+  input[type='email']:focus-visible {
+    outline: 2px solid var(--id-blue);
+    outline-offset: 1px;
+  }
+
+  input[type='email'][aria-invalid='true'] {
+    border-color: var(--danger);
+  }
+
+  .field-notes {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .field-error {
+    font: 600 11px var(--font-ui);
+    color: var(--danger);
+  }
+
+  .field-hint {
+    font: 400 11px var(--font-ui);
+    color: var(--text-faint);
   }
 
   .checkbox-row {

@@ -3,8 +3,16 @@ import { mockIPC } from '@tauri-apps/api/mocks';
 import PluginRegistryBrowser from '../../src/lib/plugins/PluginRegistryBrowser.svelte';
 import indexText from '../../../../contracts/plugin-registry/index.json?raw';
 
-// The real contract fixture index, served as the Rust command would return it.
+// The real contract fixture index, served as the Rust command would return it,
+// plus one verified plugin that asks for a permission this Petal does not
+// support (contracts/plugin-registry/unsupported-permission-cases.json): the
+// index must still load and that row must read "Needs newer Petal".
 const index = JSON.parse(indexText);
+const future = structuredClone(index.plugins[0]);
+future.id = 'acme.future-thing';
+future.name = 'Future Thing';
+future.versions[0].permissions = ['meeting:read', 'future:thing'];
+index.plugins.push(future);
 window.__calls = [];
 window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {}; // hasTauriBridge()
 mockIPC((command, payload = {}) => {

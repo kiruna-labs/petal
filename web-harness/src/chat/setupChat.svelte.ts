@@ -8,7 +8,7 @@
 // `.svelte.ts` so the drawer's props can be runes: the mounted component reads
 // `view` through getters and re-renders when the store changes.
 import type { Participant as LkParticipant, Room } from 'livekit-client';
-import { mount, unmount } from 'svelte';
+import { mount, tick, unmount } from 'svelte';
 import ChatDrawer from '@petal/shared/ui/components/ChatDrawer.svelte';
 import {
   CHAT_HISTORY_REQUEST_DELAYS_MS,
@@ -149,12 +149,26 @@ export function setupChat(ctx: HarnessContext): ChatHook {
           onClose: () => store.setOpen(false),
         },
       });
-      // Opening the drawer is an explicit act: put the caret in the composer.
-      (drawer as { focusComposer?: () => void }).focusComposer?.();
+      // Opening the drawer is an explicit act: put the caret in the composer,
+      // once it has rendered (mount does not run effects, so bind:this is not
+      // set yet). Not on touch screens, where focus raises the soft keyboard
+      // over the messages the reader opened chat to see (#246).
+      if (!window.matchMedia?.('(pointer: coarse)').matches) {
+        void tick().then(() => (drawer as { focusComposer?: () => void } | null)?.focusComposer?.());
+      }
     }
   }
 
+  // The toast for the last message that arrived while the drawer was
+  // closed: opening the drawer shows that message, so the toast goes (on a
+  // phone it would sit on the composer, #246).
+  let lastNotice: string | null = null;
+
   store.onChange(() => {
+    if (store.open && lastNotice !== null) {
+      ui.dismissToast?.(lastNotice);
+      lastNotice = null;
+    }
     renderControl();
     renderDrawer();
   });
@@ -186,7 +200,8 @@ export function setupChat(ctx: HarnessContext): ChatHook {
         case 'msg': {
           const result = store.receive(wire, sender);
           if (result === 'added' && identity !== room?.localParticipant.identity && !store.open) {
-            ui.showToast(chatNoticeText(sender, wire.text));
+            lastNotice = chatNoticeText(sender, wire.text);
+            ui.showToast(lastNotice);
           }
           break;
         }
