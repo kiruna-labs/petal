@@ -85,7 +85,7 @@ tauri-plugin-deep-link = "2"
 # with zero compile-time signal. Bump this deliberately, re-diff
 # `platform_impl/macos.rs` against `instance_lock.rs` by hand, and update the
 # pin together.
-tauri-plugin-single-instance = { version = "=2.4.4", features = ["deep-link"] }
+tauri-plugin-single-instance = { version = "=2.4.5", features = ["deep-link"] }
 # Silent auto-update (issue #103, the production plan "make it updatable"):
 # official Tauri updater. It fetches the signed updater manifest from the
 # backend (`plugins.updater.endpoints` in tauri.conf.json -> our Vercel
@@ -165,7 +165,7 @@ dotenvy = "0.15"
 # with the browser's SHA-256 canonicalization (#261). Already locked transitively.
 sha2 = "0.11"
 # Plugin registry: verifies index.json / bundle.json signatures (plugins/README.md §2.9).
-minisign-verify = "0.2"
+minisign-verify = "0.3"
 # Query-param encoding for compositor.rs's header webview URL (owner display
 # name / source window title, both arbitrary user/OS strings that can
 # contain spaces, em dashes, etc. -- share_border.rs's own hand-rolled `#`-only

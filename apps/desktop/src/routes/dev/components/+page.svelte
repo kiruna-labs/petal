@@ -7,6 +7,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
+  import { CAMERA_TILE_ASPECT_RANGE } from '@petal/shared/logic/cameraCrop';
   import ControlButton from '$lib/components/ControlButton.svelte';
   import Pill from '@petal/shared/ui/components/Pill.svelte';
   import DensityToggle from '$lib/components/DensityToggle.svelte';
@@ -76,7 +77,13 @@
     { label: '380x360', width: 380, height: 360 },
     { label: '1600x900', width: 1600, height: 900 }
   ];
-  const galleryReadout = $derived(computeGalleryLayout(galleryCount, galleryFrameWidth, galleryFrameHeight));
+  // Same options as Gallery.svelte (#248: camera tiles may crop), so the
+  // readout describes the gallery rendered next to it.
+  const galleryReadout = $derived(
+    computeGalleryLayout(galleryCount, galleryFrameWidth, galleryFrameHeight, {
+      tileAspectRange: CAMERA_TILE_ASPECT_RANGE
+    })
+  );
 
   onMount(() => {
     const frame = galleryFrameEl;

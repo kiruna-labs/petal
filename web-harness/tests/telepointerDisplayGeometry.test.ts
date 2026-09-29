@@ -35,6 +35,12 @@ class FakeClassList {
   contains(name: string): boolean {
     return this.values().includes(name);
   }
+  toggle(name: string, force?: boolean): boolean {
+    const next = force ?? !this.contains(name);
+    if (next) this.add(name);
+    else this.remove(name);
+    return next;
+  }
 }
 
 class FakeStyle {
@@ -210,6 +216,53 @@ test('telepointerDisplay positions the receive-side cursor against the video con
       // and video share the same horizontal center here), wrong Y by
       // exactly the header inset -- pin the number, not just "differs".
       assert.equal(pointer!.style.transform, 'translate3d(200.0px, 172.0px, 0)');
+    } finally {
+      display.clearRemoteTelepointers();
+    }
+  } finally {
+    fakeDom.restore();
+  }
+});
+
+test('#248: on a zoomed share, a pointer on the off-screen part of the window is hidden', () => {
+  const fakeDom = installFakeDom();
+  try {
+    const tile = makeHeaderBearingShareTile('native-1', 42);
+    tile.classList.add('is-share-zoomed');
+    const video = tile.children[0]!;
+    // The video's layout box (untransformed), tile-relative: under the header.
+    Object.assign(video, { offsetLeft: 1, offsetTop: 45, offsetWidth: 398, offsetHeight: 254 });
+    // Painted 3x around the centre, as a zoom transform makes the browser
+    // report: the window's top now sits far above the tile, under the header.
+    let painted = { left: 51, top: 65, width: 398, height: 254 };
+    Object.defineProperty(video, 'getBoundingClientRect', { configurable: true, value: () => painted });
+    fakeDom.document.body.appendChild(tile);
+    const display = setupTelepointerDisplay({
+      remoteTelepointers: new Map(),
+      handshakeCooldowns: new Map(),
+      state: {
+        room: {
+          localParticipant: { identity: 'web-1', metadata: undefined },
+          remoteParticipants: new Map([['native-1', { name: 'Native Sharer', metadata: undefined }]]),
+        },
+      },
+      ui: { logEvent: () => undefined },
+    } as never);
+    try {
+      const send = (y: number) =>
+        display.handleRemoteTelepointerPayload(
+          encode({ windowId: 42, userId: 'native-1', x: 0.5, y, visible: true }),
+          'native-1',
+          TELEPOINTER_TOPIC
+        );
+      send(0.05);
+      const pointer = tile.querySelector('.remote-telepointer') as unknown as FakeElement;
+      assert.equal(pointer.classList.contains('is-outside-media'), false, 'at 1x every point is on screen');
+      painted = { left: 51 - 398, top: 65 - 254, width: 398 * 3, height: 254 * 3 };
+      send(0.05);
+      assert.equal(pointer.classList.contains('is-outside-media'), true, 'the top of the window is off screen at 3x');
+      send(0.5);
+      assert.equal(pointer.classList.contains('is-outside-media'), false, 'the centre is still on screen');
     } finally {
       display.clearRemoteTelepointers();
     }

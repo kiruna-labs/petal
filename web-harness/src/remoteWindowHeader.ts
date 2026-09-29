@@ -79,6 +79,9 @@ const DRAW_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" s
 const AI_CHAT_ICON = sparkleIconSvg(15);
 const KEBAB_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>';
 const HIDE_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"></path></svg>';
+const ZOOM_IN_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path><path d="M11 8v6"></path><path d="M8 11h6"></path></svg>';
+const ZOOM_OUT_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path><path d="M8 11h6"></path></svg>';
+const ZOOM_FIT_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2"></path><path d="M17 3h2a2 2 0 0 1 2 2v2"></path><path d="M21 17v2a2 2 0 0 1-2 2h-2"></path><path d="M7 21H5a2 2 0 0 1-2-2v-2"></path><rect x="7" y="8" width="10" height="8" rx="1"></rect></svg>';
 const FIT_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5"></path><path d="m3 3 6 6"></path><path d="M16 21h5v-5"></path><path d="m21 21-6-6"></path><path d="M21 8V3h-5"></path><path d="m21 3-6 6"></path><path d="M3 16v5h5"></path><path d="m3 21 6-6"></path></svg>';
 
 function validWindowId(windowId: number | null): windowId is number {
@@ -462,6 +465,29 @@ export function createRemoteWindowHeader(options: RemoteWindowHeaderOptions): Re
     button.setAttribute('role', 'menuitemradio');
     overflowMenu.appendChild(button);
   }
+  // #248: the share's zoom, for touch users who have no wheel or keyboard
+  // (pinch and double-tap work too; this is the discoverable path). Only when
+  // the zoom controller is wired -- an absent callback means "not here".
+  const zoomCommand = (current.ctx.cb as Partial<HarnessContext['cb']>).shareZoomCommand;
+  const zoomMenuButtons =
+    typeof zoomCommand === 'function'
+      ? ([
+          ['in', 'Zoom in', ZOOM_IN_ICON],
+          ['out', 'Zoom out', ZOOM_OUT_ICON],
+          ['fit', 'Fit window', ZOOM_FIT_ICON],
+        ] as const).map(([command, label, icon]) => {
+          const button = makeLabeledButton(
+            'remote-window-header__overflow-item remote-window-header__zoom-item',
+            label,
+            label,
+            icon,
+          );
+          button.setAttribute('role', 'menuitem');
+          button.dataset.zoomCommand = command;
+          overflowMenu.appendChild(button);
+          return button;
+        })
+      : [];
 
   function setOverflowMenuOpen(open: boolean) {
     overflowMenu.hidden = !open;
@@ -770,6 +796,11 @@ export function createRemoteWindowHeader(options: RemoteWindowHeaderOptions): Re
     setButtonDisabled(controlButton, !canControl || requestingControl);
     setButtonDisabled(drawButton, !canDraw || requestingControl);
     setButtonDisabled(viewMenuButton, requestingControl);
+    // Nothing to zoom out of, or fit back to, while the share is at fit.
+    const zoomed = current.tile.classList.contains('is-share-zoomed');
+    for (const button of zoomMenuButtons) {
+      if (button.dataset.zoomCommand !== 'in') setButtonDisabled(button, !zoomed);
+    }
     setButtonDisabled(controlMenuButton, !canControl || requestingControl);
     setButtonDisabled(drawMenuButton, !canDraw || requestingControl);
     const expanded = windowExpanded();
@@ -989,6 +1020,14 @@ export function createRemoteWindowHeader(options: RemoteWindowHeaderOptions): Re
     selectDraw();
     setOverflowMenuOpen(false);
   });
+  for (const button of zoomMenuButtons) {
+    button.addEventListener('click', (event) => {
+      stopControlEvent(event);
+      const command = button.dataset.zoomCommand as 'in' | 'out' | 'fit';
+      (current.ctx.cb as Partial<HarnessContext['cb']>).shareZoomCommand?.(current.tile, command);
+      setOverflowMenuOpen(false);
+    });
+  }
   root.addEventListener('keydown', (event) => {
     if ((event as KeyboardEvent).key === 'Escape') setOverflowMenuOpen(false);
   });

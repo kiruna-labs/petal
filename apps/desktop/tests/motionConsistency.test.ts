@@ -100,7 +100,7 @@ test('route and gallery motion avoid layout-property animation', () => {
   assert.match(gallerySource, /function transitionGalleryLayout\(mutate: \(\) => void\)/);
   assert.match(gallerySource, /tile\.animate\(/);
   assert.match(gallerySource, /duration, easing: 'cubic-bezier\(0\.2, 0, 0, 1\)', fill: 'none'/);
-  assert.match(gallerySource, /animate:flip=\{\{ duration: suppressSvelteFlip \? 0 : tileLayoutDuration\(\) \}\}/);
+  assert.match(gallerySource, /animate:uniformTileFlip=\{\{ duration: suppressSvelteFlip \? 0 : tileLayoutDuration\(\) \}\}/);
   assert.match(gallerySource, /suppressSvelteFlip = duration > 0/);
   assert.doesNotMatch(modalSource, /\b\d+ms\b/);
   assert.doesNotMatch(windowPickerSource, /animation-delay:\s*\d+ms/);

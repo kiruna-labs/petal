@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
+import { CAMERA_TILE_ASPECT_RANGE } from '@petal/shared/logic/cameraCrop';
 import { computePaneLayout, paneContentSize } from '../src/layoutLab.ts';
 
 const source = readFileSync(new URL('../src/layoutLab.ts', import.meta.url), 'utf8');
@@ -65,4 +66,27 @@ test("a pane's layout call agrees with calling the shared function directly", ()
       `native pane disagreed with the shared function for ${count}@${frameWidth}x${frameHeight}`
     );
   }
+});
+
+test('#248: the camera crop toggle packs exactly like the camera-only web grid', () => {
+  // Landscape-phone-sized frame: 2 cameras fill the height only with the range.
+  const pane = { pad: 20 };
+  const controls = {
+    count: 2,
+    frameWidth: 780 + 40,
+    frameHeight: 300 + 40,
+    arrangement: 'auto' as const,
+    gap: 18,
+    tileAspect: 16 / 9,
+  };
+  const fixed = computePaneLayout(pane, controls);
+  const cropped = computePaneLayout(pane, { ...controls, cameraCrop: true });
+  const direct = computeGalleryLayout(2, 780, 300, { gap: 18, tileAspectRange: CAMERA_TILE_ASPECT_RANGE });
+  assert.deepEqual(
+    [cropped.columns, cropped.rows, cropped.tileWidth, cropped.tileHeight],
+    [direct.columns, direct.rows, direct.tileWidth, direct.tileHeight]
+  );
+  assert.equal(cropped.tileHeight, 300);
+  assert.ok(fixed.tileHeight < 300);
+  assert.match(source, /tileAspectRange: controls\.cameraCrop \? CAMERA_TILE_ASPECT_RANGE : null/);
 });
