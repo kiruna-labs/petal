@@ -4521,7 +4521,13 @@ async fn start_share_with_capture_source(
     // own HashSet toggle should keep this call one-shot per window -- but
     // guard against a double-start rather than silently leaking a second
     // capture+publish for the same window_id).
-    let room_connection = {
+    // The room generation is read with the connection, from the join that owns
+    // both. The rest of this function can await capture startup, a network
+    // publish and metadata reconciliation for seconds; a leave/rejoin during
+    // that gap must not let the old start commit a share -- or start its
+    // audio -- in the new room. Reading the process counter after this lock is
+    // released could pair the old connection with a newer generation.
+    let (room_connection, share_generation) = {
         let guard = state.inner.lock_unpoisoned();
         if guard.shares.contains_key(&window_id) {
             log::info!(
@@ -4550,13 +4556,11 @@ async fn start_share_with_capture_source(
             );
             return Err(ShareSessionError::NotInRoom);
         };
-        joined.room_connection.clone()
+        (
+            joined.room_connection.clone(),
+            joined.room_generation.clone(),
+        )
     };
-    // Capture the room generation alongside the connection. The rest of this
-    // function can await capture startup, a network publish and metadata
-    // reconciliation for seconds; a leave/rejoin during that gap must not let
-    // the old start commit a share -- or start its audio -- in the new room.
-    let share_generation = state.current_room_generation();
 
     let priority_value = crate::share_priority::current();
     let priority = Arc::new(Mutex::new(priority_value));
@@ -4949,13 +4953,20 @@ async fn start_share_with_capture_source(
         republish_intent,
         url_refresh,
     });
-    // `activate_if_valid` only knows about the layout gate, so a stale room
-    // generation is refused before it is consulted. This closure is what
-    // inserts the ActiveShare -- and therefore what starts the pump, the
-    // monitor and the share's audio -- so skipping it is the whole fix.
-    let window_id_to_demote = if share_generation.is_current() {
-        layout_gate.activate_if_valid(|| {
+    // `activate_if_valid` only knows about the layout gate, so the room check
+    // runs inside the activation, under the `inner` lock the insert takes.
+    // `cleanup_left_room` invalidates the generation before it takes that same
+    // lock to snapshot the shares it stops, so a share either lands before the
+    // snapshot (and is stopped with the rest) or sees the stale generation here
+    // and is refused. This closure is what inserts the ActiveShare -- and
+    // therefore what starts the pump, the monitor and the share's audio -- so
+    // refusing it is the whole fix.
+    let window_id_to_demote = layout_gate
+        .activate_if_valid(|| {
             let mut guard = state.inner.lock_unpoisoned();
+            if !share_generation.is_current() {
+                return None;
+            }
             let previously_focused = guard.focused_window();
             guard.shares.insert(
                 window_id,
@@ -4980,11 +4991,9 @@ async fn start_share_with_capture_source(
             if let Some(demote_id) = demote {
                 seed_startup_grace_demand(&mut guard, demote_id, Instant::now());
             }
-            demote
+            Some(demote)
         })
-    } else {
-        None
-    };
+        .flatten();
     let window_id_to_demote = match window_id_to_demote {
         Some(demote) => demote,
         None => {
