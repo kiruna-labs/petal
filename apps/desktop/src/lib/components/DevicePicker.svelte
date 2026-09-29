@@ -31,13 +31,12 @@
   let pendingKind = $state<'microphone' | 'speaker' | 'camera' | null>(null);
   let root = $state<HTMLDivElement>();
 
-  const micValue = $derived(
-    mics.some((device) => device.id === selectedMic) ? selectedMic : (mics[0]?.id ?? '')
-  );
+  // A stored id that is not in the list must NOT be replaced by the first device:
+  // that made the control show a device the audio was not playing through, and, with
+  // a stale pinned device, it actively hid the problem. Empty means "not in this list".
+  const micValue = $derived(mics.some((device) => device.id === selectedMic) ? selectedMic : '');
   const speakerValue = $derived(
-    speakers.some((device) => device.id === selectedSpeaker)
-      ? selectedSpeaker
-      : (speakers[0]?.id ?? '')
+    speakers.some((device) => device.id === selectedSpeaker) ? selectedSpeaker : ''
   );
   const cameraValue = $derived(
     cameras.some((device) => device.id === selectedCamera)
@@ -67,7 +66,16 @@
     }
   });
 
-  function noteFor(applied: { applied: boolean; inRoom: boolean } | null, what: string) {
+  function noteFor(
+    applied: { applied: boolean; inRoom: boolean } | null,
+    what: string,
+    error: string | null
+  ) {
+    // A failed switch must never be silent. This control is what a user reaches for
+    // when audio is going somewhere they cannot hear it, and the old shape returned
+    // null here whenever a room was joined -- so the one case that mattered said
+    // nothing at all.
+    if (error) return error;
     if (!applied) return null;
     if (applied.applied) return `Switched ${what}`;
     if (!applied.inRoom) return 'Saved — applies when you join a room';
@@ -83,7 +91,8 @@
       const applied = await setAudioDevices({ recordingId: id });
       micNote = noteFor(
         applied ? { applied: applied.micApplied, inRoom: applied.inRoom } : null,
-        'microphone'
+        'microphone',
+        applied?.micError ?? null
       );
     } catch (error) {
       console.error('device picker: mic switch failed', error);
@@ -102,7 +111,8 @@
       const applied = await setAudioDevices({ playoutId: id });
       speakerNote = noteFor(
         applied ? { applied: applied.speakerApplied, inRoom: applied.inRoom } : null,
-        'speaker'
+        'speaker',
+        applied?.speakerError ?? null
       );
     } catch (error) {
       console.error('device picker: speaker switch failed', error);
@@ -121,7 +131,8 @@
       const applied = await setCameraDevice(id);
       cameraNote = noteFor(
         applied ? { applied: applied.applied, inRoom: applied.inRoom } : null,
-        'camera'
+        'camera',
+        null
       );
     } catch (error) {
       console.error('device picker: camera switch failed', error);
