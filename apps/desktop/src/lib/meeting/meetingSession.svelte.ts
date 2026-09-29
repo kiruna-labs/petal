@@ -77,6 +77,8 @@ export interface MeetingSession {
   readonly galleryParticipants: GalleryParticipant[];
   readonly galleryStateTitle: string | null;
   readonly galleryStateDetail: string | null;
+  /** A participant's collision-resolved meeting color (tiles, share headers, chat avatars). */
+  resolvedColorFor(identity: string): string;
   readonly galleryStateTone: 'warning' | 'info';
   readonly activeIdentity: ReturnType<typeof colorForIdentity>;
   readonly activeColor: string;
@@ -502,6 +504,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     get galleryStateDetail() {
       return galleryStateDetail;
     },
+    resolvedColorFor,
     get galleryStateTone() {
       return galleryStateTone;
     },

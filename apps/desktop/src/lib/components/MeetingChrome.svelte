@@ -127,7 +127,8 @@
     pluginActions?: Snippet;
     /** Meeting chat (a host surface, plugins/README.md §2.7): open state and
      * unread count for the Chat control; the drawer itself is rendered by the
-     * route through `chatDrawer` beside the gallery while open. */
+     * route through `chatDrawer`, which Gallery places between its topbar and
+     * control bar while open (beside the tiles, or over them when narrow). */
     chatOpen?: boolean;
     chatUnread?: number;
     chatDrawer?: Snippet;
@@ -758,7 +759,6 @@
        its topbar. `inert` on collapse also disables the switcher inside, so
        only the pill's expand circle is interactive in small state. -->
   <div class="stage large-stage" aria-hidden={!expanded} inert={!expanded}>
-    <div class="gallery-column">
     <Gallery
       {roomName}
       {elapsed}
@@ -785,20 +785,11 @@
       {pluginActions}
       {chatOpen}
       {chatUnread}
+      sidePanel={chatOpen ? chatDrawer : undefined}
       onOpenDeviceMenu={(kind, el) => openDeviceMenu(kind, el)}
       deviceMenuKind={deviceMenu}
       topbarAction={viewSwitcher}
     />
-    </div>
-    {#if chatOpen && chatDrawer}
-      <!-- Chat drawer (plugins/README.md §2.7 "Panel"): a right column beside
-           the gallery, so the gallery's own topbar and control bar keep their
-           full width; under 640 px it covers the gallery instead of crushing
-           it (the 400 px minimum window would leave 80 px of tiles). -->
-      <aside class="chat-aside" data-testid="chat-aside">
-        {@render chatDrawer()}
-      </aside>
-    {/if}
   </div>
 
   <!-- Small / thumbnail state (DESIGN.md §2): "collapsed to a minimal
@@ -1005,30 +996,8 @@
   }
 
   .large-stage {
-    position: relative;
     height: 100%;
     opacity: 1;
-    display: flex;
-    min-width: 0;
-  }
-  .gallery-column {
-    flex: 1;
-    min-width: 0;
-    height: 100%;
-  }
-  .chat-aside {
-    flex: none;
-    width: 320px;
-    height: 100%;
-    min-width: 0;
-  }
-  @media (max-width: 640px) {
-    .chat-aside {
-      position: absolute;
-      inset: 0 0 0 auto;
-      width: 100%;
-      z-index: 5;
-    }
   }
 
   .large-stage :global(.topbar) {

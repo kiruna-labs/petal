@@ -23,6 +23,13 @@
   row above and below it. Enter sends, Shift+Enter inserts a line break. The
   list pins to the bottom while the reader is at the bottom and stays put when
   they have scrolled up to read.
+
+  Who said what: each group of lines starts with the sender's avatar and name
+  in their meeting color (`colorFor`, the color their tile, telepointer and
+  shared-window header use); continuation lines indent under the name. Text
+  is selectable and copyable, whole messages or part of one, even in the
+  desktop shell, which turns selection off everywhere else
+  (apps/desktop/tests/meetingChatLayoutRendered.test.ts).
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -47,12 +54,18 @@
     commands?: readonly ChatCommandOption[];
     /** Run `/name args`; a failure's message is shown under the composer and the draft is kept. */
     onCommand?: (name: string, args: string) => ChatCommandResult | Promise<ChatCommandResult>;
+    /**
+     * The sender's meeting color (the one their tile avatar, telepointer and
+     * shared-window header use), or null when unknown. Each client supplies
+     * its own lookup; without one, avatars are graphite and names neutral.
+     */
+    colorFor?: (identity: string) => string | null;
     /** Overrides for tests / fixed clocks. */
     now?: () => number;
     locale?: string;
   }
 
-  let { messages, canSend = true, onSend, onClose, commands = [], onCommand, now = () => Date.now(), locale }: Props = $props();
+  let { messages, canSend = true, onSend, onClose, commands = [], onCommand, colorFor, now = () => Date.now(), locale }: Props = $props();
 
   let draft = $state('');
   let listEl = $state<HTMLElement | null>(null);
@@ -216,6 +229,16 @@
     return m.sender.name?.trim() || 'Someone';
   }
 
+  /** A plugin's private answer is the plugin speaking, so it gets no person's color. */
+  function colorOf(m: ChatMessage): string | null {
+    return m.local ? null : (colorFor?.(m.sender.identity) ?? null);
+  }
+
+  function initialFor(m: ChatMessage): string {
+    const name = m.sender.name?.trim() || m.sender.identity;
+    return Array.from(name)[0]?.toLocaleUpperCase() ?? '?';
+  }
+
   function viaTitle(m: ChatMessage): string {
     const person = m.self ? 'you' : m.sender.name?.trim() || 'someone';
     return m.local
@@ -249,7 +272,18 @@
         data-relayed={m.relayed ? 'true' : undefined}
         data-via={m.via?.id}
         data-local={m.local ? 'true' : undefined}
+        data-color={colorOf(m) ?? undefined}
+        style:--chat-color={colorOf(m)}
       >
+        {#if !continues(i)}
+          <!-- The sender's avatar in their meeting color (the tile avatar's
+               ring + tinted initial), once per group; a private plugin answer
+               shows the plugin's puzzle instead of a person. -->
+          <span class="chat-avatar" class:colored={colorOf(m) !== null} aria-hidden="true" data-testid="chat-avatar">
+            {#if m.local}{@html pluginIconSvg('puzzle', 14)}{:else}{initialFor(m)}{/if}
+          </span>
+        {/if}
+        <div class="chat-body">
         {#if !continues(i)}
           <div class="chat-meta">
             <span class="chat-name" title={m.local ? viaTitle(m) : (m.sender.name ?? m.sender.identity)}>{nameFor(m)}</span>
@@ -269,6 +303,7 @@
           {/if}
         {/if}
         <p class="chat-text">{m.text}</p>
+        </div>
       </article>
     {/each}
   </div>
@@ -397,6 +432,12 @@
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    /* Messages can be selected and copied, whole or in part, even inside an
+       app shell that turns selection off everywhere else (the desktop's
+       app.css sets user-select: none on html/body). */
+    -webkit-user-select: text;
+    user-select: text;
+    cursor: auto;
     padding: 10px 14px;
     display: flex;
     flex-direction: column;
@@ -411,6 +452,44 @@
   }
   .chat-msg {
     min-width: 0;
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    column-gap: 10px;
+  }
+  .chat-body {
+    grid-column: 2;
+    min-width: 0;
+  }
+  .chat-avatar {
+    grid-column: 1;
+    position: relative;
+    width: 28px;
+    height: 28px;
+    margin-top: 1px;
+    border-radius: 999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface-2, rgba(255, 255, 255, 0.08));
+    color: var(--text-soft, rgba(255, 255, 255, 0.75));
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  /* The tile avatar's look (Avatar.svelte): a thin ring in the identity color
+     around a dark gradient, with the initial in that color. */
+  .chat-avatar.colored {
+    background: linear-gradient(160deg, var(--surface-2, #25252a), var(--bg-base-2, #141417));
+    color: var(--chat-color);
+  }
+  .chat-avatar.colored::after {
+    content: '';
+    position: absolute;
+    inset: -2px;
+    border-radius: 999px;
+    border: 1.5px solid var(--chat-color);
   }
   .chat-msg.continues {
     margin-top: -6px;
@@ -448,6 +527,9 @@
   }
   .chat-msg.self .chat-text {
     color: var(--text-strong, rgba(255, 255, 255, 0.88));
+  }
+  .chat-msg[data-color] .chat-name {
+    color: var(--chat-color);
   }
 
   .chat-compose {

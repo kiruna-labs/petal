@@ -30,6 +30,8 @@ import {
 import { bridgeFailure } from '@petal/shared/plugin-host/broker';
 import type { HarnessContext } from '../context.ts';
 import { displayNameForParticipant } from '../tiles.ts';
+import { colorForIdentity } from '../telepointer.ts';
+import { identityPaletteIndexFromMetadata } from '../trackNames.ts';
 
 export interface ChatHook {
   roomConnected(room: Room): void;
@@ -146,6 +148,17 @@ export function setupChat(ctx: HarnessContext): ChatHook {
     dom.meetingScreen.classList.toggle('chat-open', open);
   }
 
+  /**
+   * The sender's meeting color, as their telepointer and drawings show it:
+   * the palette index they advertise in metadata, else the identity hash. A
+   * sender who has left keeps their hash color.
+   */
+  function colorFor(identity: string): string {
+    const participant =
+      room?.localParticipant.identity === identity ? room.localParticipant : room?.remoteParticipants.get(identity);
+    return colorForIdentity(identity, identityPaletteIndexFromMetadata(participant?.metadata));
+  }
+
   function renderDrawer(): void {
     refreshView();
     if (!store.open) {
@@ -169,6 +182,7 @@ export function setupChat(ctx: HarnessContext): ChatHook {
             return commands;
           },
           onCommand: (name: string, args: string) => runCommand(name, args),
+          colorFor: (identity: string) => colorFor(identity),
           onSend: (text: string) => send(text),
           onClose: () => store.setOpen(false),
         },
