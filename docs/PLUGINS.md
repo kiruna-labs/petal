@@ -109,7 +109,8 @@ activate(petal) {
 - `post(text)` needs `chat:post`, which is meeting-scope only. Petal labels
   every post with your plugin's name and the puzzle badge, so a plugin can
   never speak as a person. Posts are plain text up to 2000 characters, at
-  most 3 in a burst and then one every 2 seconds.
+  most 6 in a burst and then one every 2 seconds. A refused post rejects
+  your promise with `rate-limited`; log it rather than dropping it silently.
 - Command names are lowercase (`^[a-z][a-z0-9-]{0,19}$`), at most 8 per
   plugin. If two plugins declare the same name, one owns it by a fixed rule
   (built-in, then installed, then dev; then plugin id).

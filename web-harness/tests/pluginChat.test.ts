@@ -12,6 +12,7 @@ import { isPermission, validateManifest, type PluginManifest } from '@petal/shar
 import { METHOD_PERMISSIONS, EVENT_PERMISSIONS } from '@petal/shared/plugin-host/permissions';
 import { PROTOCOL_VERSION, type Envelope } from '@petal/shared/plugin-host/protocol';
 import { PERMISSION_LABELS } from '@petal/shared/plugin-host/settingsModel';
+import { PLUGIN_LIMITS } from '@petal/shared/plugin-host/rateLimit';
 import { CHAT_COMMAND_LIMITS } from '@petal/shared/logic/chat';
 
 class FakeFrame {
@@ -142,12 +143,12 @@ test('broker: chat.post is permission-gated, normalized, rate-limited, and reach
     assert.equal(!res.ok && res.error.code, 'invalid', `request ${id}`);
   }
 
-  // Burst of 3 (one already spent), then rate-limited; refills at 0.5/s.
-  for (let id = 10; id < 14; id++) broker.handleMessage({ source: frame, data: req(id, 'chat.post', { text: `m${id}` }) });
+  // Burst of 6 (one already spent), then rate-limited; refills at 0.5/s.
+  for (let id = 10; id < 17; id++) broker.handleMessage({ source: frame, data: req(id, 'chat.post', { text: `m${id}` }) });
   await tick();
   // Refusals answer before the posts that await the adapter, so compare by request id.
   const burst = frame.responses().filter((r) => r.id >= 10).sort((a, b) => a.id - b.id);
-  assert.deepEqual(burst.map((r) => (r.ok ? 'ok' : r.error.code)), ['ok', 'ok', 'rate-limited', 'rate-limited']);
+  assert.deepEqual(burst.map((r) => (r.ok ? 'ok' : r.error.code)), ['ok', 'ok', 'ok', 'ok', 'ok', 'rate-limited', 'rate-limited']);
   clock.advance(2000);
   broker.handleMessage({ source: frame, data: req(20, 'chat.post', { text: 'later' }) });
   await tick();
@@ -213,12 +214,17 @@ test('broker: a command reaches only the owner\'s logic frame; chat.respond is o
   // meeting:read -> the invoker is included; no chat:commands or no logic frame -> null.
   const reader = new FakeFrame();
   broker.attach(loaded(timerManifest({ id: 'acme.reader', permissions: ['chat:commands', 'meeting:read'] })), reader);
-  broker.deliverChatCommand('acme.reader', { name: 'x', args: '', invoker: { identity: 'me', name: 'Me', isLocal: true, speaking: false, micMuted: false } });
+  broker.deliverChatCommand('acme.reader', { name: 'timer', args: '', invoker: { identity: 'me', name: 'Me', isLocal: true, speaking: false, micMuted: false } });
   assert.equal((reader.events('chat.command')[0]!.payload as { invoker: { identity: string } }).invoker.identity, 'me');
   const noPerm = new FakeFrame();
   broker.attach(loaded(timerManifest({ id: 'acme.noperm', permissions: ['chat:post'], contributes: undefined })), noPerm);
   assert.equal(broker.deliverChatCommand('acme.noperm', { name: 'x', args: '', invoker: null }), null);
   assert.equal(broker.deliverChatCommand('acme.absent', { name: 'x', args: '', invoker: null }), null);
+  // A command the plugin's own manifest does not declare never reaches it,
+  // whatever the resolver says (defense in depth).
+  const before = logic.events('chat.command').length;
+  assert.equal(broker.deliverChatCommand('petal.timer', { name: 'poll', args: '', invoker: null }), null);
+  assert.equal(logic.events('chat.command').length, before);
 });
 
 test('resolveChatCommands: one owner per name, built-in before installed before dev, then by id; ungranted plugins own nothing', () => {
@@ -255,4 +261,18 @@ test('the vendored Timer built-in validates on this host and owns /timer', () =>
   assert.deepEqual(m.contributes?.chatCommands?.map((c) => c.name), ['timer']);
   assert.match(parsed.bundle.source, /petal\.chat\.onCommand\('timer'/);
   assert.doesNotMatch(parsed.bundle.source, /chat\.on\(|onMessage/, 'it never reads chat');
+});
+
+test("the chat post burst covers the Timer built-in's worst legitimate cluster", () => {
+  // Written down, not picked: Timer's MAX_ACTIVE timers each post twice (start
+  // and "Time's up"). Three short timers must never lose a finish to the burst.
+  const text = readFileSync(new URL('../../plugins/builtins/petal.timer/bundle.json', import.meta.url), 'utf8');
+  const parsed = parseBundle(text);
+  assert.ok(parsed.ok);
+  if (!parsed.ok) return;
+  const maxActive = Number(/const MAX_ACTIVE = (\d+);/.exec(parsed.bundle.source)?.[1]);
+  const postsPerTimer = 2;
+  assert.ok(maxActive > 0, 'Timer declares MAX_ACTIVE');
+  assert.equal(PLUGIN_LIMITS.chatPostBurst, maxActive * postsPerTimer);
+  assert.ok(PLUGIN_LIMITS.chatPostPerSecond <= 0.5, 'the sustained rate, not the burst, bounds a flood');
 });

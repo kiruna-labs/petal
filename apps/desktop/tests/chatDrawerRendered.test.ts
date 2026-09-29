@@ -148,13 +148,13 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
       assert.equal(fit.namedLines, 5, "Theo's two typed lines share a name line; his plugin post does not");
       assert.equal(fit.relayed, 1);
       assert.equal(fit.names[0].ellipsized, true, 'a very long name ellipsizes instead of wrapping or pushing the time out');
-      assert.deepEqual(fit.names.map((n) => n.text), ['Mira Aleksandra Konstantinopoulou-Whitfield', 'Theo', 'You', 'Theo', 'Timer']);
+      assert.deepEqual(fit.names.map((n) => n.text), ['Mira Aleksandra Konstantinopoulou-Whitfield', 'Theo', 'You', 'Theo', 'Timer (plugin)']);
       assert.deepEqual(
         fit.vias.map((v) => [v.text, v.clipped]),
-        [['via Timer', false], ['Only you can see this', false]],
-        'a plugin post is never shown as the person alone, and the label never clips',
+        [['via Tally Hands For Big Team', false], ['Only you can see this', false]],
+        'a plugin post is never shown as the person alone, and the label never clips, even at the 24-char name limit',
       );
-      assert.equal(fit.vias[0].title, 'Posted by the Timer plugin (petal.timer) for Theo');
+      assert.equal(fit.vias[0].title, 'Posted by the Tally Hands For Big Team plugin (acme.tally) for Theo');
       assert.ok(fit.times.every((t) => /\d/.test(t ?? '')), `times render: ${fit.times.join(', ')}`);
 
       // Composer: one row, Send beside the input and no count far from the
@@ -196,7 +196,7 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
         els.map((el) => ({ text: el.textContent?.replace(/\s+/g, ' ').trim(), overflowing: el.scrollWidth > el.clientWidth + 1 })),
       );
       assert.deepEqual(rows.map((r) => r.text), [
-        '/tally Count hands for a quick decision in the meeting Tally for Teams Pro',
+        '/tally-hands-for-team <question> | <yes label> | <no label> xy Count raised hands for a quick yes or no across the meeting. Tally Hands For Big Team',
         '/timer 5m [label] | list | cancel Start a countdown everyone can see Timer',
       ]);
       assert.ok(rows.every((r) => !r.overflowing), `${width}: suggestion rows wrap, never overflow`);
@@ -213,11 +213,11 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
       assert.deepEqual((await chat()).sent, ['first line\nsecond line'], 'a command is never sent as a message');
 
       // A command the host refuses keeps the draft and says why.
-      await input.fill('/tally');
+      await input.fill('/tally-hands-for-team');
       await page.keyboard.press('Enter');
-      assert.deepEqual((await chat()).ran, ['timer|5m standup', 'tally|']);
-      assert.equal(await input.inputValue(), '/tally');
-      assert.equal(await page.locator('[data-testid="chat-error"]').textContent(), 'Tally for Teams Pro is still starting. Try again in a moment.');
+      assert.deepEqual((await chat()).ran, ['timer|5m standup', 'tally-hands-for-team|']);
+      assert.equal(await input.inputValue(), '/tally-hands-for-team');
+      assert.equal(await page.locator('[data-testid="chat-error"]').textContent(), 'Tally Hands For Big Team is still starting. Try again in a moment.');
       await page.keyboard.type(' ');
       assert.equal(await page.locator('[data-testid="chat-error"]').count(), 0, 'editing clears the refusal');
 

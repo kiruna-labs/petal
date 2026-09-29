@@ -6,7 +6,7 @@
   },
   "petal.timer": {
     "repo": "kiruna-labs/petal-plugins",
-    "commit": "60487e4071012673e2310be9016fa931a278568c",
+    "commit": "acd1fced62736ebd2b5183e38cd731608eafaf71",
     "version": "1.0.0"
   }
 }

@@ -70,8 +70,11 @@ const RELEASE_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const ENTRY_RE = /^[A-Za-z0-9_.-]+\.js$/;
 const NET_HOST_RE = /^(\*\.)?([a-z0-9-]+\.)*[a-z0-9-]+(:\d{1,5})?$/;
 const ICON_RE = /^[a-z][a-z0-9-]{0,31}$/;
-/** A slash command name: `/timer`, `/poll`. Lowercase so `/Timer` is never a second command. */
-export const CHAT_COMMAND_NAME_RE = /^[a-z][a-z0-9-]{0,19}$/;
+/**
+ * A slash command name: `/timer`, `/poll`. Lowercase so `/Timer` is never a
+ * second command. Built from MANIFEST_LIMITS so the length rule has one source.
+ */
+export const CHAT_COMMAND_NAME_RE = new RegExp(`^[a-z][a-z0-9-]{0,${MANIFEST_LIMITS.chatCommandNameMaxLength - 1}}$`);
 
 export type SurfaceKind = 'overlay' | 'popover' | 'panel' | 'settings';
 export const SURFACE_KINDS: readonly SurfaceKind[] = ['overlay', 'popover', 'panel', 'settings'];

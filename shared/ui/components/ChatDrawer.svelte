@@ -209,7 +209,9 @@
   }
 
   function nameFor(m: ChatMessage): string {
-    if (m.local && m.via) return m.via.name;
+    // "(plugin)": a sideloaded plugin named like a colleague must never read
+    // as a private message from that person.
+    if (m.local && m.via) return `${m.via.name} (plugin)`;
     if (m.self) return 'You';
     return m.sender.name?.trim() || 'Someone';
   }

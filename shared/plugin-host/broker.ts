@@ -10,6 +10,7 @@ import { HOST_API_VERSION, MANIFEST_LIMITS, isButtonLabel, isIconName } from './
 import { EVENT_PERMISSIONS, METHOD_PERMISSIONS, hasPermission, netFetchAllowed } from './permissions.ts';
 import {
   type BridgeErrorCode,
+  type ChatCommandPayload,
   type Envelope,
   type FetchParams,
   type FetchResponse,
@@ -597,11 +598,19 @@ export function createPluginBroker({ adapter, hostVersion, now = () => Date.now(
     deliverChatCommand(pluginId, command) {
       const logic = [...byFrame.values()].find((i) => i.plugin.manifest.id === pluginId && !i.surface);
       if (!logic || !hasPermission(logic.plugin.granted, 'chat:commands')) return null;
+      // Defense in depth: ownership comes from the host's resolver, but a
+      // plugin only ever receives a command its own manifest declares.
+      if (!logic.plugin.manifest.contributes?.chatCommands?.some((c) => c.name === command.name)) return null;
       prunePendingCommands();
       const commandId = `cmd-${nextCommandId++}`;
       pendingCommands.set(commandId, { pluginId, issuedAt: now() });
-      const invoker = hasPermission(logic.plugin.granted, 'meeting:read') ? command.invoker : null;
-      sendGated(logic, 'chat.command', { commandId, name: command.name, args: command.args, invoker });
+      const payload: ChatCommandPayload = {
+        commandId,
+        name: command.name,
+        args: command.args,
+        invoker: hasPermission(logic.plugin.granted, 'meeting:read') ? command.invoker : null,
+      };
+      sendGated(logic, 'chat.command', payload);
       return commandId;
     },
     instances() {

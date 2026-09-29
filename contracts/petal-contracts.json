@@ -2881,7 +2881,7 @@
       "senderIdentity and senderName come from the authenticated LiveKit participant, never from the payload; a payload field claiming a sender is ignored",
       "payloads larger than chatLimits.maxPayloadBytes are dropped before parsing",
       "a sender exceeding chatLimits.inboundPerSenderPerSecond is dropped until the window refills",
-      "the receiving host parses strictly (shared/logic/chat.ts parseChatPayload): a packet that is not exactly msg, history-req, or history is dropped whole; extra fields are ignored",
+      "the receiving host parses strictly (shared/logic/chat.ts parseChatPayload): a packet that is not exactly msg, post, history-req, history, or history-posts is dropped whole; extra fields are ignored",
       "history entries are a peer's claim; the store marks them relayed unless the relayer attributes them to itself, and they never count as unread",
       "a plugin's message is its own type, post, always carrying via {id, name} as the POSTING client stamped it; history relays posts in a separate history-posts packet, so a client that predates plugin posts drops them instead of showing a plugin's text as the person's own"
     ]

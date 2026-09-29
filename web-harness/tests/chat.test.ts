@@ -59,6 +59,9 @@ test('every contract vector parses back to itself with exactly the pinned fields
     assert.equal(options.topic, CHAT_TOPIC);
     assert.equal(options.reliable, vector.reliable);
     assert.equal(options.destinationIdentities !== undefined, vector.direct, `${vector.name} direct`);
+    if ('viaFields' in vector) {
+      assert.deepEqual(Object.keys(vector.message.via as Record<string, unknown>).sort(), (vector as { viaFields: string[] }).viaFields, `${vector.name} via`);
+    }
     if (vector.entryFields) {
       for (const entry of vector.message.messages as Record<string, unknown>[]) {
         assert.deepEqual(Object.keys(entry).sort(), vector.entryFields);

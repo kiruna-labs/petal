@@ -133,19 +133,28 @@ try {
     [...document.querySelectorAll('[data-testid="chat-via"]')].map((el) => el.textContent?.replace(/\s+/g, ' ').trim()),
   );
   step('B\'s drawer draws the via line', bVia.includes('via Timer'), JSON.stringify(bVia));
+  // The #237 review scenario: three short timers at once spend six posts
+  // (three starts, three finishes); none of the finishes may be refused.
+  for (const label of ['one', 'two', 'three']) {
+    await aInput.fill(`/timer 2s ${label}`);
+    await a.page.keyboard.press('Enter');
+  }
+  const finishes = ["⏱ Time's up: one (2 s)", "⏱ Time's up: two (2 s)", "⏱ Time's up: three (2 s)"];
+  await b.page.waitForFunction((want: string[]) => want.every((t) => window.__petalHarness.chat!.messages().some((m) => m.text === t)), finishes, { timeout: T });
+  step('three timers at once: B receives all three Time\'s up posts', true, finishes.join(' | '));
   await b.page.screenshot({ path: '/tmp/petal-chat-b-drawer.png' });
   await a.page.screenshot({ path: '/tmp/petal-chat-a-timer.png' });
 
   // C joins late and gets the history from the peers: typed messages and plugin posts.
   const c = await peer('Peer C');
-  const cGot = await waitMessages(c, preexisting + 4);
+  const cGot = await waitMessages(c, preexisting + 10);
   const typed = cGot.filter((m) => !m.via);
   const texts = typed.map((m) => m.text);
   step('late joiner C receives the history in order', texts.slice(-2).join(' | ') === 'hello from A | hi from B', texts.join(' | '));
   const relayed = typed.slice(-2).map((m) => `${m.sender.name}:${m.relayed}`);
   step('history entries carry their original senders', typed.slice(-2).every((m) => m.sender.name === 'Peer A' || m.sender.name === 'Peer B'), relayed.join(', '));
   const cPosts = cGot.filter((m) => m.via).map((m) => `${m.sender.name} via ${m.via!.name}: ${m.text}`);
-  step('C receives the Timer posts with their via stamp, and no private answer', cPosts.length === 2 && cPosts.every((p) => p.startsWith('Peer A via Timer: ⏱')) && !cGot.some((m) => m.local), cPosts.join(' | '));
+  step('C receives the Timer posts with their via stamp, and no private answer', cPosts.length === 8 && cPosts.every((p) => p.startsWith('Peer A via Timer: ⏱')) && !cGot.some((m) => m.local), `${cPosts.length} posts`);
   const cUnread = await c.page.evaluate(() => document.getElementById('ctl-chat-badge')!.hidden);
   step('history does not count as unread for C', cUnread);
   await c.page.click('#ctl-chat');
