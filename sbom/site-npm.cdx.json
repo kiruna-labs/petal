@@ -3,17 +3,17 @@
   "bomFormat": "CycloneDX",
   "components": [
     {
-      "bom-ref": "@astrojs/compiler-binding@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding/-/compiler-binding-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding/-/compiler-binding-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c764630d4b967f02cdb5cde68c07524489f0aa1feba9b2daafd726ff914e31b1ef998641ef27ca7b0cd27250315a3219b32a490d7bf596168fd961be3fc4cade"
+          "content": "3f1153c775a8c509db814befc2617a2d14308473bbedae297b03ad26fcf196b62d43dd2d2e0a262cabe4b3f6a4addda28b1da780694e8714289ca35df18a011e"
         }
       ],
       "licenses": [
@@ -24,23 +24,50 @@
         }
       ],
       "name": "@astrojs/compiler-binding",
-      "purl": "pkg:npm/%40astrojs/compiler-binding@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding@0.5.0",
       "scope": "required",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-darwin-arm64@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding-android-arm64@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-darwin-arm64/-/compiler-binding-darwin-arm64-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-android-arm64/-/compiler-binding-android-arm64-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "6555301ee9dd690c8536313aba86b4bac682d163828ad0c22d2ff899d6f8ace8895f0554b8a24133123958ccd72d699a9ac5ed2bf67ffe27cb5ef57961e8781f"
+          "content": "c15be20bfd4a681a86545d036d367c52d004ddcf1337ce0209eef0e23bb7486ce8fc1c962a7f070aa494ffed70765b4608249adf4a63564dc7f034148277e145"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@astrojs/compiler-binding-android-arm64",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-android-arm64@0.5.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.5.0"
+    },
+    {
+      "bom-ref": "@astrojs/compiler-binding-darwin-arm64@0.5.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-darwin-arm64/-/compiler-binding-darwin-arm64-0.5.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e4d34891a19e8b3b43f5041f84ecbe9cdac109955e1ea5593e57c95634caab8c898a24acc4086e0739959662b704385b4a0513f1d6a2e095799bab78fc12106b"
         }
       ],
       "licenses": [
@@ -51,23 +78,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-darwin-arm64",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-darwin-arm64@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-darwin-arm64@0.5.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-darwin-x64@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding-darwin-x64@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-darwin-x64/-/compiler-binding-darwin-x64-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-darwin-x64/-/compiler-binding-darwin-x64-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "148e86f0063cbba7d1d5223f411479c86330b6f6703f7e020e66696791f02466b9d143355484932e1aa4855e1ae3bea99a0776e57d40babd9dab0ea1527ae528"
+          "content": "1d4ff069a71c3900d7a6f8e8580ffdc7369d35921c58a6e52686b0d7d942c5f56ce801d061d6593b365442363c1da2d819ead35e37400dbadad9753e91793d3a"
         }
       ],
       "licenses": [
@@ -78,23 +105,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-darwin-x64",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-darwin-x64@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-darwin-x64@0.5.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-linux-arm64-gnu@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding-linux-arm64-gnu@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-arm64-gnu/-/compiler-binding-linux-arm64-gnu-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-arm64-gnu/-/compiler-binding-linux-arm64-gnu-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "941f602c524aee6f361278da53c9e544111f73018d78789d5b7b128ce0d352330d6a87b056e533f5fc30758e4ce238925c8a962c7df297a4d7f054c3280ef84b"
+          "content": "6b6d697ad049462d263417fe82445916859d187f953a8d334504b333836e7b3e512f9ac516499ba2774c7a391a459cef1372d5614d8d543e4c191800b3857e9d"
         }
       ],
       "licenses": [
@@ -105,23 +132,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-linux-arm64-gnu",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-arm64-gnu@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-arm64-gnu@0.5.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-linux-arm64-musl@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding-linux-arm64-musl@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-arm64-musl/-/compiler-binding-linux-arm64-musl-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-arm64-musl/-/compiler-binding-linux-arm64-musl-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "1cf6ef5aa6f1171c9aa102612f109a4a3b58071f4a068ec9195cc41590a6325f7af1ad8fb121f451f88e0d88183d7a1f4ce22c207d9aa0272b1d730bd080378a"
+          "content": "b79ae6bb6ddbffa7babf46e13e26c2b703dd0015cc44bf9b51a2577642704e9908369e330a01fa7cd6b967af91824805482a6683db9fd4cb5122ac7581d98168"
         }
       ],
       "licenses": [
@@ -132,23 +159,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-linux-arm64-musl",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-arm64-musl@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-arm64-musl@0.5.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-linux-x64-gnu@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding-linux-x64-gnu@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-x64-gnu/-/compiler-binding-linux-x64-gnu-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-x64-gnu/-/compiler-binding-linux-x64-gnu-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b502a894cc6827ffb40262d69b53e627f8becf78b5d195356cdb958c40ee9427f8f1acc432d50d8d36601c9e4c3eda5844d73b765113afc42e8d47ddbb3a02ed"
+          "content": "256b68baec528836f638a285b313b07ea96926e647a351318ab94119f0e0a09546e737895b071ddad536c3851a240e2cb93fed00548b93fbc584ce5f2e3595e0"
         }
       ],
       "licenses": [
@@ -159,23 +186,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-linux-x64-gnu",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-x64-gnu@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-x64-gnu@0.5.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-linux-x64-musl@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding-linux-x64-musl@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-x64-musl/-/compiler-binding-linux-x64-musl-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-linux-x64-musl/-/compiler-binding-linux-x64-musl-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e6fe58ca6b9db31307a773412c24bc05496ee4246a78bb560fd70a4bfe272212041c26e9cfda2499557a2341d6aa60403e15987036b7bf0fef96d60face4024c"
+          "content": "2e56923b9bf7502e88c6e4ca5c3562595fdf1476212ca48ef4e7f5d7c94d057bffb23216c33894fa38c43713e0c5fabfe2851e3aefbad77cba1fddcb04f35338"
         }
       ],
       "licenses": [
@@ -186,23 +213,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-linux-x64-musl",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-x64-musl@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-linux-x64-musl@0.5.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-wasm32-wasi@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding-wasm32-wasi@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-wasm32-wasi/-/compiler-binding-wasm32-wasi-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-wasm32-wasi/-/compiler-binding-wasm32-wasi-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9bfa61b87df1dcf444befd4e9e4338e0da0f87831ab5469d8b1d5f075bb94af30b0b20d3519ca40c96ca9d67f57239d898776507c1dc8d38e5e89ac2a8021773"
+          "content": "20ff82a749bdc8a83f0144f8ef4efbbc711a00e87fa13fe2519c753c39d5d862735312d2128b5d432e4786ffb272f11a74efc36c44d225f016795ee4b5ee1eb5"
         }
       ],
       "licenses": [
@@ -213,23 +240,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-wasm32-wasi",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-wasm32-wasi@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-wasm32-wasi@0.5.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-win32-arm64-msvc@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding-win32-arm64-msvc@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-win32-arm64-msvc/-/compiler-binding-win32-arm64-msvc-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-win32-arm64-msvc/-/compiler-binding-win32-arm64-msvc-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "07dcd87f7a24118f3790cf20c9d9691f60473f4d30e227f13ea958956ae04f0b83eb09e4ac90c2c01960cb5ab7d5c1118c22515cdd65ac4d959a42ef163bffea"
+          "content": "bfaa65c32e464011af7efe108221a1cbfaa4910bd8296ed9876bc102b3a7b06103347c944b8dc2598c0841dc3865d55598bb05ca1c138ae7836443facde8dd75"
         }
       ],
       "licenses": [
@@ -240,23 +267,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-win32-arm64-msvc",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-win32-arm64-msvc@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-win32-arm64-msvc@0.5.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-binding-win32-x64-msvc@0.4.0",
+      "bom-ref": "@astrojs/compiler-binding-win32-x64-msvc@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-win32-x64-msvc/-/compiler-binding-win32-x64-msvc-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-binding-win32-x64-msvc/-/compiler-binding-win32-x64-msvc-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "cc1d0daefd1d19cd336563c60d19a61134cf84346ac998c08e4fa058c955ac95f953cf686e9077554504d59887c4e08de4b4288de2cae8ef0bfdd9e81e896f35"
+          "content": "4a0335e7c712089db8f14217682096d96a924e33a81650eff7779dfc04e0b89a98a5934d54c94e75c3e580d1fb5988ff398783d2b210afb5f244062107bf86d4"
         }
       ],
       "licenses": [
@@ -267,23 +294,23 @@
         }
       ],
       "name": "@astrojs/compiler-binding-win32-x64-msvc",
-      "purl": "pkg:npm/%40astrojs/compiler-binding-win32-x64-msvc@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-binding-win32-x64-msvc@0.5.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
-      "bom-ref": "@astrojs/compiler-rs@0.4.0",
+      "bom-ref": "@astrojs/compiler-rs@0.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/compiler-rs/-/compiler-rs-0.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/compiler-rs/-/compiler-rs-0.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "92856291ea27d64ade132fbf2732d0472defcc71d054e8f272ce1d7a0838bc5b9f280a593b0319bd2480133b5836199c4157cd56c559648e1c1207b771ec406d"
+          "content": "db1232a67e51df71515825d75efd2c7db0e3f3170ebdcd959886ed7b2b713233b33fd2e219fbea6801498e17408f386cebe64acd8cdb484efdaeb3ce6d85b99a"
         }
       ],
       "licenses": [
@@ -294,10 +321,10 @@
         }
       ],
       "name": "@astrojs/compiler-rs",
-      "purl": "pkg:npm/%40astrojs/compiler-rs@0.4.0",
+      "purl": "pkg:npm/%40astrojs/compiler-rs@0.5.0",
       "scope": "required",
       "type": "library",
-      "version": "0.4.0"
+      "version": "0.5.0"
     },
     {
       "bom-ref": "@astrojs/internal-helpers@0.11.0",
@@ -435,17 +462,17 @@
       "version": "3.7.4"
     },
     {
-      "bom-ref": "@astrojs/starlight@0.42.2",
+      "bom-ref": "@astrojs/starlight@0.42.4",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/starlight/-/starlight-0.42.2.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/starlight/-/starlight-0.42.4.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ac3020bf740224ea3417812859eb851b7d4e76140eadc8a901397dfa00a43aaa5088eeeeec547cb956a6f871cd24ef12976d5338040a512504bc25eff2312024"
+          "content": "12c42ca86275b930507083288ef2eaaa0e0abbd89dc22e8f48dba9a483a8626bd53f5f318e85248a331d2a80e48669b029d85b07872d2e11a33d1273c5aabe27"
         }
       ],
       "licenses": [
@@ -456,10 +483,10 @@
         }
       ],
       "name": "@astrojs/starlight",
-      "purl": "pkg:npm/%40astrojs/starlight@0.42.2",
+      "purl": "pkg:npm/%40astrojs/starlight@0.42.4",
       "scope": "required",
       "type": "library",
-      "version": "0.42.2"
+      "version": "0.42.4"
     },
     {
       "bom-ref": "@astrojs/telemetry@3.3.3",
@@ -2668,17 +2695,17 @@
       "version": "1.6.0"
     },
     {
-      "bom-ref": "@napi-rs/wasm-runtime@1.2.3",
+      "bom-ref": "@napi-rs/wasm-runtime@1.2.4",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@napi-rs/wasm-runtime/-/wasm-runtime-1.2.3.tgz"
+          "url": "https://registry.npmjs.org/@napi-rs/wasm-runtime/-/wasm-runtime-1.2.4.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "50c76e31ba8ee6ce7317636435a70c4ffc8ae58e5088abd6af6fb9d1bcc8231143c15276878f5bfa8ca368218f849c5ddbf802db1dfd107bff80756ebb7eb1d9"
+          "content": "009c68503dbfd791121dbbe97328d4dbbe27b003cbb8eb4f1c2934bca24ce698fffc583f0751573568cf9d74d3f4fca60986221e8e333e3d19a265c12a1a32ee"
         }
       ],
       "licenses": [
@@ -2689,10 +2716,10 @@
         }
       ],
       "name": "@napi-rs/wasm-runtime",
-      "purl": "pkg:npm/%40napi-rs/wasm-runtime@1.2.3",
+      "purl": "pkg:npm/%40napi-rs/wasm-runtime@1.2.4",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.3"
+      "version": "1.2.4"
     },
     {
       "bom-ref": "@oslojs/encoding@1.1.0",
@@ -4192,17 +4219,17 @@
       "version": "5.3.2"
     },
     {
-      "bom-ref": "astro@7.3.3",
+      "bom-ref": "astro@7.3.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/astro/-/astro-7.3.3.tgz"
+          "url": "https://registry.npmjs.org/astro/-/astro-7.3.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "345d3c864dde7459159abf5abdff475bfad0c9fe8dae96d50f2623d9c54ddc97e28c385f2588758af5954d8e4f51de7ead1667fd5b6ee2269ec8d94fd08bfa9a"
+          "content": "d69fdeae76aafd1b8449b33934c8d6cdb3ba4a279b306ac67189468cc7c1873ce033e9ff5fb014995cb0f01a96d90602762be9b07c0905c0f57ea9a54d98d91e"
         }
       ],
       "licenses": [
@@ -4213,10 +4240,10 @@
         }
       ],
       "name": "astro",
-      "purl": "pkg:npm/astro@7.3.3",
+      "purl": "pkg:npm/astro@7.3.5",
       "scope": "required",
       "type": "library",
-      "version": "7.3.3"
+      "version": "7.3.5"
     },
     {
       "bom-ref": "astro-expressive-code@0.44.2",
@@ -4246,17 +4273,17 @@
       "version": "0.44.2"
     },
     {
-      "bom-ref": "@astrojs/markdown-satteri@0.4.1",
+      "bom-ref": "@astrojs/markdown-satteri@0.4.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/markdown-satteri/-/markdown-satteri-0.4.1.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/markdown-satteri/-/markdown-satteri-0.4.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "1278876c535ae924070e287b267a4fa2cdcd5973ba85db78ada05c3a8b1f1a695f73780ff4223fb04480dd539fd4f80967b4857dec25656f4b8af9f426e80466"
+          "content": "83841e8579c1fcccf14169d27f5ecd7221489cca84272f7de3ca7c71cef31a0febefdf799b42e7e4f32bdd79678f6e227b2d4b7216a86774b34ce6b70f83ffdf"
         }
       ],
       "licenses": [
@@ -4267,10 +4294,10 @@
         }
       ],
       "name": "@astrojs/markdown-satteri",
-      "purl": "pkg:npm/%40astrojs/markdown-satteri@0.4.1",
+      "purl": "pkg:npm/%40astrojs/markdown-satteri@0.4.2",
       "scope": "required",
       "type": "library",
-      "version": "0.4.1"
+      "version": "0.4.2"
     },
     {
       "bom-ref": "axobject-query@4.1.0",
@@ -8365,17 +8392,17 @@
       "version": "2.1.1"
     },
     {
-      "bom-ref": "obug@2.1.4",
+      "bom-ref": "obug@3.0.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/obug/-/obug-2.1.4.tgz"
+          "url": "https://registry.npmjs.org/obug/-/obug-3.0.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e1af8eb18bfd524b4e24a13e9750383ae7c381d445f4f89f5a3fad2671d4468fcff963b1a46e06cd414bf6a09a96659ab9aa3aa20886f90be70a8bf03e8c8058"
+          "content": "e6fbc1e7e5bb78fbfea77baac62f91716d570332d6d3f871b77ff85f82dce2a1ee7733a1981881c0e63a0d1a1be169da9c0106bcd70b8c5f8a34eb9fad4a0443"
         }
       ],
       "licenses": [
@@ -8386,10 +8413,10 @@
         }
       ],
       "name": "obug",
-      "purl": "pkg:npm/obug@2.1.4",
+      "purl": "pkg:npm/obug@3.0.0",
       "scope": "required",
       "type": "library",
-      "version": "2.1.4"
+      "version": "3.0.0"
     },
     {
       "bom-ref": "ofetch@1.5.1",
@@ -9718,17 +9745,17 @@
       "version": "1.0.3"
     },
     {
-      "bom-ref": "tinyclip@0.1.15",
+      "bom-ref": "tinyclip@1.0.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/tinyclip/-/tinyclip-0.1.15.tgz"
+          "url": "https://registry.npmjs.org/tinyclip/-/tinyclip-1.0.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ba8df769b1fe032b34c58683caca01b78f781dbde1b04733329702d0cc0597bef7a5acce471e1f9af2a1725851d70a2751b07abefa51b2f54cc2785fa9e31cf8"
+          "content": "9d3bf6ada285333186e89269d25a4d0ec44f75f144e941e5bb6ad51235e8f2f931d594b72d6d82557a8868bbbcc5996efbab5b16cf55e7c41cfc99a4fc88bbc0"
         }
       ],
       "licenses": [
@@ -9739,10 +9766,10 @@
         }
       ],
       "name": "tinyclip",
-      "purl": "pkg:npm/tinyclip@0.1.15",
+      "purl": "pkg:npm/tinyclip@1.0.3",
       "scope": "required",
       "type": "library",
-      "version": "0.1.15"
+      "version": "1.0.3"
     },
     {
       "bom-ref": "tinyexec@1.3.1",
@@ -10678,8 +10705,8 @@
   "dependencies": [
     {
       "dependsOn": [
-        "@astrojs/starlight@0.42.2",
-        "astro@7.3.3",
+        "@astrojs/starlight@0.42.4",
+        "astro@7.3.5",
         "sharp@0.35.4",
         "starlight-links-validator@0.26.0"
       ],
@@ -10687,61 +10714,68 @@
     },
     {
       "dependsOn": [
-        "@astrojs/compiler-binding-darwin-arm64@0.4.0",
-        "@astrojs/compiler-binding-darwin-x64@0.4.0",
-        "@astrojs/compiler-binding-linux-arm64-gnu@0.4.0",
-        "@astrojs/compiler-binding-linux-arm64-musl@0.4.0",
-        "@astrojs/compiler-binding-linux-x64-gnu@0.4.0",
-        "@astrojs/compiler-binding-linux-x64-musl@0.4.0",
-        "@astrojs/compiler-binding-wasm32-wasi@0.4.0",
-        "@astrojs/compiler-binding-win32-arm64-msvc@0.4.0",
-        "@astrojs/compiler-binding-win32-x64-msvc@0.4.0"
+        "@astrojs/compiler-binding-android-arm64@0.5.0",
+        "@astrojs/compiler-binding-darwin-arm64@0.5.0",
+        "@astrojs/compiler-binding-darwin-x64@0.5.0",
+        "@astrojs/compiler-binding-linux-arm64-gnu@0.5.0",
+        "@astrojs/compiler-binding-linux-arm64-musl@0.5.0",
+        "@astrojs/compiler-binding-linux-x64-gnu@0.5.0",
+        "@astrojs/compiler-binding-linux-x64-musl@0.5.0",
+        "@astrojs/compiler-binding-wasm32-wasi@0.5.0",
+        "@astrojs/compiler-binding-win32-arm64-msvc@0.5.0",
+        "@astrojs/compiler-binding-win32-x64-msvc@0.5.0"
       ],
-      "ref": "@astrojs/compiler-binding@0.4.0"
+      "ref": "@astrojs/compiler-binding@0.5.0"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-darwin-arm64@0.4.0"
+      "ref": "@astrojs/compiler-binding-android-arm64@0.5.0"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-darwin-x64@0.4.0"
+      "ref": "@astrojs/compiler-binding-darwin-arm64@0.5.0"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-linux-arm64-gnu@0.4.0"
+      "ref": "@astrojs/compiler-binding-darwin-x64@0.5.0"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-linux-arm64-musl@0.4.0"
+      "ref": "@astrojs/compiler-binding-linux-arm64-gnu@0.5.0"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-linux-x64-gnu@0.4.0"
+      "ref": "@astrojs/compiler-binding-linux-arm64-musl@0.5.0"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-linux-x64-musl@0.4.0"
+      "ref": "@astrojs/compiler-binding-linux-x64-gnu@0.5.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@astrojs/compiler-binding-linux-x64-musl@0.5.0"
     },
     {
       "dependsOn": [
-        "@napi-rs/wasm-runtime@1.2.3"
+        "@emnapi/core@1.11.3",
+        "@emnapi/runtime@1.11.3",
+        "@napi-rs/wasm-runtime@1.2.4"
       ],
-      "ref": "@astrojs/compiler-binding-wasm32-wasi@0.4.0"
+      "ref": "@astrojs/compiler-binding-wasm32-wasi@0.5.0"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-win32-arm64-msvc@0.4.0"
+      "ref": "@astrojs/compiler-binding-win32-arm64-msvc@0.5.0"
     },
     {
       "dependsOn": [],
-      "ref": "@astrojs/compiler-binding-win32-x64-msvc@0.4.0"
+      "ref": "@astrojs/compiler-binding-win32-x64-msvc@0.5.0"
     },
     {
       "dependsOn": [
-        "@astrojs/compiler-binding@0.4.0"
+        "@astrojs/compiler-binding@0.5.0"
       ],
-      "ref": "@astrojs/compiler-rs@0.4.0"
+      "ref": "@astrojs/compiler-rs@0.5.0"
     },
     {
       "dependsOn": [
@@ -10767,7 +10801,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.3.3",
+        "astro@7.3.5",
         "@astrojs/internal-helpers@0.11.0",
         "@astrojs/markdown-satteri@0.4.0",
         "es-module-lexer@2.3.2"
@@ -10789,7 +10823,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.3.3",
+        "astro@7.3.5",
         "@astrojs/markdown-satteri@0.4.0",
         "@astrojs/mdx@8.0.0",
         "@astrojs/sitemap@3.7.4",
@@ -10819,7 +10853,7 @@
         "unist-util-visit@5.1.0",
         "vfile@6.0.3"
       ],
-      "ref": "@astrojs/starlight@0.42.2"
+      "ref": "@astrojs/starlight@0.42.4"
     },
     {
       "dependsOn": [
@@ -10879,7 +10913,7 @@
       "dependsOn": [
         "@emnapi/core@1.11.1",
         "@emnapi/runtime@1.11.1",
-        "@napi-rs/wasm-runtime@1.2.3"
+        "@napi-rs/wasm-runtime@1.2.4"
       ],
       "ref": "@bruits/satteri-wasm32-wasi@0.10.5"
     },
@@ -11236,7 +11270,7 @@
         "@emnapi/runtime@1.11.3",
         "@tybys/wasm-util@0.10.3"
       ],
-      "ref": "@napi-rs/wasm-runtime@1.2.3"
+      "ref": "@napi-rs/wasm-runtime@1.2.4"
     },
     {
       "dependsOn": [],
@@ -11507,9 +11541,9 @@
     },
     {
       "dependsOn": [
-        "@astrojs/compiler-rs@0.4.0",
+        "@astrojs/compiler-rs@0.5.0",
         "@astrojs/internal-helpers@0.11.0",
-        "@astrojs/markdown-satteri@0.4.1",
+        "@astrojs/markdown-satteri@0.4.2",
         "@astrojs/telemetry@3.3.3",
         "@capsizecss/unpack@4.0.1",
         "@clack/prompts@1.7.0",
@@ -11539,7 +11573,7 @@
         "magicast@0.5.4",
         "mrmime@2.0.1",
         "neotraverse@1.0.1",
-        "obug@2.1.4",
+        "obug@3.0.0",
         "p-limit@7.3.2",
         "p-queue@9.3.3",
         "package-manager-detector@1.8.0",
@@ -11548,7 +11582,7 @@
         "shiki@4.4.3",
         "smol-toml@1.8.0",
         "svgo@4.1.0",
-        "tinyclip@0.1.15",
+        "tinyclip@1.0.3",
         "tinyexec@1.3.1",
         "tinyglobby@0.2.17",
         "ultrahtml@1.7.0",
@@ -11562,11 +11596,11 @@
         "zod@4.5.4",
         "sharp@0.35.4"
       ],
-      "ref": "astro@7.3.3"
+      "ref": "astro@7.3.5"
     },
     {
       "dependsOn": [
-        "astro@7.3.3",
+        "astro@7.3.5",
         "rehype-expressive-code@0.44.2",
         "url-extras@0.1.0"
       ],
@@ -11579,7 +11613,7 @@
         "github-slugger@2.0.0",
         "satteri@0.10.5"
       ],
-      "ref": "@astrojs/markdown-satteri@0.4.1"
+      "ref": "@astrojs/markdown-satteri@0.4.2"
     },
     {
       "dependsOn": [],
@@ -12551,7 +12585,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "obug@2.1.4"
+      "ref": "obug@3.0.0"
     },
     {
       "dependsOn": [
@@ -12850,8 +12884,8 @@
     },
     {
       "dependsOn": [
-        "@astrojs/starlight@0.42.2",
-        "astro@7.3.3",
+        "@astrojs/starlight@0.42.4",
+        "astro@7.3.5",
         "@astrojs/markdown-satteri@0.4.0",
         "@types/picomatch@4.0.3",
         "github-slugger@2.0.0",
@@ -12910,7 +12944,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "tinyclip@0.1.15"
+      "ref": "tinyclip@1.0.3"
     },
     {
       "dependsOn": [],

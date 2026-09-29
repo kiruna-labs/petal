@@ -3,6 +3,438 @@
   "bomFormat": "CycloneDX",
   "components": [
     {
+      "bom-ref": "@babel/code-frame@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/code-frame/-/code-frame-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "02ea7b69439fa5b01483644e38937a230e5ff43301973bb4988926fe66a52d014dfd84203b8f300a3d0ac5adec10726f3d5160eec891faa4489f05dddaa8502b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/code-frame",
+      "purl": "pkg:npm/%40babel/code-frame@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/compat-data@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/compat-data/-/compat-data-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "968713910c8abf0204801cd5ae7f3af7779b73dec5d94f191e36d7c035c9e459f64c2a4dc1394a71a28b91d1e8a7973f89c38513baaded0f490b986728d6ba1a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/compat-data",
+      "purl": "pkg:npm/%40babel/compat-data@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/core@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/core/-/core-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4601c10afb636ce2b681748d04d22436811cf6aa1512d6aede18fc804a8a42e2f71d90226ca6ab585108dcb7e6e8460a90b6a53a1f1e4ab8fd6fe721f47fd504"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/core",
+      "purl": "pkg:npm/%40babel/core@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/generator@7.29.8",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/generator/-/generator-7.29.8.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "8196dea6c761dd60ed8192962febd33e1ef52d206b9bf638fd00d905509c61f99e4c412ea0e630952cbe1b54ad7c983efd9cb9e74bbfdd30136e6eea0db6ccb6"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/generator",
+      "purl": "pkg:npm/%40babel/generator@7.29.8",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.8"
+    },
+    {
+      "bom-ref": "@babel/helper-compilation-targets@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/helper-compilation-targets/-/helper-compilation-targets-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c1e9ba59a063e0d69561574d84b3cf55a7044ba649f8a0417d2913303dd86716cfdeb9b70e2f39b4953996369436168eca7b7e023d31aee858bb3401b7c9fbd6"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/helper-compilation-targets",
+      "purl": "pkg:npm/%40babel/helper-compilation-targets@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/helper-globals@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/helper-globals/-/helper-globals-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "de7415500b6f90a1fdcda85f5a0c3de8973fb853a68c0084d64433f3613696a5a61c1823cdb365b02db69ee4137da86659e42d4eae6743fe0d9ddd80d708f8cc"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/helper-globals",
+      "purl": "pkg:npm/%40babel/helper-globals@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/helper-module-imports@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/helper-module-imports/-/helper-module-imports-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7a31f0ad0418726f719d38af4a19f62033a5233227377e005ec92fabd42272f0ad133ab5573725bbfb4a17c26ad4283c246d862fafc49a382c093ee55dea44de"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/helper-module-imports",
+      "purl": "pkg:npm/%40babel/helper-module-imports@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/helper-module-transforms@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/helper-module-transforms/-/helper-module-transforms-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "50f5154b25db3a1eb6eca8822064128305b319e04a2e4689f4f24476b9e0230312cf12d1e234b8f9fd5fd636fb57305b83c9c52da628b6f54f1424ea76b99302"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/helper-module-transforms",
+      "purl": "pkg:npm/%40babel/helper-module-transforms@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/helper-string-parser@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/helper-string-parser/-/helper-string-parser-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3dbe628cfad9f3d1831fcdb6dcbe143fc8ba400a56c6cd3845b3d02537960d5d3f91e476137e8c78a9f2afa2d899452fa91448f88bfced2b85d56e84ac837363"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/helper-string-parser",
+      "purl": "pkg:npm/%40babel/helper-string-parser@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/helper-validator-identifier@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/helper-validator-identifier/-/helper-validator-identifier-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a9e8711a4463e7987f7dff0431a27e71887268a947231a980e7ebcdb0403ed1369f54ba3390b07a20dae4b4af6bf3af8a56fac5dff7435e79aca370d697ddf16"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/helper-validator-identifier",
+      "purl": "pkg:npm/%40babel/helper-validator-identifier@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/helper-validator-option@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/helper-validator-option/-/helper-validator-option-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "37d644aeb0fec96e607820ed06a9cea31991f3eb4d2a21aec4a943a6e2717ecaa96b674571ec5ace218013faa81cb8830eb79534cba9c46992a0d972bec03783"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/helper-validator-option",
+      "purl": "pkg:npm/%40babel/helper-validator-option@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/helpers@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/helpers/-/helpers-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d64da500644c7c74dcc2e35870235499a51f7e642ff0a58c7e1da225451e465c25c07e0574d1bb99f3c8d7434f7cb1c9153844e13cabe26bfb9133593a23ee06"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/helpers",
+      "purl": "pkg:npm/%40babel/helpers@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/parser@7.29.9",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/parser/-/parser-7.29.9.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "0a35eb3474e7bea055a8781d072b18def9364fcb692476f9fd131e1c9053c956bdc60ba0081d02253c7fde83bc455d904503f7f75456a41ec3ea12e39bc57db8"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/parser",
+      "purl": "pkg:npm/%40babel/parser@7.29.9",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.9"
+    },
+    {
+      "bom-ref": "@babel/template@7.29.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/template/-/template-7.29.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a6eabe19fdf9a08db815e375d4b92851016abfdbb035e5a9c57662fc98b7ad1228280cca9f145a67e1a48f4bca4bd6428931127e783537d2f23b25efa3e9be1a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/template",
+      "purl": "pkg:npm/%40babel/template@7.29.7",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.7"
+    },
+    {
+      "bom-ref": "@babel/traverse@7.29.8",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/traverse/-/traverse-7.29.8.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "239cfb1f76dfff8d64b6c3552eda4dd3001adf7e8792a20743906e3cb1214e4b758d54b266978d288cd38045a69718dd83cd51d0881409c684f8e93736fadf66"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/traverse",
+      "purl": "pkg:npm/%40babel/traverse@7.29.8",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.8"
+    },
+    {
+      "bom-ref": "@babel/types@7.29.8",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@babel/types/-/types-7.29.8.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "563d6317770f7f183b3807e823b42754a2e820b966d8917da67547ad7f2ac7b0073226164fe343000ee30a194d8114b85932dcfdf0f59572e63e2c65ba3fb71a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@babel/types",
+      "purl": "pkg:npm/%40babel/types@7.29.8",
+      "scope": "required",
+      "type": "library",
+      "version": "7.29.8"
+    },
+    {
       "bom-ref": "@bufbuild/protobuf@1.10.1",
       "externalReferences": [
         {
@@ -886,17 +1318,17 @@
       "version": "0.28.1"
     },
     {
-      "bom-ref": "@google/genai@2.23.0",
+      "bom-ref": "@google/genai@2.24.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@google/genai/-/genai-2.23.0.tgz"
+          "url": "https://registry.npmjs.org/@google/genai/-/genai-2.24.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "34533392da19ee3260f40037bd46d66687279103fa0d21b32f6d4e4707557015a41e58b793bbfa07dcf2d3b3386d388a0c0c8859f521d89fe82d8c42bb484da5"
+          "content": "6c8bb97a8c45d4068f5acf62be65091a9d51a431f26a9a0e0ef5af9e4cd10f1d824c85ba5095c58437638f406546f7b764730cb84910055ac0fc02eaa56e1aa4"
         }
       ],
       "licenses": [
@@ -907,10 +1339,145 @@
         }
       ],
       "name": "@google/genai",
-      "purl": "pkg:npm/%40google/genai@2.23.0",
+      "purl": "pkg:npm/%40google/genai@2.24.0",
       "scope": "required",
       "type": "library",
-      "version": "2.23.0"
+      "version": "2.24.0"
+    },
+    {
+      "bom-ref": "@jridgewell/gen-mapping@0.3.13",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "da492dffb9e227a32010fc45d1b61d43a7ad65a03e7d0bc370b29c921cb5c8840ecdaa0a8c10634a3eb7fda2d58d8137aa146de5dbccfae5327c283a50a0816c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@jridgewell/gen-mapping",
+      "purl": "pkg:npm/%40jridgewell/gen-mapping@0.3.13",
+      "scope": "required",
+      "type": "library",
+      "version": "0.3.13"
+    },
+    {
+      "bom-ref": "@jridgewell/remapping@2.3.5",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@jridgewell/remapping/-/remapping-2.3.5.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2c8f6effe95a606e03b354c3292256d983eb22571560ec22d9f502eb1078de5b9e0a383157895f7ce0990ad605887e9334e5feb50297c7ded3e082876e1c8711"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@jridgewell/remapping",
+      "purl": "pkg:npm/%40jridgewell/remapping@2.3.5",
+      "scope": "required",
+      "type": "library",
+      "version": "2.3.5"
+    },
+    {
+      "bom-ref": "@jridgewell/resolve-uri@3.1.2",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@jridgewell/resolve-uri/-/resolve-uri-3.1.2.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6d12128022233f6d3fb5b5923d63048b9e1054f45913192e0fd9492fe508c542adc15240f305b54eb6f58ccb354455e8d42053359ff98690bd42f98a59da292b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@jridgewell/resolve-uri",
+      "purl": "pkg:npm/%40jridgewell/resolve-uri@3.1.2",
+      "scope": "required",
+      "type": "library",
+      "version": "3.1.2"
+    },
+    {
+      "bom-ref": "@jridgewell/sourcemap-codec@1.6.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4fb8dffb9ce0b191f0349e25bd0eff69ecdbca4d27357fb32555a998703b558b04c7b6bbaabe5183921bb4916a920cdee58dacaeeab545463c43cdfb39dee217"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@jridgewell/sourcemap-codec",
+      "purl": "pkg:npm/%40jridgewell/sourcemap-codec@1.6.0",
+      "scope": "required",
+      "type": "library",
+      "version": "1.6.0"
+    },
+    {
+      "bom-ref": "@jridgewell/trace-mapping@0.3.31",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "cf3351f9275048327373c8e869e3fc410a0242bf0db98c76748232b65d507811191c9f6e5ba85e6ecad881bcfc849c1441aa374d608cb667d5f0dbb5b7038b03"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@jridgewell/trace-mapping",
+      "purl": "pkg:npm/%40jridgewell/trace-mapping@0.3.31",
+      "scope": "required",
+      "type": "library",
+      "version": "0.3.31"
     },
     {
       "bom-ref": "@livekit/protocol@1.51.0",
@@ -967,193 +1534,544 @@
       "version": "1.9.1"
     },
     {
-      "bom-ref": "@opentelemetry/api-logs@0.220.0",
+      "bom-ref": "@oxc-parser/binding-android-arm-eabi@0.143.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@opentelemetry/api-logs/-/api-logs-0.220.0.tgz"
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-android-arm-eabi/-/binding-android-arm-eabi-0.143.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "0a655ae08989fb29dfacf30d6805c7113e8185be384b0ce67f254916af678b68e05c947f97b0ba81f54575d3661cff993a43fd71fe1ff4305eebca952d31dcf7"
+          "content": "9fdba8cd42d67e53ea06d76623c94069b2ea18a3602d534dd191fc1df802c2928636dcd1cdab81efa8d3896ff760b91c03b375cec9298bd19d56766ebb5480be"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "Apache-2.0"
+            "id": "MIT"
           }
         }
       ],
-      "name": "@opentelemetry/api-logs",
-      "purl": "pkg:npm/%40opentelemetry/api-logs@0.220.0",
-      "scope": "required",
+      "name": "@oxc-parser/binding-android-arm-eabi",
+      "purl": "pkg:npm/%40oxc-parser/binding-android-arm-eabi@0.143.0",
+      "scope": "optional",
       "type": "library",
-      "version": "0.220.0"
+      "version": "0.143.0"
     },
     {
-      "bom-ref": "@opentelemetry/core@2.11.0",
+      "bom-ref": "@oxc-parser/binding-android-arm64@0.143.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@opentelemetry/core/-/core-2.11.0.tgz"
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-android-arm64/-/binding-android-arm64-0.143.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ed83f8e171f4b55ebe31be78c766067fce22ef28bedf530166513c270be8ce4c724ef5db4a9d745fb708ed8138f42849dec84c268066089177fb540504972d18"
+          "content": "f416dd8c711393a3b7cc7fc30e277d22006d1741a5a4b69b34a376df5bab697a510d27d8fa2899c533f96e4d59eb7181a309d576174834521e75d98ccf8333a5"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "Apache-2.0"
+            "id": "MIT"
           }
         }
       ],
-      "name": "@opentelemetry/core",
-      "purl": "pkg:npm/%40opentelemetry/core@2.11.0",
-      "scope": "required",
+      "name": "@oxc-parser/binding-android-arm64",
+      "purl": "pkg:npm/%40oxc-parser/binding-android-arm64@0.143.0",
+      "scope": "optional",
       "type": "library",
-      "version": "2.11.0"
+      "version": "0.143.0"
     },
     {
-      "bom-ref": "@opentelemetry/instrumentation@0.220.0",
+      "bom-ref": "@oxc-parser/binding-darwin-arm64@0.143.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@opentelemetry/instrumentation/-/instrumentation-0.220.0.tgz"
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-darwin-arm64/-/binding-darwin-arm64-0.143.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c50c771365b13f5983bcacf12f15fe0930ad34b6b9eb4609677d3ceea6077ab97662688aa6fec01fe740cbbbe6c7e795ad9e41c217d650056828ea3108d1dca7"
+          "content": "821fba79ca07532e3fb1472894197fd6a3d72816d8371158d0f934ba3810bc83533127ed258ee8e326fc80e90324f799781f3e6bebbbc537baba6a0ff0de4714"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "Apache-2.0"
+            "id": "MIT"
           }
         }
       ],
-      "name": "@opentelemetry/instrumentation",
-      "purl": "pkg:npm/%40opentelemetry/instrumentation@0.220.0",
-      "scope": "required",
+      "name": "@oxc-parser/binding-darwin-arm64",
+      "purl": "pkg:npm/%40oxc-parser/binding-darwin-arm64@0.143.0",
+      "scope": "optional",
       "type": "library",
-      "version": "0.220.0"
+      "version": "0.143.0"
     },
     {
-      "bom-ref": "@opentelemetry/resources@2.11.0",
+      "bom-ref": "@oxc-parser/binding-darwin-x64@0.143.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@opentelemetry/resources/-/resources-2.11.0.tgz"
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-darwin-x64/-/binding-darwin-x64-0.143.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "21eefef2af0c0c5e05004402295313c7745e52fc622008088a25b773d25d98ff3e1cc703cb6d29b93f801e37b19c4c609dbbc1c6343d7e39050d6ae2909da340"
+          "content": "a9dd6197677e957807bff550fccf6a9bc4eb302e53e11a83070b4e9e5fb50f440c8f0733fbc01a07825283c49381e6a0d063fa6ba2fbe1710602cad348958dcd"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "Apache-2.0"
+            "id": "MIT"
           }
         }
       ],
-      "name": "@opentelemetry/resources",
-      "purl": "pkg:npm/%40opentelemetry/resources@2.11.0",
-      "scope": "required",
+      "name": "@oxc-parser/binding-darwin-x64",
+      "purl": "pkg:npm/%40oxc-parser/binding-darwin-x64@0.143.0",
+      "scope": "optional",
       "type": "library",
-      "version": "2.11.0"
+      "version": "0.143.0"
     },
     {
-      "bom-ref": "@opentelemetry/sdk-trace@2.11.0",
+      "bom-ref": "@oxc-parser/binding-freebsd-x64@0.143.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@opentelemetry/sdk-trace/-/sdk-trace-2.11.0.tgz"
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-freebsd-x64/-/binding-freebsd-x64-0.143.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "7c59d3a869bcfc6ef7190567c588bb2d76b565560452f80be972352e9bd5d1b3c2ed643f64680ac424a5f059e56412ada3d2471c41533bab3a094a6fbedc05ac"
+          "content": "3395d770d6bb68ea8b3ca4d1e359ac7e084abb6c90e315af0a6d75fe0c14d09ccecc7364e6c816fffad512327e2cee3cf950c03335d34b3bab515c480cac28cf"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "Apache-2.0"
+            "id": "MIT"
           }
         }
       ],
-      "name": "@opentelemetry/sdk-trace",
-      "purl": "pkg:npm/%40opentelemetry/sdk-trace@2.11.0",
-      "scope": "required",
+      "name": "@oxc-parser/binding-freebsd-x64",
+      "purl": "pkg:npm/%40oxc-parser/binding-freebsd-x64@0.143.0",
+      "scope": "optional",
       "type": "library",
-      "version": "2.11.0"
+      "version": "0.143.0"
     },
     {
-      "bom-ref": "@opentelemetry/sdk-trace-base@2.11.0",
+      "bom-ref": "@oxc-parser/binding-linux-arm-gnueabihf@0.143.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@opentelemetry/sdk-trace-base/-/sdk-trace-base-2.11.0.tgz"
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-0.143.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "1f5f71fd35ff2d976a8983a333b7eab52c70969942e6981e95abea6d07476e176ad2afc023f4c690cd9d7c6baeca74d79893de1761e8655a0f0eef931a85bbf0"
+          "content": "4ff197bacb8e90f3508424024816dc53f37c8f4ac0ca9b83065d48c852be972613e7de17b15cfcd1c94f0bf3ad6d24a9046c89c63f2e6047dcb7156ec55628c3"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "Apache-2.0"
+            "id": "MIT"
           }
         }
       ],
-      "name": "@opentelemetry/sdk-trace-base",
-      "purl": "pkg:npm/%40opentelemetry/sdk-trace-base@2.11.0",
-      "scope": "required",
+      "name": "@oxc-parser/binding-linux-arm-gnueabihf",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-arm-gnueabihf@0.143.0",
+      "scope": "optional",
       "type": "library",
-      "version": "2.11.0"
+      "version": "0.143.0"
     },
     {
-      "bom-ref": "@opentelemetry/semantic-conventions@1.43.0",
+      "bom-ref": "@oxc-parser/binding-linux-arm-musleabihf@0.143.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@opentelemetry/semantic-conventions/-/semantic-conventions-1.43.0.tgz"
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-arm-musleabihf/-/binding-linux-arm-musleabihf-0.143.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "7926164e6eb6d2d4e4e3910a49e75a50bf0c15823c856d7ae21217b20207cb1bb75686d40777c50aee6dd2141bcba3a85913ec1b52a42941b633951a7622e256"
+          "content": "a0abb845c0655d2aa8dce0bad9da7a6139d069922eacd0e9097dc19c0337f9b271b7bb3c2764c928c9c2d1461eaf5aa19516830a0eb0913693c3ed8896c675db"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "Apache-2.0"
+            "id": "MIT"
           }
         }
       ],
-      "name": "@opentelemetry/semantic-conventions",
-      "purl": "pkg:npm/%40opentelemetry/semantic-conventions@1.43.0",
+      "name": "@oxc-parser/binding-linux-arm-musleabihf",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-arm-musleabihf@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-linux-arm64-gnu@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "58905b0f5f3a01998c19a48886592d0beacf97c2f7a5e0935c087cf0887db84bcad1e9f698fa231b20866222fa987b55d513d5dc9c9f256e6dea7e6187495784"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-linux-arm64-gnu",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-arm64-gnu@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-linux-arm64-musl@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-arm64-musl/-/binding-linux-arm64-musl-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b7501c60ec04ce071e69d4f8bf97bebda0826f4027702037bf9032cdf040cffb4cab5d6acd571c5caccd1ed91676306c82f4cac1191a505dd0bd3e24a2df2f71"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-linux-arm64-musl",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-arm64-musl@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-linux-ppc64-gnu@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "46c9cefcda03f37efa2cc26af094bc4f023489e35a1514ee35ed865499ed420ea0c1934c10d66c11b9271dd5708e93a6c5d18b1a875cc1a1926c0791af90608f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-linux-ppc64-gnu",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-ppc64-gnu@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-linux-riscv64-gnu@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-riscv64-gnu/-/binding-linux-riscv64-gnu-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e3c7d255f47d4d98b9080499172bf4542eb3e810a87a2845b17d37d66003fe8487eddf4f62c3e022acdaeddf668cfed9d8a4c4a531721fa488bb4522e91d6f76"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-linux-riscv64-gnu",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-riscv64-gnu@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-linux-riscv64-musl@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-riscv64-musl/-/binding-linux-riscv64-musl-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4fc0a9743f927c4d350e720e0f81e9571bb464939f309fd5842be290a7da5c0c6467ef6f7b22ccfc3da1a62ed8da1154c8f99540edc53591e663357f5a5551e2"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-linux-riscv64-musl",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-riscv64-musl@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-linux-s390x-gnu@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "40b75e32c09c69c7a73c416c7f19c1503175cbaa29cb3e7e7e63b3f5b7c3e58edf88608cba9502b81dca4cf421370b21206d4ff5f3ea6abf4c1f1b810dde1bc1"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-linux-s390x-gnu",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-s390x-gnu@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-linux-x64-gnu@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-x64-gnu/-/binding-linux-x64-gnu-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "eb9f6e8dfa8bcba93b72e1f7b1bce177c6feced4aafa2e84d84f691bbf10d019878c01317c621d81cf1c1a031dc00a330d7799147909f8b5d825d5ac686760cb"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-linux-x64-gnu",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-x64-gnu@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-linux-x64-musl@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-linux-x64-musl/-/binding-linux-x64-musl-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "fccc3ff63e137d97272a984faf3384eade0c3249d769d70002e55494345317f113581e713a042f389576321f567bf6d6c59768c5a18075cfa1cb81ae630436c9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-linux-x64-musl",
+      "purl": "pkg:npm/%40oxc-parser/binding-linux-x64-musl@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-openharmony-arm64@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-openharmony-arm64/-/binding-openharmony-arm64-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f2b20a591d8116e89f6c82bfd5707dc1369276db89db976513b6506039c4c23ff6c47daf1ecc67bc88c74f7663495b8b2f0186952b25206fdf6ce27c4d5f2b4f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-openharmony-arm64",
+      "purl": "pkg:npm/%40oxc-parser/binding-openharmony-arm64@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-win32-arm64-msvc@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e54f6441831f45123a66aeca0f181b20fd113272ab7e7de02dea5132026e4643d25002d38910a4f5dfeeca16f89460e351dcf02bb98190aaa12e0cc13c298ba5"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-win32-arm64-msvc",
+      "purl": "pkg:npm/%40oxc-parser/binding-win32-arm64-msvc@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-win32-ia32-msvc@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-win32-ia32-msvc/-/binding-win32-ia32-msvc-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "db93fb01a1e4e11f3c62fd971f8813a0356687470ebbe6c4511414d74091ae6be069b7d102b48600fe68b26c1429e4941e3d154b9d2ea5ba5b456596fe6ee61c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-win32-ia32-msvc",
+      "purl": "pkg:npm/%40oxc-parser/binding-win32-ia32-msvc@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-parser/binding-win32-x64-msvc@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-parser/binding-win32-x64-msvc/-/binding-win32-x64-msvc-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "391321dc9135b3a57bc9289c7512bbbe06834279f9a3e50783d72df7cf4f9561db7a5f0ef4046b9965ccea4663ac132d36e73135ac90f20ebd1b455f5b384037"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-parser/binding-win32-x64-msvc",
+      "purl": "pkg:npm/%40oxc-parser/binding-win32-x64-msvc@0.143.0",
+      "scope": "optional",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
+      "bom-ref": "@oxc-project/types@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@oxc-project/types/-/types-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "bba25974b0532e8b6b342f5577abcfb2c20d773702ce578a007e8424a22641bec6b58bd7e6478dd9dc64a0ae38b2d09ce2d7df13a41046d6535d54b3b0b52558"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@oxc-project/types",
+      "purl": "pkg:npm/%40oxc-project/types@0.143.0",
       "scope": "required",
       "type": "library",
-      "version": "1.43.0"
+      "version": "0.143.0"
     },
     {
       "bom-ref": "@protobufjs/aspromise@1.1.2",
@@ -1399,17 +2317,44 @@
       "version": "1.1.2"
     },
     {
-      "bom-ref": "@sentry/conventions@0.16.0",
+      "bom-ref": "@sentry/bundler-plugins@11.0.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/conventions/-/conventions-0.16.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/bundler-plugins/-/bundler-plugins-11.0.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "7cef4f2e61dd55445c48f52958222d580b602a233019d2476e8be8484c8ba655f9b31b36ba0bc8e0204f4eb92482a84e6e764e0f40a7581283cd2550601284c9"
+          "content": "39ee3ff026ec62ba9d8d3b7dd4914c050cdae7d21651f4b03eb94719b6c94fea950b279b5f66f2931bf799f6ba4f2fc69adf3e82f6bf0c8e8a8dcc9bf4481706"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@sentry/bundler-plugins",
+      "purl": "pkg:npm/%40sentry/bundler-plugins@11.0.0",
+      "scope": "required",
+      "type": "library",
+      "version": "11.0.0"
+    },
+    {
+      "bom-ref": "@sentry/conventions@0.23.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@sentry/conventions/-/conventions-0.23.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f84bb2a3b08d55e7283aeb20527ab6ee857dee8b2189f81c78a7e71a7b8a7d7acf515580fdc8acbe28b7135ae5bf2db206b2af97d2b5802128d49aa8839ce311"
         }
       ],
       "licenses": [
@@ -1420,23 +2365,23 @@
         }
       ],
       "name": "@sentry/conventions",
-      "purl": "pkg:npm/%40sentry/conventions@0.16.0",
+      "purl": "pkg:npm/%40sentry/conventions@0.23.0",
       "scope": "required",
       "type": "library",
-      "version": "0.16.0"
+      "version": "0.23.0"
     },
     {
-      "bom-ref": "@sentry/core@10.75.0",
+      "bom-ref": "@sentry/core@11.0.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/core/-/core-10.75.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/core/-/core-11.0.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e700d0a50aa327a44774f47ecfa43ee3b5e5c28c51281bf4cb20742ca1ea2ffd5accf3906d1fa7965c8b9a64037282696a4b2e2d298b035aba8455fb8230d3db"
+          "content": "49d9a0db53ce2a6370643cfca47ff616d8a559eaf2877cb1851c5b7c0d6987c4a75f60e45e8a97e86fae5f28c24986a05b6a5e7d592599235e587994952aa2a0"
         }
       ],
       "licenses": [
@@ -1447,23 +2392,23 @@
         }
       ],
       "name": "@sentry/core",
-      "purl": "pkg:npm/%40sentry/core@10.75.0",
+      "purl": "pkg:npm/%40sentry/core@11.0.0",
       "scope": "required",
       "type": "library",
-      "version": "10.75.0"
+      "version": "11.0.0"
     },
     {
-      "bom-ref": "@sentry/node@10.75.0",
+      "bom-ref": "@sentry/node@11.0.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/node/-/node-10.75.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/node/-/node-11.0.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "5dd616f92122b1c427bae821d6132575f9c7bab9a578a493483aa07eba3a635c9deecd2bd9cb27679fd2118c4878be254a5d505e0d65200d690660178dc76728"
+          "content": "647936c18be728f7daab4e581e7bdafdae84cd90cb4c6d044ad7169d076349a7bf3b196ec027ce7ccab096c2b1698f0a0d4932aa89130943ea2484d9a541f527"
         }
       ],
       "licenses": [
@@ -1474,50 +2419,23 @@
         }
       ],
       "name": "@sentry/node",
-      "purl": "pkg:npm/%40sentry/node@10.75.0",
+      "purl": "pkg:npm/%40sentry/node@11.0.0",
       "scope": "required",
       "type": "library",
-      "version": "10.75.0"
+      "version": "11.0.0"
     },
     {
-      "bom-ref": "@sentry/node-core@10.75.0",
+      "bom-ref": "@sentry/opentelemetry@11.0.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/node-core/-/node-core-10.75.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/opentelemetry/-/opentelemetry-11.0.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "f84dca497d6832a869590db7863e8d6e52155332f2dd3da871e53b0df317d6cd5aafe9e96906714792b4fdc306710812d4b2e6f09ab0aa8fe5ad994a4c20e6e4"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@sentry/node-core",
-      "purl": "pkg:npm/%40sentry/node-core@10.75.0",
-      "scope": "required",
-      "type": "library",
-      "version": "10.75.0"
-    },
-    {
-      "bom-ref": "@sentry/opentelemetry@10.75.0",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/opentelemetry/-/opentelemetry-10.75.0.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "ade26832db8732e6a2ceda0356869e8ad736d9e1e54c0bf3daaa458626d6cb3ba426517ca1707ea3c12f0cdf669830cc79d53cf5cfff71745c9cf06526f53173"
+          "content": "9b612d829a53b4de8cc56d1d280e39699308ff1a056588b623672f4c87a71464c62dfc728e4ebe6026e0d097ffc1d516a198d1d24ea40410486effb3a6ebd338"
         }
       ],
       "licenses": [
@@ -1528,23 +2446,50 @@
         }
       ],
       "name": "@sentry/opentelemetry",
-      "purl": "pkg:npm/%40sentry/opentelemetry@10.75.0",
+      "purl": "pkg:npm/%40sentry/opentelemetry@11.0.0",
       "scope": "required",
       "type": "library",
-      "version": "10.75.0"
+      "version": "11.0.0"
     },
     {
-      "bom-ref": "@sentry/server-utils@10.75.0",
+      "bom-ref": "@sentry/server-runtime-injection@11.0.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/server-utils/-/server-utils-10.75.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/server-runtime-injection/-/server-runtime-injection-11.0.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "edf21af6f146373075de19b197c4a2a77c4899292aa5ce30113cee43b08bcd53b03efc08eb2fe05449b4a71461b494aaf12cdf3a9dba7895a5f34bbcbfbf0eb2"
+          "content": "004dfdc5d19b8bc5a6701f4bb484eebc9929fac63190f011fb79511b8318ac92d5412f987987e7fc06997445ce86739a81da68cec0dba449de1899fabc3f29e9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@sentry/server-runtime-injection",
+      "purl": "pkg:npm/%40sentry/server-runtime-injection@11.0.0",
+      "scope": "required",
+      "type": "library",
+      "version": "11.0.0"
+    },
+    {
+      "bom-ref": "@sentry/server-utils@11.0.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@sentry/server-utils/-/server-utils-11.0.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5e5283b4ba0da8e848f93802372c1a9ffb45cb4c8c473c39fbc99da7de8a347b45fd8c0ef6ce9ceea65c046d31f3e5c3c82d04a0d5c39413c938c119a39943e1"
         }
       ],
       "licenses": [
@@ -1555,23 +2500,23 @@
         }
       ],
       "name": "@sentry/server-utils",
-      "purl": "pkg:npm/%40sentry/server-utils@10.75.0",
+      "purl": "pkg:npm/%40sentry/server-utils@11.0.0",
       "scope": "required",
       "type": "library",
-      "version": "10.75.0"
+      "version": "11.0.0"
     },
     {
-      "bom-ref": "@types/node@26.6.1",
+      "bom-ref": "@types/node@26.6.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@types/node/-/node-26.6.1.tgz"
+          "url": "https://registry.npmjs.org/@types/node/-/node-26.6.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "56a18904c0ad761aa405409c04bbf2c08d0d27e28bb95ce036794150d14e423a95c73a369712d4360d4349ecbcfaedaeea4b6cc1203183eb3af102f358734eb8"
+          "content": "5f53f6d6c70cbf8cc628b62a8dd1a368a6bb08e6b444a55861964dfcd7ef2d0d497a0c4585d869646fcbca7f005f1e820d46af280775d6fe81bdfa640c1c8af2"
         }
       ],
       "licenses": [
@@ -1582,10 +2527,10 @@
         }
       ],
       "name": "@types/node",
-      "purl": "pkg:npm/%40types/node@26.6.1",
+      "purl": "pkg:npm/%40types/node@26.6.2",
       "scope": "required",
       "type": "library",
-      "version": "26.6.1"
+      "version": "26.6.2"
     },
     {
       "bom-ref": "@types/retry@0.12.0",
@@ -2437,6 +3382,33 @@
       "version": "1.3.3"
     },
     {
+      "bom-ref": "balanced-match@4.0.4",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/balanced-match/-/balanced-match-4.0.4.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "04bae011c453c17da8ea01b118e08dc8cbc64a9df96287ee633c3d87520c4d198aaadb40659554ebb6dd6fd3ebdaf50703cfa3de2dad25f8cee82ebee26c864c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "balanced-match",
+      "purl": "pkg:npm/balanced-match@4.0.4",
+      "scope": "required",
+      "type": "library",
+      "version": "4.0.4"
+    },
+    {
       "bom-ref": "base64-js@1.5.1",
       "externalReferences": [
         {
@@ -2462,6 +3434,33 @@
       "scope": "required",
       "type": "library",
       "version": "1.5.1"
+    },
+    {
+      "bom-ref": "baseline-browser-mapping@2.11.26",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.26.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "18b41d0f7cba505f2256e3099797c7804e23767fee6bb9feb6829f2e036583706a42d3998e9cbaf13f13ba9f3fc06599083966eca320eed3dbe0c3e7ee83744d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "baseline-browser-mapping",
+      "purl": "pkg:npm/baseline-browser-mapping@2.11.26",
+      "scope": "required",
+      "type": "library",
+      "version": "2.11.26"
     },
     {
       "bom-ref": "bignumber.js@9.3.1",
@@ -2491,6 +3490,60 @@
       "version": "9.3.1"
     },
     {
+      "bom-ref": "brace-expansion@5.0.12",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.12.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "628bd0debce168b308ac38cd0cc90d4b4d6d79af77aa11211b9c72f1febe47497e770dca8bee6c0a822823de368ae2d94c75a881692d830543854d3d88d12299"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "brace-expansion",
+      "purl": "pkg:npm/brace-expansion@5.0.12",
+      "scope": "required",
+      "type": "library",
+      "version": "5.0.12"
+    },
+    {
+      "bom-ref": "browserslist@4.29.1",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/browserslist/-/browserslist-4.29.1.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "014763b91c82346518b6aa6a7d3996c8ce1f5dacbcc8842198b9ef61efd31cc19f4fd07fdf85fbc5077789f2b1c3234f3e9a305418cb6feeb804df519f59a2cf"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "browserslist",
+      "purl": "pkg:npm/browserslist@4.29.1",
+      "scope": "required",
+      "type": "library",
+      "version": "4.29.1"
+    },
+    {
       "bom-ref": "buffer-equal-constant-time@1.0.1",
       "externalReferences": [
         {
@@ -2518,17 +3571,44 @@
       "version": "1.0.1"
     },
     {
-      "bom-ref": "cjs-module-lexer@2.2.1",
+      "bom-ref": "caniuse-lite@1.0.30001812",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/cjs-module-lexer/-/cjs-module-lexer-2.2.1.tgz"
+          "url": "https://registry.npmjs.org/caniuse-lite/-/caniuse-lite-1.0.30001812.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "09af2cc2284cfbfe3229e7181d8e7692025ddf4d218b69400d4fdad51c4d4d17be449f63bea425112a5bcfd0e71bd9a8c1ecfcab05c707ca98748530f5ef85e5"
+          "content": "a8df9034d06bf774c2985ae6b5ed1b0428d20ccb91bedefc5651d3f7da8818fb339b842ca825fc967c965059078bc07b64100fabc487f94ab25cdcbfa1d31d9e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "CC-BY-4.0"
+          }
+        }
+      ],
+      "name": "caniuse-lite",
+      "purl": "pkg:npm/caniuse-lite@1.0.30001812",
+      "scope": "required",
+      "type": "library",
+      "version": "1.0.30001812"
+    },
+    {
+      "bom-ref": "convert-source-map@2.0.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/convert-source-map/-/convert-source-map-2.0.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2afa78e7d1eb576144275080b22d4abbe318de46ac1f5f53172913cf6c5698c7aae9b936354dd75ef7c9f90eb59b4c64b56c2dfb51d261fdc966c4e6b3769126"
         }
       ],
       "licenses": [
@@ -2538,11 +3618,11 @@
           }
         }
       ],
-      "name": "cjs-module-lexer",
-      "purl": "pkg:npm/cjs-module-lexer@2.2.1",
+      "name": "convert-source-map",
+      "purl": "pkg:npm/convert-source-map@2.0.0",
       "scope": "required",
       "type": "library",
-      "version": "2.2.1"
+      "version": "2.0.0"
     },
     {
       "bom-ref": "cross-spawn@7.0.6",
@@ -2626,6 +3706,33 @@
       "version": "4.4.3"
     },
     {
+      "bom-ref": "dotenv@17.4.2",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/dotenv/-/dotenv-17.4.2.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9c8e14dd3a2db4a01c003f4b2ee77809bedbd90ced40c5047c76ef8531f4f5ba974f19d289ef169e33c02d5fd6302ac967a515fea1c9e8bd373aa3b72dc75867"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "name": "dotenv",
+      "purl": "pkg:npm/dotenv@17.4.2",
+      "scope": "required",
+      "type": "library",
+      "version": "17.4.2"
+    },
+    {
       "bom-ref": "ecdsa-sig-formatter@1.0.11",
       "externalReferences": [
         {
@@ -2653,17 +3760,44 @@
       "version": "1.0.11"
     },
     {
-      "bom-ref": "es-module-lexer@3.0.2",
+      "bom-ref": "electron-to-chromium@1.5.439",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/es-module-lexer/-/es-module-lexer-3.0.2.tgz"
+          "url": "https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.439.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "06e201ebb1678034b243f76940d399c9bc1d1010d418942f3aac16af885afee7d88aacee1303e428edb32e144081acb6f2d4ad4481d47969accd9009a371823a"
+          "content": "aaee9020f5e1b1bf8245c0224cc363478035cbfeed0982a42a3af90995d156287aaa40dfefda5e676069114deaa0304d091adccb732b6b75fd9c6e68aeeb80ed"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "name": "electron-to-chromium",
+      "purl": "pkg:npm/electron-to-chromium@1.5.439",
+      "scope": "required",
+      "type": "library",
+      "version": "1.5.439"
+    },
+    {
+      "bom-ref": "escalade@3.2.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/escalade/-/escalade-3.2.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5948f6aa5c5a42d3b883a3eae5cdbd193716183c9df22b4bf334e58a98040b3dc97ac02288e2a8b5df0953aa2d0773c00a01bac64254c9585ba0c4be6e37bf8c"
         }
       ],
       "licenses": [
@@ -2673,11 +3807,11 @@
           }
         }
       ],
-      "name": "es-module-lexer",
-      "purl": "pkg:npm/es-module-lexer@3.0.2",
+      "name": "escalade",
+      "purl": "pkg:npm/escalade@3.2.0",
       "scope": "required",
       "type": "library",
-      "version": "3.0.2"
+      "version": "3.2.0"
     },
     {
       "bom-ref": "execa@5.1.1",
@@ -2983,6 +4117,33 @@
       "version": "8.1.2"
     },
     {
+      "bom-ref": "gensync@1.0.0-beta.2",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/gensync/-/gensync-1.0.0-beta.2.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "de137b35ab2462f3032d0639e609d6dcd43e99eb0401ea53aa583e5446e3ef3cea10c055361cdc19861ea85a3f4e5633e9e42215ca751dcb0264efa71a04bcce"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "gensync",
+      "purl": "pkg:npm/gensync@1.0.0-beta.2",
+      "scope": "required",
+      "type": "library",
+      "version": "1.0.0-beta.2"
+    },
+    {
       "bom-ref": "get-stream@6.0.1",
       "externalReferences": [
         {
@@ -3008,6 +4169,33 @@
       "scope": "required",
       "type": "library",
       "version": "6.0.1"
+    },
+    {
+      "bom-ref": "glob@13.0.6",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/glob/-/glob-13.0.6.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5a3972ae89669bcb83a66fe8806c976576f567e09ad81f0d6c9c2a0558346b12bd19b05ea12ef2195eaf8d79d87469ba5f9de27a112ec716f288aa7c42637857"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BlueOak-1.0.0"
+          }
+        }
+      ],
+      "name": "glob",
+      "purl": "pkg:npm/glob@13.0.6",
+      "scope": "required",
+      "type": "library",
+      "version": "13.0.6"
     },
     {
       "bom-ref": "google-auth-library@10.9.1",
@@ -3064,6 +4252,33 @@
       "version": "1.1.3"
     },
     {
+      "bom-ref": "has-flag@4.0.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/has-flag/-/has-flag-4.0.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "1329094ff4352a34d672da698080207d23b4b4a56e6548e180caf5ee4a93ba6325e807efdc421295e53ba99533a170c54c01d30c2e0d3a81bf67153712f94c3d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "has-flag",
+      "purl": "pkg:npm/has-flag@4.0.0",
+      "scope": "required",
+      "type": "library",
+      "version": "4.0.0"
+    },
+    {
       "bom-ref": "human-signals@2.1.0",
       "externalReferences": [
         {
@@ -3089,33 +4304,6 @@
       "scope": "required",
       "type": "library",
       "version": "2.1.0"
-    },
-    {
-      "bom-ref": "import-in-the-middle@3.5.1",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/import-in-the-middle/-/import-in-the-middle-3.5.1.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "98f2ae2fc6cf43379cba2d8a2ba19bf8cf09bc9a079e14b515e6066b6d90a2906695ebc5e45d0513ab9e77f0791201c3788a0c4ce348a4359614a50f386d0305"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "Apache-2.0"
-          }
-        }
-      ],
-      "name": "import-in-the-middle",
-      "purl": "pkg:npm/import-in-the-middle@3.5.1",
-      "scope": "required",
-      "type": "library",
-      "version": "3.5.1"
     },
     {
       "bom-ref": "is-buffer@2.0.5",
@@ -3253,6 +4441,60 @@
       "version": "5.10.0"
     },
     {
+      "bom-ref": "js-tokens@4.0.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/js-tokens/-/js-tokens-4.0.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "45d2547e5704ddc5332a232a420b02bb4e853eef5474824ed1b7986cf84737893a6a9809b627dca02b53f5b7313a9601b690f690233a49bce0e026aeb16fcf29"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "js-tokens",
+      "purl": "pkg:npm/js-tokens@4.0.0",
+      "scope": "required",
+      "type": "library",
+      "version": "4.0.0"
+    },
+    {
+      "bom-ref": "jsesc@3.1.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/jsesc/-/jsesc-3.1.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "fec33774ed853b35e3290849ba8d10d7bdf07f628ea3cb7823cbc7cba945f69a14a7b6ca4f4fcd1c4f1f3d7db73f07e19f291faa70b6c51c4e9d5c395ee18868"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "jsesc",
+      "purl": "pkg:npm/jsesc@3.1.0",
+      "scope": "required",
+      "type": "library",
+      "version": "3.1.0"
+    },
+    {
       "bom-ref": "json-bigint@1.0.0",
       "externalReferences": [
         {
@@ -3278,6 +4520,33 @@
       "scope": "required",
       "type": "library",
       "version": "1.0.0"
+    },
+    {
+      "bom-ref": "json5@2.2.3",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/json5/-/json5-2.2.3.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5e63967bb7b21d81f5e1c2dd54fa3283e18e1f7ad85fef8aa73af2949c125bdf2ddcd93e53c5ce97c15628e830b7375bf255c67facd8c035337873167f16acca"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "json5",
+      "purl": "pkg:npm/json5@2.2.3",
+      "scope": "required",
+      "type": "library",
+      "version": "2.2.3"
     },
     {
       "bom-ref": "jwa@2.0.1",
@@ -3334,17 +4603,17 @@
       "version": "4.0.1"
     },
     {
-      "bom-ref": "livekit-server-sdk@2.19.0",
+      "bom-ref": "livekit-server-sdk@2.19.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/livekit-server-sdk/-/livekit-server-sdk-2.19.0.tgz"
+          "url": "https://registry.npmjs.org/livekit-server-sdk/-/livekit-server-sdk-2.19.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "f6af8cb954b6aa4cb9f9769feff5da94cbbdd047065f6c24281cbcd00365247f160ae950a5f34c53c20b20cabdd775f9f641fa8ad372c4fe1faf5ebad7a286dc"
+          "content": "b6a8cce683c30cd06b91bffae1845eb5af5458fdf69756b69b41c75eaf163ae133c31878cec6978de659b4f1b812be1e54093892347e10cc47ee53cace0d60ea"
         }
       ],
       "licenses": [
@@ -3355,10 +4624,10 @@
         }
       ],
       "name": "livekit-server-sdk",
-      "purl": "pkg:npm/livekit-server-sdk@2.19.0",
+      "purl": "pkg:npm/livekit-server-sdk@2.19.1",
       "scope": "required",
       "type": "library",
-      "version": "2.19.0"
+      "version": "2.19.1"
     },
     {
       "bom-ref": "long@5.3.2",
@@ -3386,6 +4655,60 @@
       "scope": "required",
       "type": "library",
       "version": "5.3.2"
+    },
+    {
+      "bom-ref": "lru-cache@5.1.1",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lru-cache/-/lru-cache-5.1.1.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2a9340450037230bfe8d3034bad51555bae1f8996baf516fd1ee7a186cc014e5cdedd93f16f89a0d6f0b1e62b9d8395c1f858fda7ea023cbcdd5a7ac045828f7"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "name": "lru-cache",
+      "purl": "pkg:npm/lru-cache@5.1.1",
+      "scope": "required",
+      "type": "library",
+      "version": "5.1.1"
+    },
+    {
+      "bom-ref": "magic-string@0.30.21",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/magic-string/-/magic-string-0.30.21.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "bddd85e1853211728670b1e8abe4c4c828f1b9e49e1e7171cb28cda7cd328345d5e2f5219c37abfe5bef96a33f6ab0796d740de4adbfde88a7c82472c7c4f609"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "magic-string",
+      "purl": "pkg:npm/magic-string@0.30.21",
+      "scope": "required",
+      "type": "library",
+      "version": "0.30.21"
     },
     {
       "bom-ref": "merge-stream@2.0.0",
@@ -3442,31 +4765,58 @@
       "version": "2.1.0"
     },
     {
-      "bom-ref": "module-details-from-path@1.0.4",
+      "bom-ref": "minimatch@10.2.6",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/module-details-from-path/-/module-details-from-path-1.0.4.tgz"
+          "url": "https://registry.npmjs.org/minimatch/-/minimatch-10.2.6.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "10658a83100b18c833bf1605d54c864f2d075d7ff6bc72e4c3af8dbc3296da3ca959b1e98d0ba3e1431ca905971c444985518a8a4a254f4e86ddb70a7b87e2ef"
+          "content": "be92d012cf952c2af59d4d015d2d3b99a628170943007d209e042ebadb71230bad0c510c1ead9b957fbcbe98310dd2b72753f08c22627a9efb3a2b536782e5d4"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "MIT"
+            "id": "BlueOak-1.0.0"
           }
         }
       ],
-      "name": "module-details-from-path",
-      "purl": "pkg:npm/module-details-from-path@1.0.4",
+      "name": "minimatch",
+      "purl": "pkg:npm/minimatch@10.2.6",
       "scope": "required",
       "type": "library",
-      "version": "1.0.4"
+      "version": "10.2.6"
+    },
+    {
+      "bom-ref": "minipass@7.1.3",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/minipass/-/minipass-7.1.3.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b44047a839c8a0cff5ad7304d738246bd83a43695ca029311cbb9cece0c9e41c5b3f977873667970682d5c092ee7ddb4d02c7b762b874ce61f4810fc9fa9a6f0"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BlueOak-1.0.0"
+          }
+        }
+      ],
+      "name": "minipass",
+      "purl": "pkg:npm/minipass@7.1.3",
+      "scope": "required",
+      "type": "library",
+      "version": "7.1.3"
     },
     {
       "bom-ref": "ms@2.1.3",
@@ -3521,6 +4871,33 @@
       "scope": "required",
       "type": "library",
       "version": "1.0.0"
+    },
+    {
+      "bom-ref": "node-releases@2.0.57",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/node-releases/-/node-releases-2.0.57.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9102bd2c6185887b6b5a236166d03b41bc35ec0433f9d9ac10a3834485535c0f7e7b9312ff681910185826dd771ab033e7f20e64a75d1ffd19dd33ff660a3ecb"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "node-releases",
+      "purl": "pkg:npm/node-releases@2.0.57",
+      "scope": "required",
+      "type": "library",
+      "version": "2.0.57"
     },
     {
       "bom-ref": "npm-run-path@4.0.1",
@@ -3604,6 +4981,33 @@
       "version": "4.4.0"
     },
     {
+      "bom-ref": "oxc-parser@0.143.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/oxc-parser/-/oxc-parser-0.143.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a2fd0dcda0c23889e49d2ee63f573029d24446ddeeb4f5bc95d8ed7545d0f13cb4184143d3cc24e36daf09437477ba524fa92ab55eddc6823dc35662d25ffd4c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "oxc-parser",
+      "purl": "pkg:npm/oxc-parser@0.143.0",
+      "scope": "required",
+      "type": "library",
+      "version": "0.143.0"
+    },
+    {
       "bom-ref": "p-retry@4.6.2",
       "externalReferences": [
         {
@@ -3658,6 +5062,87 @@
       "version": "3.1.1"
     },
     {
+      "bom-ref": "path-scurry@2.0.2",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/path-scurry/-/path-scurry-2.0.2.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "dcefe2555b0900fb0e9e9c1621e0fe77acffecf9aa029c9078f52d0a77636ad8fff48e4bca51efb79aa5b856814f7239877af57a37d1d39e9cf850aff8d9cd5e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BlueOak-1.0.0"
+          }
+        }
+      ],
+      "name": "path-scurry",
+      "purl": "pkg:npm/path-scurry@2.0.2",
+      "scope": "required",
+      "type": "library",
+      "version": "2.0.2"
+    },
+    {
+      "bom-ref": "lru-cache@11.5.3",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/lru-cache/-/lru-cache-11.5.3.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "53837c160ce65b173c935547f0aafa950835f14ec58ef6f2eb05c75515ff659ec8c166d1320ad16cfd16adbe6ae4d5629ebca9e1241a9a91ca76fb5e708b7152"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BlueOak-1.0.0"
+          }
+        }
+      ],
+      "name": "lru-cache",
+      "purl": "pkg:npm/lru-cache@11.5.3",
+      "scope": "required",
+      "type": "library",
+      "version": "11.5.3"
+    },
+    {
+      "bom-ref": "picocolors@1.1.1",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c5c787dac9e1b5be4cf658aa0ec984c39ea57b7efa993664117fe311bfd1c4d1727a036e97b78db250973fd1438ff2dcbb45fc284c8c71e3f69eda5a1eb0c454"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "name": "picocolors",
+      "purl": "pkg:npm/picocolors@1.1.1",
+      "scope": "required",
+      "type": "library",
+      "version": "1.1.1"
+    },
+    {
       "bom-ref": "protobufjs@7.6.5",
       "externalReferences": [
         {
@@ -3683,33 +5168,6 @@
       "scope": "required",
       "type": "library",
       "version": "7.6.5"
-    },
-    {
-      "bom-ref": "require-in-the-middle@8.0.1",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/require-in-the-middle/-/require-in-the-middle-8.0.1.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "413ec554c5df58e6056de44117a9eef88eadaf64dfdeed2af112048cda1bfe178a63f9e1eddac3fe4ede78c1664908274ed0b32c3702bbf5c49e95b6c24e3109"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "require-in-the-middle",
-      "purl": "pkg:npm/require-in-the-middle@8.0.1",
-      "scope": "required",
-      "type": "library",
-      "version": "8.0.1"
     },
     {
       "bom-ref": "retry@0.13.1",
@@ -3764,6 +5222,53 @@
       "scope": "required",
       "type": "library",
       "version": "5.2.1"
+    },
+    {
+      "bom-ref": "semver@6.3.1",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/semver/-/semver-6.3.1.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "051ed5bc30951cefaadb10445ac9314ba0c9135a919dbec3c7352ba206fbd425a849f89c07162c88019df8a9749a6abf329ac6f7202b464cab4314cee978cccc"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "name": "semver",
+      "purl": "pkg:npm/semver@6.3.1",
+      "scope": "required",
+      "type": "library",
+      "version": "6.3.1"
+    },
+    {
+      "bom-ref": "sentry@0.44.1",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/sentry/-/sentry-0.44.1.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2caf912763c5b0928cf8fd03ff3602f8ce60141d72b5f54e354f43554a89bbaed8165c278f7c06264533061092f11e2252a45d4530186c56d129301ed37ad6fd"
+        }
+      ],
+      "name": "sentry",
+      "purl": "pkg:npm/sentry@0.44.1",
+      "scope": "required",
+      "type": "library",
+      "version": "0.44.1"
     },
     {
       "bom-ref": "shebang-command@2.0.0",
@@ -3847,6 +5352,33 @@
       "version": "2.0.0"
     },
     {
+      "bom-ref": "supports-color@8.1.1",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/supports-color/-/supports-color-8.1.1.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3295043763a876d533c6f29097bd9c505ed14391221ec1af4ac546d226bd73945b5862f6088e02ec4a4f4bc513048a659e5cd988db95e7ac3e16e371cb7b72d9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "supports-color",
+      "purl": "pkg:npm/supports-color@8.1.1",
+      "scope": "required",
+      "type": "library",
+      "version": "8.1.1"
+    },
+    {
       "bom-ref": "throttleit@2.1.0",
       "externalReferences": [
         {
@@ -3874,17 +5406,17 @@
       "version": "2.1.0"
     },
     {
-      "bom-ref": "tsx@4.23.13",
+      "bom-ref": "tsx@4.23.15",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/tsx/-/tsx-4.23.13.tgz"
+          "url": "https://registry.npmjs.org/tsx/-/tsx-4.23.15.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "04be4c1a44659fa6836216f4c5b4251001b0ef8dc169961675b5ad749381ae26096e82a051460269d169dbf16904166ab810bf7b33419fbc0c30fc7b1436540f"
+          "content": "6227b1d4ebe7f33db13e9396724222cac575492c91318f4190b17efaad322a20f10aa461a2c29f320de36a72a488b07067973f62bca5a0ac0665cac49adc312b"
         }
       ],
       "licenses": [
@@ -3901,10 +5433,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/tsx@4.23.13",
+      "purl": "pkg:npm/tsx@4.23.15",
       "scope": "optional",
       "type": "library",
-      "version": "4.23.13"
+      "version": "4.23.15"
     },
     {
       "bom-ref": "esbuild@0.28.1",
@@ -3973,17 +5505,17 @@
       "version": "7.0.2"
     },
     {
-      "bom-ref": "undici@8.10.2",
+      "bom-ref": "undici@8.11.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/undici/-/undici-8.10.2.tgz"
+          "url": "https://registry.npmjs.org/undici/-/undici-8.11.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ff2e3f6c7f58354e618bd348ae93aebc65c5731ae3dc232b57efc0629a300184e91e7f205ff5cf163372efae853e8618d2689085d5bdefb24558a18d841770c9"
+          "content": "bb8501dbf22b29d53a945c6e9879a6a356b77c240ee6dcd0965468adfa114badedc61ac1ef14e94a7d4f7edc02e2a10790e6aa3fde5f0965b8949cf012bc3385"
         }
       ],
       "licenses": [
@@ -4000,10 +5532,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/undici@8.10.2",
+      "purl": "pkg:npm/undici@8.11.2",
       "scope": "optional",
       "type": "library",
-      "version": "8.10.2"
+      "version": "8.11.2"
     },
     {
       "bom-ref": "undici-types@8.9.0",
@@ -4031,6 +5563,33 @@
       "scope": "required",
       "type": "library",
       "version": "8.9.0"
+    },
+    {
+      "bom-ref": "update-browserslist-db@1.3.3",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/update-browserslist-db/-/update-browserslist-db-1.3.3.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a49dac61ac104b447f588f76f068f91a53e14c6cdb31e96ad3ee0836d49834357d12b289717eb18c65a4a06fd59c1ddda549b4d3300b6aa92b503efba4ee530d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "update-browserslist-db",
+      "purl": "pkg:npm/update-browserslist-db@1.3.3",
+      "scope": "required",
+      "type": "library",
+      "version": "1.3.3"
     },
     {
       "bom-ref": "web-streams-polyfill@3.3.3",
@@ -4168,6 +5727,33 @@
       "version": "7.3.0"
     },
     {
+      "bom-ref": "yallist@3.1.1",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/yallist/-/yallist-3.1.1.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6b850641a58f1f9f663975189c01b67b09dc412e22e05e374efdc9a0033eb365430264bd36c2bc1a90cc2eb0873e4b054fb8772ba4cea14367da96fb4685f1e2"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "name": "yallist",
+      "purl": "pkg:npm/yallist@3.1.1",
+      "scope": "required",
+      "type": "library",
+      "version": "3.1.1"
+    },
+    {
       "bom-ref": "zod@4.1.11",
       "externalReferences": [
         {
@@ -4198,16 +5784,140 @@
   "dependencies": [
     {
       "dependsOn": [
-        "@google/genai@2.23.0",
-        "@sentry/node@10.75.0",
+        "@google/genai@2.24.0",
+        "@sentry/node@11.0.0",
         "@vercel/blob@2.8.0",
-        "livekit-server-sdk@2.19.0",
-        "@types/node@26.6.1",
-        "tsx@4.23.13",
+        "livekit-server-sdk@2.19.1",
+        "@types/node@26.6.2",
+        "tsx@4.23.15",
         "typescript@7.0.2",
-        "undici@8.10.2"
+        "undici@8.11.2"
       ],
       "ref": "petal-backend@0.1.0"
+    },
+    {
+      "dependsOn": [
+        "@babel/helper-validator-identifier@7.29.7",
+        "js-tokens@4.0.0",
+        "picocolors@1.1.1"
+      ],
+      "ref": "@babel/code-frame@7.29.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@babel/compat-data@7.29.7"
+    },
+    {
+      "dependsOn": [
+        "@babel/code-frame@7.29.7",
+        "@babel/generator@7.29.8",
+        "@babel/helper-compilation-targets@7.29.7",
+        "@babel/helper-module-transforms@7.29.7",
+        "@babel/helpers@7.29.7",
+        "@babel/parser@7.29.9",
+        "@babel/template@7.29.7",
+        "@babel/traverse@7.29.8",
+        "@babel/types@7.29.8",
+        "@jridgewell/remapping@2.3.5",
+        "convert-source-map@2.0.0",
+        "debug@4.4.3",
+        "gensync@1.0.0-beta.2",
+        "json5@2.2.3",
+        "semver@6.3.1"
+      ],
+      "ref": "@babel/core@7.29.7"
+    },
+    {
+      "dependsOn": [
+        "@babel/parser@7.29.9",
+        "@babel/types@7.29.8",
+        "@jridgewell/gen-mapping@0.3.13",
+        "@jridgewell/trace-mapping@0.3.31",
+        "jsesc@3.1.0"
+      ],
+      "ref": "@babel/generator@7.29.8"
+    },
+    {
+      "dependsOn": [
+        "@babel/compat-data@7.29.7",
+        "@babel/helper-validator-option@7.29.7",
+        "browserslist@4.29.1",
+        "lru-cache@5.1.1",
+        "semver@6.3.1"
+      ],
+      "ref": "@babel/helper-compilation-targets@7.29.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@babel/helper-globals@7.29.7"
+    },
+    {
+      "dependsOn": [
+        "@babel/traverse@7.29.8",
+        "@babel/types@7.29.8"
+      ],
+      "ref": "@babel/helper-module-imports@7.29.7"
+    },
+    {
+      "dependsOn": [
+        "@babel/core@7.29.7",
+        "@babel/helper-module-imports@7.29.7",
+        "@babel/helper-validator-identifier@7.29.7",
+        "@babel/traverse@7.29.8"
+      ],
+      "ref": "@babel/helper-module-transforms@7.29.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@babel/helper-string-parser@7.29.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@babel/helper-validator-identifier@7.29.7"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@babel/helper-validator-option@7.29.7"
+    },
+    {
+      "dependsOn": [
+        "@babel/template@7.29.7",
+        "@babel/types@7.29.8"
+      ],
+      "ref": "@babel/helpers@7.29.7"
+    },
+    {
+      "dependsOn": [
+        "@babel/types@7.29.8"
+      ],
+      "ref": "@babel/parser@7.29.9"
+    },
+    {
+      "dependsOn": [
+        "@babel/code-frame@7.29.7",
+        "@babel/parser@7.29.9",
+        "@babel/types@7.29.8"
+      ],
+      "ref": "@babel/template@7.29.7"
+    },
+    {
+      "dependsOn": [
+        "@babel/code-frame@7.29.7",
+        "@babel/generator@7.29.8",
+        "@babel/helper-globals@7.29.7",
+        "@babel/parser@7.29.9",
+        "@babel/template@7.29.7",
+        "@babel/types@7.29.8",
+        "debug@4.4.3"
+      ],
+      "ref": "@babel/traverse@7.29.8"
+    },
+    {
+      "dependsOn": [
+        "@babel/helper-string-parser@7.29.7",
+        "@babel/helper-validator-identifier@7.29.7"
+      ],
+      "ref": "@babel/types@7.29.8"
     },
     {
       "dependsOn": [],
@@ -4324,7 +6034,36 @@
         "protobufjs@7.6.5",
         "ws@8.21.2"
       ],
-      "ref": "@google/genai@2.23.0"
+      "ref": "@google/genai@2.24.0"
+    },
+    {
+      "dependsOn": [
+        "@jridgewell/sourcemap-codec@1.6.0",
+        "@jridgewell/trace-mapping@0.3.31"
+      ],
+      "ref": "@jridgewell/gen-mapping@0.3.13"
+    },
+    {
+      "dependsOn": [
+        "@jridgewell/gen-mapping@0.3.13",
+        "@jridgewell/trace-mapping@0.3.31"
+      ],
+      "ref": "@jridgewell/remapping@2.3.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@jridgewell/resolve-uri@3.1.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@jridgewell/sourcemap-codec@1.6.0"
+    },
+    {
+      "dependsOn": [
+        "@jridgewell/resolve-uri@3.1.2",
+        "@jridgewell/sourcemap-codec@1.6.0"
+      ],
+      "ref": "@jridgewell/trace-mapping@0.3.31"
     },
     {
       "dependsOn": [
@@ -4337,57 +6076,84 @@
       "ref": "@opentelemetry/api@1.9.1"
     },
     {
-      "dependsOn": [
-        "@opentelemetry/api@1.9.1"
-      ],
-      "ref": "@opentelemetry/api-logs@0.220.0"
-    },
-    {
-      "dependsOn": [
-        "@opentelemetry/api@1.9.1",
-        "@opentelemetry/semantic-conventions@1.43.0"
-      ],
-      "ref": "@opentelemetry/core@2.11.0"
-    },
-    {
-      "dependsOn": [
-        "@opentelemetry/api@1.9.1",
-        "@opentelemetry/api-logs@0.220.0",
-        "import-in-the-middle@3.5.1",
-        "require-in-the-middle@8.0.1"
-      ],
-      "ref": "@opentelemetry/instrumentation@0.220.0"
-    },
-    {
-      "dependsOn": [
-        "@opentelemetry/api@1.9.1",
-        "@opentelemetry/core@2.11.0",
-        "@opentelemetry/semantic-conventions@1.43.0"
-      ],
-      "ref": "@opentelemetry/resources@2.11.0"
-    },
-    {
-      "dependsOn": [
-        "@opentelemetry/api@1.9.1",
-        "@opentelemetry/core@2.11.0",
-        "@opentelemetry/resources@2.11.0",
-        "@opentelemetry/semantic-conventions@1.43.0"
-      ],
-      "ref": "@opentelemetry/sdk-trace@2.11.0"
-    },
-    {
-      "dependsOn": [
-        "@opentelemetry/api@1.9.1",
-        "@opentelemetry/core@2.11.0",
-        "@opentelemetry/resources@2.11.0",
-        "@opentelemetry/sdk-trace@2.11.0",
-        "@opentelemetry/semantic-conventions@1.43.0"
-      ],
-      "ref": "@opentelemetry/sdk-trace-base@2.11.0"
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-android-arm-eabi@0.143.0"
     },
     {
       "dependsOn": [],
-      "ref": "@opentelemetry/semantic-conventions@1.43.0"
+      "ref": "@oxc-parser/binding-android-arm64@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-darwin-arm64@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-darwin-x64@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-freebsd-x64@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-arm-gnueabihf@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-arm-musleabihf@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-arm64-gnu@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-arm64-musl@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-ppc64-gnu@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-riscv64-gnu@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-riscv64-musl@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-s390x-gnu@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-x64-gnu@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-linux-x64-musl@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-openharmony-arm64@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-win32-arm64-msvc@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-win32-ia32-msvc@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-parser/binding-win32-x64-msvc@0.143.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "@oxc-project/types@0.143.0"
     },
     {
       "dependsOn": [],
@@ -4428,64 +6194,68 @@
       "ref": "@protobufjs/utf8@1.1.2"
     },
     {
+      "dependsOn": [
+        "@babel/core@7.29.7",
+        "@sentry/core@11.0.0",
+        "dotenv@17.4.2",
+        "glob@13.0.6",
+        "magic-string@0.30.21",
+        "oxc-parser@0.143.0",
+        "sentry@0.44.1",
+        "supports-color@8.1.1"
+      ],
+      "ref": "@sentry/bundler-plugins@11.0.0"
+    },
+    {
       "dependsOn": [],
-      "ref": "@sentry/conventions@0.16.0"
+      "ref": "@sentry/conventions@0.23.0"
     },
     {
       "dependsOn": [
-        "@sentry/conventions@0.16.0"
+        "@sentry/conventions@0.23.0"
       ],
-      "ref": "@sentry/core@10.75.0"
-    },
-    {
-      "dependsOn": [
-        "@opentelemetry/api@1.9.1",
-        "@opentelemetry/instrumentation@0.220.0",
-        "@opentelemetry/sdk-trace-base@2.11.0",
-        "@sentry/conventions@0.16.0",
-        "@sentry/core@10.75.0",
-        "@sentry/node-core@10.75.0",
-        "@sentry/opentelemetry@10.75.0",
-        "@sentry/server-utils@10.75.0",
-        "import-in-the-middle@3.5.1"
-      ],
-      "ref": "@sentry/node@10.75.0"
+      "ref": "@sentry/core@11.0.0"
     },
     {
       "dependsOn": [
         "@opentelemetry/api@1.9.1",
-        "@opentelemetry/core@2.11.0",
-        "@opentelemetry/instrumentation@0.220.0",
-        "@opentelemetry/sdk-trace-base@2.11.0",
-        "@sentry/conventions@0.16.0",
-        "@sentry/core@10.75.0",
-        "@sentry/opentelemetry@10.75.0",
-        "import-in-the-middle@3.5.1"
+        "@sentry/bundler-plugins@11.0.0",
+        "@sentry/conventions@0.23.0",
+        "@sentry/core@11.0.0",
+        "@sentry/opentelemetry@11.0.0",
+        "@sentry/server-runtime-injection@11.0.0",
+        "@sentry/server-utils@11.0.0"
       ],
-      "ref": "@sentry/node-core@10.75.0"
+      "ref": "@sentry/node@11.0.0"
     },
     {
       "dependsOn": [
         "@opentelemetry/api@1.9.1",
-        "@opentelemetry/core@2.11.0",
-        "@opentelemetry/sdk-trace-base@2.11.0",
-        "@sentry/conventions@0.16.0",
-        "@sentry/core@10.75.0"
+        "@sentry/conventions@0.23.0",
+        "@sentry/core@11.0.0"
       ],
-      "ref": "@sentry/opentelemetry@10.75.0"
+      "ref": "@sentry/opentelemetry@11.0.0"
     },
     {
       "dependsOn": [
-        "@sentry/conventions@0.16.0",
-        "@sentry/core@10.75.0"
+        "@sentry/core@11.0.0",
+        "@sentry/server-utils@11.0.0"
       ],
-      "ref": "@sentry/server-utils@10.75.0"
+      "ref": "@sentry/server-runtime-injection@11.0.0"
+    },
+    {
+      "dependsOn": [
+        "@opentelemetry/api@1.9.1",
+        "@sentry/conventions@0.23.0",
+        "@sentry/core@11.0.0"
+      ],
+      "ref": "@sentry/server-utils@11.0.0"
     },
     {
       "dependsOn": [
         "undici-types@8.9.0"
       ],
-      "ref": "@types/node@26.6.1"
+      "ref": "@types/node@26.6.2"
     },
     {
       "dependsOn": [],
@@ -4615,11 +6385,35 @@
     },
     {
       "dependsOn": [],
+      "ref": "balanced-match@4.0.4"
+    },
+    {
+      "dependsOn": [],
       "ref": "base64-js@1.5.1"
     },
     {
       "dependsOn": [],
+      "ref": "baseline-browser-mapping@2.11.26"
+    },
+    {
+      "dependsOn": [],
       "ref": "bignumber.js@9.3.1"
+    },
+    {
+      "dependsOn": [
+        "balanced-match@4.0.4"
+      ],
+      "ref": "brace-expansion@5.0.12"
+    },
+    {
+      "dependsOn": [
+        "baseline-browser-mapping@2.11.26",
+        "caniuse-lite@1.0.30001812",
+        "electron-to-chromium@1.5.439",
+        "node-releases@2.0.57",
+        "update-browserslist-db@1.3.3"
+      ],
+      "ref": "browserslist@4.29.1"
     },
     {
       "dependsOn": [],
@@ -4627,7 +6421,11 @@
     },
     {
       "dependsOn": [],
-      "ref": "cjs-module-lexer@2.2.1"
+      "ref": "caniuse-lite@1.0.30001812"
+    },
+    {
+      "dependsOn": [],
+      "ref": "convert-source-map@2.0.0"
     },
     {
       "dependsOn": [
@@ -4648,6 +6446,10 @@
       "ref": "debug@4.4.3"
     },
     {
+      "dependsOn": [],
+      "ref": "dotenv@17.4.2"
+    },
+    {
       "dependsOn": [
         "safe-buffer@5.2.1"
       ],
@@ -4655,7 +6457,11 @@
     },
     {
       "dependsOn": [],
-      "ref": "es-module-lexer@3.0.2"
+      "ref": "electron-to-chromium@1.5.439"
+    },
+    {
+      "dependsOn": [],
+      "ref": "escalade@3.2.0"
     },
     {
       "dependsOn": [
@@ -4733,7 +6539,19 @@
     },
     {
       "dependsOn": [],
+      "ref": "gensync@1.0.0-beta.2"
+    },
+    {
+      "dependsOn": [],
       "ref": "get-stream@6.0.1"
+    },
+    {
+      "dependsOn": [
+        "minimatch@10.2.6",
+        "minipass@7.1.3",
+        "path-scurry@2.0.2"
+      ],
+      "ref": "glob@13.0.6"
     },
     {
       "dependsOn": [
@@ -4752,15 +6570,11 @@
     },
     {
       "dependsOn": [],
-      "ref": "human-signals@2.1.0"
+      "ref": "has-flag@4.0.0"
     },
     {
-      "dependsOn": [
-        "cjs-module-lexer@2.2.1",
-        "es-module-lexer@3.0.2",
-        "module-details-from-path@1.0.4"
-      ],
-      "ref": "import-in-the-middle@3.5.1"
+      "dependsOn": [],
+      "ref": "human-signals@2.1.0"
     },
     {
       "dependsOn": [],
@@ -4783,10 +6597,22 @@
       "ref": "jose@5.10.0"
     },
     {
+      "dependsOn": [],
+      "ref": "js-tokens@4.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "jsesc@3.1.0"
+    },
+    {
       "dependsOn": [
         "bignumber.js@9.3.1"
       ],
       "ref": "json-bigint@1.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "json5@2.2.3"
     },
     {
       "dependsOn": [
@@ -4809,11 +6635,23 @@
         "@livekit/protocol@1.51.0",
         "jose@5.10.0"
       ],
-      "ref": "livekit-server-sdk@2.19.0"
+      "ref": "livekit-server-sdk@2.19.1"
     },
     {
       "dependsOn": [],
       "ref": "long@5.3.2"
+    },
+    {
+      "dependsOn": [
+        "yallist@3.1.1"
+      ],
+      "ref": "lru-cache@5.1.1"
+    },
+    {
+      "dependsOn": [
+        "@jridgewell/sourcemap-codec@1.6.0"
+      ],
+      "ref": "magic-string@0.30.21"
     },
     {
       "dependsOn": [],
@@ -4824,8 +6662,14 @@
       "ref": "mimic-fn@2.1.0"
     },
     {
+      "dependsOn": [
+        "brace-expansion@5.0.12"
+      ],
+      "ref": "minimatch@10.2.6"
+    },
+    {
       "dependsOn": [],
-      "ref": "module-details-from-path@1.0.4"
+      "ref": "minipass@7.1.3"
     },
     {
       "dependsOn": [],
@@ -4834,6 +6678,10 @@
     {
       "dependsOn": [],
       "ref": "node-domexception@1.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "node-releases@2.0.57"
     },
     {
       "dependsOn": [
@@ -4853,6 +6701,31 @@
     },
     {
       "dependsOn": [
+        "@oxc-project/types@0.143.0",
+        "@oxc-parser/binding-android-arm-eabi@0.143.0",
+        "@oxc-parser/binding-android-arm64@0.143.0",
+        "@oxc-parser/binding-darwin-arm64@0.143.0",
+        "@oxc-parser/binding-darwin-x64@0.143.0",
+        "@oxc-parser/binding-freebsd-x64@0.143.0",
+        "@oxc-parser/binding-linux-arm-gnueabihf@0.143.0",
+        "@oxc-parser/binding-linux-arm-musleabihf@0.143.0",
+        "@oxc-parser/binding-linux-arm64-gnu@0.143.0",
+        "@oxc-parser/binding-linux-arm64-musl@0.143.0",
+        "@oxc-parser/binding-linux-ppc64-gnu@0.143.0",
+        "@oxc-parser/binding-linux-riscv64-gnu@0.143.0",
+        "@oxc-parser/binding-linux-riscv64-musl@0.143.0",
+        "@oxc-parser/binding-linux-s390x-gnu@0.143.0",
+        "@oxc-parser/binding-linux-x64-gnu@0.143.0",
+        "@oxc-parser/binding-linux-x64-musl@0.143.0",
+        "@oxc-parser/binding-openharmony-arm64@0.143.0",
+        "@oxc-parser/binding-win32-arm64-msvc@0.143.0",
+        "@oxc-parser/binding-win32-ia32-msvc@0.143.0",
+        "@oxc-parser/binding-win32-x64-msvc@0.143.0"
+      ],
+      "ref": "oxc-parser@0.143.0"
+    },
+    {
+      "dependsOn": [
         "@types/retry@0.12.0",
         "retry@0.13.1"
       ],
@@ -4861,6 +6734,21 @@
     {
       "dependsOn": [],
       "ref": "path-key@3.1.1"
+    },
+    {
+      "dependsOn": [
+        "lru-cache@11.5.3",
+        "minipass@7.1.3"
+      ],
+      "ref": "path-scurry@2.0.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "lru-cache@11.5.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "picocolors@1.1.1"
     },
     {
       "dependsOn": [
@@ -4873,17 +6761,10 @@
         "@protobufjs/path@1.1.2",
         "@protobufjs/pool@1.1.0",
         "@protobufjs/utf8@1.1.2",
-        "@types/node@26.6.1",
+        "@types/node@26.6.2",
         "long@5.3.2"
       ],
       "ref": "protobufjs@7.6.5"
-    },
-    {
-      "dependsOn": [
-        "debug@4.4.3",
-        "module-details-from-path@1.0.4"
-      ],
-      "ref": "require-in-the-middle@8.0.1"
     },
     {
       "dependsOn": [],
@@ -4892,6 +6773,14 @@
     {
       "dependsOn": [],
       "ref": "safe-buffer@5.2.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "semver@6.3.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "sentry@0.44.1"
     },
     {
       "dependsOn": [
@@ -4908,6 +6797,12 @@
       "ref": "strip-final-newline@2.0.0"
     },
     {
+      "dependsOn": [
+        "has-flag@4.0.0"
+      ],
+      "ref": "supports-color@8.1.1"
+    },
+    {
       "dependsOn": [],
       "ref": "throttleit@2.1.0"
     },
@@ -4916,7 +6811,7 @@
         "esbuild@0.28.1",
         "fsevents@2.3.3"
       ],
-      "ref": "tsx@4.23.13"
+      "ref": "tsx@4.23.15"
     },
     {
       "dependsOn": [
@@ -4976,11 +6871,19 @@
     },
     {
       "dependsOn": [],
-      "ref": "undici@8.10.2"
+      "ref": "undici@8.11.2"
     },
     {
       "dependsOn": [],
       "ref": "undici-types@8.9.0"
+    },
+    {
+      "dependsOn": [
+        "browserslist@4.29.1",
+        "escalade@3.2.0",
+        "picocolors@1.1.1"
+      ],
+      "ref": "update-browserslist-db@1.3.3"
     },
     {
       "dependsOn": [],
@@ -5008,6 +6911,10 @@
         "os-paths@4.4.0"
       ],
       "ref": "xdg-portable@7.3.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "yallist@3.1.1"
     },
     {
       "dependsOn": [],

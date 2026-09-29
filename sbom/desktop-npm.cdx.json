@@ -1066,17 +1066,17 @@
       "version": "3.1.2"
     },
     {
-      "bom-ref": "@jridgewell/sourcemap-codec@1.5.5",
+      "bom-ref": "@jridgewell/sourcemap-codec@1.6.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.5.5.tgz"
+          "url": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "71843ddf5d20aeac6e7966e5f96b885086a251a0dc8fb58eab97d58449633558117ce52163d7f2db34ef7e8a96b2779b87c4a5ef45527056c80af2672ca0743a"
+          "content": "4fb8dffb9ce0b191f0349e25bd0eff69ecdbca4d27357fb32555a998703b558b04c7b6bbaabe5183921bb4916a920cdee58dacaeeab545463c43cdfb39dee217"
         }
       ],
       "licenses": [
@@ -1093,10 +1093,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40jridgewell/sourcemap-codec@1.5.5",
+      "purl": "pkg:npm/%40jridgewell/sourcemap-codec@1.6.0",
       "scope": "optional",
       "type": "library",
-      "version": "1.5.5"
+      "version": "1.6.0"
     },
     {
       "bom-ref": "@jridgewell/trace-mapping@0.3.31",
@@ -1186,17 +1186,17 @@
       "version": "1.50.4"
     },
     {
-      "bom-ref": "@oxc-project/types@0.148.0",
+      "bom-ref": "@oxc-project/types@0.151.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@oxc-project/types/-/types-0.148.0.tgz"
+          "url": "https://registry.npmjs.org/@oxc-project/types/-/types-0.151.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "366e2cfe307ee05a45b0f8561840b887baf392c7ac9ad9cc5e89a8eab08c720fdbf332d0b8ece24609024b57f10c25ce94907fe90f28001399fce3fa4483e3f4"
+          "content": "275c97ac894d0d957313769d6b7d74c5e030ee71fcc820322cfb9422c8ca6ad14f99f9f96d2d685be70cf90b063ad5567799e14a96f0656c7faee7beaf967e3c"
         }
       ],
       "licenses": [
@@ -1213,10 +1213,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40oxc-project/types@0.148.0",
+      "purl": "pkg:npm/%40oxc-project/types@0.151.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.148.0"
+      "version": "0.151.0"
     },
     {
       "bom-ref": "@polka/url@1.0.0-next.29",
@@ -1252,17 +1252,17 @@
       "version": "1.0.0-next.29"
     },
     {
-      "bom-ref": "@rolldown/binding-android-arm-eabi@1.2.7",
+      "bom-ref": "@rolldown/binding-android-arm-eabi@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "132a73827602c32558e0d0c72b31a63494f96fe5da404067887c6c31d78840b07fb5c0b366786aaf31e96456d7f626b1c7ee51881f1c6804c1b5fbd93fbcd5c5"
+          "content": "0399177c62af2965991344ed3eb7ecbd3faae18e5dd501bc806533a588c6c9d33e7c044cf4cb97f743eb5d85ded176ec0d5832c713731e8ea08828fdd1bb0537"
         }
       ],
       "licenses": [
@@ -1279,23 +1279,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-android-arm64@1.2.7",
+      "bom-ref": "@rolldown/binding-android-arm64@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "975ec713d1307966aa25986e52e34137f17333adb1c3e0c40959c9caf32cc67f2f2450062f2e507cb0e860072ba2790037c5712991decc3a6e9470cfc7de6f17"
+          "content": "cfa713c9ccfe889e0f564b8be071d6e037d37e8794ff69ea618b923ab4e61fbc872b96342c23a7034dd5e193716afc95694d683aa520220da494dfecf9448638"
         }
       ],
       "licenses": [
@@ -1312,23 +1312,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-android-arm64@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm64@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-darwin-arm64@1.2.7",
+      "bom-ref": "@rolldown/binding-darwin-arm64@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "f040fc10b16f1d773a382113227e205ce6cf89a47a6dc90cfe2a57b5bce53d50d13017c41a308a80ef7417d62d7dda436ad571fd9430eda675bd431fffe4f733"
+          "content": "8d286fa8db4feaf0c2ebf03924e0336d557e0e4807aa197f49c5422446edf93518e90633ed89d772b837b0bb450678aba347ff2dde7467009603a7fb2980f59d"
         }
       ],
       "licenses": [
@@ -1345,23 +1345,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-darwin-x64@1.2.7",
+      "bom-ref": "@rolldown/binding-darwin-x64@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "fd63eb8a98ed880219dad598edd7628ce453d148e0f3bc31596fea72815508a0165433e1b58d31afb0e3d0cdc6c8d1b3eb48c6c1312586ba3f9a417d753edd0d"
+          "content": "7f68b6c62356ab5675976fbeab67ee85945d2c04f76aac43eaf44d9b5440c6952805c76a341dc2d2cd41b7e2be3db131d85e45e20429ea1a8a92984263fc45f7"
         }
       ],
       "licenses": [
@@ -1378,23 +1378,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-freebsd-x64@1.2.7",
+      "bom-ref": "@rolldown/binding-freebsd-x64@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d780c8e0d72aa6f6c80b14a718bc773e6b43696a913ff2864866fa0be24b2d53de65197a74a7476dade91aca93defa5d4ea8446083c6d0c310f1cd3162aa09c4"
+          "content": "e08af915238a20032be2bd24131a6dd6cddb320cc9537ac0e39018387b50a65b34a0d7aa71804aad6325724ad81f82827c62df91f9f5b4dd5d9993cc56c757a3"
         }
       ],
       "licenses": [
@@ -1411,23 +1411,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.7",
+      "bom-ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "6f1ad6211bc7590bdb2708be54889efe40c9990c5c344eb1c56c1976a17f1315408a0b4792fe785932d03dbf90b19767172d7c7e0ec93df5862f4447eafc0895"
+          "content": "fe09d10ccfb7f4144ecc037f9353998c33e70cc719c41ff4114c4a8ce34ee72564344be5b28303af118d2a0662fedb45ae24b683094337307ae69bcd6c539721"
         }
       ],
       "licenses": [
@@ -1444,23 +1444,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-arm64-gnu@1.2.7",
+      "bom-ref": "@rolldown/binding-linux-arm64-gnu@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b68398d810a1059caec54ece617e939f7f3d762e08cc0a8f4f271571c8b43bb1527c1ab3441dd1667f8ae48b3a00d7f8b6681177f2b5c994ec3535db917b272e"
+          "content": "3c568af07c2f0076da29b05c0cd42286330a62f16703986210dc7f979b698530f3d44d16169df697403b6aaee5c94c06b11c3fc52acd232fe020ae2d86b482af"
         }
       ],
       "licenses": [
@@ -1477,23 +1477,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-arm64-musl@1.2.7",
+      "bom-ref": "@rolldown/binding-linux-arm64-musl@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9402174c7fda88b44bc6c4e042f7e18e8e0ad72756229d34f95d2fa0eafd6de6fff599a4505ad221bd3775734546030dbe413aa06b05d748a843a52c23ebd2e5"
+          "content": "02c93325420a44b3f192bb91d702ca7b019b3b0f8461f53ff653ab0458f8005ac403c84fa4a16738358dbb658b68db3440d9046fd40826e7e65596482ff6c996"
         }
       ],
       "licenses": [
@@ -1510,23 +1510,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-ppc64-gnu@1.2.7",
+      "bom-ref": "@rolldown/binding-linux-ppc64-gnu@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "91d9f04b6f0f91e9e9fe664c4708d75d7c3143ba48b26f9b17dd7d2d42bddc13b285c2ecad529d3f6a7d7f1a623cd3c06cdb9c87cca942dd299b63f62d80801a"
+          "content": "aa55060217a1db287c69f1fb401831d0fad11cdf3984a9cd77bf31f0c78c8578afb9ebe077cbe07fafc2b2d3b398d298fe52d31ef353acfcbdf1c2e702e83327"
         }
       ],
       "licenses": [
@@ -1543,23 +1543,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-s390x-gnu@1.2.7",
+      "bom-ref": "@rolldown/binding-linux-s390x-gnu@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e75e8e76cc8b76be44eb9a5a177c81179e6df267e6f7e826b42b0adf123b5ca5c84fb11f4651e1c4bf0afcd47a1eef01592805e7ed70ef89532f4fa7c5c73c43"
+          "content": "b1e72911a77ed2f09b49f9fcba91724a40ec92ff9b18f9374c74834bd63cf72738adbe24cea1e9f039b277d064416e129e13570590a5ffa0ab3bffe165a84d25"
         }
       ],
       "licenses": [
@@ -1576,23 +1576,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-x64-gnu@1.2.7",
+      "bom-ref": "@rolldown/binding-linux-x64-gnu@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "afcff3f27ec615a611967df198fd42c72d071ff1cb334b8150f904b925447ca18303cf4cd05b194592514b07bfb498d1c7e7e91ff823a2b7e107cb6611b4852c"
+          "content": "98e5414f774fa645a6f170563e65386dff94e9d6032de328ffda235268ace0dd0be6ebb5d2aadae6f3b29e067bfcf49da04e06f4abd1b786e5a11c4d8cb6acec"
         }
       ],
       "licenses": [
@@ -1609,23 +1609,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-x64-musl@1.2.7",
+      "bom-ref": "@rolldown/binding-linux-x64-musl@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a40b04f22883c54835c41a9d86b4df838e405435698ab8f3d34b1b94460294634d70c9c36fe7bc6de420a88030e8bbdab97fc03ef831527c2b82e9ff61818187"
+          "content": "22cefc8bd03c522e12a9cc54c0527db8c9a30e7e7c21b5538c55987507acb451207ae1261cc2c636b8979d524a9301b6622663c3c70fd33093c8331d0c6b4e3a"
         }
       ],
       "licenses": [
@@ -1642,23 +1642,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-openharmony-arm64@1.2.7",
+      "bom-ref": "@rolldown/binding-openharmony-arm64@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9537086269a741003c3abff60dab52ea84aa71d2c7bde9dd8d2fb32eef85c204e8ca758c45299076933ae5f4c03498084b89a36cc3a8e4a4f69674fd4806fdeb"
+          "content": "7540979de67cec83543324340fe0b41eb1013543cd5c768f994e464e3c8a4c9122bacb30f4a6a3e4b9fc533b4f7b87a957f7dfbe034111a764b1d621996eb124"
         }
       ],
       "licenses": [
@@ -1675,23 +1675,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-win32-arm64-msvc@1.2.7",
+      "bom-ref": "@rolldown/binding-win32-arm64-msvc@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "7b71aedd6c5b364fd4a90871a94ed82183bef5906f58dcf753e87fa91168b2c70c1737513db5d849a4968129e496fd9fcf54e0cc14dcb62db3df973fee2aec1f"
+          "content": "8c1cb16faa9f77e6c7d7151dd2a9df1676f5ee2f6c5813d8dad39abc9d25ded76bdce4eef8abed9bc71dfc95799c5b7ae7b6f556a1a5b7183da253847e87d75b"
         }
       ],
       "licenses": [
@@ -1708,23 +1708,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
-      "bom-ref": "@rolldown/binding-win32-x64-msvc@1.2.7",
+      "bom-ref": "@rolldown/binding-win32-x64-msvc@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "5bf8e0e6aa114aa8ec12fd3e7598b87baf3b99c1ea995b94d0fe1f2baa92ff18deb56d8699cd56f23fffcf99c078d702f13b66d21578e888dc61eb95c1886e8b"
+          "content": "fcfccaab3009d378b5f68cb622d3efcaf6958ce8c108d9df689b3ccaf51d1812a68844a09eb2524366b077cd50cc56db9c09aeed83bd66726b0c26fd55224f44"
         }
       ],
       "licenses": [
@@ -1741,10 +1741,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.7",
+      "purl": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
       "bom-ref": "@rolldown/pluginutils@1.0.1",
@@ -1813,17 +1813,17 @@
       "version": "1.1.0"
     },
     {
-      "bom-ref": "@sveltejs/acorn-typescript@1.0.10",
+      "bom-ref": "@sveltejs/acorn-typescript@1.0.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sveltejs/acorn-typescript/-/acorn-typescript-1.0.10.tgz"
+          "url": "https://registry.npmjs.org/@sveltejs/acorn-typescript/-/acorn-typescript-1.0.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e167ca93af1e4e287e322243e1f49bc4dec4f2454199330f58750f623be5d8dd2b32ce7760b4d3f3f623294e43b67cf92ea0e397b2c4c3853b9574765b727958"
+          "content": "c202a082785954bf417f1d4e68a293ad863d045464e82f1402440d51c22fd7e965cd8ac8ab2f91666e473cace7d0da4406f4d5853a81e24432965672c2c44145"
         }
       ],
       "licenses": [
@@ -1840,10 +1840,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40sveltejs/acorn-typescript@1.0.10",
+      "purl": "pkg:npm/%40sveltejs/acorn-typescript@1.0.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.0.10"
+      "version": "1.0.13"
     },
     {
       "bom-ref": "@sveltejs/adapter-static@3.0.10",
@@ -1945,17 +1945,17 @@
       "version": "0.2.3"
     },
     {
-      "bom-ref": "@sveltejs/vite-plugin-svelte@7.3.0",
+      "bom-ref": "@sveltejs/vite-plugin-svelte@7.3.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sveltejs/vite-plugin-svelte/-/vite-plugin-svelte-7.3.0.tgz"
+          "url": "https://registry.npmjs.org/@sveltejs/vite-plugin-svelte/-/vite-plugin-svelte-7.3.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "41b4682720fdd9ef51d2e7de4085911eb082d0e6dca92bff6810ddad032853eb32a5abf7703c79c32b5d43a18b7578c430eeb18eb5c6cdf914ca09e0f0932fd0"
+          "content": "64fb0b37c0757bf127f80939b3857bb2b1434f9df6a12d2a89e2ec430bbadcd18ab12fa2023a0ed89b3506872194796095c53e3eded600edc2e447bee1fea054"
         }
       ],
       "licenses": [
@@ -1972,10 +1972,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40sveltejs/vite-plugin-svelte@7.3.0",
+      "purl": "pkg:npm/%40sveltejs/vite-plugin-svelte@7.3.1",
       "scope": "optional",
       "type": "library",
-      "version": "7.3.0"
+      "version": "7.3.1"
     },
     {
       "bom-ref": "magic-string@1.2.3",
@@ -2036,17 +2036,17 @@
       "version": "2.11.1"
     },
     {
-      "bom-ref": "@tauri-apps/cli@2.11.4",
+      "bom-ref": "@tauri-apps/cli@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "47cc46b4ca70c9eb5ac12aa6f6460eb8c984aa48546ef714cbc9f468d5c8c689652812c4494bb97f8171fbae218004989b51fe8d25aaea3096eb3a939c7ea1a9"
+          "content": "61b789ead72d368a38d29bab3b8bb711ea37455aa6b2326bd0da0a411bbee29bcee2030bce48ed6bbc7493de92c522e6c7ead0fbcba6d5384e970f872e9805ba"
         }
       ],
       "licenses": [
@@ -2061,23 +2061,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-darwin-arm64@2.11.4",
+      "bom-ref": "@tauri-apps/cli-darwin-arm64@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-darwin-arm64/-/cli-darwin-arm64-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-darwin-arm64/-/cli-darwin-arm64-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d6bc8e177661a59fe77a61d5e73570050073f630c62a628fbd63c00ce85cf378a0d0fe1b31cda2111e0d6c2eabf6c8de219e91550e20dd164862f7b385c9784d"
+          "content": "b6080e8953a88632077621256e37817c1e35b3a7267ecabe650d0f5f47c4b4276c0dd67d7028b9e1ee6034aeed74f6d1e896dd0deed103891b41dcb2054524fd"
         }
       ],
       "licenses": [
@@ -2092,23 +2092,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-darwin-arm64@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-darwin-arm64@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-darwin-x64@2.11.4",
+      "bom-ref": "@tauri-apps/cli-darwin-x64@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-darwin-x64/-/cli-darwin-x64-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-darwin-x64/-/cli-darwin-x64-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b85b0640001fbb2cf593fc862e69167e406580a02a65fc6a94798b5b1f35414dbb44959f99b347088abc4fcc357be542965788b99523a4759fa04e04dc32e8dc"
+          "content": "4ab3be2826eabc6d48bd53dd973417e06106651403212ae60d8f5b19c5baf032d5141082d3a1fe2e8cfaa32519113531b12311e81e280dfbdb415803e21c6ca9"
         }
       ],
       "licenses": [
@@ -2123,23 +2123,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-darwin-x64@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-darwin-x64@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-arm-gnueabihf@2.11.4",
+      "bom-ref": "@tauri-apps/cli-linux-arm-gnueabihf@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm-gnueabihf/-/cli-linux-arm-gnueabihf-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm-gnueabihf/-/cli-linux-arm-gnueabihf-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "21a1d99f909d04bdb5a149a3895392d5cb70e88a753b4a63a7bd05c0e5a6633d66c967b4498f7a6488f61587fba53d26f1b23687f86bb3965b1175e1e38fcc91"
+          "content": "a8bace6826bc84b0f94153d0463020397be195314a5e64e589517bef71a0bc00d87166527669dc9c5e7304502476ed6e40af0a7d06c3941530a90619a817c145"
         }
       ],
       "licenses": [
@@ -2154,23 +2154,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm-gnueabihf@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm-gnueabihf@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-arm64-gnu@2.11.4",
+      "bom-ref": "@tauri-apps/cli-linux-arm64-gnu@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-gnu/-/cli-linux-arm64-gnu-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-gnu/-/cli-linux-arm64-gnu-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "378d7fba44d155ee974ae513112b8574678e5b68bb93adad2beea01cae4a779feae513efbe2d7d19a58054f3dbf6ef791d21a64c2852a2505fcf29d4b2cb0568"
+          "content": "4eadf6c6942389011d22bbf00eaee5c078577a69f4ef409759d6c2bebf6b762f6bb2ff4d1536d0ea2cd54887cd13ee7d41a7abc6ec2d52d6792310cd59aa1807"
         }
       ],
       "licenses": [
@@ -2185,23 +2185,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm64-gnu@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm64-gnu@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-arm64-musl@2.11.4",
+      "bom-ref": "@tauri-apps/cli-linux-arm64-musl@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-musl/-/cli-linux-arm64-musl-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-musl/-/cli-linux-arm64-musl-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "bf6efb5274ff7c1eb8c407d2ae82f93772a6ded2e6bc04d6a89270ff0448fa0ea8f8791e0f4b25c84ee03a136cd4c6e3138d51edb40e4f1315a0bddaa265099b"
+          "content": "f8e7562a3e40abe0bc1d7ca9438b7ddba57c72956773465c2487614d75a354024791a36ea3c12e411e8a4592875886c926029d30f083a2cbf0cc815a041a8729"
         }
       ],
       "licenses": [
@@ -2216,23 +2216,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm64-musl@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm64-musl@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-riscv64-gnu@2.11.4",
+      "bom-ref": "@tauri-apps/cli-linux-riscv64-gnu@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-riscv64-gnu/-/cli-linux-riscv64-gnu-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-riscv64-gnu/-/cli-linux-riscv64-gnu-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "aaa80d910daed72647c63871b196b152d4435bc748a88626df7af1fe6cf042fd127d8f71d41fa2ada8fcbd67858978e349556110c7a95d23adb354ea3f3bd735"
+          "content": "434576863a659720d6f1d590652b084ee4037dc63d069059ba15e431ad93e4014b6409fe1493d7412caf9f158d571468c1d439f579f4415b469ba1c41cd504bf"
         }
       ],
       "licenses": [
@@ -2247,23 +2247,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-riscv64-gnu@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-riscv64-gnu@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-x64-gnu@2.11.4",
+      "bom-ref": "@tauri-apps/cli-linux-x64-gnu@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-gnu/-/cli-linux-x64-gnu-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-gnu/-/cli-linux-x64-gnu-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d9544d5a5f3814e1f49b682288390eda1d105e570c25e5fecc90e9239903210031eacfa0785defe3c1780d77c97b3e064bf15da031a73e7c350b689819b43b6d"
+          "content": "5f3d6cf3b8058d925931028084b6bbed87a208933ac95a20ddff4ec4381577f2b10c8a01d5d039576c4e9cc33e49190e1a4f63bb0201a9eb150235749140740c"
         }
       ],
       "licenses": [
@@ -2278,23 +2278,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-x64-gnu@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-x64-gnu@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-x64-musl@2.11.4",
+      "bom-ref": "@tauri-apps/cli-linux-x64-musl@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-musl/-/cli-linux-x64-musl-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-musl/-/cli-linux-x64-musl-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a3d1b2858a2bfe773bc5aae6c0313791adaccee5b7bae6735e31d687ae10f185f902d4a0c5d424156ceb6383bc2a21ad54dbc5048d781f7438f508f94ce20ffc"
+          "content": "e80f3cc2a0195d91e031a06b1a2cbf0696b81a05277ed5cceeeaae28e78e5c2b8aefcfd7741c4410289c2bfd681e0ad3d7bf5704539a03a950107cac8d19868a"
         }
       ],
       "licenses": [
@@ -2309,23 +2309,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-x64-musl@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-x64-musl@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-win32-arm64-msvc@2.11.4",
+      "bom-ref": "@tauri-apps/cli-win32-arm64-msvc@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-arm64-msvc/-/cli-win32-arm64-msvc-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-arm64-msvc/-/cli-win32-arm64-msvc-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "95de4485be7df26d15918cb29513cd78216c05efe49b48f18ace8a80ca65dc8198e88fe2d51c105ced3923502c5d45ced960ba02f07f2f0e2a4dffdab22b8489"
+          "content": "b111a017f39b45f2dc4b73ed51dc936c9b641aadc4f8f3594e49ef01447030d52d1f0f4353f045e92e6c8b8df2f654b9c843bd6d624203e18662f9e7e9ca6143"
         }
       ],
       "licenses": [
@@ -2340,23 +2340,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-win32-arm64-msvc@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-win32-arm64-msvc@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-win32-ia32-msvc@2.11.4",
+      "bom-ref": "@tauri-apps/cli-win32-ia32-msvc@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-ia32-msvc/-/cli-win32-ia32-msvc-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-ia32-msvc/-/cli-win32-ia32-msvc-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d761f18b45d7fc7e551713bf6c68079055a19a5f5532010ebbd0a2763782793350d65e9fa5495b8868123fb08b2373c5b56f7f15f6de1e2799fa4c962b91fb08"
+          "content": "6c73afff2c6a7caa48ee2a081508b9c0e7d9ee391b3f3243fd4857639d88fe1ae6137a8d87bd5ca2120fcaa641e46427dcb65e25674250eaa6220ff0e975fe5a"
         }
       ],
       "licenses": [
@@ -2371,23 +2371,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-win32-ia32-msvc@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-win32-ia32-msvc@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
-      "bom-ref": "@tauri-apps/cli-win32-x64-msvc@2.11.4",
+      "bom-ref": "@tauri-apps/cli-win32-x64-msvc@2.11.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-x64-msvc/-/cli-win32-x64-msvc-2.11.4.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-x64-msvc/-/cli-win32-x64-msvc-2.11.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "faf0e2a81214e5d3084a0ff036f5f7b05f991df809189e53d0070ef841cd5d5f461801be3f97f3a1d9435c3dd074a091819c4ca029b93cfbe3dc1a8b36306d87"
+          "content": "bda68e99abea742792ee83226f66da9c165e9a0ac2e6fe78b52930a0157e6f1ad741985066b3b013610eda2e31f821cdb6f41433fe9b4acde2ca664c02cc9c5a"
         }
       ],
       "licenses": [
@@ -2402,10 +2402,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-win32-x64-msvc@2.11.4",
+      "purl": "pkg:npm/%40tauri-apps/cli-win32-x64-msvc@2.11.5",
       "scope": "optional",
       "type": "library",
-      "version": "2.11.4"
+      "version": "2.11.5"
     },
     {
       "bom-ref": "@tauri-apps/plugin-clipboard-manager@2.3.3",
@@ -2483,17 +2483,17 @@
       "version": "2.3.1"
     },
     {
-      "bom-ref": "@tauri-apps/plugin-updater@2.11.0",
+      "bom-ref": "@tauri-apps/plugin-updater@2.12.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/plugin-updater/-/plugin-updater-2.11.0.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/plugin-updater/-/plugin-updater-2.12.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "004dfa5e43a84a76b6e06e348d9318d799f302791710f2ffef7b46a2c786aed18e1ee23f719c16cc7a5914b8ca5c33e0cd8678df9cf5807bb6f0b82bb01c08c5"
+          "content": "ef8fa0eeb4881d74237b7b6d47ab586a9dc524ffd4b59aaa63119517d104d0aa73d18003c475f6627c3f78894d3cccbd0f5686f85f28068b13fba9e98526bc3a"
         }
       ],
       "licenses": [
@@ -2502,10 +2502,10 @@
         }
       ],
       "name": "@tauri-apps/plugin-updater",
-      "purl": "pkg:npm/%40tauri-apps/plugin-updater@2.11.0",
+      "purl": "pkg:npm/%40tauri-apps/plugin-updater@2.12.0",
       "scope": "required",
       "type": "library",
-      "version": "2.11.0"
+      "version": "2.12.0"
     },
     {
       "bom-ref": "@types/cookie@0.6.0",
@@ -2621,17 +2621,17 @@
       "version": "1.0.1"
     },
     {
-      "bom-ref": "acorn@8.17.0",
+      "bom-ref": "acorn@8.18.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/acorn/-/acorn-8.17.0.tgz"
+          "url": "https://registry.npmjs.org/acorn/-/acorn-8.18.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c5141b0dbf419f00da7d8367e95c25f37f436158ea5d86f55d51ad58067591c0dcea2c002f8860dc1d5d665462b8434578ed87e778051b78a7eb6d4074445502"
+          "content": "946abef72af5fc6b8059a558207463befc921b9ff855f288bc2f045b14ad3dd70387f29aec51b7b703fabf8779064adabd48a584802c1b8423f37b74d8b5943d"
         }
       ],
       "licenses": [
@@ -2648,10 +2648,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/acorn@8.17.0",
+      "purl": "pkg:npm/acorn@8.18.0",
       "scope": "optional",
       "type": "library",
-      "version": "8.17.0"
+      "version": "8.18.0"
     },
     {
       "bom-ref": "aria-query@5.3.1",
@@ -2885,17 +2885,17 @@
       "version": "2.1.2"
     },
     {
-      "bom-ref": "devalue@5.8.1",
+      "bom-ref": "devalue@5.9.4",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/devalue/-/devalue-5.8.1.tgz"
+          "url": "https://registry.npmjs.org/devalue/-/devalue-5.9.4.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e025c3611046a8dfb9ef054992e5c1626a405544a0dcbe890106bf0c5aa6db7f06ef7135c2ec9cfc9846409ccdeef51ffc23298586aedb35db7d6cc347969313"
+          "content": "b0f013e29ced6eeeb9f3afe1ae13a730a4b5ec826bbe0d769978923d24b75b9a8378dd911a0bd9d1d8990a6df57416e77af7d59ae8cd3b720cdb0ad2e18d9186"
         }
       ],
       "licenses": [
@@ -2912,10 +2912,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/devalue@5.8.1",
+      "purl": "pkg:npm/devalue@5.9.4",
       "scope": "optional",
       "type": "library",
-      "version": "5.8.1"
+      "version": "5.9.4"
     },
     {
       "bom-ref": "esbuild@0.28.2",
@@ -2984,17 +2984,17 @@
       "version": "1.2.2"
     },
     {
-      "bom-ref": "esrap@2.2.13",
+      "bom-ref": "esrap@2.3.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/esrap/-/esrap-2.2.13.tgz"
+          "url": "https://registry.npmjs.org/esrap/-/esrap-2.3.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9bc8c7e61660244d914542bf8e39063dc2440c057e7589d9605928b1068f4dc13e630e31ca75c73a8e8551dc1a581b5d4776f530c6bbc040d3487791d955ac18"
+          "content": "0dcf1a318d2da893483776a1b5c7049bf51699ad3932dfcdecd04675332d2756d1e52c9cb4d10555a3947e69335577ba3ec93c30f7e28aa51a7d722831b582b1"
         }
       ],
       "licenses": [
@@ -3011,10 +3011,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/esrap@2.2.13",
+      "purl": "pkg:npm/esrap@2.3.13",
       "scope": "optional",
       "type": "library",
-      "version": "2.2.13"
+      "version": "2.3.13"
     },
     {
       "bom-ref": "events@3.3.0",
@@ -4076,17 +4076,17 @@
       "version": "4.1.2"
     },
     {
-      "bom-ref": "rolldown@1.2.7",
+      "bom-ref": "rolldown@1.2.11",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.7.tgz"
+          "url": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.11.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "83412d2ef0634d407b8e1c95d12fd30aea77bff5d2565e39bd42066ce194e103e2ca34de9c27b898ab85bd6f5f1206264b6168e36014b2c46636e33389776b8a"
+          "content": "aa94b0232cf48c742ae6a5c14cdc45984ebaeb8ac9ecefb84ef3c53a239a052af3f0838773592828a4aa4ccd87eaed541b5f93bdeb82eaf6831ca5c53af6f52b"
         }
       ],
       "licenses": [
@@ -4103,10 +4103,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/rolldown@1.2.7",
+      "purl": "pkg:npm/rolldown@1.2.11",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.7"
+      "version": "1.2.11"
     },
     {
       "bom-ref": "rxjs@7.8.2",
@@ -4322,17 +4322,17 @@
       "version": "1.2.1"
     },
     {
-      "bom-ref": "svelte@5.57.0",
+      "bom-ref": "svelte@5.57.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/svelte/-/svelte-5.57.0.tgz"
+          "url": "https://registry.npmjs.org/svelte/-/svelte-5.57.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "35d6c39fb7e5e1b7b5562506d28abf96f1ba399cb7a04368955d8e3638aaaac7d5a1e01fcda4002947045f732b42877f05e6efd4f830113f6b7d78609fdb382a"
+          "content": "52a8f8f6558a07e8924a79debb0898609ecc660901f9e5ebd0b5c186fe2e0ee0245ea9d69aaeb94b17e57efa742dce8c74a8cc53119a78e29626acf948d89520"
         }
       ],
       "licenses": [
@@ -4349,10 +4349,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/svelte@5.57.0",
+      "purl": "pkg:npm/svelte@5.57.1",
       "scope": "optional",
       "type": "library",
-      "version": "5.57.0"
+      "version": "5.57.1"
     },
     {
       "bom-ref": "svelte-check@4.7.6",
@@ -4481,17 +4481,17 @@
       "version": "2.8.1"
     },
     {
-      "bom-ref": "tsx@4.23.13",
+      "bom-ref": "tsx@4.23.15",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/tsx/-/tsx-4.23.13.tgz"
+          "url": "https://registry.npmjs.org/tsx/-/tsx-4.23.15.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "04be4c1a44659fa6836216f4c5b4251001b0ef8dc169961675b5ad749381ae26096e82a051460269d169dbf16904166ab810bf7b33419fbc0c30fc7b1436540f"
+          "content": "6227b1d4ebe7f33db13e9396724222cac575492c91318f4190b17efaad322a20f10aa461a2c29f320de36a72a488b07067973f62bca5a0ac0665cac49adc312b"
         }
       ],
       "licenses": [
@@ -4508,10 +4508,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/tsx@4.23.13",
+      "purl": "pkg:npm/tsx@4.23.15",
       "scope": "optional",
       "type": "library",
-      "version": "4.23.13"
+      "version": "4.23.15"
     },
     {
       "bom-ref": "typed-emitter@2.1.0",
@@ -4574,17 +4574,17 @@
       "version": "6.0.3"
     },
     {
-      "bom-ref": "vite@8.3.0",
+      "bom-ref": "vite@8.3.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/vite/-/vite-8.3.0.tgz"
+          "url": "https://registry.npmjs.org/vite/-/vite-8.3.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "96164156f10779f804f874190bd3bb101260094fe757314d97bbe44b8444d003ed58b3f4dbff10548910b730713eaba1ee5ab9ffbf0d1e2a538fb38343a5eec9"
+          "content": "fdbbc7f44f6d9825d11a9dae5d8dd66ce95daa94f01646e16bff0035a110e95931847eb42b2a8bc2066aea51b6cbee2e4f9e71f7ef5e50732943bb869ce08a8c"
         }
       ],
       "licenses": [
@@ -4601,10 +4601,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/vite@8.3.0",
+      "purl": "pkg:npm/vite@8.3.1",
       "scope": "optional",
       "type": "library",
-      "version": "8.3.0"
+      "version": "8.3.1"
     },
     {
       "bom-ref": "vitefu@1.1.3",
@@ -4710,21 +4710,21 @@
         "@tauri-apps/plugin-clipboard-manager@2.3.3",
         "@tauri-apps/plugin-opener@2.5.5",
         "@tauri-apps/plugin-process@2.3.1",
-        "@tauri-apps/plugin-updater@2.11.0",
+        "@tauri-apps/plugin-updater@2.12.0",
         "@userdispatch/sdk@1.0.1",
         "livekit-client@2.22.3",
         "@sveltejs/adapter-static@3.0.10",
         "@sveltejs/kit@2.70.3",
-        "@sveltejs/vite-plugin-svelte@7.3.0",
-        "@tauri-apps/cli@2.11.4",
+        "@sveltejs/vite-plugin-svelte@7.3.1",
+        "@tauri-apps/cli@2.11.5",
         "playwright@1.63.0",
-        "svelte@5.57.0",
+        "svelte@5.57.1",
         "svelte-check@4.7.6",
-        "tsx@4.23.13",
+        "tsx@4.23.15",
         "typescript@6.0.3",
-        "vite@8.3.0"
+        "vite@8.3.1"
       ],
-      "ref": "desktop@0.9.29"
+      "ref": "desktop@0.9.30"
     },
     {
       "dependsOn": [],
@@ -4848,7 +4848,7 @@
     },
     {
       "dependsOn": [
-        "@jridgewell/sourcemap-codec@1.5.5",
+        "@jridgewell/sourcemap-codec@1.6.0",
         "@jridgewell/trace-mapping@0.3.31"
       ],
       "ref": "@jridgewell/gen-mapping@0.3.13"
@@ -4866,12 +4866,12 @@
     },
     {
       "dependsOn": [],
-      "ref": "@jridgewell/sourcemap-codec@1.5.5"
+      "ref": "@jridgewell/sourcemap-codec@1.6.0"
     },
     {
       "dependsOn": [
         "@jridgewell/resolve-uri@3.1.2",
-        "@jridgewell/sourcemap-codec@1.5.5"
+        "@jridgewell/sourcemap-codec@1.6.0"
       ],
       "ref": "@jridgewell/trace-mapping@0.3.31"
     },
@@ -4887,7 +4887,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "@oxc-project/types@0.148.0"
+      "ref": "@oxc-project/types@0.151.0"
     },
     {
       "dependsOn": [],
@@ -4895,63 +4895,63 @@
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-android-arm-eabi@1.2.7"
+      "ref": "@rolldown/binding-android-arm-eabi@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-android-arm64@1.2.7"
+      "ref": "@rolldown/binding-android-arm64@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-darwin-arm64@1.2.7"
+      "ref": "@rolldown/binding-darwin-arm64@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-darwin-x64@1.2.7"
+      "ref": "@rolldown/binding-darwin-x64@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-freebsd-x64@1.2.7"
+      "ref": "@rolldown/binding-freebsd-x64@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.7"
+      "ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-arm64-gnu@1.2.7"
+      "ref": "@rolldown/binding-linux-arm64-gnu@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-arm64-musl@1.2.7"
+      "ref": "@rolldown/binding-linux-arm64-musl@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-ppc64-gnu@1.2.7"
+      "ref": "@rolldown/binding-linux-ppc64-gnu@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-s390x-gnu@1.2.7"
+      "ref": "@rolldown/binding-linux-s390x-gnu@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-x64-gnu@1.2.7"
+      "ref": "@rolldown/binding-linux-x64-gnu@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-x64-musl@1.2.7"
+      "ref": "@rolldown/binding-linux-x64-musl@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-openharmony-arm64@1.2.7"
+      "ref": "@rolldown/binding-openharmony-arm64@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-win32-arm64-msvc@1.2.7"
+      "ref": "@rolldown/binding-win32-arm64-msvc@1.2.11"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-win32-x64-msvc@1.2.7"
+      "ref": "@rolldown/binding-win32-x64-msvc@1.2.11"
     },
     {
       "dependsOn": [],
@@ -4963,9 +4963,9 @@
     },
     {
       "dependsOn": [
-        "acorn@8.17.0"
+        "acorn@8.18.0"
       ],
-      "ref": "@sveltejs/acorn-typescript@1.0.10"
+      "ref": "@sveltejs/acorn-typescript@1.0.13"
     },
     {
       "dependsOn": [
@@ -4975,16 +4975,16 @@
     },
     {
       "dependsOn": [
-        "@sveltejs/vite-plugin-svelte@7.3.0",
-        "svelte@5.57.0",
-        "vite@8.3.0",
+        "@sveltejs/vite-plugin-svelte@7.3.1",
+        "svelte@5.57.1",
+        "vite@8.3.1",
         "typescript@6.0.3",
         "@standard-schema/spec@1.1.0",
-        "@sveltejs/acorn-typescript@1.0.10",
+        "@sveltejs/acorn-typescript@1.0.13",
         "@types/cookie@0.6.0",
-        "acorn@8.17.0",
+        "acorn@8.18.0",
         "cookie@0.7.2",
-        "devalue@5.8.1",
+        "devalue@5.9.4",
         "esm-env@1.2.2",
         "kleur@4.1.5",
         "magic-string@0.30.21",
@@ -5000,18 +5000,18 @@
     },
     {
       "dependsOn": [
-        "svelte@5.57.0",
-        "vite@8.3.0",
+        "svelte@5.57.1",
+        "vite@8.3.1",
         "deepmerge@4.3.1",
         "magic-string@1.2.3",
         "obug@2.1.4",
         "vitefu@1.1.3"
       ],
-      "ref": "@sveltejs/vite-plugin-svelte@7.3.0"
+      "ref": "@sveltejs/vite-plugin-svelte@7.3.1"
     },
     {
       "dependsOn": [
-        "@jridgewell/sourcemap-codec@1.5.5"
+        "@jridgewell/sourcemap-codec@1.6.0"
       ],
       "ref": "magic-string@1.2.3"
     },
@@ -5021,63 +5021,63 @@
     },
     {
       "dependsOn": [
-        "@tauri-apps/cli-darwin-arm64@2.11.4",
-        "@tauri-apps/cli-darwin-x64@2.11.4",
-        "@tauri-apps/cli-linux-arm-gnueabihf@2.11.4",
-        "@tauri-apps/cli-linux-arm64-gnu@2.11.4",
-        "@tauri-apps/cli-linux-arm64-musl@2.11.4",
-        "@tauri-apps/cli-linux-riscv64-gnu@2.11.4",
-        "@tauri-apps/cli-linux-x64-gnu@2.11.4",
-        "@tauri-apps/cli-linux-x64-musl@2.11.4",
-        "@tauri-apps/cli-win32-arm64-msvc@2.11.4",
-        "@tauri-apps/cli-win32-ia32-msvc@2.11.4",
-        "@tauri-apps/cli-win32-x64-msvc@2.11.4"
+        "@tauri-apps/cli-darwin-arm64@2.11.5",
+        "@tauri-apps/cli-darwin-x64@2.11.5",
+        "@tauri-apps/cli-linux-arm-gnueabihf@2.11.5",
+        "@tauri-apps/cli-linux-arm64-gnu@2.11.5",
+        "@tauri-apps/cli-linux-arm64-musl@2.11.5",
+        "@tauri-apps/cli-linux-riscv64-gnu@2.11.5",
+        "@tauri-apps/cli-linux-x64-gnu@2.11.5",
+        "@tauri-apps/cli-linux-x64-musl@2.11.5",
+        "@tauri-apps/cli-win32-arm64-msvc@2.11.5",
+        "@tauri-apps/cli-win32-ia32-msvc@2.11.5",
+        "@tauri-apps/cli-win32-x64-msvc@2.11.5"
       ],
-      "ref": "@tauri-apps/cli@2.11.4"
+      "ref": "@tauri-apps/cli@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-darwin-arm64@2.11.4"
+      "ref": "@tauri-apps/cli-darwin-arm64@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-darwin-x64@2.11.4"
+      "ref": "@tauri-apps/cli-darwin-x64@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-arm-gnueabihf@2.11.4"
+      "ref": "@tauri-apps/cli-linux-arm-gnueabihf@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-arm64-gnu@2.11.4"
+      "ref": "@tauri-apps/cli-linux-arm64-gnu@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-arm64-musl@2.11.4"
+      "ref": "@tauri-apps/cli-linux-arm64-musl@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-riscv64-gnu@2.11.4"
+      "ref": "@tauri-apps/cli-linux-riscv64-gnu@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-x64-gnu@2.11.4"
+      "ref": "@tauri-apps/cli-linux-x64-gnu@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-x64-musl@2.11.4"
+      "ref": "@tauri-apps/cli-linux-x64-musl@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-win32-arm64-msvc@2.11.4"
+      "ref": "@tauri-apps/cli-win32-arm64-msvc@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-win32-ia32-msvc@2.11.4"
+      "ref": "@tauri-apps/cli-win32-ia32-msvc@2.11.5"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-win32-x64-msvc@2.11.4"
+      "ref": "@tauri-apps/cli-win32-x64-msvc@2.11.5"
     },
     {
       "dependsOn": [
@@ -5101,7 +5101,7 @@
       "dependsOn": [
         "@tauri-apps/api@2.11.1"
       ],
-      "ref": "@tauri-apps/plugin-updater@2.11.0"
+      "ref": "@tauri-apps/plugin-updater@2.12.0"
     },
     {
       "dependsOn": [],
@@ -5121,7 +5121,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "acorn@8.17.0"
+      "ref": "acorn@8.18.0"
     },
     {
       "dependsOn": [],
@@ -5155,7 +5155,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "devalue@5.8.1"
+      "ref": "devalue@5.9.4"
     },
     {
       "dependsOn": [
@@ -5194,9 +5194,9 @@
     },
     {
       "dependsOn": [
-        "@jridgewell/sourcemap-codec@1.5.5"
+        "@jridgewell/sourcemap-codec@1.6.0"
       ],
-      "ref": "esrap@2.2.13"
+      "ref": "esrap@2.3.13"
     },
     {
       "dependsOn": [],
@@ -5317,7 +5317,7 @@
     },
     {
       "dependsOn": [
-        "@jridgewell/sourcemap-codec@1.5.5"
+        "@jridgewell/sourcemap-codec@1.6.0"
       ],
       "ref": "magic-string@0.30.21"
     },
@@ -5369,25 +5369,25 @@
     },
     {
       "dependsOn": [
-        "@oxc-project/types@0.148.0",
+        "@oxc-project/types@0.151.0",
         "@rolldown/pluginutils@1.0.1",
-        "@rolldown/binding-android-arm-eabi@1.2.7",
-        "@rolldown/binding-android-arm64@1.2.7",
-        "@rolldown/binding-darwin-arm64@1.2.7",
-        "@rolldown/binding-darwin-x64@1.2.7",
-        "@rolldown/binding-freebsd-x64@1.2.7",
-        "@rolldown/binding-linux-arm-gnueabihf@1.2.7",
-        "@rolldown/binding-linux-arm64-gnu@1.2.7",
-        "@rolldown/binding-linux-arm64-musl@1.2.7",
-        "@rolldown/binding-linux-ppc64-gnu@1.2.7",
-        "@rolldown/binding-linux-s390x-gnu@1.2.7",
-        "@rolldown/binding-linux-x64-gnu@1.2.7",
-        "@rolldown/binding-linux-x64-musl@1.2.7",
-        "@rolldown/binding-openharmony-arm64@1.2.7",
-        "@rolldown/binding-win32-arm64-msvc@1.2.7",
-        "@rolldown/binding-win32-x64-msvc@1.2.7"
+        "@rolldown/binding-android-arm-eabi@1.2.11",
+        "@rolldown/binding-android-arm64@1.2.11",
+        "@rolldown/binding-darwin-arm64@1.2.11",
+        "@rolldown/binding-darwin-x64@1.2.11",
+        "@rolldown/binding-freebsd-x64@1.2.11",
+        "@rolldown/binding-linux-arm-gnueabihf@1.2.11",
+        "@rolldown/binding-linux-arm64-gnu@1.2.11",
+        "@rolldown/binding-linux-arm64-musl@1.2.11",
+        "@rolldown/binding-linux-ppc64-gnu@1.2.11",
+        "@rolldown/binding-linux-s390x-gnu@1.2.11",
+        "@rolldown/binding-linux-x64-gnu@1.2.11",
+        "@rolldown/binding-linux-x64-musl@1.2.11",
+        "@rolldown/binding-openharmony-arm64@1.2.11",
+        "@rolldown/binding-win32-arm64-msvc@1.2.11",
+        "@rolldown/binding-win32-x64-msvc@1.2.11"
       ],
-      "ref": "rolldown@1.2.7"
+      "ref": "rolldown@1.2.11"
     },
     {
       "dependsOn": [
@@ -5428,26 +5428,26 @@
     {
       "dependsOn": [
         "@jridgewell/remapping@2.3.5",
-        "@jridgewell/sourcemap-codec@1.5.5",
-        "@sveltejs/acorn-typescript@1.0.10",
+        "@jridgewell/sourcemap-codec@1.6.0",
+        "@sveltejs/acorn-typescript@1.0.13",
         "@types/estree@1.0.9",
-        "acorn@8.17.0",
+        "acorn@8.18.0",
         "aria-query@5.3.1",
         "axobject-query@4.1.0",
         "clsx@2.1.1",
-        "devalue@5.8.1",
+        "devalue@5.9.4",
         "esm-env@1.2.2",
-        "esrap@2.2.13",
+        "esrap@2.3.13",
         "is-reference@3.0.3",
         "locate-character@3.0.0",
         "magic-string@0.30.21",
         "zimmerframe@1.1.4"
       ],
-      "ref": "svelte@5.57.0"
+      "ref": "svelte@5.57.1"
     },
     {
       "dependsOn": [
-        "svelte@5.57.0",
+        "svelte@5.57.1",
         "typescript@6.0.3",
         "@jridgewell/trace-mapping@0.3.31",
         "@sveltejs/load-config@0.2.3",
@@ -5478,7 +5478,7 @@
         "esbuild@0.28.2",
         "fsevents@2.3.3"
       ],
-      "ref": "tsx@4.23.13"
+      "ref": "tsx@4.23.15"
     },
     {
       "dependsOn": [
@@ -5493,19 +5493,19 @@
     {
       "dependsOn": [
         "esbuild@0.28.2",
-        "tsx@4.23.13",
+        "tsx@4.23.15",
         "lightningcss@1.33.0",
         "picomatch@4.0.7",
         "postcss@8.5.28",
-        "rolldown@1.2.7",
+        "rolldown@1.2.11",
         "tinyglobby@0.2.17",
         "fsevents@2.3.3"
       ],
-      "ref": "vite@8.3.0"
+      "ref": "vite@8.3.1"
     },
     {
       "dependsOn": [
-        "vite@8.3.0"
+        "vite@8.3.1"
       ],
       "ref": "vitefu@1.1.3"
     },
@@ -5522,7 +5522,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "desktop@0.9.29",
+      "bom-ref": "desktop@0.9.30",
       "description": "Petal desktop app - low-latency, multi-window screensharing for macOS and Windows",
       "licenses": [
         {
@@ -5532,10 +5532,10 @@
         }
       ],
       "name": "desktop",
-      "purl": "pkg:npm/desktop@0.9.29",
+      "purl": "pkg:npm/desktop@0.9.30",
       "scope": "required",
       "type": "library",
-      "version": "0.9.29"
+      "version": "0.9.30"
     },
     "lifecycles": [
       {
