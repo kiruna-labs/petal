@@ -1,8 +1,9 @@
 // Pins the registry index MODEL (shared/plugin-host/registry.ts) to
 // contracts/plugin-registry/: the sample index parses, installability and
-// updates behave, and every case in invalid-index-cases.json is rejected --
-// the same file the Rust validator (plugins::registry) iterates, so the two
-// implementations cannot drift apart silently.
+// updates behave, every case in invalid-index-cases.json is rejected, and
+// every case in unsupported-permission-cases.json keeps the index but blocks
+// only that entry -- the same files the Rust validator (plugins::registry)
+// iterates, so the two implementations cannot drift apart silently.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -17,6 +18,7 @@ import {
   isRegistryUrl,
   parseRegistryIndex,
 } from '@petal/shared/plugin-host/registry';
+import { classifyPermission } from '@petal/shared/plugin-host/manifest';
 
 const dir = new URL('../../contracts/plugin-registry/', import.meta.url);
 const read = (p: string) => readFileSync(new URL(p, dir), 'utf8');
@@ -87,4 +89,55 @@ test('installableVersion honours verified + host compatibility; availableUpdates
   assert.equal(updates[0]!.to.version, '1.0.0');
   assert.deepEqual(updates[0]!.newPermissions, hello!.versions[0]!.permissions.filter((p) => p !== 'meeting:read'));
   assert.deepEqual(availableUpdates([{ id: 'petal.test-hello', version: '1.0.0', permissions: [] }], parsed.index, '9.9.9'), []);
+});
+
+test('every shared unsupported-permission case keeps the index, blocks only that entry, and never offers it', () => {
+  const fixture = JSON.parse(read('unsupported-permission-cases.json')) as {
+    path: string;
+    cases: Array<{ name: string; value: unknown; unsupported: string[] }>;
+  };
+  assert.ok(fixture.cases.length >= 5);
+  const baseline = parseRegistryIndex(indexText);
+  assert.ok(baseline.ok);
+  if (!baseline.ok) return;
+  assert.deepEqual(baseline.index.plugins[0]!.versions[0]!.unsupportedPermissions, []);
+  assert.ok(installableVersion(baseline.index.plugins[0]!, '9.9.9'), 'the unmodified entry is installable');
+  for (const c of fixture.cases) {
+    const doc = JSON.parse(indexText);
+    applyPointer(doc, fixture.path, c.value, false);
+    const result = parseRegistryIndex(JSON.stringify(doc));
+    assert.ok(result.ok, `${c.name}: the index must still parse: ${JSON.stringify(result)}`);
+    if (!result.ok) continue;
+    const plugin = result.index.plugins[0]!;
+    assert.deepEqual(plugin.versions[0]!.unsupportedPermissions, c.unsupported, c.name);
+    assert.deepEqual(plugin.versions[0]!.permissions, c.value, `${c.name}: listed permissions kept as-is`);
+    assert.equal(installableVersion(plugin, '9.9.9'), null, `${c.name}: needs a newer Petal`);
+    assert.deepEqual(availableUpdates([{ id: plugin.id, version: '0.0.1', permissions: [] }], result.index, '9.9.9'), [], `${c.name}: never offered as an update`);
+    assert.deepEqual(result.index.plugins[1], baseline.index.plugins[1], `${c.name}: other plugins unaffected`);
+  }
+});
+
+test('classifyPermission: known, unsupported (future or reserved), malformed', () => {
+  for (const known of ['meeting:read', 'storage', 'net:fetch:user-urls', 'net:fetch:*.example.com', 'net:fetch:localhost:8787']) {
+    assert.equal(classifyPermission(known), 'known', known);
+  }
+  for (const unsupported of ['frames:read', 'future:thing', 'telepathy', 'future:fetch:hooks.example.com', 'future:' + 'x'.repeat(57)]) {
+    assert.equal(classifyPermission(unsupported), 'unsupported', unsupported);
+  }
+  for (const malformed of [
+    '',
+    42,
+    null,
+    'Meeting:Read',
+    'meeting read',
+    '1meeting',
+    'meeting::read',
+    'meeting:',
+    'net:fetch:*',
+    'net:fetch:*.*',
+    'net:fetch:https://x.example.com',
+    'future:' + 'x'.repeat(58),
+  ]) {
+    assert.equal(classifyPermission(malformed), 'malformed', JSON.stringify(malformed));
+  }
 });

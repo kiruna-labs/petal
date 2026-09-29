@@ -71,13 +71,15 @@ export async function copyRecentRoomInviteLink({
   logEvent,
 }: RecentRoomInviteCopyOptions): Promise<string> {
   const url = inviteLinkForCredential(credential, origin, displayLabel);
+  // Never log the link itself (#245): it carries the joinable access code and
+  // the room's label, and the session log can go out with a feedback report.
   try {
     await clipboard.writeText(url);
     showToast?.(inviteLinkCopiedToastMessage(url));
-    logEvent?.(`invite link copied: ${url}`, 'ok');
+    logEvent?.('invite link copied', 'ok');
   } catch {
     showToast?.(inviteLinkCopiedToastMessage(url));
-    logEvent?.(`clipboard unavailable -- invite link: ${url}`, 'warn');
+    logEvent?.('clipboard unavailable -- invite link shown in the toast', 'warn');
   }
   return url;
 }

@@ -57,6 +57,8 @@ LIVEKIT_URL=ws://localhost:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret
    - **Screensharing** — real capture via `getDisplayMedia` (the browser
      shows its own window/tab/screen picker), published under a fresh
      `petal-window-<random u32>` name with H.264 forced. Green = live.
+     Needs a desktop browser: phone browsers have no `getDisplayMedia`, so
+     the control is hidden wherever the API is missing.
    - **Invite** — copies the `?code=` join link, confirms with a toast.
    - **Leave** — disconnects and returns to the join screen.
 4. **Developer & test tools** (collapsible drawer, closed by default):

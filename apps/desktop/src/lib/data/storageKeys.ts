@@ -14,7 +14,8 @@ export const STORAGE_KEYS = {
   pillWindowGeometry: 'petal.windowGeometry.pill.v1',
   windowPickerSnapshot: 'petal.window-picker.snapshot.v1',
   onboardingSession: 'petal:onboarding-session:v1',
-  accessibilityRepairPending: 'petal:accessibility-repair:com.petal.app:v1'
+  accessibilityRepairPending: 'petal:accessibility-repair:com.petal.app:v1',
+  feedbackEmail: 'petal.feedbackEmail.v1'
 } as const;
 
 export const FACTORY_RESET_STORAGE_KEYS = [
@@ -24,7 +25,8 @@ export const FACTORY_RESET_STORAGE_KEYS = [
   STORAGE_KEYS.mainWindowGeometry,
   STORAGE_KEYS.meetingWindowGeometry,
   STORAGE_KEYS.pillWindowGeometry,
-  STORAGE_KEYS.windowPickerSnapshot
+  STORAGE_KEYS.windowPickerSnapshot,
+  STORAGE_KEYS.feedbackEmail
 ] as const;
 
 export function clearFactoryResetStorage(storage: Pick<StorageLike, 'removeItem'> | undefined) {
