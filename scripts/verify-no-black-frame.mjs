@@ -81,6 +81,23 @@ execFileSync(
 );
 const holdBundle = readFileSync(bundlePath, 'utf8');
 
+// The REAL zoom maths (#248), so the zoomed trial below puts the tile in the
+// state production puts it in rather than a hand-written transform that could
+// drift from it.
+const zoomBundlePath = join(workDir, 'shareZoom.js');
+execFileSync(
+  esbuildBin,
+  [
+    resolve(repoRoot, 'web-harness/src/shareZoom.ts'),
+    '--bundle',
+    '--format=iife',
+    '--global-name=PetalZoom',
+    `--outfile=${zoomBundlePath}`,
+  ],
+  { stdio: 'pipe' }
+);
+const zoomBundle = readFileSync(zoomBundlePath, 'utf8');
+
 // The REAL production stylesheet, so `.tile video { background: #000 }` and the
 // hold-canvas rules are exercised exactly as shipped.
 const productionCss = readFileSync(resolve(repoRoot, 'web-harness/src/style.css'), 'utf8');
@@ -104,13 +121,16 @@ const browser = await chromium.launch({
 });
 
 /**
- * @param {{ withHold: boolean, shippedCss: boolean }} options
+ * @param {{ withHold: boolean, shippedCss: boolean, zoomed?: boolean }} options
  *   withHold   - attach the hold-last-frame mechanism
  *   shippedCss - restore the pre-fix `background: #000` on the share video, i.e.
  *                reproduce what shipped 0.8.0 actually rendered
+ *   zoomed     - put the tile in the zoomed state first (#248). The zoom
+ *                transform and clip apply to the HOLD CANVAS too, so a wrong
+ *                clip would blank the very layer that holds the frame.
  * @returns {Promise<{ beforeLuma: number, samples: number[], holdingReason: string|null }>}
  */
-async function runGapTrial({ withHold, shippedCss }) {
+async function runGapTrial({ withHold, shippedCss, zoomed = false }) {
   const page = await browser.newPage({ viewport: { width: 640, height: 480 } });
   try {
     await page.setContent(`<!doctype html><html><body style="margin:0;background:#123">${page_html}</body></html>`);
@@ -122,6 +142,7 @@ async function runGapTrial({ withHold, shippedCss }) {
       await page.addStyleTag({ content: '.tile video.share-video { background: #000 !important; }' });
     }
     await page.addScriptTag({ content: holdBundle });
+    if (zoomed) await page.addScriptTag({ content: zoomBundle });
 
     // A bright, unmistakable source. If the tile is ever near-black the source
     // is not what we are looking at.
@@ -169,6 +190,29 @@ async function runGapTrial({ withHold, shippedCss }) {
         if (!window.__hold) throw new Error('attachHoldLastFrame returned null in the fixture');
       }
     }, { withHold });
+
+    if (zoomed) {
+      // Exactly what shareZoomUi writes when a viewer zooms in: the same
+      // helpers, so this trial cannot drift from production's geometry.
+      await page.evaluate(() => {
+        const tile = document.getElementById('probe-tile');
+        const video = document.getElementById('probe-video');
+        const box = { width: video.clientWidth, height: video.clientHeight };
+        const media = { width: video.videoWidth, height: video.videoHeight };
+        const zoom = window.PetalZoom.clampShareZoom(box, media, { scale: 3, x: 0.5, y: 0.5 });
+        const transform = window.PetalZoom.shareZoomTransform(box, media, zoom);
+        const clip = window.PetalZoom.shareZoomClipInsets(box, transform);
+        tile.style.setProperty(
+          '--share-zoom-transform',
+          `translate(${transform.x.toFixed(2)}px, ${transform.y.toFixed(2)}px) scale(${transform.scale.toFixed(4)})`
+        );
+        tile.style.setProperty(
+          '--share-zoom-clip',
+          `inset(${clip.top.toFixed(2)}px ${clip.right.toFixed(2)}px ${clip.bottom.toFixed(2)}px ${clip.left.toFixed(2)}px)`
+        );
+        tile.classList.add('is-share-zoomed');
+      });
+    }
 
     // Let the hold capture at least one copy (HOLD_REFRESH_MS is 200ms).
     await page.waitForTimeout(500);
@@ -294,6 +338,33 @@ try {
     `but it does NOT preserve the frame (during=${cssOnlyMin.toFixed(1)} well below before=${cssOnly.beforeLuma.toFixed(1)}) ` +
       '-- so the hold canvas is load-bearing, not decorative'
   );
+
+  // ---- Trial 4: the same guarantee while zoomed (#248) -------------------
+  // The zoom transform and clip-path apply to the share video, the full-range
+  // canvas AND the hold canvas. A wrong clip would blank the layer that holds
+  // the frame, which no event-level assertion can tell from a healthy hold.
+  console.log('\ntrial 4: ZOOMED -- hold-last-frame with a zoom transform and clip applied');
+  const zoomedTrial = await runGapTrial({ withHold: true, shippedCss: false, zoomed: true });
+  const zoomedMin = Math.min(...zoomedTrial.samples);
+  console.log(
+    `  before=${zoomedTrial.beforeLuma.toFixed(1)} during: min=${zoomedMin.toFixed(1)} ` +
+      `n=${zoomedTrial.samples.length} holdingReason=${zoomedTrial.holdingReason}`
+  );
+  check(
+    zoomedTrial.beforeLuma > BLACK_LUMA * 4,
+    `a zoomed share renders bright before the gap (${zoomedTrial.beforeLuma.toFixed(1)}) ` +
+      '-- if this fails the clip is hiding the picture even while frames flow'
+  );
+  check(
+    zoomedMin > BLACK_LUMA,
+    `a zoomed tile never goes black during the gap (min luma ${zoomedMin.toFixed(1)} > ${BLACK_LUMA})`
+  );
+  check(
+    Math.abs(zoomedMin - zoomedTrial.beforeLuma) < 6,
+    `the zoomed HELD FRAME is what is shown: during=${zoomedMin.toFixed(1)} ` +
+      `stays within 6 luma of before=${zoomedTrial.beforeLuma.toFixed(1)}`
+  );
+  check(zoomedTrial.holdingReason !== null, 'zoomed tile reports it is holding a frame');
 
   console.log('');
   if (failures.length > 0) {

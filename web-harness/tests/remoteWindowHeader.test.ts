@@ -540,6 +540,50 @@ test('#497: small-tile overflow menu keeps full labels and invokes all three mod
   }
 });
 
+test('#248: the overflow menu offers Zoom in / Zoom out / Fit when the zoom controller is wired', () => {
+  const commands: string[] = [];
+  const harness = createHarness({}, {
+    shareZoomCommand: (_tile: HTMLElement, command: string) => {
+      commands.push(command);
+      (harness.tile as unknown as FakeElement).classList.toggle('is-share-zoomed', command !== 'fit');
+      harness.controller.syncMode();
+    },
+  });
+  try {
+    const overflow = buttonByAria(harness.root, 'More remote window modes');
+    const menu = harness.root.querySelector('.remote-window-header__overflow-menu') as unknown as FakeElement;
+    const items = menu.querySelectorAll('.remote-window-header__overflow-item') as unknown as FakeElement[];
+    assert.deepEqual(items.map(elementText), [
+      'View shared window',
+      'Request remote control',
+      'Draw on shared window',
+      'Zoom in',
+      'Zoom out',
+      'Fit window',
+    ]);
+    const [zoomIn, zoomOut, fit] = items.slice(3);
+    assert.equal(zoomIn.getAttribute('role'), 'menuitem');
+    // At fit there is nothing to zoom out of or fit back to.
+    assert.equal(zoomOut.getAttribute('aria-disabled'), 'true');
+    assert.equal(fit.getAttribute('aria-disabled'), 'true');
+
+    overflow.click();
+    zoomIn.click();
+    assert.deepEqual(commands, ['in']);
+    assert.equal(menu.hidden, true, 'a command closes the menu');
+    assert.equal(zoomOut.getAttribute('aria-disabled'), 'false');
+    assert.equal(fit.getAttribute('aria-disabled'), 'false');
+
+    overflow.click();
+    fit.click();
+    assert.deepEqual(commands, ['in', 'fit']);
+    assert.equal(fit.getAttribute('aria-disabled'), 'true');
+  } finally {
+    harness.controller.destroy();
+    harness.restore();
+  }
+});
+
 test('#497: small-tile overflow menu escapes tile clipping and closes on outside click', () => {
   const harness = createHarness();
   try {

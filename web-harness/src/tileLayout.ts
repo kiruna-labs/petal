@@ -2,6 +2,7 @@ import type { HarnessContext, HarnessState, TileLayoutMode } from './context';
 import { HARNESS_TILE_LAYOUT_STORAGE_KEY } from './constants';
 import { getTileReflowController } from './tileReflow.ts';
 import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
+import { CAMERA_TILE_ASPECT_RANGE } from '@petal/shared/logic/cameraCrop';
 import {
   autoSpotlight,
   chooseSpotlightHero,
@@ -49,7 +50,11 @@ const REMOTE_WINDOW_HEADER_PX = 44;
 /** What the hero shows: its media's width / height, and any header docked
  * above the media inside the tile. A shared window is whatever shape the
  * window is and carries its 44px header; a phone camera held upright is
- * 9:16. #248's camera crop can hand in the cropped aspect here. */
+ * 9:16. #248: a camera hero passes its full frame's aspect -- the box is
+ * then exactly that shape, so the camera's crop rule (cameraFit.ts) shows
+ * the whole frame, cropping nothing. Offering the hero a crop range instead
+ * let the placement below trade a smaller, cropped hero for a side strip
+ * (Pixel 8 portrait, 9:16 camera: 272x689 cropped by 30% vs 347x616 whole). */
 export interface SpotlightHeroMedia {
   aspect: number;
   header: number;
@@ -325,10 +330,16 @@ export function setupTileLayout(ctx: HarnessContext) {
     const count = tilesEl.querySelectorAll('.tile').length;
     const { width, height, gap } = tileSurfaceSize();
     if (count === 0 || width <= 0 || height <= 0) return;
+    // #248: a camera-only grid may crop its tiles (cameraFit.ts caps how far),
+    // so its cells can run from ~7:6 to 16:9 and fill the surface. Once a
+    // share is in the grid every cell stays 16:9: a shared window is never
+    // cropped, and one shape per grid keeps the cells even.
+    const cameraOnly = shareTileCount() === 0;
     const layout = computeGalleryLayout(count, width, height, {
       gap,
       arrangement: 'auto',
       previous: lastGalleryLayout,
+      tileAspectRange: cameraOnly ? CAMERA_TILE_ASPECT_RANGE : null,
     });
     lastGalleryLayout = { count, columns: layout.columns, rows: layout.rows };
     tilesEl.style.setProperty('--gallery-cols', String(layout.columns));
