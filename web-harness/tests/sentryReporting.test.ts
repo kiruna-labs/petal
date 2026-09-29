@@ -39,9 +39,29 @@ test('Session Replay and Tracing/Performance integrations are never referenced a
   }
 });
 
-test('tracesSampleRate is pinned to 0 and sendDefaultPii is explicitly false (not left to SDK default)', () => {
+test('tracesSampleRate is pinned to 0 and every dataCollection category is explicitly off (not left to SDK default)', () => {
   assert.match(sentryReporting, /tracesSampleRate:\s*0\b/);
-  assert.match(sentryReporting, /sendDefaultPii:\s*false\b/);
+  // Sentry 11 replaced `sendDefaultPii: false` with `dataCollection`, whose
+  // defaults COLLECT each of these. An omitted field silently opts in, so
+  // every category is named here as well as in the source.
+  assert.match(sentryReporting, /dataCollection:\s*\{/);
+  for (const [field, off] of [
+    ['userInfo', 'false'],
+    ['cookies', 'false'],
+    ['urlQueryParams', 'false'],
+    ['databaseQueryData', 'false'],
+    ['queues', 'false'],
+    ['stackFrameVariables', 'false'],
+  ] as const) {
+    assert.match(sentryReporting, new RegExp(`${field}:\\s*${off}\\b`), `${field} must be explicitly ${off}`);
+  }
+  assert.match(sentryReporting, /httpHeaders:\s*\{\s*request:\s*false,\s*response:\s*false\s*\}/);
+  assert.match(sentryReporting, /httpBodies:\s*\[\s*\]/);
+  assert.match(sentryReporting, /graphQL:\s*\{\s*document:\s*false,\s*variables:\s*false\s*\}/);
+  assert.match(sentryReporting, /genAI:\s*\{\s*inputs:\s*false,\s*outputs:\s*false\s*\}/);
+  // The old flag must not linger as an OPTION (v11 has no such field); the
+  // migration note in the file's header may still name it.
+  assert.doesNotMatch(sentryReporting, /sendDefaultPii\s*:/);
 });
 
 test('maxBreadcrumbs is pinned to a small bounded value', () => {
