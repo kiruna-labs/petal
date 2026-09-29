@@ -1410,7 +1410,12 @@ Canonical HTTPS invite links:
 - Opening the HTTPS route returns a small interstitial that attempts
   `petal://join/<access-code>` on load, keeps an explicit Open Petal link for
   browsers that require a user gesture, offers `/api/download`, and offers a
-  browser join URL carrying `?code=<access-code>`.
+  browser join URL carrying `?code=<access-code>`. Phones and tablets (an
+  Android, iPhone, iPad, iPod or `Mobile` user agent, `Sec-CH-UA-Mobile: ?1`,
+  or a touch-capable `Macintosh` detected by the page) get the browser join
+  URL as the only action: no `petal://` attempt and no `/api/download`
+  buttons. The response is `Cache-Control: private, no-cache` because it
+  varies by device.
 - Browser join target is configured with `PETAL_WEB_JOIN_URL`, treated as an
   origin/base only: any configured path is discarded before adding `?code=`.
   The default is the production browser client, `https://meet.petal.live`

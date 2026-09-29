@@ -526,6 +526,9 @@ export interface HarnessUi {
    * (e.g. "Bring to front") and a custom auto-dismiss duration -- used by
    * the remote-share-started notice. */
   showActionableToast: (message: string, dismissMs: number, action?: SharedToastAction) => void;
+  /** Takes the toast down now; with `message`, only if that toast is the one
+   * showing (#246). Optional so test contexts need not provide it. */
+  dismissToast?: (message?: string) => void;
   setShareState: (text: string, on: boolean) => void;
   setMicState: (text: string, on: boolean) => void;
   setScreenShareState: (text: string, on: boolean) => void;

@@ -978,7 +978,7 @@
     display: inline-flex;
     align-items: center;
     gap: 10px;
-    min-height: 32px;
+    min-height: var(--topbar-control-height);
     height: auto;
     min-width: 0;
     pointer-events: auto;
@@ -990,10 +990,12 @@
     min-width: 12px;
   }
 
+  /* Centred, not top-aligned (#241): the name and time share the centre line
+     of the 24px title actions and of the top-bar controls. */
   .room-title {
     position: relative; /* anchors the rename-error chip */
     display: inline-flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 6px;
     min-width: 0;
   }
@@ -1115,7 +1117,7 @@
   }
 
   .elapsed {
-    font: 500 12.5px var(--font-mono);
+    font: 500 12.5px / 1.12 var(--font-mono);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
     /* Live meeting status, not chrome: always visible (the old hover-only
@@ -1129,6 +1131,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    /* Not --topbar-control-height: this 34px box sets the bar's 45px height (#241). */
     height: 34px;
     pointer-events: none;
   }
@@ -1142,8 +1145,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: var(--topbar-control-height);
+    height: var(--topbar-control-height);
     pointer-events: auto;
   }
 
@@ -1155,8 +1158,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: var(--topbar-control-height);
+    height: var(--topbar-control-height);
     padding: 0;
     border: none;
     border-radius: var(--radius-control);
@@ -1252,8 +1255,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: var(--topbar-control-height);
+    height: var(--topbar-control-height);
     padding: 0;
     border: none;
     border-radius: var(--radius-chip);
@@ -1299,8 +1302,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: var(--topbar-control-height);
+    height: var(--topbar-control-height);
     padding: 0;
     border: none;
     border-radius: var(--radius-chip);
@@ -1375,8 +1378,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
+    width: var(--topbar-control-height);
+    height: var(--topbar-control-height);
     padding: 0;
     border: none;
     border-radius: var(--radius-chip);
