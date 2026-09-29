@@ -244,7 +244,11 @@ test('#239 a landscape phone gets a slim control rail and two tiles covering ove
     const rail = await rect(page, '.controlbar');
     assert.ok(rail.right >= 863 - 1 && rail.top <= 0 && rail.bottom >= 360 - 1, 'a full-height rail on the right edge');
     assert.ok(rail.width <= 64, `the rail is one button wide (${rail.width}px)`);
-    for (const id of ['#ctl-audio', '#ctl-video', '#ctl-chat', '#ctl-leave', '#ctl-fullscreen']) {
+    // Chat is NOT in this set any more: #247's ⋯ collapses it before Share and
+    // Full screen, and Full screen earns its slot by being the only way to
+    // hide the browser's address bar -- the very height a short rail lacks.
+    // Unread chat still shows, as the dot on ⋯.
+    for (const id of ['#ctl-audio', '#ctl-video', '#ctl-leave', '#ctl-fullscreen']) {
       const r = await rect(page, id);
       assert.ok(r.width > 0 && r.top >= 0 && r.bottom <= 360 && r.left >= rail.left, `${id} is in the rail, on screen`);
     }
@@ -311,41 +315,12 @@ test('#239 a short last row sits centred under the full rows: 5 tiles as 3+2, 7 
   }
 });
 
-test('#239 controls that do not fit scroll with the next one peeking, Chat always on screen', { timeout: 60_000 }, async () => {
-  // Stopgap until the ⋯ overflow (#247): Chat is lifted next to Camera, and
-  // the scroller is cut so the first hidden control shows a sliver -- where
-  // that costs no control that fits (see the next-but-one test; on an 863px
-  // rail the first hidden control starts past the edge, so nothing peeks).
-  for (const [label, device, axis] of [
-    ['landscape rail', { ...LANDSCAPE_PHONE, viewport: { width: 734, height: 343 } }, 'y'],
-    ['portrait bar', { ...PORTRAIT_PHONE, viewport: { width: 360, height: 780 } }, 'x'],
-  ] as const) {
-    const page = await openMeeting(device, 2);
-    try {
-      await setLayout(page, 'Grid view');
-      await page.waitForTimeout(200);
-      const peek = await page.evaluate((vertical: boolean) => {
-        const scroller = document.querySelector<HTMLElement>('.controls-left')!;
-        const box = scroller.getBoundingClientRect();
-        const chat = document.querySelector('#ctl-chat')!.getBoundingClientRect();
-        const cut = [...scroller.children]
-          .map((child) => child.getBoundingClientRect())
-          .filter((r) => (vertical ? r.top < box.bottom && r.bottom > box.bottom : r.left < box.right && r.right > box.right));
-        return {
-          scrolls: vertical ? scroller.scrollHeight > scroller.clientHeight : scroller.scrollWidth > scroller.clientWidth,
-          chatVisible: vertical ? chat.bottom <= box.bottom : chat.right <= box.right,
-          peek: cut.map((r) => (vertical ? box.bottom - r.top : box.right - r.left)),
-        };
-      }, axis === 'y');
-      assert.ok(peek.scrolls, `${label}: this layout needs the scroll`);
-      assert.ok(peek.chatVisible, `${label}: Chat is on screen`);
-      assert.equal(peek.peek.length, 1, `${label}: exactly one control is cut`);
-      assert.ok(peek.peek[0] >= 8 && peek.peek[0] <= 16, `${label}: it peeks ${peek.peek[0]}px`);
-    } finally {
-      await page.context().close();
-    }
-  }
-});
+// #239's scroll-with-a-peek test lived here. Its own comment called it a
+// "Stopgap until the ⋯ overflow (#247)": controls that did not fit scrolled,
+// and Chat was lifted so it stayed on screen. #247 has landed, so controls
+// that do not fit now collapse into ⋯ rather than scrolling, and Chat is
+// among them. Retired rather than rewritten, because the behaviour it pinned
+// is the behaviour that was replaced (#269).
 
 test('#239 landscape spotlight strip is a side column that scrolls to every participant', { timeout: 60_000 }, async () => {
   const page = await openMeeting(LANDSCAPE_PHONE, 8);
