@@ -30,6 +30,12 @@ async function renderFixture() {
           { id: 'alan', name: 'Alan Turing', videoOn: true, videoStream: new MediaStream() }
         ]
       : [];
+    // #241: the meeting route always hands down both title actions, and the
+    // name and time must centre against their 24px buttons, so the alignment
+    // check renders them.
+    const titleActions = window.location.hash === '#title-actions'
+      ? { onInviteLinkCopy: () => {}, onRenameRoom: () => {} }
+      : {};
 
     mount(Gallery, {
       target: host,
@@ -44,7 +50,8 @@ async function renderFixture() {
         // Providing the handler is what makes the #786 cell render at all.
         onReportBug: () => {},
         onOpenNetwork: () => {},
-        onControl: () => {}
+        onControl: () => {},
+        ...titleActions
       }
     });
 
