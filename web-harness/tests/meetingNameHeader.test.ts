@@ -75,6 +75,11 @@ test('web rename icon is backed by the existing room rename flow', () => {
   assert.match(controlsSource, /input\.className = 'room-name-input'/);
   assert.match(controlsSource, /roomRenameButton\.addEventListener\('click', startRoomRename\)/);
   assert.match(controlsSource, /cb\.renameRoomDisplayName\(code, input\.value\)/);
+  // #245: renaming the meeting redacts its new label and invite slug too.
+  assert.match(
+    controlsSource,
+    /function renameRoomDisplayName[\s\S]*?const label = setRoomDisplayLabel\(code, displayName\);\s*[\s\S]*?if \(state\.currentMeetingCode === code\) registerMeetingAliases\(sensitiveStringRegistry, code, label\);/
+  );
 });
 
 test('web create-from-name stores the human label before connecting', () => {
