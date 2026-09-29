@@ -15,6 +15,8 @@ export const HARNESS_LOCAL_ECHO_STORAGE_KEY = 'petal-harness-local-echo-enabled'
 // button (mirrors desktop's Rust-owned debug_settings.rs, minus the
 // cross-webview propagation problem localStorage has no way to solve there).
 export const HARNESS_DEBUG_MODE_STORAGE_KEY = 'petal-harness-debug-mode-enabled';
+// #245: the last address feedback was sent with, prefilled next time.
+export const HARNESS_FEEDBACK_EMAIL_STORAGE_KEY = 'petal-harness-feedback-email';
 export const MAX_RECENT_ROOMS = 8;
 
 export const CAMERA_VIDEO_CONSTRAINTS: MediaTrackConstraints = {
