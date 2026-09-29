@@ -161,6 +161,23 @@ export const FRAME_RUNTIME_SOURCE = String.raw`
     clipboard: {
       writeText: function (text) { return request('clipboard.writeText', { text: text }); }
     },
+    chat: {
+      post: function (text) { return request('chat.post', { text: String(text) }); },
+      onCommand: function (name, handler) {
+        return on('chat.command', function (cmd) {
+          if (!cmd || cmd.name !== name) return;
+          // A string (or a promise of one) is the plugin's private answer to
+          // the person who ran the command; the host accepts one per run.
+          Promise.resolve().then(function () {
+            return handler({ name: cmd.name, args: cmd.args || '', invoker: cmd.invoker || null });
+          }).then(function (answer) {
+            if (typeof answer === 'string' && answer.trim()) return request('chat.respond', { commandId: cmd.commandId, text: answer });
+          }).catch(function (e) {
+            fireAndForget('log', { level: 'error', args: ['/' + name + ' failed', String((e && e.stack) || e)] });
+          });
+        });
+      }
+    },
     log: {}
   };
   ['debug', 'info', 'warn', 'error'].forEach(function (level) {

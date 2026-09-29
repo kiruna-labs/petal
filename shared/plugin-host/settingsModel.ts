@@ -91,6 +91,8 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'shares:read': 'See which windows are shared',
   'clipboard:write': 'Copy text to your clipboard',
   'net:fetch:user-urls': 'Send data to web addresses you enter in its settings',
+  'chat:post': 'Post in the meeting chat, marked as coming from this plugin',
+  'chat:commands': 'Add slash commands to the chat',
 };
 
 export function permissionLabel(permission: Permission | string): string {

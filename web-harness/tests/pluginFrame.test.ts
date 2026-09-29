@@ -153,3 +153,49 @@ test('frame runtime: activate errors are reported, not swallowed', async () => {
   assert.equal(err.event, 'error');
   assert.equal(err.payload.message, 'kaboom');
 });
+
+test('frame runtime: petal.chat posts, and a command handler\'s string is its one private answer', async () => {
+  const { win, hostInbox, deliver } = bootFrame();
+  let petalRef: any;
+  const ran: string[] = [];
+  (win as any).__petalRegister({
+    activate(petal: any) {
+      petalRef = petal;
+      petal.chat.onCommand('timer', (cmd: any) => {
+        ran.push(`timer:${cmd.args}:${cmd.invoker === null}`);
+        return cmd.args === '' ? 'Usage: /timer 5m' : undefined;
+      });
+      petal.chat.onCommand('async', async () => 'later answer');
+      petal.chat.onCommand('broken', () => {
+        throw new Error('boom');
+      });
+    },
+  });
+  deliver({ v: PROTOCOL_VERSION, kind: 'evt', event: 'init', payload: {
+    pluginId: 'petal.timer', version: '1.0.0', apiVersion: 1, scope: 'meeting', grantedPermissions: ['chat:commands', 'chat:post'],
+    hostVersion: '0.9.29', hostSupports: { native: false, frames: false }, meeting: null, state: null, shares: null, surface: null,
+  } });
+  await new Promise((r) => setImmediate(r));
+  const settle = () => new Promise((r) => setImmediate(r));
+  const requests = () => hostInbox.map((m) => m.env).filter((e) => e.kind === 'req') as Array<{ method: string; params: any }>;
+
+  void petalRef.chat.post('hi all');
+  const post = requests().at(-1)!;
+  // Objects from the vm realm: compare by value, not by prototype.
+  assert.deepEqual(JSON.parse(JSON.stringify({ method: post.method, params: post.params })), { method: 'chat.post', params: { text: 'hi all' } });
+
+  const command = (commandId: string, name: string, args: string) =>
+    deliver({ v: PROTOCOL_VERSION, kind: 'evt', event: 'chat.command', payload: { commandId, name, args, invoker: null } });
+  const before = requests().length;
+  command('cmd-1', 'timer', '');
+  command('cmd-2', 'timer', '5m');
+  command('cmd-3', 'async', '');
+  command('cmd-4', 'nobody-owns-this', '');
+  command('cmd-5', 'broken', '');
+  await settle();
+  await settle();
+  assert.deepEqual(ran, ['timer::true', 'timer:5m:true'], 'only the named handler runs');
+  const sent = requests().slice(before).map((r) => `${r.method}:${r.params.commandId ?? r.params.level}:${r.params.text ?? r.params.args?.[0]}`);
+  // An async handler answers a microtask later, so compare as a set.
+  assert.deepEqual(sent.sort(), ['chat.respond:cmd-1:Usage: /timer 5m', 'chat.respond:cmd-3:later answer', 'log:error:/broken failed'].sort());
+});

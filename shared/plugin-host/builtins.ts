@@ -13,6 +13,7 @@
 // Everything testable lives in bundle.ts / settingsModel.ts / manifest.ts.
 
 import reactionsBundleText from '../../plugins/builtins/petal.reactions/bundle.json?raw';
+import timerBundleText from '../../plugins/builtins/petal.timer/bundle.json?raw';
 import { parseBundle } from './bundle.ts';
 import type { InstalledPlugin } from './settingsModel.ts';
 
@@ -21,7 +22,11 @@ interface BuiltinSpec {
   enabledByDefault: boolean;
 }
 
-const SPECS: BuiltinSpec[] = [{ bundleText: reactionsBundleText, enabledByDefault: true }];
+const SPECS: BuiltinSpec[] = [
+  { bundleText: reactionsBundleText, enabledByDefault: true },
+  // First consumer of the chat API (I-7b): owns /timer, posts starts and finishes.
+  { bundleText: timerBundleText, enabledByDefault: true },
+];
 
 /** Validated built-ins. A built-in that fails validation is a build bug; it is skipped and reported. */
 export function builtinPlugins(warn: (message: string) => void = () => {}): InstalledPlugin[] {
