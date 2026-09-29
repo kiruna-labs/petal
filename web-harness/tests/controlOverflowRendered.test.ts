@@ -802,57 +802,6 @@ test('re-fitting after a size change never trips a ResizeObserver loop, even whe
   }
 });
 
-test('a row the menu offers of its own (#239\'s "Developer & test tools") brings ⋯ even when every control fits', { timeout: 60_000 }, async () => {
-  for (const viewport of [{ width: 1280, height: 800 }, { width: 500, height: 800 }]) {
-    const where = `${viewport.width}px`;
-    const { page, errors, close } = await openMeeting(viewport);
-    try {
-      const before = await barOf(page);
-      // What main.ts registers for the dev drawer, through the automation
-      // hook. A source string: the item's methods would otherwise get tsx's
-      // `__name` helper, which the page does not have.
-      await page.evaluate(`(() => {
-        window.itemOn = false;
-        window.itemRuns = 0;
-        window.__petalHarness.controlOverflow.addMenuItem({
-          label: 'Test tools',
-          icon: '<svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"></path></svg>',
-          available: () => window.itemOn,
-          run: () => { window.itemRuns += 1; },
-        });
-      })()`);
-      assert.deepEqual(await barOf(page), before, `${where}: an unavailable item changes nothing`);
-
-      await page.evaluate(() => {
-        const w = window as unknown as { __petalHarness: { controlOverflow: { update(): void } }; itemOn: boolean };
-        w.itemOn = true;
-        w.__petalHarness.controlOverflow.update();
-      });
-      const state = await barOf(page);
-      assertFits(state, where);
-      assert.equal(state.moreShown, true, `${where}: the item alone brings ⋯`);
-      const menu = await openMenu(page);
-      assert.deepEqual(
-        menu.rows.map((row) => row.label),
-        [...state.hidden, 'Test tools'],
-        `${where}: the item follows the hidden controls`
-      );
-      assert.equal(
-        await page.evaluate(() => document.querySelectorAll('#overflow-menu .overflow-menu-divider').length),
-        state.hidden.length > 0 ? 1 : 0
-      );
-      await page.keyboard.press('End');
-      await page.keyboard.press('Enter');
-      assert.equal(await page.evaluate(() => (window as unknown as { itemRuns: number }).itemRuns), 1);
-      assert.equal(await page.evaluate(() => document.querySelector<HTMLElement>('#overflow-menu')!.hidden), true);
-      assert.equal(await page.evaluate(() => document.activeElement?.id), 'ctl-more');
-      assert.deepEqual(errors, []);
-    } finally {
-      await close();
-    }
-  }
-});
-
 test('a control hidden as unsupported (Share on phones, #240) is in neither the bar nor the menu, and its room is reused', { timeout: 60_000 }, async () => {
   const expected: Record<number, string[]> = {
     320: ['Invite', 'Draw', 'Chat', 'React'],

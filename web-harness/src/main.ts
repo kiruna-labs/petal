@@ -619,10 +619,9 @@ ctx.hook.plugins = setupPlugins(ctx);
 // Meeting chat (plugins/README.md §2.7): a host surface beside the tiles.
 ctx.hook.chat = setupChat(ctx);
 // #247: the ⋯ overflow for controls that do not fit the bar. It re-fits on
-// its own whenever cells come and go, so plugin buttons added later count.
-// `addMenuItem` gives its menu rows of its own (the phone layout's developer
-// drawer, #239).
-ctx.hook.controlOverflow = setupControlOverflow();
+// its own whenever cells come and go, so plugin buttons added later count,
+// and it needs no handle here.
+setupControlOverflow();
 Object.assign(ctx.cb, {
   resolveIdentity: controls.resolveIdentity,
   submitMeetingField: controls.submitMeetingField,

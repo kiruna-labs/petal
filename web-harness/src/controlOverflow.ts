@@ -224,19 +224,10 @@ function visibleBadge(cell: HTMLElement): HTMLElement | null {
  * phone layout's "Developer & test tools" drawer (#239). While `available`,
  * ⋯ shows even if every control fits.
  */
-export interface OverflowMenuItem {
-  label: string;
-  /** Inline SVG markup, in the controls' 24px stroke style. */
-  icon: string;
-  available: () => boolean;
-  run: () => void;
-}
-
 export interface ControlOverflowHook {
   /** Re-fit now. The observers do this on their own; this is for when a
    * menu item's `available` flips. */
   update(): void;
-  addMenuItem(item: OverflowMenuItem): void;
   isMenuOpen(): boolean;
 }
 
@@ -253,14 +244,8 @@ export function setupControlOverflow(doc: Document = document): ControlOverflowH
 
   /** The cells in the menu right now, in the order the bar shows them. */
   let overflowed: HTMLElement[] = [];
-  const menuItems: OverflowMenuItem[] = [];
-  /** The menu's own items that are available right now. */
-  let items: OverflowMenuItem[] = [];
   let frame: number | null = null;
-  const rows = new Map<HTMLElement | OverflowMenuItem, HTMLButtonElement>();
-  const divider = doc.createElement('div');
-  divider.className = 'overflow-menu-divider';
-  divider.setAttribute('role', 'separator');
+  const rows = new Map<HTMLElement, HTMLButtonElement>();
   let menuCleanup: (() => void) | null = null;
 
   function update(): void {
@@ -287,11 +272,10 @@ export function setupControlOverflow(doc: Document = document): ControlOverflowH
     // in neither the bar nor the menu: `measureLine` skipped it.
     const cells = cellsOf(line).filter((cell) => cell !== moreCell);
     const candidates = collapseCandidates(cells.map((cell) => ({ cell, controlId: controlOf(cell)?.id ?? '' })));
-    items = menuItems.filter((item) => item.available());
-    const collapsed = planOverflow(line, availableLength(bar, vertical), candidates, moreCell, items.length > 0);
+    const collapsed = planOverflow(line, availableLength(bar, vertical), candidates, moreCell, false);
     const focused = doc.activeElement;
     for (const cell of candidates) cell.classList.toggle('overflowed', collapsed.has(cell));
-    moreCell.hidden = collapsed.size === 0 && items.length === 0;
+    moreCell.hidden = collapsed.size === 0;
     overflowed = cells.filter((cell) => collapsed.has(cell));
     // A control that leaves the bar under the keyboard hands focus to ⋯.
     if (focused instanceof HTMLElement && overflowed.some((cell) => cell.contains(focused))) moreButton.focus();
@@ -423,7 +407,7 @@ export function setupControlOverflow(doc: Document = document): ControlOverflowH
     return leading;
   }
 
-  function rowFor(key: HTMLElement | OverflowMenuItem, onClick: () => void): HTMLButtonElement {
+  function rowFor(key: HTMLElement, onClick: () => void): HTMLButtonElement {
     let row = rows.get(key);
     if (!row) {
       row = doc.createElement('button');
@@ -437,7 +421,7 @@ export function setupControlOverflow(doc: Document = document): ControlOverflowH
 
   function renderMenu(vertical: boolean): void {
     const focusedKey = [...rows].find(([, row]) => row === doc.activeElement)?.[0];
-    const keep = new Set<HTMLElement | OverflowMenuItem>([...overflowed, ...items]);
+    const keep = new Set<HTMLElement>(overflowed);
     for (const [key, row] of rows) {
       if (keep.has(key)) continue;
       row.remove();
@@ -448,20 +432,7 @@ export function setupControlOverflow(doc: Document = document): ControlOverflowH
       syncRow(row, cell);
       return row;
     });
-    const itemRows = items.map((item) => {
-      const row = rowFor(item, () => {
-        closeMenu(true);
-        item.run();
-      });
-      if (!row.firstChild) {
-        row.setAttribute('role', 'menuitem');
-        const glyph = doc.createElement('template');
-        glyph.innerHTML = item.icon;
-        row.append(rowLeading(glyph.content.firstElementChild, item.label));
-      }
-      return row;
-    });
-    const ordered: Element[] = [...controlRows, ...(controlRows.length && itemRows.length ? [divider] : []), ...itemRows];
+    const ordered: Element[] = [...controlRows];
     // Re-insert only when the order changed: moving the focused row would blur
     // it. A focused row whose control went back to the bar hands focus on.
     if (ordered.length !== menu.children.length || ordered.some((el, index) => menu.children[index] !== el)) {
@@ -664,10 +635,6 @@ export function setupControlOverflow(doc: Document = document): ControlOverflowH
   update();
   return {
     update,
-    addMenuItem(item) {
-      menuItems.push(item);
-      update();
-    },
     isMenuOpen: () => menuCleanup !== null,
   };
 }

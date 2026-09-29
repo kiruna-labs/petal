@@ -3376,13 +3376,6 @@ input[type='text']:disabled {
 }
 
 /* Between the hidden controls and the menu's own rows (dev tools, #239). */
-.overflow-menu-divider {
-  flex: 0 0 auto;
-  height: 1px;
-  margin: 4px;
-  background: var(--hairline);
-}
-
 .overflow-menu-leading {
   display: inline-flex;
   align-items: center;
