@@ -157,6 +157,8 @@ const feedbackMeetingTrigger = document.querySelector<HTMLButtonElement>('#feedb
 const feedbackDialog = document.querySelector<HTMLDialogElement>('#feedback-dialog')!;
 const feedbackForm = document.querySelector<HTMLFormElement>('#feedback-form')!;
 const feedbackMessage = document.querySelector<HTMLTextAreaElement>('#feedback-message')!;
+const feedbackEmail = document.querySelector<HTMLInputElement>('#feedback-email')!;
+const feedbackEmailError = document.querySelector<HTMLElement>('#feedback-email-error')!;
 const feedbackConsent = document.querySelector<HTMLInputElement>('#feedback-consent')!;
 const feedbackSubmit = document.querySelector<HTMLButtonElement>('#feedback-submit')!;
 const feedbackCancel = document.querySelector<HTMLButtonElement>('#feedback-cancel')!;
@@ -371,6 +373,8 @@ const feedbackReport = new FeedbackReportController({
     dialog: feedbackDialog,
     form: feedbackForm,
     message: feedbackMessage,
+    email: feedbackEmail,
+    emailError: feedbackEmailError,
     consent: feedbackConsent,
     submit: feedbackSubmit,
     cancel: feedbackCancel,
