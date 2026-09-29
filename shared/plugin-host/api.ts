@@ -82,6 +82,22 @@ export interface FetchResult {
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
+/** The local user ran `/name args` and this plugin owns `/name` (manifest `contributes.chatCommands`). */
+export interface ChatCommand {
+  name: string;
+  /** Everything after `/name`, trimmed; '' when nothing followed. */
+  args: string;
+  /** The local user who ran it; null unless the plugin holds `meeting:read`. */
+  invoker: Participant | null;
+}
+
+/**
+ * Return (or resolve to) a string to answer the person who ran the command,
+ * privately: it appears in their chat only, marked as coming from this plugin.
+ * Return nothing to stay silent (for example after `chat.post`).
+ */
+export type ChatCommandHandler = (command: ChatCommand) => void | string | Promise<void | string>;
+
 export interface HostSupports {
   native: boolean;
   frames: boolean;
@@ -136,6 +152,16 @@ export interface Petal {
   };
   clipboard: {
     writeText(text: string): Promise<void>;
+  };
+  /**
+   * The meeting chat, a host surface. `post` needs `chat:post` (meeting scope):
+   * the message appears for everyone as "<person> · via <this plugin>", never
+   * as the person. `onCommand` needs `chat:commands` and a matching entry in
+   * `contributes.chatCommands`; only this plugin sees its command's arguments.
+   */
+  chat: {
+    post(text: string): Promise<void>;
+    onCommand(name: string, handler: ChatCommandHandler): Unsubscribe;
   };
   log: Record<LogLevel, (...args: unknown[]) => void>;
 }

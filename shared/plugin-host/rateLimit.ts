@@ -21,6 +21,15 @@ export const PLUGIN_LIMITS = {
   netResponseMaxBytes: 1024 * 1024,
   logPerSecond: 20,
   uiPerSecond: 30,
+  /**
+   * `chat.post`: a message everyone reads. The sustained rate is what bounds a
+   * flood; the burst only covers a legitimate cluster, sized to the built-in
+   * that needs one: Timer's MAX_ACTIVE (3) timers × 2 posts each (start and
+   * "Time's up"), so three short timers never lose a finish. Pinned against
+   * the vendored Timer bundle in web-harness/tests/pluginChat.test.ts.
+   */
+  chatPostPerSecond: 0.5,
+  chatPostBurst: 6,
 } as const;
 
 export interface RateLimiter {

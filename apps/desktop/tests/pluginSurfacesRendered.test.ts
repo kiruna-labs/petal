@@ -51,19 +51,21 @@ test('PluginSurfaces loads the built-ins once the host version arrives after mou
     assert.deepEqual(await page.evaluate(() => (window as any).pluginSurfacesFixture.buttons()), []);
     assert.deepEqual(warnings.filter((w) => w.includes('skipped')), [], 'the unknown version must not be judged incompatible');
 
-    // The route's getVersion() resolves: the built-in Reactions plugin boots.
-    await page.evaluate(() => (window as any).pluginSurfacesFixture.setHostVersion('0.9.7'));
+    // The route's getVersion() resolves: the built-ins boot. Reactions has no
+    // floor to speak of; Timer needs the chat API (minHostVersion 0.9.29).
+    await page.evaluate(() => (window as any).pluginSurfacesFixture.setHostVersion('0.9.29'));
+    await page.waitForFunction(() => document.querySelector('iframe[data-plugin-frame="logic"][data-plugin-id="petal.timer"]') !== null);
     await page.waitForFunction(() => document.querySelector('iframe[data-plugin-frame="logic"][data-plugin-id="petal.reactions"]') !== null);
     const buttons = await page.evaluate(() => (window as any).pluginSurfacesFixture.buttons());
-    assert.equal(buttons.length, 1);
+    assert.equal(buttons.length, 1, 'only Reactions draws a toolbar button; Timer lives in the chat');
     assert.equal(buttons[0].pluginId, 'petal.reactions');
     assert.equal(buttons[0].label, 'React');
     assert.deepEqual(warnings.filter((w) => w.includes('skipped') || w.includes('failed to start')), [], `plugin warnings: ${warnings.join('\n')}`);
 
-    // A later version change never double-loads: still exactly one logic frame.
-    await page.evaluate(() => (window as any).pluginSurfacesFixture.setHostVersion('0.9.8'));
+    // A later version change never double-loads: still exactly one logic frame per plugin.
+    await page.evaluate(() => (window as any).pluginSurfacesFixture.setHostVersion('0.9.30'));
     await page.waitForTimeout(100);
-    assert.equal(await page.locator('iframe[data-plugin-frame="logic"]').count(), 1);
+    assert.equal(await page.locator('iframe[data-plugin-frame="logic"]').count(), 2);
   } finally {
     await browser?.close();
     await rm(buildDir, { recursive: true, force: true });

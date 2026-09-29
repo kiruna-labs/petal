@@ -9,6 +9,11 @@
 // not), Escape closes, and at least four lines of message text stay
 // readable. The browser's landscape-phone layout is
 // web-harness/tests/chatDrawerLayoutRendered.test.ts.
+// Plugins (I-7b): a post shows "via <plugin>" on its own line and never
+// groups with the person's typed lines, a private answer says only you can
+// see it, `/` lists commands with the owning plugin, Tab/Enter complete,
+// Enter runs, a refused or unknown command keeps the draft and says why,
+// and `//` sends a message that starts with `/`.
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -128,17 +133,28 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
           messages: document.querySelectorAll('[data-testid="chat-msg"]').length,
           namedLines: document.querySelectorAll('.chat-meta').length,
           relayed: document.querySelectorAll('[data-testid="chat-msg"][data-relayed="true"]').length,
+          vias: [...document.querySelectorAll<HTMLElement>('[data-testid="chat-via"]')].map((el) => ({
+            text: el.textContent?.replace(/\s+/g, ' ').trim(),
+            title: el.getAttribute('title'),
+            clipped: el.scrollWidth > el.clientWidth + 1,
+          })),
           times: [...document.querySelectorAll<HTMLElement>('.chat-time')].map((el) => el.textContent),
         };
       });
       assert.ok(fit.asideWidth <= 320 && fit.asideWidth >= 200, `${width}: aside ${fit.asideWidth}`);
       assert.equal(fit.listScrollsX, false, `${width}: the list must never scroll horizontally`);
       assert.deepEqual(fit.overflowing, [], `${width}: no element overflows its box`);
-      assert.equal(fit.messages, 4);
-      assert.equal(fit.namedLines, 3, 'Theo\'s two consecutive lines share one name line');
+      assert.equal(fit.messages, 6);
+      assert.equal(fit.namedLines, 5, "Theo's two typed lines share a name line; his plugin post does not");
       assert.equal(fit.relayed, 1);
       assert.equal(fit.names[0].ellipsized, true, 'a very long name ellipsizes instead of wrapping or pushing the time out');
-      assert.deepEqual(fit.names.map((n) => n.text), ['Mira Aleksandra Konstantinopoulou-Whitfield', 'Theo', 'You']);
+      assert.deepEqual(fit.names.map((n) => n.text), ['Mira Aleksandra Konstantinopoulou-Whitfield', 'Theo', 'You', 'Theo', 'Timer (plugin)']);
+      assert.deepEqual(
+        fit.vias.map((v) => [v.text, v.clipped]),
+        [['via Tally Hands For Big Team', false], ['Only you can see this', false]],
+        'a plugin post is never shown as the person alone, and the label never clips, even at the 24-char name limit',
+      );
+      assert.equal(fit.vias[0].title, 'Posted by the Tally Hands For Big Team plugin (acme.tally) for Theo');
       assert.ok(fit.times.every((t) => /\d/.test(t ?? '')), `times render: ${fit.times.join(', ')}`);
 
       // Composer: one row, Send beside the input and no count far from the
@@ -162,7 +178,7 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
       const sent = await page.evaluate(() => (window as unknown as { __chat: { sent: string[] } }).__chat.sent);
       assert.deepEqual(sent, ['first line\nsecond line']);
       assert.equal(await input.inputValue(), '', 'composer clears after send');
-      assert.equal(await page.locator('[data-testid="chat-msg"]').count(), 5);
+      assert.equal(await page.locator('[data-testid="chat-msg"]').count(), 7);
       const last = await page.locator('[data-testid="chat-msg"]').last().locator('.chat-text').textContent();
       assert.equal(last, 'first line\nsecond line');
       const pinned = await page.evaluate(() => {
@@ -170,6 +186,73 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
         return list.scrollHeight - list.scrollTop - list.clientHeight < 2;
       });
       assert.equal(pinned, true, 'the list follows the newest message');
+
+      // Commands: `/` lists every command with its plugin; the list fits.
+      const chat = () => page.evaluate(() => (window as unknown as { __chat: { sent: string[]; ran: string[] } }).__chat);
+      await input.fill('/');
+      const list = page.locator('[data-testid="chat-suggestions"]');
+      await list.waitFor();
+      const rows = await page.locator('[data-testid="chat-suggestion"]').evaluateAll((els) =>
+        els.map((el) => ({ text: el.textContent?.replace(/\s+/g, ' ').trim(), overflowing: el.scrollWidth > el.clientWidth + 1 })),
+      );
+      assert.deepEqual(rows.map((r) => r.text), [
+        '/tally-hands-for-team <question> | <yes label> | <no label> xy Count raised hands for a quick yes or no across the meeting. Tally Hands For Big Team',
+        '/timer 5m [label] | list | cancel Start a countdown everyone can see Timer',
+      ]);
+      assert.ok(rows.every((r) => !r.overflowing), `${width}: suggestion rows wrap, never overflow`);
+      // Narrowing filters; Tab completes the highlighted one; Enter on the exact name runs it.
+      await page.keyboard.type('ti');
+      assert.equal(await page.locator('[data-testid="chat-suggestion"]').count(), 1);
+      await page.keyboard.press('Tab');
+      assert.equal(await input.inputValue(), '/timer ');
+      assert.equal(await list.count(), 0, 'the list closes once arguments start');
+      await page.keyboard.type('5m standup');
+      await page.keyboard.press('Enter');
+      assert.deepEqual((await chat()).ran, ['timer|5m standup']);
+      assert.equal(await input.inputValue(), '', 'a command that ran clears the draft');
+      assert.deepEqual((await chat()).sent, ['first line\nsecond line'], 'a command is never sent as a message');
+
+      // A command the host refuses keeps the draft and says why.
+      await input.fill('/tally-hands-for-team');
+      await page.keyboard.press('Enter');
+      assert.deepEqual((await chat()).ran, ['timer|5m standup', 'tally-hands-for-team|']);
+      assert.equal(await input.inputValue(), '/tally-hands-for-team');
+      assert.equal(await page.locator('[data-testid="chat-error"]').textContent(), 'Tally Hands For Big Team is still starting. Try again in a moment.');
+      await page.keyboard.type(' ');
+      assert.equal(await page.locator('[data-testid="chat-error"]').count(), 0, 'editing clears the refusal');
+
+      // Unknown or malformed command: refused locally, never sent; // escapes.
+      await input.fill('/usr/local/bin');
+      await page.keyboard.press('Enter');
+      assert.match((await page.locator('[data-testid="chat-error"]').textContent()) ?? '', /^\/usr\/local\/bin is not a command\. To send a message that starts with \/, type \/\/ first\.$/);
+      const errorBox = await page.locator('[data-testid="chat-error"]').evaluate((el) => el.scrollWidth <= el.clientWidth + 1);
+      assert.ok(errorBox, `${width}: the refusal wraps inside the drawer`);
+      await input.fill('//usr/local/bin');
+      await page.keyboard.press('Enter');
+      assert.deepEqual((await chat()).sent, ['first line\nsecond line', '/usr/local/bin']);
+
+      // Escape closes the suggestion list first, then the drawer.
+      await input.fill('/t');
+      await list.waitFor();
+      await page.keyboard.press('Escape');
+      assert.equal(await list.count(), 0);
+      assert.equal(await page.evaluate(() => (window as unknown as { __closed: () => number }).__closed()), 0);
+      // Regression: opening the command list shrinks the message list, and the
+      // scroll event that causes must not read as "the reader scrolled up".
+      // After it, a new message still follows the bottom.
+      await page.evaluate(() => {
+        (window as unknown as { __chat: { add: (m: unknown) => void } }).__chat.add({
+          id: 'm-after-list', text: 'still following', t: Date.UTC(2026, 8, 14, 12, 2, 30), sender: { identity: 'theo-1', name: 'Theo' },
+          self: false, relayed: false, via: null, local: false,
+        });
+      });
+      await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="chat-msg"] .chat-text')].some((el) => el.textContent === 'still following'));
+      const followed = await page.evaluate(async () => {
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const l = document.querySelector('[data-testid="chat-list"]') as HTMLElement;
+        return l.scrollHeight - l.scrollTop - l.clientHeight < 2;
+      });
+      assert.equal(followed, true, `${width}x${height}: the list still follows new messages after the command list opened and closed`);
 
       // Screen readers: the count is not a live region (it would read out
       // every keystroke); a status region, in the tree before it ever
@@ -200,13 +283,14 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
       // A busy chat: at least four lines of message text stay readable above
       // the composer, in the shortest window too (#246).
       await input.fill('');
+      const beforeBusy = await page.locator('[data-testid="chat-msg"]').count();
       await page.evaluate(() => {
         const chat = (window as unknown as { __chat: { add: (m: unknown) => void } }).__chat;
         for (let i = 0; i < 12; i++) {
-          chat.add({ id: `m-busy-${String(i).padStart(4, '0')}`, text: `Busy line ${i}`, t: Date.UTC(2026, 8, 14, 12, 3, i), sender: { identity: `peer-${i % 2}`, name: i % 2 ? 'Theo' : 'Mira' }, self: false, relayed: false });
+          chat.add({ id: `m-busy-${String(i).padStart(4, '0')}`, text: `Busy line ${i}`, t: Date.UTC(2026, 8, 14, 12, 3, i), sender: { identity: `peer-${i % 2}`, name: i % 2 ? 'Theo' : 'Mira' }, self: false, relayed: false, via: null, local: false });
         }
       });
-      await page.waitForFunction(() => document.querySelectorAll('[data-testid="chat-msg"]').length === 17);
+      await page.waitForFunction((n: number) => document.querySelectorAll('[data-testid="chat-msg"]').length === n + 12, beforeBusy);
       const lines = await visibleTextLines(page);
       assert.ok(lines >= 4, `${width}x${height}: ${lines} lines of message text visible`);
 
@@ -231,7 +315,7 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
         document.querySelector('[data-testid="chat-input"]')!.addEventListener('blur', () => w.__blurs++);
       });
       await send.click();
-      assert.deepEqual(await page.evaluate(() => (window as unknown as { __chat: { sent: string[] } }).__chat.sent), ['first line\nsecond line', 'one\ntwo']);
+      assert.deepEqual(await page.evaluate(() => (window as unknown as { __chat: { sent: string[] } }).__chat.sent), ['first line\nsecond line', '/usr/local/bin', 'one\ntwo']);
       assert.equal(await page.evaluate(() => (window as unknown as { __blurs: number }).__blurs), 0, `${width}x${height}: Send click keeps focus in the input`);
       assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-testid')), 'chat-input');
       await page.close();

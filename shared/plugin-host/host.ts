@@ -7,6 +7,8 @@
 // plugins/README.md §2.3 and §2.7.
 
 import type { ButtonPatch, Json, Participant } from './api.ts';
+import type { ChatCommandOption, ChatCommandResult, ChatVia } from '../logic/chat.ts';
+import { resolveChatCommands } from './chatCommands.ts';
 import { createPluginBroker, type HostAdapter, type LoadedPlugin, type PluginBroker } from './broker.ts';
 import { createPluginFrame } from './frame.ts';
 import type { SurfaceContribution, SurfaceKind } from './manifest.ts';
@@ -28,7 +30,18 @@ import { installDismissibleLayer, type DismissibleLayerCleanup } from '../ui/dis
 // `stateSnapshot` is omitted on purpose: the HOST owns the per-identity remote
 // advert map (applyRemoteAdverts/forgetParticipant) and serves the broker's
 // `init.state` from it, so a client cannot supply a second, divergent source.
-export type PluginHostAdapter = Omit<HostAdapter, 'ui' | 'setState' | 'stateSnapshot'> & {
+export type PluginHostAdapter = Omit<HostAdapter, 'ui' | 'setState' | 'stateSnapshot' | 'chat'> & {
+  /**
+   * The client's meeting chat (shared/logic/chat.ts). The host turns a plugin
+   * into its `via` stamp here, so the client can never be handed a plugin
+   * post without one. Absent = plugins get 'unavailable' from `petal.chat`.
+   */
+  chat?: {
+    /** Publish a `post` for everyone; reject with { code: 'unavailable' } when not in a meeting. */
+    post(via: ChatVia, text: string): Promise<void>;
+    /** Show a private, local-only line from `via` to this user. */
+    notice(via: ChatVia, text: string): void;
+  };
   toast(pluginId: string, text: string, variant: 'info' | 'degraded'): void;
   /**
    * Write (or remove, with null) this participant's `plugins[pluginId]`
@@ -54,6 +67,8 @@ export interface PluginHostOptions {
   hostVersion: string;
   mounts: PluginHostMounts;
   onButtonsChanged?: (buttons: ToolbarButtonModel[]) => void;
+  /** The set of runnable slash commands changed (a plugin loaded or unloaded). */
+  onChatCommandsChanged?: (commands: ChatCommandOption[]) => void;
   /**
    * The user right-clicked a host-drawn plugin surface (today: a popover's
    * caption). The client renders its plugin menu at `at` (viewport px).
@@ -75,6 +90,14 @@ export interface PluginHost {
   activateButton(pluginId: string, buttonId: string, anchor: HTMLElement | null): void;
   openSurface(pluginId: string, surfaceId: string, anchor?: HTMLElement | null): void;
   closeSurface(pluginId: string, surfaceId: string): void;
+  /** Slash commands the composer can run right now, one owner per name (chatCommands.ts). */
+  chatCommands(): ChatCommandOption[];
+  /**
+   * The local user ran `/name args`. Routes to the owning plugin's logic frame
+   * only; nothing is sent to the meeting unless the plugin posts. A failure
+   * comes back as a sentence the composer shows under the draft.
+   */
+  runChatCommand(name: string, args: string): ChatCommandResult;
   /** Re-publish every loaded meeting plugin's advertisement (call after (re)connecting to a room). */
   readvertise(): void;
   /**
@@ -134,6 +157,33 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
 
   function notifyButtons(): void {
     opts.onButtonsChanged?.(buttons());
+    notifyChatCommands();
+  }
+
+  const warnedConflicts = new Set<string>();
+  function chatCommands(): ChatCommandOption[] {
+    const { commands, conflicts } = resolveChatCommands([...entries.values()].map((e) => e.plugin));
+    for (const c of conflicts) {
+      const key = `${c.name}:${c.losers.join(',')}`;
+      if (warnedConflicts.has(key)) continue;
+      warnedConflicts.add(key);
+      warn(`chat: /${c.name} is declared by ${[c.winner, ...c.losers].join(', ')}; ${c.winner} owns it`);
+    }
+    return commands;
+  }
+  function notifyChatCommands(): void {
+    opts.onChatCommandsChanged?.(chatCommands());
+  }
+  function runChatCommand(name: string, args: string): ChatCommandResult {
+    const option = chatCommands().find((c) => c.name === name);
+    if (!option) return { ok: false, message: `No plugin handles /${name}. To send a message that starts with /, type // first.` };
+    const invoker = adapter.meeting?.self() ?? null;
+    const commandId = broker.deliverChatCommand(option.pluginId, { name, args, invoker });
+    if (commandId === null) return { ok: false, message: `${option.pluginName} is still starting. Try again in a moment.` };
+    return { ok: true };
+  }
+  function viaOf(plugin: LoadedPlugin): ChatVia {
+    return { id: plugin.manifest.id, name: plugin.manifest.name };
   }
 
   function buttons(): ToolbarButtonModel[] {
@@ -220,6 +270,12 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
         }
         adapter.onFrameEvent?.(pluginId, event, payload);
       },
+      chat: adapter.chat
+        ? {
+            post: (plugin, text) => adapter.chat!.post(viaOf(plugin), text),
+            respond: (plugin, text) => adapter.chat!.notice(viaOf(plugin), text),
+          }
+        : undefined,
       ui: {
         setButton(pluginId, buttonId, patch) {
           const key = buttonKey(pluginId, buttonId);
@@ -524,6 +580,8 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     loaded: () => [...entries.values()].map((e) => e.plugin),
     isLoaded: (pluginId) => entries.has(pluginId),
     buttons,
+    chatCommands,
+    runChatCommand,
     activateButton,
     openSurface,
     closeSurface,

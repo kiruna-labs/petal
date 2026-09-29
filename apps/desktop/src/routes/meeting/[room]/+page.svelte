@@ -44,6 +44,7 @@
   import MeetingChrome from '$lib/components/MeetingChrome.svelte';
   import ChatDrawer from '@petal/shared/ui/components/ChatDrawer.svelte';
   import { createChatHost } from '$lib/chat/chatHost.svelte';
+  import type { ChatCommandOption } from '@petal/shared/logic/chat';
   import FeedbackModal from '$lib/components/FeedbackModal.svelte';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
   import type { ControlIcon } from '$lib/components/ControlButton.svelte';
@@ -662,6 +663,7 @@
   // PluginSurfaces; the route only renders the host-drawn toolbar cells into
   // Gallery's slot and shows plugin toasts through the same local toast shell.
   let pluginButtons = $state<ToolbarButtonModel[]>([]);
+  let chatCommands = $state<ChatCommandOption[]>([]);
   let pluginsRef = $state<PluginSurfaces | null>(null);
   const pluginToast = createLocalToast(3000);
   let pluginToastVariant = $state<'info' | 'degraded'>('info');
@@ -682,6 +684,9 @@
     canSend={meeting.meetingPhase === 'connected'}
     onSend={(text) => chat.send(text)}
     onClose={() => chat.setOpen(false)}
+    commands={chatCommands}
+    onCommand={(name, args) =>
+      pluginsRef?.runChatCommand(name, args) ?? { ok: false, message: 'Plugins are still starting. Try again in a moment.' }}
   />
 {/snippet}
 
@@ -742,6 +747,8 @@
       <PluginSurfaces
         bind:this={pluginsRef}
         bind:buttons={pluginButtons}
+        bind:chatCommands
+        chat={{ post: (via, text) => chat.post(via, text), notice: (via, text) => chat.notice(via, text) }}
         participants={meeting.presence}
         roomLabel={meeting.roomLabel}
         phase={meeting.meetingPhase}
