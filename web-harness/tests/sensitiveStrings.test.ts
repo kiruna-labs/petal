@@ -168,3 +168,40 @@ test('SensitiveStringRegistry ignores empty/blank room and participant values', 
 
   assert.equal(registry.size, 0);
 });
+
+test('a typed room name never rewrites the middle of an unrelated word', () => {
+  const registry = new SensitiveStringRegistry();
+  registry.registerFreeTextRoom('test');
+
+  // Plain substring replacement would turn "latest" into "la<redacted:room>"
+  // and "testing" into "<redacted:room>ing", destroying the very report this
+  // registry exists to keep readable.
+  const line = 'the latest attempt is testing fine';
+  assert.equal(registry.scrub(line), line);
+  assert.equal(registry.scrubForReporting(line), line);
+
+  // Standing on its own it is still redacted.
+  assert.equal(registry.scrub('joined test just now'), 'joined <redacted:room> just now');
+  assert.equal(registry.scrub('room "test".'), 'room "<redacted:room>".');
+});
+
+test('a typed room name too short to be distinctive is dropped entirely', () => {
+  const registry = new SensitiveStringRegistry();
+  registry.registerFreeTextRoom('a');
+  registry.registerFreeTextRoom('on');
+
+  const line = 'a connection is on the way';
+  assert.equal(registry.scrub(line), line);
+  assert.equal(registry.size, 0);
+});
+
+test('a generated room identifier is still redacted', () => {
+  const registry = new SensitiveStringRegistry();
+  registry.registerRoom('nbe-wayp-fgn');
+  registry.registerRoom('room-acme-77');
+
+  assert.equal(
+    registry.scrub('joined nbe-wayp-fgn via room-acme-77'),
+    'joined <redacted:room> via <redacted:room>'
+  );
+});
