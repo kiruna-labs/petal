@@ -110,6 +110,21 @@ test('desktop meeting-name header actions are reserved and reveal on topbar hove
   assert.doesNotMatch(gallerySource, /\.topbar-left:(hover|focus-within) \.room-title-actions/);
 });
 
+// #241: tests/galleryTopbarAlignmentRendered.test.ts measures the rendered
+// result; these pin the rules it depends on.
+test('desktop top bar centres the title row and sizes its controls from one token', () => {
+  assert.match(gallerySource, /\.room-title\s*{[^}]*align-items:\s*center;/);
+  assert.match(gallerySource, /\.room-name\s*{[^}]*font:\s*600 14\.5px \/ 1\.12 var\(--font-ui\);/);
+  assert.match(gallerySource, /\.elapsed\s*{[^}]*font:\s*500 12\.5px \/ 1\.12 var\(--font-mono\);/);
+  for (const selector of ['.topbar-control-cell', '.layout-toggle', '.report-bug']) {
+    assert.match(
+      gallerySource,
+      new RegExp(`\\${selector}\\s*{[^}]*width:\\s*var\\(--topbar-control-height\\);\\s*height:\\s*var\\(--topbar-control-height\\);`),
+      `${selector} is not sized from --topbar-control-height`
+    );
+  }
+});
+
 test('desktop room title icon buttons are matching square controls', () => {
   assert.match(
     gallerySource,
