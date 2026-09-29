@@ -52,7 +52,7 @@
     type PresentParticipant,
     type RoomRecord
   } from '$lib/data/rooms';
-  import { inviteLinkCopiedToastMessage, inviteLinkForRoom } from '$lib/data/inviteLinks';
+  import { findRoomRecord, inviteLinkCopiedToastMessage, inviteLinkForRoom } from '$lib/data/inviteLinks';
   import { loadFavoriteRooms, orderRoomsForMenu } from '$lib/data/roomOrdering';
   import { COMMANDS, EVENTS, formatRemoteWindowHeaderTitle, hasTauriBridge } from '$lib/ipc';
   import { isMac } from '$lib/platform';
@@ -94,7 +94,7 @@
   // the same way `onInvite` does, for the roster header ("In <name>").
   const currentRoomLabel = $derived.by(() => {
     if (!roomName) return null;
-    const room = rooms.find((item) => item.name === roomName || item.slug === roomName);
+    const room = findRoomRecord(rooms, roomName);
     return room ? roomDisplayLabel(room) : 'Petal meeting';
   });
 
@@ -355,7 +355,17 @@
 
   async function onInvite() {
     if (!roomName) return;
-    const room = rooms.find((item) => item.name === roomName || item.slug === roomName);
+    let room = findRoomRecord(rooms, roomName);
+    if (!room) {
+      // `presence-update` can name a room created after the last refresh();
+      // re-read the list rather than report a stored code as missing.
+      try {
+        rooms = await listRooms();
+      } catch {
+        // No Tauri backend (plain browser preview).
+      }
+      room = findRoomRecord(rooms, roomName);
+    }
     // Never the raw credential (#42) — roomDisplayLabel filters the legacy
     // generic "room" label too and defaults to "Petal meeting".
     const label = room ? roomDisplayLabel(room) : 'Petal meeting';

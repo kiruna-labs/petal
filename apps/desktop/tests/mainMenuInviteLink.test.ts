@@ -149,7 +149,7 @@ test('meeting and menubar copy paths share invite-link construction', () => {
   assert.match(meetingRoute, /return inviteLinkForAccessCode\(/);
   assert.match(meetingRoute, /inviteToast\.show\(inviteLinkCopiedToastMessage\(link\)\)/);
   assert.doesNotMatch(meetingRoute, /const INVITE_ORIGIN/);
-  assert.match(menubarRoute, /import \{ inviteLinkCopiedToastMessage, inviteLinkForRoom \} from '\$lib\/data\/inviteLinks'/);
+  assert.match(menubarRoute, /import \{ findRoomRecord, inviteLinkCopiedToastMessage, inviteLinkForRoom \} from '\$lib\/data\/inviteLinks'/);
   assert.match(menubarRoute, /room \? inviteLinkForRoom\(room, label\) : null/);
   assert.match(menubarRoute, /copiedLink = ok \? inviteLinkCopiedToastMessage\(link\) : ''/);
   assert.match(menubarRoute, /overflow-wrap: anywhere;/);

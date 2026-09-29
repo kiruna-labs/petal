@@ -45,7 +45,10 @@ test('desktop create flow keeps typed meeting name as the human display label', 
     meetingSessionSource,
     /pendingRouteDisplayName \?\? meetingDisplayLabelFromCredential\(roomName\) \?\? 'Petal meeting'/
   );
-  assert.match(meetingSessionSource, /roomDisplayLabel\(joinedRoom\)/);
+  // The joined record, or before join resolves the saved one -- both labelled
+  // by roomDisplayLabel, never by the credential.
+  assert.match(meetingSessionSource, /const knownRoom = \$derived\(joinedRoom \?\? savedRoom\)/);
+  assert.match(meetingSessionSource, /roomDisplayLabel\(knownRoom\)/);
 });
 
 test('desktop blank create passes an access code, not a pre-hashed credential (#107)', () => {

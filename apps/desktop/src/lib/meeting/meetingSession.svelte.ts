@@ -15,6 +15,7 @@ import { session } from '$lib/stores/session.svelte';
 import {
   joinRoom,
   leaveRoom,
+  listRooms,
   roomPresence,
   colorForIdentity,
   identityColorCss,
@@ -27,6 +28,7 @@ import {
   type RoomRecord
 } from '$lib/data/rooms';
 import { meetingDisplayLabelFromCredential } from '$lib/data/meetingCode';
+import { findRoomRecord, meetingInviteAccessCode } from '$lib/data/inviteLinks';
 import { consumePendingRoomDisplayName } from '$lib/data/pendingRoomLabels';
 import {
   cameraTrackNameForIdentity,
@@ -66,6 +68,8 @@ export interface MeetingSessionOptions {
 export interface MeetingSession {
   readonly joinedRoom: RoomRecord | null;
   readonly roomLabel: string;
+  /** Public access code for the invite controls -- never the credential (#42). */
+  readonly inviteAccessCode: string | null;
   readonly meetingPhase: MeetingPhase;
   readonly stillJoined: boolean;
   readonly presence: PresentParticipant[];
@@ -92,6 +96,14 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   const roomName = $derived(options.roomName());
 
   let joinedRoom = $state<RoomRecord | null>(null);
+  // This route's saved record, read from rooms.json at mount. `join_room`
+  // resolves only after the whole join (audio preparation alone can hold it
+  // 45s, #787), and until then the invite controls had no access code for a
+  // room the native side created or stored: "Invite link unavailable until
+  // the access code is repaired." for a room whose record had one.
+  let savedRoom = $state<RoomRecord | null>(null);
+  const knownRoom = $derived(joinedRoom ?? savedRoom);
+  const inviteAccessCode = $derived(meetingInviteAccessCode(joinedRoom, savedRoom, roomName));
   const pendingRouteDisplayName = $derived.by(() => consumePendingRoomDisplayName(roomName));
   // Never fall back to `roomName` — that's the raw credential (`room-<hash>`),
   // and showing it flashes a technical ID before the real name resolves (#42).
@@ -99,7 +111,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   const safeRouteRoomLabel = $derived(
     pendingRouteDisplayName ?? meetingDisplayLabelFromCredential(roomName) ?? 'Petal meeting'
   );
-  const roomLabel = $derived(joinedRoom ? roomDisplayLabel(joinedRoom) : safeRouteRoomLabel);
+  const roomLabel = $derived(knownRoom ? roomDisplayLabel(knownRoom) : safeRouteRoomLabel);
 
   let meetingPhase = $state<MeetingPhase>('connecting');
   let disconnectDetail = $state('Returning to rooms.');
@@ -362,6 +374,8 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   /** Returns true if it redirected to the canonical room route (caller should
    * abort the rest of its mount, matching the original inline behavior). */
   async function join(): Promise<boolean> {
+    // Not awaited: a local file read that must never delay the join itself.
+    void loadSavedRoom();
     await startListeners();
     try {
       // Real join (SPEC.md §4.6): idempotent on the Rust side, so a reload
@@ -395,6 +409,15 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     // room exists; non-fatal if it can't connect.
     void startGalleryBridge();
     return false;
+  }
+
+  async function loadSavedRoom() {
+    try {
+      const room = findRoomRecord(await listRooms(), roomName);
+      if (!disposed) savedRoom = room;
+    } catch {
+      // No Tauri bridge (plain browser preview) -- the joined record still arrives.
+    }
   }
 
   async function startListeners() {
@@ -454,6 +477,9 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     },
     get roomLabel() {
       return roomLabel;
+    },
+    get inviteAccessCode() {
+      return inviteAccessCode;
     },
     get meetingPhase() {
       return meetingPhase;
