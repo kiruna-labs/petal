@@ -39,6 +39,25 @@ function ensureInit(): boolean {
     sentryClient.init({
       dsn,
       tracesSampleRate: 0,
+      // Sentry 11 turned permissive data collection ON by default, and this
+      // file never set the old `sendDefaultPii` flag because v10 already
+      // defaulted to off. So the upgrade alone would have started attaching
+      // request context -- headers, cookies, query params, bodies -- to the
+      // synthetic events below, widening what leaves this process without any
+      // call site changing. That is precisely what the allowlist above exists
+      // to prevent, so every category is named and switched off here.
+      dataCollection: {
+        userInfo: false,
+        cookies: false,
+        httpHeaders: { request: false, response: false },
+        httpBodies: [],
+        urlQueryParams: false,
+        graphQL: { document: false, variables: false },
+        genAI: { inputs: false, outputs: false },
+        databaseQueryData: false,
+        queues: false,
+        stackFrameVariables: false,
+      },
     });
     initialized = true;
   }
