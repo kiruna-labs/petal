@@ -7,9 +7,9 @@ If someone in your meeting doesn't have the Petal desktop app installed —
 or is on Linux, or simply prefers not to install it — they can join from a
 browser at
 [meet.petal.live](https://meet.petal.live) instead. It's a real participant
-in the same meeting, not a limited guest mode: real screen sharing, a real
-camera, and a real microphone, over the same underlying connection the
-desktop app uses.
+in the same meeting, not a limited guest mode: real screen sharing (from a
+desktop browser), a real camera, and a real microphone, over the same
+underlying connection the desktop app uses.
 
 ![The browser client's join screen](../../../assets/screenshots/web-join.png)
 
@@ -17,8 +17,8 @@ desktop app uses.
 
 Petal invite links look like
 `https://meet.petal.live/design-review/abc-defg-hjk` — a readable label
-plus the meeting's access code. Opening one shows a small Petal page with
-platform-aware desktop choices:
+plus the meeting's access code. Opening one on a computer shows a small
+Petal page with platform-aware desktop choices:
 
 - **Open Petal** — hands off to the desktop app if it's installed.
 - **Download Petal for macOS** — the universal signed and notarized DMG.
@@ -28,8 +28,13 @@ platform-aware desktop choices:
   to the meeting. If you've never set a display name here before, it asks
   for your name first, then joins.
 
-Both download buttons are always shown; the one matching your operating
-system is the primary.
+Both download buttons are always shown on a computer; the one matching your
+operating system comes first.
+
+On a phone or tablet the page skips the desktop choices: **Join in browser**
+is the only button, the page doesn't try to open the desktop app, and one
+line under the meeting code, "On a computer? **Download Petal for Windows or
+macOS**", links to the install page for later.
 
 ## Joining or creating a meeting by hand
 
@@ -95,7 +100,9 @@ renders as a tile in the grid, not a floating window. This is a limitation
 of what a browser can render, not of what gets shared: a browser
 participant's screen share is the same real capture as a desktop share, and
 desktop-app participants watching that same share still see it as a native
-movable window on their machines.
+movable window on their machines. Sharing does need a desktop browser,
+though: phone browsers can't capture the screen, so **Share** isn't shown
+there.
 
 Two more things a browser can't do: nobody can remote-control a window you
 share from a browser (browsers can't inject input into your operating
