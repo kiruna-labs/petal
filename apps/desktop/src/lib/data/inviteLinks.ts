@@ -24,6 +24,36 @@ export function publicInviteAccessCode(value: string | null | undefined): string
   return normalizeAccessCode(value) ?? accessCodeForCredential(value);
 }
 
+/** The saved room a route param, `current_room`, or presence event names:
+ * its durable credential (`name`) or its `slug`. */
+export function findRoomRecord<T extends Pick<RoomRecord, 'name' | 'slug'>>(
+  rooms: readonly T[],
+  nameOrSlug: string | null | undefined
+): T | null {
+  if (!nameOrSlug) return null;
+  return rooms.find((room) => room.name === nameOrSlug || room.slug === nameOrSlug) ?? null;
+}
+
+/**
+ * The public code behind the active meeting's invite controls. The joined
+ * record is authoritative, but `join_room` resolves only after the WHOLE join
+ * -- audio preparation alone can hold it 45s (#787) -- so until then the saved
+ * record from rooms.json supplies the code. The route param is the last
+ * resort: the in-memory credential map only knows codes this webview generated
+ * or parsed itself, never one the native side created or stored.
+ */
+export function meetingInviteAccessCode(
+  joinedRoom: Pick<RoomRecord, 'accessCode'> | null | undefined,
+  savedRoom: Pick<RoomRecord, 'accessCode'> | null | undefined,
+  routeRoomName: string | null | undefined
+): string | null {
+  return (
+    publicInviteAccessCode(joinedRoom?.accessCode) ??
+    publicInviteAccessCode(savedRoom?.accessCode) ??
+    publicInviteAccessCode(routeRoomName)
+  );
+}
+
 export function inviteCopyAriaLabel(value: string | null | undefined): string {
   const accessCode = publicInviteAccessCode(value);
   return accessCode ? `Room ID ${accessCode}, click to copy invite` : 'Copy invite link';

@@ -87,7 +87,7 @@
     inviteLinkCopiedToastMessage,
     inviteLinkForAccessCode
   } from '$lib/data/inviteLinks';
-  import { accessCodeForCredential, meetingDisplayLabelFromCredential } from '$lib/data/meetingCode';
+  import { meetingDisplayLabelFromCredential } from '$lib/data/meetingCode';
   import { isFeedbackEnabled } from '$lib/feedback/config';
 
   const roomName = $derived(page.params.room ?? 'eng-sync');
@@ -202,17 +202,16 @@
   });
 
   function currentInviteLink(): string | null {
-    const accessCode = meeting.joinedRoom?.accessCode || accessCodeForCredential(roomName);
     return inviteLinkForAccessCode(
       meeting.roomLabel || meetingDisplayLabelFromCredential(roomName) || 'Petal meeting',
-      accessCode
+      meeting.inviteAccessCode
     );
   }
 
   // Keep active-meeting copy controls useful without exposing the opaque room
-  // credential. `meeting.joinedRoom` is authoritative after join; the route
-  // parameter supports the small connecting window before then.
-  const inviteAccessCode = $derived(meeting.joinedRoom?.accessCode || accessCodeForCredential(roomName));
+  // credential. `meeting.joinedRoom` is authoritative after join; the saved
+  // record covers the connecting window before then, which can last 45s+.
+  const inviteAccessCode = $derived(meeting.inviteAccessCode);
   const inviteAriaLabel = $derived(inviteCopyAriaLabel(inviteAccessCode));
   const inviteTooltip = $derived(inviteCopyTooltip(inviteAccessCode));
 
