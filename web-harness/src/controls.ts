@@ -126,6 +126,19 @@ export function supportsAudioOutputSelection(): boolean {
   );
 }
 
+/**
+ * Whether this browser can share its screen at all. Phones cannot: Chrome for
+ * Android and iPhone Safari have no `getDisplayMedia`, and no browser exposes
+ * `navigator.mediaDevices` outside a secure context. Feature detection, not
+ * the user agent, so a browser that gains the API gets Share back unchanged.
+ * Every surface that offers Share must ask this first (#240).
+ */
+export function supportsScreenShare(
+  mediaDevices: Partial<MediaDevices> | undefined = globalThis.navigator?.mediaDevices
+): boolean {
+  return typeof mediaDevices?.getDisplayMedia === 'function';
+}
+
 export function resolvePersistedDeviceId(devices: Pick<MediaDeviceInfo, 'deviceId'>[], storedId: string | null): string {
   const trimmed = storedId?.trim();
   if (!trimmed) return '';
@@ -1417,11 +1430,24 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     // this comment claims. NOTE: the getDisplayMedia picker cannot be
     // clicked by unattended automation -- that is exactly why the synthetic
     // test-pattern share in the dev panel is kept as a first-class option.
+    // Where there is no getDisplayMedia (phones) the whole cell is hidden: a
+    // Share button there could only ever fail. The dev panel's test-pattern
+    // share needs no display capture and stays.
     // -----------------------------------------------------------------------
+    const ctlShareCell = ctlShare.closest<HTMLElement>('.control-cell');
+    if (ctlShareCell) ctlShareCell.hidden = !supportsScreenShare();
+
     ctlShare.addEventListener('click', async () => {
       if (!state.room) return;
 
       if (!state.screenSharing) {
+        // The cell is hidden on such browsers; if a click lands anyway, say
+        // what is wrong. There is no picker, so nothing was "cancelled".
+        if (!supportsScreenShare()) {
+          logEvent('screen share unavailable: no getDisplayMedia', 'error');
+          showToast("Screen sharing isn't available in this browser");
+          return;
+        }
         let stream: MediaStream;
         feedbackReport?.onShareStartIntent();
         logEvent('requesting screen capture (watch for the browser picker)…');
