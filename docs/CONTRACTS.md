@@ -1380,7 +1380,20 @@ sample `index.json` and `bundle.json` signed with a throwaway test key
 (`test.pub`), plus `invalid-index-cases.json`, mutations that BOTH index
 validators (`plugins::registry::validate_index` and
 `shared/plugin-host/registry.ts` `parseRegistryIndex`, which the desktop
-Settings browser runs over the Rust-verified index) must reject case by case.
+Settings browser runs over the Rust-verified index) must reject case by case,
+and `unsupported-permission-cases.json`, mutations both must ACCEPT while
+marking that one version entry uninstallable.
+
+Permissions in an entry are classified, identically on both sides: `known`
+(this client implements it), `unsupported` (well formed,
+`^[a-z][a-z0-9-]*(:[a-z0-9.*-]+)*$` within 64 chars, but not implemented
+here: a newer Petal's permission or a reserved one like `frames:read`), or
+`malformed` (anything else, the `net:fetch:*` wildcard, or `net:fetch:` with
+a bad host). A `malformed` or duplicate permission fails the whole index like
+every other shape error; an `unsupported` one only makes its entry
+uninstallable ("Needs newer Petal"; Rust `check_installable` refuses it before
+any fetch). This is what lets the registry list plugins that use permissions
+added after a client shipped without blanking that client's "Get plugins".
 Verify chain: minisign(index) → `generatedAt`/signature `timestamp:` not
 older than the last accepted index (anti-rollback, persisted in
 `plugins.json`) → `sha256(bundle) == entry.sha256` and `size` →
@@ -1415,11 +1428,28 @@ Canonical HTTPS invite links:
 - Opening the HTTPS route returns a small interstitial that attempts
   `petal://join/<access-code>` on load, keeps an explicit Open Petal link for
   browsers that require a user gesture, offers `/api/download`, and offers a
-  browser join URL carrying `?code=<access-code>`.
+  browser join URL carrying `?code=<access-code>`. Phones and tablets (an
+  Android, iPhone, iPad, iPod or `Mobile` user agent, `Sec-CH-UA-Mobile: ?1`,
+  or a touch-capable `Macintosh` detected by the page) get the browser join
+  URL as the only action: no `petal://` attempt and no `/api/download`
+  buttons. The response is `Cache-Control: private, no-cache` because it
+  varies by device.
 - Browser join target is configured with `PETAL_WEB_JOIN_URL`, treated as an
   origin/base only: any configured path is discarded before adding `?code=`.
   The default is the production browser client, `https://meet.petal.live`
   (`DEFAULT_WEB_JOIN_BASE_URL` in `web-harness/api/j.ts`).
+- A browser meeting keeps its invite link in the address bar, so reloading it
+  requests this route. The interstitial's first script (in `<head>`) sends
+  such a tab back into the browser client: when the navigation is a reload,
+  `document.wasDiscarded` is true, or `history.state.petalMeetingGuard` is
+  set (the meeting's Back guard entry, whose state survives a session
+  restore), and the tab's `sessionStorage` `petal-harness-rejoin` equals this
+  page's access code, it stops the page and replaces the location with the
+  same-origin `/?code=<access-code>`, so the `petal://` attempt never runs.
+  Any other visit (a new tab, the link opened again) gets the interstitial
+  as before; a Back to it (`back_forward`, or a back-forward cache restore)
+  also removes `petal-harness-rejoin`, so the meeting the user backed out of
+  is not rejoined by a later reload (#244).
 
 Native deep link (accepted compatibility vector, not the primary copied invite):
 

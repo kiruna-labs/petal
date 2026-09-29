@@ -7,9 +7,9 @@ If someone in your meeting doesn't have the Petal desktop app installed —
 or is on Linux, or simply prefers not to install it — they can join from a
 browser at
 [meet.petal.live](https://meet.petal.live) instead. It's a real participant
-in the same meeting, not a limited guest mode: real screen sharing, a real
-camera, and a real microphone, over the same underlying connection the
-desktop app uses.
+in the same meeting, not a limited guest mode: real screen sharing (from a
+desktop browser), a real camera, and a real microphone, over the same
+underlying connection the desktop app uses.
 
 ![The browser client's join screen](../../../assets/screenshots/web-join.png)
 
@@ -17,8 +17,8 @@ desktop app uses.
 
 Petal invite links look like
 `https://meet.petal.live/design-review/abc-defg-hjk` — a readable label
-plus the meeting's access code. Opening one shows a small Petal page with
-platform-aware desktop choices:
+plus the meeting's access code. Opening one on a computer shows a small
+Petal page with platform-aware desktop choices:
 
 - **Open Petal** — hands off to the desktop app if it's installed.
 - **Download Petal for macOS** — the universal signed and notarized DMG.
@@ -28,8 +28,13 @@ platform-aware desktop choices:
   to the meeting. If you've never set a display name here before, it asks
   for your name first, then joins.
 
-Both download buttons are always shown; the one matching your operating
-system is the primary.
+Both download buttons are always shown on a computer; the one matching your
+operating system comes first.
+
+On a phone or tablet the page skips the desktop choices: **Join in browser**
+is the only button, the page doesn't try to open the desktop app, and one
+line under the meeting code, "On a computer? **Download Petal for Windows or
+macOS**", links to the install page for later.
 
 ## Joining or creating a meeting by hand
 
@@ -69,6 +74,40 @@ bottom:
   everyone in the meeting sees your strokes in your profile color.
 - **Leave** — disconnects and returns to the join screen.
 
+When the controls don't all fit — on a phone, or in a narrow browser
+window — the ones that don't fit move into a **⋯ More** menu, least-used
+first. **Mic**, **Camera** and **Leave** always stay in the bar. A dot on
+**⋯** means something in the menu needs a look, like unread chat messages
+or your screen share while it's live.
+
+### Staying in the meeting
+
+A meeting in the browser doesn't end by accident:
+
+- **Back** (the button, or the back gesture on a phone) asks **Leave
+  meeting?** first. **Stay** keeps you in; **Leave** is the same as the Leave
+  button.
+- **Reloading** the page, including pulling down on a phone, rejoins the
+  meeting instead of showing the invite page, and so does coming back to a
+  tab the browser unloaded in the background. Pull-to-refresh is switched
+  off while you're in a meeting. This only applies to the tab that was in
+  the meeting: the same link opened in another tab still shows the invite
+  page, and so does a reload after you've left, or backed out to the invite
+  page.
+- If the connection drops while the page is in the background, it rejoins
+  on its own once, when you come back to it.
+- Any other disconnect you didn't ask for shows what happened when Petal
+  knows (for example **Removed from the meeting** or **Connection lost**)
+  with a **Rejoin** button, instead of dropping you on the join screen.
+
+A few browser rules shape this. In desktop Chrome, the toolbar's Back
+button doesn't stop at the **Leave meeting?** box: pressing Back a second
+time while it's open leaves. On Android, the back gesture closes the box
+instead, the same as **Stay**, but the next Back then leaves without asking
+until you tap something in the meeting. And after joining straight from an
+invite link, Back only asks once you've tapped or clicked something in the
+meeting; until then it leaves like any other page.
+
 The top bar shows the room name (click the pencil to rename it for
 everyone), an elapsed timer, a layout switch between the grid and a
 **spotlight** view that enlarges one share, and a bug-report button.
@@ -89,7 +128,9 @@ renders as a tile in the grid, not a floating window. This is a limitation
 of what a browser can render, not of what gets shared: a browser
 participant's screen share is the same real capture as a desktop share, and
 desktop-app participants watching that same share still see it as a native
-movable window on their machines.
+movable window on their machines. Sharing does need a desktop browser,
+though: phone browsers can't capture the screen, so **Share** isn't shown
+there.
 
 Two more things a browser can't do: nobody can remote-control a window you
 share from a browser (browsers can't inject input into your operating

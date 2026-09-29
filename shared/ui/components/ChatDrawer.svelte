@@ -13,11 +13,16 @@
   message that starts with `/`.
 
   Fit rules: designed for a 320 px column and verified at the 400 px window
-  (apps/desktop/tests/chatDrawerRendered.test.ts): long words break, long
-  names ellipsize, plugin names and command text wrap, nothing scrolls
-  horizontally. Enter sends, Shift+Enter inserts a line break. The list pins
-  to the bottom while the reader is at the bottom and stays put when they
-  have scrolled up to read.
+  and the 360 px-tall one (apps/desktop/tests/chatDrawerRendered.test.ts)
+  and on a landscape phone (web-harness/tests/chatDrawerLayoutRendered.test.ts):
+  long words break, long names ellipsize, plugin names and command text wrap,
+  nothing scrolls horizontally. The composer is one row, Send beside the
+  input, and the character count only shows near the limit, so short
+  viewports keep their height for messages (#246); a screen reader hears only
+  going over it. The command list and a refusal each take their own full-width
+  row above and below it. Enter sends, Shift+Enter inserts a line break. The
+  list pins to the bottom while the reader is at the bottom and stays put when
+  they have scrolled up to read.
 -->
 <script lang="ts">
   import { tick } from 'svelte';
@@ -84,6 +89,19 @@
     void tick().then(() => {
       if (listEl) listEl.scrollTop = listEl.scrollHeight;
     });
+  });
+
+  // The list also shrinks without a new message: the composer grows while
+  // typing, or the soft keyboard resizes the page. Keep the newest line in
+  // view for a reader who was at the bottom.
+  $effect(() => {
+    const el = listEl;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      if (stuckToBottom) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
   });
 
   export function focusComposer(): void {
@@ -289,14 +307,19 @@
       onkeydown={onComposerKeydown}
       data-testid="chat-input"
     ></textarea>
+    <div class="chat-compose-side">
+      <span class="chat-count" class:over={overLimit}>{remaining < 200 ? remaining : ''}</span>
+      <!-- Only going over the limit is announced, once: a live count would
+           read out every keystroke. Always rendered (visually hidden, never
+           display: none) so screen readers track it before it first speaks. -->
+      <span class="chat-limit-status" role="status">{overLimit ? `Too long to send: ${CHAT_LIMITS.maxTextChars} characters at most` : ''}</span>
+      <!-- Keep focus in the input on tap, so the soft keyboard stays up
+           between messages; click still submits. -->
+      <button type="submit" class="chat-send" disabled={!sendable} data-testid="chat-send" onpointerdown={(e) => e.preventDefault()}>Send</button>
+    </div>
     {#if composerError}
       <p class="chat-error" id="chat-composer-error" role="alert" data-testid="chat-error">{composerError}</p>
     {/if}
-    <div class="chat-compose-row">
-      <span class="chat-count" class:over={overLimit} aria-live={overLimit ? 'polite' : 'off'}>
-        {#if remaining < 200}{remaining}{/if}
-      </span>
-      <button type="submit" class="chat-send" disabled={!sendable} data-testid="chat-send">Send</button>
     </div>
   </form>
 </section>
@@ -415,15 +438,21 @@
     padding: 10px 12px 12px;
     border-top: 1px solid var(--hairline, rgba(255, 255, 255, 0.07));
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    align-items: flex-end;
+    gap: 8px;
   }
   .chat-input {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     box-sizing: border-box;
     resize: none;
     min-height: 36px;
-    max-height: 120px;
+    /* Grows while typing, to about a third of a short window but always
+       two whole lines. `dvh`, not `vh`: with the keyboard up on a landscape
+       phone `vh` still measures the LARGE viewport, so the composer could
+       take 108px of a ~172px visible area and push the messages it is
+       replying to off screen. */
+    max-height: clamp(55px, 30dvh, 120px);
     padding: 8px 10px;
     border-radius: 9px;
     border: 1px solid var(--hairline-strong, rgba(255, 255, 255, 0.1));
@@ -439,25 +468,43 @@
   .chat-input:disabled {
     opacity: var(--disabled-opacity, 0.38);
   }
-  .chat-compose-row {
+  /* Send beside the input. Near the limit (past 1800 characters) the count
+     stacks above Send, in the space the grown input leaves. */
+  .chat-compose-side {
+    flex: none;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 4px;
   }
   .chat-count {
     font-size: 11px;
+    line-height: 1;
     color: var(--text-dim, rgba(255, 255, 255, 0.62));
     font-variant-numeric: tabular-nums;
-    min-height: 1em;
+  }
+  .chat-count:empty {
+    display: none;
   }
   .chat-count.over {
     color: var(--warning, #f0b429);
   }
+  .chat-limit-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
   .chat-send {
+    height: 36px;
     border: 0;
     border-radius: 8px;
-    padding: 6px 14px;
+    padding: 0 14px;
     font: inherit;
     font-weight: 600;
     background: var(--text-strong, rgba(255, 255, 255, 0.88));
@@ -548,5 +595,33 @@
     line-height: 1.4;
     color: var(--warning, #f0b429);
     overflow-wrap: anywhere;
+  }
+  /* The composer is one row (#246); the command list and a refusal wrap onto
+     their own full-width rows above and below it. */
+  .chat-compose {
+    flex-wrap: wrap;
+  }
+  .chat-suggestions,
+  .chat-error {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  /* Short viewports (a phone in landscape, #246): a compact header, list and
+     composer, so the height goes to messages. */
+  @media (max-height: 500px) {
+    .chat-head {
+      padding-block: 4px;
+    }
+    .chat-list {
+      padding-block: 6px;
+      gap: 6px;
+    }
+    .chat-msg.continues {
+      margin-top: -4px;
+    }
+    .chat-compose {
+      padding: 8px 10px 10px;
+    }
   }
 </style>

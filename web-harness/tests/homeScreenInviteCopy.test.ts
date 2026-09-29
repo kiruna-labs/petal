@@ -85,7 +85,8 @@ test('recent-room copy action writes a labeled invite link and shows copied feed
   assert.equal(url, `https://petal.example.com/design-review/${ACCESS_CODE}`);
   assert.deepEqual(writes, [url]);
   assert.deepEqual(toasts, [inviteLinkCopiedToastMessage(url)]);
-  assert.deepEqual(logs, [{ message: `invite link copied: ${url}`, kind: 'ok' }]);
+  // #245: the link (access code + label slug) never reaches the session log.
+  assert.deepEqual(logs, [{ message: 'invite link copied', kind: 'ok' }]);
 });
 
 test('recent-room copy action falls back to toast and warning log when clipboard is unavailable', async () => {
@@ -106,7 +107,7 @@ test('recent-room copy action falls back to toast and warning log when clipboard
   });
 
   assert.deepEqual(toasts, [inviteLinkCopiedToastMessage(url)]);
-  assert.deepEqual(logs, [{ message: `clipboard unavailable -- invite link: ${url}`, kind: 'warn' }]);
+  assert.deepEqual(logs, [{ message: 'clipboard unavailable -- invite link shown in the toast', kind: 'warn' }]);
 });
 
 test('recent-room list renders a copy-invite control beside favorite', () => {
