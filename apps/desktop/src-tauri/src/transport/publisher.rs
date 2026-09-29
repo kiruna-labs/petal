@@ -2054,8 +2054,8 @@ impl RoomConnection<Arc<Room>> {
 
         // The publish-time allocation floor must not stay pinned: see
         // `release_startup_min_bitrate` for why it exists and how it is
-        // released. `publish_opts.min_bitrate` is the value actually applied
-        // (already clamped to half the share's ceiling).
+        // released. `publish_opts.min_bitrate` is the value actually applied:
+        // clamped to the share's ceiling, and always `None` off Windows.
         if let Some(floor_bps) = startup_floor_bps {
             let track_for_floor = track.clone();
             let cancel = background_cancel.clone();
@@ -2259,12 +2259,32 @@ fn window_publish_options(
     window_publish_options_for_region(width, height, quality, simulcast_ladder, false)
 }
 
-/// Default publish-time allocation floor (bps) for window shares.
+/// Resolve a publish-time startup allocation floor on the platforms that apply one.
 ///
-/// 4 Mbps is ~0.086 bits/pixel/frame at 1595x969@30, the rate at which the
-/// Windows hardware H.264 rate controller stops clamping QP at its ceiling
-/// (measured: `interval_qp` 50.0 -> ~30, and a 25-30 s quality ramp plus the
-/// associated motion ramp both disappear).
+/// Windows only, by product decision on #224: the floor and every number behind
+/// it were measured on the Windows Media Foundation H.264 encoder, and nothing has
+/// measured one on macOS (VideoToolbox), the platform most users are on. There a
+/// floor would be an unmeasured startup overcommit, and on a simulcast share it
+/// could also pin the wrong rung: the vendored `compute_video_encodings` puts it
+/// on the encoding with the largest ceiling, which after budgeting is not always
+/// the source-sized one. Every Windows publication that takes a floor carries a
+/// single encoding, so there it can only land where it is meant to.
+///
+/// `resolve` is not called elsewhere, so no floor is resolved or logged there.
+/// `None` leaves `has_min_bitrate_bps` unset, and with no floor neither publish
+/// path spawns [`release_startup_min_bitrate`].
+fn startup_allocation_floor(resolve: impl FnOnce() -> Option<u64>) -> Option<u64> {
+    if cfg!(target_os = "windows") {
+        resolve()
+    } else {
+        None
+    }
+}
+
+/// The Windows window share's publish-time allocation floor, in bits per second.
+///
+/// Windows only -- see [`startup_allocation_floor`]. Every measurement below is
+/// the Windows Media Foundation H.264 encoder's.
 ///
 /// This is a FLOOR, so it raises what WebRTC's bitrate allocator is willing to
 /// spend while the congestion controller's estimate is still low -- and the
@@ -2272,10 +2292,8 @@ fn window_publish_options(
 /// target override (the removed `PETAL_MF_SCREEN_STARTUP_BITRATE` knob) left
 /// the pacer draining at the estimate, so the surplus became send queue
 /// (measured: 1773 ms of it) instead of bandwidth, and the share stuttered.
-/// The window share's allocation floor, in bits per second.
 ///
-/// 12 Mbps, up from the old 4 Mbps, because that is the measured value that
-/// works. The floor exists to hold the allocation above the congestion
+/// 12 Mbps because that is the measured value that works. The floor exists to hold the allocation above the congestion
 /// controller's low equilibrium, and the controller's low point TRACKS the floor:
 /// at an 8 Mbps floor it settled at 8,363-8,917 kbps and the send queue stayed at
 /// 1.66 intervals with the stutter still visible; at 12 Mbps it settled at
@@ -2353,6 +2371,25 @@ mod window_share_min_bitrate_tests {
         assert_eq!(window_share_min_bitrate_bps(240_000), Some(240_000));
         assert_eq!(window_share_min_bitrate_bps(0), None);
     }
+
+    #[test]
+    fn only_a_windows_share_publishes_with_a_startup_floor() {
+        // The resolver above is platform-neutral; the publish options are where
+        // the floor must stop at the platform boundary. Every ladder, so a macOS
+        // simulcast share never carries one onto some rung.
+        for ladder in [
+            FullShareSimulcastLadder::Legacy,
+            FullShareSimulcastLadder::TwoRung,
+            FullShareSimulcastLadder::HighOnly,
+        ] {
+            let options = window_publish_options(1920, 1080, ShareQuality::Full, ladder);
+            if cfg!(target_os = "windows") {
+                assert!(options.min_bitrate.is_some(), "{ladder:?}");
+            } else {
+                assert_eq!(options.min_bitrate, None, "{ladder:?}");
+            }
+        }
+    }
 }
 
 fn window_publish_options_for_region(
@@ -2416,7 +2453,8 @@ fn window_publish_options_for_region(
     };
 
     // Resolve before the struct literal consumes `top_encoding`.
-    let min_bitrate = window_share_min_bitrate_bps(top_encoding.max_bitrate);
+    let min_bitrate =
+        startup_allocation_floor(|| window_share_min_bitrate_bps(top_encoding.max_bitrate));
 
     TrackPublishOptions {
         source: TrackSource::Screenshare,
@@ -8701,13 +8739,10 @@ fn selected_pair_estimate(stats: &[livekit::webrtc::stats::RtcStats]) -> Option<
 
 /// Hard cap on how long the startup allocation floor may stay pinned.
 ///
-/// The release normally fires as soon as the estimate clears the floor, so
-/// this is the fallback for links that never get there. It has to exist: on a
-/// genuinely slow link `available_outgoing_bitrate` may never reach the floor,
-/// and an unbounded floor would stay pinned for the whole call -- which is the
-/// exact failure (allocator unable to back off) the startup-only design exists
-/// to avoid.
-/// Backstop only. Deliberately far longer than the old 20s.
+/// Backstop only, for a path that never shows loss or queueing: an unbounded
+/// floor would stay pinned for the whole call, which is the exact failure
+/// (allocator unable to back off) the startup-only design exists to avoid.
+/// Deliberately far longer than the old 20s.
 ///
 /// The old loop released on `estimate >= floor`, a condition the allocator
 /// satisfies BY CONSTRUCTION -- it clamps the reported available bitrate up to the
@@ -8730,25 +8765,6 @@ const STARTUP_FLOOR_LOSS_POLLS: u32 = 3;
 /// How often to re-check the estimate while the floor is held.
 const STARTUP_MIN_BITRATE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
-
-/// Release the window-share allocation floor once it has done its job.
-///
-/// The floor lifts the congestion controller off its conservative startup
-/// estimate (measured: ~600 kbps for 10-35 s against a path sustaining
-/// ~14 Mbps) so the pacer drains fast enough for the hardware encoder to stop
-/// clamping QP at its ceiling. It is then cleared, so the controller regains its
-/// full range for the rest of the call.
-///
-/// An "estimate has cleared the floor" check is deliberately NOT what releases
-/// it: that would compare [`selected_pair_estimate`]'s
-/// `available_outgoing_bitrate` against the floor, and the allocator clamps that
-/// stat *up* to the floor, so `estimate >= floor` holds by construction and the
-/// floor would be released on the first poll (~1 s) whatever it was set to. The
-/// floor is instead held until the path shows evidence it cannot take it, with
-/// [`STARTUP_MIN_BITRATE_MAX_HOLD`] as the backstop.
-///
-/// Every exit says why it left, at `warn`, because each one ends a decision that
-/// would otherwise have stayed pinned.
 /// Total retransmissions the sender has recorded across video streams.
 ///
 /// `nack_count` is cumulative and lives on `OutboundRtp`, which is also how the
@@ -8770,6 +8786,24 @@ fn outbound_nack_total(stats: &[livekit::webrtc::stats::RtcStats]) -> Option<u64
     seen.then_some(total)
 }
 
+/// Release the window-share allocation floor once it has done its job.
+///
+/// The floor lifts the congestion controller off its conservative startup
+/// estimate (measured: ~600 kbps for 10-35 s against a path sustaining
+/// ~14 Mbps) so the pacer drains fast enough for the hardware encoder to stop
+/// clamping QP at its ceiling. It is then cleared, so the controller regains its
+/// full range for the rest of the call.
+///
+/// An "estimate has cleared the floor" check is deliberately NOT what releases
+/// it: that would compare [`selected_pair_estimate`]'s
+/// `available_outgoing_bitrate` against the floor, and the allocator clamps that
+/// stat *up* to the floor, so `estimate >= floor` holds by construction and the
+/// floor would be released on the first poll (~1 s) whatever it was set to. The
+/// floor is instead held until the path shows evidence it cannot take it, with
+/// [`STARTUP_MIN_BITRATE_MAX_HOLD`] as the backstop.
+///
+/// Every exit says why it left, at `warn`, because each one ends a decision that
+/// would otherwise have stayed pinned.
 async fn release_startup_min_bitrate(
     track: LocalVideoTrack,
     floor_bps: u64,
