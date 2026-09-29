@@ -233,8 +233,9 @@ body {
 }
 
 .feedback-meeting-trigger {
-  width: 32px;
-  min-height: 32px;
+  width: var(--topbar-control-height);
+  height: var(--topbar-control-height);
+  min-height: var(--topbar-control-height); /* replaces .feedback-trigger's 32px floor */
   padding: 0;
   flex-shrink: 0;
   color: var(--text-faint);
@@ -313,7 +314,7 @@ body {
 
 .feedback-dialog {
   width: min(420px, calc(100vw - 32px));
-  max-height: min(680px, calc(100vh - 32px));
+  max-height: min(760px, calc(100vh - 32px));
   padding: 0;
   border: 1px solid var(--hairline-strong);
   border-radius: var(--radius-card);
@@ -369,6 +370,58 @@ body {
 .feedback-form textarea:focus-visible {
   outline: 2px solid var(--id-blue);
   outline-offset: 1px;
+}
+
+/* #245: the shared input rule matches only input[type='text'], so the email
+   field is styled here to match the message box above it. */
+.feedback-form input[type='email'] {
+  width: 100%;
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+  font: 400 14px var(--font-ui);
+}
+
+.feedback-form input[type='email']:focus-visible {
+  outline: 2px solid var(--id-blue);
+  outline-offset: 1px;
+}
+
+.feedback-form input[type='email'][aria-invalid='true'] {
+  border-color: var(--danger);
+}
+
+.feedback-field-error {
+  color: var(--danger);
+  font: 500 12px/1.45 var(--font-ui);
+}
+
+/* The error and the hint under the email field read as one group. */
+.feedback-field-error + .feedback-disclosure {
+  margin-top: 0;
+}
+
+/* #245: the email field made the dialog taller than the shortest phones
+   (iPhone SE portrait); tighten it there so it still fits without scrolling. */
+@media (max-height: 700px) {
+  .feedback-form {
+    gap: 8px;
+    padding: 14px 16px;
+  }
+
+  .feedback-form textarea {
+    height: 80px;
+    min-height: 0;
+  }
+
+  .feedback-form h2 + p,
+  .feedback-disclosure {
+    margin-top: 0;
+  }
 }
 
 .feedback-consent {
@@ -1036,9 +1089,11 @@ input[type='text']:disabled {
   flex-shrink: 0;
 }
 
+/* Centred, not top-aligned (#241): the name and time share the centre line
+   of the 24px title actions and of the top-bar controls. */
 .room-title {
   display: inline-flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 6px;
   min-width: 0;
 }
@@ -1135,12 +1190,20 @@ input[type='text']:disabled {
 }
 
 .elapsed {
-  font: 500 12.5px var(--font-mono);
+  font: 500 12.5px / 1.12 var(--font-mono);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
   opacity: 0;
   color: rgba(255, 255, 255, 0.5);
   transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+/* A touch screen has no hover, so the reveal above only fired after a tap
+   (#241). Show the time outright there. */
+@media (hover: none) {
+  .elapsed {
+    opacity: 1;
+  }
 }
 
 .topbar-right {
@@ -1188,13 +1251,18 @@ input[type='text']:disabled {
   font: 600 12px var(--font-mono);
 }
 
+/* Sits in .topbar-right (connection.ts), so it takes the top-bar control
+   height (#241); min-height, not height, so a wrapped label still fits. */
 .audio-playback-prompt {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--topbar-control-height);
   border: 1px solid rgba(232, 184, 75, 0.34);
   border-radius: var(--radius-chip);
   background: rgba(232, 184, 75, 0.14);
   color: var(--warning);
   font: 700 12px var(--font-ui);
-  padding: 7px 11px;
+  padding: 0 11px;
   cursor: pointer;
   transition:
     background var(--motion-fast) var(--ease-standard),
@@ -1218,6 +1286,7 @@ input[type='text']:disabled {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  height: var(--topbar-control-height);
   padding: 2px;
   border-radius: var(--radius-pill);
   border: 1px solid var(--hairline);
@@ -1229,7 +1298,10 @@ input[type='text']:disabled {
   align-items: center;
   justify-content: center;
   width: 28px;
-  height: 24px;
+  /* Fills the pill: the top-bar control height less its 2px padding and
+     1px border on each side (26px), so the pill matches the bug-report
+     button beside it (#241). */
+  height: 100%;
   padding: 0;
   border: 0;
   border-radius: var(--radius-pill);
@@ -1275,6 +1347,30 @@ input[type='text']:disabled {
     inset: 0 0 0 auto;
     width: 100%;
     z-index: 5;
+  }
+}
+/* A phone in landscape (#246): the body row the top bar, control bar and
+   dev tools leave is too short to read chat in, so while chat is open the
+   top bar and dev tools step out and the drawer column gets the full height
+   beside the tiles (the drawer's close button brings them back). The top
+   bar stays while it holds the "Enable audio" prompt. With the soft keyboard
+   up (at most 300 px left, given #239's interactive-widget=resizes-content)
+   the control bar steps out too, so the input stays in view. Touch screens
+   only: a short desktop window keeps its chrome. The control bar only at
+   2:1 or wider: a portrait phone with the keyboard up is short too, and can
+   be wider than tall (360x294 is 1.2:1), but keeps Leave; a landscape phone
+   with the keyboard up is 4:1 or wider. #239's landscape layout (control
+   rail, overlay top bar, dev tools below the fold) makes these rules
+   unnecessary; delete them when it lands. */
+@media (orientation: landscape) and (max-height: 500px) and (pointer: coarse) {
+  .meeting.chat-open > .topbar:not(:has(.audio-playback-prompt)),
+  .meeting.chat-open > .dev-panel {
+    display: none;
+  }
+}
+@media (orientation: landscape) and (max-height: 300px) and (min-aspect-ratio: 2/1) and (pointer: coarse) {
+  .meeting.chat-open > .controlbar {
+    display: none;
   }
 }
 .chat-cell {
@@ -3037,6 +3133,16 @@ input[type='text']:disabled {
   align-items: center;
   justify-content: flex-start;
   min-width: 0;
+}
+
+/* Load-bearing, same pitfall as .feedback-meeting-trigger: the `display`
+   above beats the UA's `[hidden] { display: none }`, so without this rule
+   the Share cell that controls.ts hides where there is no getDisplayMedia
+   (#240) would stay on screen. `!important`, like the `.hidden` utility, so
+   no later or more specific layout rule that sets a cell's `display` (a
+   landscape rail, a narrow-width variant) can bring it back. */
+.control-cell[hidden] {
+  display: none !important;
 }
 
 .meeting-control-label.on {
