@@ -365,7 +365,14 @@ export function setupMeetingContinuity(options: MeetingContinuityOptions): Meeti
       settled();
       return;
     }
-    if (!guarded || isOurGuard(event.state)) return;
+    if (isOurGuard(event.state)) {
+      // Forward landed back ON the guard entry (Back, Escape out of the
+      // dialog, Forward). It is armed again, so the next Back must confirm
+      // rather than walk out of the meeting silently.
+      guarded = true;
+      return;
+    }
+    if (!guarded) return;
     // Back popped the guard: we are on the entry below it.
     guarded = false;
     gestureSinceBack = false;

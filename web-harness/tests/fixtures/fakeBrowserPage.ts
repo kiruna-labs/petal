@@ -63,6 +63,11 @@ export class FakeHistory {
     this.traverse(-1);
   }
 
+  /** The user's Forward button, which can land back on an entry Back popped. */
+  userForward() {
+    this.traverse(1);
+  }
+
   private traverse(delta: number) {
     setTimeout(() => {
       const next = this.index + delta;

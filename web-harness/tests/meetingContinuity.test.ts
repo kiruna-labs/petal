@@ -217,6 +217,28 @@ test('a rejoin while the guard is still the current entry does not stack a secon
   assert.equal(page.history.length, 2);
 });
 
+test('Forward back onto the guard re-arms it, so the next Back still asks', async () => {
+  const { page, dialog, calls, continuity } = setup();
+  continuity.entered(CREDENTIAL);
+
+  page.history.userBack();
+  await settle();
+  assert.equal(dialog.open, true);
+
+  // Escape out of the dialog without answering, then Forward: the browser
+  // lands back ON the guard entry. Before this was fixed the guard stayed
+  // disarmed and the next Back walked out of the meeting with no prompt.
+  dialog.answer('dismiss');
+  await settle();
+  page.history.userForward();
+  await settle();
+
+  assert.equal(calls.leaves, 0, 'Forward alone never leaves');
+  page.history.userBack();
+  await settle();
+  assert.equal(dialog.open, true, 'the guard is armed again, so Back asks');
+});
+
 test('Back during a meeting asks "Leave meeting?"; a Stay click keeps the meeting and re-arms the guard', async () => {
   const { page, dialog, calls, continuity } = setup();
   continuity.entered(CREDENTIAL);
