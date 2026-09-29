@@ -160,13 +160,21 @@ function assertNear(actual: number, expected: number, label: string): void {
  * button itself is not clickable there -- the row in the menu is.
  */
 async function openChat(page: Page): Promise<void> {
-  const button = page.locator('#ctl-chat');
-  if (await button.isVisible()) {
-    await button.click();
+  const collapsed = await page.evaluate(
+    () => document.querySelector('#ctl-chat')!.getClientRects().length === 0
+  );
+  if (!collapsed) {
+    await page.locator('#ctl-chat').click();
     return;
   }
   await page.locator('#ctl-more').click();
-  await page.locator('#overflow-menu .overflow-menu-row', { hasText: 'Chat' }).first().click();
+  // The stub's `locator` takes a selector only, so pick the row by hand.
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll<HTMLElement>('#overflow-menu .overflow-menu-row')].find((el) =>
+      el.textContent?.includes('Chat')
+    );
+    row?.click();
+  });
 }
 
 test('browser chat drawer takes the full height beside the tiles on a landscape phone', { timeout: 90_000 }, async () => {
