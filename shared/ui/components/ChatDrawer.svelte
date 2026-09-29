@@ -287,8 +287,11 @@
     resize: none;
     min-height: 36px;
     /* Grows while typing, to about a third of a short window but always
-       two whole lines. */
-    max-height: clamp(55px, 30vh, 120px);
+       two whole lines. `dvh`, not `vh`: with the keyboard up on a landscape
+       phone `vh` still measures the LARGE viewport, so the composer could
+       take 108px of a ~172px visible area and push the messages it is
+       replying to off screen. */
+    max-height: clamp(55px, 30dvh, 120px);
     padding: 8px 10px;
     border-radius: 9px;
     border: 1px solid var(--hairline-strong, rgba(255, 255, 255, 0.1));
