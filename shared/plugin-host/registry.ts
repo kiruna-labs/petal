@@ -11,8 +11,23 @@
 // case by case. Signature verification and download live only where the
 // bytes are fetched (Rust today; the web client gets its own verifier with
 // the install prompt in I-6, so no unused crypto ships before then).
+//
+// Forward compatibility: a version entry that asks for a well-formed
+// permission this client does not implement (a newer Petal's, or a reserved
+// one) is kept, marked `unsupportedPermissions`, and never installable here;
+// only a MALFORMED permission fails the whole index (manifest.ts
+// `classifyPermission`, pinned by unsupported-permission-cases.json).
 
-import { HOST_API_VERSION, compareVersions, hostCompatibility, isPermission, isPluginId, isReleaseVersion, type Permission } from './manifest.ts';
+import {
+  HOST_API_VERSION,
+  classifyPermission,
+  compareVersions,
+  hostCompatibility,
+  isPermission,
+  isPluginId,
+  isReleaseVersion,
+  type Permission,
+} from './manifest.ts';
 
 
 export const REGISTRY_SCHEMA_VERSION = 1;
@@ -44,7 +59,10 @@ export interface RegistryVersion {
   version: string;
   minHostVersion: string;
   apiVersion: number;
-  permissions: Permission[];
+  /** As listed: known permissions and, possibly, ones this client does not support. */
+  permissions: string[];
+  /** Computed here, never read from the index: the listed permissions this client does not support. Non-empty = not installable. */
+  unsupportedPermissions: string[];
   bundleUrl: string;
   sigUrl: string;
   sha256: string;
@@ -93,7 +111,13 @@ export function bundlePath(id: string, version: string): string {
   return `plugins/${id}/${version}/bundle.json`;
 }
 
-/** Validate an untrusted index document. Whole-document failure on any bad entry: a registry is one signed artifact, not a stream. */
+/**
+ * Validate an untrusted index document. Whole-document failure on any bad
+ * entry (a registry is one signed artifact, not a stream), with one
+ * exception: a well-formed permission this client does not support marks its
+ * version entry `unsupportedPermissions` instead, so an older client keeps
+ * working when the registry lists something that needs a newer Petal.
+ */
 export function parseRegistryIndex(text: string): RegistryParse {
   const errors: string[] = [];
   let raw: unknown;
@@ -131,8 +155,24 @@ export function parseRegistryIndex(text: string): RegistryParse {
       if (typeof v.version === 'string') seenVersions.add(v.version);
       if (!isReleaseVersion(v.minHostVersion)) errors.push(`${vw}: bad minHostVersion`);
       if (typeof v.apiVersion !== 'number' || !Number.isInteger(v.apiVersion) || v.apiVersion < 1) errors.push(`${vw}: bad apiVersion`);
-      if (!Array.isArray(v.permissions) || !v.permissions.every(isPermission) || new Set(v.permissions).size !== v.permissions.length) {
-        errors.push(`${vw}: permissions must be known, unique permission strings`);
+      const permissions: string[] = [];
+      const unsupported: string[] = [];
+      if (!Array.isArray(v.permissions)) {
+        errors.push(`${vw}: permissions must be an array`);
+      } else {
+        for (const perm of v.permissions as unknown[]) {
+          const kind = classifyPermission(perm);
+          if (kind === 'malformed') {
+            errors.push(`${vw}: malformed permission ${JSON.stringify(perm)}`);
+            continue;
+          }
+          if (permissions.includes(perm as string)) {
+            errors.push(`${vw}: duplicate permission ${perm as string}`);
+            continue;
+          }
+          permissions.push(perm as string);
+          if (kind === 'unsupported') unsupported.push(perm as string);
+        }
       }
       if (!isRegistryUrl(v.bundleUrl)) errors.push(`${vw}: bundleUrl must be https`);
       if (!isRegistryUrl(v.sigUrl)) errors.push(`${vw}: sigUrl must be https`);
@@ -148,7 +188,8 @@ export function parseRegistryIndex(text: string): RegistryParse {
         version: String(v.version),
         minHostVersion: String(v.minHostVersion),
         apiVersion: Number(v.apiVersion),
-        permissions: Array.isArray(v.permissions) ? (v.permissions as Permission[]) : [],
+        permissions,
+        unsupportedPermissions: unsupported,
         bundleUrl: String(v.bundleUrl),
         sigUrl: String(v.sigUrl),
         sha256: String(v.sha256),
@@ -164,10 +205,15 @@ export function parseRegistryIndex(text: string): RegistryParse {
   return { ok: true, index: { schemaVersion: REGISTRY_SCHEMA_VERSION, generatedAt: String(raw.generatedAt), plugins } };
 }
 
-/** The newest version this host can install from the UI: verified, compatible. */
+/** The newest version this host can install from the UI: verified, compatible, and asking only for permissions it supports. */
 export function installableVersion(plugin: RegistryPlugin, hostVersion: string, hostApiVersion = HOST_API_VERSION): RegistryVersion | null {
   const candidates = plugin.versions
-    .filter((v) => v.verified && hostCompatibility({ apiVersion: v.apiVersion, minHostVersion: v.minHostVersion }, hostVersion, hostApiVersion).ok)
+    .filter(
+      (v) =>
+        v.verified &&
+        v.unsupportedPermissions.length === 0 &&
+        hostCompatibility({ apiVersion: v.apiVersion, minHostVersion: v.minHostVersion }, hostVersion, hostApiVersion).ok,
+    )
     .sort((a, b) => compareVersions(b.version, a.version));
   return candidates[0] ?? null;
 }
@@ -192,7 +238,8 @@ export function availableUpdates(
     if (!plugin) continue;
     const best = installableVersion(plugin, hostVersion, hostApiVersion);
     if (!best || compareVersions(best.version, inst.version) <= 0) continue;
-    out.push({ id: inst.id, from: inst.version, to: best, newPermissions: best.permissions.filter((p) => !inst.permissions.includes(p)) });
+    const known = best.permissions.filter(isPermission);
+    out.push({ id: inst.id, from: inst.version, to: best, newPermissions: known.filter((p) => !inst.permissions.includes(p)) });
   }
   return out;
 }

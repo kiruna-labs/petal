@@ -803,7 +803,17 @@ export function setupConnection(
       }
     });
 
+    // Whether this room finished joining (`connect()` resolved). livekit-
+    // client's `Room.connect()` emits `Disconnected` for a failed or
+    // cancelled attempt BEFORE it rejects, while `connectWithRetry` may still
+    // retry that attempt. Tearing the session down then would null
+    // `state.room`, show the join screen and reset the scrub registry under a
+    // retry that goes on to succeed. Until the join completes, a failure or
+    // a cancel is handled once, by the catch around `connectWithRetry`.
+    let joined = false;
+
     newRoom.on(RoomEvent.Disconnected, (reason?: unknown) => {
+      if (!joined) return;
       const userLeft = consumeLeaveRequested() || isClientInitiatedDisconnect(reason);
       if (!userLeft && inMeeting()) reconnectFailed();
       meetingLeft();
@@ -897,6 +907,7 @@ export function setupConnection(
           ctx.ui.setConnectingStatus?.('Connection hiccup — retrying…');
         },
       });
+      joined = true;
       // `Room.connect()` recreates a closed engine; re-attach (idempotent).
       sfuSender.attach(newRoom.engine);
       // #709: `ParticipantConnected` only fires for participants who join
@@ -918,7 +929,18 @@ export function setupConnection(
         await localParticipantMetadata
           .update((current) => mergeIdentityPaletteIndexMetadata(current, localStoredPaletteIndex()))
           .catch((err) => logEvent(`identity color metadata publish failed: ${(err as Error).message ?? err}`, 'warn'));
+        // Disconnected during that await: the handler above has already torn
+        // the session down, so there is no meeting to show.
+        if (state.room !== newRoom) return;
       }
+      // Re-check immediately before showing the meeting. The check above only
+      // covers the metadata await, and only runs at all when there is a local
+      // participant; a Disconnected landing anywhere else after the connect
+      // resolved -- during `sfuSender.attach`, during the participant
+      // registration loop, or with no `localParticipant` -- would otherwise
+      // fall through to a meeting screen and a sync interval over a room the
+      // teardown has already discarded.
+      if (state.room !== newRoom) return;
       setConnState('connected', 'connected');
       syncAddressBar(meetingCode);
       logEvent(`connected to "${meetingCode}" as "${displayName}"`, 'ok');
@@ -940,10 +962,25 @@ export function setupConnection(
       startPipelineStats();
       startPublicationReconcile(newRoom);
     } catch (err) {
-      setConnState('error', 'error');
-      showError(`Connect failed: ${(err as Error).message ?? err}`);
-      emitJoinFailed(err);
+      // Leave while connecting: `disconnect()` cancels the attempt (the SDK
+      // reports CLIENT_INITIATED, which the handler above ignores before the
+      // join completes). End where Leave ends -- the join screen, the bare
+      // origin, a cleared scrub registry -- without a "Connect failed" error.
+      const userCancelled = consumeLeaveRequested();
+      if (userCancelled) {
+        setConnState('disconnected', 'idle');
+        logEvent('connect cancelled', 'warn');
+      } else {
+        setConnState('error', 'error');
+        showError(`Connect failed: ${(err as Error).message ?? err}`);
+        emitJoinFailed(err);
+      }
       resetFailedJoinUi();
+      state.currentMeetingCode = null;
+      if (userCancelled) {
+        history.replaceState(null, '', location.origin);
+        registry.reset();
+      }
       if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
       state.streamStatePollTimer = null;
       state.frameMetadataWorker?.terminate();

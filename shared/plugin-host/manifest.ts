@@ -156,6 +156,35 @@ export function isPermission(value: unknown): value is Permission {
   return typeof value === 'string' && (isStaticPermission(value) || isNetHostPermission(value));
 }
 
+/**
+ * The shape EVERY permission string has, known to this client or not:
+ * lowercase words joined by `:`, at most PERMISSION_MAX_LENGTH chars. A newer
+ * Petal may add permissions an older one has never heard of; those still
+ * look like this, anything else is malformed.
+ */
+export const PERMISSION_SHAPE_RE = /^[a-z][a-z0-9-]*(:[a-z0-9.*-]+)*$/;
+export const PERMISSION_MAX_LENGTH = 64;
+
+/**
+ * - `known`: this client implements it (`isPermission`).
+ * - `unsupported`: well formed, but this client does not implement it: a
+ *   permission a newer Petal added, or a reserved one (`frames:read`). A
+ *   plugin asking for it needs a newer Petal; nothing else is wrong.
+ * - `malformed`: not a permission string at all, the `net:fetch:*` wildcard
+ *   (never allowed), or a `net:fetch:` with a bad host (a family this client
+ *   knows, used wrongly).
+ * The registry index fails as a whole only on `malformed`
+ * (plugins/README.md §2.9); a manifest must be entirely `known`.
+ */
+export type PermissionClass = 'known' | 'unsupported' | 'malformed';
+
+export function classifyPermission(value: unknown): PermissionClass {
+  if (typeof value !== 'string' || value.length > PERMISSION_MAX_LENGTH || !PERMISSION_SHAPE_RE.test(value)) return 'malformed';
+  if (isPermission(value)) return 'known';
+  if (value.startsWith('net:fetch:')) return 'malformed';
+  return 'unsupported';
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
