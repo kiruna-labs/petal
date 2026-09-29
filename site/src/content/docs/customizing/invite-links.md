@@ -84,7 +84,7 @@ https://meet.petal.live/eng-sync/abc-defg-hjk
 ### What happens when it's opened
 
 The URL resolves to a server-rendered interstitial page (`web-harness/api/j.ts`),
-not directly into the meeting. That page:
+not directly into the meeting. On a computer, that page:
 
 1. Renders immediately with **Open Petal**, platform-specific download
    links for **macOS** and **Windows**, and **Join in browser**. The primary
@@ -106,6 +106,19 @@ So the interstitial *is* the documented fallback behavior for the web link:
 it doesn't detect whether the redirect succeeded (there's no reliable way to
 do that for a custom URL scheme), it just shows manual options up front and
 races the automatic app redirect against them.
+
+On a phone or tablet, where the desktop app can't run, the page is simpler:
+**Join in browser** is the only button, nothing is handed off to
+`petal://`, and the desktop app gets one quiet line under the meeting code,
+"On a computer? **Download Petal for Windows or macOS**", linking to
+[Install Petal](/docs/getting-started/install/). A phone or tablet is
+recognized by an Android, iPhone, iPad or iPod User-Agent (or any User-Agent
+containing `Mobile`), or by the `Sec-CH-UA-Mobile: ?1` hint Chromium browsers
+send. An iPad whose browser identifies as a Mac (Safari's default) is
+recognized by the page itself from its touch screen, before the hand-off
+would fire; so is an iPhone asking for the desktop site, which also
+identifies as a Mac. An Android phone in "Request desktop site" mode and a
+Windows or Linux computer with a touch screen get the computer page.
 
 ### Skipping the interstitial: direct browser-join link
 
