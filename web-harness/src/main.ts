@@ -27,10 +27,12 @@ import { installEncodedAudioWorkaroundFromUrl } from './encodedAudioProbe';
 import { setupControls, shouldShowFirstVisitOnboarding } from './controls';
 import { setupPlugins } from './plugins/setupPlugins';
 import { setupChat } from './chat/setupChat.svelte.ts';
+import { setupControlOverflow } from './controlOverflow';
 import { addSentryBreadcrumb, initSentry, installGlobalErrorMirror } from './sentryReporting';
 import { initAnalytics } from './analytics';
 import { FeedbackReportController } from './feedbackReport';
 import { sensitiveStringRegistry } from './sensitiveStrings';
+import { isPhoneOrTablet } from './mobileDevice';
 import {
   HARNESS_COLOR_STORAGE_KEY,
   HARNESS_DEBUG_MODE_STORAGE_KEY,
@@ -197,6 +199,8 @@ displayNameInput.value = localStorage.getItem(HARNESS_NAME_STORAGE_KEY) ?? '';
 const storedProfileColor = localStorage.getItem(HARNESS_COLOR_STORAGE_KEY);
 meetingCodeInput.value = localStorage.getItem(HARNESS_ROOM_STORAGE_KEY) ?? '';
 if (desktopDownload) {
+  // A phone or tablet has no desktop app to install (#243).
+  desktopDownload.classList.toggle('hidden', isPhoneOrTablet(navigator));
   const platform = /Windows/i.test(`${navigator.userAgent} ${navigator.platform}`) ? 'windows' : 'macos';
   desktopDownload.href = `https://app.petal.live/api/download?platform=${platform}`;
   desktopDownload.textContent = platform === 'windows'
@@ -652,6 +656,10 @@ const controls = setupControls(ctx, feedbackReport);
 ctx.hook.plugins = setupPlugins(ctx);
 // Meeting chat (plugins/README.md §2.7): a host surface beside the tiles.
 ctx.hook.chat = setupChat(ctx);
+// #247: the ⋯ overflow for controls that do not fit the bar. It re-fits on
+// its own whenever cells come and go, so plugin buttons added later count,
+// and it needs no handle here.
+setupControlOverflow();
 Object.assign(ctx.cb, {
   resolveIdentity: controls.resolveIdentity,
   submitMeetingField: controls.submitMeetingField,

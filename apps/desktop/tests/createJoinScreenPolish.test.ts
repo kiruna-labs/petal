@@ -18,3 +18,15 @@ test('desktop create/join placeholder drops optional copy and stays fitted at la
 test('desktop create/join header is about twenty percent shorter', () => {
   assert.match(mainMenu, /\.hero-quiet\s*{[\s\S]*height:\s*122px;/);
 });
+
+// #243: the maintainer asked for the eyebrow to go from every version.
+test('desktop quiet hero drops the "Ready to collaborate?" eyebrow', () => {
+  assert.doesNotMatch(mainMenu, /Ready to collaborate/);
+  assert.doesNotMatch(mainMenu, /quiet-eyebrow|quiet-ring/);
+  assert.match(
+    mainMenu,
+    /<section class="hero-quiet">\s*<div class="quiet-bloom" aria-hidden="true"><\/div>\s*<span class="quiet-title">Start a meeting<\/span>\s*<\/section>/
+  );
+  // Still painted above the absolutely positioned bloom.
+  assert.match(mainMenu, /\.quiet-title\s*\{\s*position:\s*relative;/);
+});
