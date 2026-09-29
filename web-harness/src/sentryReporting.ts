@@ -20,8 +20,18 @@ import { sensitiveStringRegistry, type SensitiveStringRegistry } from './sensiti
 //
 // PII: every breadcrumb/event message and exception value is passed through
 // `sensitiveStringRegistry.scrub()` (see sensitiveStrings.ts) before Sentry
-// can send it. `sendDefaultPii` is explicitly disabled rather than relying
+// can send it. Data collection is turned OFF explicitly rather than relying
 // on the SDK default.
+//
+// Sentry 11 replaced the single `sendDefaultPii` flag with `dataCollection`,
+// and its defaults are the OPPOSITE of what we want: user info, cookies,
+// request AND response headers, all four HTTP body types, URL query params,
+// GraphQL documents and variables, DB query data and queue task arguments are
+// all collected unless each is switched off. Upgrading without this block
+// would have widened what leaves the browser without a single call site
+// changing, which is exactly what the scrub registry exists to prevent.
+// Every field below is named on purpose: an omitted one takes Sentry's
+// permissive default, so a new field in a future SDK is the thing to watch.
 // ---------------------------------------------------------------------------
 
 type ViteImportMeta = ImportMeta & {
@@ -50,7 +60,18 @@ export function initSentry(
   Sentry.init({
     dsn,
     tracesSampleRate: 0,
-    sendDefaultPii: false,
+    dataCollection: {
+      userInfo: false,
+      cookies: false,
+      httpHeaders: { request: false, response: false },
+      httpBodies: [],
+      urlQueryParams: false,
+      graphQL: { document: false, variables: false },
+      genAI: { inputs: false, outputs: false },
+      databaseQueryData: false,
+      queues: false,
+      stackFrameVariables: false,
+    },
     maxBreadcrumbs: MAX_BREADCRUMBS,
     beforeBreadcrumb: (breadcrumb) => scrubBreadcrumb(breadcrumb, registry),
     beforeSend: (event) => scrubEvent(event, registry),
