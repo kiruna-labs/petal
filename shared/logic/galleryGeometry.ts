@@ -40,7 +40,8 @@ export interface GalleryGeometry {
   tileHeight: number;
   /** The gap actually used to compute this geometry -- `opts.gap` (or its
    * default) unless the cells came out compact/tiny, in which case this is
-   * `GAP_COMPACT`/`GAP_TINY`. Callers should render their CSS grid gap from
+   * at most `GAP_COMPACT`/`GAP_TINY` (`tierGap` only tightens: a smaller
+   * base gap is kept). Callers should render their CSS grid gap from
    * THIS field, not from the `gap` they passed in, or the rendered spacing
    * will disagree with what the packer assumed. */
   gap: number;
@@ -105,10 +106,13 @@ function densityFlags(cellWidth: number, cellHeight: number) {
  * shrinks it), so re-deriving the tier from the enlarged cell could only
  * move the same direction or stay put -- iterating to a fixed point buys
  * nothing here and risks a gap that itself oscillates as inputs wobble by a
- * pixel. Callers decide the tier ONCE from the base-gap cell size. */
-function tierGap(baseGap: number, flags: { compact: boolean; tiny: boolean }): number {
-  if (flags.tiny) return GAP_TINY;
-  if (flags.compact) return GAP_COMPACT;
+ * pixel. Callers decide the tier ONCE from the base-gap cell size.
+ *
+ * Only ever tightens (#239): a base gap already below the tier's constant
+ * (the web client's 10px/9px phone breakpoints) is kept, not widened to 12. */
+export function tierGap(baseGap: number, flags: { compact: boolean; tiny: boolean }): number {
+  if (flags.tiny) return Math.min(baseGap, GAP_TINY);
+  if (flags.compact) return Math.min(baseGap, GAP_COMPACT);
   return baseGap;
 }
 
