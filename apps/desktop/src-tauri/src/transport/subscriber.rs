@@ -516,6 +516,52 @@ pub fn track_unsubscribe_decision(
     }
 }
 
+/// What a remote sharer's metadata update means for one of its open windows, in
+/// the Windows compositor feed.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataWindowVerdict {
+    /// The update declares the window, or is not Petal's title map at all.
+    Keep,
+    /// Petal's title map no longer declares the window, but the SFU still
+    /// holds a publication for it: keep the last frame on screen.
+    HoldForPublication,
+    /// Petal's title map no longer declares the window and the SFU holds no
+    /// publication for it: the share is gone.
+    Retire,
+}
+
+/// Decide whether a sharer's metadata update retires one of its windows.
+///
+/// This is the Windows feed's fallback for a `TrackUnpublished` the pinned SDK
+/// never delivers. Only metadata carrying Petal's title map counts, so unrelated
+/// or legacy participant metadata can never close a window. Even then the title
+/// map is not authority on its own: share start publishes and writes metadata
+/// concurrently, so another write from the same sharer (a title refresh on a
+/// different window, a failed-start clear) can land after this window's
+/// `TrackSubscribed` and before its title entry. The window is retired only when
+/// `publication_exists` -- in production, [`window_publication_exists`] -- says
+/// the SFU holds nothing for it, which is the same rule every other teardown
+/// path follows: close only when no publication exists, otherwise hold the last
+/// frame. The lookup runs only when the map omits the window.
+#[cfg(any(target_os = "windows", test))]
+fn metadata_window_verdict(
+    metadata: &str,
+    window_id: u32,
+    publication_exists: impl FnOnce() -> bool,
+) -> MetadataWindowVerdict {
+    let undeclared = crate::transport::publisher::has_shared_window_title_metadata(metadata)
+        && crate::transport::publisher::shared_window_title_from_metadata(metadata, window_id)
+            .is_none();
+    if !undeclared {
+        MetadataWindowVerdict::Keep
+    } else if publication_exists() {
+        MetadataWindowVerdict::HoldForPublication
+    } else {
+        MetadataWindowVerdict::Retire
+    }
+}
+
 /// Does the SFU hold any publication for this window whose sid is not in
 /// `excluding_sids`? Reads `reconcile::discover_window_publications`, the
 /// established authoritative seam, rather than replaying events -- the whole
@@ -2672,29 +2718,35 @@ pub(crate) fn start_compositor_feed(
                         // The pinned SDK can fail to deliver the remote
                         // TrackUnpublished event when the sharer's sender
                         // teardown negotiation fails or races with a leave.
-                        // The sender still clears this authoritative Petal
-                        // metadata after stopping the share, so use that
-                        // update as a visual-teardown fallback. Restrict it
-                        // to metadata carrying Petal's title map; arbitrary
-                        // or legacy participant metadata must not close a
-                        // live compositor window.
-                        let has_title_metadata =
-                            crate::transport::publisher::has_shared_window_title_metadata(
-                                &metadata,
-                            );
+                        // The sender still clears this Petal metadata after
+                        // stopping the share, so an update that no longer
+                        // declares the window is a visual-teardown fallback --
+                        // but only once the SFU confirms no publication is
+                        // left (see `metadata_window_verdict`).
+                        match metadata_window_verdict(&metadata, window_id, || {
+                            window_publication_exists(&room, &owner_identity, window_id, &[])
+                        }) {
+                            MetadataWindowVerdict::Keep => {}
+                            MetadataWindowVerdict::HoldForPublication => {
+                                log::info!(
+                                    "windows compositor feed: metadata no longer declares window {window_id} from '{owner_identity}', but the SFU still holds a publication; the window keeps its last frame on screen"
+                                );
+                                continue;
+                            }
+                            MetadataWindowVerdict::Retire => {
+                                log::info!(
+                                    "windows compositor feed: metadata no longer declares window {window_id} from '{owner_identity}' and the SFU holds no publication, removing stale window"
+                                );
+                                let key = (owner_identity.clone(), window_id);
+                                crate::windows_compositor::remove_window(&app, key.clone()).await;
+                                window_subscribed_at.remove(&key);
+                                continue;
+                            }
+                        }
                         let source_title =
                             crate::transport::publisher::shared_window_title_from_metadata(
                                 &metadata, window_id,
                             );
-                        if has_title_metadata && source_title.is_none() {
-                            log::info!(
-                                "windows compositor feed: metadata no longer declares window {window_id} from '{owner_identity}', removing stale window"
-                            );
-                            let key = (owner_identity.clone(), window_id);
-                            crate::windows_compositor::remove_window(&app, key.clone()).await;
-                            window_subscribed_at.remove(&key);
-                            continue;
-                        }
                         let source_title =
                             source_title.unwrap_or_else(|| window.source_title.clone());
                         let source_kind =
@@ -3881,6 +3933,71 @@ fn retire_no_frame_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Metadata as a sharer writes it: Petal's title map with these windows.
+    fn title_map(windows: &[(u32, &str)]) -> String {
+        let titles: serde_json::Map<String, serde_json::Value> = windows
+            .iter()
+            .map(|(id, title)| (id.to_string(), serde_json::Value::from(*title)))
+            .collect();
+        let metadata = serde_json::json!({ "petalWindowTitles": titles }).to_string();
+        // Tie the fixture to the production reader, not to a key spelled here.
+        assert!(crate::transport::publisher::has_shared_window_title_metadata(&metadata));
+        metadata
+    }
+
+    fn no_lookup() -> bool {
+        panic!("a window the metadata still declares must not cost an SFU lookup")
+    }
+
+    #[test]
+    fn a_second_window_starting_while_the_first_retitles_is_held_not_closed() {
+        // Sharing A, then starting B: B is published and subscribed, and a
+        // title refresh for A lands before B's own title entry is written. The
+        // map omits B, but the SFU holds B's publication, so B must stay up.
+        let a_retitled = title_map(&[(1, "A - edited")]);
+        assert_eq!(
+            metadata_window_verdict(&a_retitled, 2, || true),
+            MetadataWindowVerdict::HoldForPublication
+        );
+        assert_eq!(
+            metadata_window_verdict(&a_retitled, 1, no_lookup),
+            MetadataWindowVerdict::Keep
+        );
+    }
+
+    #[test]
+    fn a_cleared_title_map_retires_a_window_only_when_no_publication_is_left() {
+        // The sharer stopped and cleared the map, and the TrackUnpublished
+        // never arrived: this is the case the fallback exists for.
+        let cleared = title_map(&[]);
+        assert_eq!(
+            metadata_window_verdict(&cleared, 7, || false),
+            MetadataWindowVerdict::Retire
+        );
+        // The same update while the SFU still reports the publication holds.
+        assert_eq!(
+            metadata_window_verdict(&cleared, 7, || true),
+            MetadataWindowVerdict::HoldForPublication
+        );
+    }
+
+    #[test]
+    fn metadata_that_is_not_petals_title_map_never_touches_a_window() {
+        for metadata in [
+            "",
+            "not json",
+            "{}",
+            r#"{"displayName":"legacy"}"#,
+            r#"{"petalWindowTitles":[]}"#,
+        ] {
+            assert_eq!(
+                metadata_window_verdict(metadata, 7, no_lookup),
+                MetadataWindowVerdict::Keep,
+                "{metadata:?}"
+            );
+        }
+    }
 
     #[test]
     fn stale_publication_deadline_is_bounded_and_held_windows_rearm() {
