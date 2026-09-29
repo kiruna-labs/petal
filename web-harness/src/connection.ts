@@ -39,7 +39,7 @@ import { PLUGIN_TOPIC_PREFIX } from '@petal/shared/plugin-host/topics';
 import { CHAT_TOPIC } from '@petal/shared/logic/chat';
 import { commitLayoutModeTransition, layoutModeStateOf } from './tileLayout.ts';
 import { endAutoSpotlight } from '@petal/shared/logic/tileLayoutMode';
-import { sensitiveStringRegistry, type SensitiveStringRegistry } from './sensitiveStrings.ts';
+import { registerMeetingAliases, sensitiveStringRegistry, type SensitiveStringRegistry } from './sensitiveStrings.ts';
 import { createSfuSenderIdentityResolver } from './sfuSenderIdentity.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
 import { startAudioReceiverTelemetry } from './audioReceiverTelemetry.ts';
@@ -476,6 +476,9 @@ export function setupConnection(
     // Register room + local identity with the Sentry PII-scrub registry
     // before any log line that could embed them is emitted (#283).
     registry.registerRoom(meetingCode);
+    // #245: and the forms a user sees and shares -- the access code, the
+    // room's label and its invite-URL slug.
+    registerMeetingAliases(registry, meetingCode, cb.roomDisplayLabelForCredential(meetingCode));
     registry.registerParticipant(identity);
     registry.registerReportingValue(displayName);
     logEvent(`connecting to meeting "${meetingCode}" as "${displayName}"...`);
