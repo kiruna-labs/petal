@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { normalizedFeedbackMessage, FEEDBACK_MAX_MESSAGE_CHARS } from '../src/lib/feedback/messageSanitizer.ts';
+import { feedbackSubmission } from '../src/lib/feedback/userDispatch.ts';
 
 const userDispatchSource = readFileSync(
   new URL('../src/lib/feedback/userDispatch.ts', import.meta.url),
@@ -37,6 +38,65 @@ test('submitFeedback sends only public key, fixed subject, sanitized message, an
   assert.doesNotMatch(userDispatchSource, /roomName:|identity:|joinUrl:|accessCode:/);
 });
 
+test('#245: the payload carries the trimmed email as the SDK field, beside the fixed subject and sanitized message', () => {
+  const plain = feedbackSubmission({ message: '  audio   dropped ', email: ' riley@example.org ' });
+  assert.deepEqual(Object.keys(plain).sort(), ['email', 'message', 'subject', 'type']);
+  assert.deepEqual(plain, {
+    type: 'feedback',
+    subject: 'Petal feedback',
+    email: 'riley@example.org',
+    message: 'audio dropped'
+  });
+  // The NORMALIZED address is what is sent, never the raw field text.
+  assert.equal(feedbackSubmission({ message: 'audio dropped', email: ' <mailto:riley@example.org> ' }).email, 'riley@example.org');
+
+  const blob = new Blob(['PK'], { type: 'application/zip' });
+  const withFile = feedbackSubmission({
+    message: 'audio dropped',
+    email: 'riley@example.org',
+    attachment: { filename: 'petal-feedback-diagnostics.zip', mimeType: 'application/zip', blob, byteCount: 2 }
+  });
+  assert.deepEqual(Object.keys(withFile).sort(), ['email', 'files', 'message', 'subject', 'type']);
+  assert.equal(withFile.email, 'riley@example.org');
+  assert.deepEqual(withFile.files, [{ name: 'petal-feedback-diagnostics.zip', content: blob, type: 'application/zip' }]);
+});
+
+test('#245: a missing or malformed email is refused before the SDK, and the error never echoes it', () => {
+  for (const email of ['', '   ', 'riley', 'riley@example', 'riley@@example.org', 'ri ley@example.org']) {
+    assert.throws(
+      () => feedbackSubmission({ message: 'audio dropped', email }),
+      (error: unknown) => error instanceof Error && error.message === 'feedback email is not a well-formed address',
+      JSON.stringify(email)
+    );
+  }
+  assert.throws(() => feedbackSubmission({ message: '   ', email: 'riley@example.org' }), /feedback message is empty/);
+  // submitFeedback builds through the pure function, so the SDK only ever sees its output.
+  assert.match(userDispatchSource, /const submission = feedbackSubmission\(options\);[\s\S]*await client\.submit\(submission\);/);
+});
+
+test('#245: the email never reaches the native side, so it cannot land in the log, the diagnostics zip, or Sentry', () => {
+  // The only native calls are the argument-free share check and diagnostics
+  // build; the address stays in the webview and leaves only through the SDK.
+  assert.match(userDispatchSource, /invoke<FeedbackDiagnostics>\(COMMANDS\.prepareFeedbackDiagnostics\);/);
+  assert.match(feedbackModalSource, /prepareDiagnosticsAttachment\(\)/);
+  assert.deepEqual(
+    [...feedbackModalSource.matchAll(/invoke(?:<[^>]*>)?\(([^)]*)\)/g)].map((m) => m[1]),
+    ['COMMANDS.sharedWindowIds']
+  );
+  assert.match(feedbackRs, /pub async fn prepare_feedback_diagnostics\(\s*state: tauri::State<'_, crate::session::SessionState>,\s*\)/);
+  // Backstop: the export scrubber masks any bare address anyway.
+  assert.match(loggingRs, /fn redact_email_addresses/);
+});
+
+test('#245: the FeedbackModal email input is a required email field validated only by the shared rule (behaviour: feedbackModalRendered.test.ts)', () => {
+  assert.match(feedbackModalSource, /<form class="feedback-form" onsubmit=\{handleSubmit\} novalidate>/);
+  const input = feedbackModalSource.match(/<input\s+id="feedback-email"[\s\S]*?\/>/)?.[0] ?? '';
+  for (const attribute of ['type="email"', 'required', 'autocomplete="email"', 'inputmode="email"', 'bind:value={email}']) {
+    assert.ok(input.includes(attribute), `the email input must carry ${attribute}`);
+  }
+  assert.doesNotMatch(input, /maxlength/, 'a cap would silently truncate a pasted address into a different one');
+});
+
 test('feedback submission errors are never logged (message text must not reach the console)', () => {
   assert.doesNotMatch(userDispatchSource, /console\.(log|error|warn)/);
   assert.doesNotMatch(feedbackModalSource, /console\.(log|error|warn)/);
@@ -48,7 +108,7 @@ test('diagnostics attachment checkbox starts unchecked by default -- opt-in per 
 });
 
 test('FeedbackModal discloses that an attachment may be sent off-device and links the UserDispatch privacy policy', () => {
-  assert.match(feedbackModalSource, /Sent to UserDispatch/);
+  assert.match(feedbackModalSource, /Your message and email address are sent to UserDispatch/);
   assert.match(feedbackModalSource, /userdispatch\.com\/privacy/);
 });
 

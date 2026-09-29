@@ -13,7 +13,7 @@ import {
   type Participant,
 } from 'livekit-client';
 import type { HarnessContext } from './context.ts';
-import { accessCodeForCredential, livekitRoomName } from '@petal/shared/logic/meetingCode';
+import { livekitRoomName } from '@petal/shared/logic/meetingCode';
 import {
   AI_CHAT_TOPIC,
   COCKPIT_TOPIC,
@@ -39,7 +39,7 @@ import { PLUGIN_TOPIC_PREFIX } from '@petal/shared/plugin-host/topics';
 import { CHAT_TOPIC } from '@petal/shared/logic/chat';
 import { commitLayoutModeTransition, layoutModeStateOf } from './tileLayout.ts';
 import { endAutoSpotlight } from '@petal/shared/logic/tileLayoutMode';
-import { sensitiveStringRegistry, type SensitiveStringRegistry } from './sensitiveStrings.ts';
+import { registerMeetingAliases, sensitiveStringRegistry, type SensitiveStringRegistry } from './sensitiveStrings.ts';
 import { createSfuSenderIdentityResolver } from './sfuSenderIdentity.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
 import { startAudioReceiverTelemetry } from './audioReceiverTelemetry.ts';
@@ -491,9 +491,12 @@ export function setupConnection(
     // Register room + local identity with the Sentry PII-scrub registry
     // before any log line that could embed them is emitted (#283).
     registry.registerRoom(meetingCode);
-    // The public access code is in the address bar (and the #244 guard entry)
-    // for the whole meeting; scrub it like the internal credential.
-    registry.registerRoom(accessCodeForCredential(meetingCode));
+    // #245: and the forms a user sees and shares -- the access code, the
+    // room's label and its invite-URL slug. The access code is also in the
+    // address bar and in #244's guard entry for the whole meeting, so it has
+    // to be scrubbed like the internal credential; registerMeetingAliases
+    // covers it.
+    registerMeetingAliases(registry, meetingCode, cb.roomDisplayLabelForCredential(meetingCode));
     registry.registerParticipant(identity);
     registry.registerReportingValue(displayName);
     logEvent(`connecting to meeting "${meetingCode}" as "${displayName}"...`);
@@ -963,6 +966,14 @@ export function setupConnection(
         // the session down, so there is no meeting to show.
         if (state.room !== newRoom) return;
       }
+      // Re-check immediately before showing the meeting. The check above only
+      // covers the metadata await, and only runs at all when there is a local
+      // participant; a Disconnected landing anywhere else after the connect
+      // resolved -- during `sfuSender.attach`, during the participant
+      // registration loop, or with no `localParticipant` -- would otherwise
+      // fall through to a meeting screen and a sync interval over a room the
+      // teardown has already discarded.
+      if (state.room !== newRoom) return;
       setConnState('connected', 'connected');
       syncAddressBar(meetingCode);
       ctx.hook?.continuity?.entered(meetingCode);
@@ -998,6 +1009,9 @@ export function setupConnection(
         setConnState('error', 'error');
         emitJoinFailed(err);
       }
+      // #244: resetFailedJoinUi renders the message itself and reports whether
+      // a rejoin notice took the screen instead, so there is no separate
+      // showError here.
       const backOnNotice = resetFailedJoinUi(userCancelled ? null : `Connect failed: ${(err as Error).message ?? err}`);
       state.currentMeetingCode = null;
       if (userCancelled && !backOnNotice) {

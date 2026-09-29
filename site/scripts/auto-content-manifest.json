@@ -13,7 +13,7 @@
 		"web-harness-fragment": {
 			"source": "web-harness/README.md",
 			"dest": "site/src/fragments/web-harness-readme.md",
-			"sha256": "800c1c9405d757588d5de968b252669d34e970ddcac23ca8317eedcefeb80e70"
+			"sha256": "b7cad9206c845d71dbc3055e49cbeb9d267ff1bb92019256e8b153f1cc6a181e"
 		}
 	}
 }

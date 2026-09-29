@@ -353,6 +353,10 @@ test('invite URL waits for a display name instead of auto-joining with a generat
   assert.equal(joinHint.textContent, 'Enter your name to join this invite.');
   assert.equal(joinHint.classList.contains('hidden'), false);
   assert.match(events.join('\n'), /waiting for display name/);
+  // #245: the session log can go out with a feedback report, and nothing has
+  // registered this invite's credential for redaction yet.
+  assert.doesNotMatch(events.join('\n'), /room-[0-9a-f]{32}/);
+  assert.equal(events.join('\n').includes(ACCESS_CODE), false);
 });
 
 test('invite URL auto-joins when a display name is already stored', async () => {
@@ -515,7 +519,9 @@ test('the scrub registry is cleared only after the guard has unwound, and never 
   if (state.streamStatePollTimer !== null) clearInterval(state.streamStatePollTimer);
   noteLeaveRequested();
   rooms[0]!.emit(RoomEvent.Disconnected, DisconnectReason.CLIENT_INITIATED);
-  assert.equal(registry.scrub(`/design-review/${ACCESS_CODE}`), '/design-review/<redacted:room>', 'still scrubbed while unwinding');
+  // #245 registers the room's label and slug as well as the code, so both
+  // path segments are redacted while the guard unwinds.
+  assert.equal(registry.scrub(`/design-review/${ACCESS_CODE}`), '/<redacted:room>/<redacted:room>', 'still scrubbed while unwinding');
   await settle();
   assert.equal(registry.scrub(ACCESS_CODE), ACCESS_CODE, 'reset once settled');
 
