@@ -26,6 +26,7 @@ import { installEncodedAudioWorkaroundFromUrl } from './encodedAudioProbe';
 import { setupControls, shouldShowFirstVisitOnboarding } from './controls';
 import { setupPlugins } from './plugins/setupPlugins';
 import { setupChat } from './chat/setupChat.svelte.ts';
+import { setupControlOverflow } from './controlOverflow';
 import { addSentryBreadcrumb, initSentry, installGlobalErrorMirror } from './sentryReporting';
 import { initAnalytics } from './analytics';
 import { FeedbackReportController } from './feedbackReport';
@@ -624,6 +625,10 @@ const controls = setupControls(ctx, feedbackReport);
 ctx.hook.plugins = setupPlugins(ctx);
 // Meeting chat (plugins/README.md §2.7): a host surface beside the tiles.
 ctx.hook.chat = setupChat(ctx);
+// #247: the ⋯ overflow for controls that do not fit the bar. It re-fits on
+// its own whenever cells come and go, so plugin buttons added later count,
+// and it needs no handle here.
+setupControlOverflow();
 Object.assign(ctx.cb, {
   resolveIdentity: controls.resolveIdentity,
   submitMeetingField: controls.submitMeetingField,
