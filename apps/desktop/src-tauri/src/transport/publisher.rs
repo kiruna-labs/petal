@@ -2192,9 +2192,9 @@ impl RoomConnection<Arc<Room>> {
         );
 
         let background_cancel = CancellationToken::new();
-        // The camera carries the same startup defect the window share had, on
-        // the same MF H.264 encoder, so it takes the same fix and the same
-        // release: `release_startup_min_bitrate` polls WebRTC's selected pair
+        // On Windows the camera carries the same startup defect the window share
+        // had, on the same MF H.264 encoder, so it takes the same fix and the
+        // same release (off Windows there is no floor and no task): `release_startup_min_bitrate` polls WebRTC's selected pair
         // for loss and queueing and clears the floor on either, or after the
         // bounded hold. Nothing keeps polling a dead sender, because the task
         // observes this token.
@@ -2322,7 +2322,7 @@ fn camera_publish_options(width: u32, height: u32, frame_rate: f64) -> TrackPubl
         video_encoder: select_encoder_backend(),
         simulcast: false,
         simulcast_layers: None,
-        min_bitrate: camera_min_bitrate_bps(encoding.max_bitrate),
+        min_bitrate: startup_allocation_floor(|| camera_min_bitrate_bps(encoding.max_bitrate)),
         video_encoding: Some(encoding),
         frame_metadata_features: {
             let mut f = livekit::options::FrameMetadataFeatures::default();
@@ -2423,7 +2423,8 @@ fn window_share_min_bitrate_bps(max_bitrate_bps: u64) -> Option<u64> {
 
 /// Override for the camera allocation floor (see [`camera_min_bitrate_bps`]).
 ///
-/// Bits per second, `0` to disable. Bounded by the same half-the-ceiling guard
+/// Bits per second, `0` to disable. Windows only: there is no camera floor to
+/// tune elsewhere, so it is not read there. Bounded by the same half-the-ceiling guard
 /// the shipped default uses, so this can tune the camera floor DOWN but cannot
 /// push it past the guard.
 const PETAL_CAMERA_MIN_BITRATE_ENV: &str = "PETAL_CAMERA_MIN_BITRATE";
@@ -2495,7 +2496,7 @@ fn clamp_min_bitrate_floor(
     Some(applied)
 }
 
-/// Camera allocation floor.
+/// Camera allocation floor. Windows only -- see [`startup_allocation_floor`].
 ///
 /// Defaults to the most the ceiling guard allows rather than to a fixed bps:
 /// `camera_video_encoding` derives the ceiling from resolution and frame rate
@@ -6164,6 +6165,11 @@ mod track_name_tests {
             .expect("camera ceiling")
             .max_bitrate;
         assert_eq!(ceiling, CAMERA_MAX_BITRATE_BPS);
+        if !cfg!(target_os = "windows") {
+            // macOS keeps its camera exactly as it was: no floor on the wire.
+            assert_eq!(options.min_bitrate, None);
+            return;
+        }
         // Only assert the default when no override is in the environment, so
         // this documents the shipped value without being env-flaky.
         if std::env::var(PETAL_CAMERA_MIN_BITRATE_ENV).is_err() {
@@ -9067,7 +9073,7 @@ fn outbound_nack_total(stats: &[livekit::webrtc::stats::RtcStats]) -> Option<u64
     seen.then_some(total)
 }
 
-/// Release the window-share allocation floor once it has done its job.
+/// Release a startup allocation floor once it has done its job.
 ///
 /// The floor lifts the congestion controller off its conservative startup
 /// estimate (measured: ~600 kbps for 10-35 s against a path sustaining
