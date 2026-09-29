@@ -578,8 +578,12 @@ test('remote window header CSS pins native silhouette and responsive contract', 
   assert.match(indicator, /width\s*:\s*var\(--segment-width\)/i);
   assert.match(indicator, /transform\s*:\s*translateX\(calc\(var\(--active-mode-index\) \* var\(--segment-width\)\)\)/i);
 
-  for (const width of [720, 640, 560, 470, 300]) {
+  // #239 folded the switcher at 640px of TILE width (a landscape phone's
+  // spotlight hero); the viewport fallback keeps 470px.
+  for (const width of [720, 640, 560, 300]) {
     assert.match(css, new RegExp(`@container\\s*\\(max-width:\\s*${width}px\\)`, 'i'));
+  }
+  for (const width of [720, 640, 560, 470, 300]) {
     assert.match(css, new RegExp(`@media\\s*\\(max-width:\\s*${width}px\\)`, 'i'));
   }
 });
@@ -587,9 +591,9 @@ test('remote window header CSS pins native silhouette and responsive contract', 
 test('#497: small tiles replace the segmented switcher with a full-label overflow menu', () => {
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
 
-  for (const rule of ['@container', '@media']) {
+  for (const [rule, width] of [['@container', 640], ['@media', 470]]) {
     const narrow = new RegExp(
-      `${rule} \\(max-width: 470px\\) \\{([\\s\\S]*?)\\n\\}`
+      `${rule} \\(max-width: ${width}px\\) \\{([\\s\\S]*?)\\n\\}`
     ).exec(css)?.[1] ?? '';
     assert.match(narrow, /\.remote-window-header__mode-switcher\s*\{\s*display:\s*none;/);
     assert.match(narrow, /\.remote-window-header__overflow-button\s*\{\s*display:\s*inline-flex;/);
