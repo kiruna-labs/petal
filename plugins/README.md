@@ -408,7 +408,19 @@ repository.
   `shared/plugin-host/registry.ts` is the index MODEL (shape validation,
   installability, updates) consumed by the desktop Settings browser on top of
   the Rust-verified index; the two validators are pinned to each other by
-  `contracts/plugin-registry/invalid-index-cases.json`. The web client gets
+  `contracts/plugin-registry/invalid-index-cases.json` (reject the whole
+  index) and `unsupported-permission-cases.json` (keep it). **Forward
+  compatibility:** each permission an entry lists is `known`, `unsupported`
+  (well formed but not implemented by this client: a newer Petal's
+  permission, or a reserved one such as `frames:read`), or `malformed` (not
+  `^[a-z][a-z0-9-]*(:[a-z0-9.*-]+)*$` within 64 chars, the `net:fetch:*`
+  wildcard, or a `net:fetch:` with a bad host). Only `malformed`, a duplicate,
+  or any of the other shape errors fails the whole index; an `unsupported`
+  permission marks just that version entry, which the browser lists as
+  "Needs newer Petal" and `install` refuses before fetching anything. So an
+  older client keeps its "Get plugins" when the registry lists a plugin that
+  needs a newer Petal, and still never grants a permission it does not know
+  (manifest.ts `classifyPermission`, Rust `classify_permission`). The web client gets
   its own signature verifier together with its install path (I-6), so no
   unused crypto ships before then. The contract fixtures are produced by the
   registry publisher's signer and verified by the Rust crate in tests.

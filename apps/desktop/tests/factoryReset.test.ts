@@ -41,7 +41,8 @@ test('factory reset clears every durable frontend key', () => {
     STORAGE_KEYS.mainWindowGeometry,
     STORAGE_KEYS.meetingWindowGeometry,
     STORAGE_KEYS.pillWindowGeometry,
-    STORAGE_KEYS.windowPickerSnapshot
+    STORAGE_KEYS.windowPickerSnapshot,
+    STORAGE_KEYS.feedbackEmail
   ]);
 
   const storage = new MemoryStorage();

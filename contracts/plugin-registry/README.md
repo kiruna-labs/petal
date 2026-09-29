@@ -30,6 +30,13 @@ Entries with `verified: false` are listed but not installable from the UI.
 `invalid-index-cases.json` lists mutations of the sample index that BOTH
 implementations must reject (`web-harness/tests/pluginRegistry.test.ts` and
 the Rust `plugins::registry` tests iterate the same file), so the validation
-rules cannot drift apart silently. `generatedAt` must parse as RFC 3339 and
+rules cannot drift apart silently. `unsupported-permission-cases.json` lists
+mutations both must ACCEPT: an entry asking for a well-formed permission the
+client does not support (a newer Petal's, or a reserved one) keeps the index
+valid, is reported with exactly the listed `unsupported` permissions, and is
+not installable, while every other entry is unaffected. When a listed
+permission ships (for example `frames:read`), move its case out of that file.
+
+`generatedAt` must parse as RFC 3339 and
 fall on or after 2026-01-01; a client refuses an index whose `generatedAt` or
 signature `timestamp:` is older than the last one it accepted (anti-rollback).
