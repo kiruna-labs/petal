@@ -3039,6 +3039,16 @@ input[type='text']:disabled {
   min-width: 0;
 }
 
+/* Load-bearing, same pitfall as .feedback-meeting-trigger: the `display`
+   above beats the UA's `[hidden] { display: none }`, so without this rule
+   the Share cell that controls.ts hides where there is no getDisplayMedia
+   (#240) would stay on screen. `!important`, like the `.hidden` utility, so
+   no later or more specific layout rule that sets a cell's `display` (a
+   landscape rail, a narrow-width variant) can bring it back. */
+.control-cell[hidden] {
+  display: none !important;
+}
+
 .meeting-control-label.on {
   color: var(--text-strong);
 }

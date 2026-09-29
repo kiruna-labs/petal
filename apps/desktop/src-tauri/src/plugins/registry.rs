@@ -172,6 +172,84 @@ pub fn is_permission(value: &str) -> bool {
     }
 }
 
+/// Every permission string, known to this client or not, is lowercase words
+/// joined by `:` (the first starting with a letter) and at most this long.
+/// Mirrors `PERMISSION_SHAPE_RE` / `PERMISSION_MAX_LENGTH` in manifest.ts.
+pub const PERMISSION_MAX_LENGTH: usize = 64;
+
+fn permission_shape_ok(value: &str) -> bool {
+    if value.is_empty() || value.len() > PERMISSION_MAX_LENGTH {
+        return false;
+    }
+    let mut parts = value.split(':');
+    let first = parts.next().unwrap_or("");
+    let first_ok = first.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && first
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    first_ok
+        && parts.all(|seg| {
+            !seg.is_empty()
+                && seg.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'*' | b'-')
+                })
+        })
+}
+
+/// Same classes as `classifyPermission` in shared/plugin-host/manifest.ts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionClass {
+    /// This client implements it.
+    Known,
+    /// Well formed, not implemented here: a newer Petal's permission, or a
+    /// reserved one (`frames:read`). Its version entry needs a newer Petal.
+    Unsupported,
+    /// Not a permission string, the `net:fetch:*` wildcard, or a `net:fetch:`
+    /// with a bad host. Fails the whole index.
+    Malformed,
+}
+
+pub fn classify_permission(value: &str) -> PermissionClass {
+    if !permission_shape_ok(value) {
+        return PermissionClass::Malformed;
+    }
+    if is_permission(value) {
+        return PermissionClass::Known;
+    }
+    if value.starts_with("net:fetch:") {
+        return PermissionClass::Malformed;
+    }
+    PermissionClass::Unsupported
+}
+
+/// The listed permissions this client does not support, in index order.
+/// Non-empty = the entry is listed but never installable here.
+pub fn unsupported_permissions(entry: &RegistryVersion) -> Vec<String> {
+    entry
+        .permissions
+        .iter()
+        .filter(|p| classify_permission(p) == PermissionClass::Unsupported)
+        .cloned()
+        .collect()
+}
+
+/// What `install` requires of an index entry before fetching anything.
+pub fn check_installable(id: &str, version: &str, entry: &RegistryVersion) -> Result<(), String> {
+    if !entry.verified {
+        return Err(format!(
+            "{id}@{version} has not been verified by the registry yet"
+        ));
+    }
+    let unsupported = unsupported_permissions(entry);
+    if !unsupported.is_empty() {
+        return Err(format!(
+            "{id}@{version} needs a newer Petal: it asks for {}, which this version does not support",
+            unsupported.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- index shape
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -346,9 +424,15 @@ pub fn validate_index(index: &RegistryIndex) -> Result<u64, String> {
             }
             let mut seen_perms = std::collections::HashSet::new();
             for perm in &v.permissions {
-                if !is_permission(perm) || !seen_perms.insert(perm.as_str()) {
+                // Only a MALFORMED permission fails the index. A well-formed one
+                // this client does not support leaves the entry listed and
+                // uninstallable (check_installable), so an older client's
+                // "Get plugins" survives a registry that lists newer plugins.
+                if classify_permission(perm) == PermissionClass::Malformed
+                    || !seen_perms.insert(perm.as_str())
+                {
                     return Err(format!(
-                        "{}@{}: bad or duplicate permission {perm:?}",
+                        "{}@{}: malformed or duplicate permission {perm:?}",
                         p.id, v.version
                     ));
                 }
@@ -629,11 +713,7 @@ pub async fn install(
         .iter()
         .find(|v| v.version == version)
         .ok_or_else(|| format!("{id}@{version} is not in the registry"))?;
-    if !entry.verified {
-        return Err(format!(
-            "{id}@{version} has not been verified by the registry yet"
-        ));
-    }
+    check_installable(id, version, entry)?;
     let client = registry_client();
     let bundle = fetch_bytes(
         &client,
@@ -740,6 +820,8 @@ mod tests {
     const BUNDLE_SIG: &str = include_str!("../../../../../contracts/plugin-registry/plugins/petal.test-hello/1.0.0/bundle.json.minisig");
     const INVALID_CASES: &str =
         include_str!("../../../../../contracts/plugin-registry/invalid-index-cases.json");
+    const UNSUPPORTED_CASES: &str =
+        include_str!("../../../../../contracts/plugin-registry/unsupported-permission-cases.json");
 
     fn temp_store() -> PathBuf {
         let mut dir = std::env::temp_dir();
@@ -922,6 +1004,99 @@ mod tests {
     }
 
     #[test]
+    fn every_shared_unsupported_permission_case_keeps_the_index_and_blocks_only_that_entry() {
+        let fixture: serde_json::Value = serde_json::from_str(UNSUPPORTED_CASES).unwrap();
+        let path = fixture["path"].as_str().unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(cases.len() >= 5);
+        let (baseline, _) = parse_index(INDEX).unwrap();
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let mut doc: serde_json::Value = serde_json::from_str(INDEX).unwrap();
+            *doc.pointer_mut(path)
+                .unwrap_or_else(|| panic!("bad path in {name}")) = case["value"].clone();
+            let (index, _) = parse_index(&doc.to_string())
+                .unwrap_or_else(|e| panic!("{name}: the index must still parse, got {e}"));
+            let entry = &index.plugins[0].versions[0];
+            let expected: Vec<String> = case["unsupported"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(unsupported_permissions(entry), expected, "{name}");
+            let err = check_installable(&index.plugins[0].id, &entry.version, entry).unwrap_err();
+            assert!(err.contains("needs a newer Petal"), "{name}: {err}");
+            for u in &expected {
+                assert!(err.contains(u.as_str()), "{name}: {err}");
+            }
+            assert_eq!(
+                index.plugins[1], baseline.plugins[1],
+                "{name}: other plugins unaffected"
+            );
+            // The grant never includes what this client does not know.
+            assert!(granted_permissions(&entry.permissions, &entry.permissions)
+                .iter()
+                .all(|g| is_permission(g)));
+        }
+        // The unmodified fixture entry is installable (verified, all known).
+        let entry = &baseline.plugins[0].versions[0];
+        assert!(check_installable("petal.test-hello", &entry.version, entry).is_ok());
+        let unverified = &baseline.plugins[1].versions[0];
+        assert!(
+            check_installable("acme.unverified-thing", &unverified.version, unverified)
+                .unwrap_err()
+                .contains("not been verified")
+        );
+    }
+
+    #[test]
+    fn permission_classes_mirror_the_manifest_rules() {
+        use PermissionClass::*;
+        for known in [
+            "meeting:read",
+            "storage",
+            "net:fetch:user-urls",
+            "net:fetch:*.example.com",
+            "net:fetch:localhost:8787",
+        ] {
+            assert_eq!(classify_permission(known), Known, "{known}");
+        }
+        for unsupported in [
+            "frames:read",
+            "future:thing",
+            "telepathy",
+            "future:fetch:hooks.example.com",
+        ] {
+            assert_eq!(
+                classify_permission(unsupported),
+                Unsupported,
+                "{unsupported}"
+            );
+        }
+        let too_long = format!("future:{}", "x".repeat(58));
+        for malformed in [
+            "",
+            "Meeting:Read",
+            "meeting read",
+            "1meeting",
+            "meeting::read",
+            "meeting:",
+            "net:fetch:*",
+            "net:fetch:*.*",
+            "net:fetch:https://x.example.com",
+            too_long.as_str(),
+        ] {
+            assert_eq!(classify_permission(malformed), Malformed, "{malformed:?}");
+        }
+        assert_eq!(
+            classify_permission(&format!("future:{}", "x".repeat(57))),
+            Unsupported,
+            "exactly 64 chars"
+        );
+    }
+
+    #[test]
     fn registry_urls_are_parsed_not_prefix_matched() {
         assert!(is_registry_url("https://plugins.example.test/"));
         assert!(is_registry_url("http://localhost:8787/x"));
@@ -1043,9 +1218,7 @@ mod tests {
             .iter()
             .find(|v| v.version == version)
             .ok_or("version not in registry")?;
-        if !entry.verified {
-            return Err("not verified".into());
-        }
+        check_installable(id, version, entry)?;
         let client = registry_client();
         let bundle = fetch_bytes(
             &client,

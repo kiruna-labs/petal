@@ -41,9 +41,14 @@ test('Get plugins lists the registry, gates on verification, shows consent, and 
     await page.waitForFunction(() => document.body.dataset.ready === 'true');
     await page.locator('.row').first().waitFor();
 
-    assert.deepEqual(await page.locator('.row').evaluateAll((els) => els.map((el) => el.getAttribute('data-state'))), ['installable', 'unverified']);
+    assert.deepEqual(await page.locator('.row').evaluateAll((els) => els.map((el) => el.getAttribute('data-state'))), ['installable', 'unverified', 'incompatible']);
     assert.equal((await page.locator('[data-plugin="acme.unverified-thing"] .chip').textContent())?.trim(), 'Awaiting review');
     assert.equal(await page.locator('[data-plugin="acme.unverified-thing"] button').count(), 0, 'unverified has no install control');
+    // A verified plugin asking for a permission this Petal does not know: the
+    // index still loads (forward compatibility) and the row says why it cannot install.
+    assert.equal((await page.locator('[data-plugin="acme.future-thing"] .chip').textContent())?.trim(), 'Needs newer Petal');
+    assert.equal(await page.locator('[data-plugin="acme.future-thing"] button').count(), 0, 'no install control for an unsupported entry');
+    assert.equal(await page.locator('.note.error').count(), 0, 'no "could not load the registry" error');
 
     await page.locator('[data-plugin="petal.test-hello"] button', { hasText: 'Install' }).click();
     await page.locator('.consent').waitFor();
