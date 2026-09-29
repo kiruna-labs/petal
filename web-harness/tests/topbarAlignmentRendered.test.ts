@@ -134,11 +134,37 @@ test('web meeting top bar: title row and every top-bar control share one height 
         }
         assert.equal(control.height, reading.controlHeight, `${control.part} height at ${where}`);
       }
-      const centres = [...reading.title, ...reading.controls].map((box) => box.centre);
-      assert.ok(
-        Math.max(...centres) - Math.min(...centres) <= 1,
-        `the title row and top-bar controls are off one centre line at ${where}`
-      );
+      // One centre line PER ROW. #239 added Full screen to the top bar, so at
+      // 400px the bar wraps: the title takes one row and the controls the
+      // next. Wrapping is allowed -- the no-truncation rule is about text
+      // fitting, not about staying on one line -- but nothing within a row
+      // may sit off its neighbours' centre (#269).
+      const rowsOf = (boxes: Box[]) => {
+        const rows: number[][] = [];
+        for (const box of boxes) {
+          const row = rows.find((r) => Math.abs(r[0]! - box.centre) <= 2);
+          if (row) row.push(box.centre);
+          else rows.push([box.centre]);
+        }
+        return rows;
+      };
+      for (const row of rowsOf([...reading.title, ...reading.controls])) {
+        assert.ok(
+          Math.max(...row) - Math.min(...row) <= 1,
+          `a top-bar row is off its own centre line at ${where}`
+        );
+      }
+      // The title and the controls still share a line whenever they fit on one.
+      const titleCentres = reading.title.map((box) => box.centre);
+      const controlCentres = reading.controls.map((box) => box.centre);
+      const wrapped = Math.abs(Math.min(...controlCentres) - Math.min(...titleCentres)) > 2;
+      if (!wrapped) {
+        const centres = [...titleCentres, ...controlCentres];
+        assert.ok(
+          Math.max(...centres) - Math.min(...centres) <= 1,
+          `the title row and top-bar controls are off one centre line at ${where}`
+        );
+      }
 
       // A mouse can hover, so there the time keeps its hover reveal; a touch
       // screen cannot, so there it shows at rest.

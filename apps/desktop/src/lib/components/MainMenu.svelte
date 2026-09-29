@@ -343,7 +343,6 @@
   {:else}
     <section class="hero-quiet">
       <div class="quiet-bloom" aria-hidden="true"></div>
-      <span class="quiet-eyebrow"><span class="quiet-ring" aria-hidden="true"></span>Ready to collaborate?</span>
       <span class="quiet-title">Start a meeting</span>
     </section>
   {/if}
@@ -473,31 +472,8 @@
     background: radial-gradient(58% 80% at 82% 24%, rgba(52, 199, 89, 0.1), transparent 70%);
   }
 
-  .quiet-eyebrow,
   .quiet-title {
     position: relative;
-  }
-
-  .quiet-eyebrow {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font: 500 10.5px var(--font-mono);
-    letter-spacing: 0.06em;
-    color: var(--text-faint);
-    margin-bottom: 8px;
-  }
-
-  .quiet-ring {
-    width: 7px;
-    height: 7px;
-    border-radius: var(--radius-pill);
-    border: 1.5px solid var(--text-faint);
-    box-sizing: border-box;
-    flex-shrink: 0;
-  }
-
-  .quiet-title {
     font: 600 22px var(--font-ui);
     color: var(--text-primary);
     letter-spacing: -0.01em;

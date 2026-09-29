@@ -16,6 +16,15 @@
  */
 
 import type { TransitionConfig } from 'svelte/transition';
+import type { AnimationConfig } from 'svelte/animate';
+import { cubicOut } from 'svelte/easing';
+import {
+	uniformFlip,
+	uniformFlipClipPath,
+	uniformFlipTransform,
+	uniformFlipVisibleRect,
+	type UniformFlip
+} from '@petal/shared/logic/tileFlip';
 
 const MOTION_FEEDBACK_MS = 120;
 const MOTION_EXIT_MS = 120;
@@ -110,5 +119,71 @@ export function toastTransition(_node: Element): TransitionConfig {
 			transform: translateX(-50%) translateY(${u * distance}px);
 			filter: blur(${u * 2}px);
 		`
+	};
+}
+
+/** Each node's running keyed-list FLIP: its frame, how far back from rest
+ * it last painted (`remaining`, 1 -> 0), and when it ends (performance.now()
+ * ms). */
+interface TileFlipInFlight {
+	flip: UniformFlip;
+	remaining: number;
+	end: number;
+}
+
+const uniformTileFlips = new WeakMap<Element, TileFlipInFlight>();
+
+/**
+ * True while `uniformTileFlip` is animating `node`. Svelte owns those
+ * animations (no WAAPI handle to ask), so a layout pass that interrupts one
+ * asks here whether the tile is clipped and must be retargeted from its
+ * visible box (`visibleFlipRect`) rather than its larger painted one.
+ */
+export function uniformTileFlipInFlight(node: Element, now = performance.now()): boolean {
+	const flight = uniformTileFlips.get(node);
+	return flight !== undefined && flight.remaining > 0 && now < flight.end;
+}
+
+/**
+ * Keyed-list FLIP for gallery tiles (#248): a drop-in for `svelte/animate`'s
+ * `flip`, whose `scale(sx, sy)` squashes live video whenever a join or leave
+ * changes the tile's shape (camera tiles crop, so they now do). Uses the
+ * shared `uniformFlip` frame -- one uniform scale plus a clip of the box --
+ * that web-harness/src/tileReflow.ts uses too.
+ */
+export function uniformTileFlip(
+	node: Element,
+	{ from, to }: { from: DOMRect; to: DOMRect },
+	params: { duration?: number; easing?: (t: number) => number } = {}
+): AnimationConfig {
+	// Interrupting another keyed-list FLIP: Svelte measured `from` with
+	// getBoundingClientRect() -- that FLIP's transform but not its clip -- and
+	// has cancelled it before calling here, so start from the box its last
+	// frame actually showed, or the tile pops out to its unclipped size.
+	const interrupted = uniformTileFlipInFlight(node) ? uniformTileFlips.get(node) : undefined;
+	uniformTileFlips.delete(node);
+	const flip = uniformFlip(
+		interrupted ? uniformFlipVisibleRect(from, interrupted.flip, interrupted.remaining) : from,
+		to
+	);
+	if (!flip) return { duration: 0 };
+	const radius =
+		typeof getComputedStyle === 'function' ? parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0 : 0;
+	const duration = params.duration ?? layoutDuration();
+	const flight: TileFlipInFlight = { flip, remaining: 1, end: performance.now() + duration };
+	if (duration > 0) uniformTileFlips.set(node, flight);
+	return {
+		duration,
+		easing: params.easing ?? cubicOut,
+		// Svelte calls this every frame with the animation's own progress (it
+		// starts a frame or two after this call), so an interruption knows the
+		// exact frame the tile was showing.
+		tick: (_t, u) => {
+			flight.remaining = u;
+		},
+		css: (_t, u) => {
+			const clipPath = uniformFlipClipPath(flip, u, radius);
+			return `transform: ${uniformFlipTransform(flip, u)}; transform-origin: top left;${clipPath ? ` clip-path: ${clipPath};` : ''}`;
+		}
 	};
 }

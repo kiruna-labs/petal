@@ -83,7 +83,7 @@ test('Gallery renders one keyed participant tree for grid and spotlight motion',
   assert.match(gallery, /class:spotlight-thumb=\{spotlightActive && p\.key !== spotlightEntry\?\.key\}/);
   assert.match(gallery, /tile\.animate\(/);
   assert.match(gallery, /duration, easing: 'cubic-bezier\(0\.2, 0, 0, 1\)', fill: 'none'/);
-  assert.match(gallery, /animate:flip=\{\{ duration: suppressSvelteFlip \? 0 : tileLayoutDuration\(\) \}\}/);
+  assert.match(gallery, /animate:uniformTileFlip=\{\{ duration: suppressSvelteFlip \? 0 : tileLayoutDuration\(\) \}\}/);
   assert.doesNotMatch(gallery, /\{#key spotlightEntry\.key\}/);
   assert.equal((gallery.match(/<ParticipantTile\b/g) ?? []).length, 1);
 });

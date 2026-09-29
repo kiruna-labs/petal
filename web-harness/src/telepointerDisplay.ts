@@ -8,6 +8,7 @@ import {
   telepointerPosition,
 } from './telepointer.ts';
 import { participantDisplayName } from './tiles.ts';
+import { pointVisibleInZoomedShare } from './shareZoom.ts';
 
 // ---------------------------------------------------------------------------
 // Remote telepointer rendering: the per-window overlay that draws other
@@ -97,6 +98,9 @@ export function setupTelepointerDisplay(ctx: HarnessContext) {
     const { bounds, media } = mediaContentRectRelativeToTile(tile);
     const point = telepointerPosition(bounds, media, { x: message.x, y: message.y });
     pointer.style.transform = `translate3d(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px, 0)`;
+    // #248: a zoomed share shows only part of the window; a pointer on the
+    // hidden rest must not leave its label floating inside the visible part.
+    pointer.classList.toggle('is-outside-media', !pointVisibleInZoomedShare(tile, point));
   }
 
   function labelForTelepointer(identity: string): string {

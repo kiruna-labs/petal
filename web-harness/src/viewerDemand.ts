@@ -2,6 +2,7 @@ import { Track, VideoQuality, type RemoteTrackPublication } from 'livekit-client
 import type { HarnessContext } from './context';
 import { containedMediaRect, type RectLike, type SizeLike, windowIdFromTrackName } from './telepointer';
 import { VIEWER_DEMAND_TOPIC, type ViewerDemandMessage } from './trackNames';
+import { shareZoomDemandFactor } from './shareZoom';
 
 const HEARTBEAT_MS = 2000;
 const RESIZE_DEBOUNCE_MS = 150;
@@ -157,9 +158,22 @@ export function setupViewerDemand(ctx: HarnessContext) {
     if (!target || target.targetUserId === state.room.localParticipant.identity) return;
     const video = tile.querySelector('video');
     const videoRect = video?.getBoundingClientRect();
-    const rect = videoRect && videoRect.width > 0 && videoRect.height > 0
+    const measured = videoRect && videoRect.width > 0 && videoRect.height > 0
       ? videoRect
       : tile.getBoundingClientRect();
+    // #248: a zoomed share (shareZoomUi.ts) is deliberately asked for the
+    // pixels it displays -- sharper text is the point of zooming in. The
+    // video's rect is already transformed, so divide out the zoom painted
+    // right now and apply the one committed when the gesture ended: a pinch
+    // never re-drives the sender frame by frame, and the demand stays at its
+    // committed value on every heartbeat until the next gesture ends.
+    const demandFactor = shareZoomDemandFactor(tile);
+    const rect = {
+      left: measured.left,
+      top: measured.top,
+      width: measured.width * demandFactor,
+      height: measured.height * demandFactor,
+    };
     const visible = kind !== 'closed' && rect.width > 0 && rect.height > 0 && tile.isConnected;
     const media = shareMediaSize(tile, video);
     const mediaKnown = media.width > 0 && media.height > 0;

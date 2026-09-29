@@ -7,6 +7,7 @@
 // duplicated here: every column/row/fill/tile-size number comes straight out
 // of `computeGalleryLayout`.
 import { computeGalleryLayout, type GalleryArrangement, type GalleryGeometry } from '@petal/shared/logic/galleryGeometry';
+import { CAMERA_TILE_ASPECT_RANGE } from '@petal/shared/logic/cameraCrop';
 import { getTileReflowController } from './tileReflow.ts';
 
 const ASPECT_RATIOS: Record<string, number> = {
@@ -52,6 +53,10 @@ export interface LabControls {
   arrangement: GalleryArrangement;
   gap: number;
   tileAspect: number;
+  /** #248: pack with the camera crop range (~7:6 up to 16:9) instead of the
+   * fixed tile aspect -- what a camera-only web grid and the desktop gallery
+   * do -- so the lab can reproduce them. */
+  cameraCrop?: boolean;
 }
 
 /** The one call every pane makes into the shared packer -- a pane's skin
@@ -62,6 +67,7 @@ export function computePaneLayout(pane: Pick<PaneSkin, 'pad'>, controls: LabCont
   return computeGalleryLayout(controls.count, content.width, content.height, {
     gap: controls.gap,
     tileAspect: controls.tileAspect,
+    tileAspectRange: controls.cameraCrop ? CAMERA_TILE_ASPECT_RANGE : null,
     arrangement: controls.arrangement
   });
 }
@@ -128,6 +134,10 @@ function buildShell(root: HTMLElement) {
             <option value="4:3">4:3</option>
             <option value="1:1">1:1</option>
           </select>
+        </label>
+        <label>
+          <input type="checkbox" id="camera-crop" />
+          Camera crop range (7:6–16:9)
         </label>
       </section>
       <section class="panes" id="panes"></section>
@@ -206,6 +216,7 @@ export function mountLayoutLab(root: HTMLElement) {
   const gapInput = root.querySelector<HTMLInputElement>('#gap')!;
   const gapVal = root.querySelector<HTMLSpanElement>('#gap-val')!;
   const aspectSelect = root.querySelector<HTMLSelectElement>('#aspect')!;
+  const cameraCropInput = root.querySelector<HTMLInputElement>('#camera-crop')!;
   const panesEl = root.querySelector<HTMLElement>('#panes')!;
 
   const panes = PANES.map((skin) => buildPaneDom(panesEl, skin));
@@ -217,7 +228,8 @@ export function mountLayoutLab(root: HTMLElement) {
     frameHeight: 560,
     arrangement: 'auto',
     gap: 18,
-    tileAspect: ASPECT_RATIOS['16:9']
+    tileAspect: ASPECT_RATIOS['16:9'],
+    cameraCrop: false
   };
 
   countInput.value = String(controls.count);
@@ -289,6 +301,11 @@ export function mountLayoutLab(root: HTMLElement) {
   });
   aspectSelect.addEventListener('change', () => {
     controls.tileAspect = ASPECT_RATIOS[aspectSelect.value] ?? ASPECT_RATIOS['16:9'];
+    render();
+  });
+  cameraCropInput.addEventListener('change', () => {
+    controls.cameraCrop = cameraCropInput.checked;
+    aspectSelect.disabled = cameraCropInput.checked;
     render();
   });
 
