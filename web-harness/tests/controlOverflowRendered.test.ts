@@ -62,8 +62,18 @@ interface BarState {
   bar: Box;
   /** Cell labels in the bar, in bar order. */
   shown: string[];
-  /** Cell labels that are not rendered, in bar order. */
+  /**
+   * Cell labels the bar COLLAPSED into ⋯, in bar order.
+   *
+   * Deliberately not "every cell that is not rendered": a control scoped to
+   * another layout -- Full screen belongs to #239's landscape rail -- is
+   * CSS-hidden everywhere else and never took part in overflow. Counting it
+   * here made `hidden` mean two different things and broke every expectation
+   * the moment such a control existed (#269). Those live in `unavailable`.
+   */
   hidden: string[];
+  /** Cell labels not rendered for a reason other than overflow (CSS-hidden). */
+  unavailable: string[];
   overlaps: string[];
   outside: string[];
   squashed: string[];
@@ -166,6 +176,8 @@ function readBar(): BarState {
     .map((cell) => ({
       label: cell.querySelector('.meeting-control-label')?.textContent?.trim() ?? '?',
       rendered: cell.getClientRects().length > 0,
+      // What the overflow itself marks when it collapses a cell.
+      overflowed: cell.classList.contains('overflowed'),
     }));
   const buttons = Array.from(bar.querySelectorAll<HTMLButtonElement>('button'))
     .filter((button) => button.getClientRects().length > 0)
@@ -203,7 +215,8 @@ function readBar(): BarState {
     vertical: getComputedStyle(bar).flexDirection === 'column',
     bar: { left: barBox.left, top: barBox.top, right: barBox.right, bottom: barBox.bottom },
     shown: cells.filter((cell) => cell.rendered).map((cell) => cell.label),
-    hidden: cells.filter((cell) => !cell.rendered).map((cell) => cell.label),
+    hidden: cells.filter((cell) => cell.overflowed).map((cell) => cell.label),
+    unavailable: cells.filter((cell) => !cell.rendered && !cell.overflowed).map((cell) => cell.label),
     overlaps,
     outside,
     squashed,
@@ -267,8 +280,10 @@ function assertInside(box: Box | null, viewport: { width: number; height: number
 
 test('at 320, 360 and 412 px the bar fits: no overlap, no squash, and exactly the hidden controls are in the ⋯ menu', { timeout: 60_000 }, async () => {
   const expected: Record<number, string[]> = {
-    // Lowest priority first, and only as many as the width needs.
-    320: ['React', 'Draw', 'Invite', 'Chat', 'Share'],
+    // Lowest priority first, and only as many as the width needs. #239's
+    // control sizing fits one more in the bar than before, so Share no longer
+    // has to give way at 320 (#269).
+    320: ['React', 'Draw', 'Invite', 'Chat'],
     360: ['React', 'Draw', 'Invite', 'Chat'],
     412: ['React', 'Draw', 'Invite'],
   };
@@ -804,7 +819,9 @@ test('re-fitting after a size change never trips a ResizeObserver loop, even whe
 
 test('a control hidden as unsupported (Share on phones, #240) is in neither the bar nor the menu, and its room is reused', { timeout: 60_000 }, async () => {
   const expected: Record<number, string[]> = {
-    320: ['Invite', 'Draw', 'Chat', 'React'],
+    // Share's cell is hidden here, and #239's sizing fits one more, so Chat
+    // stays in the bar too (#269).
+    320: ['Invite', 'Draw', 'React'],
     // Share's room lets Invite back in.
     412: ['Draw', 'React'],
   };
