@@ -114,6 +114,16 @@ pixels) and **not the wiring** — it never calls `compositor.rs`'s
 `verify-speaker-playout.sh`, `verify-rc-window-identity.sh`,
 `verify-receiver-render.mjs`, `verify-t0-battery.sh`.
 
+`scripts/verify-meeting-layout-matrix.mjs` (#239) belongs to the same tier: it
+drives the real browser client against a local LiveKit server with headless
+peers, under phone/tablet/desktop emulation in both orientations, and records
+rendered geometry per cell (tile coverage, every participant reachable,
+controls on screen and unclipped, the page never scrolling). It needs the same
+local prerequisites as `verify-receiver-render.mjs` — a `livekit-server --dev`,
+`apps/desktop/.env`, and a vite server — so it is an operator step rather than
+a `ci-local.sh` one. `--check` exits non-zero when a cell misses #239's
+definition of done.
+
 ### 1d. The cross-volume updater test — must be run deliberately
 
 ```bash
