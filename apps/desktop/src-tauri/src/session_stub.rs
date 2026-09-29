@@ -3694,6 +3694,9 @@ mod tests {
             Ok("1"),
             "set PETAL_WINDOWS_MEDIA_INTEGRATION=1 to run the real Windows gate"
         );
+        // The production log lines (publish, floor, release, teardown) are
+        // this gate's evidence; `RUST_LOG` selects them.
+        let _ = env_logger::builder().is_test(true).try_init();
         let raw_handle = std::env::var("PETAL_WINDOWS_CAPTURE_HWND")
             .expect("PETAL_WINDOWS_CAPTURE_HWND must identify a visible target")
             .parse::<usize>()
@@ -3746,6 +3749,11 @@ mod tests {
         let record_observer_width = observer_min_width.clone();
         let record_observer_height = observer_min_height.clone();
         let observer_task = tokio::spawn(async move {
+            // Streams run beside the event loop, as in the capable observer:
+            // a retired publication's stream can simply stop yielding, and a
+            // loop parked on it would miss both later subscriptions and the
+            // stop request. The task ends when the room's event channel closes.
+            let mut stream_tasks = tokio::task::JoinSet::new();
             while let Some(event) = observer_events.recv().await {
                 if stop_observer.load(Ordering::Acquire) {
                     break;
@@ -3765,20 +3773,24 @@ mod tests {
                     continue;
                 }
                 // This observer is the deliberately weak leg. Make the
-                // receiver-local request explicit, then verify that the
-                // decoded frames actually move to the lower simulcast rung.
+                // receiver-local request explicit, then verify what the
+                // decoded frames actually are.
                 publication.set_video_quality(VideoQuality::Low);
                 request_observer_low.store(true, Ordering::Release);
-                let mut stream = NativeVideoStream::new(video.rtc_track());
-                while let Some(frame) = stream.next().await {
-                    if stop_observer.load(Ordering::Acquire) {
-                        return;
+                let count_frames = count_observer_frames.clone();
+                let record_width = record_observer_width.clone();
+                let record_height = record_observer_height.clone();
+                stream_tasks.spawn(async move {
+                    let mut stream = NativeVideoStream::new(video.rtc_track());
+                    while let Some(frame) = stream.next().await {
+                        count_frames.fetch_add(1, Ordering::Relaxed);
+                        record_width.fetch_min(frame.buffer.width(), Ordering::Relaxed);
+                        record_height.fetch_min(frame.buffer.height(), Ordering::Relaxed);
                     }
-                    count_observer_frames.fetch_add(1, Ordering::Relaxed);
-                    record_observer_width.fetch_min(frame.buffer.width(), Ordering::Relaxed);
-                    record_observer_height.fetch_min(frame.buffer.height(), Ordering::Relaxed);
-                }
+                });
             }
+            stream_tasks.abort_all();
+            while stream_tasks.join_next().await.is_some() {}
         });
         let capable_identity = format!("windows-media-capable-{}", std::process::id());
         let capable_access =
@@ -3838,9 +3850,26 @@ mod tests {
             while stream_tasks.join_next().await.is_some() {}
         });
 
-        let app = tauri::Builder::default()
-            .build(tauri::generate_context!())
-            .expect("build the Tauri app for the integration gate");
+        // Run the event loop on its own thread, as production does. Native
+        // windows (the sharer overlay) belong to that thread, and the overlay
+        // tracker repositions them with a cross-thread SetWindowPos while it
+        // holds the lock `close_share_overlay` takes -- so an owner thread
+        // that never pumps, like this test's, deadlocks share stop. libtest's
+        // threads are not the process main thread, hence `any_thread`.
+        let (app_sender, app_receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let app = tauri::Builder::default()
+                .any_thread()
+                .build(tauri::generate_context!())
+                .expect("build the Tauri app for the integration gate");
+            app_sender
+                .send(app.handle().clone())
+                .expect("hand the app to the integration gate");
+            app.run(|_, _| {});
+        });
+        let app = app_receiver
+            .recv()
+            .expect("the integration gate's event-loop thread built the app");
         app.manage(SessionState::default());
         let state = app.state::<SessionState>();
         let generation = state.begin_room_generation();
@@ -3857,7 +3886,7 @@ mod tests {
         // Exercise the actual session coordinator: WGC first, then the
         // publisher and best-effort process-loopback audio.
         start_share_token(
-            app.handle().clone(),
+            app.clone(),
             &state,
             token,
             RemoteControlMode::CursorPreserving,
@@ -3913,17 +3942,30 @@ mod tests {
             "the independent capable LiveKit observer never subscribed"
         );
 
-        // A LOW request must be observable in decoded output, not merely in
-        // the test observer's call site. Wait for both legs to produce frames
-        // and compare the actual received dimensions.
+        // Decoded output is compared, not the observers' call sites. The
+        // encoded frame may be cropped to an aligned size (measured: a
+        // 2863x1781 window published and decoded at 2860x1780), so a decode
+        // within one 16-pixel macroblock of the source IS the source encoding;
+        // any lower rung would be at most half of it.
+        let is_source_size = |width: u32, height: u32| {
+            width != u32::MAX
+                && height != u32::MAX
+                && width + 15 >= source_width
+                && height + 15 >= source_height
+        };
+        // A Windows full share publishes ONE source-sized encoding
+        // (`effective_full_share_ladder` resolves every Windows share to
+        // `HighOnly`), so there is no lower rung for a LOW request to select:
+        // the weak observer must keep receiving the source encoding, and the
+        // request must not stall its delivery.
         let quality_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while (observer_min_width.load(Ordering::Acquire) == u32::MAX
-            || observer_min_height.load(Ordering::Acquire) == u32::MAX
-            || capable_max_width.load(Ordering::Acquire) < source_width
-            || capable_max_height.load(Ordering::Acquire) < source_height
-            || observer_min_width.load(Ordering::Acquire) >= source_width
-            || observer_min_height.load(Ordering::Acquire) >= source_height)
-            && tokio::time::Instant::now() < quality_deadline
+        while !(is_source_size(
+            capable_max_width.load(Ordering::Acquire),
+            capable_max_height.load(Ordering::Acquire),
+        ) && is_source_size(
+            observer_min_width.load(Ordering::Acquire),
+            observer_min_height.load(Ordering::Acquire),
+        )) && tokio::time::Instant::now() < quality_deadline
         {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -3932,8 +3974,10 @@ mod tests {
             "weak observer never issued its receiver-local LOW request"
         );
         assert!(
-            capable_max_width.load(Ordering::Acquire) >= source_width
-                && capable_max_height.load(Ordering::Acquire) >= source_height,
+            is_source_size(
+                capable_max_width.load(Ordering::Acquire),
+                capable_max_height.load(Ordering::Acquire)
+            ),
             "capable observer did not decode the source/top dimensions: source={}x{} capable_max={}x{}",
             source_width,
             source_height,
@@ -3941,9 +3985,11 @@ mod tests {
             capable_max_height.load(Ordering::Acquire)
         );
         assert!(
-            observer_min_width.load(Ordering::Acquire) < source_width
-                && observer_min_height.load(Ordering::Acquire) < source_height,
-            "weak observer did not receive a lower decoded simulcast rung: source={}x{} weak_min={}x{}",
+            is_source_size(
+                observer_min_width.load(Ordering::Acquire),
+                observer_min_height.load(Ordering::Acquire)
+            ),
+            "weak observer's LOW request on the single-encoding Windows share did not keep the source encoding: source={}x{} weak_min={}x{}",
             source_width,
             source_height,
             observer_min_width.load(Ordering::Acquire),
@@ -4052,7 +4098,7 @@ mod tests {
         reconnected.room().close().await.ok();
 
         // Normal stop is the first real terminal path.
-        stop_share_token(&app.handle(), &state, token)
+        stop_share_token(&app, &state, token)
             .await
             .expect("production Windows share stop");
         assert!(!state.is_share_active(token));
@@ -4061,9 +4107,13 @@ mod tests {
         // Re-start the same real share, stop only WGC, and verify that a
         // capture crash does not pretend the LiveKit publication disappeared;
         // the production stop path must still clean up the missed-unpublish
-        // tail.
+        // tail. A stop invalidates the opaque capture token (a queued input
+        // replay must see it as stale), so a restart re-picks the window and
+        // gets a fresh token, exactly as the picker would.
+        let token = crate::windows_capture_target::register(raw_handle, owner_pid)
+            .expect("re-pick the operator-selected HWND after a stop");
         start_share_token(
-            app.handle().clone(),
+            app.clone(),
             &state,
             token,
             RemoteControlMode::CursorPreserving,
@@ -4087,15 +4137,17 @@ mod tests {
             state.is_share_active(token),
             "capture failure must leave the publication for bounded recovery"
         );
-        stop_share_token(&app.handle(), &state, token)
+        stop_share_token(&app, &state, token)
             .await
             .expect("cleanup after missed unpublish");
 
         // Exercise delayed unpublish on a fresh production share. The fault
         // injection delays only the SDK tail; visual/native cleanup still
         // returns through the normal session coordinator.
+        let token = crate::windows_capture_target::register(raw_handle, owner_pid)
+            .expect("re-pick the operator-selected HWND after a stop");
         start_share_token(
-            app.handle().clone(),
+            app.clone(),
             &state,
             token,
             RemoteControlMode::CursorPreserving,
@@ -4105,7 +4157,7 @@ mod tests {
         .expect("production Windows share delayed-stop setup");
         std::env::set_var("PETAL_TEST_UNPUBLISH_DELAY_MS", "100");
         let delayed_start = std::time::Instant::now();
-        stop_share_token(&app.handle(), &state, token)
+        stop_share_token(&app, &state, token)
             .await
             .expect("delayed production Windows share stop");
         std::env::remove_var("PETAL_TEST_UNPUBLISH_DELAY_MS");

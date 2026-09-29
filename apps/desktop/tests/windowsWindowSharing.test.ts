@@ -38,11 +38,13 @@ test('Windows media gate covers the required live recovery matrix', () => {
     'share_audio_state_for_state(&state, token)',
     'let (source_width, source_height)',
     'frame.buffer.height()',
+    'app.run(|_, _| {})',
     'capable_max_height',
-    'capable_max_width.load(Ordering::Acquire) >= source_width',
+    'capable observer did not decode the source/top dimensions',
+    'single-encoding Windows share did not keep the source encoding',
     'ScreenAudioCapture::start',
     'system_audio.stop().expect("repeated audio stop")',
-    'stop_share_token(&app.handle(), &state, token)'
+    'stop_share_token(&app, &state, token)'
   ]) {
     assert.ok(gate.includes(marker), `missing live gate marker: ${marker}`);
   }
@@ -56,13 +58,14 @@ test('Windows media gate covers the required live recovery matrix', () => {
     'set_video_quality(VideoQuality::High)',
     'start_share_token(',
     'let (source_width, source_height)',
-    'capable_max_width.load(Ordering::Acquire) >= source_width',
+    'capable observer did not decode the source/top dimensions',
+    'single-encoding Windows share did not keep the source encoding',
     'let replacement = Arc::new(',
     'old_published\n            .unpublish()',
     'capable_replacement_frames.load(Ordering::Acquire) > 0',
     'let reconnected = RoomConnection::connect',
     'reconnected_frame',
-    'stop_share_token(&app.handle(), &state, token)',
+    'stop_share_token(&app, &state, token)',
     'request_stop_for_test()',
     'PETAL_TEST_UNPUBLISH_DELAY_MS',
     'ScreenAudioCapture::start',
