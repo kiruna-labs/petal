@@ -301,8 +301,15 @@ test('at 320, 360 and 412 px the bar fits: no overlap, no squash, and exactly th
         `${where}: wrong controls hidden`
       );
       const menu = await openMenu(page);
-      // Every hidden control, in bar order, and nothing else.
-      assert.deepEqual(menu.rows.map((row) => row.label), state.hidden, `${where}: menu rows`);
+      // Every overflowed control and nothing else. Membership, not order:
+      // `hidden` is in DOM order while the menu follows what the bar SHOWS
+      // (#239 lifts Chat with CSS `order`), and that ordering has its own
+      // test below.
+      assert.deepEqual(
+        [...menu.rows.map((row) => row.label)].sort(),
+        [...state.hidden].sort(),
+        `${where}: menu rows`
+      );
       assertInside(menu.box, viewport, where);
       assert.ok(menu.box.bottom <= state.bar.top + 0.5, `${where}: the menu opens above the bar, not over its buttons`);
       assert.deepEqual(errors, []);
@@ -850,14 +857,16 @@ test('on a vertical rail (a stand-in for #239\'s landscape layout) it measures t
   const { page, errors, close } = await openMeeting(landscape, [RAIL_STAND_IN]);
   try {
     // #239's Full screen cell, placed as meetingViewport.ts places it: in the
-    // bar itself, just before Leave.
+    // bar itself, just before Leave. Still injected: this test stands in for
+    // the landscape rail rather than entering it, so the real Full screen
+    // cell is CSS-hidden here.
     await page.evaluate(() => {
       const bar = document.querySelector('.controlbar')!;
       const cell = document.createElement('div');
       cell.className = 'control-cell fullscreen-cell';
       const button = document.createElement('button');
       button.type = 'button';
-      button.id = 'ctl-fullscreen';
+      button.id = 'ctl-fullscreen-standin';
       button.className = 'control-button';
       button.setAttribute('aria-label', 'Enter full screen');
       button.setAttribute('aria-pressed', 'false');
