@@ -367,6 +367,9 @@ export interface HarnessHook {
   plugins?: import('./plugins/setupPlugins.ts').PluginsHook | null;
   /** Meeting chat host (plugins/README.md §2.7, a host surface). */
   chat?: import('./chat/setupChat.svelte.ts').ChatHook | null;
+  /** #244 Back guard, reload rejoin and disconnect notice. Set by main.ts;
+   * connection.ts reports joins, failed rejoins and disconnects to it. */
+  continuity?: import('./meetingContinuity.ts').MeetingContinuity | null;
 }
 
 export interface ActiveRemoteControl {
@@ -521,6 +524,9 @@ export interface HarnessUi {
   /** Live sub-status on the connecting interstitial ("Requesting access…",
    * retry notices). No-op when the interstitial is not up. */
   setConnectingStatus?: (text: string) => void;
+  /** #244: the disconnect notice screen (meetingContinuity.ts fills it in).
+   * Optional like the connecting interstitial. */
+  showDisconnectedScreen?: () => void;
   showToast: (message: string) => void;
   /** #679: like `showToast`, but forwards an optional inline action
    * (e.g. "Bring to front") and a custom auto-dismiss duration -- used by
