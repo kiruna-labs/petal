@@ -120,6 +120,18 @@ test('web meeting top bar: title row and every top-bar control share one height 
         assert.ok(parts.includes(expected), `${expected} was not measured at ${where}`);
       }
       for (const control of reading.controls) {
+        // `.audio-playback-prompt` sets `min-height`, not `height`, precisely
+        // so a longer or wrapped label can grow rather than be clipped -- the
+        // no-truncation rule outranks a uniform row here. Asserting equality
+        // for it would force a future "Enable audio" translation to choose
+        // between a red test and clipped text.
+        if (control.part === 'audio-playback-prompt') {
+          assert.ok(
+            control.height >= reading.controlHeight,
+            `${control.part} is shorter than the control height at ${where}`
+          );
+          continue;
+        }
         assert.equal(control.height, reading.controlHeight, `${control.part} height at ${where}`);
       }
       const centres = [...reading.title, ...reading.controls].map((box) => box.centre);
