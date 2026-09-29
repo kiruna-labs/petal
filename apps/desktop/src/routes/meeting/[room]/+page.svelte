@@ -683,6 +683,7 @@
     canSend={meeting.meetingPhase === 'connected'}
     onSend={(text) => chat.send(text)}
     onClose={() => chat.setOpen(false)}
+    colorFor={(identity) => meeting.resolvedColorFor(identity)}
     commands={chatCommands}
     onCommand={(name, args) =>
       pluginsRef?.runChatCommand(name, args) ?? { ok: false, message: 'Plugins are still starting. Try again in a moment.' }}

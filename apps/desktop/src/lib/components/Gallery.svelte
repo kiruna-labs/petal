@@ -112,6 +112,14 @@
      * open state drives the toggle; unread is the badge while it is closed. */
     chatOpen?: boolean;
     chatUnread?: number;
+    /**
+     * A panel shown between the topbar and the control bar (today: the meeting
+     * chat). Beside the tiles when the gallery is wide enough for both; over
+     * the tiles when it is not. Either way the topbar and every control stay
+     * visible and usable -- the same structure as the web client's
+     * `.meeting-body` row.
+     */
+    sidePanel?: Snippet;
     /** Plugin toolbar buttons (plugins/README.md §2.7): the route renders
      * host-drawn `.control-cell`s here so plugin actions sit in the same row
      * as the built-in controls, before More. Undefined = no plugins. */
@@ -153,6 +161,7 @@
     topbarAction,
     chatOpen = false,
     chatUnread = 0,
+    sidePanel,
     pluginActions,
     onReportBug
   }: Props = $props();
@@ -486,7 +495,53 @@
     void onInviteLinkCopy?.();
   }
 
-  type GalleryMoreIcon = 'region' | 'remotecontrol';
+  type GalleryMoreIcon = 'region' | 'remotecontrol' | 'invite' | 'chat';
+
+  // Control-row fit. #94 promised one row at every gallery width (the window
+  // becomes the pill below GALLERY_BREAKPOINT, 520 px), but Chat and the
+  // default-on Reactions button made the row ~614 px wide. Measured, not by
+  // breakpoint, like the web client's overflow (#247): when the row does not
+  // fit, Invite and then Chat move into More (lowest priority first, the web
+  // client's order), and come back as soon as they fit again.
+  const COLLAPSE_ORDER = ['invite', 'chat'] as const;
+  type CollapsibleControl = (typeof COLLAPSE_ORDER)[number];
+  let collapsedControls = $state<CollapsibleControl[]>([]);
+  let controlbarEl = $state<HTMLDivElement>();
+  let controlsClusterEl = $state<HTMLDivElement>();
+  const naturalControlWidth: Record<CollapsibleControl, number> = { invite: 52, chat: 52 };
+
+  function refitControls(): void {
+    const bar = controlbarEl;
+    const cluster = controlsClusterEl;
+    if (!bar || !cluster) return;
+    const barStyle = getComputedStyle(bar);
+    const available = bar.clientWidth - parseFloat(barStyle.paddingLeft) - parseFloat(barStyle.paddingRight);
+    const gap = parseFloat(getComputedStyle(cluster).columnGap) || 0;
+    for (const key of COLLAPSE_ORDER) {
+      const cell = cluster.querySelector<HTMLElement>(`[data-control="${key}"]`);
+      if (cell && !collapsedControls.includes(key)) naturalControlWidth[key] = cell.getBoundingClientRect().width;
+    }
+    const used = cluster.scrollWidth;
+    if (used > available + 0.5) {
+      const next = COLLAPSE_ORDER.find((key) => !collapsedControls.includes(key));
+      if (next) collapsedControls = [...collapsedControls, next];
+      return;
+    }
+    const last = collapsedControls.at(-1);
+    if (last && used + naturalControlWidth[last] + gap <= available) collapsedControls = collapsedControls.slice(0, -1);
+  }
+
+  $effect(() => {
+    const bar = controlbarEl;
+    const cluster = controlsClusterEl;
+    if (!bar || !cluster || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => refitControls());
+    observer.observe(bar);
+    observer.observe(cluster);
+    return () => observer.disconnect();
+  });
+  const inviteCollapsed = $derived(collapsedControls.includes('invite'));
+  const chatCollapsed = $derived(collapsedControls.includes('chat'));
   let galleryMoreOpen = $state(false);
   let galleryMoreMenuEl = $state<HTMLDivElement>();
   let galleryMoreTriggerEl = $state<HTMLButtonElement>();
@@ -712,6 +767,7 @@
     </div>
   </div>
 
+  <div class="gallery-body">
   <div
     bind:this={tileSurface}
     class="tiles"
@@ -789,12 +845,18 @@
       </div>
     </div>
   </div>
+  {#if sidePanel}
+    <aside class="side-panel" data-testid="chat-aside">
+      {@render sidePanel()}
+    </aside>
+  {/if}
+  </div>
 
   <!-- The gallery keeps the common actions visible and moves specialist
        actions into More. Labels remain stable while accessible names describe
        the current state. -->
-  <div class="controlbar">
-    <div class="controls-cluster">
+  <div class="controlbar" bind:this={controlbarEl}>
+    <div class="controls-cluster" bind:this={controlsClusterEl}>
       <div class="control-cell">
         <MediaSplitControl
           icon="mic"
@@ -833,7 +895,7 @@
         />
         <span class="meeting-control-label">Share</span>
       </div>
-      <div class="control-cell" role="group" onmouseenter={keepInviteTooltipInViewport} onfocusin={keepInviteTooltipInViewport}>
+      <div class="control-cell" class:collapsed={inviteCollapsed} data-control="invite" role="group" onmouseenter={keepInviteTooltipInViewport} onfocusin={keepInviteTooltipInViewport}>
         <ControlButton
           icon="invite"
           kind="oneshot"
@@ -848,7 +910,7 @@
           aria-hidden="true"
         >{inviteTooltip}</span>
       </div>
-      <div class="control-cell chat-cell">
+      <div class="control-cell chat-cell" class:collapsed={chatCollapsed} data-control="chat">
         <ControlButton
           icon="chat"
           kind="toggle"
@@ -863,7 +925,7 @@
         <span class="meeting-control-label">Chat</span>
       </div>
       {@render pluginActions?.()}
-      <div class="control-cell">
+      <div class="control-cell chat-cell">
         <ControlButton
           icon="more"
           kind="oneshot"
@@ -875,6 +937,10 @@
             toggleGalleryMore();
           }}
         />
+        {#if chatCollapsed && chatUnread > 0 && !chatOpen}
+          <!-- Chat moved into More: its unread count rides on More. -->
+          <span class="chat-badge" aria-hidden="true" data-testid="more-chat-badge">{chatUnread > 99 ? '99+' : chatUnread}</span>
+        {/if}
         <span class="meeting-control-label">More</span>
       </div>
       <div class="control-cell leave-cell">
@@ -886,6 +952,30 @@
     {#if galleryMoreOpen}
       <div bind:this={galleryMoreMenuEl} class="gallery-more-menu meeting-menu" role="menu" aria-label="More meeting controls">
         <div class="meeting-menu-section-label">More controls</div>
+        {#if chatCollapsed}
+          <button type="button" class="meeting-menu-row gallery-more-item" role="menuitem" data-testid="more-chat" onclick={() => selectGalleryMore('chat')}>
+            <span class="more-item-leading">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5z"></path>
+              </svg>
+              <span class="meeting-menu-row-copy">{chatOpen ? 'Close chat' : 'Chat'}</span>
+            </span>
+            {#if chatUnread > 0 && !chatOpen}<span class="more-item-state">{chatUnread > 99 ? '99+' : chatUnread} unread</span>{/if}
+          </button>
+        {/if}
+        {#if inviteCollapsed}
+          <button type="button" class="meeting-menu-row gallery-more-item" role="menuitem" data-testid="more-invite" aria-label={inviteAriaLabel} onclick={() => selectGalleryMore('invite')}>
+            <span class="more-item-leading">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="9" cy="8" r="3.5"></circle>
+                <path d="M3 20a6 6 0 0 1 12 0"></path>
+                <path d="M16 5.5a3.5 3.5 0 0 1 0 7"></path>
+                <path d="M19 20a6 6 0 0 0-4-5.6"></path>
+              </svg>
+              <span class="meeting-menu-row-copy">Invite</span>
+            </span>
+          </button>
+        {/if}
         <button type="button" class="meeting-menu-row gallery-more-item" role="menuitem" onclick={() => selectGalleryMore('region')}>
           <span class="more-item-leading">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1439,9 +1529,46 @@
   /* Smart tile grid (#203): rows/columns come from participant count and the
      live tile-surface aspect. The CSS only places those computed cells and
      preserves the 16:9 tile box; it does not reintroduce scroll. */
+  /* Tiles and the side panel (the meeting chat) share the row between the
+     topbar and the control bar. The panel is a 320 px column beside the
+     tiles while the tiles keep at least 400 px; narrower, it covers the tiles
+     instead of crushing them, and never the topbar or the controls. */
+  .gallery-body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    container: gallery-body / inline-size;
+  }
+  .side-panel {
+    flex: none;
+    width: 320px;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .side-panel > :global(*) {
+    flex: 1;
+    min-height: 0;
+  }
+  @container gallery-body (max-width: 719px) {
+    .side-panel {
+      position: absolute;
+      inset: 0;
+      width: auto;
+      z-index: 5;
+    }
+  }
+  .control-cell.collapsed {
+    display: none;
+  }
+
   .tiles {
     flex: 1;
     min-height: 0;
+    min-width: 0;
     --gallery-gap: 18px;
     --gallery-cols: 1;
     --gallery-rows: 1;
