@@ -49,6 +49,12 @@ const RAIL_STAND_IN = `.control-cell.fullscreen-cell { display: none; }
 // #240's rule for a control hidden as unsupported (Share without
 // getDisplayMedia). A stand-in until #240 lands.
 const UNSUPPORTED_STAND_IN = '.control-cell[hidden] { display: none !important; }';
+/**
+ * Widens every control so Share has to give way at 320px. #239's control
+ * sizing fits one more than before, and the dot test below needs a live share
+ * that is actually IN the menu -- otherwise it asserts nothing (#269).
+ */
+const WIDE_CONTROLS_STAND_IN = '.controlbar .control-cell .control-button { min-width: 72px; }';
 
 interface Box {
   left: number;
@@ -62,8 +68,18 @@ interface BarState {
   bar: Box;
   /** Cell labels in the bar, in bar order. */
   shown: string[];
-  /** Cell labels that are not rendered, in bar order. */
+  /**
+   * Cell labels the bar COLLAPSED into ⋯, in bar order.
+   *
+   * Deliberately not "every cell that is not rendered": a control scoped to
+   * another layout -- Full screen belongs to #239's landscape rail -- is
+   * CSS-hidden everywhere else and never took part in overflow. Counting it
+   * here made `hidden` mean two different things and broke every expectation
+   * the moment such a control existed (#269). Those live in `unavailable`.
+   */
   hidden: string[];
+  /** Cell labels not rendered for a reason other than overflow (CSS-hidden). */
+  unavailable: string[];
   overlaps: string[];
   outside: string[];
   squashed: string[];
@@ -166,6 +182,8 @@ function readBar(): BarState {
     .map((cell) => ({
       label: cell.querySelector('.meeting-control-label')?.textContent?.trim() ?? '?',
       rendered: cell.getClientRects().length > 0,
+      // What the overflow itself marks when it collapses a cell.
+      overflowed: cell.classList.contains('overflowed'),
     }));
   const buttons = Array.from(bar.querySelectorAll<HTMLButtonElement>('button'))
     .filter((button) => button.getClientRects().length > 0)
@@ -203,7 +221,8 @@ function readBar(): BarState {
     vertical: getComputedStyle(bar).flexDirection === 'column',
     bar: { left: barBox.left, top: barBox.top, right: barBox.right, bottom: barBox.bottom },
     shown: cells.filter((cell) => cell.rendered).map((cell) => cell.label),
-    hidden: cells.filter((cell) => !cell.rendered).map((cell) => cell.label),
+    hidden: cells.filter((cell) => cell.overflowed).map((cell) => cell.label),
+    unavailable: cells.filter((cell) => !cell.rendered && !cell.overflowed).map((cell) => cell.label),
     overlaps,
     outside,
     squashed,
@@ -267,8 +286,10 @@ function assertInside(box: Box | null, viewport: { width: number; height: number
 
 test('at 320, 360 and 412 px the bar fits: no overlap, no squash, and exactly the hidden controls are in the ⋯ menu', { timeout: 60_000 }, async () => {
   const expected: Record<number, string[]> = {
-    // Lowest priority first, and only as many as the width needs.
-    320: ['React', 'Draw', 'Invite', 'Chat', 'Share'],
+    // Lowest priority first, and only as many as the width needs. #239's
+    // control sizing fits one more in the bar than before, so Share no longer
+    // has to give way at 320 (#269).
+    320: ['React', 'Draw', 'Invite', 'Chat'],
     360: ['React', 'Draw', 'Invite', 'Chat'],
     412: ['React', 'Draw', 'Invite'],
   };
@@ -286,8 +307,15 @@ test('at 320, 360 and 412 px the bar fits: no overlap, no squash, and exactly th
         `${where}: wrong controls hidden`
       );
       const menu = await openMenu(page);
-      // Every hidden control, in bar order, and nothing else.
-      assert.deepEqual(menu.rows.map((row) => row.label), state.hidden, `${where}: menu rows`);
+      // Every overflowed control and nothing else. Membership, not order:
+      // `hidden` is in DOM order while the menu follows what the bar SHOWS
+      // (#239 lifts Chat with CSS `order`), and that ordering has its own
+      // test below.
+      assert.deepEqual(
+        [...menu.rows.map((row) => row.label)].sort(),
+        [...state.hidden].sort(),
+        `${where}: menu rows`
+      );
       assertInside(menu.box, viewport, where);
       assert.ok(menu.box.bottom <= state.bar.top + 0.5, `${where}: the menu opens above the bar, not over its buttons`);
       assert.deepEqual(errors, []);
@@ -330,7 +358,8 @@ test('with room for every control there is no ⋯: at 1280, and at 500 -- measur
 });
 
 test('the menu carries each hidden control\'s state, and a dot on ⋯ flags a hidden one that needs attention', { timeout: 60_000 }, async () => {
-  const { page, errors, close } = await openMeeting({ width: 320, height: 568 });
+  // Wide controls so Share is genuinely in the menu; see the stand-in's note.
+  const { page, errors, close } = await openMeeting({ width: 320, height: 568 }, [WIDE_CONTROLS_STAND_IN]);
   try {
     let state = await barOf(page);
     assert.equal(state.dot, false);
@@ -447,29 +476,32 @@ test('the ⋯ menu works from the keyboard like the desktop\'s: first row focuse
     await page.keyboard.press('Enter');
     await page.waitForSelector('#overflow-menu.placed');
     assert.equal(await page.getAttribute('#ctl-more', 'aria-expanded'), 'true');
-    // 360: Invite, Draw, Chat, React, in bar order.
+    // 360: Chat, Invite, Draw, React -- the order the bar SHOWS, and #239
+    // lifts Chat with CSS `order`, so it leads rather than sitting third.
+    assert.equal(await focused(), 'Chat');
+    await page.keyboard.press('ArrowDown');
     assert.equal(await focused(), 'Invite');
     await page.keyboard.press('ArrowDown');
     assert.equal(await focused(), 'Draw', 'a disabled row is still reachable');
     await page.keyboard.press('ArrowUp');
     await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('ArrowUp');
     assert.equal(await focused(), 'React', 'ArrowUp wraps to the last row');
     await page.keyboard.press('ArrowDown');
-    assert.equal(await focused(), 'Invite', 'ArrowDown wraps to the first row');
+    assert.equal(await focused(), 'Chat', 'ArrowDown wraps to the first row');
     await page.keyboard.press('End');
     assert.equal(await focused(), 'React');
     await page.keyboard.press('Home');
-    assert.equal(await focused(), 'Invite');
+    assert.equal(await focused(), 'Chat');
     await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => document.querySelector<HTMLElement>('#overflow-menu')!.hidden), true);
     assert.equal(await focused(), 'ctl-more', 'Escape returns focus to ⋯');
     assert.equal(await page.getAttribute('#ctl-more', 'aria-expanded'), 'false');
 
     // A row does what the hidden control does: Chat opens the chat drawer.
+    // Chat is the FIRST row now (#239's CSS `order`), so no arrowing needed.
     await page.keyboard.press('Enter');
     await page.waitForSelector('#overflow-menu.placed');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
     assert.equal(await focused(), 'Chat');
     await page.keyboard.press('Enter');
     assert.equal(await page.evaluate(() => document.querySelector<HTMLElement>('#overflow-menu')!.hidden), true);
@@ -514,7 +546,9 @@ test('a plugin popover opened from the menu anchors to ⋯, not to its hidden bu
 });
 
 test('a menu row clicks its control inside the user\'s own click, so the user activation getDisplayMedia and full screen need carries over', { timeout: 60_000 }, async () => {
-  const { page, errors, close } = await openMeeting({ width: 320, height: 568 });
+  // This clicks Share's ROW, so Share has to be in the menu; #239's sizing
+  // otherwise keeps it in the bar at 320px (#269).
+  const { page, errors, close } = await openMeeting({ width: 320, height: 568 }, [WIDE_CONTROLS_STAND_IN]);
   try {
     await page.evaluate(() => {
       const w = window as unknown as { inRowClick: boolean; shareClicks: Array<{ active: boolean; inRowClick: boolean }> };
@@ -554,23 +588,26 @@ test('focus never falls to the page: a control leaving the bar hands it to ⋯, 
     assert.ok((await barOf(page)).hidden.includes('Invite'));
     assert.equal(await focused(), 'ctl-more', 'Invite went into the menu: ⋯ holds focus');
 
-    // 360: Invite, Draw, Chat, React. With Invite's row focused, widen until
-    // everything fits and the menu has nothing left.
+    // 360: Chat, Invite, Draw, React -- Chat leads, #239 lifts it with CSS
+    // `order`. With its row focused, widen until everything fits and the menu
+    // has nothing left.
     await page.keyboard.press('Enter');
     await page.waitForSelector('#overflow-menu.placed');
     await page.setViewportSize({ width: 1280, height: 800 });
     await settle(page);
     assert.equal((await barOf(page)).moreShown, false);
     assert.equal(await page.evaluate(() => document.querySelector<HTMLElement>('#overflow-menu')!.hidden), true);
-    assert.equal(await focused(), 'ctl-invite', "the emptied menu hands focus to Invite's own button");
+    assert.equal(await focused(), 'ctl-chat', "the emptied menu hands focus to Chat's own button");
 
     // Draw's row: its button is disabled and cannot take focus, so the first
-    // control of the bar does.
+    // control of the bar does. Two presses from the first row (Chat) now:
+    // Chat -> Invite -> Draw.
     await page.setViewportSize({ width: 360, height: 780 });
     await settle(page);
     await page.focus('#ctl-more');
     await page.keyboard.press('Enter');
     await page.waitForSelector('#overflow-menu.placed');
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
     await page.setViewportSize({ width: 1280, height: 800 });
     await settle(page);
@@ -804,7 +841,9 @@ test('re-fitting after a size change never trips a ResizeObserver loop, even whe
 
 test('a control hidden as unsupported (Share on phones, #240) is in neither the bar nor the menu, and its room is reused', { timeout: 60_000 }, async () => {
   const expected: Record<number, string[]> = {
-    320: ['Invite', 'Draw', 'Chat', 'React'],
+    // Share's cell is hidden here, and #239's sizing fits one more, so Chat
+    // stays in the bar too (#269).
+    320: ['Invite', 'Draw', 'React'],
     // Share's room lets Invite back in.
     412: ['Draw', 'React'],
   };
@@ -832,36 +871,26 @@ test('on a vertical rail (a stand-in for #239\'s landscape layout) it measures t
   const landscape = { width: 915, height: 412 };
   const { page, errors, close } = await openMeeting(landscape, [RAIL_STAND_IN]);
   try {
-    // #239's Full screen cell, placed as meetingViewport.ts places it: in the
-    // bar itself, just before Leave.
-    await page.evaluate(() => {
-      const bar = document.querySelector('.controlbar')!;
-      const cell = document.createElement('div');
-      cell.className = 'control-cell fullscreen-cell';
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.id = 'ctl-fullscreen';
-      button.className = 'control-button';
-      button.setAttribute('aria-label', 'Enter full screen');
-      button.setAttribute('aria-pressed', 'false');
-      const label = document.createElement('span');
-      label.className = 'meeting-control-label';
-      label.textContent = 'Full screen';
-      cell.append(button, label);
-      bar.insertBefore(cell, bar.querySelector('.leave-cell'));
-    });
+    // No Full screen cell is injected: RAIL_STAND_IN's CSS reveals #239's
+    // real `.fullscreen-cell` in landscape, so injecting one put TWO in the
+    // rail and pushed Chat out (#269).
     await settle(page);
     let state = await barOf(page);
     assert.equal(state.vertical, true, 'the stand-in lays the bar out as a column');
     assertFits(state, 'rail');
     // A 915px-wide bottom bar would fit everything: only the height hides
-    // these. Share, Chat and Full screen stay (Full screen is the last to go).
-    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React']);
+    // these. #239's own Full screen cell takes a slot in the rail, so Chat
+    // gives way too; Share and Full screen stay (Full screen is last to go).
+    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'Chat', 'React']);
     assert.equal(state.moreShown, true);
-    for (const label of ['Share', 'Chat', 'Full screen']) assert.ok(state.shown.includes(label), `${label} stays in the rail`);
+    for (const label of ['Share', 'Full screen']) assert.ok(state.shown.includes(label), `${label} stays in the rail`);
 
     const menu = await openMenu(page);
-    assert.deepEqual(menu.rows.map((row) => row.label), ['Invite', 'Draw', 'React']);
+    assert.deepEqual(
+      [...menu.rows.map((row) => row.label)].sort(),
+      ['Chat', 'Draw', 'Invite', 'React'],
+      'the rail menu carries every overflowed control'
+    );
     assertInside(menu.box, landscape, 'rail');
     assert.ok(menu.box.right <= state.bar.left + 0.5, 'the menu opens beside the rail, not over it');
     await page.keyboard.press('ArrowDown');
@@ -874,7 +903,10 @@ test('on a vertical rail (a stand-in for #239\'s landscape layout) it measures t
     state = await barOf(page);
     assert.equal(state.vertical, false);
     assertFits(state, 'rotated to portrait');
-    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React', 'Full screen']);
+    // Full screen is CSS-hidden in portrait rather than overflowed, so it is
+    // `unavailable`, not in the ⋯ menu.
+    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React']);
+    assert.ok(state.unavailable.includes('Full screen'), 'Full screen is hidden by layout, not collapsed');
     // Full screen is not part of this layout at all: not offered in the menu.
     assert.deepEqual((await openMenu(page)).rows.map((row) => row.label), ['Invite', 'Draw', 'React']);
     await page.keyboard.press('Escape');
@@ -884,7 +916,9 @@ test('on a vertical rail (a stand-in for #239\'s landscape layout) it measures t
     state = await barOf(page);
     assert.equal(state.vertical, true);
     assertFits(state, 'rotated back');
-    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'React']);
+    // Back in the rail, Full screen is visible again and takes a slot, so
+    // Chat gives way as it did the first time.
+    assert.deepEqual(state.hidden, ['Invite', 'Draw', 'Chat', 'React']);
 
     // A shorter phone (iPhone SE landscape): Chat goes before Full screen,
     // which is the only way to hide a phone browser's address bar.
@@ -894,7 +928,12 @@ test('on a vertical rail (a stand-in for #239\'s landscape layout) it measures t
     assertFits(state, '375px rail');
     assert.deepEqual(state.hidden, ['Invite', 'Draw', 'Chat', 'React']);
     assert.ok(state.shown.includes('Full screen'), 'Full screen stays in a 375px rail');
-    assert.deepEqual((await openMenu(page)).rows.map((row) => row.label), ['Invite', 'Draw', 'Chat', 'React']);
+    // Membership, not order: the menu follows what the bar shows and #239
+    // lifts Chat, which its own test pins.
+    assert.deepEqual(
+      [...(await openMenu(page)).rows.map((row) => row.label)].sort(),
+      ['Chat', 'Draw', 'Invite', 'React']
+    );
     await page.keyboard.press('Escape');
 
     // Shorter still: Full screen goes too, and stays gone although the rail's
