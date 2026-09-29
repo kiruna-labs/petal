@@ -77,9 +77,24 @@
     highlighted = 0;
   });
 
+  // The list's height when we last saw it. A scroll event that arrives with a
+  // DIFFERENT height was caused by layout (the composer grew, the command list
+  // opened), not by the reader: browsers dispatch it before the resize observer
+  // below can re-pin, and it used to be read as "the reader scrolled up", so
+  // new messages stopped following the bottom after the command list opened.
+  // A reader's own scroll never changes the list's height.
+  let lastListHeight = 0;
+
   function onListScroll(): void {
     if (!listEl) return;
-    stuckToBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 24;
+    const atBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 24;
+    const resized = listEl.clientHeight !== lastListHeight;
+    lastListHeight = listEl.clientHeight;
+    if (resized && stuckToBottom && !atBottom) {
+      listEl.scrollTop = listEl.scrollHeight;
+      return;
+    }
+    stuckToBottom = atBottom;
   }
 
   // New messages: follow the bottom only if the reader was already there.
@@ -99,6 +114,7 @@
     if (!el) return;
     const observer = new ResizeObserver(() => {
       if (stuckToBottom) el.scrollTop = el.scrollHeight;
+      lastListHeight = el.clientHeight;
     });
     observer.observe(el);
     return () => observer.disconnect();
@@ -320,7 +336,6 @@
     {#if composerError}
       <p class="chat-error" id="chat-composer-error" role="alert" data-testid="chat-error">{composerError}</p>
     {/if}
-    </div>
   </form>
 </section>
 

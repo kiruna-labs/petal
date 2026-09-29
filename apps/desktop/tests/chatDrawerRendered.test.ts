@@ -237,6 +237,22 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
       await page.keyboard.press('Escape');
       assert.equal(await list.count(), 0);
       assert.equal(await page.evaluate(() => (window as unknown as { __closed: () => number }).__closed()), 0);
+      // Regression: opening the command list shrinks the message list, and the
+      // scroll event that causes must not read as "the reader scrolled up".
+      // After it, a new message still follows the bottom.
+      await page.evaluate(() => {
+        (window as unknown as { __chat: { add: (m: unknown) => void } }).__chat.add({
+          id: 'm-after-list', text: 'still following', t: Date.UTC(2026, 8, 14, 12, 2, 30), sender: { identity: 'theo-1', name: 'Theo' },
+          self: false, relayed: false, via: null, local: false,
+        });
+      });
+      await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="chat-msg"] .chat-text')].some((el) => el.textContent === 'still following'));
+      const followed = await page.evaluate(async () => {
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const l = document.querySelector('[data-testid="chat-list"]') as HTMLElement;
+        return l.scrollHeight - l.scrollTop - l.clientHeight < 2;
+      });
+      assert.equal(followed, true, `${width}x${height}: the list still follows new messages after the command list opened and closed`);
 
       // Screen readers: the count is not a live region (it would read out
       // every keystroke); a status region, in the tree before it ever
@@ -267,13 +283,14 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
       // A busy chat: at least four lines of message text stay readable above
       // the composer, in the shortest window too (#246).
       await input.fill('');
+      const beforeBusy = await page.locator('[data-testid="chat-msg"]').count();
       await page.evaluate(() => {
         const chat = (window as unknown as { __chat: { add: (m: unknown) => void } }).__chat;
         for (let i = 0; i < 12; i++) {
-          chat.add({ id: `m-busy-${String(i).padStart(4, '0')}`, text: `Busy line ${i}`, t: Date.UTC(2026, 8, 14, 12, 3, i), sender: { identity: `peer-${i % 2}`, name: i % 2 ? 'Theo' : 'Mira' }, self: false, relayed: false });
+          chat.add({ id: `m-busy-${String(i).padStart(4, '0')}`, text: `Busy line ${i}`, t: Date.UTC(2026, 8, 14, 12, 3, i), sender: { identity: `peer-${i % 2}`, name: i % 2 ? 'Theo' : 'Mira' }, self: false, relayed: false, via: null, local: false });
         }
       });
-      await page.waitForFunction(() => document.querySelectorAll('[data-testid="chat-msg"]').length === 17);
+      await page.waitForFunction((n: number) => document.querySelectorAll('[data-testid="chat-msg"]').length === n + 12, beforeBusy);
       const lines = await visibleTextLines(page);
       assert.ok(lines >= 4, `${width}x${height}: ${lines} lines of message text visible`);
 
@@ -298,7 +315,7 @@ test('chat drawer fits its column, groups senders, and sends on Enter', { timeou
         document.querySelector('[data-testid="chat-input"]')!.addEventListener('blur', () => w.__blurs++);
       });
       await send.click();
-      assert.deepEqual(await page.evaluate(() => (window as unknown as { __chat: { sent: string[] } }).__chat.sent), ['first line\nsecond line', 'one\ntwo']);
+      assert.deepEqual(await page.evaluate(() => (window as unknown as { __chat: { sent: string[] } }).__chat.sent), ['first line\nsecond line', '/usr/local/bin', 'one\ntwo']);
       assert.equal(await page.evaluate(() => (window as unknown as { __blurs: number }).__blurs), 0, `${width}x${height}: Send click keeps focus in the input`);
       assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-testid')), 'chat-input');
       await page.close();
