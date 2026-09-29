@@ -61,6 +61,10 @@ LIVEKIT_URL=ws://localhost:7880 LIVEKIT_API_KEY=devkey LIVEKIT_API_SECRET=secret
      the control is hidden wherever the API is missing.
    - **Invite** — copies the `?code=` join link, confirms with a toast.
    - **Leave** — disconnects and returns to the join screen.
+   - **⋯ More** — only when the controls do not fit the bar (measured, not a
+     breakpoint): everything but Audio, Video and Leave moves into its menu,
+     least-used first, carrying each control's state; a dot on ⋯ flags
+     unread chat or a live share in there (`src/controlOverflow.ts`).
 
    On a phone in landscape the control bar becomes an icon-only rail on the
    right edge and the top bar fades after a few idle seconds (a tap brings

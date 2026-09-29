@@ -515,31 +515,8 @@ body {
   background: radial-gradient(58% 80% at 82% 24%, rgba(52, 199, 89, 0.1), transparent 70%);
 }
 
-.quiet-eyebrow,
 .quiet-title {
   position: relative;
-}
-
-.quiet-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font: 500 10.5px var(--font-mono);
-  letter-spacing: 0.06em;
-  color: rgba(255, 255, 255, 0.4);
-  margin-bottom: 8px;
-}
-
-.quiet-ring {
-  width: 7px;
-  height: 7px;
-  border-radius: var(--radius-pill);
-  border: 1.5px solid rgba(255, 255, 255, 0.4);
-  box-sizing: border-box;
-  flex-shrink: 0;
-}
-
-.quiet-title {
   margin: 0;
   max-width: 280px;
   font: 600 22px var(--font-ui);
@@ -629,8 +606,9 @@ input[type='text'] {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
-  width: min(212px, calc(100vw - 48px), 100%);
-  max-inline-size: 100%;
+  /* Sized from the viewport, not the picker: the picker is now just the
+     bubble's width, beside Save (#243). */
+  width: min(212px, calc(100vw - 48px));
   padding: 8px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 12px;
@@ -684,18 +662,21 @@ input[type='text'] {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
 }
 
+/* Name and colour card. Shell as the desktop IdentitySetup card (popover
+   radius, 16px padding); heading, name, then one row with the colour bubble
+   left and Save right (#243). */
 .profile-onboarding {
   display: grid;
   gap: 12px;
   margin-bottom: 14px;
-  padding: 12px;
+  padding: 16px;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 12px;
+  border-radius: var(--radius-popover);
   background: rgba(255, 255, 255, 0.055);
 }
 
 .profile-onboarding h2 {
-  margin: 0 0 4px;
+  margin: 0;
   font: 700 14px var(--font-ui);
   color: var(--text-primary);
 }
@@ -708,8 +689,18 @@ input[type='text'] {
 
 .profile-onboarding-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* The bubble's 3px halo lines up with the name field's edge above it. */
+.profile-onboarding-actions .color-bubble {
+  margin-inline-start: 3px;
+}
+
+.profile-onboarding-actions .btn {
+  min-width: 96px;
 }
 
 .meeting-field input[type='text'] {
@@ -1035,7 +1026,31 @@ input[type='text']:disabled {
   border-radius: 3px;
 }
 
-@media (max-width: 420px) {
+/* Phones, both orientations (#243): the home screen is the whole screen.
+   - Full-bleed card at the dynamic viewport height. 100vh alone is the
+     tallest viewport on Android and iOS (URL bar hidden), which pushed the
+     footer below the fold; 100dvh follows the URL bar.
+   - The quiet hero stops being a band: its gradient and green bloom become
+     the backdrop of the whole screen.
+   - One column, capped at 440px. Top bar at the top, footer at the bottom,
+     and the free space between them split 1:2 by three auto margins (above
+     the title, below the fields, above the footer): the title lands at the
+     optical centre and the fields sit high, clear of the on-screen keyboard.
+     The margins collapse when the name card or recent rooms need the room:
+     the page scrolls, nothing overlaps.
+   - The gutters include the safe-area insets, for the notch once the
+     viewport is `viewport-fit=cover`.
+   Landscape phones get two columns below. */
+@media (max-width: 600px), (max-height: 500px) {
+  /* Rubber-banding past the top shows the canvas: paint it the backdrop's
+     top colour (the --hero-gradient start), not the darker --bg-base. No
+     single colour matches both ends of the gradient, so a bounce past the
+     bottom shows this against the darker #0b0c0e; the top, where pull-down
+     happens, is the edge that matters. */
+  :root:has(.join-screen:not(.hidden)) {
+    background-color: #16181b;
+  }
+
   .join-screen {
     align-items: stretch;
     padding: 0;
@@ -1044,15 +1059,95 @@ input[type='text']:disabled {
   .join-card {
     width: 100%;
     min-height: 100vh;
+    min-height: 100dvh;
     max-height: none;
+    overflow: visible;
+    padding-left: max(20px, env(safe-area-inset-left, 0px), calc((100% - 440px) / 2));
+    padding-right: max(20px, env(safe-area-inset-right, 0px), calc((100% - 440px) / 2));
+    border: 0;
     border-radius: 0;
-    border-inline: 0;
+    box-shadow: none;
+    background:
+      radial-gradient(360px 300px at 88% 0%, rgba(52, 199, 89, 0.1), transparent 70%),
+      var(--hero-gradient);
+  }
+
+  .home-topbar,
+  .home-body,
+  .web-status-bar {
+    padding-inline: 0;
+  }
+
+  .home-topbar {
+    height: auto;
+    min-height: 52px;
+    padding-top: calc(6px + env(safe-area-inset-top, 0px));
+  }
+
+  .hero-quiet {
+    height: auto;
+    margin-top: auto;
+    padding: 24px 0 20px;
+    overflow: visible;
+    background: none;
+  }
+
+  .quiet-bloom {
+    display: none;
+  }
+
+  .quiet-title {
+    max-width: 320px;
+    font-size: var(--text-hero);
+  }
+
+  .home-body {
+    flex: 0 0 auto;
+    margin-bottom: auto;
+  }
+}
+
+/* Landscape phones (#243): one column cannot fit the title, the name card
+   and the fields in ~360px of height, so the title takes the left column
+   and the fields the right, both centred between the top bar and the
+   footer. Not the connecting card, which stays one centred stack. */
+@media (max-height: 500px) and (min-width: 640px) {
+  .join-card:not(.connecting-card) {
+    display: grid;
+    grid-template-columns: minmax(0, min(380px, 42%)) minmax(0, 440px);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    justify-content: center;
+    column-gap: 40px;
+    padding-left: max(24px, env(safe-area-inset-left, 0px));
+    padding-right: max(24px, env(safe-area-inset-right, 0px));
+  }
+
+  .home-topbar,
+  .web-status-bar {
+    grid-column: 1 / -1;
+  }
+
+  .hero-quiet {
+    margin: 0;
+    padding: 0;
+    align-self: center;
+  }
+
+  .home-body {
+    margin: 0;
+    align-self: center;
+    min-width: 0;
   }
 
   .web-status-bar {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .web-status-bar {
     flex-direction: column;
     gap: 2px;
-    padding-inline: 12px;
   }
 }
 
@@ -3277,7 +3372,9 @@ html:has(> body > #meeting-screen:not(.hidden)) {
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
-  min-width: 0;
+  /* Never squashed: a cell narrower than its 44px button let the button
+     overlap the next one. What does not fit goes to the ⋯ menu instead. */
+  flex-shrink: 0;
 }
 
 /* Load-bearing, same pitfall as .feedback-meeting-trigger: the `display`
@@ -3557,6 +3654,146 @@ html:has(> body > #meeting-screen:not(.hidden)) {
 
 .control-button.slashed .slash {
   stroke-dashoffset: 0;
+}
+
+/* =========================================================================
+   Control-bar overflow (#247, controlOverflow.ts): the controls that do not
+   fit leave the bar for the ⋯ menu, drawn in the shared .meeting-menu
+   register (meeting-controls.css) like the desktop's More menus.
+   ========================================================================= */
+/* `!important`, like the `.hidden` utility: a layout that shows a cell with
+   its own `display` (the landscape rail's Full screen cell, #239) must not
+   bring it back while it is in the menu. */
+.control-cell.overflowed {
+  display: none !important;
+}
+
+/* Load-bearing, the `[hidden]` vs author `display` trap again: ⋯ is hidden
+   whenever everything fits. */
+.control-cell.overflow-cell[hidden] {
+  display: none !important;
+}
+
+/* A control in the menu wants attention (unread chat, a plugin badge): the
+   chat badge's color, as a dot on ⋯ -- or the sharer's identity color while
+   the screen share in there is live, as on the Share button itself. */
+.overflow-dot {
+  position: absolute;
+  top: 1px;
+  left: calc(50% + 10px);
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border: 2px solid var(--bg-base);
+  border-radius: var(--radius-pill);
+  background: var(--live-bright);
+  pointer-events: none;
+}
+
+.overflow-dot.live {
+  background: var(--control-live-bg, var(--live-bright));
+}
+
+/* Touch only (controlOverflow.ts): takes the tap that dismisses the menu, so
+   it cannot also land on a control, Leave included. */
+.overflow-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+/* Fixed and placed by measurement (placeOverflowMenu), like the device
+   menus; invisible until placed, so it never flashes at 0,0. */
+.overflow-menu {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 21;
+  width: max-content;
+  visibility: hidden;
+}
+
+.overflow-menu.placed {
+  visibility: visible;
+}
+
+.overflow-menu[hidden] {
+  display: none;
+}
+
+/* Between the hidden controls and the menu's own rows (dev tools, #239). */
+.overflow-menu-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.overflow-menu-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-soft);
+}
+
+.overflow-menu-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Why a control is unavailable (Draw's "Nothing to draw on"). */
+.overflow-menu-note {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+/* aria-disabled, not :disabled -- the row stays focusable (controlOverflow.ts). */
+.overflow-menu-row[aria-disabled='true'] {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.overflow-menu-row[aria-disabled='true'] .overflow-menu-icon {
+  opacity: var(--disabled-opacity);
+}
+
+/* A finger's target, like the controls themselves. */
+@media (pointer: coarse) {
+  .overflow-menu-row {
+    min-height: 44px;
+  }
+}
+
+/* The state the button showed in the bar, as Gallery.svelte's
+   .more-item-state: "On", a live share, an unread count. */
+.overflow-menu-state {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font: 700 10px / 1 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.overflow-menu-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: var(--radius-pill);
+  background: var(--live-bright);
+  color: var(--bg-base);
+  font: 600 10px / 16px var(--font-ui);
+  letter-spacing: 0;
+  text-align: center;
+}
+
+/* Same colors as the live Share button: the sharer's identity color. */
+.overflow-menu-live {
+  padding: 3px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--control-live-bg, var(--live-tint));
+  color: var(--control-live-fg, var(--live-bright));
 }
 
 /* =========================================================================
