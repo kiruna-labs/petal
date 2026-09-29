@@ -930,6 +930,14 @@ export function setupConnection(
         // the session down, so there is no meeting to show.
         if (state.room !== newRoom) return;
       }
+      // Re-check immediately before showing the meeting. The check above only
+      // covers the metadata await, and only runs at all when there is a local
+      // participant; a Disconnected landing anywhere else after the connect
+      // resolved -- during `sfuSender.attach`, during the participant
+      // registration loop, or with no `localParticipant` -- would otherwise
+      // fall through to a meeting screen and a sync interval over a room the
+      // teardown has already discarded.
+      if (state.room !== newRoom) return;
       setConnState('connected', 'connected');
       syncAddressBar(meetingCode);
       logEvent(`connected to "${meetingCode}" as "${displayName}"`, 'ok');
