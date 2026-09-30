@@ -296,13 +296,20 @@ impl ScreenAudioTrack {
         let pump_source = native_source.clone();
         let delivery_failed = Arc::new(AtomicBool::new(false));
         let pump_delivery_failed = delivery_failed.clone();
-        // Resolved before the pump because the health line needs it too.
         let track_name = source.track_name();
-        let pump_track_name = track_name.clone();
+        let scope = source.scope_label();
         let pump = tauri::async_runtime::spawn(async move {
             let mut health = ScreenAudioHealth::default();
-            let mut ticker = tokio::time::interval(SCREEN_AUDIO_HEALTH_INTERVAL);
+            let mut reporter = ScreenAudioHealthReporter::new(scope);
+            // `interval` fires its first tick immediately, which would log
+            // `verdict=NoFrames frames=0` at t=0 -- the very stall signature
+            // this line exists to distinguish. Start one interval in.
+            let mut ticker = tokio::time::interval_at(
+                tokio::time::Instant::now() + SCREEN_AUDIO_HEALTH_INTERVAL,
+                SCREEN_AUDIO_HEALTH_INTERVAL,
+            );
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut interval_started = tokio::time::Instant::now();
             loop {
                 tokio::select! {
                     frame = queue.pop() => {
@@ -331,24 +338,15 @@ impl ScreenAudioTrack {
                         // "stopped", so a stalled capture, a silent source and a
                         // working capture delivered to a dead output device were all
                         // indistinguishable from the sharer's log.
-                        let stats = queue.stats();
-                        log::info!(
-                            "audio: screen-audio '{}' verdict={:?} frames={} audible={} silent={} peak={} delivery_failures={} dropped={} queue_depth={} in the last {}s",
-                            pump_track_name,
-                            health.verdict(),
-                            health.frames,
-                            health.audible_frames,
-                            health.frames.saturating_sub(health.audible_frames),
-                            health.peak_abs,
-                            health.delivery_failures,
-                            stats.dropped,
-                            stats.depth,
-                            SCREEN_AUDIO_HEALTH_INTERVAL.as_secs(),
-                        );
+                        reporter.report(&health, &queue.stats(), interval_started.elapsed(), false);
                         health = ScreenAudioHealth::default();
+                        interval_started = tokio::time::Instant::now();
                     }
                 }
             }
+            // The last partial interval -- and the only line a delivery failure
+            // can reach, because a failure ends the loop before the next tick.
+            reporter.report(&health, &queue.stats(), interval_started.elapsed(), true);
         });
 
         let track =
@@ -1804,6 +1802,73 @@ impl ScreenAudioHealth {
     }
 }
 
+/// Turns one pump's interval counters into log lines.
+///
+/// A line reaches `info` only when the verdict changes, and for the final line
+/// when the pump exits; the steady state is `debug`. An `info` line every 5 s
+/// per audio source would otherwise become a standing share of Sentry's
+/// 50-slot breadcrumb ring during a long share and push out the lines that
+/// explain a failure.
+struct ScreenAudioHealthReporter {
+    /// `scope_label()`, never the track name: that embeds the captured pid.
+    scope: &'static str,
+    last_verdict: Option<ScreenAudioVerdict>,
+    /// The queue's drop counter is cumulative; lines report the delta.
+    last_dropped: u64,
+}
+
+impl ScreenAudioHealthReporter {
+    fn new(scope: &'static str) -> Self {
+        Self {
+            scope,
+            last_verdict: None,
+            last_dropped: 0,
+        }
+    }
+
+    /// The level for this line and the drops since the previous one.
+    fn next_line(
+        &mut self,
+        verdict: ScreenAudioVerdict,
+        cumulative_dropped: u64,
+        final_line: bool,
+    ) -> (log::Level, u64) {
+        let dropped = cumulative_dropped.saturating_sub(self.last_dropped);
+        self.last_dropped = cumulative_dropped;
+        let changed = self.last_verdict.replace(verdict) != Some(verdict);
+        let level = if changed || final_line {
+            log::Level::Info
+        } else {
+            log::Level::Debug
+        };
+        (level, dropped)
+    }
+
+    fn report(
+        &mut self,
+        health: &ScreenAudioHealth,
+        queue: &crate::screen_audio::AudioQueueStats,
+        elapsed: Duration,
+        final_line: bool,
+    ) {
+        let verdict = health.verdict();
+        let (level, dropped) = self.next_line(verdict, queue.dropped, final_line);
+        log::log!(
+            level,
+            "audio: screen-audio scope={} verdict={verdict:?} frames={} audible={} silent={} peak={} delivery_failures={} dropped={dropped} queue_depth={} over {:.1}s{}",
+            self.scope,
+            health.frames,
+            health.audible_frames,
+            health.frames.saturating_sub(health.audible_frames),
+            health.peak_abs,
+            health.delivery_failures,
+            queue.depth,
+            elapsed.as_secs_f64(),
+            if final_line { " (final)" } else { "" },
+        );
+    }
+}
+
 /// Peak |sample| in a decoded PCM buffer. `i16::MIN` is why this returns
 /// `u16` -- `(-32768i16).abs()` overflows, `unsigned_abs()` does not.
 pub(crate) fn pcm_peak_abs(samples: &[i16]) -> u16 {
@@ -2138,6 +2203,35 @@ mod tests {
         assert_eq!(mostly_quiet.verdict(), ScreenAudioVerdict::Audio);
         assert_eq!(mostly_quiet.peak_abs, 4_000);
         assert_eq!(mostly_quiet.audible_frames, 1);
+    }
+
+    #[test]
+    fn app_audio_health_lines_reach_info_only_on_a_verdict_change_or_the_final_line() {
+        let mut reporter = ScreenAudioHealthReporter::new("process");
+        let audio = ScreenAudioVerdict::Audio;
+        assert_eq!(reporter.next_line(audio, 0, false).0, log::Level::Info);
+        // A long healthy share must not fill the breadcrumb ring.
+        for _ in 0..3 {
+            assert_eq!(reporter.next_line(audio, 0, false).0, log::Level::Debug);
+        }
+        assert_eq!(
+            reporter.next_line(ScreenAudioVerdict::Silence, 0, false).0,
+            log::Level::Info
+        );
+        assert_eq!(
+            reporter.next_line(ScreenAudioVerdict::Silence, 0, true).0,
+            log::Level::Info,
+            "the final line carries the last partial interval and any delivery failure"
+        );
+    }
+
+    #[test]
+    fn app_audio_health_reports_drops_per_line_not_since_the_share_began() {
+        let mut reporter = ScreenAudioHealthReporter::new("system");
+        let audio = ScreenAudioVerdict::Audio;
+        assert_eq!(reporter.next_line(audio, 4, false).1, 4);
+        assert_eq!(reporter.next_line(audio, 4, false).1, 0);
+        assert_eq!(reporter.next_line(audio, 9, true).1, 5);
     }
 
     #[test]
