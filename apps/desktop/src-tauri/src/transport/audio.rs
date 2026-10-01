@@ -119,6 +119,44 @@
 //! true`. This is automatic, not something this module has to opt into --
 //! documented here so it's clear it was verified, not assumed.
 //!
+//! ## Windows: other apps' audio ducks while a peer is audible
+//!
+//! Observed on Windows: while a remote peer is audible, other applications'
+//! audio is reduced -- by default BY 80%, so a user listening to music while
+//! sharing hears their own music drop to a fifth of its level. This is not a
+//! Petal routing bug; nothing in our own mixing lowers it.
+//!
+//! The likely mechanism is Windows' communications ducking, which would mean
+//! the ADM renders through a WASAPI *communications* endpoint and the OS is
+//! treating us as a call. **That premise is NOT verified in this tree.** The
+//! WASAPI implementation lives inside the prebuilt `vendor/libwebrtc` binary,
+//! which carries no source here, and the only Windows endpoint-role code we do
+//! have asks for the MULTIMEDIA role (`windows_audio_device.rs`'s
+//! `GetDefaultAudioEndpoint(flow, eMultimedia)`). So treat the mechanism as the
+//! leading hypothesis, not as established fact, and source it from libwebrtc
+//! before building anything on top of it.
+//!
+//! Not to be confused with Petal's OWN ducking (`MicDuckGate`, #845), which
+//! lowers OUR microphone during AI chat playback. This section is about the OS
+//! lowering OTHER applications because of us -- the opposite direction.
+//!
+//! The OS knob is per-user, at
+//! `HKCU\Software\Microsoft\Multimedia\Audio` -> `UserDuckingPreference`
+//! (0 = mute others, 1 = reduce others 80%, 2 = reduce 50%, 3 = do nothing).
+//! It has been observed to be **necessary but not sufficient**: one host set to
+//! `1` ducked other audio, while another host with no value at all (i.e. the
+//! reduce-by-80% default) did not duck. Ducking is evidently also endpoint- and
+//! driver-scoped, so the registry value cannot be used to predict, detect or
+//! warn about this behavior.
+//!
+//! So: no UI notice (a false alarm on every host whose driver ignores the
+//! preference is worse than the silence), and no stream-category change.
+//! Deliberately changing how we declare the playout stream would be a change
+//! to the audio path that carries the APM's reference signal, so it needs its
+//! own validation and its own before/after -- it is not a fix to apply on a
+//! hypothesis. Recorded here so the next report of "Petal lowers my other
+//! audio" is answered from this note instead of re-derived from scratch.
+//!
 //! ## Mute semantics: `LocalAudioTrack::mute()`/`unmute()`, not
 //! unpublish/republish
 //!
@@ -296,25 +334,59 @@ impl ScreenAudioTrack {
         let pump_source = native_source.clone();
         let delivery_failed = Arc::new(AtomicBool::new(false));
         let pump_delivery_failed = delivery_failed.clone();
+        let track_name = source.track_name();
+        let scope = source.scope_label();
         let pump = tauri::async_runtime::spawn(async move {
-            while let Some(frame) = queue.pop().await {
-                let audio_frame = AudioFrame {
-                    data: Cow::Owned(frame.into_samples()),
-                    sample_rate: SCREEN_AUDIO_SAMPLE_RATE,
-                    num_channels: SCREEN_AUDIO_CHANNELS as u32,
-                    samples_per_channel: SCREEN_AUDIO_SAMPLES_PER_CHANNEL as u32,
-                };
-                if let Err(error) = pump_source.capture_frame(&audio_frame).await {
-                    let detail = format!("screen audio delivery failed: {error:?}");
-                    pump_delivery_failed.store(true, Ordering::Release);
-                    queue.close();
-                    on_error(detail);
-                    break;
+            let mut health = ScreenAudioHealth::default();
+            let mut reporter = ScreenAudioHealthReporter::new(scope);
+            // `interval` fires its first tick immediately, which would log
+            // `verdict=NoFrames frames=0` at t=0 -- the very stall signature
+            // this line exists to distinguish. Start one interval in.
+            let mut ticker = tokio::time::interval_at(
+                tokio::time::Instant::now() + SCREEN_AUDIO_HEALTH_INTERVAL,
+                SCREEN_AUDIO_HEALTH_INTERVAL,
+            );
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut interval_started = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    frame = queue.pop() => {
+                        let Some(frame) = frame else { break };
+                        let samples = frame.into_samples();
+                        health.record_frame(&samples);
+                        let audio_frame = AudioFrame {
+                            data: Cow::Owned(samples),
+                            sample_rate: SCREEN_AUDIO_SAMPLE_RATE,
+                            num_channels: SCREEN_AUDIO_CHANNELS as u32,
+                            samples_per_channel: SCREEN_AUDIO_SAMPLES_PER_CHANNEL as u32,
+                        };
+                        if let Err(error) = pump_source.capture_frame(&audio_frame).await {
+                            health.record_delivery_failure();
+                            let detail = format!("screen audio delivery failed: {error:?}");
+                            pump_delivery_failed.store(true, Ordering::Release);
+                            queue.close();
+                            on_error(detail);
+                            break;
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        // One line per interval, mirroring the video path's health
+                        // line. This is what the reported bug could not answer: the
+                        // app-audio path logged nothing between "published" and
+                        // "stopped", so a stalled capture, a silent source and a
+                        // working capture delivered to a dead output device were all
+                        // indistinguishable from the sharer's log.
+                        reporter.report(&health, &queue.stats(), interval_started.elapsed(), false);
+                        health = ScreenAudioHealth::default();
+                        interval_started = tokio::time::Instant::now();
+                    }
                 }
             }
+            // The last partial interval -- and the only line a delivery failure
+            // can reach, because a failure ends the loop before the next tick.
+            reporter.report(&health, &queue.stats(), interval_started.elapsed(), true);
         });
 
-        let track_name = source.track_name();
         let track =
             LocalAudioTrack::create_audio_track(&track_name, RtcAudioSource::Native(native_source));
         let local_participant = room.local_participant();
@@ -1715,6 +1787,126 @@ pub(crate) const AUDIBLE_PEAK_FLOOR: u16 = 64;
 /// track into a healthy verdict; 5 frames is 50 ms of real content.
 const AUDIBLE_FRAMES_MIN: u64 = 5;
 
+/// How often the app-audio pump reports what it captured. Matches the video
+/// path's health cadence, so one grep of a log shows both halves of a share.
+const SCREEN_AUDIO_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// What one interval of app-audio capture actually contained. The distinction is
+/// the diagnostic: `NoFrames` means the capture path stalled, `Silence` means it
+/// is running and the source app is producing nothing, and `Audio` means the
+/// samples existed and were handed to the encoder. All three were previously
+/// indistinguishable from the sharer's log -- no line was emitted between
+/// "published" and "stopped" -- which is why the reported bug could not be
+/// narrowed down from a log alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScreenAudioVerdict {
+    NoFrames,
+    Silence,
+    Audio,
+}
+
+/// Per-interval app-audio capture counters, accumulated by the pump and logged
+/// once per interval. Deliberately separate from the pump so the verdict above
+/// is a testable summary rather than three strings a human has to diff.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScreenAudioHealth {
+    pub(crate) frames: u64,
+    pub(crate) audible_frames: u64,
+    pub(crate) peak_abs: u16,
+    pub(crate) delivery_failures: u64,
+}
+
+impl ScreenAudioHealth {
+    fn record_frame(&mut self, samples: &[i16]) {
+        self.frames += 1;
+        self.peak_abs = self.peak_abs.max(pcm_peak_abs(samples));
+        if pcm_is_audible(samples) {
+            self.audible_frames += 1;
+        }
+    }
+
+    fn record_delivery_failure(&mut self) {
+        self.delivery_failures += 1;
+    }
+
+    fn verdict(&self) -> ScreenAudioVerdict {
+        if self.frames == 0 {
+            ScreenAudioVerdict::NoFrames
+        } else if self.audible_frames == 0 {
+            ScreenAudioVerdict::Silence
+        } else {
+            ScreenAudioVerdict::Audio
+        }
+    }
+}
+
+/// Turns one pump's interval counters into log lines.
+///
+/// A line reaches `info` only when the verdict changes, and for the final line
+/// when the pump exits; the steady state is `debug`. An `info` line every 5 s
+/// per audio source would otherwise become a standing share of Sentry's
+/// 50-slot breadcrumb ring during a long share and push out the lines that
+/// explain a failure.
+struct ScreenAudioHealthReporter {
+    /// `scope_label()`, never the track name: that embeds the captured pid.
+    scope: &'static str,
+    last_verdict: Option<ScreenAudioVerdict>,
+    /// The queue's drop counter is cumulative; lines report the delta.
+    last_dropped: u64,
+}
+
+impl ScreenAudioHealthReporter {
+    fn new(scope: &'static str) -> Self {
+        Self {
+            scope,
+            last_verdict: None,
+            last_dropped: 0,
+        }
+    }
+
+    /// The level for this line and the drops since the previous one.
+    fn next_line(
+        &mut self,
+        verdict: ScreenAudioVerdict,
+        cumulative_dropped: u64,
+        final_line: bool,
+    ) -> (log::Level, u64) {
+        let dropped = cumulative_dropped.saturating_sub(self.last_dropped);
+        self.last_dropped = cumulative_dropped;
+        let changed = self.last_verdict.replace(verdict) != Some(verdict);
+        let level = if changed || final_line {
+            log::Level::Info
+        } else {
+            log::Level::Debug
+        };
+        (level, dropped)
+    }
+
+    fn report(
+        &mut self,
+        health: &ScreenAudioHealth,
+        queue: &crate::screen_audio::AudioQueueStats,
+        elapsed: Duration,
+        final_line: bool,
+    ) {
+        let verdict = health.verdict();
+        let (level, dropped) = self.next_line(verdict, queue.dropped, final_line);
+        log::log!(
+            level,
+            "audio: screen-audio scope={} verdict={verdict:?} frames={} audible={} silent={} peak={} delivery_failures={} dropped={dropped} queue_depth={} over {:.1}s{}",
+            self.scope,
+            health.frames,
+            health.audible_frames,
+            health.frames.saturating_sub(health.audible_frames),
+            health.peak_abs,
+            health.delivery_failures,
+            queue.depth,
+            elapsed.as_secs_f64(),
+            if final_line { " (final)" } else { "" },
+        );
+    }
+}
+
 /// Peak |sample| in a decoded PCM buffer. `i16::MIN` is why this returns
 /// `u16` -- `(-32768i16).abs()` overflows, `unsigned_abs()` does not.
 pub(crate) fn pcm_peak_abs(samples: &[i16]) -> u16 {
@@ -2015,6 +2207,79 @@ async fn watch_remote_audio_track(
 
 #[cfg(test)]
 mod tests {
+    /// The distinction this exists for: an interval where the capture produced
+    /// nothing at all is NOT the same finding as one that produced silence, and
+    /// the reported bug was invisible precisely because no log line separated
+    /// them.
+    #[test]
+    fn app_audio_health_separates_no_frames_from_silence_from_audio() {
+        let mut stalled = ScreenAudioHealth::default();
+        assert_eq!(stalled.verdict(), ScreenAudioVerdict::NoFrames);
+
+        let mut silent = ScreenAudioHealth::default();
+        for _ in 0..50 {
+            silent.record_frame(&vec![0i16; SCREEN_AUDIO_SAMPLES_PER_CHANNEL * SCREEN_AUDIO_CHANNELS]);
+        }
+        assert_eq!(silent.verdict(), ScreenAudioVerdict::Silence);
+        assert_eq!(silent.frames, 50);
+        assert_eq!(silent.peak_abs, 0);
+
+        let mut audible = ScreenAudioHealth::default();
+        for _ in 0..50 {
+            audible.record_frame(&vec![1_000i16; SCREEN_AUDIO_SAMPLES_PER_CHANNEL * SCREEN_AUDIO_CHANNELS]);
+        }
+        audible.record_delivery_failure();
+        assert_eq!(audible.verdict(), ScreenAudioVerdict::Audio);
+        assert_eq!(audible.audible_frames, 50);
+        assert_eq!(audible.delivery_failures, 1);
+
+        // One loud frame among quiet ones still counts as audio, and the peak
+        // remembers it -- the level readout must not be an average of silence.
+        let mut mostly_quiet = ScreenAudioHealth::default();
+        mostly_quiet.record_frame(&vec![0i16; 16]);
+        mostly_quiet.record_frame(&vec![4_000i16; 16]);
+        assert_eq!(mostly_quiet.verdict(), ScreenAudioVerdict::Audio);
+        assert_eq!(mostly_quiet.peak_abs, 4_000);
+        assert_eq!(mostly_quiet.audible_frames, 1);
+    }
+
+    #[test]
+    fn app_audio_health_lines_reach_info_only_on_a_verdict_change_or_the_final_line() {
+        let mut reporter = ScreenAudioHealthReporter::new("process");
+        let audio = ScreenAudioVerdict::Audio;
+        assert_eq!(reporter.next_line(audio, 0, false).0, log::Level::Info);
+        // A long healthy share must not fill the breadcrumb ring.
+        for _ in 0..3 {
+            assert_eq!(reporter.next_line(audio, 0, false).0, log::Level::Debug);
+        }
+        assert_eq!(
+            reporter.next_line(ScreenAudioVerdict::Silence, 0, false).0,
+            log::Level::Info
+        );
+        assert_eq!(
+            reporter.next_line(ScreenAudioVerdict::Silence, 0, true).0,
+            log::Level::Info,
+            "the final line carries the last partial interval and any delivery failure"
+        );
+    }
+
+    #[test]
+    fn app_audio_health_reports_drops_per_line_not_since_the_share_began() {
+        let mut reporter = ScreenAudioHealthReporter::new("system");
+        let audio = ScreenAudioVerdict::Audio;
+        assert_eq!(reporter.next_line(audio, 4, false).1, 4);
+        assert_eq!(reporter.next_line(audio, 4, false).1, 0);
+        assert_eq!(reporter.next_line(audio, 9, true).1, 5);
+    }
+
+    #[test]
+    fn app_audio_health_does_not_overflow_on_full_scale_negative_samples() {
+        let mut health = ScreenAudioHealth::default();
+        health.record_frame(&[i16::MIN, i16::MIN]);
+        assert_eq!(health.peak_abs, i16::MIN.unsigned_abs());
+        assert_eq!(health.verdict(), ScreenAudioVerdict::Audio);
+    }
+
     /// Env-var tests mutate process-global state; serialize them so a sibling
     /// test cannot observe a half-set pair (mutation-check trap: a racing test
     /// writing the same globals can rescue a broken guard).
