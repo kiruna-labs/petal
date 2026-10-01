@@ -301,7 +301,7 @@ const FULL_SIMULCAST_TOP_MAX_BITRATE_BPS: u64 = 16_000_000;
 #[cfg(target_os = "windows")]
 const FULL_SIMULCAST_TOTAL_BUDGET_BPS: u64 = 13_000_000;
 #[cfg(not(target_os = "windows"))]
-const FULL_SIMULCAST_TOTAL_BUDGET_BPS: u64 = 9_250_000;
+const FULL_SIMULCAST_TOTAL_BUDGET_BPS: u64 = 8_000_000;
 /// Minimum top-layer hint when a large lower layer consumes most of the
 /// combined budget. It is intentionally below the raw 4 Mbps floor because
 /// the total-budget invariant is more important than layer ordering.
@@ -309,32 +309,65 @@ const FULL_SIMULCAST_TOP_BUDGETED_MIN_BITRATE_BPS: u64 = 1_500_000;
 /// Top-rung asks at 1920x1080/30 that [`FULL_SIMULCAST_TOTAL_BUDGET_BPS`]
 /// implies for each ladder, pinned per platform instead of derived from that
 /// constant: a change to either platform's ladder must fail a fixture rather
-/// than silently move the expectation along with it. Every non-Windows value is
-/// the pre-raise one, so the macOS arm of these fixtures is itself the evidence
-/// that macOS' ladder did not move.
+/// than silently move the expectation along with it.
+///
+/// The non-Windows arms are the values macOS ships today, so a change that
+/// reaches macOS fails here instead of passing with a moved expectation. Note
+/// what that does NOT prove: a fixture updated in the same commit as the
+/// constant it pins proves nothing at all. The macOS arms were verified against
+/// the pre-raise tree, not re-derived from the new budget.
 #[cfg(test)]
 const EXPECTED_LEGACY_TOP_BPS: u64 = if cfg!(target_os = "windows") {
     11_125_000
 } else {
-    7_375_000
+    6_125_000
 };
 #[cfg(test)]
 const EXPECTED_RAISED_TOP_BPS: u64 = if cfg!(target_os = "windows") {
     8_937_500
 } else {
-    5_187_500
+    3_937_500
+};
+/// The default ladder's adaptive rung. Windows scales the source by 2; macOS
+/// keeps the three-quarter rung it ships today (see `full_share_simulcast_layers`).
+/// `HighOnly` and `ReducedQ` are budgeted against the HALF rung's cost by
+/// design (see the `None if high_only` arm), so that the experiment changes
+/// layer count without also changing the top ceiling. On Windows that still
+/// equals `EXPECTED_TWO_RUNG_TOP_BPS`, because Windows' default rung IS the
+/// half rung. On macOS the default rung is three-quarter, so the two diverge.
+/// Both ladders are opt-in via `PETAL_SHARE_LADDER` and are never the shipped
+/// macOS default, so this divergence changes nothing a user receives -- but it
+/// does mean the "equal to the normal two-rung top ceiling" intent now holds
+/// only on Windows. Worth revisiting if either ladder ever ships.
+#[cfg(test)]
+const EXPECTED_HALF_BUDGETED_TOP_BPS: u64 = if cfg!(target_os = "windows") {
+    11_197_440
+} else {
+    6_750_000
+};
+#[cfg(test)]
+const EXPECTED_TWO_RUNG_LOWER_BPS: u64 = if cfg!(target_os = "windows") {
+    1_250_000
+} else {
+    2_812_500
+};
+#[cfg(test)]
+const EXPECTED_TWO_RUNG_LOWER_SIZE: (u32, u32) = if cfg!(target_os = "windows") {
+    (960, 540)
+} else {
+    (1440, 810)
 };
 #[cfg(test)]
 const EXPECTED_TWO_RUNG_TOP_BPS: u64 = if cfg!(target_os = "windows") {
     11_197_440
 } else {
-    8_000_000
+    5_187_500
 };
 #[cfg(test)]
 const EXPECTED_4K_LEGACY_TOP_BPS: u64 = if cfg!(target_os = "windows") {
     7_375_000
 } else {
-    3_625_000
+    2_375_000
 };
 /// Measurement-only q-rung ceiling. This leaves the normal two-rung ladder
 /// unchanged while testing whether the lower rung monopolizes startup budget.
@@ -598,12 +631,25 @@ fn share_fps_for_geometry(width: u32, height: u32, configured_fps: f64) -> (f64,
 /// the bitrate ask, the encoder's own `max_framerate` and the session's push
 /// gate are all derived from one number rather than three.
 fn effective_share_cadence(quality: ShareQuality, width: u32, height: u32) -> f64 {
-    let requested = quality.encode_fps();
-    let (effective, capped) = share_fps_for_geometry(width, height, requested);
-    if capped {
-        warn_share_fps_geometry_capped_once(width, height, requested);
+    // macOS keeps the cadence it ships today. `full_share_top_ask_bps` is the
+    // pre-existing per-pixel formula extracted verbatim, so returning
+    // `capture_fps()` here reproduces both the old bitrate ask and the old
+    // `max_framerate` exactly. The Level 5.2 geometry cap and the
+    // PETAL_SHARE_ENCODE_FPS override are Windows-side only for now.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (width, height);
+        f64::from(quality.capture_fps())
     }
-    effective
+    #[cfg(target_os = "windows")]
+    {
+        let requested = quality.encode_fps();
+        let (effective, capped) = share_fps_for_geometry(width, height, requested);
+        if capped {
+            warn_share_fps_geometry_capped_once(width, height, requested);
+        }
+        effective
+    }
 }
 
 /// One-shot for the whole process, not per share or per publish: the condition
@@ -2693,7 +2739,26 @@ fn full_share_simulcast_layers(
         ],
         // The default lower rung matches LiveKit JS: scale the source by 2,
         // then let maintain-resolution shed cadence before spatial detail.
-        FullShareSimulcastLadder::TwoRung | FullShareSimulcastLadder::ReducedQ => {
+        // The SHIPPED default. Windows never reaches this arm --
+        // `effective_full_share_ladder` forces `HighOnly` there -- so a
+        // half-resolution rung here would land ONLY on macOS. macOS keeps the
+        // three-quarter rung it ships today; changing it is a macOS ladder
+        // change with its own measurement, not a side effect of Windows work.
+        FullShareSimulcastLadder::TwoRung => {
+            #[cfg(target_os = "windows")]
+            let (lower_width, lower_height) = (half_width, half_height);
+            #[cfg(not(target_os = "windows"))]
+            let (lower_width, lower_height) = (three_quarter_width, three_quarter_height);
+            vec![VideoPreset::new(
+                lower_width,
+                lower_height,
+                full_share_half_layer_max_bitrate(lower_width, lower_height),
+                FULL_SIMULCAST_HALF_MAX_FRAMERATE_FPS,
+            )]
+        }
+        // Opt-in measurement ladder: kept exactly as designed, on a half rung,
+        // on every platform. Unreachable unless PETAL_SHARE_LADDER says so.
+        FullShareSimulcastLadder::ReducedQ => {
             vec![VideoPreset::new(
                 half_width,
                 half_height,
@@ -4547,7 +4612,12 @@ mod track_name_tests {
             (
                 FullShareSimulcastLadder::TwoRung,
                 true,
-                vec![(960, 540, 1_250_000, 30.0)],
+                vec![(
+                    EXPECTED_TWO_RUNG_LOWER_SIZE.0,
+                    EXPECTED_TWO_RUNG_LOWER_SIZE.1,
+                    EXPECTED_TWO_RUNG_LOWER_BPS,
+                    30.0,
+                )],
             ),
             (FullShareSimulcastLadder::HighOnly, false, vec![]),
             (FullShareSimulcastLadder::ReducedQ, true, vec![(960, 540, 400_000, 30.0)]),
@@ -4581,9 +4651,10 @@ mod track_name_tests {
                     EXPECTED_LEGACY_TOP_BPS
                 }
                 FullShareSimulcastLadder::Raised => EXPECTED_RAISED_TOP_BPS,
-                FullShareSimulcastLadder::TwoRung
-                | FullShareSimulcastLadder::HighOnly
-                | FullShareSimulcastLadder::ReducedQ => EXPECTED_TWO_RUNG_TOP_BPS,
+                FullShareSimulcastLadder::TwoRung => EXPECTED_TWO_RUNG_TOP_BPS,
+                FullShareSimulcastLadder::HighOnly | FullShareSimulcastLadder::ReducedQ => {
+                    EXPECTED_HALF_BUDGETED_TOP_BPS
+                }
             };
             assert_eq!(full_encoding.max_bitrate, expected_top, "{ladder:?}");
             assert_eq!(full_encoding.max_framerate, 30.0);
@@ -4748,9 +4819,9 @@ mod track_name_tests {
         // fit the budget. On the web-parity budget the top is the web-shaped
         // 8,000,000; on Windows' raised budget the top rung's own 0.18 bpp
         // ceiling binds first and the budget is left with slack.
-        let top = budgeted_top_bitrate(11_197_440, 1_250_000);
+        let top = budgeted_top_bitrate(11_197_440, EXPECTED_TWO_RUNG_LOWER_BPS);
         assert_eq!(top, EXPECTED_TWO_RUNG_TOP_BPS);
-        assert!(top + 1_250_000 <= FULL_SIMULCAST_TOTAL_BUDGET_BPS);
+        assert!(top + EXPECTED_TWO_RUNG_LOWER_BPS <= FULL_SIMULCAST_TOTAL_BUDGET_BPS);
     }
 
     #[test]
@@ -4809,7 +4880,7 @@ mod track_name_tests {
             .video_encoding
             .as_ref()
             .expect("full share must keep an explicit top-layer ceiling");
-        assert_eq!(lower_sum, 1_250_000);
+        assert_eq!(lower_sum, EXPECTED_TWO_RUNG_LOWER_BPS);
         assert_eq!(top.max_bitrate, EXPECTED_TWO_RUNG_TOP_BPS);
         assert!(
             lower_sum + top.max_bitrate <= FULL_SIMULCAST_TOTAL_BUDGET_BPS,
