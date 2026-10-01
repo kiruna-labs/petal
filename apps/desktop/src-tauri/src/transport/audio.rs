@@ -119,6 +119,44 @@
 //! true`. This is automatic, not something this module has to opt into --
 //! documented here so it's clear it was verified, not assumed.
 //!
+//! ## Windows: other apps' audio ducks while a peer is audible
+//!
+//! Observed on Windows: while a remote peer is audible, other applications'
+//! audio is reduced -- by default BY 80%, so a user listening to music while
+//! sharing hears their own music drop to a fifth of its level. This is not a
+//! Petal routing bug; nothing in our own mixing lowers it.
+//!
+//! The likely mechanism is Windows' communications ducking, which would mean
+//! the ADM renders through a WASAPI *communications* endpoint and the OS is
+//! treating us as a call. **That premise is NOT verified in this tree.** The
+//! WASAPI implementation lives inside the prebuilt `vendor/libwebrtc` binary,
+//! which carries no source here, and the only Windows endpoint-role code we do
+//! have asks for the MULTIMEDIA role (`windows_audio_device.rs`'s
+//! `GetDefaultAudioEndpoint(flow, eMultimedia)`). So treat the mechanism as the
+//! leading hypothesis, not as established fact, and source it from libwebrtc
+//! before building anything on top of it.
+//!
+//! Not to be confused with Petal's OWN ducking (`MicDuckGate`, #845), which
+//! lowers OUR microphone during AI chat playback. This section is about the OS
+//! lowering OTHER applications because of us -- the opposite direction.
+//!
+//! The OS knob is per-user, at
+//! `HKCU\Software\Microsoft\Multimedia\Audio` -> `UserDuckingPreference`
+//! (0 = mute others, 1 = reduce others 80%, 2 = reduce 50%, 3 = do nothing).
+//! It has been observed to be **necessary but not sufficient**: one host set to
+//! `1` ducked other audio, while another host with no value at all (i.e. the
+//! reduce-by-80% default) did not duck. Ducking is evidently also endpoint- and
+//! driver-scoped, so the registry value cannot be used to predict, detect or
+//! warn about this behavior.
+//!
+//! So: no UI notice (a false alarm on every host whose driver ignores the
+//! preference is worse than the silence), and no stream-category change.
+//! Deliberately changing how we declare the playout stream would be a change
+//! to the audio path that carries the APM's reference signal, so it needs its
+//! own validation and its own before/after -- it is not a fix to apply on a
+//! hypothesis. Recorded here so the next report of "Petal lowers my other
+//! audio" is answered from this note instead of re-derived from scratch.
+//!
 //! ## Mute semantics: `LocalAudioTrack::mute()`/`unmute()`, not
 //! unpublish/republish
 //!
