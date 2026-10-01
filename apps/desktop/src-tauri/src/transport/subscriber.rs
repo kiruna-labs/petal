@@ -516,6 +516,52 @@ pub fn track_unsubscribe_decision(
     }
 }
 
+/// What a remote sharer's metadata update means for one of its open windows, in
+/// the Windows compositor feed.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataWindowVerdict {
+    /// The update declares the window, or is not Petal's title map at all.
+    Keep,
+    /// Petal's title map no longer declares the window, but the SFU still
+    /// holds a publication for it: keep the last frame on screen.
+    HoldForPublication,
+    /// Petal's title map no longer declares the window and the SFU holds no
+    /// publication for it: the share is gone.
+    Retire,
+}
+
+/// Decide whether a sharer's metadata update retires one of its windows.
+///
+/// This is the Windows feed's fallback for a `TrackUnpublished` the pinned SDK
+/// never delivers. Only metadata carrying Petal's title map counts, so unrelated
+/// or legacy participant metadata can never close a window. Even then the title
+/// map is not authority on its own: share start publishes and writes metadata
+/// concurrently, so another write from the same sharer (a title refresh on a
+/// different window, a failed-start clear) can land after this window's
+/// `TrackSubscribed` and before its title entry. The window is retired only when
+/// `publication_exists` -- in production, [`window_publication_exists`] -- says
+/// the SFU holds nothing for it, which is the same rule every other teardown
+/// path follows: close only when no publication exists, otherwise hold the last
+/// frame. The lookup runs only when the map omits the window.
+#[cfg(any(target_os = "windows", test))]
+fn metadata_window_verdict(
+    metadata: &str,
+    window_id: u32,
+    publication_exists: impl FnOnce() -> bool,
+) -> MetadataWindowVerdict {
+    let undeclared = crate::transport::publisher::has_shared_window_title_metadata(metadata)
+        && crate::transport::publisher::shared_window_title_from_metadata(metadata, window_id)
+            .is_none();
+    if !undeclared {
+        MetadataWindowVerdict::Keep
+    } else if publication_exists() {
+        MetadataWindowVerdict::HoldForPublication
+    } else {
+        MetadataWindowVerdict::Retire
+    }
+}
+
 /// Does the SFU hold any publication for this window whose sid is not in
 /// `excluding_sids`? Reads `reconcile::discover_window_publications`, the
 /// established authoritative seam, rather than replaying events -- the whole
@@ -2669,11 +2715,40 @@ pub(crate) fn start_compositor_feed(
                             continue;
                         }
                         let window_id = window.window_id;
+                        // The pinned SDK can fail to deliver the remote
+                        // TrackUnpublished event when the sharer's sender
+                        // teardown negotiation fails or races with a leave.
+                        // The sender still clears this Petal metadata after
+                        // stopping the share, so an update that no longer
+                        // declares the window is a visual-teardown fallback --
+                        // but only once the SFU confirms no publication is
+                        // left (see `metadata_window_verdict`).
+                        match metadata_window_verdict(&metadata, window_id, || {
+                            window_publication_exists(&room, &owner_identity, window_id, &[])
+                        }) {
+                            MetadataWindowVerdict::Keep => {}
+                            MetadataWindowVerdict::HoldForPublication => {
+                                log::info!(
+                                    "windows compositor feed: metadata no longer declares window {window_id} from '{owner_identity}', but the SFU still holds a publication; the window keeps its last frame on screen"
+                                );
+                                continue;
+                            }
+                            MetadataWindowVerdict::Retire => {
+                                log::info!(
+                                    "windows compositor feed: metadata no longer declares window {window_id} from '{owner_identity}' and the SFU holds no publication, removing stale window"
+                                );
+                                let key = (owner_identity.clone(), window_id);
+                                crate::windows_compositor::remove_window(&app, key.clone()).await;
+                                window_subscribed_at.remove(&key);
+                                continue;
+                            }
+                        }
                         let source_title =
                             crate::transport::publisher::shared_window_title_from_metadata(
                                 &metadata, window_id,
-                            )
-                            .unwrap_or_else(|| window.source_title.clone());
+                            );
+                        let source_title =
+                            source_title.unwrap_or_else(|| window.source_title.clone());
                         let source_kind =
                             crate::transport::publisher::shared_window_kind_from_metadata(
                                 &metadata, window_id,
@@ -3768,12 +3843,12 @@ fn retire_no_frame_windows(
     for (key, state) in retire {
         let window_id = key.window_id;
         // #627: decide BEFORE touching the receive state. A stall is not an
-        // ended share: while the SFU still holds a publication the share is
-        // real and merely not arriving, so hiding the window would make a live
-        // share vanish. Hold its last frame and KEEP the receive state, so this
-        // watchdog can re-arm if the stall later becomes a real disappearance.
-        // (Removing it made the watchdog one-shot and, combined with the
-        // registry drop, left the window with no teardown path at all.)
+        // ended share during the initial recovery window: while the SFU still
+        // holds a publication the share may be real and merely not arriving,
+        // so hiding it immediately would make a live share vanish. Hold its
+        // last frame and KEEP the receive state, but only until the hard
+        // stale-publication deadline. A source crash can leave the publication
+        // present with no sender able to negotiate its removal.
         let publication_exists =
             window_publication_exists(room, &key.owner_identity, window_id, &[]);
         let silence = now.duration_since(state.last_frame_at.unwrap_or(state.subscribed_at));
@@ -3859,6 +3934,71 @@ fn retire_no_frame_windows(
 mod tests {
     use super::*;
 
+    /// Metadata as a sharer writes it: Petal's title map with these windows.
+    fn title_map(windows: &[(u32, &str)]) -> String {
+        let titles: serde_json::Map<String, serde_json::Value> = windows
+            .iter()
+            .map(|(id, title)| (id.to_string(), serde_json::Value::from(*title)))
+            .collect();
+        let metadata = serde_json::json!({ "petalWindowTitles": titles }).to_string();
+        // Tie the fixture to the production reader, not to a key spelled here.
+        assert!(crate::transport::publisher::has_shared_window_title_metadata(&metadata));
+        metadata
+    }
+
+    fn no_lookup() -> bool {
+        panic!("a window the metadata still declares must not cost an SFU lookup")
+    }
+
+    #[test]
+    fn a_second_window_starting_while_the_first_retitles_is_held_not_closed() {
+        // Sharing A, then starting B: B is published and subscribed, and a
+        // title refresh for A lands before B's own title entry is written. The
+        // map omits B, but the SFU holds B's publication, so B must stay up.
+        let a_retitled = title_map(&[(1, "A - edited")]);
+        assert_eq!(
+            metadata_window_verdict(&a_retitled, 2, || true),
+            MetadataWindowVerdict::HoldForPublication
+        );
+        assert_eq!(
+            metadata_window_verdict(&a_retitled, 1, no_lookup),
+            MetadataWindowVerdict::Keep
+        );
+    }
+
+    #[test]
+    fn a_cleared_title_map_retires_a_window_only_when_no_publication_is_left() {
+        // The sharer stopped and cleared the map, and the TrackUnpublished
+        // never arrived: this is the case the fallback exists for.
+        let cleared = title_map(&[]);
+        assert_eq!(
+            metadata_window_verdict(&cleared, 7, || false),
+            MetadataWindowVerdict::Retire
+        );
+        // The same update while the SFU still reports the publication holds.
+        assert_eq!(
+            metadata_window_verdict(&cleared, 7, || true),
+            MetadataWindowVerdict::HoldForPublication
+        );
+    }
+
+    #[test]
+    fn metadata_that_is_not_petals_title_map_never_touches_a_window() {
+        for metadata in [
+            "",
+            "not json",
+            "{}",
+            r#"{"displayName":"legacy"}"#,
+            r#"{"petalWindowTitles":[]}"#,
+        ] {
+            assert_eq!(
+                metadata_window_verdict(metadata, 7, no_lookup),
+                MetadataWindowVerdict::Keep,
+                "{metadata:?}"
+            );
+        }
+    }
+
     #[test]
     fn stale_publication_deadline_is_bounded_and_held_windows_rearm() {
         assert!(!stale_publication_should_retire(
@@ -3887,6 +4027,148 @@ mod tests {
             no_frame_decision(hard_stale, subscribed, Some(subscribed), false, true, false, false),
             NoFrameDecision::Keep
         );
+    }
+
+    #[test]
+    fn low_fps_does_not_trigger_receiver_downgrade() {
+        // A low decoded rate is ambiguous: capture, source adaptation, and
+        // encoding can all cause it. Only a silent subscription is eligible
+        // for the deliberate lower-layer fallback.
+        assert_eq!(
+            starvation_action(Duration::from_secs(4), false, None, 0),
+            StarvationAction::Keep
+        );
+        assert_eq!(
+            starvation_action(STARVATION_DOWNGRADE_AFTER, false, None, 0),
+            StarvationAction::DowngradeToLow
+        );
+    }
+
+    #[test]
+    fn windows_media_lifecycle_acceptance_matrix_covers_weak_receiver_and_republish() {
+        assert_eq!(
+            teardown_decision(Some("old"), "old", true),
+            TeardownDecision::HoldForReplacement
+        );
+        assert_eq!(
+            teardown_decision(Some("old"), "old", false),
+            TeardownDecision::RemoveWindow
+        );
+        assert_eq!(
+            teardown_decision(Some("new"), "old", false),
+            TeardownDecision::IgnoreSuperseded
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_media_lifecycle_runtime_matrix_drives_terminal_events() {
+        // Drive the production lifecycle helpers in the same order as the
+        // Windows SDK events: delayed unpublish, replacement, terminal stop,
+        // then reconnect/leave. This is intentionally an executable matrix,
+        // not a source-shape assertion.
+        let states: Arc<Mutex<HashMap<ReceiveWindowKey, ReceiveWindowState>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let key = ReceiveWindowKey::new("windows-runtime-owner".to_string(), 9001);
+        let old_cancel = CancellationToken::new();
+        insert_window_state(
+            &states,
+            key.clone(),
+            ReceiveWindowState::new(
+                "windows-runtime-owner".to_string(),
+                "petal-window-9001".to_string(),
+                VideoColorProfile::BT601_VIDEO,
+                Instant::now(),
+                old_cancel.clone(),
+            ),
+        );
+
+        // A transient unsubscribe holds the state; it is not a terminal
+        // removal while the SFU can still deliver a replacement publication.
+        assert_eq!(
+            teardown_decision(Some("sid-old"), "sid-old", true),
+            TeardownDecision::HoldForReplacement
+        );
+        let old_task = tokio::spawn({
+            let cancel = old_cancel.clone();
+            async move {
+                let mut stream = futures::stream::pending::<()>();
+                assert!(matches!(
+                    next_frame_or_cancelled(&mut stream, &cancel).await,
+                    FrameOrCancelled::Cancelled
+                ));
+            }
+        });
+        tokio::task::yield_now().await;
+
+        // The real replacement path inserts through this helper. It must
+        // cancel the old decoder even when no explicit remove event arrived.
+        let new_cancel = CancellationToken::new();
+        insert_window_state(
+            &states,
+            key.clone(),
+            ReceiveWindowState::new(
+                "windows-runtime-owner".to_string(),
+                "petal-window-9001-replacement".to_string(),
+                VideoColorProfile::BT601_VIDEO,
+                Instant::now(),
+                new_cancel.clone(),
+            ),
+        );
+        tokio::time::timeout(Duration::from_secs(2), old_task)
+            .await
+            .expect("replacement must cancel the old decoder")
+            .expect("old decoder task must not panic");
+        assert!(!new_cancel.is_cancelled());
+
+        // A genuine terminal unpublish removes the successor and cancels its
+        // decoder; a stale old event cannot remove it first.
+        assert_eq!(
+            teardown_decision(Some("sid-new"), "sid-old", false),
+            TeardownDecision::IgnoreSuperseded
+        );
+        assert_eq!(
+            teardown_decision(Some("sid-new"), "sid-new", false),
+            TeardownDecision::RemoveWindow
+        );
+        assert!(remove_window_state(&states, &key).is_some());
+        assert!(new_cancel.is_cancelled());
+        assert!(states.lock_unpoisoned().is_empty());
+
+        // Reconnect/leave drains every remaining decode loop through the same
+        // production helper used by the feed loop.
+        let mut handles = Vec::new();
+        for window_id in [9002_u32, 9003_u32] {
+            let reconnect_key =
+                ReceiveWindowKey::new("windows-runtime-owner".to_string(), window_id);
+            let cancel = CancellationToken::new();
+            insert_window_state(
+                &states,
+                reconnect_key,
+                ReceiveWindowState::new(
+                    "windows-runtime-owner".to_string(),
+                    format!("petal-window-{window_id}"),
+                    VideoColorProfile::BT601_VIDEO,
+                    Instant::now(),
+                    cancel.clone(),
+                ),
+            );
+            handles.push(tokio::spawn(async move {
+                let mut stream = futures::stream::pending::<()>();
+                assert!(matches!(
+                    next_frame_or_cancelled(&mut stream, &cancel).await,
+                    FrameOrCancelled::Cancelled
+                ));
+            }));
+        }
+        tokio::task::yield_now().await;
+        cancel_all_window_states(&states);
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("reconnect must terminate every decoder")
+                .expect("reconnect decoder task must not panic");
+        }
+        assert!(states.lock_unpoisoned().is_empty());
     }
 
     // ---- Starvation watchdog policy --------------------------------------
