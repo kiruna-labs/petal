@@ -119,17 +119,26 @@
 //! true`. This is automatic, not something this module has to opt into --
 //! documented here so it's clear it was verified, not assumed.
 //!
-//! ## Windows: remote-audio playout is a communications stream, and the OS
-//! treats it as one
+//! ## Windows: other apps' audio ducks while a peer is audible
 //!
-//! The ADM renders remote audio through a WASAPI *communications* endpoint
-//! (that stream category is what WebRTC's ADM asks for, and it is also what
-//! keeps the AEC/reference path valid). Windows therefore applies
-//! communications ducking: while a peer is audible, other apps' audio is
-//! reduced -- by default BY 80%, so a user listening to music while sharing
-//! hears their own music drop to a fifth of its level. This is not a Petal bug
-//! in the routing sense; it is our own audio stack telling Windows we are a
-//! call.
+//! Observed on Windows: while a remote peer is audible, other applications'
+//! audio is reduced -- by default BY 80%, so a user listening to music while
+//! sharing hears their own music drop to a fifth of its level. This is not a
+//! Petal routing bug; nothing in our own mixing lowers it.
+//!
+//! The likely mechanism is Windows' communications ducking, which would mean
+//! the ADM renders through a WASAPI *communications* endpoint and the OS is
+//! treating us as a call. **That premise is NOT verified in this tree.** The
+//! WASAPI implementation lives inside the prebuilt `vendor/libwebrtc` binary,
+//! which carries no source here, and the only Windows endpoint-role code we do
+//! have asks for the MULTIMEDIA role (`windows_audio_device.rs`'s
+//! `GetDefaultAudioEndpoint(flow, eMultimedia)`). So treat the mechanism as the
+//! leading hypothesis, not as established fact, and source it from libwebrtc
+//! before building anything on top of it.
+//!
+//! Not to be confused with Petal's OWN ducking (`MicDuckGate`, #845), which
+//! lowers OUR microphone during AI chat playback. This section is about the OS
+//! lowering OTHER applications because of us -- the opposite direction.
 //!
 //! The OS knob is per-user, at
 //! `HKCU\Software\Microsoft\Multimedia\Audio` -> `UserDuckingPreference`
@@ -141,13 +150,12 @@
 //! warn about this behavior.
 //!
 //! So: no UI notice (a false alarm on every host whose driver ignores the
-//! preference is worse than the silence), and no category change. Owning the
-//! playout stream with a non-communications category would stop the AEC
-//! reference from being the same stream the far end hears, which invalidates
-//! the echo-cancellation assumptions documented above -- that is a design
-//! change with its own validation, not a fix. Recorded here so the next report
-//! of "Petal lowers my other audio" is answered from this note instead of
-//! re-derived from scratch.
+//! preference is worse than the silence), and no stream-category change.
+//! Deliberately changing how we declare the playout stream would be a change
+//! to the audio path that carries the APM's reference signal, so it needs its
+//! own validation and its own before/after -- it is not a fix to apply on a
+//! hypothesis. Recorded here so the next report of "Petal lowers my other
+//! audio" is answered from this note instead of re-derived from scratch.
 //!
 //! ## Mute semantics: `LocalAudioTrack::mute()`/`unmute()`, not
 //! unpublish/republish
