@@ -326,3 +326,43 @@ rather than per-republish in production.
 
 Upstream: report both to livekit/rust-sdks (same FFI core as
 livekit/python-sdks#449's report).
+
+# Petal patch: native screen-share quality policy
+
+The native sender needs the two WebRTC controls the web sender already uses on a
+screen share: `RtcVideoTrack::set_content_hint(ContentHint::Detailed)` (this is
+text and UI, so detail beats smoothness) and
+`RtpSender::set_degradation_preference(DegradationPreference::MaintainResolution)`
+(when a sender is constrained, drop frame rate before resolution -- a blurry
+window is worse than a stuttering one). LiveKit applies both only when creating a
+native `Screenshare` sender; cameras and audio retain their existing behavior.
+
+Revert: `git checkout -- src/rtc_engine/rtc_session.rs`, or stop publishing with
+`TrackSource::Screenshare`. Updating: remove this patch when the upstream Rust SDK
+exposes equivalent screen-share publishing options.
+
+# Petal patch: `TrackPublishOptions::min_bitrate`
+
+## Why this exists
+
+The floor has to reach the encodings `into_rtp_encodings` builds, but
+`VideoEncoding` is constructed as a field-exhaustive literal at several sites,
+and `PublishingLayerParameters` is documented as live-tunable for only two
+fields. Adding the field to either would have forced unrelated edits.
+
+## The fix
+
+Put `min_bitrate: Option<u64>` on `TrackPublishOptions` (which every caller
+already builds with `..Default::default()`), rename the existing
+`compute_video_encodings` body to `compute_video_encodings_inner`, and apply the
+floor in a thin wrapper to the top encoding (the one with the largest
+`max_bitrate`). `None` leaves the computed encodings untouched.
+`LocalVideoTrack::clear_publishing_min_bitrate` releases it again, which is the
+only way back to an unconstrained allocator once a floor has been applied.
+
+## Updating
+
+Revert with `git checkout -- src/room/options.rs
+src/room/track/local_video_track.rs`, or stop setting
+`TrackPublishOptions::min_bitrate`, which alone restores prior behaviour. Drop
+once upstream exposes an allocation floor on the publish path.

@@ -112,3 +112,32 @@ the decoder-side test feed discard it deliberately.
 
 No C++ change is involved, and no publish, capture, bitrate or FPS policy
 changes with it.
+
+## Publish-time encoding `min_bitrate` (allocation floor)
+
+### Why this exists
+
+The vendored cxx bridge already carried `has_min_bitrate_bps` /
+`min_bitrate_bps` -- `webrtc-sys/src/rtp_parameters.cpp` reads and writes both --
+but `src/native/rtp_parameters.rs` hardcoded `has_min_bitrate_bps: false,
+min_bitrate_bps: 0` in the Rust -> native `From`, so no caller could set an
+allocation floor. A floor is not the same as a higher encoder target: WebRTC
+clamps each stream's allocation to `[min_bitrate_bps, max_bitrate_bps]`, so a
+floor moves the bitrate allocator and therefore the pacer's drain rate, while an
+encoder-side target override leaves the pacer draining at the estimate and turns
+the surplus into send queue.
+
+### The fix
+
+Add `min_bitrate: Option<u64>` to the public `RtpEncodingParameters` (and its
+`Default`), forward it in the Rust -> native `From`, and read it back in the
+native -> Rust `From`. `None` maps to `has_min_bitrate_bps: false`, which is
+byte-for-byte the previous wire output, so this patch is inert unless a caller
+opts in through `TrackPublishOptions::min_bitrate`.
+
+### Updating
+
+Fold away once upstream carries the field through directly. To revert,
+`git checkout -- src/rtp_parameters.rs src/native/rtp_parameters.rs`; a publisher
+that stops setting `TrackPublishOptions::min_bitrate` restores prior behaviour
+without reverting anything.

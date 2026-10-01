@@ -22,6 +22,17 @@ pub enum Priority {
     High,
 }
 
+/// Controls whether the video adaptation logic prefers preserving frame rate
+/// or spatial resolution when a sender is constrained.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(i32)]
+pub enum DegradationPreference {
+    Disabled = 0,
+    MaintainFramerate = 1,
+    MaintainResolution = 2,
+    Balanced = 3,
+}
+
 #[derive(Debug, Clone)]
 pub struct RtpHeaderExtensionParameters {
     pub uri: String,
@@ -41,6 +52,13 @@ pub struct RtpParameters {
     pub(crate) mid: String,
     pub(crate) has_degradation_preference: bool,
     pub(crate) degradation_preference: i32,
+}
+
+impl RtpParameters {
+    pub fn set_degradation_preference(&mut self, preference: DegradationPreference) {
+        self.has_degradation_preference = true;
+        self.degradation_preference = preference as i32;
+    }
 }
 
 /// Mirrors webrtc_sys RtcpFeedback for round-trip fidelity.
@@ -80,6 +98,11 @@ pub struct RtcpParameters {
 pub struct RtpEncodingParameters {
     pub active: bool,
     pub max_bitrate: Option<u64>,
+    /// Floor for this encoding's allocation. Unlike an encoder-side target
+    /// override, this is applied by WebRTC's bitrate allocator, so the pacer's
+    /// drain rate rises with it instead of the excess becoming send queue.
+    /// `None` reproduces the upstream wire output exactly.
+    pub min_bitrate: Option<u64>,
     pub max_framerate: Option<f64>,
     pub priority: Priority,
     pub rid: String,
@@ -117,6 +140,7 @@ impl Default for RtpEncodingParameters {
         Self {
             active: true,
             max_bitrate: None,
+            min_bitrate: None,
             max_framerate: None,
             priority: Priority::Low,
             rid: String::default(),
