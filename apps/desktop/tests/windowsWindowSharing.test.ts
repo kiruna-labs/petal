@@ -109,8 +109,18 @@ test('Windows share session wires publish_window_at + push_frame into ActiveShar
   );
   assert.match(
     sessionStub,
-    /published\s*\.push_frame\(&captured, frame\.capture_wall_time_us\)/,
-    'the frame pump must push CapturedFrame::Bgra payloads'
+    /let published_cadence_fps = published\.cadence_fps\(\);/,
+    'the push gate must take the publication`s own effective cadence, not an environment knob'
+  );
+  assert.match(
+    sessionStub,
+    /payload: crate::capture::CapturedFramePayload::Bgra \{/,
+    'the frame pump must build CapturedFrame::Bgra payloads'
+  );
+  assert.match(
+    sessionStub,
+    /published\s*\.push_frame\(&captured, published_wall_time_us\)/,
+    'the pump must push the RESOLVED frame clock (the grid instant under the shipped clock), not the raw capture instant'
   );
   assert.match(sessionStub, /MAX_CONCURRENT_SHARES: usize = 4/);
 });

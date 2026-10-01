@@ -18,6 +18,7 @@
 #include <wrl/implements.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -29,6 +30,7 @@
 #include "api/video/video_codec_constants.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_encoder.h"
+#include "h264_sps.h"
 
 namespace webrtc {
 
@@ -88,15 +90,16 @@ class MfH264EncoderImpl : public VideoEncoder {
   // contract, negotiate types, start the event loop + encoder thread. Used by
   // both InitEncode and ReconfigureMft.
   int32_t InitMft(int width, int height);
+  void HandleEvent(MediaEventType event_type, HRESULT status);
   // Rebuild the MFT + event loop at a new resolution, IN PLACE (Chromium's
   // MFVEA re-init on resolution change; no track republish, no encoder churn).
   // Called from Encode when the source frame size changes; the receiver
   // renegotiates via the new SPS (format-change path).
   int32_t ReconfigureMft(int new_width, int new_height);
   void EncoderThreadMain();
-  void HandleEvent(MediaEventType event_type, HRESULT status);
   void FeedInputs();
   void ProcessOutput();
+  void ApplyLowLatencySettings();
   // Complete async-MFT teardown (Chromium MFVEA Reset() sequence).
   void TeardownMft();
 
@@ -104,11 +107,19 @@ class MfH264EncoderImpl : public VideoEncoder {
   // mode (plus documented env overrides), then applied in exactly one place, so
   // that one source's policy can never fall through into the other's.
   enum class RateControlPolicy {
-    // Set nothing and leave the driver's own mode alone. Screensharing default.
+    // Set nothing and leave the driver's own mode alone. No longer any source's
+    // default; reachable only through the camera's documented
+    // `PETAL_MF_CAMERA_RATE_CONTROL=default` arm.
     DriverDefault,
-    // Minimize QP and ignore the bitrate target. Explicit experiment only.
-    Quality,
-    // Constant bitrate at the target. Realtime-camera default.
+    // Constant bitrate at the target. Default for BOTH sources.
+    //
+    // Screensharing moved here from DriverDefault: with the driver's own mode
+    // the hardware encoder clamped QP at its ceiling while the congestion
+    // controller ramped, which was the startup screen-text quality ramp. The
+    // fix that actually removed it was raising the allocation (see
+    // `TrackPublishOptions::min_bitrate`); CBR is kept as the explicit mode
+    // because a driver default is whatever each GPU vendor chooses, which is
+    // not something a cross-vendor validation can reason about.
     Cbr,
     // Bounded VBR: mean at the target, peak at 2x. Camera experiment arm.
     PeakVbr,
@@ -116,6 +127,9 @@ class MfH264EncoderImpl : public VideoEncoder {
   RateControlPolicy ResolveRateControlPolicy(const char** source) const;
   void ApplyRateControlPolicy(RateControlPolicy policy, const char* source);
 
+  /// One-shot (per distinct SPS) report of the profile/level the MFT ACTUALLY
+  /// emitted, read out of the encoded bitstream. See `ProcessOutput`.
+  void MaybeLogEmittedSps();
   Microsoft::WRL::ComPtr<IMFTransform> mft_;
   Microsoft::WRL::ComPtr<IMFMediaEventGenerator> event_generator_;
   Microsoft::WRL::ComPtr<ICodecAPI> codec_api_;
@@ -156,10 +170,43 @@ class MfH264EncoderImpl : public VideoEncoder {
   // content want opposite rate control, so the codec mode is a real input to
   // the policy rather than a caller-side detail.
   VideoCodecMode codec_mode_ = VideoCodecMode::kRealtimeVideo;
+  // Screen-share MFTs are kept deliberately shallow: stale frames are less
+  // useful than the newest frame for an interactive share.
+  bool low_latency_ = false;
   // Bounded `set_rates` diagnostic cadence: the first call proves the MFT
   // accepts a mid-stream target change, then one sample per ~60 updates keeps
   // requested-vs-accepted visible without flooding the log.
   uint64_t set_rates_calls_ = 0;
+
+  // Emitted-SPS report state: the first SPS always logs, and a later SPS logs
+  // only when the triple actually changed (a reconfigure to a new geometry
+  // re-derives the level). Bounded by construction -- the triple is stable, so
+  // this cannot become a per-frame line.
+  bool emitted_sps_logged_ = false;
+  uint8_t emitted_sps_profile_ = 0;
+  uint8_t emitted_sps_constraints_ = 0;
+  uint8_t emitted_sps_level_ = 0;
+
+  // The keyframe interval currently set on the MFT (0 = never set). Kept so
+  // `SetRates` can tell whether a rate change has moved the scheduled interval
+  // far enough to be worth re-setting. See the sizing rule in the .cpp.
+  uint32_t applied_gop_frames_ = 0;
+  // Exponential moving average of the measured INTRA frame size, seeded by the
+  // first refresh seen and updated on every one after. This is the input the
+  // duty rule wants: the estimated `bytes_per_pixel x pixels` was 3.07x too
+  // conservative at 1920x1076 (930 kB assumed against 270-336 kB measured),
+  // which capped an interval that needed 4s down to 10s and cost recovery
+  // latency and prediction drift for nothing. 0 = nothing measured yet, fall
+  // back to the estimate. A double so the estimate and the measurement share
+  // one path.
+  double intra_bytes_ema_ = 0.0;
+  // Mean frame size of the PREVIOUS reference window, used as the reference for
+  // the fallback intra-frame threshold (see ProcessOutput). 0 = no window yet,
+  // in which case the running one below is used instead.
+  uint32_t last_window_mean_bytes_ = 0;
+  // The running reference window the fallback threshold is measured over.
+  uint64_t window_bytes_sum_ = 0;
+  uint32_t window_frame_count_ = 0;
 
   // Reused encoded-image scaffolding (only touched on the encoder thread).
   EncodedImage encoded_image_;
