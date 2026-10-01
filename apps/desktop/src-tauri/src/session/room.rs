@@ -414,6 +414,12 @@ pub(super) struct RoomJoinInfo {
     /// `rooms::livekit_room_name`), not stored redundantly here.
     pub(super) room_record: crate::rooms::RoomRecord,
     pub(super) room_connection: Arc<RoomConnection>,
+    /// The generation this join owns. Read together with `room_connection`,
+    /// under one lock, by work that must not outlive this room: the process
+    /// counter alone can move on (a leave bumps it before `joined` is cleared),
+    /// and a later read of it would pair this connection with a generation
+    /// that no longer belongs to it.
+    pub(super) room_generation: crate::room_generation::RoomGeneration,
     /// The real identity this process joined under (from onboarding, passed
     /// in to `join_room` -- see that function's doc comment). Threaded
     /// through to `telepointer.rs` (replacing its own `DEV_USER_ID` stand-in)
@@ -759,6 +765,7 @@ pub async fn join_room(
             guard.joined = Some(RoomJoinInfo {
                 room_record: room_record.clone(),
                 room_connection: room_connection.clone(),
+                room_generation: room_generation.clone(),
                 identity: identity.clone(),
                 presence: presence.clone(),
                 display_sleep_assertion,

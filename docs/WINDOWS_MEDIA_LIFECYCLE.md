@@ -65,13 +65,16 @@ cargo test --lib session::tests::windows_share_session_runs_real_wgc_livekit_aud
 ```
 
 This verifies real WGC -> `session::start_share_token` -> LiveKit observer
-frames, a weak observer whose decoded width is lower after its LOW request,
-an independent capable observer that remains HIGH, same-window replacement
+frames, a weak observer whose LOW request keeps receiving the share's single
+source-sized encoding (a Windows full share publishes no lower rung), an
+independent capable observer that remains HIGH, same-window replacement
 (and a second subscription event), receiver reconnect, normal stop, a
 capture-failure/missed-unpublish tail, delayed SDK unpublish, and idempotent
-native audio teardown. The test also requires production process-loopback
-audio to be published; the standalone system-output adapter stop is checked
-again for idempotence. The deterministic receiver-quality matrix remains
+native audio teardown. The Tauri event loop runs on its own thread, as in
+production: the sharer overlay's HWND belongs to that thread, and share stop
+deadlocks against the overlay tracker if its owner never pumps messages. The
+test also requires production process-loopback audio to be published; the
+standalone system-output adapter stop is checked again for idempotence. The deterministic receiver-quality matrix remains
 separate because forcing an old-GPU/low-FPS receiver requires the
 multi-machine/manual run described in the plan. The one-test TypeScript bridge
 in `apps/desktop/tests/windowsWindowSharing.test.ts` executes this same Rust

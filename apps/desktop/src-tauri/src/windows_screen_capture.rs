@@ -585,6 +585,13 @@ impl TargetCaptureSession {
         }
     }
 
+    /// Test-cockpit fault injection: stop the native capture thread while the
+    /// production share publication remains registered, reproducing a
+    /// crash/missed-unpublish tail without terminating the test process.
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn request_stop_for_test(&self) {
+        self.signal.request_stop();
+    }
 }
 
 impl Drop for TargetCaptureSession {
@@ -1752,14 +1759,16 @@ unsafe impl windows::core::Interface for IDirect3DDXGIInterfaceAccess {
 impl IDirect3DDXGIInterfaceAccess {
     #[allow(non_snake_case)]
     unsafe fn GetInterface<T: windows::core::Interface>(&self) -> windows::core::Result<T> {
-        let mut result = std::ptr::null_mut();
-        (windows::core::Interface::vtable(self).GetInterface)(
-            windows::core::Interface::as_raw(self),
-            &T::IID,
-            &mut result,
-        )
-        .ok()?;
-        Ok(windows::core::Type::from_abi(result)?)
+        unsafe {
+            let mut result = std::ptr::null_mut();
+            (windows::core::Interface::vtable(self).GetInterface)(
+                windows::core::Interface::as_raw(self),
+                &T::IID,
+                &mut result,
+            )
+            .ok()?;
+            windows::core::Type::from_abi(result)
+        }
     }
 }
 

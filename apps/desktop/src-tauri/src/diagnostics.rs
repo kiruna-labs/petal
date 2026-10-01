@@ -3623,6 +3623,14 @@ pub async fn collect_tick(
     // --- Subscribed (recv) tracks ---
     for (identity, participant) in room.remote_participants() {
         for (sid, publication) in participant.track_publications() {
+            // A `RemoteTrack` handle can outlive the subscription transition
+            // briefly. Do not poll stats for a publication that is no longer
+            // desired or subscribed: libwebrtc then repeatedly asks for RTP
+            // parameters of a retired SSRC, which is the stale-camera warning
+            // observed on Windows.
+            if !publication.is_desired() || !publication.is_subscribed() {
+                continue;
+            }
             let Some(track) = publication.track() else {
                 continue;
             };
