@@ -3270,6 +3270,15 @@ async fn start_audio_for_session(
     crate::transport::audio::start_audio_track_logger(room_connection.room(), generation);
 }
 
+/// Pure: whether this tick's connected endpoints differ from the last tick's.
+/// The first observation only records the baseline.
+#[cfg(target_os = "windows")]
+fn audio_endpoints_changed<T: PartialEq>(last: &mut Option<T>, current: T) -> bool {
+    let changed = last.as_ref().is_some_and(|last| *last != current);
+    *last = Some(current);
+    changed
+}
+
 fn start_audio_device_watcher(
     app: tauri::AppHandle,
     generation: RoomGeneration,
@@ -3280,6 +3289,8 @@ fn start_audio_device_watcher(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         let mut mic_failure_reported = false;
         let mut speaker_failure_reported = false;
+        #[cfg(target_os = "windows")]
+        let mut last_endpoints = None;
         loop {
             tokio::select! {
                 changed = cancelled.changed() => {
@@ -3433,6 +3444,18 @@ fn start_audio_device_watcher(
                             }
                         }
                         None => {}
+                    }
+                    // Last, so an open picker re-lists after any switch above.
+                    #[cfg(target_os = "windows")]
+                    if let (Ok(mut recording), Ok(mut playout)) = (
+                        crate::windows_audio_device::active_recording_endpoint_ids(),
+                        crate::windows_audio_device::active_playout_endpoint_ids(),
+                    ) {
+                        recording.sort();
+                        playout.sort();
+                        if audio_endpoints_changed(&mut last_endpoints, (recording, playout)) {
+                            let _ = tauri::Emitter::emit(&app, "audio-devices-changed", ());
+                        }
                     }
                 }
             }
@@ -3659,6 +3682,25 @@ struct RoomLeftEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn audio_endpoint_changes_are_reported_after_the_baseline() {
+        let mut last = None;
+        let headset = (vec!["headset"], vec!["speakers"]);
+        let with_webcam = (vec!["headset", "webcam"], vec!["speakers"]);
+        assert!(
+            !audio_endpoints_changed(&mut last, headset.clone()),
+            "baseline"
+        );
+        assert!(!audio_endpoints_changed(&mut last, headset.clone()));
+        assert!(
+            audio_endpoints_changed(&mut last, with_webcam.clone()),
+            "plugged in"
+        );
+        assert!(!audio_endpoints_changed(&mut last, with_webcam));
+        assert!(audio_endpoints_changed(&mut last, headset), "unplugged");
+    }
 
     fn room(id: &str, name: &str) -> crate::rooms::RoomRecord {
         crate::rooms::RoomRecord {
