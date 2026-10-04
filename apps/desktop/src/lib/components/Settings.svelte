@@ -72,6 +72,12 @@
   } from '$lib/data/permissions';
   import { cameraPreviewConstraints } from '$lib/data/cameraConstraints';
   import { listAudioDevices, setAudioDevices } from '$lib/data/audioDevices';
+  import {
+    MISSING_DEVICE,
+    MISSING_DEVICE_LABEL,
+    pickerValue,
+    switchNote
+  } from '$lib/data/audioDeviceSelection';
   import { listCameraDevices, setCameraDevice } from '$lib/data/cameraDevices';
   import {
     CAMERA_FPS_PRESETS,
@@ -407,20 +413,22 @@
   // pass a specific selection, so the dropdowns never render empty. Derived
   // (not a mutation of the bindable prop itself) so it stays reactive to
   // late-arriving device lists without the "state referenced locally" pitfall.
-  // Mic/speaker additionally fall back to the first option when the persisted
-  // selection no longer exists (device unplugged since it was saved).
+  // Mic/speaker instead show "Saved device not connected" when the persisted
+  // selection is not in the list, rather than naming another device.
   const cameraValue = $derived(
     cameraOptions.some((c) => c.id === selectedCamera)
       ? selectedCamera
       : (cameraOptions[0]?.id ?? '')
   );
-  const micValue = $derived(
-    micOptions.some((m) => m.id === selectedMic) ? selectedMic : (micOptions[0]?.id ?? '')
+  const micValue = $derived(pickerValue(micOptions, selectedMic));
+  const speakerValue = $derived(pickerValue(speakerOptions, selectedSpeaker));
+  const missingDeviceOption = { id: MISSING_DEVICE, label: MISSING_DEVICE_LABEL };
+  const missingDeviceDisabled = new Set([MISSING_DEVICE]);
+  const micSelectOptions = $derived(
+    micValue === MISSING_DEVICE ? [missingDeviceOption, ...micOptions] : micOptions
   );
-  const speakerValue = $derived(
-    speakerOptions.some((s) => s.id === selectedSpeaker)
-      ? selectedSpeaker
-      : (speakerOptions[0]?.id ?? '')
+  const speakerSelectOptions = $derived(
+    speakerValue === MISSING_DEVICE ? [missingDeviceOption, ...speakerOptions] : speakerOptions
   );
   const showTestCockpit = $derived(Boolean(buildInfo?.cockpitPrivileged));
   const cockpitMessage = $derived(latestCockpitMessage(cockpitStatus, cockpitProgress));
@@ -487,13 +495,8 @@
     updateAudioDevices(id, undefined);
     micNote = null;
     try {
-      const applied = await setAudioDevices({ recordingId: id });
-      if (!applied) return; // plain browser — nothing real to apply
-      if (applied.micApplied) micNote = 'Switched microphone';
-      else if (!applied.inRoom) micNote = 'Saved — applies when you join a room';
-      else if (applied.micError === 'no live microphone track')
-        micNote = 'Saved — microphone isn’t active in this meeting (check mic permission)';
-      else micNote = applied.micError ?? 'Could not switch microphone';
+      // Null in a plain browser: nothing real to apply.
+      micNote = switchNote(await setAudioDevices({ recordingId: id }), 'microphone');
     } catch (e) {
       micNote = `Could not switch microphone: ${e}`;
     }
@@ -504,11 +507,7 @@
     updateAudioDevices(undefined, id);
     speakerNote = null;
     try {
-      const applied = await setAudioDevices({ playoutId: id });
-      if (!applied) return;
-      if (applied.speakerApplied) speakerNote = 'Switched speaker';
-      else if (!applied.inRoom) speakerNote = 'Saved — applies when you join a room';
-      else speakerNote = applied.speakerError ?? 'Could not switch speaker';
+      speakerNote = switchNote(await setAudioDevices({ playoutId: id }), 'speaker');
     } catch (e) {
       speakerNote = `Could not switch speaker: ${e}`;
     }
@@ -1533,7 +1532,8 @@
             id="microphone-device"
             label="Microphone"
             value={micValue}
-            options={micOptions}
+            options={micSelectOptions}
+            disabledOptions={missingDeviceDisabled}
             emptyLabel="No microphones found"
             disabled={noMics || audioDevicesError !== null}
             onchange={(value) => void handleMicSelect(value)}
@@ -1549,7 +1549,8 @@
             id="speaker-device"
             label="Speaker"
             value={speakerValue}
-            options={speakerOptions}
+            options={speakerSelectOptions}
+            disabledOptions={missingDeviceDisabled}
             emptyLabel="No speakers found"
             disabled={noSpeakers || audioDevicesError !== null}
             onchange={(value) => void handleSpeakerSelect(value)}

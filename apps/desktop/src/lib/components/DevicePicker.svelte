@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listAudioDevices, setAudioDevices } from '$lib/data/audioDevices';
+  import {
+    MISSING_DEVICE,
+    MISSING_DEVICE_LABEL,
+    pickerValue,
+    switchNote
+  } from '$lib/data/audioDeviceSelection';
   import { listCameraDevices, setCameraDevice } from '$lib/data/cameraDevices';
   import { session, updateAudioDevices } from '$lib/stores/session.svelte';
   import { hasTauriBridge } from '$lib/ipc';
@@ -31,14 +37,8 @@
   let pendingKind = $state<'microphone' | 'speaker' | 'camera' | null>(null);
   let root = $state<HTMLDivElement>();
 
-  const micValue = $derived(
-    mics.some((device) => device.id === selectedMic) ? selectedMic : (mics[0]?.id ?? '')
-  );
-  const speakerValue = $derived(
-    speakers.some((device) => device.id === selectedSpeaker)
-      ? selectedSpeaker
-      : (speakers[0]?.id ?? '')
-  );
+  const micValue = $derived(pickerValue(mics, selectedMic));
+  const speakerValue = $derived(pickerValue(speakers, selectedSpeaker));
   const cameraValue = $derived(
     cameras.some((device) => device.id === selectedCamera)
       ? selectedCamera
@@ -80,11 +80,7 @@
     micNote = null;
     pendingKind = 'microphone';
     try {
-      const applied = await setAudioDevices({ recordingId: id });
-      micNote = noteFor(
-        applied ? { applied: applied.micApplied, inRoom: applied.inRoom } : null,
-        'microphone'
-      );
+      micNote = switchNote(await setAudioDevices({ recordingId: id }), 'microphone');
     } catch (error) {
       console.error('device picker: mic switch failed', error);
       micNote = 'Could not switch microphone.';
@@ -99,11 +95,7 @@
     speakerNote = null;
     pendingKind = 'speaker';
     try {
-      const applied = await setAudioDevices({ playoutId: id });
-      speakerNote = noteFor(
-        applied ? { applied: applied.speakerApplied, inRoom: applied.inRoom } : null,
-        'speaker'
-      );
+      speakerNote = switchNote(await setAudioDevices({ playoutId: id }), 'speaker');
     } catch (error) {
       console.error('device picker: speaker switch failed', error);
       speakerNote = 'Could not switch speaker.';
@@ -167,6 +159,26 @@
   }
 </script>
 
+{#snippet missingDeviceRow()}
+  <!-- The saved device is not in the list: say so instead of checking another
+       device. Disabled, so it is not a choice. -->
+  <button
+    type="button"
+    class="meeting-menu-row device-row selected"
+    role="option"
+    aria-selected="true"
+    aria-label={`${MISSING_DEVICE_LABEL}, selected`}
+    disabled
+  >
+    <span class="meeting-menu-row-copy">{MISSING_DEVICE_LABEL}</span>
+    <span class="meeting-menu-row-check" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m5 12 4 4L19 6"></path>
+      </svg>
+    </span>
+  </button>
+{/snippet}
+
 <div
   bind:this={root}
   class="device-picker"
@@ -191,6 +203,9 @@
         <p class="meeting-menu-status">No microphones found.</p>
       {:else}
         <div class="device-list" role="listbox" aria-label="Microphones">
+          {#if micValue === MISSING_DEVICE}
+            {@render missingDeviceRow()}
+          {/if}
           {#each mics as device, index (device.id)}
             <button
               type="button"
@@ -227,6 +242,9 @@
         <p class="meeting-menu-status">No speakers found.</p>
       {:else}
         <div class="device-list" role="listbox" aria-label="Speakers">
+          {#if speakerValue === MISSING_DEVICE}
+            {@render missingDeviceRow()}
+          {/if}
           {#each speakers as device, index (device.id)}
             <button
               type="button"
