@@ -199,6 +199,8 @@ mod session;
 #[path = "session_stub.rs"]
 mod session;
 mod share_border;
+#[cfg(target_os = "windows")]
+mod share_capture_options;
 mod share_overlay;
 mod share_priority;
 mod share_target;
@@ -1809,6 +1811,12 @@ pub fn run() {
             windows_hover::set_hover_tab_menu_open,
             share_priority::get_share_priority,
             share_priority::set_share_priority,
+            share_capture_options::share_capture_options,
+            share_capture_options::set_share_fps,
+            // Petal View's label-addressed twins of the commands above: the
+            // region route holds a window label, never a capture token.
+            region_window::region_share_capture_options,
+            region_window::set_region_share_fps,
             gallery_bridge::gallery_bridge_config,
             main_window::open_main_route,
             main_window::show_main_window,

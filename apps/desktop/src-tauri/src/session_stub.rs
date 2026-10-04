@@ -76,6 +76,25 @@ fn push_gate_interval_us(cadence_fps: u32) -> Option<u64> {
     Some(1_000_000 / u64::from(cadence_fps.max(1)))
 }
 
+/// Pure: the push gate's interval for one frame, given the share's configured
+/// interval and the cadence ceiling the encoder applies to a frame this large
+/// (`share_fps_ceiling_for_geometry`; `None` = no ceiling).
+///
+/// The ceiling can only tighten the gate, never loosen it. It matters when the
+/// window grows mid-share: a 5K-class frame is capped to 30 fps by the encoder,
+/// so pushing 60 of them a second -- the ~9ms D3D copy plus libyuv pass per
+/// frame -- is the expensive way to lose every other one.
+fn effective_push_interval_us(
+    configured_interval_us: Option<u64>,
+    ceiling_fps: Option<u32>,
+) -> Option<u64> {
+    let ceiling_interval_us = ceiling_fps.map(|fps| 1_000_000 / u64::from(fps.max(1)));
+    match (configured_interval_us, ceiling_interval_us) {
+        (None, None) => None,
+        (configured, ceiling) => Some(configured.unwrap_or(0).max(ceiling.unwrap_or(0))),
+    }
+}
+
 /// Which instant becomes the published frame clock: the push gate's own ladder
 /// point, one interval ahead of the frame that was admitted.
 ///
@@ -114,6 +133,28 @@ mod push_gate_cadence_tests {
         assert_eq!(push_gate_interval_us(30), Some(1_000_000 / 30));
         // A degenerate cadence still gates rather than flooding the encoder.
         assert_eq!(push_gate_interval_us(0), Some(1_000_000));
+    }
+
+    #[test]
+    fn a_geometry_ceiling_tightens_the_gate_and_never_loosens_it() {
+        let sixty = push_gate_interval_us(60);
+        // A 5K-class frame caps the encoder at 30, so a 60 fps gate tightens.
+        assert_eq!(
+            effective_push_interval_us(sixty, Some(30)),
+            Some(1_000_000 / 30)
+        );
+        // 4K keeps 60 and 1080p keeps 120: the gate stays as configured.
+        assert_eq!(effective_push_interval_us(sixty, Some(60)), sixty);
+        assert_eq!(effective_push_interval_us(sixty, Some(120)), sixty);
+        // A 15 fps share is never loosened by a higher ceiling.
+        let fifteen = push_gate_interval_us(15);
+        assert_eq!(effective_push_interval_us(fifteen, Some(30)), fifteen);
+        assert_eq!(effective_push_interval_us(fifteen, None), fifteen);
+        assert_eq!(
+            effective_push_interval_us(None, Some(30)),
+            Some(1_000_000 / 30)
+        );
+        assert_eq!(effective_push_interval_us(None, None), None);
     }
 
     /// The published ladder must be exactly 1/fps apart even though the frames
@@ -819,6 +860,27 @@ impl SessionState {
     /// membership test on it.
     pub(crate) fn is_share_active(&self, window_id: u32) -> bool {
         self.shared_window_ids().contains(&window_id)
+    }
+
+    /// A live share's published geometry and effective cadence: what
+    /// `share_capture_options` answers from while a window is shared. The
+    /// cadence is the already-capped value the encoder runs at, so a share whose
+    /// window outgrew its choice reports the lowered number. `None` when the
+    /// window is not shared.
+    pub(crate) fn share_published_cadence(&self, window_id: u32) -> Option<(u32, u32, u32)> {
+        let joined = self.joined.lock_unpoisoned();
+        let share = joined
+            .as_ref()?
+            .media
+            .shares
+            .iter()
+            .find(|share| share.token == window_id)?;
+        let published = share.shared.published.lock_unpoisoned().clone();
+        Some((
+            published.width(),
+            published.height(),
+            published.cadence_fps(),
+        ))
     }
 
     /// macOS `session::SessionState::current_room_record` parity (the AI chat
@@ -1663,6 +1725,9 @@ pub(crate) async fn start_share_token(
     control_mode: crate::remote_control_core::RemoteControlMode,
     color: String,
 ) -> Result<bool, ShareError> {
+    // A failed start forgets this window's pre-share choices; only the
+    // successful commit (or an already-live share) keeps them.
+    let capture_options = crate::share_capture_options::clear_on_failure(token);
     let is_region_share = crate::region_window::resolve(token).is_some();
     let (room_connection, identity, generation, target) = {
         let joined = state.joined.lock_unpoisoned();
@@ -1687,6 +1752,7 @@ pub(crate) async fn start_share_token(
             .iter()
             .any(|share| share.token == token)
         {
+            capture_options.keep();
             return Ok(true);
         }
         if session.media.shares.len() >= MAX_CONCURRENT_SHARES {
@@ -1887,11 +1953,15 @@ pub(crate) async fn start_share_token(
     };
 
     let published = match room_connection
-        .publish_window_at(
+        .publish_window_at_cadence(
             width,
             height,
             crate::transport::publisher::ShareQuality::Full,
             Some(token),
+            // This window's frame-rate ceiling (default 30), written by the
+            // hover tab or Petal View. The publisher caps it to the geometry
+            // and `cadence_fps()` below reports the capped value.
+            crate::share_capture_options::pending(token),
         )
         .await
     {
@@ -2073,6 +2143,7 @@ pub(crate) async fn start_share_token(
             crate::analytics::ShareStartedSource::Display
         }
     });
+    capture_options.keep();
     Ok(true)
 }
 
@@ -2343,7 +2414,16 @@ fn start_share_frame_pump(
                 continue;
             }
             let mut published_wall_time_us = frame.capture_wall_time_us;
-            if let Some(interval_us) = push_interval_us {
+            // See `effective_push_interval_us`: a frame large enough to cap the
+            // encoder's cadence is gated at that ceiling.
+            let interval_us = effective_push_interval_us(
+                push_interval_us,
+                crate::transport::publisher::share_fps_ceiling_for_geometry(
+                    frame.width,
+                    frame.height,
+                ),
+            );
+            if let Some(interval_us) = interval_us {
                 if !push_gate_allows(
                     &mut next_push_grid_us,
                     frame.capture_wall_time_us,
@@ -2508,6 +2588,8 @@ async fn stop_share(
         ..
     } = share;
     let started = std::time::Instant::now();
+    // Per-share capture choices end with the share, whatever stopped it.
+    crate::share_capture_options::clear(token);
     // Invalidate the desired reference synchronously, then clean up audio in
     // its own serialized task. A delayed enable cannot commit, and visual
     // teardown never waits for native audio or signaling.
@@ -4015,11 +4097,13 @@ mod tests {
         };
         let replacement = Arc::new(
             connection
-                .publish_window_at(
+                .publish_window_at_cadence(
                     width,
                     height,
                     crate::transport::publisher::ShareQuality::Full,
                     Some(token),
+                    // A republish inherits this window's resolved cadence.
+                    old_published.cadence_fps(),
                 )
                 .await
                 .expect("publish the real replacement window track"),

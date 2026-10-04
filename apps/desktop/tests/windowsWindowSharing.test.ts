@@ -28,7 +28,8 @@ test('Windows media gate covers the required live recovery matrix', () => {
     'set_video_quality(VideoQuality::Low)',
     'set_video_quality(VideoQuality::High)',
     'let capable_observer = RoomConnection::connect',
-    'publish_window_at(',
+    'publish_window_at_cadence(',
+    'old_published.cadence_fps()',
     'old_published\n            .unpublish()',
     'capable_replacement_frames.load(Ordering::Acquire) > 0',
     'reconnect the capable LiveKit observer',
@@ -200,12 +201,12 @@ test('Windows thumbnails use the WGC one-shot capture path', () => {
   );
 });
 
-test('Windows share session wires publish_window_at + push_frame into ActiveShare', () => {
+test('Windows share session wires publish_window_at_cadence + push_frame into ActiveShare', () => {
   assert.match(sessionStub, /struct ActiveShare \{/);
   assert.match(
     sessionStub,
-    /\.publish_window_at\(\s*width,\s*height,\s*crate::transport::publisher::ShareQuality::Full,\s*Some\(token\),?\s*\)/,
-    'shares must publish at ShareQuality::Full under petal-window-<token>'
+    /\.publish_window_at_cadence\(\s*width,\s*height,\s*crate::transport::publisher::ShareQuality::Full,\s*Some\(token\),[\s\S]*?crate::share_capture_options::pending\(token\),?\s*\)/,
+    'shares must publish at ShareQuality::Full under petal-window-<token>, at the window`s frame-rate ceiling'
   );
   assert.match(
     sessionStub,
