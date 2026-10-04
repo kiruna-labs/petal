@@ -890,8 +890,18 @@ fn setup_capture(
             }
         }
     }
+    // The per-share cursor choice (`share_capture_options`, default off,
+    // matching macOS). A capture-session property, so it is set before
+    // StartCapture and fixed for the life of the share. A failed write is not
+    // terminal: the share continues with WGC's default, which shows the cursor.
+    let cursor_in_video = crate::share_capture_options::cursor_in_video(token);
+    if let Err(error) = session.SetIsCursorCaptureEnabled(cursor_in_video) {
+        log::warn!(
+            "windows screen capture: SetIsCursorCaptureEnabled({cursor_in_video}) failed token={token}; the cursor stays visible: {error}"
+        );
+    }
     log::info!(
-        "windows screen capture: indicator mode={:?} region={} system_required={system_border_required}",
+        "windows screen capture: indicator mode={:?} region={} system_required={system_border_required} cursor_in_video={cursor_in_video}",
         effective_indicator_mode,
         region.is_some()
     );

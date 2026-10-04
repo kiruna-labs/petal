@@ -1,5 +1,6 @@
 //! Ephemeral per-window capture choices for Windows shares: the frame-rate
-//! ceiling for the window's next share.
+//! ceiling for the window's next share, and whether the system cursor is
+//! captured into its frames.
 //!
 //! Unlike `share_priority`, these are deliberately not persisted. They belong to
 //! the next share of that window and are cleared when the share ends or fails to
@@ -16,7 +17,7 @@ use crate::sync_ext::MutexExt;
 use crate::transport::publisher::share_fps_ceiling_for_geometry;
 use crate::windows_capture_target::{self, TargetKind};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 
 pub const DEFAULT_SHARE_FPS: u32 = 30;
@@ -45,10 +46,19 @@ pub struct ShareCaptureOptions {
     pub window_id: u32,
     pub choices: Vec<ShareFpsChoice>,
     pub selected_fps: u32,
+    /// Whether the system cursor is captured into the video. Off by default,
+    /// matching macOS (`with_shows_cursor(false)`): the sharer's pointer
+    /// already travels on the telepointer channel.
+    pub cursor_in_video: bool,
 }
 
 static PENDING_FPS: LazyLock<Mutex<HashMap<u32, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Windows whose next share captures the system cursor. An absent entry is the
+/// default (off), so this only ever holds opt-ins.
+static CURSOR_IN_VIDEO: LazyLock<Mutex<HashSet<u32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Clears a pre-share choice unless the share-start transaction reaches its
 /// successful commit. This covers every early-return/error path without
@@ -119,6 +129,22 @@ fn set_pending(window_id: u32, fps: u32) -> Result<(), String> {
 
 pub(crate) fn clear(window_id: u32) {
     PENDING_FPS.lock_unpoisoned().remove(&window_id);
+    CURSOR_IN_VIDEO.lock_unpoisoned().remove(&window_id);
+}
+
+/// Whether this window's next share captures the system cursor. Read by the
+/// capture session before `StartCapture`.
+pub(crate) fn cursor_in_video(window_id: u32) -> bool {
+    CURSOR_IN_VIDEO.lock_unpoisoned().contains(&window_id)
+}
+
+fn set_cursor_in_video(window_id: u32, enabled: bool) {
+    let mut opted_in = CURSOR_IN_VIDEO.lock_unpoisoned();
+    if enabled {
+        opted_in.insert(window_id);
+    } else {
+        opted_in.remove(&window_id);
+    }
 }
 
 fn target_frame(window_id: u32) -> Result<WindowFrame, String> {
@@ -169,6 +195,7 @@ fn options_for_geometry(
         window_id,
         choices,
         selected_fps,
+        cursor_in_video: cursor_in_video(window_id),
     }
 }
 
@@ -269,6 +296,33 @@ pub(crate) fn set_share_fps_for_state(
     Ok(options_for_geometry(window_id, width, height, fps, false))
 }
 
+#[tauri::command]
+pub fn set_share_cursor_in_video(
+    state: tauri::State<'_, crate::session::SessionState>,
+    window_id: u32,
+    enabled: bool,
+) -> Result<ShareCaptureOptions, String> {
+    set_share_cursor_in_video_for_state(&state, window_id, enabled)
+}
+
+/// [`set_share_cursor_in_video`]'s command body; see
+/// [`share_capture_options_for_state`]. Refused while the window is shared:
+/// cursor capture is a capture-session property set before `StartCapture`, so
+/// the choice applies to the next share.
+pub(crate) fn set_share_cursor_in_video_for_state(
+    state: &crate::session::SessionState,
+    window_id: u32,
+    enabled: bool,
+) -> Result<ShareCaptureOptions, String> {
+    if state.is_share_active(window_id) {
+        return Err(format!(
+            "cannot change cursor capture while window {window_id} is shared; it applies to the next share"
+        ));
+    }
+    set_cursor_in_video(window_id, enabled);
+    share_capture_options_for_state(state, window_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +385,40 @@ mod tests {
         }
         assert_eq!(pending(7004), 60);
         clear(7004);
+    }
+
+    #[test]
+    fn cursor_capture_is_off_unless_opted_in_and_cleared_with_the_share() {
+        clear(7060);
+        assert!(!cursor_in_video(7060), "the default is off");
+        set_cursor_in_video(7060, true);
+        assert!(cursor_in_video(7060));
+        // Per-window, like the frame rate.
+        clear(7061);
+        assert!(!cursor_in_video(7061));
+        // Turning it back off removes the opt-in.
+        set_cursor_in_video(7060, false);
+        assert!(!cursor_in_video(7060));
+        // Unshare (or a failed start) clears it with the frame rate.
+        set_cursor_in_video(7060, true);
+        set_pending(7060, 15).expect("15 is a supported choice");
+        clear(7060);
+        assert!(!cursor_in_video(7060));
+        assert_eq!(pending(7060), DEFAULT_SHARE_FPS);
+        set_cursor_in_video(7060, true);
+        drop(clear_on_failure(7060));
+        assert!(!cursor_in_video(7060));
+    }
+
+    #[test]
+    fn the_options_report_the_cursor_choice_for_the_window() {
+        clear(7070);
+        assert!(!options_for_geometry(7070, 1920, 1080, 30, false).cursor_in_video);
+        set_cursor_in_video(7070, true);
+        assert!(options_for_geometry(7070, 1920, 1080, 30, false).cursor_in_video);
+        // A live share reports the value its capture started with.
+        assert!(options_for_geometry(7070, 1920, 1080, 30, true).cursor_in_video);
+        clear(7070);
     }
 
     #[test]

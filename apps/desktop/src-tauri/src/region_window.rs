@@ -868,6 +868,20 @@ pub fn set_region_share_fps(
     crate::share_capture_options::set_share_fps_for_state(&state, token, fps)
 }
 
+/// Store whether this selector's next share captures the system cursor.
+/// Refuses while the region is already shared, like the hover tab's command.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub fn set_region_share_cursor_in_video(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::session::SessionState>,
+    window_label: String,
+    enabled: bool,
+) -> Result<crate::share_capture_options::ShareCaptureOptions, String> {
+    let token = ensure_region_token(&app, &window_label)?;
+    crate::share_capture_options::set_share_cursor_in_video_for_state(&state, token, enabled)
+}
+
 /// Toggle Draw on the existing sharer overlay without exposing its disposable
 /// capture token to the Petal View route.
 #[tauri::command]
