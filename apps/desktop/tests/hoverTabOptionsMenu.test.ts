@@ -5,13 +5,17 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   CONTROL_MODE_CHOICES,
+  CURSOR_IN_VIDEO_MENU_ITEM_ID,
+  CURSOR_IN_VIDEO_MENU_ITEM_LABEL,
   DEBUG_MENU_ITEM_ID,
   DEBUG_MENU_ITEM_LABEL,
   HOVER_TAB_POSITION_CHOICES,
   HOVER_TAB_POSITION_SECTION_LABEL,
   QUALITY_PRIORITY_CHOICES,
   QUALITY_PRIORITY_SECTION_LABEL,
-  buildHoverTabMenuEntries
+  SHARE_FPS_SECTION_LABEL,
+  buildHoverTabMenuEntries,
+  type WindowsCaptureMenuState
 } from '../src/lib/data/hoverTabMenu.ts';
 import {
   buildShareOptionsMenuEntries,
@@ -334,4 +338,141 @@ test('the fixed CSS prevents copy or transparent overflow from changing the nati
   assert.match(buttonRule, /height: 40px;/);
   assert.match(buttonRule, /border-radius: 0 12px 12px 0;/);
   assert.match(insetButtonRule, /border-radius: 12px 0 0 12px;/);
+});
+
+function windowsCapture(overrides: Partial<WindowsCaptureMenuState> = {}): WindowsCaptureMenuState {
+  return {
+    selectedFps: 30,
+    choices: [
+      { fps: 15, enabled: true },
+      { fps: 30, enabled: true },
+      { fps: 60, enabled: true }
+    ],
+    cursorInVideo: false,
+    ...overrides
+  };
+}
+
+function hoverEntriesWith(shared: boolean, capture?: WindowsCaptureMenuState) {
+  return buildShareOptionsMenuEntries(
+    'automatic', shared, false, 'cursorPreserving', true, false, false, false,
+    true, true, 'right', false, false, capture
+  );
+}
+
+test('Windows capture choices take the priority section slot with frame-rate ceilings', () => {
+  const entries = hoverEntriesWith(false, windowsCapture());
+  assert.deepEqual(entries[0], { kind: 'section-label', text: SHARE_FPS_SECTION_LABEL });
+  assert.equal(SHARE_FPS_SECTION_LABEL, 'Share frame rate');
+  assert.equal(entries.some((entry) => entry.kind === 'priority'), false);
+  assert.equal(
+    entries.some((entry) => entry.kind === 'section-label' && entry.text === QUALITY_PRIORITY_SECTION_LABEL),
+    false
+  );
+
+  const fps = entries.filter((entry) => entry.kind === 'fps');
+  assert.deepEqual(fps.map((entry) => entry.text), ['Up to 15 fps', 'Up to 30 fps', 'Up to 60 fps']);
+  assert.deepEqual(fps.map((entry) => entry.id), ['share-fps-15', 'share-fps-30', 'share-fps-60']);
+  assert.deepEqual(fps.map((entry) => entry.checked), [false, true, false], '30 is the default');
+  assert.ok(fps.every((entry) => entry.enabled));
+  // The frame-rate section comes first, then the hover-tab position section.
+  const positionLabel = entries.findIndex(
+    (entry) => entry.kind === 'section-label' && entry.text === HOVER_TAB_POSITION_SECTION_LABEL
+  );
+  assert.equal(positionLabel, fps.length + 2, 'section label, three entries, separator');
+
+  // The cursor choice sits right after Debug.
+  const debug = entries.findIndex((entry) => entry.kind === 'debug');
+  assert.deepEqual(entries[debug + 1], {
+    kind: 'cursor-in-video',
+    id: CURSOR_IN_VIDEO_MENU_ITEM_ID,
+    text: CURSOR_IN_VIDEO_MENU_ITEM_LABEL,
+    checked: false,
+    enabled: true
+  });
+  assert.equal(CURSOR_IN_VIDEO_MENU_ITEM_ID, 'share-cursor-in-video');
+  assert.equal(CURSOR_IN_VIDEO_MENU_ITEM_LABEL, 'Show system cursor');
+  assert.equal(entries.filter((entry) => entry.kind === 'cursor-in-video').length, 1);
+});
+
+test('Windows capture choices are inert while shared and where the geometry cannot carry them', () => {
+  const fiveK = windowsCapture({
+    choices: [
+      { fps: 15, enabled: true },
+      { fps: 30, enabled: true },
+      { fps: 60, enabled: false }
+    ]
+  });
+  const unshared = hoverEntriesWith(false, fiveK).filter((entry) => entry.kind === 'fps');
+  assert.deepEqual(unshared.map((entry) => entry.enabled), [true, true, false]);
+
+  // Shared: every choice is shown, checked as reported, and none is actionable.
+  const shared = hoverEntriesWith(true, windowsCapture({ selectedFps: 60, cursorInVideo: true }));
+  const sharedFps = shared.filter((entry) => entry.kind === 'fps');
+  assert.deepEqual(sharedFps.map((entry) => entry.checked), [false, false, true]);
+  assert.ok(sharedFps.every((entry) => !entry.enabled));
+  const cursor = shared.find((entry) => entry.kind === 'cursor-in-video');
+  assert.equal(cursor?.checked, true);
+  assert.equal(cursor?.enabled, false);
+
+  // A frame rate the command did not report fails closed.
+  const partial = hoverEntriesWith(false, windowsCapture({ choices: [{ fps: 30, enabled: true }] }));
+  assert.deepEqual(
+    partial.filter((entry) => entry.kind === 'fps').map((entry) => entry.enabled),
+    [false, true, false]
+  );
+});
+
+test('without Windows capture choices the menu keeps the priority section and gains nothing', () => {
+  for (const shared of [false, true]) {
+    const omitted = hoverEntriesWith(shared);
+    assert.deepEqual(omitted, hoverEntriesWith(shared, undefined));
+    assert.deepEqual(omitted[0], { kind: 'section-label', text: QUALITY_PRIORITY_SECTION_LABEL });
+    assert.equal(omitted.some((entry) => entry.kind === 'fps' || entry.kind === 'cursor-in-video'), false);
+  }
+});
+
+test('frame-rate and cursor dispatch pick the entry value and never fire while disabled', () => {
+  const picked: number[] = [];
+  const cursor: boolean[] = [];
+  const actions = {
+    onPriority: () => {},
+    onControlMode: () => {},
+    onDraw: () => {},
+    onAiChat: () => {},
+    onDebug: () => {},
+    onFps: (fps: number) => picked.push(fps),
+    onCursorInVideo: (enabled: boolean) => cursor.push(enabled)
+  };
+  const fiveK = windowsCapture({
+    choices: [
+      { fps: 15, enabled: true },
+      { fps: 30, enabled: true },
+      { fps: 60, enabled: false }
+    ]
+  });
+  for (const entry of hoverEntriesWith(false, fiveK)) {
+    if (entry.kind === 'fps' || entry.kind === 'cursor-in-video') {
+      dispatchShareOptionsMenuEntry(entry, actions)?.();
+    }
+  }
+  assert.deepEqual(picked, [15, 30], 'the geometry-disabled 60 never dispatches');
+  assert.deepEqual(cursor, [true], 'the cursor entry flips its current state');
+
+  for (const entry of hoverEntriesWith(true, windowsCapture())) {
+    if (entry.kind === 'fps' || entry.kind === 'cursor-in-video') {
+      assert.equal(dispatchShareOptionsMenuEntry(entry, actions), undefined);
+    }
+  }
+});
+
+test('only Windows fetches capture choices for the hover tab menu', () => {
+  assert.match(
+    hoverTabSource,
+    /if \(isWindows\(\)\) \{\s*windowsCapture = await invoke<ShareCaptureOptions>\(COMMANDS\.shareCaptureOptions,/
+  );
+  assert.match(hoverTabSource, /shareAudio\.available,\s*windowsCapture\s*\)/);
+  assert.match(hoverTabSource, /COMMANDS\.setShareFps/);
+  assert.match(hoverTabSource, /COMMANDS\.setShareCursorInVideo/);
+  assert.match(popupSource, /case 'fps':\s*case 'cursor-in-video':\s*return CheckMenuItem\.new/);
 });

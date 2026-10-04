@@ -171,6 +171,12 @@ export const COMMANDS = {
   openApplicationsFolder: 'open_applications_folder',
   revealRunningBundle: 'reveal_running_bundle',
   setSharePriority: 'set_share_priority',
+  shareCaptureOptions: 'share_capture_options',
+  setShareFps: 'set_share_fps',
+  setShareCursorInVideo: 'set_share_cursor_in_video',
+  regionShareCaptureOptions: 'region_share_capture_options',
+  setRegionShareFps: 'set_region_share_fps',
+  setRegionShareCursorInVideo: 'set_region_share_cursor_in_video',
   shareAudioState: 'share_audio_state',
   setShareAudioEnabled: 'set_share_audio_enabled',
   setHoverTabTooltip: 'set_hover_tab_tooltip',
@@ -955,6 +961,18 @@ export interface ShareAudioState {
   /** Window audio is process-wide; display/region audio is system output. */
   scope: 'process' | 'systemOutput' | null;
   error: string | null;
+}
+
+/**
+ * Mirrors `share_capture_options::ShareCaptureOptions` (Windows only). Before a
+ * share, `selectedFps` is the stored ceiling; while shared it is the share's
+ * effective cadence, and every choice is disabled.
+ */
+export interface ShareCaptureOptions {
+  windowId: number;
+  choices: { fps: number; enabled: boolean }[];
+  selectedFps: number;
+  cursorInVideo: boolean;
 }
 
 export type ShareControlMode = 'cursorPreserving' | 'fullControl';
@@ -1759,6 +1777,12 @@ export interface CommandArgs {
   [COMMANDS.setShareRemoteControlAllowed]: { windowId: number; allowed: boolean };
   [COMMANDS.shareRemoteControlAllowed]: { windowId: number };
   [COMMANDS.shareAudioState]: { windowId: number };
+  [COMMANDS.shareCaptureOptions]: { windowId: number };
+  [COMMANDS.setShareFps]: { windowId: number; fps: number };
+  [COMMANDS.setShareCursorInVideo]: { windowId: number; enabled: boolean };
+  [COMMANDS.regionShareCaptureOptions]: { windowLabel: string };
+  [COMMANDS.setRegionShareFps]: { windowLabel: string; fps: number };
+  [COMMANDS.setRegionShareCursorInVideo]: { windowLabel: string; enabled: boolean };
   [COMMANDS.setShareAudioEnabled]: { windowId: number; enabled: boolean };
   [COMMANDS.toggleWindowShare]: { windowId: number; frame: WindowFrame; color?: string };
   [COMMANDS.updateShareBorderFrame]: {
@@ -1905,6 +1929,12 @@ export interface CommandReturns {
   [COMMANDS.setHoverTabMenuOpen]: void;
   [COMMANDS.shareWindow]: boolean;
   [COMMANDS.shareAudioState]: ShareAudioState;
+  [COMMANDS.shareCaptureOptions]: ShareCaptureOptions;
+  [COMMANDS.setShareFps]: ShareCaptureOptions;
+  [COMMANDS.setShareCursorInVideo]: ShareCaptureOptions;
+  [COMMANDS.regionShareCaptureOptions]: ShareCaptureOptions;
+  [COMMANDS.setRegionShareFps]: ShareCaptureOptions;
+  [COMMANDS.setRegionShareCursorInVideo]: ShareCaptureOptions;
   [COMMANDS.setShareAudioEnabled]: ShareAudioState;
   [COMMANDS.sharedWindowIds]: number[];
   [COMMANDS.toggleMenubarMic]: boolean;

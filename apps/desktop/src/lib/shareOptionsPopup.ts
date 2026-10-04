@@ -20,6 +20,10 @@ export interface ShareOptionsMenuActions {
   onRemoteControlAllowed?(allowed: boolean): void;
   /** Flip explicit output-audio consent for the menu's captured target. */
   onShareAudio?(enabled: boolean): void;
+  /** Pick the next share's frame-rate ceiling (Windows). */
+  onFps?(fps: number): void;
+  /** Flip whether the next share captures the system cursor (Windows). */
+  onCursorInVideo?(enabled: boolean): void;
 }
 
 /**
@@ -49,6 +53,12 @@ export function dispatchShareOptionsMenuEntry(
     case 'share-audio':
       return entry.enabled && actions.onShareAudio
         ? () => actions.onShareAudio?.(!entry.checked)
+        : undefined;
+    case 'fps':
+      return entry.enabled && actions.onFps ? () => actions.onFps?.(entry.value) : undefined;
+    case 'cursor-in-video':
+      return entry.enabled && actions.onCursorInVideo
+        ? () => actions.onCursorInVideo?.(!entry.checked)
         : undefined;
     case 'debug':
       return () => actions.onDebug();
@@ -113,6 +123,8 @@ export async function popupShareOptionsMenu(
           });
         case 'remote-control-allowed':
         case 'share-audio':
+        case 'fps':
+        case 'cursor-in-video':
           return CheckMenuItem.new({
             id: entry.id,
             text: entry.text,

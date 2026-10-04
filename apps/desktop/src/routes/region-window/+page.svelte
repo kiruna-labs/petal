@@ -10,6 +10,7 @@
     type RegionControlStateChanged,
     type RegionViewOptionsChanged,
     type RegionViewOptionsState,
+    type ShareCaptureOptions,
     type SharePriority
   } from '$lib/ipc';
   import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
@@ -21,6 +22,7 @@
   import { aiChatEndReasonMessage } from '$lib/data/aiChat';
   import { buildShareOptionsMenuEntries } from '$lib/data/shareOptionsMenu';
   import { popupShareOptionsMenu } from '$lib/shareOptionsPopup';
+  import { isWindows } from '$lib/platform';
 
   const hasTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   const appWindow = hasTauri ? getCurrentWindow() : null;
@@ -238,12 +240,47 @@
     }
   }
 
+  // Windows per-share capture choices, label-addressed like every other Petal
+  // View action. The menu re-fetches them on every open, so a refusal only
+  // needs logging.
+  async function setRegionShareFps(fps: number) {
+    if (!regionWindowLabel) return;
+    try {
+      await invoke<ShareCaptureOptions>(COMMANDS.setRegionShareFps, {
+        windowLabel: regionWindowLabel,
+        fps
+      });
+    } catch (error) {
+      console.error(`set_region_share_fps(${regionWindowLabel}) failed`, error);
+    }
+  }
+
+  async function setRegionShareCursorInVideo(enabled: boolean) {
+    if (!regionWindowLabel) return;
+    try {
+      await invoke<ShareCaptureOptions>(COMMANDS.setRegionShareCursorInVideo, {
+        windowLabel: regionWindowLabel,
+        enabled
+      });
+    } catch (error) {
+      console.error(`set_region_share_cursor_in_video(${regionWindowLabel}) failed`, error);
+    }
+  }
+
   async function openRegionOptionsMenu(event: MouseEvent) {
     event.stopPropagation();
     if (!appWindow || optionsPending || placementActive || placementSettlementPending) return;
     // Resolve the label immediately before opening: Windows stop/restart mints
     // a fresh token, and the native side must resolve it again per action.
     await seedRegionOptionsState();
+    // Windows only: the frame-rate and cursor choices replace the priority
+    // section. Without them (macOS) the menu is unchanged. The fetch only fails
+    // when the selector is closing, and then the menu does not open.
+    const windowsCapture = isWindows()
+      ? await invoke<ShareCaptureOptions>(COMMANDS.regionShareCaptureOptions, {
+          windowLabel: regionWindowLabel
+        })
+      : undefined;
     const entries = buildShareOptionsMenuEntries(
       priority,
       shareActive,
@@ -257,7 +294,8 @@
       true,
       'right',
       shareAudioEnabled,
-      shareAudioAvailable
+      shareAudioAvailable,
+      windowsCapture
     );
     await popupShareOptionsMenu(entries, {
       onPriority: (value) => void setRegionPriority(value),
@@ -267,7 +305,9 @@
       onDebug: () => void openRegionDebugCockpit(),
       onShareAudio: (enabled) => {
         void setRegionShareAudio(enabled);
-      }
+      },
+      onFps: (fps) => void setRegionShareFps(fps),
+      onCursorInVideo: (enabled) => void setRegionShareCursorInVideo(enabled)
     });
   }
 

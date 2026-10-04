@@ -25,6 +25,7 @@
     HoverTabUpdate,
     RemoteControlStatus,
     ShareAudioState,
+    ShareCaptureOptions,
     ShareControlModeChanged,
     SharePriority,
     WindowFrame
@@ -687,6 +688,24 @@
     }
   }
 
+  // Windows per-share capture choices. The menu re-fetches them on every open,
+  // so a refusal (for example, the window became shared) only needs logging.
+  async function setShareFps(windowId: number, fps: number) {
+    try {
+      await invoke<ShareCaptureOptions>(COMMANDS.setShareFps, { windowId, fps });
+    } catch (error) {
+      console.error(`set_share_fps(${windowId}) failed`, error);
+    }
+  }
+
+  async function setShareCursorInVideo(windowId: number, enabled: boolean) {
+    try {
+      await invoke<ShareCaptureOptions>(COMMANDS.setShareCursorInVideo, { windowId, enabled });
+    } catch (error) {
+      console.error(`set_share_cursor_in_video(${windowId}) failed`, error);
+    }
+  }
+
   async function onSetShareRemoteControlAllowed(allowed: boolean) {
     const windowId = currentWindowId;
     if (windowId === null || !sharedWindows.has(windowId)) return;
@@ -870,6 +889,10 @@
 
     const remoteControlSupported = isWindows();
     const menuWindowId = currentWindowId;
+    // Windows only: the frame-rate and cursor choices replace the priority
+    // section. Without them (macOS) the menu is unchanged. The fetch only fails
+    // when the shared window is gone, and then the menu does not open.
+    let windowsCapture: ShareCaptureOptions | undefined;
     if (menuWindowId !== null) {
       shareAudio = await invoke<ShareAudioState>(COMMANDS.shareAudioState, {
         windowId: menuWindowId
@@ -881,6 +904,11 @@
         scope: null,
         error: null
       }));
+      if (isWindows()) {
+        windowsCapture = await invoke<ShareCaptureOptions>(COMMANDS.shareCaptureOptions, {
+          windowId: menuWindowId
+        });
+      }
     }
     await invoke(COMMANDS.setHoverTabMenuOpen, { open: true }).catch(() => {});
 
@@ -900,7 +928,8 @@
         shareRemoteControlAllowed,
         side,
         shareAudio.enabled,
-        shareAudio.available
+        shareAudio.available,
+        windowsCapture
       );
       const placement = keyboardInvocation && actionButton
         ? (() => {
@@ -921,6 +950,12 @@
         onRemoteControlAllowed: (allowed) => void onSetShareRemoteControlAllowed(allowed),
         onShareAudio: (enabled) => {
           if (menuWindowId !== null) void setShareAudioForTarget(menuWindowId, enabled);
+        },
+        onFps: (fps) => {
+          if (menuWindowId !== null) void setShareFps(menuWindowId, fps);
+        },
+        onCursorInVideo: (enabled) => {
+          if (menuWindowId !== null) void setShareCursorInVideo(menuWindowId, enabled);
         }
       }, placement);
     } finally {
