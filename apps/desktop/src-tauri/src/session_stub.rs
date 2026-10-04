@@ -3377,14 +3377,16 @@ fn start_audio_device_watcher(
                                 crate::analytics::DeviceKind::Mic,
                                 crate::analytics::DeviceChange::Switched,
                             );
-                            app.state::<crate::transport::audio::AudioDevicePreferences>()
-                                .set_recording_device(String::new());
+                            // The saved choice is kept, so the restore above
+                            // switches back when it reconnects. No
+                            // `using_default`: that tells the frontend to
+                            // reset its saved choice to System default.
                             let _ = tauri::Emitter::emit(
                                 &app,
                                 "resilience-event",
                                 crate::resilience_event::ResilienceEvent::MicDeviceChanged {
                                     device_name,
-                                    using_default: Some(true),
+                                    using_default: None,
                                 },
                             );
                         }
@@ -3410,14 +3412,13 @@ fn start_audio_device_watcher(
                         }
                         Some(crate::transport::audio::PlayoutDeviceRefresh::Switched(device_name)) => {
                             speaker_failure_reported = false;
-                            app.state::<crate::transport::audio::AudioDevicePreferences>()
-                                .set_playout_device(String::new());
+                            // Saved choice kept, as for the microphone above.
                             let _ = tauri::Emitter::emit(
                                 &app,
                                 "resilience-event",
                                 crate::resilience_event::ResilienceEvent::SpeakerDeviceChanged {
                                     device_name,
-                                    using_default: Some(true),
+                                    using_default: None,
                                 },
                             );
                         }

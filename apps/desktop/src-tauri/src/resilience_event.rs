@@ -1,8 +1,10 @@
 /// Payload for the shared `resilience-event` Tauri event.
 ///
-/// `using_default` is present only when a native device watcher knows an
-/// automatic fallback selected the system default. Older/macOS emitters omit
-/// it, preserving their existing wire shape and frontend behavior.
+/// `using_default: Some(true)` means an automatic fallback selected the system
+/// default and cleared the saved choice; the frontend mirrors that by resetting
+/// its own saved choice. Emitters that keep the saved choice (the Windows
+/// watcher, which switches back when the saved device reconnects) send `None`
+/// or `Some(false)`, and omitting it preserves the older wire shape.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(
     tag = "kind",
