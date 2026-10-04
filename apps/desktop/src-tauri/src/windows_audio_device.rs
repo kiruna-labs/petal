@@ -68,11 +68,11 @@ pub(crate) fn default_playout_device_id() -> Result<String, String> {
 /// `UNPLUGGED`, an unplugged USB device goes `UNPLUGGED`, and one disabled in
 /// Sound settings goes `DISABLED`. None of those should be selectable.
 ///
-/// This deliberately does NOT claim to solve the powered-off-wireless-headset
-/// case: such a headset's USB dongle stays `ACTIVE`, because Windows has no way
-/// to see that the sink on the other end of the radio link is gone. This filter
-/// does not catch that case. If a switch to such a device fails in the SDK, the
-/// failure is logged and shown in the picker (`transport::audio::set_audio_devices`).
+/// This filter does NOT catch a powered-off wireless headset: its USB dongle
+/// stays `ACTIVE`, because Windows has no way to see that the headset on the
+/// other end of the radio link is gone. During a call, `windows_mic_signal`
+/// catches that case from the captured signal instead, and capture moves to
+/// another microphone.
 fn active_endpoint_ids(flow: EDataFlow) -> Result<Vec<String>, String> {
     let _apartment = ComApartment::enter()?;
     let enumerator: IMMDeviceEnumerator = unsafe {

@@ -46,3 +46,24 @@ test('the open in-call picker re-lists when Windows audio devices come and go', 
   assert.match(picker, /if \(request !== audioListRequest\) return;/);
   assert.match(picker, /unlistenAudioDevices\?\.\(\);/);
 });
+
+test('a silent Windows mic fails over, and both the toast and the picker say so', () => {
+  const watcher = watcherSource();
+  // Decided from this tick's signal, after the probe has observed it.
+  const observe = watcher.indexOf('mic_signal.observe(');
+  const dead = watcher.indexOf('dead_mic.observe(&device_id, mic_signal.last_signal())');
+  const failOver = watcher.indexOf('microphone.fail_over_from_silent_device(&device_id)');
+  assert.ok(observe >= 0 && dead > observe && failOver > dead);
+  assert.match(watcher, /ResilienceEvent::MicSwitchedFromSilent \{\s*silent_device,\s*device_name,/);
+  // The saved choice is kept: the switch never touches the preferences.
+  assert.doesNotMatch(watcher.slice(failOver), /set_recording_device\(/);
+
+  assert.match(ipc, /kind: 'micSwitchedFromSilent'; silentDevice: string; deviceName: string/);
+  assert.match(
+    toastHost,
+    /case 'micSwitchedFromSilent':[\s\S]*?silentMicNote\(event\.silentDevice, event\.deviceName\)/
+  );
+  assert.match(picker, /payload\.kind === 'micSwitchedFromSilent'/);
+  assert.match(picker, /micNote = silentMicNote\(payload\.silentDevice, payload\.deviceName\);/);
+  assert.match(picker, /unlistenResilience\?\.\(\);/);
+});

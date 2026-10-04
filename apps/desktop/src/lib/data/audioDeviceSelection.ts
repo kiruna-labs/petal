@@ -29,6 +29,16 @@ export function pickerValue(options: readonly { id: string }[], savedId: string)
 }
 
 /**
+ * The message when capture moved off a microphone that gave only digital
+ * silence (Windows: a wireless headset switched off behind its dongle). The
+ * saved choice is unchanged, so the picker still checks it; this says where
+ * the voice actually comes from.
+ */
+export function silentMicNote(silentDevice: string, deviceName: string): string {
+  return `No sound from ${silentDevice} — switched to ${deviceName}`;
+}
+
+/**
  * The caption after a switch. Null only when there is no backend to ask; an
  * in-room failure always says so, with the error the backend reported.
  */

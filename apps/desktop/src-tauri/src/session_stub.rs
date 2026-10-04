@@ -3301,6 +3301,8 @@ fn start_audio_device_watcher(
         let mut last_endpoints = None;
         #[cfg(target_os = "windows")]
         let mut mic_signal = crate::windows_mic_signal::MicSignalProbe::default();
+        #[cfg(target_os = "windows")]
+        let mut dead_mic = crate::windows_mic_signal::DeadMicDetector::default();
         loop {
             tokio::select! {
                 changed = cancelled.changed() => {
@@ -3472,9 +3474,12 @@ fn start_audio_device_watcher(
                             let _ = tauri::Emitter::emit(&app, "audio-devices-changed", ());
                         }
                     }
-                    // Diagnostic: what the mic actually captures. A wireless
-                    // headset's dongle stays listed while the headset is off,
-                    // so only the captured signal shows a dead capture.
+                    // What the mic actually captures. A wireless headset's
+                    // dongle stays listed while the headset is off, so only
+                    // the captured signal shows a dead capture; when it does,
+                    // capture moves to another microphone. Mute does not
+                    // hide the signal, and nothing is sent until the user
+                    // unmutes, so this also runs while muted.
                     #[cfg(target_os = "windows")]
                     if let Some(microphone) = state.joined_microphone() {
                         let counters =
@@ -3487,6 +3492,47 @@ fn start_audio_device_watcher(
                                 .recording_device_name(&device_id)
                                 .map_or_else(|| format!("{device_id:?}"), |name| format!("'{name}'"));
                             log::info!("{}", report.line(&device));
+                        }
+                        if dead_mic.observe(&device_id, mic_signal.last_signal()) {
+                            let silent_device = microphone
+                                .recording_device_name(&device_id)
+                                .unwrap_or_else(|| device_id.clone());
+                            match microphone.fail_over_from_silent_device(&device_id) {
+                                Some(crate::transport::audio::RecordingDeviceRefresh::Switched(device_name)) => {
+                                    log::warn!(
+                                        "windows session: no sound from microphone '{silent_device}' -- switched to '{device_name}'"
+                                    );
+                                    crate::analytics::device_changed(
+                                        crate::analytics::DeviceKind::Mic,
+                                        crate::analytics::DeviceChange::Switched,
+                                    );
+                                    let _ = tauri::Emitter::emit(
+                                        &app,
+                                        "resilience-event",
+                                        crate::resilience_event::ResilienceEvent::MicSwitchedFromSilent {
+                                            silent_device,
+                                            device_name,
+                                        },
+                                    );
+                                }
+                                Some(crate::transport::audio::RecordingDeviceRefresh::Failed(error)) => {
+                                    log::warn!(
+                                        "windows session: no sound from microphone '{silent_device}', and switching to another microphone failed: {error}"
+                                    );
+                                    let _ = tauri::Emitter::emit(
+                                        &app,
+                                        "resilience-event",
+                                        crate::resilience_event::ResilienceEvent::MicDeviceFailed {
+                                            message: format!("No sound from {silent_device}, and switching to another microphone failed: {error}"),
+                                        },
+                                    );
+                                }
+                                Some(crate::transport::audio::RecordingDeviceRefresh::Unchanged) | None => {
+                                    log::warn!(
+                                        "windows session: no sound from microphone '{silent_device}', and no other microphone to switch to"
+                                    );
+                                }
+                            }
                         }
                     }
                 }

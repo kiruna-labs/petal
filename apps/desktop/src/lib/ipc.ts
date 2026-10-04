@@ -1258,6 +1258,7 @@ export type ResilienceEvent =
   | { kind: 'networkChanged' }
   | { kind: 'micDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'micDeviceFailed'; message: string }
+  | { kind: 'micSwitchedFromSilent'; silentDevice: string; deviceName: string }
   | { kind: 'speakerDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'speakerDeviceFailed'; message: string }
   | { kind: 'sharePublicationRepairRecovering'; windowId: number }
