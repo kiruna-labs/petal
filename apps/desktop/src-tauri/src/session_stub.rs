@@ -1118,6 +1118,14 @@ impl SessionState {
         result
     }
 
+    #[cfg(target_os = "windows")]
+    fn joined_microphone(&self) -> Option<Arc<crate::transport::audio::MicTrack>> {
+        self.joined
+            .lock_unpoisoned()
+            .as_ref()
+            .and_then(|session| session.media.microphone.clone())
+    }
+
     /// Switch back to a saved mic or speaker that is connected again. Runs
     /// before `refresh_audio_devices` in the same tick: plugging a device in
     /// often makes it the Windows default too, and the default-chasing refresh
@@ -3291,6 +3299,8 @@ fn start_audio_device_watcher(
         let mut speaker_failure_reported = false;
         #[cfg(target_os = "windows")]
         let mut last_endpoints = None;
+        #[cfg(target_os = "windows")]
+        let mut mic_signal = crate::windows_mic_signal::MicSignalProbe::default();
         loop {
             tokio::select! {
                 changed = cancelled.changed() => {
@@ -3454,7 +3464,29 @@ fn start_audio_device_watcher(
                         recording.sort();
                         playout.sort();
                         if audio_endpoints_changed(&mut last_endpoints, (recording, playout)) {
+                            if let Some((recording, playout)) = &last_endpoints {
+                                log::info!(
+                                    "windows session: active audio endpoints changed -- recording={recording:?} playout={playout:?}"
+                                );
+                            }
                             let _ = tauri::Emitter::emit(&app, "audio-devices-changed", ());
+                        }
+                    }
+                    // Diagnostic: what the mic actually captures. A wireless
+                    // headset's dongle stays listed while the headset is off,
+                    // so only the captured signal shows a dead capture.
+                    #[cfg(target_os = "windows")]
+                    if let Some(microphone) = state.joined_microphone() {
+                        let counters =
+                            crate::windows_mic_signal::capture_counters(&microphone.local_track()).await;
+                        let device_id = microphone.current_device_id().unwrap_or_default();
+                        if let Some(report) =
+                            mic_signal.observe(&device_id, microphone.is_muted(), counters)
+                        {
+                            let device = microphone
+                                .recording_device_name(&device_id)
+                                .map_or_else(|| format!("{device_id:?}"), |name| format!("'{name}'"));
+                            log::info!("{}", report.line(&device));
                         }
                     }
                 }
