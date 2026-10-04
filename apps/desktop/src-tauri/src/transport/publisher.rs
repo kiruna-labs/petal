@@ -677,6 +677,25 @@ fn capped_share_cadence(requested_fps: u32, width: u32, height: u32) -> u32 {
         .map_or(requested_fps, |ceiling| requested_fps.min(ceiling))
 }
 
+/// Pure: the live-parameter update that re-caps a share's cadence after a
+/// resize, built from the sender's own readback so it covers exactly the
+/// encodings it has -- including the empty RID of a single encoding. Only
+/// `max_framerate` changes; each layer keeps its `max_bitrate`. A layer whose
+/// readback carries no bitrate is left alone rather than written as zero.
+#[cfg(target_os = "windows")]
+fn reapplied_layer_parameters(
+    live: Vec<livekit::prelude::PublishingLayerParameters>,
+    cadence_fps: u32,
+) -> Vec<livekit::prelude::PublishingLayerParameters> {
+    live.into_iter()
+        .filter(|layer| layer.max_bitrate > 0)
+        .map(|layer| livekit::prelude::PublishingLayerParameters {
+            max_framerate: f64::from(cadence_fps),
+            ..layer
+        })
+        .collect()
+}
+
 /// The cadence a share publishes at: [`effective_share_cadence`] unless the
 /// caller pinned one, in which case that pin capped to the geometry. Only the
 /// Windows publish path pins a cadence; every other caller passes `None` and
@@ -805,6 +824,54 @@ mod share_fps_geometry_tests {
         .expect("a window share always declares its encoding");
         let tier = full.video_encoding(1920, 1080);
         assert_eq!(unpinned.max_framerate, tier.max_framerate);
+    }
+
+    /// A resize re-caps the CURRENT cadence, so it can only hold or lower it:
+    /// growing past 4K drops 60 to 30, and shrinking back does not restore 60.
+    #[test]
+    fn a_resize_ratchets_the_cadence_down_and_never_back_up() {
+        // Thresholds: 4K keeps 60, DCI 4K is exactly on the limit, 5K-class is 30.
+        assert_eq!(capped_share_cadence(60, 3840, 2160), 60);
+        assert_eq!(capped_share_cadence(60, 4096, 2160), 60);
+        assert_eq!(capped_share_cadence(60, 4096, 2304), 30);
+        assert_eq!(capped_share_cadence(60, 5120, 2880), 30);
+
+        let grown = capped_share_cadence(60, 5120, 2880);
+        let shrunk_back = capped_share_cadence(grown, 1920, 1080);
+        assert_eq!(shrunk_back, 30, "the ratchet never raises the cadence");
+        // Lower-only: a cadence already below the ceiling is untouched.
+        for (width, height) in [(1280, 720), (1920, 1080), (5120, 2880)] {
+            assert_eq!(capped_share_cadence(15, width, height), 15);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_resize_update_changes_only_the_frame_rate_of_each_live_encoding() {
+        use livekit::prelude::PublishingLayerParameters;
+        let live = vec![
+            // A single encoding reads back with an empty RID.
+            PublishingLayerParameters {
+                rid: String::new(),
+                max_bitrate: 16_000_000,
+                max_framerate: 60.0,
+            },
+            // No bitrate in the readback: not written back as zero.
+            PublishingLayerParameters {
+                rid: "q".to_string(),
+                max_bitrate: 0,
+                max_framerate: 60.0,
+            },
+        ];
+        assert_eq!(
+            reapplied_layer_parameters(live, 30),
+            vec![PublishingLayerParameters {
+                rid: String::new(),
+                max_bitrate: 16_000_000,
+                max_framerate: 30.0,
+            }]
+        );
+        assert!(reapplied_layer_parameters(Vec::new(), 30).is_empty());
     }
 
     /// A republish passes the old track's `cadence_fps()` back in as the pin,
@@ -1246,6 +1313,10 @@ pub struct PublishedTrack {
     last_source_boundary_log: Mutex<Option<std::time::Instant>>,
     /// Cancels the detached encoder diagnostics when this track is terminal.
     background_cancel: CancellationToken,
+    /// Windows: set once a re-anchor failed to re-apply the cadence, so the
+    /// failure is logged once per share rather than on every resize.
+    #[cfg(target_os = "windows")]
+    geometry_reapply_warned: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2300,6 +2371,8 @@ impl RoomConnection<Arc<Room>> {
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
             last_source_boundary_log: Mutex::new(None),
             background_cancel,
+            #[cfg(target_os = "windows")]
+            geometry_reapply_warned: AtomicBool::new(false),
         })
     }
 
@@ -2405,6 +2478,8 @@ impl RoomConnection<Arc<Room>> {
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
             last_source_boundary_log: Mutex::new(None),
             background_cancel,
+            #[cfg(target_os = "windows")]
+            geometry_reapply_warned: AtomicBool::new(false),
         })
     }
 
@@ -7500,6 +7575,49 @@ impl PublishedTrack {
         self.cadence_fps.load(Ordering::Relaxed)
     }
 
+    /// Windows: re-cap this share's cadence for a NEW published geometry.
+    /// Called from `push_bgra`'s re-anchor before the first new-size frame is
+    /// pushed, so the encoder reconfigures for that frame with a cadence the
+    /// geometry affords (a 60 fps share that grows past 4K drops to 30 and
+    /// stays inside H.264 Level 5.2). The cadence only ratchets down: the
+    /// current cadence capped again, never the original choice.
+    ///
+    /// No republish. If the update fails, the per-frame push gate in the
+    /// session pump still holds the push to the new geometry's ceiling, and
+    /// the failure is logged once for this share.
+    #[cfg(target_os = "windows")]
+    fn reapply_parameters_for_new_geometry(&self, width: u32, height: u32) {
+        let previous = self.cadence_fps();
+        let cadence = capped_share_cadence(previous, width, height);
+        let updates = reapplied_layer_parameters(self.track.publishing_layer_parameters(), cadence);
+        let applied = if updates.is_empty() {
+            Err(RoomError::Internal(
+                "the sender reported no encoding with a bitrate to update".to_string(),
+            ))
+        } else {
+            self.track.set_publishing_layer_parameters(&updates)
+        };
+        match applied {
+            Ok(()) => {
+                self.cadence_fps.store(cadence, Ordering::Relaxed);
+                if cadence != previous {
+                    log::info!(
+                        "publisher: re-anchor cadence {previous} -> {cadence} fps at {width}x{height} for track '{}' (the geometry's Level 5.2 ceiling; it does not rise again)",
+                        self.track.name()
+                    );
+                }
+            }
+            Err(error) => {
+                if !self.geometry_reapply_warned.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "publisher: could not re-apply the {cadence} fps cadence for '{}' at {width}x{height} (was {previous} fps): {error}; the push gate still caps the push to this geometry",
+                        self.track.name()
+                    );
+                }
+            }
+        }
+    }
+
     /// Apply a quality-tier change to the existing sender. The simulcast
     /// layout is fixed at publish time, so focus/dynacast flips only update
     /// live RTP encoding limits and retain the track SID.
@@ -8069,6 +8187,8 @@ impl PublishedTrack {
                 )
             };
             if should_reanchor {
+                #[cfg(target_os = "windows")]
+                self.reapply_parameters_for_new_geometry(width, height);
                 self.published_width
                     .store(width, std::sync::atomic::Ordering::Relaxed);
                 self.published_height
