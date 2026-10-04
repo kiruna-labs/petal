@@ -6,11 +6,12 @@
     MISSING_DEVICE,
     MISSING_DEVICE_LABEL,
     pickerValue,
+    silentMicNote,
     switchNote
   } from '$lib/data/audioDeviceSelection';
   import { listCameraDevices, setCameraDevice } from '$lib/data/cameraDevices';
   import { session, updateAudioDevices } from '$lib/stores/session.svelte';
-  import { EVENTS, hasTauriBridge, listenUntilDestroy } from '$lib/ipc';
+  import { EVENTS, hasTauriBridge, listenUntilDestroy, type ResilienceEvent } from '$lib/ipc';
 
   interface DeviceOption {
     id: string;
@@ -39,6 +40,7 @@
   let root = $state<HTMLDivElement>();
   let audioListRequest = 0;
   let unlistenAudioDevices: UnlistenFn | undefined;
+  let unlistenResilience: UnlistenFn | undefined;
   let destroyed = false;
 
   const micValue = $derived(pickerValue(mics, selectedMic));
@@ -81,6 +83,18 @@
         (unlisten) => (unlistenAudioDevices = unlisten),
         () => destroyed
       );
+      // Windows: capture left a silent microphone. The saved one stays
+      // checked, so say where the voice actually comes from.
+      listenUntilDestroy<ResilienceEvent>(
+        EVENTS.resilienceEvent,
+        ({ payload }) => {
+          if (payload.kind === 'micSwitchedFromSilent') {
+            micNote = silentMicNote(payload.silentDevice, payload.deviceName);
+          }
+        },
+        (unlisten) => (unlistenResilience = unlisten),
+        () => destroyed
+      );
     }
 
     try {
@@ -97,6 +111,7 @@
   onDestroy(() => {
     destroyed = true;
     unlistenAudioDevices?.();
+    unlistenResilience?.();
   });
 
   function noteFor(applied: { applied: boolean; inRoom: boolean } | null, what: string) {

@@ -1,4 +1,4 @@
-//! Diagnostic: what the microphone actually captures during a Windows call.
+//! What the microphone actually captures during a Windows call.
 //!
 //! The device list cannot tell a live microphone from a dead one. A wireless
 //! headset's USB dongle stays an `ACTIVE` endpoint while the headset is off
@@ -6,7 +6,8 @@
 //! it while it may capture nothing. This reads what WebRTC reports the mic
 //! captured and logs a line whenever the signal state changes, plus a
 //! heartbeat, so a log shows when the signal stopped or resumed without
-//! anyone noting times.
+//! anyone noting times. [`DeadMicDetector`] turns the same signal into the
+//! decision to move capture to another microphone.
 
 /// Cumulative capture counters from WebRTC's `media-source` stats for the mic.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -104,6 +105,8 @@ pub(crate) struct MicSignalProbe {
     /// Device, mute state and signal of the last logged line.
     last_logged: Option<(String, bool, Signal)>,
     since_logged: u32,
+    /// The latest observation's signal; `None` after a baseline-only one.
+    last_signal: Option<Signal>,
 }
 
 impl MicSignalProbe {
@@ -138,10 +141,12 @@ impl MicSignalProbe {
             // source): only a baseline.
             (_, Some(_)) => {
                 self.last_counters = counters;
+                self.last_signal = None;
                 return None;
             }
         };
         self.last_counters = counters;
+        self.last_signal = Some(signal);
         self.since_logged += 1;
 
         let previous = self.last_logged.as_ref().map(|(_, _, signal)| *signal);
@@ -163,6 +168,44 @@ impl MicSignalProbe {
             captured_seconds,
             muted,
         })
+    }
+
+    pub(crate) fn last_signal(&self) -> Option<Signal> {
+        self.last_signal
+    }
+}
+
+/// Silent observations in a row (about 6s) before the mic counts as dead. A
+/// live mic's noise floor never reads as digital silence, muted or not.
+const DEAD_AFTER: u32 = 3;
+
+/// Pure: decides when the microphone capture is on has gone dead.
+#[derive(Default)]
+pub(crate) struct DeadMicDetector {
+    device: String,
+    silent: u32,
+}
+
+impl DeadMicDetector {
+    /// True once, after `DEAD_AFTER` silent observations in a row of the same
+    /// device. Any other signal or a device change starts the count again; a
+    /// baseline-only observation (`None`) neither counts nor resets.
+    pub(crate) fn observe(&mut self, device_id: &str, signal: Option<Signal>) -> bool {
+        if self.device != device_id {
+            self.device = device_id.to_owned();
+            self.silent = 0;
+        }
+        match signal {
+            Some(Signal::Silent) if !device_id.is_empty() => {
+                self.silent += 1;
+                self.silent == DEAD_AFTER
+            }
+            None => false,
+            Some(_) => {
+                self.silent = 0;
+                false
+            }
+        }
     }
 }
 
@@ -278,5 +321,38 @@ mod tests {
         }
         assert_eq!(logged.iter().filter(|line| **line).count(), 2);
         assert!(logged[14] && logged[29], "every 15th observation");
+    }
+
+    #[test]
+    fn a_mic_is_dead_after_three_silent_observations_and_fires_once() {
+        let mut detector = DeadMicDetector::default();
+        let silent = Some(Signal::Silent);
+        assert!(!detector.observe("corsair", None), "baseline");
+        assert!(!detector.observe("corsair", silent));
+        assert!(!detector.observe("corsair", silent));
+        assert!(detector.observe("corsair", silent), "about 6s of silence");
+        assert!(!detector.observe("corsair", silent), "only once");
+        assert!(!detector.observe("corsair", silent));
+    }
+
+    #[test]
+    fn live_or_stalled_signal_and_device_changes_restart_the_count() {
+        let mut detector = DeadMicDetector::default();
+        let silent = Some(Signal::Silent);
+        detector.observe("corsair", silent);
+        detector.observe("corsair", silent);
+        assert!(!detector.observe("corsair", Some(Signal::Live)), "speech resets");
+        assert!(!detector.observe("corsair", silent));
+        assert!(!detector.observe("corsair", Some(Signal::Stalled)));
+        assert!(!detector.observe("corsair", silent));
+        assert!(!detector.observe("corsair", silent));
+        assert!(!detector.observe("webcam", silent), "new device, new count");
+        assert!(!detector.observe("webcam", silent));
+        assert!(detector.observe("webcam", silent));
+        // No known device: never declared dead.
+        let mut unknown = DeadMicDetector::default();
+        for _ in 0..5 {
+            assert!(!unknown.observe("", silent));
+        }
     }
 }
