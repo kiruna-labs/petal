@@ -1118,6 +1118,36 @@ impl SessionState {
         result
     }
 
+    /// Switch back to a saved mic or speaker that is connected again. Runs
+    /// before `refresh_audio_devices` in the same tick: plugging a device in
+    /// often makes it the Windows default too, and the default-chasing refresh
+    /// would otherwise switch to it first and clear the saved choice.
+    fn restore_saved_audio_devices(
+        &self,
+        recording: Option<&str>,
+        playout: Option<&str>,
+    ) -> (
+        Option<crate::transport::audio::RecordingDeviceRefresh>,
+        Option<crate::transport::audio::PlayoutDeviceRefresh>,
+    ) {
+        let joined = self.joined.lock_unpoisoned();
+        let Some(session) = joined.as_ref() else {
+            return (None, None);
+        };
+        (
+            session
+                .media
+                .microphone
+                .as_ref()
+                .map(|microphone| microphone.restore_saved_recording_device(recording)),
+            session
+                .media
+                .playout
+                .as_ref()
+                .map(|speaker| speaker.restore_saved_playout_device(playout)),
+        )
+    }
+
     fn refresh_audio_devices(
         &self,
     ) -> (
@@ -3267,6 +3297,71 @@ fn start_audio_device_watcher(
                     let _device_transaction = state.audio_device_lock.lock().await;
                     if !generation.is_current() {
                         break;
+                    }
+                    let preferences = app.state::<crate::transport::audio::AudioDevicePreferences>();
+                    let (restored_mic, restored_speaker) = state.restore_saved_audio_devices(
+                        preferences.recording_device().as_deref(),
+                        preferences.playout_device().as_deref(),
+                    );
+                    match restored_mic {
+                        Some(crate::transport::audio::RecordingDeviceRefresh::Switched(device_name)) => {
+                            log::info!(
+                                "windows session: saved microphone '{device_name}' is connected again -- switched to it"
+                            );
+                            crate::analytics::device_changed(
+                                crate::analytics::DeviceKind::Mic,
+                                crate::analytics::DeviceChange::Switched,
+                            );
+                            let _ = tauri::Emitter::emit(
+                                &app,
+                                "resilience-event",
+                                crate::resilience_event::ResilienceEvent::MicDeviceChanged {
+                                    device_name,
+                                    using_default: Some(false),
+                                },
+                            );
+                        }
+                        Some(crate::transport::audio::RecordingDeviceRefresh::Failed(error)) => {
+                            log::warn!(
+                                "windows session: saved microphone is connected again but switching to it failed: {error}"
+                            );
+                            let _ = tauri::Emitter::emit(
+                                &app,
+                                "resilience-event",
+                                crate::resilience_event::ResilienceEvent::MicDeviceFailed {
+                                    message: format!("Could not switch back to the saved microphone: {error}"),
+                                },
+                            );
+                        }
+                        Some(crate::transport::audio::RecordingDeviceRefresh::Unchanged) | None => {}
+                    }
+                    match restored_speaker {
+                        Some(crate::transport::audio::PlayoutDeviceRefresh::Switched(device_name)) => {
+                            log::info!(
+                                "windows session: saved speaker '{device_name}' is connected again -- switched to it"
+                            );
+                            let _ = tauri::Emitter::emit(
+                                &app,
+                                "resilience-event",
+                                crate::resilience_event::ResilienceEvent::SpeakerDeviceChanged {
+                                    device_name,
+                                    using_default: Some(false),
+                                },
+                            );
+                        }
+                        Some(crate::transport::audio::PlayoutDeviceRefresh::Failed(error)) => {
+                            log::warn!(
+                                "windows session: saved speaker is connected again but switching to it failed: {error}"
+                            );
+                            let _ = tauri::Emitter::emit(
+                                &app,
+                                "resilience-event",
+                                crate::resilience_event::ResilienceEvent::SpeakerDeviceFailed {
+                                    message: format!("Could not switch back to the saved speaker: {error}"),
+                                },
+                            );
+                        }
+                        Some(crate::transport::audio::PlayoutDeviceRefresh::Unchanged) | None => {}
                     }
                     let (recording, playout) = state.refresh_audio_devices();
                     log::debug!(
