@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import type { UnlistenFn } from '@tauri-apps/api/event';
   import { listAudioDevices, setAudioDevices } from '$lib/data/audioDevices';
   import {
     MISSING_DEVICE,
@@ -9,7 +10,7 @@
   } from '$lib/data/audioDeviceSelection';
   import { listCameraDevices, setCameraDevice } from '$lib/data/cameraDevices';
   import { session, updateAudioDevices } from '$lib/stores/session.svelte';
-  import { hasTauriBridge } from '$lib/ipc';
+  import { EVENTS, hasTauriBridge, listenUntilDestroy } from '$lib/ipc';
 
   interface DeviceOption {
     id: string;
@@ -36,6 +37,9 @@
   let cameraNote = $state<string | null>(null);
   let pendingKind = $state<'microphone' | 'speaker' | 'camera' | null>(null);
   let root = $state<HTMLDivElement>();
+  let audioListRequest = 0;
+  let unlistenAudioDevices: UnlistenFn | undefined;
+  let destroyed = false;
 
   const micValue = $derived(pickerValue(mics, selectedMic));
   const speakerValue = $derived(pickerValue(speakers, selectedSpeaker));
@@ -47,6 +51,15 @@
 
   const title = $derived(mode === 'audio' ? 'Audio devices' : 'Camera');
 
+  async function loadAudioLists() {
+    const request = ++audioListRequest;
+    const audio = await listAudioDevices();
+    // A newer listing (from a device change) supersedes this one.
+    if (request !== audioListRequest) return;
+    mics = (audio?.recording ?? []).map((device) => ({ id: device.id, label: device.name }));
+    speakers = (audio?.playout ?? []).map((device) => ({ id: device.id, label: device.name }));
+  }
+
   onMount(async () => {
     if (!hasTauriBridge()) {
       deviceError = 'Device switching is unavailable in this preview.';
@@ -54,10 +67,24 @@
       return;
     }
 
+    if (mode === 'audio') {
+      // Windows, in a call: the device watcher announces connects and
+      // disconnects, so the open picker re-lists instead of showing what was
+      // connected when it opened.
+      listenUntilDestroy(
+        EVENTS.audioDevicesChanged,
+        () => {
+          loadAudioLists().catch((error) =>
+            console.error('device picker: re-enumeration failed', error)
+          );
+        },
+        (unlisten) => (unlistenAudioDevices = unlisten),
+        () => destroyed
+      );
+    }
+
     try {
-      const [audio, camera] = await Promise.all([listAudioDevices(), listCameraDevices()]);
-      mics = (audio?.recording ?? []).map((device) => ({ id: device.id, label: device.name }));
-      speakers = (audio?.playout ?? []).map((device) => ({ id: device.id, label: device.name }));
+      const [, camera] = await Promise.all([loadAudioLists(), listCameraDevices()]);
       cameras = (camera ?? []).map((device) => ({ id: device.id, label: device.name }));
     } catch (error) {
       console.error('device picker: enumeration failed', error);
@@ -65,6 +92,11 @@
     } finally {
       loading = false;
     }
+  });
+
+  onDestroy(() => {
+    destroyed = true;
+    unlistenAudioDevices?.();
   });
 
   function noteFor(applied: { applied: boolean; inRoom: boolean } | null, what: string) {
