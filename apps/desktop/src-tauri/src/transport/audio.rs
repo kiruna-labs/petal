@@ -1428,6 +1428,25 @@ pub struct AppliedAudioDevices {
     pub speaker_error: Option<String>,
 }
 
+impl AppliedAudioDevices {
+    /// One warning per failed side of one user attempt, so a switch that did
+    /// not take is in the log and not only in a picker caption. User-driven,
+    /// so it cannot repeat on its own (#788's per-episode rule).
+    fn log_failures(&self, recording_id: Option<&str>, playout_id: Option<&str>) {
+        for (kind, requested, error) in [
+            ("microphone", recording_id, &self.mic_error),
+            ("speaker", playout_id, &self.speaker_error),
+        ] {
+            if let (Some(requested), Some(error)) = (requested, error) {
+                log::warn!(
+                    "audio: {kind} switch to {requested:?} failed (in_room={}): {error}",
+                    self.in_room
+                );
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn with_system_default(mut devices: Vec<AudioDeviceInfo>) -> Vec<AudioDeviceInfo> {
     if !devices.is_empty() {
@@ -1571,6 +1590,7 @@ pub fn set_audio_devices(
         }
     }
 
+    result.log_failures(recording_id.as_deref(), playout_id.as_deref());
     result
 }
 
@@ -1582,9 +1602,15 @@ pub async fn set_audio_devices(
     preferences: tauri::State<'_, AudioDevicePreferences>,
     state: tauri::State<'_, crate::session::SessionState>,
 ) -> Result<AppliedAudioDevices, String> {
-    Ok(state
-        .set_audio_devices(recording_id, playout_id, preferences.inner())
-        .await)
+    let applied = state
+        .set_audio_devices(
+            recording_id.clone(),
+            playout_id.clone(),
+            preferences.inner(),
+        )
+        .await;
+    applied.log_failures(recording_id.as_deref(), playout_id.as_deref());
+    Ok(applied)
 }
 
 /// Start a background task that logs every remote audio track `room`

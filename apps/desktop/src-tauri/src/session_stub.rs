@@ -1090,6 +1090,17 @@ impl SessionState {
         if let Some(id) = playout_id {
             match session.media.playout.as_ref() {
                 Some(playout) => {
+                    // A failure here can leave the ADM worse off than before the
+                    // attempt. The vendored `switch_playout_device` (and its
+                    // `switch_recording_device` twin) stops the device, sets the
+                    // target GUID, then inits and starts it; if init or start
+                    // fails, the ADM is left stopped with the GUID already on the
+                    // target. A later switch then reads `was_initialized` as false,
+                    // only sets the GUID, and reports success with nothing
+                    // playing. That is why the error text is reported as-is and
+                    // never claims where audio is still going. The likely
+                    // follow-up is a `reassert_playout()` after a failed switch,
+                    // gated on a real log of this state.
                     let switched = if id.is_empty() {
                         playout.use_default_playout_device()
                     } else {
