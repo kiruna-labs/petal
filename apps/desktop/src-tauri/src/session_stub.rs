@@ -2915,6 +2915,9 @@ pub async fn join_room_command(
         room_connection.room().clone(),
         generation.clone(),
     );
+    // Meeting chat, Windows parity with session/room.rs for the same reason:
+    // without it `chat_publish` sends but no `chat-data` event ever arrives.
+    crate::chat::start_receiver_for_room(&app, room_connection.room().clone(), generation.clone());
     crate::remote_control::start_receiver_for_room(
         &app,
         room_connection.room().clone(),
