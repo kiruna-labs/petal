@@ -595,6 +595,31 @@ impl MicTrack {
         self.muted.load(Ordering::SeqCst)
     }
 
+    /// The published mic track, for reading its capture stats
+    /// (`windows_mic_signal`).
+    #[cfg(target_os = "windows")]
+    pub(crate) fn local_track(&self) -> LocalAudioTrack {
+        self.track.clone()
+    }
+
+    /// The recording device id capture is on, as last pinned or followed.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn current_device_id(&self) -> Option<String> {
+        self.current_device
+            .lock_unpoisoned()
+            .as_ref()
+            .map(|snapshot| snapshot.id.as_str().to_owned())
+    }
+
+    /// A recording device's name, when it is still enumerated.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn recording_device_name(&self, device_id: &str) -> Option<String> {
+        self.audio
+            .recording_devices()
+            .find(|device| device.id.as_str() == device_id)
+            .map(|device| device.name)
+    }
+
     /// This mic's current LiveKit track SID. Used by #713's reconnect
     /// publication-repair health check to tell whether the vendored SDK's
     /// own unpublish+republish-on-restart (`handle_restarted`) actually left

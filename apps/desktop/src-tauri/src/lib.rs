@@ -251,6 +251,8 @@ pub mod window_source;
 #[cfg(target_os = "windows")]
 mod windows_audio_device;
 #[cfg(target_os = "windows")]
+mod windows_mic_signal;
+#[cfg(target_os = "windows")]
 mod windows_capture_target;
 #[cfg(target_os = "windows")]
 mod windows_screen_audio;
