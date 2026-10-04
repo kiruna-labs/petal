@@ -50,6 +50,7 @@
   import { clearUpdateStatus, updateStatus } from '$lib/stores/updateStatus.svelte';
   import { setToastHostVisible } from '$lib/stores/toastHost.svelte';
   import { updateAudioDevices } from '$lib/stores/session.svelte';
+  import { silentMicNote } from '$lib/data/audioDeviceSelection';
   import { EVENTS } from '$lib/ipc';
   import type { ResilienceEvent, ShareErrorPayload, RemoteControlStatus } from '$lib/ipc';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
@@ -167,6 +168,13 @@
         break;
       case 'micDeviceFailed':
         show({ variant: 'degraded', message: event.message, autoDismiss: true });
+        break;
+      case 'micSwitchedFromSilent':
+        show({
+          variant: 'reconnected',
+          message: silentMicNote(event.silentDevice, event.deviceName),
+          autoDismiss: true,
+        });
         break;
       case 'speakerDeviceChanged':
         if (event.usingDefault) updateAudioDevices(undefined, '');

@@ -558,10 +558,11 @@ pub struct MicTrack {
 /// Pure: the saved device the in-call watcher should switch back to, if any.
 ///
 /// Only a saved device that is connected, not already in use, and not in
-/// `do_not_retry`. That holds devices a switch failed on: a failed switch can
-/// leave the ADM stopped with its GUID already on the target, and a retry
+/// `do_not_retry`. That holds devices a switch failed on -- a failed switch
+/// can leave the ADM stopped with its GUID already on the target, and a retry
 /// would then report success with nothing flowing (see
-/// `session_stub::SessionState::set_audio_devices`). A device leaves the set
+/// `session_stub::SessionState::set_audio_devices`) -- and, on Windows,
+/// microphones that captured only digital silence. A device leaves the set
 /// when it is unplugged, so its next connection gets one fresh attempt, or
 /// when the user picks it.
 pub(crate) fn saved_device_to_restore<'a>(
@@ -573,6 +574,25 @@ pub(crate) fn saved_device_to_restore<'a>(
     do_not_retry.retain(|id| present.contains(&id.as_str()));
     let id = saved?;
     (present.contains(&id) && current != Some(id) && !do_not_retry.contains(id)).then_some(id)
+}
+
+/// Pure: the microphone to switch to when `silent` captures only digital
+/// silence -- the Windows default if it is usable, otherwise the first usable
+/// one in `devices` order. Usable means listed, not `silent`, and not in
+/// `do_not_retry`.
+pub(crate) fn fallback_recording_device<'a>(
+    devices: &[&'a str],
+    default: Option<&str>,
+    silent: &str,
+    do_not_retry: &HashSet<String>,
+) -> Option<&'a str> {
+    let usable = |id: &&str| *id != silent && !do_not_retry.contains(*id);
+    devices
+        .iter()
+        .copied()
+        .filter(usable)
+        .find(|id| Some(*id) == default)
+        .or_else(|| devices.iter().copied().find(usable))
 }
 
 /// A cheap snapshot of the recording device selected by the ADM. `id` is the
@@ -748,6 +768,41 @@ impl MicTrack {
             Ok(name) => RecordingDeviceRefresh::Switched(name),
             Err(error) => RecordingDeviceRefresh::Failed(error),
         }
+    }
+
+    /// Stop using `silent`, a microphone that captured only digital silence
+    /// (a wireless headset switched off behind its still-connected dongle),
+    /// and switch to [`fallback_recording_device`] among the active
+    /// microphones. `silent` is not switched back to on our own while it
+    /// stays connected. `None` when no other microphone is usable.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn fail_over_from_silent_device(
+        &self,
+        silent: &str,
+    ) -> Option<RecordingDeviceRefresh> {
+        self.do_not_retry
+            .lock_unpoisoned()
+            .insert(silent.to_owned());
+        let devices: Vec<_> = self.audio.recording_devices().collect();
+        let active = crate::windows_audio_device::active_recording_endpoint_ids().ok();
+        let ids: Vec<&str> = devices
+            .iter()
+            .map(|device| device.id.as_str())
+            .filter(|id| {
+                active
+                    .as_ref()
+                    .is_none_or(|active| active.iter().any(|active| active == id))
+            })
+            .collect();
+        let default = crate::windows_audio_device::default_recording_device_id().ok();
+        let target = {
+            let do_not_retry = self.do_not_retry.lock_unpoisoned();
+            fallback_recording_device(&ids, default.as_deref(), silent, &do_not_retry)?.to_owned()
+        };
+        Some(match self.set_recording_device(&target) {
+            Ok(name) => RecordingDeviceRefresh::Switched(name),
+            Err(error) => RecordingDeviceRefresh::Failed(error),
+        })
     }
 
     pub fn use_default_recording_device(&self) -> Result<String, String> {
@@ -2693,6 +2748,33 @@ mod tests {
                 &mut other
             ),
             Some("webcam")
+        );
+    }
+
+    #[test]
+    fn a_silent_mic_falls_back_to_the_default_or_else_the_first_other_one() {
+        let none = HashSet::new();
+        let devices = ["corsair", "webcam", "usb"];
+        // The Windows default is the dead headset's dongle: first other one.
+        assert_eq!(
+            fallback_recording_device(&devices, Some("corsair"), "corsair", &none),
+            Some("webcam")
+        );
+        // A usable default wins over enumeration order.
+        assert_eq!(
+            fallback_recording_device(&devices, Some("usb"), "corsair", &none),
+            Some("usb")
+        );
+        // Devices that already failed or went silent are skipped.
+        let tried = HashSet::from(["webcam".to_string()]);
+        assert_eq!(
+            fallback_recording_device(&devices, None, "corsair", &tried),
+            Some("usb")
+        );
+        // Nothing else connected: stay.
+        assert_eq!(
+            fallback_recording_device(&["corsair"], Some("corsair"), "corsair", &none),
+            None
         );
     }
 
