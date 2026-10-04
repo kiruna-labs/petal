@@ -1466,31 +1466,81 @@ fn with_system_default(devices: Vec<AudioDeviceInfo>) -> Vec<AudioDeviceInfo> {
     devices
 }
 
+/// Drop devices Windows reports as gone, so a stale selection cannot be re-made
+/// from the list. `active_ids` is empty when we have no information (the
+/// endpoint query failed), and an empty set fails OPEN, keeping the ADM's list
+/// untouched, because hiding every device is worse than showing one that has
+/// gone away.
+///
+/// See `windows_audio_device::active_endpoint_ids` for why this cannot catch a
+/// powered-off wireless headset.
+#[cfg(target_os = "windows")]
+fn keep_active_devices(
+    devices: Vec<AudioDeviceInfo>,
+    active_ids: &[String],
+) -> Vec<AudioDeviceInfo> {
+    if active_ids.is_empty() {
+        return devices;
+    }
+    let active: HashSet<&str> = active_ids.iter().map(String::as_str).collect();
+    devices
+        .into_iter()
+        .filter(|device| active.contains(device.id.as_str()))
+        .collect()
+}
+
+/// The endpoint ids Windows still reports as ACTIVE for one direction, or no
+/// information when the query failed. The failure is logged, not silent.
+#[cfg(target_os = "windows")]
+fn active_endpoint_ids(direction: &str, query: Result<Vec<String>, String>) -> Vec<String> {
+    query.unwrap_or_else(|error| {
+        log::warn!(
+            "audio: could not list active {direction} endpoints ({error}); showing every enumerated device"
+        );
+        Vec::new()
+    })
+}
+
 /// Enumerate the machine's real recording + playout devices (issue #28).
 /// Errors (no audio hardware, ADM init failure) surface as a string so the
 /// frontend can show an honest "audio devices unavailable" state.
 #[tauri::command]
 pub fn list_audio_devices() -> Result<AudioDeviceLists, String> {
     let audio = PlatformAudio::new().map_err(|e| format!("audio devices unavailable: {e}"))?;
+    let recording: Vec<AudioDeviceInfo> = audio
+        .recording_devices()
+        .map(|device| AudioDeviceInfo {
+            id: device.id.as_str().to_string(),
+            name: device.name,
+        })
+        .collect();
+    let playout: Vec<AudioDeviceInfo> = audio
+        .playout_devices()
+        .map(|device| AudioDeviceInfo {
+            id: device.id.as_str().to_string(),
+            name: device.name,
+        })
+        .collect();
+    #[cfg(target_os = "windows")]
+    let (recording, playout) = (
+        keep_active_devices(
+            recording,
+            &active_endpoint_ids(
+                "recording",
+                crate::windows_audio_device::active_recording_endpoint_ids(),
+            ),
+        ),
+        keep_active_devices(
+            playout,
+            &active_endpoint_ids(
+                "playout",
+                crate::windows_audio_device::active_playout_endpoint_ids(),
+            ),
+        ),
+    );
     Ok(AudioDeviceLists {
-        recording: with_system_default(
-            audio
-                .recording_devices()
-                .map(|device| AudioDeviceInfo {
-                    id: device.id.as_str().to_string(),
-                    name: device.name,
-                })
-                .collect(),
-        ),
-        playout: with_system_default(
-            audio
-                .playout_devices()
-                .map(|device| AudioDeviceInfo {
-                    id: device.id.as_str().to_string(),
-                    name: device.name,
-                })
-                .collect(),
-        ),
+        recording: with_system_default(recording),
+        playout: with_system_default(playout),
     })
 }
 
@@ -2409,6 +2459,35 @@ mod tests {
         assert_eq!(devices[0].name, "System default");
         assert_eq!(devices[1].id, "guid-1");
         assert!(with_system_default(Vec::new()).is_empty());
+    }
+
+    /// Devices Windows reports as gone must be dropped from the lists we offer,
+    /// so a stale choice cannot be re-made from the UI.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_device_lists_drop_gone_devices_and_fail_open() {
+        let devices = vec![
+            AudioDeviceInfo {
+                id: "speakers".into(),
+                name: "Speakers".into(),
+            },
+            AudioDeviceInfo {
+                id: "bt".into(),
+                name: "Bluetooth headset".into(),
+            },
+        ];
+        assert_eq!(
+            keep_active_devices(devices.clone(), &["speakers".to_string()])
+                .iter()
+                .map(|device| device.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["speakers"],
+            "a NOTPRESENT/UNPLUGGED device must not be offered"
+        );
+        // Fail OPEN: no information keeps the ADM's list, because hiding every
+        // device is worse than showing one that has gone away.
+        assert_eq!(keep_active_devices(devices.clone(), &[]).len(), 2);
+        assert!(active_endpoint_ids("playout", Err("no enumerator".into())).is_empty());
     }
 
     #[test]
