@@ -27,8 +27,9 @@
   import ParticipantTile from './ParticipantTile.svelte';
   import ControlButton, { type ControlIcon } from './ControlButton.svelte';
   import MediaSplitControl from './MediaSplitControl.svelte';
-  import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
+  import { computeGalleryLayoutPreferringLines } from '@petal/shared/logic/galleryGeometry';
   import { CAMERA_TILE_ASPECT_RANGE } from '@petal/shared/logic/cameraCrop';
+  import { computeSpotlightGeometry } from '@petal/shared/logic/spotlightGeometry';
   import { uniformFlip, uniformFlipKeyframes, visibleFlipRect, type FlipRect } from '@petal/shared/logic/tileFlip';
   import { chooseSpotlightHero } from '@petal/shared/logic/tileLayoutMode';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
@@ -179,7 +180,13 @@
   let tileSurface = $state<HTMLElement>();
   let tileSurfaceWidth = $state(0);
   let tileSurfaceHeight = $state(0);
-  let lastGalleryLayout: { count: number; columns: number; rows: number } | null = null;
+  let galleryEl = $state<HTMLDivElement>();
+  let galleryWidth = $state(0);
+  let galleryHeight = $state(0);
+  let spotlightRailEl = $state<HTMLDivElement>();
+  let spotlightRailWidth = $state(0);
+  let spotlightRailHeight = $state(0);
+  let lastGalleryLayout: { count: number; columns: number; rows: number; line: boolean } | null = null;
   let inviteTooltipElement = $state<HTMLSpanElement>();
   let inviteTooltipShift = $state(0);
   const activeGalleryTileAnimations = new Map<string, Animation>();
@@ -330,6 +337,35 @@
       ? [spotlightEntry, ...thumbnailEntries]
       : participantEntries
   );
+  // Window shape -> chrome. The gallery measures ITSELF (not the viewport), so
+  // the meeting window can be any shape a person drags it to (#239 parity):
+  //  - short and wide (a bar of faces along the top of the screen): the
+  //    controls become a rail at the right edge and the top bar floats over
+  //    the tiles, shown while the pointer is over the window or focus is in
+  //    it, so nearly the whole height goes to faces;
+  //  - narrow (a column of faces beside an editor): the controls drop their
+  //    labels and wrap, and the top bar wraps its buttons under the name
+  //    (the control-row fit below), never clipping either.
+  const RAIL_BELOW_HEIGHT = 420;
+  const RAIL_BUTTON_PX = 40;
+  const RAIL_GAP_PX = 6;
+  const RAIL_PADDING_PX = 8;
+  const railControls = $derived(
+    galleryHeight > 0 && galleryHeight < RAIL_BELOW_HEIGHT && galleryWidth > galleryHeight
+  );
+  /** Below this width (or on the rail) the tiles take the window's edges:
+   * smaller padding and gaps, so a column of faces is mostly faces. */
+  const COMPACT_WINDOW_BELOW_WIDTH = 620;
+  const COMPACT_TILE_GAP_PX = 8;
+  const compactWindow = $derived(
+    railControls || (galleryWidth > 0 && galleryWidth < COMPACT_WINDOW_BELOW_WIDTH)
+  );
+  /** Rail controls fill top to bottom, then start another column. */
+  const railRows = $derived(
+    Math.max(1, Math.floor((galleryHeight - RAIL_PADDING_PX * 2 + RAIL_GAP_PX) / (RAIL_BUTTON_PX + RAIL_GAP_PX)))
+  );
+  const galleryChromeStyle = $derived(`--rail-rows: ${railRows};`);
+
   const gridOverflowScroll = $derived(false);
   // `lastGalleryLayout` is a plain (non-reactive) closure variable, not
   // `$state` -- it feeds `previous` back into computeGalleryLayout for
@@ -338,15 +374,56 @@
   const smartGridLayout = $derived.by(() => {
     // #248: the gallery holds camera tiles only (native shares are separate
     // compositor windows), so every layout may crop within the shared caps.
-    const layout = computeGalleryLayout(participantEntries.length, tileSurfaceWidth, tileSurfaceHeight, {
+    // A bar or column of faces keeps everyone in one line while that shows
+    // faces at least as tall as a grid would (the shared packer decides).
+    const layout = computeGalleryLayoutPreferringLines(participantEntries.length, tileSurfaceWidth, tileSurfaceHeight, {
       previous: lastGalleryLayout,
-      tileAspectRange: CAMERA_TILE_ASPECT_RANGE
+      previousWasLine: lastGalleryLayout?.count === participantEntries.length && lastGalleryLayout.line,
+      tileAspectRange: CAMERA_TILE_ASPECT_RANGE,
+      gap: compactWindow ? COMPACT_TILE_GAP_PX : undefined
     });
-    lastGalleryLayout = { count: participantEntries.length, columns: layout.columns, rows: layout.rows };
+    lastGalleryLayout = { count: participantEntries.length, columns: layout.columns, rows: layout.rows, line: layout.line };
     return layout;
   });
   const smartGridStyle = $derived(
-    `--gallery-cols: ${smartGridLayout.columns}; --gallery-rows: ${smartGridLayout.rows}; --gallery-tail-width: ${smartGridLayout.tileWidth}px; --gallery-tile-width: ${smartGridLayout.tileWidth}px; --gallery-tile-height: ${smartGridLayout.tileHeight}px; --gallery-gap: ${smartGridLayout.gap}px; --camera-tile-min-aspect: ${CAMERA_TILE_ASPECT_RANGE.min};`
+    `--gallery-cols: ${smartGridLayout.columns}; --gallery-half-cols: ${smartGridLayout.columns * 2}; --gallery-rows: ${smartGridLayout.rows}; --gallery-tile-width: ${smartGridLayout.tileWidth}px; --gallery-tile-height: ${smartGridLayout.tileHeight}px; --gallery-gap: ${smartGridLayout.gap}px; --camera-tile-min-aspect: ${CAMERA_TILE_ASPECT_RANGE.min};`
+  );
+
+  // Spotlight (#239 parity): the shared geometry decides whether the
+  // thumbnails sit beside the hero or in rows below it, and sizes the hero
+  // and ONE thumbnail size for everyone (your own included). The hero takes
+  // its camera's own shape, so a phone held upright is shown whole.
+  const DEFAULT_HERO_ASPECT = 16 / 9;
+  let heroAspect = $state(DEFAULT_HERO_ASPECT);
+  const spotlightGap = $derived(compactWindow ? COMPACT_TILE_GAP_PX : 12);
+  const spotlightGeometry = $derived(
+    computeSpotlightGeometry(
+      thumbnailEntries.length,
+      spotlightRailWidth,
+      spotlightRailHeight,
+      spotlightGap,
+      { aspect: heroAspect, header: 0 },
+      { wrapSideStrip: true }
+    )
+  );
+  /** The thumbnails need more room than the rail has: the rail scrolls and
+   * the hero stays put at its top. */
+  const spotlightScrolls = $derived.by(() => {
+    const g = spotlightGeometry;
+    const count = thumbnailEntries.length;
+    if (count === 0 || g.thumbnailWidth <= 0) return false;
+    if (g.placement === 'side') {
+      const rows = Math.ceil(count / Math.max(1, g.stripColumns));
+      return rows * g.thumbnailHeight + (rows - 1) * spotlightGap > spotlightRailHeight + 0.5;
+    }
+    const perRow = Math.max(1, Math.floor((spotlightRailWidth + spotlightGap) / (g.thumbnailWidth + spotlightGap)));
+    const rows = Math.ceil(count / perRow);
+    return g.heroHeight + spotlightGap + rows * g.thumbnailHeight + (rows - 1) * spotlightGap > spotlightRailHeight + 0.5;
+  });
+  const spotlightRailStyle = $derived(
+    spotlightActive && spotlightRailWidth > 0 && spotlightRailHeight > 0
+      ? `--hero-w: ${spotlightGeometry.heroWidth}px; --hero-h: ${spotlightGeometry.heroHeight}px; --thumb-w: ${spotlightGeometry.thumbnailWidth}px; --thumb-h: ${spotlightGeometry.thumbnailHeight}px; --strip-cols: ${Math.max(1, spotlightGeometry.stripColumns)}; --strip-rows: ${Math.max(1, Math.ceil(thumbnailEntries.length / Math.max(1, spotlightGeometry.stripColumns)))}; --spotlight-gap: ${spotlightGap}px;`
+      : undefined
   );
   const layoutToggleLabel = $derived(
     layoutMode === 'grid' ? 'Switch to spotlight' : 'Switch to gallery grid'
@@ -386,6 +463,66 @@
     observer.observe(surface);
 
     return () => observer.disconnect();
+  });
+
+  $effect(() => {
+    const el = galleryEl;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      galleryWidth = el.clientWidth;
+      galleryHeight = el.clientHeight;
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  // The spotlight is packed into the rail's content box (its padding keeps
+  // the sharing ring's glow clear of the scroll edge).
+  $effect(() => {
+    const rail = spotlightRailEl;
+    if (!rail || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      const style = getComputedStyle(rail);
+      spotlightRailWidth = Math.max(0, rail.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
+      spotlightRailHeight = Math.max(0, rail.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom));
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(rail);
+    return () => observer.disconnect();
+  });
+
+  // The hero camera's shape, read off its video as frames arrive (a phone
+  // can rotate mid-meeting: `resize`). No video yet, or camera off: 16:9.
+  $effect(() => {
+    if (!spotlightActive || !tileSurface) {
+      heroAspect = DEFAULT_HERO_ASPECT;
+      return;
+    }
+    void spotlightEntry?.key;
+    void spotlightEntry?.videoStream;
+    void spotlightEntry?.videoOn;
+    let cancelled = false;
+    let video: HTMLVideoElement | null = null;
+    const read = () => {
+      const next = video && video.videoWidth > 0 && video.videoHeight > 0 && spotlightEntry?.videoOn !== false
+        ? video.videoWidth / video.videoHeight
+        : DEFAULT_HERO_ASPECT;
+      if (Math.abs(next - heroAspect) > 0.005) heroAspect = next;
+    };
+    const events = ['loadedmetadata', 'resize', 'emptied'] as const;
+    void tick().then(() => {
+      if (cancelled) return;
+      video = tileSurface?.querySelector<HTMLVideoElement>('.tile-wrap.spotlight-main video') ?? null;
+      for (const name of events) video?.addEventListener(name, read);
+      read();
+    });
+    return () => {
+      cancelled = true;
+      for (const name of events) video?.removeEventListener(name, read);
+    };
   });
 
   function setLayoutMode(next: GalleryLayout) {
@@ -433,9 +570,14 @@
       : `Spotlight ${entry.name}`;
   }
 
-  function shouldCenterTail(index: number): boolean {
-    const remainder = participantEntries.length % smartGridLayout.columns;
-    return remainder === 1 && index === participantEntries.length - 1;
+  /** #239 parity: an incomplete last row sits centred under the full ones.
+   * The grid runs on half-column tracks, so the row's first tile starts after
+   * half the empty cells; the rest auto-place after it. */
+  function tailColumnStart(index: number): number | undefined {
+    const columns = smartGridLayout.columns;
+    const tail = participantEntries.length % columns;
+    if (spotlightActive || tail === 0 || index !== participantEntries.length - tail) return undefined;
+    return columns - tail + 1;
   }
 
   async function beginRoomRename() {
@@ -498,37 +640,62 @@
   type GalleryMoreIcon = 'region' | 'remotecontrol' | 'invite' | 'chat';
 
   // Control-row fit. #94 promised one row at every gallery width (the window
-  // becomes the pill below GALLERY_BREAKPOINT, 520 px), but Chat and the
-  // default-on Reactions button made the row ~614 px wide. Measured, not by
-  // breakpoint, like the web client's overflow (#247): when the row does not
-  // fit, Invite and then Chat move into More (lowest priority first, the web
-  // client's order), and come back as soon as they fit again.
+  // became the pill below 520 px), but Chat and the default-on Reactions
+  // button made the row ~614 px wide, and the window may now be as narrow as
+  // a column of faces. Measured, not by breakpoint, like the web client's
+  // overflow (#247), one step at a time and back as soon as the wider step
+  // fits again:
+  //   0  everything in the row, labelled
+  //   1  Invite moves into More (lowest priority first, the web client's order)
+  //   2  Chat moves into More too
+  //   3  the controls drop their labels and shrink (icon only, like the web
+  //      client's landscape-phone rail) and, if that is still too wide, wrap
+  //      onto a second row -- they are never clipped.
+  // The rail (a short window) is its own fixed arrangement: Invite in More,
+  // icon only, filled top to bottom and then another column.
   const COLLAPSE_ORDER = ['invite', 'chat'] as const;
   type CollapsibleControl = (typeof COLLAPSE_ORDER)[number];
-  let collapsedControls = $state<CollapsibleControl[]>([]);
+  const MAX_FIT_LEVEL = 3;
+  let fitLevel = $state(0);
   let controlbarEl = $state<HTMLDivElement>();
   let controlsClusterEl = $state<HTMLDivElement>();
-  const naturalControlWidth: Record<CollapsibleControl, number> = { invite: 52, chat: 52 };
+  /** The one-row width each level needed when it was last showing. */
+  const rowWidthAtLevel: Array<number | undefined> = [];
+
+  const collapsedControls = $derived<CollapsibleControl[]>(
+    railControls ? ['invite'] : COLLAPSE_ORDER.slice(0, Math.min(fitLevel, COLLAPSE_ORDER.length))
+  );
+  const compactControls = $derived(railControls || fitLevel >= MAX_FIT_LEVEL);
+
+  /** The row's width if nothing wrapped: every shown cell plus the gaps. */
+  function oneRowWidth(cluster: HTMLElement): number {
+    const style = getComputedStyle(cluster);
+    const gap = parseFloat(style.columnGap) || 0;
+    let width = 0;
+    let shown = 0;
+    for (const cell of Array.from(cluster.children) as HTMLElement[]) {
+      const cellStyle = getComputedStyle(cell);
+      if (cellStyle.display === 'none') continue;
+      width += cell.getBoundingClientRect().width + (parseFloat(cellStyle.marginLeft) || 0) + (parseFloat(cellStyle.marginRight) || 0);
+      shown += 1;
+    }
+    return width + gap * Math.max(0, shown - 1);
+  }
 
   function refitControls(): void {
     const bar = controlbarEl;
     const cluster = controlsClusterEl;
-    if (!bar || !cluster) return;
+    if (!bar || !cluster || railControls) return;
     const barStyle = getComputedStyle(bar);
     const available = bar.clientWidth - parseFloat(barStyle.paddingLeft) - parseFloat(barStyle.paddingRight);
-    const gap = parseFloat(getComputedStyle(cluster).columnGap) || 0;
-    for (const key of COLLAPSE_ORDER) {
-      const cell = cluster.querySelector<HTMLElement>(`[data-control="${key}"]`);
-      if (cell && !collapsedControls.includes(key)) naturalControlWidth[key] = cell.getBoundingClientRect().width;
-    }
-    const used = cluster.scrollWidth;
+    const used = oneRowWidth(cluster);
+    rowWidthAtLevel[fitLevel] = used;
     if (used > available + 0.5) {
-      const next = COLLAPSE_ORDER.find((key) => !collapsedControls.includes(key));
-      if (next) collapsedControls = [...collapsedControls, next];
+      if (fitLevel < MAX_FIT_LEVEL) fitLevel += 1;
       return;
     }
-    const last = collapsedControls.at(-1);
-    if (last && used + naturalControlWidth[last] + gap <= available) collapsedControls = collapsedControls.slice(0, -1);
+    const wider = fitLevel > 0 ? rowWidthAtLevel[fitLevel - 1] : undefined;
+    if (wider !== undefined && wider <= available + 0.5) fitLevel -= 1;
   }
 
   $effect(() => {
@@ -539,6 +706,13 @@
     observer.observe(bar);
     observer.observe(cluster);
     return () => observer.disconnect();
+  });
+
+  // Leaving the rail: re-measure from the top of the ladder (the rail's own
+  // arrangement says nothing about how wide the row is).
+  $effect(() => {
+    if (railControls) return;
+    void tick().then(() => refitControls());
   });
   const inviteCollapsed = $derived(collapsedControls.includes('invite'));
   const chatCollapsed = $derived(collapsedControls.includes('chat'));
@@ -612,7 +786,16 @@
 
 <svelte:window onresize={keepInviteTooltipInViewport} />
 
-<div class="gallery" class:frameless>
+<div
+  bind:this={galleryEl}
+  class="gallery"
+  class:frameless
+  class:rail-controls={railControls}
+  class:compact-controls={compactControls}
+  class:compact-window={compactWindow}
+  class:has-side-panel={!!sidePanel}
+  style={galleryChromeStyle}
+>
   <div class="topbar">
     <div class="topbar-drag-layer" data-tauri-drag-region aria-hidden="true"></div>
     <div class="topbar-left" data-tauri-drag-region>
@@ -684,7 +867,6 @@
         <span class="elapsed">{elapsed}</span>
       </span>
     </div>
-    <div class="topbar-fill" data-tauri-drag-region></div>
     <div class="topbar-right">
       <div class="topbar-control-cell">
         <!-- View toggle (#186): one destination-state button, not simultaneous
@@ -778,6 +960,7 @@
     class:compact={smartGridLayout.compact}
     class:tiny={smartGridLayout.tiny}
     style={smartGridStyle}
+    data-tauri-drag-region={railControls ? '' : undefined}
   >
     {#if gridStateTitle}
       <div class="gallery-state" class:warning={stateTone === 'warning'}>
@@ -792,7 +975,15 @@
          spotlight only change classes/layout, so ParticipantTile and its
          camera element never remount during a visual layout change. -->
     <div class="spotlight-layout" class:solo={spotlightActive && thumbnailEntries.length === 0} class:grid-layout={!spotlightActive}>
-      <div class="spotlight-rail" aria-label={spotlightActive ? 'Other gallery feeds' : undefined}>
+      <div
+        bind:this={spotlightRailEl}
+        class="spotlight-rail"
+        class:side={spotlightActive && spotlightGeometry.placement === 'side'}
+        class:below={spotlightActive && spotlightGeometry.placement === 'below'}
+        class:scrolls={spotlightActive && spotlightScrolls}
+        style={spotlightRailStyle}
+        aria-label={spotlightActive ? 'Other gallery feeds' : undefined}
+      >
         {#each tileEntries as p, index (p.key)}
           <!-- Participant join/leave use a restrained opacity transition. The
                explicit Gallery FLIP pass suppresses keyed-list FLIP during
@@ -803,7 +994,7 @@
             data-participant-key={p.key}
             class:spotlight-main={spotlightActive && p.key === spotlightEntry?.key}
             class:spotlight-thumb={spotlightActive && p.key !== spotlightEntry?.key}
-            class:centered-tail={!spotlightActive && shouldCenterTail(index)}
+            style:grid-column-start={tailColumnStart(index)}
             class:pinned={manualPinnedKey === p.key}
             class:sharing={!!p.sharing}
             style:--sharing-tint={p.sharingLiveBackground}
@@ -855,8 +1046,13 @@
   <!-- The gallery keeps the common actions visible and moves specialist
        actions into More. Labels remain stable while accessible names describe
        the current state. -->
-  <div class="controlbar" bind:this={controlbarEl}>
-    <div class="controls-cluster" bind:this={controlsClusterEl}>
+  <div
+    class="controlbar"
+    bind:this={controlbarEl}
+    data-orientation={railControls ? 'vertical' : 'horizontal'}
+    data-tauri-drag-region={railControls ? '' : undefined}
+  >
+    <div class="controls-cluster" bind:this={controlsClusterEl} data-tauri-drag-region={railControls ? '' : undefined}>
       <div class="control-cell">
         <MediaSplitControl
           icon="mic"
@@ -1032,12 +1228,15 @@
     border: none;
   }
 
+  /* Wraps (#239 parity): in a narrow window the right-hand buttons drop
+     under the room name rather than squeezing it to one letter per line. */
   .topbar {
     position: relative;
     flex-shrink: 0;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
+    gap: 4px 10px;
     min-height: 44px;
     height: auto;
     padding: 5px 18px;
@@ -1054,26 +1253,22 @@
   }
 
   .topbar-left,
-  .topbar-fill,
   .topbar-right {
     position: relative;
     z-index: 1;
   }
 
+  /* Takes the free width itself (it is also a drag region); 160px is the
+     least it keeps for the name before the buttons wrap to a second row. */
   .topbar-left {
     display: inline-flex;
+    flex: 1 1 160px;
     align-items: center;
     gap: 10px;
     min-height: var(--topbar-control-height);
     height: auto;
     min-width: 0;
     pointer-events: auto;
-  }
-
-  .topbar-fill {
-    flex: 1;
-    align-self: stretch;
-    min-width: 12px;
   }
 
   /* Centred, not top-aligned (#241): the name and time share the centre line
@@ -1202,14 +1397,23 @@
     box-sizing: border-box;
   }
 
+  /* Owner call: the running time is on demand, not always on. It keeps its
+     reserved width, so revealing it never moves the name, and shows while the
+     top bar is hovered or keyboard focus is in the title row (the same reveal
+     as the title actions; never focus-within, which a mouse click leaves
+     stuck on in WebKit -- uiConsistency.test.ts). */
   .elapsed {
     font: 500 12.5px / 1.12 var(--font-mono);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
-    /* Live meeting status, not chrome: always visible (the old hover-only
-       opacity hid the running time during the whole meeting). */
-    opacity: 1;
+    opacity: 0;
     color: var(--text-faint);
+    transition: opacity var(--motion-fast) var(--ease-standard);
+  }
+
+  .topbar:hover .elapsed,
+  .room-title:has(:focus-visible) .elapsed {
+    opacity: 1;
   }
 
   .topbar-right {
@@ -1217,6 +1421,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    margin-left: auto;
     /* Not --topbar-control-height: this 34px box sets the bar's 45px height (#241). */
     height: 34px;
     pointer-events: none;
@@ -1574,7 +1779,6 @@
     --gallery-rows: 1;
     --gallery-tile-width: 100%;
     --gallery-tile-height: 100%;
-    --gallery-tail-width: var(--gallery-tile-width);
     /* Comp grid metrics: padding 28px, gap 18px (were 20px/16px — issue #14
        item 2). */
     padding: 28px;
@@ -1668,60 +1872,18 @@
 
   .spotlight-layout {
     /* `flex: 1 1 0`, NOT `1 1 auto` -- with an `auto` basis the flex item's
-       resolved height is initially seeded from the `height: 100%` property
-       below, which is itself a percentage of a flex container's content
-       size; that circularity gets treated as indefinite in at least one
-       browser tested, and an "indefinite" main size then also makes the
-       grid-template-rows percentage track below (22%) indefinite, so it
-       fell back to a content-based auto size instead of an actual 22% of
-       the real available height -- confirmed live: rail height measured
-       ~30px too small at a 380x500 fixture before this. An explicit `0`
-       basis has no such dependency: the flex algorithm distributes 100% of
-       the leftover space to this item in one deterministic pass, which
-       gives its descendants (this grid) a genuinely definite height to
-       resolve `22%`/`24%` against. */
+       resolved height is seeded from a percentage of a flex container's
+       content size, which at least one browser treats as indefinite (#676),
+       and the rail inside needs a definite height to pack the spotlight. */
     flex: 1 1 0;
     min-height: 0;
-    display: grid;
-    grid-template-rows: minmax(100px, 1fr) minmax(64px, 22%);
-    gap: 14px;
-  }
-
-  .spotlight-layout.solo {
-    grid-template-rows: minmax(0, 1fr);
-  }
-
-  .spotlight-rail {
-    min-height: 0;
-    /* flex, not grid (#676 fix): each thumb's width follows its own 16:9 box
-       (see .spotlight-thumb) via `flex: 0 0 auto` + `aspect-ratio`, so tile
-       shape tracks the media aspect instead of an arbitrary 132-180px band
-       that squeezed cameras into near-square crops. This is now a genuine
-       mirror of the web strip's 2026-07-30 E1 fix
-       (web-harness/src/style.css, `.spotlight-strip` /
-       `.tile.is-spotlight-thumbnail`) — a `grid-auto-columns` version of
-       this shipped instead (0738c91f) and regressed twice: a stale
-       `minmax(118px,150px)` media-query override (deleted below) made
-       neighbouring thumbs overlap by ~57px at the default 400px window, and
-       even without that override, CSS grid stretches `auto` tracks to fill
-       free space once the window is wider than ~620px, leaving ~83px gaps
-       between correctly-sized thumbs. Flex items sized `flex: 0 0 auto` never
-       stretch past their aspect-ratio-derived width, at any window width. */
-    display: flex;
-    align-items: stretch;
-    gap: 12px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    overscroll-behavior-x: contain;
-    overscroll-behavior-y: none;
-    /* 12px: sharing ring glow (0 0 8px -2px) reaches ~6px from the element
-       edge; 12px gives 6px clearance so it never clips at the rail border. */
-    padding: 12px 12px 6px;
   }
 
   /* The participant tree is shared by both presentations. In grid mode the
      persistent layout/rail wrappers become transparent sizing layers, while
-     the rail keeps the original smart grid tracks. */
+     the rail keeps the smart grid tracks: half-column tracks (each tile spans
+     two), so an incomplete last row can start half a tile in and sit centred
+     under the full ones (tailColumnStart, the web client's #239 rule). */
   .tiles.grid > .spotlight-layout {
     grid-column: 1 / -1;
     grid-row: 1 / -1;
@@ -1740,7 +1902,7 @@
 
   .tiles.grid .spotlight-rail {
     display: grid;
-    grid-template-columns: repeat(var(--gallery-cols), minmax(0, 1fr));
+    grid-template-columns: repeat(var(--gallery-half-cols), minmax(0, 1fr));
     grid-template-rows: repeat(var(--gallery-rows), minmax(0, 1fr));
     place-items: center;
     gap: var(--gallery-gap);
@@ -1756,92 +1918,81 @@
     white-space: normal;
   }
 
-  /* Spotlight keeps the hero in the viewport while the inline thumbnail
-     sequence supplies native horizontal overflow without a second tile tree.
-     The block hero consumes the upper track; nowrap inline thumbnails form the
-     lower rail and never force the hero to scroll sideways. */
+  /* Spotlight (#239 parity, shared/logic/spotlightGeometry.ts): the hero and
+     ONE thumbnail size for everyone come from the shared geometry as
+     --hero-w/--hero-h/--thumb-w/--thumb-h on the rail. `.side` puts the
+     thumbnails in a column right of the hero (a wide window); `.below` puts
+     them in centred rows under it (a tall window) -- centred, never hugging
+     the left edge. When they need more room than there is (`.scrolls`) the
+     rail scrolls and the hero stays at its top. The rail is still the one
+     keyed list, so a tile moving between hero and thumbnail never remounts
+     its camera. */
   .tiles.spotlight .spotlight-layout {
     display: flex;
-    flex: 1 1 0;
     min-width: 0;
-    min-height: 0;
   }
 
   .tiles.spotlight .spotlight-rail {
-    display: block;
     position: relative;
     width: 100%;
     height: 100%;
     min-width: 0;
     min-height: 0;
     box-sizing: border-box;
-    padding: 12px 12px 6px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    overscroll-behavior-x: contain;
-    overscroll-behavior-y: none;
-    white-space: nowrap;
-    font-size: 0;
-    /* #248: a size container so the hero below can be sized in cqw/cqh. */
-    container-type: size;
+    /* 6px: the sharing ring's glow (0 0 8px -2px) reaches ~6px out; the
+       scroller would clip it at its edge. */
+    padding: 6px;
+    gap: var(--spotlight-gap, 12px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
-  /* #248: the hero is its area clamped to the camera tile range (~7:6 up to
-     16:9, the same band the grid packer uses), centred. The old full-width
-     hero was ~2.2-2.7:1 in a wide window, which a 16:9 camera can only fill
-     by cutting ~19-35% of its height -- past the 10% head cap, so it would
-     letterbox INSIDE the tile; in a narrow window it was portrait and lost
-     over half the width. Clamped, a 16:9 camera always fills it within the
-     caps, and the space around it is the page. The area is the one this hero
-     always had (rail minus the thumbnail row), written in cqh/cqw so the box
-     can be fitted to both. --camera-tile-min-aspect comes from the shared
-     CAMERA_TILE_ASPECT_RANGE via the .tiles style. */
+  .tiles.spotlight .spotlight-rail.below {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    /* `center` first: WebKit before 17.6 drops the `safe` declaration. */
+    align-content: center;
+    align-content: safe center;
+  }
+
+  .tiles.spotlight .spotlight-rail.side {
+    display: grid;
+    grid-template-columns: var(--hero-w) repeat(var(--strip-cols, 1), var(--thumb-w));
+    grid-template-rows: repeat(var(--strip-rows), var(--thumb-h));
+    justify-content: center;
+    align-content: center;
+    align-content: safe center;
+  }
+
+  .tiles.spotlight .spotlight-rail.scrolls {
+    align-content: start;
+  }
+
   .tiles.spotlight .spotlight-main {
-    --hero-area-height: max(100px, calc(100cqh - clamp(64px, 22cqh, 104px) - 14px));
-    --hero-width: min(100cqw, calc(var(--hero-area-height) * 16 / 9));
-    display: block;
     position: sticky;
-    /* A sticky inset resolves against the scrollport (the rail's padding
-       box), so this is exactly the centred position: the hero stays put
-       while the thumbnails scroll beneath it. */
-    left: calc((100% - var(--hero-width)) / 2);
-    z-index: 1;
-    width: var(--hero-width);
-    height: min(var(--hero-area-height), calc(var(--hero-width) / var(--camera-tile-min-aspect, 1.185)));
-    margin: 0 auto 14px;
+    top: 0;
+    z-index: 2;
+    flex: 0 0 auto;
+    width: var(--hero-w, 100%);
+    height: var(--hero-h, 100%);
   }
 
-  .tiles.spotlight .spotlight-layout.solo .spotlight-main {
-    --hero-area-height: 100cqh;
-    margin-bottom: 0;
+  /* Margins that add up to the whole line: the hero sits alone on its row,
+     centred, and the thumbnails wrap into the rows below it. */
+  .tiles.spotlight .spotlight-rail.below > .spotlight-main {
+    margin-inline: calc((100% - var(--hero-w, 100%)) / 2);
   }
 
-  .tiles.spotlight .spotlight-thumb {
-    display: inline-block;
-    width: auto;
-    height: clamp(64px, 22%, 104px);
-    margin: 0 12px 0 0;
-    vertical-align: top;
+  .tiles.spotlight .spotlight-rail.side > .spotlight-main {
+    grid-column: 1;
+    grid-row: 1 / -1;
+    align-self: center;
   }
 
-  @media (max-width: 620px) {
-    .tiles.spotlight .spotlight-main {
-      --hero-area-height: max(100px, calc(100cqh - clamp(56px, 24cqh, 92px) - 12px));
-    }
-
-    .tiles.spotlight .spotlight-thumb {
-      height: clamp(56px, 24%, 92px);
-    }
-  }
-
-  @media (max-height: 560px) {
-    .tiles.spotlight .spotlight-main {
-      --hero-area-height: max(80px, calc(100cqh - clamp(48px, 16cqh, 64px) - 8px));
-    }
-
-    .tiles.spotlight .spotlight-thumb {
-      height: clamp(48px, 16%, 64px);
-    }
+  .tiles.spotlight .spotlight-rail.side.scrolls > .spotlight-main {
+    align-self: start;
   }
 
   /* Wraps each tile so the join/leave scale transition above has a stable
@@ -1900,22 +2051,15 @@
   }
 
   .tile-wrap.spotlight-thumb {
-    /* flex: 0 0 auto -- never grow past, never shrink below, the
-       aspect-ratio-derived width; see .spotlight-rail above (#676). */
+    /* flex: 0 0 auto -- never grow past, never shrink below, the shared
+       geometry's one thumbnail size (#676, #239 parity). */
     flex: 0 0 auto;
-    min-width: 132px;
-    height: 100%;
-    aspect-ratio: 16 / 9;
-    width: auto;
+    width: var(--thumb-w, 160px);
+    height: var(--thumb-h, 90px);
     /* Establishes a query container so the typography rules below (and
        ParticipantTile's own descendants) can scale by the thumb's actual
-       rendered size (via `cqh`) instead of another arbitrary fixed px --
-       both the rail height (92-104px+ across breakpoints) and thus this
-       aspect-ratio-derived width vary, and #676's font was fixed 26px
-       regardless of either (#676). Safe to use `size` containment here:
-       height is always extrinsic (100% of the rail) and width is always
-       derived from height via aspect-ratio, so nothing here depends on this
-       element's own content to compute its size. */
+       rendered size (via `cqh`) instead of another arbitrary fixed px (#676).
+       Safe to use `size` containment here: both dimensions are extrinsic. */
     container-type: size;
     container-name: spotlight-thumb;
   }
@@ -1931,14 +2075,10 @@
   }
 
   .tiles.grid .tile-wrap {
+    grid-column-end: span 2;
     width: min(100%, var(--gallery-tile-width));
     height: min(100%, var(--gallery-tile-height));
     aspect-ratio: 16 / 9;
-  }
-
-  .tiles.grid .tile-wrap.centered-tail {
-    grid-column: 1 / -1;
-    width: min(100%, var(--gallery-tail-width));
   }
 
   /* Also applies to spotlight rail thumbnails (#676): `.tiles.grid.compact`
@@ -2015,51 +2155,6 @@
   .tile-wrap :global(.tile) {
     width: 100%;
     height: 100%;
-  }
-
-  @media (max-width: 620px) {
-    .tiles {
-      padding: 18px;
-      --gallery-gap: 12px;
-    }
-
-    .tiles.grid {
-      gap: var(--gallery-gap);
-    }
-
-    .tiles.grid.scrollable {
-      overflow: hidden;
-    }
-
-    .tiles.spotlight {
-      padding: 18px;
-    }
-
-    .spotlight-layout {
-      grid-template-rows: minmax(100px, 1fr) minmax(56px, 24%);
-      gap: 12px;
-    }
-
-    /* No `.spotlight-rail` override at this breakpoint any more (#676). The
-       removed rule capped the grid track to a 118-150px band, stale from
-       before 0738c91f switched the base rule to an aspect-ratio-driven
-       width: that cap couldn't hold a ~186.7px (16:9-of-105px) thumb, so
-       neighbours overlapped by ~57px at exactly this breakpoint -- which
-       covers the app's own 400px default window width. Flex thumbs (above)
-       need no per-breakpoint track-width override at all; each thumb just
-       sizes itself from the rail's own height at any width. */
-  }
-
-  /* #676: short-window guard. The strip uses clamp(48px, 16%, 64px) here so
-     thumbs shrink with the container instead of holding a fixed floor and
-     starving the hero. Mirrors web-harness style.css's `@media (max-height:
-     700px)` `--spotlight-strip-height` guard, scaled to this file's chrome
-     (44px topbar + ~82px controlbar are not part of `.tiles`). */
-  @media (max-height: 560px) {
-    .spotlight-layout {
-      grid-template-rows: minmax(80px, 1fr) minmax(48px, 16%);
-      gap: 8px;
-    }
   }
 
   .controlbar {
@@ -2214,8 +2309,151 @@
     text-transform: uppercase;
   }
 
+  /* Compact controls (controlFit level 3, and the rail): icon only, a size
+     smaller, and -- below the rail -- wrapping onto a second row instead of
+     clipping. Every button keeps its accessible name; the labels are what
+     go, the web client's landscape-phone rail does the same. */
+  .gallery.compact-controls {
+    --compact-control: 44px;
+  }
+
+  .gallery.rail-controls {
+    --compact-control: 40px;
+  }
+
+  .gallery.compact-controls .controlbar :global(.meeting-control-label) {
+    display: none;
+  }
+
+  .gallery.compact-controls .control-cell {
+    min-width: 0;
+  }
+
+  .gallery.compact-controls .control-cell :global(.control-button),
+  .gallery.compact-controls :global(.media-split-gallery .control-button) {
+    width: var(--compact-control) !important;
+    height: var(--compact-control) !important;
+  }
+
+  .gallery.compact-controls :global(.media-split-gallery) {
+    --meeting-split-height: var(--compact-control);
+    --meeting-split-options-width: 20px;
+  }
+
+  .gallery.compact-controls :global(.plugin-button) {
+    width: var(--compact-control);
+    height: var(--compact-control);
+  }
+
+  .gallery.compact-controls:not(.rail-controls) .controlbar {
+    min-height: 0;
+    padding: 10px 12px;
+  }
+
+  .gallery.compact-controls:not(.rail-controls) .controls-cluster {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .gallery.compact-controls .leave-cell {
+    margin-left: 0;
+  }
+
+  /* A narrow or short window gives the tiles its edges. */
+  .gallery.compact-window .tiles {
+    padding: 12px;
+  }
+
+  /* The rail: a short, wide window -- a bar of faces along the top of the
+     screen. The controls stand in a column at the right edge (filling top to
+     bottom, then another column: --rail-rows), and the top bar floats over
+     the top of the tiles, shown while the pointer is over the window or
+     focus is in it, so the faces get nearly the whole height. Empty rail and
+     tile space moves the window, as the top bar does. */
+  .gallery.rail-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .gallery.rail-controls > .topbar {
+    grid-area: 1 / 1;
+    align-self: start;
+    z-index: 7;
+    min-height: 44px;
+    height: auto;
+    padding: 5px 12px;
+    border-bottom: none;
+    background: color-mix(in srgb, var(--bg-base-2) 86%, transparent);
+    backdrop-filter: blur(12px);
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-standard);
+  }
+
+  .gallery.rail-controls:hover > .topbar,
+  .gallery.rail-controls > .topbar:has(:focus-visible) {
+    opacity: 1;
+  }
+
+  .gallery.rail-controls > .gallery-body {
+    grid-area: 1 / 1;
+  }
+
+  /* With a panel open (the chat) the top bar is a row again: floating, it
+     would sit over the panel's own header and its Close button. */
+  .gallery.rail-controls.has-side-panel {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .gallery.rail-controls.has-side-panel > .topbar {
+    grid-area: 1 / 1;
+    opacity: 1;
+    background: var(--fill-weak);
+    backdrop-filter: none;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .gallery.rail-controls.has-side-panel > .gallery-body {
+    grid-area: 2 / 1;
+  }
+
+  .gallery.rail-controls.has-side-panel > .controlbar {
+    grid-area: 1 / 2 / 3 / 3;
+  }
+
+  .gallery.rail-controls > .controlbar {
+    grid-area: 1 / 2;
+    min-height: 0;
+    padding: 8px;
+    border-top: none;
+    border-left: 1px solid var(--hairline);
+  }
+
+  .gallery.rail-controls .controls-cluster {
+    display: grid;
+    grid-auto-flow: column;
+    grid-template-rows: repeat(var(--rail-rows), auto);
+    align-content: center;
+    align-items: center;
+    justify-items: center;
+    gap: 6px;
+  }
+
+  .gallery.rail-controls .tiles {
+    padding: 8px;
+  }
+
+  /* The More menu opens beside the rail, not above it. */
+  .gallery.rail-controls .gallery-more-menu {
+    left: auto;
+    right: calc(100% + 8px);
+    bottom: 8px;
+    transform: none;
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .control-tooltip {
+    .control-tooltip,
+    .gallery.rail-controls > .topbar {
       transition: none;
     }
   }

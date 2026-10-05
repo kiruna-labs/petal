@@ -14,9 +14,10 @@
 // (the route strips its own background + the layout's app shell via
 // body.pill-mode so ONLY the floating pill renders). macOS stays transparent
 // + CSS-rounded the whole time. Gallery mode restores the remembered
-// geometry. Resizing
-// across GALLERY_BREAKPOINT is an ADDITIONAL switch trigger next to the
-// explicit switcher buttons (#1).
+// geometry. Dragging the gallery small in both directions
+// (galleryCollapsesToPill) is an ADDITIONAL switch trigger next to the
+// explicit switcher buttons (#1); narrow alone or short alone stays the
+// gallery, which lays itself out as a column or a bar of faces.
 
 import { tick } from 'svelte';
 import { invoke } from '@tauri-apps/api/core';
@@ -31,12 +32,12 @@ import {
 import {
   centeredPosition,
   clampedPosition,
-  GALLERY_BREAKPOINT,
-  GALLERY_MIN_HEIGHT,
+  GALLERY_MIN,
   HOME_DEFAULT,
   HOME_MIN,
   MEETING_DEFAULT,
   clampMeetingWindowSize,
+  galleryCollapsesToPill,
   loadMainWindowFrame,
   loadMainWindowSize,
   loadMeetingWindowFrame,
@@ -216,7 +217,9 @@ export async function prepareMeetingWindow(): Promise<void> {
     await programmatic.run(async () => {
       await setCurrentWindowResizable(win, true);
       await win.setShadow(true);
-      await win.setMinSize(new LogicalSize(HOME_MIN.width, HOME_MIN.height));
+      // The gallery's own minimum, BEFORE sizing: a remembered column or bar
+      // of faces is smaller than the home window's minimum.
+      await win.setMinSize(new LogicalSize(GALLERY_MIN.width, GALLERY_MIN.height));
       const applied = await applyMeetingWindowGeometry(win, null);
       saveMeetingWindowFrame(applied);
     });
@@ -415,7 +418,7 @@ export function createPillWindow(): PillWindow {
       await programmatic.run(async () => {
         await setCurrentWindowResizable(win, true);
         await win.setShadow(true);
-        await win.setMinSize(new LogicalSize(HOME_MIN.width, HOME_MIN.height));
+        await win.setMinSize(new LogicalSize(GALLERY_MIN.width, GALLERY_MIN.height));
         remembered = await applyMeetingWindowGeometry(win, first ? null : remembered);
       });
     } catch {
@@ -472,11 +475,11 @@ export function createPillWindow(): PillWindow {
     }
   }
 
-  /** Breakpoint switching (#11): gallery below breakpoint → pill; pill
-   * drag-resized meaningfully wider than the pill → gallery. */
-  function handleLogicalWidth(w: number) {
+  /** Breakpoint switching (#11): gallery dragged small in both directions →
+   * pill; pill drag-resized meaningfully wider than the pill → gallery. */
+  function handleLogicalSize(w: number, h: number) {
     if (expanded) {
-      if (w < GALLERY_BREAKPOINT - 1) expanded = false;
+      if (galleryCollapsesToPill({ width: w, height: h })) expanded = false;
     } else {
       // pillWindowSize is set by the Tauri collapse path; measure on demand
       // in the plain-browser preview (where that path never runs).
@@ -490,7 +493,7 @@ export function createPillWindow(): PillWindow {
    * same constants drive the flip in a plain browser. */
   function browserResize() {
     if (resizeDebounce) clearTimeout(resizeDebounce);
-    resizeDebounce = setTimeout(() => handleLogicalWidth(window.innerWidth), 150);
+    resizeDebounce = setTimeout(() => handleLogicalSize(window.innerWidth, window.innerHeight), 150);
   }
 
   /** #12: edge detection — flip the pill vertical near left/right work-area
@@ -744,7 +747,7 @@ export function createPillWindow(): PillWindow {
                 } else {
                   savePillWindowFrame({ ...logical, x: pos.x, y: pos.y });
                 }
-                handleLogicalWidth(logical.width);
+                handleLogicalSize(logical.width, logical.height);
               } catch {
                 // ignore — bridge went away
               }

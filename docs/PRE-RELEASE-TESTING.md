@@ -124,6 +124,22 @@ local prerequisites as `verify-receiver-render.mjs` — a `livekit-server --dev`
 a `ci-local.sh` one. `--check` exits non-zero when a cell misses #239's
 definition of done.
 
+`scripts/verify-native-gallery-matrix.mjs` is the desktop gallery's
+counterpart and needs nothing running: it builds the REAL meeting composition
+(`MeetingChrome` → `Gallery` → `ParticipantTile`, mounted by
+`apps/desktop/src/lib/dev/GalleryLabStage.svelte`) with synthetic cameras and
+renders it in Chromium at every window shape -- the default, laptop and full
+screen, a narrow column of faces (down to the 240 px minimum), a short bar of
+faces (down to 160 px), 1-12 people, grid and spotlight, chat open, cameras
+off, mixed camera shapes. Each cell gets a screenshot, a reading and the
+rules from `galleryLabMeasure.ts` `judgeGalleryLab` (nothing scrolls,
+overlaps or clips; Mic/Camera/Share/Leave on screen; the spotlight strip
+centred; faces big enough; the window going to faces). `--out DIR` writes a
+contact sheet (`DIR/index.html`); `--check` exits non-zero on any broken rule.
+`tests/galleryLabRendered.test.ts` runs the shapes that matter in CI, and
+`npm run dev` in `apps/desktop` serves the same lab interactively at
+`/dev/gallery-lab` (drag the frame's corner to resize the window).
+
 ### 1d. The cross-volume updater test — must be run deliberately
 
 ```bash

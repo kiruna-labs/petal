@@ -11,6 +11,7 @@ import {
   renderedMediaRect
 } from '@petal/shared/logic/cameraCrop';
 import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
+import { computeSpotlightGeometry } from '@petal/shared/logic/spotlightGeometry';
 
 // #248: camera tiles crop to fill their box -- up to about a third of the
 // width off the sides, at most 10% off the top and bottom -- and letterbox
@@ -141,23 +142,37 @@ test('desktop letterbox bars are near-black, like the web client', () => {
   assert.match(participantTile, /\.video-el\.contain \{[^}]*object-fit: contain;[^}]*background: var\(--bg-base\);/);
 });
 
-test('the desktop spotlight hero is its area clamped to the camera range, centred', () => {
-  // The rail is the size container the hero measures against.
-  assert.match(gallery, /\.tiles\.spotlight \.spotlight-rail \{[^}]*container-type: size;/);
+test('the desktop spotlight hero takes its camera\'s own shape from the shared spotlight geometry', () => {
+  // #239 parity: one geometry for both clients (shared/logic/spotlightGeometry.ts)
+  // sizes the hero and the thumbnails; the hero box is its camera's own shape,
+  // read off the hero's video, so it covers the whole frame and crops nothing.
+  assert.match(gallery, /import \{ computeSpotlightGeometry \} from '@petal\/shared\/logic\/spotlightGeometry'/);
+  assert.match(gallery, /\{ aspect: heroAspect, header: 0 \}/);
+  assert.match(gallery, /video\.videoWidth \/ video\.videoHeight/);
   const hero = /\.tiles\.spotlight \.spotlight-main \{(?<body>[^}]+)\}/.exec(gallery)?.groups?.body ?? '';
-  assert.match(hero, /--hero-width: min\(100cqw, calc\(var\(--hero-area-height\) \* 16 \/ 9\)\);/);
-  assert.match(hero, /width: var\(--hero-width\);/);
-  assert.match(hero, /height: min\(var\(--hero-area-height\), calc\(var\(--hero-width\) \/ var\(--camera-tile-min-aspect, 1\.185\)\)\);/);
-  assert.match(hero, /left: calc\(\(100% - var\(--hero-width\)\) \/ 2\);/);
-  assert.match(hero, /margin: 0 auto 14px;/);
-  assert.doesNotMatch(hero, /width: 100%;/);
-  // The narrow end comes from the shared constant, not a second copy.
+  assert.match(hero, /width: var\(--hero-w, 100%\);/);
+  assert.match(hero, /height: var\(--hero-h, 100%\);/);
+  assert.match(gallery, /--hero-w: \$\{spotlightGeometry\.heroWidth\}px; --hero-h: \$\{spotlightGeometry\.heroHeight\}px;/);
+  // The grid's narrow end still comes from the shared constant, not a copy.
   assert.match(gallery, /--camera-tile-min-aspect: \$\{CAMERA_TILE_ASPECT_RANGE\.min\};/);
-  // A 16:9 camera covers both ends of that box within the caps.
-  for (const aspect of [16 / 9, CAMERA_TILE_ASPECT_RANGE.min]) {
-    assert.equal(cameraFit(HD, box(aspect)), 'cover');
+  for (const [camera, surfaces] of [
+    [HD, [[800, 380], [380, 700], [1250, 200]]],
+    [PORTRAIT_PHONE, [[800, 380], [380, 700]]],
+    [{ width: 640, height: 480 }, [[800, 380], [1250, 200]]]
+  ] as const) {
+    for (const [width, height] of surfaces) {
+      for (const count of [1, 3, 6]) {
+        const g = computeSpotlightGeometry(count, width, height, 12, { aspect: camera.width / camera.height, header: 0 }, { wrapSideStrip: true });
+        const heroBox = { width: g.heroWidth, height: g.heroHeight };
+        const label = `${camera.width}x${camera.height} camera, ${width}x${height}, ${count} thumbnails`;
+        assert.equal(cameraFit(camera, heroBox), 'cover', label);
+        const crop = coverCropFractions(camera, heroBox);
+        assert.ok(crop.sides < 0.01 && crop.vertical < 0.01, `${label}: crops nothing (${JSON.stringify(crop)})`);
+      }
+    }
   }
 });
+
 
 test('the desktop gallery packs its camera tiles with the shared crop range', () => {
   assert.match(gallery, /import \{ CAMERA_TILE_ASPECT_RANGE \} from '@petal\/shared\/logic\/cameraCrop'/);

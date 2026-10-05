@@ -3,7 +3,8 @@ import { test } from 'node:test';
 
 import {
   GALLERY_BREAKPOINT,
-  GALLERY_MIN_HEIGHT,
+  GALLERY_MIN,
+  GALLERY_PILL_HEIGHT,
   HOME_MIN,
   MAIN_WINDOW_GEOMETRY_KEY,
   MEETING_DEFAULT,
@@ -12,6 +13,7 @@ import {
   clampMainWindowSize,
   clampMeetingWindowSize,
   clampedPosition,
+  galleryCollapsesToPill,
   loadMeetingWindowFrame,
   loadMainWindowSize,
   loadMeetingWindowSize,
@@ -49,15 +51,26 @@ class MemoryStorage implements StorageLike {
 
 test('main and meeting sizes clamp to their route minimums', () => {
   assert.deepEqual(clampMainWindowSize({ width: 320.4, height: 500.2 }), HOME_MIN);
-  assert.deepEqual(clampMeetingWindowSize({ width: 320.4, height: 300.2 }), {
-    width: GALLERY_BREAKPOINT,
-    height: GALLERY_MIN_HEIGHT
-  });
+  assert.deepEqual(clampMeetingWindowSize({ width: 200.4, height: 120.2 }), GALLERY_MIN);
   assert.deepEqual(MEETING_DEFAULT, { width: 840, height: 560 });
   assert.deepEqual(clampMeetingWindowSize({ width: 800.4, height: 640.6 }), {
     width: 800,
     height: 641
   });
+});
+
+test('the gallery keeps a column of faces and a bar of faces; small both ways it is the pill', () => {
+  // A column beside an editor and a bar along the top of the screen are
+  // gallery shapes now (Gallery.svelte lays them out), not pill triggers.
+  assert.deepEqual(clampMeetingWindowSize({ width: 300, height: 900 }), { width: 300, height: 900 });
+  assert.deepEqual(clampMeetingWindowSize({ width: 1400, height: 220 }), { width: 1400, height: 220 });
+  assert.ok(GALLERY_MIN.width < 300 && GALLERY_MIN.height < 220);
+  assert.equal(galleryCollapsesToPill({ width: 300, height: 900 }), false, 'narrow alone is a column');
+  assert.equal(galleryCollapsesToPill({ width: 1400, height: 170 }), false, 'short alone is a bar');
+  assert.equal(galleryCollapsesToPill({ width: 840, height: 560 }), false);
+  assert.equal(galleryCollapsesToPill({ width: GALLERY_BREAKPOINT - 2, height: GALLERY_PILL_HEIGHT - 1 }), true);
+  assert.equal(galleryCollapsesToPill({ width: GALLERY_BREAKPOINT - 2, height: GALLERY_PILL_HEIGHT }), false);
+  assert.equal(galleryCollapsesToPill({ width: GALLERY_BREAKPOINT - 1, height: GALLERY_MIN.height }), false);
 });
 
 test('main route entry keeps the current splash size unless it violates the minimum', () => {
@@ -115,23 +128,15 @@ test('meeting frame storage preserves gallery position and clamps to gallery min
   const storage = new MemoryStorage();
 
   assert.equal(
-    saveMeetingWindowFrame({ width: 500.2, height: 350.4, x: 812.6, y: 96.3 }, storage),
+    saveMeetingWindowFrame({ width: 200.2, height: 150.4, x: 812.6, y: 96.3 }, storage),
     true
   );
   assert.equal(
     storage.getItem(MEETING_WINDOW_GEOMETRY_KEY),
-    '{"width":520,"height":360,"x":813,"y":96}'
+    '{"width":240,"height":160,"x":813,"y":96}'
   );
-  assert.deepEqual(loadMeetingWindowFrame(storage), {
-    width: GALLERY_BREAKPOINT,
-    height: GALLERY_MIN_HEIGHT,
-    x: 813,
-    y: 96
-  });
-  assert.deepEqual(loadMeetingWindowSize(storage), {
-    width: GALLERY_BREAKPOINT,
-    height: GALLERY_MIN_HEIGHT
-  });
+  assert.deepEqual(loadMeetingWindowFrame(storage), { ...GALLERY_MIN, x: 813, y: 96 });
+  assert.deepEqual(loadMeetingWindowSize(storage), GALLERY_MIN);
 });
 
 test('parseWindowFrame rejects missing coordinates and clamps valid frames', () => {
@@ -147,23 +152,15 @@ test('parseWindowFrame rejects missing coordinates and clamps valid frames', () 
   );
 
   const storage = new MemoryStorage();
-  storage.setItem(MEETING_WINDOW_GEOMETRY_KEY, '{"width":300.2,"height":300.4,"x":9.6,"y":10.2}');
-  assert.deepEqual(loadWindowFrame('meeting', storage), {
-    width: GALLERY_BREAKPOINT,
-    height: GALLERY_MIN_HEIGHT,
-    x: 10,
-    y: 10
-  });
+  storage.setItem(MEETING_WINDOW_GEOMETRY_KEY, '{"width":200.2,"height":100.4,"x":9.6,"y":10.2}');
+  assert.deepEqual(loadWindowFrame('meeting', storage), { ...GALLERY_MIN, x: 10, y: 10 });
 });
 
 test('stored undersized meeting geometry is recovered as a gallery-safe size', () => {
   const storage = new MemoryStorage();
 
-  assert.equal(saveMeetingWindowSize({ width: 300, height: 300 }, storage), true);
-  assert.deepEqual(loadMeetingWindowSize(storage), {
-    width: GALLERY_BREAKPOINT,
-    height: GALLERY_MIN_HEIGHT
-  });
+  assert.equal(saveMeetingWindowSize({ width: 200, height: 100 }, storage), true);
+  assert.deepEqual(loadMeetingWindowSize(storage), GALLERY_MIN);
 });
 
 test('storage failures are contained', () => {

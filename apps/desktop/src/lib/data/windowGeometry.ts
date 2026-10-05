@@ -26,7 +26,14 @@ export interface MonitorLike {
 export const HOME_MIN: WindowSize = { width: 380, height: 560 };
 export const HOME_DEFAULT: WindowSize = { width: 400, height: 640 };
 export const GALLERY_BREAKPOINT = 520;
-export const GALLERY_MIN_HEIGHT = 360;
+/** The meeting gallery's own minimum: small enough for a column of faces
+ * beside an editor (narrow, tall) and a bar of faces along the top of the
+ * screen (short, wide). Gallery.svelte lays both out; see the layout lab
+ * (scripts/verify-native-gallery-matrix.mjs). */
+export const GALLERY_MIN: WindowSize = { width: 240, height: 160 };
+/** Dragged narrower than GALLERY_BREAKPOINT AND shorter than this, the
+ * gallery becomes the pill. Narrow alone is a column, short alone a bar. */
+export const GALLERY_PILL_HEIGHT = 320;
 export const MEETING_DEFAULT: WindowSize = { width: 840, height: 560 };
 export const PILL_STORAGE_MIN: WindowSize = { width: 1, height: 1 };
 
@@ -45,7 +52,7 @@ function keyFor(kind: GeometryKind): string {
 
 function minFor(kind: GeometryKind): WindowSize {
   if (kind === 'main') return HOME_MIN;
-  if (kind === 'meeting') return { width: GALLERY_BREAKPOINT, height: GALLERY_MIN_HEIGHT };
+  if (kind === 'meeting') return GALLERY_MIN;
   return PILL_STORAGE_MIN;
 }
 
@@ -85,7 +92,14 @@ export function mainRouteEntryResizeTarget(current: WindowSize): WindowSize | nu
 }
 
 export function clampMeetingWindowSize(size: WindowSize): WindowSize {
-  return clampWindowSize(size, { width: GALLERY_BREAKPOINT, height: GALLERY_MIN_HEIGHT });
+  return clampWindowSize(size, GALLERY_MIN);
+}
+
+/** #11 breakpoint switching: a gallery dragged small in BOTH directions
+ * becomes the pill. Only narrow (a column of faces) or only short (a bar of
+ * faces) stays the gallery, which lays itself out for that shape. */
+export function galleryCollapsesToPill(size: WindowSize): boolean {
+  return size.width < GALLERY_BREAKPOINT - 1 && size.height < GALLERY_PILL_HEIGHT;
 }
 
 export function logicalToPhysicalSize(size: WindowSize, scaleFactor: number): WindowSize {

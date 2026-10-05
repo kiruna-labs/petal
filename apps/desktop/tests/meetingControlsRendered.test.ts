@@ -150,7 +150,80 @@ test('expanded gallery device selectors stay open and restore focus', { timeout:
     await settleMotion(page, ['.meeting-split']);
     const hoverBackground = await micPrimary.evaluate((element) => getComputedStyle(element).backgroundColor);
     assert.notEqual(hoverBackground, 'rgba(0, 0, 0, 0)');
+    // The picker is measured in both control-bar arrangements: a horizontal
+    // bar along the bottom (opens above it, 8px off its top edge) and the
+    // rail a short window stands at its right edge (Gallery.svelte: opens
+    // left of it, 8px off its left edge). 560x460 is the first, 520x360 the
+    // second -- the old shortest window, now a bar-shaped gallery.
+    const measurePicker = () =>
+      page.evaluate(() => {
+        const menu = document.querySelector('.devices-menu');
+        const picker = document.querySelector('.device-picker');
+        const trigger = document.querySelector('.large-stage [aria-label="Microphone options"]');
+        const controlbar = document.querySelector('.large-stage .controlbar');
+        if (!(menu instanceof HTMLElement) || !(picker instanceof HTMLElement) ||
+            !(trigger instanceof HTMLElement) || !(controlbar instanceof HTMLElement)) return null;
+        const menuRect = menu.getBoundingClientRect();
+        const triggerRect = trigger.getBoundingClientRect();
+        const controlbarRect = controlbar.getBoundingClientRect();
+        const pickerRect = picker.getBoundingClientRect();
+        const lowerCorner = document.elementFromPoint(
+          Math.min(innerWidth - 1, Math.max(0, menuRect.right - 3)),
+          Math.min(innerHeight - 1, Math.max(0, menuRect.bottom - 3))
+        );
+        const rail = controlbar.dataset.orientation === 'vertical';
+        const gap = rail
+          ? controlbarRect.left - menuRect.right
+          : menuRect.bottom <= controlbarRect.top
+            ? controlbarRect.top - menuRect.bottom
+            : menuRect.top - controlbarRect.bottom;
+        return {
+          viewport: { width: innerWidth, height: innerHeight },
+          rail,
+          menu: { top: menuRect.top, left: menuRect.left, right: menuRect.right, bottom: menuRect.bottom },
+          picker: { bottom: pickerRect.bottom, maxHeight: getComputedStyle(picker).maxHeight },
+          trigger: { top: triggerRect.top, bottom: triggerRect.bottom },
+          controlbar: { top: controlbarRect.top, left: controlbarRect.left, bottom: controlbarRect.bottom },
+          gap,
+          overlapsControlbar: rail
+            ? menuRect.right > controlbarRect.left
+            : menuRect.bottom > controlbarRect.top && menuRect.top < controlbarRect.bottom,
+          pickerScrollable:
+            picker.scrollHeight > picker.clientHeight && getComputedStyle(picker).overflowY === 'auto',
+          lowerCornerClass: lowerCorner?.className ?? lowerCorner?.tagName ?? null
+        };
+      });
+    const checkPicker = (geometry: Awaited<ReturnType<typeof measurePicker>>, rail: boolean, scrollable: boolean) => {
+      if (!geometry) {
+        regressionFailures.push('expected rendered picker geometry');
+        return;
+      }
+      const where = JSON.stringify(geometry);
+      if (geometry.rail !== rail) regressionFailures.push(`expected ${rail ? 'the rail' : 'a horizontal bar'}: ${where}`);
+      if (geometry.menu.top < 0) regressionFailures.push(`picker top is outside viewport: ${where}`);
+      if (geometry.menu.left < 0) regressionFailures.push(`picker left is outside viewport: ${where}`);
+      if (geometry.menu.bottom > geometry.viewport.height) {
+        regressionFailures.push(`picker bottom is outside viewport: ${where}`);
+      }
+      if (geometry.overlapsControlbar) regressionFailures.push(`picker overlaps action bar: ${where}`);
+      if (Math.round(geometry.gap) !== 8) regressionFailures.push(`picker anchor gap drifted: ${where}`);
+      if (scrollable && !geometry.pickerScrollable) regressionFailures.push(`device picker is not scrollable: ${where}`);
+      if (!/device-picker|devices-menu/.test(String(geometry.lowerCornerClass))) {
+        regressionFailures.push(`picker lower corner hit ${String(geometry.lowerCornerClass)}`);
+      }
+    };
+
     await page.mouse.move(0, 0);
+    await page.setViewportSize({ width: 560, height: 460 });
+    await page.waitForTimeout(100);
+    await mic.click();
+    await page.locator('.devices-menu.placed').waitFor({ timeout: 2_000 });
+    await page.mouse.move(0, 0);
+    await settleMotion(page, ['.meeting-split', '.devices-menu']);
+    checkPicker(await measurePicker(), false, false);
+    await page.keyboard.press('Escape');
+    await page.locator('.devices-menu').waitFor({ state: 'detached', timeout: 2_000 });
+
     await page.setViewportSize({ width: 520, height: 360 });
     await page.waitForTimeout(100);
     await mic.click();
@@ -176,59 +249,7 @@ test('expanded gallery device selectors stay open and restore focus', { timeout:
     assert.equal(await camera.getAttribute('aria-expanded'), 'false');
     assert.equal(await page.locator('.devices-menu.placed').count(), 1);
 
-    const narrowGeometry = await page.evaluate(() => {
-      const menu = document.querySelector('.devices-menu');
-      const picker = document.querySelector('.device-picker');
-      const trigger = document.querySelector('.large-stage [aria-label="Microphone options"]');
-      const controlbar = document.querySelector('.large-stage .controlbar');
-      if (!(menu instanceof HTMLElement) || !(picker instanceof HTMLElement) ||
-          !(trigger instanceof HTMLElement) || !(controlbar instanceof HTMLElement)) return null;
-      const menuRect = menu.getBoundingClientRect();
-      const triggerRect = trigger.getBoundingClientRect();
-      const controlbarRect = controlbar.getBoundingClientRect();
-      const pickerRect = picker.getBoundingClientRect();
-      const lowerCorner = document.elementFromPoint(
-        Math.min(innerWidth - 1, Math.max(0, menuRect.right - 3)),
-        Math.min(innerHeight - 1, Math.max(0, menuRect.bottom - 3))
-      );
-      const verticalGap = menuRect.bottom <= controlbarRect.top
-        ? controlbarRect.top - menuRect.bottom
-        : menuRect.top - controlbarRect.bottom;
-      return {
-        viewport: { width: innerWidth, height: innerHeight },
-        menu: { top: menuRect.top, right: menuRect.right, bottom: menuRect.bottom },
-        picker: { bottom: pickerRect.bottom, maxHeight: getComputedStyle(picker).maxHeight },
-        trigger: { top: triggerRect.top, bottom: triggerRect.bottom },
-        controlbar: { top: controlbarRect.top, bottom: controlbarRect.bottom },
-        verticalGap,
-        overlapsControlbar: menuRect.bottom > controlbarRect.top && menuRect.top < controlbarRect.bottom,
-        pickerScrollable:
-          picker.scrollHeight > picker.clientHeight && getComputedStyle(picker).overflowY === 'auto',
-        lowerCornerClass: lowerCorner?.className ?? lowerCorner?.tagName ?? null
-      };
-    });
-    if (!narrowGeometry) {
-      regressionFailures.push('expected rendered picker geometry');
-    } else {
-      if (narrowGeometry.menu.top < 0) {
-        regressionFailures.push(`picker top is outside viewport: ${JSON.stringify(narrowGeometry)}`);
-      }
-      if (narrowGeometry.menu.bottom > narrowGeometry.viewport.height) {
-        regressionFailures.push(`picker bottom is outside viewport: ${JSON.stringify(narrowGeometry)}`);
-      }
-      if (narrowGeometry.overlapsControlbar) {
-        regressionFailures.push(`picker overlaps action bar: ${JSON.stringify(narrowGeometry)}`);
-      }
-      if (Math.round(narrowGeometry.verticalGap) !== 8) {
-        regressionFailures.push(`picker anchor gap drifted: ${JSON.stringify(narrowGeometry)}`);
-      }
-      if (!narrowGeometry.pickerScrollable) {
-        regressionFailures.push(`device picker is not scrollable: ${JSON.stringify(narrowGeometry)}`);
-      }
-      if (!/device-picker|devices-menu/.test(String(narrowGeometry.lowerCornerClass))) {
-        regressionFailures.push(`picker lower corner hit ${String(narrowGeometry.lowerCornerClass)}`);
-      }
-    }
+    checkPicker(await measurePicker(), true, true);
     assert.deepEqual(regressionFailures, [], `meeting-control regressions:\n${regressionFailures.join('\n')}`);
 
     // Wheel input over a device row must chain to the outer picker after the

@@ -665,13 +665,30 @@
     const tr = trigger.getBoundingClientRect();
     const actionbar = trigger.closest<HTMLElement>('.controlbar');
     const actionbarRect = actionbar?.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    // A short window stands the controls in a rail at the right edge
+    // (Gallery.svelte): open beside the rail, level with the trigger, as tall
+    // as the window allows.
+    if (actionbar?.dataset.orientation === 'vertical' && actionbarRect) {
+      const railHeight = Math.max(1, Math.floor(vh - DEVICE_INSET * 2));
+      const railMaxHeight = `${railHeight}px`;
+      deviceMenuMaxHeight = railMaxHeight;
+      menu.style.setProperty('--device-menu-max-height', railMaxHeight);
+      const mw = menu.offsetWidth;
+      const mh = Math.min(menu.offsetHeight, railHeight);
+      deviceMenuLeft = Math.round(Math.max(DEVICE_INSET, actionbarRect.left - DEVICE_GAP - mw));
+      deviceMenuTop = Math.round(
+        Math.min(Math.max(tr.top + tr.height / 2 - mh / 2, DEVICE_INSET), Math.max(DEVICE_INSET, vh - mh - DEVICE_INSET))
+      );
+      deviceMenuPlaced = true;
+      return;
+    }
     // Expanded controls live inside the action bar. Treat that bar as the
     // popup anchor so the panel never paints over its top border/buttons;
     // compact-pill controls have no action bar and retain the trigger edge.
     const anchorTop = actionbarRect?.top ?? tr.top;
     const anchorBottom = actionbarRect?.bottom ?? tr.bottom;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
     const spaceAbove = Math.max(0, anchorTop - DEVICE_GAP - DEVICE_INSET);
     const spaceBelow = Math.max(0, vh - DEVICE_INSET - anchorBottom - DEVICE_GAP);
     // `scrollHeight` is the unconstrained content height even when a previous
@@ -1000,9 +1017,11 @@
     opacity: 1;
   }
 
+  /* min-height, not height: in a narrow window the gallery top bar wraps
+     its buttons under the room name (Gallery.svelte) and must grow. */
   .large-stage :global(.topbar) {
     min-height: 58px;
-    height: 58px;
+    height: auto;
     padding-top: 12px;
     padding-bottom: 10px;
   }
@@ -1020,6 +1039,13 @@
   .chrome.small .large-stage {
     opacity: 0;
     pointer-events: none;
+  }
+
+  /* While the gallery shows, the faded-out pill still lays out at its own
+     width; a gallery narrower than the pill (a column of faces) would scroll
+     sideways to it. Clip it to the window until it is the one showing. */
+  .chrome:not(.small) .small-stage {
+    overflow: hidden;
   }
 
   .chrome.small .small-stage {

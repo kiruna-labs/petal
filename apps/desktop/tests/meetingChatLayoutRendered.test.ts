@@ -132,7 +132,14 @@ test('meeting chat keeps composer and controls usable at every gallery size', { 
         assert.equal(Math.round(layout.panel.width), 320, `${label}: a 320 px column`);
         assert.ok(layout.tiles.right <= layout.panel.left + 0.5, `${label}: tiles sit beside the panel`);
       } else {
-        assert.equal(Math.round(layout.panel.width), width, `${label}: the panel covers the tiles`);
+        // Over the tiles, never the controls: the whole width, or -- in a
+        // short window, whose controls stand in a rail at the right edge --
+        // the width left of the rail.
+        assert.ok(
+          layout.panel.left <= layout.tiles.left + 0.5 && layout.panel.right >= layout.tiles.right - 0.5,
+          `${label}: the panel covers the tiles: ${JSON.stringify({ panel: layout.panel, tiles: layout.tiles })}`
+        );
+        assert.equal(Math.round(layout.panel.width), height < 420 ? Math.round(layout.tiles.right - layout.tiles.left) : width, `${label}: the panel's width`);
       }
       // Chat stays reachable: its own control, or a More row.
       if (layout.collapsed.includes('chat')) {
