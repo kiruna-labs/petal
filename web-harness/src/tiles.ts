@@ -897,6 +897,10 @@ export function setupTiles(
       video.muted = isLocal; // avoid local echo when previewing our own media
       tile.insertBefore(video, tile.querySelector('.name-chip'));
     }
+    // Your own camera reads like a mirror, as on the desktop (#7). Only the
+    // picture flips: the name chip stays readable, and drawings map through
+    // telepointer.ts `mediaIsMirrored` so they stay on the same spot.
+    video.classList.toggle('self-view', isLocal);
     // #248: crop to fill the tile within the shared caps, else letterbox.
     bindCameraFit(video);
     const attachedNewTrack = attachVideoTrackIfChanged(video, track);

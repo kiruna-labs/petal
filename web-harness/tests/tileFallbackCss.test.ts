@@ -81,6 +81,19 @@ test('#248 camera video crops only where cameraFit.ts says so; shares always let
   assert.deepEqual(tileCoverRules, [".tile video.camera-video[data-fit='cover']"]);
 });
 
+test('your own camera is mirrored like the desktop self-view; nothing else in a tile is', async () => {
+  const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
+  const tiles = await readFile(new URL('../src/tiles.ts', import.meta.url), 'utf8');
+  const uncommented = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const mirrorRules = [...uncommented.matchAll(/(?<selector>[^{}]+)\{[^}]*scaleX\(\s*-1\s*\)[^}]*\}/gi)].map((m) =>
+    (m.groups?.selector ?? '').trim()
+  );
+  assert.deepEqual(mirrorRules, ['.tile video.camera-video.self-view']);
+  // Only setTileCamera tags the video, and only for the local participant.
+  assert.match(tiles, /function setTileCamera[\s\S]*video\.classList\.toggle\('self-view', isLocal\);/);
+  assert.equal([...tiles.matchAll(/'self-view'/g)].length, 1);
+});
+
 test('meeting tile breakpoints still tighten gap and padding through phone widths', async () => {
   const css = await readFile(new URL('../src/style.css', import.meta.url), 'utf8');
   for (const width of [1024, 760, 560, 420]) {

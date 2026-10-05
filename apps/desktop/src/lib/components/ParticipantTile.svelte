@@ -535,7 +535,7 @@
   ></video>
 
   {#if drawStrokes.length > 0}
-    <svg class="draw-layer" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true"
+    <svg class="draw-layer" class:mirrored viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true"
       style:left={drawLayerStyle?.left}
       style:top={drawLayerStyle?.top}
       style:width={drawLayerStyle?.width}
@@ -809,6 +809,13 @@
     width: 100%;
     height: 100%;
     pointer-events: none;
+  }
+
+  /* Strokes arrive in the picture's own coordinates; on your mirrored
+     self-view they flip with the picture, so they stay on the spot of your
+     face they were drawn on (the web client maps the same way). */
+  .draw-layer.mirrored {
+    transform: scaleX(-1);
   }
 
   .draw-layer path {

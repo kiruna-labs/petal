@@ -1,6 +1,6 @@
 import type { HarnessContext } from './context.ts';
 import { DRAW_TOPIC, identityPaletteIndexFromMetadata, type DrawMessage, type DrawPoint } from './trackNames.ts';
-import { colorForIdentity, containedMediaRect, mediaContentRectRelativeToTile } from './telepointer.ts';
+import { colorForIdentity, containedMediaRect, mediaContentRectRelativeToTile, mediaIsMirrored, mirrorMediaX } from './telepointer.ts';
 import { parseDrawPayload } from './draw.ts';
 import { isStrokeExpired, strokeFadeOpacity } from '@petal/shared/logic/strokeExpiry';
 import { pointVisibleInZoomedShare } from './shareZoom.ts';
@@ -58,9 +58,11 @@ function pointInTile(tile: HTMLDivElement, point: DrawPoint): DrawPoint {
   // outgoing capture, so the two errors cancelled and only the sharer saw it.
   const { bounds, media } = mediaContentRectRelativeToTile(tile);
   const content = containedMediaRect(bounds, media);
+  // A self-view camera is painted mirrored (telepointer.ts mediaIsMirrored).
+  const shown = mirrorMediaX(point, mediaIsMirrored(tile));
   return {
-    x: content.left + content.width * point.x,
-    y: content.top + content.height * point.y,
+    x: content.left + content.width * shown.x,
+    y: content.top + content.height * shown.y,
   };
 }
 
@@ -130,7 +132,7 @@ export function setupDrawDisplay(ctx: HarnessContext) {
     text.element.style.setProperty('left', `${point.x}px`);
     text.element.style.setProperty('top', `${point.y}px`);
     const rect = tile.getBoundingClientRect();
-    const alignRight = text.anchor.x > 0.62;
+    const alignRight = mirrorMediaX(text.anchor, mediaIsMirrored(tile)).x > 0.62;
     const available = Math.max(24, alignRight ? point.x : rect.width - point.x);
     const estimatedTextWidth = Math.max(8, [...text.text].length * 8.5 + 14);
     const horizontalScale = Math.min(1, available / estimatedTextWidth);

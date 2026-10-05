@@ -57,7 +57,11 @@ test('participant tiles render matched camera draw strokes without payload color
   assert.match(participantTile, /update\.ownerIdentity !== ownerIdentity \|\| update\.windowId !== drawWindowId/);
   assert.match(participantTile, /identityColorFromPaletteIndex\(update\.drawerPaletteIndex\) \?\? colorForIdentity\(update\.drawerIdentity\)/);
   assert.doesNotMatch(participantTile, /update\.color/);
-  assert.match(participantTile, /<svg class="draw-layer" viewBox="0 0 1 1" preserveAspectRatio="none"/);
+  assert.match(participantTile, /<svg class="draw-layer" class:mirrored viewBox="0 0 1 1" preserveAspectRatio="none"/);
+  // Your mirrored self-view flips its strokes with the picture: they arrive
+  // in the picture's own coordinates (the web sender maps through its own
+  // mirrored tile the same way).
+  assert.match(participantTile, /\.draw-layer\.mirrored \{\s*transform: scaleX\(-1\);\s*\}/);
 });
 
 test('meeting route forwards only high-bit camera draw updates to gallery', () => {
