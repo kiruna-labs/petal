@@ -124,7 +124,7 @@
     onOpenSettings?: () => void | Promise<void>;
     onRenameRoom?: (displayName: string | null) => void | Promise<void>;
     /** Pass-through to Gallery's plugin toolbar slot (plugins/README.md §2.7). */
-    pluginActions?: Snippet;
+    pluginActions?: Snippet<[ReadonlySet<string>]>;
     /** Meeting chat (a host surface, plugins/README.md §2.7): open state and
      * unread count for the Chat control; the drawer itself is rendered by the
      * route through `chatDrawer`, which Gallery places between its topbar and

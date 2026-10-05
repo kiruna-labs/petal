@@ -93,8 +93,8 @@
   <ChatDrawer {messages} onSend={() => {}} onClose={() => {}} now={() => Date.UTC(2026, 9, 5, 12, 5)} locale="en-GB" />
 {/snippet}
 
-{#snippet pluginActions()}
-  <PluginToolbarButtons buttons={pluginButtons} onActivate={() => {}} />
+{#snippet pluginActions(hidden: ReadonlySet<string>)}
+  <PluginToolbarButtons buttons={pluginButtons} {hidden} onActivate={() => {}} />
 {/snippet}
 
 <!-- The route's own boxes (routes/meeting/[room]/+page.svelte: main, .frame,

@@ -55,8 +55,8 @@
   ];
 </script>
 
-{#snippet pluginActions()}
-  <PluginToolbarButtons buttons={pluginButtons} onActivate={() => {}} />
+{#snippet pluginActions(hidden: ReadonlySet<string>)}
+  <PluginToolbarButtons buttons={pluginButtons} {hidden} onActivate={() => {}} />
 {/snippet}
 
 {#snippet chatDrawer()}

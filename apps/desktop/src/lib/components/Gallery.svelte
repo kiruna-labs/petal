@@ -34,6 +34,7 @@
   import { chooseSpotlightHero } from '@petal/shared/logic/tileLayoutMode';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
   import { tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight } from '$lib/motion';
+  import { stepFitLadder } from '$lib/meeting/fitLadder';
   import type { DrawUpdate } from '$lib/ipc';
 
   export interface GalleryParticipant {
@@ -123,8 +124,10 @@
     sidePanel?: Snippet;
     /** Plugin toolbar buttons (plugins/README.md §2.7): the route renders
      * host-drawn `.control-cell`s here so plugin actions sit in the same row
-     * as the built-in controls, before More. Undefined = no plugins. */
-    pluginActions?: Snippet;
+     * as the built-in controls, before More. Undefined = no plugins. Called
+     * with the `${pluginId}/${buttonId}` keys the row has moved into More,
+     * whose cells the snippet hides (PluginToolbarButtons `hidden`). */
+    pluginActions?: Snippet<[ReadonlySet<string>]>;
     /** Opens the feedback/bug-report dialog (#786). The route passes this
      * ONLY when the build carries a UserDispatch public key
      * (`isFeedbackEnabled()`); absent → the topbar cell never renders. */
@@ -650,38 +653,43 @@
     void onInviteLinkCopy?.();
   }
 
-  type GalleryMoreIcon = 'region' | 'remotecontrol' | 'invite' | 'chat';
+  type GalleryMoreIcon = 'region' | 'remotecontrol' | 'invite' | 'chat' | 'screenshare';
 
-  // Control-row fit. #94 promised one row at every gallery width (the window
-  // became the pill below 520 px), but Chat and the default-on Reactions
-  // button made the row ~614 px wide, and the window may now be as narrow as
-  // a column of faces. Measured, not by breakpoint, like the web client's
-  // overflow (#247), one step at a time and back as soon as the wider step
-  // fits again:
-  //   0  everything in the row, labelled
-  //   1  Invite moves into More (lowest priority first, the web client's order)
-  //   2  Chat moves into More too
-  //   3  the controls drop their labels and shrink (icon only, like the web
-  //      client's landscape-phone rail) and, if that is still too wide, wrap
-  //      onto a second row -- they are never clipped.
-  // The rail (a short window) is its own fixed arrangement: Invite in More,
-  // icon only, filled top to bottom and then another column.
-  const COLLAPSE_ORDER = ['invite', 'chat'] as const;
-  type CollapsibleControl = (typeof COLLAPSE_ORDER)[number];
-  const MAX_FIT_LEVEL = 3;
+  // Control-row fit (#247 parity with the web client's control bar). The row
+  // is ONE row at every width; what does not fit moves into More, measured,
+  // never by breakpoint, one step at a time (fitLadder.ts) and back as soon
+  // as the wider step fits again. Mic, Camera, More and Leave never leave the
+  // row. The rest give way lowest priority first, the web client's order:
+  // plugin buttons (the one furthest along first), Invite, Chat, Share. Only
+  // when even Mic, Camera, More and Leave do not fit with their labels does
+  // the row switch to icon only (super compact). The rail (a short window)
+  // is its own arrangement: icon only, Invite in More, filled top to bottom
+  // and then another column.
+  const BUILTIN_COLLAPSE_ORDER = ['invite', 'chat', 'share'] as const;
+  /** `${pluginId}/${buttonId}` of each plugin cell in the row, in row order. */
+  let pluginCellKeys = $state<string[]>([]);
+  const collapseOrder = $derived<string[]>([
+    ...[...pluginCellKeys].reverse().map((key) => `plugin:${key}`),
+    ...BUILTIN_COLLAPSE_ORDER
+  ]);
   let fitLevel = $state(0);
   let controlbarEl = $state<HTMLDivElement>();
   let controlsClusterEl = $state<HTMLDivElement>();
-  /** The bar width each level needed (its one-row width plus ITS OWN side
-   * padding -- level 3's bar is padded less) when it was last showing. */
+  /** The bar width each level needed (its row plus ITS OWN side padding --
+   * the icon-only bar is padded less) when it was last showing. */
   const barWidthAtLevel: Array<number | undefined> = [];
+  let controlLadderKey = '';
 
-  const collapsedControls = $derived<CollapsibleControl[]>(
-    railControls ? ['invite'] : COLLAPSE_ORDER.slice(0, Math.min(fitLevel, COLLAPSE_ORDER.length))
+  const collapsedControls = $derived<ReadonlySet<string>>(
+    railControls ? new Set(['invite']) : new Set(collapseOrder.slice(0, Math.min(fitLevel, collapseOrder.length)))
   );
-  const compactControls = $derived(railControls || fitLevel >= MAX_FIT_LEVEL);
+  const compactControls = $derived(railControls || fitLevel > collapseOrder.length);
+  /** Plugin buttons in More: PluginToolbarButtons hides their cells. */
+  const hiddenPluginKeys = $derived<ReadonlySet<string>>(
+    new Set([...collapsedControls].filter((key) => key.startsWith('plugin:')).map((key) => key.slice('plugin:'.length)))
+  );
 
-  /** The row's width if nothing wrapped: every shown cell plus the gaps. */
+  /** The row's width on one line: every shown cell plus the gaps. */
   function oneRowWidth(cluster: HTMLElement): number {
     const style = getComputedStyle(cluster);
     const gap = parseFloat(style.columnGap) || 0;
@@ -699,19 +707,23 @@
   function refitControls(): void {
     const bar = controlbarEl;
     const cluster = controlsClusterEl;
-    if (!bar || !cluster || railControls) return;
-    const barStyle = getComputedStyle(bar);
-    const needed = oneRowWidth(cluster) + parseFloat(barStyle.paddingLeft) + parseFloat(barStyle.paddingRight);
-    barWidthAtLevel[fitLevel] = needed;
-    if (needed > bar.clientWidth + 0.5) {
-      if (fitLevel < MAX_FIT_LEVEL) fitLevel += 1;
+    if (!bar || !cluster) return;
+    const keys = Array.from(cluster.querySelectorAll<HTMLElement>('.plugin-cell')).map(
+      (cell) => `${cell.dataset.plugin}/${cell.dataset.button}`
+    );
+    // A plugin button came or went: what each level needs has changed.
+    const ladderKey = keys.join('|');
+    if (ladderKey !== controlLadderKey) {
+      controlLadderKey = ladderKey;
+      pluginCellKeys = keys;
+      barWidthAtLevel.length = 0;
+      fitLevel = 0;
       return;
     }
-    // Compared in bar widths, not content widths: comparing the wider level's
-    // row against THIS level's (larger) content box flipped 2 -> 3 -> 2 every
-    // frame wherever the row fell inside the padding difference.
-    const wider = fitLevel > 0 ? barWidthAtLevel[fitLevel - 1] : undefined;
-    if (wider !== undefined && wider <= bar.clientWidth + 0.5) fitLevel -= 1;
+    if (railControls) return;
+    const barStyle = getComputedStyle(bar);
+    const needed = oneRowWidth(cluster) + parseFloat(barStyle.paddingLeft) + parseFloat(barStyle.paddingRight);
+    fitLevel = stepFitLadder(fitLevel, needed, bar.clientWidth, barWidthAtLevel, collapseOrder.length + 1);
   }
 
   $effect(() => {
@@ -724,14 +736,69 @@
     return () => observer.disconnect();
   });
 
-  // Leaving the rail: re-measure from the top of the ladder (the rail's own
-  // arrangement says nothing about how wide the row is).
+  // Leaving the rail: re-measure (the rail's own arrangement says nothing
+  // about how wide the row is).
   $effect(() => {
     if (railControls) return;
     void tick().then(() => refitControls());
   });
-  const inviteCollapsed = $derived(collapsedControls.includes('invite'));
-  const chatCollapsed = $derived(collapsedControls.includes('chat'));
+
+  // A badge on a plugin button in More (an unread count, say) puts a dot on
+  // More, as the web client's ⋯ does.
+  let pluginAttention = $state(false);
+  $effect(() => {
+    const cluster = controlsClusterEl;
+    if (!cluster || typeof MutationObserver === 'undefined') return;
+    const read = () => {
+      pluginAttention = !!cluster.querySelector('.plugin-cell.collapsed .badge');
+    };
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(cluster, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  });
+
+  const inviteCollapsed = $derived(collapsedControls.has('invite'));
+  const chatCollapsed = $derived(collapsedControls.has('chat'));
+  const shareCollapsed = $derived(collapsedControls.has('share'));
+
+  /** A plugin button in More, as its row shows it -- read off the real
+   * (hidden) button, which the row clicks, so each keeps one code path. */
+  interface MorePluginRow {
+    key: string;
+    label: string;
+    ariaLabel: string;
+    glyph: string;
+    badge: string | null;
+    disabled: boolean;
+  }
+  let morePluginRows = $state<MorePluginRow[]>([]);
+
+  function readMorePluginRows(): MorePluginRow[] {
+    const cluster = controlsClusterEl;
+    if (!cluster) return [];
+    return Array.from(cluster.querySelectorAll<HTMLElement>('.plugin-cell.collapsed')).map((cell) => {
+      const button = cell.querySelector<HTMLButtonElement>('button');
+      return {
+        key: `${cell.dataset.plugin}/${cell.dataset.button}`,
+        label: cell.querySelector('.meeting-control-label')?.textContent?.trim() ?? '',
+        ariaLabel: button?.getAttribute('aria-label') ?? '',
+        glyph: cell.querySelector('.glyph')?.innerHTML ?? '',
+        badge: cell.querySelector('.badge')?.textContent?.trim() || null,
+        disabled: button?.disabled ?? false
+      };
+    });
+  }
+
+  function activateMorePluginRow(key: string) {
+    closeGalleryMore(false);
+    const [plugin, button] = key.split('/');
+    controlsClusterEl
+      ?.querySelector<HTMLButtonElement>(
+        `.plugin-cell[data-plugin="${CSS.escape(plugin ?? '')}"][data-button="${CSS.escape(button ?? '')}"] button`
+      )
+      ?.click();
+  }
   let galleryMoreOpen = $state(false);
   let galleryMoreMenuEl = $state<HTMLDivElement>();
   let galleryMoreTriggerEl = $state<HTMLButtonElement>();
@@ -746,6 +813,7 @@
       closeGalleryMore(false);
       return;
     }
+    morePluginRows = readMorePluginRows();
     galleryMoreOpen = true;
   }
 
@@ -1095,7 +1163,7 @@
           onOptions={(el) => onOpenDeviceMenu?.('camera', el)}
         />
       </div>
-      <div class="control-cell">
+      <div class="control-cell" class:collapsed={shareCollapsed} data-control="share">
         <ControlButton
           icon="screenshare"
           kind="toggle"
@@ -1136,8 +1204,8 @@
         {/if}
         <span class="meeting-control-label">Chat</span>
       </div>
-      {@render pluginActions?.()}
-      <div class="control-cell chat-cell">
+      {@render pluginActions?.(hiddenPluginKeys)}
+      <div class="control-cell chat-cell" data-control="more">
         <ControlButton
           icon="more"
           kind="oneshot"
@@ -1152,6 +1220,9 @@
         {#if chatCollapsed && chatUnread > 0 && !chatOpen}
           <!-- Chat moved into More: its unread count rides on More. -->
           <span class="chat-badge" aria-hidden="true" data-testid="more-chat-badge">{chatUnread > 99 ? '99+' : chatUnread}</span>
+        {:else if pluginAttention}
+          <!-- A plugin button in More shows a badge: a dot on More. -->
+          <span class="more-attention-dot" aria-hidden="true" data-testid="more-attention-dot"></span>
         {/if}
         <span class="meeting-control-label">More</span>
       </div>
@@ -1164,6 +1235,17 @@
     {#if galleryMoreOpen}
       <div bind:this={galleryMoreMenuEl} class="gallery-more-menu meeting-menu" role="menu" aria-label="More meeting controls">
         <div class="meeting-menu-section-label">More controls</div>
+        {#if shareCollapsed}
+          <button type="button" class="meeting-menu-row gallery-more-item" role="menuitem" data-testid="more-share" onclick={() => selectGalleryMore('screenshare')}>
+            <span class="more-item-leading">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="13" rx="2"></rect>
+                <path d="M8 21h8M12 17v4"></path>
+              </svg>
+              <span class="meeting-menu-row-copy">{sharingActive ? 'Stop sharing' : 'Share a window'}</span>
+            </span>
+          </button>
+        {/if}
         {#if chatCollapsed}
           <button type="button" class="meeting-menu-row gallery-more-item" role="menuitem" data-testid="more-chat" onclick={() => selectGalleryMore('chat')}>
             <span class="more-item-leading">
@@ -1188,6 +1270,16 @@
             </span>
           </button>
         {/if}
+        {#each morePluginRows as row (row.key)}
+          <!-- A plugin button in More: the row clicks the real (hidden) button. -->
+          <button type="button" class="meeting-menu-row gallery-more-item" role="menuitem" data-testid="more-plugin" aria-label={row.ariaLabel} disabled={row.disabled} onclick={() => activateMorePluginRow(row.key)}>
+            <span class="more-item-leading">
+              <span class="more-item-glyph" aria-hidden="true">{@html row.glyph}</span>
+              <span class="meeting-menu-row-copy">{row.label}</span>
+            </span>
+            {#if row.badge}<span class="more-item-state">{row.badge}</span>{/if}
+          </button>
+        {/each}
         <button type="button" class="meeting-menu-row gallery-more-item" role="menuitem" onclick={() => selectGalleryMore('region')}>
           <span class="more-item-leading">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -2220,9 +2312,12 @@
     flex-wrap: nowrap;
   }
 
+  /* Never shrunk: the row's fit is measured from the cells' own widths
+     (refitControls), and a squeezed row would read as one that fits. */
   .control-cell {
     position: relative;
     display: flex;
+    flex: 0 0 auto;
     flex-direction: column;
     align-items: center;
     justify-content: center;
@@ -2317,6 +2412,28 @@
     color: var(--text-soft);
   }
 
+  .more-item-glyph {
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
+
+  .more-item-glyph :global(svg) {
+    width: 16px;
+    height: 16px;
+    color: var(--text-soft);
+  }
+
+  .more-attention-dot {
+    position: absolute;
+    top: 2px;
+    left: calc(50% + 12px);
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-pill);
+    background: var(--live-bright);
+    pointer-events: none;
+  }
+
   .more-item-state {
     flex: 0 0 auto;
     color: var(--text-dim);
@@ -2325,10 +2442,9 @@
     text-transform: uppercase;
   }
 
-  /* Compact controls (controlFit level 3, and the rail): icon only, a size
-     smaller, and -- below the rail -- wrapping onto a second row instead of
-     clipping. Every button keeps its accessible name; the labels are what
-     go, the web client's landscape-phone rail does the same. */
+  /* Super compact (the last step of the control-row fit, and the rail): icon
+     only and a size smaller. Every button keeps its accessible name; the
+     labels are what go, as on the web client's landscape-phone rail. */
   .gallery.compact-controls {
     --compact-control: 40px;
   }
@@ -2357,14 +2473,15 @@
     height: var(--compact-control);
   }
 
+  /* Icon only is still one row: Mic, Camera, More and Leave fit the
+     narrowest gallery (240 px) with these gaps. */
   .gallery.compact-controls:not(.rail-controls) .controlbar {
     min-height: 0;
-    padding: 10px 12px;
+    padding: 8px;
   }
 
   .gallery.compact-controls:not(.rail-controls) .controls-cluster {
-    flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
   }
 
   .gallery.compact-controls .leave-cell {
