@@ -13,7 +13,7 @@ import '@fontsource/jetbrains-mono/500.css';
 import { mount, tick } from 'svelte';
 import Lab from './gallery-lab.svelte';
 import { scenarioFromQuery } from '$lib/dev/galleryLab';
-import { judgeGalleryLab, measureGalleryLab } from '$lib/dev/galleryLabMeasure';
+import { judgeGalleryLab, measureGalleryLab, sampleIdleLayoutChanges } from '$lib/dev/galleryLabMeasure';
 
 const frames = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 
@@ -49,6 +49,7 @@ window.__galleryLab = {
     lab.set(scenario);
     await settle();
     const reading = this.measure();
+    reading.idleChanges = await sampleIdleLayoutChanges(document.querySelector('[data-lab-window]'));
     return { reading, problems: judgeGalleryLab(scenario, reading) };
   },
   measure() {

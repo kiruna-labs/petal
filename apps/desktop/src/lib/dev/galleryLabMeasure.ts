@@ -41,6 +41,9 @@ export interface GalleryLabReading {
   surfaceShare: number;
   /** Tiles' area / tile surface area: how well they are packed into it. */
   packing: number;
+  /** A side panel (the chat) lies over the tiles -- a narrow window -- so
+   * how the tiles under it are laid out is not what anyone sees. */
+  panelCoversTiles: boolean;
   /** Camera pictures' on-screen area / window area. */
   videoShare: number;
   smallestTile: { width: number; height: number };
@@ -67,6 +70,42 @@ export interface GalleryLabReading {
   selfViewSmaller: boolean;
   /** Spotlight: the hero's area over the largest thumbnail's. */
   heroToThumbnailRatio: number | null;
+  /** Times the layout changed while nothing happened (sampled over frames
+   * after it settled, sampleIdleLayoutChanges): a layout that flips back
+   * and forth on its own. Absent when not sampled. */
+  idleChanges?: number;
+}
+
+/** What a person would see change: the gallery's chrome classes, what is in
+ * More, and every tile's box to the pixel. */
+function layoutSignature(windowEl: HTMLElement): string {
+  const gallery = windowEl.querySelector('.gallery');
+  const collapsed = Array.from(windowEl.querySelectorAll('.controlbar .control-cell.collapsed')).length;
+  const tiles = Array.from(windowEl.querySelectorAll('.tile-wrap[data-participant-key]')).map((el) => {
+    const r = el.getBoundingClientRect();
+    return `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`;
+  });
+  return `${gallery?.className ?? ''}|${collapsed}|${tiles.join(';')}`;
+}
+
+/** Counts layout changes over `frames` animation frames with nothing
+ * happening. A settled layout must stay put: a measure-and-adjust loop that
+ * undoes itself (the control row once flipped labels on and off every two
+ * frames at some widths) shows up here and nowhere else. */
+export function sampleIdleLayoutChanges(windowEl: HTMLElement, frames = 20): Promise<number> {
+  return new Promise((resolve) => {
+    let previous = layoutSignature(windowEl);
+    let changes = 0;
+    let left = frames;
+    const step = () => {
+      const next = layoutSignature(windowEl);
+      if (next !== previous) changes += 1;
+      previous = next;
+      if (--left > 0) requestAnimationFrame(step);
+      else resolve(changes);
+    };
+    requestAnimationFrame(step);
+  });
 }
 
 function rectOf(el: Element, origin: DOMRect): LabRect {
@@ -167,6 +206,8 @@ export function measureGalleryLab(windowEl: HTMLElement): GalleryLabReading {
     };
   }
   const tilesArea = tiles.reduce((sum, t) => sum + t.visibleArea, 0);
+  const panelEl = windowEl.querySelector('.side-panel');
+  const panelCoversTiles = !!panelEl && !!tileSurface && area(intersect(rectOf(panelEl, origin), tileSurface)) > area(tileSurface) / 2;
   const sizes = tiles.map((t) => t.rect);
   const smallest = sizes.reduce((min, r) => (area(r) < area(min) ? r : min), sizes[0] ?? { left: 0, top: 0, width: 0, height: 0 });
   const largest = sizes.reduce((max, r) => (area(r) > area(max) ? r : max), sizes[0] ?? { left: 0, top: 0, width: 0, height: 0 });
@@ -227,6 +268,7 @@ export function measureGalleryLab(windowEl: HTMLElement): GalleryLabReading {
     tileSurface,
     surfaceShare: tileSurface ? area(tileSurface) / windowArea : 0,
     packing: tileSurface && area(tileSurface) > 0 ? tilesArea / area(tileSurface) : 0,
+    panelCoversTiles,
     videoShare: tiles.reduce((sum, t) => sum + t.videoArea, 0) / windowArea,
     smallestTile: { width: smallest.width, height: smallest.height },
     largestTile: { width: largest.width, height: largest.height },
@@ -250,19 +292,24 @@ export function measureGalleryLab(windowEl: HTMLElement): GalleryLabReading {
 /**
  * Everything wrong with one lab window, in words; empty when the layout is
  * fine. The rules (#239 parity for the desktop gallery):
+ *  - a settled layout stays put (when idleChanges was sampled);
  *  - the meeting never scrolls, tiles never overlap, and every tile is on
  *    screen or one scroll of the spotlight strip away;
  *  - Mic, Camera, Share and Leave are always on screen, and no control is
  *    clipped (a control may move into More, never off the bar);
  *  - the spotlight strip is centred, and your own thumbnail is never smaller
  *    than anyone else's;
- *  - every face is recognisable: no tile under 54px tall or 80px wide;
+ *  - every face is recognisable: no tile under 54px tall or 80px wide,
+ *    whenever the tiles' box has room for that many (twelve people in the
+ *    smallest gallery cannot all be 80px wide);
  *  - the window goes to faces: with nothing else open the tiles' box is at
  *    least 55% of it, and a grid fills at least 40% of that box;
  *  - the spotlight hero is clearly the biggest picture.
+ * Tile rules are skipped while a panel lies over the tiles (narrow + chat).
  */
 export function judgeGalleryLab(scenario: GalleryLabScenario, reading: GalleryLabReading): string[] {
   const problems: string[] = [];
+  if (reading.idleChanges) problems.push(`the layout changed ${reading.idleChanges} times while idle`);
   if (reading.pageScrolls) problems.push('the meeting scrolls');
   if (reading.overlaps.length) problems.push(`tiles overlap: ${reading.overlaps.map((pair) => pair.join('/')).join(', ')}`);
   const unreachable = reading.tiles.filter((t) => !t.reachable).map((t) => t.key);
@@ -274,17 +321,21 @@ export function judgeGalleryLab(scenario: GalleryLabScenario, reading: GalleryLa
     problems.push(`spotlight strip ${reading.stripCentreOffset.toFixed(1)}px off centre`);
   }
   if (reading.selfViewSmaller) problems.push('your own thumbnail is smaller than someone else’s');
+  const MIN_TILE = { width: 80, height: 54 };
+  const surfaceArea = reading.tileSurface ? reading.tileSurface.width * reading.tileSurface.height : 0;
+  // Room for everyone at the minimum, gaps included (~30%).
+  const roomForAll = surfaceArea >= scenario.count * MIN_TILE.width * MIN_TILE.height * 1.3;
   const tooSmall = reading.tiles
-    .filter((t) => t.rect.height < 54 || t.rect.width < 80)
+    .filter((t) => t.rect.height < MIN_TILE.height || t.rect.width < MIN_TILE.width)
     .map((t) => `${t.key} ${Math.round(t.rect.width)}x${Math.round(t.rect.height)}`);
-  if (tooSmall.length) problems.push(`tiles too small: ${tooSmall.join(', ')}`);
+  if (tooSmall.length && roomForAll && !reading.panelCoversTiles) problems.push(`tiles too small: ${tooSmall.join(', ')}`);
   if (!scenario.chatOpen && reading.surfaceShare < 0.55) {
     problems.push(`the chrome leaves ${(reading.surfaceShare * 100).toFixed(0)}% of the window for tiles (< 55%)`);
   }
-  if (scenario.mode === 'grid' && scenario.count > 1 && reading.packing < 0.4) {
+  if (scenario.mode === 'grid' && scenario.count > 1 && !reading.panelCoversTiles && reading.packing < 0.4) {
     problems.push(`tiles fill ${(reading.packing * 100).toFixed(0)}% of their box (< 40%)`);
   }
-  if (scenario.mode === 'spotlight' && reading.heroToThumbnailRatio !== null && reading.heroToThumbnailRatio < 1.5) {
+  if (scenario.mode === 'spotlight' && !reading.panelCoversTiles && reading.heroToThumbnailRatio !== null && reading.heroToThumbnailRatio < 1.5) {
     problems.push(`hero only ${reading.heroToThumbnailRatio.toFixed(2)}x the largest thumbnail`);
   }
   return problems;

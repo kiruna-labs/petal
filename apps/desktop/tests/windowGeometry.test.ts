@@ -51,7 +51,13 @@ class MemoryStorage implements StorageLike {
 
 test('main and meeting sizes clamp to their route minimums', () => {
   assert.deepEqual(clampMainWindowSize({ width: 320.4, height: 500.2 }), HOME_MIN);
-  assert.deepEqual(clampMeetingWindowSize({ width: 200.4, height: 120.2 }), GALLERY_MIN);
+  // Below the minimum is clamped to it -- and a size inside the pill zone is
+  // lifted to the pill height, so a restored gallery is never one the next
+  // small drag collapses.
+  assert.deepEqual(clampMeetingWindowSize({ width: 200.4, height: 120.2 }), { width: GALLERY_MIN.width, height: GALLERY_PILL_HEIGHT });
+  assert.deepEqual(clampMeetingWindowSize({ width: 500, height: 300 }), { width: 500, height: GALLERY_PILL_HEIGHT });
+  assert.equal(galleryCollapsesToPill(clampMeetingWindowSize({ width: 300, height: 200 })), false);
+  assert.deepEqual(clampMeetingWindowSize({ width: 900, height: 120 }), { width: 900, height: GALLERY_MIN.height });
   assert.deepEqual(MEETING_DEFAULT, { width: 840, height: 560 });
   assert.deepEqual(clampMeetingWindowSize({ width: 800.4, height: 640.6 }), {
     width: 800,

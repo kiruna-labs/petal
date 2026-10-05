@@ -5,13 +5,13 @@
   control bar below it (Mute, Start Video, Sharing, More, Invite, Leave —
   exact set + order from canvas.html's control-bar row).
 
-  Responsive approach: CSS grid with `auto-fit`/`minmax` reflows the tile
-  count-per-row continuously as the gallery resizes, rather than fixed JS
-  breakpoints — this satisfies SPEC.md §4.7's "no reflow jank" at a basic
-  level for this phase (a real fluid tiny→full-screen interpolation, e.g.
-  smoothly morphing into the compact Pill state, is a later wiring concern
-  per Build-Map §2.2 — DensityToggle already exists for that transition and
-  isn't duplicated here).
+  Responsive approach: the gallery measures itself and lays out for any
+  window shape -- tiles packed by the shared geometry (galleryGeometry.ts,
+  spotlightGeometry.ts, one source with the web client), and the chrome
+  adapting to a narrow column of faces or a short bar of faces (see "Window
+  shape -> chrome" in the script). Every shape is rendered and judged by the
+  layout lab: scripts/verify-native-gallery-matrix.mjs, /dev/gallery-lab and
+  tests/galleryLabRendered.test.ts.
 
   Control label is "Invite", not "Participants" (Build-Map §3 override #3).
   Labels name the FEATURE (Audio, Video, Screensharing, Invite, Leave —
@@ -341,11 +341,15 @@
   // the meeting window can be any shape a person drags it to (#239 parity):
   //  - short and wide (a bar of faces along the top of the screen): the
   //    controls become a rail at the right edge and the top bar floats over
-  //    the tiles, shown while the pointer is over the window or focus is in
-  //    it, so nearly the whole height goes to faces;
+  //    the tiles, shown while the pointer is over the window or keyboard
+  //    focus is in it, so nearly the whole height goes to faces;
   //  - narrow (a column of faces beside an editor): the controls drop their
-  //    labels and wrap, and the top bar wraps its buttons under the name
-  //    (the control-row fit below), never clipping either.
+  //    labels and wrap (the control-row fit below), never clipping, and the
+  //    top bar wraps its buttons under the name -- or floats too, while the
+  //    column is short enough that a top bar would be most of it.
+  // A floating top bar takes clicks only on its own buttons: the tiles under
+  // it stay clickable, and the window is moved by the control bar's empty
+  // space instead.
   const RAIL_BELOW_HEIGHT = 420;
   const RAIL_BUTTON_PX = 40;
   const RAIL_GAP_PX = 6;
@@ -359,6 +363,15 @@
   const COMPACT_TILE_GAP_PX = 8;
   const compactWindow = $derived(
     railControls || (galleryWidth > 0 && galleryWidth < COMPACT_WINDOW_BELOW_WIDTH)
+  );
+  const FLOATING_TOPBAR_NARROW_WIDTH = 520;
+  const FLOATING_TOPBAR_NARROW_HEIGHT = 600;
+  const floatingTopbar = $derived(
+    railControls ||
+      (galleryWidth > 0 &&
+        galleryWidth < FLOATING_TOPBAR_NARROW_WIDTH &&
+        galleryHeight > 0 &&
+        galleryHeight < FLOATING_TOPBAR_NARROW_HEIGHT)
   );
   /** Rail controls fill top to bottom, then start another column. */
   const railRows = $derived(
@@ -659,8 +672,9 @@
   let fitLevel = $state(0);
   let controlbarEl = $state<HTMLDivElement>();
   let controlsClusterEl = $state<HTMLDivElement>();
-  /** The one-row width each level needed when it was last showing. */
-  const rowWidthAtLevel: Array<number | undefined> = [];
+  /** The bar width each level needed (its one-row width plus ITS OWN side
+   * padding -- level 3's bar is padded less) when it was last showing. */
+  const barWidthAtLevel: Array<number | undefined> = [];
 
   const collapsedControls = $derived<CollapsibleControl[]>(
     railControls ? ['invite'] : COLLAPSE_ORDER.slice(0, Math.min(fitLevel, COLLAPSE_ORDER.length))
@@ -687,15 +701,17 @@
     const cluster = controlsClusterEl;
     if (!bar || !cluster || railControls) return;
     const barStyle = getComputedStyle(bar);
-    const available = bar.clientWidth - parseFloat(barStyle.paddingLeft) - parseFloat(barStyle.paddingRight);
-    const used = oneRowWidth(cluster);
-    rowWidthAtLevel[fitLevel] = used;
-    if (used > available + 0.5) {
+    const needed = oneRowWidth(cluster) + parseFloat(barStyle.paddingLeft) + parseFloat(barStyle.paddingRight);
+    barWidthAtLevel[fitLevel] = needed;
+    if (needed > bar.clientWidth + 0.5) {
       if (fitLevel < MAX_FIT_LEVEL) fitLevel += 1;
       return;
     }
-    const wider = fitLevel > 0 ? rowWidthAtLevel[fitLevel - 1] : undefined;
-    if (wider !== undefined && wider <= available + 0.5) fitLevel -= 1;
+    // Compared in bar widths, not content widths: comparing the wider level's
+    // row against THIS level's (larger) content box flipped 2 -> 3 -> 2 every
+    // frame wherever the row fell inside the padding difference.
+    const wider = fitLevel > 0 ? barWidthAtLevel[fitLevel - 1] : undefined;
+    if (wider !== undefined && wider <= bar.clientWidth + 0.5) fitLevel -= 1;
   }
 
   $effect(() => {
@@ -793,6 +809,7 @@
   class:rail-controls={railControls}
   class:compact-controls={compactControls}
   class:compact-window={compactWindow}
+  class:floating-topbar={floatingTopbar}
   class:has-side-panel={!!sidePanel}
   style={galleryChromeStyle}
 >
@@ -960,7 +977,6 @@
     class:compact={smartGridLayout.compact}
     class:tiny={smartGridLayout.tiny}
     style={smartGridStyle}
-    data-tauri-drag-region={railControls ? '' : undefined}
   >
     {#if gridStateTitle}
       <div class="gallery-state" class:warning={stateTone === 'warning'}>
@@ -1050,9 +1066,9 @@
     class="controlbar"
     bind:this={controlbarEl}
     data-orientation={railControls ? 'vertical' : 'horizontal'}
-    data-tauri-drag-region={railControls ? '' : undefined}
+    data-tauri-drag-region={floatingTopbar ? '' : undefined}
   >
-    <div class="controls-cluster" bind:this={controlsClusterEl} data-tauri-drag-region={railControls ? '' : undefined}>
+    <div class="controls-cluster" bind:this={controlsClusterEl} data-tauri-drag-region={floatingTopbar ? '' : undefined}>
       <div class="control-cell">
         <MediaSplitControl
           icon="mic"
@@ -2314,10 +2330,6 @@
      clipping. Every button keeps its accessible name; the labels are what
      go, the web client's landscape-phone rail does the same. */
   .gallery.compact-controls {
-    --compact-control: 44px;
-  }
-
-  .gallery.rail-controls {
     --compact-control: 40px;
   }
 
@@ -2367,9 +2379,8 @@
   /* The rail: a short, wide window -- a bar of faces along the top of the
      screen. The controls stand in a column at the right edge (filling top to
      bottom, then another column: --rail-rows), and the top bar floats over
-     the top of the tiles, shown while the pointer is over the window or
-     focus is in it, so the faces get nearly the whole height. Empty rail and
-     tile space moves the window, as the top bar does. */
+     the top of the tiles (below), so the faces get nearly the whole height.
+     The rail's empty space moves the window. */
   .gallery.rail-controls {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -2379,6 +2390,26 @@
   .gallery.rail-controls > .topbar {
     grid-area: 1 / 1;
     align-self: start;
+  }
+
+  .gallery.rail-controls > .gallery-body {
+    grid-area: 1 / 1;
+  }
+
+  .gallery.rail-controls > .controlbar {
+    grid-area: 1 / 2;
+    min-height: 0;
+    padding: 8px;
+    border-top: none;
+    border-left: 1px solid var(--hairline);
+  }
+
+  /* The floating top bar (a bar of faces, or a short column): over the top
+     of the tiles, shown while the pointer is over the window or keyboard
+     focus is in it. Only its buttons take clicks -- its surface passes them
+     to the tiles beneath (the pin, the share-count pill), so it can cover
+     nothing while visible either. The control bar and its menus stay above it. */
+  .gallery.floating-topbar > .topbar {
     z-index: 7;
     min-height: 44px;
     height: auto;
@@ -2390,27 +2421,63 @@
     transition: opacity var(--motion-fast) var(--ease-standard);
   }
 
-  .gallery.rail-controls:hover > .topbar,
-  .gallery.rail-controls > .topbar:has(:focus-visible) {
+  .gallery.floating-topbar:not(.rail-controls) > .topbar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+  }
+
+  .gallery.floating-topbar > .topbar,
+  .gallery.floating-topbar > .topbar .topbar-drag-layer,
+  .gallery.floating-topbar > .topbar .topbar-left {
+    pointer-events: none;
+  }
+
+  .gallery.floating-topbar:hover > .topbar,
+  .gallery.floating-topbar > .topbar:has(:focus-visible) {
     opacity: 1;
   }
 
-  .gallery.rail-controls > .gallery-body {
-    grid-area: 1 / 1;
+  .gallery.floating-topbar:hover > .topbar :is(button, input),
+  .gallery.floating-topbar > .topbar:has(:focus-visible) :is(button, input) {
+    pointer-events: auto;
+  }
+
+  /* The bar's own reveals key on the window being pointed at, since the bar
+     itself is no longer hit-tested. */
+  .gallery.floating-topbar:hover .room-title-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .gallery.floating-topbar:hover .elapsed {
+    opacity: 1;
+  }
+
+  .gallery.floating-topbar > .controlbar {
+    z-index: 8;
   }
 
   /* With a panel open (the chat) the top bar is a row again: floating, it
      would sit over the panel's own header and its Close button. */
-  .gallery.rail-controls.has-side-panel {
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-
-  .gallery.rail-controls.has-side-panel > .topbar {
-    grid-area: 1 / 1;
+  .gallery.floating-topbar.has-side-panel > .topbar {
+    position: relative;
     opacity: 1;
     background: var(--fill-weak);
     backdrop-filter: none;
     border-bottom: 1px solid var(--hairline);
+    pointer-events: auto;
+  }
+
+  .gallery.floating-topbar.has-side-panel > .topbar .topbar-drag-layer,
+  .gallery.floating-topbar.has-side-panel > .topbar .topbar-left,
+  .gallery.floating-topbar.has-side-panel > .topbar :is(button, input) {
+    pointer-events: auto;
+  }
+
+  .gallery.rail-controls.has-side-panel {
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .gallery.rail-controls.has-side-panel > .gallery-body {
@@ -2419,14 +2486,6 @@
 
   .gallery.rail-controls.has-side-panel > .controlbar {
     grid-area: 1 / 2 / 3 / 3;
-  }
-
-  .gallery.rail-controls > .controlbar {
-    grid-area: 1 / 2;
-    min-height: 0;
-    padding: 8px;
-    border-top: none;
-    border-left: 1px solid var(--hairline);
   }
 
   .gallery.rail-controls .controls-cluster {
@@ -2453,7 +2512,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .control-tooltip,
-    .gallery.rail-controls > .topbar {
+    .gallery.floating-topbar > .topbar {
       transition: none;
     }
   }

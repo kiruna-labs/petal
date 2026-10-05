@@ -15,7 +15,8 @@
 //     well the tiles fill that box;
 //   - the smallest and largest tile, overlaps, and whether every tile is on
 //     screen or one scroll of the spotlight strip away;
-//   - whether the meeting itself scrolls (it never should);
+//   - whether the meeting itself scrolls (it never should), and whether the
+//     settled layout keeps changing on its own over the next 20 frames;
 //   - controls clipped off the bar or the window, controls folded into More,
 //     and whether Mic, Camera, Share and Leave are all on screen;
 //   - in spotlight, how far the thumbnail strip sits from centred, and
@@ -58,7 +59,11 @@ const DEFAULT_SIZES = [
   '520x380', // the smallest the gallery used to allow
   '300x900', // a side column
   '240x700', // the narrowest the gallery allows (GALLERY_MIN)
+  '240x360', // narrow and as short as it gets before it is the pill
+  '300x450', // a short column: the top bar floats here too
+  '360x560',
   '420x1000',
+  '470x800', // inside a band where the control row once flickered
   '600x1000',
   '1400x220', // a bar along the top
   '1100x170',

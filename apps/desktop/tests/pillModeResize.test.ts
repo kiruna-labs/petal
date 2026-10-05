@@ -39,3 +39,30 @@ test('native window resizability is disabled only while in pill mode', () => {
   assert.ok(restoreHomeWindow, 'restoreHomeWindow should exist');
   assert.match(restoreHomeWindow, /await setCurrentWindowResizable\(win, true\)/);
 });
+
+// The layout lab's window shapes: a column of faces and a bar of faces stay
+// the gallery; small in BOTH directions is the pill. The wiring, not just
+// windowGeometry.ts's pure rule (ENGINEERING.md: native window lifecycle).
+test('the gallery collapses to the pill only when small both ways, and never remembers the collapsing frame', () => {
+  const handleSize = pillWindowSource.match(/function handleLogicalSize\(w: number, h: number\)[\s\S]*?\n  \}/)?.[0];
+  assert.ok(handleSize, 'handleLogicalSize should exist');
+  assert.match(handleSize, /if \(galleryCollapsesToPill\(\{ width: w, height: h \}\)\) expanded = false;/);
+  assert.doesNotMatch(pillWindowSource, /handleLogicalWidth|GALLERY_BREAKPOINT - 1/);
+  // Both resize paths feed width AND height.
+  assert.match(pillWindowSource, /handleLogicalSize\(window\.innerWidth, window\.innerHeight\)/);
+  assert.match(pillWindowSource, /handleLogicalSize\(logical\.width, logical\.height\)/);
+  // A drag into the pill zone does not overwrite the remembered gallery
+  // frame, on either path that saves it, so expanding restores the window
+  // the person had.
+  assert.match(pillWindowSource, /if \(expanded && !galleryCollapsesToPill\(logical\)\) \{/);
+  const rememberGallery = pillWindowSource.match(/async function rememberGalleryFrame[\s\S]*?\n  \}/)?.[0];
+  assert.ok(rememberGallery, 'rememberGalleryFrame should exist');
+  assert.match(rememberGallery, /if \(remembered && galleryCollapsesToPill\(frame\)\) return;/);
+  // Every gallery entry lowers the minimum to the gallery's own BEFORE sizing.
+  const enterGallery = pillWindowSource.match(/async function enterGalleryWindow[\s\S]*?\n  \}/)?.[0];
+  assert.ok(enterGallery, 'enterGalleryWindow should exist');
+  assert.match(enterGallery, /setMinSize\(new LogicalSize\(GALLERY_MIN\.width, GALLERY_MIN\.height\)\);\s*remembered = await applyMeetingWindowGeometry/);
+  const prepare = pillWindowSource.match(/export async function prepareMeetingWindow[\s\S]*?\n\}/)?.[0];
+  assert.ok(prepare, 'prepareMeetingWindow should exist');
+  assert.match(prepare, /setMinSize\(new LogicalSize\(GALLERY_MIN\.width, GALLERY_MIN\.height\)\);\s*const applied = await applyMeetingWindowGeometry/);
+});

@@ -105,6 +105,14 @@ test('the native gallery lays out every window shape: a column, a bar, centred s
     assert.ok(thumbs.every((t) => t.rect.top >= hero.rect.top + hero.rect.height - 1), 'thumbnails under the hero');
     assert.ok(thumbs.every((t) => t.rect.width < hero.rect.width), 'thumbnails smaller than the hero');
     assert.equal(distinct(thumbs.map((t) => t.rect.left)), 1, 'thumbnails in one column');
+    // Inside the band where the control row once flipped its labels on and
+    // off every two frames (judgeGalleryLab samples 20 idle frames).
+    await show({ w: 470, h: 800, n: 4, mode: 'grid' });
+    // A short column -- narrow, and too short for a top bar row: the top bar
+    // floats there too, and the smallest narrow gallery before the pill.
+    const shortColumn = await show({ w: 300, h: 450, n: 4, mode: 'grid' });
+    assert.ok(shortColumn.galleryClasses.includes('floating-topbar'), `${shortColumn.galleryClasses}`);
+    await show({ w: 240, h: 360, n: 3, mode: 'grid' });
     // The narrowest the gallery allows still lays out (GALLERY_MIN).
     await show({ w: 240, h: 700, n: 5, mode: 'grid' });
     await show({ w: 240, h: 700, n: 5, mode: 'spotlight' });
@@ -122,6 +130,21 @@ test('the native gallery lays out every window shape: a column, a bar, centred s
     await page.waitForFunction(`Number(getComputedStyle(document.querySelector('.gallery .topbar')).opacity) === 1`, undefined, { timeout: 2_000 });
     assert.equal(await topbarOpacity(), 1);
     await page.mouse.move(1100, 170);
+    // ...and even shown, it takes clicks only on its buttons: where it lies
+    // over a tile (two people in a 1400x220 bar fill the height), the tile is
+    // what a click there reaches.
+    await show({ w: 1400, h: 220, n: 2, mode: 'grid' });
+    await page.mouse.move(700, 120);
+    await page.waitForFunction(`Number(getComputedStyle(document.querySelector('.gallery .topbar')).opacity) === 1`, undefined, { timeout: 2_000 });
+    const underBar = (await page.evaluate(`(() => {
+      const bar = document.querySelector('.gallery .topbar').getBoundingClientRect();
+      const tile = [...document.querySelectorAll('.tile-wrap')].map((el) => el.getBoundingClientRect()).find((r) => r.top < bar.bottom - 8);
+      if (!tile) return 'no tile under the bar';
+      const hit = document.elementFromPoint(tile.left + tile.width / 2, (Math.max(tile.top, bar.top) + bar.bottom) / 2);
+      return hit?.closest('.tile-wrap') ? 'tile' : String(hit?.className);
+    })()`)) as string;
+    assert.equal(underBar, 'tile', 'the floating top bar passes clicks to the tile beneath it');
+    await page.mouse.move(1400, 220);
 
     const barSpotlight = await show({ w: 1400, h: 220, n: 6, mode: 'spotlight' });
     assert.equal(barSpotlight.stripPlacement, 'side');

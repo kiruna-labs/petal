@@ -1,6 +1,8 @@
 // The desktop meeting window with the chat open, at every gallery size (the
-// window becomes the pill below GALLERY_BREAKPOINT, 520 px; tauri.conf.json
-// minHeight is 360). The chat panel lives between the gallery's topbar and
+// window becomes the pill only when narrower than GALLERY_BREAKPOINT, 520 px,
+// AND shorter than GALLERY_PILL_HEIGHT; windowGeometry.ts galleryCollapsesToPill;
+// tests/galleryLabRendered.test.ts covers the narrower and shorter shapes).
+// The chat panel lives between the gallery's topbar and
 // control bar: a 320 px column beside the tiles from 720 px, over the tiles
 // below that. At every size the composer and Send are on screen and not
 // covered, every control is on screen and not covered, and nothing scrolls

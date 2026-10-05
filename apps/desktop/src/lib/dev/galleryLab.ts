@@ -60,6 +60,7 @@ export const LAB_WINDOW_PRESETS: ReadonlyArray<{ key: string; label: string; wid
   { key: 'full-hd', label: 'Full screen 1920×1080', width: 1920, height: 1080 },
   { key: 'column', label: 'Side column 300×900', width: 300, height: 900 },
   { key: 'column-min', label: 'Narrowest 240×700', width: 240, height: 700 },
+  { key: 'column-short', label: 'Short column 300×450', width: 300, height: 450 },
   { key: 'column-wide', label: 'Wide column 420×1000', width: 420, height: 1000 },
   { key: 'tall', label: 'Tall 600×1000', width: 600, height: 1000 },
   { key: 'bar', label: 'Top bar 1400×220', width: 1400, height: 220 },

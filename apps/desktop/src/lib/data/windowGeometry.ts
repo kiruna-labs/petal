@@ -32,8 +32,10 @@ export const GALLERY_BREAKPOINT = 520;
  * (scripts/verify-native-gallery-matrix.mjs). */
 export const GALLERY_MIN: WindowSize = { width: 240, height: 160 };
 /** Dragged narrower than GALLERY_BREAKPOINT AND shorter than this, the
- * gallery becomes the pill. Narrow alone is a column, short alone a bar. */
-export const GALLERY_PILL_HEIGHT = 320;
+ * gallery becomes the pill. Narrow alone is a column, short alone a bar.
+ * 360: a narrow window any shorter is mostly chrome (the layout lab's
+ * "the window goes to faces" rule fails below it). */
+export const GALLERY_PILL_HEIGHT = 360;
 export const MEETING_DEFAULT: WindowSize = { width: 840, height: 560 };
 export const PILL_STORAGE_MIN: WindowSize = { width: 1, height: 1 };
 
@@ -91,8 +93,13 @@ export function mainRouteEntryResizeTarget(current: WindowSize): WindowSize | nu
   return clamped;
 }
 
+/** A meeting window size to SHOW as the gallery: at least GALLERY_MIN, and
+ * never inside the pill zone -- a frame remembered there (the drag that
+ * collapsed it) would come back as a gallery the next small drag collapses
+ * again. Lifted to the pill height, the nearest gallery shape. */
 export function clampMeetingWindowSize(size: WindowSize): WindowSize {
-  return clampWindowSize(size, GALLERY_MIN);
+  const clamped = clampWindowSize(size, GALLERY_MIN);
+  return galleryCollapsesToPill(clamped) ? { ...clamped, height: GALLERY_PILL_HEIGHT } : clamped;
 }
 
 /** #11 breakpoint switching: a gallery dragged small in BOTH directions

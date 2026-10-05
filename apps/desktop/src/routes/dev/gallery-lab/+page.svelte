@@ -21,7 +21,12 @@
     scenarioToQuery,
     type GalleryLabScenario
   } from '$lib/dev/galleryLab';
-  import { judgeGalleryLab, measureGalleryLab, type GalleryLabReading } from '$lib/dev/galleryLabMeasure';
+  import {
+    judgeGalleryLab,
+    measureGalleryLab,
+    sampleIdleLayoutChanges,
+    type GalleryLabReading
+  } from '$lib/dev/galleryLabMeasure';
 
   let scenario = $state<GalleryLabScenario>(scenarioFromQuery(typeof location === 'undefined' ? '' : location.hash));
   let reading = $state<GalleryLabReading | null>(null);
@@ -36,9 +41,12 @@
     if (typeof history !== 'undefined') history.replaceState(null, '', `#${query}`);
   });
 
-  function remeasure() {
+  async function remeasure() {
     const windowEl = frameEl?.querySelector<HTMLElement>('[data-lab-window]');
-    if (windowEl) reading = measureGalleryLab(windowEl);
+    if (!windowEl) return;
+    const next = measureGalleryLab(windowEl);
+    next.idleChanges = await sampleIdleLayoutChanges(windowEl);
+    reading = next;
   }
 
   // Re-read after layout settles (tiles FLIP for up to ~400ms).

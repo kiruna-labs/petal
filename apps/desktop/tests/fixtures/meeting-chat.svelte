@@ -7,7 +7,8 @@
 
   // The real desktop meeting chrome with the chat drawer open beside the
   // tiles: what `meetingChatLayoutRendered.test.ts` measures at every gallery
-  // size (the window becomes the pill below GALLERY_BREAKPOINT, 520 px).
+  // size (the gallery's own layout lab, tests/galleryLabRendered.test.ts,
+  // covers the column and bar shapes below 520 px wide or 420 px tall).
   const base = Date.UTC(2026, 8, 29, 16, 0, 0);
   const person = (identity: string, name: string) => ({ identity, name });
   let messages = $state<ChatMessage[]>([

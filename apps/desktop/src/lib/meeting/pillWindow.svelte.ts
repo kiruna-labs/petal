@@ -222,6 +222,12 @@ export async function prepareMeetingWindow(): Promise<void> {
       await win.setMinSize(new LogicalSize(GALLERY_MIN.width, GALLERY_MIN.height));
       const applied = await applyMeetingWindowGeometry(win, null);
       saveMeetingWindowFrame(applied);
+      // Still on /main until the navigation lands (and it can fail): keep the
+      // home minimum unless the meeting frame needs the smaller one. The
+      // meeting route lowers it again when it mounts (enterGalleryWindow).
+      if (applied.width >= HOME_MIN.width && applied.height >= HOME_MIN.height) {
+        await win.setMinSize(new LogicalSize(HOME_MIN.width, HOME_MIN.height));
+      }
     });
   } catch {
     // No Tauri bridge (plain browser preview) — nothing to size.
@@ -338,6 +344,10 @@ export function createPillWindow(): PillWindow {
 
   async function rememberGalleryFrame(win: ReturnType<typeof getCurrentWindow>) {
     const frame = await currentWindowFrame(win);
+    // Collapsing because it was dragged into the pill zone: keep the last
+    // gallery-shaped frame, so expanding brings back the window the person
+    // had, not the one that collapsed.
+    if (remembered && galleryCollapsesToPill(frame)) return;
     const target = clampMeetingWindowSize(frame);
     remembered = { ...frame, ...target };
     saveMeetingWindowFrame(remembered);
@@ -740,11 +750,11 @@ export function createPillWindow(): PillWindow {
                 const sf = await win.scaleFactor();
                 const pos = await win.outerPosition();
                 const logical = { width: payload.width / sf, height: payload.height / sf };
-                if (expanded) {
+                if (expanded && !galleryCollapsesToPill(logical)) {
                   const target = clampMeetingWindowSize(logical);
                   remembered = { ...logical, ...target, x: pos.x, y: pos.y };
                   saveMeetingWindowFrame(remembered);
-                } else {
+                } else if (!expanded) {
                   savePillWindowFrame({ ...logical, x: pos.x, y: pos.y });
                 }
                 handleLogicalSize(logical.width, logical.height);
