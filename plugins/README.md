@@ -315,11 +315,15 @@ packet for an uninstalled id goes through the same gate as a fallback.
 | Toast | existing toast host | existing shared toast | `Toast.svelte` |
 | Settings | new "Plugins" section in `Settings.svelte`: installed list, permissions, enable/disable, Remove, "Get plugins", Developer mode with sideload path or URL | Plugins sheet from the home-screen menu | `settingsModel.ts` |
 
-**Provenance and one-click off (added after M2, owner request):** every
-host-drawn plugin control carries a small puzzle badge, plugin popovers carry
-a caption, and both say the same line: "<name> · <source> plugin"
+**Provenance and one-click off (added after M2, owner request):** plugin
+popovers carry a caption, and every host-drawn plugin control's tooltip and
+accessible name say the same line: "<name> · <source> plugin"
 ("Reactions · built-in plugin"). Right-clicking either opens a plugin menu
-with "Turn off <name>". Shared model and copy:
+with "Turn off <name>". Plugin controls carry no badge and no puzzle glyph,
+and the caption is text only (owner call, 2026-10): a plugin control looks
+like any other control, and a popover is one card -- the caption is its
+first row, the plugin's frame sits inside it at exactly its declared size
+(`POPOVER_INSET`), never a strip that the card's corners cut off. Shared model and copy:
 `shared/plugin-host/provenance.ts`; shared styles:
 `shared/ui/plugin-provenance.css` (imported by both clients); desktop menu
 `apps/desktop/src/lib/plugins/PluginContextMenu.svelte`, web menu in
@@ -341,8 +345,8 @@ kiruna-labs/petal#71 — do not undo them piecemeal:
    `host.ts` grows the popover when it takes a second line. Measured by
    `web-harness/tests/pluginProvenanceRendered.test.ts` in a real browser
    with the real font — reading the CSS cannot tell "fits" from "clipped".
-3. **The badge must be hit-tested.** It carries the `title`; a
-   `pointer-events: none` badge produces no tooltip at all, and asserting
+3. **The tooltip must be reachable.** The control carries the `title`; a
+   `pointer-events: none` element produces no tooltip at all, and asserting
    `getAttribute('title')` cannot see the difference.
    `apps/desktop/tests/pluginToolbarRendered.test.ts` hit-tests instead.
 

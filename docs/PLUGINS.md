@@ -121,10 +121,11 @@ wire format is in `docs/CONTRACTS.md` "Chat".
 
 ## How users see your plugin
 
-Every control Petal draws for you carries a small puzzle badge whose tooltip
-names your plugin AND where Petal loaded it from ("<name> · built-in plugin",
-"· installed plugin", "· dev plugin"); your popovers get the same line as a
-caption. The source is Petal's own record, not something a manifest can
+Every control Petal draws for you looks like Petal's own controls, and its
+tooltip names your plugin AND where Petal loaded it from ("<name> · built-in
+plugin", "· installed plugin", "· dev plugin"); your popovers are drawn as a
+card with the same line as a caption above your frame, which keeps the size
+you declared. The source is Petal's own record, not something a manifest can
 claim, so a sideloaded plugin can never present itself as a built-in one.
 Right-clicking either offers "Turn off <name>", which unloads your plugin
 immediately; on desktop users turn it back on in Settings → Plugins, and in

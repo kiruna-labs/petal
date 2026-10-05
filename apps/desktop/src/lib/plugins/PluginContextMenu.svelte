@@ -7,7 +7,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
-  import { pluginIconSvg } from '@petal/shared/plugin-host/icons';
   import { pluginMenuModel, type PluginMenuTarget } from '@petal/shared/plugin-host/provenance';
 
   interface Props {
@@ -49,7 +48,6 @@
 
 <div class="plugin-menu" role="menu" aria-label={model.heading} bind:this={menuEl} style:left="{left}px" style:top="{top}px">
   <div class="plugin-menu-label">
-    <span aria-hidden="true">{@html pluginIconSvg('puzzle', 12)}</span>
     <span>{model.heading}</span>
   </div>
   {#each model.items as item (item.id)}

@@ -19,11 +19,11 @@ import {
   POPOVER_CAPTION_HEIGHT,
   buttonKey,
   placePopover,
+  popoverCardSize,
   popoverContentSize,
   toolbarButtonModels,
   type ToolbarButtonModel,
 } from './surfaces.ts';
-import { pluginIconSvg } from './icons.ts';
 import { pluginCaption, pluginProvenanceTitle } from './provenance.ts';
 import { installDismissibleLayer, type DismissibleLayerCleanup } from '../ui/dismissibleLayer.ts';
 
@@ -478,7 +478,7 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     // own provenance caption on this box, and a hostile `width` must not be
     // able to clip it away.
     const content = popoverContentSize(declared.spec);
-    const size = { width: content.width, height: content.height + POPOVER_CAPTION_HEIGHT };
+    const size = popoverCardSize(content);
     const viewport = { width: win.innerWidth, height: win.innerHeight };
     const anchorRect = anchor?.getBoundingClientRect() ?? {
       left: viewport.width / 2,
@@ -497,7 +497,6 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     const caption = doc.createElement('div');
     caption.className = 'petal-plugin-caption';
     caption.title = pluginProvenanceTitle(entry.plugin.manifest.name, entry.plugin.source);
-    caption.innerHTML = pluginIconSvg('puzzle', 12);
     const captionText = doc.createElement('span');
     captionText.textContent = pluginCaption(entry.plugin.manifest.name, entry.plugin.source);
     caption.appendChild(captionText);
@@ -522,7 +521,7 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     // never the thing that loses. Re-place so the taller box still fits.
     const captionHeight = Math.ceil(caption.getBoundingClientRect().height);
     if (captionHeight > POPOVER_CAPTION_HEIGHT) {
-      const grown = placePopover(anchorRect, { width: content.width, height: content.height + captionHeight }, viewport);
+      const grown = placePopover(anchorRect, popoverCardSize(content, captionHeight), viewport);
       container.style.left = `${grown.left}px`;
       container.style.top = `${grown.top}px`;
       container.style.height = `${grown.height}px`;
