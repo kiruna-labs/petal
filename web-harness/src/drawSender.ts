@@ -2,7 +2,7 @@ import { cockpitShareTileMissingDetail, selectCockpitShareTile } from './cockpit
 import type { HarnessContext } from './context.ts';
 import { drawPublishOptions, MAX_DRAW_TEXT_CHARS } from './draw.ts';
 import { DRAW_TOPIC, identityPaletteIndexFromMetadata, type DrawMessage, type DrawPoint } from './trackNames.ts';
-import { colorForIdentity, mediaContentRect, normalizedPointInContainedMedia } from './telepointer.ts';
+import { colorForIdentity, mediaContentRect, mediaIsMirrored, mirrorMediaX, normalizedPointInContainedMedia } from './telepointer.ts';
 
 export const MAX_DRAW_POINTS_PER_MESSAGE = 128;
 export const DRAW_FLUSH_MS = 50;
@@ -62,7 +62,10 @@ export function penCursor(color: string): string {
  */
 export function pointForTile(tile: HTMLDivElement, event: Pick<PointerEvent, 'clientX' | 'clientY'>): DrawPoint | null {
   const { bounds, media } = mediaContentRect(tile);
-  return normalizedPointInContainedMedia(bounds, media, { x: event.clientX, y: event.clientY });
+  const point = normalizedPointInContainedMedia(bounds, media, { x: event.clientX, y: event.clientY });
+  // Your own camera is painted mirrored; strokes travel in the picture's
+  // own coordinates, so everyone sees them on the same spot of your face.
+  return point && mirrorMediaX(point, mediaIsMirrored(tile));
 }
 
 export function drawTargetFromTile(tile: HTMLDivElement): DrawTarget | null {

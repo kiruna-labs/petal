@@ -23,18 +23,28 @@ class FakeTileWithVideoAt {
   private readonly tileRect: { left: number; top: number; width: number; height: number };
   private readonly video: { rect: { left: number; top: number; width: number; height: number }; width: number; height: number } | null;
 
+  private readonly selfView: boolean;
+
   constructor(
     tileRect: { left: number; top: number; width: number; height: number },
-    video: { rect: { left: number; top: number; width: number; height: number }; width: number; height: number } | null
+    video: { rect: { left: number; top: number; width: number; height: number }; width: number; height: number } | null,
+    selfView = false
   ) {
     this.tileRect = tileRect;
     this.video = video;
+    this.selfView = selfView;
   }
 
   querySelector<T extends Element>(selector: string): T | null {
     if (selector !== 'video' || !this.video) return null;
     const { rect, width, height } = this.video;
-    return { videoWidth: width, videoHeight: height, getBoundingClientRect: () => rect as DOMRect } as unknown as T;
+    const selfView = this.selfView;
+    return {
+      videoWidth: width,
+      videoHeight: height,
+      classList: { contains: (name: string) => selfView && name === 'self-view' },
+      getBoundingClientRect: () => rect as DOMRect,
+    } as unknown as T;
   }
 
   getBoundingClientRect() {
@@ -77,6 +87,17 @@ test('pointForTile falls back to the tile rect when the tile has no video (camer
   // fallback itself, not a letterbox computation.
   assert.deepEqual(pointForTile(tile as unknown as HTMLDivElement, { clientX: 250, clientY: 170 }), { x: 0.5, y: 0.5 });
   assert.deepEqual(pointForTile(tile as unknown as HTMLDivElement, { clientX: 450, clientY: 320 }), { x: 1, y: 1 });
+});
+
+test('pointForTile flips x on your own mirrored camera, so a stroke lands on the same spot of the picture for everyone', () => {
+  const rect = { left: 50, top: 20, width: 400, height: 225 };
+  const mirrored = new FakeTileWithVideoAt(rect, { rect, width: 1600, height: 900 }, true);
+  const plain = new FakeTileWithVideoAt(rect, { rect, width: 1600, height: 900 });
+  // The painted left edge of a mirrored self-view is the picture's right edge.
+  assert.deepEqual(pointForTile(mirrored as unknown as HTMLDivElement, { clientX: 50, clientY: 20 }), { x: 1, y: 0 });
+  assert.deepEqual(pointForTile(mirrored as unknown as HTMLDivElement, { clientX: 150, clientY: 132.5 }), { x: 0.75, y: 0.5 });
+  // Everyone else's camera, and shares, are never mirrored.
+  assert.deepEqual(pointForTile(plain as unknown as HTMLDivElement, { clientX: 150, clientY: 132.5 }), { x: 0.25, y: 0.5 });
 });
 
 test('draw sender batches points at the MVP cadence and chunks large payloads', () => {

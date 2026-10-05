@@ -1806,6 +1806,13 @@ html:has(> body > #meeting-screen:not(.hidden)) {
   object-fit: cover;
 }
 
+/* Your own camera reads like a mirror (the desktop's self-view convention).
+   Only the picture: drawings on it map through telepointer.ts
+   `mediaIsMirrored`. Everyone else sees the unmirrored stream. */
+.tile video.camera-video.self-view {
+  transform: scaleX(-1);
+}
+
 /* Hold-last-frame (#627). A share video must never render black: the moment it
    has no frame to present -- source swap on republish, track mute, resubscribe,
    decoder reconfigure -- the held copy underneath shows through instead. Two

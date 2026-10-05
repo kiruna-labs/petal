@@ -234,6 +234,22 @@ export function mediaContentRect(tile: MediaTileLike): { bounds: RectLike; media
 }
 
 /**
+ * Your own camera tile shows its picture mirrored, like a mirror (the desktop
+ * self-view convention; tiles.ts tags the video `self-view`). Drawings travel
+ * in the picture's own coordinates, so a tile-anchored consumer flips x on
+ * the way in (capture) and on the way out (render): a stroke stays on the
+ * face it was drawn on for everyone, and under your pointer for you.
+ */
+export function mediaIsMirrored(tile: Pick<MediaTileLike, 'querySelector'>): boolean {
+  return tile.querySelector<HTMLVideoElement>('video')?.classList?.contains('self-view') === true;
+}
+
+/** x in the picture's coordinates <-> x as painted on a mirrored tile. */
+export function mirrorMediaX<T extends PointLike>(point: T, mirrored: boolean): T {
+  return mirrored ? { ...point, x: 1 - point.x } : point;
+}
+
+/**
  * Same rect choice as `mediaContentRect`, but expressed relative to the
  * tile's own top-left -- what a tile-anchored overlay layer (the draw SVG,
  * the telepointer layer) needs, since those layers are positioned/viewboxed
