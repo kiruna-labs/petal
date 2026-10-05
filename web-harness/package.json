@@ -17,17 +17,17 @@
     "@noble/ed25519": "^3.2.0",
     "@noble/hashes": "^2.4.0",
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
-    "@types/node": "^26.6.2",
-    "dotenv": "^18.0.3",
+    "@types/node": "^26.6.4",
+    "dotenv": "^18.0.5",
     "livekit-server-sdk": "^2.19.1",
     "svelte": "^5.57.1",
     "svelte-check": "^4.7.6",
     "tsx": "^4.23.15",
     "typescript": "~6.0.2",
-    "vite": "^8.3.1"
+    "vite": "^8.3.2"
   },
   "dependencies": {
-    "@sentry/browser": "^11.0.0",
+    "@sentry/browser": "^11.3.0",
     "@userdispatch/sdk": "1.0.1",
     "livekit-client": "^2.22.3"
   }
