@@ -116,11 +116,7 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
         const badge = doc.createElement('span');
         badge.className = 'plugin-control-badge';
         badge.hidden = true;
-        const provenance = doc.createElement('span');
-        provenance.className = 'plugin-provenance';
-        provenance.setAttribute('aria-hidden', 'true');
-        provenance.innerHTML = pluginIconSvg('puzzle', 10);
-        btn.append(icon, badge, provenance);
+        btn.append(icon, badge);
         cell.addEventListener('contextmenu', (event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -136,11 +132,9 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
       const btn = cell.querySelector('button')!;
       btn.setAttribute('aria-label', button.ariaLabel);
       btn.disabled = button.disabled;
-      // On the badge AND the button: the badge is what a user points at, and
-      // it must stay hit-tested to produce a tooltip at all (#71 finding 2).
-      const provenanceTitle = pluginProvenanceTitle(button.pluginName, button.pluginSource);
-      btn.title = provenanceTitle;
-      cell.querySelector<HTMLElement>('.plugin-provenance')!.title = provenanceTitle;
+      // No badge: a plugin control looks like any other control (owner call),
+      // and its tooltip and accessible name say whose it is.
+      btn.title = pluginProvenanceTitle(button.pluginName, button.pluginSource);
       if (button.opens) btn.setAttribute('aria-haspopup', 'dialog');
       cell.querySelector('.plugin-control-icon')!.innerHTML = pluginIconSvg(button.icon, 20);
       const badge = cell.querySelector<HTMLElement>('.plugin-control-badge')!;
@@ -188,7 +182,6 @@ export function setupPlugins(ctx: HarnessContext): PluginsHook {
     menu.setAttribute('aria-label', model.heading);
     const label = doc.createElement('div');
     label.className = 'plugin-menu-label';
-    label.innerHTML = pluginIconSvg('puzzle', 12);
     const labelText = doc.createElement('span');
     labelText.textContent = model.heading;
     label.appendChild(labelText);

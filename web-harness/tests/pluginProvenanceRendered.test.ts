@@ -30,6 +30,15 @@ interface CaptionMeasurement {
   spanScrollWidth: number;
   spanClientWidth: number;
   popoverWidth: number;
+  frameWidth: number;
+  frameHeight: number;
+  captionIcons: number;
+  captionLeft: number;
+  captionTop: number;
+  popoverLeft: number;
+  popoverTop: number;
+  popoverBackground: string;
+  captionBackground: string;
   captionRight: number;
   captionBottom: number;
   popoverRight: number;
@@ -70,6 +79,7 @@ test('the plugin popover caption stays fully visible at the worst width a manife
         const caption = document.querySelector<HTMLElement>('.petal-plugin-popover .petal-plugin-caption')!;
         const span = caption.querySelector<HTMLElement>('span')!;
         const popover = caption.parentElement as HTMLElement;
+        const frame = popover.querySelector('iframe')!.getBoundingClientRect();
         const cr = caption.getBoundingClientRect();
         const pr = popover.getBoundingClientRect();
         return {
@@ -82,6 +92,15 @@ test('the plugin popover caption stays fully visible at the worst width a manife
           spanScrollWidth: span.scrollWidth,
           spanClientWidth: span.clientWidth,
           popoverWidth: Math.round(pr.width),
+          frameWidth: Math.round(frame.width),
+          frameHeight: Math.round(frame.height),
+          captionIcons: caption.querySelectorAll('svg').length,
+          captionLeft: cr.left,
+          captionTop: cr.top,
+          popoverLeft: pr.left,
+          popoverTop: pr.top,
+          popoverBackground: getComputedStyle(popover).backgroundImage + getComputedStyle(popover).backgroundColor,
+          captionBackground: getComputedStyle(caption).backgroundImage + getComputedStyle(caption).backgroundColor,
           captionRight: cr.right,
           captionBottom: cr.bottom,
           popoverRight: pr.right,
@@ -100,6 +119,13 @@ test('the plugin popover caption stays fully visible at the worst width a manife
       // The popover sets `overflow: hidden`, so "inside its own box" is part of "visible".
       assert.ok(m.captionRight <= m.popoverRight + 0.5, `${where}: caption escapes the popover (${m.captionRight} > ${m.popoverRight})`);
       assert.ok(m.captionBottom <= m.popoverBottom + 0.5, `${where}: caption clipped by the popover (${m.captionBottom} > ${m.popoverBottom})`);
+      // One card, not a cut-off strip: the caption is inset from the card's
+      // rounded corners and has no bar of its own; the card carries the
+      // background. Text only -- no puzzle glyph.
+      assert.ok(m.captionLeft >= m.popoverLeft + 4 && m.captionTop >= m.popoverTop + 4, `${where}: caption sits inside the card padding -- ${JSON.stringify(m)}`);
+      assert.equal(m.captionBackground, 'nonergba(0, 0, 0, 0)', `${where}: the caption draws no bar of its own`);
+      assert.notEqual(m.popoverBackground, 'nonergba(0, 0, 0, 0)', `${where}: the card draws the background`);
+      assert.equal(m.captionIcons, 0, `${where}: no icon in the caption`);
     };
 
     // The adversarial case: 24 'W's -- the longest name the validator allows,
@@ -113,7 +139,9 @@ test('the plugin popover caption stays fully visible at the worst width a manife
     const builtin = await measure('petal.reactions');
     fits(builtin, 'builtin');
     assert.equal(builtin.text, 'Reactions · built-in plugin');
-    assert.equal(builtin.popoverWidth, 296, 'a caption-safe declared width is used as declared');
+    assert.equal(builtin.frameWidth, 296, 'a caption-safe declared width is used as declared');
+    assert.equal(builtin.frameHeight, 64, 'the plugin frame keeps its declared height under the caption');
+    assert.equal(builtin.popoverWidth, 296 + 10, 'the card adds its 5 px inset on each side');
 
     // The source is the HOST's record (LoadedPlugin.source), not manifest text:
     // a sideloaded plugin calling itself "Reactions" cannot claim "built-in".

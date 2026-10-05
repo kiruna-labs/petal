@@ -1,12 +1,12 @@
-// Plugin provenance at the real 400px width: every host-drawn plugin control
-// carries the badge whose tooltip names the plugin AND where it came from,
-// right-click opens the plugin menu (not the app-wide editing menu), the
-// menu's copy never clips, and "Turn off" reports the plugin id.
+// Plugin provenance at the real 400px width: plugin controls look like every
+// other control -- no puzzle badge (owner call) -- while the button's tooltip
+// names the plugin AND where it came from, right-click opens the plugin menu
+// (not the app-wide editing menu), the menu's copy never clips, and "Turn
+// off" reports the plugin id.
 //
 // The tooltip assertions HIT-TEST. `getAttribute('title')` cannot tell a
-// visible tooltip from an unreachable one: the badge carried a `title` while
-// `pointer-events: none` made it un-hit-testable, so no tooltip could ever
-// appear (kiruna-labs/petal#71 review, finding 2).
+// visible tooltip from an unreachable one (kiruna-labs/petal#71 review,
+// finding 2), so point at the control and ask what the browser would show.
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -44,18 +44,19 @@ test('plugin controls show provenance and right-click offers turning the plugin 
     await page.goto(pathToFileURL(join(buildDir, 'plugin-toolbar.html')).href);
     await page.waitForFunction(() => document.body.dataset.ready === 'true');
 
-    const badges = page.locator('.plugin-provenance');
-    assert.equal(await badges.count(), 3);
+    // No badge and no puzzle glyph anywhere on a plugin control.
+    assert.equal(await page.locator('.plugin-provenance').count(), 0);
+    assert.equal(await page.locator('.plugin-cell').count(), 3);
     // Two plugins are both called "Reactions": only the host-owned source
     // separates them, so the tooltip has to carry it.
-    assert.deepEqual(await badges.evaluateAll((els) => els.map((el) => el.getAttribute('title'))), [
+    assert.deepEqual(await page.locator('.plugin-cell button.plugin-button').evaluateAll((els) => els.map((el) => el.getAttribute('title'))), [
       'Reactions · built-in plugin',
       'Reactions · installed plugin',
       'Webhook Notifier Deluxe · installed plugin',
     ]);
 
-    // Reachability, not just presence: point at the badge and at the button
-    // and ask what tooltip the browser would actually show.
+    // Reachability, not just presence: point at the control and ask what
+    // tooltip the browser would actually show.
     const hits = await page.evaluate(
       (selectors: Record<string, string>) => {
         // No named inner functions here (see the note on the right-click probe below).
@@ -82,33 +83,21 @@ test('plugin controls show provenance and right-click offers turning the plugin 
         return out;
       },
       {
-        badge: '[data-plugin="petal.reactions"] .plugin-provenance',
         button: '[data-plugin="petal.reactions"] button.plugin-button',
         countBadge: '[data-plugin="acme.webhook-notifier-pro"] .badge',
       },
     );
     assert.deepEqual(
-      hits.badge,
-      { computedPointerEvents: 'auto', hitIsInside: true, titleTheBrowserWouldShow: 'Reactions · built-in plugin' },
-      `the provenance badge must be hit-tested and show its tooltip, got ${JSON.stringify(hits.badge)}`,
-    );
-    assert.deepEqual(
       hits.button,
       { computedPointerEvents: 'auto', hitIsInside: true, titleTheBrowserWouldShow: 'Reactions · built-in plugin' },
-      `the rest of the plugin control must explain itself too, got ${JSON.stringify(hits.button)}`,
+      `the plugin control must explain itself, got ${JSON.stringify(hits.button)}`,
     );
-    // The count badge was what `pointer-events: none` protected; it still wins
-    // its own pixels now that the provenance badge is hit-tested.
+    // The count badge still wins its own pixels and still explains itself.
     assert.deepEqual(
       hits.countBadge,
       { computedPointerEvents: 'auto', hitIsInside: true, titleTheBrowserWouldShow: 'Webhook Notifier Deluxe · installed plugin' },
       `the count badge must stay on top of its own area, got ${JSON.stringify(hits.countBadge)}`,
     );
-    // The count badge (top-right) and the provenance badge (bottom-right) must not overlap.
-    const boxes = await page.locator('[data-plugin="acme.webhook-notifier-pro"] .badge, [data-plugin="acme.webhook-notifier-pro"] .plugin-provenance').evaluateAll((els) =>
-      els.map((el) => el.getBoundingClientRect().toJSON()),
-    );
-    assert.ok(boxes[0].bottom <= boxes[1].top + 0.5, `count badge ${JSON.stringify(boxes[0])} overlaps provenance ${JSON.stringify(boxes[1])}`);
 
     // Right-click opens the plugin menu and suppresses the browser/editing menu.
     const claim = await page.evaluate(() => {
@@ -126,6 +115,7 @@ test('plugin controls show provenance and right-click offers turning the plugin 
     const menu = page.locator('.plugin-menu');
     await menu.waitFor();
     assert.equal((await menu.locator('.plugin-menu-label').textContent())?.trim(), 'Webhook Notifier Deluxe · installed plugin');
+    assert.equal(await menu.locator('.plugin-menu-label svg').count(), 0, 'the menu heading is text only');
     assert.equal((await menu.locator('.plugin-menu-row').textContent())?.trim(), 'Turn off Webhook Notifier Deluxe');
     const overflow = await page.evaluate(() => {
       const bad: string[] = [];

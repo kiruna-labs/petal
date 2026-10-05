@@ -80,6 +80,22 @@ export const POPOVER_SIZE = {
 /** Height of one caption line (plugin-provenance.css `.petal-plugin-caption`). */
 export const POPOVER_CAPTION_HEIGHT = 22;
 
+/** The popover card's padding plus border on each side
+ * (plugin-provenance.css `.petal-plugin-popover`: 4 px + 1 px). The host adds
+ * it around the plugin's frame, so the frame keeps its declared size. */
+export const POPOVER_INSET = 5;
+
+/** The whole popover card for a frame of `content` and a caption `captionHeight` tall. */
+export function popoverCardSize(
+  content: { width: number; height: number },
+  captionHeight = POPOVER_CAPTION_HEIGHT,
+): { width: number; height: number } {
+  return {
+    width: content.width + POPOVER_INSET * 2,
+    height: content.height + captionHeight + POPOVER_INSET * 2,
+  };
+}
+
 /** The content box the plugin's frame gets, after clamping what it declared. */
 export function popoverContentSize(spec: Pick<SurfaceContribution, 'width' | 'height'>): { width: number; height: number } {
   return {
