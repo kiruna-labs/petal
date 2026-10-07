@@ -44,7 +44,7 @@
     "svelte-check": "^4.7.6",
     "tsx": "^4.23.15",
     "typescript": "~6.0.2",
-    "vite": "^8.3.1"
+    "vite": "^8.3.2"
   },
   "allowScripts": {
     "esbuild@0.25.12": true,
