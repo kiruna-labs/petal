@@ -35,7 +35,7 @@
     "livekit-client": "^2.22.3"
   },
   "devDependencies": {
-    "@sveltejs/adapter-static": "^3.0.6",
+    "@sveltejs/adapter-static": "^4.0.0",
     "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
     "@tauri-apps/cli": "^2",
