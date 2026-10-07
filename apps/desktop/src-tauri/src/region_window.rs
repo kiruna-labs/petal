@@ -840,6 +840,48 @@ pub async fn set_region_share_priority(
     result
 }
 
+/// The Windows per-share capture choices for this selector's share, or its
+/// pre-share estimate while it is not shared. Label-addressed like every other
+/// Petal View action, and answered by the same rule the hover tab uses.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub fn region_share_capture_options(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::session::SessionState>,
+    window_label: String,
+) -> Result<crate::share_capture_options::ShareCaptureOptions, String> {
+    let token = ensure_region_token(&app, &window_label)?;
+    crate::share_capture_options::share_capture_options_for_state(&state, token)
+}
+
+/// Store this selector's frame-rate ceiling for its next share. Refuses while
+/// the region is already shared, exactly like the hover tab's command.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub fn set_region_share_fps(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::session::SessionState>,
+    window_label: String,
+    fps: u32,
+) -> Result<crate::share_capture_options::ShareCaptureOptions, String> {
+    let token = ensure_region_token(&app, &window_label)?;
+    crate::share_capture_options::set_share_fps_for_state(&state, token, fps)
+}
+
+/// Store whether this selector's next share captures the system cursor.
+/// Refuses while the region is already shared, like the hover tab's command.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub fn set_region_share_cursor_in_video(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::session::SessionState>,
+    window_label: String,
+    enabled: bool,
+) -> Result<crate::share_capture_options::ShareCaptureOptions, String> {
+    let token = ensure_region_token(&app, &window_label)?;
+    crate::share_capture_options::set_share_cursor_in_video_for_state(&state, token, enabled)
+}
+
 /// Toggle Draw on the existing sharer overlay without exposing its disposable
 /// capture token to the Petal View route.
 #[tauri::command]

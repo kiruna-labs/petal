@@ -192,3 +192,68 @@ test('Petal View keeps native Draw adapters, label state, and popup cleanup', ()
   assert.match(route, /COMMANDS\.regionViewOptionsState/);
   assert.match(popup, /await menu\.close\(\);/);
 });
+
+test('Petal View offers Windows capture choices in place of priority, with the same rules', () => {
+  const capture = {
+    selectedFps: 30,
+    choices: [
+      { fps: 15, enabled: true },
+      { fps: 30, enabled: true },
+      { fps: 60, enabled: false }
+    ],
+    cursorInVideo: false
+  };
+  // The route's own arguments: full control, no modes, display-like, no position.
+  const regionEntries = (shared: boolean, windowsCapture?: typeof capture) =>
+    buildShareOptionsMenuEntries(
+      'automatic', shared, false, 'fullControl', false, false, false, true,
+      false, true, 'right', false, false, windowsCapture
+    );
+  const idle = regionEntries(false, capture);
+  assert.deepEqual(idle[0], { kind: 'section-label', text: 'Share frame rate' });
+  assert.equal(idle.some((entry) => entry.kind === 'priority'), false);
+  assert.equal(idle.some((entry) => entry.kind === 'position'), false);
+  assert.deepEqual(
+    idle.filter((entry) => entry.kind === 'fps').map((entry) => [entry.text, entry.checked, entry.enabled]),
+    [
+      ['Up to 15 fps', false, true],
+      ['Up to 30 fps', true, true],
+      ['Up to 60 fps', false, false]
+    ]
+  );
+  const shared = regionEntries(true, capture);
+  assert.ok(
+    shared
+      .filter((entry) => entry.kind === 'fps' || entry.kind === 'cursor-in-video')
+      .every((entry) => !entry.enabled)
+  );
+  // Without the choices (macOS) the region menu keeps its priority section.
+  assert.equal(regionEntries(false).some((entry) => entry.kind === 'priority'), true);
+  assert.equal(regionEntries(false).some((entry) => entry.kind === 'fps'), false);
+
+  assert.match(
+    route,
+    /isWindows\(\)\s*\?\s*await invoke<ShareCaptureOptions>\(COMMANDS\.regionShareCaptureOptions,/
+  );
+  assert.match(route, /shareAudioAvailable,\s*windowsCapture\s*\)/);
+  assert.match(ipc, /regionShareCaptureOptions: 'region_share_capture_options'/);
+  assert.match(ipc, /setRegionShareFps: 'set_region_share_fps'/);
+  assert.match(ipc, /setRegionShareCursorInVideo: 'set_region_share_cursor_in_video'/);
+  for (const command of [
+    'region_share_capture_options',
+    'set_region_share_fps',
+    'set_region_share_cursor_in_video'
+  ]) {
+    assert.match(
+      native,
+      new RegExp(
+        String.raw`#\[cfg\(target_os = "windows"\)\]\s*#\[tauri::command\]\s*pub fn ` + command + String.raw`\(`
+      )
+    );
+    assert.equal(
+      lib.split(`region_window::${command},`).length - 1,
+      1,
+      `${command} is registered once (Windows)`
+    );
+  }
+});

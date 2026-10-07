@@ -5,37 +5,48 @@ import {
   buildHoverTabMenuEntries,
   CONTROL_MODE_CHOICES,
   CONTROL_MODE_SECTION_LABEL,
+  CURSOR_IN_VIDEO_MENU_ITEM_ID,
+  CURSOR_IN_VIDEO_MENU_ITEM_LABEL,
   DEBUG_MENU_ITEM_ID,
   DEBUG_MENU_ITEM_LABEL,
+  fpsMenuItemId,
   HOVER_TAB_POSITION_CHOICES,
   HOVER_TAB_POSITION_SECTION_LABEL,
   positionMenuItemId,
   priorityMenuItemId,
   QUALITY_PRIORITY_CHOICES,
   QUALITY_PRIORITY_SECTION_LABEL,
+  SHARE_FPS_CHOICES,
+  SHARE_FPS_SECTION_LABEL,
   controlModeMenuItemId
 } from './hoverTabMenu.ts';
 import type {
   ControlMode,
   HoverTabMenuEntry,
-  HoverTabPosition
+  HoverTabPosition,
+  WindowsCaptureMenuState
 } from './hoverTabMenu.ts';
 import type { HoverTabSide, SharePriority } from '../ipc.ts';
 
 export {
   CONTROL_MODE_CHOICES,
   CONTROL_MODE_SECTION_LABEL,
+  CURSOR_IN_VIDEO_MENU_ITEM_ID,
+  CURSOR_IN_VIDEO_MENU_ITEM_LABEL,
   DEBUG_MENU_ITEM_ID,
   DEBUG_MENU_ITEM_LABEL,
+  fpsMenuItemId,
   HOVER_TAB_POSITION_CHOICES,
   HOVER_TAB_POSITION_SECTION_LABEL,
   positionMenuItemId,
   priorityMenuItemId,
   QUALITY_PRIORITY_CHOICES,
   QUALITY_PRIORITY_SECTION_LABEL,
+  SHARE_FPS_CHOICES,
+  SHARE_FPS_SECTION_LABEL,
   controlModeMenuItemId
 };
-export type { ControlMode, HoverTabPosition };
+export type { ControlMode, HoverTabPosition, WindowsCaptureMenuState };
 export type { HoverTabMenuEntry as ShareOptionsMenuEntry } from './hoverTabMenu.ts';
 
 export function buildShareOptionsMenuEntries(
@@ -51,7 +62,8 @@ export function buildShareOptionsMenuEntries(
   remoteControlAllowed = true,
   hoverTabSide: HoverTabSide = 'right',
   shareAudioEnabled = false,
-  shareAudioAvailable = false
+  shareAudioAvailable = false,
+  windowsCapture?: WindowsCaptureMenuState
 ): HoverTabMenuEntry[] {
   return buildHoverTabMenuEntries(
     currentPriority,
@@ -66,6 +78,7 @@ export function buildShareOptionsMenuEntries(
     remoteControlAllowed,
     hoverTabSide,
     shareAudioEnabled,
-    shareAudioAvailable
+    shareAudioAvailable,
+    windowsCapture
   );
 }

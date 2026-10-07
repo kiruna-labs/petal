@@ -35,6 +35,34 @@ export type HoverTabPosition = HoverTabSide;
 
 export const CONTROL_MODE_SECTION_LABEL = 'Remote control';
 
+/**
+ * Windows per-share frame-rate section. It takes the slot of the priority
+ * section, which nothing on Windows consumes. The choice is a ceiling: the
+ * share runs at most this fast, and less where the window's geometry cannot
+ * carry it.
+ */
+export const SHARE_FPS_SECTION_LABEL = 'Share frame rate';
+
+export const SHARE_FPS_CHOICES: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 15, label: 'Up to 15 fps' },
+  { value: 30, label: 'Up to 30 fps' },
+  { value: 60, label: 'Up to 60 fps' }
+];
+
+export const CURSOR_IN_VIDEO_MENU_ITEM_ID = 'share-cursor-in-video';
+export const CURSOR_IN_VIDEO_MENU_ITEM_LABEL = 'Show system cursor';
+
+/**
+ * The Windows capture choices a caller fetched for one window
+ * (`share_capture_options`). `enabled` is the native feasibility answer for the
+ * window's geometry; this module never re-derives it.
+ */
+export interface WindowsCaptureMenuState {
+  selectedFps: number;
+  choices: ReadonlyArray<{ fps: number; enabled: boolean }>;
+  cursorInVideo: boolean;
+}
+
 export type ControlMode = 'cursorPreserving' | 'fullControl';
 
 export const CONTROL_MODE_CHOICES: ReadonlyArray<{ value: ControlMode; label: string }> = [
@@ -65,6 +93,8 @@ export type HoverTabMenuEntry =
       enabled: boolean;
     }
   | { kind: 'debug'; id: string; text: string }
+  | { kind: 'fps'; id: string; text: string; value: number; checked: boolean; enabled: boolean }
+  | { kind: 'cursor-in-video'; id: string; text: string; checked: boolean; enabled: boolean }
   | { kind: 'annotation'; id: string; text: string; enabled: boolean; checked: boolean }
   | { kind: 'ai-chat'; id: string; text: string; enabled: boolean; checked: boolean }
   | { kind: 'remote-control-allowed'; id: string; text: string; enabled: boolean; checked: boolean }
@@ -86,6 +116,10 @@ export const SHARE_SYSTEM_AUDIO_MENU_ITEM_LABEL = 'Share system audio';
 
 export function priorityMenuItemId(value: SharePriority): string {
   return `share-priority-${value}`;
+}
+
+export function fpsMenuItemId(fps: number): string {
+  return `share-fps-${fps}`;
 }
 
 export function positionMenuItemId(value: HoverTabPosition): string {
@@ -113,20 +147,41 @@ export function buildHoverTabMenuEntries(
   remoteControlAllowed = true,
   hoverTabSide: HoverTabSide = 'right',
   shareAudioEnabled = false,
-  shareAudioAvailable = false
+  shareAudioAvailable = false,
+  windowsCapture?: WindowsCaptureMenuState
 ): HoverTabMenuEntry[] {
-  const entries: HoverTabMenuEntry[] = [
-    { kind: 'section-label', text: QUALITY_PRIORITY_SECTION_LABEL },
-    ...QUALITY_PRIORITY_CHOICES.map(
-      ({ value, label }): HoverTabMenuEntry => ({
-        kind: 'priority',
-        id: priorityMenuItemId(value),
-        text: label,
-        value,
-        checked: currentPriority === value
-      })
-    )
-  ];
+  // Only Windows passes `windowsCapture`; without it the menu is unchanged.
+  // Every frame rate is listed, and one the geometry cannot carry is shown
+  // disabled rather than hidden. The frame rate is fixed when a share starts,
+  // so nothing here is actionable while shared.
+  const entries: HoverTabMenuEntry[] = windowsCapture
+    ? [
+        { kind: 'section-label', text: SHARE_FPS_SECTION_LABEL },
+        ...SHARE_FPS_CHOICES.map(
+          ({ value, label }): HoverTabMenuEntry => ({
+            kind: 'fps',
+            id: fpsMenuItemId(value),
+            text: label,
+            value,
+            checked: windowsCapture.selectedFps === value,
+            enabled:
+              !shared &&
+              (windowsCapture.choices.find((choice) => choice.fps === value)?.enabled ?? false)
+          })
+        )
+      ]
+    : [
+        { kind: 'section-label', text: QUALITY_PRIORITY_SECTION_LABEL },
+        ...QUALITY_PRIORITY_CHOICES.map(
+          ({ value, label }): HoverTabMenuEntry => ({
+            kind: 'priority',
+            id: priorityMenuItemId(value),
+            text: label,
+            value,
+            checked: currentPriority === value
+          })
+        )
+      ];
 
   if (includePosition) {
     entries.push(
@@ -194,6 +249,20 @@ export function buildHoverTabMenuEntries(
     },
     { kind: 'separator' },
     { kind: 'debug', id: DEBUG_MENU_ITEM_ID, text: DEBUG_MENU_ITEM_LABEL },
+    // Beside Debug: showing the captured cursor is mostly a diagnostic, since
+    // the pointer already travels on the telepointer channel. Cursor capture
+    // is fixed when a share starts, so it applies to the next share.
+    ...(windowsCapture
+      ? [
+          {
+            kind: 'cursor-in-video',
+            id: CURSOR_IN_VIDEO_MENU_ITEM_ID,
+            text: CURSOR_IN_VIDEO_MENU_ITEM_LABEL,
+            checked: windowsCapture.cursorInVideo,
+            enabled: !shared
+          } satisfies HoverTabMenuEntry
+        ]
+      : []),
     {
       kind: 'annotation',
       id: 'draw-on-shared-window',
