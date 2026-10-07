@@ -167,7 +167,7 @@ pub(crate) async fn request_borderless_access() -> BorderlessAccess {
     ) {
         Ok(operation) => match tokio::time::timeout(
             BORDERLESS_ACCESS_TIMEOUT,
-            tokio::task::spawn_blocking(move || operation.get()),
+            tokio::task::spawn_blocking(move || operation.join()),
         )
         .await
         {

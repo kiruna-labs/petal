@@ -3583,8 +3583,8 @@ fn create_d3d_device() -> windows::core::Result<(ID3D11Device, ID3D11DeviceConte
         }?;
     }
     Ok((
-        device.ok_or_else(windows::core::Error::from_win32)?,
-        context.ok_or_else(windows::core::Error::from_win32)?,
+        device.ok_or_else(windows::core::Error::from_thread)?,
+        context.ok_or_else(windows::core::Error::from_thread)?,
     ))
 }
 
