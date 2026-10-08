@@ -239,6 +239,13 @@ export const EVENTS = {
    * Tauri bus so the main window (which owns the toast surfaces) can render it.
    */
   aiChatRefused: 'ai-chat-refused',
+  /**
+   * Windows, in a call: a microphone or speaker connected or disconnected.
+   * No payload. The in-call device watcher sends it after it has switched to
+   * or away from the affected device, so an open picker re-lists and shows
+   * the settled state.
+   */
+  audioDevicesChanged: 'audio-devices-changed',
   autotestJoinResult: 'autotest-join-result',
   cameraPublishState: 'camera-publish-state',
   /**
@@ -1269,6 +1276,7 @@ export type ResilienceEvent =
   | { kind: 'networkChanged' }
   | { kind: 'micDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'micDeviceFailed'; message: string }
+  | { kind: 'micSwitchedFromSilent'; silentDevice: string; deviceName: string }
   | { kind: 'speakerDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'speakerDeviceFailed'; message: string }
   | { kind: 'sharePublicationRepairRecovering'; windowId: number }

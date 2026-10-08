@@ -1,8 +1,10 @@
 /// Payload for the shared `resilience-event` Tauri event.
 ///
-/// `using_default` is present only when a native device watcher knows an
-/// automatic fallback selected the system default. Older/macOS emitters omit
-/// it, preserving their existing wire shape and frontend behavior.
+/// `using_default: Some(true)` means an automatic fallback selected the system
+/// default and cleared the saved choice; the frontend mirrors that by resetting
+/// its own saved choice. Emitters that keep the saved choice (the Windows
+/// watcher, which switches back when the saved device reconnects) send `None`
+/// or `Some(false)`, and omitting it preserves the older wire shape.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(
     tag = "kind",
@@ -25,6 +27,13 @@ pub enum ResilienceEvent {
     },
     MicDeviceFailed {
         message: String,
+    },
+    /// Windows: the microphone in use captured only digital silence (a
+    /// wireless headset switched off behind its still-connected dongle), so
+    /// capture moved to another microphone. The saved choice is unchanged.
+    MicSwitchedFromSilent {
+        silent_device: String,
+        device_name: String,
     },
     SpeakerDeviceChanged {
         device_name: String,
@@ -74,6 +83,15 @@ mod tests {
         assert_eq!(mic["kind"], "micDeviceChanged");
         assert_eq!(mic["deviceName"], "USB Mic");
         assert!(mic.get("usingDefault").is_none());
+
+        let silent = serde_json::to_value(ResilienceEvent::MicSwitchedFromSilent {
+            silent_device: "Headset Microphone".into(),
+            device_name: "Webcam Microphone".into(),
+        })
+        .unwrap();
+        assert_eq!(silent["kind"], "micSwitchedFromSilent");
+        assert_eq!(silent["silentDevice"], "Headset Microphone");
+        assert_eq!(silent["deviceName"], "Webcam Microphone");
 
         let speaker = serde_json::to_value(ResilienceEvent::SpeakerDeviceChanged {
             device_name: "USB Speakers".into(),

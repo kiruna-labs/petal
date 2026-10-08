@@ -52,13 +52,14 @@ test('gallery exposes stable primary labels and specialist More actions', () => 
 
 test('device picker is a one-level direct-row panel with selected checks and feedback', () => {
   assert.match(pickerSource, /mode: 'audio' \| 'camera';/);
-  assert.doesNotMatch(pickerSource, /DeviceSelect/);
+  assert.doesNotMatch(pickerSource, /\bDeviceSelect\b/);
   assert.match(pickerSource, /class="meeting-menu-row device-row"/);
   assert.match(pickerSource, /role="option"/);
   assert.match(pickerSource, /meeting-menu-row-check/);
   assert.match(pickerSource, /aria-live="polite"/);
   assert.match(pickerSource, /ArrowDown/);
-  assert.match(pickerSource, /Saved — applies when you join a room/);
+  assert.match(pickerSource, /switchNote\(/);
+  assert.match(pickerSource, /pickerValue\(/);
   assert.match(pickerSource, /max-height: var\(--device-menu-max-height, none\)/);
   assert.match(pickerSource, /overflow-y: auto;/);
 });

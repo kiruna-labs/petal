@@ -1152,6 +1152,17 @@ impl SessionState {
         if let Some(id) = playout_id {
             match session.media.playout.as_ref() {
                 Some(playout) => {
+                    // A failure here can leave the ADM worse off than before the
+                    // attempt. The vendored `switch_playout_device` (and its
+                    // `switch_recording_device` twin) stops the device, sets the
+                    // target GUID, then inits and starts it; if init or start
+                    // fails, the ADM is left stopped with the GUID already on the
+                    // target. A later switch then reads `was_initialized` as false,
+                    // only sets the GUID, and reports success with nothing
+                    // playing. That is why the error text is reported as-is and
+                    // never claims where audio is still going. The likely
+                    // follow-up is a `reassert_playout()` after a failed switch,
+                    // gated on a real log of this state.
                     let switched = if id.is_empty() {
                         playout.use_default_playout_device()
                     } else {
@@ -1167,6 +1178,44 @@ impl SessionState {
         }
 
         result
+    }
+
+    #[cfg(target_os = "windows")]
+    fn joined_microphone(&self) -> Option<Arc<crate::transport::audio::MicTrack>> {
+        self.joined
+            .lock_unpoisoned()
+            .as_ref()
+            .and_then(|session| session.media.microphone.clone())
+    }
+
+    /// Switch back to a saved mic or speaker that is connected again. Runs
+    /// before `refresh_audio_devices` in the same tick: plugging a device in
+    /// often makes it the Windows default too, and the default-chasing refresh
+    /// would otherwise switch to it first and clear the saved choice.
+    fn restore_saved_audio_devices(
+        &self,
+        recording: Option<&str>,
+        playout: Option<&str>,
+    ) -> (
+        Option<crate::transport::audio::RecordingDeviceRefresh>,
+        Option<crate::transport::audio::PlayoutDeviceRefresh>,
+    ) {
+        let joined = self.joined.lock_unpoisoned();
+        let Some(session) = joined.as_ref() else {
+            return (None, None);
+        };
+        (
+            session
+                .media
+                .microphone
+                .as_ref()
+                .map(|microphone| microphone.restore_saved_recording_device(recording)),
+            session
+                .media
+                .playout
+                .as_ref()
+                .map(|speaker| speaker.restore_saved_playout_device(playout)),
+        )
     }
 
     fn refresh_audio_devices(
@@ -3314,6 +3363,15 @@ async fn start_audio_for_session(
     crate::transport::audio::start_audio_track_logger(room_connection.room(), generation);
 }
 
+/// Pure: whether this tick's connected endpoints differ from the last tick's.
+/// The first observation only records the baseline.
+#[cfg(target_os = "windows")]
+fn audio_endpoints_changed<T: PartialEq>(last: &mut Option<T>, current: T) -> bool {
+    let changed = last.as_ref().is_some_and(|last| *last != current);
+    *last = Some(current);
+    changed
+}
+
 fn start_audio_device_watcher(
     app: tauri::AppHandle,
     generation: RoomGeneration,
@@ -3324,6 +3382,12 @@ fn start_audio_device_watcher(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         let mut mic_failure_reported = false;
         let mut speaker_failure_reported = false;
+        #[cfg(target_os = "windows")]
+        let mut last_endpoints = None;
+        #[cfg(target_os = "windows")]
+        let mut mic_signal = crate::windows_mic_signal::MicSignalProbe::default();
+        #[cfg(target_os = "windows")]
+        let mut dead_mic = crate::windows_mic_signal::DeadMicDetector::default();
         loop {
             tokio::select! {
                 changed = cancelled.changed() => {
@@ -3342,6 +3406,71 @@ fn start_audio_device_watcher(
                     if !generation.is_current() {
                         break;
                     }
+                    let preferences = app.state::<crate::transport::audio::AudioDevicePreferences>();
+                    let (restored_mic, restored_speaker) = state.restore_saved_audio_devices(
+                        preferences.recording_device().as_deref(),
+                        preferences.playout_device().as_deref(),
+                    );
+                    match restored_mic {
+                        Some(crate::transport::audio::RecordingDeviceRefresh::Switched(device_name)) => {
+                            log::info!(
+                                "windows session: saved microphone '{device_name}' is connected again -- switched to it"
+                            );
+                            crate::analytics::device_changed(
+                                crate::analytics::DeviceKind::Mic,
+                                crate::analytics::DeviceChange::Switched,
+                            );
+                            let _ = tauri::Emitter::emit(
+                                &app,
+                                "resilience-event",
+                                crate::resilience_event::ResilienceEvent::MicDeviceChanged {
+                                    device_name,
+                                    using_default: Some(false),
+                                },
+                            );
+                        }
+                        Some(crate::transport::audio::RecordingDeviceRefresh::Failed(error)) => {
+                            log::warn!(
+                                "windows session: saved microphone is connected again but switching to it failed: {error}"
+                            );
+                            let _ = tauri::Emitter::emit(
+                                &app,
+                                "resilience-event",
+                                crate::resilience_event::ResilienceEvent::MicDeviceFailed {
+                                    message: format!("Could not switch back to the saved microphone: {error}"),
+                                },
+                            );
+                        }
+                        Some(crate::transport::audio::RecordingDeviceRefresh::Unchanged) | None => {}
+                    }
+                    match restored_speaker {
+                        Some(crate::transport::audio::PlayoutDeviceRefresh::Switched(device_name)) => {
+                            log::info!(
+                                "windows session: saved speaker '{device_name}' is connected again -- switched to it"
+                            );
+                            let _ = tauri::Emitter::emit(
+                                &app,
+                                "resilience-event",
+                                crate::resilience_event::ResilienceEvent::SpeakerDeviceChanged {
+                                    device_name,
+                                    using_default: Some(false),
+                                },
+                            );
+                        }
+                        Some(crate::transport::audio::PlayoutDeviceRefresh::Failed(error)) => {
+                            log::warn!(
+                                "windows session: saved speaker is connected again but switching to it failed: {error}"
+                            );
+                            let _ = tauri::Emitter::emit(
+                                &app,
+                                "resilience-event",
+                                crate::resilience_event::ResilienceEvent::SpeakerDeviceFailed {
+                                    message: format!("Could not switch back to the saved speaker: {error}"),
+                                },
+                            );
+                        }
+                        Some(crate::transport::audio::PlayoutDeviceRefresh::Unchanged) | None => {}
+                    }
                     let (recording, playout) = state.refresh_audio_devices();
                     log::debug!(
                         "windows session: audio-device poll recording={recording:?} playout={playout:?}"
@@ -3356,14 +3485,16 @@ fn start_audio_device_watcher(
                                 crate::analytics::DeviceKind::Mic,
                                 crate::analytics::DeviceChange::Switched,
                             );
-                            app.state::<crate::transport::audio::AudioDevicePreferences>()
-                                .set_recording_device(String::new());
+                            // The saved choice is kept, so the restore above
+                            // switches back when it reconnects. No
+                            // `using_default`: that tells the frontend to
+                            // reset its saved choice to System default.
                             let _ = tauri::Emitter::emit(
                                 &app,
                                 "resilience-event",
                                 crate::resilience_event::ResilienceEvent::MicDeviceChanged {
                                     device_name,
-                                    using_default: Some(true),
+                                    using_default: None,
                                 },
                             );
                         }
@@ -3389,14 +3520,13 @@ fn start_audio_device_watcher(
                         }
                         Some(crate::transport::audio::PlayoutDeviceRefresh::Switched(device_name)) => {
                             speaker_failure_reported = false;
-                            app.state::<crate::transport::audio::AudioDevicePreferences>()
-                                .set_playout_device(String::new());
+                            // Saved choice kept, as for the microphone above.
                             let _ = tauri::Emitter::emit(
                                 &app,
                                 "resilience-event",
                                 crate::resilience_event::ResilienceEvent::SpeakerDeviceChanged {
                                     device_name,
-                                    using_default: Some(true),
+                                    using_default: None,
                                 },
                             );
                         }
@@ -3411,6 +3541,84 @@ fn start_audio_device_watcher(
                             }
                         }
                         None => {}
+                    }
+                    // Last, so an open picker re-lists after any switch above.
+                    #[cfg(target_os = "windows")]
+                    if let (Ok(mut recording), Ok(mut playout)) = (
+                        crate::windows_audio_device::active_recording_endpoint_ids(),
+                        crate::windows_audio_device::active_playout_endpoint_ids(),
+                    ) {
+                        recording.sort();
+                        playout.sort();
+                        if audio_endpoints_changed(&mut last_endpoints, (recording, playout)) {
+                            if let Some((recording, playout)) = &last_endpoints {
+                                log::info!(
+                                    "windows session: active audio endpoints changed -- recording={recording:?} playout={playout:?}"
+                                );
+                            }
+                            let _ = tauri::Emitter::emit(&app, "audio-devices-changed", ());
+                        }
+                    }
+                    // What the mic actually captures. A wireless headset's
+                    // dongle stays listed while the headset is off, so only
+                    // the captured signal shows a dead capture; when it does,
+                    // capture moves to another microphone. Mute does not
+                    // hide the signal, and nothing is sent until the user
+                    // unmutes, so this also runs while muted.
+                    #[cfg(target_os = "windows")]
+                    if let Some(microphone) = state.joined_microphone() {
+                        let counters =
+                            crate::windows_mic_signal::capture_counters(&microphone.local_track()).await;
+                        let device_id = microphone.current_device_id().unwrap_or_default();
+                        if let Some(report) =
+                            mic_signal.observe(&device_id, microphone.is_muted(), counters)
+                        {
+                            let device = microphone
+                                .recording_device_name(&device_id)
+                                .map_or_else(|| format!("{device_id:?}"), |name| format!("'{name}'"));
+                            log::info!("{}", report.line(&device));
+                        }
+                        if dead_mic.observe(&device_id, mic_signal.last_signal()) {
+                            let silent_device = microphone
+                                .recording_device_name(&device_id)
+                                .unwrap_or_else(|| device_id.clone());
+                            match microphone.fail_over_from_silent_device(&device_id) {
+                                Some(crate::transport::audio::RecordingDeviceRefresh::Switched(device_name)) => {
+                                    log::warn!(
+                                        "windows session: no sound from microphone '{silent_device}' -- switched to '{device_name}'"
+                                    );
+                                    crate::analytics::device_changed(
+                                        crate::analytics::DeviceKind::Mic,
+                                        crate::analytics::DeviceChange::Switched,
+                                    );
+                                    let _ = tauri::Emitter::emit(
+                                        &app,
+                                        "resilience-event",
+                                        crate::resilience_event::ResilienceEvent::MicSwitchedFromSilent {
+                                            silent_device,
+                                            device_name,
+                                        },
+                                    );
+                                }
+                                Some(crate::transport::audio::RecordingDeviceRefresh::Failed(error)) => {
+                                    log::warn!(
+                                        "windows session: no sound from microphone '{silent_device}', and switching to another microphone failed: {error}"
+                                    );
+                                    let _ = tauri::Emitter::emit(
+                                        &app,
+                                        "resilience-event",
+                                        crate::resilience_event::ResilienceEvent::MicDeviceFailed {
+                                            message: format!("No sound from {silent_device}, and switching to another microphone failed: {error}"),
+                                        },
+                                    );
+                                }
+                                Some(crate::transport::audio::RecordingDeviceRefresh::Unchanged) | None => {
+                                    log::warn!(
+                                        "windows session: no sound from microphone '{silent_device}', and no other microphone to switch to"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3637,6 +3845,25 @@ struct RoomLeftEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn audio_endpoint_changes_are_reported_after_the_baseline() {
+        let mut last = None;
+        let headset = (vec!["headset"], vec!["speakers"]);
+        let with_webcam = (vec!["headset", "webcam"], vec!["speakers"]);
+        assert!(
+            !audio_endpoints_changed(&mut last, headset.clone()),
+            "baseline"
+        );
+        assert!(!audio_endpoints_changed(&mut last, headset.clone()));
+        assert!(
+            audio_endpoints_changed(&mut last, with_webcam.clone()),
+            "plugged in"
+        );
+        assert!(!audio_endpoints_changed(&mut last, with_webcam));
+        assert!(audio_endpoints_changed(&mut last, headset), "unplugged");
+    }
 
     fn room(id: &str, name: &str) -> crate::rooms::RoomRecord {
         crate::rooms::RoomRecord {

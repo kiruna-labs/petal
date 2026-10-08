@@ -550,6 +550,49 @@ pub struct MicTrack {
     /// poll falls back to the first available device and CLEARS the pin, so
     /// audio keeps flowing rather than staying wedged on a dead device.
     user_pinned: AtomicBool,
+    /// Devices not to switch to on our own while they stay connected; see
+    /// [`saved_device_to_restore`].
+    do_not_retry: Mutex<HashSet<String>>,
+}
+
+/// Pure: the saved device the in-call watcher should switch back to, if any.
+///
+/// Only a saved device that is connected, not already in use, and not in
+/// `do_not_retry`. That holds devices a switch failed on -- a failed switch
+/// can leave the ADM stopped with its GUID already on the target, and a retry
+/// would then report success with nothing flowing (see
+/// `session_stub::SessionState::set_audio_devices`) -- and, on Windows,
+/// microphones that captured only digital silence. A device leaves the set
+/// when it is unplugged, so its next connection gets one fresh attempt, or
+/// when the user picks it.
+pub(crate) fn saved_device_to_restore<'a>(
+    saved: Option<&'a str>,
+    current: Option<&str>,
+    present: &[&str],
+    do_not_retry: &mut HashSet<String>,
+) -> Option<&'a str> {
+    do_not_retry.retain(|id| present.contains(&id.as_str()));
+    let id = saved?;
+    (present.contains(&id) && current != Some(id) && !do_not_retry.contains(id)).then_some(id)
+}
+
+/// Pure: the microphone to switch to when `silent` captures only digital
+/// silence -- the Windows default if it is usable, otherwise the first usable
+/// one in `devices` order. Usable means listed, not `silent`, and not in
+/// `do_not_retry`.
+pub(crate) fn fallback_recording_device<'a>(
+    devices: &[&'a str],
+    default: Option<&str>,
+    silent: &str,
+    do_not_retry: &HashSet<String>,
+) -> Option<&'a str> {
+    let usable = |id: &&str| *id != silent && !do_not_retry.contains(*id);
+    devices
+        .iter()
+        .copied()
+        .filter(usable)
+        .find(|id| Some(*id) == default)
+        .or_else(|| devices.iter().copied().find(usable))
 }
 
 /// A cheap snapshot of the recording device selected by the ADM. `id` is the
@@ -570,6 +613,31 @@ pub enum RecordingDeviceRefresh {
 impl MicTrack {
     pub fn is_muted(&self) -> bool {
         self.muted.load(Ordering::SeqCst)
+    }
+
+    /// The published mic track, for reading its capture stats
+    /// (`windows_mic_signal`).
+    #[cfg(target_os = "windows")]
+    pub(crate) fn local_track(&self) -> LocalAudioTrack {
+        self.track.clone()
+    }
+
+    /// The recording device id capture is on, as last pinned or followed.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn current_device_id(&self) -> Option<String> {
+        self.current_device
+            .lock_unpoisoned()
+            .as_ref()
+            .map(|snapshot| snapshot.id.as_str().to_owned())
+    }
+
+    /// A recording device's name, when it is still enumerated.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn recording_device_name(&self, device_id: &str) -> Option<String> {
+        self.audio
+            .recording_devices()
+            .find(|device| device.id.as_str() == device_id)
+            .map(|device| device.name)
     }
 
     /// This mic's current LiveKit track SID. Used by #713's reconnect
@@ -663,19 +731,78 @@ impl MicTrack {
         let Some(target) = devices.iter().find(|d| d.id.as_str() == device_id) else {
             return Err(format!("recording device not found: {device_id}"));
         };
-        self.audio
-            .switch_recording_device(&target.id)
-            .map_err(|e| format!("failed to switch recording device: {e}"))?;
+        if let Err(e) = self.audio.switch_recording_device(&target.id) {
+            self.do_not_retry
+                .lock_unpoisoned()
+                .insert(device_id.to_owned());
+            return Err(format!("failed to switch recording device: {e}"));
+        }
+        self.do_not_retry.lock_unpoisoned().remove(device_id);
         self.user_pinned.store(true, Ordering::SeqCst);
         let mut guard = self.current_device.lock_unpoisoned();
         *guard = Some(DeviceSnapshot {
             id: target.id.clone(),
         });
-        log::info!(
-            "audio: mic hot-swapped to '{}' (user-selected)",
-            target.name
-        );
+        log::info!("audio: mic hot-swapped to '{}' (pinned)", target.name);
         Ok(target.name.clone())
+    }
+
+    /// Switch back to the saved recording device once it is connected again,
+    /// pinning it like a user pick. `Unchanged` when there is nothing to do.
+    pub fn restore_saved_recording_device(&self, saved: Option<&str>) -> RecordingDeviceRefresh {
+        let Some(target) = ({
+            let devices: Vec<_> = self.audio.recording_devices().collect();
+            let present: Vec<&str> = devices.iter().map(|d| d.id.as_str()).collect();
+            let current = self
+                .current_device
+                .lock_unpoisoned()
+                .as_ref()
+                .map(|snapshot| snapshot.id.as_str().to_owned());
+            let mut do_not_retry = self.do_not_retry.lock_unpoisoned();
+            saved_device_to_restore(saved, current.as_deref(), &present, &mut do_not_retry)
+                .map(str::to_owned)
+        }) else {
+            return RecordingDeviceRefresh::Unchanged;
+        };
+        match self.set_recording_device(&target) {
+            Ok(name) => RecordingDeviceRefresh::Switched(name),
+            Err(error) => RecordingDeviceRefresh::Failed(error),
+        }
+    }
+
+    /// Stop using `silent`, a microphone that captured only digital silence
+    /// (a wireless headset switched off behind its still-connected dongle),
+    /// and switch to [`fallback_recording_device`] among the active
+    /// microphones. `silent` is not switched back to on our own while it
+    /// stays connected. `None` when no other microphone is usable.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn fail_over_from_silent_device(
+        &self,
+        silent: &str,
+    ) -> Option<RecordingDeviceRefresh> {
+        self.do_not_retry
+            .lock_unpoisoned()
+            .insert(silent.to_owned());
+        let devices: Vec<_> = self.audio.recording_devices().collect();
+        let active = crate::windows_audio_device::active_recording_endpoint_ids().ok();
+        let ids: Vec<&str> = devices
+            .iter()
+            .map(|device| device.id.as_str())
+            .filter(|id| {
+                active
+                    .as_ref()
+                    .is_none_or(|active| active.iter().any(|active| active == id))
+            })
+            .collect();
+        let default = crate::windows_audio_device::default_recording_device_id().ok();
+        let target = {
+            let do_not_retry = self.do_not_retry.lock_unpoisoned();
+            fallback_recording_device(&ids, default.as_deref(), silent, &do_not_retry)?.to_owned()
+        };
+        Some(match self.set_recording_device(&target) {
+            Ok(name) => RecordingDeviceRefresh::Switched(name),
+            Err(error) => RecordingDeviceRefresh::Failed(error),
+        })
     }
 
     pub fn use_default_recording_device(&self) -> Result<String, String> {
@@ -821,6 +948,8 @@ pub struct SpeakerPlayout {
     audio: PlatformAudio,
     current_device: Mutex<Option<PlayoutDeviceSnapshot>>,
     user_pinned: AtomicBool,
+    /// See [`saved_device_to_restore`].
+    do_not_retry: Mutex<HashSet<String>>,
 }
 
 impl SpeakerPlayout {
@@ -837,8 +966,12 @@ impl SpeakerPlayout {
                 id: device.id.clone(),
             });
         let mut user_pinned = false;
+        let mut failed_switch = None;
         if let Some(wanted_id) = preferred_playout_device {
-            match devices.iter().find(|device| device.id.as_str() == wanted_id) {
+            match devices
+                .iter()
+                .find(|device| device.id.as_str() == wanted_id)
+            {
                 Some(device) => match audio.switch_playout_device(&device.id) {
                     Ok(()) => {
                         current_device = Some(PlayoutDeviceSnapshot {
@@ -847,10 +980,13 @@ impl SpeakerPlayout {
                         user_pinned = true;
                         log::info!("audio: applied preferred playout device '{}'", device.name);
                     }
-                    Err(error) => log::warn!(
-                        "audio: failed to apply preferred playout device '{}': {error} -- using default",
-                        device.name
-                    ),
+                    Err(error) => {
+                        failed_switch = Some(wanted_id.clone());
+                        log::warn!(
+                            "audio: failed to apply preferred playout device '{}': {error} -- using default",
+                            device.name
+                        );
+                    }
                 },
                 None => log::warn!(
                     "audio: preferred playout device {wanted_id} not present -- using default"
@@ -862,6 +998,7 @@ impl SpeakerPlayout {
             audio,
             current_device: Mutex::new(current_device),
             user_pinned: AtomicBool::new(user_pinned),
+            do_not_retry: Mutex::new(failed_switch.into_iter().collect()),
         })
     }
 
@@ -873,18 +1010,42 @@ impl SpeakerPlayout {
         else {
             return Err(format!("playout device not found: {device_id}"));
         };
-        self.audio
-            .switch_playout_device(&target.id)
-            .map_err(|error| format!("failed to switch playout device: {error}"))?;
+        if let Err(error) = self.audio.switch_playout_device(&target.id) {
+            self.do_not_retry
+                .lock_unpoisoned()
+                .insert(device_id.to_owned());
+            return Err(format!("failed to switch playout device: {error}"));
+        }
+        self.do_not_retry.lock_unpoisoned().remove(device_id);
         self.user_pinned.store(true, Ordering::SeqCst);
         *self.current_device.lock_unpoisoned() = Some(PlayoutDeviceSnapshot {
             id: target.id.clone(),
         });
-        log::info!(
-            "audio: playout hot-swapped to '{}' (user-selected)",
-            target.name
-        );
+        log::info!("audio: playout hot-swapped to '{}' (pinned)", target.name);
         Ok(target.name.clone())
+    }
+
+    /// Switch back to the saved playout device once it is connected again,
+    /// pinning it like a user pick. `Unchanged` when there is nothing to do.
+    pub fn restore_saved_playout_device(&self, saved: Option<&str>) -> PlayoutDeviceRefresh {
+        let Some(target) = ({
+            let devices: Vec<_> = self.audio.playout_devices().collect();
+            let present: Vec<&str> = devices.iter().map(|device| device.id.as_str()).collect();
+            let current = self
+                .current_device
+                .lock_unpoisoned()
+                .as_ref()
+                .map(|snapshot| snapshot.id.as_str().to_owned());
+            let mut do_not_retry = self.do_not_retry.lock_unpoisoned();
+            saved_device_to_restore(saved, current.as_deref(), &present, &mut do_not_retry)
+                .map(str::to_owned)
+        }) else {
+            return PlayoutDeviceRefresh::Unchanged;
+        };
+        match self.set_playout_device(&target) {
+            Ok(name) => PlayoutDeviceRefresh::Switched(name),
+            Err(error) => PlayoutDeviceRefresh::Failed(error),
+        }
     }
 
     pub fn use_default_playout_device(&self) -> Result<String, String> {
@@ -1037,6 +1198,7 @@ pub struct PreparedMicrophone {
     muted: bool,
     current_device: Option<DeviceSnapshot>,
     user_pinned: bool,
+    failed_switch: Option<String>,
     publish_summary: String,
 }
 
@@ -1056,6 +1218,7 @@ impl PreparedMicrophone {
             muted: AtomicBool::new(self.muted),
             current_device: Mutex::new(self.current_device),
             user_pinned: AtomicBool::new(self.user_pinned),
+            do_not_retry: Mutex::new(self.failed_switch.into_iter().collect()),
         }
     }
 }
@@ -1223,6 +1386,7 @@ pub fn prepare_microphone(
     // log line, never fails the publish.
     let preferred = preferred_recording_device;
     let mut pinned = false;
+    let mut failed_switch = None;
     if let Some(ref wanted_id) = preferred {
         match recording_devices
             .iter()
@@ -1236,10 +1400,13 @@ pub fn prepare_microphone(
                         device.name
                     );
                 }
-                Err(e) => log::warn!(
-                    "audio: failed to apply preferred recording device '{}': {e} -- using default",
-                    device.name
-                ),
+                Err(e) => {
+                    failed_switch = Some(wanted_id.clone());
+                    log::warn!(
+                        "audio: failed to apply preferred recording device '{}': {e} -- using default",
+                        device.name
+                    );
+                }
             },
             None => log::warn!(
                 "audio: preferred recording device {wanted_id} not present -- using default"
@@ -1291,6 +1458,7 @@ pub fn prepare_microphone(
         track,
         current_device,
         user_pinned: pinned,
+        failed_switch,
         publish_summary,
     })
 }
@@ -1428,6 +1596,25 @@ pub struct AppliedAudioDevices {
     pub speaker_error: Option<String>,
 }
 
+impl AppliedAudioDevices {
+    /// One warning per failed side of one user attempt, so a switch that did
+    /// not take is in the log and not only in a picker caption. User-driven,
+    /// so it cannot repeat on its own (#788's per-episode rule).
+    fn log_failures(&self, recording_id: Option<&str>, playout_id: Option<&str>) {
+        for (kind, requested, error) in [
+            ("microphone", recording_id, &self.mic_error),
+            ("speaker", playout_id, &self.speaker_error),
+        ] {
+            if let (Some(requested), Some(error)) = (requested, error) {
+                log::warn!(
+                    "audio: {kind} switch to {requested:?} failed (in_room={}): {error}",
+                    self.in_room
+                );
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn with_system_default(mut devices: Vec<AudioDeviceInfo>) -> Vec<AudioDeviceInfo> {
     if !devices.is_empty() {
@@ -1447,31 +1634,81 @@ fn with_system_default(devices: Vec<AudioDeviceInfo>) -> Vec<AudioDeviceInfo> {
     devices
 }
 
+/// Drop devices Windows reports as gone, so a stale selection cannot be re-made
+/// from the list. `active_ids` is empty when we have no information (the
+/// endpoint query failed), and an empty set fails OPEN, keeping the ADM's list
+/// untouched, because hiding every device is worse than showing one that has
+/// gone away.
+///
+/// See `windows_audio_device::active_endpoint_ids` for why this cannot catch a
+/// powered-off wireless headset.
+#[cfg(target_os = "windows")]
+fn keep_active_devices(
+    devices: Vec<AudioDeviceInfo>,
+    active_ids: &[String],
+) -> Vec<AudioDeviceInfo> {
+    if active_ids.is_empty() {
+        return devices;
+    }
+    let active: HashSet<&str> = active_ids.iter().map(String::as_str).collect();
+    devices
+        .into_iter()
+        .filter(|device| active.contains(device.id.as_str()))
+        .collect()
+}
+
+/// The endpoint ids Windows still reports as ACTIVE for one direction, or no
+/// information when the query failed. The failure is logged, not silent.
+#[cfg(target_os = "windows")]
+fn active_endpoint_ids(direction: &str, query: Result<Vec<String>, String>) -> Vec<String> {
+    query.unwrap_or_else(|error| {
+        log::warn!(
+            "audio: could not list active {direction} endpoints ({error}); showing every enumerated device"
+        );
+        Vec::new()
+    })
+}
+
 /// Enumerate the machine's real recording + playout devices (issue #28).
 /// Errors (no audio hardware, ADM init failure) surface as a string so the
 /// frontend can show an honest "audio devices unavailable" state.
 #[tauri::command]
 pub fn list_audio_devices() -> Result<AudioDeviceLists, String> {
     let audio = PlatformAudio::new().map_err(|e| format!("audio devices unavailable: {e}"))?;
+    let recording: Vec<AudioDeviceInfo> = audio
+        .recording_devices()
+        .map(|device| AudioDeviceInfo {
+            id: device.id.as_str().to_string(),
+            name: device.name,
+        })
+        .collect();
+    let playout: Vec<AudioDeviceInfo> = audio
+        .playout_devices()
+        .map(|device| AudioDeviceInfo {
+            id: device.id.as_str().to_string(),
+            name: device.name,
+        })
+        .collect();
+    #[cfg(target_os = "windows")]
+    let (recording, playout) = (
+        keep_active_devices(
+            recording,
+            &active_endpoint_ids(
+                "recording",
+                crate::windows_audio_device::active_recording_endpoint_ids(),
+            ),
+        ),
+        keep_active_devices(
+            playout,
+            &active_endpoint_ids(
+                "playout",
+                crate::windows_audio_device::active_playout_endpoint_ids(),
+            ),
+        ),
+    );
     Ok(AudioDeviceLists {
-        recording: with_system_default(
-            audio
-                .recording_devices()
-                .map(|device| AudioDeviceInfo {
-                    id: device.id.as_str().to_string(),
-                    name: device.name,
-                })
-                .collect(),
-        ),
-        playout: with_system_default(
-            audio
-                .playout_devices()
-                .map(|device| AudioDeviceInfo {
-                    id: device.id.as_str().to_string(),
-                    name: device.name,
-                })
-                .collect(),
-        ),
+        recording: with_system_default(recording),
+        playout: with_system_default(playout),
     })
 }
 
@@ -1571,6 +1808,7 @@ pub fn set_audio_devices(
         }
     }
 
+    result.log_failures(recording_id.as_deref(), playout_id.as_deref());
     result
 }
 
@@ -1582,9 +1820,15 @@ pub async fn set_audio_devices(
     preferences: tauri::State<'_, AudioDevicePreferences>,
     state: tauri::State<'_, crate::session::SessionState>,
 ) -> Result<AppliedAudioDevices, String> {
-    Ok(state
-        .set_audio_devices(recording_id, playout_id, preferences.inner())
-        .await)
+    let applied = state
+        .set_audio_devices(
+            recording_id.clone(),
+            playout_id.clone(),
+            preferences.inner(),
+        )
+        .await;
+    applied.log_failures(recording_id.as_deref(), playout_id.as_deref());
+    Ok(applied)
 }
 
 /// Start a background task that logs every remote audio track `room`
@@ -2385,6 +2629,35 @@ mod tests {
         assert!(with_system_default(Vec::new()).is_empty());
     }
 
+    /// Devices Windows reports as gone must be dropped from the lists we offer,
+    /// so a stale choice cannot be re-made from the UI.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_device_lists_drop_gone_devices_and_fail_open() {
+        let devices = vec![
+            AudioDeviceInfo {
+                id: "speakers".into(),
+                name: "Speakers".into(),
+            },
+            AudioDeviceInfo {
+                id: "bt".into(),
+                name: "Bluetooth headset".into(),
+            },
+        ];
+        assert_eq!(
+            keep_active_devices(devices.clone(), &["speakers".to_string()])
+                .iter()
+                .map(|device| device.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["speakers"],
+            "a NOTPRESENT/UNPLUGGED device must not be offered"
+        );
+        // Fail OPEN: no information keeps the ADM's list, because hiding every
+        // device is worse than showing one that has gone away.
+        assert_eq!(keep_active_devices(devices.clone(), &[]).len(), 2);
+        assert!(active_endpoint_ids("playout", Err("no enumerator".into())).is_empty());
+    }
+
     #[test]
     fn applied_audio_devices_serialize_camel_case() {
         let applied = AppliedAudioDevices {
@@ -2411,6 +2684,98 @@ mod tests {
 
         assert_eq!(preferences.recording_device().as_deref(), Some("rec-guid"));
         assert_eq!(preferences.playout_device().as_deref(), Some("play-guid"));
+    }
+
+    #[test]
+    fn saved_device_is_restored_once_it_is_connected_and_not_in_use() {
+        let mut failed = HashSet::new();
+        // Saved webcam mic missing at join: stay on the headset.
+        assert_eq!(
+            saved_device_to_restore(Some("webcam"), Some("headset"), &["headset"], &mut failed),
+            None
+        );
+        // Plugged in mid-call: switch to it.
+        assert_eq!(
+            saved_device_to_restore(
+                Some("webcam"),
+                Some("headset"),
+                &["headset", "webcam"],
+                &mut failed
+            ),
+            Some("webcam")
+        );
+        // Already on it, or nothing saved (System default): nothing to do.
+        assert_eq!(
+            saved_device_to_restore(Some("webcam"), Some("webcam"), &["webcam"], &mut failed),
+            None
+        );
+        assert_eq!(
+            saved_device_to_restore(None, Some("headset"), &["headset", "webcam"], &mut failed),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failed_switch_is_not_retried_until_the_device_reconnects() {
+        let mut failed = HashSet::from(["webcam".to_string()]);
+        let both = ["headset", "webcam"];
+        // Still connected: never retried, so every 2s poll stays quiet.
+        for _ in 0..3 {
+            assert_eq!(
+                saved_device_to_restore(Some("webcam"), Some("headset"), &both, &mut failed),
+                None
+            );
+        }
+        assert!(failed.contains("webcam"));
+        // Unplugged: the failure is forgotten...
+        assert_eq!(
+            saved_device_to_restore(Some("webcam"), Some("headset"), &["headset"], &mut failed),
+            None
+        );
+        assert!(failed.is_empty());
+        // ...so plugging it back in gets one fresh attempt.
+        assert_eq!(
+            saved_device_to_restore(Some("webcam"), Some("headset"), &both, &mut failed),
+            Some("webcam")
+        );
+        // A failure on another device does not block the saved one.
+        let mut other = HashSet::from(["usb".to_string()]);
+        assert_eq!(
+            saved_device_to_restore(
+                Some("webcam"),
+                Some("headset"),
+                &["headset", "webcam", "usb"],
+                &mut other
+            ),
+            Some("webcam")
+        );
+    }
+
+    #[test]
+    fn a_silent_mic_falls_back_to_the_default_or_else_the_first_other_one() {
+        let none = HashSet::new();
+        let devices = ["corsair", "webcam", "usb"];
+        // The Windows default is the dead headset's dongle: first other one.
+        assert_eq!(
+            fallback_recording_device(&devices, Some("corsair"), "corsair", &none),
+            Some("webcam")
+        );
+        // A usable default wins over enumeration order.
+        assert_eq!(
+            fallback_recording_device(&devices, Some("usb"), "corsair", &none),
+            Some("usb")
+        );
+        // Devices that already failed or went silent are skipped.
+        let tried = HashSet::from(["webcam".to_string()]);
+        assert_eq!(
+            fallback_recording_device(&devices, None, "corsair", &tried),
+            Some("usb")
+        );
+        // Nothing else connected: stay.
+        assert_eq!(
+            fallback_recording_device(&["corsair"], Some("corsair"), "corsair", &none),
+            None
+        );
     }
 
     #[test]
