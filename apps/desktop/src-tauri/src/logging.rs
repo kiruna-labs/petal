@@ -567,6 +567,9 @@ diagnostic_enum!(BrowserUrlExtractionCauseTag {
     Timeout => "timeout",
     Ambiguous => "ambiguous",
     NoMatch => "no-match",
+    ProcessGone => "process-gone",
+    NoWindows => "no-windows",
+    TitleMismatch => "title-mismatch",
     Spawn => "spawn",
     Failed => "failed",
     NotApplicable => "not_applicable"
@@ -5659,7 +5662,16 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
         ),
         "browser_url_extraction_cause" => matches!(
             value,
-            "denied" | "timeout" | "ambiguous" | "no-match" | "spawn" | "failed" | "not_applicable"
+            "denied"
+                | "timeout"
+                | "ambiguous"
+                | "no-match"
+                | "process-gone"
+                | "no-windows"
+                | "title-mismatch"
+                | "spawn"
+                | "failed"
+                | "not_applicable"
         ),
         "descriptor_pressure_stage" => {
             matches!(value, "high_water" | "exhausted" | "not_applicable")
@@ -9712,6 +9724,9 @@ mod tests {
             BrowserUrlExtractionCauseTag::Timeout,
             BrowserUrlExtractionCauseTag::Ambiguous,
             BrowserUrlExtractionCauseTag::NoMatch,
+            BrowserUrlExtractionCauseTag::ProcessGone,
+            BrowserUrlExtractionCauseTag::NoWindows,
+            BrowserUrlExtractionCauseTag::TitleMismatch,
             BrowserUrlExtractionCauseTag::Spawn,
             BrowserUrlExtractionCauseTag::Failed,
         ] {

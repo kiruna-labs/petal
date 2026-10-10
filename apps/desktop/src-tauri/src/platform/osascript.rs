@@ -39,8 +39,28 @@ pub enum OsascriptOutcome {
 
 /// Run `/usr/bin/osascript -e <line> -e <line> ...` and wait up to `timeout`
 /// for it to exit, killing it if the deadline passes.
+// Only the feature-gated test cockpit calls this outside tests now.
+#[allow(dead_code)]
 pub fn run_osascript(lines: &[&str], timeout: Duration) -> OsascriptOutcome {
+    run_osascript_with_language(None, lines, timeout)
+}
+
+/// Run one JavaScript-for-Automation script via `/usr/bin/osascript -l
+/// JavaScript -e <script>`. Same deadline/kill/capture behaviour as
+/// [`run_osascript`]; the script's last expression is printed to stdout.
+pub fn run_osascript_javascript(script: &str, timeout: Duration) -> OsascriptOutcome {
+    run_osascript_with_language(Some("JavaScript"), &[script], timeout)
+}
+
+fn run_osascript_with_language(
+    language: Option<&str>,
+    lines: &[&str],
+    timeout: Duration,
+) -> OsascriptOutcome {
     let mut command = Command::new("/usr/bin/osascript");
+    if let Some(language) = language {
+        command.arg("-l").arg(language);
+    }
     for line in lines {
         command.arg("-e").arg(line);
     }
