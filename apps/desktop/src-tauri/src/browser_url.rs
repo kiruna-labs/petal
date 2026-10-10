@@ -2,8 +2,10 @@
 //!
 //! Petal sends the current browser tab URL as LiveKit participant metadata
 //! alongside the existing shared-window title/scale metadata. This mirrors the
-//! takt project's browser-context capture: use AppleScript for known browser
-//! bundle IDs, keep the call timeout-bound, and return a typed
+//! takt project's browser-context capture: use JavaScript for Automation
+//! (JXA) against the shared window's OWNING PROCESS (by pid, never by bundle
+//! id -- two instances of one browser share a bundle id and Apple Events by
+//! bundle id reach the wrong one), keep the call timeout-bound, and return a typed
 //! [`UrlExtraction`] outcome for every case -- including "not a recognised
 //! browser" -- instead of guessing from titles or pixels.
 
@@ -22,6 +24,15 @@ pub enum UrlExtraction {
     /// The script ran and found no matching window (or its match wasn't an
     /// openable http(s) URL).
     Empty,
+    /// The target process no longer exists (quit between share start and
+    /// this poll). Distinct from `Empty` so the log can tell "browser gone"
+    /// from "browser up but wrong window".
+    ProcessGone,
+    /// The process is up but reports zero windows.
+    NoWindows,
+    /// The process is up and reports `n` windows, none of which matched the
+    /// exact shared title (or the match was hidden/had no URL).
+    TitleMismatch(u32),
     /// More than one on-screen window shared the target title, so the
     /// fail-closed match rule (#97) refused to guess. Carries the count.
     Ambiguous(u32),
@@ -67,6 +78,9 @@ impl UrlExtraction {
         match self {
             Self::Url(_) => "ok",
             Self::Empty => "no-match",
+            Self::ProcessGone => "process-gone",
+            Self::NoWindows => "no-windows",
+            Self::TitleMismatch(_) => "title-mismatch",
             Self::Ambiguous(_) => "ambiguous",
             Self::Timeout => "timeout",
             Self::Denied => "denied",
@@ -96,20 +110,28 @@ pub const FRESH_URL_TTL: Duration = Duration::from_secs(15);
 /// returns `Unsupported`.
 pub fn extract_url_for_window(
     bundle_id: &str,
+    owner_pid: i32,
     window_title: Option<&str>,
     timeout: Duration,
 ) -> UrlExtraction {
     #[cfg(target_os = "macos")]
     {
-        let Some(script) = script_for_bundle(bundle_id, window_title.unwrap_or("")) else {
+        if browser_family(bundle_id).is_none() {
             return UrlExtraction::Unsupported;
+        }
+        let Some(script) = script_for_bundle(bundle_id, owner_pid, window_title.unwrap_or(""))
+        else {
+            return UrlExtraction::Failed {
+                status: -1,
+                stderr: "invalid owner pid".to_string(),
+            };
         };
-        let outcome = crate::platform::osascript::run_osascript(&[script.as_str()], timeout);
+        let outcome = crate::platform::osascript::run_osascript_javascript(&script, timeout);
         classify_osascript_outcome(outcome)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (bundle_id, window_title, timeout);
+        let _ = (bundle_id, owner_pid, window_title, timeout);
         UrlExtraction::Unsupported
     }
 }
@@ -126,7 +148,7 @@ pub fn extract_url_for_window(
 pub fn is_supported_bundle_id(bundle_id: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
-        script_for_bundle(bundle_id, "").is_some()
+        browser_family(bundle_id).is_some()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -142,7 +164,10 @@ pub fn is_supported_bundle_id(bundle_id: &str) -> bool {
 /// the field about). Split out from `log_extraction_failure` itself so the
 /// warn-once/debug-thereafter and emit-once rules can be unit-tested
 /// without a live logger or Sentry client.
-fn extraction_log_plan(outcome: &UrlExtraction, first_for_share: bool) -> Option<(log::Level, bool)> {
+fn extraction_log_plan(
+    outcome: &UrlExtraction,
+    first_for_share: bool,
+) -> Option<(log::Level, bool)> {
     if matches!(outcome, UrlExtraction::Url(_) | UrlExtraction::Unsupported) {
         return None;
     }
@@ -167,6 +192,9 @@ fn browser_url_extraction_cause_tag(
         UrlExtraction::Timeout => Some(Tag::Timeout),
         UrlExtraction::Ambiguous(_) => Some(Tag::Ambiguous),
         UrlExtraction::Empty => Some(Tag::NoMatch),
+        UrlExtraction::ProcessGone => Some(Tag::ProcessGone),
+        UrlExtraction::NoWindows => Some(Tag::NoWindows),
+        UrlExtraction::TitleMismatch(_) => Some(Tag::TitleMismatch),
         UrlExtraction::Spawn(_) => Some(Tag::Spawn),
         UrlExtraction::Failed { .. } => Some(Tag::Failed),
         UrlExtraction::Url(_) | UrlExtraction::Unsupported => None,
@@ -227,7 +255,16 @@ fn classify_osascript_outcome(
         }
         OsascriptOutcome::Ok(stdout) => {
             let trimmed = stdout.trim();
-            if let Some(count) = trimmed.strip_prefix("AMBIGUOUS:") {
+            if trimmed == "PETAL_GONE" {
+                UrlExtraction::ProcessGone
+            } else if trimmed == "PETAL_NOWINDOWS" {
+                UrlExtraction::NoWindows
+            } else if let Some(count) = trimmed.strip_prefix("PETAL_NOMATCH:") {
+                match count.trim().parse::<u32>() {
+                    Ok(n) => UrlExtraction::TitleMismatch(n),
+                    Err(_) => UrlExtraction::Empty,
+                }
+            } else if let Some(count) = trimmed.strip_prefix("AMBIGUOUS:") {
                 match count.trim().parse::<u32>() {
                     Ok(n) => UrlExtraction::Ambiguous(n),
                     Err(_) => UrlExtraction::Empty,
@@ -552,36 +589,20 @@ unsafe fn get_browser_url_from_hwnd(hwnd: windows::Win32::Foundation::HWND) -> O
     found
 }
 
+/// Browser scripting families `script_for_bundle` knows. The bundle id is
+/// only the "is this a supported browser, and which dictionary" check -- the
+/// script itself targets a pid (see `script_for_bundle`).
 #[cfg(target_os = "macos")]
-fn script_for_bundle(bundle_id: &str, window_title: &str) -> Option<String> {
-    let target = applescript_string(window_title);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserFamily {
+    Safari,
+    Chromium,
+}
+
+#[cfg(target_os = "macos")]
+fn browser_family(bundle_id: &str) -> Option<BrowserFamily> {
     match bundle_id {
-        "com.apple.Safari" | "com.apple.SafariTechnologyPreview" => Some(format!(
-            r#"set targetTitle to {target}
-set matchesFound to 0
-set matchedUrl to missing value
-if application id "{bundle_id}" is not running then return ""
-tell application id "{bundle_id}"
-  repeat with w in windows
-    try
-      set winName to name of w as text
-      set isHidden to false
-      try
-        set isHidden to miniaturized of w
-      end try
-      if targetTitle is not "" and winName is targetTitle and isHidden is false then
-        set matchesFound to matchesFound + 1
-        if matchesFound is 1 then
-          set matchedUrl to URL of current tab of w
-        end if
-      end if
-    end try
-  end repeat
-end tell
-if matchesFound is 1 and matchedUrl is not missing value then return matchedUrl
-if matchesFound > 1 then return "AMBIGUOUS:" & matchesFound
-return """#
-        )),
+        "com.apple.Safari" | "com.apple.SafariTechnologyPreview" => Some(BrowserFamily::Safari),
         "com.google.Chrome"
         | "com.google.Chrome.canary"
         | "com.google.Chrome.beta"
@@ -594,40 +615,137 @@ return """#
         | "com.vivaldi.Vivaldi"
         | "company.thebrowser.Browser"
         | "org.chromium.Chromium"
-        | "com.operasoftware.Opera" => Some(format!(
-            r#"set targetTitle to {target}
-set matchesFound to 0
-set matchedUrl to missing value
-if application id "{bundle_id}" is not running then return ""
-tell application id "{bundle_id}"
-  repeat with w in windows
-    try
-      set winName to name of w as text
-      set isHidden to false
-      try
-        set isHidden to minimized of w
-      end try
-      if targetTitle is not "" and winName is targetTitle and isHidden is false then
-        set matchesFound to matchesFound + 1
-        if matchesFound is 1 then
-          set matchedUrl to URL of active tab of w
-        end if
-      end if
-    end try
-  end repeat
-end tell
-if matchesFound is 1 and matchedUrl is not missing value then return matchedUrl
-if matchesFound > 1 then return "AMBIGUOUS:" & matchesFound
-return """#
-        )),
+        | "com.operasoftware.Opera" => Some(BrowserFamily::Chromium),
         _ => None,
     }
 }
 
+/// Build the JXA (`osascript -l JavaScript`) script for one shared window.
+///
+/// Sends RAW Apple Events through the ObjC bridge to
+/// `NSAppleEventDescriptor.descriptorWithProcessIdentifier(<pid>)` -- the
+/// exact process that owns the shared window. Neither `application id "..."`
+/// (AppleScript) nor JXA `Application(<pid>)` is pid-bound (both resolve to
+/// whichever instance of the bundle LaunchServices picks), so with two
+/// processes sharing a bundle id (the user's Chrome plus an automation
+/// Chrome) they reached the wrong one: no window with the shared title,
+/// `cause=no-match` forever. `pid` is a validated positive integer
+/// interpolated as a number, never text. A pid-addressed event cannot launch
+/// an app, so no is-running guard is needed.
+///
+/// Windows are read one index at a time (1..N until `-1719` invalid index),
+/// since `every window` is not answered. Four-char codes come from each
+/// browser's sdef: window `cwin`, name `pnam`, minimized/miniaturized `pmnd`;
+/// Chromium tab `acTa` + URL `URL `, Safari tab `cTab` + URL `pURL`.
+///
+/// Output contract (parsed by `classify_osascript_outcome`): the URL for
+/// exactly one visible exact-title match; `AMBIGUOUS:<n>` for several;
+/// `PETAL_GONE` when the process no longer exists; `PETAL_NOWINDOWS` for
+/// zero windows; otherwise `PETAL_NOMATCH:<window count>`. Any other error
+/// (e.g. `-1743` Automation denial) is rethrown with its code in
+/// parentheses so it reaches stderr.
 #[cfg(target_os = "macos")]
-fn applescript_string(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+fn script_for_bundle(bundle_id: &str, pid: i32, window_title: &str) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    let family = browser_family(bundle_id)?;
+    let target = js_string(window_title);
+    let (tab_code, url_code) = match family {
+        BrowserFamily::Safari => ("cTab", "pURL"),
+        BrowserFamily::Chromium => ("acTa", "URL "),
+    };
+    Some(format!(
+        r#"(function () {{
+  ObjC.import('Foundation');
+  var targetTitle = {target};
+  function fourcc(s) {{
+    return (s.charCodeAt(0) << 24) | (s.charCodeAt(1) << 16) | (s.charCodeAt(2) << 8) | s.charCodeAt(3);
+  }}
+  function aeError(code, detail) {{
+    code = Number(code);
+    var e = new Error(detail + " (" + code + ")");
+    e.aeCode = code;
+    return e;
+  }}
+  function typeDesc(code) {{ return $.NSAppleEventDescriptor.descriptorWithTypeCode(fourcc(code)); }}
+  function enumDesc(code) {{ return $.NSAppleEventDescriptor.descriptorWithEnumCode(fourcc(code)); }}
+  function objSpec(wantType, form, seld, from) {{
+    var r = $.NSAppleEventDescriptor.recordDescriptor;
+    r.setDescriptorForKeyword(typeDesc(wantType), fourcc('want'));
+    r.setDescriptorForKeyword(enumDesc(form), fourcc('form'));
+    r.setDescriptorForKeyword(seld, fourcc('seld'));
+    r.setDescriptorForKeyword(from || $.NSAppleEventDescriptor.nullDescriptor, fourcc('from'));
+    return r.coerceToDescriptorType(fourcc('obj '));
+  }}
+  function prop(code, from) {{ return objSpec('prop', 'prop', typeDesc(code), from); }}
+  function send(spec) {{
+    var targetDesc = $.NSAppleEventDescriptor.descriptorWithProcessIdentifier({pid});
+    var ev = $.NSAppleEventDescriptor.appleEventWithEventClassEventIDTargetDescriptorReturnIDTransactionID(fourcc('core'), fourcc('getd'), targetDesc, -1, 0);
+    ev.setParamDescriptorForKeyword(spec, fourcc('----'));
+    var err = $();
+    var reply = ev.sendEventWithOptionsTimeoutError(3, 10, err);
+    if (reply.isNil()) {{
+      throw aeError(err.code ? err.code : -1, "send failed");
+    }}
+    var en = reply.paramDescriptorForKeyword(fourcc('errn'));
+    if (en && !en.isNil() && en.int32Value) {{
+      throw aeError(en.int32Value, "AE error");
+    }}
+    return reply.paramDescriptorForKeyword(fourcc('----'));
+  }}
+  var matchesFound = 0;
+  var matchedUrl = null;
+  var total = 0;
+  try {{
+    for (var i = 1; i <= 200; i++) {{
+      var w = objSpec('cwin', 'indx', $.NSAppleEventDescriptor.descriptorWithInt32(i), null);
+      var winName;
+      try {{
+        winName = String(send(prop('pnam', w)).stringValue.js);
+      }} catch (e) {{
+        if (e.aeCode === -1719) {{ break; }}
+        if (e.aeCode === -1743 || e.aeCode === -600 || e.aeCode === -609 || e.aeCode === -1712) {{ throw e; }}
+        total = total + 1;
+        continue;
+      }}
+      total = total + 1;
+      try {{
+        var isHidden = false;
+        try {{
+          isHidden = send(prop('pmnd', w)).booleanValue === true;
+        }} catch (e) {{}}
+        if (targetTitle !== "" && winName === targetTitle && isHidden === false) {{
+          matchesFound = matchesFound + 1;
+          if (matchesFound === 1) {{
+            matchedUrl = String(send(prop('{url_code}', prop('{tab_code}', w))).stringValue.js);
+          }}
+        }}
+      }} catch (e) {{}}
+    }}
+  }} catch (e) {{
+    if (e.aeCode === -600 || e.aeCode === -609) {{
+      return "PETAL_GONE";
+    }}
+    throw new Error(String(e.message));
+  }}
+  if (matchesFound === 1 && matchedUrl !== null && matchedUrl !== undefined) {{ return matchedUrl; }}
+  if (matchesFound > 1) {{ return "AMBIGUOUS:" + matchesFound; }}
+  if (total === 0) {{ return "PETAL_NOWINDOWS"; }}
+  return "PETAL_NOMATCH:" + total;
+}})()"#
+    ))
+}
+
+/// JSON-encode `s` as a JavaScript string literal. JSON string syntax is a
+/// subset of JS, so quotes, backslashes, newlines and control characters are
+/// all escaped; U+2028/U+2029 are escaped too for pre-ES2019 engines.
+#[cfg(target_os = "macos")]
+fn js_string(s: &str) -> String {
+    serde_json::to_string(s)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 #[cfg(test)]
@@ -704,7 +822,11 @@ mod tests {
     #[test]
     fn cause_and_is_terminal_mapping() {
         let cases: &[(UrlExtraction, &str, bool)] = &[
-            (UrlExtraction::Url("https://example.com".to_string()), "ok", false),
+            (
+                UrlExtraction::Url("https://example.com".to_string()),
+                "ok",
+                false,
+            ),
             (UrlExtraction::Empty, "no-match", false),
             (UrlExtraction::Ambiguous(2), "ambiguous", false),
             (UrlExtraction::Timeout, "timeout", false),
@@ -906,27 +1028,27 @@ mod tests {
             "com.operasoftware.Opera",
         ] {
             assert!(
-                script_for_bundle(bundle_id, "Petal").is_some(),
+                script_for_bundle(bundle_id, 4242, "Petal").is_some(),
                 "expected a script for {bundle_id}"
             );
         }
         assert!(
-            script_for_bundle("org.mozilla.firefox", "Petal").is_none(),
+            script_for_bundle("org.mozilla.firefox", 4242, "Petal").is_none(),
             "Firefox has no tab model this AppleScript dictionary can address (#915) -- \
              it must stay unsupported, not silently fail every time"
         );
-        assert!(script_for_bundle("com.example.not-a-browser", "Petal").is_none());
+        assert!(script_for_bundle("com.example.not-a-browser", 4242, "Petal").is_none());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn browser_scripts_do_not_use_fuzzy_or_front_window_fallback() {
         for bundle_id in ["com.apple.Safari", "com.google.Chrome"] {
-            let script = script_for_bundle(bundle_id, "Petal").expect("supported browser");
+            let script = script_for_bundle(bundle_id, 4242, "Petal").expect("supported browser");
             assert!(!script.contains("front window"));
             assert!(!script.contains(" contains "));
-            assert!(script.contains("winName is targetTitle"));
-            assert!(script.contains("matchesFound is 1"));
+            assert!(script.contains("winName === targetTitle"));
+            assert!(script.contains("matchesFound === 1"));
             assert!(script.contains("AMBIGUOUS:"));
         }
     }
@@ -934,15 +1056,16 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn chromium_script_filters_minimized_windows_and_safari_filters_miniaturized() {
-        let chrome = script_for_bundle("com.google.Chrome", "Petal").expect("chrome script");
-        assert!(chrome.contains("minimized of w"));
-        assert!(chrome.contains("isHidden is false"));
+        let chrome = script_for_bundle("com.google.Chrome", 4242, "Petal").expect("chrome script");
+        // Both families read the sdef `minimized`/`miniaturized` property
+        // code `pmnd`, defaulting to "not hidden" if the read fails.
+        assert!(chrome.contains("prop('pmnd', w)"));
+        assert!(chrome.contains("isHidden === false"));
         assert!(!chrome.contains("miniaturized"));
 
-        let safari = script_for_bundle("com.apple.Safari", "Petal").expect("safari script");
-        assert!(safari.contains("miniaturized of w"));
-        assert!(safari.contains("isHidden is false"));
-        assert!(!safari.contains(" minimized "));
+        let safari = script_for_bundle("com.apple.Safari", 4242, "Petal").expect("safari script");
+        assert!(safari.contains("prop('pmnd', w)"));
+        assert!(safari.contains("isHidden === false"));
     }
 
     #[cfg(target_os = "macos")]
@@ -954,21 +1077,21 @@ mod tests {
         // drop that window from matching -- it must default to "not hidden"
         // instead, via its own inner try/end try.
         for bundle_id in ["com.apple.Safari", "com.google.Chrome"] {
-            let script = script_for_bundle(bundle_id, "Petal").expect("supported browser");
+            let script = script_for_bundle(bundle_id, 4242, "Petal").expect("supported browser");
             assert!(
-                script.contains("set isHidden to false"),
+                script.contains("var isHidden = false;"),
                 "script for {bundle_id} must default isHidden to false before reading the \
                  real (possibly-missing) property"
             );
-            let bare_try_lines = script.lines().filter(|line| line.trim() == "try").count();
+            let try_lines = script.lines().filter(|line| line.trim() == "try {").count();
             assert!(
-                bare_try_lines >= 2,
-                "expected an outer per-window try plus a nested try around the hidden-property \
-                 read in the {bundle_id} script, found {bare_try_lines} bare `try` lines: \
-                 {script}"
+                try_lines >= 3,
+                "expected the outer app try, a per-window try, and a nested try around the \
+                 hidden-property read in the {bundle_id} script, found {try_lines} `try {{` \
+                 lines: {script}"
             );
             assert!(
-                script.contains("isHidden is false"),
+                script.contains("isHidden === false"),
                 "the match condition must gate on the safely-read isHidden value, not the raw \
                  property read, in the {bundle_id} script"
             );
@@ -977,33 +1100,127 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn scripts_refuse_to_relaunch_a_quit_browser() {
-        // `tell application id "X"` launches a non-running app. The poller
-        // runs every 3s for the life of a share, so without this guard,
-        // quitting the shared browser mid-meeting relaunches it on the very
-        // next poll.
+    fn scripts_target_the_owner_pid_never_the_bundle_id() {
+        // Two processes sharing a bundle id (a regular plus an automation
+        // instance) made bundle-id AND JXA `Application(<pid>)` events reach
+        // the wrong one: `cause=no-match` forever. Only raw events addressed
+        // with `descriptorWithProcessIdentifier` are pid-bound (measured live).
         for bundle_id in [
             "com.apple.Safari",
             "com.apple.SafariTechnologyPreview",
             "com.google.Chrome",
             "org.chromium.Chromium",
+            "com.operasoftware.Opera",
         ] {
-            let script = script_for_bundle(bundle_id, "Petal").expect("supported browser");
-            let guard = format!(r#"if application id "{bundle_id}" is not running then return """#);
+            let script = script_for_bundle(bundle_id, 54935, "Petal").expect("supported browser");
             assert!(
-                script.contains(&guard),
-                "expected a not-running guard in the {bundle_id} script before its `tell` block"
+                script.contains("descriptorWithProcessIdentifier(54935)"),
+                "script for {bundle_id} must send raw events to the pid: {script}"
             );
-            let guard_index = script.find(&guard).expect("guard present");
-            let tell_index = script
-                .find(&format!(r#"tell application id "{bundle_id}""#))
-                .expect("tell block present");
             assert!(
-                guard_index < tell_index,
-                "the not-running guard must run before the `tell` block for {bundle_id}, or the \
-                 `tell` itself launches the app first"
+                !script.contains("application id"),
+                "script for {bundle_id} must not address the app by bundle id: {script}"
+            );
+            assert!(
+                !script.contains("Application("),
+                "JXA Application(...) is not pid-bound; {bundle_id} script must not use it: {script}"
+            );
+            assert!(
+                !script.contains(bundle_id),
+                "the bundle id must not appear in the {bundle_id} script at all: {script}"
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scripts_use_the_dictionary_of_their_browser_family() {
+        let chrome = script_for_bundle("com.google.Chrome", 1, "T").expect("chrome");
+        assert!(chrome.contains("prop('URL ', prop('acTa', w))"));
+        assert!(!chrome.contains("cTab"));
+        let safari = script_for_bundle("com.apple.Safari", 1, "T").expect("safari");
+        assert!(safari.contains("prop('pURL', prop('cTab', w))"));
+        assert!(!safari.contains("acTa"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn script_for_bundle_rejects_a_non_positive_pid() {
+        assert!(script_for_bundle("com.google.Chrome", 0, "T").is_none());
+        assert!(script_for_bundle("com.google.Chrome", -5, "T").is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hostile_titles_stay_inside_a_json_string_literal() {
+        let title = "a\"); doShellScript(\"rm -rf ~\") //\nline2\\ \u{2028}";
+        let literal = js_string(title);
+        assert_eq!(
+            literal,
+            "\"a\\\"); doShellScript(\\\"rm -rf ~\\\") //\\nline2\\\\ \\u2028\""
+        );
+        for bundle_id in ["com.google.Chrome", "com.apple.Safari"] {
+            let script = script_for_bundle(bundle_id, 7, title).expect("supported browser");
+            assert!(
+                script.contains(&format!("var targetTitle = {literal};")),
+                "title must appear only as the escaped literal in the {bundle_id} script"
+            );
+            // The raw payload (unescaped quote followed by `);`) must not
+            // appear anywhere: every `"` from the title is backslash-escaped.
+            assert!(!script.contains("a\"); doShellScript"));
+            assert!(!script.contains('\u{2028}'));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn classify_maps_the_diagnostic_sentinels_to_distinct_outcomes() {
+        use crate::platform::osascript::OsascriptOutcome;
+        let classify =
+            |out: &str| classify_osascript_outcome(OsascriptOutcome::Ok(out.to_string()));
+        assert_eq!(classify("PETAL_GONE\n"), UrlExtraction::ProcessGone);
+        assert_eq!(classify("PETAL_NOWINDOWS\n"), UrlExtraction::NoWindows);
+        assert_eq!(
+            classify("PETAL_NOMATCH:3\n"),
+            UrlExtraction::TitleMismatch(3)
+        );
+        assert_eq!(classify("PETAL_NOMATCH:oops\n"), UrlExtraction::Empty);
+        assert_eq!(
+            classify("https://example.com/a?b=1\n"),
+            UrlExtraction::Url("https://example.com/a".to_string())
+        );
+    }
+
+    #[test]
+    fn diagnostic_outcomes_have_distinct_non_terminal_causes() {
+        let cases: &[(UrlExtraction, &str)] = &[
+            (UrlExtraction::ProcessGone, "process-gone"),
+            (UrlExtraction::NoWindows, "no-windows"),
+            (UrlExtraction::TitleMismatch(2), "title-mismatch"),
+        ];
+        for (outcome, cause) in cases {
+            assert_eq!(outcome.cause(), *cause);
+            assert!(!outcome.is_terminal());
+            assert_eq!(outcome.url(), None);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn diagnostic_outcomes_map_to_their_own_sentry_tags() {
+        use crate::logging::BrowserUrlExtractionCauseTag as Tag;
+        assert_eq!(
+            browser_url_extraction_cause_tag(&UrlExtraction::ProcessGone),
+            Some(Tag::ProcessGone)
+        );
+        assert_eq!(
+            browser_url_extraction_cause_tag(&UrlExtraction::NoWindows),
+            Some(Tag::NoWindows)
+        );
+        assert_eq!(
+            browser_url_extraction_cause_tag(&UrlExtraction::TitleMismatch(1)),
+            Some(Tag::TitleMismatch)
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -1013,5 +1230,4 @@ mod tests {
         assert!(address_bar_candidate_score("", "", "urlbar-input") > 0);
         assert!(address_bar_candidate_score("A page link", "", "") == 0);
     }
-
 }

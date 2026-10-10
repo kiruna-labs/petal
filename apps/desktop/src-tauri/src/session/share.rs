@@ -2208,6 +2208,11 @@ struct SourceWindowInfo {
     /// removes; see `browser_extraction_target`'s doc comment for the one
     /// remaining caller that still needs a standalone lookup).
     bundle_id: Option<String>,
+    /// Owning process id of the shared window (`ShareableWindow::app_pid`).
+    /// URL extraction targets THIS process, not the bundle id: two running
+    /// instances of one browser share a bundle id and Apple Events by bundle
+    /// id can reach the wrong one.
+    owner_pid: Option<i32>,
     raw_title: Option<String>,
 }
 
@@ -2241,6 +2246,7 @@ fn source_info_for_window(window_id: u32) -> SourceWindowInfo {
                     title: fallback_source_title(window_id),
                     url: None,
                     bundle_id: None,
+                    owner_pid: None,
                     raw_title: None,
                 };
             };
@@ -2264,6 +2270,7 @@ fn source_info_for_window(window_id: u32) -> SourceWindowInfo {
                 title,
                 url: None,
                 bundle_id: Some(w.app_bundle_id),
+                owner_pid: Some(w.app_pid).filter(|pid| *pid > 0),
                 raw_title,
             }
         }
@@ -2273,6 +2280,7 @@ fn source_info_for_window(window_id: u32) -> SourceWindowInfo {
                 title: fallback_source_title(window_id),
                 url: None,
                 bundle_id: None,
+                owner_pid: None,
                 raw_title: None,
             }
         }
@@ -2292,7 +2300,7 @@ fn source_info_for_window(window_id: u32) -> SourceWindowInfo {
 /// threading a cached bundle id through `ShareRestartSnapshot`, and the
 /// title only matters as a first-tick fallback now that the poller reads
 /// the live title on every attempt -- see `effective_title`).
-fn browser_extraction_target(window_id: u32) -> Option<(String, Option<String>)> {
+fn browser_extraction_target(window_id: u32) -> Option<(String, Option<i32>, Option<String>)> {
     let windows = crate::window_source::list().ok()?;
     let w = windows.into_iter().find(|w| w.window_id == window_id)?;
     let raw_title = w
@@ -2301,7 +2309,11 @@ fn browser_extraction_target(window_id: u32) -> Option<(String, Option<String>)>
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string);
-    Some((w.app_bundle_id, raw_title))
+    Some((
+        w.app_bundle_id,
+        Some(w.app_pid).filter(|pid| *pid > 0),
+        raw_title,
+    ))
 }
 
 /// #915: resolve the title to use for one refresh-poller tick. `live` is a
@@ -2375,6 +2387,7 @@ fn spawn_share_url_refresh(
     started_seq: u64,
     eligible: bool,
     bundle_id: Option<String>,
+    owner_pid: Option<i32>,
     start_title: Option<String>,
 ) -> Option<UrlRefreshTask> {
     if !eligible {
@@ -2387,8 +2400,12 @@ fn spawn_share_url_refresh(
     if !crate::browser_url::is_supported_bundle_id(&bundle_id) {
         return None;
     }
+    let Some(owner_pid) = owner_pid else {
+        log::warn!("session: window {window_id} has no owner pid; no browser URL refresh poller");
+        return None;
+    };
     log::debug!(
-        "session: window {window_id} spawning browser URL refresh (seq {started_seq}, bundle {bundle_id})"
+        "session: window {window_id} spawning browser URL refresh (seq {started_seq}, bundle {bundle_id}, pid {owner_pid})"
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     let run_cancel = cancel.clone();
@@ -2422,6 +2439,7 @@ fn spawn_share_url_refresh(
                     tokio::task::spawn_blocking(move || {
                         crate::browser_url::extract_url_for_window(
                             &bundle_id,
+                            owner_pid,
                             title.as_deref(),
                             attempt.timeout,
                         )
@@ -4916,6 +4934,7 @@ async fn start_share_with_capture_source(
         started_seq,
         source_kind == SharedSourceKind::Window && !has_source_title_override,
         source_info.bundle_id,
+        source_info.owner_pid,
         source_info.raw_title,
     );
 
@@ -6543,15 +6562,15 @@ fn spawn_pump_failure_recovery(
         // enumeration) inline on this task would be exactly the
         // blocking-on-async-task class #915 removes from the share-start
         // path, just relocated to the restart path.
-        let (restart_bundle_id, restart_start_title) = if had_url_refresh {
+        let (restart_bundle_id, restart_owner_pid, restart_start_title) = if had_url_refresh {
             tokio::task::spawn_blocking(move || browser_extraction_target(window_id))
                 .await
                 .ok()
                 .flatten()
-                .map(|(bundle_id, title)| (Some(bundle_id), title))
-                .unwrap_or((None, None))
+                .map(|(bundle_id, pid, title)| (Some(bundle_id), pid, title))
+                .unwrap_or((None, None, None))
         } else {
-            (None, None)
+            (None, None, None)
         };
         let mut new_url_refresh = spawn_share_url_refresh(
             snapshot.room_connection.clone(),
@@ -6560,6 +6579,7 @@ fn spawn_pump_failure_recovery(
             started_seq,
             had_url_refresh,
             restart_bundle_id,
+            restart_owner_pid,
             restart_start_title,
         );
         let replaced = {
