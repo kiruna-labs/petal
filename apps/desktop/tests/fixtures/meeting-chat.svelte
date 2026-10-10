@@ -10,7 +10,19 @@
   // size (the window becomes the pill below GALLERY_BREAKPOINT, 520 px).
   const base = Date.UTC(2026, 8, 29, 16, 0, 0);
   const person = (identity: string, name: string) => ({ identity, name });
+  // A long history for the scroll test: `window.__chatCount` extra lines.
+  const extraCount = (window as unknown as { __chatCount?: number }).__chatCount ?? 0;
   let messages = $state<ChatMessage[]>([
+    ...Array.from({ length: extraCount }, (_, i) => ({
+      id: `m-long-${String(i).padStart(4, '0')}`,
+      text: i % 4 === 0 ? 'A longer history line so the list wraps and keeps growing past the panel height.' : `History ${i + 1}`,
+      t: base - 3_600_000 + i * 30_000,
+      sender: i % 2 ? person('theo-1', 'Theo') : person('mira-1', 'Mira'),
+      self: false,
+      relayed: false,
+      via: null,
+      local: false
+    })),
     ...Array.from({ length: 8 }, (_, i) => ({
       id: `m-layout-${String(i).padStart(4, '0')}`,
       text: i % 3 === 0 ? 'A longer line so the list has something to wrap at narrow widths.' : `Message ${i + 1}`,
@@ -72,6 +84,10 @@
   />
 {/snippet}
 
+<!-- The meeting route's own wrappers (routes/meeting/[room]/+page.svelte). -->
+<main>
+  <div class="frame">
+    <div class="chrome-shell">
 <MeetingChrome
   roomName="meeting-chat-fixture"
   elapsed="12:00"
@@ -84,3 +100,19 @@
   {pluginActions}
   onControl={(icon) => (window as unknown as { __controls: string[] }).__controls.push(icon)}
 />
+      <!-- Same box and stacking as lib/plugins/PluginSurfaces.svelte's overlay and the host's
+           overlay frame (shared/plugin-host/host.ts): full-viewport, pointer-events none, z 5. -->
+      <div class="plugin-overlay">
+        <iframe title="Reactions overlay" sandbox="allow-scripts" srcdoc="<!doctype html><body></body>"></iframe>
+      </div>
+    </div>
+  </div>
+</main>
+
+<style>
+  main { display: flex; height: 100%; width: 100%; background: var(--bg-base-2); box-sizing: border-box; overscroll-behavior: none; }
+  .frame { position: relative; width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; }
+  .chrome-shell { position: relative; height: 100%; overflow-y: auto; overscroll-behavior: none; }
+  .plugin-overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
+  .plugin-overlay iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; pointer-events: none; }
+</style>

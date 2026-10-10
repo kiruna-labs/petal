@@ -1577,7 +1577,7 @@ html:has(> body > #meeting-screen:not(.hidden)) {
     position: absolute;
     inset: 0 0 0 auto;
     width: 100%;
-    z-index: 5;
+    z-index: 6; /* above the plugin overlay (5); see ChatDrawer's .chat-drawer */
   }
 }
 /* A phone in landscape (#246): the body row the top bar, control bar and
