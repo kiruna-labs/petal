@@ -378,6 +378,11 @@
 
 <style>
   .chat-drawer {
+    /* Paint above the full-viewport plugin overlay (z-index 5). WebKit routes wheel
+       input by paint order and ignores the overlay frame's pointer-events:none, so a
+       drawer painted below it cannot wheel-scroll its history. */
+    position: relative;
+    z-index: 6;
     display: flex;
     flex-direction: column;
     height: 100%;

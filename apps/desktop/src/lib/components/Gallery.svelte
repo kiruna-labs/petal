@@ -1558,7 +1558,8 @@
       position: absolute;
       inset: 0;
       width: auto;
-      z-index: 5;
+      /* Above the plugin overlay (z 5): see ChatDrawer's .chat-drawer. */
+      z-index: 6;
     }
   }
   .control-cell.collapsed {
