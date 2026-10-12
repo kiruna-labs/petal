@@ -4,11 +4,14 @@ import { test } from 'node:test';
 import {
   computeGalleryLayout,
   computeGalleryLayoutPreferringLines,
+  computeGalleryLayoutScrollingColumn,
+  SCROLL_COLUMN_MIN_TILE_HEIGHT,
   GAP_COMPACT,
   GAP_TINY,
   scoreGalleryCandidate,
   tierGap
 } from '@petal/shared/logic/galleryGeometry';
+import { CAMERA_TILE_ASPECT_RANGE } from '@petal/shared/logic/cameraCrop';
 import { computeSpotlightGeometry } from '@petal/shared/logic/spotlightGeometry';
 
 // #P0: apps/desktop/src/lib/galleryLayout.ts used to hard-code a 2x2 grid for
@@ -178,11 +181,14 @@ test('a roomy layout keeps the base gap', () => {
 
 test("gap tiering applies to a forced 'column' arrangement too", () => {
   const layout = computeGalleryLayout(20, 400, 600, { arrangement: 'column' });
-  assert.equal(layout.gap, GAP_TINY);
-  // Unchanged from the pre-gap-tiering behavior: the minTileHeight clamp
-  // still wins regardless of which gap tier fed into it.
+  // #204: once the clamp makes the container scroll, the gap follows the
+  // 400x96 track the user sees (compact), not the sliver 20 rows would get.
+  assert.equal(layout.gap, GAP_COMPACT);
   assert.equal(layout.overflow, true);
   assert.equal(layout.tileHeight, 96);
+  // Not scrolling: the tier still comes from the fitted cell.
+  assert.equal(computeGalleryLayout(20, 400, 3000, { arrangement: 'column' }).overflow, false);
+  assert.equal(layout.tiny, false);
 });
 
 // #239: the web client's phone breakpoints pass a 10px/9px base gap. The
@@ -356,4 +362,56 @@ test('wrapSideStrip: a bar spotlight puts its thumbnails in a row beside the her
   assert.ok(tiny.thumbnailHeight >= 54, 'still recognisable');
   // A strip that already fits in one column is left alone.
   assert.deepEqual(computeSpotlightGeometry(2, 1240, 634, 12, undefined, { wrapSideStrip: true }), computeSpotlightGeometry(2, 1240, 634, 12));
+});
+
+// #204 (decision c): vertical is automatic. A tall window with too many people
+// for readable faces packs ONE column of minimum-height tiles and scrolls.
+const camera = { tileAspectRange: CAMERA_TILE_ASPECT_RANGE } as const;
+
+test('a tall 400px window packs 12 and 20 people as one scrolling column, never tiles under the minimum', () => {
+  // 400px-wide window: 344px of tiles after 28px padding.
+  for (const [count, height] of [[12, 600], [20, 900]] as const) {
+    for (const pack of [computeGalleryLayoutPreferringLines, computeGalleryLayoutScrollingColumn]) {
+      const layout = pack(count, 344, height, camera);
+      assert.equal(layout.columns, 1, `${count} people, ${pack.name}`);
+      assert.equal(layout.rows, count);
+      assert.equal(layout.overflow, true, 'the surface must scroll');
+      assert.equal(layout.tileHeight, SCROLL_COLUMN_MIN_TILE_HEIGHT, 'tiles stop shrinking at the minimum');
+      assert.ok(layout.rows * layout.tileHeight + (layout.rows - 1) * layout.gap > height, 'the column is taller than the surface');
+    }
+  }
+});
+
+test('a window that can show readable faces keeps its grid, and a wide one never scrolls', () => {
+  const roomy = computeGalleryLayoutPreferringLines(12, 344, 1000, camera);
+  assert.equal(roomy.overflow, false);
+  assert.ok(roomy.columns > 1 && roomy.tileHeight >= SCROLL_COLUMN_MIN_TILE_HEIGHT);
+  const wide = computeGalleryLayoutScrollingColumn(30, 1600, 500, camera);
+  assert.equal(wide.overflow, false, 'only a tall surface scrolls');
+  assert.equal(computeGalleryLayoutScrollingColumn(1, 344, 900, camera).overflow, false);
+});
+
+test('a scrolling column keeps its density tier and gap from the tile the user sees', () => {
+  const layout = computeGalleryLayoutScrollingColumn(20, 344, 900, camera);
+  assert.equal(layout.cellHeight, layout.tileHeight, 'the track is the tile, not the share of the container it did not get');
+  assert.equal(layout.tiny, false, 'a 96px face is not a tiny cell just because 20 of them do not fit');
+});
+
+test('a scrolling column has hysteresis: it holds until the grid clears the minimum by a margin', () => {
+  // Find a height where the grid's tiles sit just under the minimum.
+  let boundary = 0;
+  for (let h = 400; h < 1200; h += 1) {
+    if (!computeGalleryLayoutScrollingColumn(14, 344, h, camera).overflow) {
+      boundary = h;
+      break;
+    }
+  }
+  assert.ok(boundary > 0);
+  assert.equal(computeGalleryLayoutScrollingColumn(14, 344, boundary - 1, camera).overflow, true);
+  assert.equal(
+    computeGalleryLayoutScrollingColumn(14, 344, boundary, { ...camera, previousOverflowed: true }).overflow,
+    true,
+    'still scrolling one pixel past the boundary when it was scrolling before'
+  );
+  assert.equal(computeGalleryLayoutScrollingColumn(14, 344, boundary + 400, { ...camera, previousOverflowed: true }).overflow, false);
 });

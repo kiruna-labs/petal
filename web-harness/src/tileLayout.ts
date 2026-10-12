@@ -1,7 +1,7 @@
 import type { HarnessContext, HarnessState, TileLayoutMode } from './context';
 import { HARNESS_TILE_LAYOUT_STORAGE_KEY } from './constants';
 import { getTileReflowController } from './tileReflow.ts';
-import { computeGalleryLayout } from '@petal/shared/logic/galleryGeometry';
+import { computeGalleryLayoutScrollingColumn } from '@petal/shared/logic/galleryGeometry';
 import { CAMERA_TILE_ASPECT_RANGE } from '@petal/shared/logic/cameraCrop';
 import {
   computeSpotlightGeometry,
@@ -81,7 +81,7 @@ export function setupTileLayout(ctx: HarnessContext) {
   // the computed cells; the shape (columns x rows, tile px, gap) comes from
   // here. `lastGalleryLayout` feeds hysteresis so a near-tied shape does not
   // flip during a drag-resize.
-  let lastGalleryLayout: { count: number; columns: number; rows: number } | null = null;
+  let lastGalleryLayout: { count: number; columns: number; rows: number; overflow: boolean } | null = null;
 
   function cssPx(value: string | null | undefined): number {
     const parsed = parseFloat(value ?? '');
@@ -172,13 +172,17 @@ export function setupTileLayout(ctx: HarnessContext) {
     // share is in the grid every cell stays 16:9: a shared window is never
     // cropped, and one shape per grid keeps the cells even.
     const cameraOnly = shareTileCount() === 0;
-    const layout = computeGalleryLayout(count, width, height, {
+    // #204: a tall surface with too many people for readable faces packs ONE
+    // column of minimum-height tiles and `.tiles` (overflow: auto) scrolls it.
+    const layout = computeGalleryLayoutScrollingColumn(count, width, height, {
       gap,
       arrangement: 'auto',
       previous: lastGalleryLayout,
+      previousOverflowed: lastGalleryLayout?.count === count && lastGalleryLayout.overflow,
       tileAspectRange: cameraOnly ? CAMERA_TILE_ASPECT_RANGE : null,
     });
-    lastGalleryLayout = { count, columns: layout.columns, rows: layout.rows };
+    lastGalleryLayout = { count, columns: layout.columns, rows: layout.rows, overflow: layout.overflow };
+    tilesEl.classList.toggle('layout-scroll', layout.overflow);
     tilesEl.style.setProperty('--gallery-cols', String(layout.columns));
     // The half-column track count (style.css `.tiles`), precomputed: older
     // WebKit rejects `repeat(calc(...), ...)` and would drop the template.

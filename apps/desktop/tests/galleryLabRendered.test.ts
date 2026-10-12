@@ -169,6 +169,67 @@ test('the native gallery lays out every window shape: a column, a bar, centred s
     assert.equal(tall.stripPlacement, 'below');
     assert.ok(tall.stripCentreOffset !== null && Math.abs(tall.stripCentreOffset) <= 2, `centred: ${tall.stripCentreOffset}`);
 
+    // #204 (decision c): vertical is automatic. A tall 400px window with too
+    // many people for readable faces is ONE column that scrolls -- the tiles
+    // stop at their minimum height instead of shrinking -- and every name
+    // stays fully visible at that width.
+    const readNames = () =>
+      page.evaluate(`(() => {
+        const scroller = document.querySelector('.gallery .tiles');
+        const box = scroller.getBoundingClientRect();
+        const wraps = [...document.querySelectorAll('.tile-wrap[data-participant-key]')];
+        return {
+          scrollable: scroller.classList.contains('scrollable'),
+          scrolls: scroller.scrollHeight > scroller.clientHeight + 1,
+          overflowsSideways: scroller.scrollWidth > scroller.clientWidth + 1,
+          scrollerWidth: box.width,
+          tiles: wraps.map((wrap) => {
+            const tile = wrap.getBoundingClientRect();
+            const chip = wrap.querySelector('.name-chip');
+            const label = wrap.querySelector('.name-chip-visible');
+            const centred = wrap.querySelector('.camera-off-name.active');
+            const chipRect = chip?.getBoundingClientRect();
+            return {
+              left: Math.round(tile.left), width: Math.round(tile.width), height: Math.round(tile.height),
+              hasName: !!(label?.textContent?.trim() || centred?.textContent?.trim()),
+              labelFits: !label || label.scrollWidth <= label.clientWidth + 1,
+              // The hidden measuring span sits inside the chip, so scrollWidth is not
+              // the chip's own content: compare the visible label's box to the chip's.
+              chipFits: !chip || !label || label.getBoundingClientRect().right <= chip.getBoundingClientRect().right + 1,
+              text: label?.textContent?.trim() ?? '',
+              chipInsideTile: !chipRect || (chipRect.left >= tile.left - 1 && chipRect.right <= tile.right + 1),
+              centredFits: !centred || centred.scrollWidth <= centred.clientWidth + 1
+            };
+          })
+        };
+      })()`) as Promise<{
+        scrollable: boolean; scrolls: boolean; overflowsSideways: boolean; scrollerWidth: number;
+        tiles: Array<{ left: number; width: number; height: number; hasName: boolean; text: string; labelFits: boolean; chipFits: boolean; chipInsideTile: boolean; centredFits: boolean }>;
+      }>;
+    for (const cell of [
+      { w: 400, h: 600, n: 12, mode: 'grid', extra: '&long=1' },
+      { w: 400, h: 900, n: 20, mode: 'grid', extra: '&long=1' },
+      { w: 400, h: 900, n: 16, mode: 'grid', extra: '&long=1&off=4' }
+    ] as Cell[]) {
+      const reading = await show(cell);
+      const names = await readNames();
+      assert.equal(distinct(reading.tiles.map((t) => t.rect.left)), 1, `${query(cell)}: one column ${JSON.stringify([reading.tileSurface, reading.tiles.slice(0, 4).map((t) => t.rect), reading.galleryClasses])}`);
+      assert.equal(names.scrollable && names.scrolls, true, `${query(cell)}: the column scrolls`);
+      assert.equal(names.overflowsSideways, false, `${query(cell)}: nothing sideways`);
+      assert.ok(reading.smallestTile.height >= 96 - 1, `${query(cell)}: tiles stop at the minimum (${reading.smallestTile.height}px)`);
+      for (const [index, tile] of names.tiles.entries()) {
+        const where = `${query(cell)} tile ${index} ${JSON.stringify(tile)}`;
+        assert.ok(tile.hasName, `${where}: has a name`);
+        assert.ok(tile.labelFits && tile.chipFits && tile.centredFits, `${where}: the name fits its chip`);
+        assert.ok(tile.chipInsideTile, `${where}: the chip stays inside the tile`);
+        assert.ok(tile.left >= 0 && tile.left + tile.width <= names.scrollerWidth + 1, `${where}: the tile is inside the window`);
+      }
+    }
+    // A tall window that CAN show readable faces keeps its grid: no scroll.
+    await show({ w: 400, h: 1100, n: 12, mode: 'grid', extra: '&long=1' });
+    const roomy = await readNames();
+    assert.equal(roomy.scrollable || roomy.scrolls, false, 'twelve people with room do not scroll');
+
     assert.deepEqual(pageErrors, []);
   } finally {
     await browser?.close();

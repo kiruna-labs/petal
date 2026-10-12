@@ -315,6 +315,52 @@ test('#239 a short last row sits centred under the full rows: 5 tiles as 3+2, 7 
   }
 });
 
+test('#204 a tall window with too many people packs one column that scrolls, tiles held at the minimum', { timeout: 60_000 }, async () => {
+  // Decision (c): vertical is automatic. 20 tiles in a narrow portrait window
+  // would otherwise shrink to slivers; the shared packer returns one column of
+  // minimum-height tiles and `.tiles` (overflow: auto) scrolls it.
+  const tall = { viewport: { width: 400, height: 900 } };
+  const page = await openMeeting(tall, 20);
+  try {
+    await setLayout(page, 'Grid view');
+    const read = () =>
+      page.evaluate(() => {
+        const tiles = document.querySelector<HTMLElement>('#tiles')!;
+        const cells = [...tiles.querySelectorAll<HTMLElement>(':scope > .tile')].map((tile) => tile.getBoundingClientRect());
+        const style = getComputedStyle(tiles);
+        return {
+          scrollClass: tiles.classList.contains('layout-scroll'),
+          scrolls: tiles.scrollHeight > tiles.clientHeight + 1,
+          sideways: tiles.scrollWidth > tiles.clientWidth + 1,
+          lefts: new Set(cells.map((c) => Math.round(c.left))).size,
+          shortest: Math.min(...cells.map((c) => c.height)),
+          insideWidth: cells.every((c) => c.left >= 0 && c.right <= tiles.getBoundingClientRect().right + 1),
+          overflowY: style.overflowY,
+        };
+      });
+    const crowded = await read();
+    assert.equal(crowded.scrollClass, true, 'twenty people in 400px pack the scrolling column');
+    assert.equal(crowded.lefts, 1, 'one column');
+    assert.ok(crowded.shortest >= 95, `tiles stop at the minimum (${crowded.shortest}px)`);
+    assert.ok(crowded.scrolls && crowded.overflowY !== 'visible', 'the tile surface scrolls');
+    assert.equal(crowded.sideways, false);
+    assert.ok(crowded.insideWidth);
+    assert.equal(await documentScrolls(page), false, 'only the tile surface scrolls, never the page');
+    // Few people keep the ordinary grid: no scroll.
+    await page.evaluate(() => {
+      const tiles = document.querySelector('#tiles')!;
+      [...tiles.querySelectorAll(':scope > .tile')].slice(3).forEach((tile) => tile.remove());
+      window.dispatchEvent(new Event('resize'));
+    });
+    await setLayout(page, 'Grid view');
+    await page.waitForTimeout(350);
+    const few = await read();
+    assert.equal(few.scrollClass, false, 'three people do not scroll');
+  } finally {
+    await page.context().close();
+  }
+});
+
 // #239's scroll-with-a-peek test lived here. Its own comment called it a
 // "Stopgap until the ⋯ overflow (#247)": controls that did not fit scrolled,
 // and Chat was lifted so it stayed on screen. #247 has landed, so controls

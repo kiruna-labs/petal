@@ -189,7 +189,7 @@
   let spotlightRailEl = $state<HTMLDivElement>();
   let spotlightRailWidth = $state(0);
   let spotlightRailHeight = $state(0);
-  let lastGalleryLayout: { count: number; columns: number; rows: number; line: boolean } | null = null;
+  let lastGalleryLayout: { count: number; columns: number; rows: number; line: boolean; overflow: boolean } | null = null;
   let inviteTooltipElement = $state<HTMLSpanElement>();
   let inviteTooltipShift = $state(0);
   const activeGalleryTileAnimations = new Map<string, Animation>();
@@ -382,7 +382,6 @@
   );
   const galleryChromeStyle = $derived(`--rail-rows: ${railRows};`);
 
-  const gridOverflowScroll = $derived(false);
   // `lastGalleryLayout` is a plain (non-reactive) closure variable, not
   // `$state` -- it feeds `previous` back into computeGalleryLayout for
   // hysteresis (keep the current shape unless another clears it by a
@@ -395,12 +394,16 @@
     const layout = computeGalleryLayoutPreferringLines(participantEntries.length, tileSurfaceWidth, tileSurfaceHeight, {
       previous: lastGalleryLayout,
       previousWasLine: lastGalleryLayout?.count === participantEntries.length && lastGalleryLayout.line,
+      previousOverflowed: lastGalleryLayout?.count === participantEntries.length && lastGalleryLayout.overflow,
       tileAspectRange: CAMERA_TILE_ASPECT_RANGE,
       gap: compactWindow ? COMPACT_TILE_GAP_PX : undefined
     });
-    lastGalleryLayout = { count: participantEntries.length, columns: layout.columns, rows: layout.rows, line: layout.line };
+    lastGalleryLayout = { count: participantEntries.length, columns: layout.columns, rows: layout.rows, line: layout.line, overflow: layout.overflow };
     return layout;
   });
+  // #204: a tall window with too many people for readable faces is ONE column
+  // that scrolls (the shared packer decides), never a grid of shrinking tiles.
+  const gridOverflowScroll = $derived(smartGridLayout.overflow);
   const smartGridStyle = $derived(
     `--gallery-cols: ${smartGridLayout.columns}; --gallery-half-cols: ${smartGridLayout.columns * 2}; --gallery-rows: ${smartGridLayout.rows}; --gallery-tile-width: ${smartGridLayout.tileWidth}px; --gallery-tile-height: ${smartGridLayout.tileHeight}px; --gallery-gap: ${smartGridLayout.gap}px; --camera-tile-min-aspect: ${CAMERA_TILE_ASPECT_RANGE.min};`
   );
@@ -1914,8 +1917,19 @@
     gap: var(--gallery-gap);
   }
 
+  /* #204: an automatic single column that outgrows the window scrolls. The
+     row tracks must be FIXED: `minmax(0, h)` shrinks to the container's
+     height, which is exactly the tiles-shrinking-below-the-minimum this
+     avoids. */
   .tiles.grid.scrollable {
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    grid-template-rows: repeat(var(--gallery-rows), var(--gallery-tile-height));
+  }
+
+  .tiles.grid.scrollable.with-state {
+    grid-template-rows: auto repeat(var(--gallery-rows), var(--gallery-tile-height));
   }
 
   .tiles.grid.with-state {

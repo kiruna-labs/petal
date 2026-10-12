@@ -225,22 +225,31 @@ function forcedLineCandidate(
   let overflow = false;
   let tileWidth = tile.width;
   let tileHeight = tile.height;
+  let cellWidth = cell.width;
+  let cellHeight = cell.height;
+  let finalGap = gap;
   if (tileHeight < minTileHeight) {
     overflow = true;
     tileWidth = minTileHeight * tile.aspect;
     tileHeight = minTileHeight;
+    // The container will scroll, so the cell is the clamped tile's own track,
+    // not the (smaller) share of the container it did not get: the density
+    // tier and the gap follow the faces the user actually sees.
+    cellWidth = arrangement === 'column' ? width : (width - baseGap * (columns - 1)) / columns;
+    cellHeight = arrangement === 'column' ? minTileHeight : height;
+    finalGap = tierGap(baseGap, densityFlags(cellWidth, cellHeight));
   }
   const containerArea = width * height;
   const fill = containerArea > 0 ? Math.min(1, (count * tileWidth * tileHeight) / containerArea) : 0;
-  const flags = densityFlags(cell.width, cell.height);
+  const flags = densityFlags(cellWidth, cellHeight);
   return {
     columns,
     rows,
-    cellWidth: cell.width,
-    cellHeight: cell.height,
+    cellWidth,
+    cellHeight,
     tileWidth,
     tileHeight,
-    gap,
+    gap: finalGap,
     fill,
     overflow,
     ...flags
@@ -356,9 +365,21 @@ export function computeGalleryLayoutPreferringLines(
   count: number,
   width: number,
   height: number,
-  opts: GalleryGeometryOptions & { previousWasLine?: boolean } = {}
+  opts: GalleryGeometryOptions & { previousWasLine?: boolean; previousOverflowed?: boolean } = {}
 ): GalleryGeometry & { line: boolean } {
-  const { previousWasLine = false, ...packerOpts } = opts;
+  const { previousWasLine = false, previousOverflowed = false, ...packerOpts } = opts;
+  const lined = packLinePreferred(count, width, height, { ...packerOpts, previousWasLine });
+  const scrolled = withScrollingColumn(lined, count, width, height, { ...packerOpts, previousOverflowed });
+  return scrolled === lined ? lined : { ...scrolled, line: true };
+}
+
+function packLinePreferred(
+  count: number,
+  width: number,
+  height: number,
+  opts: GalleryGeometryOptions & { previousWasLine: boolean }
+): GalleryGeometry & { line: boolean } {
+  const { previousWasLine, ...packerOpts } = opts;
   const grid = computeGalleryLayout(count, width, height, packerOpts);
   const safeWidth = safeDimension(width, DEFAULT_WIDTH);
   const safeHeight = safeDimension(height, DEFAULT_HEIGHT);
@@ -371,4 +392,50 @@ export function computeGalleryLayoutPreferringLines(
   const line = computeGalleryLayout(count, width, height, { ...packerOpts, arrangement, previous: null, minTileHeight: 0 });
   const needed = previousWasLine ? LINE_KEEP_RATIO : 1;
   return line.tileHeight >= grid.tileHeight * needed ? { ...line, line: true } : { ...grid, line: false };
+}
+
+/** A grid whose tiles would be shorter than this is not a gallery anyone can
+ * read faces in; a tall window gives up the grid for a scrolling column. */
+export const SCROLL_COLUMN_MIN_TILE_HEIGHT = DEFAULT_MIN_TILE_HEIGHT;
+/** Once a tall window scrolls, it keeps scrolling until the grid's tiles clear
+ * the minimum by this much, so a drag-resize does not flip at one pixel. */
+const SCROLL_KEEP_RATIO = 1.08;
+
+/**
+ * Many participants in a tall window (#204, automatic vertical). When the
+ * packed shape's tiles would fall below `minTileHeight` and the surface is
+ * taller than wide, the answer is ONE column of minimum-height tiles that the
+ * surface scrolls -- never a grid of ever smaller faces. `overflow` on the
+ * result says the surface must scroll. Anything else passes through.
+ * `previousOverflowed` is the hysteresis for that choice.
+ */
+export function withScrollingColumn<T extends GalleryGeometry>(
+  packed: T,
+  count: number,
+  width: number,
+  height: number,
+  opts: GalleryGeometryOptions & { previousOverflowed?: boolean } = {}
+): T | GalleryGeometry {
+  const safeWidth = safeDimension(width, DEFAULT_WIDTH);
+  const safeHeight = safeDimension(height, DEFAULT_HEIGHT);
+  const minTileHeight = opts.minTileHeight ?? SCROLL_COLUMN_MIN_TILE_HEIGHT;
+  if (count < 2 || safeHeight <= safeWidth || (opts.arrangement ?? 'auto') !== 'auto') return packed;
+  const needed = opts.previousOverflowed ? minTileHeight * SCROLL_KEEP_RATIO : minTileHeight;
+  if (packed.tileHeight >= needed) return packed;
+  // The column's tiles are never shorter than `minTileHeight`, which is more
+  // than the packed shape's (it is below `needed`), so no comparison here.
+  return computeGalleryLayout(count, safeWidth, safeHeight, { ...opts, arrangement: 'column', minTileHeight });
+}
+
+/** `computeGalleryLayout` for a client that has no bar/column line preference
+ * (the web grid): the best packed shape, or the scrolling column above. */
+export function computeGalleryLayoutScrollingColumn(
+  count: number,
+  width: number,
+  height: number,
+  opts: GalleryGeometryOptions & { previousOverflowed?: boolean } = {}
+): GalleryGeometry {
+  const { previousOverflowed, ...packerOpts } = opts;
+  const grid = computeGalleryLayout(count, width, height, packerOpts);
+  return withScrollingColumn(grid, count, width, height, { ...packerOpts, previousOverflowed });
 }

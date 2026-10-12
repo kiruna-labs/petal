@@ -1668,6 +1668,16 @@ html:has(> body > #meeting-screen:not(.hidden)) {
   overflow: auto;
 }
 
+/* #204: a tall surface with too many people for readable faces packs one
+   column (tileLayout.ts adds .layout-scroll) and `.tiles` scrolls it. The row
+   tracks must be FIXED: `minmax(0, h)` shrinks to the container's height,
+   which is the tiles-shrinking-below-the-minimum this avoids. */
+.tiles.layout-grid.layout-scroll {
+  grid-template-rows: repeat(var(--gallery-rows), var(--gallery-tile-height));
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 .tiles.layout-grid > .tile {
   grid-column-end: span 2;
   width: min(100%, var(--gallery-tile-width));
