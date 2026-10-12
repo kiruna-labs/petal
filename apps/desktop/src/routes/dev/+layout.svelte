@@ -7,6 +7,7 @@
   // auto-enumerate sibling routes, so a new dev harness needs a line here too.
   const harnesses = [
     { path: '/dev/components', label: 'Components' },
+    { path: '/dev/gallery-lab', label: 'Gallery layout lab' },
     { path: '/dev/main-menu', label: 'Main menu' },
     { path: '/dev/menubar-popover', label: 'Menubar popover' },
     { path: '/dev/network-cockpit', label: 'Network cockpit' },

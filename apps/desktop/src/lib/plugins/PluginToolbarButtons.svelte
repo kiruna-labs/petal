@@ -17,12 +17,24 @@
 
   interface Props {
     buttons: ToolbarButtonModel[];
+    /** `${pluginId}/${buttonId}` keys the gallery's control row has moved
+     * into More (Gallery.svelte): their cells are hidden, and a click (the
+     * More row clicks the real button) anchors the popover to More. */
+    hidden?: ReadonlySet<string>;
     onActivate: (pluginId: string, buttonId: string, anchor: HTMLElement) => void;
     /** Right-click on a plugin control: open the plugin menu at viewport coordinates. */
     onMenu?: (pluginId: string, at: { x: number; y: number }) => void;
   }
 
-  let { buttons, onActivate, onMenu }: Props = $props();
+  let { buttons, hidden, onActivate, onMenu }: Props = $props();
+
+  const keyOf = (button: ToolbarButtonModel) => `${button.pluginId}/${button.buttonId}`;
+
+  /** The button itself, or More while the button is in More's menu. */
+  function anchorFor(button: ToolbarButtonModel, el: HTMLElement): HTMLElement {
+    if (!hidden?.has(keyOf(button))) return el;
+    return el.closest('.controls-cluster')?.querySelector<HTMLElement>('[data-control="more"] button') ?? el;
+  }
 
   function contextMenu(event: MouseEvent, pluginId: string) {
     if (!onMenu) return;
@@ -38,6 +50,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="control-cell plugin-cell"
+    class:collapsed={hidden?.has(keyOf(button))}
     data-plugin={button.pluginId}
     data-button={button.buttonId}
     oncontextmenu={(event) => contextMenu(event, button.pluginId)}
@@ -49,7 +62,7 @@
       title={pluginProvenanceTitle(button.pluginName, button.pluginSource)}
       aria-haspopup={button.opens ? 'dialog' : undefined}
       disabled={button.disabled}
-      onclick={(event) => onActivate(button.pluginId, button.buttonId, event.currentTarget)}
+      onclick={(event) => onActivate(button.pluginId, button.buttonId, anchorFor(button, event.currentTarget))}
     >
       <span class="glyph" aria-hidden="true">{@html pluginIconSvg(button.icon, 20)}</span>
       {#if badgeText(button.badge) !== null}
@@ -64,10 +77,16 @@
   .control-cell {
     position: relative;
     display: flex;
+    flex: 0 0 auto;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     min-width: 52px;
+  }
+
+  /* In the gallery's More menu (Gallery.svelte's control-row fit). */
+  .control-cell.collapsed {
+    display: none;
   }
 
   .plugin-button {

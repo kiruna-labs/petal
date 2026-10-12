@@ -56,9 +56,9 @@ you into the meeting.
 
 ![The meeting window with two participants and the control bar](../../../assets/screenshots/meeting-window.png)
 
-The meeting window shows the room name, a timer, and a tile for each
-participant (camera video when it's on, the person's name when it's off).
-Along the bottom:
+The meeting window shows the room name (hover the top bar for the meeting
+timer) and a tile for each participant (camera video when it's on, the
+person's name when it's off). Along the bottom:
 
 - **Mic** and **Camera** — toggle each; the small arrow beside them picks a
   device.
@@ -75,6 +75,13 @@ compact bar** — a small floating pill with the same controls that stays out
 of the way while you work. Expand it again from the pill. On macOS the global
 shortcut `⌘⌃⇧P` brings the pill back to the front from anywhere, and
 `⌘⌃⇧S` toggles sharing of the window you last shared.
+
+The meeting window can be any shape. Drag it narrow and tall to keep a
+column of faces beside your editor, or short and wide to keep a row of faces
+along the top of your screen: the tiles rearrange to fit, and in a short
+window the controls move to a column at the right edge while the room name
+and the top-bar icons appear when you point at the window. Drag it small in
+both directions and it becomes the pill.
 
 When a teammate starts sharing, a short notice appears at the top-center of
 your screen — "*Name* is sharing a window" — with a **Bring to foreground**

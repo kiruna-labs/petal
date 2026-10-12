@@ -3,11 +3,13 @@ import { test } from 'node:test';
 
 import {
   computeGalleryLayout,
+  computeGalleryLayoutPreferringLines,
   GAP_COMPACT,
   GAP_TINY,
   scoreGalleryCandidate,
   tierGap
 } from '@petal/shared/logic/galleryGeometry';
+import { computeSpotlightGeometry } from '@petal/shared/logic/spotlightGeometry';
 
 // #P0: apps/desktop/src/lib/galleryLayout.ts used to hard-code a 2x2 grid for
 // 3-4 participants and start its column search at 2, so a single column was
@@ -276,4 +278,82 @@ test("a forced line with a range keeps the clamped tile's own aspect when it ove
   assert.equal(layout.overflow, true);
   assert.equal(layout.tileHeight, 96);
   assert.ok(Math.abs(layout.tileWidth - 96 * (16 / 9)) < 1e-9);
+});
+
+// The layout lab (scripts/verify-native-gallery-matrix.mjs): a bar of faces
+// along the top of the screen and a column of faces beside an editor read as
+// ONE line whenever that shows faces at least as tall as a grid -- camera
+// tiles crop their sides, so a face follows its tile's height, not its area.
+test('a bar of faces is one row of shorter tiles, not two rows of smaller faces', () => {
+  // 9 people in a 1100x170 window: the tiles' box beside the control rail.
+  const grid = computeGalleryLayout(9, 944, 154, { gap: 8, tileAspectRange: CAMERA_RANGE });
+  assert.ok(grid.rows > 1, 'area alone packs two rows');
+  const bar = computeGalleryLayoutPreferringLines(9, 944, 154, { gap: 8, tileAspectRange: CAMERA_RANGE });
+  assert.equal(bar.line, true);
+  assert.deepEqual([bar.columns, bar.rows], [9, 1]);
+  assert.ok(bar.tileHeight > grid.tileHeight, `faces ${bar.tileHeight}px tall vs ${grid.tileHeight}px`);
+  assert.equal(bar.overflow, false);
+});
+
+test('a column of faces stays one column while that keeps the faces as tall', () => {
+  const column = computeGalleryLayoutPreferringLines(4, 276, 640, { gap: 8, tileAspectRange: CAMERA_RANGE });
+  assert.equal(column.line, true);
+  assert.deepEqual([column.columns, column.rows], [1, 4]);
+  // Twelve people in the same column: one line would shrink every face, so
+  // the grid wins.
+  const crowded = computeGalleryLayoutPreferringLines(12, 276, 640, { gap: 8, tileAspectRange: CAMERA_RANGE });
+  assert.equal(crowded.line, false);
+  assert.ok(crowded.columns > 1);
+});
+
+test('an ordinary window keeps its grid, and a showing line has hysteresis', () => {
+  // The default meeting window: 2x2 beats a row of four narrow tiles.
+  const regular = computeGalleryLayoutPreferringLines(4, 784, 364, { tileAspectRange: CAMERA_RANGE });
+  assert.equal(regular.line, false);
+  assert.deepEqual([regular.columns, regular.rows], [2, 2]);
+  // Same as the plain packer away from long, thin surfaces.
+  assert.deepEqual(
+    computeGalleryLayoutPreferringLines(6, 1240, 634, { tileAspectRange: CAMERA_RANGE }),
+    { ...computeGalleryLayout(6, 1240, 634, { tileAspectRange: CAMERA_RANGE }), line: false }
+  );
+  // Find a bar where the row is just under the grid's face height: a fresh
+  // layout picks the grid, one already showing the row keeps it.
+  let found = false;
+  for (let height = 120; height <= 260 && !found; height += 2) {
+    const grid = computeGalleryLayout(9, 944, height, { gap: 8, tileAspectRange: CAMERA_RANGE });
+    const row = computeGalleryLayout(9, 944, height, { gap: 8, tileAspectRange: CAMERA_RANGE, arrangement: 'row', minTileHeight: 0 });
+    if (grid.rows > 1 && row.tileHeight < grid.tileHeight && row.tileHeight >= grid.tileHeight * 0.9) {
+      found = true;
+      assert.equal(computeGalleryLayoutPreferringLines(9, 944, height, { gap: 8, tileAspectRange: CAMERA_RANGE }).line, false);
+      assert.equal(
+        computeGalleryLayoutPreferringLines(9, 944, height, { gap: 8, tileAspectRange: CAMERA_RANGE, previousWasLine: true }).line,
+        true
+      );
+    }
+  }
+  assert.ok(found, 'a near-tie bar exists to exercise the hysteresis');
+});
+
+test('wrapSideStrip: a bar spotlight puts its thumbnails in a row beside the hero; off by default', () => {
+  const plain = computeSpotlightGeometry(5, 1254, 204, 8);
+  assert.equal(plain.placement, 'side');
+  assert.equal(plain.stripColumns, 1, 'the web client keeps its one scrolling column');
+  assert.ok(5 * plain.thumbnailHeight > 204, 'which scrolls in a bar');
+  const wrapped = computeSpotlightGeometry(5, 1254, 204, 8, undefined, { wrapSideStrip: true });
+  assert.equal(wrapped.placement, 'side');
+  assert.equal(wrapped.stripColumns, 5, 'one row of five beside the hero');
+  assert.ok(wrapped.thumbnailHeight <= 204, 'every thumbnail fits the height');
+  assert.ok(Math.abs(wrapped.heroHeight - 204) < 0.5, 'the hero keeps the full height');
+  assert.ok(wrapped.heroWidth + 8 + wrapped.stripSize <= 1254 + 0.5, 'hero and strip fit the width');
+  assert.ok(wrapped.thumbnailWidth * wrapped.thumbnailHeight * 2 <= wrapped.heroWidth * wrapped.heroHeight, 'the hero stays the biggest picture');
+  // The shortest gallery (160px tall, 132px for the spotlight): two rows of
+  // three beside the hero, every face in view, rather than one column and a
+  // half that scrolls.
+  const tiny = computeSpotlightGeometry(5, 689, 132, 8, undefined, { wrapSideStrip: true });
+  assert.equal(tiny.placement, 'side');
+  assert.equal(tiny.stripColumns, 3);
+  assert.ok(2 * tiny.thumbnailHeight + 8 <= 132, `two rows fit (${tiny.thumbnailHeight}px each)`);
+  assert.ok(tiny.thumbnailHeight >= 54, 'still recognisable');
+  // A strip that already fits in one column is left alone.
+  assert.deepEqual(computeSpotlightGeometry(2, 1240, 634, 12, undefined, { wrapSideStrip: true }), computeSpotlightGeometry(2, 1240, 634, 12));
 });

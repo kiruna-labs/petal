@@ -98,14 +98,21 @@ test('spotlight rail thumbnail name-chip and muted-chip reuse the compact tier, 
 // (0738c91f left `grid-auto-columns: minmax(118px, 150px)` on `.spotlight-rail`
 // inside the `@media (max-width: 620px)` block after the base rule moved to
 // an aspect-ratio-driven width) must never come back. A regex test alone is
-// not sufficient evidence -- see scripts/verify-spotlight-rail.mjs for the
-// real rendered-pixel check -- but it is a cheap, fast extra guard.
+// not sufficient evidence -- tests/galleryLabRendered.test.ts and
+// scripts/verify-native-gallery-matrix.mjs measure the real rendered spotlight
+// (no overlaps, the strip centred) -- but it is a cheap, fast extra guard.
 test('spotlight rail has no grid-auto-columns override left over from the pre-0738c91f grid layout', () => {
   assert.doesNotMatch(gallery, /\.spotlight-rail\s*{\s*grid-auto-columns/);
   assert.doesNotMatch(gallery, /grid-auto-columns:\s*minmax\(118px,\s*150px\)/);
 });
 
-test('spotlight rail and thumbnails use flex, not grid, so tracks cannot over-stretch at wide window widths', () => {
-  assert.match(gallery, /\.spotlight-rail\s*{[\s\S]*display:\s*flex;/);
-  assert.match(gallery, /\.tile-wrap\.spotlight-thumb\s*{[\s\S]*flex:\s*0 0 auto;/);
+test('spotlight thumbnails take one fixed size, so nothing can over-stretch them at wide window widths', () => {
+  // #239 parity: one size for every thumbnail from the shared geometry --
+  // never auto tracks a grid could stretch (the 0738c91f gaps).
+  assert.match(gallery, /\.tile-wrap\.spotlight-thumb\s*{[^}]*flex:\s*0 0 auto;[^}]*width:\s*var\(--thumb-w, 160px\);[^}]*height:\s*var\(--thumb-h, 90px\);/);
+  // Below the hero: centred rows that wrap.
+  assert.match(gallery, /\.tiles\.spotlight \.spotlight-rail\.below\s*{[^}]*display:\s*flex;[^}]*flex-wrap:\s*wrap;[^}]*justify-content:\s*center;/);
+  // Beside it: a grid of fixed tracks, the hero's and the thumbnails'.
+  assert.match(gallery, /grid-template-columns:\s*var\(--hero-w\) repeat\(var\(--strip-cols, 1\), var\(--thumb-w\)\);/);
+  assert.doesNotMatch(gallery, /grid-auto-columns/);
 });

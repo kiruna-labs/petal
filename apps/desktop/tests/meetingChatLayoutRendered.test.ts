@@ -1,6 +1,8 @@
 // The desktop meeting window with the chat open, at every gallery size (the
-// window becomes the pill below GALLERY_BREAKPOINT, 520 px; tauri.conf.json
-// minHeight is 360). The chat panel lives between the gallery's topbar and
+// window becomes the pill only when narrower than GALLERY_BREAKPOINT, 520 px,
+// AND shorter than GALLERY_PILL_HEIGHT; windowGeometry.ts galleryCollapsesToPill;
+// tests/galleryLabRendered.test.ts covers the narrower and shorter shapes).
+// The chat panel lives between the gallery's topbar and
 // control bar: a 320 px column beside the tiles from 720 px, over the tiles
 // below that. At every size the composer and Send are on screen and not
 // covered, every control is on screen and not covered, and nothing scrolls
@@ -54,6 +56,8 @@ function measure(page: Page): Promise<Layout> {
         outOfView.push(`${name} (missing)`);
         continue;
       }
+      // A collapsed plugin button lives in More (checked below), not on screen.
+      if (name === 'react' && el.closest('.control-cell')?.classList.contains('collapsed')) continue;
       const b = el.getBoundingClientRect();
       if (b.width < 1 || b.height < 1 || b.left < -0.5 || b.top < -0.5 || b.right > vw + 0.5 || b.bottom > vh + 0.5) {
         outOfView.push(`${name} [${Math.round(b.left)},${Math.round(b.top)},${Math.round(b.right)},${Math.round(b.bottom)}]`);
@@ -116,6 +120,7 @@ test('meeting chat keeps composer and controls usable at every gallery size', { 
 
     // 1. Every gallery size, chat open.
     const sizes: Array<[number, number]> = [
+      [420, 600], [480, 600],
       [520, 600], [560, 600], [614, 600], [640, 600], [719, 600], [720, 600],
       [900, 600], [1000, 700], [1440, 900], [520, 360], [900, 360],
     ];
@@ -132,7 +137,14 @@ test('meeting chat keeps composer and controls usable at every gallery size', { 
         assert.equal(Math.round(layout.panel.width), 320, `${label}: a 320 px column`);
         assert.ok(layout.tiles.right <= layout.panel.left + 0.5, `${label}: tiles sit beside the panel`);
       } else {
-        assert.equal(Math.round(layout.panel.width), width, `${label}: the panel covers the tiles`);
+        // Over the tiles, never the controls: the whole width, or -- in a
+        // short window, whose controls stand in a rail at the right edge --
+        // the width left of the rail.
+        assert.ok(
+          layout.panel.left <= layout.tiles.left + 0.5 && layout.panel.right >= layout.tiles.right - 0.5,
+          `${label}: the panel covers the tiles: ${JSON.stringify({ panel: layout.panel, tiles: layout.tiles })}`
+        );
+        assert.equal(Math.round(layout.panel.width), height < 420 ? Math.round(layout.tiles.right - layout.tiles.left) : width, `${label}: the panel's width`);
       }
       // Chat stays reachable: its own control, or a More row.
       if (layout.collapsed.includes('chat')) {
@@ -149,9 +161,10 @@ test('meeting chat keeps composer and controls usable at every gallery size', { 
     // More, More carries the count, the More row opens chat, and growing the
     // window brings Invite and Chat back.
     {
-      const page = await openFixture(browser, buildDir, 520, 600, 'window.__chatOpen = false; window.__chatUnread = 3;');
+      const page = await openFixture(browser, buildDir, 480, 600, 'window.__chatOpen = false; window.__chatUnread = 3;');
       const layout = await measure(page);
-      assert.deepEqual(layout.collapsed, ['invite', 'chat'], '520 px: Invite then Chat collapse into More');
+      // Collapse order is the web client's: plugin buttons first, then Invite, then Chat.
+      assert.deepEqual(layout.collapsed, ['invite', 'chat', '?'], '480 px: plugin buttons, then Invite, then Chat collapse into More');
       assert.equal(layout.panel, null);
       assert.equal(await page.locator('[data-testid="more-chat-badge"]').textContent(), '3', 'More carries the unread count');
       await page.click('.controlbar button[aria-label="More meeting controls"]');
@@ -165,7 +178,7 @@ test('meeting chat keeps composer and controls usable at every gallery size', { 
       assert.equal(await page.locator('[data-testid="more-chat-badge"]').count(), 0, 'no More badge once Chat is back');
       await page.setViewportSize({ width: 560, height: 600 });
       await page.waitForFunction(() => document.querySelectorAll('.control-cell.collapsed').length === 1, null, { timeout: 5_000 });
-      assert.deepEqual((await measure(page)).collapsed, ['invite'], '560 px: only Invite collapses');
+      assert.deepEqual((await measure(page)).collapsed, ['?'], '560 px: only the plugin button collapses (Invite and Chat stay)');
       await page.close();
     }
 

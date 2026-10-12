@@ -81,7 +81,7 @@ test('desktop smart field joins strict credentials instead of creating from them
   assert.match(mainMenuActionSource, /onJoinByCode\?\.\(credential, accessCode\)/);
 });
 
-test('desktop meeting-name header actions are reserved and reveal on topbar hover/focus; elapsed is always visible', () => {
+test('desktop meeting-name header actions and elapsed time are reserved and reveal on topbar hover/focus', () => {
   assert.match(
     gallerySource,
     /<span class="room-title">[\s\S]*class="room-name"[\s\S]*class="room-title-actions"[\s\S]*class="elapsed"/
@@ -95,14 +95,17 @@ test('desktop meeting-name header actions are reserved and reveal on topbar hove
     gallerySource,
     /\.topbar:hover \.room-title-actions,\s*\.room-title:has\(:focus-visible\) \.room-title-actions\s*{[\s\S]*opacity:\s*1;[\s\S]*pointer-events:\s*auto;/
   );
-  // The live meeting timer is status, not chrome: always visible (UX sweep —
-  // the old hover-only opacity hid it for the whole meeting).
+  // The running time shows on demand only (owner call), like the web client:
+  // hidden at rest, revealed while the top bar is hovered or keyboard focus is
+  // in the title row, and its width stays reserved so the name never moves.
   assert.match(
     gallerySource,
-    /\.elapsed\s*{[\s\S]*font-variant-numeric:\s*tabular-nums;[\s\S]*opacity:\s*1;/
+    /\.elapsed\s*{[^}]*font-variant-numeric:\s*tabular-nums;[^}]*opacity:\s*0;[^}]*transition:\s*opacity var\(--motion-fast\) var\(--ease-standard\);/
   );
-  assert.doesNotMatch(gallerySource, /\.topbar:hover \.elapsed/);
-  assert.doesNotMatch(gallerySource, /\.room-title:has\(:focus-visible\) \.elapsed/);
+  assert.match(
+    gallerySource,
+    /\.topbar:hover \.elapsed,\s*\.room-title:has\(:focus-visible\) \.elapsed\s*{\s*opacity:\s*1;\s*}/
+  );
   assert.match(gallerySource, /color:\s*var\(--text-faint\);/);
   assert.match(
     gallerySource,

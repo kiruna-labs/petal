@@ -334,3 +334,41 @@ export function computeGalleryLayout(
     ...flags
   };
 }
+
+/** A tile surface at least this many times wider than tall (or taller than
+ * wide) is a line: a bar of faces along the top of the screen, a column of
+ * faces beside an editor. */
+export const LINE_SURFACE_ASPECT = 2;
+/** Once a line is showing it is kept while its faces stay this close to the
+ * grid's, so a drag-resize does not flip between the two at one pixel. */
+const LINE_KEEP_RATIO = 0.9;
+
+/**
+ * `computeGalleryLayout`, but a long, thin surface keeps everyone in ONE
+ * line -- a row in a bar, a column in a column -- whenever that shows faces
+ * at least as tall as the best grid (camera tiles crop their sides within
+ * the shared caps, so a face's size follows its tile's height, not its
+ * area). Nine people in a bar of faces get one shorter row instead of two
+ * rows of wide, smaller faces. `previousWasLine` is the hysteresis for that
+ * choice; `opts.previous` still steadies the grid itself.
+ */
+export function computeGalleryLayoutPreferringLines(
+  count: number,
+  width: number,
+  height: number,
+  opts: GalleryGeometryOptions & { previousWasLine?: boolean } = {}
+): GalleryGeometry & { line: boolean } {
+  const { previousWasLine = false, ...packerOpts } = opts;
+  const grid = computeGalleryLayout(count, width, height, packerOpts);
+  const safeWidth = safeDimension(width, DEFAULT_WIDTH);
+  const safeHeight = safeDimension(height, DEFAULT_HEIGHT);
+  const arrangement =
+    safeWidth >= safeHeight * LINE_SURFACE_ASPECT ? 'row' : safeHeight >= safeWidth * LINE_SURFACE_ASPECT ? 'column' : null;
+  if (count < 2 || !arrangement || (packerOpts.arrangement ?? 'auto') !== 'auto') return { ...grid, line: false };
+  if ((arrangement === 'row' && grid.rows === 1) || (arrangement === 'column' && grid.columns === 1)) {
+    return { ...grid, line: true };
+  }
+  const line = computeGalleryLayout(count, width, height, { ...packerOpts, arrangement, previous: null, minTileHeight: 0 });
+  const needed = previousWasLine ? LINE_KEEP_RATIO : 1;
+  return line.tileHeight >= grid.tileHeight * needed ? { ...line, line: true } : { ...grid, line: false };
+}

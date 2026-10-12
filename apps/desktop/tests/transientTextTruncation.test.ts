@@ -1034,6 +1034,7 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
       const thumbs = Array.from(document.querySelectorAll('.spotlight-thumb')).map((tile) => tile.getBoundingClientRect());
       const railElement = document.querySelector('.spotlight-rail');
       return {
+        placement: railElement?.classList.contains('side') ? 'side' : 'below',
         rail: rail ? { left: rail.left, right: rail.right, top: rail.top, bottom: rail.bottom } : null,
         main: main ? { left: main.left, right: main.right, top: main.top, bottom: main.bottom, width: main.width, height: main.height } : null,
         mainPosition: mainElement ? getComputedStyle(mainElement).position : null,
@@ -1047,8 +1048,17 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     assert.equal(spotlightGeometry.mainPosition, 'sticky');
     assert.ok(spotlightGeometry.main.left >= spotlightGeometry.rail.left - 1);
     assert.ok(spotlightGeometry.main.right <= spotlightGeometry.rail.right + 1);
-    assert.ok(spotlightGeometry.thumbs.every((thumb) => thumb.top >= spotlightGeometry.main.bottom - 1 && thumb.bottom <= spotlightGeometry.rail.bottom + 1));
-    assert.ok(spotlightGeometry.thumbs[1].left >= spotlightGeometry.thumbs[0].right + 11, `spotlight thumbnails overlap: ${JSON.stringify(spotlightGeometry)}`);
+    // Shared spotlight geometry (#239 parity): the thumbnails sit beside the
+    // hero in a wide window and in rows under it in a tall one, inside the
+    // rail either way, never overlapping it or each other.
+    const { main, rail, thumbs } = spotlightGeometry;
+    if (spotlightGeometry.placement === 'side') {
+      assert.ok(thumbs.every((thumb) => thumb.left >= main.right - 1 && thumb.right <= rail.right + 1), `side thumbnails: ${JSON.stringify(spotlightGeometry)}`);
+      assert.ok(thumbs[1].top >= thumbs[0].bottom + 7, `spotlight thumbnails overlap: ${JSON.stringify(spotlightGeometry)}`);
+    } else {
+      assert.ok(thumbs.every((thumb) => thumb.top >= main.bottom - 1 && thumb.bottom <= rail.bottom + 1), `thumbnails below: ${JSON.stringify(spotlightGeometry)}`);
+      assert.ok(thumbs[1].left >= thumbs[0].right + 7, `spotlight thumbnails overlap: ${JSON.stringify(spotlightGeometry)}`);
+    }
 
     // Selecting a different hero while the spotlight branch stays mounted
     // exercises the keyed hero block and the hero↔rail FLIP pair.

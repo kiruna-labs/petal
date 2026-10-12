@@ -690,9 +690,10 @@
   />
 {/snippet}
 
-{#snippet pluginActions()}
+{#snippet pluginActions(hidden: ReadonlySet<string>)}
   <PluginToolbarButtons
     buttons={pluginButtons}
+    {hidden}
     onActivate={(p, b, el) => pluginsRef?.activate(p, b, el)}
     onMenu={(p, at) => pluginsRef?.openMenu(p, at)}
   />
