@@ -718,6 +718,9 @@
       pluginCellKeys = keys;
       barWidthAtLevel.length = 0;
       fitLevel = 0;
+      // Re-measure once the reset row has rendered: nothing else re-runs the
+      // fit until the next resize, leaving a narrow row clipped.
+      void tick().then(() => refitControls());
       return;
     }
     if (railControls) return;

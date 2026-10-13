@@ -34,10 +34,11 @@ interface Cell {
   h: number;
   n: number;
   mode: 'grid' | 'spotlight';
+  plugins?: number;
   extra?: string;
 }
 
-const query = (cell: Cell) => `w=${cell.w}&h=${cell.h}&n=${cell.n}&mode=${cell.mode}&plugins=1${cell.extra ?? ''}`;
+const query = (cell: Cell) => `w=${cell.w}&h=${cell.h}&n=${cell.n}&mode=${cell.mode}&plugins=${cell.plugins ?? 1}${cell.extra ?? ''}`;
 const distinct = (values: number[]) => new Set(values.map((value) => Math.round(value))).size;
 
 test('the native gallery lays out every window shape: a column, a bar, centred spotlight strips', { timeout: 180_000 }, async () => {
@@ -108,6 +109,14 @@ test('the native gallery lays out every window shape: a column, a bar, centred s
     // Inside the band where the control row once flipped its labels on and
     // off every two frames (judgeGalleryLab samples 20 idle frames).
     await show({ w: 470, h: 800, n: 4, mode: 'grid' });
+    // A plugin button that arrives (or leaves) after the row has fit, as the
+    // meeting route's async plugin load does, must refit rather than leave the
+    // full row clipped in a narrow window.
+    for (const w of [300, 360, 580]) {
+      await show({ w, h: 900, n: 4, mode: 'grid', plugins: 0 });
+      await show({ w, h: 900, n: 4, mode: 'grid', plugins: 1 });
+      await show({ w, h: 900, n: 4, mode: 'grid', plugins: 0 });
+    }
     // A short column -- narrow, and too short for a top bar row: the top bar
     // floats there too, and the smallest narrow gallery before the pill.
     const shortColumn = await show({ w: 300, h: 450, n: 4, mode: 'grid' });
