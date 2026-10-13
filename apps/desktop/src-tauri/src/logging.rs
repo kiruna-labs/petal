@@ -8428,7 +8428,7 @@ mod tests {
         let mut zip = ZipArchive::new(file).unwrap();
 
         let mut names = (0..zip.len())
-            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
             .collect::<Vec<_>>();
         names.sort();
         assert_eq!(
@@ -8476,7 +8476,7 @@ mod tests {
         let mut zip = ZipArchive::new(file).unwrap();
 
         let mut names = (0..zip.len())
-            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
             .collect::<Vec<_>>();
         names.sort();
         assert_eq!(
@@ -8548,7 +8548,7 @@ mod tests {
         let bytes = build_feedback_attachment_zip_from(&log_path).unwrap();
         let mut zip = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut names = (0..zip.len())
-            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
             .collect::<Vec<_>>();
         names.sort();
         assert_eq!(
