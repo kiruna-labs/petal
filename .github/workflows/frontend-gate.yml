@@ -121,9 +121,9 @@ jobs:
       # installs. With the browser already present `pretest` is then a no-op.
       # The test helpers resolve `chrome-headless-shell-linux64` out of the
       # playwright cache on their own, so no PETAL_CHROME_BIN is needed.
-      - name: Install Chromium headless shell + Linux deps
+      - name: Install Chromium headless shell + WebKit + Linux deps
         if: env.RUN == 'true'
-        run: npx playwright install --with-deps chromium-headless-shell
+        run: npx playwright install --with-deps chromium-headless-shell webkit
 
       # This gate runs `npm test`'s stages by hand so it can exclude ONE
       # macOS-only test (below). That means the two can drift, which is how
@@ -250,10 +250,10 @@ jobs:
         working-directory: apps/desktop
         run: npm ci
 
-      - name: Install Chromium headless shell + Linux deps
+      - name: Install Chromium headless shell + WebKit + Linux deps
         if: env.RUN == 'true'
         working-directory: apps/desktop
-        run: npx playwright install --with-deps chromium-headless-shell
+        run: npx playwright install --with-deps chromium-headless-shell webkit
 
       - if: env.RUN == 'true'
         run: npm test

@@ -30,6 +30,7 @@ type Page = {
   addInitScript(script: string): Promise<void>;
   evaluate<R = unknown>(script: string): Promise<R>;
   goto(url: string, options?: object): Promise<unknown>;
+  setContent(html: string): Promise<void>;
   waitForFunction(script: string, arg?: unknown, options?: object): Promise<unknown>;
   waitForTimeout(ms: number): Promise<void>;
   setViewportSize(size: { width: number; height: number }): Promise<void>;
