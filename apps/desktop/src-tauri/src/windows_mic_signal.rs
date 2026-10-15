@@ -7,7 +7,7 @@
 //! captured and logs a line whenever the signal state changes, plus a
 //! heartbeat, so a log shows when the signal stopped or resumed without
 //! anyone noting times. [`DeadMicDetector`] turns the same signal into the
-//! decision to move capture to another microphone.
+//! decision to ask the user whether to move capture to another microphone.
 
 /// Cumulative capture counters from WebRTC's `media-source` stats for the mic.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -176,29 +176,47 @@ impl MicSignalProbe {
 }
 
 /// Silent observations in a row (about 6s) before the mic counts as dead. A
-/// live mic's noise floor never reads as digital silence, muted or not.
+/// live mic's noise floor never reads as digital silence, whether or not Petal
+/// has it muted.
 const DEAD_AFTER: u32 = 3;
 
-/// Pure: decides when the microphone capture is on has gone dead.
+/// Pure: decides when to ask whether the microphone capture is on has gone
+/// dead.
+///
+/// Digital silence is not proof on its own. A mic muted at the Windows
+/// endpoint (a laptop's mic-mute key, Sound settings, a headset's mute
+/// button) captures exact silence, and so do noise-gated headsets and virtual
+/// noise-removal mics between words. So silence from a muted endpoint never
+/// counts, the user is asked rather than switched, and each device is asked
+/// about at most once per call.
 #[derive(Default)]
 pub(crate) struct DeadMicDetector {
     device: String,
     silent: u32,
+    asked: std::collections::HashSet<String>,
 }
 
 impl DeadMicDetector {
     /// True once, after `DEAD_AFTER` silent observations in a row of the same
-    /// device. Any other signal or a device change starts the count again; a
-    /// baseline-only observation (`None`) neither counts nor resets.
-    pub(crate) fn observe(&mut self, device_id: &str, signal: Option<Signal>) -> bool {
+    /// device, unless the user was already asked about it. A silent
+    /// observation from an endpoint Windows has muted, any other signal, or a
+    /// device change starts the count again; a baseline-only observation
+    /// (`None`) neither counts nor resets. `endpoint_muted` is only called for
+    /// a silent observation.
+    pub(crate) fn observe(
+        &mut self,
+        device_id: &str,
+        signal: Option<Signal>,
+        endpoint_muted: impl FnOnce() -> bool,
+    ) -> bool {
         if self.device != device_id {
             self.device = device_id.to_owned();
             self.silent = 0;
         }
         match signal {
-            Some(Signal::Silent) if !device_id.is_empty() => {
+            Some(Signal::Silent) if !device_id.is_empty() && !endpoint_muted() => {
                 self.silent += 1;
-                self.silent == DEAD_AFTER
+                self.silent == DEAD_AFTER && !self.asked.contains(device_id)
             }
             None => false,
             Some(_) => {
@@ -206,6 +224,11 @@ impl DeadMicDetector {
                 false
             }
         }
+    }
+
+    /// The user was asked about `device_id`: don't ask again this call.
+    pub(crate) fn asked(&mut self, device_id: &str) {
+        self.asked.insert(device_id.to_owned());
     }
 }
 
@@ -323,36 +346,93 @@ mod tests {
         assert!(logged[14] && logged[29], "every 15th observation");
     }
 
+    const SILENT: Option<Signal> = Some(Signal::Silent);
+    const UNMUTED: fn() -> bool = || false;
+
     #[test]
     fn a_mic_is_dead_after_three_silent_observations_and_fires_once() {
         let mut detector = DeadMicDetector::default();
-        let silent = Some(Signal::Silent);
-        assert!(!detector.observe("corsair", None), "baseline");
-        assert!(!detector.observe("corsair", silent));
-        assert!(!detector.observe("corsair", silent));
-        assert!(detector.observe("corsair", silent), "about 6s of silence");
-        assert!(!detector.observe("corsair", silent), "only once");
-        assert!(!detector.observe("corsair", silent));
+        assert!(!detector.observe("corsair", None, UNMUTED), "baseline");
+        assert!(!detector.observe("corsair", SILENT, UNMUTED));
+        assert!(!detector.observe("corsair", SILENT, UNMUTED));
+        assert!(
+            detector.observe("corsair", SILENT, UNMUTED),
+            "about 6s of silence"
+        );
+        assert!(!detector.observe("corsair", SILENT, UNMUTED), "only once");
+        assert!(!detector.observe("corsair", SILENT, UNMUTED));
     }
 
     #[test]
     fn live_or_stalled_signal_and_device_changes_restart_the_count() {
         let mut detector = DeadMicDetector::default();
-        let silent = Some(Signal::Silent);
-        detector.observe("corsair", silent);
-        detector.observe("corsair", silent);
-        assert!(!detector.observe("corsair", Some(Signal::Live)), "speech resets");
-        assert!(!detector.observe("corsair", silent));
-        assert!(!detector.observe("corsair", Some(Signal::Stalled)));
-        assert!(!detector.observe("corsair", silent));
-        assert!(!detector.observe("corsair", silent));
-        assert!(!detector.observe("webcam", silent), "new device, new count");
-        assert!(!detector.observe("webcam", silent));
-        assert!(detector.observe("webcam", silent));
+        detector.observe("corsair", SILENT, UNMUTED);
+        detector.observe("corsair", SILENT, UNMUTED);
+        assert!(
+            !detector.observe("corsair", Some(Signal::Live), UNMUTED),
+            "speech resets"
+        );
+        assert!(!detector.observe("corsair", SILENT, UNMUTED));
+        assert!(!detector.observe("corsair", Some(Signal::Stalled), UNMUTED));
+        assert!(!detector.observe("corsair", SILENT, UNMUTED));
+        assert!(!detector.observe("corsair", SILENT, UNMUTED));
+        assert!(
+            !detector.observe("webcam", SILENT, UNMUTED),
+            "new device, new count"
+        );
+        assert!(!detector.observe("webcam", SILENT, UNMUTED));
+        assert!(detector.observe("webcam", SILENT, UNMUTED));
         // No known device: never declared dead.
         let mut unknown = DeadMicDetector::default();
         for _ in 0..5 {
-            assert!(!unknown.observe("", silent));
+            assert!(!unknown.observe("", SILENT, UNMUTED));
         }
+    }
+
+    #[test]
+    fn silence_from_an_endpoint_windows_has_muted_never_counts() {
+        let mut detector = DeadMicDetector::default();
+        detector.observe("laptop", SILENT, UNMUTED);
+        detector.observe("laptop", SILENT, UNMUTED);
+        // The mic-mute key: the endpoint goes silent because it is muted.
+        for _ in 0..10 {
+            assert!(
+                !detector.observe("laptop", SILENT, || true),
+                "muted at the endpoint"
+            );
+        }
+        // Unmuted again and still silent: a fresh count.
+        assert!(!detector.observe("laptop", SILENT, UNMUTED));
+        assert!(!detector.observe("laptop", SILENT, UNMUTED));
+        assert!(detector.observe("laptop", SILENT, UNMUTED));
+    }
+
+    #[test]
+    fn the_endpoint_mute_is_only_read_for_a_silent_observation() {
+        let mut detector = DeadMicDetector::default();
+        let unread = || -> bool { panic!("endpoint mute read for a non-silent observation") };
+        detector.observe("corsair", None, unread);
+        detector.observe("corsair", Some(Signal::Live), unread);
+        detector.observe("corsair", Some(Signal::Stalled), unread);
+        detector.observe("corsair", Some(Signal::Unavailable), unread);
+    }
+
+    #[test]
+    fn a_device_is_asked_about_at_most_once_per_call() {
+        // A noise-gated headset: silent at every pause, live between them.
+        let mut detector = DeadMicDetector::default();
+        let pause = |detector: &mut DeadMicDetector| {
+            detector.observe("gated", Some(Signal::Live), UNMUTED);
+            (0..DEAD_AFTER).any(|_| detector.observe("gated", SILENT, UNMUTED))
+        };
+        assert!(pause(&mut detector), "the first long pause asks");
+        detector.asked("gated");
+        for _ in 0..5 {
+            assert!(!pause(&mut detector), "later pauses do not ask again");
+        }
+        // Not asked (no other mic to offer): the next long pause may ask.
+        let mut detector = DeadMicDetector::default();
+        assert!(pause(&mut detector));
+        assert!(pause(&mut detector));
     }
 }

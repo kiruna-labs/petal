@@ -4,7 +4,9 @@ import {
   MISSING_DEVICE,
   MISSING_DEVICE_LABEL,
   pickerValue,
+  SILENT_MIC_OFFER_ACTION,
   silentMicNote,
+  silentMicOffer,
   switchNote
 } from '../src/lib/data/audioDeviceSelection.ts';
 import type { AppliedAudioDevices } from '../src/lib/ipc.ts';
@@ -100,6 +102,14 @@ test('an in-room failure is never silent and carries the backend error', () => {
 
 test('no backend means no note', () => {
   assert.equal(switchNote(null, 'speaker'), null);
+});
+
+test('a silent mic is a question naming both devices, answered by one action', () => {
+  assert.equal(
+    silentMicOffer('Headset Microphone (CORSAIR)', 'Microphone (Webcam AC410)'),
+    'No sound from Headset Microphone (CORSAIR) — switch to Microphone (Webcam AC410)?'
+  );
+  assert.equal(SILENT_MIC_OFFER_ACTION, 'Switch');
 });
 
 test('a switch off a silent mic names both devices', () => {

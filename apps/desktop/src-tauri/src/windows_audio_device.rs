@@ -1,4 +1,5 @@
 use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
     eCapture, eMultimedia, eRender, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator,
     DEVICE_STATE_ACTIVE,
@@ -7,6 +8,7 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
     COINIT_MULTITHREADED,
 };
+use windows_core::HSTRING;
 
 struct ComApartment(bool);
 
@@ -71,8 +73,8 @@ pub(crate) fn default_playout_device_id() -> Result<String, String> {
 /// This filter does NOT catch a powered-off wireless headset: its USB dongle
 /// stays `ACTIVE`, because Windows has no way to see that the headset on the
 /// other end of the radio link is gone. During a call, `windows_mic_signal`
-/// catches that case from the captured signal instead, and capture moves to
-/// another microphone.
+/// catches that case from the captured signal instead, and the user is asked
+/// whether to move capture to another microphone.
 fn active_endpoint_ids(flow: EDataFlow) -> Result<Vec<String>, String> {
     let _apartment = ComApartment::enter()?;
     let enumerator: IMMDeviceEnumerator = unsafe {
@@ -105,4 +107,23 @@ pub(crate) fn active_recording_endpoint_ids() -> Result<Vec<String>, String> {
 
 pub(crate) fn active_playout_endpoint_ids() -> Result<Vec<String>, String> {
     active_endpoint_ids(eRender)
+}
+
+/// Whether Windows itself has the recording endpoint `device_id` muted: a
+/// laptop's mic-mute key, the mute toggle in Sound settings, or a headset's
+/// own mute button. A muted endpoint captures exact digital silence, so
+/// `windows_mic_signal` must not read it as a dead microphone.
+pub(crate) fn recording_endpoint_muted(device_id: &str) -> Result<bool, String> {
+    let _apartment = ComApartment::enter()?;
+    let enumerator: IMMDeviceEnumerator = unsafe {
+        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            .map_err(|error| format!("failed to create audio endpoint enumerator: {error}"))?
+    };
+    let device = unsafe { enumerator.GetDevice(&HSTRING::from(device_id)) }
+        .map_err(|error| format!("failed to open audio endpoint {device_id:?}: {error}"))?;
+    let volume: IAudioEndpointVolume = unsafe { device.Activate(CLSCTX_ALL, None) }
+        .map_err(|error| format!("failed to open the endpoint volume of {device_id:?}: {error}"))?;
+    let muted = unsafe { volume.GetMute() }
+        .map_err(|error| format!("failed to read the endpoint mute of {device_id:?}: {error}"))?;
+    Ok(muted.as_bool())
 }
