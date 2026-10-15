@@ -888,6 +888,76 @@ impl RemoteControlTargetKind {
     }
 }
 
+/// One rendered remote window, as a controller's compositor sees it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RemoteWindowCandidate<'a> {
+    pub(crate) window_id: u32,
+    pub(crate) owner_identity: &'a str,
+    pub(crate) hidden: bool,
+    pub(crate) target_kind: RemoteControlTargetKind,
+    pub(crate) share_instance_id: Option<&'a str>,
+}
+
+/// Where a controller's control request goes, and in which envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ControlRequestTarget {
+    pub(crate) owner_identity: String,
+    pub(crate) target_kind: RemoteControlTargetKind,
+    /// `None` for a host that publishes no share instance (macOS): the
+    /// request then goes out in the legacy v1 shape that host accepts.
+    pub(crate) share_instance_id: Option<String>,
+}
+
+/// Resolve the owner of a visible remote window. #314: never require a
+/// share-instance id here -- macOS hosts publish none, and requiring one made
+/// Windows controllers drop every request to a Mac share before sending it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn resolve_control_request_target<'a>(
+    candidates: impl IntoIterator<Item = RemoteWindowCandidate<'a>>,
+    window_id: u32,
+    owner_identity: Option<&str>,
+) -> Option<ControlRequestTarget> {
+    candidates
+        .into_iter()
+        .find(|window| {
+            window.window_id == window_id
+                && owner_identity.is_none_or(|owner| owner == window.owner_identity)
+                && !window.hidden
+        })
+        .map(|window| ControlRequestTarget {
+            owner_identity: window.owner_identity.to_string(),
+            target_kind: window.target_kind,
+            share_instance_id: window
+                .share_instance_id
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+        })
+}
+
+/// Stamp a control request's capability envelope. A target without a share
+/// instance (legacy/macOS host) keeps the legacy shape: no `targetKind`, no
+/// `shareInstanceId`, no capabilities -- the host rejects a half envelope.
+pub(crate) fn apply_control_request_envelope(
+    message: &mut RemoteControlMessage,
+    target: &ControlRequestTarget,
+    controller_capabilities: impl FnOnce(RemoteControlTargetKind) -> Vec<RemoteControlCapability>,
+) {
+    let Some(share_instance_id) = target
+        .share_instance_id
+        .clone()
+        .filter(|id| !id.is_empty())
+    else {
+        message.target_kind = None;
+        message.share_instance_id = None;
+        message.controller_capabilities = Vec::new();
+        return;
+    };
+    message.target_kind = Some(target.target_kind);
+    message.share_instance_id = Some(share_instance_id);
+    message.controller_capabilities = controller_capabilities(target.target_kind);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RemoteControlCapability {
@@ -2329,6 +2399,119 @@ mod tests {
 
     fn message(json: &str) -> RemoteControlMessage {
         serde_json::from_str(json).unwrap()
+    }
+
+    fn mac_and_windows_windows() -> Vec<RemoteWindowCandidate<'static>> {
+        vec![
+            RemoteWindowCandidate {
+                window_id: 270,
+                owner_identity: "mac-host",
+                hidden: false,
+                target_kind: RemoteControlTargetKind::Window,
+                share_instance_id: None,
+            },
+            RemoteWindowCandidate {
+                window_id: 270,
+                owner_identity: "windows-host",
+                hidden: false,
+                target_kind: RemoteControlTargetKind::Display,
+                share_instance_id: Some("share-win-1"),
+            },
+            RemoteWindowCandidate {
+                window_id: 17778,
+                owner_identity: "mac-host",
+                hidden: true,
+                target_kind: RemoteControlTargetKind::Window,
+                share_instance_id: None,
+            },
+        ]
+    }
+
+    fn capable_caps(kind: RemoteControlTargetKind) -> Vec<RemoteControlCapability> {
+        assert_ne!(kind, RemoteControlTargetKind::Unknown);
+        vec![RemoteControlCapability::LegacyControl]
+    }
+
+    #[test]
+    fn control_request_to_mac_share_without_share_instance_resolves_and_stays_legacy() {
+        // #314: a Windows controller dropped every request to a Mac share
+        // because the owner lookup required a share-instance id.
+        let target =
+            resolve_control_request_target(mac_and_windows_windows(), 270, Some("mac-host"))
+                .expect("a Mac share without a share instance must still resolve its owner");
+        assert_eq!(target.owner_identity, "mac-host");
+        assert_eq!(target.share_instance_id, None);
+
+        let mut request = message(
+            r#"{"v":1,"kind":"request","targetUserId":"mac-host","controllerId":"win-1","windowId":270,"seq":6}"#,
+        );
+        apply_control_request_envelope(&mut request, &target, |_| {
+            panic!("a legacy host must not be offered controller capabilities")
+        });
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["kind"], "request");
+        assert_eq!(encoded["targetUserId"], "mac-host");
+        for field in ["targetKind", "shareInstanceId", "controllerCapabilities"] {
+            assert!(
+                encoded.get(field).is_none(),
+                "legacy request to a Mac host must omit {field}: {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_request_to_capable_share_carries_full_envelope() {
+        let target =
+            resolve_control_request_target(mac_and_windows_windows(), 270, Some("windows-host"))
+                .unwrap();
+        let mut request = message(
+            r#"{"v":1,"kind":"request","targetUserId":"windows-host","controllerId":"mac-1","windowId":270,"seq":7}"#,
+        );
+        apply_control_request_envelope(&mut request, &target, capable_caps);
+        assert_eq!(request.target_kind, Some(RemoteControlTargetKind::Display));
+        assert_eq!(request.share_instance_id.as_deref(), Some("share-win-1"));
+        assert_eq!(
+            request.controller_capabilities,
+            vec![RemoteControlCapability::LegacyControl]
+        );
+    }
+
+    #[test]
+    fn control_request_target_skips_hidden_wrong_owner_and_empty_share_instance() {
+        let windows = mac_and_windows_windows();
+        assert_eq!(
+            resolve_control_request_target(windows.clone(), 17778, Some("mac-host")),
+            None,
+            "a hidden window is not controllable"
+        );
+        assert_eq!(
+            resolve_control_request_target(windows.clone(), 270, Some("someone-else")),
+            None
+        );
+        // Without an owner hint the first visible match wins.
+        assert_eq!(
+            resolve_control_request_target(windows, 270, None)
+                .map(|target| target.owner_identity),
+            Some("mac-host".to_string())
+        );
+        let empty = [RemoteWindowCandidate {
+            window_id: 5,
+            owner_identity: "mac-host",
+            hidden: false,
+            target_kind: RemoteControlTargetKind::Window,
+            share_instance_id: Some(""),
+        }];
+        let target = resolve_control_request_target(empty, 5, Some("mac-host")).unwrap();
+        assert_eq!(target.share_instance_id, None, "an empty id is no share instance");
+
+        // A half-stamped message is reset to the legacy shape, never mixed.
+        let mut request = message(
+            r#"{"v":1,"kind":"request","targetUserId":"mac-host","controllerId":"win-1","windowId":5,"seq":8,"targetKind":"window"}"#,
+        );
+        apply_control_request_envelope(&mut request, &target, capable_caps);
+        assert_eq!(request.target_kind, None);
+        assert_eq!(request.share_instance_id, None);
+        assert!(request.controller_capabilities.is_empty());
     }
 
     #[test]
