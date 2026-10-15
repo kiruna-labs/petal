@@ -1,5 +1,6 @@
 import { isAiTrackName, type TelepointerMessage } from './trackNames.ts';
 import { renderedMediaRect } from '@petal/shared/logic/cameraCrop';
+import { identityPaletteIndex } from '@petal/shared/logic/identityPalette';
 
 export interface RectLike {
   left: number;
@@ -39,27 +40,6 @@ const IDENTITY_INK_PALETTE = [
   '#1f102b',
   DARK_IDENTITY_INK,
 ] as const;
-
-function paletteIndexForIdentity(identity: string): number {
-  let hash = 0;
-  for (let i = 0; i < identity.length; i++) {
-    hash = (hash * 31 + identity.charCodeAt(i)) >>> 0;
-  }
-  return hash % IDENTITY_COLOR_PALETTE.length;
-}
-
-function validPaletteIndex(index: number | null | undefined): index is number {
-  return (
-    typeof index === 'number' &&
-    Number.isInteger(index) &&
-    index >= 0 &&
-    index < IDENTITY_COLOR_PALETTE.length
-  );
-}
-
-function selectedPaletteIndex(identity: string, paletteIndex?: number | null): number {
-  return validPaletteIndex(paletteIndex) ? paletteIndex : paletteIndexForIdentity(identity);
-}
 
 export function windowIdFromTrackName(trackName: string | undefined | null): number | null {
   // #657: an assistant voice track (`petal-ai-window-<id>`) is not a shared
@@ -265,11 +245,11 @@ export function mediaContentRectRelativeToTile(tile: MediaTileLike): { bounds: R
 }
 
 export function colorForIdentity(identity: string, paletteIndex?: number | null): string {
-  return IDENTITY_COLOR_PALETTE[selectedPaletteIndex(identity, paletteIndex)];
+  return IDENTITY_COLOR_PALETTE[identityPaletteIndex(identity, paletteIndex)];
 }
 
 export function inkForIdentity(identity: string, paletteIndex?: number | null): string {
-  return IDENTITY_INK_PALETTE[selectedPaletteIndex(identity, paletteIndex)] ?? LIGHT_IDENTITY_INK;
+  return IDENTITY_INK_PALETTE[identityPaletteIndex(identity, paletteIndex)] ?? LIGHT_IDENTITY_INK;
 }
 
 export function identityHeaderCss(identity: string, paletteIndex?: number | null): { background: string; ink: string } {

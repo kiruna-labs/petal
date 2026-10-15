@@ -44,6 +44,10 @@ pub struct PresentParticipant {
     pub is_local: bool,
     pub speaking: bool,
     pub mic_muted: bool,
+    /// #317: the participant's chosen `petalIdentityPaletteIndex` (metadata),
+    /// so the gallery/roster/pills color matches the remote-window border.
+    /// `None` = never published; the frontend falls back to the identity hash.
+    pub palette_index: Option<u8>,
 }
 
 /// Payload for the `presence-update` event — the full current roster (not a
@@ -116,6 +120,30 @@ fn apply_name(participants: &mut [PresentParticipant], identity: &str, name: &st
         return false;
     }
     participant.name = name.to_string();
+    true
+}
+
+fn palette_index_from_metadata(metadata: &str) -> Option<u8> {
+    crate::transport::publisher::identity_palette_index_from_metadata(metadata)
+}
+
+/// #317: a palette index can land after join (metadata publish races the
+/// connect), so `ParticipantMetadataChanged` must refresh the roster entry.
+fn apply_palette_index(
+    participants: &mut [PresentParticipant],
+    identity: &str,
+    palette_index: Option<u8>,
+) -> bool {
+    let Some(participant) = participants
+        .iter_mut()
+        .find(|participant| participant.identity == identity)
+    else {
+        return false;
+    };
+    if participant.palette_index == palette_index {
+        return false;
+    }
+    participant.palette_index = palette_index;
     true
 }
 
@@ -217,12 +245,20 @@ pub fn start_for_room(
     let mut initial: Vec<PresentParticipant> = room
         .remote_participants()
         .values()
-        .map(|p| PresentParticipant {
-            identity: p.identity().to_string(),
-            name: p.name(),
-            is_local: false,
-            speaking: p.is_speaking(),
-            mic_muted: remote_mic_muted(p),
+        .map(|p| {
+            let palette_index = palette_index_from_metadata(&p.metadata());
+            log::info!(
+                "presence: '{}' already in room at join (palette index {palette_index:?})",
+                crate::logging::log_safe_quoted(&p.identity().to_string())
+            );
+            PresentParticipant {
+                identity: p.identity().to_string(),
+                name: p.name(),
+                is_local: false,
+                speaking: p.is_speaking(),
+                mic_muted: remote_mic_muted(p),
+                palette_index,
+            }
         })
         .collect();
     initial.push(PresentParticipant {
@@ -231,6 +267,7 @@ pub fn start_for_room(
         is_local: true,
         speaking: room.local_participant().is_speaking(),
         mic_muted: local_mic_muted(&room.local_participant()),
+        palette_index: palette_index_from_metadata(&room.local_participant().metadata()),
     });
     presence.set(initial.clone());
     emit_presence(app, &room_display_name, initial);
@@ -252,13 +289,18 @@ pub fn start_for_room(
                     let log_identity = crate::logging::log_safe_quoted(&identity);
                     let log_room = crate::logging::log_safe_quoted(&room_display_name);
                     if !roster.iter().any(|r| r.identity == identity) {
-                        log::info!("presence: '{log_name}' ({log_identity}) joined '{log_room}'");
+                        let palette_index = palette_index_from_metadata(&p.metadata());
+                        log::info!(
+                            "presence: '{log_name}' ({log_identity}) joined '{log_room}' \
+                             (palette index {palette_index:?})"
+                        );
                         roster.push(PresentParticipant {
                             identity,
                             name,
                             is_local: false,
                             speaking: p.is_speaking(),
                             mic_muted: remote_mic_muted(&p),
+                            palette_index,
                         });
                         presence.set(roster.clone());
                         emit_presence(&app, &room_display_name, roster);
@@ -341,6 +383,23 @@ pub fn start_for_room(
                         emit_presence(&app, &room_display_name, roster);
                     }
                 }
+                livekit::RoomEvent::ParticipantMetadataChanged {
+                    participant,
+                    metadata,
+                    ..
+                } => {
+                    let identity = participant.identity().to_string();
+                    let palette_index = palette_index_from_metadata(&metadata);
+                    let mut roster = presence.snapshot();
+                    if apply_palette_index(&mut roster, &identity, palette_index) {
+                        log::info!(
+                            "presence: '{}' palette index -> {palette_index:?}",
+                            crate::logging::log_safe_quoted(&identity)
+                        );
+                        presence.set(roster.clone());
+                        emit_presence(&app, &room_display_name, roster);
+                    }
+                }
                 livekit::RoomEvent::ParticipantDisconnected(p) => {
                     let identity = p.identity().to_string();
                     let name = p.name();
@@ -414,6 +473,7 @@ mod tests {
             is_local,
             speaking: false,
             mic_muted: true,
+            palette_index: None,
         }
     }
 
@@ -443,6 +503,7 @@ mod tests {
             is_local: true,
             speaking: false,
             mic_muted: true,
+            palette_index: None,
         }];
         state.set(participants.clone());
         assert_eq!(state.snapshot(), participants);
@@ -457,6 +518,7 @@ mod tests {
                 is_local: true,
                 speaking: false,
                 mic_muted: false,
+                palette_index: None,
             },
             PresentParticipant {
                 identity: "remote".to_string(),
@@ -464,6 +526,7 @@ mod tests {
                 is_local: false,
                 speaking: false,
                 mic_muted: false,
+                palette_index: None,
             },
         ];
         let speakers = std::collections::HashSet::from(["local".to_string()]);
@@ -489,6 +552,7 @@ mod tests {
             is_local: false,
             speaking: false,
             mic_muted: true,
+            palette_index: None,
         }];
         let speakers = std::collections::HashSet::from(["sharer".to_string()]);
 
@@ -521,11 +585,44 @@ mod tests {
             is_local: false,
             speaking: false,
             mic_muted: false,
+            palette_index: None,
         }];
 
         assert!(apply_mic_muted(&mut participants, "remote", true));
         assert!(participants[0].mic_muted);
         assert!(!apply_mic_muted(&mut participants, "remote", true));
         assert!(!apply_mic_muted(&mut participants, "missing", false));
+    }
+
+    /// #317: the frontend's gallery/roster/pills color reads `paletteIndex`
+    /// off the serialized roster; a missing index must serialize as null.
+    #[test]
+    fn presence_serializes_the_chosen_palette_index() {
+        let mut chosen = participant("u1", "Ada", false);
+        chosen.palette_index = Some(3);
+        let value = serde_json::to_value(&chosen).expect("serialize");
+        assert_eq!(value["paletteIndex"], 3);
+        let unset = serde_json::to_value(participant("u2", "Bo", false)).expect("serialize");
+        assert!(unset["paletteIndex"].is_null());
+    }
+
+    /// #317: a palette index published after join (the metadata-changed path)
+    /// must reach the roster entry, decoded from the real metadata wire shape.
+    #[test]
+    fn metadata_change_refreshes_the_roster_palette_index() {
+        let mut roster = vec![participant("me", "Max", true), participant("u2", "Ada", false)];
+        let metadata = r#"{"petalIdentityPaletteIndex":4,"petalWindowKinds":{}}"#;
+        assert!(apply_palette_index(&mut roster, "u2", palette_index_from_metadata(metadata)));
+        assert_eq!(roster[1].palette_index, Some(4));
+        assert_eq!(roster[0].palette_index, None);
+        assert!(!apply_palette_index(&mut roster, "u2", Some(4)), "idempotent");
+        assert!(!apply_palette_index(&mut roster, "missing", Some(1)));
+        // Out-of-range or absent index decodes to None and clears the entry.
+        assert!(apply_palette_index(
+            &mut roster,
+            "u2",
+            palette_index_from_metadata(r#"{"petalIdentityPaletteIndex":9}"#)
+        ));
+        assert_eq!(roster[1].palette_index, None);
     }
 }

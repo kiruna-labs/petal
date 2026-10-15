@@ -234,17 +234,30 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   }
 
   const colorResolutionParticipants = $derived.by(() => {
-    const participants = new Map<string, { identity: string }>();
-    for (const p of presence) participants.set(p.identity, { identity: p.identity });
+    const participants = new Map<string, { identity: string; paletteIndex?: number | null }>();
     for (const cam of remoteCameras) participants.set(cam.identity, { identity: cam.identity });
+    // #317: presence carries the chosen palette index, so it wins over a camera-only entry.
+    for (const p of presence) participants.set(p.identity, { identity: p.identity, paletteIndex: paletteIndexFor(p.identity) });
     return Array.from(participants.values());
   });
   const resolvedColorsByIdentity = $derived.by(() =>
     resolveMeetingColors(colorResolutionParticipants)
   );
 
+  // #317: the chosen palette index from presence; our own entry falls back to
+  // the locally chosen color until the metadata echo lands.
+  function paletteIndexFor(identity: string): number | null | undefined {
+    const entry = presence.find((p) => p.identity === identity);
+    if (entry?.paletteIndex != null) return entry.paletteIndex;
+    const isLocal = entry ? entry.isLocal : identity === session.participantId;
+    return isLocal ? paletteIndexForIdentityColor(session.identity) : null;
+  }
+
   function resolvedColorFor(identity: string): string {
-    return resolvedColorsByIdentity.get(identity) ?? identityColorCss(colorForIdentity(identity));
+    return (
+      resolvedColorsByIdentity.get(identity) ??
+      identityColorCss(colorForIdentity(identity, paletteIndexFor(identity)))
+    );
   }
 
   // #875: ink (foreground text/icon color) for the identity-tinted share
@@ -254,7 +267,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   // palette color, same as the local share button's own
   // `identityInkCss(session.identity)` in the route.
   function resolvedInkFor(identity: string): string {
-    return identityInkCss(colorForIdentity(identity));
+    return identityInkCss(colorForIdentity(identity, paletteIndexFor(identity)));
   }
 
   const galleryParticipants = $derived.by<GalleryParticipant[]>(() => {
@@ -362,11 +375,11 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   const galleryStateTone = $derived<'warning' | 'info'>(
     meetingPhase === 'disconnected' ? 'warning' : 'info'
   );
-  const activeIdentity = $derived(
-    colorForIdentity(
-      spotlight.activeSpeakerIdentity ?? presence.find((p) => p.isLocal)?.identity ?? session.participantId
-    )
-  );
+  const activeIdentity = $derived.by(() => {
+    const identity =
+      spotlight.activeSpeakerIdentity ?? presence.find((p) => p.isLocal)?.identity ?? session.participantId;
+    return colorForIdentity(identity, paletteIndexFor(identity));
+  });
   const activeColor = $derived(
     resolvedColorFor(
       spotlight.activeSpeakerIdentity ?? presence.find((p) => p.isLocal)?.identity ?? session.participantId
