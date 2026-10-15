@@ -5,15 +5,43 @@ import test from 'node:test';
 import {
   COMMANDS,
   formatRemoteWindowHeaderTitle,
-  remoteWindowSourceLabel
+  formatRemoteWindowHeaderTooltip,
+  remoteWindowSourceLabel,
+  shortenWindowTitle
 } from '../src/lib/ipc.ts';
 
 test('remote window header formats human labels with the owner', () => {
   assert.equal(formatRemoteWindowHeaderTitle('Sublime', 'Bob'), 'Sublime by Bob');
   assert.equal(
     formatRemoteWindowHeaderTitle('  Example & Specs — Chrome  ', '  Ada  '),
-    'Chrome by Ada'
+    'Example & Specs by Ada'
   );
+  // #318: the tooltip keeps the FULL title the header shortened.
+  assert.equal(
+    formatRemoteWindowHeaderTooltip('  Example & Specs — Chrome  ', '  Ada  '),
+    'Example & Specs — Chrome by Ada'
+  );
+  assert.equal(formatRemoteWindowHeaderTooltip('petal-window-57', 'Bob'), 'Shared window by Bob');
+});
+
+test('shortenWindowTitle drops the app suffix and keeps the document part (#318)', () => {
+  assert.equal(shortenWindowTitle('Quarterly plan.key — Keynote'), 'Quarterly plan.key');
+  assert.equal(shortenWindowTitle('Release notes – TextEdit'), 'Release notes');
+  assert.equal(shortenWindowTitle('*Untitled - Notepad'), '*Untitled');
+  assert.equal(shortenWindowTitle('Inbox - Work - Outlook'), 'Inbox - Work');
+  // Petal's own "{title} — {app}" composition around a title that already
+  // names the app (Windows/VS Code) drops both suffixes.
+  assert.equal(shortenWindowTitle('*Untitled - Notepad — Notepad'), '*Untitled');
+  assert.equal(shortenWindowTitle('main.rs - petal - Visual Studio Code — Code'), 'main.rs - petal');
+  assert.equal(shortenWindowTitle('Spec - Draft — Safari'), 'Spec - Draft');
+  // No suffix, app name only, or nothing left after stripping: unchanged.
+  assert.equal(shortenWindowTitle('Terminal'), 'Terminal');
+  assert.equal(shortenWindowTitle('  Finder  '), 'Finder');
+  assert.equal(shortenWindowTitle('— Notepad'), '— Notepad');
+  assert.equal(shortenWindowTitle('Untitled — '), 'Untitled');
+  // Hyphenated words without surrounding spaces are never split.
+  assert.equal(shortenWindowTitle('well-known-file.txt'), 'well-known-file.txt');
+  assert.equal(shortenWindowTitle('pre-release-notes—draft'), 'pre-release-notes—draft');
 });
 
 test('remote window header hides raw Petal track names from the title', () => {

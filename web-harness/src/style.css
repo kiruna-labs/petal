@@ -2554,16 +2554,16 @@ html:has(> body > #meeting-screen:not(.hidden)) {
 }
 
 .remote-window-header__title {
-  /* Keep the source/owner text as one inline run, but wrap rather than
-     truncate when names are long. */
+  /* #318 (user directive 2026-10-15): one line, never wrapped. The label is
+     already shortened (shortenWindowTitle); ellipsis is the last resort and
+     the full title stays in the header tooltip. */
   display: block;
   min-width: 0;
   font: 600 14px / 1.15 var(--font-ui);
   color: var(--identity-header-ink, rgba(255, 255, 255, 0.95));
-  overflow: visible;
-  overflow-wrap: anywhere;
-  text-wrap: pretty;
-  white-space: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .remote-window-header__owner-label {

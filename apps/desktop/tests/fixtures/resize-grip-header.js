@@ -41,6 +41,26 @@ function hitDescribe(element) {
   return `${element.tagName.toLowerCase()}${classes ? `.${classes}` : ''}`;
 }
 
+// #318: rendered line count of the header title (must be exactly one).
+function titleMetrics(root) {
+  const title = root.querySelector('.title');
+  const header = root.querySelector('.header');
+  if (!title || !header) return null;
+  const style = getComputedStyle(title);
+  const range = document.createRange();
+  range.selectNodeContents(title);
+  const lineTops = new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top)));
+  return {
+    lines: lineTops.size,
+    height: title.getBoundingClientRect().height,
+    lineHeight: parseFloat(style.lineHeight),
+    whiteSpace: style.whiteSpace,
+    headerHeight: header.getBoundingClientRect().height,
+    sourceText: root.querySelector('.source-label')?.textContent ?? null,
+    tooltip: root.querySelector('.title-cluster')?.getAttribute('title') ?? null
+  };
+}
+
 async function renderFixture() {
   try {
     const style = document.createElement('style');
@@ -64,7 +84,8 @@ async function renderFixture() {
       props: {
         ownerName: 'Fixture Owner',
         identity: 'blue',
-        sourceTitle: 'Fixture Source — App',
+        // #318: the title-line test passes a long `?title=` to render.
+        sourceTitle: new URLSearchParams(location.search).get('title') ?? 'Fixture Source — App',
         autoHide: false,
         onHideWindow: () => {},
         onFitToSource: () => {},
@@ -121,7 +142,8 @@ async function renderFixture() {
       overflowBtn: probe(overflowBtn),
       winMin: probe(winMin),
       resizeNwRect: rectOf(resizeNw),
-      resizeNeRect: rectOf(resizeNe)
+      resizeNeRect: rectOf(resizeNe),
+      title: titleMetrics(dragHandle)
     };
 
     document.body.dataset.resizeGripMeasurement = encodeURIComponent(JSON.stringify(measurement));

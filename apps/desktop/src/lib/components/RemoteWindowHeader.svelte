@@ -10,7 +10,7 @@
   import { identityHeaderCss } from '$lib/data/identityColor';
   import { isWindows } from '$lib/platform';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { formatRemoteWindowHeaderTitle, remoteWindowSourceLabel } from '$lib/ipc';
+  import { formatRemoteWindowHeaderTooltip, remoteWindowSourceLabel } from '$lib/ipc';
   import {
     remoteControlFeedbackLabel,
     remoteControlFeedbackTitle,
@@ -267,7 +267,7 @@
 
   const sourceLabel = $derived(remoteWindowSourceLabel(sourceTitle));
   const ownerLabel = $derived(ownerName.trim() || 'Someone');
-  const displayTitle = $derived(formatRemoteWindowHeaderTitle(sourceTitle, ownerName));
+  const displayTitle = $derived(formatRemoteWindowHeaderTooltip(sourceTitle, ownerName));
   const remoteControlFeedback = $derived(remoteControlFeedbackLabel(remoteControlStatus));
   const remoteControlFeedbackWarning = $derived(
     !!remoteControlFeedback &&
@@ -967,13 +967,13 @@
     min-width: 0;
     font: 600 14px / 1.15 var(--font-ui);
     color: var(--identity-header-ink);
-    /* Wrap rather than truncate when names are long: user-facing text must
-       never be clipped or ellipsized (CLAUDE.md hard rule; guarded by
-       uiConsistency.test.ts). #918 briefly made this nowrap+ellipsis. */
-    overflow: visible;
-    overflow-wrap: anywhere;
-    text-wrap: pretty;
-    white-space: normal;
+    /* #318 (user directive 2026-10-15): ONE line, never wrapped -- wrapping
+       overflowed the fixed 44px header. The label is already shortened
+       (shortenWindowTitle); ellipsis is the last resort and the full title
+       stays in the title-cluster tooltip. Exception to the never-truncate rule. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .owner-label {

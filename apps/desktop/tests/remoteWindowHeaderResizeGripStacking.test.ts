@@ -256,6 +256,15 @@ type Measurement = {
   winMin: Probe;
   resizeNwRect: { left: number; top: number; right: number; bottom: number; width: number; height: number };
   resizeNeRect: { left: number; top: number; right: number; bottom: number; width: number; height: number };
+  title: {
+    lines: number;
+    height: number;
+    lineHeight: number;
+    whiteSpace: string;
+    headerHeight: number;
+    sourceText: string | null;
+    tooltip: string | null;
+  } | null;
 };
 
 async function renderMeasurement(
@@ -366,6 +375,57 @@ test('remote window header controls win hit-testing over the resize-grip corners
       `Windows minimize button at (${winMeasurement.winMin!.point.x}, ${winMeasurement.winMin!.point.y}) resolved to ${winMeasurement.winMin!.hitSelector} instead of itself`
     );
     assert.equal(winMeasurement.winMin!.hitIsResizeNw, false, 'Windows minimize button is still covered by .resize-nw');
+  } finally {
+    try {
+      await browser?.close();
+    } finally {
+      await Promise.all([rm(buildDir, { recursive: true, force: true }), rm(profileDir, { recursive: true, force: true })]);
+    }
+  }
+});
+
+// #318 (user directive 2026-10-15): a long remote window title is shortened
+// and renders on ONE line in the fixed 44px header, on both the macOS and
+// Windows header branches; the tooltip keeps the full title.
+test('remote window header title stays on one shortened line (#318)', async () => {
+  const buildDir = await mkdtemp(join(tmpdir(), 'petal-title-line-build-'));
+  const profileDir = await mkdtemp(join(tmpdir(), 'petal-title-line-chrome-'));
+  let browser: Awaited<ReturnType<typeof launchRenderedTestBrowser>> | undefined;
+  const longDocument =
+    'Quarterly engineering planning notes for the multi-window screenshare latency and reliability review meeting';
+  const cases = [
+    {
+      name: 'macOS',
+      title: `${longDocument} — Google Chrome`,
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    },
+    {
+      name: 'Windows',
+      title: `${longDocument} - Notepad — Notepad`,
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+  ];
+
+  try {
+    await buildFixture(buildDir);
+    browser = await launchRenderedTestBrowser(profileDir);
+    const fixtureUrl = pathToFileURL(join(buildDir, 'resize-grip-header.html')).href;
+    for (const scenario of cases) {
+      for (const width of [480, 720]) {
+        const url = `${fixtureUrl}?title=${encodeURIComponent(scenario.title)}`;
+        const { title } = await renderMeasurement(browser, url, width, scenario.userAgent);
+        const label = `${scenario.name}@${width}px`;
+        assert.ok(title, `${label}: header title did not render`);
+        assert.equal(title.whiteSpace, 'nowrap', `${label}: title may wrap`);
+        assert.equal(title.lines, 1, `${label}: title rendered on ${title.lines} lines`);
+        assert.ok(title.height <= title.lineHeight + 1, `${label}: title is ${title.height}px tall`);
+        assert.equal(title.headerHeight, 44, `${label}: header height drifted`);
+        assert.equal(title.sourceText, longDocument, `${label}: app suffix was not dropped`);
+        assert.equal(title.tooltip, `${scenario.title} by Fixture Owner`, `${label}: tooltip lost the full title`);
+      }
+    }
   } finally {
     try {
       await browser?.close();

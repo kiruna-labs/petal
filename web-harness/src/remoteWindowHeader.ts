@@ -13,6 +13,7 @@ import { identityPaletteIndexFromMetadata, type CaptureStateReport } from './tra
 import { createAiChatPanel, type AiChatPanelController } from './aiChatPanel.ts';
 import { aiChatEndReasonMessage, isNormalAiChatEnd, type AiChatSessionState } from './aiChat.ts';
 import { debugHeaderControlVisible } from '@petal/shared/logic/debugHeaderVisibility';
+import { remoteWindowFullSourceLabel, remoteWindowSourceLabel } from '@petal/shared/logic/remoteWindowTitle';
 import { sparkleIconSvg } from '@petal/shared/ui/icons';
 import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
 
@@ -58,8 +59,6 @@ const VALID_WINDOW_ID_MAX = 0xffff_ffff;
 const IDLE_DELAY_MS = 1800;
 const REQUESTING_CONTROL_FEEDBACK_MS = 420;
 
-const RAW_WINDOW_TRACK_RE = /^petal-window(?:-\d+|-capture)?$/i;
-const RAW_CAMERA_TRACK_RE = /^petal-camera(?:-.+)?$/i;
 const REMOTE_CONTROL_STATUS_DATA_ATTRS = [
   'class',
   'data-window-id',
@@ -91,26 +90,6 @@ function validWindowId(windowId: number | null): windowId is number {
 function stopControlEvent(event: Event) {
   event.preventDefault();
   event.stopPropagation();
-}
-
-function isRawRemoteTrackName(label: string): boolean {
-  return RAW_WINDOW_TRACK_RE.test(label) || RAW_CAMERA_TRACK_RE.test(label);
-}
-
-function sourceLabelFor(sourceTitle: string): string {
-  const trimmed = sourceTitle.trim();
-  if (!trimmed || RAW_WINDOW_TRACK_RE.test(trimmed)) return 'Shared window';
-  if (RAW_CAMERA_TRACK_RE.test(trimmed)) return 'Camera';
-  const parts = trimmed.split(/\s+—\s*/).map((part) => part.trim());
-  if (parts.length > 1) {
-    const appName = parts[parts.length - 1];
-    if (appName && !isRawRemoteTrackName(appName)) return appName;
-    const windowTitle = parts.find((part) => part && !isRawRemoteTrackName(part));
-    if (windowTitle) return windowTitle;
-    if (parts.some((part) => RAW_CAMERA_TRACK_RE.test(part))) return 'Camera';
-    if (parts.some((part) => RAW_WINDOW_TRACK_RE.test(part))) return 'Shared window';
-  }
-  return trimmed;
 }
 
 function sourceTitleFor(options: RemoteWindowHeaderOptions): string {
@@ -728,7 +707,7 @@ export function createRemoteWindowHeader(options: RemoteWindowHeaderOptions): Re
     const canControl = controlAvailable() || isControlActive;
     const canDraw = drawAvailable();
     const rawSourceTitle = sourceTitleFor(current);
-    const source = sourceLabelFor(rawSourceTitle);
+    const source = remoteWindowSourceLabel(rawSourceTitle);
     const owner = ownerLabelFor(current);
     const currentStatus = statusState();
     const sourceUrl = current.sourceUrl?.trim() || '';
@@ -744,7 +723,8 @@ export function createRemoteWindowHeader(options: RemoteWindowHeaderOptions): Re
     root.style?.setProperty('--active-mode-index', String(modeIndex));
     root.style?.setProperty('--identity-header-bg', headerColor.background);
     root.style?.setProperty('--identity-header-ink', headerColor.ink);
-    root.title = `${source} by ${owner}`;
+    // #318: the label is shortened and single-line; the tooltip keeps the full title.
+    root.title = `${remoteWindowFullSourceLabel(rawSourceTitle)} by ${owner}`;
     titleCluster.title = root.title;
 
     sourceLabel.textContent = source;

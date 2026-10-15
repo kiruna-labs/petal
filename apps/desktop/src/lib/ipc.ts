@@ -1,5 +1,9 @@
 import { listen, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
 import type { ShareSessionError } from '$lib/data/shareErrors';
+import {
+  remoteWindowFullSourceLabel,
+  remoteWindowSourceLabel
+} from '@petal/shared/logic/remoteWindowTitle';
 
 export const COMMANDS = {
   aiChatControlApprove: 'ai_chat_control_approve',
@@ -528,28 +532,13 @@ export type AutotestJoinResult =
   | { status: 'joined'; roomName: string }
   | { status: 'failed'; reason: 'permission_denied' | 'backend_token_unavailable' | 'room_connection_failed' | 'session_setup_failed' };
 
-const RAW_WINDOW_TRACK_RE = /^petal-window(?:-\d+|-capture)?$/i;
-const RAW_CAMERA_TRACK_RE = /^petal-camera(?:-.+)?$/i;
-
-function isRawRemoteTrackName(label: string): boolean {
-  return RAW_WINDOW_TRACK_RE.test(label) || RAW_CAMERA_TRACK_RE.test(label);
-}
-
-export function remoteWindowSourceLabel(sourceTitle: string): string {
-  const trimmed = sourceTitle.trim();
-  if (!trimmed || RAW_WINDOW_TRACK_RE.test(trimmed)) return 'Shared window';
-  if (RAW_CAMERA_TRACK_RE.test(trimmed)) return 'Camera';
-  const parts = trimmed.split(/\s+—\s*/).map((part) => part.trim());
-  if (parts.length > 1) {
-    const appName = parts[parts.length - 1];
-    if (appName && !isRawRemoteTrackName(appName)) return appName;
-    const windowTitle = parts.find((part) => part && !isRawRemoteTrackName(part));
-    if (windowTitle) return windowTitle;
-    if (parts.some((part) => RAW_CAMERA_TRACK_RE.test(part))) return 'Camera';
-    if (parts.some((part) => RAW_WINDOW_TRACK_RE.test(part))) return 'Shared window';
-  }
-  return trimmed;
-}
+// #318: the label logic lives in shared/logic/remoteWindowTitle.ts, the single
+// source consumed by this app and web-harness. Do not re-implement it here.
+export {
+  remoteWindowFullSourceLabel,
+  remoteWindowSourceLabel,
+  shortenWindowTitle
+} from '@petal/shared/logic/remoteWindowTitle';
 
 /**
  * Owner-name fallback shared by every remote-window surface: an empty/
@@ -566,6 +555,11 @@ export function remoteWindowOwnerLabel(ownerName: string): string {
 
 export function formatRemoteWindowHeaderTitle(sourceTitle: string, ownerName: string): string {
   return `${remoteWindowSourceLabel(sourceTitle)} by ${remoteWindowOwnerLabel(ownerName)}`;
+}
+
+/** Tooltip for the header title: the FULL source title, never shortened (#318). */
+export function formatRemoteWindowHeaderTooltip(sourceTitle: string, ownerName: string): string {
+  return `${remoteWindowFullSourceLabel(sourceTitle)} by ${remoteWindowOwnerLabel(ownerName)}`;
 }
 
 /** Mirrors `BuildInfo` (src-tauri/src/lib.rs). */
