@@ -1428,6 +1428,10 @@ struct CompositorState {
     /// reuse pattern takt's global highlight panel already relies on).
     retired: HashMap<RemoteWindowKey, CompositorWindow>,
     retired_order: Vec<RemoteWindowKey>,
+    /// #316: why each retired key was retired. Only a viewer's ManualHide is
+    /// restorable; a sharer-side end must never come back as a frozen panel.
+    /// Written synchronously in `remove_window` (the park itself is async).
+    retired_reasons: HashMap<RemoteWindowKey, RemoveWindowReason>,
     /// Next cascade slot to hand out (wraps at `CASCADE_WRAP`) -- NOT the
     /// count of currently-open windows, so closing and reopening windows
     /// keeps advancing the cascade rather than reusing the same spot
@@ -1456,6 +1460,7 @@ fn with_state<R>(f: impl FnOnce(&mut CompositorState) -> R) -> R {
         remote_control_active: HashSet::new(),
         retired: HashMap::new(),
         retired_order: Vec::new(),
+        retired_reasons: HashMap::new(),
         next_cascade_slot: 0,
         suppressed_reshare_pill: HashSet::new(),
     });
@@ -5076,10 +5081,7 @@ pub fn remove_window(
     // Classification needs only `key`/`reason`, not `removed`, so hoisting it
     // above the early return is free and closes that gap in both directions.
     record_share_pill_suppression_for_remove_reason(&key, reason);
-    let removed = with_state(|s| {
-        s.remote_control_active.remove(&key);
-        s.windows.remove(&key)
-    });
+    let removed = with_state(|s| detach_window_for_removal(s, &key, reason));
     let Some(removed) = removed else {
         return;
     };
@@ -5405,7 +5407,82 @@ pub fn retired_window_ids_for_participant(owner_identity: &str) -> Vec<u32> {
     })
 }
 
-fn remote_window_summaries() -> Vec<RemoteWindowSummary> {
+/// #316: keys the SFU still holds a window publication for (the receiver's
+/// tracked set). Read OUTSIDE `with_state` -- it takes the subscriber's lock.
+fn live_window_publication_keys() -> HashSet<RemoteWindowKey> {
+    crate::transport::subscriber::tracked_window_publications()
+        .into_iter()
+        .map(|tracked| RemoteWindowKey::new(tracked.owner_identity, tracked.window_id))
+        .collect()
+}
+
+/// #316: record why `key` was retired. A genuine end that lands on an
+/// already-retired (e.g. manually hidden) key must overwrite ManualHide, or
+/// the dead share stays listed as restorable; ManualHide never downgrades.
+fn record_retired_reason(
+    s: &mut CompositorState,
+    key: &RemoteWindowKey,
+    reason: RemoveWindowReason,
+    was_open: bool,
+) {
+    if was_open
+        || (reason != RemoveWindowReason::ManualHide && s.retired_reasons.contains_key(key))
+    {
+        s.retired_reasons.insert(key.clone(), reason);
+    }
+}
+
+/// `remove_window`'s synchronous state step: drop the open entry (parked in
+/// `retired` later, on the main thread) and record why (#316).
+fn detach_window_for_removal(
+    s: &mut CompositorState,
+    key: &RemoteWindowKey,
+    reason: RemoveWindowReason,
+) -> Option<CompositorWindow> {
+    s.remote_control_active.remove(key);
+    let removed = s.windows.remove(key);
+    record_retired_reason(s, key, reason, removed.is_some());
+    removed
+}
+
+/// #316: a retired window may be listed as "Hidden" / restored only if the
+/// viewer hid it themselves AND its publication is still live. Anything else
+/// (unpublished, left, reconciled away, watchdog) would come back frozen.
+fn retired_window_restorable(
+    s: &CompositorState,
+    key: &RemoteWindowKey,
+    live: &HashSet<RemoteWindowKey>,
+) -> bool {
+    s.retired_reasons.get(key) == Some(&RemoveWindowReason::ManualHide) && live.contains(key)
+}
+
+/// #316: outcome of `take_restorable_retired` for `activate_window_then`.
+enum RetiredRestore {
+    NotRetired,
+    Restore(CompositorWindow),
+    Refused(Option<RemoveWindowReason>),
+}
+
+fn take_restorable_retired(
+    s: &mut CompositorState,
+    key: &RemoteWindowKey,
+    live: &HashSet<RemoteWindowKey>,
+) -> RetiredRestore {
+    if s.windows.contains_key(key) || !s.retired.contains_key(key) {
+        return RetiredRestore::NotRetired;
+    }
+    if !retired_window_restorable(s, key, live) {
+        return RetiredRestore::Refused(s.retired_reasons.get(key).copied());
+    }
+    s.retired_order.retain(|stored| stored != key);
+    s.retired_reasons.remove(key);
+    match s.retired.remove(key) {
+        Some(window) => RetiredRestore::Restore(window),
+        None => RetiredRestore::NotRetired,
+    }
+}
+
+fn remote_window_summaries(live: &HashSet<RemoteWindowKey>) -> Vec<RemoteWindowSummary> {
     let mut entries = with_state(|s| {
         let mut entries = Vec::with_capacity(s.windows.len() + s.retired.len());
         entries.extend(s.windows.iter().map(|(key, window)| RemoteWindowSummary {
@@ -5415,13 +5492,18 @@ fn remote_window_summaries() -> Vec<RemoteWindowSummary> {
             source_title: window.source_title.clone(),
             hidden: false,
         }));
-        entries.extend(s.retired.iter().map(|(key, window)| RemoteWindowSummary {
-            window_id: key.window_id,
-            owner_identity: key.owner_identity.clone(),
-            owner_display_name: window.owner_display_name.clone(),
-            source_title: window.source_title.clone(),
-            hidden: true,
-        }));
+        entries.extend(
+            s.retired
+                .iter()
+                .filter(|(key, _)| retired_window_restorable(s, key, live))
+                .map(|(key, window)| RemoteWindowSummary {
+                    window_id: key.window_id,
+                    owner_identity: key.owner_identity.clone(),
+                    owner_display_name: window.owner_display_name.clone(),
+                    source_title: window.source_title.clone(),
+                    hidden: true,
+                }),
+        );
         entries
     });
     entries.sort_by_key(|entry| (entry.hidden, entry.owner_identity.clone(), entry.window_id));
@@ -6068,13 +6150,22 @@ fn activate_window_then(
         app,
         format!("compositor: activate {window_id}"),
         move || {
-            let restored_state = with_state(|s| {
-                if s.windows.contains_key(&key_for_main) {
-                    return None;
+            let live = live_window_publication_keys();
+            let restore = with_state(|s| take_restorable_retired(s, &key_for_main, &live));
+            let restored_state = match restore {
+                RetiredRestore::NotRetired => None,
+                RetiredRestore::Restore(win_state) => Some(win_state),
+                RetiredRestore::Refused(reason) => {
+                    // #316: raising the hidden panel would un-hide a frozen,
+                    // publication-less window. Refuse; leave it retired.
+                    log::warn!(
+                        "compositor: refusing to restore retired window {window_id} (retired reason={}, publication live={}); only a live manual hide is restorable (#316)",
+                        reason.map_or("unknown", RemoveWindowReason::label),
+                        live.contains(&key_for_main)
+                    );
+                    return;
                 }
-                s.retired_order.retain(|stored| stored != &key_for_main);
-                s.retired.remove(&key_for_main)
-            });
+            };
             if let Some(mut win_state) = restored_state {
                 let passive_anchor = crate::window_diag::frontmost_normal_window_number();
                 show_retired_window_on_main(
@@ -6268,9 +6359,9 @@ fn raise_order_for_participant_windows(
 /// * Every currently OPEN window for this owner (`s.windows`) is eligible --
 ///   it is already rendering, so there is nothing to gate.
 /// * A RETIRED window (`s.retired` -- this bucket holds both a user's
-///   manual-hide and a genuine sharer-side teardown; nothing in this
-///   module's own state tells them apart, see `CompositorState::retired`'s
-///   doc comment) is eligible ONLY if `live_window_ids` says the SFU still
+///   manual-hide and a genuine sharer-side teardown; see
+///   `CompositorState::retired_reasons`, #316) is eligible ONLY if
+///   `live_window_ids` says the SFU still
 ///   holds a publication for it. This is the CLAUDE.md never-black-frame
 ///   rule applied to restoration: "hide only when the SFU holds no
 ///   publication ... otherwise hold_window_last_frame" -- a retired window
@@ -6427,7 +6518,7 @@ pub fn compositor_raise_participant_windows(app: AppHandle, owner_identity: Stri
 
 #[tauri::command]
 pub fn compositor_list_windows() -> Vec<RemoteWindowSummary> {
-    remote_window_summaries()
+    remote_window_summaries(&live_window_publication_keys())
 }
 
 fn display_enqueue_snapshot_for_key(key: &RemoteWindowKey) -> Option<DisplayEnqueueSnapshot> {
@@ -10490,5 +10581,125 @@ mod tests {
              .focused(false) to avoid tao's build-time makeKeyAndOrderFront (#677) -- \
              got body:\n{body}"
         );
+    }
+
+    /// #316 helper: run `remove_window`'s real synchronous state step, then
+    /// the main-thread park it schedules (the AppKit hide is not modelled).
+    fn retire_for_316_test(key: &RemoteWindowKey, reason: RemoveWindowReason) {
+        with_state(|s| {
+            if let Some(removed) = detach_window_for_removal(s, key, reason) {
+                s.retired_order.retain(|stored| stored != key);
+                s.retired_order.push(key.clone());
+                s.retired.insert(key.clone(), removed);
+            }
+        });
+    }
+
+    fn clear_316_keys(keys: &[&RemoteWindowKey]) {
+        with_state(|s| {
+            for key in keys {
+                s.windows.remove(*key);
+                s.retired.remove(*key);
+                s.retired_reasons.remove(*key);
+                s.retired_order.retain(|stored| stored != *key);
+            }
+        });
+    }
+
+    fn listed_316(live: &HashSet<RemoteWindowKey>, key: &RemoteWindowKey) -> Option<bool> {
+        remote_window_summaries(live)
+            .into_iter()
+            .find(|e| e.owner_identity == key.owner_identity && e.window_id == key.window_id)
+            .map(|e| e.hidden)
+    }
+
+    #[test]
+    fn issue_316_publication_ended_retiree_is_not_listed_and_activate_refuses_it() {
+        let ended = test_key("issue316-ended", 0x316_0001);
+        clear_316_keys(&[&ended]);
+        with_state(|s| {
+            s.windows.insert(ended.clone(), test_window("issue316-ended", "Claude"));
+        });
+        retire_for_316_test(&ended, RemoveWindowReason::TrackUnpublished);
+        // Even if a stale publication entry lingered, a sharer-side end is final.
+        let live: HashSet<RemoteWindowKey> = [ended.clone()].into_iter().collect();
+
+        assert_eq!(listed_316(&live, &ended), None, "dead share must not be listed as Hidden");
+        let outcome = with_state(|s| take_restorable_retired(s, &ended, &live));
+        assert!(matches!(
+            outcome,
+            RetiredRestore::Refused(Some(RemoveWindowReason::TrackUnpublished))
+        ));
+        assert!(
+            with_state(|s| s.retired.contains_key(&ended) && !s.windows.contains_key(&ended)),
+            "a refused restore must leave the window retired"
+        );
+        clear_316_keys(&[&ended]);
+    }
+
+    #[test]
+    fn issue_316_manual_hide_with_live_publication_is_listed_and_restored() {
+        let hidden = test_key("issue316-hidden", 0x316_0002);
+        clear_316_keys(&[&hidden]);
+        with_state(|s| {
+            s.windows.insert(hidden.clone(), test_window("issue316-hidden", "Editor"));
+        });
+        retire_for_316_test(&hidden, RemoveWindowReason::ManualHide);
+        let live: HashSet<RemoteWindowKey> = [hidden.clone()].into_iter().collect();
+
+        assert_eq!(listed_316(&live, &hidden), Some(true));
+        // Without a live publication the same manual hide is not restorable.
+        assert_eq!(listed_316(&HashSet::new(), &hidden), None);
+        assert!(matches!(
+            with_state(|s| take_restorable_retired(s, &hidden, &HashSet::new())),
+            RetiredRestore::Refused(Some(RemoveWindowReason::ManualHide))
+        ));
+
+        let outcome = with_state(|s| take_restorable_retired(s, &hidden, &live));
+        assert!(matches!(outcome, RetiredRestore::Restore(_)));
+        with_state(|s| {
+            assert!(!s.retired.contains_key(&hidden));
+            assert!(!s.retired_order.contains(&hidden));
+            assert!(!s.retired_reasons.contains_key(&hidden));
+        });
+        clear_316_keys(&[&hidden]);
+    }
+
+    #[test]
+    fn issue_316_sharer_end_after_manual_hide_makes_the_retiree_unrestorable() {
+        // The hidden-then-unshared case: the genuine end reaches
+        // `remove_window` for an already-retired key (early-return path).
+        let key = test_key("issue316-hidden-then-ended", 0x316_0003);
+        clear_316_keys(&[&key]);
+        with_state(|s| {
+            s.windows.insert(key.clone(), test_window("issue316-hidden-then-ended", "Doc"));
+        });
+        retire_for_316_test(&key, RemoveWindowReason::ManualHide);
+        retire_for_316_test(&key, RemoveWindowReason::TrackUnpublished);
+        // A later ManualHide must never re-arm a dead retiree.
+        retire_for_316_test(&key, RemoveWindowReason::ManualHide);
+        let live: HashSet<RemoteWindowKey> = [key.clone()].into_iter().collect();
+
+        assert_eq!(listed_316(&live, &key), None);
+        assert!(matches!(
+            with_state(|s| take_restorable_retired(s, &key, &live)),
+            RetiredRestore::Refused(Some(RemoveWindowReason::TrackUnpublished))
+        ));
+        clear_316_keys(&[&key]);
+    }
+
+    #[test]
+    fn issue_316_open_window_is_listed_and_activation_is_not_a_restore() {
+        let key = test_key("issue316-open", 0x316_0004);
+        clear_316_keys(&[&key]);
+        with_state(|s| {
+            s.windows.insert(key.clone(), test_window("issue316-open", "Terminal"));
+        });
+        assert_eq!(listed_316(&HashSet::new(), &key), Some(false));
+        assert!(matches!(
+            with_state(|s| take_restorable_retired(s, &key, &HashSet::new())),
+            RetiredRestore::NotRetired
+        ));
+        clear_316_keys(&[&key]);
     }
 }
