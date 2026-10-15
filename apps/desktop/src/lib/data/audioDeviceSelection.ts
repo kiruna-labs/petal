@@ -29,10 +29,22 @@ export function pickerValue(options: readonly { id: string }[], savedId: string)
 }
 
 /**
+ * The question when the microphone in use gives only digital silence
+ * (Windows: a wireless headset switched off behind its dongle). Asked, never
+ * acted on alone: a mic muted at the Windows endpoint, a noise-gated headset or
+ * a virtual noise-removal mic can give the same silence while working.
+ */
+export function silentMicOffer(silentDevice: string, deviceName: string): string {
+  return `No sound from ${silentDevice} — switch to ${deviceName}?`;
+}
+
+export const SILENT_MIC_OFFER_ACTION = 'Switch';
+
+/**
  * The message when capture moved off a microphone that gave only digital
- * silence (Windows: a wireless headset switched off behind its dongle). The
- * saved choice is unchanged, so the picker still checks it; this says where
- * the voice actually comes from.
+ * silence, after the user accepted `silentMicOffer`. The saved choice is
+ * unchanged, so the picker still checks it; this says where the voice
+ * actually comes from.
  */
 export function silentMicNote(silentDevice: string, deviceName: string): string {
   return `No sound from ${silentDevice} — switched to ${deviceName}`;

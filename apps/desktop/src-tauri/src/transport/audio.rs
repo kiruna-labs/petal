@@ -576,9 +576,9 @@ pub(crate) fn saved_device_to_restore<'a>(
     (present.contains(&id) && current != Some(id) && !do_not_retry.contains(id)).then_some(id)
 }
 
-/// Pure: the microphone to switch to when `silent` captures only digital
-/// silence -- the Windows default if it is usable, otherwise the first usable
-/// one in `devices` order. Usable means listed, not `silent`, and not in
+/// Pure: the microphone to offer when `silent` captures only digital silence
+/// -- the Windows default if it is usable, otherwise the first usable one in
+/// `devices` order. Usable means listed, not `silent`, and not in
 /// `do_not_retry`.
 pub(crate) fn fallback_recording_device<'a>(
     devices: &[&'a str],
@@ -770,19 +770,14 @@ impl MicTrack {
         }
     }
 
-    /// Stop using `silent`, a microphone that captured only digital silence
-    /// (a wireless headset switched off behind its still-connected dongle),
-    /// and switch to [`fallback_recording_device`] among the active
-    /// microphones. `silent` is not switched back to on our own while it
-    /// stays connected. `None` when no other microphone is usable.
+    /// The microphone to offer the user when `silent` captured only digital
+    /// silence (a wireless headset switched off behind its still-connected
+    /// dongle): [`fallback_recording_device`] among the active microphones,
+    /// as `(id, name)`. Changes nothing; capture moves only when the user
+    /// accepts, through [`Self::switch_from_silent_device`]. `None` when no
+    /// other microphone is usable.
     #[cfg(target_os = "windows")]
-    pub(crate) fn fail_over_from_silent_device(
-        &self,
-        silent: &str,
-    ) -> Option<RecordingDeviceRefresh> {
-        self.do_not_retry
-            .lock_unpoisoned()
-            .insert(silent.to_owned());
+    pub(crate) fn silent_device_fallback(&self, silent: &str) -> Option<(String, String)> {
         let devices: Vec<_> = self.audio.recording_devices().collect();
         let active = crate::windows_audio_device::active_recording_endpoint_ids().ok();
         let ids: Vec<&str> = devices
@@ -795,14 +790,33 @@ impl MicTrack {
             })
             .collect();
         let default = crate::windows_audio_device::default_recording_device_id().ok();
-        let target = {
-            let do_not_retry = self.do_not_retry.lock_unpoisoned();
-            fallback_recording_device(&ids, default.as_deref(), silent, &do_not_retry)?.to_owned()
-        };
-        Some(match self.set_recording_device(&target) {
-            Ok(name) => RecordingDeviceRefresh::Switched(name),
-            Err(error) => RecordingDeviceRefresh::Failed(error),
-        })
+        let do_not_retry = self.do_not_retry.lock_unpoisoned();
+        let target = fallback_recording_device(&ids, default.as_deref(), silent, &do_not_retry)?;
+        let name = devices
+            .iter()
+            .find(|device| device.id.as_str() == target)
+            .map(|device| device.name.clone())?;
+        Some((target.to_owned(), name))
+    }
+
+    /// The user accepted the offer to stop using `silent`: switch to `target`.
+    /// `silent` is then not switched back to on our own while it stays
+    /// connected, and the saved choice is unchanged. Refused when capture is
+    /// no longer on `silent`, so an offer the user acts on late can never
+    /// undo a newer choice.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn switch_from_silent_device(
+        &self,
+        silent: &str,
+        target: &str,
+    ) -> Result<String, String> {
+        if self.current_device_id().as_deref() != Some(silent) {
+            return Err("the microphone already changed".to_string());
+        }
+        self.do_not_retry
+            .lock_unpoisoned()
+            .insert(silent.to_owned());
+        self.set_recording_device(target)
     }
 
     pub fn use_default_recording_device(&self) -> Result<String, String> {

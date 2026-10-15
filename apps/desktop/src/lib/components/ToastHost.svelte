@@ -50,7 +50,8 @@
   import { clearUpdateStatus, updateStatus } from '$lib/stores/updateStatus.svelte';
   import { setToastHostVisible } from '$lib/stores/toastHost.svelte';
   import { updateAudioDevices } from '$lib/stores/session.svelte';
-  import { silentMicNote } from '$lib/data/audioDeviceSelection';
+  import { SILENT_MIC_OFFER_ACTION, silentMicNote, silentMicOffer } from '$lib/data/audioDeviceSelection';
+  import { switchFromSilentMic } from '$lib/data/audioDevices';
   import { EVENTS } from '$lib/ipc';
   import type { ResilienceEvent, ShareErrorPayload, RemoteControlStatus } from '$lib/ipc';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
@@ -63,6 +64,9 @@
    * clear them early; ambient status toasts stay non-dismissible by design
    * (issue #18 — they clear when the next event supersedes them). */
   let dismissible = $state(false);
+  /** A question (`micSilentOffer`) carries the one action that answers it. */
+  let actionLabel = $state<string | undefined>();
+  let action = $state<(() => void) | undefined>();
   let updateToastVisible = $state(false);
   // Auto-dismiss timer handle -- re-armed on every new event so a rapid
   // sequence (e.g. Reconnecting -> Reconnected) always shows the LATEST
@@ -107,11 +111,20 @@
     }
   });
 
-  function show(next: { variant: ToastVariant; message: string; autoDismiss: boolean }) {
+  function show(next: {
+    variant: ToastVariant;
+    message: string;
+    autoDismiss: boolean;
+    /** Defaults to `autoDismiss`; a question stays up but can be closed. */
+    dismissible?: boolean;
+    action?: { label: string; run: () => void };
+  }) {
     variant = next.variant;
     message = next.message;
     visible = true;
-    dismissible = next.autoDismiss;
+    dismissible = next.dismissible ?? next.autoDismiss;
+    actionLabel = next.action?.label;
+    action = next.action?.run;
     clearTimeout(dismissTimer);
     if (next.autoDismiss) {
       dismissTimer = setTimeout(() => {
@@ -124,6 +137,25 @@
     clearTimeout(dismissTimer);
     visible = false;
     dismissible = false;
+    actionLabel = undefined;
+    action = undefined;
+  }
+
+  // Only the user moves capture off a silent mic: the same silence comes from
+  // a mic muted at the Windows endpoint, a noise-gated headset or a virtual
+  // noise-removal mic that all work. The backend confirms a switch with
+  // `micSwitchedFromSilent`.
+  async function acceptSilentMicOffer(offer: Extract<ResilienceEvent, { kind: 'micSilentOffer' }>) {
+    dismissToast();
+    try {
+      await switchFromSilentMic(offer.silentDeviceId, offer.deviceId);
+    } catch (error) {
+      show({
+        variant: 'degraded',
+        message: `Could not switch microphone: ${String(error)}`,
+        autoDismiss: true,
+      });
+    }
   }
 
   function clearShareRepairToast(windowId: number) {
@@ -168,6 +200,15 @@
         break;
       case 'micDeviceFailed':
         show({ variant: 'degraded', message: event.message, autoDismiss: true });
+        break;
+      case 'micSilentOffer':
+        show({
+          variant: 'degraded',
+          message: silentMicOffer(event.silentDevice, event.deviceName),
+          autoDismiss: false,
+          dismissible: true,
+          action: { label: SILENT_MIC_OFFER_ACTION, run: () => void acceptSilentMicOffer(event) },
+        });
         break;
       case 'micSwitchedFromSilent':
         show({
@@ -328,7 +369,14 @@
       />
     {/if}
     {#if visible}
-      <Toast {variant} {message} dismissible={dismissible} onDismiss={dismissToast} />
+      <Toast
+        {variant}
+        {message}
+        dismissible={dismissible}
+        onDismiss={dismissToast}
+        {actionLabel}
+        onAction={action}
+      />
     {/if}
   </div>
 {/if}

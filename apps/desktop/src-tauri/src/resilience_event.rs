@@ -30,7 +30,16 @@ pub enum ResilienceEvent {
     },
     /// Windows: the microphone in use captured only digital silence (a
     /// wireless headset switched off behind its still-connected dongle), so
-    /// capture moved to another microphone. The saved choice is unchanged.
+    /// ask whether to move capture to `device_id`. Nothing switches until the
+    /// user accepts, through `session::switch_from_silent_mic`.
+    MicSilentOffer {
+        silent_device: String,
+        silent_device_id: String,
+        device_name: String,
+        device_id: String,
+    },
+    /// Windows: the user accepted a [`Self::MicSilentOffer`] and capture
+    /// moved to another microphone. The saved choice is unchanged.
     MicSwitchedFromSilent {
         silent_device: String,
         device_name: String,
@@ -83,6 +92,19 @@ mod tests {
         assert_eq!(mic["kind"], "micDeviceChanged");
         assert_eq!(mic["deviceName"], "USB Mic");
         assert!(mic.get("usingDefault").is_none());
+
+        let offer = serde_json::to_value(ResilienceEvent::MicSilentOffer {
+            silent_device: "Headset Microphone".into(),
+            silent_device_id: "{headset}".into(),
+            device_name: "Webcam Microphone".into(),
+            device_id: "{webcam}".into(),
+        })
+        .unwrap();
+        assert_eq!(offer["kind"], "micSilentOffer");
+        assert_eq!(offer["silentDevice"], "Headset Microphone");
+        assert_eq!(offer["silentDeviceId"], "{headset}");
+        assert_eq!(offer["deviceName"], "Webcam Microphone");
+        assert_eq!(offer["deviceId"], "{webcam}");
 
         let silent = serde_json::to_value(ResilienceEvent::MicSwitchedFromSilent {
             silent_device: "Headset Microphone".into(),

@@ -155,6 +155,7 @@ export const COMMANDS = {
   roomPresence: 'room_presence',
   runLaunchUpdateCheck: 'run_launch_update_check',
   setAudioDevices: 'set_audio_devices',
+  switchFromSilentMic: 'switch_from_silent_mic',
   setCameraDevice: 'set_camera_device',
   setCameraPrefs: 'set_camera_prefs',
   setCockpitOpen: 'set_cockpit_open',
@@ -1276,6 +1277,13 @@ export type ResilienceEvent =
   | { kind: 'networkChanged' }
   | { kind: 'micDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'micDeviceFailed'; message: string }
+  | {
+      kind: 'micSilentOffer';
+      silentDevice: string;
+      silentDeviceId: string;
+      deviceName: string;
+      deviceId: string;
+    }
   | { kind: 'micSwitchedFromSilent'; silentDevice: string; deviceName: string }
   | { kind: 'speakerDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'speakerDeviceFailed'; message: string }
@@ -1726,6 +1734,7 @@ export interface CommandArgs {
     which: 'screenRecording' | 'microphone' | 'camera' | 'accessibility';
   };
   [COMMANDS.setAudioDevices]: { recordingId: string | null; playoutId: string | null };
+  [COMMANDS.switchFromSilentMic]: { silentDeviceId: string; deviceId: string };
   [COMMANDS.listCameraModes]: { preferredDeviceId: string | null };
   [COMMANDS.setCameraDevice]: { deviceId: string };
   /** Settings' camera-preview edge, written to petal.log so a #76 camera-intent
@@ -1924,6 +1933,7 @@ export interface CommandReturns {
   [COMMANDS.restartApp]: boolean;
   [COMMANDS.roomPresence]: PresentParticipant[];
   [COMMANDS.setAudioDevices]: AppliedAudioDevices;
+  [COMMANDS.switchFromSilentMic]: string;
   [COMMANDS.setCameraDevice]: AppliedCameraDevice;
   [COMMANDS.setCameraPrefs]: AppliedCameraDevice;
   [COMMANDS.startTestCockpit]: CockpitStatus;
