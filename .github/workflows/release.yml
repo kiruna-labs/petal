@@ -851,8 +851,10 @@ jobs:
         run: |
           set -euo pipefail
           npm i -g vercel@59 >/dev/null 2>&1
-          VERCEL_PROJECT_ID=prj_oi8RLddPbTrKSalKvix1GEgdti1W vercel promote "$BACKEND_URL" --yes --token "$VERCEL_TOKEN"
-          VERCEL_PROJECT_ID=prj_OwXNV8ZFq9moT4jWcNVa1bxlz1lk vercel promote "$WEB_URL" --yes --token "$VERCEL_TOKEN"
+          # `vercel promote` ignores VERCEL_ORG_ID and searches the token owner's
+          # personal scope; without --scope it 403s ("scope kiruna-labs1", v0.9.31).
+          VERCEL_PROJECT_ID=prj_oi8RLddPbTrKSalKvix1GEgdti1W vercel promote "$BACKEND_URL" --yes --token "$VERCEL_TOKEN" --scope "$VERCEL_ORG_ID"
+          VERCEL_PROJECT_ID=prj_OwXNV8ZFq9moT4jWcNVa1bxlz1lk vercel promote "$WEB_URL" --yes --token "$VERCEL_TOKEN" --scope "$VERCEL_ORG_ID"
 
       # The real domains must now serve this commit. Still pre-publish for the
       # manifest-dependent checks; the post-publish step below closes those.
