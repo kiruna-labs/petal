@@ -21,8 +21,11 @@ use std::time::Duration;
 pub enum UrlExtraction {
     /// A privacy-minimized `http(s)://` URL was extracted.
     Url(String),
-    /// The script ran and found no matching window (or its match wasn't an
-    /// openable http(s) URL).
+    /// Exactly one window matched, but its active tab is not an openable
+    /// http(s) URL (new tab, `about:blank`, `chrome://`, `file://`, an
+    /// extension page, Safari's Start Page). An expected page state, not an
+    /// extraction failure: logged at info, never a Sentry diagnostic
+    /// (PETAL-DESKTOP-2M). Window-match failures have their own variants.
     Empty,
     /// The target process no longer exists (quit between share start and
     /// this poll). Distinct from `Empty` so the log can tell "browser gone"
@@ -69,6 +72,14 @@ impl UrlExtraction {
     /// itself on the next poll, and an unsupported bundle id never will.
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Denied | Self::Unsupported)
+    }
+
+    /// `true` for an outcome that is an expected page state rather than an
+    /// extraction failure (see `Empty`). Such outcomes are logged at info
+    /// and never emit the Sentry diagnostic, and they don't use up a share's
+    /// one diagnostic slot for a later real failure (`run_url_refresh`).
+    pub fn is_expected_non_url(&self) -> bool {
+        matches!(self, Self::Empty)
     }
 
     /// A short, closed-set signature for logs and the `browser-url-extraction-failed`
@@ -170,6 +181,16 @@ fn extraction_log_plan(
 ) -> Option<(log::Level, bool)> {
     if matches!(outcome, UrlExtraction::Url(_) | UrlExtraction::Unsupported) {
         return None;
+    }
+    if outcome.is_expected_non_url() {
+        // PETAL-DESKTOP-2M: a non-web tab is not a failure -- keep the
+        // detail in the log (a Sentry breadcrumb), never an error event.
+        let level = if first_for_share {
+            log::Level::Info
+        } else {
+            log::Level::Debug
+        };
+        return Some((level, false));
     }
     if first_for_share {
         Some((log::Level::Warn, true))
@@ -887,6 +908,42 @@ mod tests {
             Some((log::Level::Debug, false)),
             "every later poll of the same share must stay at debug and emit nothing further"
         );
+    }
+
+    #[test]
+    fn extraction_log_plan_keeps_a_non_web_tab_at_info_and_never_emits() {
+        // PETAL-DESKTOP-2M: sharing a browser window on a new tab /
+        // about:blank / file:// page is an expected state, not an error.
+        assert!(UrlExtraction::Empty.is_expected_non_url());
+        assert_eq!(
+            extraction_log_plan(&UrlExtraction::Empty, true),
+            Some((log::Level::Info, false))
+        );
+        assert_eq!(
+            extraction_log_plan(&UrlExtraction::Empty, false),
+            Some((log::Level::Debug, false))
+        );
+        // Every real failure still emits on the first occurrence.
+        for outcome in [
+            UrlExtraction::ProcessGone,
+            UrlExtraction::NoWindows,
+            UrlExtraction::TitleMismatch(2),
+            UrlExtraction::Ambiguous(2),
+            UrlExtraction::Timeout,
+            UrlExtraction::Denied,
+            UrlExtraction::Failed {
+                status: 1,
+                stderr: "boom".to_string(),
+            },
+            UrlExtraction::Spawn("nope".to_string()),
+        ] {
+            assert!(!outcome.is_expected_non_url(), "outcome: {outcome:?}");
+            assert_eq!(
+                extraction_log_plan(&outcome, true),
+                Some((log::Level::Warn, true)),
+                "outcome: {outcome:?}"
+            );
+        }
     }
 
     #[test]
