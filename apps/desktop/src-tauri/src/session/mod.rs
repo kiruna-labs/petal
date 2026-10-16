@@ -167,7 +167,7 @@ pub use share::{
     promote_quality_for_remote_control, reconcile_quality_after_remote_control_release,
     start_share, stop_share,
 };
-pub(crate) use share::{stop_share_explained, StopShareAnalytics};
+pub(crate) use share::{is_source_not_found, stop_share_explained, StopShareAnalytics};
 // #106: SHARE-DESKTOP attaches a display share's own memory marks to its
 // run.jsonl evidence rather than scraping the app log.
 #[cfg(feature = "cockpit-privileged")]

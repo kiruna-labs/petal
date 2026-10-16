@@ -460,7 +460,13 @@ pub(crate) async fn toggle_share_for_window_with_color(
         }
         if let Err(error) = crate::session::start_share(app, state, window_id, frame).await {
             invalidate_share_focus_attempt(ShareFocusLifecycle::StartFailed(focus_attempt));
-            log::error!("toggle_share_for_window: start_share({window_id}) failed: {error}");
+            // A not-found was already reported, at the right level, by the
+            // capture-start site (PETAL-DESKTOP-3D/-1N duplicated it).
+            if crate::session::is_source_not_found(&error) {
+                log::warn!("toggle_share_for_window: start_share({window_id}) failed: {error}");
+            } else {
+                log::error!("toggle_share_for_window: start_share({window_id}) failed: {error}");
+            }
             reconcile_share_border(app, state, source_kind, window_id, frame, Some(&color));
             reconcile_share_overlay(app, state, window_id, frame, source_kind);
             emit_share_error(app, window_id, true, error);

@@ -2352,6 +2352,69 @@ struct SourceWindowInfo {
     raw_title: Option<String>,
 }
 
+/// How a failed capture start is reported. Only `Anomalous` reaches Sentry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureStartFailureKind {
+    /// The window no longer exists anywhere: closed between pick and start,
+    /// or mid-share before an in-place restart (PETAL-DESKTOP-13/-12/-3C).
+    SourceClosed,
+    Anomalous,
+}
+
+fn classify_capture_start_failure(
+    error: &crate::capture::CaptureError,
+    existence: &dyn WindowExistence,
+) -> CaptureStartFailureKind {
+    match error {
+        crate::capture::CaptureError::WindowNotFound(id)
+            if !crate::window_source::is_display_source_id(*id)
+                && !existence.window_exists(*id) =>
+        {
+            CaptureStartFailureKind::SourceClosed
+        }
+        _ => CaptureStartFailureKind::Anomalous,
+    }
+}
+
+/// The single reporter for capture-start failures; callers that re-log a
+/// not-found error downstream use `is_source_not_found` to stay at warn.
+fn log_capture_start_failure(
+    reason: &str,
+    window_id: u32,
+    error: &crate::capture::CaptureError,
+    existence: &dyn WindowExistence,
+) {
+    match classify_capture_start_failure(error, existence) {
+        CaptureStartFailureKind::SourceClosed => log::warn!(
+            "session: {reason}(window {window_id}) failed -- WindowCapture::start error: {error} (the window no longer exists -- closed by its app or the user)"
+        ),
+        CaptureStartFailureKind::Anomalous => {
+            // A window CoreGraphics still has but ScreenCaptureKit does not
+            // list is the interesting case: record why (PETAL-DESKTOP-3C/-3D).
+            let facts = match error {
+                crate::capture::CaptureError::WindowNotFound(id) => {
+                    crate::platform::cg::capture_facts_for_window_id(*id)
+                        .map(|facts| format!(" (window still exists: {facts})"))
+                        .unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            log::error!(
+                "session: {reason}(window {window_id}) failed -- WindowCapture::start error: {error}{facts}"
+            );
+        }
+    }
+}
+
+/// Whether a share error is the not-found outcome `log_capture_start_failure`
+/// already reported.
+pub(crate) fn is_source_not_found(error: &ShareSessionError) -> bool {
+    matches!(
+        error,
+        ShareSessionError::WindowNotFound(_) | ShareSessionError::DisplayNotFound(_)
+    )
+}
+
 /// #712 Fable follow-up (non-blocking): `window_id` here can be a TAGGED
 /// display source id (`DISPLAY_SOURCE_MARKER | CGDirectDisplayID`), not just
 /// a raw `CGWindowID` -- normally `crate::window_source::list()` below
@@ -4238,9 +4301,7 @@ async fn start_capture_for_share(
                 ),
             }
             .map_err(|e| {
-                log::error!(
-                    "session: {reason}(window {window_id}) failed -- WindowCapture::start error: {e}"
-                );
+                log_capture_start_failure(reason, window_id, &e, &CgWindowExistence);
                 e
             })?;
             started_without_frame = true;
@@ -6412,7 +6473,10 @@ fn spawn_share_monitor(
                             if let Some(diagnostics) = diagnostics.as_ref() {
                                 diagnostics.mark_capture_wedged(window_id);
                             }
-                            log::error!("session: window {window_id} {message}");
+                            // warn, not error: a restart-in-place is a recovered
+                            // quality event (logging.rs policy); a restart that
+                            // fails or trips the breaker still logs at error.
+                            log::warn!("session: window {window_id} {message}");
                             published
                                 .lock_unpoisoned()
                                 .disable_native_zero_copy("raw capture watchdog fired; possible IOSurface pool starvation");
@@ -6669,9 +6733,17 @@ fn spawn_pump_failure_recovery(
         {
             Ok(capture) => capture,
             Err(error) => {
-                log::error!(
-                    "session: window {window_id} in-place capture restart after pump failure failed: {error}"
-                );
+                // The capture-start site already reported this at the right
+                // level (a closed window is expected, PETAL-DESKTOP-13/-12).
+                if is_source_not_found(&error) {
+                    log::warn!(
+                        "session: window {window_id} in-place capture restart after pump failure failed: {error}"
+                    );
+                } else {
+                    log::error!(
+                        "session: window {window_id} in-place capture restart after pump failure failed: {error}"
+                    );
+                }
                 crate::analytics::capture_restarted(crate::analytics::RestartOutcome::Failed);
                 if let Err(stop_error) = stop_share_explained(
                     &app,
@@ -11394,6 +11466,46 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             self.asked.lock_unpoisoned().push(window_id);
             self.alive.contains(&window_id)
         }
+    }
+
+    /// Sentry PETAL-DESKTOP-13/-12: a window closed mid-share fails its
+    /// in-place restart with `WindowNotFound` -- expected, not an error.
+    /// Only a window CoreGraphics still has (PETAL-DESKTOP-3C/-3D) or a
+    /// display id on the window path (the PETAL-DESKTOP-1M bug class) is.
+    #[test]
+    fn a_closed_source_is_not_a_capture_start_anomaly_petal_desktop_13() {
+        use crate::capture::CaptureError;
+        let existence = FakeExistence::new(&[9635]);
+        assert_eq!(
+            classify_capture_start_failure(&CaptureError::WindowNotFound(23189), &existence),
+            CaptureStartFailureKind::SourceClosed
+        );
+        assert_eq!(
+            classify_capture_start_failure(&CaptureError::WindowNotFound(9635), &existence),
+            CaptureStartFailureKind::Anomalous,
+            "on screen per CoreGraphics but missing from ScreenCaptureKit"
+        );
+        let display = crate::window_source::display_source_id(4);
+        assert_eq!(
+            classify_capture_start_failure(&CaptureError::WindowNotFound(display), &existence),
+            CaptureStartFailureKind::Anomalous,
+            "a display id on the window path is a routing bug, never 'closed'"
+        );
+        assert!(!existence.asked().contains(&display), "no CG query for a display id");
+        for other in [
+            CaptureError::PermissionDenied,
+            CaptureError::DisplayNotFound(display),
+            CaptureError::ScreenCaptureKit("boom".to_string()),
+        ] {
+            assert_eq!(
+                classify_capture_start_failure(&other, &existence),
+                CaptureStartFailureKind::Anomalous
+            );
+        }
+        // Downstream re-logs of a not-found defer to the reporter above.
+        assert!(is_source_not_found(&ShareSessionError::WindowNotFound(1)));
+        assert!(is_source_not_found(&ShareSessionError::DisplayNotFound(1)));
+        assert!(!is_source_not_found(&ShareSessionError::PermissionDenied));
     }
 
     /// #742: this replaces a test that asserted on `classify_shared_window_
