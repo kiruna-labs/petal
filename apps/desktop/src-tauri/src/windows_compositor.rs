@@ -1416,13 +1416,6 @@ fn resolve_key(window_id: u32, owner_identity: Option<&str>) -> Option<WindowKey
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct RemoteControlTargetMetadata {
-    pub(crate) owner_identity: String,
-    pub(crate) target_kind: crate::remote_control_core::RemoteControlTargetKind,
-    pub(crate) share_instance_id: String,
-}
-
 pub(crate) fn remote_control_window_exists(
     window_id: u32,
     owner_identity: Option<&str>,
@@ -1437,23 +1430,26 @@ pub(crate) fn remote_control_window_exists(
 pub(crate) fn remote_control_target_metadata(
     window_id: u32,
     owner_identity: Option<&str>,
-) -> Option<RemoteControlTargetMetadata> {
+) -> Option<crate::remote_control_core::ControlRequestTarget> {
+    use crate::remote_control_core::{RemoteControlTargetKind, RemoteWindowCandidate};
     let windows = snapshot().lock_unpoisoned();
-    let window = windows.iter().find(|window| {
-        window.window_id == window_id
-            && owner_identity.is_none_or(|owner| owner == window.owner_identity)
-            && !window.hidden
-    })?;
-    Some(RemoteControlTargetMetadata {
-        owner_identity: window.owner_identity.clone(),
-        target_kind: match window.source_kind {
-            SharedSourceKind::Window => crate::remote_control_core::RemoteControlTargetKind::Window,
-            SharedSourceKind::Display | SharedSourceKind::DisplayRegion => {
-                crate::remote_control_core::RemoteControlTargetKind::Display
-            }
-        },
-        share_instance_id: window.share_instance_id.clone()?,
-    })
+    // #314: a Mac share has no share-instance id; it must still resolve.
+    crate::remote_control_core::resolve_control_request_target(
+        windows.iter().map(|window| RemoteWindowCandidate {
+            window_id: window.window_id,
+            owner_identity: &window.owner_identity,
+            hidden: window.hidden,
+            target_kind: match window.source_kind {
+                SharedSourceKind::Window => RemoteControlTargetKind::Window,
+                SharedSourceKind::Display | SharedSourceKind::DisplayRegion => {
+                    RemoteControlTargetKind::Display
+                }
+            },
+            share_instance_id: window.share_instance_id.as_deref(),
+        }),
+        window_id,
+        owner_identity,
+    )
 }
 
 /// Start a native window drag from the header strip. The surface route's

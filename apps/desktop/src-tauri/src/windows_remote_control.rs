@@ -117,9 +117,12 @@ pub(crate) async fn prepare_control_request(
     if let Some(target) =
         crate::windows_compositor::remote_control_target_metadata(window_id, Some(owner_identity))
     {
-        message.target_kind = Some(target.target_kind);
-        message.share_instance_id = Some(target.share_instance_id);
-        message.controller_capabilities = controller_capabilities(target.target_kind);
+        // #314: a Mac host (no share instance) gets the legacy request shape.
+        crate::remote_control_core::apply_control_request_envelope(
+            message,
+            &target,
+            controller_capabilities,
+        );
         return Ok(());
     }
     crate::windows_compositor::compositor_list_windows()
@@ -305,7 +308,7 @@ pub(crate) fn record_controller_status(message: &RemoteControlMessage, status: &
         .as_ref()
         .is_some_and(|capability| capability.version == 2 && !capability.retry_enabled);
     if target.target_kind != target_kind
-        || target.share_instance_id != share_instance_id
+        || target.share_instance_id.as_deref() != Some(share_instance_id.as_str())
         || message.host_capabilities.is_empty()
         || !reliable_result
     {

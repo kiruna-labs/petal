@@ -4334,12 +4334,18 @@ fn handle_message(
     message: RemoteControlMessage,
 ) {
     if message.v != VERSION {
-        log::debug!("remote-control: dropping unsupported version {}", message.v);
+        if should_log_message(message.message_type, message.action, message.seq) {
+            log::warn!(
+                "remote-control: dropping unsupported version {} for window {}",
+                message.v,
+                message.window_id
+            );
+        }
         return;
     }
     if message.target_user_id != local_identity {
         if should_log_message(message.message_type, message.action, message.seq) {
-            log::debug!(
+            log::info!(
                 "remote-control: ignoring packet for another target: {} local='{}'",
                 message_summary(&message),
                 local_identity
@@ -4355,7 +4361,10 @@ fn handle_message(
     if message.message_type == RemoteControlType::Unknown
         || message.action == Some(RemoteControlAction::Unknown)
     {
-        log::debug!("remote-control: ignoring unknown kind/action packet");
+        log::info!(
+            "remote-control: ignoring unknown kind/action packet for window {}",
+            message.window_id
+        );
         return;
     }
     if should_log_message(message.message_type, message.action, message.seq) {
@@ -5808,12 +5817,13 @@ fn prepare_macos_controller_request_for_capable_host(
     ) else {
         return;
     };
-    let Some(share_instance_id) = target.share_instance_id else {
-        return;
+    let target = crate::remote_control_core::ControlRequestTarget {
+        owner_identity: owner_identity.to_string(),
+        target_kind: target.target_kind,
+        share_instance_id: target.share_instance_id,
     };
-    message.target_kind = Some(target.target_kind);
-    message.share_instance_id = Some(share_instance_id);
-    message.controller_capabilities = match target.target_kind {
+    // Same envelope decision as the Windows controller (#314).
+    crate::remote_control_core::apply_control_request_envelope(message, &target, |kind| match kind {
         RemoteControlTargetKind::Window => vec![
             RemoteControlCapability::LegacyControl,
             RemoteControlCapability::DiscretePointerV1,
@@ -5831,7 +5841,7 @@ fn prepare_macos_controller_request_for_capable_host(
             RemoteControlCapability::UnicodeText,
         ],
         RemoteControlTargetKind::Unknown => Vec::new(),
-    };
+    });
 }
 
 #[tauri::command]
@@ -6004,8 +6014,15 @@ pub async fn remote_control_set_active(
     owner_identity: Option<String>,
     active: bool,
 ) -> Result<bool, String> {
+    // #314: this failure used to be silent (UI toast only); always log it.
     let (publisher, controller_id, target_user_id) =
-        viewer_channel(&app, window_id, owner_identity.as_deref())?;
+        viewer_channel(&app, window_id, owner_identity.as_deref()).inspect_err(|error| {
+            log::warn!(
+                "remote-control: {} for window {window_id} (owner {:?}) not sent: {error}",
+                if active { "activation" } else { "deactivation" },
+                owner_identity
+            );
+        })?;
     let mut message = RemoteControlMessage {
         v: VERSION,
         message_type: if active {
@@ -6062,7 +6079,12 @@ pub async fn remote_control_set_active(
                 window_id,
                 request_owner.as_str(),
             )
-            .await?;
+            .await
+            .inspect_err(|error| {
+                log::warn!(
+                    "remote-control: activation for window {window_id} not sent: {error}"
+                );
+            })?;
         }
     }
     #[cfg(target_os = "macos")]
