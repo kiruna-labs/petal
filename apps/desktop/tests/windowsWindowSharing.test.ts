@@ -391,8 +391,8 @@ test('Windows receiver compositor exists with the frontend command surface', () 
 test('Windows compositor feed consumes the connect-time events and keeps windows on republish', () => {
   assert.match(
     subscriber,
-    /on_forced_disconnect: tokio::sync::mpsc::UnboundedSender<\(\)>,?\n\)/,
-    'the Windows feed must take the forced-disconnect fan-out'
+    /on_forced_disconnect: tokio::sync::mpsc::UnboundedSender<livekit::DisconnectReason>,?\n\)/,
+    'the Windows feed must take the forced-disconnect fan-out (with its reason, #354)'
   );
   assert.match(
     subscriber,

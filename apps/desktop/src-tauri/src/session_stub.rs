@@ -2962,7 +2962,7 @@ pub async fn join_room_command(
         }
     }
 
-    leave_room_inner(&app, &state, true, "room_switch").await;
+    leave_room_inner(&app, &state, true, "room_switch", false, false).await;
 
     let generation = state.begin_room_generation();
     let connected = match crate::meeting_core::connect_room(
@@ -3075,7 +3075,8 @@ pub async fn join_room_command(
     // feed owns the forced-disconnect fan-out; the receiver task below moves
     // the old `start_disconnect_watcher` Disconnected arm (session teardown)
     // onto that signal.
-    let (disconnect_tx, mut disconnect_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (disconnect_tx, mut disconnect_rx) =
+        tokio::sync::mpsc::unbounded_channel::<livekit::DisconnectReason>();
     match compositor_events {
         Some(events) => {
             crate::transport::subscriber::start_compositor_feed(
@@ -3094,9 +3095,11 @@ pub async fn join_room_command(
         let room_connection_for_disconnect = room_connection.clone();
         let generation_for_disconnect = generation.clone();
         tauri::async_runtime::spawn(async move {
-            if disconnect_rx.recv().await.is_none() {
+            let Some(reason) = disconnect_rx.recv().await else {
                 return;
-            }
+            };
+            // #354: a lost connection is rejoined by the meeting route.
+            let connection_lost = crate::meeting_core::disconnect_is_rejoinable(reason);
             if let Some(state) = app_for_disconnect.try_state::<SessionState>() {
                 generation_for_disconnect.invalidate_if_current();
                 let _transition = state.transition_lock.lock().await;
@@ -3109,7 +3112,15 @@ pub async fn join_room_command(
                     })
                     .unwrap_or(false);
                 if owns_room {
-                    leave_room_inner(&app_for_disconnect, &state, false, "forced_disconnect").await;
+                    leave_room_inner(
+                        &app_for_disconnect,
+                        &state,
+                        false,
+                        "forced_disconnect",
+                        connection_lost,
+                        false,
+                    )
+                    .await;
                 }
             }
         });
@@ -3140,7 +3151,7 @@ pub async fn join_room_command(
     if !generation.is_current()
         || room_connection.room().connection_state() == livekit::ConnectionState::Disconnected
     {
-        leave_room_inner(&app, &state, false, "join_disconnect").await;
+        leave_room_inner(&app, &state, false, "join_disconnect", false, false).await;
         return Err(SessionError::RoomConnect(
             "room disconnected during native media startup".to_string(),
         ));
@@ -3429,7 +3440,7 @@ pub async fn leave_room_command(
 
 pub async fn leave_room(app: &tauri::AppHandle, state: &SessionState) {
     let _transition = state.transition_lock.lock().await;
-    leave_room_inner(app, state, true, "leave_room").await;
+    leave_room_inner(app, state, true, "leave_room", false, true).await;
 }
 
 async fn leave_room_inner(
@@ -3437,6 +3448,8 @@ async fn leave_room_inner(
     state: &SessionState,
     close_connection: bool,
     reason: &str,
+    connection_lost: bool,
+    user_leave: bool,
 ) {
     #[cfg(target_os = "windows")]
     crate::windows_hover::cancel_drag_for_lifecycle();
@@ -3484,6 +3497,7 @@ async fn leave_room_inner(
         track.stop().await;
     }
     drop(audio_control);
+    let stopped_share_count = shares.len();
     for share in shares {
         let token = share.token;
         stop_share(app, state, share, joined.room_connection.clone()).await;
@@ -3509,6 +3523,9 @@ async fn leave_room_inner(
         "room-left",
         RoomLeftEvent {
             room_name: joined.room_record.name.clone(),
+            connection_lost,
+            user_leave,
+            stopped_share_count,
         },
     );
     log::info!(
@@ -3632,6 +3649,11 @@ pub async fn set_share_remote_control_allowed(
 #[serde(rename_all = "camelCase")]
 struct RoomLeftEvent {
     room_name: String,
+    /// #354: lost connection (not a deliberate end) -- the route rejoins.
+    connection_lost: bool,
+    /// An explicit Leave (any surface): a running rejoin must stop (#354).
+    user_leave: bool,
+    stopped_share_count: usize,
 }
 
 #[cfg(test)]

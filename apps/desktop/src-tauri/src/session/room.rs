@@ -635,7 +635,7 @@ pub async fn join_room(
 
     // Joined to a DIFFERENT room -- leave it first (a process is a member of
     // at most one room at a time in this model).
-    leave_room(app, state).await;
+    cleanup_left_room(app, state, true, "room_switch", false, false).await;
 
     // `can_subscribe: true` -- telepointers (SPEC.md §4.5) need this process
     // to *receive* other participants' cursor data-channel messages on this
@@ -1288,7 +1288,7 @@ fn spawn_local_publish_reconcile(app: &tauri::AppHandle, room_id: String) {
 /// unpublishes audio and closes the LiveKit room connection. Idempotent:
 /// leaving when not currently joined to anything is a clean no-op.
 pub async fn leave_room(app: &tauri::AppHandle, state: &SessionState) {
-    cleanup_left_room(app, state, true, "leave_room").await;
+    cleanup_left_room(app, state, true, "leave_room", false, true).await;
 }
 
 /// Cleanup shared by explicit leaves and forced LiveKit disconnects.
@@ -1296,8 +1296,12 @@ pub async fn leave_room(app: &tauri::AppHandle, state: &SessionState) {
 /// `close_room_connection=false` is for `RoomEvent::Disconnected` paths where
 /// the SDK already considers the room gone; we still must clear every local
 /// UI/native surface that explicit leave clears.
-pub(crate) async fn cleanup_for_forced_disconnect(app: &tauri::AppHandle, state: &SessionState) {
-    cleanup_left_room(app, state, false, "forced_disconnect").await;
+pub(crate) async fn cleanup_for_forced_disconnect(
+    app: &tauri::AppHandle,
+    state: &SessionState,
+    connection_lost: bool,
+) {
+    cleanup_left_room(app, state, false, "forced_disconnect", connection_lost, false).await;
 }
 
 async fn cleanup_left_room(
@@ -1305,6 +1309,8 @@ async fn cleanup_left_room(
     state: &SessionState,
     close_room_connection: bool,
     reason: &str,
+    connection_lost: bool,
+    user_leave: bool,
 ) {
     crate::hover_tab::cancel_drag_for_lifecycle();
     crate::remote_control::revoke_all(app);
@@ -1357,6 +1363,7 @@ async fn cleanup_left_room(
         let guard = state.inner.lock_unpoisoned();
         guard.shares.keys().copied().collect()
     };
+    let stopped_share_count = window_ids.len();
     if !window_ids.is_empty() {
         log::info!(
             "session: {reason} stopping {} active share(s): {window_ids:?}",
@@ -1451,6 +1458,9 @@ async fn cleanup_left_room(
             "room-left",
             RoomLeftEvent {
                 room_name: joined.room_record.name.clone(),
+                connection_lost,
+                user_leave,
+                stopped_share_count,
             },
         );
 
@@ -1467,6 +1477,13 @@ async fn cleanup_left_room(
 #[serde(rename_all = "camelCase")]
 pub struct RoomLeftEvent {
     pub room_name: String,
+    /// #354: the connection was lost (not a deliberate end) -- the meeting
+    /// route rejoins instead of returning to the room list.
+    pub connection_lost: bool,
+    /// An explicit Leave (any surface): a running rejoin must stop (#354).
+    pub user_leave: bool,
+    /// Window shares this leave stopped; a rejoin does not restart them (#170).
+    pub stopped_share_count: usize,
 }
 
 #[cfg(test)]
@@ -1488,6 +1505,23 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn room_left_event_tells_a_lost_connection_from_a_user_leave() {
+        // #354: the meeting route rejoins only on connectionLost, and a
+        // userLeave from any surface must stop a running rejoin.
+        let wire = serde_json::to_value(super::RoomLeftEvent {
+            room_name: "room-a".into(),
+            connection_lost: true,
+            user_leave: false,
+            stopped_share_count: 2,
+        })
+        .unwrap();
+        assert_eq!(wire["roomName"], "room-a");
+        assert_eq!(wire["connectionLost"], true);
+        assert_eq!(wire["userLeave"], false);
+        assert_eq!(wire["stoppedShareCount"], 2);
+    }
 
     /// The leave→rejoin publish carryover (the B1 fix's source of truth) is
     /// room-scoped and one-shot: rejoining the SAME room consumes the

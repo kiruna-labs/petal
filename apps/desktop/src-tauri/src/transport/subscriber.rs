@@ -2406,7 +2406,7 @@ pub(crate) fn start_compositor_feed(
     room: Arc<Room>,
     local_identity: String,
     generation: RoomGeneration,
-    on_forced_disconnect: tokio::sync::mpsc::UnboundedSender<()>,
+    on_forced_disconnect: tokio::sync::mpsc::UnboundedSender<livekit::DisconnectReason>,
 ) {
     // The Windows feed creates/closes Tauri WebviewWindows for remote shares
     // (the surface route renders the header), so it needs the app handle.
@@ -2904,7 +2904,7 @@ pub(crate) fn start_compositor_feed(
                     window_subscribed_at.clear();
                     // Fan out: the session performs its own teardown on the
                     // receiving end (move of the old disconnect watcher).
-                    let _ = on_forced_disconnect.send(());
+                    let _ = on_forced_disconnect.send(reason);
                     break;
                 }
                 _ => {}

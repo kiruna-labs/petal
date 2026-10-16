@@ -761,6 +761,13 @@ export interface PresenceUpdate {
 /** Mirrors `session::RoomLeftEvent` (src-tauri/src/session.rs). */
 export interface RoomLeftEvent {
   roomName: string;
+  /** #354: the connection was lost (not a deliberate end); the route rejoins.
+   * Optional so an older native side reads as a deliberate leave. */
+  connectionLost?: boolean;
+  /** An explicit Leave from any surface: a running rejoin must stop. */
+  userLeave?: boolean;
+  /** Window shares the leave stopped (a rejoin does not restart them). */
+  stoppedShareCount?: number;
 }
 
 /** Mirrors `menubar::MenubarPillState` (src-tauri/src/menubar.rs). */
@@ -1262,6 +1269,9 @@ export type ResilienceEvent =
   | { kind: 'reconnecting' }
   | { kind: 'reconnected'; message: string }
   | { kind: 'disconnected'; reason: string }
+  /** Frontend-only (#354): the user left during the meeting route's rejoin;
+   * clears the ambient "Reconnecting…" toast. Rust never emits it. */
+  | { kind: 'reconnectAbandoned' }
   | { kind: 'networkChanged' }
   | { kind: 'micDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'micDeviceFailed'; message: string }

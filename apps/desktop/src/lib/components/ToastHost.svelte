@@ -56,7 +56,8 @@
   import { setToastHostVisible } from '$lib/stores/toastHost.svelte';
   import { updateAudioDevices } from '$lib/stores/session.svelte';
   import { EVENTS } from '$lib/ipc';
-  import type { ResilienceEvent, ShareErrorPayload, RemoteControlStatus } from '$lib/ipc';
+  import type { ResilienceEvent, ShareErrorPayload, RemoteControlStatus, RoomLeftEvent } from '$lib/ipc';
+  import { connectionLossNeedsToast } from '$lib/stores/meetingRoute';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
   import type { ToastVariant } from '@petal/shared/ui/components/Toast.svelte';
 
@@ -166,6 +167,12 @@
         // — so say that, not "attempting to reconnect". Non-dismissible:
         // being disconnected is an ambient state, not a moment.
         show({ variant: 'degraded', message: 'Disconnected — connection lost', autoDismiss: false });
+        break;
+      case 'reconnectAbandoned':
+        if (message === 'Reconnecting…') {
+          clearTimeout(dismissTimer);
+          visible = false;
+        }
         break;
       case 'networkChanged':
         // Deliberately not shown (issue #18): a real network change triggers
@@ -320,8 +327,16 @@
       EVENTS.remoteControlStatus,
       (e) => handleRemoteControlStatus(e.payload)
     );
+    // #354: the meeting route rejoins a lost connection and owns its toasts;
+    // when it isn't mounted, the loss must still be visible.
+    const unRoomLeft = listen<RoomLeftEvent>(EVENTS.roomLeft, (e) => {
+      if (connectionLossNeedsToast(e.payload)) {
+        handleEvent({ kind: 'disconnected', reason: 'connectionLost' });
+      }
+    });
     return () => {
       un.then((u) => u()).catch(() => {});
+      unRoomLeft.then((u) => u()).catch(() => {});
       unShareError.then((u) => u()).catch(() => {});
       unRemoteControl.then((u) => u()).catch(() => {});
       clearTimeout(dismissTimer);
