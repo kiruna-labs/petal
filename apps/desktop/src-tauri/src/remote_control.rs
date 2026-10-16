@@ -9060,6 +9060,17 @@ pub(crate) mod input {
             flags: u64,
         ) -> Result<(), String>;
 
+        /// #335: a keyboard event on the session tap. Keyboard routing is
+        /// responder-based, so it lands in the host's key window -- only used
+        /// for a display share, where that IS the authorized target.
+        fn post_key(
+            &self,
+            keycode: u16,
+            down: bool,
+            flags: u64,
+            unicode: Option<&str>,
+        ) -> Result<(), String>;
+
         /// Current host cursor position, or `None` if it cannot be read.
         fn cursor_position(&self) -> Option<super::GlobalPoint>;
 
@@ -9173,6 +9184,28 @@ pub(crate) mod input {
                         y: point.y,
                     },
                 );
+                Self::post(event);
+            }
+            Ok(())
+        }
+
+        fn post_key(
+            &self,
+            keycode: u16,
+            down: bool,
+            flags: u64,
+            unicode: Option<&str>,
+        ) -> Result<(), String> {
+            unsafe {
+                let event = CGEventCreateKeyboardEvent(std::ptr::null(), keycode, down);
+                if event.is_null() {
+                    return Err("CGEventCreateKeyboardEvent returned null".to_string());
+                }
+                CGEventSetFlags(event, flags);
+                if let Some(text) = unicode {
+                    let utf16: Vec<u16> = text.encode_utf16().collect();
+                    CGEventKeyboardSetUnicodeString(event, utf16.len(), utf16.as_ptr());
+                }
                 Self::post(event);
             }
             Ok(())
@@ -9847,6 +9880,14 @@ pub(crate) mod input {
         pb: &dyn PasteboardBackend,
         tap: &dyn SessionTapBackend,
     ) -> Result<(), String> {
+        if target_pid.is_some_and(is_display_target)
+            && matches!(
+                message.message_type,
+                RemoteControlType::Key | RemoteControlType::Text
+            )
+        {
+            return replay_display_keyboard(message, frame, tap);
+        }
         let probe_before = ax_probe_snapshot();
         let ax_result = match message.message_type {
             RemoteControlType::Pointer => {
@@ -10059,6 +10100,79 @@ pub(crate) mod input {
         // A v2 semantic click must not degrade into the known-ineffective
         // CGEventPostToPid pointer path. AX/SL exhaustion is a real failure.
         Err("semantic pointer click exhausted AX/SkyLight routes".to_string())
+    }
+
+    /// #335: keyboard/text for a display share. There is no app behind the
+    /// sentinel pid, so AX text routes and `CGEventPostToPid(1)` both went to
+    /// launchd and every key nacked `windowMismatch`. The host's keyboard focus
+    /// on the shared display IS the target: post on the session tap through
+    /// the normal key/text plans (so key-up release semantics are unchanged).
+    fn replay_display_keyboard(
+        message: &RemoteControlMessage,
+        frame: WindowFrame,
+        tap: &dyn SessionTapBackend,
+    ) -> Result<(), String> {
+        if !tap.is_trusted() {
+            return Err("session-tap route requires Accessibility".to_string());
+        }
+        if super::injection_was_cancelled() {
+            return Ok(());
+        }
+        replay_to_sink(message, frame, &DisplayKeySink { tap })
+    }
+
+    /// Keyboard-only sink for a display share (#335). No per-window focus
+    /// gate: a display has no window identity, the whole display is granted.
+    struct DisplayKeySink<'a> {
+        tap: &'a dyn SessionTapBackend,
+    }
+
+    impl InputSink for DisplayKeySink<'_> {
+        fn verify_key_window(&self, _window_id: u32) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn mouse(
+            &self,
+            _kind: MouseKind,
+            _at: super::GlobalPoint,
+            _button: RemoteControlButton,
+            _click_state: u32,
+            _flags: u64,
+        ) -> Result<(), String> {
+            Err("display keyboard sink does not post pointer events".to_string())
+        }
+
+        fn scroll(
+            &self,
+            _axis1: i32,
+            _axis2: i32,
+            _at: super::GlobalPoint,
+            _unit: ScrollUnit,
+            _flags: u64,
+        ) -> Result<(), String> {
+            Err("display keyboard sink does not post scroll events".to_string())
+        }
+
+        fn key(
+            &self,
+            keycode: u16,
+            down: bool,
+            flags: u64,
+            unicode: Option<&str>,
+        ) -> Result<(), String> {
+            self.tap.post_key(keycode, down, flags, unicode)
+        }
+
+        fn text(&self, s: &str) -> Result<(), String> {
+            for ch in s.chars() {
+                let text = ch.to_string();
+                self.tap.post_key(0, true, 0, Some(&text))?;
+                self.tap.post_key(0, false, 0, Some(&text))?;
+                thread::sleep(Duration::from_millis(2));
+            }
+            Ok(())
+        }
     }
 
     fn replay_to_sink(
@@ -13026,6 +13140,8 @@ pub(crate) mod input {
             Mouse(MouseKind, i64, i64),
             Scroll(i64, i64, i32, i32),
             MoveCursor(i64, i64),
+            /// keycode, down, first char of the unicode payload (Copy-able).
+            Key(u16, bool, Option<char>),
         }
 
         /// A pid for the fake occluder that is guaranteed to be neither the
@@ -13305,6 +13421,24 @@ pub(crate) mod input {
                 }
                 self.record(TapEvent::Scroll(q(point.x), q(point.y), delta_y, delta_x));
                 self.track_cursor(point);
+                Ok(())
+            }
+
+            fn post_key(
+                &self,
+                keycode: u16,
+                down: bool,
+                _flags: u64,
+                unicode: Option<&str>,
+            ) -> Result<(), String> {
+                if self.fail_posts {
+                    return Err("post failed".to_string());
+                }
+                self.record(TapEvent::Key(
+                    keycode,
+                    down,
+                    unicode.and_then(|text| text.chars().next()),
+                ));
                 Ok(())
             }
 
@@ -17215,6 +17349,134 @@ pub(crate) mod input {
             let tap = region_tap_with_petal_window(Vec::new());
             assert!(display_click_kinds(&tap).is_ok());
             clear_all_ax_control_state();
+        }
+
+        fn display_key_ax() -> RecordingAxBackend {
+            let ax = display_share_ax();
+            ax.fail_text_resolution_with(AxError::new(K_AX_ERROR_WINDOW_ID_MISMATCH));
+            ax
+        }
+
+        fn tap_keys(tap: &RecordingSessionTap) -> Vec<(u16, bool, Option<char>)> {
+            tap.events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    TapEvent::Key(code, down, text) => Some((code, down, text)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// #335: keys on a macOS DISPLAY share went to the sentinel pid --
+        /// AX text resolution on launchd, a focus check that can never match
+        /// a display (`windowMismatch`), and `CGEventPostToPid(1)`. They must
+        /// reach the session tap instead. Cmd+A also proves the AX shortcut
+        /// route is skipped (its resolver here fails loudly if consulted).
+        #[test]
+        fn display_share_keys_are_posted_on_the_session_tap() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_key_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = display_share_tap();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let enter_down = key_message("Enter", "Enter", RemoteControlModifiers::default());
+            let mut enter_up = enter_down.clone();
+            enter_up.action = Some(RemoteControlAction::Up);
+            let select_all = key_message(
+                "KeyA",
+                "a",
+                RemoteControlModifiers {
+                    meta: true,
+                    ..RemoteControlModifiers::default()
+                },
+            );
+            for message in [&enter_down, &enter_up, &select_all] {
+                replay_with_backends(message, frame, pid, &sink, &ax, &sl, &pb, &tap)
+                    .expect("a display-share key must be delivered");
+            }
+
+            let keys = tap_keys(&tap);
+            assert_eq!(keys.len(), 3, "every key must reach the session tap: {keys:?}");
+            assert!(keys[0].1 && !keys[1].1 && keys[0].0 == keys[1].0);
+            assert!(sink.events().is_empty(), "nothing may be posted to the sentinel pid");
+            assert!(
+                !tap.events().iter().any(|event| matches!(event, TapEvent::Raise(..))),
+                "keyboard needs no raise: {:?}",
+                tap.events()
+            );
+        }
+
+        #[test]
+        fn display_share_text_is_posted_on_the_session_tap() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_key_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = display_share_tap();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let mut text = base_message(RemoteControlType::Text);
+            text.text = Some("hé".to_string());
+            replay_with_backends(&text, frame, pid, &sink, &ax, &sl, &pb, &tap)
+                .expect("display-share text must be delivered");
+
+            assert_eq!(
+                tap_keys(&tap),
+                vec![
+                    (0, true, Some('h')),
+                    (0, false, Some('h')),
+                    (0, true, Some('é')),
+                    (0, false, Some('é')),
+                ]
+            );
+            assert!(sink.events().is_empty());
+        }
+
+        /// Without Accessibility the session tap cannot post: nack, never a
+        /// silent success, and never a fallback to the sentinel pid.
+        #[test]
+        fn display_share_keys_nack_without_accessibility() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_key_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::untrusted();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let key = key_message("Enter", "Enter", RemoteControlModifiers::default());
+            assert!(replay_with_backends(&key, frame, pid, &sink, &ax, &sl, &pb, &tap).is_err());
+            assert!(tap_keys(&tap).is_empty());
+            assert!(sink.events().is_empty());
+        }
+
+        /// Control: a WINDOW share's keys still take the pid sink with its
+        /// focus gate -- the session-tap route is the display branch only.
+        #[test]
+        fn window_share_keys_still_use_the_pid_sink() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::trusted();
+
+            let key = key_message("Enter", "Enter", RemoteControlModifiers::default());
+            replay_with_backends(&key, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).unwrap();
+            assert!(tap_keys(&tap).is_empty());
+            assert!(!sink.events().is_empty(), "the window key must reach the pid sink");
         }
 
         /// #611: the cancellation release must land where the pointer ACTUALLY
