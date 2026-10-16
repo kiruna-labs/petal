@@ -4149,8 +4149,16 @@ fn resolve_one_task(app: &AppHandle, task: ResolveTask) {
     // Displays have no owning process. Resolve their kind from the active
     // sharer-side share registry, not from the input envelope: legacy-shaped
     // Move/Down/Up pointer messages intentionally omit v2 target metadata.
+    let is_display_share = active_display_share(state, message.window_id);
+    #[cfg(target_os = "macos")]
+    if is_display_share {
+        input::note_display_target_kind(
+            message.window_id,
+            state.is_display_region_share(message.window_id),
+        );
+    }
     let resolved_target_pid = resolved_replay_target_pid(
-        active_display_share(state, message.window_id),
+        is_display_share,
         target_pid_for_window(state, message.window_id),
     );
     let Some(target_pid) = resolved_target_pid else {
@@ -6442,6 +6450,72 @@ pub(crate) mod input {
         pid == super::DISPLAY_REPLAY_TARGET_PID
     }
 
+    fn display_region_targets() -> &'static Mutex<HashSet<u32>> {
+        static TARGETS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+        TARGETS.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    /// #334: recorded at resolve time for every display-share message, so the
+    /// session-tap route knows a Petal View REGION (whose capture hides
+    /// Petal's own windows) from a whole display (where they are visible).
+    pub(crate) fn note_display_target_kind(window_id: u32, is_region: bool) {
+        let mut targets = display_region_targets().lock_unpoisoned();
+        if is_region {
+            targets.insert(window_id);
+        } else {
+            targets.remove(&window_id);
+        }
+    }
+
+    fn is_display_region_target(window_id: u32) -> bool {
+        display_region_targets()
+            .lock_unpoisoned()
+            .contains(&window_id)
+    }
+
+    /// #334 review: `normalized_to_global` maps 1.0 to origin + extent, one
+    /// point PAST the display -- onto the neighbouring monitor. Clamp a
+    /// display target to its last addressable point.
+    fn clamp_into_display(frame: WindowFrame, point: super::GlobalPoint) -> super::GlobalPoint {
+        let max_x = frame.x as f64 + (frame.width.max(1) - 1) as f64;
+        let max_y = frame.y as f64 + (frame.height.max(1) - 1) as f64;
+        super::GlobalPoint {
+            x: point.x.min(max_x).max(frame.x as f64),
+            y: point.y.min(max_y).max(frame.y as f64),
+        }
+    }
+
+    /// #334 review (#759 class): the Petal window that would take a click at
+    /// `point`, if the topmost click-receiving window there is ours and not a
+    /// known click-through panel. A foreign window on top means the click
+    /// lands there (fine). Same band/alpha rules as `hit_test_target`.
+    fn petal_window_at_point(
+        stack: Option<&[StackWindow]>,
+        point: super::GlobalPoint,
+        self_pid: i32,
+        click_through: &[u32],
+    ) -> Option<u32> {
+        for window in stack? {
+            if window.alpha <= 0.0 || window.layer < 0 || window.layer > BLOCKING_LAYER_MAX {
+                continue;
+            }
+            if !window.contains(point) {
+                continue;
+            }
+            if window.owner_pid != self_pid {
+                return None;
+            }
+            let Ok(id) = u32::try_from(window.window_id) else {
+                continue;
+            };
+            if click_through.contains(&id) {
+                continue;
+            }
+            return Some(id);
+        }
+        None
+    }
+
     pub(crate) fn is_pointer_button_release(message: &RemoteControlMessage) -> bool {
         message.message_type == RemoteControlType::Pointer
             && message.action == Some(RemoteControlAction::Up)
@@ -7385,6 +7459,7 @@ pub(crate) mod input {
         // idempotent early return and skip the raise/warp: an order-dependent
         // failure unrelated to whatever that test asserts.
         cursor_takeovers().lock_unpoisoned().clear();
+        display_region_targets().lock_unpoisoned().clear();
     }
 
     /// Same as `clear_all_ax_control_state`, except an in-progress SkyLight
@@ -9012,6 +9087,13 @@ pub(crate) mod input {
         }
 
         fn is_trusted(&self) -> bool;
+
+        /// #334: CGWindowIDs of Petal panels that are click-through by
+        /// construction (share overlay / border), so a region-share hit test
+        /// does not mistake them for a Petal click target.
+        fn petal_click_through_window_ids(&self) -> Vec<u32> {
+            Vec::new()
+        }
     }
 
     struct SystemSessionTapBackend;
@@ -9236,6 +9318,12 @@ pub(crate) mod input {
         fn is_trusted(&self) -> bool {
             unsafe { AXIsProcessTrusted() }
         }
+
+        fn petal_click_through_window_ids(&self) -> Vec<u32> {
+            let mut ids = crate::share_overlay::overlay_panel_window_numbers();
+            ids.extend(crate::share_border::border_panel_window_numbers());
+            ids
+        }
     }
 
     impl SystemSessionTapBackend {
@@ -9430,6 +9518,29 @@ pub(crate) mod input {
             .contains_key(&window_id)
         {
             return Ok(());
+        }
+        if is_display_target(pid) && is_display_region_target(window_id) {
+            // #334 review: region capture EXCLUDES Petal's own windows, so a
+            // Petal panel at this point is invisible to the controller (#759).
+            // A whole-display share shows them, so it is not gated here.
+            let mut click_through = tap.petal_click_through_window_ids();
+            click_through.push(window_id);
+            let self_pid = std::process::id() as i32;
+            if let Some(petal_window) = petal_window_at_point(
+                tap.onscreen_stack().as_deref(),
+                point,
+                self_pid,
+                &click_through,
+            ) {
+                log::warn!(
+                    "remote-control: display-region click refused at ({:.0},{:.0}) window_id={window_id} -- Petal window {petal_window} the controller cannot see is on top (#334)",
+                    point.x,
+                    point.y
+                );
+                return Err(format!(
+                    "session-tap route: target is not the frontmost window at the target point (covered_by_petal_window={petal_window})"
+                ));
+            }
         }
         if is_display_target(pid) {
             // #334: the target is the whole shared display, so whatever
@@ -9985,7 +10096,10 @@ pub(crate) mod input {
         let y = message
             .y
             .ok_or_else(|| "pointer message missing y".to_string())?;
-        let point = normalized_to_global(frame, x, y);
+        let mut point = normalized_to_global(frame, x, y);
+        if is_display_target(pid) {
+            point = clamp_into_display(frame, point);
+        }
         let action = message
             .action
             .ok_or_else(|| "pointer message missing action".to_string())?;
@@ -11301,6 +11415,7 @@ pub(crate) mod input {
         let point = normalized_to_global(frame, x, y);
         if is_display_target(pid) {
             // #334: no AX tree and no SkyLight pid behind a display.
+            let point = clamp_into_display(frame, point);
             let (dx, dy) = wheel_delta_pixels(message, frame);
             if dx == 0 && dy == 0 {
                 return Ok(AxReplayOutcome::Handled);
@@ -12948,6 +13063,8 @@ pub(crate) mod input {
             /// front-to-back. `None` = "could not be read", which must never
             /// be treated as a failure.
             stack: Option<Vec<StackWindow>>,
+            /// #334: Petal panels reported click-through by construction.
+            click_through: Vec<u32>,
         }
 
         impl RecordingSessionTap {
@@ -12961,6 +13078,7 @@ pub(crate) mod input {
                     raise_ok: true,
                     windows: vec![42],
                     stack: None,
+                    click_through: Vec::new(),
                 }
             }
 
@@ -13214,6 +13332,10 @@ pub(crate) mod input {
 
             fn is_trusted(&self) -> bool {
                 self.trusted
+            }
+
+            fn petal_click_through_window_ids(&self) -> Vec<u32> {
+                self.click_through.clone()
             }
         }
 
@@ -16902,6 +17024,196 @@ pub(crate) mod input {
             );
             replay_with_backends(&hover, frame, pid, &sink, &ax, &sl, &pb, &tap).unwrap();
             assert!(sink.events().is_empty(), "a display hover must not reach the pid sink");
+            clear_all_ax_control_state();
+        }
+
+        /// #334 review: x/y = 1.0 used to map to origin + extent -- one
+        /// point past the display, i.e. onto the neighbouring monitor.
+        #[test]
+        fn display_share_edge_click_stays_on_the_shared_display() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_share_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = display_share_tap();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                1.0,
+                1.0,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&click, frame, pid, &sink, &ax, &sl, &pb, &tap).unwrap();
+            let wheel = {
+                let mut wheel = wheel_message(0.0, 120.0, Some(0));
+                wheel.x = Some(1.0);
+                wheel.y = Some(1.0);
+                wheel
+            };
+            replay_with_backends(&wheel, frame, pid, &sink, &ax, &sl, &pb, &tap).unwrap();
+            for event in tap.events() {
+                let (x, y) = match event {
+                    TapEvent::Mouse(_, x, y) | TapEvent::Scroll(x, y, _, _) => (x, y),
+                    _ => continue,
+                };
+                assert!(
+                    x <= q(99.0) && y <= q(99.0),
+                    "an edge input must stay on the 100x100 display, got ({x},{y}) in {:?}",
+                    tap.events()
+                );
+            }
+            assert!(tap.mouse_kinds().contains(&MouseKind::LeftDown));
+            clear_all_ax_control_state();
+        }
+
+        /// A Petal window (owned by THIS process) at the target point, in the
+        /// ordinary app band -- e.g. a remote-window compositor panel.
+        fn region_tap_with_petal_window(click_through: Vec<u32>) -> RecordingSessionTap {
+            RecordingSessionTap {
+                stack: Some(vec![StackWindow {
+                    window_id: 7777,
+                    owner_pid: std::process::id() as i32,
+                    layer: 0,
+                    alpha: 1.0,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                }]),
+                click_through,
+                ..display_share_tap()
+            }
+        }
+
+        fn display_click_kinds(tap: &RecordingSessionTap) -> Result<Vec<MouseKind>, String> {
+            let frame = unit_frame();
+            let ax = display_share_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                0.5,
+                0.5,
+                RemoteControlButton::Left,
+                0,
+            );
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+            replay_with_backends(&click, frame, pid, &sink, &ax, &sl, &pb, tap)
+                .map(|()| tap.mouse_kinds())
+        }
+
+        /// #334 review (#759 class): a Petal View REGION capture excludes
+        /// Petal's own windows, so a click on a Petal panel at the point lands
+        /// in UI the controller cannot see. Refuse it.
+        #[test]
+        fn display_region_click_on_an_invisible_petal_window_is_refused() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            note_display_target_kind(42, true);
+            let tap = region_tap_with_petal_window(Vec::new());
+
+            // The session-tap refusal surfaces as the semantic click's
+            // route-exhausted nack, same as the #599 refusals.
+            assert!(display_click_kinds(&tap).is_err(), "must nack");
+            assert!(tap.mouse_kinds().is_empty(), "nothing may be posted: {:?}", tap.events());
+            let gate = prepare_session_tap_target(
+                42,
+                super::super::DISPLAY_REPLAY_TARGET_PID,
+                super::super::GlobalPoint { x: 50.0, y: 50.0 },
+                &tap,
+            );
+            assert!(
+                gate.as_ref()
+                    .is_err_and(|error| error.contains("covered_by_petal_window=7777")),
+                "the gate itself must refuse: {gate:?}"
+            );
+
+            // Legacy Down on the same point must not press anything either.
+            let down =
+                pointer_message(RemoteControlAction::Down, 0.5, 0.5, RemoteControlButton::Left, 0);
+            let _ = replay_with_backends(
+                &down,
+                unit_frame(),
+                Some(super::super::DISPLAY_REPLAY_TARGET_PID),
+                &RecordingSink::default(),
+                &display_share_ax(),
+                &RecordingSlClickBackend::unavailable(),
+                &RecordingPasteboard::default(),
+                &tap,
+            );
+            assert!(tap.mouse_kinds().is_empty(), "a Down must not press a Petal window");
+            clear_all_ax_control_state();
+        }
+
+        /// Controls: each must still deliver, or the refusal above proves
+        /// nothing (an always-nack would satisfy it).
+        #[test]
+        fn display_click_petal_window_gate_controls() {
+            let _guard = ax_test_lock();
+
+            // Click-through Petal panel (share overlay/border) is not a target.
+            clear_all_ax_control_state();
+            note_display_target_kind(42, true);
+            let tap = region_tap_with_petal_window(vec![7777]);
+            assert_eq!(
+                display_click_kinds(&tap).unwrap(),
+                vec![MouseKind::LeftDown, MouseKind::LeftUp]
+            );
+
+            // The region's own selector window (the share's window id) is exempt.
+            clear_all_ax_control_state();
+            note_display_target_kind(7777, true);
+            let mut tap = region_tap_with_petal_window(Vec::new());
+            tap.windows = Vec::new();
+            let frame = unit_frame();
+            let mut click =
+                pointer_message(RemoteControlAction::Click, 0.5, 0.5, RemoteControlButton::Left, 0);
+            click.window_id = 7777;
+            replay_with_backends(
+                &click,
+                frame,
+                Some(super::super::DISPLAY_REPLAY_TARGET_PID),
+                &RecordingSink::default(),
+                &display_share_ax(),
+                &RecordingSlClickBackend::unavailable(),
+                &RecordingPasteboard::default(),
+                &tap,
+            )
+            .expect("the selector window itself must not block its own region");
+
+            // A foreign window on top takes the click -- that is visible content.
+            clear_all_ax_control_state();
+            note_display_target_kind(42, true);
+            let mut tap = region_tap_with_petal_window(Vec::new());
+            if let Some(stack) = tap.stack.as_mut() {
+                stack.insert(
+                    0,
+                    StackWindow {
+                        window_id: 9001,
+                        owner_pid: foreign_test_pid(),
+                        layer: 0,
+                        alpha: 1.0,
+                        x: 0.0,
+                        y: 0.0,
+                        w: 100.0,
+                        h: 100.0,
+                    },
+                );
+            }
+            assert!(display_click_kinds(&tap).is_ok());
+
+            // Whole-display share: Petal's windows are IN the capture, so the
+            // controller can see them -- product decision, not gated.
+            clear_all_ax_control_state();
+            note_display_target_kind(42, false);
+            let tap = region_tap_with_petal_window(Vec::new());
+            assert!(display_click_kinds(&tap).is_ok());
             clear_all_ax_control_state();
         }
 
