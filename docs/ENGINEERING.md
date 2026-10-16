@@ -99,6 +99,15 @@ When you add or change any user-facing string, make it fit **autonomously**:
 
 Never ship truncated/overflowing text, ever.
 
+**Exception — remote window titles (user directive, 2026-10-15, #318):** "The
+titles of remote windows were way too long, and put into multiple lines, they
+should be shortened and never break." The header title is shortened
+(`shared/logic/remoteWindowTitle.ts` `shortenWindowTitle` drops the app
+suffix), stays on one line, and ellipsizes only as a last resort; the full
+title stays in the tooltip. This reverses a 2026-09-05 change that replaced
+an earlier nowrap+ellipsis title with wrapping to satisfy this rule, which let
+titles spill past the fixed 44px header. Don't re-wrap it.
+
 ## Native window-lifecycle changes need a live-exercising test, not just unit tests
 
 Three issues in a row targeting small-remote-window UX (#376, #466, #497) each

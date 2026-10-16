@@ -326,8 +326,10 @@ test('remote window header uses web-appropriate shared-window actions', () => {
     assert.equal(sizeToggle.getAttribute('aria-expanded'), 'false');
     // The source-app avatar/logo was removed per user request.
     assert.equal(harness.root.querySelector('.remote-window-header__avatar'), null);
-    assert.equal(elementText(harness.root.querySelector('.remote-window-header__source-label') as unknown as FakeElement), 'Chrome');
-    // Leading space preserved so it renders "Chrome by Ada", not "Chromeby Ada".
+    // #318: the app suffix is dropped from the label; the tooltip keeps the full title.
+    assert.equal(elementText(harness.root.querySelector('.remote-window-header__source-label') as unknown as FakeElement), 'Example & Specs');
+    assert.equal(harness.root.title, 'Example & Specs — Chrome by Ada');
+    // Leading space preserved so it renders "Specs by Ada", not "Specsby Ada".
     assert.equal(elementText(harness.root.querySelector('.remote-window-header__owner-label') as unknown as FakeElement), ' by Ada');
     assert.equal(harness.root.querySelectorAll('.remote-window-header__active-indicator').length, 1);
     assert.equal(harness.root.querySelectorAll('.remote-window-header__segment').length, 3);

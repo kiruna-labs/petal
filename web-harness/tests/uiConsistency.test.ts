@@ -11,11 +11,22 @@ test('browser client imports the shared Petal foundations and uses defined font 
   assert.doesNotMatch(styleSource, /var\(--text-secondary\)/);
 });
 
+// #318 (user directive 2026-10-15): the remote window title is the one
+// sanctioned exception -- shortened, single line, ellipsis as last resort.
+const REMOTE_WINDOW_TITLE_RULE = /\.remote-window-header__title\s*\{[^}]*\}/;
+
 test('browser user-facing copy wraps instead of using ellipsis', () => {
-  assert.doesNotMatch(styleSource, /text-overflow:\s*ellipsis/);
+  assert.doesNotMatch(styleSource.replace(REMOTE_WINDOW_TITLE_RULE, ''), /text-overflow:\s*ellipsis/);
   assert.match(styleSource, /\.room-name\s*\{[\s\S]*overflow-wrap:\s*anywhere;[\s\S]*white-space:\s*normal;/);
   assert.match(styleSource, /\.remote-telepointer__label\s*\{[\s\S]*overflow-wrap:\s*anywhere;[\s\S]*white-space:\s*normal;/);
-  assert.match(styleSource, /\.remote-window-header__title\s*\{[\s\S]*overflow-wrap:\s*anywhere;[\s\S]*white-space:\s*normal;/);
+});
+
+test('remote window title stays on one line (#318)', () => {
+  const rule = styleSource.match(REMOTE_WINDOW_TITLE_RULE)?.[0] ?? '';
+  assert.match(rule, /white-space:\s*nowrap;/);
+  assert.match(rule, /overflow:\s*hidden;/);
+  assert.match(rule, /text-overflow:\s*ellipsis;/);
+  assert.doesNotMatch(rule, /overflow-wrap:\s*anywhere|white-space:\s*normal/);
 });
 
 test('browser controls use the shared interaction register', () => {
