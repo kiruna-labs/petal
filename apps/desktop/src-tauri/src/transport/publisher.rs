@@ -2390,7 +2390,7 @@ impl RoomConnection<Arc<Room>> {
         frame_rate: f64,
         identity: &str,
     ) -> Result<PublishedTrack, RoomConnectionError> {
-        let rtc_source = NativeVideoSource::new(VideoResolution { width, height }, true);
+        let rtc_source = camera_video_source(width, height);
         let track_name = camera_track_name(identity);
         let track = LocalVideoTrack::create_video_track(
             &track_name,
@@ -2406,6 +2406,10 @@ impl RoomConnection<Arc<Room>> {
             .video_encoding
             .as_ref()
             .map(|encoding| encoding.max_bitrate);
+        let configured_framerate = publish_opts
+            .video_encoding
+            .as_ref()
+            .map(|encoding| encoding.max_framerate);
 
         self.room
             .local_participant()
@@ -2413,8 +2417,11 @@ impl RoomConnection<Arc<Room>> {
             .await?;
 
         log::info!(
-            "Published camera track '{track_name}' {width}x{height} (H.264, requested encoder: {requested_encoder:?}, max bitrate: {} kbps)",
-            configured_bitrate.unwrap_or_default() / 1000
+            "Published camera track '{track_name}' {width}x{height} (H.264, content type: {} (is_screencast={CAMERA_SOURCE_IS_SCREENCAST}), requested encoder: {requested_encoder:?}, max bitrate: {} kbps, max fps: {}, startup floor: {} kbps)",
+            video_content_type_label(CAMERA_SOURCE_IS_SCREENCAST),
+            configured_bitrate.unwrap_or_default() / 1000,
+            configured_framerate.unwrap_or_default(),
+            startup_floor_bps.unwrap_or_default() / 1000
         );
 
         let background_cancel = CancellationToken::new();
@@ -2507,6 +2514,25 @@ fn validate_video_toolbox_h264_size(width: u32, height: u32) -> Result<(), RoomC
         "share capture size {width}x{height} exceeds VideoToolbox H.264 guardrail \
          ({VIDEO_TOOLBOX_H264_MAX_LONG_EDGE}px long edge)"
     )))
+}
+
+/// WebRTC's `is_screencast` for the camera source. Must stay `false`: `true`
+/// makes libwebrtc handle a webcam as screen content (maintain-resolution,
+/// `kScreensharing` encoder mode), and on Windows a live window share then
+/// froze the camera into a keyframe-per-PLI loop (#313).
+const CAMERA_SOURCE_IS_SCREENCAST: bool = false;
+
+fn camera_video_source(width: u32, height: u32) -> NativeVideoSource {
+    NativeVideoSource::new(VideoResolution { width, height }, CAMERA_SOURCE_IS_SCREENCAST)
+}
+
+/// libwebrtc's `VideoEncoderConfig::ContentType` that `is_screencast` selects.
+fn video_content_type_label(is_screencast: bool) -> &'static str {
+    if is_screencast {
+        "screen"
+    } else {
+        "realtime-video"
+    }
 }
 
 /// Camera encoding ceiling: the 720p30 baseline (2.5 Mbps, the pre-existing
@@ -5927,6 +5953,15 @@ mod track_name_tests {
         .expect("TwoRung's top rid must be present for Reduced too");
         assert_eq!(reduced_bitrate, 2_000_000);
         assert_eq!(reduced_framerate, 4.0);
+    }
+
+    #[test]
+    fn camera_source_is_published_as_realtime_video_not_screen_content() {
+        // #313: a screencast camera could not step down while a share held the
+        // uplink and froze into a keyframe-per-PLI loop on Windows.
+        assert!(!CAMERA_SOURCE_IS_SCREENCAST);
+        assert_eq!(video_content_type_label(CAMERA_SOURCE_IS_SCREENCAST), "realtime-video");
+        assert_eq!(video_content_type_label(true), "screen");
     }
 
     #[test]
