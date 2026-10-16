@@ -3475,7 +3475,8 @@ pub fn update_window_metadata(
             );
             // #317: the border must follow a palette index that lands late.
             apply_remote_window_border(&win, border_hex);
-            // #315: metadata refresh is a periodic, move-independent re-dock.
+            // #315: a metadata change (ParticipantMetadataChanged) is a
+            // move-independent re-dock trigger.
             sync_chrome_to_panel_frame_deferred(&app_main, &key_for_main);
         }
     }) {
@@ -4820,12 +4821,23 @@ fn sync_chrome_to_panel_frame(
         return;
     };
     let scale = panel_window.scale_factor().unwrap_or(1.0);
-    let frames = chrome_frames_for_panel_bounds(
-        pos.x as f64 / scale,
-        pos.y as f64 / scale,
-        size.width as f64 / scale,
-        size.height as f64 / scale,
-    );
+    let appkit = ChromeFrame {
+        x: pos.x as f64 / scale,
+        y: pos.y as f64 / scale,
+        width: size.width as f64 / scale,
+        height: size.height as f64 / scale,
+    };
+    // #315: dock from the same WindowServer frame the verifier checks, or an
+    // AppKit/WindowServer disagreement makes every dock trigger fight it.
+    let server = server_frame_of(panel_window);
+    let (panel, disagree) = choose_panel_dock_bounds(appkit, server);
+    if disagree && chrome_dock_disagreement_warn_due(now_ms()) {
+        log::warn!(
+            "compositor: window {} panel frames disagree (#315): appkit={appkit:?} server={server:?}; docking chrome to the WindowServer frame",
+            key.window_id,
+        );
+    }
+    let frames = chrome_frames_for_panel_bounds(panel.x, panel.y, panel.width, panel.height);
     trace_chrome_geometry("chrome-dock", key.window_id, "control", frames.control);
     reposition_chrome_frame(app, &control_label_for_key(key), frames.control);
     reposition_chrome_frame(app, &pointer_label_for_key(key), frames.pointer);
@@ -4919,8 +4931,14 @@ fn sync_chrome_to_panel_frame_deferred_with_log(
 // uncommitted (0,0 0x0) left control/pointer at `(0, HEADER_HEIGHT)` over
 // other apps, and nothing re-docked an unmoved window. Verify each dock pass
 // against WindowServer, not AppKit's cached frame (which may claim docked).
-const CHROME_DOCK_VERIFY_DELAY: Duration = Duration::from_millis(150);
-const CHROME_DOCK_VERIFY_MAX_PASSES: u8 = 10;
+const CHROME_DOCK_VERIFY_FAST_DELAY: Duration = Duration::from_millis(150);
+const CHROME_DOCK_VERIFY_SLOW_DELAY: Duration = Duration::from_secs(1);
+/// Passes at the fast cadence; corrections are confirmed only within these.
+const CHROME_DOCK_VERIFY_FAST_PASSES: u8 = 10;
+/// An uncommitted panel keeps being polled, at the slow cadence, up to here.
+const CHROME_DOCK_VERIFY_MAX_PASSES: u8 = 20;
+const CHROME_DOCK_DISAGREE_WARN_INTERVAL_MS: u64 = 30_000;
+static CHROME_DOCK_DISAGREE_LAST_WARN_MS: AtomicU64 = AtomicU64::new(0);
 static CHROME_DOCK_VERIFY_GEN: Mutex<Option<HashMap<RemoteWindowKey, u64>>> = Mutex::new(None);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4951,6 +4969,31 @@ enum ChromeDockVerdict {
     Corrected(usize),
 }
 
+/// Panel bounds to dock chrome against: the WindowServer frame when it is
+/// readable and committed (non-zero size), else AppKit's. The flag reports an
+/// AppKit/WindowServer disagreement worth a (rate-limited) WARN.
+fn choose_panel_dock_bounds(
+    appkit: ChromeFrame,
+    server: Option<ChromeFrame>,
+) -> (ChromeFrame, bool) {
+    match server {
+        Some(server) if server.width >= 1.0 && server.height >= 1.0 => {
+            (server, chrome_frame_needs_update(appkit, server))
+        }
+        _ => (appkit, false),
+    }
+}
+
+fn chrome_dock_disagreement_warn_due(now: u64) -> bool {
+    let last = CHROME_DOCK_DISAGREE_LAST_WARN_MS.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < CHROME_DOCK_DISAGREE_WARN_INTERVAL_MS {
+        return false;
+    }
+    CHROME_DOCK_DISAGREE_LAST_WARN_MS
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
+
 /// The native reads/writes `verify_chrome_dock` needs. Production uses
 /// `AppKitChromeDockProbe`; tests substitute a WindowServer model.
 trait ChromeDockProbe {
@@ -4959,7 +5002,9 @@ trait ChromeDockProbe {
     /// `None` for a hidden or missing child, which is skipped.
     fn child_server_frame(&mut self, role: ChromeRole) -> Option<ChromeFrame>;
     fn child_appkit_frame(&mut self, role: ChromeRole) -> Option<ChromeFrame>;
-    fn set_child_appkit_frame(&mut self, role: ChromeRole, frame: ChromeFrame);
+    /// Unconditional AppKit write -- no "already there" short-circuit, since
+    /// AppKit may report the target while WindowServer has the child elsewhere.
+    fn force_child_appkit_frame(&mut self, role: ChromeRole, frame: ChromeFrame);
     /// Move the child in WindowServer directly; false when unavailable.
     fn move_child_server(&mut self, role: ChromeRole, x: f64, y: f64) -> bool;
 }
@@ -4988,16 +5033,19 @@ fn verify_chrome_dock(probe: &mut impl ChromeDockProbe, window_id: u32) -> Chrom
         }
         let appkit = probe.child_appkit_frame(role);
         let appkit_agrees = appkit.is_some_and(|frame| !chrome_frame_needs_update(frame, target));
+        // A WindowServer move fixes only the origin: use it when AppKit already
+        // claims the dock and only the server-side position is off.
+        let size_matches = (actual.width - target.width).abs() <= 0.5
+            && (actual.height - target.height).abs() <= 0.5;
+        let server_move = appkit_agrees && size_matches;
         log::warn!(
             "compositor: window {window_id} {} overlay misdocked (#315): server={actual:?} appkit={appkit:?} panel={panel:?} target={target:?}; re-docking via {}",
             role.name(),
-            if appkit_agrees { "WindowServer" } else { "AppKit" },
+            if server_move { "WindowServer" } else { "AppKit" },
         );
         trace_chrome_geometry("chrome-redock-verify", window_id, role.name(), target);
-        // AppKit already believes the child is docked, so an AppKit write is
-        // a no-op; only a WindowServer move fixes the server-side position.
-        if !appkit_agrees || !probe.move_child_server(role, target.x, target.y) {
-            probe.set_child_appkit_frame(role, target);
+        if !server_move || !probe.move_child_server(role, target.x, target.y) {
+            probe.force_child_appkit_frame(role, target);
         }
         corrected += 1;
     }
@@ -5008,16 +5056,24 @@ fn verify_chrome_dock(probe: &mut impl ChromeDockProbe, window_id: u32) -> Chrom
     }
 }
 
-/// Whether another verification pass should follow `pass`: wait for an
-/// uncommitted panel, and confirm a correction stuck. Bounded either way.
+/// Whether another verification pass should follow `pass`: keep polling an
+/// uncommitted panel (backing off), and confirm a correction stuck. Bounded.
 fn next_chrome_dock_verify_pass(verdict: ChromeDockVerdict, pass: u8) -> Option<u8> {
-    match verdict {
-        ChromeDockVerdict::PanelNotCommitted | ChromeDockVerdict::Corrected(_)
-            if pass + 1 < CHROME_DOCK_VERIFY_MAX_PASSES =>
-        {
-            Some(pass + 1)
-        }
-        _ => None,
+    let limit = match verdict {
+        ChromeDockVerdict::PanelNotCommitted => CHROME_DOCK_VERIFY_MAX_PASSES,
+        ChromeDockVerdict::Corrected(_) => CHROME_DOCK_VERIFY_FAST_PASSES,
+        ChromeDockVerdict::Docked | ChromeDockVerdict::Unverifiable => return None,
+    };
+    (pass + 1 < limit).then_some(pass + 1)
+}
+
+/// Delay before verification pass `pass`: 150ms, then 1s once the fast
+/// passes are spent on a panel that still has not committed.
+fn chrome_dock_verify_delay(pass: u8) -> Duration {
+    if pass < CHROME_DOCK_VERIFY_FAST_PASSES {
+        CHROME_DOCK_VERIFY_FAST_DELAY
+    } else {
+        CHROME_DOCK_VERIFY_SLOW_DELAY
     }
 }
 
@@ -5087,9 +5143,16 @@ impl ChromeDockProbe for AppKitChromeDockProbe<'_> {
         current_chrome_frame(&self.child(role)?)
     }
 
-    fn set_child_appkit_frame(&mut self, role: ChromeRole, frame: ChromeFrame) {
+    fn force_child_appkit_frame(&mut self, role: ChromeRole, frame: ChromeFrame) {
         if let Some(child) = self.child(role) {
-            reposition_chrome_frame(self.app, child.label(), frame);
+            let _ = child.set_position(tauri::Position::Logical(tauri::LogicalPosition {
+                x: frame.x,
+                y: frame.y,
+            }));
+            let _ = child.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                width: frame.width,
+                height: frame.height,
+            }));
         }
     }
 
@@ -5114,7 +5177,7 @@ fn schedule_chrome_dock_verification_pass(
     let app_defer = app.clone();
     let key_defer = key.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(CHROME_DOCK_VERIFY_DELAY).await;
+        tokio::time::sleep(chrome_dock_verify_delay(pass)).await;
         if !chrome_dock_verify_generation_is_current(&key_defer, generation) {
             return;
         }
@@ -11111,15 +11174,13 @@ mod tests {
                 .map(|child| child.appkit)
         }
 
-        fn set_child_appkit_frame(&mut self, role: ChromeRole, frame: ChromeFrame) {
+        fn force_child_appkit_frame(&mut self, role: ChromeRole, frame: ChromeFrame) {
             self.appkit_writes.push((role.name(), frame));
             let child = self.children.get_mut(role.name()).unwrap();
-            // Like `reposition_chrome`: AppKit drops a write equal to what it
-            // already believes; a real change reaches WindowServer too.
-            if chrome_frame_needs_update(child.appkit, frame) {
-                child.appkit = frame;
-                child.server = frame;
-            }
+            // A forced write reaches WindowServer even when AppKit already
+            // reported this frame.
+            child.appkit = frame;
+            child.server = frame;
         }
 
         fn move_child_server(&mut self, role: ChromeRole, x: f64, y: f64) -> bool {
@@ -11202,6 +11263,63 @@ mod tests {
             ChromeDockVerdict::Corrected(1)
         );
         assert_eq!(probe.appkit_writes, vec![("control", docked)]);
+        assert_eq!(probe.server(ChromeRole::Control), docked);
+    }
+
+    #[test]
+    fn chrome_dock_verification_uses_appkit_when_server_size_is_off() {
+        // AppKit claims the dock but WindowServer has the wrong size: an
+        // origin-only WindowServer move cannot fix that, so force AppKit.
+        let docked = frame(217.0, 175.0 + HEADER_HEIGHT, 1095.0, 565.0);
+        let wrong_size = frame(0.0, HEADER_HEIGHT, 640.0, 400.0);
+        let panel = frame(217.0, 175.0, 1095.0, 565.0 + HEADER_HEIGHT);
+        let mut probe =
+            FakeDockProbe::new(Some(panel)).with_child(ChromeRole::Control, wrong_size, docked);
+
+        assert_eq!(
+            verify_chrome_dock(&mut probe, 7),
+            ChromeDockVerdict::Corrected(1)
+        );
+        assert!(probe.server_moves.is_empty());
+        assert_eq!(probe.appkit_writes, vec![("control", docked)]);
+        assert_eq!(probe.server(ChromeRole::Control), docked);
+        assert_eq!(verify_chrome_dock(&mut probe, 7), ChromeDockVerdict::Docked);
+    }
+
+    #[test]
+    fn chrome_dock_prefers_the_committed_windowserver_panel_frame() {
+        let appkit_corner = frame(0.0, 0.0, 1095.0, 565.0 + HEADER_HEIGHT);
+        let server = frame(217.0, 175.0, 1095.0, 565.0 + HEADER_HEIGHT);
+        // AppKit stuck at the origin, WindowServer has the real frame: dock to
+        // WindowServer and flag the disagreement.
+        assert_eq!(
+            choose_panel_dock_bounds(appkit_corner, Some(server)),
+            (server, true)
+        );
+        assert_eq!(
+            choose_panel_dock_bounds(server, Some(server)),
+            (server, false)
+        );
+        // Uncommitted or unreadable WindowServer frame: fall back to AppKit.
+        assert_eq!(
+            choose_panel_dock_bounds(server, Some(frame(0.0, 0.0, 0.0, 0.0))),
+            (server, false)
+        );
+        assert_eq!(choose_panel_dock_bounds(server, None), (server, false));
+    }
+
+    #[test]
+    fn chrome_dock_disagreement_warning_is_rate_limited() {
+        let base = 1_000_000_000_u64;
+        CHROME_DOCK_DISAGREE_LAST_WARN_MS.store(0, Ordering::Relaxed);
+        assert!(chrome_dock_disagreement_warn_due(base));
+        assert!(!chrome_dock_disagreement_warn_due(base + 1));
+        assert!(!chrome_dock_disagreement_warn_due(
+            base + CHROME_DOCK_DISAGREE_WARN_INTERVAL_MS - 1
+        ));
+        assert!(chrome_dock_disagreement_warn_due(
+            base + CHROME_DOCK_DISAGREE_WARN_INTERVAL_MS
+        ));
     }
 
     #[test]
@@ -11227,13 +11345,27 @@ mod tests {
 
     #[test]
     fn chrome_dock_verification_passes_are_bounded_and_latest_wins() {
+        // An uncommitted panel is polled through the fast passes and on at
+        // the slow cadence; a correction is confirmed only within the fast
+        // passes.
+        let fast = CHROME_DOCK_VERIFY_FAST_PASSES;
         let last = CHROME_DOCK_VERIFY_MAX_PASSES - 1;
+        assert_eq!(
+            next_chrome_dock_verify_pass(ChromeDockVerdict::PanelNotCommitted, fast - 1),
+            Some(fast)
+        );
+        assert_eq!(chrome_dock_verify_delay(0), Duration::from_millis(150));
+        assert_eq!(
+            chrome_dock_verify_delay(fast - 1),
+            Duration::from_millis(150)
+        );
+        assert_eq!(chrome_dock_verify_delay(fast), Duration::from_secs(1));
         assert_eq!(
             next_chrome_dock_verify_pass(ChromeDockVerdict::PanelNotCommitted, last),
             None
         );
         assert_eq!(
-            next_chrome_dock_verify_pass(ChromeDockVerdict::Corrected(1), last),
+            next_chrome_dock_verify_pass(ChromeDockVerdict::Corrected(1), fast - 1),
             None
         );
 
@@ -11265,6 +11397,12 @@ mod tests {
     #[test]
     fn chrome_redock_is_wired_into_dock_raise_activate_and_metadata_paths() {
         let source = include_str!("compositor.rs");
+        let sync = top_level_fn_body(source, "fn sync_chrome_to_panel_frame(");
+        assert!(
+            sync.contains("choose_panel_dock_bounds(appkit, server)")
+                && sync.contains("server_frame_of(panel_window)"),
+            "the dock pass must dock from the WindowServer panel frame the verifier checks (#315)"
+        );
         let deferred =
             top_level_fn_body(source, "fn sync_chrome_to_panel_frame_deferred_with_log(");
         assert!(
