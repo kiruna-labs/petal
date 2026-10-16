@@ -42,6 +42,7 @@ import {
 } from '$lib/stores/updateStatus.svelte';
 import {
   friendlyUpdateErrorMessage,
+  updateFailureLogLevel,
   updateFailureOffersManualDownload
 } from '$lib/data/updaterErrors';
 import { isQuietUpdateCheckReason, type UpdateCheckReason } from '$lib/updateScheduler';
@@ -177,7 +178,7 @@ export async function checkForUpdate(
     // which is nagging, not observability (#90). A user-initiated check still
     // reports the failure -- that is #43's whole point.
     if (!quiet) markUpdateFailed(friendlyMessage, recovery);
-    await logUpdaterStep('error', `failed: ${rawMessage}`);
+    await logUpdaterStep(updateFailureLogLevel(rawMessage), `failed: ${rawMessage}`);
     return { status: 'error', error: friendlyMessage, recovery };
   }
 }
@@ -219,7 +220,7 @@ export async function installUpdateAndRelaunch(
     // branch a stranded client lands in on every single attempt (#125).
     const recovery = recoveryFor(rawMessage);
     markUpdateFailed(friendlyMessage, recovery);
-    await logUpdaterStep('error', `failed: ${rawMessage}`);
+    await logUpdaterStep(updateFailureLogLevel(rawMessage), `failed: ${rawMessage}`);
     return { status: 'error', error: friendlyMessage, recovery };
   }
 }

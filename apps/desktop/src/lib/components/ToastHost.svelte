@@ -45,6 +45,11 @@
   import { toastTransition } from '$lib/motion';
   import { installUpdateAndRelaunch } from '$lib/updater';
   import { manualDownloadUrl } from '$lib/data/updateDownload';
+  import {
+    fetchLaunchLocationClass,
+    needsRelocation,
+    openApplicationsFolder
+  } from '$lib/data/launchLocation';
   import { openPrivacySettings } from '$lib/data/permissions';
   import { shareErrorDisplay } from '$lib/data/shareErrors';
   import { clearUpdateStatus, updateStatus } from '$lib/stores/updateStatus.svelte';
@@ -70,6 +75,9 @@
   let dismissTimer: ReturnType<typeof setTimeout> | undefined;
   let updateDismissTimer: ReturnType<typeof setTimeout> | undefined;
   let shareRepairRecoveringWindowId = $state<number | null>(null);
+  // #332: from the disk image / a translocated bundle the install can never
+  // succeed, so the ready toast points at the move instead of Restart now.
+  let updateNeedsRelocation = $state(false);
 
   const AUTO_DISMISS_MS = 4000;
   const UPDATE_RELAUNCH_TOAST_MS = 1600;
@@ -81,6 +89,14 @@
       case 'relaunching':
         return { message: 'Update installed — relaunching…', dismissible: false };
       case 'available':
+        if (updateNeedsRelocation) {
+          return {
+            message: updateStatus.version
+              ? `Update ${updateStatus.version} ready — move Petal to Applications to install`
+              : 'Update ready — move Petal to Applications to install',
+            dismissible: true
+          };
+        }
         return {
           message: updateStatus.version
             ? `Update ${updateStatus.version} ready — restart to install`
@@ -261,7 +277,9 @@
   }
 
   const updateActionLabel = $derived(
-    updateStatus.kind === 'available' || updateStatus.kind === 'pending-relaunch'
+    updateStatus.kind === 'available' && updateNeedsRelocation
+      ? 'Open Applications'
+      : updateStatus.kind === 'available' || updateStatus.kind === 'pending-relaunch'
       ? 'Restart now'
       : updateStatus.kind === 'failed' && updateStatus.recovery === 'download-installer'
         ? 'Download installer'
@@ -269,7 +287,9 @@
   );
 
   const updateAction = $derived(
-    updateStatus.kind === 'available' || updateStatus.kind === 'pending-relaunch'
+    updateStatus.kind === 'available' && updateNeedsRelocation
+      ? openApplicationsFolder
+      : updateStatus.kind === 'available' || updateStatus.kind === 'pending-relaunch'
       ? restartToApply
       : updateStatus.kind === 'failed' && updateStatus.recovery === 'download-installer'
         ? downloadInstaller
@@ -291,6 +311,9 @@
   });
 
   onMount(() => {
+    void fetchLaunchLocationClass().then((cls) => {
+      updateNeedsRelocation = needsRelocation(cls);
+    });
     const un = listen<ResilienceEvent>(EVENTS.resilienceEvent, (e) => handleEvent(e.payload));
     const unShareError = listen<ShareErrorPayload>(EVENTS.shareError, (e) => handleShareError(e.payload));
     const unRemoteControl = listen<RemoteControlStatus>(
