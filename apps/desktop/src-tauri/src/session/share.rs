@@ -3410,6 +3410,16 @@ fn coalesce_capture_error_events(
 enum CaptureFailureAction {
     RestartInPlace { message: String },
     StopShare { message: String },
+    /// The user ended the capture from macOS's own screen-sharing menu
+    /// (`SCStreamErrorCode::UserStopped`, -3817): a deliberate stop, not a
+    /// failure -- no error toast, no Sentry error (PETAL-DESKTOP-32/-2S).
+    UserStopped { message: String },
+}
+
+/// `SCStreamErrorCode::UserStopped`'s Display text, as it reaches
+/// `on_error` (pinned against the vendored crate by a test).
+fn is_user_stopped_sck_error(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("user stopped the stream")
 }
 
 /// ScreenCaptureKit's lid-close / display-sleep signature (see #734
@@ -3425,6 +3435,13 @@ fn is_sleep_style_sck_error(error: &str) -> bool {
 }
 
 fn capture_failure_action(error: String, sleep_correlated: bool) -> CaptureFailureAction {
+    // Before the sleep check: restarting a stream the user just stopped
+    // would silently re-share against their explicit action.
+    if is_user_stopped_sck_error(&error) {
+        return CaptureFailureAction::UserStopped {
+            message: format!("capture stopped from the macOS screen-sharing menu: {error}"),
+        };
+    }
     if error == crate::capture::CAPTURE_LAYOUT_INVALID
         || sleep_correlated
         || is_sleep_style_sck_error(&error)
@@ -5917,11 +5934,14 @@ fn spawn_share_monitor(
                             deferred_layout_target = Some((width, height));
                         }
                         CoalescedCaptureEvent::Failure(error) => {
-                            if let Some(diagnostics) = diagnostics.as_ref() {
-                                diagnostics.mark_capture_wedged(window_id);
-                            }
                             let sleep_correlated = sleep_correlated_for_capture_failure();
-                            match capture_failure_action(error, sleep_correlated) {
+                            let action = capture_failure_action(error, sleep_correlated);
+                            if !matches!(action, CaptureFailureAction::UserStopped { .. }) {
+                                if let Some(diagnostics) = diagnostics.as_ref() {
+                                    diagnostics.mark_capture_wedged(window_id);
+                                }
+                            }
+                            match action {
                                 CaptureFailureAction::RestartInPlace { message } => {
                                     // Only emit the layout-invalid diagnostic for
                                     // the original layout-invalid path; sleep
@@ -5949,6 +5969,18 @@ fn spawn_share_monitor(
                                 CaptureFailureAction::StopShare { message } => {
                                     log::error!("session: window {window_id} {message}");
                                     spawn_capture_failure_cleanup(app.clone(), window_id, message);
+                                    break;
+                                }
+                                CaptureFailureAction::UserStopped { message } => {
+                                    log::info!(
+                                        "session: window {window_id} {message} -- ending the share as a user stop"
+                                    );
+                                    spawn_capture_stop_cleanup(
+                                        app.clone(),
+                                        window_id,
+                                        message,
+                                        CaptureStopCause::UserStoppedFromSystemMenu,
+                                    );
                                     break;
                                 }
                             }
@@ -6682,23 +6714,55 @@ fn spawn_pump_failure_recovery(
 }
 
 fn spawn_capture_failure_cleanup(app: tauri::AppHandle, window_id: u32, message: String) {
+    spawn_capture_stop_cleanup(app, window_id, message, CaptureStopCause::Failure);
+}
+
+/// Why a live capture ended on its own (not via the pill/picker toggle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureStopCause {
+    Failure,
+    UserStoppedFromSystemMenu,
+}
+
+/// How a capture-ended teardown is reported: journal level, whether the
+/// user sees a `share-error`, and which `share_stopped` reason it counts as.
+fn capture_stop_reporting(cause: CaptureStopCause) -> (&'static str, bool, StopShareAnalytics) {
+    match cause {
+        CaptureStopCause::Failure => ("error", true, StopShareAnalytics::CaptureFailed),
+        CaptureStopCause::UserStoppedFromSystemMenu => ("info", false, StopShareAnalytics::User),
+    }
+}
+
+fn spawn_capture_stop_cleanup(
+    app: tauri::AppHandle,
+    window_id: u32,
+    message: String,
+    cause: CaptureStopCause,
+) {
     tokio::spawn(async move {
         use tauri::Manager;
 
+        let (journal_level, emit_error, analytics) = capture_stop_reporting(cause);
         crate::hover_tab::clear_share_state_for_window(&app, window_id);
-        crate::remote_control::revoke_window(&app, window_id, "capture stalled");
+        let revoke_reason = match cause {
+            CaptureStopCause::Failure => "capture stalled",
+            CaptureStopCause::UserStoppedFromSystemMenu => "share stopped",
+        };
+        crate::remote_control::revoke_window(&app, window_id, revoke_reason);
 
         if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
             let diagnostics: crate::diagnostics::DiagnosticsState = diagnostics.inner().clone();
             diagnostics.journal_append(
                 &app,
-                "error",
+                journal_level,
                 format!("Shared window {window_id} stopped: {message}"),
             );
         }
 
-        let error = ShareSessionError::Capture(message);
-        crate::hover_tab::emit_share_error(&app, window_id, false, error.clone());
+        if emit_error {
+            let error = ShareSessionError::Capture(message);
+            crate::hover_tab::emit_share_error(&app, window_id, false, error);
+        }
 
         let Some(state) = app.try_state::<SessionState>() else {
             log::warn!(
@@ -6710,7 +6774,7 @@ fn spawn_capture_failure_cleanup(app: tauri::AppHandle, window_id: u32, message:
             &app,
             state.inner(),
             window_id,
-            StopShareAnalytics::CaptureFailed,
+            analytics,
         )
         .await
         {
@@ -11672,6 +11736,36 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         );
         assert!(is_sleep_style_sck_error(sck_sleep));
         assert!(!is_sleep_style_sck_error("stream stopped by the system"));
+    }
+
+    /// Sentry PETAL-DESKTOP-32 / -2S: stopping the capture from macOS's own
+    /// screen-sharing menu reached the user as "capture stalled" (error
+    /// toast, Sentry error, CaptureFailed). It is a deliberate user stop --
+    /// even when sleep-correlated, it must never be restarted in place.
+    #[test]
+    fn a_capture_stopped_from_the_macos_menu_is_a_user_stop_petal_desktop_32() {
+        // The exact text the vendored crate formats for -3817.
+        let code = screencapturekit::utils::error::SCStreamErrorCode::UserStopped.to_string();
+        let sck = format!("SCStream error ({code}): The user stopped the stream");
+        assert!(is_user_stopped_sck_error(&sck));
+        for sleep_correlated in [false, true] {
+            assert_eq!(
+                capture_failure_action(sck.clone(), sleep_correlated),
+                CaptureFailureAction::UserStopped {
+                    message: format!("capture stopped from the macOS screen-sharing menu: {sck}")
+                }
+            );
+        }
+        assert_eq!(
+            capture_stop_reporting(CaptureStopCause::UserStoppedFromSystemMenu),
+            ("info", false, StopShareAnalytics::User)
+        );
+        // A genuine failure keeps its loud reporting.
+        assert_eq!(
+            capture_stop_reporting(CaptureStopCause::Failure),
+            ("error", true, StopShareAnalytics::CaptureFailed)
+        );
+        assert!(!is_user_stopped_sck_error("encoder hardware fault"));
     }
 
     #[test]
