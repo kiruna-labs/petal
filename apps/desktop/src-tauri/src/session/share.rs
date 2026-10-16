@@ -409,6 +409,27 @@ fn hold_pull_carried_share_at_breaker(window_id: u32, now_us: u64, pulls_fresh: 
         ) == PumpFailureRecoveryDecision::CircuitOpen
 }
 
+/// One error-level event per breaker-hold episode (#337 review): the hold
+/// replaces the circuit-open error, so without this a re-wedging stream
+/// would reach Sentry not at all. An episode ends when the raw stream
+/// recovers (or the share's monitor exits, dropping this state).
+#[derive(Debug, Default)]
+struct BreakerHoldEpisode {
+    reported: bool,
+}
+
+impl BreakerHoldEpisode {
+    /// The hold engaged this tick; `true` exactly once per episode.
+    fn on_hold(&mut self) -> bool {
+        !std::mem::replace(&mut self.reported, true)
+    }
+
+    /// The raw stream is delivering again.
+    fn on_raw_recovered(&mut self) {
+        self.reported = false;
+    }
+}
+
 fn clear_pump_recovery_failures(window_id: u32) {
     pump_recovery_failures()
         .lock_unpoisoned()
@@ -6036,6 +6057,7 @@ fn spawn_share_monitor(
         // and this, so a window that comes back after minutes hidden gets a
         // full silence window to resume before it is called stalled.
         let mut off_screen_seen_us: u64 = 0;
+        let mut breaker_hold = BreakerHoldEpisode::default();
         let mut layout_reconfigure_deadline: Option<(tokio::time::Instant, (u32, u32))> = None;
         // Debounced ROI reconfiguration: events stash the newest target here
         // and the timed apply branch below commits it. A resize storm
@@ -6292,7 +6314,7 @@ fn spawn_share_monitor(
                         last.max(off_screen_seen_us),
                         source_appears_idle(window_id),
                     ) {
-                        RawCaptureWatchdogDecision::Healthy => {}
+                        RawCaptureWatchdogDecision::Healthy => breaker_hold.on_raw_recovered(),
                         RawCaptureWatchdogDecision::IdleHealthy { silent_for_us } => {
                             // Source is idle/occluded (not drawing), stream is
                             // healthy -- do NOT restart (that just republishes
@@ -6358,7 +6380,18 @@ fn spawn_share_monitor(
                             // stream and one more would stop the share --
                             // keep it on snapshot pulls instead.
                             if hold_pull_carried_share_at_breaker(window_id, now, pulls_fresh) {
-                                if now.saturating_sub(last_silent_log_us)
+                                if breaker_hold.on_hold() {
+                                    if let Some(diagnostics) = diagnostics.as_ref() {
+                                        diagnostics.mark_capture_wedged(window_id);
+                                    }
+                                    log::error!(
+                                        "session: window {window_id} capture held on snapshot pulls after {} restart(s) within {}s -- raw ScreenCaptureKit stream keeps wedging (silent {:.1}s); share stays up at pull-only frame rate",
+                                        pump_recovery_burst_len(window_id, now),
+                                        PUMP_RECOVERY_FAILURE_WINDOW_US / 1_000_000,
+                                        silent_for_us as f64 / 1_000_000.0
+                                    );
+                                    last_silent_log_us = now;
+                                } else if now.saturating_sub(last_silent_log_us)
                                     > RAW_CAPTURE_SILENCE_RESTART_THRESHOLD_US
                                 {
                                     last_silent_log_us = now;
@@ -14048,6 +14081,24 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         assert_eq!(pump_recovery_burst_len(WINDOW_ID, quiet), 0);
         assert!(!hold_pull_carried_share_at_breaker(WINDOW_ID, quiet, true));
         clear_pump_recovery_failures(WINDOW_ID);
+    }
+
+    /// #337 review: the hold replaced the circuit-open error, so each hold
+    /// episode must still produce exactly one error -- not zero (blind) and
+    /// not one per watchdog tick (storm).
+    #[test]
+    fn a_breaker_hold_reports_once_per_episode_petal_desktop_31() {
+        let mut episode = BreakerHoldEpisode::default();
+        assert!(episode.on_hold(), "the hold engaging is reported");
+        for _ in 0..100 {
+            assert!(!episode.on_hold(), "a continuing hold is not re-reported");
+        }
+        episode.on_raw_recovered();
+        episode.on_raw_recovered();
+        assert!(episode.on_hold(), "a new episode after recovery is reported");
+        assert!(!episode.on_hold());
+        // A new monitor (restart or new share) starts a fresh episode.
+        assert!(BreakerHoldEpisode::default().on_hold());
     }
 
     #[test]
