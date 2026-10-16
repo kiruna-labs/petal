@@ -718,6 +718,8 @@ export interface PresentParticipant {
   isLocal: boolean;
   speaking: boolean;
   micMuted: boolean;
+  /** #317: chosen `petalIdentityPaletteIndex` from participant metadata; null when unpublished. */
+  paletteIndex?: number | null;
 }
 
 /**

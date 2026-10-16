@@ -322,7 +322,7 @@
   }
 
   function visibleParticipants(
-    participants: readonly { identity: string; name: string }[]
+    participants: readonly { identity: string; name: string; paletteIndex?: number | null }[]
   ): VisibleParticipant[] {
     return rosterFromPresence(participants);
   }

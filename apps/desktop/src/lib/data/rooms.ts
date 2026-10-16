@@ -323,6 +323,8 @@ export async function roomPresence(): Promise<PresentParticipant[]> {
 export interface MeetingColorParticipant {
   identity: string;
   baseColor?: IdentityColor | null;
+  /** #317: chosen palette index; preferred over the identity hash. */
+  paletteIndex?: number | null;
 }
 
 interface HslColor {
@@ -352,7 +354,7 @@ export function resolveMeetingColors(
     if (!participant.identity || byIdentity.has(participant.identity)) continue;
     byIdentity.set(participant.identity, {
       identity: participant.identity,
-      baseColor: participant.baseColor ?? colorForIdentity(participant.identity)
+      baseColor: participant.baseColor ?? colorForIdentity(participant.identity, participant.paletteIndex)
     });
   }
 
@@ -386,6 +388,7 @@ export function rosterFromPresence<
     isLocal?: boolean;
     speaking?: boolean;
     micMuted?: boolean;
+    paletteIndex?: number | null;
   }
 >(
   participants: readonly T[],
@@ -400,7 +403,7 @@ export function rosterFromPresence<
 }> {
   const resolvedColors = resolveMeetingColors(participants);
   return participants.map((participant) => {
-    const identity = colorForIdentity(participant.identity);
+    const identity = colorForIdentity(participant.identity, participant.paletteIndex);
     const muted =
       participant.isLocal && options.localMicMuted !== undefined
         ? options.localMicMuted

@@ -1,4 +1,5 @@
 import type { IdentityColor } from '$lib/components/Avatar.svelte';
+import { identityPaletteIndex, isValidIdentityPaletteIndex } from '@petal/shared/logic/identityPalette';
 
 // Keep these hex values in lockstep with shared/ui/tokens.css's
 // --id-* custom properties. Identity color is intentionally this fixed set.
@@ -22,12 +23,13 @@ const IDENTITY_INK_HEX: Record<IdentityColor, string> = {
   slate: '#071018'
 };
 
-export function colorForIdentity(identity: string): IdentityColor {
-  let hash = 0;
-  for (let i = 0; i < identity.length; i++) {
-    hash = (hash * 31 + identity.charCodeAt(i)) >>> 0;
-  }
-  return PALETTE[hash % PALETTE.length];
+/**
+ * #317: the participant's CHOSEN palette index (`petalIdentityPaletteIndex`
+ * metadata) wins; the identity hash is only the fallback. Never call this
+ * without the index for a participant whose metadata you have.
+ */
+export function colorForIdentity(identity: string, paletteIndex?: number | null): IdentityColor {
+  return PALETTE[identityPaletteIndex(identity, paletteIndex)];
 }
 
 export function paletteIndexForIdentityColor(color: IdentityColor): number {
@@ -35,9 +37,7 @@ export function paletteIndexForIdentityColor(color: IdentityColor): number {
 }
 
 export function identityColorFromPaletteIndex(index: number | null | undefined): IdentityColor | null {
-  return Number.isInteger(index) && index !== null && index !== undefined && index >= 0 && index < PALETTE.length
-    ? PALETTE[index]
-    : null;
+  return isValidIdentityPaletteIndex(index) ? PALETTE[index] : null;
 }
 
 export function identityColorCss(color: IdentityColor): string {

@@ -518,6 +518,16 @@ fn owner_border_color_hex(
     owner_color_hex(key)
 }
 
+/// #317: store the owner's chosen palette index and return the border color it
+/// implies. Every path that refreshes owner metadata (metadata update, pool
+/// reuse) must go through here AND re-apply the border, or a late-arriving
+/// index leaves the border on the identity-hash color.
+fn set_owner_palette_index(win: &mut CompositorWindow, palette_index: Option<u8>) -> &'static str {
+    win.owner_palette_index =
+        palette_index.filter(|index| (*index as usize) < OWNER_COLOR_PALETTE_HEX.len());
+    owner_border_color_hex(&win.owner_identity, &win.owner_display_name, win.owner_palette_index)
+}
+
 fn parse_hex_rgb(hex: &str) -> Option<(f64, f64, f64)> {
     let raw = hex.strip_prefix('#').unwrap_or(hex);
     if raw.len() != 6 {
@@ -2206,6 +2216,8 @@ pub fn ensure_window(
             );
             win_state.remote_control_available = remote_control_available;
             win_state.owner_display_name = owner_display_name.to_string();
+            // #317: the reveal below re-colors the border from this field.
+            set_owner_palette_index(&mut win_state, owner_palette_index);
             win_state.source_title = source_title.to_string();
             win_state.source_url = source_url.clone();
             win_state.source_kind = source_kind;
@@ -3404,12 +3416,10 @@ pub fn update_window_metadata(
     let source_title = source_title.to_string();
     let source_url = source_url.filter(|u| crate::browser_url::is_openable_url(u));
     let share_instance_id = share_instance_id.filter(|value| !value.is_empty());
-    let should_refresh = with_state(|s| {
-        let Some(win) = s.windows.get_mut(&key) else {
-            return false;
-        };
+    let border_hex = with_state(|s| {
+        let win = s.windows.get_mut(&key)?;
         win.owner_display_name = owner_display_name.clone();
-        win.owner_palette_index = owner_palette_index;
+        let border_hex = set_owner_palette_index(win, owner_palette_index);
         win.source_title = source_title.clone();
         win.source_url = source_url.clone();
         win.share_instance_id = share_instance_id.clone();
@@ -3417,11 +3427,11 @@ pub fn update_window_metadata(
             win.source_scale = valid_source_scale(source_scale);
         }
         win.remote_control_available = remote_control_available;
-        true
+        Some(border_hex)
     });
-    if !should_refresh {
+    let Some(border_hex) = border_hex else {
         return;
-    }
+    };
 
     let app_main = app.clone();
     let key_for_main = key.clone();
@@ -3440,6 +3450,8 @@ pub fn update_window_metadata(
                     owner_palette_index,
                 ),
             );
+            // #317: the border must follow a palette index that lands late.
+            apply_remote_window_border(&win, border_hex);
         }
     }) {
         log::error!(
@@ -10169,6 +10181,73 @@ mod tests {
             owner_border_color_hex("bob-identity", "Bob", Some(2)),
             OWNER_COLOR_PALETTE_HEX[2]
         );
+    }
+
+    /// #317: a palette index that lands after the window opened (metadata
+    /// refresh) or across a pool reuse must re-color the border. Drives the
+    /// helper on a window held in the real compositor state.
+    #[test]
+    fn late_palette_index_recolors_the_stored_window_border() {
+        let key = test_key("ada-owner-317", 0x3170_0001);
+        let hashed = owner_color_hex(&key.owner_identity);
+        let hashed_index = OWNER_COLOR_PALETTE_HEX
+            .iter()
+            .position(|hex| *hex == hashed)
+            .expect("hash color is in the palette");
+        let chosen = ((hashed_index + 1) % OWNER_COLOR_PALETTE_HEX.len()) as u8;
+        with_state(|s| {
+            s.windows
+                .insert(key.clone(), test_window(&key.owner_identity, "Ada Terminal"));
+        });
+
+        let border = with_state(|s| {
+            let win = s.windows.get_mut(&key).expect("window open");
+            assert_eq!(set_owner_palette_index(win, None), hashed);
+            set_owner_palette_index(win, Some(chosen))
+        });
+        assert_eq!(border, OWNER_COLOR_PALETTE_HEX[chosen as usize]);
+        assert_ne!(border, hashed, "the chosen color must win over the identity hash");
+        let stored = with_state(|s| s.windows.get(&key).and_then(|w| w.owner_palette_index));
+        assert_eq!(stored, Some(chosen), "surface/header queries read the stored index");
+        let invalid = with_state(|s| {
+            let win = s.windows.get_mut(&key).expect("window open");
+            set_owner_palette_index(win, Some(9))
+        });
+        assert_eq!(invalid, hashed, "an out-of-range index falls back to the hash");
+        with_state(|s| {
+            s.windows.remove(&key);
+        });
+    }
+
+    /// #317: no tauri::test harness here, so pin the wiring the helper test
+    /// cannot reach: metadata refresh re-applies the border on the panel, and
+    /// pool reuse stores the new index before the reveal re-colors from it.
+    #[test]
+    fn metadata_refresh_and_reuse_reapply_the_owner_border() {
+        let source = include_str!("compositor.rs");
+        let body = |name: &str| {
+            let start = source.find(name).expect("function exists");
+            let rest = &source[start..];
+            let end = ["\npub fn ", "\nfn ", "\npub(crate) fn "]
+                .iter()
+                .filter_map(|marker| rest[1..].find(marker))
+                .min()
+                .expect("a following top-level fn");
+            &rest[..end + 1]
+        };
+        let update = body("pub fn update_window_metadata(");
+        assert!(update.contains("set_owner_palette_index(win, owner_palette_index)"));
+        assert!(update.contains("apply_remote_window_border(&win, border_hex)"));
+        let ensure = body("pub fn ensure_window(");
+        let store = ensure
+            .find("set_owner_palette_index(&mut win_state, owner_palette_index)")
+            .expect("reuse branch must refresh the owner palette index");
+        let reveal = ensure
+            .find("show_retired_window_on_main(")
+            .expect("reuse branch reveals the retired window");
+        assert!(store < reveal, "the index must be stored before the reveal re-colors");
+        let show = body("fn show_retired_window_on_main(");
+        assert!(show.contains("apply_remote_window_border("));
     }
 
     #[test]
