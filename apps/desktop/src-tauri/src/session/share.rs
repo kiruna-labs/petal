@@ -17,8 +17,8 @@ use crate::screen_audio::{
 use crate::share_priority::SharePriority;
 use crate::time_util::now_us;
 use crate::transport::publisher::{
-    CaptureResolution, PostWakeEncoderFallbackRecovery, RoomConnection, ShareQuality,
-    SharedSourceKind,
+    CaptureResolution, PostWakeEncoderFallbackRecovery, RoomConnection, RoomConnectionError,
+    ShareQuality, SharedSourceKind,
 };
 use crate::video_color::VideoColorProfile;
 use screencapturekit::stream::content_filter::SCContentFilter;
@@ -226,6 +226,99 @@ where
         metadata_publish_outcome(metadata_elapsed, SHARE_METADATA_PUBLISH_BUDGET)
     };
     (media_result, outcome, metadata_elapsed)
+}
+
+/// #339: how long a share start waits for a reconnect in progress to settle
+/// before its single publish retry, and how often it samples room state.
+const SHARE_PUBLISH_RECONNECT_SETTLE: Duration = Duration::from_secs(10);
+const SHARE_PUBLISH_RECONNECT_POLL: Duration = Duration::from_millis(100);
+
+/// Only an engine failure (signal/connection/publication timeout) can be the
+/// reconnect's fault; a bad config or a rejected request is not retried.
+fn is_reconnect_transient_publish_error(error: &RoomConnectionError) -> bool {
+    matches!(
+        error,
+        RoomConnectionError::Connect(livekit::RoomError::Engine(_))
+    )
+}
+
+/// Poll until the room is `Connected` (true) or `Disconnected`/deadline (false).
+async fn wait_for_room_connected(
+    connection_state: &impl Fn() -> livekit::ConnectionState,
+    settle: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + settle;
+    loop {
+        match connection_state() {
+            livekit::ConnectionState::Connected => return true,
+            livekit::ConnectionState::Disconnected => return false,
+            livekit::ConnectionState::Reconnecting => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(SHARE_PUBLISH_RECONNECT_POLL).await;
+    }
+}
+
+/// #339 (PETAL-DESKTOP-2W/-2X): a publish whose request was lost to a signal
+/// drop fails with an engine error while the room resumes, though a second
+/// publish a moment later succeeds. If the room was seen `Reconnecting` during
+/// the attempt (or still is), wait for it to settle and retry ONCE; any other
+/// failure, or one that still fails, is returned unchanged.
+async fn publish_with_reconnect_retry<T, Publish, PublishFut>(
+    window_id: u32,
+    mut publish: Publish,
+    connection_state: impl Fn() -> livekit::ConnectionState,
+    settle: Duration,
+) -> Result<T, RoomConnectionError>
+where
+    Publish: FnMut() -> PublishFut,
+    PublishFut: Future<Output = Result<T, RoomConnectionError>>,
+{
+    let mut saw_reconnecting = false;
+    let first = {
+        let attempt = publish();
+        tokio::pin!(attempt);
+        loop {
+            if connection_state() == livekit::ConnectionState::Reconnecting {
+                saw_reconnecting = true;
+            }
+            tokio::select! {
+                result = &mut attempt => break result,
+                _ = tokio::time::sleep(SHARE_PUBLISH_RECONNECT_POLL) => {}
+            }
+        }
+    };
+    let error = match first {
+        Ok(published) => return Ok(published),
+        Err(error) => error,
+    };
+    let reconnecting_now = connection_state() == livekit::ConnectionState::Reconnecting;
+    if !is_reconnect_transient_publish_error(&error) || !(saw_reconnecting || reconnecting_now) {
+        return Err(error);
+    }
+    log::warn!(
+        "session: start_share(window {window_id}) publish failed while the room was reconnecting ({error}); waiting up to {}ms for the reconnect to settle, then retrying once (#339)",
+        settle.as_millis()
+    );
+    if !wait_for_room_connected(&connection_state, settle).await {
+        log::warn!(
+            "session: start_share(window {window_id}) room did not reconnect within {}ms; not retrying the publish (#339)",
+            settle.as_millis()
+        );
+        return Err(error);
+    }
+    let retried = publish().await;
+    match &retried {
+        Ok(_) => log::warn!(
+            "session: start_share(window {window_id}) publish retry after reconnect succeeded (#339)"
+        ),
+        Err(retry_error) => log::warn!(
+            "session: start_share(window {window_id}) publish retry after reconnect failed too: {retry_error} (#339)"
+        ),
+    }
+    retried
 }
 
 /// Run the network teardown only after the local capture-stopped boundary has
@@ -4731,11 +4824,18 @@ async fn start_share_with_capture_source(
         SharePublishOrigin::Ordinary => {
             publish_media_while_metadata_runs(
                 metadata_task,
-                room_connection.publish_window_at(
-                    width,
-                    height,
-                    ShareQuality::Full,
-                    Some(window_id),
+                publish_with_reconnect_retry(
+                    window_id,
+                    || {
+                        room_connection.publish_window_at(
+                            width,
+                            height,
+                            ShareQuality::Full,
+                            Some(window_id),
+                        )
+                    },
+                    || room_connection.room().connection_state(),
+                    SHARE_PUBLISH_RECONNECT_SETTLE,
                 ),
             )
             .await
@@ -8903,6 +9003,197 @@ async fn republish_window_for_resolution(
 
 #[cfg(test)]
 mod tests {
+    // -- #339: one publish retry when the room was reconnecting ------------
+
+    mod publish_reconnect_retry {
+        use super::super::{publish_with_reconnect_retry, RoomConnectionError};
+        use livekit::ConnectionState;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        const SETTLE: Duration = Duration::from_secs(10);
+
+        // The exact SDK failure from PETAL-DESKTOP-2X.
+        fn publication_timeout() -> RoomConnectionError {
+            RoomConnectionError::Connect(livekit::RoomError::Engine(
+                livekit::rtc_engine::EngineError::Internal(
+                    "track publication timed out, no response received from the server".into(),
+                ),
+            ))
+        }
+
+        /// Room state driven by the paused clock: each `(at, state)` entry
+        /// applies from `at` onward (the latest reached entry wins).
+        fn scripted_state(
+            timeline: Arc<Mutex<Vec<(Duration, ConnectionState)>>>,
+            start: tokio::time::Instant,
+        ) -> impl Fn() -> ConnectionState {
+            move || {
+                let elapsed = start.elapsed();
+                let timeline = timeline.lock().unwrap();
+                let mut state = timeline[0].1;
+                for (at, next) in timeline.iter() {
+                    if elapsed >= *at {
+                        state = *next;
+                    }
+                }
+                state
+            }
+        }
+
+        /// Publishes that fail with `first` after 5s, then return `retry`.
+        fn scripted_publish(
+            attempts: Arc<AtomicUsize>,
+            first: fn() -> RoomConnectionError,
+            retry: Result<&'static str, fn() -> RoomConnectionError>,
+        ) -> impl FnMut() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<&'static str, RoomConnectionError>>>,
+        > {
+            move || {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if n == 0 {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        Err(first())
+                    } else {
+                        retry.map_err(|make| make())
+                    }
+                })
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_once_after_the_room_resumes_mid_publish() {
+            // 2X timeline: resume starts during the publish, the publish times
+            // out while still reconnecting, the room recovers 1s later.
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![
+                (Duration::ZERO, ConnectionState::Connected),
+                (Duration::from_secs(2), ConnectionState::Reconnecting),
+                (Duration::from_secs(6), ConnectionState::Connected),
+            ]));
+            let started = tokio::time::Instant::now();
+            let result = publish_with_reconnect_retry(
+                7,
+                scripted_publish(attempts.clone(), publication_timeout, Ok("published")),
+                scripted_state(timeline, started),
+                SETTLE,
+            )
+            .await;
+            assert_eq!(result.unwrap(), "published");
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            // The retry waited for Connected, not a fixed sleep or the deadline.
+            assert!(started.elapsed() >= Duration::from_secs(6));
+            assert!(started.elapsed() < Duration::from_secs(7));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_when_the_room_already_recovered_before_the_failure_landed() {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![
+                (Duration::ZERO, ConnectionState::Connected),
+                (Duration::from_secs(1), ConnectionState::Reconnecting),
+                (Duration::from_secs(3), ConnectionState::Connected),
+            ]));
+            let result = publish_with_reconnect_retry(
+                7,
+                scripted_publish(attempts.clone(), publication_timeout, Ok("published")),
+                scripted_state(timeline, tokio::time::Instant::now()),
+                SETTLE,
+            )
+            .await;
+            assert_eq!(result.unwrap(), "published");
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn no_retry_when_the_room_never_reconnected() {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![(Duration::ZERO, ConnectionState::Connected)]));
+            let result = publish_with_reconnect_retry(
+                7,
+                scripted_publish(attempts.clone(), publication_timeout, Ok("published")),
+                scripted_state(timeline, tokio::time::Instant::now()),
+                SETTLE,
+            )
+            .await;
+            assert!(matches!(result, Err(RoomConnectionError::Connect(_))));
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn no_retry_for_a_non_transient_failure_even_while_reconnecting() {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![
+                (Duration::ZERO, ConnectionState::Reconnecting),
+                (Duration::from_secs(6), ConnectionState::Connected),
+            ]));
+            fn invalid_config() -> RoomConnectionError {
+                RoomConnectionError::InvalidVideoConfig("odd size".into())
+            }
+            fn already_published() -> RoomConnectionError {
+                RoomConnectionError::Connect(livekit::RoomError::TrackAlreadyPublished)
+            }
+            for first in [invalid_config as fn() -> RoomConnectionError, already_published] {
+                attempts.store(0, Ordering::SeqCst);
+                let result = publish_with_reconnect_retry(
+                    7,
+                    scripted_publish(attempts.clone(), first, Ok("published")),
+                    scripted_state(timeline.clone(), tokio::time::Instant::now()),
+                    SETTLE,
+                )
+                .await;
+                assert!(result.is_err());
+                assert_eq!(attempts.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn no_retry_when_the_reconnect_does_not_settle_or_the_room_disconnects() {
+            for terminal in [ConnectionState::Reconnecting, ConnectionState::Disconnected] {
+                let attempts = Arc::new(AtomicUsize::new(0));
+                let timeline = Arc::new(Mutex::new(vec![
+                    (Duration::ZERO, ConnectionState::Reconnecting),
+                    (Duration::from_secs(6), terminal),
+                ]));
+                let started = tokio::time::Instant::now();
+                let result = publish_with_reconnect_retry(
+                    7,
+                    scripted_publish(attempts.clone(), publication_timeout, Ok("published")),
+                    scripted_state(timeline, started),
+                    SETTLE,
+                )
+                .await;
+                assert!(result.is_err(), "{terminal:?}");
+                assert_eq!(attempts.load(Ordering::SeqCst), 1, "{terminal:?}");
+                // Bounded: never longer than the attempt plus the settle budget.
+                assert!(started.elapsed() <= Duration::from_secs(5) + SETTLE + Duration::from_millis(200));
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_retry_that_fails_too_surfaces_its_error_and_stops() {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![
+                (Duration::ZERO, ConnectionState::Reconnecting),
+                (Duration::from_secs(6), ConnectionState::Connected),
+            ]));
+            let result = publish_with_reconnect_retry(
+                7,
+                scripted_publish(attempts.clone(), publication_timeout, Err(publication_timeout)),
+                scripted_state(timeline, tokio::time::Instant::now()),
+                SETTLE,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(RoomConnectionError::Connect(livekit::RoomError::Engine(_)))
+            ));
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        }
+    }
+
     /// #171: the ONE screen status that must never reach the abort-and-recover
     /// path is OffScreen. Every other status (including NotShared, which the
     /// recovery path already rejects as stale) recovers as before.
