@@ -4833,8 +4833,9 @@ fn sync_chrome_to_panel_frame(
     let (panel, disagree) = choose_panel_dock_bounds(appkit, server);
     if disagree && chrome_dock_disagreement_warn_due(now_ms()) {
         log::warn!(
-            "compositor: window {} panel frames disagree (#315): appkit={appkit:?} server={server:?}; docking chrome to the WindowServer frame",
+            "compositor: window {} panel frames disagree (#315): appkit={appkit:?} server={server:?}; docking chrome to the {} frame",
             key.window_id,
+            if server == Some(panel) { "WindowServer" } else { "AppKit" },
         );
     }
     let frames = chrome_frames_for_panel_bounds(panel.x, panel.y, panel.width, panel.height);
@@ -4969,8 +4970,10 @@ enum ChromeDockVerdict {
     Corrected(usize),
 }
 
-/// Panel bounds to dock chrome against: the WindowServer frame when it is
-/// readable and committed (non-zero size), else AppKit's. The flag reports an
+/// Panel bounds to dock chrome against. AppKit's frame normally wins: it
+/// leads WindowServer by a commit after a programmatic move/resize. Only the
+/// #315 signature -- AppKit origin at (0,0) while a committed WindowServer
+/// frame says otherwise -- docks to WindowServer. The flag reports any
 /// AppKit/WindowServer disagreement worth a (rate-limited) WARN.
 fn choose_panel_dock_bounds(
     appkit: ChromeFrame,
@@ -4978,7 +4981,13 @@ fn choose_panel_dock_bounds(
 ) -> (ChromeFrame, bool) {
     match server {
         Some(server) if server.width >= 1.0 && server.height >= 1.0 => {
-            (server, chrome_frame_needs_update(appkit, server))
+            let disagree = chrome_frame_needs_update(appkit, server);
+            let appkit_at_origin = appkit.x.abs() < 0.5 && appkit.y.abs() < 0.5;
+            if disagree && appkit_at_origin {
+                (server, true)
+            } else {
+                (appkit, disagree)
+            }
         }
         _ => (appkit, false),
     }
@@ -11299,6 +11308,13 @@ mod tests {
         assert_eq!(
             choose_panel_dock_bounds(server, Some(server)),
             (server, false)
+        );
+        // A placed AppKit frame that merely leads WindowServer (mid-resize)
+        // keeps AppKit, but still flags the disagreement.
+        let resized = frame(217.0, 175.0, 1200.0, 700.0);
+        assert_eq!(
+            choose_panel_dock_bounds(resized, Some(server)),
+            (resized, true)
         );
         // Uncommitted or unreadable WindowServer frame: fall back to AppKit.
         assert_eq!(
