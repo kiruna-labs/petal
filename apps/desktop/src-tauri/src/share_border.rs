@@ -750,6 +750,16 @@ fn realize_share_border(app_main: &AppHandle, border_id: u32, show_kind: ShowKin
 /// error and the next apply rewrites the entry.
 static DRAG_PANEL_WIDS: Mutex<Option<HashMap<u32, u32>>> = Mutex::new(None);
 
+/// #334: every border panel CGWindowID seen so far (click-through panels).
+#[cfg(target_os = "macos")]
+pub(crate) fn border_panel_window_numbers() -> Vec<u32> {
+    DRAG_PANEL_WIDS
+        .lock_unpoisoned()
+        .as_ref()
+        .map(|map| map.values().copied().collect())
+        .unwrap_or_default()
+}
+
 #[cfg(target_os = "macos")]
 fn cache_drag_panel_wid(window_id: u32, window: &tauri::WebviewWindow) {
     if let Ok(ns) = window.ns_window() {

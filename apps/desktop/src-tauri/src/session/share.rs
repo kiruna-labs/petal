@@ -3055,6 +3055,15 @@ impl SessionState {
         })
     }
 
+    /// #334: a Petal View region share (capture excludes Petal's own windows).
+    pub(crate) fn is_display_region_share(&self, window_id: u32) -> bool {
+        let guard = self.inner.lock_unpoisoned();
+        guard
+            .shares
+            .get(&window_id)
+            .is_some_and(|share| share.source_kind == SharedSourceKind::DisplayRegion)
+    }
+
     fn active_share_restart_snapshot(
         &self,
         window_id: u32,

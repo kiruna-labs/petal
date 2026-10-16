@@ -1191,6 +1191,17 @@ fn complete_hide_share_overlay(app_main: &AppHandle, overlay_id: u32) {
 /// as share_border's; the overlay covers the shared window's frame exactly).
 static DRAG_OVERLAY_WIDS: Mutex<Option<std::collections::HashMap<u32, u32>>> = Mutex::new(None);
 
+/// #334: every overlay panel CGWindowID seen so far. These panels are
+/// click-through, so remote control must not treat them as click targets.
+#[cfg(target_os = "macos")]
+pub(crate) fn overlay_panel_window_numbers() -> Vec<u32> {
+    DRAG_OVERLAY_WIDS
+        .lock_unpoisoned()
+        .as_ref()
+        .map(|map| map.values().copied().collect())
+        .unwrap_or_default()
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn drag_nudge_overlay(window_id: u32, x: f64, y: f64) {
     let wid = DRAG_OVERLAY_WIDS
