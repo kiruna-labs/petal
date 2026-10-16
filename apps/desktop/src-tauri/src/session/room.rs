@@ -708,7 +708,9 @@ pub async fn join_room(
         Ok(Ok(connected)) => connected,
         Ok(Err(error)) => {
             state.invalidate_room_generation();
-            log::error!(
+            // warn, not error: `connect_room` already reported this failure
+            // at error; a second error! filed a duplicate Sentry issue (#338).
+            log::warn!(
                 "session: join_room('{}') failed -- portable room connect error: {error}",
                 crate::logging::log_safe_quoted(&room_name)
             );

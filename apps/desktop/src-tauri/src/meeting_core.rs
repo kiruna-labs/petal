@@ -31,7 +31,9 @@ const ROOM_CONNECT_RETRY_DELAYS: [std::time::Duration; 2] = [
 #[derive(Debug, thiserror::Error, Clone, serde::Serialize)]
 #[serde(tag = "kind", content = "message", rename_all = "camelCase")]
 pub(crate) enum RoomJoinError {
-    #[error("missing LiveKit configuration: {0}")]
+    /// Token mint or local room-record failure. Not "missing configuration":
+    /// a token timeout/network error lands here too (#338).
+    #[error("room setup failed: {0}")]
     Config(String),
     #[error("failed to connect to LiveKit room: {0}")]
     RoomConnect(String),
@@ -380,6 +382,26 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(BoundedConnectError::TimedOut)));
+    }
+
+    #[test]
+    fn token_network_failure_is_not_reported_as_missing_configuration() {
+        // PETAL-DESKTOP-34 (#338): a token timeout read "missing LiveKit
+        // configuration: backend token request timed out".
+        let error =
+            RoomJoinError::Config(crate::transport::token::TokenError::Timeout.to_string());
+        assert_eq!(error.to_string(), "room setup failed: backend token request timed out");
+        #[cfg(target_os = "macos")]
+        let platform_error: crate::session::ShareSessionError = error.clone().into();
+        #[cfg(not(target_os = "macos"))]
+        let platform_error: crate::session::SessionError = error.clone().into();
+        assert_eq!(
+            platform_error.to_string(),
+            "room setup failed: backend token request timed out"
+        );
+        // The wire kind is unchanged for the frontend and the autotest.
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(wire["kind"], "config");
     }
 
     #[test]
