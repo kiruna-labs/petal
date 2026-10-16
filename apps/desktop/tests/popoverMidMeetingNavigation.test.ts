@@ -317,10 +317,11 @@ test('an in-flight join cannot resurrect the gallery bridge after teardown', () 
     /function dispose\(\)\s*\{\s*disposed = true;/,
     'dispose() must record that the session is gone'
   );
+  // #356: the join body lives in attemptJoin() so Try again can re-run it.
   const join = meetingSessionSource.match(
-    /async function join\(\): Promise<boolean> \{([\s\S]*?)\n  \}/
+    /async function attemptJoin\(\): Promise<boolean> \{([\s\S]*?)\n  \}/
   )?.[1];
-  assert.ok(join, 'could not locate join()');
+  assert.ok(join, 'could not locate attemptJoin()');
   const guardIndex = join.indexOf('if (disposed) return false;');
   const bridgeIndex = join.indexOf('startGalleryBridge()');
   assert.ok(guardIndex >= 0, 'join() must bail out when the session was disposed mid-flight');

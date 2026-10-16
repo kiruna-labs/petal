@@ -42,6 +42,7 @@ import {
 import { COMMANDS, EVENTS, hasTauriBridge } from '$lib/ipc';
 import type { PresentParticipant, RoomLeftEvent } from '$lib/ipc';
 import { createSpeakerSpotlight } from './speakerSpotlight.svelte';
+import { joinFailureMessage } from '$lib/data/joinFailure';
 export type MeetingPhase = 'connecting' | 'connected' | 'disconnected';
 
 export interface MeetingSessionOptions {
@@ -80,6 +81,8 @@ export interface MeetingSession {
   /** A participant's collision-resolved meeting color (tiles, share headers, chat avatars). */
   resolvedColorFor(identity: string): string;
   readonly galleryStateTone: 'warning' | 'info';
+  /** Buttons on the state card: a failed join offers Try again (#356). */
+  readonly galleryStateActions: { label: string; onClick: () => void; primary?: boolean }[];
   readonly activeIdentity: ReturnType<typeof colorForIdentity>;
   readonly activeColor: string;
   handleRenameRoom(displayName: string | null): Promise<void>;
@@ -117,6 +120,9 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
 
   let meetingPhase = $state<MeetingPhase>('connecting');
   let disconnectDetail = $state('Returning to rooms.');
+  // #356: the join failed; the card explains why and offers Try again
+  // instead of auto-returning to the room list.
+  let joinFailed = $state(false);
   let presence = $state<PresentParticipant[]>([]);
   let presenceRevision = 0;
   let remoteCameras = $state<RemoteCamera[]>([]);
@@ -362,8 +368,18 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     meetingPhase === 'connecting'
       ? null
       : meetingPhase === 'disconnected'
-        ? 'Disconnected'
+        ? joinFailed
+          ? "Couldn't join this meeting"
+          : 'Disconnected'
         : null
+  );
+  const galleryStateActions = $derived(
+    joinFailed && meetingPhase === 'disconnected'
+      ? [
+          { label: 'Try again', onClick: () => void retryJoin(), primary: true },
+          { label: 'Back to rooms', onClick: () => returnToRooms(0) }
+        ]
+      : []
   );
   const galleryStateDetail = $derived(
     meetingPhase === 'connecting'
@@ -392,6 +408,17 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     // Not awaited: a local file read that must never delay the join itself.
     void loadSavedRoom();
     await startListeners();
+    return attemptJoin();
+  }
+
+  async function retryJoin() {
+    if (!joinFailed || disposed) return;
+    joinFailed = false;
+    meetingPhase = 'connecting';
+    await attemptJoin();
+  }
+
+  async function attemptJoin(): Promise<boolean> {
     try {
       // Real join (SPEC.md §4.6): idempotent on the Rust side, so a reload
       // of this route never duplicates membership.
@@ -413,7 +440,12 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
       meetingPhase = 'connected';
     } catch (e) {
       console.error(`Failed to join room '${roomName}'`, e);
-      beginTerminalReturn('Could not join this room - returning you to the room list.');
+      // #356: say why (server unreachable, firewall-blocked socket, ...)
+      // and let the user retry, instead of a 900ms generic flash.
+      disconnectDetail = joinFailureMessage(e);
+      joinFailed = true;
+      meetingPhase = 'disconnected';
+      return false;
     }
 
     // Without this the continuation of an awaited join connects a SECOND
@@ -453,6 +485,9 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
           // The user's own Leave already navigates via handleLeave; showing
           // the terminal card here would flash it for the leave duration.
           if (selfLeaveRequested) return;
+          // A failing join's own cleanup emits room-left before the invoke
+          // rejects; the join's outcome owns the card while it runs (#356).
+          if (meetingPhase === 'connecting' || joinFailed) return;
           beginTerminalReturn('Meeting ended - returning you to the room list.');
         }
       });
@@ -520,6 +555,9 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     resolvedColorFor,
     get galleryStateTone() {
       return galleryStateTone;
+    },
+    get galleryStateActions() {
+      return galleryStateActions;
     },
     get activeIdentity() {
       return activeIdentity;

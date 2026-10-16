@@ -730,6 +730,7 @@
         stateTitle={meeting.galleryStateTitle}
         stateDetail={meeting.galleryStateDetail}
         stateTone={meeting.galleryStateTone}
+        stateActions={meeting.galleryStateActions}
         bind:expanded={pill.expanded}
         onControl={handleControl}
         {inviteAriaLabel}
