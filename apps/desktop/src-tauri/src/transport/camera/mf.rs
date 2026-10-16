@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEvent, IMFMediaSource,
-    IMFSample, IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
+    IMFMediaType, IMFSample, IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
     IMFSourceReaderEx,
     MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateMediaType,
     MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFShutdown,
@@ -30,7 +30,8 @@ use windows::Win32::Media::MediaFoundation::{
     MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
     MF_SOURCE_READERF_ERROR, MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED,
     MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_D3D_MANAGER,
-    MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
+    MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+    MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
@@ -40,7 +41,8 @@ use crate::sync_ext::MutexExt;
 use super::{
     CameraBackend, CameraDeviceInfo, CameraError, CameraFrame, CameraMode, CameraStatus,
     CameraStatusSource, FrameLayout, PreferredCameraMode, dedupe_and_sort_modes,
-    frame_from_packed_nv12, operation_error, select_camera_format_index, CameraFormatMetadata,
+    frame_from_packed_nv12, operation_error, rank_camera_format_indices, camera_output_type_rejected,
+    CameraFormatMetadata, MAX_NV12_NEGOTIATION_ATTEMPTS,
 };
 
 const CALLBACK_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -652,7 +654,10 @@ fn open_reader_attempt(
     }
     unsafe {
         attributes.SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, callback)?;
-        attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)?;
+        // Advanced, not basic, processing: basic only converts YUV to RGB32,
+        // so a YUY2-only camera could never be delivered as NV12
+        // (PETAL-DESKTOP-36, MF_E_TOPO_CODEC_NOT_FOUND). #331
+        attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
         attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
     }
     let reader = unsafe { MFCreateSourceReaderFromMediaSource(&source, &attributes) }
@@ -737,51 +742,113 @@ fn configure_nv12_reader(
         candidates.push((media_type, metadata));
     }
 
-    let selected_index = select_camera_format_index(
+    let order = rank_camera_format_indices(
         candidates.iter().map(|(_, metadata)| *metadata),
         preferred,
-    )
-    .ok_or_else(|| CameraError::Operation("camera exposes no usable video media type".into()))?;
-    let (native_type, native_format) = candidates.swap_remove(selected_index);
-    let native_layout = FrameLayout::new(native_format.width, native_format.height)?;
-    // Pin the exact native media type the selection chose. Without this the
-    // call below only constrains the *output* format, and Media Foundation is
-    // free to satisfy it from a different native type -- so the mode we report
-    // and publish is not necessarily the mode the device runs. Measured on a
-    // Logitech BRIO: a 1280x720@30 request negotiated down to ~20 fps that way,
-    // while a 1280x720@60 request landed on a 60-capable type and delivered
-    // ~57.
-    //
-    // `IMFSourceReaderEx` is not guaranteed on every reader, and a device may
-    // reject the type. Neither is fatal: fall through to the baseline
-    // negotiation rather than refusing to open the camera, because a working
-    // camera at an unverified cadence beats no camera, and the log line below
-    // records which of the two happened.
-    match reader.cast::<IMFSourceReaderEx>() {
-        Ok(source_reader_ex) => {
-            match unsafe {
-                source_reader_ex
-                    .SetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, &native_type)
-            } {
-                Ok(_) => log::info!(
-                    "camera: pinned native media type {}x{} @ {}/{} fps (nv12={})",
+    );
+    if order.is_empty() {
+        return Err(CameraError::Operation(
+            "camera exposes no usable video media type".into(),
+        ));
+    }
+    // `IMFSourceReaderEx` is not guaranteed on every reader. Without it the
+    // output type alone drives the baseline negotiation, which is not fatal:
+    // a working camera at an unverified cadence beats no camera.
+    let source_reader_ex = match reader.cast::<IMFSourceReaderEx>() {
+        Ok(source_reader_ex) => Some(source_reader_ex),
+        Err(error) => {
+            log::warn!(
+                "camera: reader has no IMFSourceReaderEx ({error}); continuing with baseline negotiation"
+            );
+            None
+        }
+    };
+    // The top-ranked mode is not always convertible to NV12 (PETAL-DESKTOP-36:
+    // MF_E_TOPO_CODEC_NOT_FOUND). A conversion rejection moves on to the next
+    // ranked mode; any other failure is still fatal. #331
+    let mut last_rejection = None;
+    for &index in order.iter().take(MAX_NV12_NEGOTIATION_ATTEMPTS) {
+        let (native_type, native_format) = &candidates[index];
+        let native_layout = FrameLayout::new(native_format.width, native_format.height)?;
+        let subtype = unsafe { native_type.GetGUID(&MF_MT_SUBTYPE) }.ok();
+        match set_nv12_output(
+            reader,
+            source_reader_ex.as_ref(),
+            native_type,
+            *native_format,
+            native_layout,
+        ) {
+            Ok(()) => {}
+            Err(error) if camera_output_type_rejected(error.code().0) => {
+                log::warn!(
+                    "camera: native mode {}x{} @ {}/{} fps subtype={:?} cannot be delivered as NV12 \
+                     (hresult={:#010x}); trying the next camera mode",
                     native_format.width,
                     native_format.height,
                     native_format.frame_rate_numerator,
                     native_format.frame_rate_denominator,
-                    native_format.is_nv12,
-                ),
-                Err(error) => log::warn!(
-                    "camera: failed to pin camera native media type ({error}); continuing with baseline negotiation"
-                ),
+                    subtype,
+                    error.code().0
+                );
+                last_rejection = Some(error);
+                continue;
             }
+            Err(error) => return Err(error.into()),
         }
-        Err(error) => log::warn!(
-            "camera: reader has no IMFSourceReaderEx ({error}); continuing with baseline negotiation"
-        ),
+
+        let current =
+            unsafe { reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32) }
+                .map_err(|error| {
+                    operation_error("failed to read negotiated camera media type", error)
+                })?;
+        let negotiated = unsafe { current.GetGUID(&MF_MT_SUBTYPE) }
+            .map_err(|error| operation_error("negotiated camera type has no subtype", error))?;
+        if negotiated != MFVideoFormat_NV12 {
+            return Err(CameraError::Operation(
+                "Media Foundation did not negotiate NV12 camera output".into(),
+            ));
+        }
+        return Ok(ConfiguredCameraFormat {
+            layout: FrameLayout::from_media_type(&current)?,
+            frame_rate_numerator: native_format.frame_rate_numerator,
+            frame_rate_denominator: native_format.frame_rate_denominator,
+        });
     }
-    let output_type = unsafe { MFCreateMediaType() }
-        .map_err(|error| operation_error("failed to create NV12 camera media type", error))?;
+    Err(last_rejection
+        .map(CameraError::from)
+        .unwrap_or_else(|| CameraError::Operation("camera exposes no usable video media type".into())))
+}
+
+/// Pin `native_type` (when the reader supports it) and request NV12 output at
+/// its size and rate. Pinning matters: without it the output type alone lets
+/// Media Foundation satisfy the request from a different native type -- on a
+/// Logitech BRIO a 1280x720@30 request negotiated down to ~20 fps that way.
+fn set_nv12_output(
+    reader: &IMFSourceReader,
+    source_reader_ex: Option<&IMFSourceReaderEx>,
+    native_type: &IMFMediaType,
+    native_format: CameraFormatMetadata,
+    native_layout: FrameLayout,
+) -> windows::core::Result<()> {
+    if let Some(source_reader_ex) = source_reader_ex {
+        match unsafe {
+            source_reader_ex
+                .SetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, native_type)
+        } {
+            Ok(_) => log::info!(
+                "camera: pinned native media type {}x{} @ {}/{} fps (nv12={})",
+                native_format.width,
+                native_format.height,
+                native_format.frame_rate_numerator,
+                native_format.frame_rate_denominator,
+                native_format.is_nv12,
+            ),
+            Err(error) => log::warn!(
+                "camera: failed to pin camera native media type ({error}); continuing with baseline negotiation"
+            ),
+        }
+    }
+    let output_type = unsafe { MFCreateMediaType() }?;
     unsafe {
         output_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         output_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
@@ -793,27 +860,8 @@ fn configure_nv12_reader(
             MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
             None,
             &output_type,
-        )?;
+        )
     }
-    drop(native_type);
-
-    let current =
-        unsafe { reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32) }
-            .map_err(|error| {
-                operation_error("failed to read negotiated camera media type", error)
-            })?;
-    let subtype = unsafe { current.GetGUID(&MF_MT_SUBTYPE) }
-        .map_err(|error| operation_error("negotiated camera type has no subtype", error))?;
-    if subtype != MFVideoFormat_NV12 {
-        return Err(CameraError::Operation(
-            "Media Foundation did not negotiate NV12 camera output".into(),
-        ));
-    }
-    Ok(ConfiguredCameraFormat {
-        layout: FrameLayout::from_media_type(&current)?,
-        frame_rate_numerator: native_format.frame_rate_numerator,
-        frame_rate_denominator: native_format.frame_rate_denominator,
-    })
 }
 
 pub struct CameraCapture {
