@@ -387,6 +387,28 @@ fn record_pump_recovery_failure(window_id: u32, now_us: u64) -> u32 {
     entry.1
 }
 
+/// Failures in the window's current burst, WITHOUT recording one (0 once the
+/// burst has gone quiet for longer than `PUMP_RECOVERY_FAILURE_WINDOW_US`).
+fn pump_recovery_burst_len(window_id: u32, now_us: u64) -> u32 {
+    pump_recovery_failures()
+        .lock_unpoisoned()
+        .get(&window_id)
+        .filter(|(last_us, _)| now_us.saturating_sub(*last_us) <= PUMP_RECOVERY_FAILURE_WINDOW_US)
+        .map_or(0, |(_, count)| *count)
+}
+
+/// Sentry PETAL-DESKTOP-31: a raw stream that re-wedges after every restart
+/// stalls again every ~90s (`RAW_CAPTURE_STALL_HOLD_GRACE_US`), inside the
+/// breaker window, so the 4th restart opened the circuit and stopped a share
+/// that snapshot pulls were still delivering. Once the next restart would
+/// open the circuit, stay on pulls instead; the burst expiring re-arms it.
+fn hold_pull_carried_share_at_breaker(window_id: u32, now_us: u64, pulls_fresh: bool) -> bool {
+    pulls_fresh
+        && pump_failure_recovery_decision(
+            pump_recovery_burst_len(window_id, now_us).saturating_add(1),
+        ) == PumpFailureRecoveryDecision::CircuitOpen
+}
+
 fn clear_pump_recovery_failures(window_id: u32) {
     pump_recovery_failures()
         .lock_unpoisoned()
@@ -6318,10 +6340,9 @@ fn spawn_share_monitor(
                             // RAW_CAPTURE_STALL_HOLD_GRACE_US's doc comment for
                             // why an unbounded hold here was a one-way ratchet
                             // that left a wedged raw stream degrading forever.
-                            if raw_capture_stall_hold(
-                                silent_for_us,
-                                snapshot_pull_fresh_within(window_id, now, 10_000_000),
-                            ) {
+                            let pulls_fresh =
+                                snapshot_pull_fresh_within(window_id, now, 10_000_000);
+                            if raw_capture_stall_hold(silent_for_us, pulls_fresh) {
                                 if now.saturating_sub(last_silent_log_us)
                                     > RAW_CAPTURE_SILENCE_RESTART_THRESHOLD_US
                                 {
@@ -6329,6 +6350,23 @@ fn spawn_share_monitor(
                                     log::info!(
                                         "session: window {window_id} raw capture silent {:.1}s but snapshot pulls are delivering fresh content -- no restart",
                                         silent_for_us as f64 / 1_000_000.0
+                                    );
+                                }
+                                continue;
+                            }
+                            // PETAL-DESKTOP-31: restarts are not curing this
+                            // stream and one more would stop the share --
+                            // keep it on snapshot pulls instead.
+                            if hold_pull_carried_share_at_breaker(window_id, now, pulls_fresh) {
+                                if now.saturating_sub(last_silent_log_us)
+                                    > RAW_CAPTURE_SILENCE_RESTART_THRESHOLD_US
+                                {
+                                    last_silent_log_us = now;
+                                    log::warn!(
+                                        "session: window {window_id} raw capture silent {:.1}s after {} restart(s) within {}s; snapshot pulls are delivering, so staying pull-only instead of opening the recovery circuit and stopping the share",
+                                        silent_for_us as f64 / 1_000_000.0,
+                                        pump_recovery_burst_len(window_id, now),
+                                        PUMP_RECOVERY_FAILURE_WINDOW_US / 1_000_000
                                     );
                                 }
                                 continue;
@@ -13963,6 +14001,52 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             PUMP_RECOVERY_FAILURE_WINDOW_US < RAW_CAPTURE_HARD_RESTART_THRESHOLD_US,
             "the idle backstop's cadence must reset the burst counter (#806)"
         );
+        clear_pump_recovery_failures(WINDOW_ID);
+    }
+
+    /// Sentry PETAL-DESKTOP-31 (macOS 14.7.1, 0.9.30): a raw stream that
+    /// re-wedged within seconds of every restart was carried by snapshot
+    /// pulls at ~8fps, yet the pull-grace stall recurs every ~90s -- inside
+    /// the breaker window -- so the 4th restart stopped a working share.
+    /// Drives the REAL recorder + breaker the recovery path uses.
+    #[test]
+    fn a_pull_carried_share_is_held_instead_of_tripping_the_breaker_petal_desktop_31() {
+        const WINDOW_ID: u32 = 31_001;
+        clear_pump_recovery_failures(WINDOW_ID);
+        // The production cadence that tripped it does accumulate.
+        assert!(RAW_CAPTURE_STALL_HOLD_GRACE_US < PUMP_RECOVERY_FAILURE_WINDOW_US);
+
+        let t0 = 2_000_000_000u64;
+        let step = RAW_CAPTURE_STALL_HOLD_GRACE_US;
+        let mut at = t0;
+        for expected in 1..=MAX_PUMP_FAILURE_RECOVERY_RESTARTS as u32 {
+            assert!(
+                !hold_pull_carried_share_at_breaker(WINDOW_ID, at, true),
+                "restart {expected} still has breaker budget -- try it"
+            );
+            assert_eq!(
+                pump_failure_recovery_decision(record_pump_recovery_failure(WINDOW_ID, at)),
+                PumpFailureRecoveryDecision::Restart
+            );
+            assert_eq!(pump_recovery_burst_len(WINDOW_ID, at), expected);
+            at += step;
+        }
+
+        // The next restart would open the circuit: hold while pulls deliver...
+        assert!(hold_pull_carried_share_at_breaker(WINDOW_ID, at, true));
+        // ...and the hold must be exactly the case the breaker would stop.
+        assert_eq!(
+            pump_failure_recovery_decision(pump_recovery_burst_len(WINDOW_ID, at) + 1),
+            PumpFailureRecoveryDecision::CircuitOpen
+        );
+        // Without fresh pulls nothing is carrying the share: let it stop.
+        assert!(!hold_pull_carried_share_at_breaker(WINDOW_ID, at, false));
+
+        // Once the burst goes quiet, restarts are allowed again.
+        let last = t0 + step * (u64::from(MAX_PUMP_FAILURE_RECOVERY_RESTARTS) - 1);
+        let quiet = last + PUMP_RECOVERY_FAILURE_WINDOW_US + 1;
+        assert_eq!(pump_recovery_burst_len(WINDOW_ID, quiet), 0);
+        assert!(!hold_pull_carried_share_at_breaker(WINDOW_ID, quiet, true));
         clear_pump_recovery_failures(WINDOW_ID);
     }
 
