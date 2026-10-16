@@ -580,7 +580,9 @@ diagnostic_enum!(BrowserUrlExtractionCauseTag {
 // restored first). `*_no_interface` is `E_NOINTERFACE` -- no
 // `IGraphicsCaptureSession2` on this Windows build; `*_other` is any other
 // HRESULT (the numeric code is in petal.log). Mirrors
-// `windows_screen_capture::wgc_border_failure_tag`.
+// `windows_screen_capture::wgc_border_failure_tag`. `show_no_interface` is
+// the expected Windows 10 gap and is no longer sent (#330); the variant stays
+// so the closed tag vocabulary is unchanged.
 diagnostic_enum!(WgcBorderFailureTag {
     ShowNoInterface => "show_no_interface",
     ShowOther => "show_other",
