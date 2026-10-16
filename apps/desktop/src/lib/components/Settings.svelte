@@ -71,6 +71,12 @@
     type AuthStatus
   } from '$lib/data/permissions';
   import { cameraPreviewConstraints } from '$lib/data/cameraConstraints';
+  import {
+    previewCameraIdFor,
+    streamCameraId,
+    webCamerasFrom,
+    type WebCamera
+  } from '$lib/data/cameraPreviewDevice';
   import { listAudioDevices, setAudioDevices } from '$lib/data/audioDevices';
   import { listCameraDevices, setCameraDevice } from '$lib/data/cameraDevices';
   import {
@@ -533,8 +539,7 @@
     } catch (e) {
       cameraNote = `Could not switch camera: ${e}`;
     }
-    // The native id space cannot be safely correlated with WebKit's salted
-    // deviceId space. The preview therefore remains best-effort/default.
+    // The preview follows the selection by device name (#312).
     void acquirePreview(id);
   }
 
@@ -1085,6 +1090,20 @@
     clearPreviewStream(reason);
   }
 
+  // WebKit's labelled cameras from the last enumeration, for matching the
+  // native selection by name (see cameraPreviewDevice.ts).
+  let webCameras = $state<WebCamera[]>([]);
+
+  function previewCameraId(deviceId: string): string | undefined {
+    // The browser harness's sample picker already holds WebKit ids.
+    if (realCameras.some((c) => c.id === deviceId)) return deviceId;
+    return previewCameraIdFor(
+      deviceId,
+      nativeCameras.map((c) => ({ id: c.id, name: c.label })),
+      webCameras
+    );
+  }
+
   async function acquirePreview(deviceId: string) {
     stopPreview('reacquire');
     const requestId = previewRequestId;
@@ -1119,7 +1138,7 @@
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new DOMException('unsupported', 'NotSupportedError');
       }
-      const selectedCameraId = realCameras.some((c) => c.id === deviceId) ? deviceId : undefined;
+      const selectedCameraId = previewCameraId(deviceId);
       const constraints: MediaStreamConstraints = {
         video: cameraPreviewConstraints(selectedCameraId)
       };
@@ -1160,6 +1179,14 @@
       realCameras = devices
         .filter((d) => d.kind === 'videoinput')
         .map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
+      webCameras = webCamerasFrom(devices);
+      // WebKit hides device labels until a stream has been granted, so the
+      // first acquire in this window can only open the default camera. Now
+      // that the labels are known, reopen on the selected one if it differs.
+      const labeledCameraId = previewCameraId(deviceId);
+      if (!selectedCameraId && labeledCameraId && labeledCameraId !== streamCameraId(stream)) {
+        void acquirePreview(deviceId);
+      }
     } catch (err) {
       if (requestId !== previewRequestId) return;
       clearPreviewStream('failed');

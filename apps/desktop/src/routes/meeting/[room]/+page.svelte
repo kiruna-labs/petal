@@ -37,7 +37,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { onMount, onDestroy, type Component } from 'svelte';
+  import { onMount, onDestroy, untrack, type Component } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -52,6 +52,12 @@
   import { session, startSessionSync } from '$lib/stores/session.svelte';
   import { toastHostState } from '$lib/stores/toastHost.svelte';
   import { cameraPreviewConstraints } from '$lib/data/cameraConstraints';
+  import { listCameraDevices } from '$lib/data/cameraDevices';
+  import {
+    previewCameraIdFor,
+    streamCameraId,
+    webCamerasFrom
+  } from '$lib/data/cameraPreviewDevice';
   import { identityColorCss, identityInkCss } from '$lib/data/identityColor';
   import { ensureCameraAccess, openPrivacySettings } from '$lib/data/permissions';
   import { startNativeSelfView, stopNativeSelfView } from '$lib/data/selfView';
@@ -429,10 +435,11 @@
         return false; // camActive stays false — control never lies
       }
     }
+    const cameraId = await selectedSelfViewCameraId();
     let stream: MediaStream;
     try {
       stream = await Promise.race([
-        navigator.mediaDevices.getUserMedia({ video: cameraPreviewConstraints() }),
+        navigator.mediaDevices.getUserMedia({ video: cameraPreviewConstraints(cameraId) }),
         new Promise<never>((_, reject) =>
           setTimeout(
             () => reject(new DOMException('camera request timed out', 'TimeoutError')),
@@ -458,8 +465,61 @@
     }
     localCameraStream = stream;
     camActive = true;
+    // Without labels (WebKit hides them until a stream is granted) this
+    // opened the default camera; now that one is granted, follow the picker.
+    if (!cameraId) void followSelectedCamera();
     return true;
   }
+
+  // The WebKit deviceId of the camera chosen in the picker, matched by name
+  // (#312). Undefined means "open the default", which is also the answer
+  // whenever the match is ambiguous.
+  async function selectedSelfViewCameraId(): Promise<string | undefined> {
+    if (!hasTauri || !session.cameraDeviceId) return undefined;
+    try {
+      const [nativeCameras, devices] = await Promise.all([
+        listCameraDevices(),
+        navigator.mediaDevices.enumerateDevices()
+      ]);
+      return previewCameraIdFor(session.cameraDeviceId, nativeCameras ?? [], webCamerasFrom(devices));
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Move a live macOS self-view onto the selected camera. The new stream is
+  // opened before the old one stops, so a camera that won't open leaves the
+  // current preview up rather than a blank tile.
+  let selfViewFollowRequest = 0;
+  async function followSelectedCamera() {
+    const request = ++selfViewFollowRequest;
+    const cameraId = await selectedSelfViewCameraId();
+    const current = localCameraStream;
+    if (request !== selfViewFollowRequest || !current || !cameraId) return;
+    if (cameraId === streamCameraId(current)) return;
+    let next: MediaStream;
+    try {
+      next = await navigator.mediaDevices.getUserMedia({ video: cameraPreviewConstraints(cameraId) });
+    } catch (err) {
+      console.warn('camera self-view: could not open the selected camera', err);
+      return;
+    }
+    if (request !== selfViewFollowRequest || localCameraStream !== current) {
+      next.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    localCameraStream = next;
+    current.getTracks().forEach((t) => t.stop());
+  }
+
+  $effect(() => {
+    // A camera switch from the picker (here or in Settings) only reaches the
+    // native publish; the WebKit self-view has to follow it separately.
+    // Windows' self-view is fed by the native capture, so it already does.
+    void session.cameraDeviceId;
+    if (!hasTauri || isWindows() || !untrack(() => localCameraStream)) return;
+    void followSelectedCamera();
+  });
 
   // The native snapshot declares whether this platform needs its WebView
   // preview before publication (macOS) or treats it as best-effort (Windows).
