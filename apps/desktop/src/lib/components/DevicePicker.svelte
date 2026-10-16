@@ -1,9 +1,17 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import type { UnlistenFn } from '@tauri-apps/api/event';
   import { listAudioDevices, setAudioDevices } from '$lib/data/audioDevices';
+  import {
+    MISSING_DEVICE,
+    MISSING_DEVICE_LABEL,
+    pickerValue,
+    silentMicNote,
+    switchNote
+  } from '$lib/data/audioDeviceSelection';
   import { listCameraDevices, setCameraDevice } from '$lib/data/cameraDevices';
   import { session, updateAudioDevices } from '$lib/stores/session.svelte';
-  import { hasTauriBridge } from '$lib/ipc';
+  import { EVENTS, hasTauriBridge, listenUntilDestroy, type ResilienceEvent } from '$lib/ipc';
 
   interface DeviceOption {
     id: string;
@@ -30,15 +38,13 @@
   let cameraNote = $state<string | null>(null);
   let pendingKind = $state<'microphone' | 'speaker' | 'camera' | null>(null);
   let root = $state<HTMLDivElement>();
+  let audioListRequest = 0;
+  let unlistenAudioDevices: UnlistenFn | undefined;
+  let unlistenResilience: UnlistenFn | undefined;
+  let destroyed = false;
 
-  const micValue = $derived(
-    mics.some((device) => device.id === selectedMic) ? selectedMic : (mics[0]?.id ?? '')
-  );
-  const speakerValue = $derived(
-    speakers.some((device) => device.id === selectedSpeaker)
-      ? selectedSpeaker
-      : (speakers[0]?.id ?? '')
-  );
+  const micValue = $derived(pickerValue(mics, selectedMic));
+  const speakerValue = $derived(pickerValue(speakers, selectedSpeaker));
   const cameraValue = $derived(
     cameras.some((device) => device.id === selectedCamera)
       ? selectedCamera
@@ -47,6 +53,15 @@
 
   const title = $derived(mode === 'audio' ? 'Audio devices' : 'Camera');
 
+  async function loadAudioLists() {
+    const request = ++audioListRequest;
+    const audio = await listAudioDevices();
+    // A newer listing (from a device change) supersedes this one.
+    if (request !== audioListRequest) return;
+    mics = (audio?.recording ?? []).map((device) => ({ id: device.id, label: device.name }));
+    speakers = (audio?.playout ?? []).map((device) => ({ id: device.id, label: device.name }));
+  }
+
   onMount(async () => {
     if (!hasTauriBridge()) {
       deviceError = 'Device switching is unavailable in this preview.';
@@ -54,10 +69,36 @@
       return;
     }
 
+    if (mode === 'audio') {
+      // Windows, in a call: the device watcher announces connects and
+      // disconnects, so the open picker re-lists instead of showing what was
+      // connected when it opened.
+      listenUntilDestroy(
+        EVENTS.audioDevicesChanged,
+        () => {
+          loadAudioLists().catch((error) =>
+            console.error('device picker: re-enumeration failed', error)
+          );
+        },
+        (unlisten) => (unlistenAudioDevices = unlisten),
+        () => destroyed
+      );
+      // Windows: capture left a silent microphone. The saved one stays
+      // checked, so say where the voice actually comes from.
+      listenUntilDestroy<ResilienceEvent>(
+        EVENTS.resilienceEvent,
+        ({ payload }) => {
+          if (payload.kind === 'micSwitchedFromSilent') {
+            micNote = silentMicNote(payload.silentDevice, payload.deviceName);
+          }
+        },
+        (unlisten) => (unlistenResilience = unlisten),
+        () => destroyed
+      );
+    }
+
     try {
-      const [audio, camera] = await Promise.all([listAudioDevices(), listCameraDevices()]);
-      mics = (audio?.recording ?? []).map((device) => ({ id: device.id, label: device.name }));
-      speakers = (audio?.playout ?? []).map((device) => ({ id: device.id, label: device.name }));
+      const [, camera] = await Promise.all([loadAudioLists(), listCameraDevices()]);
       cameras = (camera ?? []).map((device) => ({ id: device.id, label: device.name }));
     } catch (error) {
       console.error('device picker: enumeration failed', error);
@@ -65,6 +106,12 @@
     } finally {
       loading = false;
     }
+  });
+
+  onDestroy(() => {
+    destroyed = true;
+    unlistenAudioDevices?.();
+    unlistenResilience?.();
   });
 
   function noteFor(applied: { applied: boolean; inRoom: boolean } | null, what: string) {
@@ -80,11 +127,7 @@
     micNote = null;
     pendingKind = 'microphone';
     try {
-      const applied = await setAudioDevices({ recordingId: id });
-      micNote = noteFor(
-        applied ? { applied: applied.micApplied, inRoom: applied.inRoom } : null,
-        'microphone'
-      );
+      micNote = switchNote(await setAudioDevices({ recordingId: id }), 'microphone');
     } catch (error) {
       console.error('device picker: mic switch failed', error);
       micNote = 'Could not switch microphone.';
@@ -99,11 +142,7 @@
     speakerNote = null;
     pendingKind = 'speaker';
     try {
-      const applied = await setAudioDevices({ playoutId: id });
-      speakerNote = noteFor(
-        applied ? { applied: applied.speakerApplied, inRoom: applied.inRoom } : null,
-        'speaker'
-      );
+      speakerNote = switchNote(await setAudioDevices({ playoutId: id }), 'speaker');
     } catch (error) {
       console.error('device picker: speaker switch failed', error);
       speakerNote = 'Could not switch speaker.';
@@ -167,6 +206,26 @@
   }
 </script>
 
+{#snippet missingDeviceRow()}
+  <!-- The saved device is not in the list: say so instead of checking another
+       device. Disabled, so it is not a choice. -->
+  <button
+    type="button"
+    class="meeting-menu-row device-row selected"
+    role="option"
+    aria-selected="true"
+    aria-label={`${MISSING_DEVICE_LABEL}, selected`}
+    disabled
+  >
+    <span class="meeting-menu-row-copy">{MISSING_DEVICE_LABEL}</span>
+    <span class="meeting-menu-row-check" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m5 12 4 4L19 6"></path>
+      </svg>
+    </span>
+  </button>
+{/snippet}
+
 <div
   bind:this={root}
   class="device-picker"
@@ -191,6 +250,9 @@
         <p class="meeting-menu-status">No microphones found.</p>
       {:else}
         <div class="device-list" role="listbox" aria-label="Microphones">
+          {#if micValue === MISSING_DEVICE}
+            {@render missingDeviceRow()}
+          {/if}
           {#each mics as device, index (device.id)}
             <button
               type="button"
@@ -227,6 +289,9 @@
         <p class="meeting-menu-status">No speakers found.</p>
       {:else}
         <div class="device-list" role="listbox" aria-label="Speakers">
+          {#if speakerValue === MISSING_DEVICE}
+            {@render missingDeviceRow()}
+          {/if}
           {#each speakers as device, index (device.id)}
             <button
               type="button"

@@ -159,6 +159,7 @@ export const COMMANDS = {
   roomPresence: 'room_presence',
   runLaunchUpdateCheck: 'run_launch_update_check',
   setAudioDevices: 'set_audio_devices',
+  switchFromSilentMic: 'switch_from_silent_mic',
   setCameraDevice: 'set_camera_device',
   setCameraPrefs: 'set_camera_prefs',
   setCockpitOpen: 'set_cockpit_open',
@@ -243,6 +244,13 @@ export const EVENTS = {
    * Tauri bus so the main window (which owns the toast surfaces) can render it.
    */
   aiChatRefused: 'ai-chat-refused',
+  /**
+   * Windows, in a call: a microphone or speaker connected or disconnected.
+   * No payload. The in-call device watcher sends it after it has switched to
+   * or away from the affected device, so an open picker re-lists and shows
+   * the settled state.
+   */
+  audioDevicesChanged: 'audio-devices-changed',
   autotestJoinResult: 'autotest-join-result',
   cameraPublishState: 'camera-publish-state',
   /**
@@ -1265,6 +1273,14 @@ export type ResilienceEvent =
   | { kind: 'networkChanged' }
   | { kind: 'micDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'micDeviceFailed'; message: string }
+  | {
+      kind: 'micSilentOffer';
+      silentDevice: string;
+      silentDeviceId: string;
+      deviceName: string;
+      deviceId: string;
+    }
+  | { kind: 'micSwitchedFromSilent'; silentDevice: string; deviceName: string }
   | { kind: 'speakerDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'speakerDeviceFailed'; message: string }
   | { kind: 'sharePublicationRepairRecovering'; windowId: number }
@@ -1714,6 +1730,7 @@ export interface CommandArgs {
     which: 'screenRecording' | 'microphone' | 'camera' | 'accessibility';
   };
   [COMMANDS.setAudioDevices]: { recordingId: string | null; playoutId: string | null };
+  [COMMANDS.switchFromSilentMic]: { silentDeviceId: string; deviceId: string };
   [COMMANDS.listCameraModes]: { preferredDeviceId: string | null };
   [COMMANDS.setCameraDevice]: { deviceId: string };
   /** Settings' camera-preview edge, written to petal.log so a #76 camera-intent
@@ -1912,6 +1929,7 @@ export interface CommandReturns {
   [COMMANDS.restartApp]: boolean;
   [COMMANDS.roomPresence]: PresentParticipant[];
   [COMMANDS.setAudioDevices]: AppliedAudioDevices;
+  [COMMANDS.switchFromSilentMic]: string;
   [COMMANDS.setCameraDevice]: AppliedCameraDevice;
   [COMMANDS.setCameraPrefs]: AppliedCameraDevice;
   [COMMANDS.startTestCockpit]: CockpitStatus;
