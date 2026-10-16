@@ -2358,6 +2358,9 @@ enum CaptureStartFailureKind {
     /// The window no longer exists anywhere: closed between pick and start,
     /// or mid-share before an in-place restart (PETAL-DESKTOP-13/-12/-3C).
     SourceClosed,
+    /// The window's app opted it out of capture (`NSWindow.sharingType =
+    /// .none`): an app's choice, not a Petal failure (PETAL-DESKTOP-3C/-3D).
+    SourceExcludedByApp,
     Anomalous,
 }
 
@@ -2371,6 +2374,9 @@ fn classify_capture_start_failure(
                 && !existence.window_exists(*id) =>
         {
             CaptureStartFailureKind::SourceClosed
+        }
+        crate::capture::CaptureError::WindowCaptureExcluded(_) => {
+            CaptureStartFailureKind::SourceExcludedByApp
         }
         _ => CaptureStartFailureKind::Anomalous,
     }
@@ -2387,6 +2393,10 @@ fn log_capture_start_failure(
     match classify_capture_start_failure(error, existence) {
         CaptureStartFailureKind::SourceClosed => log::warn!(
             "session: {reason}(window {window_id}) failed -- WindowCapture::start error: {error} (the window no longer exists -- closed by its app or the user)"
+        ),
+        CaptureStartFailureKind::SourceExcludedByApp => log::warn!(
+            "session: {reason}(window {window_id}) failed -- WindowCapture::start error: {error} ({})",
+            crate::platform::cg::capture_facts_for_window_id(window_id).unwrap_or_default()
         ),
         CaptureStartFailureKind::Anomalous => {
             // A window CoreGraphics still has but ScreenCaptureKit does not
@@ -2406,12 +2416,14 @@ fn log_capture_start_failure(
     }
 }
 
-/// Whether a share error is the not-found outcome `log_capture_start_failure`
-/// already reported.
+/// Whether a share error is the not-found (or excluded-by-its-app) outcome
+/// `log_capture_start_failure` already reported.
 pub(crate) fn is_source_not_found(error: &ShareSessionError) -> bool {
     matches!(
         error,
-        ShareSessionError::WindowNotFound(_) | ShareSessionError::DisplayNotFound(_)
+        ShareSessionError::WindowNotFound(_)
+            | ShareSessionError::DisplayNotFound(_)
+            | ShareSessionError::WindowCaptureExcluded(_)
     )
 }
 
@@ -11511,10 +11523,33 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
                 CaptureStartFailureKind::Anomalous
             );
         }
+        // A visible window whose app opts out of capture is the app's choice.
+        assert_eq!(
+            classify_capture_start_failure(&CaptureError::WindowCaptureExcluded(9635), &existence),
+            CaptureStartFailureKind::SourceExcludedByApp
+        );
         // Downstream re-logs of a not-found defer to the reporter above.
+        assert!(is_source_not_found(&ShareSessionError::WindowCaptureExcluded(1)));
         assert!(is_source_not_found(&ShareSessionError::WindowNotFound(1)));
         assert!(is_source_not_found(&ShareSessionError::DisplayNotFound(1)));
         assert!(!is_source_not_found(&ShareSessionError::PermissionDenied));
+    }
+
+    /// PETAL-DESKTOP-3C/-3D: the hover tab's `share-error` event carries this
+    /// kind to `shareErrors.ts`, which says the app blocks sharing instead of
+    /// "no longer available" for a window the user can still see.
+    #[test]
+    fn an_app_excluded_window_reaches_the_frontend_as_its_own_kind() {
+        let error =
+            ShareSessionError::from(crate::capture::CaptureError::WindowCaptureExcluded(9635));
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            serde_json::json!({ "kind": "windowCaptureExcluded", "message": 9635 })
+        );
+        assert_eq!(
+            serde_json::to_value(ShareSessionError::WindowNotFound(9635)).unwrap()["kind"],
+            "windowNotFound"
+        );
     }
 
     /// #742: this replaces a test that asserted on `classify_shared_window_

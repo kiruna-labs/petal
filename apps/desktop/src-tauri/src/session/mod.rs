@@ -203,6 +203,10 @@ pub enum ShareSessionError {
     /// not a window closing.
     #[error("display {0} not found (disconnected, or invalid id)")]
     DisplayNotFound(u32),
+    /// The window is visible but its app excludes it from screen capture
+    /// (PETAL-DESKTOP-3C/-3D) -- not "closed", so the UI says why.
+    #[error("window {0} is excluded from screen capture by its app")]
+    WindowCaptureExcluded(u32),
     #[error("capture failed: {0}")]
     Capture(String),
     #[error("room setup failed: {0}")]
@@ -225,6 +229,7 @@ impl From<CaptureError> for ShareSessionError {
             CaptureError::PermissionDenied => Self::PermissionDenied,
             CaptureError::WindowNotFound(id) => Self::WindowNotFound(id),
             CaptureError::DisplayNotFound(id) => Self::DisplayNotFound(id),
+            CaptureError::WindowCaptureExcluded(id) => Self::WindowCaptureExcluded(id),
             CaptureError::ScreenCaptureKit(msg) => Self::Capture(msg),
         }
     }
