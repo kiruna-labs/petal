@@ -205,7 +205,7 @@ pub enum ShareSessionError {
     DisplayNotFound(u32),
     #[error("capture failed: {0}")]
     Capture(String),
-    #[error("missing LiveKit configuration: {0}")]
+    #[error("room setup failed: {0}")]
     Config(String),
     #[error("failed to connect to LiveKit room: {0}")]
     RoomConnect(String),

@@ -1195,7 +1195,7 @@ fn is_same_room(current: &crate::rooms::RoomRecord, candidate: &crate::rooms::Ro
 #[derive(Debug, thiserror::Error, Clone, serde::Serialize)]
 #[serde(tag = "kind", content = "message", rename_all = "camelCase")]
 pub enum SessionError {
-    #[error("missing LiveKit configuration: {0}")]
+    #[error("room setup failed: {0}")]
     Config(String),
     #[error("failed to connect to LiveKit room: {0}")]
     RoomConnect(String),
