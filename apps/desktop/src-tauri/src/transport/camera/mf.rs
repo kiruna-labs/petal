@@ -15,7 +15,8 @@ use windows::core::{implement, Error as WindowsError, Interface, Ref, HRESULT};
 use windows::Win32::Foundation::{HMODULE, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
+    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_SDK_VERSION, ID3D11Device, ID3D11Multithread,
 };
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEvent, IMFMediaSource,
@@ -42,7 +43,8 @@ use super::{
     CameraBackend, CameraDeviceInfo, CameraError, CameraFrame, CameraMode, CameraStatus,
     CameraStatusSource, FrameLayout, PreferredCameraMode, dedupe_and_sort_modes,
     frame_from_packed_nv12, operation_error, rank_camera_format_indices, camera_output_type_rejected,
-    CameraFormatMetadata, MAX_NV12_NEGOTIATION_ATTEMPTS,
+    negotiated_camera_frame_rate, should_attempt_camera_subtype, CameraFormatMetadata,
+    MAX_NV12_NEGOTIATION_ATTEMPTS,
 };
 
 const CALLBACK_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -196,32 +198,41 @@ fn create_d3d_device_manager() -> Option<(IMFDXGIDeviceManager, u32)> {
     let mut device: Option<ID3D11Device> = None;
     let mut used_driver: &str = "none";
     let mut last_error: Option<WindowsError> = None;
-    for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
-        device = None;
-        match unsafe {
-            D3D11CreateDevice(
-                None,
-                driver,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )
-        } {
-            Ok(()) => {
-                used_driver = if driver == D3D_DRIVER_TYPE_HARDWARE {
-                    "hardware"
-                } else {
-                    "warp"
-                };
-                break;
-            }
-            Err(error) => {
-                last_error = Some(error);
-                device = None;
+    // VIDEO_SUPPORT lets MF run its GPU video processor on this device
+    // (advanced processing, #331); retry without it on drivers that refuse.
+    let flag_sets = [
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    ];
+    'drivers: for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+        for flags in flag_sets {
+            device = None;
+            match unsafe {
+                D3D11CreateDevice(
+                    None,
+                    driver,
+                    HMODULE::default(),
+                    flags,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                )
+            } {
+                Ok(()) => {
+                    used_driver = match (driver == D3D_DRIVER_TYPE_HARDWARE, flags == flag_sets[0]) {
+                        (true, true) => "hardware+video",
+                        (true, false) => "hardware",
+                        (false, true) => "warp+video",
+                        (false, false) => "warp",
+                    };
+                    break 'drivers;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    device = None;
+                }
             }
         }
     }
@@ -232,6 +243,23 @@ fn create_d3d_device_manager() -> Option<(IMFDXGIDeviceManager, u32)> {
         );
         return None;
     };
+
+    // MF work-queue threads (the GPU converter) and the reader callback's
+    // Lock/ContiguousCopyTo share this device's immediate context: it must be
+    // multithread-protected, or the context races. #331
+    match unsafe { device.GetImmediateContext() }
+        .and_then(|context| context.cast::<ID3D11Multithread>())
+    {
+        Ok(multithread) => {
+            let _ = unsafe { multithread.SetMultithreadProtected(true) };
+        }
+        Err(error) => {
+            log::warn!(
+                "camera: D3D11 device has no ID3D11Multithread ({error}); camera will run without a hardware DXGI device manager"
+            );
+            return None;
+        }
+    }
 
     let mut reset_token: u32 = 0;
     let mut manager: Option<IMFDXGIDeviceManager> = None;
@@ -767,10 +795,19 @@ fn configure_nv12_reader(
     // MF_E_TOPO_CODEC_NOT_FOUND). A conversion rejection moves on to the next
     // ranked mode; any other failure is still fatal. #331
     let mut last_rejection = None;
-    for &index in order.iter().take(MAX_NV12_NEGOTIATION_ATTEMPTS) {
+    let mut rejected_subtypes = Vec::new();
+    let mut attempts = 0;
+    for &index in &order {
         let (native_type, native_format) = &candidates[index];
-        let native_layout = FrameLayout::new(native_format.width, native_format.height)?;
         let subtype = unsafe { native_type.GetGUID(&MF_MT_SUBTYPE) }.ok();
+        if !should_attempt_camera_subtype(&rejected_subtypes, subtype.as_ref()) {
+            continue;
+        }
+        if attempts == MAX_NV12_NEGOTIATION_ATTEMPTS {
+            break;
+        }
+        attempts += 1;
+        let native_layout = FrameLayout::new(native_format.width, native_format.height)?;
         match set_nv12_output(
             reader,
             source_reader_ex.as_ref(),
@@ -791,6 +828,7 @@ fn configure_nv12_reader(
                     error.code().0
                 );
                 last_rejection = Some(error);
+                rejected_subtypes.extend(subtype);
                 continue;
             }
             Err(error) => return Err(error.into()),
@@ -808,10 +846,16 @@ fn configure_nv12_reader(
                 "Media Foundation did not negotiate NV12 camera output".into(),
             ));
         }
+        // Report what MF actually negotiated, not the mode we asked to pin:
+        // if pinning failed, processing may convert from another mode. #331
+        let (frame_rate_numerator, frame_rate_denominator) = negotiated_camera_frame_rate(
+            unsafe { current.GetUINT64(&MF_MT_FRAME_RATE) }.ok(),
+            *native_format,
+        );
         return Ok(ConfiguredCameraFormat {
             layout: FrameLayout::from_media_type(&current)?,
-            frame_rate_numerator: native_format.frame_rate_numerator,
-            frame_rate_denominator: native_format.frame_rate_denominator,
+            frame_rate_numerator,
+            frame_rate_denominator,
         });
     }
     Err(last_rejection

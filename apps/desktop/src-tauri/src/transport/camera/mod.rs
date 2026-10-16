@@ -724,6 +724,27 @@ fn camera_output_type_rejected(hresult: i32) -> bool {
     )
 }
 
+/// A native subtype whose NV12 output was already rejected fails the same way
+/// at every size, so it is skipped; an unknown subtype is always tried. #331
+#[cfg(any(target_os = "windows", test))]
+fn should_attempt_camera_subtype<T: PartialEq>(rejected: &[T], subtype: Option<&T>) -> bool {
+    subtype.is_none_or(|subtype| !rejected.contains(subtype))
+}
+
+/// The frame rate to report for a configured reader: the negotiated output
+/// type's packed `MF_MT_FRAME_RATE` when it is a valid ratio, else the pinned
+/// native mode's. #331
+#[cfg(any(target_os = "windows", test))]
+fn negotiated_camera_frame_rate(
+    negotiated_packed: Option<u64>,
+    native: CameraFormatMetadata,
+) -> (u32, u32) {
+    negotiated_packed
+        .map(|packed| ((packed >> 32) as u32, packed as u32))
+        .filter(|&(numerator, denominator)| numerator != 0 && denominator != 0)
+        .unwrap_or((native.frame_rate_numerator, native.frame_rate_denominator))
+}
+
 /// Absolute distance between a mode's fps and a target integer fps preset.
 #[cfg(any(target_os = "windows", test))]
 fn format_frame_rate_distance(format: CameraFormatMetadata, target_fps: u32) -> f64 {
@@ -1192,6 +1213,28 @@ mod tests {
         for hresult in [0x8007_0005_u32, 0x8000_4005, 0xC00D_3EA3, 0xC00D_3704, 0] {
             assert!(!camera_output_type_rejected(hresult as i32), "{hresult:#010x}");
         }
+    }
+
+    #[test]
+    fn a_rejected_subtype_is_skipped_but_unknown_subtypes_are_always_tried() {
+        let rejected = ["YUY2"];
+        assert!(!should_attempt_camera_subtype(&rejected, Some(&"YUY2")));
+        assert!(should_attempt_camera_subtype(&rejected, Some(&"MJPG")));
+        assert!(should_attempt_camera_subtype(&rejected, None));
+        assert!(should_attempt_camera_subtype::<&str>(&[], Some(&"YUY2")));
+    }
+
+    #[test]
+    fn reported_camera_rate_is_the_negotiated_one_when_valid() {
+        let native = camera_format(1280, 720, 30, false);
+        assert_eq!(negotiated_camera_frame_rate(Some((15u64 << 32) | 1), native), (15, 1));
+        assert_eq!(
+            negotiated_camera_frame_rate(Some((30_000u64 << 32) | 1001), native),
+            (30_000, 1001)
+        );
+        assert_eq!(negotiated_camera_frame_rate(None, native), (30, 1));
+        assert_eq!(negotiated_camera_frame_rate(Some(1), native), (30, 1));
+        assert_eq!(negotiated_camera_frame_rate(Some(30u64 << 32), native), (30, 1));
     }
 
     #[test]
