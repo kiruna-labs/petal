@@ -220,17 +220,17 @@
       "version": "1.1.1"
     },
     {
-      "bom-ref": "@livekit/protocol@1.50.4",
+      "bom-ref": "@livekit/protocol@1.52.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@livekit/protocol/-/protocol-1.50.4.tgz"
+          "url": "https://registry.npmjs.org/@livekit/protocol/-/protocol-1.52.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "2f5ba080d400ab2636d6c99063c0259723986dcbfd31ef536b1c2e2f2b4bd51f1c93d9db60f9902cdc040e2de938518031ae45f08da7522d89739f56e5ac3194"
+          "content": "5fc0f12a535bce4e8b87ebfadf4fa68dd1474a8b5d005c08cb3c5245252a9760db4f10a79696bb26cbc519ce8d6b799789ec763858748a242d5b03813f4ac860"
         }
       ],
       "licenses": [
@@ -241,10 +241,10 @@
         }
       ],
       "name": "@livekit/protocol",
-      "purl": "pkg:npm/%40livekit/protocol@1.50.4",
+      "purl": "pkg:npm/%40livekit/protocol@1.52.1",
       "scope": "required",
       "type": "library",
-      "version": "1.50.4"
+      "version": "1.52.1"
     },
     {
       "bom-ref": "@noble/ed25519@3.2.0",
@@ -313,17 +313,17 @@
       "version": "2.4.0"
     },
     {
-      "bom-ref": "@oxc-project/types@0.151.0",
+      "bom-ref": "@oxc-project/types@0.153.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@oxc-project/types/-/types-0.151.0.tgz"
+          "url": "https://registry.npmjs.org/@oxc-project/types/-/types-0.153.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "275c97ac894d0d957313769d6b7d74c5e030ee71fcc820322cfb9422c8ca6ad14f99f9f96d2d685be70cf90b063ad5567799e14a96f0656c7faee7beaf967e3c"
+          "content": "8d236b448caf3d52cbe44d73fed4b9ccb029ae8b06cff16e2353d6c043b3e7d8f71384d34f34a9a8a6ff4431aa261856d101d8212197c6ae7cdb01b1e93d754f"
         }
       ],
       "licenses": [
@@ -340,23 +340,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40oxc-project/types@0.151.0",
+      "purl": "pkg:npm/%40oxc-project/types@0.153.0",
       "scope": "optional",
       "type": "library",
-      "version": "0.151.0"
+      "version": "0.153.0"
     },
     {
-      "bom-ref": "@rolldown/binding-android-arm-eabi@1.2.11",
+      "bom-ref": "@rolldown/binding-android-arm-eabi@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "0399177c62af2965991344ed3eb7ecbd3faae18e5dd501bc806533a588c6c9d33e7c044cf4cb97f743eb5d85ded176ec0d5832c713731e8ea08828fdd1bb0537"
+          "content": "56efcd202ae0751bd439e689648c81d853fadece9f3bfe2e77997c7579b10f1f720f29fe98dd32fa0b2fb15be24a58be4f7eb502aa34878e84b8ca286ebc1ac0"
         }
       ],
       "licenses": [
@@ -373,23 +373,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-android-arm64@1.2.11",
+      "bom-ref": "@rolldown/binding-android-arm64@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "cfa713c9ccfe889e0f564b8be071d6e037d37e8794ff69ea618b923ab4e61fbc872b96342c23a7034dd5e193716afc95694d683aa520220da494dfecf9448638"
+          "content": "e8b12822b1b2e6fbc27766e8367bf6b283d25198ff3d1be1a7c47fb7d2a55fe9886714e1204fd9ab1ac65f19ae357d05baf405bcb759afb4b81eb62960156111"
         }
       ],
       "licenses": [
@@ -406,23 +406,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-android-arm64@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm64@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-darwin-arm64@1.2.11",
+      "bom-ref": "@rolldown/binding-darwin-arm64@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "8d286fa8db4feaf0c2ebf03924e0336d557e0e4807aa197f49c5422446edf93518e90633ed89d772b837b0bb450678aba347ff2dde7467009603a7fb2980f59d"
+          "content": "09a252473950e90fb390331503d3a45710635683d1083104defd05489f64210060463140a40dd28b88a385b3555238bb649b7e3df3b47b8eaacb89cf2271d43c"
         }
       ],
       "licenses": [
@@ -439,23 +439,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-darwin-x64@1.2.11",
+      "bom-ref": "@rolldown/binding-darwin-x64@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "7f68b6c62356ab5675976fbeab67ee85945d2c04f76aac43eaf44d9b5440c6952805c76a341dc2d2cd41b7e2be3db131d85e45e20429ea1a8a92984263fc45f7"
+          "content": "7b8af7e342398714b32640f7609071833abfac9df0c31c1d2cb6f614fb75669c9e9b6d27ad03d3d750c310491acf0c5a1ee987f30a6096ca7f3b3823ff04fa9b"
         }
       ],
       "licenses": [
@@ -472,23 +472,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-freebsd-x64@1.2.11",
+      "bom-ref": "@rolldown/binding-freebsd-x64@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e08af915238a20032be2bd24131a6dd6cddb320cc9537ac0e39018387b50a65b34a0d7aa71804aad6325724ad81f82827c62df91f9f5b4dd5d9993cc56c757a3"
+          "content": "8680560d9e3f2bf98929531bb2051dd637e90360e23ab279e26a5e80e6d4f53047041aed5f814b2172494110cf67fd839fdd46bcfa1bf99da1c0a2737f813949"
         }
       ],
       "licenses": [
@@ -505,23 +505,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.11",
+      "bom-ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "fe09d10ccfb7f4144ecc037f9353998c33e70cc719c41ff4114c4a8ce34ee72564344be5b28303af118d2a0662fedb45ae24b683094337307ae69bcd6c539721"
+          "content": "a05f5f66edef4d69d38950240c5c54f4f24bb759e1db42bd451a6e1ec47b6671362fb5e8a2405b0c154ba2309548b19bbed4a5c5e50d9e3023e836cdb0acb36e"
         }
       ],
       "licenses": [
@@ -538,23 +538,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-arm64-gnu@1.2.11",
+      "bom-ref": "@rolldown/binding-linux-arm64-gnu@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "3c568af07c2f0076da29b05c0cd42286330a62f16703986210dc7f979b698530f3d44d16169df697403b6aaee5c94c06b11c3fc52acd232fe020ae2d86b482af"
+          "content": "0d3a5bffe8cc8aa58c3e0a619f892c5b5cd6f972c9e9d249f4532f9c893d236f752e109cb4c3e131826b3f9b7da7a0bda9adca5da7437541191c168f87790dc5"
         }
       ],
       "licenses": [
@@ -571,23 +571,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-arm64-musl@1.2.11",
+      "bom-ref": "@rolldown/binding-linux-arm64-musl@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "02c93325420a44b3f192bb91d702ca7b019b3b0f8461f53ff653ab0458f8005ac403c84fa4a16738358dbb658b68db3440d9046fd40826e7e65596482ff6c996"
+          "content": "c54f8abeff4dd80dd2637e73161d45596363c5b69d13f04a7aa9e45deeef49c538199b30ef9ec19559832c84d912af033e993a9bbba80d890aecffb1fee5393b"
         }
       ],
       "licenses": [
@@ -604,23 +604,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-ppc64-gnu@1.2.11",
+      "bom-ref": "@rolldown/binding-linux-ppc64-gnu@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "aa55060217a1db287c69f1fb401831d0fad11cdf3984a9cd77bf31f0c78c8578afb9ebe077cbe07fafc2b2d3b398d298fe52d31ef353acfcbdf1c2e702e83327"
+          "content": "5cc93f867861db9a10ef9e8b7256f5435d61e25974c42d04b1ae70e15ce9fa6004d92dc018981e3344a89eb22063c7c78636ab6fa85ca13bb0a051b45553f68a"
         }
       ],
       "licenses": [
@@ -637,23 +637,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-s390x-gnu@1.2.11",
+      "bom-ref": "@rolldown/binding-linux-s390x-gnu@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b1e72911a77ed2f09b49f9fcba91724a40ec92ff9b18f9374c74834bd63cf72738adbe24cea1e9f039b277d064416e129e13570590a5ffa0ab3bffe165a84d25"
+          "content": "5350684c7626972c04da7dc75168f367ef0442c2abf8ec29c58b8359ab9bc78dad50bf1048bee73aa473fcd5476a789b6c53f7335471ba9af3ff035c6cc2a3ab"
         }
       ],
       "licenses": [
@@ -670,23 +670,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-x64-gnu@1.2.11",
+      "bom-ref": "@rolldown/binding-linux-x64-gnu@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "98e5414f774fa645a6f170563e65386dff94e9d6032de328ffda235268ace0dd0be6ebb5d2aadae6f3b29e067bfcf49da04e06f4abd1b786e5a11c4d8cb6acec"
+          "content": "278726f343dceb0130579019e36a3adac21080393e63b476b3ae3a8c8c2ebcefb8578e90079f0de2f56e30f58205a360babb172e999458957ffd640090fbc705"
         }
       ],
       "licenses": [
@@ -703,23 +703,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-linux-x64-musl@1.2.11",
+      "bom-ref": "@rolldown/binding-linux-x64-musl@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "22cefc8bd03c522e12a9cc54c0527db8c9a30e7e7c21b5538c55987507acb451207ae1261cc2c636b8979d524a9301b6622663c3c70fd33093c8331d0c6b4e3a"
+          "content": "5b47ae652e3453857a2649849d50885fd99cb0be9c6d74385fc736c3e30c3888c583af135d45bebb7453fb67b5b75a6ff6683f10fde90ed2b73ce5dd43b471cb"
         }
       ],
       "licenses": [
@@ -736,23 +736,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-openharmony-arm64@1.2.11",
+      "bom-ref": "@rolldown/binding-openharmony-arm64@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "7540979de67cec83543324340fe0b41eb1013543cd5c768f994e464e3c8a4c9122bacb30f4a6a3e4b9fc533b4f7b87a957f7dfbe034111a764b1d621996eb124"
+          "content": "768fc017fe27f4c46c8626b76b9697a32f3133673a9a07d3e83ec7fdd63a9b2e73fa17c2211e1a6fb9a4e08463fbe9ec110a4acb7f647740d09c3abeafaf76b7"
         }
       ],
       "licenses": [
@@ -769,23 +769,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-win32-arm64-msvc@1.2.11",
+      "bom-ref": "@rolldown/binding-win32-arm64-msvc@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "8c1cb16faa9f77e6c7d7151dd2a9df1676f5ee2f6c5813d8dad39abc9d25ded76bdce4eef8abed9bc71dfc95799c5b7ae7b6f556a1a5b7183da253847e87d75b"
+          "content": "e85b547f67096686eeb497719c6617f33d2fb5b82a5346f6bfcbdf0619176fdc29d8ca69305b64ba713e21a3a7b728b4d6b9084283d6d861c006d7f3b02d0145"
         }
       ],
       "licenses": [
@@ -802,23 +802,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
-      "bom-ref": "@rolldown/binding-win32-x64-msvc@1.2.11",
+      "bom-ref": "@rolldown/binding-win32-x64-msvc@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "fcfccaab3009d378b5f68cb622d3efcaf6958ce8c108d9df689b3ccaf51d1812a68844a09eb2524366b077cd50cc56db9c09aeed83bd66726b0c26fd55224f44"
+          "content": "50a8456994de4dc6caadbde253cda6d7b8d570f100a2a0e408de4c06a80fc994b0a7f7109a26f6d5cad34b40dd1fb4f507bc19456108f3d61000e24c7ade7286"
         }
       ],
       "licenses": [
@@ -835,10 +835,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.11",
+      "purl": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
       "bom-ref": "@rolldown/pluginutils@1.0.1",
@@ -874,17 +874,17 @@
       "version": "1.0.1"
     },
     {
-      "bom-ref": "@sentry/browser@11.0.0",
+      "bom-ref": "@sentry/browser@11.6.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/browser/-/browser-11.0.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/browser/-/browser-11.6.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "6b4f63529c7838179b998d172d85cb85fbe408891e9fcc689dc8e63a66cf21ade26d41c8e99255ca1de303332ee7a2d8f717c9455e5b39fa7ddb27f8d58afa75"
+          "content": "ce4a9421b45cf4708132ca0bebb1ce02be8f49f373252330e09872b421ee0d9e4eecab8ec3080110d1a1561de6af9963d83e3b061bf4d4ca7008930fdf206765"
         }
       ],
       "licenses": [
@@ -895,23 +895,23 @@
         }
       ],
       "name": "@sentry/browser",
-      "purl": "pkg:npm/%40sentry/browser@11.0.0",
+      "purl": "pkg:npm/%40sentry/browser@11.6.0",
       "scope": "required",
       "type": "library",
-      "version": "11.0.0"
+      "version": "11.6.0"
     },
     {
-      "bom-ref": "@sentry/browser-utils@11.0.0",
+      "bom-ref": "@sentry/browser-utils@11.6.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/browser-utils/-/browser-utils-11.0.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/browser-utils/-/browser-utils-11.6.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "66f1b27c3a15792b9a005efcbd27983857226d40a941f625515a6a13e074440373a120818372629916be703601febab7e8f8d1c08364e2edaf88ad8974edf6d3"
+          "content": "b38ceeb84ef534e45fc8d77a7224b6effa3deea81fbbbd2a0d174f0a42caf1439cb35444b1a0103e09af3414800d1626e1e785c167a32810902a32f990eccbab"
         }
       ],
       "licenses": [
@@ -922,23 +922,23 @@
         }
       ],
       "name": "@sentry/browser-utils",
-      "purl": "pkg:npm/%40sentry/browser-utils@11.0.0",
+      "purl": "pkg:npm/%40sentry/browser-utils@11.6.0",
       "scope": "required",
       "type": "library",
-      "version": "11.0.0"
+      "version": "11.6.0"
     },
     {
-      "bom-ref": "@sentry/conventions@0.23.0",
+      "bom-ref": "@sentry/conventions@0.26.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/conventions/-/conventions-0.23.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/conventions/-/conventions-0.26.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "f84bb2a3b08d55e7283aeb20527ab6ee857dee8b2189f81c78a7e71a7b8a7d7acf515580fdc8acbe28b7135ae5bf2db206b2af97d2b5802128d49aa8839ce311"
+          "content": "b6d4917282dfda4204343205cc7d7668969531dc6789d3182ef54dc045ff2635df5da428b7cbb9338ed09a000538e8552789d0dae53cc130a1f9fc123ebac27e"
         }
       ],
       "licenses": [
@@ -949,23 +949,23 @@
         }
       ],
       "name": "@sentry/conventions",
-      "purl": "pkg:npm/%40sentry/conventions@0.23.0",
+      "purl": "pkg:npm/%40sentry/conventions@0.26.0",
       "scope": "required",
       "type": "library",
-      "version": "0.23.0"
+      "version": "0.26.0"
     },
     {
-      "bom-ref": "@sentry/core@11.0.0",
+      "bom-ref": "@sentry/core@11.6.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/core/-/core-11.0.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/core/-/core-11.6.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "49d9a0db53ce2a6370643cfca47ff616d8a559eaf2877cb1851c5b7c0d6987c4a75f60e45e8a97e86fae5f28c24986a05b6a5e7d592599235e587994952aa2a0"
+          "content": "3db2134f591f258289892f5f1f866d39cc0838d2b2b7eb54b136523ed7008cf7645033b330a4fad4c9146b565ed3b57336d2c02d3db865d50e73a77d2b862828"
         }
       ],
       "licenses": [
@@ -976,23 +976,23 @@
         }
       ],
       "name": "@sentry/core",
-      "purl": "pkg:npm/%40sentry/core@11.0.0",
+      "purl": "pkg:npm/%40sentry/core@11.6.0",
       "scope": "required",
       "type": "library",
-      "version": "11.0.0"
+      "version": "11.6.0"
     },
     {
-      "bom-ref": "@sentry/feedback@11.0.0",
+      "bom-ref": "@sentry/feedback@11.6.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/feedback/-/feedback-11.0.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/feedback/-/feedback-11.6.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "65d504eaa49f307e33b6eacb1f183c89d7c8f1c03e25d7eb8aca9443a844e8c29a200019cac3483efbc5cac1365900e315b8f7a6e4b58999b48e0d329bb900e6"
+          "content": "579dbff9290c70f76595d1313c2f53592dac67e082fbc052cef55b46d910c6fcbe8d339714025f2276952cf00056df16e166cfc3d880c55333c0719a6769ae07"
         }
       ],
       "licenses": [
@@ -1003,23 +1003,23 @@
         }
       ],
       "name": "@sentry/feedback",
-      "purl": "pkg:npm/%40sentry/feedback@11.0.0",
+      "purl": "pkg:npm/%40sentry/feedback@11.6.0",
       "scope": "required",
       "type": "library",
-      "version": "11.0.0"
+      "version": "11.6.0"
     },
     {
-      "bom-ref": "@sentry/replay@11.0.0",
+      "bom-ref": "@sentry/replay@11.6.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/replay/-/replay-11.0.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/replay/-/replay-11.6.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e3fdfa230dbcf126961302e38692d18c28cbd94992344c94d13bcbac0973440a18764b277847bb8904d27bb583db9edbb92828a749be95ab8644741fedf0fdaa"
+          "content": "709c8f62717a40903c00345f016d3a62853b11521e6ed59ecc138253d55a839f96d552c191712f1fb0b82db78c5220e6aeac3ddacba6ab4e8d82a8a923103b04"
         }
       ],
       "licenses": [
@@ -1030,23 +1030,23 @@
         }
       ],
       "name": "@sentry/replay",
-      "purl": "pkg:npm/%40sentry/replay@11.0.0",
+      "purl": "pkg:npm/%40sentry/replay@11.6.0",
       "scope": "required",
       "type": "library",
-      "version": "11.0.0"
+      "version": "11.6.0"
     },
     {
-      "bom-ref": "@sentry/replay-canvas@11.0.0",
+      "bom-ref": "@sentry/replay-canvas@11.6.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/replay-canvas/-/replay-canvas-11.0.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/replay-canvas/-/replay-canvas-11.6.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "716031e0573e4f7eb0e12c0dd047b7e7154baf1fa7b76924d809f780a3ea8115341f0c40d70d787ca0317177ca949732fcaee79cd3207abce7bd62a004e6de9f"
+          "content": "711ba20bc37dc570e868a103a4c3d10ed98602bd06d98331d66d89ae7ae64e732df73fd570828dc1a8944534d6f16f2ef7afd1c9141f7e5307600457ec51bc61"
         }
       ],
       "licenses": [
@@ -1057,10 +1057,10 @@
         }
       ],
       "name": "@sentry/replay-canvas",
-      "purl": "pkg:npm/%40sentry/replay-canvas@11.0.0",
+      "purl": "pkg:npm/%40sentry/replay-canvas@11.6.0",
       "scope": "required",
       "type": "library",
-      "version": "11.0.0"
+      "version": "11.6.0"
     },
     {
       "bom-ref": "@sveltejs/acorn-typescript@1.0.13",
@@ -1255,17 +1255,17 @@
       "version": "1.0.9"
     },
     {
-      "bom-ref": "@types/node@26.6.2",
+      "bom-ref": "@types/node@26.6.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@types/node/-/node-26.6.2.tgz"
+          "url": "https://registry.npmjs.org/@types/node/-/node-26.6.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "5f53f6d6c70cbf8cc628b62a8dd1a368a6bb08e6b444a55861964dfcd7ef2d0d497a0c4585d869646fcbca7f005f1e820d46af280775d6fe81bdfa640c1c8af2"
+          "content": "b8ccecbfdb2d0dda1f219071e141a1e19f598179c60bdb1e443b1c8a505c4c701e38593aecc660fe4f5b5957cef9b938a99986fa5e768519cbc14887d8b9c94e"
         }
       ],
       "licenses": [
@@ -1282,10 +1282,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40types/node@26.6.2",
+      "purl": "pkg:npm/%40types/node@26.6.5",
       "scope": "optional",
       "type": "library",
-      "version": "26.6.2"
+      "version": "26.6.5"
     },
     {
       "bom-ref": "@userdispatch/sdk@1.0.1",
@@ -1572,17 +1572,17 @@
       "version": "5.9.4"
     },
     {
-      "bom-ref": "dotenv@18.0.3",
+      "bom-ref": "dotenv@18.0.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/dotenv/-/dotenv-18.0.3.tgz"
+          "url": "https://registry.npmjs.org/dotenv/-/dotenv-18.0.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ffc0894f22fcd7ba8f9df6d0ac980e11cad4ddf0eb264448a17044e7aeb01eebc85ca3821d46613ea18f6c23e2f52a208dd1a7ade1744e5be74e02ba27ff33a4"
+          "content": "404bcc105f1c6b718d64926701b3a0c698f950b841be731c511a7e5caaedbea14d3e08c1bd8a2cc10d0997670eec9cc28f1663261afd66e204865ad1c4c7edfd"
         }
       ],
       "licenses": [
@@ -1599,10 +1599,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/dotenv@18.0.3",
+      "purl": "pkg:npm/dotenv@18.0.7",
       "scope": "optional",
       "type": "library",
-      "version": "18.0.3"
+      "version": "18.0.7"
     },
     {
       "bom-ref": "esm-env@1.2.2",
@@ -2220,17 +2220,17 @@
       "version": "1.33.0"
     },
     {
-      "bom-ref": "livekit-client@2.22.3",
+      "bom-ref": "livekit-client@2.22.4",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/livekit-client/-/livekit-client-2.22.3.tgz"
+          "url": "https://registry.npmjs.org/livekit-client/-/livekit-client-2.22.4.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "8f0f7304a5d8e46b6be4c67bbc438ddd084c35c72e0ef607724d4f152c86d5a69ab5e40faa02991413206641596971c87fd455e0c0d6e71a532b66fffaa6f03a"
+          "content": "509e4af20a8ff2e20efad8e119e17eb3a4b380b7f164a3f14234aacf3905dbdf1035832785899719044c321dc69ec7da7acc27b071cc4a880c79bed2a1c1f6cf"
         }
       ],
       "licenses": [
@@ -2241,10 +2241,10 @@
         }
       ],
       "name": "livekit-client",
-      "purl": "pkg:npm/livekit-client@2.22.3",
+      "purl": "pkg:npm/livekit-client@2.22.4",
       "scope": "required",
       "type": "library",
-      "version": "2.22.3"
+      "version": "2.22.4"
     },
     {
       "bom-ref": "livekit-server-sdk@2.19.1",
@@ -2499,17 +2499,17 @@
       "version": "1.2.0"
     },
     {
-      "bom-ref": "nanoid@3.3.18",
+      "bom-ref": "nanoid@3.3.20",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz"
+          "url": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "0d38383096c631691f8ba55915d36ddbf71a31b432e0ebbe3a9fe1250bc611672755fa00d5003ec7344a033c3d8c3ebe19538e798aff98872e0d276e83a17afb"
+          "content": "b8a760d86dc63422909fd6f260ea716c6aab4f67c63b9291b7927ff1bde9a24f2b4faab119617a871332262118b407fe155c98b83f6145a0ea5f9b8f15827865"
         }
       ],
       "licenses": [
@@ -2526,10 +2526,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/nanoid@3.3.18",
+      "purl": "pkg:npm/nanoid@3.3.20",
       "scope": "optional",
       "type": "library",
-      "version": "3.3.18"
+      "version": "3.3.20"
     },
     {
       "bom-ref": "obug@2.1.4",
@@ -2631,17 +2631,17 @@
       "version": "4.0.7"
     },
     {
-      "bom-ref": "postcss@8.5.28",
+      "bom-ref": "postcss@8.5.29",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/postcss/-/postcss-8.5.28.tgz"
+          "url": "https://registry.npmjs.org/postcss/-/postcss-8.5.29.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "451bb3a83b6de58f61deabb3e615a12be4cf9ec995b3a5b0494e8b90931e6381ecb54103b984c6f1425275ac0c4739b302d57e284a06f0ddd0836a8bcb9bccfc"
+          "content": "e3d7068546d78fc41e9efd224ccc40d5c141cf15e872da42f548ddefbb7559c6c922bea717f788ee0ffc320c6b62574546e017be36bbc504706afa16ee482bc5"
         }
       ],
       "licenses": [
@@ -2658,10 +2658,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/postcss@8.5.28",
+      "purl": "pkg:npm/postcss@8.5.29",
       "scope": "optional",
       "type": "library",
-      "version": "8.5.28"
+      "version": "8.5.29"
     },
     {
       "bom-ref": "readdirp@4.1.2",
@@ -2697,17 +2697,17 @@
       "version": "4.1.2"
     },
     {
-      "bom-ref": "rolldown@1.2.11",
+      "bom-ref": "rolldown@1.2.13",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.11.tgz"
+          "url": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.13.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "aa94b0232cf48c742ae6a5c14cdc45984ebaeb8ac9ecefb84ef3c53a239a052af3f0838773592828a4aa4ccd87eaed541b5f93bdeb82eaf6831ca5c53af6f52b"
+          "content": "ff96a93a4c16c6d002710b59e5696b02c292e09c175538503c967746a22bb9163d506f4cf1ed15957374ebcc6e9bf251280e1a214a09d778217bf9060af89d89"
         }
       ],
       "licenses": [
@@ -2724,10 +2724,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/rolldown@1.2.11",
+      "purl": "pkg:npm/rolldown@1.2.13",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.11"
+      "version": "1.2.13"
     },
     {
       "bom-ref": "rxjs@7.8.2",
@@ -2844,17 +2844,17 @@
       "version": "2.15.0"
     },
     {
-      "bom-ref": "source-map-js@1.2.1",
+      "bom-ref": "source-map-js@1.2.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.1.tgz"
+          "url": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "51758c2a12cec1529bef6f0852d40f5f17d853ebac7726ed52b2bff2e184f0240cbeb84ea70bf30c1c23d108522fb31073bbc8b084811bc550f3e203431a5f40"
+          "content": "2868fff18e37c77e5a6550edb7e27898ad61a0b18750b3187d290e0c93508cd0c2de85b53ea3e8c4cc28d292d4b1633f5041b338dfcdc5e1f2c047cd5cd3f757"
         }
       ],
       "licenses": [
@@ -2871,23 +2871,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/source-map-js@1.2.1",
+      "purl": "pkg:npm/source-map-js@1.2.2",
       "scope": "optional",
       "type": "library",
-      "version": "1.2.1"
+      "version": "1.2.2"
     },
     {
-      "bom-ref": "svelte@5.57.1",
+      "bom-ref": "svelte@5.57.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/svelte/-/svelte-5.57.1.tgz"
+          "url": "https://registry.npmjs.org/svelte/-/svelte-5.57.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "52a8f8f6558a07e8924a79debb0898609ecc660901f9e5ebd0b5c186fe2e0ee0245ea9d69aaeb94b17e57efa742dce8c74a8cc53119a78e29626acf948d89520"
+          "content": "d5888f0805d3d02b7a835bce32648b6b436c73741132fb43177da2860825195aee808b882b7f11c8388535754386d43cd5326348ee7b35d330e83c982ea4860d"
         }
       ],
       "licenses": [
@@ -2904,10 +2904,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/svelte@5.57.1",
+      "purl": "pkg:npm/svelte@5.57.2",
       "scope": "optional",
       "type": "library",
-      "version": "5.57.1"
+      "version": "5.57.2"
     },
     {
       "bom-ref": "svelte-check@4.7.6",
@@ -4020,17 +4020,17 @@
       "version": "8.9.0"
     },
     {
-      "bom-ref": "vite@8.3.1",
+      "bom-ref": "vite@8.3.4",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/vite/-/vite-8.3.1.tgz"
+          "url": "https://registry.npmjs.org/vite/-/vite-8.3.4.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "fdbbc7f44f6d9825d11a9dae5d8dd66ce95daa94f01646e16bff0035a110e95931847eb42b2a8bc2066aea51b6cbee2e4f9e71f7ef5e50732943bb869ce08a8c"
+          "content": "21fb4b13ca6126174d44818d115e09082bdf35272865055f71768df1342ba2958626d38772efa2001f691dcb86be611bfe475dc342c17bf8d2f33b5d0bac5d89"
         }
       ],
       "licenses": [
@@ -4047,10 +4047,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/vite@8.3.1",
+      "purl": "pkg:npm/vite@8.3.4",
       "scope": "optional",
       "type": "library",
-      "version": "8.3.1"
+      "version": "8.3.4"
     },
     {
       "bom-ref": "vitefu@1.1.3",
@@ -4086,17 +4086,17 @@
       "version": "1.1.3"
     },
     {
-      "bom-ref": "web-vitals@6.2.2",
+      "bom-ref": "web-vitals@6.2.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/web-vitals/-/web-vitals-6.2.2.tgz"
+          "url": "https://registry.npmjs.org/web-vitals/-/web-vitals-6.2.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a2da39c7a74b120ad1a9f71679dfa964451bdaaea291b166a85e780910e123f4066e7faac42e3d6f80b83a46c7fa46fd0b76bcb21a450f74a047d91172cf3465"
+          "content": "0e6cbebdd3b550f32a5e202d65235aca19787fbf780717ddf785b81c88f61e562d7331107c43a89fdebd99e9a5729707ad3b8e28b6b96da1635fb59b8263aaf8"
         }
       ],
       "licenses": [
@@ -4107,10 +4107,10 @@
         }
       ],
       "name": "web-vitals",
-      "purl": "pkg:npm/web-vitals@6.2.2",
+      "purl": "pkg:npm/web-vitals@6.2.3",
       "scope": "required",
       "type": "library",
-      "version": "6.2.2"
+      "version": "6.2.3"
     },
     {
       "bom-ref": "webrtc-adapter@9.0.6",
@@ -4176,22 +4176,22 @@
   "dependencies": [
     {
       "dependsOn": [
-        "@sentry/browser@11.0.0",
+        "@sentry/browser@11.6.0",
         "@userdispatch/sdk@1.0.1",
-        "livekit-client@2.22.3",
+        "livekit-client@2.22.4",
         "@noble/ed25519@3.2.0",
         "@noble/hashes@2.4.0",
         "@sveltejs/vite-plugin-svelte@7.3.1",
-        "@types/node@26.6.2",
-        "dotenv@18.0.3",
+        "@types/node@26.6.5",
+        "dotenv@18.0.7",
         "livekit-server-sdk@2.19.1",
-        "svelte@5.57.1",
+        "svelte@5.57.2",
         "svelte-check@4.7.6",
         "tsx@4.23.15",
         "typescript@6.0.3",
-        "vite@8.3.1"
+        "vite@8.3.4"
       ],
-      "ref": "web-harness@0.9.30"
+      "ref": "web-harness@0.9.31"
     },
     {
       "dependsOn": [],
@@ -4234,7 +4234,7 @@
       "dependsOn": [
         "@bufbuild/protobuf@1.10.1"
       ],
-      "ref": "@livekit/protocol@1.50.4"
+      "ref": "@livekit/protocol@1.52.1"
     },
     {
       "dependsOn": [],
@@ -4246,67 +4246,67 @@
     },
     {
       "dependsOn": [],
-      "ref": "@oxc-project/types@0.151.0"
+      "ref": "@oxc-project/types@0.153.0"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-android-arm-eabi@1.2.11"
+      "ref": "@rolldown/binding-android-arm-eabi@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-android-arm64@1.2.11"
+      "ref": "@rolldown/binding-android-arm64@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-darwin-arm64@1.2.11"
+      "ref": "@rolldown/binding-darwin-arm64@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-darwin-x64@1.2.11"
+      "ref": "@rolldown/binding-darwin-x64@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-freebsd-x64@1.2.11"
+      "ref": "@rolldown/binding-freebsd-x64@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.11"
+      "ref": "@rolldown/binding-linux-arm-gnueabihf@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-arm64-gnu@1.2.11"
+      "ref": "@rolldown/binding-linux-arm64-gnu@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-arm64-musl@1.2.11"
+      "ref": "@rolldown/binding-linux-arm64-musl@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-ppc64-gnu@1.2.11"
+      "ref": "@rolldown/binding-linux-ppc64-gnu@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-s390x-gnu@1.2.11"
+      "ref": "@rolldown/binding-linux-s390x-gnu@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-x64-gnu@1.2.11"
+      "ref": "@rolldown/binding-linux-x64-gnu@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-linux-x64-musl@1.2.11"
+      "ref": "@rolldown/binding-linux-x64-musl@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-openharmony-arm64@1.2.11"
+      "ref": "@rolldown/binding-openharmony-arm64@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-win32-arm64-msvc@1.2.11"
+      "ref": "@rolldown/binding-win32-arm64-msvc@1.2.13"
     },
     {
       "dependsOn": [],
-      "ref": "@rolldown/binding-win32-x64-msvc@1.2.11"
+      "ref": "@rolldown/binding-win32-x64-msvc@1.2.13"
     },
     {
       "dependsOn": [],
@@ -4314,52 +4314,52 @@
     },
     {
       "dependsOn": [
-        "@sentry/browser-utils@11.0.0",
-        "@sentry/conventions@0.23.0",
-        "@sentry/core@11.0.0",
-        "@sentry/feedback@11.0.0",
-        "@sentry/replay@11.0.0",
-        "@sentry/replay-canvas@11.0.0"
+        "@sentry/browser-utils@11.6.0",
+        "@sentry/conventions@0.26.0",
+        "@sentry/core@11.6.0",
+        "@sentry/feedback@11.6.0",
+        "@sentry/replay@11.6.0",
+        "@sentry/replay-canvas@11.6.0"
       ],
-      "ref": "@sentry/browser@11.0.0"
+      "ref": "@sentry/browser@11.6.0"
     },
     {
       "dependsOn": [
-        "@sentry/conventions@0.23.0",
-        "@sentry/core@11.0.0",
-        "web-vitals@6.2.2"
+        "@sentry/conventions@0.26.0",
+        "@sentry/core@11.6.0",
+        "web-vitals@6.2.3"
       ],
-      "ref": "@sentry/browser-utils@11.0.0"
+      "ref": "@sentry/browser-utils@11.6.0"
     },
     {
       "dependsOn": [],
-      "ref": "@sentry/conventions@0.23.0"
+      "ref": "@sentry/conventions@0.26.0"
     },
     {
       "dependsOn": [
-        "@sentry/conventions@0.23.0"
+        "@sentry/conventions@0.26.0"
       ],
-      "ref": "@sentry/core@11.0.0"
+      "ref": "@sentry/core@11.6.0"
     },
     {
       "dependsOn": [
-        "@sentry/core@11.0.0"
+        "@sentry/core@11.6.0"
       ],
-      "ref": "@sentry/feedback@11.0.0"
+      "ref": "@sentry/feedback@11.6.0"
     },
     {
       "dependsOn": [
-        "@sentry/browser-utils@11.0.0",
-        "@sentry/core@11.0.0"
+        "@sentry/browser-utils@11.6.0",
+        "@sentry/core@11.6.0"
       ],
-      "ref": "@sentry/replay@11.0.0"
+      "ref": "@sentry/replay@11.6.0"
     },
     {
       "dependsOn": [
-        "@sentry/core@11.0.0",
-        "@sentry/replay@11.0.0"
+        "@sentry/core@11.6.0",
+        "@sentry/replay@11.6.0"
       ],
-      "ref": "@sentry/replay-canvas@11.0.0"
+      "ref": "@sentry/replay-canvas@11.6.0"
     },
     {
       "dependsOn": [
@@ -4373,8 +4373,8 @@
     },
     {
       "dependsOn": [
-        "svelte@5.57.1",
-        "vite@8.3.1",
+        "svelte@5.57.2",
+        "vite@8.3.4",
         "deepmerge@4.3.1",
         "magic-string@1.2.3",
         "obug@2.1.4",
@@ -4400,7 +4400,7 @@
       "dependsOn": [
         "undici-types@8.9.0"
       ],
-      "ref": "@types/node@26.6.2"
+      "ref": "@types/node@26.6.5"
     },
     {
       "dependsOn": [],
@@ -4442,7 +4442,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "dotenv@18.0.3"
+      "ref": "dotenv@18.0.7"
     },
     {
       "dependsOn": [],
@@ -4543,7 +4543,7 @@
       "dependsOn": [
         "@types/dom-mediacapture-record@1.0.22",
         "@livekit/mutex@1.1.1",
-        "@livekit/protocol@1.50.4",
+        "@livekit/protocol@1.52.1",
         "events@3.3.0",
         "jose@6.2.3",
         "loglevel@1.9.2",
@@ -4553,7 +4553,7 @@
         "typed-emitter@2.1.0",
         "webrtc-adapter@9.0.6"
       ],
-      "ref": "livekit-client@2.22.3"
+      "ref": "livekit-client@2.22.4"
     },
     {
       "dependsOn": [
@@ -4597,7 +4597,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "nanoid@3.3.18"
+      "ref": "nanoid@3.3.20"
     },
     {
       "dependsOn": [],
@@ -4613,11 +4613,11 @@
     },
     {
       "dependsOn": [
-        "nanoid@3.3.18",
+        "nanoid@3.3.20",
         "picocolors@1.1.1",
-        "source-map-js@1.2.1"
+        "source-map-js@1.2.2"
       ],
-      "ref": "postcss@8.5.28"
+      "ref": "postcss@8.5.29"
     },
     {
       "dependsOn": [],
@@ -4625,25 +4625,25 @@
     },
     {
       "dependsOn": [
-        "@oxc-project/types@0.151.0",
+        "@oxc-project/types@0.153.0",
         "@rolldown/pluginutils@1.0.1",
-        "@rolldown/binding-android-arm-eabi@1.2.11",
-        "@rolldown/binding-android-arm64@1.2.11",
-        "@rolldown/binding-darwin-arm64@1.2.11",
-        "@rolldown/binding-darwin-x64@1.2.11",
-        "@rolldown/binding-freebsd-x64@1.2.11",
-        "@rolldown/binding-linux-arm-gnueabihf@1.2.11",
-        "@rolldown/binding-linux-arm64-gnu@1.2.11",
-        "@rolldown/binding-linux-arm64-musl@1.2.11",
-        "@rolldown/binding-linux-ppc64-gnu@1.2.11",
-        "@rolldown/binding-linux-s390x-gnu@1.2.11",
-        "@rolldown/binding-linux-x64-gnu@1.2.11",
-        "@rolldown/binding-linux-x64-musl@1.2.11",
-        "@rolldown/binding-openharmony-arm64@1.2.11",
-        "@rolldown/binding-win32-arm64-msvc@1.2.11",
-        "@rolldown/binding-win32-x64-msvc@1.2.11"
+        "@rolldown/binding-android-arm-eabi@1.2.13",
+        "@rolldown/binding-android-arm64@1.2.13",
+        "@rolldown/binding-darwin-arm64@1.2.13",
+        "@rolldown/binding-darwin-x64@1.2.13",
+        "@rolldown/binding-freebsd-x64@1.2.13",
+        "@rolldown/binding-linux-arm-gnueabihf@1.2.13",
+        "@rolldown/binding-linux-arm64-gnu@1.2.13",
+        "@rolldown/binding-linux-arm64-musl@1.2.13",
+        "@rolldown/binding-linux-ppc64-gnu@1.2.13",
+        "@rolldown/binding-linux-s390x-gnu@1.2.13",
+        "@rolldown/binding-linux-x64-gnu@1.2.13",
+        "@rolldown/binding-linux-x64-musl@1.2.13",
+        "@rolldown/binding-openharmony-arm64@1.2.13",
+        "@rolldown/binding-win32-arm64-msvc@1.2.13",
+        "@rolldown/binding-win32-x64-msvc@1.2.13"
       ],
-      "ref": "rolldown@1.2.11"
+      "ref": "rolldown@1.2.13"
     },
     {
       "dependsOn": [
@@ -4667,7 +4667,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "source-map-js@1.2.1"
+      "ref": "source-map-js@1.2.2"
     },
     {
       "dependsOn": [
@@ -4687,11 +4687,11 @@
         "magic-string@0.30.21",
         "zimmerframe@1.1.4"
       ],
-      "ref": "svelte@5.57.1"
+      "ref": "svelte@5.57.2"
     },
     {
       "dependsOn": [
-        "svelte@5.57.1",
+        "svelte@5.57.2",
         "typescript@6.0.3",
         "@jridgewell/trace-mapping@0.3.31",
         "@sveltejs/load-config@0.2.3",
@@ -4871,26 +4871,26 @@
     },
     {
       "dependsOn": [
-        "@types/node@26.6.2",
+        "@types/node@26.6.5",
         "tsx@4.23.15",
         "lightningcss@1.33.0",
         "picomatch@4.0.7",
-        "postcss@8.5.28",
-        "rolldown@1.2.11",
+        "postcss@8.5.29",
+        "rolldown@1.2.13",
         "tinyglobby@0.2.17",
         "fsevents@2.3.3"
       ],
-      "ref": "vite@8.3.1"
+      "ref": "vite@8.3.4"
     },
     {
       "dependsOn": [
-        "vite@8.3.1"
+        "vite@8.3.4"
       ],
       "ref": "vitefu@1.1.3"
     },
     {
       "dependsOn": [],
-      "ref": "web-vitals@6.2.2"
+      "ref": "web-vitals@6.2.3"
     },
     {
       "dependsOn": [
@@ -4905,7 +4905,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "web-harness@0.9.30",
+      "bom-ref": "web-harness@0.9.31",
       "description": "Petal browser client",
       "licenses": [
         {
@@ -4921,10 +4921,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/web-harness@0.9.30",
+      "purl": "pkg:npm/web-harness@0.9.31",
       "scope": "required",
       "type": "library",
-      "version": "0.9.30"
+      "version": "0.9.31"
     },
     "lifecycles": [
       {
