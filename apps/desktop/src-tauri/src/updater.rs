@@ -187,12 +187,46 @@ pub async fn check_compatible_update_available<R: Runtime>(
     })
 }
 
+/// What the install path says on the disk image; the relocation refusal
+/// reuses it verbatim so the UI classifier keys off one phrase.
+const READ_ONLY_DISK_IMAGE_MESSAGE: &str =
+    "Petal is running from a read-only disk image. Drag Petal into Applications, then try again.";
+
+/// The refusal for a launch that cannot install in place, or `None` when the
+/// install may proceed. Checked BEFORE downloading (#332): failing at the stage
+/// step cost a full download and two Sentry events per click.
+fn relocation_refusal_message(
+    class: crate::launch_location::LaunchLocationClass,
+) -> Option<&'static str> {
+    use crate::launch_location::LaunchLocationClass;
+    match class {
+        LaunchLocationClass::DiskImage => Some(READ_ONLY_DISK_IMAGE_MESSAGE),
+        LaunchLocationClass::Translocated | LaunchLocationClass::OtherReadOnly => Some(
+            "Petal is running from a read-only location. Move Petal into Applications, then try again.",
+        ),
+        LaunchLocationClass::Applications
+        | LaunchLocationClass::UserApplications
+        | LaunchLocationClass::Other
+        | LaunchLocationClass::Unbundled => None,
+    }
+}
+
 #[tauri::command]
 pub async fn download_and_install_compatible_update<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<GuardedUpdateResult, String> {
     if let Some(disabled) = disabled_updater_result(&app) {
         return Ok(disabled);
+    }
+    // #332: a handled user condition (the launch already routed to /relocate),
+    // so WARN, not an install failure -- keep it out of Sentry's error stream.
+    let launch_location = crate::launch_location::current();
+    if let Some(message) = relocation_refusal_message(launch_location) {
+        log::warn!(
+            "updater: install refused before download -- running from {}; the user must move Petal to Applications (#172, #332)",
+            launch_location.as_str()
+        );
+        return Err(message.to_string());
     }
     let update = match app
         .updater()
@@ -687,8 +721,7 @@ fn mac_install_user_message(error: &MacInstallError, destination: &Path) -> Stri
         );
     }
     if error.is_read_only() {
-        return "Petal is running from a read-only disk image. Drag Petal into Applications, then try again."
-            .to_string();
+        return READ_ONLY_DISK_IMAGE_MESSAGE.to_string();
     }
     if error.kind == std::io::ErrorKind::CrossesDevices {
         let parent = destination.parent().unwrap_or(destination);
@@ -1152,6 +1185,38 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #332: every class that needs relocation is refused before the download,
+    /// and no class that can install in place is.
+    #[test]
+    fn relocation_refusal_covers_exactly_the_classes_that_need_relocation() {
+        use crate::launch_location::LaunchLocationClass;
+        for class in [
+            LaunchLocationClass::Applications,
+            LaunchLocationClass::UserApplications,
+            LaunchLocationClass::DiskImage,
+            LaunchLocationClass::Translocated,
+            LaunchLocationClass::OtherReadOnly,
+            LaunchLocationClass::Other,
+            LaunchLocationClass::Unbundled,
+        ] {
+            let refusal = relocation_refusal_message(class);
+            assert_eq!(refusal.is_some(), class.needs_relocation(), "{class:?}");
+            if let Some(message) = refusal {
+                // updaterErrors.ts classifies on these phrases.
+                assert!(
+                    message.contains("read-only disk image")
+                        || message.contains("read-only location"),
+                    "{class:?}: {message}"
+                );
+                assert!(!message.contains('/'), "no path in the UI: {message}");
+            }
+        }
+        assert_eq!(
+            relocation_refusal_message(LaunchLocationClass::DiskImage),
+            Some(READ_ONLY_DISK_IMAGE_MESSAGE)
+        );
+    }
 
     const COMMITTED_TAURI_CONF: &str = include_str!("../tauri.conf.json");
     const RELEASE_TAURI_CONF: &str = include_str!("../tauri.release.conf.json");
