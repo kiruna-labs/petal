@@ -110,6 +110,7 @@
     stateTitle?: string | null;
     stateDetail?: string | null;
     stateTone?: 'info' | 'warning';
+    stateActions?: { label: string; onClick: () => void; primary?: boolean }[];
     /** Large (comfortable) vs. small (collapsed floating bar). Bindable so a
      * parent can drive it (e.g. a future drag-to-collapse gesture) as well
      * as read it back. */
@@ -170,6 +171,7 @@
     stateTitle = null,
     stateDetail = null,
     stateTone = 'info',
+    stateActions = [],
     expanded = $bindable(true),
     onControl,
     inviteAriaLabel = 'Copy invite link',
@@ -790,6 +792,7 @@
       {stateTitle}
       {stateDetail}
       {stateTone}
+      {stateActions}
       {onControl}
       {inviteAriaLabel}
       {inviteTooltip}
