@@ -67,6 +67,9 @@ step "Harness: shared instance guard + by-pid phase-handoff helpers (#846, #150)
 step "CI: live e2e gate Cockpit -> loopback handoff, both directions (#150)"
 "$ROOT/scripts/test-e2e-gate-handoff.sh"
 
+step "CI: live e2e gate verdict (loopback + Cockpit), both directions"
+node --test "$ROOT/scripts/test-e2e-gate-verdict.mjs"
+
 step "Harness: capture-preflight contract (plan 6d step 2)"
 "$ROOT/scripts/test-capture-preflight.sh"
 

@@ -1,0 +1,267 @@
+#!/usr/bin/env node
+// The release e2e gate's verdict for BOTH tiers of nightly-loopback.yml.
+//
+// Every check here closes a path by which a broken run used to read as green:
+// the loopback scorecard failed only on `status == "fail"` (zero passes, an
+// unexplained skip, a #580 tokenless drop, or a non-zero harness exit all
+// passed), and the Cockpit tier trusted whatever test-runs directory was
+// newest -- including one left by an EARLIER run. Absence of evidence is
+// never a pass here. Unit tests (both directions): scripts/test-e2e-gate-verdict.mjs.
+//
+//   node scripts/ci/e2e-gate-verdict.mjs loopback --results <json> --harness-exit <n> [--quarantine <ids>]
+//   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> [--quarantine <ids>]
+//
+// Prints GitHub ::error/::warning annotations; exits 0 (pass) or 1 (fail).
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+// Skips that are structurally unavoidable on the release runner and carry no
+// signal there. Keyed by case id AND reason: the same case skipping for any
+// OTHER reason (AX unavailable, a dead fixture) fails the gate. Observed on
+// every healthy VM run checked (release gates 38987683137, 38926248564;
+// dispatches 35953250430, 35266967135): exactly these two, nothing else.
+// AX-unavailable skips (cases 6/12/16/17) are deliberately NOT here: on this
+// runner they mean the Accessibility grant broke, which is a real outage.
+export const EXPECTED_LOOPBACK_SKIPS = Object.freeze([
+  Object.freeze({
+    caseId: '23',
+    reason: /^displayplacer reports fewer than two displays$/,
+    why: 'the Tart guest has one 1920x1080 display (scripts/runner/tart/make-golden.sh)',
+  }),
+  Object.freeze({
+    caseId: '30',
+    reason: /^host advertises legacy control \(macOS by contract; docs\/CONTRACTS\.md\)/,
+    why: 'a macOS host speaks legacy control by contract, so v2 cached-terminal replay is unreachable',
+  }),
+]);
+
+export function parseIdList(value) {
+  return new Set(String(value ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+}
+
+function clip(value, n = 300) {
+  return String(value ?? '').replace(/\s+/g, ' ').slice(0, n);
+}
+
+/// report: the parsed --json results file (or null when it is missing).
+/// harnessExit: remote-control-local-loopback.mjs's exit status.
+export function loopbackVerdict({ report, harnessExit, quarantine = new Set() }) {
+  const errors = [];
+  const warnings = [];
+  const notes = [];
+  const done = () => ({ ok: errors.length === 0, errors, warnings, notes });
+
+  if (!report || typeof report !== 'object') {
+    errors.push('loopback produced no results JSON (or it did not parse) -- nothing was proved');
+    return done();
+  }
+  const results = Array.isArray(report.results) ? report.results : [];
+  const summary = report.summary && typeof report.summary === 'object' ? report.summary : null;
+  if (results.length === 0) {
+    errors.push('loopback results JSON has zero cases (INSUFFICIENT DATA)');
+    return done();
+  }
+  if (!summary) {
+    errors.push('loopback results JSON has no summary -- the suite did not finish its accounting');
+    return done();
+  }
+  if (summary.total !== results.length) {
+    errors.push(`summary.total=${summary.total} but the results list holds ${results.length} cases -- the scorecard is inconsistent`);
+  }
+  const ids = results.map((c) => String(c.caseId));
+  const dupes = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+  if (dupes.length) errors.push(`case id(s) reported more than once: ${dupes.join(',')}`);
+  // The release gate runs the full numbered suite with the live-tile share
+  // gate; an --input-only run proves less and must not stand in for it.
+  if (summary.mode !== 'numbered' || summary.shareReadiness !== 'live-tile') {
+    errors.push(`suite ran mode=${summary.mode} shareReadiness=${summary.shareReadiness}; the gate requires mode=numbered shareReadiness=live-tile`);
+  }
+
+  const passed = results.filter((c) => c.status === 'pass');
+  if (passed.length === 0) errors.push(`zero of ${results.length} cases passed -- a run that proves nothing is not a pass`);
+
+  const quarantinedFails = [];
+  for (const c of results) {
+    const id = String(c.caseId);
+    const label = `loopback case ${id} '${c.name ?? ''}'`;
+    if (c.status === 'pass') continue;
+    if (c.status === 'fail') {
+      if (quarantine.has(id)) {
+        quarantinedFails.push(id);
+        warnings.push(`${label}: fail -- QUARANTINED (known failure, tracked in an issue; NOT a pass) ${clip(c.detail)}`);
+      } else {
+        errors.push(`${label}: fail -- ${clip(c.detail)}`);
+      }
+      continue;
+    }
+    if (c.status === 'skip') {
+      const expected = EXPECTED_LOOPBACK_SKIPS.find((s) => s.caseId === id && s.reason.test(String(c.detail ?? '')));
+      if (expected) {
+        notes.push(`${label}: expected skip on this runner (${expected.why})`);
+      } else if (quarantine.has(id)) {
+        warnings.push(`${label}: skip -- QUARANTINED (known, tracked in an issue; NOT a pass) ${clip(c.detail)}`);
+      } else {
+        errors.push(`${label}: unexpected skip -- ${clip(c.detail)} (a skip proves nothing; add it to EXPECTED_LOOPBACK_SKIPS with evidence, or quarantine it with an issue)`);
+      }
+      continue;
+    }
+    errors.push(`${label}: unknown status '${c.status}'`);
+  }
+
+  // #580: a tokenless drop means the host never injected what the suite
+  // claims it did. Missing is not zero.
+  if (!Number.isInteger(summary.tokenlessDrops)) {
+    errors.push(`summary.tokenlessDrops is missing or not an integer (${JSON.stringify(summary.tokenlessDrops)}) -- cannot prove no input was dropped`);
+  } else if (summary.tokenlessDrops > 0) {
+    errors.push(`host dropped ${summary.tokenlessDrops} tokenless input packet(s) (#580) -- this run did not inject what it claims`);
+  }
+
+  // The harness exit carries failures the scorecard cannot (a crash after the
+  // JSON was written, a wedge kill, no-result exit 2). Exit 1 is excused ONLY
+  // by a quarantined failing case, which is exactly what makes the suite exit 1.
+  const exit = /^\d+$/.test(String(harnessExit ?? '').trim()) ? Number(harnessExit) : NaN;
+  if (!Number.isInteger(exit)) {
+    errors.push(`harness exit status unknown (${JSON.stringify(harnessExit)})`);
+  } else if (exit !== 0) {
+    if (exit === 1 && quarantinedFails.length > 0) {
+      warnings.push(`harness exited 1, explained by quarantined failing case(s) ${quarantinedFails.join(',')}`);
+    } else {
+      errors.push(`harness exited ${exit} with no quarantined failure to explain it${exit === 2 ? ' (2 = NO RESULT)' : ''}`);
+    }
+  }
+
+  const skips = results.filter((c) => c.status === 'skip').length;
+  notes.push(`loopback: total=${results.length} pass=${passed.length} fail=${results.filter((c) => c.status === 'fail').length} skip=${skips} quarantinedFail=${quarantinedFails.length} tokenlessDrops=${summary.tokenlessDrops} harnessExit=${harnessExit}`);
+  return done();
+}
+
+/// lines: run.jsonl parsed into objects (unparseable lines dropped).
+/// runDirName: basename of the results directory (the engine names it runId).
+export function cockpitVerdict({ lines, runDirName, startedAtMs, selector, quarantine = new Set() }) {
+  const errors = [];
+  const warnings = [];
+  const notes = [];
+  const done = () => ({ ok: errors.length === 0, errors, warnings, notes });
+
+  if (!Array.isArray(lines)) {
+    errors.push('Test Cockpit produced no run.jsonl');
+    return done();
+  }
+  const meta = lines.find((o) => o?.kind === 'meta')?.payload;
+  if (!meta) {
+    errors.push('run.jsonl has no meta line -- not a Test Cockpit run this gate can attribute');
+    return done();
+  }
+  // Freshness: the step picks the NEWEST test-runs dir, which is a previous
+  // run's when this one wrote nothing. runId is the engine's start time (ms).
+  const runId = Number(meta.runId);
+  const since = /^\d+$/.test(String(startedAtMs ?? '').trim()) ? Number(startedAtMs) : NaN;
+  if (!Number.isFinite(runId) || !Number.isFinite(since) || runId < since) {
+    errors.push(`run.jsonl is STALE: runId=${meta.runId} predates this step (started ${startedAtMs}) -- these verdicts belong to an earlier run`);
+  }
+  if (runDirName != null && String(runDirName) !== String(meta.runId)) {
+    errors.push(`results dir '${runDirName}' does not match the run's runId ${meta.runId}`);
+  }
+  if (selector != null && String(meta.selector).toLowerCase() !== String(selector).trim().toLowerCase()) {
+    errors.push(`run.jsonl ran selector '${meta.selector}', the gate asked for '${selector}'`);
+  }
+
+  const started = lines.filter((o) => o?.kind === 'scenario-start').map((o) => String(o.scenarioId ?? o.payload));
+  const verdicts = lines.filter((o) => o?.kind === 'scenario-verdict').map((o) => {
+    const p = o.payload ?? {};
+    return { id: String(p.scenarioId ?? o.scenarioId), verdict: String(p.verdict ?? '').toLowerCase(), why: clip(p.message ?? p.reason ?? p.detail, 160) };
+  });
+  if (verdicts.length === 0) errors.push('Test Cockpit emitted zero verdicts (INSUFFICIENT DATA)');
+  const verdictIds = new Set(verdicts.map((v) => v.id));
+  const unfinished = started.filter((id) => !verdictIds.has(id));
+  if (unfinished.length) errors.push(`scenario(s) started but never reached a verdict: ${unfinished.join(',')}`);
+
+  for (const v of verdicts) {
+    notes.push(`  ${v.id}: ${v.verdict} ${v.why}`);
+    if (v.verdict === 'pass') continue;
+    if (quarantine.has(v.id)) {
+      warnings.push(`Test Cockpit ${v.id}: ${v.verdict} -- QUARANTINED (known failure, tracked in an issue; NOT a pass) ${v.why}`);
+    } else {
+      errors.push(`Test Cockpit ${v.id}: ${v.verdict} -- ${v.why}`);
+    }
+  }
+
+  // The engine scores a failed cleanup (orphaned web peer / native peer) as a
+  // run failure; the gate must agree. Both lines are written only at the end.
+  const cleanup = lines.find((o) => o?.kind === 'cleanup')?.payload;
+  if (!cleanup) errors.push('run.jsonl has no cleanup line -- the engine never finished the run');
+  else if (cleanup.passed !== true) errors.push('Test Cockpit cleanup verifier failed (orphaned peer process or stale participant)');
+  if (!lines.some((o) => o?.kind === 'conclusion')) errors.push('run.jsonl has no conclusion line -- the engine never finished the run');
+
+  const bad = verdicts.filter((v) => v.verdict !== 'pass' && !quarantine.has(v.id)).length;
+  const quarantined = verdicts.filter((v) => v.verdict !== 'pass' && quarantine.has(v.id)).length;
+  notes.push(`Test Cockpit ${meta.selector}: ${verdicts.length - bad - quarantined}/${verdicts.length} PASS, ${quarantined} quarantined, ${bad} not PASS`);
+  return done();
+}
+
+export function readJsonl(file) {
+  if (!file || !fs.existsSync(file)) return null;
+  const out = [];
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch { /* a torn line is not evidence */ }
+  }
+  return out;
+}
+
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+function parseArgs(argv) {
+  const args = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const key = argv[i];
+    if (!key.startsWith('--')) throw new Error(`unexpected argument '${key}'`);
+    args[key.slice(2)] = argv[i + 1] ?? '';
+    i += 1;
+  }
+  return args;
+}
+
+export function emit(verdict, log = console.log) {
+  for (const n of verdict.notes) log(n);
+  for (const w of verdict.warnings) log(`::warning::${w}`);
+  for (const e of verdict.errors) log(`::error::${e}`);
+}
+
+function main(argv) {
+  const [tier, ...rest] = argv;
+  const args = parseArgs(rest);
+  let verdict;
+  if (tier === 'loopback') {
+    const report = args.results && fs.existsSync(args.results) ? readJson(args.results) : null;
+    verdict = loopbackVerdict({ report, harnessExit: args['harness-exit'], quarantine: parseIdList(args.quarantine) });
+  } else if (tier === 'cockpit') {
+    const dir = args['run-dir'] || '';
+    verdict = cockpitVerdict({
+      lines: dir ? readJsonl(path.join(dir, 'run.jsonl')) : null,
+      runDirName: dir ? path.basename(path.resolve(dir)) : null,
+      startedAtMs: args['started-at-ms'],
+      selector: args.selector,
+      quarantine: parseIdList(args.quarantine),
+    });
+  } else {
+    console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|cockpit)`);
+    return 1;
+  }
+  emit(verdict);
+  console.log(verdict.ok ? `e2e-gate-verdict ${tier}: PASS` : `e2e-gate-verdict ${tier}: FAIL (${verdict.errors.length} problem(s))`);
+  return verdict.ok ? 0 : 1;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  try {
+    process.exitCode = main(process.argv.slice(2));
+  } catch (error) {
+    console.log(`::error::e2e-gate-verdict crashed: ${error?.stack ?? error}`);
+    process.exitCode = 1;
+  }
+}
