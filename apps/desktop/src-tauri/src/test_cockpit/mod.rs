@@ -78,6 +78,10 @@ mod rc_n2n;
 // being an untested assumption. Probe window + host-journal oracle.
 mod plugin_boot;
 
+// SHARE-W2N-Q receiver-window oracles (#315 overlay docking + telepointer
+// placement, #316 phantom restore of an ended window).
+mod receiver_window;
+
 /// Name of the one-time local marker file `scripts/cockpit-setup.sh` writes
 /// (under the app's data directory) after every required grant -- Screen
 /// Recording + Accessibility for both `target/debug/desktop` and the
@@ -6562,7 +6566,9 @@ async fn assert_reported_scenario(
             });
             outcome
         }
-        ScenarioKind::WebToNativeShare => assert_web_to_native_video(app, scenario, writer).await,
+        ScenarioKind::WebToNativeShare => {
+            receiver_window::assert_web_to_native_receiver(app, scenario, report, writer).await
+        }
         ScenarioKind::ChaosDevice
         | ScenarioKind::ChaosDisplayChange
         | ScenarioKind::ChaosNet

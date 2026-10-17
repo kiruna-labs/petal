@@ -7069,6 +7069,101 @@ pub(crate) fn cockpit_eval_in_control_overlay(
         .map_err(|_| "timed out evaluating in the control overlay on main thread".to_string())?
 }
 
+/// A WindowServer frame (global top-left points) for the cockpit's receiver
+/// window oracles (#315).
+#[cfg(feature = "cockpit-privileged")]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub(crate) struct CockpitScreenFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// One open remote window's panel and control/pointer overlay children, read
+/// from CGWindowList (on-screen only; `None` = not on screen). CGWindowList,
+/// not the dock verifier's SLS reads, so the oracle does not share the
+/// verifier's blind spots (#315).
+#[cfg(feature = "cockpit-privileged")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CockpitRemoteChromeSnapshot {
+    pub source_window_id: u32,
+    pub panel_cg_window_id: Option<u32>,
+    pub panel: Option<CockpitScreenFrame>,
+    pub control: Option<CockpitScreenFrame>,
+    pub pointer: Option<CockpitScreenFrame>,
+    pub pointer_label: String,
+}
+
+/// Where control/pointer must sit for a panel at `panel`, per
+/// `chrome_frames_for_panel_bounds` (both cover the content area).
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) fn cockpit_chrome_dock_target(panel: CockpitScreenFrame) -> CockpitScreenFrame {
+    let frames = chrome_frames_for_panel_bounds(panel.x, panel.y, panel.width, panel.height);
+    debug_assert_eq!(frames.control, frames.pointer);
+    CockpitScreenFrame {
+        x: frames.pointer.x,
+        y: frames.pointer.y,
+        width: frames.pointer.width,
+        height: frames.pointer.height,
+    }
+}
+
+/// Snapshot every OPEN remote window of `owner_identity` as the WindowServer
+/// sees it (#315 docking oracle).
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) fn cockpit_remote_chrome_snapshots(
+    app: &AppHandle,
+    owner_identity: &str,
+) -> Result<Vec<CockpitRemoteChromeSnapshot>, String> {
+    let keys: Vec<RemoteWindowKey> = with_state(|state| {
+        state
+            .windows
+            .keys()
+            .filter(|key| key.owner_identity == owner_identity)
+            .cloned()
+            .collect()
+    });
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let app_main = app.clone();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let on_screen = |label: &str| -> (Option<u32>, Option<CockpitScreenFrame>) {
+            let Some(win) = app_main.get_webview_window(label) else {
+                return (None, None);
+            };
+            let Ok(cg_id) = crate::platform::appkit::window_number(&win) else {
+                return (None, None);
+            };
+            let frame = crate::platform::cg::frame_for_window_id_raw(cg_id)
+                .map(|(x, y, width, height)| CockpitScreenFrame { x, y, width, height });
+            (Some(cg_id), frame)
+        };
+        let snapshots = keys
+            .iter()
+            .map(|key| {
+                let (panel_cg_window_id, panel) = on_screen(&panel_label_for_key(key));
+                CockpitRemoteChromeSnapshot {
+                    source_window_id: key.window_id,
+                    panel_cg_window_id,
+                    panel,
+                    control: on_screen(&control_label_for_key(key)).1,
+                    pointer: on_screen(&pointer_label_for_key(key)).1,
+                    pointer_label: pointer_label_for_key(key),
+                }
+            })
+            .collect::<Vec<_>>();
+        let _ = sender.send(snapshots);
+    })
+    .map_err(|error| format!("dispatch chrome snapshot to main thread: {error}"))?;
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "timed out snapshotting remote chrome on main thread".to_string())
+}
+
 #[tauri::command]
 pub fn compositor_toggle_debug_panel(
     app: AppHandle,
