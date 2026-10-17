@@ -67,6 +67,11 @@ on:
         required: false
         default: ""
         type: string
+      gate:
+        description: "Run with release-gate strictness: a runner without the Cockpit setup marker FAILS instead of skipping the Cockpit tier"
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       ref:
@@ -98,6 +103,15 @@ on:
         required: false
         default: ""
         type: string
+      # A called workflow cannot tell from `github.event_name` that it is the
+      # release gate (that reads as the CALLER's event), so strictness is an
+      # explicit input. It defaults to TRUE here: the only caller is the
+      # release gate, and a new caller should have to opt OUT of strictness.
+      gate:
+        description: "Release-gate strictness: a runner without the Cockpit setup marker FAILS instead of skipping the Cockpit tier"
+        required: false
+        default: true
+        type: boolean
     secrets:
       vercel_bypass_secret:
         description: "Vercel Protection Bypass for Automation secret, required ONLY when harness_url/backend_url point at a protected staged deployment. Empty for production targets."
@@ -234,6 +248,9 @@ jobs:
           COCKPIT_SELECTOR: ${{ inputs.cockpit_selector || 'quick' }}
           PETAL_COCKPIT_STALL_FREEZE_MS: ${{ inputs.stall_freeze_ms || '' }}
           PETAL_COCKPIT_STALL_RESUME_MS: ${{ inputs.stall_resume_ms || '' }}
+          # 1 when this run IS the release gate (release.yml / workflow_call
+          # default), 0 for a plain manual dispatch.
+          E2E_GATE: ${{ inputs.gate && '1' || '0' }}
           # The `||` is what makes a protected staged target reproducible BY
           # HAND. A `workflow_call` from release.yml supplies
           # `vercel_bypass_secret`; a `workflow_dispatch` cannot (a secret must
@@ -246,9 +263,25 @@ jobs:
         run: |
           set -euo pipefail
 
+          # The verdict lives in a script (unit-tested both directions). A
+          # dispatch that pairs this workflow with an older tree lacking it
+          # must fail as CANNOT CHECK, never fall back to a laxer check.
+          VERDICT="scripts/ci/e2e-gate-verdict.mjs"
+          if [ ! -f "$VERDICT" ]; then
+            echo "::error::CANNOT CHECK: $VERDICT is not in this checkout, so no Cockpit verdict can be computed. Dispatch a ref that contains it."
+            exit 1
+          fi
+
           MARKER="$HOME/Library/Application Support/com.petal.app/.cockpit-setup-complete"
           if [ ! -f "$MARKER" ]; then
-            echo "::notice::Skipping Test Cockpit Quick tier: cockpit setup marker is missing on this runner."
+            # As the release gate, a runner that cannot run the tier is a
+            # FAILURE: skipping with exit 0 let a broken runner ship a release
+            # with half the gate unrun. A manual dispatch keeps the notice.
+            if [ "$E2E_GATE" = "1" ]; then
+              echo "::error::Test Cockpit Quick tier CANNOT RUN: the cockpit setup marker is missing on this runner ($MARKER). The release gate does not pass with a tier unrun. Run scripts/cockpit-setup.sh on the self-hosted Mac (or re-provision the Tart golden image)."
+              exit 1
+            fi
+            echo "::notice::Skipping Test Cockpit Quick tier: cockpit setup marker is missing on this runner (manual dispatch, gate=false)."
             echo "::notice::Run scripts/cockpit-setup.sh on the self-hosted Mac to enable QA-featured cockpit runs."
             exit 0
           fi
@@ -296,6 +329,9 @@ jobs:
             bash apps/desktop/scripts/build-cockpit-primary.sh
           build_exit=$?
           if [ "$build_exit" -ne 0 ]; then echo "::error::build-cockpit-primary.sh failed ($build_exit)"; exit "$build_exit"; fi
+          # The engine names its results dir by its start time in ms; anything
+          # older than this is a previous run's and must not be scored.
+          COCKPIT_STARTED_MS=$(( $(date +%s) * 1000 ))
           # PETAL_WEB_HARNESS_URL_MATCH is unset here for the same reason as
           # LIVEKIT_*: the job-level value (localhost:5185) belongs to the
           # loopback tier, and it would make the cockpit-drive CDP lookup hunt
@@ -335,27 +371,11 @@ jobs:
             while IFS= read -r f; do [ -n "$f" ] && cp "$f" "$RUNNER_TEMP/petal-cockpit/crashes/" 2>/dev/null || true; done <<< "$NEW_CRASHES"
             exit 1
           fi
-          python3 - "${RUN_DIR:-}" <<'PY'
-          import json, sys, os
-          d = sys.argv[1]
-          if not d or not os.path.exists(os.path.join(d, "run.jsonl")):
-              print("::error::Test Cockpit produced no run.jsonl"); sys.exit(1)
-          verdicts = []
-          for line in open(os.path.join(d, "run.jsonl")):
-              try: o = json.loads(line)
-              except Exception: continue
-              if o.get("kind") == "scenario-verdict":
-                  p = o.get("payload", {}); verdicts.append((p.get("scenarioId"), p.get("verdict"), (p.get("reason") or p.get("detail") or "")[:160]))
-          for sid, v, why in verdicts: print(f"  {sid}: {v} {why}")
-          quarantine = {q.strip() for q in os.environ.get("E2E_QUARANTINE_COCKPIT", "").split(",") if q.strip()}
-          not_pass = [v for v in verdicts if str(v[1]).lower() != "pass"]   # engine writes lowercase "pass"/"infra-fail"
-          quarantined = [v for v in not_pass if v[0] in quarantine]
-          bad = [v for v in not_pass if v[0] not in quarantine]
-          if not verdicts: print("::error::Test Cockpit emitted zero verdicts (INSUFFICIENT DATA)"); sys.exit(1)
-          for sid, v, why in quarantined: print(f"::warning::Test Cockpit {sid}: {v} -- QUARANTINED (known failure, tracked in an issue; NOT a pass) {why}")
-          if bad: print(f"::error::Test Cockpit Quick tier: {len(bad)}/{len(verdicts)} scenarios not PASS"); sys.exit(1)
-          print(f"Test Cockpit Quick tier: {len(verdicts) - len(quarantined)}/{len(verdicts)} PASS, {len(quarantined)} quarantined")
-          PY
+          # Verdict: fresh run dir (not a previous run's), every started
+          # scenario reached a verdict, every non-pass is quarantined, and the
+          # engine finished (cleanup verified + conclusion written).
+          node "$VERDICT" cockpit --run-dir "${RUN_DIR:-}" --started-at-ms "$COCKPIT_STARTED_MS" \
+            --selector "$COCKPIT_SELECTOR" --quarantine "$E2E_QUARANTINE_COCKPIT"
 
       # The two tiers below are independent: a Cockpit failure must not hide
       # the loopback suite's verdict (or vice versa). The job still fails.
@@ -715,40 +735,27 @@ jobs:
             grep -m1 "SLS hit-test LIVE" "$PETAL_LOG" | tee -a "$HARNESS_LOG"
           fi
 
-          # -- Scorecard with quarantine. A failing case on the quarantine
-          # list (tracked in an issue) is reported loudly but does not fail
-          # the gate; any other failure does. A missing or empty scorecard is
-          # a failure -- never a pass by absence.
+          # -- Scorecard with quarantine (scripts/ci/e2e-gate-verdict.mjs,
+          # unit-tested both directions). Fails on: a missing/empty/inconsistent
+          # scorecard, zero passes, any unquarantined fail, any skip not on the
+          # script's evidence-backed EXPECTED_LOOPBACK_SKIPS allow-list (cases
+          # 23 and 30 on this single-display macOS runner) or the quarantine
+          # list, summary.tokenlessDrops > 0 (#580), and a non-zero harness exit
+          # that no quarantined failure explains. Never a pass by absence.
           echo "==> Post-suite: scorecard" | tee -a "$HARNESS_LOG"
-          set +e
-          python3 - "$RESULTS_JSON" <<'PY' 2>&1 | tee -a "$HARNESS_LOG"
-          import json, os, sys
-          path = sys.argv[1]
-          if not os.path.exists(path):
-              print("::error::loopback produced no results JSON"); sys.exit(1)
-          r = json.load(open(path))
-          quarantine = {q.strip() for q in os.environ.get("E2E_QUARANTINE_RC_CASES", "").split(",") if q.strip()}
-          results = r.get("results", [])
-          if not results:
-              print("::error::loopback results JSON has zero cases (INSUFFICIENT DATA)"); sys.exit(1)
-          failed = [c for c in results if c.get("status") == "fail"]
-          quarantined = [c for c in failed if str(c.get("caseId")) in quarantine]
-          bad = [c for c in failed if str(c.get("caseId")) not in quarantine]
-          for c in quarantined:
-              print(f"::warning::loopback case {c['caseId']} '{c.get('name')}': fail -- QUARANTINED (known failure, tracked in an issue; NOT a pass)")
-          for c in bad:
-              print(f"::error::loopback case {c['caseId']} '{c.get('name')}': {str(c.get('detail', ''))[:300]}")
-          s = r.get("summary", {})
-          print(f"loopback: total={s.get('total')} pass={s.get('pass')} fail={len(bad)} quarantined={len(quarantined)} skip={s.get('skip')} shareReadiness={s.get('shareReadiness')}")
-          sys.exit(1 if bad else 0)
-          PY
-          scorecard_status=${PIPESTATUS[0]}
-          set -e
-          [ "$scorecard_status" -eq 0 ] || gate_fail=1
-
-          if [ "$status" -ne 0 ] && [ "$gate_fail" -eq 0 ]; then
-            echo "::warning::harness exited $status but every failing case is quarantined; the gate passes on the scorecard above." | tee -a "$HARNESS_LOG"
+          VERDICT="scripts/ci/e2e-gate-verdict.mjs"
+          if [ ! -f "$VERDICT" ]; then
+            echo "::error::CANNOT CHECK: $VERDICT is not in this checkout; no loopback verdict was computed." | tee -a "$HARNESS_LOG"
+            gate_fail=1
+          else
+            set +e
+            node "$VERDICT" loopback --results "$RESULTS_JSON" --harness-exit "$status" \
+              --quarantine "$E2E_QUARANTINE_RC_CASES" 2>&1 | tee -a "$HARNESS_LOG"
+            scorecard_status=${PIPESTATUS[0]}
+            set -e
+            [ "$scorecard_status" -eq 0 ] || gate_fail=1
           fi
+
           if [ "$gate_fail" -ne 0 ]; then
             echo "::error::Live e2e gate FAILED (harness exit $status)." | tee -a "$HARNESS_LOG"
             exit 1

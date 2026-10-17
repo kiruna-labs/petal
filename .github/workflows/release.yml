@@ -201,6 +201,9 @@ jobs:
       ref: ${{ github.event.inputs.tag || github.ref }}
       harness_url: ${{ needs.deploy-web.outputs.web-url || 'https://meet.petal.live' }}
       backend_url: ${{ needs.deploy-web.outputs.backend-url || 'https://app.petal.live' }}
+      # Release-gate strictness (the input's default too; explicit so it is
+      # visible here): a runner that cannot run the Cockpit tier FAILS.
+      gate: true
     secrets:
       vercel_bypass_secret: ${{ needs.deploy-web.outputs.web-url && secrets.VERCEL_AUTOMATION_BYPASS_SECRET || '' }}
 
