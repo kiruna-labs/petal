@@ -1504,6 +1504,15 @@ the quarantine (`PETAL_RC_LEFT_DRAG_STRESS_QUARANTINE=0`, then deleting the
 flag) is part of fixing #134, and the unit tests pin that the un-quarantined
 outcome is a real `fail`.
 
+**Release gate (2026-10-17): a skip is not a pass there.** #134 was closed as
+cannot-reproduce, and `scripts/ci/e2e-gate-verdict.mjs` now fails the release
+gate on ANY skipped case that is not on its evidence-backed
+`EXPECTED_LOOPBACK_SKIPS` allow-list (case 23, one display; case 30, legacy
+control on macOS) — including a `QUARANTINED (#134 …)` stress skip. A
+recurrence of the leak therefore blocks a release. To ship past a known one,
+list the case ids in the workflow's `E2E_QUARANTINE_RC_CASES` with a tracking
+issue (quarantine covers a skip as well as a fail).
+
 The leak record answers the questions the #134 analysis identified: which
 iteration failed; whether a `pointer RELEASE not injected` line accompanied it
 and with which `reason=` (present → native injection of the Up failed; absent
