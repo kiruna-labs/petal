@@ -119,6 +119,14 @@ Threshold env:
   PETAL_REMOTE_CONTROL_PHOTON_WARMUP_SAMPLES (default 2 per input kind)
   PETAL_REMOTE_CONTROL_PHOTON_TIMEOUT_MS (default 2000 per sample)
   PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS (default 250)
+  PETAL_RC_OBSERVATION_DISTRIBUTION_SAMPLES (default 0; extra samples per latency case
+    for the run-level p50/p95 -- the release gate sets 3)
+
+Run-level latency gate (release e2e, after the suite):
+  node scripts/ci/e2e-gate-verdict.mjs latency --results <json> --photon <json> --host-log <petal log>
+  Budgets: PETAL_RC_OBSERVATION_P50/P95_BUDGET_MS, PETAL_RC_HOST_RECEIVE_TO_INJECT_P95_BUDGET_MS,
+  PETAL_RC_HOST_RECEIVE_TO_COMPLETE_P95_BUDGET_MS, PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS,
+  PETAL_RC_PHOTON_P50_BUDGET_MS, PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS (see docs/TESTING.md)
 
 Wedge bounds (#102):
   PETAL_AUTOTEST_COMMAND_TIMEOUT_MS (default 60000; per autotest-socket command)

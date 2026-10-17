@@ -204,6 +204,7 @@ test('the scorecard survives a run with no measured observations', () => {
     maxMs: null,
     overBudgetSamples: 0,
     retriedObservations: 0,
+    methods: {},
   });
 });
 

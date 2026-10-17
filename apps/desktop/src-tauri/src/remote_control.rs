@@ -3234,6 +3234,12 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
         );
         return;
     }
+    // Test-only: lets the release latency gate be proven red (#rc-latency).
+    // Compiled out of release builds; never set it outside a gate dispatch.
+    #[cfg(debug_assertions)]
+    if let Some(delay) = test_replay_delay() {
+        std::thread::sleep(delay);
+    }
     let started = Instant::now();
     let inject_started_ms = now_ms();
     if should_log_latency_probe(&task.message) {
@@ -3548,6 +3554,24 @@ fn should_log_message(
         (message_type, action),
         (RemoteControlType::Pointer, Some(RemoteControlAction::Move))
     ) || seq % 120 == 0
+}
+
+/// `PETAL_RC_TEST_REPLAY_DELAY_MS`: a stall before every host replay, read
+/// once. Debug builds only -- it exists so the e2e latency gate's budgets can
+/// be shown to fail (nightly-loopback.yml), never as a product setting.
+#[cfg(debug_assertions)]
+fn test_replay_delay() -> Option<Duration> {
+    static DELAY: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    *DELAY.get_or_init(|| {
+        parse_test_replay_delay(std::env::var("PETAL_RC_TEST_REPLAY_DELAY_MS").ok().as_deref())
+    })
+}
+
+#[cfg(debug_assertions)]
+fn parse_test_replay_delay(raw: Option<&str>) -> Option<Duration> {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis)
 }
 
 fn should_log_latency_probe(message: &RemoteControlMessage) -> bool {
@@ -18971,6 +18995,20 @@ pub(crate) mod input {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn test_replay_delay_parses_only_positive_millis() {
+        use std::time::Duration;
+        assert_eq!(super::parse_test_replay_delay(None), None);
+        assert_eq!(super::parse_test_replay_delay(Some("")), None);
+        assert_eq!(super::parse_test_replay_delay(Some("0")), None);
+        assert_eq!(super::parse_test_replay_delay(Some("abc")), None);
+        assert_eq!(
+            super::parse_test_replay_delay(Some(" 150 ")),
+            Some(Duration::from_millis(150))
+        );
+    }
 
     /// Source-level, and deliberately so: the guarantee is that all THREE
     /// authorization points consult the per-share lock, which is a
