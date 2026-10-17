@@ -1844,6 +1844,21 @@ function writePhotonReport(report) {
   }
 }
 
+// What the browser decodes now, and which sentinel actions landed since the
+// sample started (the sentinel ledgers each press/setValue with a host time).
+async function photonFailureContext(ctx, sinceMs) {
+  let lastFrame = null;
+  try {
+    lastFrame = await decodedPhotonFrame(ctx);
+  } catch {
+    // Diagnostic only.
+  }
+  const landed = sentinelEvents()
+    .filter((event) => event.kind === 'axAction' && (!Number.isFinite(event.tMs) || event.tMs >= sinceMs))
+    .map((event) => ({ action: event.action, tMs: event.tMs ?? null }));
+  return { lastFrame, sentinelActionsSinceStart: landed.length, sentinelActions: landed.slice(-4) };
+}
+
 async function runPressToPhotonSuite(ctx) {
   const suiteStarted = performance.now();
   ctx.caseStartedAt = Date.now();
@@ -1858,8 +1873,22 @@ async function runPressToPhotonSuite(ctx) {
   console.log(
     `# photon-sentinel-ready generation=${initialFrame.generation} decoded=${initialFrame.width}x${initialFrame.height} confidence=${initialFrame.confidence.toFixed(3)}`
   );
+  // A just-started share sends its first frames soft (encoder ramp); a blurred
+  // Gray block decodes as "neither 0 nor 1" and the sample times out. Give the
+  // stream a bounded moment to sharpen, then proceed regardless.
+  const settledFrame = await waitUntil(
+    'sharp photon sentinel frame',
+    async () => {
+      const frame = await decodedPhotonFrame(ctx);
+      return frame && frame.confidence >= 0.75 ? frame : null;
+    },
+    5000,
+    100
+  ).catch(() => null);
+  console.log(`# photon-sentinel-settled ${settledFrame ? `confidence=${settledFrame.confidence.toFixed(3)}` : 'no frame reached confidence 0.75 within 5000ms'}`);
 
   const sampleFailures = [];
+  const warmupFailures = [];
   const blockedInputKinds = new Set();
   const warmupSchedule = shuffledPhotonInputSchedule(photonWarmupSamplesPerInput, photonShuffleSeed);
   const measuredSchedule = shuffledPhotonInputSchedule(photonSamplesPerInput, photonShuffleSeed);
@@ -1868,17 +1897,24 @@ async function runPressToPhotonSuite(ctx) {
   );
   for (const { inputKind, sample } of warmupSchedule) {
     if (blockedInputKinds.has(inputKind)) continue;
+    const startedMs = Date.now();
     try {
       await measurePhotonInput(ctx, inputKind);
     } catch (error) {
-      sampleFailures.push({ sample, inputKind, warmup: true, error: error.message });
-      blockedInputKinds.add(inputKind);
+      // rc-latency gate: a warm-up miss is recorded with enough to tell "input
+      // never landed in the sentinel" from "the repaint never reached the
+      // browser", but no longer blocks the kind -- warm-up exists to absorb
+      // exactly the encoder/focus ramp right after the share starts.
+      const failure = { sample, inputKind, warmup: true, error: error.message, ...(await photonFailureContext(ctx, startedMs)) };
+      warmupFailures.push(failure);
+      console.log(`PHOTON_WARMUP_MISS ${JSON.stringify(failure)}`);
     }
   }
 
   const photonSamples = [];
   for (const { inputKind, sample: sampleNumber } of measuredSchedule) {
     if (blockedInputKinds.has(inputKind)) continue;
+    const sampleStartedMs = Date.now();
     try {
       const measured = await measurePhotonInput(ctx, inputKind);
       const sample = {
@@ -1892,7 +1928,7 @@ async function runPressToPhotonSuite(ctx) {
       photonSamples.push(sample);
       console.log(`PHOTON_SAMPLE ${JSON.stringify(sample)}`);
     } catch (error) {
-      const failure = { sample: sampleNumber, inputKind, error: error.message };
+      const failure = { sample: sampleNumber, inputKind, error: error.message, ...(await photonFailureContext(ctx, sampleStartedMs)) };
       sampleFailures.push(failure);
       console.log(`PHOTON_SAMPLE ${JSON.stringify({ ...failure, status: 'fail' })}`);
     }
@@ -1929,6 +1965,7 @@ async function runPressToPhotonSuite(ctx) {
       warmupSamplesPerInput: photonWarmupSamplesPerInput,
       sampleTimeoutMs: photonSampleTimeoutMs,
       sampleFailures,
+      warmupFailures,
       timingSamples: photonSamples.map(({ sample, inputKind, mediaTime, pressToEstimatedPhotonMs }) => ({
         sample,
         inputKind,
