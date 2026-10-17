@@ -23,3 +23,12 @@ test('unknown share errors still produce a visible message', () => {
     openScreenRecordingSettings: false
   });
 });
+
+// PETAL-DESKTOP-3C/-3D: a visible window whose app opts out of capture must
+// not be reported as gone.
+test('a window excluded from capture by its app says why, not "no longer available"', () => {
+  assert.deepEqual(shareErrorDisplay({ kind: 'windowCaptureExcluded', message: 9635 }), {
+    message: "That window's app blocks screen sharing",
+    openScreenRecordingSettings: false
+  });
+});

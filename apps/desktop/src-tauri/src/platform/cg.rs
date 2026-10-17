@@ -308,6 +308,16 @@ mod macos {
         with_window_dict(window_id, |_dict| ()).is_some()
     }
 
+    /// `kCGWindowSharingState` for a window that exists anywhere (`None` when
+    /// it does not; `Some(None)` when the key is absent). 0 is
+    /// `kCGWindowSharingNone`: the app opted the window out of capture.
+    pub fn sharing_state_for_window_id(window_id: u32) -> Option<Option<i64>> {
+        // SAFETY: see `frame_for_window_id`; a missing key reads as `None`.
+        with_window_dict(window_id, |dict| unsafe {
+            dict_i64(dict, kCGWindowSharingState as *const c_void)
+        })
+    }
+
     /// Diagnostic facts for a window ScreenCaptureKit could not find even
     /// though it still exists (Sentry PETAL-DESKTOP-3C/-3D): on-screen flag,
     /// layer, `kCGWindowSharingState` (0 = the window opts out of capture)
@@ -470,7 +480,7 @@ pub use macos::{
     frame_for_window_id,
     frame_for_window_id_raw, left_mouse_button_is_down, name_for_window_id, occlusion_fraction,
     onscreen_stack, onscreen_windows, onscreen_windows_lean, owner_name_for_window_id,
-    owner_pid_for_window_id, window_exists, WindowEntry,
+    owner_pid_for_window_id, sharing_state_for_window_id, window_exists, WindowEntry,
 };
 
 #[cfg(not(target_os = "macos"))]

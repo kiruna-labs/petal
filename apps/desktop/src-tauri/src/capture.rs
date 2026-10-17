@@ -266,6 +266,11 @@ pub enum CaptureError {
     /// distinguish "which shareable-content list did we search" can.
     #[error("display {0} not found in current shareable content (disconnected, or invalid id)")]
     DisplayNotFound(u32),
+    /// The window is on screen per CoreGraphics, but its app set
+    /// `NSWindow.sharingType = .none`, so ScreenCaptureKit never lists it.
+    /// Not "closed": the user can see it (PETAL-DESKTOP-3C/-3D).
+    #[error("window {0} is excluded from screen capture by its app (sharing type none)")]
+    WindowCaptureExcluded(u32),
     #[error("ScreenCaptureKit error: {0}")]
     ScreenCaptureKit(String),
 }
@@ -1684,18 +1689,81 @@ fn screen_recording_preflight(window_id: u32) -> bool {
     granted
 }
 
-fn prepare_direct_window_source(window_id: u32) -> Result<PreparedCaptureSource, CaptureError> {
+/// What a window id missing from the on-screen-only `SCShareableContent` is,
+/// judged from CoreGraphics (PETAL-DESKTOP-3C/-3D).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingShareableWindow {
+    /// CoreGraphics no longer has it either: closed.
+    Closed,
+    /// `kCGWindowSharingState == kCGWindowSharingNone`: the app opted the
+    /// window out of capture. No refetch can find it.
+    ExcludedByApp,
+    /// CoreGraphics has it and it is capturable: worth one refetch without
+    /// the on-screen filter (stale on-screen state, Space transition).
+    Refetch,
+}
+
+/// `cg_sharing_state`: `None` = CoreGraphics has no such window; `Some(None)`
+/// = it exists but the sharing-state key is absent.
+fn classify_missing_shareable_window(
+    cg_sharing_state: Option<Option<i64>>,
+) -> MissingShareableWindow {
+    const K_CG_WINDOW_SHARING_NONE: i64 = 0;
+    match cg_sharing_state {
+        None => MissingShareableWindow::Closed,
+        Some(Some(K_CG_WINDOW_SHARING_NONE)) => MissingShareableWindow::ExcludedByApp,
+        Some(_) => MissingShareableWindow::Refetch,
+    }
+}
+
+fn find_content_window(content: &SCShareableContent, window_id: u32) -> Option<SCWindow> {
+    content
+        .windows()
+        .into_iter()
+        .find(|w| w.window_id() == window_id)
+}
+
+/// Resolve a window id to its `SCWindow`. The hover tab offers windows from the
+/// CoreGraphics on-screen list, which can hold windows the on-screen-only
+/// `SCShareableContent` omits; a miss is classified, not reported as "closed"
+/// (PETAL-DESKTOP-3C/-3D).
+fn resolve_shareable_window(
+    window_id: u32,
+) -> Result<(SCShareableContent, SCWindow), CaptureError> {
     let content = SCShareableContent::create()
         .with_on_screen_windows_only(true)
         .with_exclude_desktop_windows(true)
         .get()
         .map_err(|e| CaptureError::ScreenCaptureKit(e.to_string()))?;
+    if let Some(window) = find_content_window(&content, window_id) {
+        return Ok((content, window));
+    }
+    match classify_missing_shareable_window(crate::platform::cg::sharing_state_for_window_id(
+        window_id,
+    )) {
+        MissingShareableWindow::Closed => Err(CaptureError::WindowNotFound(window_id)),
+        MissingShareableWindow::ExcludedByApp => {
+            Err(CaptureError::WindowCaptureExcluded(window_id))
+        }
+        MissingShareableWindow::Refetch => {
+            let content = SCShareableContent::create()
+                .with_on_screen_windows_only(false)
+                .with_exclude_desktop_windows(true)
+                .get()
+                .map_err(|e| CaptureError::ScreenCaptureKit(e.to_string()))?;
+            let window = find_content_window(&content, window_id)
+                .ok_or(CaptureError::WindowNotFound(window_id))?;
+            log::warn!(
+                "capture: window {window_id} was missing from the on-screen shareable content but present without the on-screen filter (sck_on_screen={}); capturing it",
+                window.is_on_screen()
+            );
+            Ok((content, window))
+        }
+    }
+}
 
-    let window = content
-        .windows()
-        .into_iter()
-        .find(|w| w.window_id() == window_id)
-        .ok_or(CaptureError::WindowNotFound(window_id))?;
+fn prepare_direct_window_source(window_id: u32) -> Result<PreparedCaptureSource, CaptureError> {
+    let (content, window) = resolve_shareable_window(window_id)?;
 
     let frame = window.frame();
     let color_profile = color_profile_for_window_rect(
@@ -2809,6 +2877,29 @@ fn cap_capture_size_to_long_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PETAL-DESKTOP-3C/-3D: a window CoreGraphics lists but the on-screen
+    /// `SCShareableContent` omits is closed, excluded by its app, or worth
+    /// one refetch -- never all reported as "closed".
+    #[test]
+    fn a_window_missing_from_shareable_content_is_classified_by_core_graphics() {
+        assert_eq!(classify_missing_shareable_window(None), MissingShareableWindow::Closed);
+        assert_eq!(
+            classify_missing_shareable_window(Some(Some(0))),
+            MissingShareableWindow::ExcludedByApp,
+            "kCGWindowSharingNone"
+        );
+        for capturable in [Some(1), Some(2), None] {
+            assert_eq!(
+                classify_missing_shareable_window(Some(capturable)),
+                MissingShareableWindow::Refetch,
+                "sharing state {capturable:?}"
+            );
+        }
+        assert!(CaptureError::WindowCaptureExcluded(9635)
+            .to_string()
+            .contains("excluded from screen capture by its app"));
+    }
 
     // -- #108: no-image-buffer flap suppression ---------------------------
 
