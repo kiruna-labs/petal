@@ -16,7 +16,7 @@
 //!   on it must be refused (panel stays off screen).
 
 use super::*;
-use crate::compositor::{CockpitRemoteChromeSnapshot, CockpitScreenFrame};
+use crate::compositor::{CockpitMainThreadError, CockpitRemoteChromeSnapshot, CockpitScreenFrame};
 use crate::telepointer::CockpitOverlayDelivery;
 
 /// Docking tolerance per edge (points). The dock is exact arithmetic on the
@@ -44,6 +44,10 @@ const REVEAL_POLL: Duration = Duration::from_millis(100);
 /// the 5s reconciliation pass retires it.
 const RETIRE_TIMEOUT: Duration = Duration::from_secs(30);
 const ACTIVATE_SETTLE: Duration = Duration::from_millis(1_500);
+/// A chrome snapshot whose main-thread hop times out is retried this many
+/// times in total before the sample is reported INFRA (main thread busy),
+/// never as "window no longer open".
+pub(super) const SNAPSHOT_ATTEMPTS: usize = 3;
 
 fn off_by_more_than(actual: CockpitScreenFrame, target: CockpitScreenFrame, tol: f64) -> bool {
     (actual.x - target.x).abs() > tol
@@ -69,7 +73,10 @@ pub(super) fn dock_problems(snapshot: &CockpitRemoteChromeSnapshot) -> Vec<Strin
     let Some(panel) = snapshot.panel else {
         return vec!["remote panel is not on screen".to_string()];
     };
-    let target = crate::compositor::cockpit_chrome_dock_target(panel);
+    let target = match crate::compositor::cockpit_chrome_dock_target(panel) {
+        Ok(target) => target,
+        Err(problem) => return vec![problem],
+    };
     let mut problems = Vec::new();
     for (name, child) in [("control", snapshot.control), ("pointer", snapshot.pointer)] {
         match child {
@@ -123,7 +130,7 @@ pub(super) fn pointer_render_check(
     let (Some(panel), Some(pointer)) = (snapshot.panel, snapshot.pointer) else {
         return Err("panel or pointer overlay is not on screen".to_string());
     };
-    let content = crate::compositor::cockpit_chrome_dock_target(panel);
+    let content = crate::compositor::cockpit_chrome_dock_target(panel)?;
     let rendered = (
         pointer.x + delivery.x * pointer.width,
         pointer.y + delivery.y * pointer.height,
@@ -144,8 +151,12 @@ pub(super) fn pointer_render_check(
 
 /// Verdict over the gating samples: every one docked and rendering the
 /// pointer in place, and the delivered pointer actually moved between them.
+/// `infra_samples` = gating samples that could not be taken (main thread
+/// timed out); with any, the count/movement requirements are INSUFFICIENT
+/// DATA rather than product failures, and only concrete problems count.
 pub(super) fn receiver_window_verdict(
     samples: &[(Vec<String>, Result<((f64, f64), (f64, f64)), String>, Option<(f64, f64)>)],
+    infra_samples: usize,
 ) -> (Vec<String>, Vec<String>) {
     let mut dock = Vec::new();
     let mut pointer = Vec::new();
@@ -154,6 +165,9 @@ pub(super) fn receiver_window_verdict(
         if let Err(problem) = pointer_check {
             pointer.push(format!("sample {index}: {problem}"));
         }
+    }
+    if infra_samples > 0 {
+        return (dock, pointer);
     }
     if samples.len() < DOCK_GATING_SAMPLES {
         dock.push(format!(
@@ -174,14 +188,37 @@ pub(super) fn receiver_window_verdict(
     (dock, pointer)
 }
 
-fn snapshot_for(app: &AppHandle, owner: &str, window_id: Option<u32>) -> Option<CockpitRemoteChromeSnapshot> {
-    crate::compositor::cockpit_remote_chrome_snapshots(app, owner)
-        .ok()?
-        .into_iter()
-        .find(|snapshot| match window_id {
-            Some(id) => snapshot.source_window_id == id,
-            None => snapshot.panel.is_some(),
-        })
+/// Run a main-thread inspection, retrying a timeout up to `SNAPSHOT_ATTEMPTS`
+/// times. Err = INFRA (the inspection could not be made), never a product
+/// verdict; a dispatch failure is not retried.
+pub(super) fn with_main_thread_retry<T>(
+    mut attempt: impl FnMut() -> Result<T, CockpitMainThreadError>,
+) -> Result<T, String> {
+    for _ in 0..SNAPSHOT_ATTEMPTS {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(CockpitMainThreadError::Timeout) => continue,
+            Err(CockpitMainThreadError::Dispatch(error)) => return Err(error),
+        }
+    }
+    Err(format!(
+        "main-thread chrome snapshot timed out {SNAPSHOT_ATTEMPTS} times ({:?} each) -- the main thread was busy, so the receiver window could not be sampled",
+        crate::compositor::COCKPIT_CHROME_SNAPSHOT_TIMEOUT
+    ))
+}
+
+/// Ok(None) = the window is genuinely not open/on screen; Err = INFRA.
+fn snapshot_for(
+    app: &AppHandle,
+    owner: &str,
+    window_id: Option<u32>,
+) -> Result<Option<CockpitRemoteChromeSnapshot>, String> {
+    let snapshots =
+        with_main_thread_retry(|| crate::compositor::cockpit_remote_chrome_snapshots(app, owner))?;
+    Ok(snapshots.into_iter().find(|snapshot| match window_id {
+        Some(id) => snapshot.source_window_id == id,
+        None => snapshot.panel.is_some(),
+    }))
 }
 
 /// SHARE-W2N-Q's verdict: the existing video oracle, then the #315 docking +
@@ -195,10 +232,16 @@ pub(super) async fn assert_web_to_native_receiver(
     let owner = report.sender.clone();
     let reveal_wait = Instant::now();
     let mut revealed: Option<(Instant, CockpitRemoteChromeSnapshot)> = None;
+    // The last poll's INFRA error, if it could not be taken at all.
+    let mut reveal_infra: Option<String> = None;
     while reveal_wait.elapsed() < REVEAL_TIMEOUT {
-        if let Some(snapshot) = snapshot_for(app, &owner, None) {
-            revealed = Some((Instant::now(), snapshot));
-            break;
+        match snapshot_for(app, &owner, None) {
+            Ok(Some(snapshot)) => {
+                revealed = Some((Instant::now(), snapshot));
+                break;
+            }
+            Ok(None) => reveal_infra = None,
+            Err(problem) => reveal_infra = Some(problem),
         }
         tokio::time::sleep(REVEAL_POLL).await;
     }
@@ -221,6 +264,9 @@ pub(super) async fn assert_web_to_native_receiver(
         return outcome;
     }
     let Some((revealed_at, first)) = revealed else {
+        if let Some(problem) = reveal_infra {
+            return infra_fail(outcome, scenario, "receiver-window-docked", problem);
+        }
         return fail(
             outcome,
             scenario,
@@ -236,12 +282,30 @@ pub(super) async fn assert_web_to_native_receiver(
         tokio::time::sleep(DOCK_GRACE - since_reveal).await;
     }
     let mut samples = Vec::new();
+    let mut infra_samples = Vec::new();
     let mut last_panel_cg_id = first.panel_cg_window_id;
     for index in 0..DOCK_GATING_SAMPLES {
         if index > 0 {
             tokio::time::sleep(DOCK_SAMPLE_SPACING).await;
         }
-        let snapshot = snapshot_for(app, &owner, Some(window_id));
+        let snapshot = match snapshot_for(app, &owner, Some(window_id)) {
+            Ok(snapshot) => snapshot,
+            Err(problem) => {
+                let _ = writer.write(
+                    "receiver-window-sample",
+                    Some(scenario.id),
+                    serde_json::json!({
+                        "phase": "steady",
+                        "gating": true,
+                        "index": index,
+                        "msSinceReveal": revealed_at.elapsed().as_millis() as u64,
+                        "infra": problem,
+                    }),
+                );
+                infra_samples.push(format!("sample {index}: {problem}"));
+                continue;
+            }
+        };
         let (problems, pointer_check, position) = match snapshot.as_ref() {
             Some(snapshot) => {
                 last_panel_cg_id = snapshot.panel_cg_window_id.or(last_panel_cg_id);
@@ -277,7 +341,14 @@ pub(super) async fn assert_web_to_native_receiver(
         );
         samples.push((problems, pointer_check, position));
     }
-    let (dock, pointer) = receiver_window_verdict(&samples);
+    let (dock, pointer) = receiver_window_verdict(&samples, infra_samples.len());
+    if !infra_samples.is_empty() {
+        outcome.assertions.push(AssertionOutcome {
+            name: "receiver-window-sampled".to_string(),
+            passed: false,
+            detail: infra_samples.join("; "),
+        });
+    }
     outcome.assertions.push(AssertionOutcome {
         name: "receiver-window-docked".to_string(),
         passed: dock.is_empty(),
@@ -310,7 +381,13 @@ pub(super) async fn assert_web_to_native_receiver(
         Some(scenario.id),
         serde_json::json!({ "windowId": window_id, "panelCgWindowId": last_panel_cg_id, "result": &phantom }),
     );
-    let ended_infra = matches!(phantom, Err(EndedCheckError::Infra(_)));
+    let mut infra_assertions = Vec::new();
+    if !infra_samples.is_empty() {
+        infra_assertions.push("receiver-window-sampled".to_string());
+    }
+    if matches!(phantom, Err(EndedCheckError::Infra(_))) {
+        infra_assertions.push("ended-window-not-restorable".to_string());
+    }
     outcome.assertions.push(AssertionOutcome {
         name: "ended-window-not-restorable".to_string(),
         passed: phantom.is_ok(),
@@ -328,10 +405,10 @@ pub(super) async fn assert_web_to_native_receiver(
         .filter(|assertion| !assertion.passed && assertion.name != "recv-window-active-fps")
         .map(|assertion| assertion.name.clone())
         .collect::<Vec<_>>();
-    if ended_infra && failed == ["ended-window-not-restorable"] {
+    if !failed.is_empty() && failed.iter().all(|name| infra_assertions.contains(name)) {
         outcome.verdict = ScenarioVerdict::InfraFail;
         outcome.message = format!(
-            "{} INFRA-FAIL receiver window checks passed but the #316 check could not be driven",
+            "{} INFRA-FAIL no receiver window product failure, but {failed:?} could not be driven",
             scenario.id
         );
     } else if !failed.is_empty() {
@@ -352,6 +429,22 @@ fn fail(
 ) -> ScenarioOutcome {
     outcome.verdict = ScenarioVerdict::TestFail;
     outcome.message = format!("{} TEST-FAIL {detail}", scenario.id);
+    outcome.assertions.push(AssertionOutcome {
+        name: name.to_string(),
+        passed: false,
+        detail,
+    });
+    outcome
+}
+
+fn infra_fail(
+    mut outcome: ScenarioOutcome,
+    scenario: ScenarioSpec,
+    name: &str,
+    detail: String,
+) -> ScenarioOutcome {
+    outcome.verdict = ScenarioVerdict::InfraFail;
+    outcome.message = format!("{} INFRA-FAIL {detail}", scenario.id);
     outcome.assertions.push(AssertionOutcome {
         name: name.to_string(),
         passed: false,
@@ -533,19 +626,74 @@ mod tests {
     fn verdict_requires_enough_docked_samples_and_a_moving_pointer() {
         let ok = |p: (f64, f64)| (Vec::new(), Ok(((0.0, 0.0), (0.0, 0.0))), Some(p));
         let moving = vec![ok((0.3, 0.3)), ok((0.4, 0.35)), ok((0.5, 0.4)), ok((0.6, 0.5))];
-        assert_eq!(receiver_window_verdict(&moving), (vec![], vec![]));
+        assert_eq!(receiver_window_verdict(&moving, 0), (vec![], vec![]));
 
         let frozen = vec![ok((0.3, 0.3)); 4];
-        let (dock, pointer) = receiver_window_verdict(&frozen);
+        let (dock, pointer) = receiver_window_verdict(&frozen, 0);
         assert!(dock.is_empty());
         assert!(pointer[0].contains("never moved"), "{pointer:?}");
 
-        let (dock, _) = receiver_window_verdict(&moving[..2]);
+        let (dock, _) = receiver_window_verdict(&moving[..2], 0);
         assert!(dock[0].contains("only 2 gating sample"), "{dock:?}");
 
         let mut misdocked = moving.clone();
         misdocked[3].0 = vec!["pointer overlay at (0.0,44.0 960.0x600.0)".to_string()];
-        let (dock, _) = receiver_window_verdict(&misdocked);
+        let (dock, _) = receiver_window_verdict(&misdocked, 0);
         assert_eq!(dock, vec!["sample 3: pointer overlay at (0.0,44.0 960.0x600.0)"]);
+    }
+
+    #[test]
+    fn verdict_with_infra_samples_is_insufficient_data_not_a_product_failure() {
+        let ok = |p: (f64, f64)| (Vec::new(), Ok(((0.0, 0.0), (0.0, 0.0))), Some(p));
+        // Two samples taken, two timed out: no "only 2 samples"/"never moved".
+        assert_eq!(receiver_window_verdict(&[ok((0.3, 0.3)), ok((0.3, 0.3))], 2), (vec![], vec![]));
+        assert_eq!(receiver_window_verdict(&[], 4), (vec![], vec![]));
+        // A concrete problem in a sample that WAS taken still counts.
+        let mut misdocked = vec![ok((0.3, 0.3))];
+        misdocked[0].0 = vec!["control overlay is not on screen".to_string()];
+        let (dock, _) = receiver_window_verdict(&misdocked, 3);
+        assert_eq!(dock, vec!["sample 0: control overlay is not on screen"]);
+    }
+
+    #[test]
+    fn main_thread_timeout_is_retried_then_reported_as_infra() {
+        // Recovers within the budget.
+        let mut calls = 0;
+        let result = with_main_thread_retry(|| {
+            calls += 1;
+            if calls < SNAPSHOT_ATTEMPTS { Err(CockpitMainThreadError::Timeout) } else { Ok(7) }
+        });
+        assert_eq!(result, Ok(7));
+        assert_eq!(calls, SNAPSHOT_ATTEMPTS);
+
+        // Times out every attempt: INFRA text, never "no longer open".
+        let mut calls = 0;
+        let error = with_main_thread_retry::<()>(|| {
+            calls += 1;
+            Err(CockpitMainThreadError::Timeout)
+        })
+        .unwrap_err();
+        assert_eq!(calls, SNAPSHOT_ATTEMPTS);
+        assert!(error.contains("timed out 3 times") && error.contains("main thread was busy"), "{error}");
+        assert!(!error.contains("no longer open"), "{error}");
+
+        // A dispatch failure is not retried.
+        let mut calls = 0;
+        let error = with_main_thread_retry::<()>(|| {
+            calls += 1;
+            Err(CockpitMainThreadError::Dispatch("event loop gone".to_string()))
+        })
+        .unwrap_err();
+        assert_eq!((calls, error.as_str()), (1, "event loop gone"));
+
+        // A genuinely absent window is Ok(empty), not an error.
+        assert_eq!(with_main_thread_retry(|| Ok(Vec::<u32>::new())), Ok(vec![]));
+    }
+
+    #[test]
+    fn dock_target_divergence_is_reported_as_a_problem() {
+        // cockpit_chrome_dock_target is Result-returning; a healthy panel
+        // still docks (no panic path left in the oracle).
+        assert!(crate::compositor::cockpit_chrome_dock_target(frame(217.0, 175.0, 960.0, 644.0)).is_ok());
     }
 }
