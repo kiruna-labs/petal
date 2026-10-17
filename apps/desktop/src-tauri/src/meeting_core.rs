@@ -171,6 +171,33 @@ pub(crate) async fn connect_room(
     })
 }
 
+/// Whether a non-client-initiated LiveKit disconnect is a lost connection the
+/// app should recover from with a fresh join (#354). Deliberate ends of this
+/// membership must NOT be rejoined: a rejoin after `DuplicateIdentity` would
+/// kick the user's other device, after `ParticipantRemoved` it defies a host.
+pub(crate) fn disconnect_is_rejoinable(reason: livekit::DisconnectReason) -> bool {
+    use livekit::DisconnectReason as R;
+    match reason {
+        R::UnknownReason
+        | R::ServerShutdown
+        | R::StateMismatch
+        | R::JoinFailure
+        | R::Migration
+        | R::SignalClose
+        | R::ConnectionTimeout
+        | R::MediaFailure => true,
+        R::ClientInitiated
+        | R::DuplicateIdentity
+        | R::ParticipantRemoved
+        | R::RoomDeleted
+        | R::RoomClosed
+        | R::UserUnavailable
+        | R::UserRejected
+        | R::SipTrunkFailure
+        | R::AgentError => false,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum BoundedConnectError<E> {
     /// The attempt itself failed (and every retry after it).
@@ -295,6 +322,35 @@ mod tests {
     fn wait_until_after_ms(timestamp_ms: u64) {
         while now_ms() <= timestamp_ms {
             std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn lost_connections_are_rejoinable_but_deliberate_ends_are_not() {
+        use livekit::DisconnectReason as R;
+        // PETAL-DESKTOP-2R (#354): reconnect exhaustion closes the room with
+        // the episode's cause -- these must lead to an automatic rejoin.
+        for reason in [
+            R::UnknownReason,
+            R::SignalClose,
+            R::ConnectionTimeout,
+            R::MediaFailure,
+            R::ServerShutdown,
+            R::JoinFailure,
+            R::StateMismatch,
+            R::Migration,
+        ] {
+            assert!(disconnect_is_rejoinable(reason), "{reason:?} should rejoin");
+        }
+        for reason in [
+            R::ClientInitiated,
+            R::DuplicateIdentity,
+            R::ParticipantRemoved,
+            R::RoomDeleted,
+            R::RoomClosed,
+            R::UserRejected,
+        ] {
+            assert!(!disconnect_is_rejoinable(reason), "{reason:?} must not rejoin");
         }
     }
 
