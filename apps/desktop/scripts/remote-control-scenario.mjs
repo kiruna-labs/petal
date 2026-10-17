@@ -37,6 +37,16 @@ import {
 } from './remote-control-observation.mjs';
 import { ProcessLeaseLedger, psIdentity } from './process-lease-ledger.mjs';
 import { classifyShareBorderStackReport } from './remote-control-share-border.mjs';
+import {
+  boundsCoverDisplayCorner,
+  boundsOverlap,
+  displayRoutingVerdict,
+  hotCornerActive,
+  normalizedPointOnDisplay,
+  parseAppleScriptBounds,
+  pointInBounds,
+  undeliveredDisplayResults,
+} from './remote-control-display-share.mjs';
 // #102: the autotest socket client lives in its own module so its per-command
 // timeout can be tested against a server that never answers.
 import { connectSocket } from './autotest-socket.mjs';
@@ -2415,6 +2425,119 @@ async function leftDragReleaseStressAttempt(ctx, checkpointIndex) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Whole-display share (#334/#349 pointer, #335/#353 keyboard). Every other
+// case shares a WINDOW; a display share hands the host replay the sentinel
+// pid 1, and before those fixes every route treated it as a process, so
+// nothing reached the display. Cases 37-41 share the runner's display,
+// park TextEdit in a strip the photon sentinel does not overlap, and aim
+// normalized display coordinates at it. Started lazily so the other 36 cases
+// never pay for a second full-display capture.
+// ---------------------------------------------------------------------------
+
+const DISPLAY_TEXTEDIT_WIDTH = 800;
+const DISPLAY_TEXTEDIT_TOP_INSET = 40;
+
+function sentinelTopLeftBounds() {
+  const geometry = sentinelGeometry();
+  const { x, y, w, h } = geometry.windowFrame;
+  const screenHeight = geometry.screenFrame.h;
+  return [x, screenHeight - y - h, x + w, screenHeight - y];
+}
+
+function readTextEditWindowBounds() {
+  return parseAppleScriptBounds(osascript(
+    'tell application "TextEdit"',
+    `return bounds of (first window whose name contains "${sacrificialDocMarker}")`,
+    'end tell'
+  ));
+}
+
+// The right-hand strip of the display, flush with its bottom-right corner so
+// the clamped (1.0, 1.0) click of case 41 lands inside TextEdit.
+function placeTextEditForDisplayCases(frame) {
+  const right = frame.x + frame.width;
+  const bottom = frame.y + frame.height;
+  const wanted = [right - DISPLAY_TEXTEDIT_WIDTH, frame.y + DISPLAY_TEXTEDIT_TOP_INSET, right, bottom];
+  osascript(
+    'tell application "TextEdit"',
+    `set bounds of (first window whose name contains "${sacrificialDocMarker}") to {${wanted.join(', ')}}`,
+    'end tell'
+  );
+  const bounds = readTextEditWindowBounds();
+  const sentinel = sentinelTopLeftBounds();
+  if (boundsOverlap(bounds, sentinel)) {
+    throw new Error(`TextEdit bounds ${bounds} overlap the photon sentinel ${sentinel}; the focus re-arm would cover the target`);
+  }
+  return bounds;
+}
+
+function readBottomRightHotCorner() {
+  const result = spawnSync('defaults', ['read', 'com.apple.dock', 'wvous-br-corner'], { encoding: 'utf8', timeout: 5000 });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+async function ensureDisplayTarget(ctx) {
+  if (ctx.displayShare) return ctx.displayShare.target;
+  const shared = await command(ctx.client, { cmd: 'share_display' });
+  if (!shared.isDisplayShare) {
+    throw new Error(`share_display started source ${shared.windowId} but the host does not classify it as a display share`);
+  }
+  let live;
+  try {
+    live = await waitForLiveTile(ctx.cdp, shared.windowId, shareReadyTimeoutMs * 3);
+  } catch (error) {
+    await captureCaseFailureForensics(ctx.client, 'display-share-ready');
+    throw new Error(`display share ${shared.windowId} never produced a live web video tile: ${error.message}`);
+  }
+  const sourceKind = await evaluate(
+    ctx.cdp,
+    `document.getElementById(${JSON.stringify(live.tileId)})?.dataset?.sourceKind ?? null`
+  );
+  const hotCorner = readBottomRightHotCorner();
+  ctx.displayShare = {
+    shared,
+    target: { targetUserId, windowId: shared.windowId },
+    hotCorner,
+    bounds: null,
+  };
+  console.log(
+    `# display-share-ready window=${shared.windowId} display=${shared.displayId} frame=${JSON.stringify(shared.frame)}`
+    + ` tile=${live.tileId} sourceKind=${sourceKind} br-hot-corner=${hotCorner ?? 'unset'}`
+  );
+  return ctx.displayShare.target;
+}
+
+function displayPoint(ctx, fx, fy) {
+  return normalizedPointOnDisplay(ctx.displayShare.shared.frame, pointInBounds(ctx.displayShare.bounds, fx, fy));
+}
+
+async function waitForFrontmost(name, timeoutMs, intervalMs = 100) {
+  return waitUntil(`${name} frontmost`, () => (readFrontmostProcess() === name ? true : null), timeoutMs, intervalMs);
+}
+
+// Re-arm for a click oracle: TextEdit must NOT be active, so only a click
+// that really reached it can make it frontmost. The sentinel's window does
+// not overlap TextEdit's strip (placeTextEditForDisplayCases checks).
+async function defocusTextEditToSentinel() {
+  raiseSentinel();
+  await waitForFrontmost('PetalRCPhotonSentinel', 3000);
+}
+
+// "Nothing is posted to pid 1": this case's slice of the host log must show
+// display replays (or the oracle is blind) and no route treating the
+// sentinel as a process; and no terminal result may report non-delivery.
+async function assertDisplayRouting(ctx) {
+  const lines = readPetalLogSince(ctx.displayLogOffset ?? 0).split('\n');
+  const verdict = displayRoutingVerdict(lines, ctx.target.windowId);
+  if (!verdict.ok) throw new Error(verdict.message);
+  const undelivered = undeliveredDisplayResults(await collectTerminalDeliveries(ctx), ctx.target.windowId);
+  if (undelivered.length > 0) {
+    throw new Error(`display-share input reported undelivered: ${JSON.stringify(undelivered.slice(0, 3))}`);
+  }
+  return verdict;
+}
+
 const CASES = [
   {
     id: 1,
@@ -3172,6 +3295,123 @@ const CASES = [
       }
     },
   },
+  // ---- Whole-display share (#334/#349, #335/#353). See ensureDisplayTarget.
+  {
+    id: 37,
+    target: 'display',
+    name: 'display share: click reaches the window under the point',
+    features: 'display/pointer',
+    sequence: 'defocus -> display click on TextEdit -> TextEdit frontmost',
+    run: async (ctx) => {
+      const point = displayPoint(ctx, 0.25, 0.55);
+      const measurement = await measureTargetObservation('display click activates TextEdit', async (attempt) => {
+        // The re-arm: TextEdit inactive again, so attempt N cannot pass on
+        // attempt N-1's activation.
+        await defocusTextEditToSentinel();
+        console.log(`# display click attempt ${attempt}: TextEdit defocused`);
+        return {
+          action: () => send(ctx, `api.click({ target, x: ${point.x}, y: ${point.y}, button: 0 }); return true;`),
+          observe: () => waitForFrontmost('TextEdit', observationCorrectnessTimeoutMs),
+        };
+      });
+      await assertReleased(ctx, 'display click');
+      const routing = await assertDisplayRouting(ctx);
+      return pass(`click at display (${point.x},${point.y}) activated TextEdit; ${routing.message}; host confirms no held input`, measurement);
+    },
+  },
+  {
+    id: 38,
+    target: 'display',
+    name: 'display share: typed text lands in the focused document',
+    features: 'display/text',
+    sequence: 'text -> TextEdit document',
+    run: async (ctx) => {
+      const measurement = await measureTargetObservation('display-typed marker visible in TextEdit', async (attempt) => {
+        await waitForFrontmost('TextEdit', 3000);
+        const marker = ` Disp-${Date.now()}-${attempt} `;
+        return {
+          action: () => send(ctx, `api.text({ target, text: ${JSON.stringify(marker)} }); return true;`),
+          observe: () => assertDocumentIncludes(marker, observationCorrectnessTimeoutMs),
+        };
+      });
+      const routing = await assertDisplayRouting(ctx);
+      return pass(`TextEdit document contains the display-typed marker; ${routing.message}`, measurement);
+    },
+  },
+  {
+    id: 39,
+    target: 'display',
+    name: 'display share: drag selects text',
+    features: 'display/pointer/drag',
+    sequence: 'display drag across TextEdit lines',
+    run: async (ctx) => {
+      setTextEditDocument('remote-control display drag target line\n'.repeat(30));
+      await waitForFrontmost('TextEdit', 3000);
+      const from = displayPoint(ctx, 0.05, 0.10);
+      const to = displayPoint(ctx, 0.45, 0.25);
+      await send(ctx, `return api.drag({ target, from: ${JSON.stringify(from)}, to: ${JSON.stringify(to)}, steps: ${REMOTE_CONTROL_DRAG_STEPS.suite}, button: ${REMOTE_CONTROL_BUTTONS.left} });`);
+      const selected = await waitForTextEditSelection();
+      if (!selected) throw new Error(`no TextEdit selection after the display drag (AXSelectedText=${JSON.stringify(selected)})`);
+      await assertReleased(ctx, 'display drag');
+      const routing = await assertDisplayRouting(ctx);
+      return pass(`AXSelectedText ${JSON.stringify(selected.slice(0, 40))}...; ${routing.message}; host confirms no held input`);
+    },
+  },
+  {
+    id: 40,
+    target: 'display',
+    name: 'display share: scroll moves the window under the point',
+    features: 'display/scroll',
+    sequence: 'wheel deltaMode=0 deltaY at TextEdit',
+    run: async (ctx) => {
+      setTextEditDocument(Array.from({ length: 100 }, (_, index) => `display scroll line ${index + 1}`).join('\n'));
+      const before = maybeReadTextEditScrollValue();
+      if (before === null) throw new Error('AXVisibleCharacterRange unavailable before the display scroll');
+      const point = displayPoint(ctx, 0.25, 0.55);
+      await send(ctx, `api.wheel({ target, ...${JSON.stringify({ ...REMOTE_CONTROL_SCROLL_DELTAS.pixel, ...point })} }); return true;`);
+      const after = await waitUntil(
+        'TextEdit visible range changes after display scroll',
+        () => {
+          const value = maybeReadTextEditScrollValue();
+          return value !== null && value !== before ? value : null;
+        },
+        acquisitionTimeoutMs
+      );
+      const routing = await assertDisplayRouting(ctx);
+      return pass(`AX visible character range ${before} -> ${after}; ${routing.message}`);
+    },
+  },
+  {
+    id: 41,
+    target: 'display',
+    name: 'display share: click at normalized 1.0/1.0 is clamped onto the display',
+    features: 'display/pointer/coordinates',
+    sequence: 'defocus -> display click (1,1) -> TextEdit frontmost',
+    run: async (ctx) => {
+      const frame = ctx.displayShare.shared.frame;
+      if (!boundsCoverDisplayCorner(ctx.displayShare.bounds, frame)) {
+        throw new Error(`TextEdit bounds ${ctx.displayShare.bounds} do not cover display ${JSON.stringify(frame)}'s last point; the clamp oracle needs it there`);
+      }
+      // An active bottom-right hot corner would fire when the cursor reaches
+      // the clamped corner and steal focus; stay on the right EDGE instead.
+      const y = hotCornerActive(ctx.displayShare.hotCorner) ? 0.97 : 1;
+      const measurement = await measureTargetObservation('clamped display click activates TextEdit', async (attempt) => {
+        await defocusTextEditToSentinel();
+        console.log(`# clamped display click attempt ${attempt}: TextEdit defocused`);
+        return {
+          action: () => send(ctx, `api.click({ target, x: 1, y: ${y}, button: 0 }); return true;`),
+          observe: () => waitForFrontmost('TextEdit', observationCorrectnessTimeoutMs),
+        };
+      });
+      const metric = await published(ctx, `m.kind === 'pointer' && m.action === 'click' && m.x === 1 && m.y === ${y}`);
+      await assertReleased(ctx, 'clamped display click');
+      const routing = await assertDisplayRouting(ctx);
+      return pass(
+        `packet (${metric.x},${metric.y}) landed on TextEdit at the display's last point${y === 1 ? '' : ' (right edge; bottom-right hot corner active)'}; ${routing.message}; host confirms no held input`,
+        measurement
+      );
+    },
+  },
 ];
 
 async function runCase(ctx, testCase) {
@@ -3193,11 +3433,18 @@ async function runCase(ctx, testCase) {
   };
   try {
     ctx.caseId = testCase.id;
-    ctx.target = testCase.target === 'sentinel' ? ctx.sentinelTarget : ctx.textTarget;
+    if (testCase.target === 'display') {
+      ctx.target = await ensureDisplayTarget(ctx);
+      ctx.displayLogOffset = petalLogSize();
+    } else {
+      ctx.target = testCase.target === 'sentinel' ? ctx.sentinelTarget : ctx.textTarget;
+    }
     if (testCase.target === 'sentinel') clearSentinelEventLog();
     if (testCase.target !== 'sentinel') {
       setTextEditDocument(`case ${testCase.id} ${testCase.name}\n`);
     }
+    // Re-placed every case: a TextEdit recovery opens a fresh window.
+    if (testCase.target === 'display') ctx.displayShare.bounds = placeTextEditForDisplayCases(ctx.displayShare.shared.frame);
     ctx.caseStartedAt = Date.now();
     await send(ctx, `api.resetMetrics(); api.request(target); return true;`);
     try {
@@ -3501,6 +3748,9 @@ try {
     const numberedExitCode = suiteExitCode(summary);
     process.exitCode = numberedExitCode === 0 && (tokenlessDrops > 0 || passBarShortfall > 0) ? 1 : numberedExitCode;
     try { await command(client, { cmd: 'stop_share', window_id: sentinel.shared.windowId }); } catch {}
+    if (ctx.displayShare) {
+      try { await command(client, { cmd: 'stop_share', window_id: ctx.displayShare.shared.windowId }); } catch {}
+    }
   }
 } finally {
   closeTextEditSacrificialDocument();

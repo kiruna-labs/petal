@@ -173,6 +173,12 @@ jobs:
       # #106 is its tracking issue.
       E2E_QUARANTINE_COCKPIT: "SHARE-DESKTOP"
       E2E_QUARANTINE_RC_CASES: ""
+      # Cases that must PASS -- a skip or a missing result fails the gate, not
+      # just a fail. 37-41 are the whole-display share cases: macOS display
+      # share pointer input went to placeholder pid 1 (#334/#349) and its
+      # keyboard/text was never delivered (#335/#353), while every window case
+      # stayed green. A quarantined case is still reported, not required.
+      E2E_REQUIRED_RC_CASES: "37,38,39,40,41"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -738,9 +744,20 @@ jobs:
               print(f"::warning::loopback case {c['caseId']} '{c.get('name')}': fail -- QUARANTINED (known failure, tracked in an issue; NOT a pass)")
           for c in bad:
               print(f"::error::loopback case {c['caseId']} '{c.get('name')}': {str(c.get('detail', ''))[:300]}")
+          required = [q.strip() for q in os.environ.get("E2E_REQUIRED_RC_CASES", "").split(",") if q.strip()]
+          by_id = {str(c.get("caseId")): c for c in results}
+          unmet = []
+          for case_id in required:
+              c = by_id.get(case_id)
+              if c is None:
+                  unmet.append(case_id); print(f"::error::required loopback case {case_id} produced no result")
+              elif c.get("status") != "pass" and not (c.get("status") == "fail" and case_id in quarantine):
+                  if c.get("status") != "fail":
+                      print(f"::error::required loopback case {case_id} '{c.get('name')}': {c.get('status')} -- must pass: {str(c.get('detail', ''))[:300]}")
+                  unmet.append(case_id)
           s = r.get("summary", {})
-          print(f"loopback: total={s.get('total')} pass={s.get('pass')} fail={len(bad)} quarantined={len(quarantined)} skip={s.get('skip')} shareReadiness={s.get('shareReadiness')}")
-          sys.exit(1 if bad else 0)
+          print(f"loopback: total={s.get('total')} pass={s.get('pass')} fail={len(bad)} quarantined={len(quarantined)} skip={s.get('skip')} requiredUnmet={len(unmet)} shareReadiness={s.get('shareReadiness')}")
+          sys.exit(1 if bad or unmet else 0)
           PY
           scorecard_status=${PIPESTATUS[0]}
           set -e
