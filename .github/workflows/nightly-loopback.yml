@@ -67,6 +67,11 @@ on:
         required: false
         default: ""
         type: string
+      rc_test_replay_delay_ms:
+        description: "RED-PROOF ONLY: stall every host remote-control replay by this many ms (debug build knob PETAL_RC_TEST_REPLAY_DELAY_MS) to prove the latency gate fails. Leave empty."
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       ref:
@@ -158,6 +163,20 @@ jobs:
       # included) is reported in SUMMARY.targetObservationLatency.
       # Bare metal keeps the 500ms default; do not raise this globally.
       PETAL_RC_OBSERVATION_BUDGET_MS: "620"
+      # RUN-LEVEL LATENCY GATE (remote-control-latency-gate.mjs). Remote
+      # control of a shared window is the pair-programming core use case, so
+      # the distribution is enforced, not just reported. Each budget fails on a
+      # breach AND on too few samples. Calibration and headroom: see the PR
+      # that introduced these (VM runs listed there); summary --
+      #   CALIBRATION_PLACEHOLDER
+      PETAL_RC_OBSERVATION_DISTRIBUTION_SAMPLES: "3"
+      PETAL_RC_OBSERVATION_P50_BUDGET_MS: "250"
+      PETAL_RC_OBSERVATION_P95_BUDGET_MS: "450"
+      PETAL_RC_HOST_RECEIVE_TO_INJECT_P95_BUDGET_MS: "50"
+      PETAL_RC_HOST_RECEIVE_TO_COMPLETE_P95_BUDGET_MS: "200"
+      PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS: "100"
+      PETAL_RC_PHOTON_P50_BUDGET_MS: "200"
+      PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS: "300"
       # QUARANTINE (release gate). Comma-separated. A listed failure is
       # printed as a ::warning "QUARANTINED" -- never counted as a pass -- and
       # does not fail the gate; anything NOT listed does. Every entry needs a
@@ -463,6 +482,7 @@ jobs:
           # plus the tail of the app log) in the directory this job uploads.
           PETAL_WEDGE_EVIDENCE_DIR: ${{ runner.temp }}/petal-nightly-loopback
           PETAL_DEV_LOG: ${{ runner.temp }}/petal-nightly-loopback/petal-dev.log
+          RC_TEST_REPLAY_DELAY_MS: ${{ inputs.rc_test_replay_delay_ms || '' }}
         run: |
           set -euo pipefail
 
@@ -522,12 +542,14 @@ jobs:
           mkdir -p "$LOG_DIR"
           SOCKET="$LOG_DIR/petal-rc.sock"
           RESULTS_JSON="$LOG_DIR/remote-control-results.json"
+          PHOTON_JSON="$LOG_DIR/remote-control-photon.json"
+          LATENCY_JSON="$LOG_DIR/remote-control-latency.json"
           HARNESS_LOG="$LOG_DIR/remote-control-live.log"
           LIVEKIT_LOG="$LOG_DIR/livekit.log"
           WEB_LOG="$LOG_DIR/web-harness.log"
           CHROME_LOG="$LOG_DIR/chrome-cdp.log"
           PETAL_LOG="$LOG_DIR/petal-dev.log"
-          rm -f "$SOCKET" "$RESULTS_JSON"
+          rm -f "$SOCKET" "$RESULTS_JSON" "$PHOTON_JSON" "$LATENCY_JSON"
           CRASH_MARK="$LOG_DIR/loopback-start.mark"; touch "$CRASH_MARK"
 
           pids=()
@@ -587,10 +609,19 @@ jobs:
           if [ -n "${PRE_LAUNCH_INSTANCES// /}" ]; then
             echo "::warning::A Petal instance was already running when the loopback tier launched its own: $PRE_LAUNCH_INSTANCES -- the phase handoff did not settle." | tee -a "$HARNESS_LOG"
           fi
+          # Red-proof dispatches only (input rc_test_replay_delay_ms); empty
+          # on every release run, and the debug-only knob ignores empty.
+          if [ -n "$RC_TEST_REPLAY_DELAY_MS" ]; then
+            case "$RC_TEST_REPLAY_DELAY_MS" in
+              *[!0-9]*) echo "::error::rc_test_replay_delay_ms must be an integer"; exit 1 ;;
+            esac
+            echo "::warning::RED-PROOF RUN: host replay stalled ${RC_TEST_REPLAY_DELAY_MS}ms; the latency gate is expected to FAIL." | tee -a "$HARNESS_LOG"
+          fi
           (
             cd apps/desktop
             PETAL_BACKEND_URL= \
             PETAL_AUTOTEST_SOCK="$SOCKET" \
+            PETAL_RC_TEST_REPLAY_DELAY_MS="$RC_TEST_REPLAY_DELAY_MS" \
             npm run dev:clean
           ) >"$PETAL_LOG" 2>&1 &
           # The launcher's own pid (this subshell, which runs `npm run
@@ -667,6 +698,20 @@ jobs:
             2>&1 | tee -a "$HARNESS_LOG"
           status=${PIPESTATUS[0]}
           set -e
+
+          # Press-to-photon: web input -> sentinel repaint -> decoded frame back
+          # in the controller's browser, i.e. the round trip a pair-programming
+          # controller feels. Same Petal instance, so the survival/crash checks
+          # below cover it too. Its verdict is the latency gate's, further down:
+          # an incomplete or skipped photon run is INSUFFICIENT there, not a pass.
+          echo "==> Run press-to-photon (latency gate)" | tee -a "$HARNESS_LOG"
+          set +e
+          PETAL_AUTOTEST_SOCK="$SOCKET" \
+            node apps/desktop/scripts/remote-control-local-loopback.mjs --live --skip-preflight --press-to-photon --json "$PHOTON_JSON" \
+            2>&1 | tee -a "$HARNESS_LOG"
+          photon_status=${PIPESTATUS[0]}
+          set -e
+          echo "press-to-photon harness exit $photon_status (verdict: latency gate below)" | tee -a "$HARNESS_LOG"
 
           gate_fail=0
 
@@ -745,6 +790,16 @@ jobs:
           scorecard_status=${PIPESTATUS[0]}
           set -e
           [ "$scorecard_status" -eq 0 ] || gate_fail=1
+
+          # -- Run-level latency budgets (budgets + rationale in env above).
+          echo "==> Post-suite: remote-control latency gate" | tee -a "$HARNESS_LOG"
+          set +e
+          node apps/desktop/scripts/remote-control-latency-gate.mjs \
+            --results "$RESULTS_JSON" --photon "$PHOTON_JSON" --host-log "$PETAL_LOG" --json "$LATENCY_JSON" \
+            2>&1 | tee -a "$HARNESS_LOG"
+          latency_status=${PIPESTATUS[0]}
+          set -e
+          [ "$latency_status" -eq 0 ] || gate_fail=1
 
           if [ "$status" -ne 0 ] && [ "$gate_fail" -eq 0 ]; then
             echo "::warning::harness exited $status but every failing case is quarantined; the gate passes on the scorecard above." | tee -a "$HARNESS_LOG"
