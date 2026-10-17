@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  boundsCoverDisplayCorner,
+  boundsCoverDisplayRightEdge,
   boundsOverlap,
   displayRoutingVerdict,
   hotCornerActive,
@@ -33,10 +33,11 @@ test('AppleScript bounds parse, point and overlap helpers', () => {
   assert.equal(boundsOverlap([213, 77, 886, 516], sentinel), true);
 });
 
-test('the clamped (1.0, 1.0) point must land inside the target window', () => {
-  assert.equal(boundsCoverDisplayCorner([1120, 40, 1920, 1080], DISPLAY), true);
-  assert.equal(boundsCoverDisplayCorner([1120, 40, 1919, 1080], DISPLAY), false);
-  assert.equal(boundsCoverDisplayCorner([1120, 40, 1920, 1079], DISPLAY), false);
+test('the clamped x = 1.0 point must land inside the target window', () => {
+  // The runner's real constrained TextEdit bounds (the Dock caps the bottom).
+  assert.equal(boundsCoverDisplayRightEdge([1120, 30, 1920, 990], DISPLAY, 510), true);
+  assert.equal(boundsCoverDisplayRightEdge([1120, 30, 1919, 990], DISPLAY, 510), false);
+  assert.equal(boundsCoverDisplayRightEdge([1120, 30, 1920, 990], DISPLAY, 1079), false);
 });
 
 test('hot-corner reading: unset, 0 and 1 are inert', () => {

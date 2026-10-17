@@ -38,10 +38,10 @@ import {
 import { ProcessLeaseLedger, psIdentity } from './process-lease-ledger.mjs';
 import { classifyShareBorderStackReport } from './remote-control-share-border.mjs';
 import {
-  boundsCoverDisplayCorner,
+  boundsCoverDisplayRightEdge,
+  hotCornerActive,
   boundsOverlap,
   displayRoutingVerdict,
-  hotCornerActive,
   normalizedPointOnDisplay,
   parseAppleScriptBounds,
   pointInBounds,
@@ -2466,8 +2466,9 @@ function readTextEditWindowBounds() {
   ));
 }
 
-// The right-hand strip of the display, flush with its bottom-right corner so
-// the clamped (1.0, 1.0) click of case 41 lands inside TextEdit.
+// The right-hand strip of the display, flush with its right edge so the
+// clamped x = 1.0 click of case 41 lands inside TextEdit. macOS keeps the
+// window above the Dock, so the bottom edge is whatever the system allows.
 function placeTextEditForDisplayCases(frame) {
   const right = frame.x + frame.width;
   const bottom = frame.y + frame.height;
@@ -3397,17 +3398,20 @@ const CASES = [
   {
     id: 41,
     target: 'display',
-    name: 'display share: click at normalized 1.0/1.0 is clamped onto the display',
+    name: 'display share: click at normalized x = 1.0 is clamped onto the display',
     features: 'display/pointer/coordinates',
-    sequence: 'defocus -> display click (1,1) -> TextEdit frontmost',
+    sequence: 'defocus -> display click (1.0, y) -> TextEdit frontmost',
     run: async (ctx) => {
       const frame = ctx.displayShare.shared.frame;
-      if (!boundsCoverDisplayCorner(ctx.displayShare.bounds, frame)) {
-        throw new Error(`TextEdit bounds ${ctx.displayShare.bounds} do not cover display ${JSON.stringify(frame)}'s last point; the clamp oracle needs it there`);
+      // x = 1.0, not (1.0, 1.0): the runner's bottom-right corner is a Quick
+      // Note hot corner (wvous-br-corner=14) that steals focus when the cursor
+      // reaches it, and macOS keeps TextEdit above the Dock, so nothing a test
+      // owns can sit at the corner. The right edge exercises the same clamp.
+      const anchor = pointInBounds(ctx.displayShare.bounds, 0.5, 0.55);
+      if (!boundsCoverDisplayRightEdge(ctx.displayShare.bounds, frame, anchor.y)) {
+        throw new Error(`TextEdit bounds ${ctx.displayShare.bounds} do not reach display ${JSON.stringify(frame)}'s last column; the clamp oracle needs them there`);
       }
-      // An active bottom-right hot corner would fire when the cursor reaches
-      // the clamped corner and steal focus; stay on the right EDGE instead.
-      const y = hotCornerActive(ctx.displayShare.hotCorner) ? 0.97 : 1;
+      const y = normalizedPointOnDisplay(frame, anchor).y;
       const measurement = await measureTargetObservation('clamped display click activates TextEdit', async (attempt) => {
         await defocusTextEditToSentinel();
         console.log(`# clamped display click attempt ${attempt}: TextEdit defocused`);
@@ -3416,11 +3420,12 @@ const CASES = [
           observe: () => waitForFrontmost('TextEdit', observationCorrectnessTimeoutMs),
         };
       });
-      const metric = await published(ctx, `m.kind === 'pointer' && m.action === 'click' && m.x === 1 && m.y === ${y}`);
+      const metric = await published(ctx, `m.kind === 'pointer' && m.action === 'click' && m.x === 1`);
       await assertReleased(ctx, 'clamped display click');
       const routing = await assertDisplayRouting(ctx);
       return pass(
-        `packet (${metric.x},${metric.y}) landed on TextEdit at the display's last point${y === 1 ? '' : ' (right edge; bottom-right hot corner active)'}; ${routing.message}; host confirms no held input`,
+        `packet (${metric.x},${metric.y}) landed on TextEdit at the display's last column`
+        + ` (br-hot-corner=${ctx.displayShare.hotCorner ?? 'unset'}, active=${hotCornerActive(ctx.displayShare.hotCorner)}); ${routing.message}; host confirms no held input`,
         measurement
       );
     },

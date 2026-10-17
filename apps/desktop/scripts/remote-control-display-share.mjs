@@ -47,16 +47,16 @@ export function boundsOverlap(a, b) {
   return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
 }
 
-/// True when the window's bounds cover the display's last addressable point,
-/// i.e. where the host clamps a normalized (1.0, 1.0) click (#349 review).
-export function boundsCoverDisplayCorner(bounds, displayFrame) {
-  const cornerX = displayFrame.x + displayFrame.width - 1;
-  const cornerY = displayFrame.y + displayFrame.height - 1;
-  return bounds[0] <= cornerX && cornerX < bounds[2] && bounds[1] <= cornerY && cornerY < bounds[3];
+/// True when the window's bounds cover the display's last addressable column
+/// at height `y` -- where the host clamps a normalized x = 1.0 click (#349
+/// review: unclamped, 1.0 mapped one point PAST the display).
+export function boundsCoverDisplayRightEdge(bounds, displayFrame, y) {
+  const lastX = displayFrame.x + displayFrame.width - 1;
+  return bounds[0] <= lastX && lastX < bounds[2] && bounds[1] <= y && y < bounds[3];
 }
 
-/// A `wvous-br-corner` value that triggers an action when the cursor reaches
-/// the bottom-right corner (0 and 1 are "no action"; unset reads as null).
+/// A `wvous-br-corner` value that fires an action when the cursor reaches the
+/// bottom-right corner (0 and 1 are "no action"; unset reads as null).
 export function hotCornerActive(value) {
   if (value === null || value === undefined || String(value).trim() === '') return false;
   const parsed = Number(String(value).trim());

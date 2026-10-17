@@ -1524,8 +1524,10 @@ the autotest socket, the picker's "Screen N" path), park TextEdit in a strip
 the photon sentinel does not cover, and aim normalized display coordinates at
 it: a click must activate TextEdit after the sentinel took focus (measured), a
 typed marker must land (measured), a drag must select, a wheel must scroll,
-and a 1.0/1.0 click must be clamped onto the display and still land on
-TextEdit (measured). Each case also requires the host log to show display
+and a click at normalized x = 1.0 must be clamped onto the display's last
+column and still land on TextEdit (measured; not the 1.0/1.0 corner, which is
+a Quick Note hot corner on the runner and sits under the Dock's reserved
+band). Each case also requires the host log to show display
 replays (`target_pid=1`) and no route that used pid 1 as a process, plus no
 held input and no undelivered terminal result. `E2E_REQUIRED_RC_CASES` in
 `nightly-loopback.yml` makes a skip or a missing result fail the gate too.
