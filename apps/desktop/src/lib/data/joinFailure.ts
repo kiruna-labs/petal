@@ -17,6 +17,10 @@ const TIMED_OUT =
   'Connecting to the meeting server timed out. Check your internet connection, then try again.';
 const UNREACHABLE =
   "The meeting server can't be reached from this network. Check your connection or VPN, then try again.";
+const RATE_LIMITED =
+  'Too many join attempts from this network. Wait a minute, then try again.';
+const NO_ACCESS =
+  "Petal's server didn't let you into this room. Check the invite link or meeting code, or ask the host to let you in.";
 const FALLBACK = 'Petal could not join this room. Check your connection, then try again.';
 
 /** OS socket error codes (Windows WSA* and macOS errno) -> copy. Matched on
@@ -50,13 +54,22 @@ function errorParts(error: unknown): { kind: string; message: string } {
 
 export function joinFailureMessage(error: unknown): string {
   const { kind, message } = errorParts(error);
+  // Token-stage failures first: a socket error there is about Petal's
+  // server, not the meeting server (the os-error map below).
+  const httpStatus = /backend token endpoint returned HTTP (\d{3})/i.exec(message);
+  if (httpStatus) {
+    const status = Number(httpStatus[1]);
+    if (status === 429) return RATE_LIMITED;
+    if (status >= 400 && status < 500) return NO_ACCESS;
+    return SERVER_UNREACHABLE;
+  }
+  if (/backend token (request timed out|connection failed|transport failed)/i.test(message)) {
+    return SERVER_UNREACHABLE;
+  }
   const osError = /\(os error (\d+)\)/i.exec(message);
   if (osError) {
     const copy = OS_ERROR_COPY[Number(osError[1])];
     if (copy) return copy;
-  }
-  if (/backend token (request timed out|connection failed|transport failed)/i.test(message)) {
-    return SERVER_UNREACHABLE;
   }
   if (kind === 'joinTimeout' || /connect attempt timed out/i.test(message)) return TIMED_OUT;
   return FALLBACK;

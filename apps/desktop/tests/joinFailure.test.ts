@@ -69,3 +69,30 @@ test('the meeting route shows the reason and offers Try again instead of auto-re
   const retry = meetingSessionSource.match(/async function retryJoin\(\)[\s\S]*?\n  \}/)?.[0];
   assert.ok(retry && !retry.includes('startListeners'));
 });
+
+test('token-endpoint HTTP statuses: 429 asks to wait, other 4xx is access, 5xx is the server', () => {
+  const http = (status: string) =>
+    joinFailureMessage({ kind: 'config', message: `room setup failed: backend token endpoint returned HTTP ${status}` });
+  assert.match(http('429 Too Many Requests'), /Wait a minute/);
+  assert.match(http('403 Forbidden'), /invite link or meeting code/);
+  assert.match(http('404 Not Found'), /invite link or meeting code/);
+  assert.match(http('502 Bad Gateway'), /Couldn't reach Petal's server/);
+});
+
+test('a token-stage failure names Petal\'s server even when it carries an os error', () => {
+  const message = joinFailureMessage({
+    kind: 'config',
+    message: 'room setup failed: backend token connection failed (os error 61)'
+  });
+  assert.match(message, /Couldn't reach Petal's server/);
+});
+
+test('a room-left during an in-flight join is stashed and replayed, never dropped', () => {
+  const listener = meetingSessionSource.match(/unlistenRoomLeft = await listen[\s\S]*?\n {6}\}\);/)?.[0];
+  assert.ok(listener);
+  assert.match(listener, /if \(meetingPhase === 'connecting'\) \{\s*pendingRoomLeft = event\.payload;\s*return;\s*\}/);
+  const attempt = meetingSessionSource.match(/async function attemptJoin\(\)[\s\S]*?\n  \}/)?.[0] ?? '';
+  const replay = attempt.indexOf('handleRoomLeft(stashed)');
+  const connected = attempt.indexOf("meetingPhase = 'connected'");
+  assert.ok(replay !== -1 && replay < connected, 'the stash is replayed before the room is marked connected');
+});

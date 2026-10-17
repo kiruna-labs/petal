@@ -123,6 +123,10 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   // #356: the join failed; the card explains why and offers Try again
   // instead of auto-returning to the room list.
   let joinFailed = $state(false);
+  // A room-left that lands while a join is in flight (the room died during
+  // the join tail, or a popover/pill Leave): replayed once the join resolves
+  // so a dead room is never shown as connected.
+  let pendingRoomLeft: RoomLeftEvent | null = null;
   let presence = $state<PresentParticipant[]>([]);
   let presenceRevision = 0;
   let remoteCameras = $state<RemoteCamera[]>([]);
@@ -414,6 +418,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   async function retryJoin() {
     if (!joinFailed || disposed) return;
     joinFailed = false;
+    pendingRoomLeft = null;
     meetingPhase = 'connecting';
     await attemptJoin();
   }
@@ -437,9 +442,16 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
       const snapshotRevision = presenceRevision;
       const snapshot = await roomPresence();
       if (snapshotRevision === presenceRevision) presence = snapshot;
+      const stashed = pendingRoomLeft;
+      pendingRoomLeft = null;
+      if (stashed) {
+        handleRoomLeft(stashed);
+        return false;
+      }
       meetingPhase = 'connected';
     } catch (e) {
       console.error(`Failed to join room '${roomName}'`, e);
+      pendingRoomLeft = null;
       // #356: say why (server unreachable, firewall-blocked socket, ...)
       // and let the user retry, instead of a 900ms generic flash.
       disconnectDetail = joinFailureMessage(e);
@@ -485,16 +497,25 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
           // The user's own Leave already navigates via handleLeave; showing
           // the terminal card here would flash it for the leave duration.
           if (selfLeaveRequested) return;
-          // A failing join's own cleanup emits room-left before the invoke
-          // rejects; the join's outcome owns the card while it runs (#356).
-          if (meetingPhase === 'connecting' || joinFailed) return;
-          beginTerminalReturn('Meeting ended - returning you to the room list.');
+          // The failure card owns the screen after a failed join (#356).
+          if (joinFailed) return;
+          // Mid-join: a failing join's own cleanup emits room-left before
+          // the invoke rejects. Stash it; attemptJoin replays it on success.
+          if (meetingPhase === 'connecting') {
+            pendingRoomLeft = event.payload;
+            return;
+          }
+          handleRoomLeft(event.payload);
         }
       });
     } catch {
       // No Tauri bridge (plain browser preview) — `listen` rejects; without
       // this guard the rejection aborts the rest of onMount.
     }
+  }
+
+  function handleRoomLeft(_event: RoomLeftEvent) {
+    beginTerminalReturn('Meeting ended - returning you to the room list.');
   }
 
   async function handleLeave() {

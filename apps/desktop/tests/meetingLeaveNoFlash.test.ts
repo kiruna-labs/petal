@@ -40,8 +40,12 @@ test('room-left listener skips the terminal card for a self-initiated leave', ()
   );
   // The external-leave path (meeting ended by the host / menubar Leave)
   // must still show the terminal card — only the self-leave case is silent.
+  // #356: the terminal branch lives in handleRoomLeft (shared with the
+  // replay of a room-left stashed during an in-flight join).
+  assert.match(listener, /handleRoomLeft\(event\.payload\);/);
+  const handler = meetingSessionSource.match(/function handleRoomLeft\([\s\S]*?\n  \}/)?.[0] ?? '';
   assert.match(
-    listener,
+    handler,
     /beginTerminalReturn\('Meeting ended - returning you to the room list\.'\);/,
     'external leaves must still render the terminal return card'
   );
