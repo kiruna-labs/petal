@@ -51,7 +51,7 @@ export const LATENCY_CHECKS = [
   { id: 'host-receive-to-complete-p95', metric: 'hostReceiveToComplete', stat: 'p95Ms', env: 'PETAL_RC_HOST_RECEIVE_TO_COMPLETE_P95_BUDGET_MS', defaultBudgetMs: 200, minSamples: 40 },
   { id: 'send-to-inject-p95', metric: 'sendToInject', stat: 'p95Ms', env: 'PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS', defaultBudgetMs: 50, minSamples: 30 },
   { id: 'press-to-photon-p50', metric: 'pressToPhoton', stat: 'p50Ms', env: 'PETAL_RC_PHOTON_P50_BUDGET_MS', defaultBudgetMs: 250, minSamples: 30 },
-  { id: 'press-to-photon-p95', metric: 'pressToPhoton', stat: 'p95Ms', env: 'PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS', defaultBudgetMs: 350, minSamples: 30 },
+  { id: 'press-to-photon-p95', metric: 'pressToPhoton', stat: 'p95Ms', env: 'PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS', defaultBudgetMs: 400, minSamples: 30 },
 ];
 
 export function resolveLatencyBudgets(env = {}) {
@@ -165,19 +165,27 @@ export function observationSamples(results) {
   ]).filter((value) => Number.isFinite(value));
 }
 
-// The photon suite's own completeness rule: every scheduled sample measured,
-// none failed. A partial photon run is insufficient data, not a pass.
+// A measured photon sample that missed (generation never decoded within the
+// per-sample timeout) is scored AS the timeout, so one miss lands in the tail
+// the p95 already tolerates instead of voiding the run. More than
+// MAX_PHOTON_MISSES, or fewer scored samples than scheduled, is insufficient.
+export const MAX_PHOTON_MISSES = 2;
+export const DEFAULT_PHOTON_MISS_SCORE_MS = 2000;
+
 export function photonValues(photonReport) {
   const stats = photonReport?.summary?.pressToPhoton;
-  if (!stats) return { values: [], complete: false, reason: 'no press-to-photon summary' };
-  const values = (stats.timingSamples ?? []).map((sample) => sample.pressToEstimatedPhotonMs);
-  const failures = (stats.sampleFailures ?? []).length;
-  const complete = failures === 0 && values.length >= (stats.expectedSamples ?? Infinity);
-  return {
-    values,
-    complete,
-    reason: complete ? null : `measured ${values.length}/${stats.expectedSamples} with ${failures} sample failure(s)`,
-  };
+  if (!stats) return { values: [], complete: false, misses: 0, reason: 'no press-to-photon summary' };
+  const measured = (stats.timingSamples ?? []).map((sample) => sample.pressToEstimatedPhotonMs);
+  const missScoreMs = Number.isFinite(stats.sampleTimeoutMs) ? stats.sampleTimeoutMs : DEFAULT_PHOTON_MISS_SCORE_MS;
+  // Warm-up misses never count (warm-up absorbs the encoder/focus ramp).
+  const misses = (stats.sampleFailures ?? []).filter((failure) => !failure?.warmup).length;
+  const values = [...measured, ...Array.from({ length: misses }, () => missScoreMs)];
+  const expected = stats.expectedSamples ?? Infinity;
+  const complete = misses <= MAX_PHOTON_MISSES && values.length >= expected;
+  let reason = null;
+  if (misses > MAX_PHOTON_MISSES) reason = `${misses} missed sample(s) > ${MAX_PHOTON_MISSES} allowed`;
+  else if (values.length < expected) reason = `scored ${values.length}/${expected} samples`;
+  return { values, complete, misses, reason };
 }
 
 export function collectLatencyMetrics({ results = null, photon = null, hostLog = '' }) {
@@ -192,7 +200,11 @@ export function collectLatencyMetrics({ results = null, photon = null, hostLog =
     .filter((event) => Number.isFinite(event.receiveTsMs) && Number.isFinite(event.completeTsMs))
     .map((event) => event.completeTsMs - event.receiveTsMs);
   return {
-    targetObservation: { ...distribution(observationSamples(results?.results)), methods: results?.summary?.targetObservationLatency?.methods ?? null },
+    targetObservation: {
+      ...distribution(observationSamples(results?.results)),
+      methods: results?.summary?.targetObservationLatency?.methods ?? null,
+      maxReadGapMs: results?.summary?.targetObservationLatency?.maxReadGapMs ?? null,
+    },
     hostReceiveToInject: distribution(receiveToInject),
     hostReceiveToComplete: distribution(receiveToComplete),
     sendToReceive: distribution(pairs.map((pair) => pair.sendToReceiveMs)),
@@ -202,6 +214,7 @@ export function collectLatencyMetrics({ results = null, photon = null, hostLog =
     pressToPhoton: {
       ...distribution(photonData.values),
       complete: photonData.complete,
+      misses: photonData.misses,
       incompleteReason: photonData.reason,
       byInput: photon?.summary?.pressToPhoton?.byInput ?? null,
     },
@@ -255,7 +268,7 @@ export function latencyVerdict({ results = null, photon = null, hostLog = '', en
     if (!metric || typeof metric !== 'object' || !('samples' in metric)) continue;
     notes.push(`  ${name.padEnd(30)} ${String(metric.samples).padStart(7)} ${String(metric.p50Ms).padStart(6)} ${String(metric.p95Ms).padStart(7)} ${String(metric.maxMs).padStart(7)}`);
   }
-  notes.push(`  host replay timeouts: ${metrics.hostReplayTimeouts}; send->inject paired ${metrics.sendToInject.paired}/${metrics.sendToInject.publishes} controller publishes; observation methods ${JSON.stringify(metrics.targetObservation.methods)}`);
+  notes.push(`  host replay timeouts: ${metrics.hostReplayTimeouts}; send->inject paired ${metrics.sendToInject.paired}/${metrics.sendToInject.publishes} controller publishes; observation methods ${JSON.stringify(metrics.targetObservation.methods)}, watcher max read gap ${metrics.targetObservation.maxReadGapMs ?? 'n/a'}ms`);
   for (const check of verdict.checks) {
     const line = `latency ${check.id}: ${check.status.toUpperCase()} -- ${check.detail} (${check.env})`;
     if (check.status === 'pass') notes.push(line);

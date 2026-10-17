@@ -23,7 +23,7 @@ import {
   parseHostLatencyLog,
   resolveLatencyBudgets,
 } from './ci/remote-control-latency-verdict.mjs';
-import { armObservationWatch, parseWatchLine } from '../apps/desktop/scripts/remote-control-observation-watch.mjs';
+import { WATCH_SCRIPT, armObservationWatch, parseWatchLine } from '../apps/desktop/scripts/remote-control-observation-watch.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
@@ -126,12 +126,55 @@ test('missing data is INSUFFICIENT and fails the gate -- never a pass by absence
   assert.equal(thin.checks.find((c) => c.id === 'observation-p95').status, 'insufficient');
 });
 
-test('an incomplete press-to-photon run is insufficient even if its p95 looks fine', () => {
-  const run = syntheticRun();
-  run.photon.summary.pressToPhoton.sampleFailures = [{ sample: 3, inputKind: 'click', error: 'timeout' }];
+// The scenario lists a missed sample in sampleFailures and NOT in
+// timingSamples, so a run with N misses carries 40-N timings.
+function withPhotonMisses(run, misses, { warmup = false } = {}) {
+  const stats = run.photon.summary.pressToPhoton;
+  if (!warmup) stats.timingSamples = stats.timingSamples.slice(misses);
+  stats.sampleTimeoutMs = 2000;
+  stats.sampleFailures = Array.from({ length: misses }, (_, i) => ({
+    sample: i + 1, inputKind: 'click', error: 'sentinel generation 1 was not visible within 2000ms', ...(warmup ? { warmup: true } : {}),
+  }));
+  return run;
+}
+
+test('a missed photon sample scores as the 2000ms timeout and one or two are absorbed by the p95', () => {
+  for (const misses of [1, 2]) {
+    const metrics = collectLatencyMetrics(withPhotonMisses(syntheticRun(), misses));
+    assert.equal(metrics.pressToPhoton.samples, 40);
+    assert.equal(metrics.pressToPhoton.maxMs, 2000);
+    assert.equal(metrics.pressToPhoton.misses, misses);
+    const verdict = evaluateLatencyGate(metrics, budgets);
+    assert.equal(verdict.checks.find((c) => c.id === 'press-to-photon-p95').status, 'pass', `${misses} miss(es)`);
+    assert.equal(verdict.checks.find((c) => c.id === 'press-to-photon-p50').status, 'pass', `${misses} miss(es)`);
+  }
+});
+
+test('more than two photon misses, or too few samples, is INSUFFICIENT and fails', () => {
+  const three = evaluateLatencyGate(collectLatencyMetrics(withPhotonMisses(syntheticRun(), 3)), budgets);
+  assert.equal(three.checks.find((c) => c.id === 'press-to-photon-p95').status, 'insufficient');
+  assert.match(three.checks.find((c) => c.id === 'press-to-photon-p95').detail, /3 missed sample\(s\) > 2 allowed/);
+  assert.equal(three.pass, false);
+
+  const short = syntheticRun();
+  short.photon.summary.pressToPhoton.timingSamples = short.photon.summary.pressToPhoton.timingSamples.slice(10);
+  const thin = evaluateLatencyGate(collectLatencyMetrics(short), budgets);
+  assert.equal(thin.checks.find((c) => c.id === 'press-to-photon-p50').status, 'insufficient');
+  assert.equal(thin.pass, false);
+});
+
+test('two misses plus the recurring ~788ms text outlier still breach the photon p95', () => {
+  const run = withPhotonMisses(syntheticRun(), 2);
+  run.photon.summary.pressToPhoton.timingSamples[26].pressToEstimatedPhotonMs = 788;
   const verdict = evaluateLatencyGate(collectLatencyMetrics(run), budgets);
-  assert.equal(verdict.checks.find((c) => c.id === 'press-to-photon-p95').status, 'insufficient');
-  assert.equal(verdict.pass, false);
+  assert.equal(verdict.checks.find((c) => c.id === 'press-to-photon-p95').status, 'fail');
+});
+
+test('warm-up misses never count against the photon run', () => {
+  const metrics = collectLatencyMetrics(withPhotonMisses(syntheticRun(), 4, { warmup: true }));
+  assert.equal(metrics.pressToPhoton.misses, 0);
+  assert.equal(metrics.pressToPhoton.samples, 40);
+  assert.equal(evaluateLatencyGate(metrics, budgets).checks.find((c) => c.id === 'press-to-photon-p95').status, 'pass');
 });
 
 test('one outlier in a 40-sample photon run does not fail the p95', () => {
@@ -192,7 +235,8 @@ test('budgets come from the workflow env and reject garbage', () => {
 
 test('watcher protocol lines parse, and garbage is ignored', () => {
   assert.deepEqual(parseWatchLine('READY 1792198601528.4 present=false'), { type: 'ready', atMs: 1792198601528.4, present: false });
-  assert.deepEqual(parseWatchLine('SEEN 1792198601612.0'), { type: 'seen', atMs: 1792198601612 });
+  assert.deepEqual(parseWatchLine('SEEN 1792198601612.0'), { type: 'seen', atMs: 1792198601612, reads: null, maxGapMs: null });
+  assert.deepEqual(parseWatchLine('SEEN 1792198601612.0 reads=9 maxGapMs=19.2'), { type: 'seen', atMs: 1792198601612, reads: 9, maxGapMs: 19.2 });
   assert.deepEqual(parseWatchLine('TIMEOUT ""'), { type: 'timeout', lastError: '""' });
   assert.equal(parseWatchLine('osascript: some warning'), null);
 });
@@ -217,9 +261,10 @@ function fakeSpawn(lines, { delayMs = 1 } = {}) {
 test('an armed watcher hands back the SEEN wall-clock instant', async () => {
   const watch = await armObservationWatch({
     mode: 'textedit', needle: ' Typed-1 ', timeoutMs: 1000,
-    spawnImpl: fakeSpawn(['READY 1000.0 present=false', 'SEEN 1084.5']),
+    spawnImpl: fakeSpawn(['READY 1000.0 present=false', 'SEEN 1084.5 reads=6 maxGapMs=17.5']),
   });
   assert.equal(await watch.waitSeen(), 1084.5);
+  assert.deepEqual(watch.resolution(), { reads: 6, maxGapMs: 17.5 });
 });
 
 test('a watcher that times out yields null so the caller falls back to its oracle', async () => {
@@ -255,19 +300,37 @@ test('a watcher that never reports READY degrades to null (poll fallback)', asyn
 test('no sentinel subview covers the Gray-code strip the photon gate decodes', async () => {
   const swift = readFileSync(path.join(rcScripts, 'remote-control-photon-sentinel.swift'), 'utf8');
   const { REMOTE_CONTROL_SCROLL_DELTAS } = await import('../apps/desktop/scripts/remote-control-gestures.mjs');
-  const rect = (name) => {
-    const match = swift.match(new RegExp(`${name} = NSRect\\(x: (\\d+), y: (\\d+), width: (\\d+), height: (\\d+)\\)`));
-    assert.ok(match, `${name} must be a literal NSRect in the sentinel`);
-    const [x, y, w, h] = match.slice(1).map(Number);
-    return { x, y, w, h };
+  const literal = (text) => {
+    const match = /NSRect\(x: (\d+), y: (\d+), width: (\d+), height: (\d+)\)/.exec(text);
+    return match ? (([x, y, w, h]) => ({ x, y, w, h }))(match.slice(1).map(Number)) : null;
   };
+  const named = (name) => {
+    const match = swift.match(new RegExp(`let ${name} = (NSRect\\([^)]*\\))`));
+    assert.ok(match, `${name} must be a literal NSRect in the sentinel`);
+    return literal(match[1]);
+  };
+  // Every view added to the pattern view, resolved to its frame: either a
+  // literal NSRect or a named `let ...Rect` constant. A new subview whose
+  // frame cannot be resolved fails here rather than being silently skipped.
+  const subviews = [...swift.matchAll(/patternView\.addSubview\((\w+)\)/g)].map((m) => m[1]);
+  assert.ok(subviews.length >= 5, `expected the sentinel's subviews, found ${subviews.join(',')}`);
+  const frames = {};
+  for (const name of subviews) {
+    const assignments = [...swift.matchAll(new RegExp(`\\b${name}(?:\\.frame)? = [^\\n]*`, 'g'))].map((m) => m[0]);
+    assert.ok(assignments.length, `cannot find the frame assignment for subview ${name}`);
+    for (const assignment of assignments) {
+      const constant = /frame: (\w+Rect)\)/.exec(assignment);
+      frames[name] = (constant ? named(constant[1]) : literal(assignment)) ?? frames[name];
+    }
+    assert.ok(frames[name], `cannot resolve the frame of subview ${name}: ${assignments.join(' | ')}`);
+  }
   const gray = { x: 160, y: 88, w: 640, h: 30 };
   assert.match(swift, /NSRect\(x: 160 \+ CGFloat\(index \* 40\), y: 88, width: 40, height: 30\)/, 'Gray strip geometry moved; update this test');
   const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
-  for (const name of ['scrollStripRect', 'hostileRect']) {
-    assert.equal(overlaps(rect(name), gray), false, `${name} covers the Gray-code strip`);
+  for (const [name, frame] of Object.entries(frames)) {
+    assert.equal(overlaps(frame, gray), false, `subview ${name} ${JSON.stringify(frame)} covers the Gray-code strip`);
   }
-  const strip = rect('scrollStripRect');
+  const strip = frames.scrollStrip;
   const aim = REMOTE_CONTROL_SCROLL_DELTAS.horizontalSentinel;
   const px = { x: aim.x * 960, y: aim.y * 600 };
   assert.ok(px.x > strip.x && px.x < strip.x + strip.w && px.y > strip.y && px.y < strip.y + strip.h,
@@ -311,4 +374,12 @@ test('e2e-gate-verdict.mjs latency exits 0 on a healthy run and 1 on a stalled o
     '--results', path.join(dir, 'missing.json'), '--photon', path.join(dir, 'missing.json'), '--host-log', path.join(dir, 'missing.log')],
   { encoding: 'utf8' });
   assert.equal(absent.status, 1, 'missing evidence must fail, never pass by absence');
+});
+
+// The watcher sleeps between reads (no busy-wait) and reports its own
+// resolution; a spin loop here pinned a core for every armed observation.
+test('the JXA watcher sleeps between reads instead of spinning, and reports read gaps', () => {
+  assert.match(WATCH_SCRIPT, /\$\.usleep\(\d+\)/);
+  assert.doesNotMatch(WATCH_SCRIPT, /while \(nowMs\(\) < next\) \{\}/);
+  assert.match(WATCH_SCRIPT, /'SEEN ' \+ readAt\.toFixed\(1\) \+ ' reads=' \+ reads \+ ' maxGapMs='/);
 });

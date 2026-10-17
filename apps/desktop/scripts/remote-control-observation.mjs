@@ -96,6 +96,7 @@ export function summarizeObservationLatency({
   budgetSource = 'default',
   retriedObservations = 0,
   methods = [],
+  readGapsMs = [],
 }) {
   const sorted = samplesMs.filter((sample) => Number.isFinite(sample)).sort((a, b) => a - b);
   const methodCounts = {};
@@ -112,6 +113,8 @@ export function summarizeObservationLatency({
     retriedObservations,
     // `watch` = in-process watcher timestamp; `poll` = 25ms poll fallback.
     methods: methodCounts,
+    // Watcher resolution evidence: the worst read gap seen in any sample.
+    maxReadGapMs: readGapsMs.length ? roundMs(Math.max(...readGapsMs)) : null,
   };
 }
 
@@ -141,16 +144,24 @@ export async function measureObservationWithRetry({
 }) {
   const samplesMs = [];
   const methods = [];
+  const readGapsMs = [];
   const takeSample = async (attempt) => {
-    const { action, observe } = await prepare(attempt);
-    const started = now();
-    await action();
-    // Correctness. A throw here is a REAL failure and is never retried for
-    // latency reasons -- it propagates with the case's own message.
-    const observed = await observe();
-    const ended = Number.isFinite(observed?.observedAtMs) ? observed.observedAtMs : now();
-    methods.push(observed?.method ?? 'poll');
-    return roundMs(Math.max(0, ended - started));
+    const { action, observe, cancel } = await prepare(attempt);
+    try {
+      const started = now();
+      await action();
+      // Correctness. A throw here is a REAL failure and is never retried for
+      // latency reasons -- it propagates with the case's own message.
+      const observed = await observe();
+      const ended = Number.isFinite(observed?.observedAtMs) ? observed.observedAtMs : now();
+      methods.push(observed?.method ?? 'poll');
+      if (Number.isFinite(observed?.maxGapMs)) readGapsMs.push(observed.maxGapMs);
+      return roundMs(Math.max(0, ended - started));
+    } finally {
+      // A watcher armed by prepare() must never outlive its sample -- not
+      // even when the action throws -- or it overlaps the next case.
+      cancel?.();
+    }
   };
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const sampleMs = await takeSample(attempt);
@@ -169,6 +180,8 @@ export async function measureObservationWithRetry({
     targetObservationAttempts: verdict.attempts,
     targetObservationBudgetMs: budgetMs,
     targetObservationMethods: methods,
+    // Worst gap between the watcher's reads, per watched sample (resolution).
+    targetObservationReadGapsMs: readGapsMs,
   };
   if (!verdict.withinBudget) {
     const error = new Error(observationBudgetFailureMessage(label, samplesMs, budgetMs));

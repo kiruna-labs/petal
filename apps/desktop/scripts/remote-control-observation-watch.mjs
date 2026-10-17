@@ -17,15 +17,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-// JXA's own delay()/NSThread sleeps are coalesced to ~70ms for a background
-// osascript (measured: 14 iterations/s asking for 100), so the loop waits by
-// spinning on the clock between reads. Reads stay at this interval -- TextEdit
-// is never hammered faster than ~65 Apple Events/s, and only while armed.
+// One 10ms sleep was measured to take ~65ms on a loaded Mac (delay(),
+// NSThread and usleep alike; Python too -- system timer coalescing), so the
+// loop sleeps in 1ms usleep() steps up to each read deadline: a real sleep,
+// overshoot of a few ms instead of ~50. Each SEEN line reports the achieved
+// read gaps so the resolution is evidence, not an assumption. TextEdit is
+// never asked faster than ~65 Apple Events/s, and only while armed.
 export const WATCH_INTERVAL_MS = 15;
 const READY_TIMEOUT_MS = 5000;
 
 export const WATCH_SCRIPT = String.raw`
 ObjC.import('AppKit');
+ObjC.bindFunction('usleep', ['int', ['unsigned int']]);
 function nowMs() { return $.NSDate.date.timeIntervalSince1970 * 1000; }
 function run(argv) {
   const mode = argv[0];
@@ -51,10 +54,20 @@ function run(argv) {
   console.log('READY ' + nowMs().toFixed(1) + ' present=' + sample());
   const deadline = nowMs() + timeoutMs;
   let next = nowMs();
+  let last = next;
+  let reads = 0;
+  let maxGapMs = 0;
   while (nowMs() < deadline) {
     next += intervalMs;
-    while (nowMs() < next) {}
-    if (sample()) { console.log('SEEN ' + nowMs().toFixed(1)); return; }
+    while (nowMs() < next) $.usleep(1000);
+    const readAt = nowMs();
+    maxGapMs = Math.max(maxGapMs, readAt - last);
+    last = readAt;
+    reads += 1;
+    if (sample()) {
+      console.log('SEEN ' + readAt.toFixed(1) + ' reads=' + reads + ' maxGapMs=' + maxGapMs.toFixed(1));
+      return;
+    }
   }
   console.log('TIMEOUT ' + JSON.stringify(lastError));
 }
@@ -67,8 +80,13 @@ export function parseWatchLine(line) {
   if ((match = /^READY (\d+(?:\.\d+)?) present=(true|false)$/.exec(text))) {
     return { type: 'ready', atMs: Number(match[1]), present: match[2] === 'true' };
   }
-  if ((match = /^SEEN (\d+(?:\.\d+)?)$/.exec(text))) {
-    return { type: 'seen', atMs: Number(match[1]) };
+  if ((match = /^SEEN (\d+(?:\.\d+)?)(?: reads=(\d+) maxGapMs=(\d+(?:\.\d+)?))?$/.exec(text))) {
+    return {
+      type: 'seen',
+      atMs: Number(match[1]),
+      reads: match[2] === undefined ? null : Number(match[2]),
+      maxGapMs: match[3] === undefined ? null : Number(match[3]),
+    };
   }
   if ((match = /^TIMEOUT(?: (.*))?$/.exec(text))) {
     return { type: 'timeout', lastError: match[1] ?? '' };
@@ -114,6 +132,7 @@ export function armObservationWatch({
       return;
     }
     let armed = false;
+    let lastSeen = null;
     let settledSeen = false;
     let seenResolve;
     const seen = new Promise((r) => { seenResolve = r; });
@@ -146,8 +165,14 @@ export function armObservationWatch({
             reject(new Error(`observation target already shows ${JSON.stringify(needle)} before the action; the case did not re-arm it`));
             return;
           }
-          resolve({ waitSeen: () => seen, cancel: () => { kill(); finishSeen(null); } });
+          resolve({
+            waitSeen: () => seen,
+            // Read-gap evidence from the SEEN line ({ reads, maxGapMs }).
+            resolution: () => (lastSeen ? { reads: lastSeen.reads, maxGapMs: lastSeen.maxGapMs } : null),
+            cancel: () => { kill(); finishSeen(null); },
+          });
         } else if (parsed.type === 'seen') {
+          lastSeen = parsed;
           finishSeen(parsed.atMs);
         } else if (parsed.type === 'timeout') {
           if (parsed.lastError) log(`observation watch timed out; last read error ${parsed.lastError}`);

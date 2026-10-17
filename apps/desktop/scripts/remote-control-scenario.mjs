@@ -1762,7 +1762,9 @@ function watchedObserve(watch, oracle) {
   return async () => {
     const observedAtMs = watch ? await watch.waitSeen() : null;
     await oracle();
-    return Number.isFinite(observedAtMs) ? { observedAtMs, method: 'watch' } : { method: 'poll' };
+    return Number.isFinite(observedAtMs)
+      ? { observedAtMs, method: 'watch', maxGapMs: watch.resolution()?.maxGapMs ?? null }
+      : { method: 'poll' };
   };
 }
 
@@ -1774,6 +1776,7 @@ function measureDocumentInput(ctx, label, prepare) {
     const watch = await armTargetWatch('textedit', fragment);
     return {
       action: () => send(ctx, body),
+      cancel: () => watch?.cancel(),
       observe: watchedObserve(
         watch,
         () => assertDocumentIncludes(fragment, observationCorrectnessTimeoutMs, observationPollIntervalMs)
@@ -2848,6 +2851,7 @@ const CASES = [
           writeClipboard('not-the-selection');
           const watch = await armTargetWatch('clipboard', text);
           return {
+            cancel: () => watch?.cancel(),
             action: () => send(ctx, `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdA)} }); api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdC)} }); return true;`),
             observe: watchedObserve(watch, () => waitUntil('clipboard equals selection', () => readClipboard() === text, observationCorrectnessTimeoutMs, observationPollIntervalMs)),
           };
@@ -2904,6 +2908,7 @@ const CASES = [
           writeClipboard('not-cmd');
           const watch = await armTargetWatch('clipboard', text);
           return {
+            cancel: () => watch?.cancel(),
             action: () => send(ctx, `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdA)} }); api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdC)} }); return true;`),
             observe: watchedObserve(watch, () => waitUntil('Cmd+C clipboard', () => readClipboard() === text, observationCorrectnessTimeoutMs, observationPollIntervalMs)),
           };
@@ -3610,6 +3615,7 @@ async function runCase(ctx, testCase) {
     result.targetObservationAttempts = outcome.targetObservationAttempts ?? null;
     result.targetObservationDistributionSamplesMs = outcome.targetObservationDistributionSamplesMs ?? null;
     result.targetObservationMethods = outcome.targetObservationMethods ?? null;
+    result.targetObservationReadGapsMs = outcome.targetObservationReadGapsMs ?? null;
   } catch (error) {
     result.status = 'fail';
     result.detail = error.message;
@@ -3839,6 +3845,7 @@ try {
       return Number.isFinite(result.targetObservationLatencyMs) ? [result.targetObservationLatencyMs, ...extra] : extra;
     }).filter((value) => Number.isFinite(value));
     const observationMethods = results.flatMap((result) => result.targetObservationMethods ?? []);
+    const observationReadGaps = results.flatMap((result) => result.targetObservationReadGapsMs ?? []);
     const retriedObservations = results.filter((result) => (result.targetObservationAttempts ?? 1) > 1).length;
     // #580: a host-side tokenless drop means the packet never reached any
     // injection route. It is never expected in a healthy run -- once control
@@ -3872,6 +3879,7 @@ try {
         budgetSource: observationBudget.source,
         retriedObservations,
         methods: observationMethods,
+        readGapsMs: observationReadGaps,
       }),
     };
     console.log(`SUMMARY ${JSON.stringify(summary)}`);

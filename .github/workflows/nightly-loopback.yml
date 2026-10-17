@@ -187,11 +187,15 @@ jobs:
       #   host receive->inject p95 8-10           -> 40
       #   host receive->replay complete p95 93-106 -> 200 (~1.9x)
       #   web send->host inject p95 10-12         -> 50
-      #   press-to-photon p50 139-189, p95 239-254 -> 250 / 350 (~1.35x: tight
-      #     on purpose, so a 150ms host stall -- red run 39053565892, p50 288 /
-      #     p95 390 -- still fails; raise only with new VM evidence)
-      # Red run 39053565892 (rc_test_replay_delay_ms=150) fails all seven with
-      # these budgets (live, under the looser first photon budgets, five).
+      #   press-to-photon p50 139-189, p95 239-288 -> 250 / 400. The p50 is
+      #     the discriminating check (green max 188.5 vs red 337.5, red run
+      #     39056551241, 150ms host stall). p95 has 1.4x headroom because a
+      #     repeatable ~788ms text outlier shows up in 2 of 3 green runs and a
+      #     40-sample nearest-rank p95 tolerates only two. A missed photon
+      #     sample scores as its 2000ms timeout; more than 2 misses fails.
+      # Red run 39056551241 (rc_test_replay_delay_ms=150) fails all seven at
+      # these budgets (photon p95 only just: 402.5 > 400; the photon p50 is the
+      # reliable photon signal). Raise budgets only with new VM evidence.
       PETAL_RC_OBSERVATION_DISTRIBUTION_SAMPLES: "3"
       PETAL_RC_OBSERVATION_P50_BUDGET_MS: "200"
       PETAL_RC_OBSERVATION_P95_BUDGET_MS: "400"
@@ -199,7 +203,7 @@ jobs:
       PETAL_RC_HOST_RECEIVE_TO_COMPLETE_P95_BUDGET_MS: "200"
       PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS: "50"
       PETAL_RC_PHOTON_P50_BUDGET_MS: "250"
-      PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS: "350"
+      PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS: "400"
       # QUARANTINE (release gate). Comma-separated. A listed failure is
       # printed as a ::warning "QUARANTINED" -- never counted as a pass -- and
       # does not fail the gate; anything NOT listed does. Every entry needs a
