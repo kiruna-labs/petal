@@ -9,7 +9,7 @@
 // never a pass here. Unit tests (both directions): scripts/test-e2e-gate-verdict.mjs.
 //
 //   node scripts/ci/e2e-gate-verdict.mjs loopback --results <json> --harness-exit <n> [--quarantine <ids>]
-//   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> [--quarantine <ids>]
+//   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> --engine-exit <n> [--quarantine <ids>]
 //
 // Prints GitHub ::error/::warning annotations; exits 0 (pass) or 1 (fail).
 
@@ -139,7 +139,10 @@ export function loopbackVerdict({ report, harnessExit, quarantine = new Set() })
 
 /// lines: run.jsonl parsed into objects (unparseable lines dropped).
 /// runDirName: basename of the results directory (the engine names it runId).
-export function cockpitVerdict({ lines, runDirName, startedAtMs, selector, quarantine = new Set() }) {
+/// engineExit: the `desktop --test-case=<sel>` process's exit status. The
+/// engine exits 0 only when its own run status is Passed (1 otherwise:
+/// test-fail/infra-fail, cleanup failure, or a cancelled run).
+export function cockpitVerdict({ lines, runDirName, startedAtMs, selector, engineExit, quarantine = new Set() }) {
   const errors = [];
   const warnings = [];
   const notes = [];
@@ -193,7 +196,45 @@ export function cockpitVerdict({ lines, runDirName, startedAtMs, selector, quara
   const cleanup = lines.find((o) => o?.kind === 'cleanup')?.payload;
   if (!cleanup) errors.push('run.jsonl has no cleanup line -- the engine never finished the run');
   else if (cleanup.passed !== true) errors.push('Test Cockpit cleanup verifier failed (orphaned peer process or stale participant)');
-  if (!lines.some((o) => o?.kind === 'conclusion')) errors.push('run.jsonl has no conclusion line -- the engine never finished the run');
+  // The conclusion lists every scenario the engine scored -- including a
+  // Cancelled one, which gets NO scenario-start/verdict line. A run cancelled
+  // mid-way otherwise read as N<expected passes and went green.
+  const conclusion = lines.find((o) => o?.kind === 'conclusion')?.payload;
+  if (!conclusion) {
+    errors.push('run.jsonl has no conclusion line -- the engine never finished the run');
+  } else {
+    const status = String(conclusion.status ?? '').toLowerCase();
+    if (status !== 'complete') errors.push(`run conclusion status is '${conclusion.status}' (not 'complete') -- the run was aborted or cancelled`);
+    const listed = Array.isArray(conclusion.scenarios) ? conclusion.scenarios : null;
+    if (!listed || listed.length === 0) {
+      errors.push('run conclusion lists no scenarios -- cannot prove every scenario reached a verdict');
+    } else {
+      const listedIds = listed.map((s) => String(s?.scenarioId));
+      const cancelled = listed.filter((s) => /^(cancel|abort)/i.test(String(s?.verdict ?? ''))).map((s) => String(s?.scenarioId));
+      if (cancelled.length) errors.push(`run was CANCELLED: conclusion scores ${cancelled.join(',')} as cancelled -- the remaining scenarios never ran`);
+      const noVerdict = listedIds.filter((id) => !verdictIds.has(id));
+      if (noVerdict.length) errors.push(`scenario(s) in the run conclusion with no verdict line: ${noVerdict.join(',')}`);
+      const unlisted = [...verdictIds].filter((id) => !listedIds.includes(id));
+      if (unlisted.length) errors.push(`verdict line(s) for scenario(s) missing from the run conclusion: ${unlisted.join(',')}`);
+      if (listed.length !== verdicts.length) errors.push(`run conclusion lists ${listed.length} scenario(s) but run.jsonl holds ${verdicts.length} verdict line(s)`);
+    }
+  }
+
+  // The engine exit carries failures run.jsonl cannot (a crash or kill after
+  // the verdicts were written, a launch error). Exit 1 is excused ONLY by a
+  // quarantined test-fail/infra-fail, which is exactly what makes the engine
+  // exit 1 on an otherwise healthy run (a skipped verdict does not).
+  const engineQuarantined = verdicts.filter((v) => (v.verdict === 'test-fail' || v.verdict === 'infra-fail') && quarantine.has(v.id)).map((v) => v.id);
+  const exit = /^\d+$/.test(String(engineExit ?? '').trim()) ? Number(engineExit) : NaN;
+  if (!Number.isInteger(exit)) {
+    errors.push(`Test Cockpit engine exit status unknown (${JSON.stringify(engineExit)})`);
+  } else if (exit !== 0) {
+    if (exit === 1 && engineQuarantined.length > 0) {
+      warnings.push(`Test Cockpit engine exited 1, explained by quarantined failing scenario(s) ${engineQuarantined.join(',')}`);
+    } else {
+      errors.push(`Test Cockpit engine exited ${exit} with no quarantined failure to explain it`);
+    }
+  }
 
   const bad = verdicts.filter((v) => v.verdict !== 'pass' && !quarantine.has(v.id)).length;
   const quarantined = verdicts.filter((v) => v.verdict !== 'pass' && quarantine.has(v.id)).length;
@@ -246,6 +287,7 @@ function main(argv) {
       runDirName: dir ? path.basename(path.resolve(dir)) : null,
       startedAtMs: args['started-at-ms'],
       selector: args.selector,
+      engineExit: args['engine-exit'],
       quarantine: parseIdList(args.quarantine),
     });
   } else {

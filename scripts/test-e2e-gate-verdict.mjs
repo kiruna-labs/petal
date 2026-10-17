@@ -159,6 +159,15 @@ const QUICK = ['PLUGIN-BOOT', 'SHARE-N2W-Q', 'SHARE-W2N-Q', 'SHARE-W2N-STALL', '
 const STARTED_AT = 1792198250000;
 const RUN_ID = '1792198256594';
 
+// Mirrors conclusions.rs verdict_label: proxy-evidence passes carry a suffix.
+const LABEL = { pass: 'PASS', 'test-fail': 'FAIL', 'infra-fail': 'FAIL', skipped: 'SKIPPED', cancelled: 'CANCELLED' };
+const conclusionEntry = (id, verdict) => ({
+  scenarioId: id,
+  verdict: verdict === 'pass' && id === 'DRAW-N' ? 'PASS (proxy — not content-verified)' : (LABEL[verdict] ?? verdict),
+  evidenceBasis: 'x',
+  detail: `${id} msg`,
+});
+
 function healthyCockpit({ verdicts = {} } = {}) {
   const lines = [{ kind: 'meta', payload: { runId: RUN_ID, selector: 'quick' } }];
   for (const id of QUICK) {
@@ -166,10 +175,27 @@ function healthyCockpit({ verdicts = {} } = {}) {
     lines.push({ kind: 'scenario-verdict', scenarioId: id, payload: { scenarioId: id, verdict: verdicts[id] ?? 'pass', message: `${id} msg` } });
   }
   lines.push({ kind: 'cleanup', payload: { passed: true } });
-  lines.push({ kind: 'conclusion', payload: { status: 'pass' } });
+  lines.push({ kind: 'conclusion', payload: { status: 'complete', scenarios: QUICK.map((id) => conclusionEntry(id, verdicts[id] ?? 'pass')), notChecked: [] } });
   return lines;
 }
-const cockpit = (lines, extra = {}) => cockpitVerdict({ lines, runDirName: RUN_ID, startedAtMs: STARTED_AT, selector: 'quick', quarantine: parseIdList('SHARE-DESKTOP'), ...extra });
+
+// Exactly what the engine writes when cancel_requested is seen before
+// scenario index `at` (mod.rs run loop): the earlier scenarios start and get a
+// verdict, the cancelled one is pushed to outcomes with NO start/verdict line,
+// the loop breaks, and cleanup + a 'complete' conclusion are still written.
+function cancelledCockpit(at) {
+  const lines = [{ kind: 'meta', payload: { runId: RUN_ID, selector: 'quick' } }];
+  const ran = QUICK.slice(0, at);
+  for (const id of ran) {
+    lines.push({ kind: 'scenario-start', scenarioId: id, payload: id });
+    lines.push({ kind: 'scenario-verdict', scenarioId: id, payload: { scenarioId: id, verdict: 'pass', message: `${id} msg` } });
+  }
+  lines.push({ kind: 'cleanup', payload: { passed: true } });
+  const scenarios = [...ran.map((id) => conclusionEntry(id, 'pass')), conclusionEntry(QUICK[at], 'cancelled')];
+  lines.push({ kind: 'conclusion', payload: { status: 'complete', scenarios, notChecked: [{ scenarioId: QUICK[at], reason: 'Test cockpit run cancelled' }] } });
+  return lines;
+}
+const cockpit = (lines, extra = {}) => cockpitVerdict({ lines, runDirName: RUN_ID, startedAtMs: STARTED_AT, selector: 'quick', engineExit: 0, quarantine: parseIdList('SHARE-DESKTOP'), ...extra });
 
 test('cockpit: a healthy quick run passes', () => {
   const v = cockpit(healthyCockpit());
@@ -206,8 +232,8 @@ test('cockpit: non-pass fails unless quarantined (skipped / infra-fail count as 
   for (const verdict of ['test-fail', 'infra-fail', 'skipped', 'cancelled']) {
     assert.equal(cockpit(healthyCockpit({ verdicts: { CAM: verdict } })).ok, false, verdict);
   }
-  const q = cockpit(healthyCockpit({ verdicts: { 'SHARE-DESKTOP': 'test-fail' } }));
-  assert.equal(q.ok, true);
+  const q = cockpit(healthyCockpit({ verdicts: { 'SHARE-DESKTOP': 'test-fail' } }), { engineExit: 1 });
+  assert.equal(q.ok, true, q.errors.join('\n'));
   assert.ok(q.warnings.some((w) => /SHARE-DESKTOP.*QUARANTINED/.test(w)));
 });
 
@@ -216,6 +242,61 @@ test('cockpit: a failed or missing cleanup, or a missing conclusion, fails', () 
   assert.equal(cockpit(failedCleanup).ok, false);
   assert.equal(cockpit(healthyCockpit().filter((o) => o.kind !== 'cleanup')).ok, false);
   assert.equal(cockpit(healthyCockpit().filter((o) => o.kind !== 'conclusion')).ok, false);
+});
+
+test('cockpit: a run cancelled mid-way fails even though every verdict written is a pass', () => {
+  for (const at of [1, 3, QUICK.length - 1]) {
+    for (const engineExit of [0, 1]) {
+      const v = cockpit(cancelledCockpit(at), { engineExit });
+      assert.equal(v.ok, false, `cancel at ${at}, exit ${engineExit} must fail`);
+      assert.ok(errorsMatch(v, /CANCELLED/), v.errors.join('\n'));
+      assert.ok(errorsMatch(v, new RegExp(`no verdict line: ${QUICK[at]}`)), v.errors.join('\n'));
+    }
+  }
+  // Even with the cancelled entry's label scrubbed, the count/verdict-per-
+  // listed-scenario check alone still catches it.
+  const scrubbed = cancelledCockpit(3).map((o) => (o.kind === 'conclusion'
+    ? { ...o, payload: { ...o.payload, scenarios: o.payload.scenarios.map((s) => ({ ...s, verdict: 'PASS' })) } } : o));
+  assert.equal(cockpit(scrubbed).ok, false);
+});
+
+test('cockpit: a full run with a real-shaped conclusion still passes (no false red)', () => {
+  const v = cockpit(healthyCockpit());
+  assert.deepEqual(v.errors, []);
+  assert.deepEqual(v.warnings, []);
+});
+
+test('cockpit: an aborted/non-complete conclusion, or one listing no scenarios, fails', () => {
+  const withConclusion = (patch) => healthyCockpit().map((o) => (o.kind === 'conclusion' ? { ...o, payload: { ...o.payload, ...patch } } : o));
+  for (const status of ['aborted', 'cancelled', undefined]) {
+    const v = cockpit(withConclusion({ status }));
+    assert.equal(v.ok, false, String(status));
+    assert.ok(errorsMatch(v, /conclusion status/));
+  }
+  assert.equal(cockpit(withConclusion({ scenarios: [] })).ok, false);
+  assert.equal(cockpit(withConclusion({ scenarios: undefined })).ok, false);
+  // A verdict line for a scenario the conclusion never scored is inconsistent.
+  assert.equal(cockpit(withConclusion({ scenarios: QUICK.slice(1).map((id) => conclusionEntry(id, 'pass')) })).ok, false);
+});
+
+test('cockpit: engine exit -- 0 passes; non-zero fails unless a quarantined failure explains exit 1', () => {
+  assert.equal(cockpit(healthyCockpit(), { engineExit: 0 }).ok, true);
+  assert.equal(cockpit(healthyCockpit(), { engineExit: '0' }).ok, true);
+  for (const engineExit of [1, 2, 101, 134, 137]) {
+    const v = cockpit(healthyCockpit(), { engineExit });
+    assert.equal(v.ok, false, `exit ${engineExit} must fail`);
+    assert.ok(errorsMatch(v, new RegExp(`engine exited ${engineExit} with no quarantined failure`)));
+  }
+  for (const engineExit of ['', undefined, 'x']) {
+    assert.equal(cockpit(healthyCockpit(), { engineExit }).ok, false, JSON.stringify(engineExit));
+  }
+  const q = healthyCockpit({ verdicts: { 'SHARE-DESKTOP': 'infra-fail' } });
+  const ok1 = cockpit(q, { engineExit: 1 });
+  assert.equal(ok1.ok, true, ok1.errors.join('\n'));
+  assert.ok(ok1.warnings.some((w) => /engine exited 1, explained by .*SHARE-DESKTOP/.test(w)));
+  assert.equal(cockpit(q, { engineExit: 134 }).ok, false, 'a crash is not explained by a quarantine');
+  // A quarantined SKIP does not make the engine exit 1, so it cannot excuse it.
+  assert.equal(cockpit(healthyCockpit({ verdicts: { 'SHARE-DESKTOP': 'skipped' } }), { engineExit: 1 }).ok, false);
 });
 
 // ---------------------------------------------------------------- CLI
@@ -247,9 +328,18 @@ test('CLI cockpit: real run dir, both directions, and an unknown tier', () => {
   const runDir = join(root, RUN_ID);
   mkdirSync(runDir);
   writeFileSync(join(runDir, 'run.jsonl'), `${healthyCockpit().map((o) => JSON.stringify(o)).join('\n')}\n`);
-  const args = ['cockpit', '--run-dir', `${runDir}/`, '--selector', 'quick', '--quarantine', 'SHARE-DESKTOP'];
+  const args = ['cockpit', '--run-dir', `${runDir}/`, '--selector', 'quick', '--quarantine', 'SHARE-DESKTOP', '--engine-exit', '0'];
   const ok = runCli([...args, '--started-at-ms', String(STARTED_AT)]);
   assert.equal(ok.status, 0, ok.out);
+  const exited = runCli([...args, '--started-at-ms', String(STARTED_AT), '--engine-exit', '1']);
+  assert.equal(exited.status, 1, exited.out);
+  assert.match(exited.out, /::error::Test Cockpit engine exited 1/);
+  const missingExit = runCli(['cockpit', '--run-dir', `${runDir}/`, '--selector', 'quick', '--started-at-ms', String(STARTED_AT)]);
+  assert.equal(missingExit.status, 1, missingExit.out);
+  writeFileSync(join(runDir, 'run.jsonl'), `${cancelledCockpit(4).map((o) => JSON.stringify(o)).join('\n')}\n`);
+  const cancelled = runCli([...args, '--started-at-ms', String(STARTED_AT)]);
+  assert.equal(cancelled.status, 1, cancelled.out);
+  assert.match(cancelled.out, /::error::run was CANCELLED/);
   const stale = runCli([...args, '--started-at-ms', String(Number(RUN_ID) + 5000)]);
   assert.equal(stale.status, 1, stale.out);
   assert.match(stale.out, /STALE/);
@@ -268,6 +358,8 @@ const RELEASE = fileURLToPath(new URL('../.github/workflows/release.yml', import
 const WIRING = [
   ['workflow', 'loopback verdict is called with the harness exit', /node "\$VERDICT" loopback --results "\$RESULTS_JSON" --harness-exit "\$status"/],
   ['workflow', 'cockpit verdict is called with the step start time', /node "\$VERDICT" cockpit --run-dir "\$\{RUN_DIR:-\}" --started-at-ms "\$COCKPIT_STARTED_MS"/],
+  ['workflow', 'cockpit verdict is called with the engine exit', /--engine-exit "\$engine_exit"/],
+  ['workflow', 'the engine exit is captured right after the engine runs', /--test-case="\$COCKPIT_SELECTOR"\n\s+engine_exit=\$\?/],
   ['workflow', 'the step start time is recorded', /COCKPIT_STARTED_MS=\$\(\( \$\(date \+%s\) \* 1000 \)\)/],
   ['workflow', 'a missing setup marker fails as the release gate', /if \[ "\$E2E_GATE" = "1" \]; then\n\s+echo "::error::Test Cockpit Quick tier CANNOT RUN[^\n]*\n\s+exit 1/],
   ['workflow', 'E2E_GATE comes from the gate input', /E2E_GATE: \$\{\{ inputs\.gate && '1' \|\| '0' \}\}/],
@@ -293,6 +385,8 @@ test('wiring: each pin fails when its line is deleted', () => {
     ['workflow', /^.*node "\$VERDICT" loopback.*\n/m],
     ['workflow', /^.*node "\$VERDICT" cockpit.*\n/m],
     ['workflow', /^.*COCKPIT_STARTED_MS=\$\(\(.*\n/m],
+    ['workflow', / --engine-exit "\$engine_exit"/],
+    ['workflow', /^\s+engine_exit=\$\?\n/m],
     ['workflow', /^.*if \[ "\$E2E_GATE" = "1" \]; then\n/m],
     ['workflow', /^.*E2E_GATE: \$\{\{.*\n/m],
     ['workflow', /(workflow_call:[\s\S]*?\n      gate:\n(?:\s+[a-z].*\n)*?\s+default: )true/],

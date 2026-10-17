@@ -347,7 +347,8 @@ jobs:
             apps/desktop/src-tauri/target/debug/desktop --test-case="$COCKPIT_SELECTOR"
           engine_exit=$?
           set -e
-          # The engine's exit code does not carry the verdicts; run.jsonl does.
+          # run.jsonl carries the verdicts; the engine exit is scored too (a
+          # crash/kill after the verdicts were written shows only there).
           touch "$CONSENT_STOP" 2>/dev/null || true
           kill "$CONSENT_PID" 2>/dev/null || true
           if [ -s "$CONSENT_LOG" ]; then
@@ -373,9 +374,11 @@ jobs:
           fi
           # Verdict: fresh run dir (not a previous run's), every started
           # scenario reached a verdict, every non-pass is quarantined, and the
-          # engine finished (cleanup verified + conclusion written).
+          # engine finished (cleanup verified + a complete, uncancelled
+          # conclusion with one verdict per listed scenario), and the engine
+          # exit is 0 or explained by a quarantined failure.
           node "$VERDICT" cockpit --run-dir "${RUN_DIR:-}" --started-at-ms "$COCKPIT_STARTED_MS" \
-            --selector "$COCKPIT_SELECTOR" --quarantine "$E2E_QUARANTINE_COCKPIT"
+            --selector "$COCKPIT_SELECTOR" --engine-exit "$engine_exit" --quarantine "$E2E_QUARANTINE_COCKPIT"
 
       # The two tiers below are independent: a Cockpit failure must not hide
       # the loopback suite's verdict (or vice versa). The job still fails.
