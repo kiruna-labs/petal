@@ -17,8 +17,8 @@ use crate::screen_audio::{
 use crate::share_priority::SharePriority;
 use crate::time_util::now_us;
 use crate::transport::publisher::{
-    CaptureResolution, PostWakeEncoderFallbackRecovery, RoomConnection, ShareQuality,
-    SharedSourceKind,
+    CaptureResolution, PostWakeEncoderFallbackRecovery, RoomConnection, RoomConnectionError,
+    ShareQuality, SharedSourceKind,
 };
 use crate::video_color::VideoColorProfile;
 use screencapturekit::stream::content_filter::SCContentFilter;
@@ -228,6 +228,99 @@ where
     (media_result, outcome, metadata_elapsed)
 }
 
+/// #339: how long a share start waits for a reconnect in progress to settle
+/// before its single publish retry, and how often it samples room state.
+const SHARE_PUBLISH_RECONNECT_SETTLE: Duration = Duration::from_secs(10);
+const SHARE_PUBLISH_RECONNECT_POLL: Duration = Duration::from_millis(100);
+
+/// Only an engine failure (signal/connection/publication timeout) can be the
+/// reconnect's fault; a bad config or a rejected request is not retried.
+fn is_reconnect_transient_publish_error(error: &RoomConnectionError) -> bool {
+    matches!(
+        error,
+        RoomConnectionError::Connect(livekit::RoomError::Engine(_))
+    )
+}
+
+/// Poll until the room is `Connected` (true) or `Disconnected`/deadline (false).
+async fn wait_for_room_connected(
+    connection_state: &impl Fn() -> livekit::ConnectionState,
+    settle: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + settle;
+    loop {
+        match connection_state() {
+            livekit::ConnectionState::Connected => return true,
+            livekit::ConnectionState::Disconnected => return false,
+            livekit::ConnectionState::Reconnecting => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(SHARE_PUBLISH_RECONNECT_POLL).await;
+    }
+}
+
+/// #339 (PETAL-DESKTOP-2W/-2X): a publish whose request was lost to a signal
+/// drop fails with an engine error while the room resumes, though a second
+/// publish a moment later succeeds. If the room was seen `Reconnecting` during
+/// the attempt (or still is), wait for it to settle and retry ONCE; any other
+/// failure, or one that still fails, is returned unchanged.
+async fn publish_with_reconnect_retry<T, Publish, PublishFut>(
+    window_id: u32,
+    mut publish: Publish,
+    connection_state: impl Fn() -> livekit::ConnectionState,
+    settle: Duration,
+) -> Result<T, RoomConnectionError>
+where
+    Publish: FnMut() -> PublishFut,
+    PublishFut: Future<Output = Result<T, RoomConnectionError>>,
+{
+    let mut saw_reconnecting = false;
+    let first = {
+        let attempt = publish();
+        tokio::pin!(attempt);
+        loop {
+            if connection_state() == livekit::ConnectionState::Reconnecting {
+                saw_reconnecting = true;
+            }
+            tokio::select! {
+                result = &mut attempt => break result,
+                _ = tokio::time::sleep(SHARE_PUBLISH_RECONNECT_POLL) => {}
+            }
+        }
+    };
+    let error = match first {
+        Ok(published) => return Ok(published),
+        Err(error) => error,
+    };
+    let reconnecting_now = connection_state() == livekit::ConnectionState::Reconnecting;
+    if !is_reconnect_transient_publish_error(&error) || !(saw_reconnecting || reconnecting_now) {
+        return Err(error);
+    }
+    log::warn!(
+        "session: start_share(window {window_id}) publish failed while the room was reconnecting ({error}); waiting up to {}ms for the reconnect to settle, then retrying once (#339)",
+        settle.as_millis()
+    );
+    if !wait_for_room_connected(&connection_state, settle).await {
+        log::warn!(
+            "session: start_share(window {window_id}) room did not reconnect within {}ms; not retrying the publish (#339)",
+            settle.as_millis()
+        );
+        return Err(error);
+    }
+    let retried = publish().await;
+    match &retried {
+        Ok(_) => log::warn!(
+            "session: start_share(window {window_id}) publish retry after reconnect succeeded (#339)"
+        ),
+        Err(retry_error) => log::warn!(
+            "session: start_share(window {window_id}) publish retry after reconnect failed too: {retry_error} (#339)"
+        ),
+    }
+    retried
+}
+
 /// Run the network teardown only after the local capture-stopped boundary has
 /// updated its visible state. Keeping this small sequencing seam shared by the
 /// real stop path and the test prevents a slow or failed unpublish from
@@ -292,6 +385,49 @@ fn record_pump_recovery_failure(window_id: u32, now_us: u64) -> u32 {
     entry.0 = now_us;
     entry.1 += 1;
     entry.1
+}
+
+/// Failures in the window's current burst, WITHOUT recording one (0 once the
+/// burst has gone quiet for longer than `PUMP_RECOVERY_FAILURE_WINDOW_US`).
+fn pump_recovery_burst_len(window_id: u32, now_us: u64) -> u32 {
+    pump_recovery_failures()
+        .lock_unpoisoned()
+        .get(&window_id)
+        .filter(|(last_us, _)| now_us.saturating_sub(*last_us) <= PUMP_RECOVERY_FAILURE_WINDOW_US)
+        .map_or(0, |(_, count)| *count)
+}
+
+/// Sentry PETAL-DESKTOP-31: a raw stream that re-wedges after every restart
+/// stalls again every ~90s (`RAW_CAPTURE_STALL_HOLD_GRACE_US`), inside the
+/// breaker window, so the 4th restart opened the circuit and stopped a share
+/// that snapshot pulls were still delivering. Once the next restart would
+/// open the circuit, stay on pulls instead; the burst expiring re-arms it.
+fn hold_pull_carried_share_at_breaker(window_id: u32, now_us: u64, pulls_fresh: bool) -> bool {
+    pulls_fresh
+        && pump_failure_recovery_decision(
+            pump_recovery_burst_len(window_id, now_us).saturating_add(1),
+        ) == PumpFailureRecoveryDecision::CircuitOpen
+}
+
+/// One error-level event per breaker-hold episode (#337 review): the hold
+/// replaces the circuit-open error, so without this a re-wedging stream
+/// would reach Sentry not at all. An episode ends when the raw stream
+/// recovers (or the share's monitor exits, dropping this state).
+#[derive(Debug, Default)]
+struct BreakerHoldEpisode {
+    reported: bool,
+}
+
+impl BreakerHoldEpisode {
+    /// The hold engaged this tick; `true` exactly once per episode.
+    fn on_hold(&mut self) -> bool {
+        !std::mem::replace(&mut self.reported, true)
+    }
+
+    /// The raw stream is delivering again.
+    fn on_raw_recovered(&mut self) {
+        self.reported = false;
+    }
 }
 
 fn clear_pump_recovery_failures(window_id: u32) {
@@ -2216,6 +2352,81 @@ struct SourceWindowInfo {
     raw_title: Option<String>,
 }
 
+/// How a failed capture start is reported. Only `Anomalous` reaches Sentry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureStartFailureKind {
+    /// The window no longer exists anywhere: closed between pick and start,
+    /// or mid-share before an in-place restart (PETAL-DESKTOP-13/-12/-3C).
+    SourceClosed,
+    /// The window's app opted it out of capture (`NSWindow.sharingType =
+    /// .none`): an app's choice, not a Petal failure (PETAL-DESKTOP-3C/-3D).
+    SourceExcludedByApp,
+    Anomalous,
+}
+
+fn classify_capture_start_failure(
+    error: &crate::capture::CaptureError,
+    existence: &dyn WindowExistence,
+) -> CaptureStartFailureKind {
+    match error {
+        crate::capture::CaptureError::WindowNotFound(id)
+            if !crate::window_source::is_display_source_id(*id)
+                && !existence.window_exists(*id) =>
+        {
+            CaptureStartFailureKind::SourceClosed
+        }
+        crate::capture::CaptureError::WindowCaptureExcluded(_) => {
+            CaptureStartFailureKind::SourceExcludedByApp
+        }
+        _ => CaptureStartFailureKind::Anomalous,
+    }
+}
+
+/// The single reporter for capture-start failures; callers that re-log a
+/// not-found error downstream use `is_source_not_found` to stay at warn.
+fn log_capture_start_failure(
+    reason: &str,
+    window_id: u32,
+    error: &crate::capture::CaptureError,
+    existence: &dyn WindowExistence,
+) {
+    match classify_capture_start_failure(error, existence) {
+        CaptureStartFailureKind::SourceClosed => log::warn!(
+            "session: {reason}(window {window_id}) failed -- WindowCapture::start error: {error} (the window no longer exists -- closed by its app or the user)"
+        ),
+        CaptureStartFailureKind::SourceExcludedByApp => log::warn!(
+            "session: {reason}(window {window_id}) failed -- WindowCapture::start error: {error} ({})",
+            crate::platform::cg::capture_facts_for_window_id(window_id).unwrap_or_default()
+        ),
+        CaptureStartFailureKind::Anomalous => {
+            // A window CoreGraphics still has but ScreenCaptureKit does not
+            // list is the interesting case: record why (PETAL-DESKTOP-3C/-3D).
+            let facts = match error {
+                crate::capture::CaptureError::WindowNotFound(id) => {
+                    crate::platform::cg::capture_facts_for_window_id(*id)
+                        .map(|facts| format!(" (window still exists: {facts})"))
+                        .unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            log::error!(
+                "session: {reason}(window {window_id}) failed -- WindowCapture::start error: {error}{facts}"
+            );
+        }
+    }
+}
+
+/// Whether a share error is the not-found (or excluded-by-its-app) outcome
+/// `log_capture_start_failure` already reported.
+pub(crate) fn is_source_not_found(error: &ShareSessionError) -> bool {
+    matches!(
+        error,
+        ShareSessionError::WindowNotFound(_)
+            | ShareSessionError::DisplayNotFound(_)
+            | ShareSessionError::WindowCaptureExcluded(_)
+    )
+}
+
 /// #712 Fable follow-up (non-blocking): `window_id` here can be a TAGGED
 /// display source id (`DISPLAY_SOURCE_MARKER | CGDirectDisplayID`), not just
 /// a raw `CGWindowID` -- normally `crate::window_source::list()` below
@@ -2856,6 +3067,15 @@ impl SessionState {
         })
     }
 
+    /// #334: a Petal View region share (capture excludes Petal's own windows).
+    pub(crate) fn is_display_region_share(&self, window_id: u32) -> bool {
+        let guard = self.inner.lock_unpoisoned();
+        guard
+            .shares
+            .get(&window_id)
+            .is_some_and(|share| share.source_kind == SharedSourceKind::DisplayRegion)
+    }
+
     fn active_share_restart_snapshot(
         &self,
         window_id: u32,
@@ -3410,6 +3630,16 @@ fn coalesce_capture_error_events(
 enum CaptureFailureAction {
     RestartInPlace { message: String },
     StopShare { message: String },
+    /// The user ended the capture from macOS's own screen-sharing menu
+    /// (`SCStreamErrorCode::UserStopped`, -3817): a deliberate stop, not a
+    /// failure -- no error toast, no Sentry error (PETAL-DESKTOP-32/-2S).
+    UserStopped { message: String },
+}
+
+/// `SCStreamErrorCode::UserStopped`'s Display text, as it reaches
+/// `on_error` (pinned against the vendored crate by a test).
+fn is_user_stopped_sck_error(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("user stopped the stream")
 }
 
 /// ScreenCaptureKit's lid-close / display-sleep signature (see #734
@@ -3425,6 +3655,13 @@ fn is_sleep_style_sck_error(error: &str) -> bool {
 }
 
 fn capture_failure_action(error: String, sleep_correlated: bool) -> CaptureFailureAction {
+    // Before the sleep check: restarting a stream the user just stopped
+    // would silently re-share against their explicit action.
+    if is_user_stopped_sck_error(&error) {
+        return CaptureFailureAction::UserStopped {
+            message: format!("capture stopped from the macOS screen-sharing menu: {error}"),
+        };
+    }
     if error == crate::capture::CAPTURE_LAYOUT_INVALID
         || sleep_correlated
         || is_sleep_style_sck_error(&error)
@@ -4085,9 +4322,7 @@ async fn start_capture_for_share(
                 ),
             }
             .map_err(|e| {
-                log::error!(
-                    "session: {reason}(window {window_id}) failed -- WindowCapture::start error: {e}"
-                );
+                log_capture_start_failure(reason, window_id, &e, &CgWindowExistence);
                 e
             })?;
             started_without_frame = true;
@@ -4731,11 +4966,18 @@ async fn start_share_with_capture_source(
         SharePublishOrigin::Ordinary => {
             publish_media_while_metadata_runs(
                 metadata_task,
-                room_connection.publish_window_at(
-                    width,
-                    height,
-                    ShareQuality::Full,
-                    Some(window_id),
+                publish_with_reconnect_retry(
+                    window_id,
+                    || {
+                        room_connection.publish_window_at(
+                            width,
+                            height,
+                            ShareQuality::Full,
+                            Some(window_id),
+                        )
+                    },
+                    || room_connection.room().connection_state(),
+                    SHARE_PUBLISH_RECONNECT_SETTLE,
                 ),
             )
             .await
@@ -5897,6 +6139,7 @@ fn spawn_share_monitor(
         // and this, so a window that comes back after minutes hidden gets a
         // full silence window to resume before it is called stalled.
         let mut off_screen_seen_us: u64 = 0;
+        let mut breaker_hold = BreakerHoldEpisode::default();
         let mut layout_reconfigure_deadline: Option<(tokio::time::Instant, (u32, u32))> = None;
         // Debounced ROI reconfiguration: events stash the newest target here
         // and the timed apply branch below commits it. A resize storm
@@ -5917,11 +6160,14 @@ fn spawn_share_monitor(
                             deferred_layout_target = Some((width, height));
                         }
                         CoalescedCaptureEvent::Failure(error) => {
-                            if let Some(diagnostics) = diagnostics.as_ref() {
-                                diagnostics.mark_capture_wedged(window_id);
-                            }
                             let sleep_correlated = sleep_correlated_for_capture_failure();
-                            match capture_failure_action(error, sleep_correlated) {
+                            let action = capture_failure_action(error, sleep_correlated);
+                            if !matches!(action, CaptureFailureAction::UserStopped { .. }) {
+                                if let Some(diagnostics) = diagnostics.as_ref() {
+                                    diagnostics.mark_capture_wedged(window_id);
+                                }
+                            }
+                            match action {
                                 CaptureFailureAction::RestartInPlace { message } => {
                                     // Only emit the layout-invalid diagnostic for
                                     // the original layout-invalid path; sleep
@@ -5949,6 +6195,18 @@ fn spawn_share_monitor(
                                 CaptureFailureAction::StopShare { message } => {
                                     log::error!("session: window {window_id} {message}");
                                     spawn_capture_failure_cleanup(app.clone(), window_id, message);
+                                    break;
+                                }
+                                CaptureFailureAction::UserStopped { message } => {
+                                    log::info!(
+                                        "session: window {window_id} {message} -- ending the share as a user stop"
+                                    );
+                                    spawn_capture_stop_cleanup(
+                                        app.clone(),
+                                        window_id,
+                                        message,
+                                        CaptureStopCause::UserStoppedFromSystemMenu,
+                                    );
                                     break;
                                 }
                             }
@@ -6138,7 +6396,7 @@ fn spawn_share_monitor(
                         last.max(off_screen_seen_us),
                         source_appears_idle(window_id),
                     ) {
-                        RawCaptureWatchdogDecision::Healthy => {}
+                        RawCaptureWatchdogDecision::Healthy => breaker_hold.on_raw_recovered(),
                         RawCaptureWatchdogDecision::IdleHealthy { silent_for_us } => {
                             // Source is idle/occluded (not drawing), stream is
                             // healthy -- do NOT restart (that just republishes
@@ -6186,10 +6444,9 @@ fn spawn_share_monitor(
                             // RAW_CAPTURE_STALL_HOLD_GRACE_US's doc comment for
                             // why an unbounded hold here was a one-way ratchet
                             // that left a wedged raw stream degrading forever.
-                            if raw_capture_stall_hold(
-                                silent_for_us,
-                                snapshot_pull_fresh_within(window_id, now, 10_000_000),
-                            ) {
+                            let pulls_fresh =
+                                snapshot_pull_fresh_within(window_id, now, 10_000_000);
+                            if raw_capture_stall_hold(silent_for_us, pulls_fresh) {
                                 if now.saturating_sub(last_silent_log_us)
                                     > RAW_CAPTURE_SILENCE_RESTART_THRESHOLD_US
                                 {
@@ -6197,6 +6454,34 @@ fn spawn_share_monitor(
                                     log::info!(
                                         "session: window {window_id} raw capture silent {:.1}s but snapshot pulls are delivering fresh content -- no restart",
                                         silent_for_us as f64 / 1_000_000.0
+                                    );
+                                }
+                                continue;
+                            }
+                            // PETAL-DESKTOP-31: restarts are not curing this
+                            // stream and one more would stop the share --
+                            // keep it on snapshot pulls instead.
+                            if hold_pull_carried_share_at_breaker(window_id, now, pulls_fresh) {
+                                if breaker_hold.on_hold() {
+                                    if let Some(diagnostics) = diagnostics.as_ref() {
+                                        diagnostics.mark_capture_wedged(window_id);
+                                    }
+                                    log::error!(
+                                        "session: window {window_id} capture held on snapshot pulls after {} restart(s) within {}s -- raw ScreenCaptureKit stream keeps wedging (silent {:.1}s); share stays up at pull-only frame rate",
+                                        pump_recovery_burst_len(window_id, now),
+                                        PUMP_RECOVERY_FAILURE_WINDOW_US / 1_000_000,
+                                        silent_for_us as f64 / 1_000_000.0
+                                    );
+                                    last_silent_log_us = now;
+                                } else if now.saturating_sub(last_silent_log_us)
+                                    > RAW_CAPTURE_SILENCE_RESTART_THRESHOLD_US
+                                {
+                                    last_silent_log_us = now;
+                                    log::warn!(
+                                        "session: window {window_id} raw capture silent {:.1}s after {} restart(s) within {}s; snapshot pulls are delivering, so staying pull-only instead of opening the recovery circuit and stopping the share",
+                                        silent_for_us as f64 / 1_000_000.0,
+                                        pump_recovery_burst_len(window_id, now),
+                                        PUMP_RECOVERY_FAILURE_WINDOW_US / 1_000_000
                                     );
                                 }
                                 continue;
@@ -6209,7 +6494,10 @@ fn spawn_share_monitor(
                             if let Some(diagnostics) = diagnostics.as_ref() {
                                 diagnostics.mark_capture_wedged(window_id);
                             }
-                            log::error!("session: window {window_id} {message}");
+                            // warn, not error: a restart-in-place is a recovered
+                            // quality event (logging.rs policy); a restart that
+                            // fails or trips the breaker still logs at error.
+                            log::warn!("session: window {window_id} {message}");
                             published
                                 .lock_unpoisoned()
                                 .disable_native_zero_copy("raw capture watchdog fired; possible IOSurface pool starvation");
@@ -6466,9 +6754,17 @@ fn spawn_pump_failure_recovery(
         {
             Ok(capture) => capture,
             Err(error) => {
-                log::error!(
-                    "session: window {window_id} in-place capture restart after pump failure failed: {error}"
-                );
+                // The capture-start site already reported this at the right
+                // level (a closed window is expected, PETAL-DESKTOP-13/-12).
+                if is_source_not_found(&error) {
+                    log::warn!(
+                        "session: window {window_id} in-place capture restart after pump failure failed: {error}"
+                    );
+                } else {
+                    log::error!(
+                        "session: window {window_id} in-place capture restart after pump failure failed: {error}"
+                    );
+                }
                 crate::analytics::capture_restarted(crate::analytics::RestartOutcome::Failed);
                 if let Err(stop_error) = stop_share_explained(
                     &app,
@@ -6682,23 +6978,55 @@ fn spawn_pump_failure_recovery(
 }
 
 fn spawn_capture_failure_cleanup(app: tauri::AppHandle, window_id: u32, message: String) {
+    spawn_capture_stop_cleanup(app, window_id, message, CaptureStopCause::Failure);
+}
+
+/// Why a live capture ended on its own (not via the pill/picker toggle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureStopCause {
+    Failure,
+    UserStoppedFromSystemMenu,
+}
+
+/// How a capture-ended teardown is reported: journal level, whether the
+/// user sees a `share-error`, and which `share_stopped` reason it counts as.
+fn capture_stop_reporting(cause: CaptureStopCause) -> (&'static str, bool, StopShareAnalytics) {
+    match cause {
+        CaptureStopCause::Failure => ("error", true, StopShareAnalytics::CaptureFailed),
+        CaptureStopCause::UserStoppedFromSystemMenu => ("info", false, StopShareAnalytics::User),
+    }
+}
+
+fn spawn_capture_stop_cleanup(
+    app: tauri::AppHandle,
+    window_id: u32,
+    message: String,
+    cause: CaptureStopCause,
+) {
     tokio::spawn(async move {
         use tauri::Manager;
 
+        let (journal_level, emit_error, analytics) = capture_stop_reporting(cause);
         crate::hover_tab::clear_share_state_for_window(&app, window_id);
-        crate::remote_control::revoke_window(&app, window_id, "capture stalled");
+        let revoke_reason = match cause {
+            CaptureStopCause::Failure => "capture stalled",
+            CaptureStopCause::UserStoppedFromSystemMenu => "share stopped",
+        };
+        crate::remote_control::revoke_window(&app, window_id, revoke_reason);
 
         if let Some(diagnostics) = app.try_state::<crate::diagnostics::DiagnosticsState>() {
             let diagnostics: crate::diagnostics::DiagnosticsState = diagnostics.inner().clone();
             diagnostics.journal_append(
                 &app,
-                "error",
+                journal_level,
                 format!("Shared window {window_id} stopped: {message}"),
             );
         }
 
-        let error = ShareSessionError::Capture(message);
-        crate::hover_tab::emit_share_error(&app, window_id, false, error.clone());
+        if emit_error {
+            let error = ShareSessionError::Capture(message);
+            crate::hover_tab::emit_share_error(&app, window_id, false, error);
+        }
 
         let Some(state) = app.try_state::<SessionState>() else {
             log::warn!(
@@ -6710,7 +7038,7 @@ fn spawn_capture_failure_cleanup(app: tauri::AppHandle, window_id: u32, message:
             &app,
             state.inner(),
             window_id,
-            StopShareAnalytics::CaptureFailed,
+            analytics,
         )
         .await
         {
@@ -8903,6 +9231,197 @@ async fn republish_window_for_resolution(
 
 #[cfg(test)]
 mod tests {
+    // -- #339: one publish retry when the room was reconnecting ------------
+
+    mod publish_reconnect_retry {
+        use super::super::{publish_with_reconnect_retry, RoomConnectionError};
+        use livekit::ConnectionState;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        const SETTLE: Duration = Duration::from_secs(10);
+
+        // The exact SDK failure from PETAL-DESKTOP-2X.
+        fn publication_timeout() -> RoomConnectionError {
+            RoomConnectionError::Connect(livekit::RoomError::Engine(
+                livekit::rtc_engine::EngineError::Internal(
+                    "track publication timed out, no response received from the server".into(),
+                ),
+            ))
+        }
+
+        /// Room state driven by the paused clock: each `(at, state)` entry
+        /// applies from `at` onward (the latest reached entry wins).
+        fn scripted_state(
+            timeline: Arc<Mutex<Vec<(Duration, ConnectionState)>>>,
+            start: tokio::time::Instant,
+        ) -> impl Fn() -> ConnectionState {
+            move || {
+                let elapsed = start.elapsed();
+                let timeline = timeline.lock().unwrap();
+                let mut state = timeline[0].1;
+                for (at, next) in timeline.iter() {
+                    if elapsed >= *at {
+                        state = *next;
+                    }
+                }
+                state
+            }
+        }
+
+        /// Publishes that fail with `first` after 5s, then return `retry`.
+        fn scripted_publish(
+            attempts: Arc<AtomicUsize>,
+            first: fn() -> RoomConnectionError,
+            retry: Result<&'static str, fn() -> RoomConnectionError>,
+        ) -> impl FnMut() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<&'static str, RoomConnectionError>>>,
+        > {
+            move || {
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if n == 0 {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        Err(first())
+                    } else {
+                        retry.map_err(|make| make())
+                    }
+                })
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_once_after_the_room_resumes_mid_publish() {
+            // 2X timeline: resume starts during the publish, the publish times
+            // out while still reconnecting, the room recovers 1s later.
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![
+                (Duration::ZERO, ConnectionState::Connected),
+                (Duration::from_secs(2), ConnectionState::Reconnecting),
+                (Duration::from_secs(6), ConnectionState::Connected),
+            ]));
+            let started = tokio::time::Instant::now();
+            let result = publish_with_reconnect_retry(
+                7,
+                scripted_publish(attempts.clone(), publication_timeout, Ok("published")),
+                scripted_state(timeline, started),
+                SETTLE,
+            )
+            .await;
+            assert_eq!(result.unwrap(), "published");
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            // The retry waited for Connected, not a fixed sleep or the deadline.
+            assert!(started.elapsed() >= Duration::from_secs(6));
+            assert!(started.elapsed() < Duration::from_secs(7));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn retries_when_the_room_already_recovered_before_the_failure_landed() {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![
+                (Duration::ZERO, ConnectionState::Connected),
+                (Duration::from_secs(1), ConnectionState::Reconnecting),
+                (Duration::from_secs(3), ConnectionState::Connected),
+            ]));
+            let result = publish_with_reconnect_retry(
+                7,
+                scripted_publish(attempts.clone(), publication_timeout, Ok("published")),
+                scripted_state(timeline, tokio::time::Instant::now()),
+                SETTLE,
+            )
+            .await;
+            assert_eq!(result.unwrap(), "published");
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn no_retry_when_the_room_never_reconnected() {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![(Duration::ZERO, ConnectionState::Connected)]));
+            let result = publish_with_reconnect_retry(
+                7,
+                scripted_publish(attempts.clone(), publication_timeout, Ok("published")),
+                scripted_state(timeline, tokio::time::Instant::now()),
+                SETTLE,
+            )
+            .await;
+            assert!(matches!(result, Err(RoomConnectionError::Connect(_))));
+            assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn no_retry_for_a_non_transient_failure_even_while_reconnecting() {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![
+                (Duration::ZERO, ConnectionState::Reconnecting),
+                (Duration::from_secs(6), ConnectionState::Connected),
+            ]));
+            fn invalid_config() -> RoomConnectionError {
+                RoomConnectionError::InvalidVideoConfig("odd size".into())
+            }
+            fn already_published() -> RoomConnectionError {
+                RoomConnectionError::Connect(livekit::RoomError::TrackAlreadyPublished)
+            }
+            for first in [invalid_config as fn() -> RoomConnectionError, already_published] {
+                attempts.store(0, Ordering::SeqCst);
+                let result = publish_with_reconnect_retry(
+                    7,
+                    scripted_publish(attempts.clone(), first, Ok("published")),
+                    scripted_state(timeline.clone(), tokio::time::Instant::now()),
+                    SETTLE,
+                )
+                .await;
+                assert!(result.is_err());
+                assert_eq!(attempts.load(Ordering::SeqCst), 1);
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn no_retry_when_the_reconnect_does_not_settle_or_the_room_disconnects() {
+            for terminal in [ConnectionState::Reconnecting, ConnectionState::Disconnected] {
+                let attempts = Arc::new(AtomicUsize::new(0));
+                let timeline = Arc::new(Mutex::new(vec![
+                    (Duration::ZERO, ConnectionState::Reconnecting),
+                    (Duration::from_secs(6), terminal),
+                ]));
+                let started = tokio::time::Instant::now();
+                let result = publish_with_reconnect_retry(
+                    7,
+                    scripted_publish(attempts.clone(), publication_timeout, Ok("published")),
+                    scripted_state(timeline, started),
+                    SETTLE,
+                )
+                .await;
+                assert!(result.is_err(), "{terminal:?}");
+                assert_eq!(attempts.load(Ordering::SeqCst), 1, "{terminal:?}");
+                // Bounded: never longer than the attempt plus the settle budget.
+                assert!(started.elapsed() <= Duration::from_secs(5) + SETTLE + Duration::from_millis(200));
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_retry_that_fails_too_surfaces_its_error_and_stops() {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let timeline = Arc::new(Mutex::new(vec![
+                (Duration::ZERO, ConnectionState::Reconnecting),
+                (Duration::from_secs(6), ConnectionState::Connected),
+            ]));
+            let result = publish_with_reconnect_retry(
+                7,
+                scripted_publish(attempts.clone(), publication_timeout, Err(publication_timeout)),
+                scripted_state(timeline, tokio::time::Instant::now()),
+                SETTLE,
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(RoomConnectionError::Connect(livekit::RoomError::Engine(_)))
+            ));
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        }
+    }
+
     /// #171: the ONE screen status that must never reach the abort-and-recover
     /// path is OffScreen. Every other status (including NotShared, which the
     /// recovery path already rejects as stale) recovers as before.
@@ -10970,6 +11489,69 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         }
     }
 
+    /// Sentry PETAL-DESKTOP-13/-12: a window closed mid-share fails its
+    /// in-place restart with `WindowNotFound` -- expected, not an error.
+    /// Only a window CoreGraphics still has (PETAL-DESKTOP-3C/-3D) or a
+    /// display id on the window path (the PETAL-DESKTOP-1M bug class) is.
+    #[test]
+    fn a_closed_source_is_not_a_capture_start_anomaly_petal_desktop_13() {
+        use crate::capture::CaptureError;
+        let existence = FakeExistence::new(&[9635]);
+        assert_eq!(
+            classify_capture_start_failure(&CaptureError::WindowNotFound(23189), &existence),
+            CaptureStartFailureKind::SourceClosed
+        );
+        assert_eq!(
+            classify_capture_start_failure(&CaptureError::WindowNotFound(9635), &existence),
+            CaptureStartFailureKind::Anomalous,
+            "on screen per CoreGraphics but missing from ScreenCaptureKit"
+        );
+        let display = crate::window_source::display_source_id(4);
+        assert_eq!(
+            classify_capture_start_failure(&CaptureError::WindowNotFound(display), &existence),
+            CaptureStartFailureKind::Anomalous,
+            "a display id on the window path is a routing bug, never 'closed'"
+        );
+        assert!(!existence.asked().contains(&display), "no CG query for a display id");
+        for other in [
+            CaptureError::PermissionDenied,
+            CaptureError::DisplayNotFound(display),
+            CaptureError::ScreenCaptureKit("boom".to_string()),
+        ] {
+            assert_eq!(
+                classify_capture_start_failure(&other, &existence),
+                CaptureStartFailureKind::Anomalous
+            );
+        }
+        // A visible window whose app opts out of capture is the app's choice.
+        assert_eq!(
+            classify_capture_start_failure(&CaptureError::WindowCaptureExcluded(9635), &existence),
+            CaptureStartFailureKind::SourceExcludedByApp
+        );
+        // Downstream re-logs of a not-found defer to the reporter above.
+        assert!(is_source_not_found(&ShareSessionError::WindowCaptureExcluded(1)));
+        assert!(is_source_not_found(&ShareSessionError::WindowNotFound(1)));
+        assert!(is_source_not_found(&ShareSessionError::DisplayNotFound(1)));
+        assert!(!is_source_not_found(&ShareSessionError::PermissionDenied));
+    }
+
+    /// PETAL-DESKTOP-3C/-3D: the hover tab's `share-error` event carries this
+    /// kind to `shareErrors.ts`, which says the app blocks sharing instead of
+    /// "no longer available" for a window the user can still see.
+    #[test]
+    fn an_app_excluded_window_reaches_the_frontend_as_its_own_kind() {
+        let error =
+            ShareSessionError::from(crate::capture::CaptureError::WindowCaptureExcluded(9635));
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            serde_json::json!({ "kind": "windowCaptureExcluded", "message": 9635 })
+        );
+        assert_eq!(
+            serde_json::to_value(ShareSessionError::WindowNotFound(9635)).unwrap()["kind"],
+            "windowNotFound"
+        );
+    }
+
     /// #742: this replaces a test that asserted on `classify_shared_window_
     /// screen_status`, a `#[cfg(test)]` DUPLICATE of the production rules --
     /// it read green while being unable to fail when production regressed.
@@ -11672,6 +12254,36 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         );
         assert!(is_sleep_style_sck_error(sck_sleep));
         assert!(!is_sleep_style_sck_error("stream stopped by the system"));
+    }
+
+    /// Sentry PETAL-DESKTOP-32 / -2S: stopping the capture from macOS's own
+    /// screen-sharing menu reached the user as "capture stalled" (error
+    /// toast, Sentry error, CaptureFailed). It is a deliberate user stop --
+    /// even when sleep-correlated, it must never be restarted in place.
+    #[test]
+    fn a_capture_stopped_from_the_macos_menu_is_a_user_stop_petal_desktop_32() {
+        // The exact text the vendored crate formats for -3817.
+        let code = screencapturekit::utils::error::SCStreamErrorCode::UserStopped.to_string();
+        let sck = format!("SCStream error ({code}): The user stopped the stream");
+        assert!(is_user_stopped_sck_error(&sck));
+        for sleep_correlated in [false, true] {
+            assert_eq!(
+                capture_failure_action(sck.clone(), sleep_correlated),
+                CaptureFailureAction::UserStopped {
+                    message: format!("capture stopped from the macOS screen-sharing menu: {sck}")
+                }
+            );
+        }
+        assert_eq!(
+            capture_stop_reporting(CaptureStopCause::UserStoppedFromSystemMenu),
+            ("info", false, StopShareAnalytics::User)
+        );
+        // A genuine failure keeps its loud reporting.
+        assert_eq!(
+            capture_stop_reporting(CaptureStopCause::Failure),
+            ("error", true, StopShareAnalytics::CaptureFailed)
+        );
+        assert!(!is_user_stopped_sck_error("encoder hardware fault"));
     }
 
     #[test]
@@ -13579,6 +14191,70 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             "the idle backstop's cadence must reset the burst counter (#806)"
         );
         clear_pump_recovery_failures(WINDOW_ID);
+    }
+
+    /// Sentry PETAL-DESKTOP-31 (macOS 14.7.1, 0.9.30): a raw stream that
+    /// re-wedged within seconds of every restart was carried by snapshot
+    /// pulls at ~8fps, yet the pull-grace stall recurs every ~90s -- inside
+    /// the breaker window -- so the 4th restart stopped a working share.
+    /// Drives the REAL recorder + breaker the recovery path uses.
+    #[test]
+    fn a_pull_carried_share_is_held_instead_of_tripping_the_breaker_petal_desktop_31() {
+        const WINDOW_ID: u32 = 31_001;
+        clear_pump_recovery_failures(WINDOW_ID);
+        // The production cadence that tripped it does accumulate.
+        assert!(RAW_CAPTURE_STALL_HOLD_GRACE_US < PUMP_RECOVERY_FAILURE_WINDOW_US);
+
+        let t0 = 2_000_000_000u64;
+        let step = RAW_CAPTURE_STALL_HOLD_GRACE_US;
+        let mut at = t0;
+        for expected in 1..=MAX_PUMP_FAILURE_RECOVERY_RESTARTS as u32 {
+            assert!(
+                !hold_pull_carried_share_at_breaker(WINDOW_ID, at, true),
+                "restart {expected} still has breaker budget -- try it"
+            );
+            assert_eq!(
+                pump_failure_recovery_decision(record_pump_recovery_failure(WINDOW_ID, at)),
+                PumpFailureRecoveryDecision::Restart
+            );
+            assert_eq!(pump_recovery_burst_len(WINDOW_ID, at), expected);
+            at += step;
+        }
+
+        // The next restart would open the circuit: hold while pulls deliver...
+        assert!(hold_pull_carried_share_at_breaker(WINDOW_ID, at, true));
+        // ...and the hold must be exactly the case the breaker would stop.
+        assert_eq!(
+            pump_failure_recovery_decision(pump_recovery_burst_len(WINDOW_ID, at) + 1),
+            PumpFailureRecoveryDecision::CircuitOpen
+        );
+        // Without fresh pulls nothing is carrying the share: let it stop.
+        assert!(!hold_pull_carried_share_at_breaker(WINDOW_ID, at, false));
+
+        // Once the burst goes quiet, restarts are allowed again.
+        let last = t0 + step * (u64::from(MAX_PUMP_FAILURE_RECOVERY_RESTARTS) - 1);
+        let quiet = last + PUMP_RECOVERY_FAILURE_WINDOW_US + 1;
+        assert_eq!(pump_recovery_burst_len(WINDOW_ID, quiet), 0);
+        assert!(!hold_pull_carried_share_at_breaker(WINDOW_ID, quiet, true));
+        clear_pump_recovery_failures(WINDOW_ID);
+    }
+
+    /// #337 review: the hold replaced the circuit-open error, so each hold
+    /// episode must still produce exactly one error -- not zero (blind) and
+    /// not one per watchdog tick (storm).
+    #[test]
+    fn a_breaker_hold_reports_once_per_episode_petal_desktop_31() {
+        let mut episode = BreakerHoldEpisode::default();
+        assert!(episode.on_hold(), "the hold engaging is reported");
+        for _ in 0..100 {
+            assert!(!episode.on_hold(), "a continuing hold is not re-reported");
+        }
+        episode.on_raw_recovered();
+        episode.on_raw_recovered();
+        assert!(episode.on_hold(), "a new episode after recovery is reported");
+        assert!(!episode.on_hold());
+        // A new monitor (restart or new share) starts a fresh episode.
+        assert!(BreakerHoldEpisode::default().on_hold());
     }
 
     #[test]

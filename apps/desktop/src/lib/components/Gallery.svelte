@@ -95,6 +95,8 @@
     stateTitle?: string | null;
     stateDetail?: string | null;
     stateTone?: 'info' | 'warning';
+    /** Buttons under the state card (e.g. a failed join's Try again, #356). */
+    stateActions?: { label: string; onClick: () => void; primary?: boolean }[];
     /** Real routes pass true so the gallery IS the window (edge-to-edge, no
      * rounded floating card). Default false preserves the card look for the
      * /dev/* harnesses and MeetingChrome's framed usage. */
@@ -155,6 +157,7 @@
     stateTitle = null,
     stateDetail = null,
     stateTone = 'info',
+    stateActions = [],
     frameless = false,
     /** Optional in-meeting per-device menus (MeetingChrome owns the
      * popovers): the carets render only when provided, and hand the trigger
@@ -1057,6 +1060,18 @@
         <p class="gallery-state-title">{gridStateTitle}</p>
         {#if stateDetail}
           <p class="gallery-state-detail">{stateDetail}</p>
+        {/if}
+        {#if stateActions.length > 0}
+          <div class="gallery-state-actions">
+            {#each stateActions as action (action.label)}
+              <button
+                type="button"
+                class="gallery-state-action"
+                class:primary={action.primary}
+                onclick={action.onClick}>{action.label}</button
+              >
+            {/each}
+          </div>
         {/if}
       </div>
     {/if}
@@ -1973,6 +1988,29 @@
     margin-top: 6px;
     font: 500 var(--text-caption) var(--font-ui);
     color: var(--text-soft);
+  }
+
+  .gallery-state-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .gallery-state-action {
+    font: 600 var(--text-caption) var(--font-ui);
+    color: var(--text-strong);
+    background: var(--fill-bright);
+    border: none;
+    border-radius: var(--radius-pill);
+    padding: 6px 14px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .gallery-state-action.primary {
+    background: var(--fill-strong);
   }
 
   /* flex column (not block, #676): `.gallery-state` can render as a sibling

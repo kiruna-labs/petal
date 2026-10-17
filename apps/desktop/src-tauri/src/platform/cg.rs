@@ -27,7 +27,7 @@ mod macos {
     use core_graphics::window::{
         copy_window_info, kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds, kCGWindowIsOnscreen,
         kCGWindowLayer, kCGWindowListOptionAll, kCGWindowListOptionOnScreenOnly, kCGWindowName,
-        kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
+        kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID, kCGWindowSharingState,
     };
     use std::os::raw::c_void;
 
@@ -308,6 +308,36 @@ mod macos {
         with_window_dict(window_id, |_dict| ()).is_some()
     }
 
+    /// `kCGWindowSharingState` for a window that exists anywhere (`None` when
+    /// it does not; `Some(None)` when the key is absent). 0 is
+    /// `kCGWindowSharingNone`: the app opted the window out of capture.
+    pub fn sharing_state_for_window_id(window_id: u32) -> Option<Option<i64>> {
+        // SAFETY: see `frame_for_window_id`; a missing key reads as `None`.
+        with_window_dict(window_id, |dict| unsafe {
+            dict_i64(dict, kCGWindowSharingState as *const c_void)
+        })
+    }
+
+    /// Diagnostic facts for a window ScreenCaptureKit could not find even
+    /// though it still exists (Sentry PETAL-DESKTOP-3C/-3D): on-screen flag,
+    /// layer, `kCGWindowSharingState` (0 = the window opts out of capture)
+    /// and owning app. `None` when the window no longer exists.
+    pub fn capture_facts_for_window_id(window_id: u32) -> Option<String> {
+        // SAFETY: see `frame_for_window_id`; every read tolerates a missing key.
+        with_window_dict(window_id, |dict| unsafe {
+            let number = |key: CFStringRef| {
+                dict_i64(dict, key as *const c_void).map_or_else(|| "?".to_string(), |v| v.to_string())
+            };
+            format!(
+                "on_screen={} layer={} sharing_state={} owner={:?}",
+                dict_bool(dict, kCGWindowIsOnscreen as *const c_void).unwrap_or(false),
+                number(kCGWindowLayer),
+                number(kCGWindowSharingState),
+                dict_string(dict, kCGWindowOwnerName as *const c_void).unwrap_or_default(),
+            )
+        })
+    }
+
     /// All on-screen windows, in the front-to-back order
     /// `CGWindowListCopyWindowInfo` returns. Includes `name` / `owner_name`
     /// (two CFString reads per window). Only consumers that actually read those
@@ -446,10 +476,11 @@ mod macos {
 
 #[cfg(target_os = "macos")]
 pub use macos::{
-    all_windows_lean, cursor_position, escape_is_down, frame_for_window_id,
+    all_windows_lean, capture_facts_for_window_id, cursor_position, escape_is_down,
+    frame_for_window_id,
     frame_for_window_id_raw, left_mouse_button_is_down, name_for_window_id, occlusion_fraction,
     onscreen_stack, onscreen_windows, onscreen_windows_lean, owner_name_for_window_id,
-    owner_pid_for_window_id, window_exists, WindowEntry,
+    owner_pid_for_window_id, sharing_state_for_window_id, window_exists, WindowEntry,
 };
 
 #[cfg(not(target_os = "macos"))]

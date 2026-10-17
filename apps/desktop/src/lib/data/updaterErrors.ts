@@ -41,7 +41,7 @@ export function updateFailureCategory(raw: string): UpdateFailureCategory {
   // phrases are the stable contract with `mac_install_user_message`; the
   // path-bearing detail stays in petal.log, exactly as #105 requires.
   if (lower.includes('previous petal is safe')) return 'restore-previous';
-  if (lower.includes('read-only disk image') || lower.includes('different disks')) {
+  if (isRelocationRequiredUpdateFailure(raw) || lower.includes('different disks')) {
     return 'move-to-applications';
   }
   if (lower.includes('administrator password')) return 'needs-admin';
@@ -61,6 +61,22 @@ export function updateFailureCategory(raw: string): UpdateFailureCategory {
     return 'network';
   }
   return 'unknown';
+}
+
+/**
+ * The launch is on the disk image or another read-only location (#332). A
+ * handled user condition, not an install failure: `updater.rs` refuses it up
+ * front and the UI already says what to do. Phrases mirror its messages.
+ */
+export function isRelocationRequiredUpdateFailure(raw: string): boolean {
+  const lower = raw.toLowerCase();
+  return lower.includes('read-only disk image') || lower.includes('read-only location');
+}
+
+/** petal.log level for an updater failure. `error` becomes a Sentry event, so
+ *  a handled user condition logs `warn` with the same detail (#332). */
+export function updateFailureLogLevel(raw: string): 'warn' | 'error' {
+  return isRelocationRequiredUpdateFailure(raw) ? 'warn' : 'error';
 }
 
 export function friendlyUpdateErrorMessage(raw: string): string {

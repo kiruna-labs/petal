@@ -86,6 +86,8 @@ pub enum RefreshExit {
 /// - `on_failure(outcome, first_for_share)` is called for every non-`Url`
 ///   outcome (including terminal ones), with `first_for_share` true for
 ///   exactly the first such call in this run and false for every call after.
+///   Expected non-URL outcomes (`is_expected_non_url`, e.g. a new tab) keep
+///   their own first flag, so they never use up the real-failure one.
 /// - `cancel` is checked before every attempt (including the first) and
 ///   raced against both the inter-poll sleep and an in-flight `extract`
 ///   call, so cancellation is prompt even if `extract` is slow to resolve.
@@ -108,6 +110,7 @@ where
     // (title at the last successful extraction, when that success happened)
     let mut last_success: Option<(Option<String>, Instant)> = None;
     let mut first_failure = true;
+    let mut first_expected_non_url = true;
     let mut first_attempt = true;
 
     loop {
@@ -159,8 +162,12 @@ where
             continue;
         }
 
-        on_failure(&outcome, first_failure);
-        first_failure = false;
+        let first_flag = if outcome.is_expected_non_url() {
+            &mut first_expected_non_url
+        } else {
+            &mut first_failure
+        };
+        on_failure(&outcome, std::mem::replace(first_flag, false));
         if outcome.is_terminal() {
             return RefreshExit::Terminal;
         }
@@ -500,10 +507,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn first_failure_flag_is_true_exactly_once() {
+        // PETAL-DESKTOP-2M: a non-web tab (`Empty`) keeps its own first
+        // flag, so a share that starts on a new tab still reports its
+        // first REAL failure (here the Timeout) as first_for_share.
         let extractor = std::sync::Arc::new(ScriptedExtractor::new(vec![
             UrlExtraction::Empty,
             UrlExtraction::Timeout,
             UrlExtraction::Empty,
+            UrlExtraction::Timeout,
         ]));
         let failure_flags = std::sync::Arc::new(Mutex::new(Vec::new()));
 
@@ -522,22 +533,32 @@ mod tests {
                     || None,
                     |_url| async { true },
                     task_cancel,
-                    move |_outcome, first| failure_flags.lock().unwrap().push(first),
+                    move |outcome, first| {
+                        failure_flags.lock().unwrap().push((outcome.cause(), first))
+                    },
                 )
                 .await
             })
         };
 
         tokio::task::yield_now().await;
-        tokio::time::advance(std::time::Duration::from_secs(4)).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(std::time::Duration::from_secs(4)).await;
-        tokio::task::yield_now().await;
+        for _ in 0..3 {
+            tokio::time::advance(std::time::Duration::from_secs(4)).await;
+            tokio::task::yield_now().await;
+        }
         cancel.cancel();
         handle.await.unwrap();
 
         let flags = failure_flags.lock().unwrap().clone();
-        assert_eq!(flags, vec![true, false, false]);
+        assert_eq!(
+            flags,
+            vec![
+                ("no-match", true),
+                ("timeout", true),
+                ("no-match", false),
+                ("timeout", false),
+            ]
+        );
     }
 
     #[tokio::test(start_paused = true)]

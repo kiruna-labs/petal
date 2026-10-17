@@ -2741,12 +2741,18 @@ fn active_display_share(state: &SessionState, window_id: u32) -> bool {
     state.is_display_share(window_id)
 }
 
+/// Positive pid sentinel for a display share: a display has no owning process.
+/// launchd is pid 1 and owns no windows, so it never collides with a real
+/// shared-window owner. macOS `input` keys its display route off this value --
+/// it must never reach AX/SkyLight/`CGEventPostToPid` as a process (#334).
+pub(crate) const DISPLAY_REPLAY_TARGET_PID: i32 = 1;
+
 fn resolved_replay_target_pid(is_display_share: bool, window_pid: Option<i32>) -> Option<i32> {
     if is_display_share {
         // A display is a monitor, not an HWND-owning process. The replay
         // pipeline only needs a positive sentinel to pass the shared resolve
         // stage; display replay never uses it as a process identity.
-        Some(1)
+        Some(DISPLAY_REPLAY_TARGET_PID)
     } else {
         window_pid.filter(|pid| *pid > 0)
     }
@@ -4143,8 +4149,16 @@ fn resolve_one_task(app: &AppHandle, task: ResolveTask) {
     // Displays have no owning process. Resolve their kind from the active
     // sharer-side share registry, not from the input envelope: legacy-shaped
     // Move/Down/Up pointer messages intentionally omit v2 target metadata.
+    let is_display_share = active_display_share(state, message.window_id);
+    #[cfg(target_os = "macos")]
+    if is_display_share {
+        input::note_display_target_kind(
+            message.window_id,
+            state.is_display_region_share(message.window_id),
+        );
+    }
     let resolved_target_pid = resolved_replay_target_pid(
-        active_display_share(state, message.window_id),
+        is_display_share,
         target_pid_for_window(state, message.window_id),
     );
     let Some(target_pid) = resolved_target_pid else {
@@ -6431,6 +6445,77 @@ pub(crate) mod input {
         std::mem::take(&mut *RELEASE_FAILURE_REPORTS.lock_unpoisoned())
     }
 
+    /// #334: true for the display-share sentinel, which is not a process.
+    fn is_display_target(pid: i32) -> bool {
+        pid == super::DISPLAY_REPLAY_TARGET_PID
+    }
+
+    fn display_region_targets() -> &'static Mutex<HashSet<u32>> {
+        static TARGETS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+        TARGETS.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    /// #334: recorded at resolve time for every display-share message, so the
+    /// session-tap route knows a Petal View REGION (whose capture hides
+    /// Petal's own windows) from a whole display (where they are visible).
+    pub(crate) fn note_display_target_kind(window_id: u32, is_region: bool) {
+        let mut targets = display_region_targets().lock_unpoisoned();
+        if is_region {
+            targets.insert(window_id);
+        } else {
+            targets.remove(&window_id);
+        }
+    }
+
+    fn is_display_region_target(window_id: u32) -> bool {
+        display_region_targets()
+            .lock_unpoisoned()
+            .contains(&window_id)
+    }
+
+    /// #334 review: `normalized_to_global` maps 1.0 to origin + extent, one
+    /// point PAST the display -- onto the neighbouring monitor. Clamp a
+    /// display target to its last addressable point.
+    fn clamp_into_display(frame: WindowFrame, point: super::GlobalPoint) -> super::GlobalPoint {
+        let max_x = frame.x as f64 + (frame.width.max(1) - 1) as f64;
+        let max_y = frame.y as f64 + (frame.height.max(1) - 1) as f64;
+        super::GlobalPoint {
+            x: point.x.min(max_x).max(frame.x as f64),
+            y: point.y.min(max_y).max(frame.y as f64),
+        }
+    }
+
+    /// #334 review (#759 class): the Petal window that would take a click at
+    /// `point`, if the topmost click-receiving window there is ours and not a
+    /// known click-through panel. A foreign window on top means the click
+    /// lands there (fine). Same band/alpha rules as `hit_test_target`.
+    fn petal_window_at_point(
+        stack: Option<&[StackWindow]>,
+        point: super::GlobalPoint,
+        self_pid: i32,
+        click_through: &[u32],
+    ) -> Option<u32> {
+        for window in stack? {
+            if window.alpha <= 0.0 || window.layer < 0 || window.layer > BLOCKING_LAYER_MAX {
+                continue;
+            }
+            if !window.contains(point) {
+                continue;
+            }
+            if window.owner_pid != self_pid {
+                return None;
+            }
+            let Ok(id) = u32::try_from(window.window_id) else {
+                continue;
+            };
+            if click_through.contains(&id) {
+                continue;
+            }
+            return Some(id);
+        }
+        None
+    }
+
     pub(crate) fn is_pointer_button_release(message: &RemoteControlMessage) -> bool {
         message.message_type == RemoteControlType::Pointer
             && message.action == Some(RemoteControlAction::Up)
@@ -7374,6 +7459,7 @@ pub(crate) mod input {
         // idempotent early return and skip the raise/warp: an order-dependent
         // failure unrelated to whatever that test asserts.
         cursor_takeovers().lock_unpoisoned().clear();
+        display_region_targets().lock_unpoisoned().clear();
     }
 
     /// Same as `clear_all_ax_control_state`, except an in-progress SkyLight
@@ -8974,6 +9060,17 @@ pub(crate) mod input {
             flags: u64,
         ) -> Result<(), String>;
 
+        /// #335: a keyboard event on the session tap. Keyboard routing is
+        /// responder-based, so it lands in the host's key window -- only used
+        /// for a display share, where that IS the authorized target.
+        fn post_key(
+            &self,
+            keycode: u16,
+            down: bool,
+            flags: u64,
+            unicode: Option<&str>,
+        ) -> Result<(), String>;
+
         /// Current host cursor position, or `None` if it cannot be read.
         fn cursor_position(&self) -> Option<super::GlobalPoint>;
 
@@ -9001,6 +9098,13 @@ pub(crate) mod input {
         }
 
         fn is_trusted(&self) -> bool;
+
+        /// #334: CGWindowIDs of Petal panels that are click-through by
+        /// construction (share overlay / border), so a region-share hit test
+        /// does not mistake them for a Petal click target.
+        fn petal_click_through_window_ids(&self) -> Vec<u32> {
+            Vec::new()
+        }
     }
 
     struct SystemSessionTapBackend;
@@ -9080,6 +9184,28 @@ pub(crate) mod input {
                         y: point.y,
                     },
                 );
+                Self::post(event);
+            }
+            Ok(())
+        }
+
+        fn post_key(
+            &self,
+            keycode: u16,
+            down: bool,
+            flags: u64,
+            unicode: Option<&str>,
+        ) -> Result<(), String> {
+            unsafe {
+                let event = CGEventCreateKeyboardEvent(std::ptr::null(), keycode, down);
+                if event.is_null() {
+                    return Err("CGEventCreateKeyboardEvent returned null".to_string());
+                }
+                CGEventSetFlags(event, flags);
+                if let Some(text) = unicode {
+                    let utf16: Vec<u16> = text.encode_utf16().collect();
+                    CGEventKeyboardSetUnicodeString(event, utf16.len(), utf16.as_ptr());
+                }
                 Self::post(event);
             }
             Ok(())
@@ -9224,6 +9350,12 @@ pub(crate) mod input {
 
         fn is_trusted(&self) -> bool {
             unsafe { AXIsProcessTrusted() }
+        }
+
+        fn petal_click_through_window_ids(&self) -> Vec<u32> {
+            let mut ids = crate::share_overlay::overlay_panel_window_numbers();
+            ids.extend(crate::share_border::border_panel_window_numbers());
+            ids
         }
     }
 
@@ -9419,6 +9551,37 @@ pub(crate) mod input {
             .contains_key(&window_id)
         {
             return Ok(());
+        }
+        if is_display_target(pid) && is_display_region_target(window_id) {
+            // #334 review: region capture EXCLUDES Petal's own windows, so a
+            // Petal panel at this point is invisible to the controller (#759).
+            // A whole-display share shows them, so it is not gated here.
+            let mut click_through = tap.petal_click_through_window_ids();
+            click_through.push(window_id);
+            let self_pid = std::process::id() as i32;
+            if let Some(petal_window) = petal_window_at_point(
+                tap.onscreen_stack().as_deref(),
+                point,
+                self_pid,
+                &click_through,
+            ) {
+                log::warn!(
+                    "remote-control: display-region click refused at ({:.0},{:.0}) window_id={window_id} -- Petal window {petal_window} the controller cannot see is on top (#334)",
+                    point.x,
+                    point.y
+                );
+                return Err(format!(
+                    "session-tap route: target is not the frontmost window at the target point (covered_by_petal_window={petal_window})"
+                ));
+            }
+        }
+        if is_display_target(pid) {
+            // #334: the target is the whole shared display, so whatever
+            // is under the point IS the target. There is no window to raise or
+            // to find "in front" -- both checks always failed and nacked every
+            // gesture. `normalized_to_global` already clamps into the display.
+            begin_cursor_takeover(window_id, point, tap);
+            return tap.move_cursor(point);
         }
         // #599: the raise is a PRECONDITION, not a courtesy. Delivery on this
         // route is geometry-hit-tested, so if the target could not be brought
@@ -9717,6 +9880,14 @@ pub(crate) mod input {
         pb: &dyn PasteboardBackend,
         tap: &dyn SessionTapBackend,
     ) -> Result<(), String> {
+        if target_pid.is_some_and(is_display_target)
+            && matches!(
+                message.message_type,
+                RemoteControlType::Key | RemoteControlType::Text
+            )
+        {
+            return replay_display_keyboard(message, frame, tap);
+        }
         let probe_before = ax_probe_snapshot();
         let ax_result = match message.message_type {
             RemoteControlType::Pointer => {
@@ -9869,6 +10040,11 @@ pub(crate) mod input {
         if message.action != Some(RemoteControlAction::Move) || message.buttons.unwrap_or(0) != 0 {
             return false;
         }
+        // #334: the pid sink would post into launchd; the telepointer
+        // already shows a display controller's hover, so drop it here.
+        if target_pid.is_some_and(is_display_target) {
+            return true;
+        }
         let Some(pid) = target_pid.filter(|pid| *pid > 0) else {
             return false;
         };
@@ -9926,6 +10102,79 @@ pub(crate) mod input {
         Err("semantic pointer click exhausted AX/SkyLight routes".to_string())
     }
 
+    /// #335: keyboard/text for a display share. There is no app behind the
+    /// sentinel pid, so AX text routes and `CGEventPostToPid(1)` both went to
+    /// launchd and every key nacked `windowMismatch`. The host's keyboard focus
+    /// on the shared display IS the target: post on the session tap through
+    /// the normal key/text plans (so key-up release semantics are unchanged).
+    fn replay_display_keyboard(
+        message: &RemoteControlMessage,
+        frame: WindowFrame,
+        tap: &dyn SessionTapBackend,
+    ) -> Result<(), String> {
+        if !tap.is_trusted() {
+            return Err("session-tap route requires Accessibility".to_string());
+        }
+        if super::injection_was_cancelled() {
+            return Ok(());
+        }
+        replay_to_sink(message, frame, &DisplayKeySink { tap })
+    }
+
+    /// Keyboard-only sink for a display share (#335). No per-window focus
+    /// gate: a display has no window identity, the whole display is granted.
+    struct DisplayKeySink<'a> {
+        tap: &'a dyn SessionTapBackend,
+    }
+
+    impl InputSink for DisplayKeySink<'_> {
+        fn verify_key_window(&self, _window_id: u32) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn mouse(
+            &self,
+            _kind: MouseKind,
+            _at: super::GlobalPoint,
+            _button: RemoteControlButton,
+            _click_state: u32,
+            _flags: u64,
+        ) -> Result<(), String> {
+            Err("display keyboard sink does not post pointer events".to_string())
+        }
+
+        fn scroll(
+            &self,
+            _axis1: i32,
+            _axis2: i32,
+            _at: super::GlobalPoint,
+            _unit: ScrollUnit,
+            _flags: u64,
+        ) -> Result<(), String> {
+            Err("display keyboard sink does not post scroll events".to_string())
+        }
+
+        fn key(
+            &self,
+            keycode: u16,
+            down: bool,
+            flags: u64,
+            unicode: Option<&str>,
+        ) -> Result<(), String> {
+            self.tap.post_key(keycode, down, flags, unicode)
+        }
+
+        fn text(&self, s: &str) -> Result<(), String> {
+            for ch in s.chars() {
+                let text = ch.to_string();
+                self.tap.post_key(0, true, 0, Some(&text))?;
+                self.tap.post_key(0, false, 0, Some(&text))?;
+                thread::sleep(Duration::from_millis(2));
+            }
+            Ok(())
+        }
+    }
+
     fn replay_to_sink(
         message: &RemoteControlMessage,
         frame: WindowFrame,
@@ -9961,7 +10210,10 @@ pub(crate) mod input {
         let y = message
             .y
             .ok_or_else(|| "pointer message missing y".to_string())?;
-        let point = normalized_to_global(frame, x, y);
+        let mut point = normalized_to_global(frame, x, y);
+        if is_display_target(pid) {
+            point = clamp_into_display(frame, point);
+        }
         let action = message
             .action
             .ok_or_else(|| "pointer message missing action".to_string())?;
@@ -10046,6 +10298,10 @@ pub(crate) mod input {
         sl: &dyn SlClickBackend,
         tap: &dyn SessionTapBackend,
     ) -> Result<AxReplayOutcome, String> {
+        if is_display_target(pid) {
+            // #334: no app behind a display share -- session tap only.
+            return session_tap_semantic_click(window_id, pid, point, button, click_count, tap);
+        }
         let outcome =
             replay_semantic_click_ax(window_id, pid, point, button, click_count, ax, sl, tap)?;
         if outcome != AxReplayOutcome::PassThrough {
@@ -10368,6 +10624,24 @@ pub(crate) mod input {
         sl: &dyn SlClickBackend,
         tap: &dyn SessionTapBackend,
     ) -> Result<AxReplayOutcome, String> {
+        if is_display_target(pid) {
+            // #334: a display share has no owning app, so there is no AX
+            // tree to hit-test and no window to raise -- the session tap at the
+            // global point IS the route. Never hand the sentinel pid to AX.
+            log::info!(
+                "remote-control: AX pointer down window_id={window_id} controller='{controller_id}' button={button:?} route=display-session-tap"
+            );
+            return pass_through_pointer_down(
+                window_id,
+                controller_id,
+                pid,
+                point,
+                button,
+                click_count,
+                sl,
+                tap,
+            );
+        }
         if button == RemoteControlButton::Middle {
             match resolve_cached(window_id, pid, point, ax) {
                 Err(error) if error.is_window_id_mismatch() => {
@@ -10559,7 +10833,10 @@ pub(crate) mod input {
     ) -> Result<AxReplayOutcome, String> {
         // #446 review finding: same reordering as ax_pointer_down -- check
         // cancellation before posting a real SL Down, not after.
-        let mode = if direct_drag_enabled() && !super::injection_was_cancelled() {
+        let mode = if direct_drag_enabled()
+            && !is_display_target(pid)
+            && !super::injection_was_cancelled()
+        {
             match sl.post_mouse_event(pid, point, button, SlMouseEvent::Down) {
                 Ok(()) => GestureMode::SlDrag,
                 Err(SlClickError::Unavailable) => GestureMode::PassThrough,
@@ -11120,7 +11397,9 @@ pub(crate) mod input {
         click_count: u32,
         sl: &dyn SlClickBackend,
     ) -> AxReplayOutcome {
-        if displacement >= AX_CLICK_DRAG_THRESHOLD_POINTS {
+        // #334: SLEventPostToPid(1) would "succeed" into launchd and be
+        // reported Handled for a click nobody received.
+        if displacement >= AX_CLICK_DRAG_THRESHOLD_POINTS || is_display_target(pid) {
             return AxReplayOutcome::PassThrough;
         }
         match post_sl_click_with_priming(pid, point, button, click_count.max(1), sl) {
@@ -11248,6 +11527,16 @@ pub(crate) mod input {
             .y
             .ok_or_else(|| "wheel message missing y".to_string())?;
         let point = normalized_to_global(frame, x, y);
+        if is_display_target(pid) {
+            // #334: no AX tree and no SkyLight pid behind a display.
+            let point = clamp_into_display(frame, point);
+            let (dx, dy) = wheel_delta_pixels(message, frame);
+            if dx == 0 && dy == 0 {
+                return Ok(AxReplayOutcome::Handled);
+            }
+            let flags = cg_flags_for_modifiers(&message.modifiers);
+            return session_tap_wheel(message.window_id, pid, point, dy, dx, flags, tap);
+        }
         let element = match resolve_cached(message.window_id, pid, point, ax) {
             Ok(Some((element, _caps))) => element,
             Ok(None) => return wheel_sl_fallback(message, frame, pid, point, sl, tap),
@@ -12851,6 +13140,8 @@ pub(crate) mod input {
             Mouse(MouseKind, i64, i64),
             Scroll(i64, i64, i32, i32),
             MoveCursor(i64, i64),
+            /// keycode, down, first char of the unicode payload (Copy-able).
+            Key(u16, bool, Option<char>),
         }
 
         /// A pid for the fake occluder that is guaranteed to be neither the
@@ -12888,6 +13179,8 @@ pub(crate) mod input {
             /// front-to-back. `None` = "could not be read", which must never
             /// be treated as a failure.
             stack: Option<Vec<StackWindow>>,
+            /// #334: Petal panels reported click-through by construction.
+            click_through: Vec<u32>,
         }
 
         impl RecordingSessionTap {
@@ -12901,6 +13194,7 @@ pub(crate) mod input {
                     raise_ok: true,
                     windows: vec![42],
                     stack: None,
+                    click_through: Vec::new(),
                 }
             }
 
@@ -13130,6 +13424,24 @@ pub(crate) mod input {
                 Ok(())
             }
 
+            fn post_key(
+                &self,
+                keycode: u16,
+                down: bool,
+                _flags: u64,
+                unicode: Option<&str>,
+            ) -> Result<(), String> {
+                if self.fail_posts {
+                    return Err("post failed".to_string());
+                }
+                self.record(TapEvent::Key(
+                    keycode,
+                    down,
+                    unicode.and_then(|text| text.chars().next()),
+                ));
+                Ok(())
+            }
+
             fn cursor_position(&self) -> Option<super::super::GlobalPoint> {
                 Some(*self.cursor.lock_unpoisoned())
             }
@@ -13154,6 +13466,10 @@ pub(crate) mod input {
 
             fn is_trusted(&self) -> bool {
                 self.trusted
+            }
+
+            fn petal_click_through_window_ids(&self) -> Vec<u32> {
+                self.click_through.clone()
             }
         }
 
@@ -16639,6 +16955,528 @@ pub(crate) mod input {
                 tap.mouse_kinds().contains(&MouseKind::LeftUp),
                 "a cancelled drag must post its mouse-up or the target is left with a phantom held button"
             );
+        }
+
+        /// #334: what a macOS display share actually looks like to the
+        /// session tap. The display id is not a window, so nothing can raise it
+        /// and the window stack never contains it; a foreign window sits at
+        /// the point. Every window-scoped check refuses this target.
+        fn display_share_tap() -> RecordingSessionTap {
+            RecordingSessionTap {
+                raise_ok: false,
+                windows: Vec::new(),
+                stack: Some(vec![StackWindow {
+                    window_id: 9001,
+                    owner_pid: foreign_test_pid(),
+                    layer: 0,
+                    alpha: 1.0,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 200.0,
+                }]),
+                ..RecordingSessionTap::trusted()
+            }
+        }
+
+        /// AX must never be consulted for the sentinel: a resolve against
+        /// pid 1 (launchd) is meaningless, so make it fail loudly if it runs.
+        fn display_share_ax() -> RecordingAxBackend {
+            let ax = RecordingAxBackend::default();
+            ax.fail_resolution_with(AxError::new(K_AX_ERROR_WINDOW_ID_MISMATCH));
+            ax
+        }
+
+        /// #334 (Sentry PETAL-DESKTOP-3B): a controller's drag on a
+        /// macOS DISPLAY share was never delivered. The sentinel pid went
+        /// through the window routes -- AX hit-test on launchd, then a
+        /// session-tap raise of a "window" that is a display -- so the Down
+        /// fell to PassThrough and the Up reported routes-exhausted. Drives
+        /// the real dispatcher for the whole Down / drag / Up gesture.
+        #[test]
+        fn display_share_drag_is_delivered_through_the_session_tap() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_share_ax();
+            let sl = RecordingSlClickBackend::available();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = display_share_tap();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            let drag = pointer_message(
+                RemoteControlAction::Move,
+                0.60,
+                0.10,
+                RemoteControlButton::Left,
+                1,
+            );
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.60,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            for message in [&down, &drag, &up] {
+                replay_with_backends(message, frame, pid, &sink, &ax, &sl, &pb, &tap)
+                    .expect("a display-share gesture must be delivered");
+            }
+
+            assert_eq!(
+                tap.mouse_kinds(),
+                vec![MouseKind::LeftDown, MouseKind::LeftDragged, MouseKind::LeftUp]
+            );
+            assert!(
+                !tap.events().iter().any(|event| matches!(event, TapEvent::Raise(..))),
+                "a display is not a window -- nothing may try to raise it: {:?}",
+                tap.events()
+            );
+            assert!(sl.events().is_empty() && sl.clicks().is_empty());
+            assert!(sink.events().is_empty(), "nothing may be posted to the sentinel pid");
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// Control for the test above: the same unraisable target addressed
+        /// as a real WINDOW is still refused (#599 stays intact), so the
+        /// display pass is the sentinel branch, not a weakened gate.
+        #[test]
+        fn an_unraisable_window_target_is_still_refused() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = display_share_tap();
+
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            let _ = replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap);
+            assert!(
+                tap.mouse_kinds().is_empty(),
+                "a window that cannot be raised must not receive a Down: {:?}",
+                tap.events()
+            );
+            clear_all_ax_control_state();
+        }
+
+        #[test]
+        fn display_share_click_and_wheel_use_the_session_tap() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_share_ax();
+            let sl = RecordingSlClickBackend::available();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = display_share_tap();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                0.25,
+                0.25,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&click, frame, pid, &sink, &ax, &sl, &pb, &tap)
+                .expect("a display-share click must be delivered");
+            assert_eq!(
+                tap.mouse_kinds(),
+                vec![MouseKind::LeftDown, MouseKind::LeftUp]
+            );
+
+            let wheel = wheel_message(0.0, 120.0, Some(0));
+            replay_with_backends(&wheel, frame, pid, &sink, &ax, &sl, &pb, &tap)
+                .expect("a display-share scroll must be delivered");
+            assert!(
+                tap.events().iter().any(|event| matches!(event, TapEvent::Scroll(..))),
+                "the wheel must reach the session tap: {:?}",
+                tap.events()
+            );
+            assert!(sl.clicks().is_empty() && sl.scroll_count() == 0);
+            assert!(sink.events().is_empty());
+            clear_all_ax_control_state();
+        }
+
+        /// With the session tap unavailable a display click must NACK. Before
+        /// the fix the Up fell to `sl_click_or_passthrough`, which posted a
+        /// SkyLight click into pid 1 (launchd) and reported it delivered.
+        #[test]
+        fn display_share_click_is_never_reported_delivered_via_skylight() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_share_ax();
+            let sl = RecordingSlClickBackend::available();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::untrusted();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&down, frame, pid, &sink, &ax, &sl, &pb, &tap).unwrap();
+            let result = replay_with_backends(&up, frame, pid, &sink, &ax, &sl, &pb, &tap);
+            assert!(result.is_err(), "an undelivered display click must nack");
+            assert!(sl.clicks().is_empty(), "no SkyLight click may target the sentinel pid");
+            assert!(sink.events().is_empty());
+
+            let hover = pointer_message(
+                RemoteControlAction::Move,
+                0.30,
+                0.30,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&hover, frame, pid, &sink, &ax, &sl, &pb, &tap).unwrap();
+            assert!(sink.events().is_empty(), "a display hover must not reach the pid sink");
+            clear_all_ax_control_state();
+        }
+
+        /// #334 review: x/y = 1.0 used to map to origin + extent -- one
+        /// point past the display, i.e. onto the neighbouring monitor.
+        #[test]
+        fn display_share_edge_click_stays_on_the_shared_display() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_share_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = display_share_tap();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                1.0,
+                1.0,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&click, frame, pid, &sink, &ax, &sl, &pb, &tap).unwrap();
+            let wheel = {
+                let mut wheel = wheel_message(0.0, 120.0, Some(0));
+                wheel.x = Some(1.0);
+                wheel.y = Some(1.0);
+                wheel
+            };
+            replay_with_backends(&wheel, frame, pid, &sink, &ax, &sl, &pb, &tap).unwrap();
+            for event in tap.events() {
+                let (x, y) = match event {
+                    TapEvent::Mouse(_, x, y) | TapEvent::Scroll(x, y, _, _) => (x, y),
+                    _ => continue,
+                };
+                assert!(
+                    x <= q(99.0) && y <= q(99.0),
+                    "an edge input must stay on the 100x100 display, got ({x},{y}) in {:?}",
+                    tap.events()
+                );
+            }
+            assert!(tap.mouse_kinds().contains(&MouseKind::LeftDown));
+            clear_all_ax_control_state();
+        }
+
+        /// A Petal window (owned by THIS process) at the target point, in the
+        /// ordinary app band -- e.g. a remote-window compositor panel.
+        fn region_tap_with_petal_window(click_through: Vec<u32>) -> RecordingSessionTap {
+            RecordingSessionTap {
+                stack: Some(vec![StackWindow {
+                    window_id: 7777,
+                    owner_pid: std::process::id() as i32,
+                    layer: 0,
+                    alpha: 1.0,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                }]),
+                click_through,
+                ..display_share_tap()
+            }
+        }
+
+        fn display_click_kinds(tap: &RecordingSessionTap) -> Result<Vec<MouseKind>, String> {
+            let frame = unit_frame();
+            let ax = display_share_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                0.5,
+                0.5,
+                RemoteControlButton::Left,
+                0,
+            );
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+            replay_with_backends(&click, frame, pid, &sink, &ax, &sl, &pb, tap)
+                .map(|()| tap.mouse_kinds())
+        }
+
+        /// #334 review (#759 class): a Petal View REGION capture excludes
+        /// Petal's own windows, so a click on a Petal panel at the point lands
+        /// in UI the controller cannot see. Refuse it.
+        #[test]
+        fn display_region_click_on_an_invisible_petal_window_is_refused() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            note_display_target_kind(42, true);
+            let tap = region_tap_with_petal_window(Vec::new());
+
+            // The session-tap refusal surfaces as the semantic click's
+            // route-exhausted nack, same as the #599 refusals.
+            assert!(display_click_kinds(&tap).is_err(), "must nack");
+            assert!(tap.mouse_kinds().is_empty(), "nothing may be posted: {:?}", tap.events());
+            let gate = prepare_session_tap_target(
+                42,
+                super::super::DISPLAY_REPLAY_TARGET_PID,
+                super::super::GlobalPoint { x: 50.0, y: 50.0 },
+                &tap,
+            );
+            assert!(
+                gate.as_ref()
+                    .is_err_and(|error| error.contains("covered_by_petal_window=7777")),
+                "the gate itself must refuse: {gate:?}"
+            );
+
+            // Legacy Down on the same point must not press anything either.
+            let down =
+                pointer_message(RemoteControlAction::Down, 0.5, 0.5, RemoteControlButton::Left, 0);
+            let _ = replay_with_backends(
+                &down,
+                unit_frame(),
+                Some(super::super::DISPLAY_REPLAY_TARGET_PID),
+                &RecordingSink::default(),
+                &display_share_ax(),
+                &RecordingSlClickBackend::unavailable(),
+                &RecordingPasteboard::default(),
+                &tap,
+            );
+            assert!(tap.mouse_kinds().is_empty(), "a Down must not press a Petal window");
+            clear_all_ax_control_state();
+        }
+
+        /// Controls: each must still deliver, or the refusal above proves
+        /// nothing (an always-nack would satisfy it).
+        #[test]
+        fn display_click_petal_window_gate_controls() {
+            let _guard = ax_test_lock();
+
+            // Click-through Petal panel (share overlay/border) is not a target.
+            clear_all_ax_control_state();
+            note_display_target_kind(42, true);
+            let tap = region_tap_with_petal_window(vec![7777]);
+            assert_eq!(
+                display_click_kinds(&tap).unwrap(),
+                vec![MouseKind::LeftDown, MouseKind::LeftUp]
+            );
+
+            // The region's own selector window (the share's window id) is exempt.
+            clear_all_ax_control_state();
+            note_display_target_kind(7777, true);
+            let mut tap = region_tap_with_petal_window(Vec::new());
+            tap.windows = Vec::new();
+            let frame = unit_frame();
+            let mut click =
+                pointer_message(RemoteControlAction::Click, 0.5, 0.5, RemoteControlButton::Left, 0);
+            click.window_id = 7777;
+            replay_with_backends(
+                &click,
+                frame,
+                Some(super::super::DISPLAY_REPLAY_TARGET_PID),
+                &RecordingSink::default(),
+                &display_share_ax(),
+                &RecordingSlClickBackend::unavailable(),
+                &RecordingPasteboard::default(),
+                &tap,
+            )
+            .expect("the selector window itself must not block its own region");
+
+            // A foreign window on top takes the click -- that is visible content.
+            clear_all_ax_control_state();
+            note_display_target_kind(42, true);
+            let mut tap = region_tap_with_petal_window(Vec::new());
+            if let Some(stack) = tap.stack.as_mut() {
+                stack.insert(
+                    0,
+                    StackWindow {
+                        window_id: 9001,
+                        owner_pid: foreign_test_pid(),
+                        layer: 0,
+                        alpha: 1.0,
+                        x: 0.0,
+                        y: 0.0,
+                        w: 100.0,
+                        h: 100.0,
+                    },
+                );
+            }
+            assert!(display_click_kinds(&tap).is_ok());
+
+            // Whole-display share: Petal's windows are IN the capture, so the
+            // controller can see them -- product decision, not gated.
+            clear_all_ax_control_state();
+            note_display_target_kind(42, false);
+            let tap = region_tap_with_petal_window(Vec::new());
+            assert!(display_click_kinds(&tap).is_ok());
+            clear_all_ax_control_state();
+        }
+
+        fn display_key_ax() -> RecordingAxBackend {
+            let ax = display_share_ax();
+            ax.fail_text_resolution_with(AxError::new(K_AX_ERROR_WINDOW_ID_MISMATCH));
+            ax
+        }
+
+        fn tap_keys(tap: &RecordingSessionTap) -> Vec<(u16, bool, Option<char>)> {
+            tap.events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    TapEvent::Key(code, down, text) => Some((code, down, text)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// #335: keys on a macOS DISPLAY share went to the sentinel pid --
+        /// AX text resolution on launchd, a focus check that can never match
+        /// a display (`windowMismatch`), and `CGEventPostToPid(1)`. They must
+        /// reach the session tap instead. Cmd+A also proves the AX shortcut
+        /// route is skipped (its resolver here fails loudly if consulted).
+        #[test]
+        fn display_share_keys_are_posted_on_the_session_tap() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_key_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = display_share_tap();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let enter_down = key_message("Enter", "Enter", RemoteControlModifiers::default());
+            let mut enter_up = enter_down.clone();
+            enter_up.action = Some(RemoteControlAction::Up);
+            let select_all = key_message(
+                "KeyA",
+                "a",
+                RemoteControlModifiers {
+                    meta: true,
+                    ..RemoteControlModifiers::default()
+                },
+            );
+            for message in [&enter_down, &enter_up, &select_all] {
+                replay_with_backends(message, frame, pid, &sink, &ax, &sl, &pb, &tap)
+                    .expect("a display-share key must be delivered");
+            }
+
+            let keys = tap_keys(&tap);
+            assert_eq!(keys.len(), 3, "every key must reach the session tap: {keys:?}");
+            assert!(keys[0].1 && !keys[1].1 && keys[0].0 == keys[1].0);
+            assert!(sink.events().is_empty(), "nothing may be posted to the sentinel pid");
+            assert!(
+                !tap.events().iter().any(|event| matches!(event, TapEvent::Raise(..))),
+                "keyboard needs no raise: {:?}",
+                tap.events()
+            );
+        }
+
+        #[test]
+        fn display_share_text_is_posted_on_the_session_tap() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_key_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = display_share_tap();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let mut text = base_message(RemoteControlType::Text);
+            text.text = Some("hé".to_string());
+            replay_with_backends(&text, frame, pid, &sink, &ax, &sl, &pb, &tap)
+                .expect("display-share text must be delivered");
+
+            assert_eq!(
+                tap_keys(&tap),
+                vec![
+                    (0, true, Some('h')),
+                    (0, false, Some('h')),
+                    (0, true, Some('é')),
+                    (0, false, Some('é')),
+                ]
+            );
+            assert!(sink.events().is_empty());
+        }
+
+        /// Without Accessibility the session tap cannot post: nack, never a
+        /// silent success, and never a fallback to the sentinel pid.
+        #[test]
+        fn display_share_keys_nack_without_accessibility() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = display_key_ax();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::untrusted();
+            let pid = Some(super::super::DISPLAY_REPLAY_TARGET_PID);
+
+            let key = key_message("Enter", "Enter", RemoteControlModifiers::default());
+            assert!(replay_with_backends(&key, frame, pid, &sink, &ax, &sl, &pb, &tap).is_err());
+            assert!(tap_keys(&tap).is_empty());
+            assert!(sink.events().is_empty());
+        }
+
+        /// Control: a WINDOW share's keys still take the pid sink with its
+        /// focus gate -- the session-tap route is the display branch only.
+        #[test]
+        fn window_share_keys_still_use_the_pid_sink() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::trusted();
+
+            let key = key_message("Enter", "Enter", RemoteControlModifiers::default());
+            replay_with_backends(&key, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).unwrap();
+            assert!(tap_keys(&tap).is_empty());
+            assert!(!sink.events().is_empty(), "the window key must reach the pid sink");
         }
 
         /// #611: the cancellation release must land where the pointer ACTUALLY

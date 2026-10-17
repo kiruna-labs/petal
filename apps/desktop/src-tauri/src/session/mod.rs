@@ -167,7 +167,7 @@ pub use share::{
     promote_quality_for_remote_control, reconcile_quality_after_remote_control_release,
     start_share, stop_share,
 };
-pub(crate) use share::{stop_share_explained, StopShareAnalytics};
+pub(crate) use share::{is_source_not_found, stop_share_explained, StopShareAnalytics};
 // #106: SHARE-DESKTOP attaches a display share's own memory marks to its
 // run.jsonl evidence rather than scraping the app log.
 #[cfg(feature = "cockpit-privileged")]
@@ -203,9 +203,13 @@ pub enum ShareSessionError {
     /// not a window closing.
     #[error("display {0} not found (disconnected, or invalid id)")]
     DisplayNotFound(u32),
+    /// The window is visible but its app excludes it from screen capture
+    /// (PETAL-DESKTOP-3C/-3D) -- not "closed", so the UI says why.
+    #[error("window {0} is excluded from screen capture by its app")]
+    WindowCaptureExcluded(u32),
     #[error("capture failed: {0}")]
     Capture(String),
-    #[error("missing LiveKit configuration: {0}")]
+    #[error("room setup failed: {0}")]
     Config(String),
     #[error("failed to connect to LiveKit room: {0}")]
     RoomConnect(String),
@@ -225,6 +229,7 @@ impl From<CaptureError> for ShareSessionError {
             CaptureError::PermissionDenied => Self::PermissionDenied,
             CaptureError::WindowNotFound(id) => Self::WindowNotFound(id),
             CaptureError::DisplayNotFound(id) => Self::DisplayNotFound(id),
+            CaptureError::WindowCaptureExcluded(id) => Self::WindowCaptureExcluded(id),
             CaptureError::ScreenCaptureKit(msg) => Self::Capture(msg),
         }
     }

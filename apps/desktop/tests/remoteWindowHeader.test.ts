@@ -474,8 +474,14 @@ test('menubar switcher lists hidden windows and activates them', () => {
   assert.match(menubarRoute, /COMMANDS\.compositorActivateWindow/);
   assert.match(menubarRoute, /remoteWindow\.hidden \? 'Hidden' : 'Open'/);
   assert.match(compositor, /entries\.extend\(s\.windows\.iter\(\)\.map\(\|\(key, window\)\| RemoteWindowSummary/s);
-  assert.match(compositor, /entries\.extend\(s\.retired\.iter\(\)\.map\(\|\(key, window\)\| RemoteWindowSummary/s);
-  assert.match(compositor, /s\.retired_order\.retain\(\|stored\| stored != &key_for_main\);\s+s\.retired\.remove\(&key_for_main\)/s);
+  // #316: only a viewer's own manual hide with a live publication is listed
+  // or restored; a window whose share ended must never come back frozen.
+  assert.match(
+    compositor,
+    /s\.retired\s*\.iter\(\)\s*\.filter\(\|\(key, _\)\| retired_window_restorable\(s, key, live\)\)/s
+  );
+  assert.match(compositor, /with_state\(\|s\| take_restorable_retired\(s, &key_for_main, &live\)\)/);
+  assert.match(compositor, /RetiredRestore::Refused\(reason\) => \{[\s\S]*?refusing to restore retired window/);
   // #678: the menubar switcher used to omit ownerIdentity, which makes
   // resolve_window_key silently no-op on an ambiguous windowId (two
   // participants sharing the same CGWindowID) -- the click would then do

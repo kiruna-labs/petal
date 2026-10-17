@@ -9,10 +9,11 @@
 
 import { goto } from '$app/navigation';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { GalleryParticipant } from '$lib/components/Gallery.svelte';
 import { session } from '$lib/stores/session.svelte';
 import {
+  currentRoom,
   joinRoom,
   leaveRoom,
   listRooms,
@@ -40,8 +41,16 @@ import {
   type RemoteCamera
 } from '$lib/data/galleryBridge';
 import { COMMANDS, EVENTS, hasTauriBridge } from '$lib/ipc';
-import type { PresentParticipant, RoomLeftEvent } from '$lib/ipc';
+import type { PresentParticipant, ResilienceEvent, RoomLeftEvent } from '$lib/ipc';
 import { createSpeakerSpotlight } from './speakerSpotlight.svelte';
+import { clearMeetingRouteRoom, setMeetingRouteRoom } from '$lib/stores/meetingRoute';
+import { joinFailureMessage } from '$lib/data/joinFailure';
+import {
+  GALLERY_BRIDGE_MAX_RESTARTS,
+  galleryBridgeRestartDelayMs,
+  rejoinedMessage,
+  runBoundedRejoin
+} from './connectionRecovery';
 export type MeetingPhase = 'connecting' | 'connected' | 'disconnected';
 
 export interface MeetingSessionOptions {
@@ -80,6 +89,8 @@ export interface MeetingSession {
   /** A participant's collision-resolved meeting color (tiles, share headers, chat avatars). */
   resolvedColorFor(identity: string): string;
   readonly galleryStateTone: 'warning' | 'info';
+  /** Buttons on the state card: a failed join offers Try again (#356). */
+  readonly galleryStateActions: { label: string; onClick: () => void; primary?: boolean }[];
   readonly activeIdentity: ReturnType<typeof colorForIdentity>;
   readonly activeColor: string;
   handleRenameRoom(displayName: string | null): Promise<void>;
@@ -117,6 +128,19 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
 
   let meetingPhase = $state<MeetingPhase>('connecting');
   let disconnectDetail = $state('Returning to rooms.');
+  // #356: the join failed; the card explains why and offers Try again
+  // instead of auto-returning to the room list.
+  let joinFailed = $state(false);
+  // A room-left that lands while a join is in flight (the room died during
+  // the join tail, or a popover/pill Leave): replayed once the join resolves
+  // so a dead room is never shown as connected.
+  let pendingRoomLeft: RoomLeftEvent | null = null;
+  // #354: set while the automatic rejoin after a lost connection runs.
+  let reconnecting = $state<{ attempt: number; total: number } | null>(null);
+  // Bumped per rejoin run; a run that sees a newer epoch (or dispose) stops.
+  let recoveryEpoch = 0;
+  // A Leave from another surface while the rejoin runs (#354).
+  let rejoinCancelled = false;
   let presence = $state<PresentParticipant[]>([]);
   let presenceRevision = 0;
   let remoteCameras = $state<RemoteCamera[]>([]);
@@ -181,6 +205,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   }
 
   async function startGalleryBridge() {
+    const generation = galleryBridgeGeneration;
     try {
       let cfg: Pick<GalleryBridgeConfig, 'url' | 'token'> | null = null;
       if (hasTauri) {
@@ -199,8 +224,9 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
         if (url && token) cfg = { url, token };
       }
       if (!cfg) return;
+      if (generation !== galleryBridgeGeneration || disposed) return;
       galleryBridgeDisconnectExpected = false;
-      galleryBridge = await connectGalleryBridge(
+      const bridge = await connectGalleryBridge(
         cfg,
         session.participantId,
         (cams) => {
@@ -210,17 +236,51 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
         () => {
           if (galleryBridgeDisconnectExpected) return;
           if (meetingPhase !== 'connected') return;
-          beginTerminalReturn('Connection lost - returning you to the room list.', 1400);
+          // #354: the native room is the authority on membership. A lost
+          // bridge only costs camera tiles -- reconnect it; if the native
+          // room is gone too, its `room-left` drives the rejoin.
+          restartGalleryBridgeSoon();
         }
       );
+      // Stopped or disposed while connecting: drop the late bridge.
+      if (generation !== galleryBridgeGeneration || disposed) {
+        void bridge.disconnect().catch(() => {});
+        return;
+      }
+      galleryBridge = bridge;
+      resetGalleryBridgeRestarts();
     } catch (e) {
       // Non-fatal: the meeting works without in-tile remote video (tiles
       // fall back to the camera-off state); never block join on the bridge.
       console.warn('gallery bridge unavailable', e);
+      if (galleryBridgeRestarts > 0 && meetingPhase === 'connected') restartGalleryBridgeSoon();
     }
   }
 
+  // Each restart mints a token; the backend allows 20/min per IP, shared
+  // with native rejoins on the same NAT -- so back off and cap (#354).
+  let galleryBridgeRestartTimer: ReturnType<typeof setTimeout> | undefined;
+  let galleryBridgeRestarts = 0;
+  let galleryBridgeGeneration = 0;
+  function resetGalleryBridgeRestarts() {
+    galleryBridgeRestarts = 0;
+  }
+  function restartGalleryBridgeSoon() {
+    stopGalleryBridge();
+    clearTimeout(galleryBridgeRestartTimer);
+    if (galleryBridgeRestarts >= GALLERY_BRIDGE_MAX_RESTARTS) {
+      console.warn('gallery bridge: giving up after repeated restarts');
+      return;
+    }
+    const delayMs = galleryBridgeRestartDelayMs(galleryBridgeRestarts);
+    galleryBridgeRestarts += 1;
+    galleryBridgeRestartTimer = setTimeout(() => {
+      if (!disposed && meetingPhase === 'connected') void startGalleryBridge();
+    }, delayMs);
+  }
+
   function stopGalleryBridge() {
+    galleryBridgeGeneration += 1;
     const bridge = galleryBridge;
     galleryBridge = null;
     galleryBridgeDisconnectExpected = true;
@@ -359,21 +419,37 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   });
 
   const galleryStateTitle = $derived(
-    meetingPhase === 'connecting'
-      ? null
-      : meetingPhase === 'disconnected'
-        ? 'Disconnected'
-        : null
+    reconnecting
+      ? 'Connection lost'
+      : meetingPhase === 'connecting'
+        ? null
+        : meetingPhase === 'disconnected'
+          ? joinFailed
+            ? "Couldn't join this meeting"
+            : 'Disconnected'
+          : null
+  );
+  const galleryStateActions = $derived(
+    joinFailed && meetingPhase === 'disconnected'
+      ? [
+          { label: 'Try again', onClick: () => void retryJoin(), primary: true },
+          { label: 'Back to rooms', onClick: () => returnToRooms(0) }
+        ]
+      : []
   );
   const galleryStateDetail = $derived(
-    meetingPhase === 'connecting'
-      ? null
-      : meetingPhase === 'disconnected'
-        ? disconnectDetail
-        : null
+    reconnecting
+      ? reconnecting.attempt > 0
+        ? `Reconnecting… (attempt ${reconnecting.attempt} of ${reconnecting.total})`
+        : 'Reconnecting…'
+      : meetingPhase === 'connecting'
+        ? null
+        : meetingPhase === 'disconnected'
+          ? disconnectDetail
+          : null
   );
   const galleryStateTone = $derived<'warning' | 'info'>(
-    meetingPhase === 'disconnected' ? 'warning' : 'info'
+    reconnecting || meetingPhase === 'disconnected' ? 'warning' : 'info'
   );
   const activeIdentity = $derived.by(() => {
     const identity =
@@ -392,6 +468,18 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     // Not awaited: a local file read that must never delay the join itself.
     void loadSavedRoom();
     await startListeners();
+    return attemptJoin();
+  }
+
+  async function retryJoin() {
+    if (!joinFailed || disposed) return;
+    joinFailed = false;
+    pendingRoomLeft = null;
+    meetingPhase = 'connecting';
+    await attemptJoin();
+  }
+
+  async function attemptJoin(): Promise<boolean> {
     try {
       // Real join (SPEC.md §4.6): idempotent on the Rust side, so a reload
       // of this route never duplicates membership.
@@ -410,10 +498,22 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
       const snapshotRevision = presenceRevision;
       const snapshot = await roomPresence();
       if (snapshotRevision === presenceRevision) presence = snapshot;
+      const stashed = pendingRoomLeft;
+      pendingRoomLeft = null;
+      if (stashed) {
+        handleRoomLeft(stashed);
+        return false;
+      }
       meetingPhase = 'connected';
     } catch (e) {
       console.error(`Failed to join room '${roomName}'`, e);
-      beginTerminalReturn('Could not join this room - returning you to the room list.');
+      pendingRoomLeft = null;
+      // #356: say why (server unreachable, firewall-blocked socket, ...)
+      // and let the user retry, instead of a 900ms generic flash.
+      disconnectDetail = joinFailureMessage(e);
+      joinFailed = true;
+      meetingPhase = 'disconnected';
+      return false;
     }
 
     // Without this the continuation of an awaited join connects a SECOND
@@ -453,13 +553,126 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
           // The user's own Leave already navigates via handleLeave; showing
           // the terminal card here would flash it for the leave duration.
           if (selfLeaveRequested) return;
-          beginTerminalReturn('Meeting ended - returning you to the room list.');
+          // A Leave from another surface (popover/pill): never rejoin (#354).
+          if (event.payload.userLeave) {
+            rejoinCancelled = true;
+            beginTerminalReturn('You left the meeting - returning you to the room list.');
+            return;
+          }
+          // Mid-rejoin: a failed attempt's own cleanup emits room-left before
+          // its invoke rejects (cleared when the next attempt starts); one
+          // that lands after a successful attempt is replayed by the rejoin.
+          if (reconnecting) {
+            pendingRoomLeft = event.payload;
+            return;
+          }
+          // The failure card owns the screen after a failed join (#356).
+          if (joinFailed) return;
+          // Mid-join: a failing join's own cleanup emits room-left before
+          // the invoke rejects. Stash it; attemptJoin replays it on success.
+          if (meetingPhase === 'connecting') {
+            pendingRoomLeft = event.payload;
+            return;
+          }
+          handleRoomLeft(event.payload);
         }
       });
+      setMeetingRouteRoom(roomName);
     } catch {
       // No Tauri bridge (plain browser preview) — `listen` rejects; without
       // this guard the rejection aborts the rest of onMount.
     }
+  }
+
+  function handleRoomLeft(event: RoomLeftEvent) {
+    // #354: a lost connection is not the meeting ending -- rejoin.
+    if (event.connectionLost) {
+      void recoverLostConnection(event.stoppedShareCount ?? 0);
+      return;
+    }
+    beginTerminalReturn('Meeting ended - returning you to the room list.');
+  }
+
+  function showResilienceToast(event: ResilienceEvent) {
+    // ToastHost renders `resilience-event` from either side; the native side
+    // leaves a rejoinable loss to this controller (#354).
+    void emit(EVENTS.resilienceEvent, event).catch(() => {});
+  }
+
+  async function recoverLostConnection(stoppedShareCount: number) {
+    if (reconnecting) return;
+    const epoch = ++recoveryEpoch;
+    const stale = () => disposed || epoch !== recoveryEpoch;
+    rejoinCancelled = false;
+    pendingRoomLeft = null;
+    meetingPhase = 'connecting';
+    clearTimeout(galleryBridgeRestartTimer);
+    stopGalleryBridge();
+    presence = [];
+    reconnecting = { attempt: 0, total: 0 };
+    showResilienceToast({ kind: 'reconnecting' });
+    const outcome = await runBoundedRejoin({
+      join: async () => {
+        joinedRoom = await joinRoom(
+          roomName,
+          session.participantId,
+          session.name || 'Guest',
+          session.remoteControlPolicy,
+          paletteIndexForIdentityColor(session.identity)
+        );
+      },
+      // Room-scoped: never tear down a different room the user joined since.
+      leave: async () => {
+        if ((await currentRoom()) === roomName) await leaveRoom();
+      },
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      cancelled: () => stale() || selfLeaveRequested || rejoinCancelled,
+      onAttempt: (attempt, total) => {
+        // Anything stashed so far came from the previous attempt's cleanup.
+        pendingRoomLeft = null;
+        reconnecting = { attempt, total };
+      },
+      onAttemptFailed: (attempt, total, error) => {
+        console.warn(`rejoin attempt ${attempt}/${total} failed`, error);
+      }
+    });
+    if (stale()) return;
+    if (outcome.kind === 'cancelled') {
+      reconnecting = null;
+      showResilienceToast({ kind: 'reconnectAbandoned' });
+      return;
+    }
+    if (outcome.kind === 'failed') {
+      reconnecting = null;
+      pendingRoomLeft = null;
+      showResilienceToast({ kind: 'disconnected', reason: 'rejoinFailed' });
+      beginTerminalReturn(
+        "Lost the connection to this meeting and couldn't reconnect. Check your network, then rejoin from the room list.",
+        6000
+      );
+      return;
+    }
+    try {
+      const snapshotRevision = presenceRevision;
+      const snapshot = await roomPresence();
+      if (!stale() && snapshotRevision === presenceRevision) presence = snapshot;
+    } catch {
+      // presence-update events repopulate the roster anyway.
+    }
+    if (stale()) return;
+    // The rejoined room died (or was left) while we finished up: replay it
+    // instead of showing a dead room as connected.
+    const stashed = pendingRoomLeft;
+    pendingRoomLeft = null;
+    reconnecting = null;
+    if (stashed) {
+      handleRoomLeft(stashed);
+      return;
+    }
+    meetingPhase = 'connected';
+    resetGalleryBridgeRestarts();
+    void startGalleryBridge();
+    showResilienceToast({ kind: 'reconnected', message: rejoinedMessage(stoppedShareCount) });
   }
 
   async function handleLeave() {
@@ -480,7 +693,9 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     disposed = true;
     unlistenPresence?.();
     unlistenRoomLeft?.();
+    clearMeetingRouteRoom(roomName);
     if (joinReturnTimer) clearTimeout(joinReturnTimer);
+    clearTimeout(galleryBridgeRestartTimer);
     spotlight.dispose();
     // Tear down the bridge's duplicate subscriptions (issue #26).
     stopGalleryBridge();
@@ -520,6 +735,9 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
     resolvedColorFor,
     get galleryStateTone() {
       return galleryStateTone;
+    },
+    get galleryStateActions() {
+      return galleryStateActions;
     },
     get activeIdentity() {
       return activeIdentity;

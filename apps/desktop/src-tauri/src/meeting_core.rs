@@ -31,7 +31,9 @@ const ROOM_CONNECT_RETRY_DELAYS: [std::time::Duration; 2] = [
 #[derive(Debug, thiserror::Error, Clone, serde::Serialize)]
 #[serde(tag = "kind", content = "message", rename_all = "camelCase")]
 pub(crate) enum RoomJoinError {
-    #[error("missing LiveKit configuration: {0}")]
+    /// Token mint or local room-record failure. Not "missing configuration":
+    /// a token timeout/network error lands here too (#338).
+    #[error("room setup failed: {0}")]
     Config(String),
     #[error("failed to connect to LiveKit room: {0}")]
     RoomConnect(String),
@@ -169,6 +171,33 @@ pub(crate) async fn connect_room(
     })
 }
 
+/// Whether a non-client-initiated LiveKit disconnect is a lost connection the
+/// app should recover from with a fresh join (#354). Deliberate ends of this
+/// membership must NOT be rejoined: a rejoin after `DuplicateIdentity` would
+/// kick the user's other device, after `ParticipantRemoved` it defies a host.
+pub(crate) fn disconnect_is_rejoinable(reason: livekit::DisconnectReason) -> bool {
+    use livekit::DisconnectReason as R;
+    match reason {
+        R::UnknownReason
+        | R::ServerShutdown
+        | R::StateMismatch
+        | R::JoinFailure
+        | R::Migration
+        | R::SignalClose
+        | R::ConnectionTimeout
+        | R::MediaFailure => true,
+        R::ClientInitiated
+        | R::DuplicateIdentity
+        | R::ParticipantRemoved
+        | R::RoomDeleted
+        | R::RoomClosed
+        | R::UserUnavailable
+        | R::UserRejected
+        | R::SipTrunkFailure
+        | R::AgentError => false,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum BoundedConnectError<E> {
     /// The attempt itself failed (and every retry after it).
@@ -296,6 +325,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lost_connections_are_rejoinable_but_deliberate_ends_are_not() {
+        use livekit::DisconnectReason as R;
+        // PETAL-DESKTOP-2R (#354): reconnect exhaustion closes the room with
+        // the episode's cause -- these must lead to an automatic rejoin.
+        for reason in [
+            R::UnknownReason,
+            R::SignalClose,
+            R::ConnectionTimeout,
+            R::MediaFailure,
+            R::ServerShutdown,
+            R::JoinFailure,
+            R::StateMismatch,
+            R::Migration,
+        ] {
+            assert!(disconnect_is_rejoinable(reason), "{reason:?} should rejoin");
+        }
+        for reason in [
+            R::ClientInitiated,
+            R::DuplicateIdentity,
+            R::ParticipantRemoved,
+            R::RoomDeleted,
+            R::RoomClosed,
+            R::UserRejected,
+        ] {
+            assert!(!disconnect_is_rejoinable(reason), "{reason:?} must not rejoin");
+        }
+    }
+
     /// Paused-clock tests: sleeps/timeouts auto-advance instantly, so the
     /// retry ladder's real delays are exercised without real waiting.
     #[tokio::test(start_paused = true)]
@@ -380,6 +438,26 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(BoundedConnectError::TimedOut)));
+    }
+
+    #[test]
+    fn token_network_failure_is_not_reported_as_missing_configuration() {
+        // PETAL-DESKTOP-34 (#338): a token timeout read "missing LiveKit
+        // configuration: backend token request timed out".
+        let error =
+            RoomJoinError::Config(crate::transport::token::TokenError::Timeout.to_string());
+        assert_eq!(error.to_string(), "room setup failed: backend token request timed out");
+        #[cfg(target_os = "macos")]
+        let platform_error: crate::session::ShareSessionError = error.clone().into();
+        #[cfg(not(target_os = "macos"))]
+        let platform_error: crate::session::SessionError = error.clone().into();
+        assert_eq!(
+            platform_error.to_string(),
+            "room setup failed: backend token request timed out"
+        );
+        // The wire kind is unchanged for the frontend and the autotest.
+        let wire = serde_json::to_value(&error).unwrap();
+        assert_eq!(wire["kind"], "config");
     }
 
     #[test]

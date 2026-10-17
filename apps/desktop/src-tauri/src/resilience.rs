@@ -320,7 +320,8 @@ type DisconnectCleanup = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 struct DisconnectEffects {
     surface: Arc<dyn Fn(ResilienceEvent) + Send + Sync>,
-    cleanup: Arc<dyn Fn() -> DisconnectCleanup + Send + Sync>,
+    /// `true` = a lost connection the meeting route will rejoin (#354).
+    cleanup: Arc<dyn Fn(bool) -> DisconnectCleanup + Send + Sync>,
 }
 
 impl DisconnectEffects {
@@ -328,11 +329,12 @@ impl DisconnectEffects {
         let surface_app = app.clone();
         Self {
             surface: Arc::new(move |event| emit(&surface_app, event)),
-            cleanup: Arc::new(move || {
+            cleanup: Arc::new(move |connection_lost| {
                 let app = app.clone();
                 Box::pin(async move {
                     if let Some(state) = app.try_state::<crate::session::SessionState>() {
-                        crate::session::cleanup_for_forced_disconnect(&app, &state).await;
+                        crate::session::cleanup_for_forced_disconnect(&app, &state, connection_lost)
+                            .await;
                     } else {
                         log::warn!(
                             "resilience: forced disconnect cleanup skipped -- SessionState unavailable"
@@ -347,8 +349,8 @@ impl DisconnectEffects {
         (self.surface)(event);
     }
 
-    async fn cleanup(&self) {
-        (self.cleanup)().await;
+    async fn cleanup(&self, connection_lost: bool) {
+        (self.cleanup)(connection_lost).await;
     }
 }
 
@@ -461,11 +463,22 @@ fn start_room_event_watcher(
                     share_repair_epoch.fetch_add(1, Ordering::SeqCst);
                     reconnecting_shown.store(false, Ordering::SeqCst);
                     if should_surface_disconnect(reason) {
-                        log::warn!("resilience: room disconnected: {reason:?}");
-                        disconnect_effects.surface(ResilienceEvent::Disconnected {
-                            reason: format!("{reason:?}"),
-                        });
-                        disconnect_effects.cleanup().await;
+                        // #354: a lost connection is rejoined by the meeting
+                        // route, which owns the Reconnecting/Reconnected
+                        // toasts; only a deliberate end is terminal here.
+                        let connection_lost = crate::meeting_core::disconnect_is_rejoinable(reason);
+                        if connection_lost {
+                            log::warn!(
+                                "resilience: room connection lost ({reason:?}) after the SDK's \
+                                 reconnect attempts -- handing off to the meeting route's rejoin"
+                            );
+                        } else {
+                            log::warn!("resilience: room disconnected: {reason:?}");
+                            disconnect_effects.surface(ResilienceEvent::Disconnected {
+                                reason: format!("{reason:?}"),
+                            });
+                        }
+                        disconnect_effects.cleanup(connection_lost).await;
                     } else {
                         log::info!(
                             "resilience: room disconnected (client-initiated leave) -- no toast"
@@ -2037,17 +2050,16 @@ mod tests {
         assert!(context.stopped_sources.lock_unpoisoned().is_empty());
     }
 
-    #[tokio::test]
-    async fn connect_time_resilience_receiver_reaches_watcher_and_stops_on_disconnect() {
-        use std::sync::atomic::AtomicUsize;
-
+    /// Drive the REAL watcher through the connect-time fanout with one
+    /// terminal `Disconnected`; returns (surfaced events, cleanup args).
+    async fn run_watcher_to_disconnect(
+        reason: livekit::DisconnectReason,
+    ) -> (Vec<ResilienceEvent>, Vec<bool>) {
         let (source_tx, source_rx) = tokio::sync::mpsc::unbounded_channel();
         let connection =
             crate::transport::RoomConnection::from_connect_event_source_for_test(source_rx);
         source_tx
-            .send(livekit::RoomEvent::Disconnected {
-                reason: livekit::DisconnectReason::ServerShutdown,
-            })
+            .send(livekit::RoomEvent::Disconnected { reason })
             .expect("the connect-time fanout accepts the terminal event");
 
         let events = connection
@@ -2056,7 +2068,7 @@ mod tests {
         let session = Arc::new(crate::session::SessionState::default());
         let generation = session.begin_room_generation();
         let surfaced = Arc::new(Mutex::new(Vec::new()));
-        let cleanup_count = Arc::new(AtomicUsize::new(0));
+        let cleanups = Arc::new(Mutex::new(Vec::new()));
         let effects = DisconnectEffects {
             surface: {
                 let surfaced = surfaced.clone();
@@ -2064,9 +2076,9 @@ mod tests {
             },
             cleanup: {
                 let session = session.clone();
-                let cleanup_count = cleanup_count.clone();
-                Arc::new(move || {
-                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                let cleanups = cleanups.clone();
+                Arc::new(move |connection_lost| {
+                    cleanups.lock_unpoisoned().push(connection_lost);
                     session.invalidate_room_generation();
                     Box::pin(async {}) as DisconnectCleanup
                 })
@@ -2082,10 +2094,35 @@ mod tests {
             !generation.is_current(),
             "forced-disconnect cleanup invalidates the room generation"
         );
-        assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
+        let surfaced = surfaced.lock_unpoisoned().clone();
+        let cleanups = cleanups.lock_unpoisoned().clone();
+        (surfaced, cleanups)
+    }
+
+    #[tokio::test]
+    async fn connect_time_resilience_receiver_reaches_watcher_and_stops_on_disconnect() {
+        // PETAL-DESKTOP-2R (#354): reconnect exhaustion / a server restart
+        // is a lost connection -- cleanup is told so (the meeting route
+        // rejoins) and no terminal "Disconnected" toast is shown.
+        let (surfaced, cleanups) =
+            run_watcher_to_disconnect(livekit::DisconnectReason::ServerShutdown).await;
+        assert_eq!(cleanups, [true]);
+        assert!(surfaced.is_empty(), "no terminal toast for a rejoinable loss: {surfaced:?}");
+
+        let (surfaced, cleanups) =
+            run_watcher_to_disconnect(livekit::DisconnectReason::SignalClose).await;
+        assert_eq!(cleanups, [true]);
+        assert!(surfaced.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_deliberate_end_of_membership_is_terminal_and_not_rejoined() {
+        let (surfaced, cleanups) =
+            run_watcher_to_disconnect(livekit::DisconnectReason::DuplicateIdentity).await;
+        assert_eq!(cleanups, [false]);
         assert!(matches!(
-            surfaced.lock_unpoisoned().as_slice(),
-            [ResilienceEvent::Disconnected { reason }] if reason == "ServerShutdown"
+            surfaced.as_slice(),
+            [ResilienceEvent::Disconnected { reason }] if reason == "DuplicateIdentity"
         ));
     }
 

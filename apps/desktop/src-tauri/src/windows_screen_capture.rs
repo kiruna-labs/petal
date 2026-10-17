@@ -825,8 +825,15 @@ fn setup_capture(
         let failure =
             wgc_border_policy::on_border_request_failure(system_border_required, error.code().0);
         // Numeric HRESULT + bounded cause lead so the line is greppable; the
-        // localized OS text (`{error}`) only ever trails.
-        log::warn!(
+        // localized OS text (`{error}`) only ever trails. The pre-20348 SHOW
+        // gap is expected and handled: info, no Sentry event (#330, 2Z).
+        let level = if failure.is_expected_capability_gap() {
+            log::Level::Info
+        } else {
+            log::Level::Warn
+        };
+        log::log!(
+            level,
             "windows screen capture: SetIsBorderRequired({system_border_required}) failed \
              mode={:?} region={} cause={} hresult={:#010x} decision={:?}: {error}",
             indicator_mode,
@@ -835,13 +842,15 @@ fn setup_capture(
             failure.hresult,
             failure.decision
         );
-        crate::logging::capture_sentry_diagnostic(
-            crate::logging::SentryDiagnosticEvent::WgcBorderRequestFailed(
-                crate::logging::WgcBorderRequestFailedDiagnostic {
-                    failure: wgc_border_failure_tag(&failure),
-                },
-            ),
-        );
+        if !failure.is_expected_capability_gap() {
+            crate::logging::capture_sentry_diagnostic(
+                crate::logging::SentryDiagnosticEvent::WgcBorderRequestFailed(
+                    crate::logging::WgcBorderRequestFailedDiagnostic {
+                        failure: wgc_border_failure_tag(&failure),
+                    },
+                ),
+            );
+        }
         match failure.decision {
             wgc_border_policy::BorderFailureDecision::ContinueWithSystemBorder => {
                 effective_indicator_mode = CaptureIndicatorMode::System;

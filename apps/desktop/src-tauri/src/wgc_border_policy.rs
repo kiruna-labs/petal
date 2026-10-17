@@ -75,6 +75,16 @@ pub(crate) struct BorderRequestFailure {
     pub(crate) decision: BorderFailureDecision,
 }
 
+impl BorderRequestFailure {
+    /// A SHOW refused with `E_NOINTERFACE` is the known pre-20348 capability
+    /// gap (Windows 10 19044/19045): WGC's border is unconditional there, so
+    /// it is logged at info, never sent to Sentry. Every other failure --
+    /// any HIDE, any other HRESULT -- is still a reportable failure. #330
+    pub(crate) fn is_expected_capability_gap(&self) -> bool {
+        self.requested_border && self.cause == BorderFailureCause::NoInterface
+    }
+}
+
 /// Decide what a failed `SetIsBorderRequired(requested_border)` means.
 ///
 /// `requested_border` is the value that was written (`true` = show WGC's
@@ -179,6 +189,26 @@ mod tests {
             assert_eq!(hide.decision, BorderFailureDecision::RefuseBorderless);
             assert_eq!(show.cause, hide.cause, "hresult {hresult:#010x}");
             assert_eq!(show.cause, BorderFailureCause::classify(hresult));
+        }
+    }
+
+    /// Sentry PETAL-DESKTOP-2Z: every share on Windows 10 19044/19045 sent
+    /// a `show_no_interface` error for a request the OS already satisfies.
+    /// Only that exact shape is the expected gap; everything else reports.
+    #[test]
+    fn only_a_show_refused_for_no_interface_is_an_expected_capability_gap() {
+        assert!(on_border_request_failure(true, E_NOINTERFACE).is_expected_capability_gap());
+        for hresult in [RO_E_CLOSED, E_FAIL, -1] {
+            assert!(
+                !on_border_request_failure(true, hresult).is_expected_capability_gap(),
+                "show hresult {hresult:#010x}"
+            );
+        }
+        for hresult in [E_NOINTERFACE, RO_E_CLOSED, E_FAIL] {
+            assert!(
+                !on_border_request_failure(false, hresult).is_expected_capability_gap(),
+                "hide hresult {hresult:#010x}"
+            );
         }
     }
 

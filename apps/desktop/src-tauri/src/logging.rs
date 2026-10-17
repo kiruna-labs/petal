@@ -580,7 +580,9 @@ diagnostic_enum!(BrowserUrlExtractionCauseTag {
 // restored first). `*_no_interface` is `E_NOINTERFACE` -- no
 // `IGraphicsCaptureSession2` on this Windows build; `*_other` is any other
 // HRESULT (the numeric code is in petal.log). Mirrors
-// `windows_screen_capture::wgc_border_failure_tag`.
+// `windows_screen_capture::wgc_border_failure_tag`. `show_no_interface` is
+// the expected Windows 10 gap and is no longer sent (#330); the variant stays
+// so the closed tag vocabulary is unchanged.
 diagnostic_enum!(WgcBorderFailureTag {
     ShowNoInterface => "show_no_interface",
     ShowOther => "show_other",
@@ -2615,6 +2617,111 @@ impl<L: log::Log> log::Log for RepeatSuppressingLog<L> {
     }
 }
 
+/// LiveKit SDK `error!` lines that are one step of a self-healing reconnect,
+/// or a send racing a socket/session that is already being torn down. Each is
+/// followed by a terminal line that IS reported: `"RtcEngine successfully
+/// recovered"` (info) or `"failed to reconnect to the livekit room"` (error,
+/// deliberately absent here). Field evidence (#336): PETAL-DESKTOP-2Y's
+/// 17 events were 2 incidents, each already captured by a -2R terminal event.
+fn is_livekit_transient_error(target: &str, message: &str) -> bool {
+    if target == "livekit::rtc_engine" || target.starts_with("livekit::rtc_engine::") {
+        return message.starts_with("restarting connection failed:")
+            || message.starts_with("resuming connection failed:")
+            || message.contains("could not establish publisher connection: timeout")
+            || message.starts_with("failed to send dc_event buffer_amount_change:")
+            || (message.starts_with("failed to negotiate the publisher:")
+                && message.contains("Called in wrong state: closed"));
+    }
+    if target == "livekit_api::signal_client" || target.starts_with("livekit_api::signal_client::") {
+        return message.starts_with("failed to send pong message:")
+            || message.starts_with("failed to send queued signal:")
+            || message.starts_with("unhandled websocket message Err(");
+    }
+    false
+}
+
+/// Re-levels `is_livekit_transient_error` records from ERROR to WARN before
+/// they reach the Sentry bridge and file sink, so they ride along as
+/// breadcrumbs on the terminal event instead of opening their own issues.
+/// The message text is unchanged; petal.log still carries every line.
+pub(crate) struct LivekitTransientErrorDowngrade<L: log::Log> {
+    inner: L,
+}
+
+impl<L: log::Log> LivekitTransientErrorDowngrade<L> {
+    pub(crate) fn new(inner: L) -> Self {
+        LivekitTransientErrorDowngrade { inner }
+    }
+}
+
+impl<L: log::Log> log::Log for LivekitTransientErrorDowngrade<L> {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.inner.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if record.level() == log::Level::Error && record.target().starts_with("livekit") {
+            let message = record.args().to_string();
+            if is_livekit_transient_error(record.target(), &message) {
+                self.inner.log(
+                    &log::Record::builder()
+                        .args(format_args!("{message}"))
+                        .level(log::Level::Warn)
+                        .target(record.target())
+                        .module_path(record.module_path())
+                        .file(record.file())
+                        .line(record.line())
+                        .build(),
+                );
+                return;
+            }
+        }
+        self.inner.log(record);
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+}
+
+/// The Sentry bridge's per-target policy (see the call site in
+/// `init_logging`). Extracted so tests exercise the production filter.
+fn sentry_log_filter(metadata: &log::Metadata) -> sentry_log::LogFilter {
+    if metadata.target() == PANIC_HOOK_LOG_TARGET
+        || metadata.target() == OBJC_EXCEPTION_HOOK_LOG_TARGET
+    {
+        sentry_log::LogFilter::Ignore
+    } else if metadata.target() == NATIVE_WEBRTC_LOG_TARGET
+        || metadata.target().starts_with(NATIVE_WEBRTC_LOG_TARGET_PREFIX)
+    {
+        // #787 mapped native WebRTC severities so its lines reach the log
+        // at all -- but SentryLogger's capture branch runs on every record
+        // `log::set_max_level` admits, BEFORE the fern denylist that caps
+        // this target at `warn`. So each `RTC_LOG(LS_ERROR)` would open its
+        // own Sentry issue, unrate-limited, and libwebrtc emits LS_ERROR
+        // for routine non-fatal conditions (RTP demux, SRTP unprotect, ICE)
+        // whose text carries ssrc/port numbers, so grouping fragments.
+        //
+        // The same day, transport/audio.rs downgraded its own watchdog from
+        // error! to warn! with the note "error! would open a Sentry issue
+        // per track" -- this channel has a far higher and, by construction,
+        // entirely unmeasured line rate. Breadcrumb only: the lines stay in
+        // petal.log and ride along on a real error, without becoming one.
+        sentry_log::LogFilter::Breadcrumb
+    } else {
+        sentry_log::default_filter(metadata)
+    }
+}
+
+/// The full Sentry-facing logger chain around `dest` (the fern sink).
+fn sentry_logger_chain<L: log::Log>(
+    dest: L,
+) -> LivekitTransientErrorDowngrade<sentry_log::SentryLogger<L>> {
+    LivekitTransientErrorDowngrade::new(
+        sentry_log::SentryLogger::with_dest(dest).filter(sentry_log_filter),
+    )
+}
+
 /// Install the file-based logging sink + panic hook. Must be called exactly
 /// once, as the very first thing in `run()`, before any other startup code
 /// (including `dotenvy::from_path`) so that even a failure in that early
@@ -2768,39 +2875,13 @@ pub fn init() -> PathBuf {
     // since every line carries its own timestamp) and so stdout benefits
     // too, not just the file. See `RepeatSuppressingLog`'s doc comment.
     let fern_logger: Box<dyn log::Log> = Box::new(RepeatSuppressingLog::new(fern_logger));
-    // `.filter(...)` overrides ONLY the two hook-internal targets (see their
-    // constants' doc comments) to `Ignore` -- every other record keeps
-    // `sentry_log`'s own `default_filter` (Error -> event, Warn/Info ->
-    // breadcrumb, Debug/Trace -> ignored), unchanged from the plain
-    // `with_dest` default. This does not affect what fern writes to
-    // petal.log/stdout, only what the Sentry bridge does with these two
-    // specific lines.
-    let logger = sentry_log::SentryLogger::with_dest(fern_logger).filter(|metadata| {
-        if metadata.target() == PANIC_HOOK_LOG_TARGET
-            || metadata.target() == OBJC_EXCEPTION_HOOK_LOG_TARGET
-        {
-            sentry_log::LogFilter::Ignore
-        } else if metadata.target() == NATIVE_WEBRTC_LOG_TARGET
-            || metadata.target().starts_with(NATIVE_WEBRTC_LOG_TARGET_PREFIX)
-        {
-            // #787 mapped native WebRTC severities so its lines reach the log
-            // at all -- but SentryLogger's capture branch runs on every record
-            // `log::set_max_level` admits, BEFORE the fern denylist that caps
-            // this target at `warn`. So each `RTC_LOG(LS_ERROR)` would open its
-            // own Sentry issue, unrate-limited, and libwebrtc emits LS_ERROR
-            // for routine non-fatal conditions (RTP demux, SRTP unprotect, ICE)
-            // whose text carries ssrc/port numbers, so grouping fragments.
-            //
-            // The same day, transport/audio.rs downgraded its own watchdog from
-            // error! to warn! with the note "error! would open a Sentry issue
-            // per track" -- this channel has a far higher and, by construction,
-            // entirely unmeasured line rate. Breadcrumb only: the lines stay in
-            // petal.log and ride along on a real error, without becoming one.
-            sentry_log::LogFilter::Breadcrumb
-        } else {
-            sentry_log::default_filter(metadata)
-        }
-    });
+    // `sentry_log_filter` overrides ONLY the two hook-internal targets (see
+    // their constants' doc comments) to `Ignore` and native WebRTC to
+    // breadcrumbs -- every other record keeps `sentry_log`'s own
+    // `default_filter` (Error -> event, Warn/Info -> breadcrumb, Debug/Trace
+    // -> ignored). The outer `LivekitTransientErrorDowngrade` re-levels known
+    // intermediate LiveKit SDK errors to WARN first (#336).
+    let logger = sentry_logger_chain(fern_logger);
     if let Err(e) = log::set_boxed_logger(Box::new(logger)) {
         // `set_boxed_logger` only fails if a logger is already installed
         // (double-init) -- log it via stderr since the logger itself isn't
@@ -7829,6 +7910,117 @@ mod tests {
         assert!(content.contains("yesterday's line"));
         assert!(content.contains("today's line"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- #336: intermediate LiveKit SDK errors stay out of Sentry issues --
+
+    #[derive(Clone, Default)]
+    struct LevelRecordingLog {
+        records: std::sync::Arc<Mutex<Vec<(log::Level, String, String)>>>,
+    }
+
+    impl log::Log for LevelRecordingLog {
+        fn enabled(&self, _metadata: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            self.records.lock().unwrap_or_else(|e| e.into_inner()).push((
+                record.level(),
+                record.target().to_string(),
+                record.args().to_string(),
+            ));
+        }
+        fn flush(&self) {}
+    }
+
+    fn log_error_via(logger: &dyn log::Log, target: &str, msg: &str) {
+        logger.log(
+            &log::Record::builder()
+                .args(format_args!("{msg}"))
+                .level(log::Level::Error)
+                .target(target)
+                .build(),
+        );
+    }
+
+    // Verbatim messages from the Sentry events (PETAL-DESKTOP-2Y/-3E/-2V/
+    // -2Q/-30/-2T/-37/-38/-39) and the SDK targets that emit them.
+    const LIVEKIT_TRANSIENT_ERRORS: &[(&str, &str)] = &[
+        ("livekit::rtc_engine", "restarting connection failed: signal failure: validate request timed out"),
+        ("livekit::rtc_engine", "restarting connection failed: signal failure: signal connection timed out"),
+        ("livekit::rtc_engine", "restarting connection failed: connection error: wait_pc_connection timed out"),
+        ("livekit::rtc_engine", "resuming connection failed: signal failure: signal connection timed out"),
+        ("livekit::rtc_engine::rtc_session", "connection error: could not establish publisher connection: timeout"),
+        ("livekit::rtc_engine::rtc_session", "failed to send dc_event buffer_amount_change: SendError { .. }"),
+        (
+            "livekit::rtc_engine::rtc_session",
+            "failed to negotiate the publisher: Rtc(RtcError { error_type: InvalidState, message: \"Failed to set local offer sdp: Called in wrong state: closed\" })",
+        ),
+        ("livekit_api::signal_client::signal_stream", "failed to send pong message: Protocol(SendAfterClosing)"),
+        ("livekit_api::signal_client", "failed to send queued signal: failed to send message to the server"),
+        (
+            "livekit_api::signal_client::signal_stream",
+            "unhandled websocket message Err(Io(Os { code: 10054, kind: ConnectionReset, message: \"reset\" }))",
+        ),
+    ];
+
+    // Terminal or genuinely unexpected SDK failures that must stay errors.
+    const LIVEKIT_REAL_ERRORS: &[(&str, &str)] = &[
+        ("livekit::rtc_engine", "failed to reconnect to the livekit room"),
+        (
+            "livekit::rtc_engine::rtc_session",
+            "failed to negotiate the publisher: Rtc(RtcError { error_type: InvalidState, message: \"Failed to set local offer sdp: Called in wrong state: have-remote-offer\" })",
+        ),
+        ("livekit::rtc_engine::rtc_session", "failed to handle signal: Rtc(RtcError { error_type: InvalidState })"),
+        ("livekit_api::signal_client", "v0 fallback also failed: Timeout"),
+        // Same text from a non-SDK target is never re-levelled.
+        ("desktop_lib::session", "restarting connection failed: signal failure"),
+    ];
+
+    #[test]
+    fn livekit_transient_error_classifier_matches_only_intermediate_sdk_lines() {
+        for (target, msg) in LIVEKIT_TRANSIENT_ERRORS {
+            assert!(is_livekit_transient_error(target, msg), "{target}: {msg}");
+        }
+        for (target, msg) in LIVEKIT_REAL_ERRORS {
+            assert!(!is_livekit_transient_error(target, msg), "{target}: {msg}");
+        }
+    }
+
+    #[test]
+    fn sentry_logger_chain_keeps_transient_livekit_errors_as_breadcrumbs_on_the_terminal_event() {
+        let recorder = LevelRecordingLog::default();
+        let records = recorder.records.clone();
+        let chain = sentry_logger_chain(recorder);
+        let events = sentry::test::with_captured_events(|| {
+            for (target, msg) in LIVEKIT_TRANSIENT_ERRORS {
+                log_error_via(&chain, target, msg);
+            }
+            log_error_via(&chain, "livekit::rtc_engine", "failed to reconnect to the livekit room");
+        });
+
+        assert_eq!(events.len(), 1, "only the terminal failure becomes an event: {events:?}");
+        let terminal = &events[0];
+        let crumbs: Vec<&str> = terminal
+            .breadcrumbs
+            .iter()
+            .filter_map(|crumb| crumb.message.as_deref())
+            .collect();
+        for (_, msg) in LIVEKIT_TRANSIENT_ERRORS {
+            assert!(crumbs.contains(msg), "missing breadcrumb {msg}: {crumbs:?}");
+        }
+
+        // The file sink still gets every line, verbatim, at the honest level.
+        let records = records.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(records.len(), LIVEKIT_TRANSIENT_ERRORS.len() + 1);
+        for (level, _, msg) in records.iter() {
+            let expected = if msg == "failed to reconnect to the livekit room" {
+                log::Level::Error
+            } else {
+                log::Level::Warn
+            };
+            assert_eq!(*level, expected, "{msg}");
+        }
     }
 
     // -- #905: native-WebRTC repeat suppression --------------------------

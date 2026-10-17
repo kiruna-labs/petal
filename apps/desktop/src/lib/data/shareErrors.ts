@@ -2,6 +2,7 @@ export type ShareSessionError =
   | { kind: 'permissionDenied'; message?: unknown }
   | { kind: 'windowNotFound'; message?: unknown }
   | { kind: 'displayNotFound'; message?: unknown }
+  | { kind: 'windowCaptureExcluded'; message?: unknown }
   | { kind: 'capture'; message?: unknown }
   | { kind: 'config'; message?: unknown }
   | { kind: 'roomConnect'; message?: unknown }
@@ -55,6 +56,11 @@ export function shareErrorDisplay(error: unknown): ShareErrorDisplay {
     case 'windowNotFound':
       return {
         message: 'That window is no longer available to share',
+        openScreenRecordingSettings: false
+      };
+    case 'windowCaptureExcluded':
+      return {
+        message: "That window's app blocks screen sharing",
         openScreenRecordingSettings: false
       };
     case 'displayNotFound':

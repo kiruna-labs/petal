@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs';
 import {
   INCOMPATIBLE_UPDATE_MARKER,
   friendlyUpdateErrorMessage,
+  isRelocationRequiredUpdateFailure,
   updateFailureCategory,
+  updateFailureLogLevel,
   updateFailureOffersManualDownload
 } from '../src/lib/data/updaterErrors.ts';
 import { DOWNLOAD_ORIGIN, manualDownloadUrl } from '../src/lib/data/updateDownload.ts';
@@ -247,4 +249,61 @@ test('the Rust guard itself stamps the marker the recovery action keys off (#125
     updaterRustSource.indexOf('enum MacInstallStage')
   );
   assert.match(installCommand, /verify_update_archive_architecture\(&bytes\)/);
+});
+
+test('a relocation-required update failure is a handled condition, not a Sentry error (#332)', () => {
+  // Both phrasings `updater.rs` emits: the disk image (also the install path's
+  // own wording) and a translocated / other read-only launch.
+  const relocation = [
+    'Petal is running from a read-only disk image. Drag Petal into Applications, then try again.',
+    'Petal is running from a read-only location. Move Petal into Applications, then try again.'
+  ];
+  for (const raw of relocation) {
+    assert.equal(isRelocationRequiredUpdateFailure(raw), true, raw);
+    assert.equal(updateFailureLogLevel(raw), 'warn', raw);
+    assert.equal(friendlyUpdateErrorMessage(raw), 'move Petal to Applications, then update');
+  }
+  // The other direction: genuine failures still reach Sentry as errors.
+  const genuine = [
+    'Petal could not install the update because /Volumes/X and the staging folder are on different disks.',
+    'The update could not be completed. Your previous Petal is safe at /Applications/.petal-update-1/old -- move it back to /Applications/Petal.app.',
+    'update download failed: connection reset',
+    'update is incompatible with this Mac: running architecture arm64 not present in staged app bundle (x86_64)',
+    'some completely unrecognized error shape'
+  ];
+  for (const raw of genuine) {
+    assert.equal(isRelocationRequiredUpdateFailure(raw), false, raw);
+    assert.equal(updateFailureLogLevel(raw), 'error', raw);
+  }
+  // Both catch blocks log through the classifier; no hardcoded 'error' remains.
+  assert.doesNotMatch(updaterSource, /logUpdaterStep\('error'/);
+  assert.equal(
+    updaterSource.match(/logUpdaterStep\(updateFailureLogLevel\(rawMessage\), `failed: \$\{rawMessage\}`\)/g)?.length,
+    2
+  );
+});
+
+test('the install command refuses a relocation-required launch before downloading (#332)', () => {
+  const installCommand = updaterRustSource.slice(
+    updaterRustSource.indexOf('pub async fn download_and_install_compatible_update'),
+    updaterRustSource.indexOf('enum MacInstallStage')
+  );
+  const refusal = installCommand.indexOf('relocation_refusal_message(launch_location)');
+  assert.ok(refusal > 0, 'install command must check the launch location');
+  assert.ok(refusal < installCommand.indexOf('.download('), 'refusal must precede the download');
+  // The install path and the refusal share one disk-image sentence.
+  assert.match(updaterRustSource, /return READ_ONLY_DISK_IMAGE_MESSAGE\.to_string\(\);/);
+});
+
+test('the update-ready toast points at Applications when the launch cannot install (#332)', () => {
+  assert.match(toastHostSource, /needsRelocation\(cls\)/);
+  assert.match(toastHostSource, /move Petal to Applications to install/);
+  assert.match(
+    toastHostSource,
+    /updateStatus\.kind === 'available' && updateNeedsRelocation\s*\?\s*'Open Applications'/
+  );
+  assert.match(
+    toastHostSource,
+    /updateStatus\.kind === 'available' && updateNeedsRelocation\s*\?\s*openApplicationsFolder/
+  );
 });
