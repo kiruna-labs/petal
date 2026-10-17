@@ -5781,7 +5781,9 @@ fn retired_window_restorable(
     key: &RemoteWindowKey,
     live: &HashSet<RemoteWindowKey>,
 ) -> bool {
-    s.retired_reasons.get(key) == Some(&RemoveWindowReason::ManualHide) && live.contains(key)
+    // RED-PROOF ONLY: #316 filter reverted -- every retiree is restorable.
+    let _ = (s, key, live);
+    true
 }
 
 /// #316: outcome of `take_restorable_retired` for `activate_window_then`.
@@ -7108,6 +7110,27 @@ pub(crate) fn cockpit_chrome_dock_target(panel: CockpitScreenFrame) -> CockpitSc
         width: frames.pointer.width,
         height: frames.pointer.height,
     }
+}
+
+/// RED-PROOF ONLY: drop the owner's control/pointer overlays at the #315
+/// screen corner (0, HEADER_HEIGHT), keeping their docked size.
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) fn cockpit_red_inject_corner_misdock(app: &AppHandle, owner_identity: &str) {
+    let keys: Vec<RemoteWindowKey> = with_state(|state| {
+        state.windows.keys().filter(|key| key.owner_identity == owner_identity).cloned().collect()
+    });
+    let app_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        for key in keys {
+            let Some(panel) = app_main.get_webview_window(&panel_label_for_key(&key)) else { continue };
+            let Some(frame) = current_chrome_frame(&panel) else { continue };
+            let content_h = (frame.height - HEADER_HEIGHT).max(1.0);
+            for label in [control_label_for_key(&key), pointer_label_for_key(&key)] {
+                log::warn!("compositor: RED-PROOF injecting #315 corner misdock on '{label}'");
+                reposition_chrome(&app_main, &label, 0.0, HEADER_HEIGHT, frame.width, content_h);
+            }
+        }
+    });
 }
 
 /// Snapshot every OPEN remote window of `owner_identity` as the WindowServer

@@ -235,6 +235,9 @@ pub(super) async fn assert_web_to_native_receiver(
     if since_reveal < DOCK_GRACE {
         tokio::time::sleep(DOCK_GRACE - since_reveal).await;
     }
+    // RED-PROOF ONLY.
+    crate::compositor::cockpit_red_inject_corner_misdock(app, &owner);
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let mut samples = Vec::new();
     let mut last_panel_cg_id = first.panel_cg_window_id;
     for index in 0..DOCK_GATING_SAMPLES {
