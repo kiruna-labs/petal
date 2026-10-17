@@ -7069,6 +7069,169 @@ pub(crate) fn cockpit_eval_in_control_overlay(
         .map_err(|_| "timed out evaluating in the control overlay on main thread".to_string())?
 }
 
+/// A WindowServer frame (global top-left points) for the cockpit's receiver
+/// window oracles (#315).
+#[cfg(feature = "cockpit-privileged")]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub(crate) struct CockpitScreenFrame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// One open remote window's panel and control/pointer overlay children, read
+/// from CGWindowList (on-screen only; `None` = not on screen). CGWindowList,
+/// not the dock verifier's SLS reads, so the oracle does not share the
+/// verifier's blind spots (#315).
+#[cfg(feature = "cockpit-privileged")]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CockpitRemoteChromeSnapshot {
+    pub source_window_id: u32,
+    pub panel_cg_window_id: Option<u32>,
+    pub panel: Option<CockpitScreenFrame>,
+    pub control: Option<CockpitScreenFrame>,
+    pub pointer: Option<CockpitScreenFrame>,
+    pub pointer_label: String,
+}
+
+/// Where control/pointer must sit for a panel at `panel`, per
+/// `chrome_frames_for_panel_bounds` (both cover the content area). Err when
+/// the two docks diverge: an assertion failure for the oracle, never a panic
+/// in a QA run (the oracle assumes one shared target).
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) fn cockpit_chrome_dock_target(
+    panel: CockpitScreenFrame,
+) -> Result<CockpitScreenFrame, String> {
+    let frames = chrome_frames_for_panel_bounds(panel.x, panel.y, panel.width, panel.height);
+    cockpit_shared_dock_target(frames.control, frames.pointer)
+}
+
+#[cfg(feature = "cockpit-privileged")]
+fn cockpit_shared_dock_target(
+    control: ChromeFrame,
+    pointer: ChromeFrame,
+) -> Result<CockpitScreenFrame, String> {
+    if control != pointer {
+        return Err(format!(
+            "chrome_frames_for_panel_bounds docks control at {control:?} but pointer at {pointer:?}; the #315 oracle needs one shared content-area target"
+        ));
+    }
+    Ok(CockpitScreenFrame {
+        x: pointer.x,
+        y: pointer.y,
+        width: pointer.width,
+        height: pointer.height,
+    })
+}
+
+/// Why a cockpit main-thread inspection produced no answer. `Timeout` means
+/// the main thread was busy past the budget -- NOT that the window is gone;
+/// callers must not fold it into "not open" (a misleading product FAIL).
+#[cfg(feature = "cockpit-privileged")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CockpitMainThreadError {
+    Timeout,
+    Dispatch(String),
+}
+
+/// Main-thread hop budget for one chrome snapshot.
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) const COCKPIT_CHROME_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Snapshot every OPEN remote window of `owner_identity` as the WindowServer
+/// sees it (#315 docking oracle).
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) fn cockpit_remote_chrome_snapshots(
+    app: &AppHandle,
+    owner_identity: &str,
+) -> Result<Vec<CockpitRemoteChromeSnapshot>, CockpitMainThreadError> {
+    let keys: Vec<RemoteWindowKey> = with_state(|state| {
+        state
+            .windows
+            .keys()
+            .filter(|key| key.owner_identity == owner_identity)
+            .cloned()
+            .collect()
+    });
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let app_main = app.clone();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let on_screen = |label: &str| -> (Option<u32>, Option<CockpitScreenFrame>) {
+            let Some(win) = app_main.get_webview_window(label) else {
+                return (None, None);
+            };
+            let Ok(cg_id) = crate::platform::appkit::window_number(&win) else {
+                return (None, None);
+            };
+            let frame = crate::platform::cg::frame_for_window_id_raw(cg_id)
+                .map(|(x, y, width, height)| CockpitScreenFrame { x, y, width, height });
+            (Some(cg_id), frame)
+        };
+        let snapshots = keys
+            .iter()
+            .map(|key| {
+                let (panel_cg_window_id, panel) = on_screen(&panel_label_for_key(key));
+                CockpitRemoteChromeSnapshot {
+                    source_window_id: key.window_id,
+                    panel_cg_window_id,
+                    panel,
+                    control: on_screen(&control_label_for_key(key)).1,
+                    pointer: on_screen(&pointer_label_for_key(key)).1,
+                    pointer_label: pointer_label_for_key(key),
+                }
+            })
+            .collect::<Vec<_>>();
+        let _ = sender.send(snapshots);
+    })
+    .map_err(|error| {
+        CockpitMainThreadError::Dispatch(format!(
+            "dispatch chrome snapshot to main thread: {error}"
+        ))
+    })?;
+    receiver
+        .recv_timeout(COCKPIT_CHROME_SNAPSHOT_TIMEOUT)
+        .map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => CockpitMainThreadError::Timeout,
+            std::sync::mpsc::RecvTimeoutError::Disconnected => CockpitMainThreadError::Dispatch(
+                "main thread dropped the chrome snapshot without answering".to_string(),
+            ),
+        })
+}
+
+#[cfg(all(test, feature = "cockpit-privileged"))]
+mod cockpit_dock_target_tests {
+    use super::*;
+
+    #[test]
+    fn dock_target_is_the_shared_content_area() {
+        let target = cockpit_chrome_dock_target(CockpitScreenFrame {
+            x: 217.0,
+            y: 175.0,
+            width: 960.0,
+            height: 644.0,
+        })
+        .unwrap();
+        assert_eq!(
+            target,
+            CockpitScreenFrame { x: 217.0, y: 175.0 + HEADER_HEIGHT, width: 960.0, height: 644.0 - HEADER_HEIGHT }
+        );
+    }
+
+    #[test]
+    fn diverging_control_and_pointer_docks_are_an_error_not_a_panic() {
+        let control = ChromeFrame { x: 0.0, y: 44.0, width: 10.0, height: 10.0 };
+        let pointer = ChromeFrame { x: 1.0, y: 44.0, width: 10.0, height: 10.0 };
+        let error = cockpit_shared_dock_target(control, pointer).unwrap_err();
+        assert!(error.contains("docks control at") && error.contains("but pointer at"), "{error}");
+        assert!(cockpit_shared_dock_target(pointer, pointer).is_ok());
+    }
+}
+
 #[tauri::command]
 pub fn compositor_toggle_debug_panel(
     app: AppHandle,

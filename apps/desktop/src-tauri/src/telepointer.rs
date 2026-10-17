@@ -1239,6 +1239,52 @@ fn publish_pointer(
     });
 }
 
+/// Test Cockpit only (#315): the last telepointer update pushed into each
+/// REMOTE window's pointer overlay, keyed by overlay label. The overlay draws
+/// the cursor at `x*100% / y*100%` of its own frame, so overlay frame + this
+/// position is where the cursor lands on screen. Never compiled into a
+/// customer build.
+#[cfg(feature = "cockpit-privileged")]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CockpitOverlayDelivery {
+    pub x: f64,
+    pub y: f64,
+    pub visible: bool,
+    pub at_ms: u64,
+}
+
+#[cfg(feature = "cockpit-privileged")]
+static COCKPIT_OVERLAY_DELIVERIES: std::sync::Mutex<
+    Option<std::collections::HashMap<String, CockpitOverlayDelivery>>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(all(feature = "cockpit-privileged", target_os = "macos"))]
+fn cockpit_record_remote_overlay_delivery(label: &str, update: &TelepointerUpdate) {
+    use crate::sync_ext::MutexExt;
+    COCKPIT_OVERLAY_DELIVERIES
+        .lock_unpoisoned()
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(
+            label.to_string(),
+            CockpitOverlayDelivery {
+                x: update.x,
+                y: update.y,
+                visible: update.visible,
+                at_ms: crate::time_util::now_ms(),
+            },
+        );
+}
+
+#[cfg(feature = "cockpit-privileged")]
+pub(crate) fn cockpit_last_remote_overlay_delivery(label: &str) -> Option<CockpitOverlayDelivery> {
+    use crate::sync_ext::MutexExt;
+    COCKPIT_OVERLAY_DELIVERIES
+        .lock_unpoisoned()
+        .as_ref()
+        .and_then(|deliveries| deliveries.get(label).copied())
+}
+
 /// Start the receiver-side task: subscribes to `publisher`'s room's events
 /// and routes every telepointer-topic `RoomEvent::DataReceived`. Called once
 /// per room connection -- see
@@ -1373,6 +1419,11 @@ pub fn start_receiver_for_room(
                                 "telepointer: failed to eval update for window {window_id} overlay '{}': {e}",
                                 overlay.label()
                             );
+                        } else {
+                            #[cfg(feature = "cockpit-privileged")]
+                            if surface_owner != local_identity {
+                                cockpit_record_remote_overlay_delivery(&label, &update);
+                            }
                         }
                     }
                 }
