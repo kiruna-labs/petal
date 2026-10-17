@@ -310,12 +310,15 @@ pub(super) async fn assert_web_to_native_receiver(
         Some(scenario.id),
         serde_json::json!({ "windowId": window_id, "panelCgWindowId": last_panel_cg_id, "result": &phantom }),
     );
+    let ended_infra = matches!(phantom, Err(EndedCheckError::Infra(_)));
     outcome.assertions.push(AssertionOutcome {
         name: "ended-window-not-restorable".to_string(),
         passed: phantom.is_ok(),
         detail: match &phantom {
             Ok(detail) => detail.clone(),
-            Err(problem) => problem.clone(),
+            Err(EndedCheckError::Product(problem) | EndedCheckError::Infra(problem)) => {
+                problem.clone()
+            }
         },
     });
 
@@ -325,7 +328,13 @@ pub(super) async fn assert_web_to_native_receiver(
         .filter(|assertion| !assertion.passed && assertion.name != "recv-window-active-fps")
         .map(|assertion| assertion.name.clone())
         .collect::<Vec<_>>();
-    if !failed.is_empty() {
+    if ended_infra && failed == ["ended-window-not-restorable"] {
+        outcome.verdict = ScenarioVerdict::InfraFail;
+        outcome.message = format!(
+            "{} INFRA-FAIL receiver window checks passed but the #316 check could not be driven",
+            scenario.id
+        );
+    } else if !failed.is_empty() {
         outcome.verdict = ScenarioVerdict::TestFail;
         outcome.message = format!(
             "{} TEST-FAIL video arrived but the receiver window failed {failed:?}",
@@ -351,6 +360,14 @@ fn fail(
     outcome
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+enum EndedCheckError {
+    /// The receiver kept, listed or restored the ended window.
+    Product(String),
+    /// The check could not be driven (the sharer never left).
+    Infra(String),
+}
+
 /// #316: disconnect the sharer, wait for its window to be retired, then
 /// assert the menubar list omits it and an activate leaves it off screen.
 async fn check_ended_window_not_restorable(
@@ -358,14 +375,21 @@ async fn check_ended_window_not_restorable(
     owner: &str,
     window_id: u32,
     panel_cg_window_id: Option<u32>,
-) -> Result<String, String> {
-    publish_cockpit_command(app, owner, "disconnect").await?;
+) -> Result<String, EndedCheckError> {
+    publish_cockpit_command(app, owner, "disconnect")
+        .await
+        .map_err(EndedCheckError::Infra)?;
     let started = Instant::now();
     while crate::compositor::is_open_for_owner(owner, window_id) {
         if started.elapsed() > RETIRE_TIMEOUT {
-            return Err(format!(
+            if remote_participant_identities(app).iter().any(|id| id == owner) {
+                return Err(EndedCheckError::Infra(format!(
+                    "the sharer '{owner}' never left the room after the disconnect command, so the ended-window check could not run"
+                )));
+            }
+            return Err(EndedCheckError::Product(format!(
                 "the sharer left but its window {window_id} was still open after {RETIRE_TIMEOUT:?}"
-            ));
+            )));
         }
         tokio::time::sleep(REVEAL_POLL).await;
     }
@@ -382,10 +406,10 @@ async fn check_ended_window_not_restorable(
                 && entry["windowId"].as_u64() == Some(u64::from(window_id))
         });
     if let Some(entry) = listed {
-        return Err(format!(
+        return Err(EndedCheckError::Product(format!(
             "ended window {window_id} is still listed by compositor_list_windows (hidden={}) -- the #316 phantom",
             entry["hidden"]
-        ));
+        )));
     }
     crate::compositor::compositor_activate_window(app.clone(), window_id, Some(owner.to_string()));
     tokio::time::sleep(ACTIVATE_SETTLE).await;
@@ -394,9 +418,9 @@ async fn check_ended_window_not_restorable(
         .and_then(crate::platform::cg::frame_for_window_id_raw)
         .is_some();
     if reopened || on_screen {
-        return Err(format!(
+        return Err(EndedCheckError::Product(format!(
             "compositor_activate_window restored ended window {window_id} (open={reopened}, panel on screen={on_screen}) -- the #316 phantom restore"
-        ));
+        )));
     }
     Ok(format!(
         "window {window_id} closed {retire_ms}ms after the sharer left (retired={retired}); not listed, activate refused, panel stays off screen (#316)"
