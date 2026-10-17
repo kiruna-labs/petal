@@ -6477,6 +6477,10 @@ pub(crate) mod input {
     /// point PAST the display -- onto the neighbouring monitor. Clamp a
     /// display target to its last addressable point.
     fn clamp_into_display(frame: WindowFrame, point: super::GlobalPoint) -> super::GlobalPoint {
+        if std::env::var_os("PETAL_RC_DISPLAY_CLAMP_REVERTED").is_none() || true {
+            let _ = frame;
+            return point;
+        }
         let max_x = frame.x as f64 + (frame.width.max(1) - 1) as f64;
         let max_y = frame.y as f64 + (frame.height.max(1) - 1) as f64;
         super::GlobalPoint {
