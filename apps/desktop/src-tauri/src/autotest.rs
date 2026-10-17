@@ -597,6 +597,12 @@ mod command_server {
         ShareBorderStack {
             window_id: u32,
         },
+        /// Share a whole display through the picker path (#349/#353 loopback
+        /// coverage). `display_id` omitted = the first display the picker offers.
+        ShareDisplay {
+            #[serde(default)]
+            display_id: Option<u32>,
+        },
         ListWindows,
         ShareMatching {
             app_name: Option<String>,
@@ -896,6 +902,7 @@ mod command_server {
                     Ok(serde_json::json!({ "windowId": window_id, "shared": false }))
                 })
             }
+            Command::ShareDisplay { display_id } => share_display(app, display_id),
             Command::ShareBorderStack { window_id } => {
                 crate::share_border::qa_share_border_stack_report(app, window_id)
                     .and_then(|report| serde_json::to_value(report).map_err(|e| e.to_string()))
@@ -1010,6 +1017,70 @@ mod command_server {
                     .await;
             }
             Ok(serde_json::json!({ "windowId": window_id, "shared": true }))
+        })
+    }
+
+    /// Start (idempotently) a whole-display share through the same picker
+    /// path a user's "Screen N" card takes, and report the display's global
+    /// point frame so a scenario can aim normalized input at a window on it.
+    fn share_display(
+        app: &tauri::AppHandle,
+        display_id: Option<u32>,
+    ) -> Result<serde_json::Value, String> {
+        use core_graphics::geometry::CGRect;
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGDisplayBounds(display: u32) -> CGRect;
+        }
+
+        let source = crate::window_source::list()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|source| crate::window_source::is_display_source_id(source.window_id))
+            .find(|source| {
+                display_id.map_or(true, |wanted| {
+                    crate::window_source::display_id_from_source_id(source.window_id) == wanted
+                })
+            })
+            .ok_or_else(|| "the picker offered no matching display source".to_string())?;
+        let source_id = source.window_id;
+        let display_id = crate::window_source::display_id_from_source_id(source_id);
+        // SAFETY: takes a CGDirectDisplayID by value; a stale id returns an
+        // empty rect, which the check below rejects.
+        let bounds = unsafe { CGDisplayBounds(display_id) };
+        if !(bounds.size.width > 0.0 && bounds.size.height > 0.0) {
+            return Err(format!("display {display_id} reported empty bounds"));
+        }
+        let app = app.clone();
+        tauri::async_runtime::block_on(async move {
+            let session = app.state::<crate::session::SessionState>();
+            for _ in 0..3 {
+                if session.inner().is_share_active(source_id) {
+                    break;
+                }
+                crate::hover_tab::toggle_window_share_from_picker(
+                    &app,
+                    session.inner(),
+                    source_id,
+                    None,
+                )
+                .await;
+            }
+            if !session.inner().is_share_active(source_id) {
+                return Err(format!("display {display_id} did not enter shared state"));
+            }
+            Ok(serde_json::json!({
+                "windowId": source_id,
+                "displayId": display_id,
+                "isDisplayShare": session.inner().is_display_share(source_id),
+                "frame": {
+                    "x": bounds.origin.x,
+                    "y": bounds.origin.y,
+                    "width": bounds.size.width,
+                    "height": bounds.size.height,
+                },
+                "shared": true,
+            }))
         })
     }
 
@@ -1255,6 +1326,15 @@ mod command_server {
                 command,
                 Command::ShareBorderStack { window_id: 4242 }
             ));
+        }
+
+        #[test]
+        fn share_display_command_parses_with_and_without_a_display_id() {
+            let command: Command = serde_json::from_str(r#"{"cmd":"share_display"}"#).unwrap();
+            assert!(matches!(command, Command::ShareDisplay { display_id: None }));
+            let command: Command =
+                serde_json::from_str(r#"{"cmd":"share_display","display_id":3}"#).unwrap();
+            assert!(matches!(command, Command::ShareDisplay { display_id: Some(3) }));
         }
 
         #[test]
