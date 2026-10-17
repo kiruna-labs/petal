@@ -35,6 +35,7 @@ import {
   resolveObservationBudgetMs,
   summarizeObservationLatency,
 } from './remote-control-observation.mjs';
+import { armObservationWatch } from './remote-control-observation-watch.mjs';
 import { ProcessLeaseLedger, psIdentity } from './process-lease-ledger.mjs';
 import { classifyShareBorderStackReport } from './remote-control-share-border.mjs';
 // #102: the autotest socket client lives in its own module so its per-command
@@ -107,6 +108,13 @@ const caseSettleMs = Number(process.env.PETAL_REMOTE_CONTROL_CASE_SETTLE_MS || 5
 const observationBudget = resolveObservationBudgetMs(process.env);
 const inputBudgetMs = observationBudget.budgetMs;
 const observationCorrectnessTimeoutMs = correctnessTimeoutMs(inputBudgetMs);
+// rc-latency gate: extra re-armed samples per latency case, for the run-level
+// p50/p95 only (see measureObservationWithRetry). The workflow sets this; a
+// manual run keeps the old one-sample-per-case cost.
+const observationDistributionSamples = Number(process.env.PETAL_RC_OBSERVATION_DISTRIBUTION_SAMPLES || 0);
+// Fallback poll for when the in-process watcher cannot be armed. Was 250ms,
+// which quantized every sample; each poll still costs one osascript spawn.
+const observationPollIntervalMs = 25;
 const photonSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_SAMPLES || 20);
 const photonWarmupSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_WARMUP_SAMPLES || 2);
 const photonSampleTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_TIMEOUT_MS || 2000);
@@ -1577,6 +1585,23 @@ async function send(ctx, body) {
   return evaluate(ctx.cdp, harnessExpression(ctx.target, body));
 }
 
+// rc-latency gate: the controller's own publish ledger (seq + wall-clock send
+// time) for every case, so scripts/ci/remote-control-latency-verdict.mjs can pair each input
+// with the host's `remote-control-latency:` receive/inject lines. Both peers
+// share one clock (same machine). resetMetrics() wipes it, so drain per case.
+const controllerPublishes = [];
+async function collectControllerPublishes(ctx, caseId) {
+  try {
+    const published = await send(
+      ctx,
+      'return api.metrics().published.map(({ kind, action, seq, windowId, at }) => ({ kind, action: action ?? null, seq, windowId, at }));'
+    );
+    for (const entry of published ?? []) controllerPublishes.push({ caseId, ...entry });
+  } catch {
+    // Best-effort: the gate fails on too few paired samples, never on absence.
+  }
+}
+
 async function published(ctx, predicateSource, timeoutMs = acquisitionTimeoutMs) {
   return waitUntil(
     'remote-control publish metric',
@@ -1609,14 +1634,15 @@ function skipCase(detail) {
   return { status: 'skip', detail };
 }
 
-async function assertDocumentIncludes(fragment, timeoutMs = acquisitionTimeoutMs) {
+async function assertDocumentIncludes(fragment, timeoutMs = acquisitionTimeoutMs, intervalMs = 250) {
   const text = await waitUntil(
     `TextEdit document contains ${fragment}`,
     () => {
       const current = readTextEditDocument();
       return current.includes(fragment) ? current : null;
     },
-    timeoutMs
+    timeoutMs,
+    intervalMs
   );
   return text;
 }
@@ -1698,6 +1724,7 @@ function measureTargetObservation(label, prepare) {
     label,
     prepare,
     budgetMs: inputBudgetMs,
+    distributionSamples: observationDistributionSamples,
     onRetry: ({ attempt, sampleMs }) => {
       console.log(
         `# OBSERVATION-RETRY ${label}: attempt ${attempt} took ${sampleMs}ms > ${inputBudgetMs}ms budget;`
@@ -1707,14 +1734,43 @@ function measureTargetObservation(label, prepare) {
   });
 }
 
+// Arm the in-process watcher AFTER the target is re-armed and BEFORE the
+// action (remote-control-observation-watch.mjs). null = poll fallback; the
+// cross-machine rig reads TextEdit over ssh, where a local watcher is blind.
+async function armTargetWatch(mode, needle) {
+  if (process.env.PETAL_REMOTE_OSASCRIPT_HOST) return null;
+  return armObservationWatch({
+    mode,
+    needle,
+    docMarker: mode === 'textedit' ? sacrificialDocMarker ?? '' : '',
+    timeoutMs: observationCorrectnessTimeoutMs + 500,
+    log: (message) => console.log(`# OBSERVATION-WATCH ${message}`),
+  });
+}
+
+// The watcher only TIMES the observation; `oracle` (the case's original
+// TextEdit/clipboard assertion) still decides correctness, after the clock
+// has stopped.
+function watchedObserve(watch, oracle) {
+  return async () => {
+    const observedAtMs = watch ? await watch.waitSeen() : null;
+    await oracle();
+    return Number.isFinite(observedAtMs) ? { observedAtMs, method: 'watch' } : { method: 'poll' };
+  };
+}
+
 // `prepare(attempt)` returns { fragment, body }: the harness expression to
 // send and the document fragment that proves it landed.
 function measureDocumentInput(ctx, label, prepare) {
   return measureTargetObservation(label, async (attempt) => {
     const { fragment, body } = await prepare(attempt);
+    const watch = await armTargetWatch('textedit', fragment);
     return {
       action: () => send(ctx, body),
-      observe: () => assertDocumentIncludes(fragment, observationCorrectnessTimeoutMs),
+      observe: watchedObserve(
+        watch,
+        () => assertDocumentIncludes(fragment, observationCorrectnessTimeoutMs, observationPollIntervalMs)
+      ),
     };
   });
 }
@@ -1788,6 +1844,50 @@ function writePhotonReport(report) {
   }
 }
 
+// What the browser decodes now, and which sentinel actions landed since the
+// sample started (the sentinel ledgers each press/setValue with a host time).
+let photonFailureFramesSaved = false;
+async function photonFailureContext(ctx, sinceMs) {
+  let lastFrame = null;
+  try {
+    lastFrame = await decodedPhotonFrame(ctx);
+  } catch {
+    // Diagnostic only.
+  }
+  // First miss only: the decoded browser frame and the host screen, so a
+  // photon failure can be LOOKED at (frame stale? pattern mis-sampled?).
+  if (jsonOutputPath && !photonFailureFramesSaved) {
+    photonFailureFramesSaved = true;
+    const forensics = { browserFrame: null, hostScreenPng: null };
+    try {
+      forensics.browserFrame = await evaluate(
+        ctx.cdp,
+        `window.__petalHarness?.testPatternMeasurement?.captureFramePng(${Number(ctx.target.windowId)}) ?? null`
+      );
+    } catch {
+      // Diagnostic only.
+    }
+    try {
+      const shot = path.join(os.tmpdir(), `petal-rc-photon-miss-${process.pid}.png`);
+      spawnSync('screencapture', ['-x', shot], { stdio: 'ignore', timeout: 5000 });
+      forensics.hostScreenPng = `data:image/png;base64,${fs.readFileSync(shot).toString('base64')}`;
+    } catch {
+      // Diagnostic only.
+    }
+    try {
+      const out = path.join(path.dirname(jsonOutputPath), 'remote-control-photon-miss-frames.json');
+      fs.writeFileSync(out, JSON.stringify(forensics));
+      console.log(`# photon miss forensics written to ${out}`);
+    } catch {
+      // Diagnostic only.
+    }
+  }
+  const landed = sentinelEvents()
+    .filter((event) => event.kind === 'axAction' && (!Number.isFinite(event.tMs) || event.tMs >= sinceMs))
+    .map((event) => ({ action: event.action, tMs: event.tMs ?? null }));
+  return { lastFrame, sentinelActionsSinceStart: landed.length, sentinelActions: landed.slice(-4) };
+}
+
 async function runPressToPhotonSuite(ctx) {
   const suiteStarted = performance.now();
   ctx.caseStartedAt = Date.now();
@@ -1802,8 +1902,22 @@ async function runPressToPhotonSuite(ctx) {
   console.log(
     `# photon-sentinel-ready generation=${initialFrame.generation} decoded=${initialFrame.width}x${initialFrame.height} confidence=${initialFrame.confidence.toFixed(3)}`
   );
+  // A just-started share sends its first frames soft (encoder ramp); a blurred
+  // Gray block decodes as "neither 0 nor 1" and the sample times out. Give the
+  // stream a bounded moment to sharpen, then proceed regardless.
+  const settledFrame = await waitUntil(
+    'sharp photon sentinel frame',
+    async () => {
+      const frame = await decodedPhotonFrame(ctx);
+      return frame && frame.confidence >= 0.75 ? frame : null;
+    },
+    5000,
+    100
+  ).catch(() => null);
+  console.log(`# photon-sentinel-settled ${settledFrame ? `confidence=${settledFrame.confidence.toFixed(3)}` : 'no frame reached confidence 0.75 within 5000ms'}`);
 
   const sampleFailures = [];
+  const warmupFailures = [];
   const blockedInputKinds = new Set();
   const warmupSchedule = shuffledPhotonInputSchedule(photonWarmupSamplesPerInput, photonShuffleSeed);
   const measuredSchedule = shuffledPhotonInputSchedule(photonSamplesPerInput, photonShuffleSeed);
@@ -1812,17 +1926,24 @@ async function runPressToPhotonSuite(ctx) {
   );
   for (const { inputKind, sample } of warmupSchedule) {
     if (blockedInputKinds.has(inputKind)) continue;
+    const startedMs = Date.now();
     try {
       await measurePhotonInput(ctx, inputKind);
     } catch (error) {
-      sampleFailures.push({ sample, inputKind, warmup: true, error: error.message });
-      blockedInputKinds.add(inputKind);
+      // rc-latency gate: a warm-up miss is recorded with enough to tell "input
+      // never landed in the sentinel" from "the repaint never reached the
+      // browser", but no longer blocks the kind -- warm-up exists to absorb
+      // exactly the encoder/focus ramp right after the share starts.
+      const failure = { sample, inputKind, warmup: true, error: error.message, ...(await photonFailureContext(ctx, startedMs)) };
+      warmupFailures.push(failure);
+      console.log(`PHOTON_WARMUP_MISS ${JSON.stringify(failure)}`);
     }
   }
 
   const photonSamples = [];
   for (const { inputKind, sample: sampleNumber } of measuredSchedule) {
     if (blockedInputKinds.has(inputKind)) continue;
+    const sampleStartedMs = Date.now();
     try {
       const measured = await measurePhotonInput(ctx, inputKind);
       const sample = {
@@ -1836,7 +1957,7 @@ async function runPressToPhotonSuite(ctx) {
       photonSamples.push(sample);
       console.log(`PHOTON_SAMPLE ${JSON.stringify(sample)}`);
     } catch (error) {
-      const failure = { sample: sampleNumber, inputKind, error: error.message };
+      const failure = { sample: sampleNumber, inputKind, error: error.message, ...(await photonFailureContext(ctx, sampleStartedMs)) };
       sampleFailures.push(failure);
       console.log(`PHOTON_SAMPLE ${JSON.stringify({ ...failure, status: 'fail' })}`);
     }
@@ -1873,6 +1994,7 @@ async function runPressToPhotonSuite(ctx) {
       warmupSamplesPerInput: photonWarmupSamplesPerInput,
       sampleTimeoutMs: photonSampleTimeoutMs,
       sampleFailures,
+      warmupFailures,
       timingSamples: photonSamples.map(({ sample, inputKind, mediaTime, pressToEstimatedPhotonMs }) => ({
         sample,
         inputKind,
@@ -1884,7 +2006,8 @@ async function runPressToPhotonSuite(ctx) {
   };
   console.log(`RESULT ${JSON.stringify(gate)}`);
   console.log(`SUMMARY ${JSON.stringify(summary)}`);
-  return { summary, results: [gate], photonSamples };
+  await collectControllerPublishes(ctx, 'press-to-photon');
+  return { summary, results: [gate], photonSamples, controllerPublishes };
 }
 
 // ---------------------------------------------------------------------------
@@ -2586,13 +2709,14 @@ const CASES = [
         'clipboard equals selected TextEdit document',
         // Re-arm per attempt: a fresh document AND a clipboard that does NOT
         // already hold it, or the retry would observe attempt 1's copy (#45).
-        (attempt) => {
+        async (attempt) => {
           const text = `copy-${Date.now()}-${attempt}`;
           setTextEditDocument(text);
           writeClipboard('not-the-selection');
+          const watch = await armTargetWatch('clipboard', text);
           return {
             action: () => send(ctx, `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdA)} }); api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdC)} }); return true;`),
-            observe: () => waitUntil('clipboard equals selection', () => readClipboard() === text, observationCorrectnessTimeoutMs),
+            observe: watchedObserve(watch, () => waitUntil('clipboard equals selection', () => readClipboard() === text, observationCorrectnessTimeoutMs, observationPollIntervalMs)),
           };
         }
       );
@@ -2641,13 +2765,14 @@ const CASES = [
     run: async (ctx) => {
       const measurement = await measureTargetObservation(
         'Cmd+C result visible in clipboard',
-        (attempt) => {
+        async (attempt) => {
           const text = `cmd-${Date.now()}-${attempt}`;
           setTextEditDocument(text);
           writeClipboard('not-cmd');
+          const watch = await armTargetWatch('clipboard', text);
           return {
             action: () => send(ctx, `api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdA)} }); api.key({ target, ...${JSON.stringify(REMOTE_CONTROL_SHORTCUTS.cmdC)} }); return true;`),
-            observe: () => waitUntil('Cmd+C clipboard', () => readClipboard() === text, observationCorrectnessTimeoutMs),
+            observe: watchedObserve(watch, () => waitUntil('Cmd+C clipboard', () => readClipboard() === text, observationCorrectnessTimeoutMs, observationPollIntervalMs)),
           };
         }
       );
@@ -3222,6 +3347,8 @@ async function runCase(ctx, testCase) {
     result.targetObservationLatencyMs = outcome.targetObservationLatencyMs ?? null;
     result.targetObservationSamplesMs = outcome.targetObservationSamplesMs ?? null;
     result.targetObservationAttempts = outcome.targetObservationAttempts ?? null;
+    result.targetObservationDistributionSamplesMs = outcome.targetObservationDistributionSamplesMs ?? null;
+    result.targetObservationMethods = outcome.targetObservationMethods ?? null;
   } catch (error) {
     result.status = 'fail';
     result.detail = error.message;
@@ -3232,9 +3359,11 @@ async function runCase(ctx, testCase) {
       result.targetObservationLatencyMs = error.observation.targetObservationLatencyMs ?? null;
       result.targetObservationSamplesMs = error.observation.targetObservationSamplesMs ?? null;
       result.targetObservationAttempts = error.observation.targetObservationAttempts ?? null;
+      result.targetObservationMethods = error.observation.targetObservationMethods ?? null;
     }
     result.forensics = await captureCaseFailureForensics(ctx.client, testCase.id);
   } finally {
+    await collectControllerPublishes(ctx, testCase.id);
     try {
       await send(ctx, `api.release(target); return true;`);
     } catch (error) {
@@ -3439,9 +3568,14 @@ try {
     // over-budget ones a retry rescued. A creeping regression has to stay
     // visible in a run where no case failed.
     const measuredTargetLatencies = results.flatMap((result) => {
-      if (Array.isArray(result.targetObservationSamplesMs)) return result.targetObservationSamplesMs;
-      return Number.isFinite(result.targetObservationLatencyMs) ? [result.targetObservationLatencyMs] : [];
+      // rc-latency gate: the distribution-only repeats count too.
+      const extra = Array.isArray(result.targetObservationDistributionSamplesMs)
+        ? result.targetObservationDistributionSamplesMs
+        : [];
+      if (Array.isArray(result.targetObservationSamplesMs)) return [...result.targetObservationSamplesMs, ...extra];
+      return Number.isFinite(result.targetObservationLatencyMs) ? [result.targetObservationLatencyMs, ...extra] : extra;
     }).filter((value) => Number.isFinite(value));
+    const observationMethods = results.flatMap((result) => result.targetObservationMethods ?? []);
     const retriedObservations = results.filter((result) => (result.targetObservationAttempts ?? 1) > 1).length;
     // #580: a host-side tokenless drop means the packet never reached any
     // injection route. It is never expected in a healthy run -- once control
@@ -3467,6 +3601,7 @@ try {
         budgetMs: inputBudgetMs,
         budgetSource: observationBudget.source,
         retriedObservations,
+        methods: observationMethods,
       }),
     };
     console.log(`SUMMARY ${JSON.stringify(summary)}`);
@@ -3478,7 +3613,7 @@ try {
     if (jsonOutputPath) {
       fs.writeFileSync(
         jsonOutputPath,
-        `${JSON.stringify({ summary, recoveries, results, terminalDeliveries, terminalRecovery: ctx.terminalRecovery }, null, 2)}\n`,
+        `${JSON.stringify({ summary, recoveries, results, terminalDeliveries, terminalRecovery: ctx.terminalRecovery, controllerPublishes }, null, 2)}\n`,
         'utf8'
       );
     }
