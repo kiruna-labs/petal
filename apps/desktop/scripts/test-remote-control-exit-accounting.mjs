@@ -13,7 +13,17 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { NO_RESULT_EXIT_CODE, SUITE_SUMMARY_KEYS, noResultSummary, suiteExitCode } from './remote-control-exit.mjs';
+import {
+  HOST_RC_LINE_NEEDLE,
+  NO_RESULT_EXIT_CODE,
+  SUITE_SUMMARY_KEYS,
+  TOKENLESS_DROP_NEEDLE,
+  assessHostLogEvidence,
+  noResultSummary,
+  numberedSuiteExitCode,
+  resolvePetalLogPath,
+  suiteExitCode,
+} from './remote-control-exit.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '../../..');
@@ -128,8 +138,88 @@ test('every exit site in the scenario is accounted for', () => {
     'suiteExitCode(report.summary);',
     // The numbered suite. `passBarShortfall` is 6c's --input-only pass bar:
     // a bar case that SKIPS adds no failure count, so without it a relaxed run
-    // could exit 0 having proved none of the sentinel-oracle claims.
-    'numberedExitCode === 0 && (tokenlessDrops > 0 || passBarShortfall > 0) ? 1 : numberedExitCode;',
+    // could exit 0 having proved none of the sentinel-oracle claims. A blind
+    // host log (#580) makes it "no result"; see numberedSuiteExitCode tests.
+    'numberedSuiteExitCode(summary, passBarShortfall);',
   ]);
-  assert.match(source, /const numberedExitCode = suiteExitCode\(summary\);/);
+});
+
+// ---- #580: the tokenless-drop count must come from the log the host writes --
+//
+// On the CI VM the host writes PETAL_LOG_PATH (petal-dev.log); the scenario
+// read ~/Library/Logs/Petal/petal.log and counted 0 drops from a log that
+// never saw the run. Both directions are pinned: a log with host
+// remote-control lines is trusted, a log without them is infra-invalid.
+
+const hostLine = (text) => `2026-10-17 18:10:43.408 [INFO] [desktop_lib::remote_control] ${text}`;
+const VM_LOG = [
+  hostLine(`${HOST_RC_LINE_NEEDLE}Request action=None window=165 seq=1 controller='web-1'`),
+  hostLine(`${HOST_RC_LINE_NEEDLE}Pointer action=Some(Click) window=165 seq=7 controller='web-1'`),
+].join('\n');
+
+test('resolvePetalLogPath prefers PETAL_LOG_PATH, then PETAL_ACCEPTANCE_LOG, then the user log', () => {
+  const home = '/Users/runner';
+  assert.equal(
+    resolvePetalLogPath({ PETAL_LOG_PATH: '/tmp/petal-dev.log', PETAL_ACCEPTANCE_LOG: '/tmp/acc.log' }, home),
+    '/tmp/petal-dev.log'
+  );
+  assert.equal(resolvePetalLogPath({ PETAL_ACCEPTANCE_LOG: '/tmp/acc.log' }, home), '/tmp/acc.log');
+  assert.equal(resolvePetalLogPath({}, home), '/Users/runner/Library/Logs/Petal/petal.log');
+  assert.equal(resolvePetalLogPath({ PETAL_LOG_PATH: '' }, home), '/Users/runner/Library/Logs/Petal/petal.log');
+});
+
+test('a host log with remote-control lines is trusted and its drops are counted', () => {
+  const clean = assessHostLogEvidence({ logText: VM_LOG, logPath: '/tmp/petal-dev.log', rcCasesRan: 30 });
+  assert.equal(clean.tokenlessDrops, 0);
+  assert.deepEqual(clean.hostLogEvidence, { path: '/tmp/petal-dev.log', remoteControlLines: 2, verdict: 'ok' });
+
+  const dropped = assessHostLogEvidence({
+    logText: `${VM_LOG}\n${hostLine(`remote-control: ${TOKENLESS_DROP_NEEDLE} from 'web-1' for window 165`)}`,
+    logPath: '/tmp/petal-dev.log',
+    rcCasesRan: 30,
+  });
+  assert.equal(dropped.tokenlessDrops, 1);
+  assert.equal(dropped.hostLogEvidence.verdict, 'ok');
+});
+
+test('a host log with no remote-control line while cases ran is infra-invalid, never 0 drops', () => {
+  for (const logText of ['', 'unrelated line\nanother one', null]) {
+    const blind = assessHostLogEvidence({ logText, logPath: '/Users/runner/Library/Logs/Petal/petal.log', rcCasesRan: 30 });
+    assert.equal(blind.tokenlessDrops, null, `logText=${JSON.stringify(logText)}`);
+    assert.equal(blind.hostLogEvidence.verdict, 'infra-invalid');
+    assert.equal(blind.hostLogEvidence.remoteControlLines, 0);
+  }
+  // A drop line alone does not prove the reader sees this run's host traffic.
+  const dropOnly = assessHostLogEvidence({ logText: TOKENLESS_DROP_NEEDLE, logPath: 'x', rcCasesRan: 1 });
+  assert.equal(dropOnly.hostLogEvidence.verdict, 'infra-invalid');
+});
+
+test('no remote-control case ran: an empty host log is not evidence of a wrong path', () => {
+  const idle = assessHostLogEvidence({ logText: '', logPath: 'x', rcCasesRan: 0 });
+  assert.equal(idle.tokenlessDrops, 0);
+  assert.equal(idle.hostLogEvidence.verdict, 'ok');
+});
+
+test('numberedSuiteExitCode: a blind host log is "no result", a trusted one keeps the old accounting', () => {
+  const ok = { remoteControlLines: 12, verdict: 'ok', path: 'x' };
+  const blind = { remoteControlLines: 0, verdict: 'infra-invalid', path: 'x' };
+  const green = { total: 3, pass: 3, fail: 0, skip: 0 };
+  assert.equal(numberedSuiteExitCode({ ...green, tokenlessDrops: 0, hostLogEvidence: ok }), 0);
+  assert.equal(numberedSuiteExitCode({ ...green, tokenlessDrops: 2, hostLogEvidence: ok }), 1);
+  assert.equal(numberedSuiteExitCode({ ...green, tokenlessDrops: 0, hostLogEvidence: ok }, 1), 1);
+  assert.equal(numberedSuiteExitCode({ ...green, fail: 1, pass: 2, tokenlessDrops: 0, hostLogEvidence: ok }), 1);
+  assert.equal(numberedSuiteExitCode({ total: 0, pass: 0, fail: 0, skip: 0, tokenlessDrops: 0, hostLogEvidence: ok }), NO_RESULT_EXIT_CODE);
+  // The defect: every case green, 0 drops "counted" from the wrong file.
+  assert.equal(numberedSuiteExitCode({ ...green, tokenlessDrops: null, hostLogEvidence: blind }), NO_RESULT_EXIT_CODE);
+  assert.equal(numberedSuiteExitCode({ ...green, fail: 1, pass: 2, tokenlessDrops: null, hostLogEvidence: blind }), NO_RESULT_EXIT_CODE);
+  // Missing evidence is not "ok".
+  assert.equal(numberedSuiteExitCode({ ...green, tokenlessDrops: 0 }), NO_RESULT_EXIT_CODE);
+});
+
+test('the scenario counts tokenless drops through the host-log evidence check, from this run only', () => {
+  const source = readFileSync(scenarioPath, 'utf8');
+  assert.match(source, /const hostLogStartOffset = petalLogSize\(\);/);
+  assert.match(source, /assessHostLogEvidence\(\{\s*logText: readPetalLogSince\(hostLogStartOffset\)/);
+  assert.match(source, /const petalLogPath = resolvePetalLogPath\(\);/);
+  assert.doesNotMatch(source, /process\.env\.PETAL_ACCEPTANCE_LOG/, 'log path resolution lives in resolvePetalLogPath only');
 });

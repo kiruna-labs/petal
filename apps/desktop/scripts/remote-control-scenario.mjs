@@ -28,7 +28,13 @@ import {
   stressLeakOutcome,
   summarizeReleaseStressLeak,
 } from './remote-control-held-input.mjs';
-import { noResultSummary, suiteExitCode } from './remote-control-exit.mjs';
+import {
+  assessHostLogEvidence,
+  noResultSummary,
+  numberedSuiteExitCode,
+  resolvePetalLogPath,
+  suiteExitCode,
+} from './remote-control-exit.mjs';
 import {
   correctnessTimeoutMs,
   measureObservationWithRetry,
@@ -461,17 +467,14 @@ function runSentinelTool(args, label) {
   return (result.stdout || '').trim();
 }
 
+// #580: PETAL_LOG_PATH first -- on the CI VM the host writes petal-dev.log
+// there and ~/Library/Logs/Petal/petal.log never sees the run. No silent
+// fallback to another file: a wrong path must read as empty, which the
+// summary's host-log evidence check turns into an infra-invalid run.
 function petalLogTail() {
-  const candidates = [
-    process.env.PETAL_ACCEPTANCE_LOG,
-    path.join(os.homedir(), 'Library', 'Logs', 'Petal', 'petal.log'),
-  ].filter(Boolean);
-  for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) continue;
-    const text = fs.readFileSync(candidate, 'utf8');
-    return text.slice(-400_000);
-  }
-  return '';
+  const logPath = resolvePetalLogPath();
+  if (!fs.existsSync(logPath)) return '';
+  return fs.readFileSync(logPath, 'utf8').slice(-400_000);
 }
 
 function petalLogLinesSince(marker) {
@@ -1567,12 +1570,6 @@ async function waitForActiveStatus(ctx, startedAt) {
   return status;
 }
 
-// #580: the host-side half of the same gate. Read the host's own drop
-// warnings rather than trusting the browser's view alone.
-function tokenlessDropLines(marker) {
-  return petalLogLinesSince(marker).filter((line) => line.includes('dropping tokenless input'));
-}
-
 async function send(ctx, body) {
   return evaluate(ctx.cdp, harnessExpression(ctx.target, body));
 }
@@ -1910,8 +1907,7 @@ const BURST_GENERATION_MASK = 0xffff;
 // inject - enqueue is queue wait: the direct measure of a backing-up shard,
 // with no clock alignment and no frame-rate ceiling. It is the primary signal
 // wherever it is available.
-const petalLogPath = process.env.PETAL_LOG_PATH
-  || path.join(os.homedir(), 'Library', 'Logs', 'Petal', 'petal.log');
+const petalLogPath = resolvePetalLogPath();
 
 function petalLogSize() {
   try { return fs.statSync(petalLogPath).size; } catch { return 0; }
@@ -3408,6 +3404,8 @@ try {
       },
     };
     const terminalDeliveries = [];
+    // #580: tokenless drops are counted from the host log written by THIS run.
+    const hostLogStartOffset = petalLogSize();
     for (const testCase of CASES) {
       textEditWedged = false;
       const result = await runCase(ctx, testCase);
@@ -3447,8 +3445,14 @@ try {
     // injection route. It is never expected in a healthy run -- once control
     // is released the host has no session at all and returns before the token
     // check, so scenario case 24's deliberate post-release input does NOT
-    // produce this line. Any occurrence fails the run.
-    const tokenlessDrops = tokenlessDropLines(null).length;
+    // produce this line. Any occurrence fails the run. The host-side half of
+    // the gate reads the host's own drop warnings rather than trusting the
+    // browser's view alone -- and refuses a log that never saw the run.
+    const { tokenlessDrops, hostLogEvidence } = assessHostLogEvidence({
+      logText: readPetalLogSince(hostLogStartOffset),
+      logPath: petalLogPath,
+      rcCasesRan: results.filter((result) => result.status === 'pass' || result.status === 'fail').length,
+    });
     // SUMMARY-KEYS-PINNED: the keys of this object literal are pinned to
     // SUITE_SUMMARY_KEYS by scripts/test-remote-control-exit-accounting.mjs,
     // which is what stops scripts/cross-machine-rc-suite.sh's reducer
@@ -3460,6 +3464,7 @@ try {
       skip: results.filter((result) => result.status === 'skip').length,
       recoveries,
       tokenlessDrops,
+      hostLogEvidence,
       mode: inputOnlyMode ? 'input-only' : 'numbered',
       shareReadiness: shareReadinessMode(inputOnlyMode),
       targetObservationLatency: summarizeObservationLatency({
@@ -3470,6 +3475,15 @@ try {
       }),
     };
     console.log(`SUMMARY ${JSON.stringify(summary)}`);
+    console.log(
+      `# HOST-LOG path=${hostLogEvidence.path} remoteControlLines=${hostLogEvidence.remoteControlLines} verdict=${hostLogEvidence.verdict}`
+    );
+    if (hostLogEvidence.verdict !== 'ok') {
+      console.log(
+        `# FAIL INFRA-INVALID the host log ${hostLogEvidence.path} holds no host remote-control line for this run, `
+        + 'so the #580 tokenless-drop count is unknown (set PETAL_LOG_PATH to the log the host writes)'
+      );
+    }
     if (tokenlessDrops > 0) {
       console.log(
         `# FAIL host dropped ${tokenlessDrops} tokenless input packet(s) (#580); this run did not inject what it claims to have injected`
@@ -3497,9 +3511,8 @@ try {
       passBarShortfall = verdict.met ? 0 : 1;
     }
     // A tokenless drop is a real failure, but it can never upgrade a "no
-    // result" run into a mere failure -- 2 stays 2.
-    const numberedExitCode = suiteExitCode(summary);
-    process.exitCode = numberedExitCode === 0 && (tokenlessDrops > 0 || passBarShortfall > 0) ? 1 : numberedExitCode;
+    // result" run into a mere failure -- 2 stays 2. A blind host log is 2.
+    process.exitCode = numberedSuiteExitCode(summary, passBarShortfall);
     try { await command(client, { cmd: 'stop_share', window_id: sentinel.shared.windowId }); } catch {}
   }
 } finally {

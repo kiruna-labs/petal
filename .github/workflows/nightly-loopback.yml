@@ -685,7 +685,10 @@ jobs:
 
           echo "==> Run live remote-control local loopback" | tee -a "$HARNESS_LOG"
           set +e
-          PETAL_AUTOTEST_SOCK="$SOCKET" \
+          # PETAL_LOG_PATH: the display cases (37-41) read the host's replay
+          # lines from THIS log; ~/Library/Logs/Petal/petal.log never gets them
+          # on the runner, and the cases refuse to pass on a blind log.
+          PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_LOG_PATH="$PETAL_LOG" \
             node apps/desktop/scripts/remote-control-local-loopback.mjs --live --json "$RESULTS_JSON" \
             2>&1 | tee -a "$HARNESS_LOG"
           status=${PIPESTATUS[0]}

@@ -674,10 +674,15 @@ if (!report.summary || typeof report.summary !== 'object' || Array.isArray(repor
 // by scripts/test-cross-machine-rc-suite.sh. #580 added `tokenlessDrops` to the
 // producer's SUMMARY and nowhere else, so every real run reduced to
 // `malformed-results` while this file's hand-written fixtures stayed green.
-const allowedSummary = new Set(['total', 'pass', 'fail', 'skip', 'recoveries', 'tokenlessDrops', 'mode', 'shareReadiness', 'targetObservationLatency']);
+const allowedSummary = new Set(['total', 'pass', 'fail', 'skip', 'recoveries', 'tokenlessDrops', 'hostLogEvidence', 'mode', 'shareReadiness', 'targetObservationLatency']);
 if (Object.keys(report.summary).some((key) => !allowedSummary.has(key))) fail();
 const tokenlessDrops = report.summary.tokenlessDrops ?? 0;
 if (!Number.isInteger(tokenlessDrops) || tokenlessDrops < 0) fail();
+// #580: a tokenless count read from a host log that never saw the run is not a
+// zero. The producer marks that run infra-invalid; it can never reduce to a pass.
+const hostLogEvidence = report.summary.hostLogEvidence;
+const hostLogTrusted = hostLogEvidence === undefined
+  || (hostLogEvidence !== null && typeof hostLogEvidence === 'object' && hostLogEvidence.verdict === 'ok');
 for (const key of ['total', 'pass', 'fail', 'skip']) {
   if (!Number.isInteger(report.summary[key]) || report.summary[key] < 0) fail();
 }
@@ -780,6 +785,7 @@ const recovery = {
 const effectiveExit = Number(exitStatus) !== 0
   || report.summary.fail > 0
   || tokenlessDrops > 0
+  || !hostLogTrusted
   || !resultCountsMatchSummary
   || !recoverySucceeded
   ? 1
