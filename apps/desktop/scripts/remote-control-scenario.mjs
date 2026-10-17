@@ -1846,12 +1846,41 @@ function writePhotonReport(report) {
 
 // What the browser decodes now, and which sentinel actions landed since the
 // sample started (the sentinel ledgers each press/setValue with a host time).
+let photonFailureFramesSaved = false;
 async function photonFailureContext(ctx, sinceMs) {
   let lastFrame = null;
   try {
     lastFrame = await decodedPhotonFrame(ctx);
   } catch {
     // Diagnostic only.
+  }
+  // First miss only: the decoded browser frame and the host screen, so a
+  // photon failure can be LOOKED at (frame stale? pattern mis-sampled?).
+  if (jsonOutputPath && !photonFailureFramesSaved) {
+    photonFailureFramesSaved = true;
+    const forensics = { browserFrame: null, hostScreenPng: null };
+    try {
+      forensics.browserFrame = await evaluate(
+        ctx.cdp,
+        `window.__petalHarness?.testPatternMeasurement?.captureFramePng(${Number(ctx.target.windowId)}) ?? null`
+      );
+    } catch {
+      // Diagnostic only.
+    }
+    try {
+      const shot = path.join(os.tmpdir(), `petal-rc-photon-miss-${process.pid}.png`);
+      spawnSync('screencapture', ['-x', shot], { stdio: 'ignore', timeout: 5000 });
+      forensics.hostScreenPng = `data:image/png;base64,${fs.readFileSync(shot).toString('base64')}`;
+    } catch {
+      // Diagnostic only.
+    }
+    try {
+      const out = path.join(path.dirname(jsonOutputPath), 'remote-control-photon-miss-frames.json');
+      fs.writeFileSync(out, JSON.stringify(forensics));
+      console.log(`# photon miss forensics written to ${out}`);
+    } catch {
+      // Diagnostic only.
+    }
   }
   const landed = sentinelEvents()
     .filter((event) => event.kind === 'axAction' && (!Number.isFinite(event.tMs) || event.tMs >= sinceMs))
