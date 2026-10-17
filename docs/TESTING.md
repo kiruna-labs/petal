@@ -1518,6 +1518,18 @@ hypothesis — the key changing mid-gesture); and whether
 a zero-mask move or the host TTL cleared the phantom press afterwards — the
 case leaves the machine clean either way.
 
+**Whole-display share (cases 37-41, #334/#349, #335/#353).** Every other
+case shares a window. These share the runner's display (`share_display` on
+the autotest socket, the picker's "Screen N" path), park TextEdit in a strip
+the photon sentinel does not cover, and aim normalized display coordinates at
+it: a click must activate TextEdit after the sentinel took focus (measured), a
+typed marker must land (measured), a drag must select, a wheel must scroll,
+and a 1.0/1.0 click must be clamped onto the display and still land on
+TextEdit (measured). Each case also requires the host log to show display
+replays (`target_pid=1`) and no route that used pid 1 as a process, plus no
+held input and no undelivered terminal result. `E2E_REQUIRED_RC_CASES` in
+`nightly-loopback.yml` makes a skip or a missing result fail the gate too.
+
 **Live status (2026-08-14, CURRENT): 27 pass / 2 fail / 1 skip**, up from
 **2 pass / 28 fail** at the start of the same session. Full video path
 (`shareReadiness: live-tile`), `recoveries: 0`, `tokenlessDrops: 0`,

@@ -2438,11 +2438,24 @@ async function leftDragReleaseStressAttempt(ctx, checkpointIndex) {
 const DISPLAY_TEXTEDIT_WIDTH = 800;
 const DISPLAY_TEXTEDIT_TOP_INSET = 40;
 
-function sentinelTopLeftBounds() {
-  const geometry = sentinelGeometry();
-  const { x, y, w, h } = geometry.windowFrame;
-  const screenHeight = geometry.screenFrame.h;
-  return [x, screenHeight - y - h, x + w, screenHeight - y];
+// The sentinel's event ledger is cleared per sentinel case, so its one-shot
+// geometry record is usually gone by now; ask System Events instead, with the
+// sentinel's own contentRect (x120 y120 960x600, bottom-left) as the fallback.
+function sentinelTopLeftBounds(displayFrame) {
+  try {
+    const raw = osascript(
+      'tell application "System Events" to tell process "PetalRCPhotonSentinel"',
+      'set p to position of window 1',
+      'set s to size of window 1',
+      'return ((item 1 of p) as text) & ", " & ((item 2 of p) as text) & ", " & ((item 1 of p) + (item 1 of s) as text) & ", " & ((item 2 of p) + (item 2 of s) as text)',
+      'end tell'
+    );
+    return parseAppleScriptBounds(raw);
+  } catch (error) {
+    const top = displayFrame.y + displayFrame.height - 120 - 600;
+    console.log(`# sentinel bounds via System Events unavailable (${error.message.split('\n')[0]}); using its contentRect`);
+    return [displayFrame.x + 120, top, displayFrame.x + 1080, top + 600];
+  }
 }
 
 function readTextEditWindowBounds() {
@@ -2465,7 +2478,7 @@ function placeTextEditForDisplayCases(frame) {
     'end tell'
   );
   const bounds = readTextEditWindowBounds();
-  const sentinel = sentinelTopLeftBounds();
+  const sentinel = sentinelTopLeftBounds(frame);
   if (boundsOverlap(bounds, sentinel)) {
     throw new Error(`TextEdit bounds ${bounds} overlap the photon sentinel ${sentinel}; the focus re-arm would cover the target`);
   }
