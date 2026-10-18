@@ -2231,6 +2231,32 @@ pub(crate) fn track_pressed_input(
     synthetic_releases
 }
 
+/// #365: true when `message` releases a key or button the host is still holding
+/// for this (window, controller). Such a release must never be dropped as
+/// unauthorized, even after the grant is gone or rotated.
+pub(crate) fn releases_held_input(message: &RemoteControlMessage) -> bool {
+    if message.action != Some(RemoteControlAction::Up) {
+        return false;
+    }
+    let pressed_by_controller = pressed_inputs().lock_unpoisoned();
+    let Some(pressed) =
+        pressed_by_controller.get(&(message.window_id, message.controller_id.clone()))
+    else {
+        return false;
+    };
+    match message.message_type {
+        // A pointer Up clicks at its own position, so only the held button's
+        // own Up passes; never "any Up while any button is held" (#365 review).
+        RemoteControlType::Pointer => pressed
+            .buttons
+            .contains_key(&button_from_wire(message.button)),
+        RemoteControlType::Key => {
+            matching_key_release_identity(&pressed.keys, &key_identity(message)).is_some()
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn drain_pressed_for_controller(window_id: u32, controller_id: &str) -> Vec<ReplayTask> {
     pressed_inputs()
         .lock_unpoisoned()
