@@ -987,6 +987,15 @@ fn pressed_inputs() -> &'static Mutex<HashMap<(u32, String), PressedInputs>> {
     remote_control_engine().pressed_inputs()
 }
 
+/// #365: the resolver's final auth check, held-input insert and replay enqueue
+/// run under this lock, and every grant removal drains held input under it, so
+/// a revoke either sees an in-flight Down and releases it, or the Down sees the
+/// revoke and is dropped. Take it before `sessions()`/`pressed_inputs()`.
+fn input_authority_fence() -> &'static Mutex<()> {
+    static FENCE: OnceLock<Mutex<()>> = OnceLock::new();
+    FENCE.get_or_init(|| Mutex::new(()))
+}
+
 fn target_pid_cache() -> &'static Mutex<HashMap<u32, CachedTargetPid>> {
     TARGET_PID_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -1548,12 +1557,15 @@ fn revoke(window_id: u32, controller_id: &str) {
     // Refs #288: same insert-only leak class #410 fixed for the other
     // per-(window, controller) maps -- see `clear_discrete_admissions`.
     clear_discrete_admissions(|w, c| !(w == window_id && c == controller_id));
+    // #365: drain + grant removal under the fence -- see `input_authority_fence`.
+    let fence = input_authority_fence().lock_unpoisoned();
     let releases = drain_pressed_for_controller(window_id, controller_id);
     let mut grants = sessions().lock_unpoisoned();
     let before = grants.len();
     grants.retain(|key, _| key.window_id != window_id || key.controller_id != controller_id);
     let removed = grants.len() != before;
     drop(grants);
+    drop(fence);
     warned_tokenless_inputs()
         .lock_unpoisoned()
         .remove(&(window_id, controller_id.to_string()));
@@ -1610,6 +1622,8 @@ fn drain_window_control_releasing(
     last_unreliable_seqs()
         .lock_unpoisoned()
         .retain(|(stored_window_id, _, _), _| *stored_window_id != window_id);
+    // #365: drain + grant removal under the fence -- see `input_authority_fence`.
+    let fence = input_authority_fence().lock_unpoisoned();
     let releases = drain_pressed_for_window(window_id);
     let mut active = Vec::new();
     sessions().lock_unpoisoned().retain(|key, _| {
@@ -1620,6 +1634,7 @@ fn drain_window_control_releasing(
             true
         }
     });
+    drop(fence);
     // Fable review fix (#372), round 2: this is a genuine grant-teardown path
     // (sharing ended) that was missing the same per-departed-controller
     // cleanup `revoke()`/`revoke_controller()` already do -- window IDs are
@@ -1709,8 +1724,9 @@ pub(crate) fn revoke_all(app: &AppHandle) {
     crate::windows_remote_control::clear_all_pending_controller_operations();
     clear_all_control_caches();
     bump_all_replay_epochs("all control revoked");
+    // #365: drain + grant removal under the fence -- see `input_authority_fence`.
+    let fence = input_authority_fence().lock_unpoisoned();
     let releases = drain_all_pressed();
-    enqueue_synthetic_releases(releases, "all control revoked");
     let active: Vec<(u32, String)> = {
         let mut guard = sessions().lock_unpoisoned();
         guard
@@ -1718,6 +1734,8 @@ pub(crate) fn revoke_all(app: &AppHandle) {
             .map(|(key, _)| (key.window_id, key.controller_id))
             .collect()
     };
+    drop(fence);
+    enqueue_synthetic_releases(releases, "all control revoked");
     warned_tokenless_inputs().lock_unpoisoned().clear();
     last_unreliable_seqs().lock_unpoisoned().clear();
     // Fable review fix (#372): same insert-only leak class as
@@ -1763,11 +1781,9 @@ pub(crate) fn revoke_controller(app: &AppHandle, controller_id: &str, reason: &'
         remote_control_engine().remove_controller_grants_for_owner(controller_id);
         crate::windows_remote_control::clear_pending_controller_operations_for_owner(controller_id);
     }
+    // #365: drain + grant removal under the fence -- see `input_authority_fence`.
+    let fence = input_authority_fence().lock_unpoisoned();
     let releases = drain_pressed_for_controller_id(controller_id);
-    enqueue_synthetic_releases(releases, reason);
-    last_unreliable_seqs()
-        .lock_unpoisoned()
-        .retain(|(_, stored_controller_id, _), _| stored_controller_id != controller_id);
     let mut active = Vec::new();
     sessions().lock_unpoisoned().retain(|key, _| {
         if key.controller_id == controller_id {
@@ -1777,6 +1793,11 @@ pub(crate) fn revoke_controller(app: &AppHandle, controller_id: &str, reason: &'
             true
         }
     });
+    drop(fence);
+    enqueue_synthetic_releases(releases, reason);
+    last_unreliable_seqs()
+        .lock_unpoisoned()
+        .retain(|(_, stored_controller_id, _), _| stored_controller_id != controller_id);
     // Refs #288: same insert-only leak class as the maps below -- see
     // `clear_discrete_admissions`.
     clear_discrete_admissions(|_, c| c != controller_id);
@@ -4004,13 +4025,27 @@ async fn drain_status_publish_lane(
 }
 
 fn resolve_task_still_authorized(message: &RemoteControlMessage) -> bool {
-    let authorized = is_authorized_input(message);
+    // #365: releasing a held key/button is always allowed.
+    let authorized = is_authorized_input(message) || releases_held_input(message);
     if !authorized {
-        log::debug!(
-            "remote-control: dropping resolved input from '{}' for window {}, no longer authorized",
-            message.controller_id,
-            message.window_id
-        );
+        let is_release = message.action == Some(RemoteControlAction::Up)
+            && matches!(
+                message.message_type,
+                RemoteControlType::Key | RemoteControlType::Pointer
+            );
+        if is_release {
+            log::info!(
+                "remote-control: dropping resolved release {} from '{}', no longer authorized and nothing held",
+                message_summary(message),
+                message.controller_id
+            );
+        } else {
+            log::debug!(
+                "remote-control: dropping resolved input from '{}' for window {}, no longer authorized",
+                message.controller_id,
+                message.window_id
+            );
+        }
     }
     authorized
 }
@@ -4283,6 +4318,35 @@ fn resolve_one_task(app: &AppHandle, task: ResolveTask) {
     // The #209 cache here has pid/frame freshness, not z-order/occlusion;
     // confirming frontmost-at-point would require a per-event CG scan.
     publish_control_activity(state, &message);
+    commit_resolved_input(message, frame, target_pid, admission, result_sender);
+}
+
+/// The resolver's last step: record the input as held, then queue its replay.
+/// Returns false when a revoke won the race and the input was dropped.
+fn commit_resolved_input(
+    message: RemoteControlMessage,
+    frame: WindowFrame,
+    target_pid: i32,
+    admission: Option<DiscreteAdmission>,
+    result_sender: Option<TerminalResultSender>,
+) -> bool {
+    // #365: re-check auth, track and enqueue under the fence every grant
+    // removal drains under. Checking only at the top of `resolve_one_task`
+    // let a revoke land in between and strand an injected Down with no Up.
+    let fence = input_authority_fence().lock_unpoisoned();
+    if !resolve_task_still_authorized(&message) {
+        drop(fence);
+        complete_terminal_admission(
+            &admission,
+            &result_sender,
+            TerminalDisposition::failure(
+                "unauthorized",
+                RemoteControlDeliveryRoute::Resolve,
+                RemoteControlFailureCode::Unauthorized,
+            ),
+        );
+        return false;
+    }
     if should_log_message(message.message_type, message.action, message.seq) {
         log::info!(
             "remote-control: enqueue replay {} frame=({},{} {}x{}) target_pid={}",
@@ -4302,23 +4366,29 @@ fn resolve_one_task(app: &AppHandle, task: ResolveTask) {
             target_pid
         );
     }
-    commit_resolved_input(message, frame, target_pid, admission, result_sender);
-}
-
-/// The resolver's last step: record the input as held, then queue its replay.
-fn commit_resolved_input(
-    message: RemoteControlMessage,
-    frame: WindowFrame,
-    target_pid: i32,
-    admission: Option<DiscreteAdmission>,
-    result_sender: Option<TerminalResultSender>,
-) {
     let synthetic_releases = track_pressed_input(&message, frame, Some(target_pid));
+    #[cfg(test)]
+    run_issue365_commit_hook();
     enqueue_synthetic_releases(synthetic_releases, "held input reconciled");
     let mut replay = replay_task(message, frame, Some(target_pid), false);
     replay.admission = admission;
     replay.result_sender = result_sender;
     enqueue_replay(replay);
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: runs inside the fence after the held input is tracked (#365).
+    static ISSUE365_COMMIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn run_issue365_commit_hook() {
+    if let Some(hook) = ISSUE365_COMMIT_HOOK.with(|cell| cell.borrow_mut().take()) {
+        hook();
+    }
 }
 
 fn complete_resolve_task(task: &ResolveTask, disposition: TerminalDisposition) {
@@ -4803,8 +4873,10 @@ fn handle_message(
             // false here into a reject WITH revoke_control.
             let remote_control_allowed = state.remote_control_allowed()
                 && state.share_allows_remote_control(message.window_id);
+            // #365: a release for a key/button the host holds is never
+            // dropped as unauthorized, even after the grant is gone.
             let authorized = remote_control_allowed
-                .then(|| is_authorized_input(&message))
+                .then(|| is_authorized_input(&message) || releases_held_input(&message))
                 .unwrap_or(true);
             let unreliable_seq_accepted = (remote_control_allowed && authorized)
                 .then(|| should_accept_unreliable_seq(&message))
@@ -22104,19 +22176,65 @@ mod tests {
         // A re-grant rotates the token while the key is still held.
         let second = authorize_shared(ids.window_id, &ids.controller_id);
         assert_ne!(first, second);
-        issue365_resolve(issue365_input(
-            RemoteControlType::Key,
-            RemoteControlAction::Up,
-            13,
-            &ids,
-            &first,
-        ));
+        let up = issue365_input(RemoteControlType::Key, RemoteControlAction::Up, 13, &ids, &first);
+        // The receive gate's two halves: stale token, but it releases a held key.
+        assert!(!is_authorized_input(&up));
+        assert!(releases_held_input(&up));
+        issue365_resolve(up);
 
         sink.assert_no_stranded_down();
         assert!(!pressed_inputs()
             .lock_unpoisoned()
             .contains_key(&(ids.window_id, ids.controller_id.clone())));
         revoke(ids.window_id, &ids.controller_id);
+    }
+
+    #[test]
+    fn issue365_revoke_waits_for_an_in_flight_commit_and_releases_its_down() {
+        let _guard = pressed_input_test_lock();
+        let ids =
+            remote_control_test_ids("issue365_revoke_waits_for_an_in_flight_commit_and_releases_its_down");
+        let sink = Issue365Sink::register(&ids.controller_id);
+        let token = authorize_shared(ids.window_id, &ids.controller_id);
+        let down = issue365_input(RemoteControlType::Key, RemoteControlAction::Down, 12, &ids, &token);
+        let revoked = Arc::new(AtomicBool::new(false));
+        let revoker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+        {
+            let (window_id, controller_id) = (ids.window_id, ids.controller_id.clone());
+            let (revoked, revoker) = (Arc::clone(&revoked), Arc::clone(&revoker));
+            ISSUE365_COMMIT_HOOK.with(|cell| {
+                *cell.borrow_mut() = Some(Box::new(move || {
+                    // The controller's Release lands while the resolver is mid-commit.
+                    let done = Arc::clone(&revoked);
+                    *revoker.lock_unpoisoned() = Some(std::thread::spawn(move || {
+                        revoke(window_id, &controller_id);
+                        done.store(true, Ordering::SeqCst);
+                    }));
+                    std::thread::sleep(Duration::from_millis(100));
+                    assert!(
+                        !revoked.load(Ordering::SeqCst),
+                        "revoke must wait for the in-flight commit"
+                    );
+                }));
+            });
+        }
+
+        assert!(commit_resolved_input(down, frame(0, 0, 100, 100), ISSUE365_PID, None, None));
+        let handle = revoker.lock_unpoisoned().take().expect("commit hook ran");
+        handle.join().expect("revoke thread");
+
+        assert!(revoked.load(Ordering::SeqCst));
+        sink.assert_no_stranded_down();
+        assert_eq!(
+            sink.summary(),
+            vec![
+                (RemoteControlType::Key, Some(RemoteControlAction::Down), 12, false),
+                (RemoteControlType::Key, Some(RemoteControlAction::Up), 12, true),
+            ]
+        );
+        assert!(!pressed_inputs()
+            .lock_unpoisoned()
+            .contains_key(&(ids.window_id, ids.controller_id.clone())));
     }
 
     #[test]
