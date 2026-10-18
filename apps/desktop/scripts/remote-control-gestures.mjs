@@ -36,9 +36,10 @@ export const REMOTE_CONTROL_SCROLL_DELTAS = Object.freeze({
   line: Object.freeze({ x: 0.50, y: 0.50, deltaY: 8, deltaMode: 1 }),
   horizontal: Object.freeze({ x: 0.50, y: 0.50, deltaX: 240, deltaY: 0, deltaMode: 0 }),
   // #811: aimed at the sentinel's horizontal scroll strip -- content rect
-  // (60, 60, 840, 120) top-origin in the 960x600 sentinel, center (480, 120).
-  // Keep in lockstep with `scrollStrip` in remote-control-photon-sentinel.swift.
-  horizontalSentinel: Object.freeze({ x: 480 / 960, y: 120 / 600, deltaX: 240, deltaY: 0, deltaMode: 0 }),
+  // (60, 170, 840, 42) top-origin in the 960x600 sentinel, center (480, 191)
+  // -- clear of the press-to-photon Gray-code strip at y 88..118.
+  // Keep in lockstep with `scrollStripRect` in remote-control-photon-sentinel.swift.
+  horizontalSentinel: Object.freeze({ x: 480 / 960, y: 191 / 600, deltaX: 240, deltaY: 0, deltaMode: 0 }),
 });
 
 // #446 acceptance geometry, expressed as fractions of the sentinel's shared

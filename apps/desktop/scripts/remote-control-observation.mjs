@@ -95,8 +95,12 @@ export function summarizeObservationLatency({
   budgetMs,
   budgetSource = 'default',
   retriedObservations = 0,
+  methods = [],
+  readGapsMs = [],
 }) {
   const sorted = samplesMs.filter((sample) => Number.isFinite(sample)).sort((a, b) => a - b);
+  const methodCounts = {};
+  for (const method of methods) methodCounts[method] = (methodCounts[method] ?? 0) + 1;
   return {
     budgetMs,
     budgetSource,
@@ -107,6 +111,10 @@ export function summarizeObservationLatency({
     maxMs: sorted.at(-1) ?? null,
     overBudgetSamples: sorted.filter((sample) => sample > budgetMs).length,
     retriedObservations,
+    // `watch` = in-process watcher timestamp; `poll` = 25ms poll fallback.
+    methods: methodCounts,
+    // Watcher resolution evidence: the worst read gap seen in any sample.
+    maxReadGapMs: readGapsMs.length ? roundMs(Math.max(...readGapsMs)) : null,
   };
 }
 
@@ -115,23 +123,48 @@ export function summarizeObservationLatency({
 // the first attempt's own result (the marker is already in the document, the
 // clipboard already holds the selection) and clock a meaningless ~0ms.
 // Timing covers action + observe only, never the re-arm.
+//
+// `observe()` may resolve to { observedAtMs, method }: the wall-clock instant
+// a high-resolution watcher (remote-control-observation-watch.mjs) first saw
+// the result. The sample then ends THERE rather than when observe() returned,
+// so the correctness re-check that follows it is never inside the number.
+//
+// `distributionSamples` (rc-latency gate): extra re-armed samples taken AFTER
+// the verdict, for the run-level p50/p95 only. They never decide this case --
+// the per-case verdict is unchanged -- but a run-level p95 over one sample per
+// case would just be the max, i.e. the single-sample gate #45 removed.
 export async function measureObservationWithRetry({
   label,
   prepare,
   budgetMs,
   maxAttempts = MAX_OBSERVATION_ATTEMPTS,
-  now = () => performance.now(),
+  distributionSamples = 0,
+  now = () => Date.now(),
   onRetry = () => {},
 }) {
   const samplesMs = [];
+  const methods = [];
+  const readGapsMs = [];
+  const takeSample = async (attempt) => {
+    const { action, observe, cancel } = await prepare(attempt);
+    try {
+      const started = now();
+      await action();
+      // Correctness. A throw here is a REAL failure and is never retried for
+      // latency reasons -- it propagates with the case's own message.
+      const observed = await observe();
+      const ended = Number.isFinite(observed?.observedAtMs) ? observed.observedAtMs : now();
+      methods.push(observed?.method ?? 'poll');
+      if (Number.isFinite(observed?.maxGapMs)) readGapsMs.push(observed.maxGapMs);
+      return roundMs(Math.max(0, ended - started));
+    } finally {
+      // A watcher armed by prepare() must never outlive its sample -- not
+      // even when the action throws -- or it overlaps the next case.
+      cancel?.();
+    }
+  };
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const { action, observe } = await prepare(attempt);
-    const started = now();
-    await action();
-    // Correctness. A throw here is a REAL failure and is never retried for
-    // latency reasons -- it propagates with the case's own message.
-    await observe();
-    const sampleMs = roundMs(now() - started);
+    const sampleMs = await takeSample(attempt);
     samplesMs.push(sampleMs);
     if (sampleMs <= budgetMs) break;
     if (attempt < maxAttempts) {
@@ -146,6 +179,9 @@ export async function measureObservationWithRetry({
     targetObservationSamplesMs: samplesMs,
     targetObservationAttempts: verdict.attempts,
     targetObservationBudgetMs: budgetMs,
+    targetObservationMethods: methods,
+    // Worst gap between the watcher's reads, per watched sample (resolution).
+    targetObservationReadGapsMs: readGapsMs,
   };
   if (!verdict.withinBudget) {
     const error = new Error(observationBudgetFailureMessage(label, samplesMs, budgetMs));
@@ -154,5 +190,10 @@ export async function measureObservationWithRetry({
     error.observation = measurement;
     throw error;
   }
+  const distribution = [];
+  for (let extra = 1; extra <= distributionSamples; extra += 1) {
+    distribution.push(await takeSample(samplesMs.length + extra));
+  }
+  measurement.targetObservationDistributionSamplesMs = distribution;
   return measurement;
 }

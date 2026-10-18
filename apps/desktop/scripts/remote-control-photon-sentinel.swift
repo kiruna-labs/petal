@@ -19,6 +19,8 @@ private let sentinelClickDelayMs = Double(
 // the coordinate route. Kept clear of the AppKit button/text field so a hit
 // here can never be serviced by the AX path.
 private let hostileRect = NSRect(x: 60, y: 440, width: 840, height: 140)
+// Keep in lockstep with REMOTE_CONTROL_SCROLL_DELTAS.horizontalSentinel.
+private let scrollStripRect = NSRect(x: 60, y: 170, width: 840, height: 42)
 
 // `--warp <x> <y>` reuses this same compiled binary as a one-shot cursor mover
 // for #446's host-reclaims-the-mouse acceptance case. CGWarpMouseCursorPosition
@@ -428,14 +430,17 @@ private final class SentinelAppDelegate: NSObject, NSApplicationDelegate, NSText
         // (docs/TESTING.md, "#446 ... measured ineffective"). The observable
         // host effect is therefore the scroll POSITION: this strip ledgers
         // every horizontal origin change as a `type: "hscroll"` event.
-        scrollStrip = NSScrollView(frame: NSRect(x: 60, y: 60, width: 840, height: 120))
+        // Below the status line and above the panels: at (60, 60, 840, 120) it
+        // covered the Gray-code strip (y 88..118), so press-to-photon could
+        // never decode a new generation (rc-latency gate, first VM runs).
+        scrollStrip = NSScrollView(frame: scrollStripRect)
         scrollStrip.hasHorizontalScroller = true
         scrollStrip.hasVerticalScroller = false
         // Legacy (always-visible) scrollers, so AXHorizontalScrollBar is
         // reliably exposed to the replay path's scroll-target resolution.
         scrollStrip.scrollerStyle = .legacy
         scrollStrip.autohidesScrollers = false
-        scrollStrip.documentView = HScrollTickView(frame: NSRect(x: 0, y: 0, width: 4000, height: 96))
+        scrollStrip.documentView = HScrollTickView(frame: NSRect(x: 0, y: 0, width: 4000, height: scrollStripRect.height - 18))
         scrollStrip.contentView.postsBoundsChangedNotifications = true
         scrollStrip.setAccessibilityLabel("Horizontal scroll sentinel")
         NotificationCenter.default.addObserver(

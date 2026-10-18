@@ -204,7 +204,51 @@ test('the scorecard survives a run with no measured observations', () => {
     maxMs: null,
     overBudgetSamples: 0,
     retriedObservations: 0,
+    methods: {},
+    maxReadGapMs: null,
   });
+});
+
+// rc-latency gate: a watcher armed in prepare() must be cancelled on every
+// exit path, or a throwing action leaves it reading into the next case.
+test('the armed watcher is cancelled when the action throws, when observe throws, and on success', async () => {
+  for (const failAt of ['action', 'observe', null]) {
+    let cancelled = 0;
+    const run = measureObservationWithRetry({
+      label: 'cancel probe',
+      budgetMs: 500,
+      now: scriptedClock([10]),
+      prepare: () => ({
+        action: async () => { if (failAt === 'action') throw new Error('action blew up'); },
+        observe: async () => { if (failAt === 'observe') throw new Error('timed out waiting for TextEdit document'); },
+        cancel: () => { cancelled += 1; },
+      }),
+    });
+    if (failAt) await assert.rejects(run, failAt === 'action' ? /action blew up/ : /timed out/);
+    else await run;
+    assert.equal(cancelled, 1, `cancel must run exactly once (failAt=${failAt})`);
+  }
+});
+
+test('a watcher timestamp ends the sample, and distribution samples never decide the case', async () => {
+  let attempt = 0;
+  const measurement = await measureObservationWithRetry({
+    label: 'watched',
+    budgetMs: 500,
+    distributionSamples: 2,
+    now: () => 1000,
+    prepare: () => {
+      attempt += 1;
+      const seenAt = 1000 + (attempt === 1 ? 42.25 : 900);
+      return { action: async () => {}, observe: async () => ({ observedAtMs: seenAt, method: 'watch', maxGapMs: 18 }) };
+    },
+  });
+  assert.deepEqual(measurement.targetObservationSamplesMs, [42.3]);
+  // Two 900ms repeats are reported for the run-level p95 but do not fail
+  // the case -- that is the run-level gate's job.
+  assert.deepEqual(measurement.targetObservationDistributionSamplesMs, [900, 900]);
+  assert.deepEqual(measurement.targetObservationMethods, ['watch', 'watch', 'watch']);
+  assert.deepEqual(measurement.targetObservationReadGapsMs, [18, 18, 18]);
 });
 
 test('every scenario call site re-arms per attempt', () => {

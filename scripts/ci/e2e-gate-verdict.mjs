@@ -9,6 +9,7 @@
 // never a pass here. Unit tests (both directions): scripts/test-e2e-gate-verdict.mjs.
 //
 //   node scripts/ci/e2e-gate-verdict.mjs loopback --results <json> --harness-exit <n> [--quarantine <ids>] [--required <ids>]
+//   node scripts/ci/e2e-gate-verdict.mjs latency  --results <json> --photon <json> --host-log <petal log> [--json <out>]
 //   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> --engine-exit <n> [--quarantine <ids>]
 //
 // Prints GitHub ::error/::warning annotations; exits 0 (pass) or 1 (fail).
@@ -16,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { latencyVerdict } from './remote-control-latency-verdict.mjs';
 
 // Skips that are structurally unavoidable on the release runner and carry no
 // signal there. Keyed by case id AND reason: the same case skipping for any
@@ -302,8 +304,20 @@ function main(argv) {
       engineExit: args['engine-exit'],
       quarantine: parseIdList(args.quarantine),
     });
+  } else if (tier === 'latency') {
+    // Run-level remote-control latency budgets: scripts/ci/remote-control-latency-verdict.mjs.
+    const hostLog = args['host-log'] && fs.existsSync(args['host-log']) ? fs.readFileSync(args['host-log'], 'utf8') : '';
+    verdict = latencyVerdict({
+      results: args.results && fs.existsSync(args.results) ? readJson(args.results) : null,
+      photon: args.photon && fs.existsSync(args.photon) ? readJson(args.photon) : null,
+      hostLog,
+      env: process.env,
+    });
+    if (args.json) {
+      fs.writeFileSync(args.json, `${JSON.stringify({ pass: verdict.ok, budgets: verdict.budgets, metrics: verdict.metrics, checks: verdict.checks }, null, 2)}\n`);
+    }
   } else {
-    console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|cockpit)`);
+    console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|latency|cockpit)`);
     return 1;
   }
   emit(verdict);
