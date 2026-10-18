@@ -752,7 +752,7 @@ jobs:
           # an incomplete or skipped photon run is INSUFFICIENT there, not a pass.
           echo "==> Run press-to-photon (latency gate)" | tee -a "$HARNESS_LOG"
           set +e
-          PETAL_AUTOTEST_SOCK="$SOCKET" \
+          PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_LOG_PATH="$PETAL_LOG" \
             node apps/desktop/scripts/remote-control-local-loopback.mjs --live --skip-preflight --press-to-photon --json "$PHOTON_JSON" \
             2>&1 | tee -a "$HARNESS_LOG"
           photon_status=${PIPESTATUS[0]}

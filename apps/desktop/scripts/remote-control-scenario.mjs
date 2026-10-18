@@ -1726,12 +1726,12 @@ function summarizeElapsedTimeVsLatency(photonSamples) {
 // for that attempt (fresh marker, clipboard reset, cleared document). Retrying
 // without re-arming would just re-read attempt 1's own result and clock ~0ms.
 // Policy, retry loop and scorecard live in remote-control-observation.mjs.
-function measureTargetObservation(label, prepare) {
+function measureTargetObservation(label, prepare, { distributionSamples = observationDistributionSamples } = {}) {
   return measureObservationWithRetry({
     label,
     prepare,
     budgetMs: inputBudgetMs,
-    distributionSamples: observationDistributionSamples,
+    distributionSamples,
     onRetry: ({ attempt, sampleMs }) => {
       console.log(
         `# OBSERVATION-RETRY ${label}: attempt ${attempt} took ${sampleMs}ms > ${inputBudgetMs}ms budget;`
@@ -2655,6 +2655,11 @@ async function waitForFrontmost(name, timeoutMs, intervalMs = 100) {
 // Re-arm for a click oracle: TextEdit must NOT be active, so only a click
 // that really reached it can make it frontmost. The sentinel's window does
 // not overlap TextEdit's strip (placeTextEditForDisplayCases checks).
+// Display cases keep ONE sample each (no distribution repeats): every extra
+// click lands in the case's own host-log routing slice, and each re-arm
+// re-defocuses TextEdit. Their single samples still feed the run p50/p95.
+const DISPLAY_CASE_OBSERVATION = Object.freeze({ distributionSamples: 0 });
+
 async function defocusTextEditToSentinel() {
   raiseSentinel();
   await waitForFrontmost('PetalRCPhotonSentinel', 3000);
@@ -3453,7 +3458,7 @@ const CASES = [
           action: () => send(ctx, `api.click({ target, x: ${point.x}, y: ${point.y}, button: 0 }); return true;`),
           observe: () => waitForFrontmost('TextEdit', observationCorrectnessTimeoutMs),
         };
-      });
+      }, DISPLAY_CASE_OBSERVATION);
       await assertReleased(ctx, 'display click');
       const routing = await assertDisplayRouting(ctx);
       return pass(`click at display (${point.x},${point.y}) activated TextEdit; ${routing.message}; host confirms no held input`, measurement);
@@ -3469,11 +3474,16 @@ const CASES = [
       const measurement = await measureTargetObservation('display-typed marker visible in TextEdit', async (attempt) => {
         await waitForFrontmost('TextEdit', 3000);
         const marker = ` Disp-${Date.now()}-${attempt} `;
+        const watch = await armTargetWatch('textedit', marker);
         return {
           action: () => send(ctx, `api.text({ target, text: ${JSON.stringify(marker)} }); return true;`),
-          observe: () => assertDocumentIncludes(marker, observationCorrectnessTimeoutMs),
+          cancel: () => watch?.cancel(),
+          observe: watchedObserve(
+            watch,
+            () => assertDocumentIncludes(marker, observationCorrectnessTimeoutMs, observationPollIntervalMs)
+          ),
         };
-      });
+      }, DISPLAY_CASE_OBSERVATION);
       const routing = await assertDisplayRouting(ctx);
       return pass(`TextEdit document contains the display-typed marker; ${routing.message}`, measurement);
     },
@@ -3545,7 +3555,7 @@ const CASES = [
           action: () => send(ctx, `api.click({ target, x: 1, y: ${y}, button: 0 }); return true;`),
           observe: () => waitForFrontmost('TextEdit', observationCorrectnessTimeoutMs),
         };
-      });
+      }, DISPLAY_CASE_OBSERVATION);
       const metric = await published(ctx, `m.kind === 'pointer' && m.action === 'click' && m.x === 1`);
       await assertReleased(ctx, 'clamped display click');
       const routing = await assertDisplayRouting(ctx);
