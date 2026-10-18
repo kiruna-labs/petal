@@ -3387,6 +3387,11 @@ fn enqueue_replay(task: ReplayTask) {
 /// `DISCRETE_IN_FLIGHT_TTL` (5s) silently expires it with no terminal result
 /// ever sent, and the controller's pending-op tracking would never resolve.
 fn enqueue_replay_with_injector(task: ReplayTask, inject: &ReplayInjector) {
+    #[cfg(test)]
+    if let Some(sink) = test_replay_sink(&task.message.controller_id) {
+        sink(task);
+        return;
+    }
     let key = ReplayShardKey::for_task(&task);
     // Fable review (issue #369): the lookup-or-create AND the send must share
     // one lock acquisition with reap_idle_shard_locked's lock, not two
@@ -3426,6 +3431,22 @@ fn enqueue_replay_with_injector(task: ReplayTask, inject: &ReplayInjector) {
             );
         }
     }
+}
+
+/// Test-only: capture, in queue order, every replay enqueued for one
+/// controller instead of injecting it (#365 ordering tests).
+#[cfg(test)]
+type TestReplaySink = Arc<dyn Fn(ReplayTask) + Send + Sync>;
+
+#[cfg(test)]
+fn test_replay_sinks() -> &'static Mutex<HashMap<String, TestReplaySink>> {
+    static SINKS: OnceLock<Mutex<HashMap<String, TestReplaySink>>> = OnceLock::new();
+    SINKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn test_replay_sink(controller_id: &str) -> Option<TestReplaySink> {
+    test_replay_sinks().lock_unpoisoned().get(controller_id).cloned()
 }
 
 fn record_replay_drop(message: &RemoteControlMessage) {
@@ -4281,6 +4302,17 @@ fn resolve_one_task(app: &AppHandle, task: ResolveTask) {
             target_pid
         );
     }
+    commit_resolved_input(message, frame, target_pid, admission, result_sender);
+}
+
+/// The resolver's last step: record the input as held, then queue its replay.
+fn commit_resolved_input(
+    message: RemoteControlMessage,
+    frame: WindowFrame,
+    target_pid: i32,
+    admission: Option<DiscreteAdmission>,
+    result_sender: Option<TerminalResultSender>,
+) {
     let synthetic_releases = track_pressed_input(&message, frame, Some(target_pid));
     enqueue_synthetic_releases(synthetic_releases, "held input reconciled");
     let mut replay = replay_task(message, frame, Some(target_pid), false);
@@ -21905,6 +21937,186 @@ mod tests {
             drain_pressed_for_controller(ids.window_id, &ids.other_controller_id).len(),
             1
         );
+    }
+
+    /// #365: captures, in queue order, every replay queued for one controller.
+    struct Issue365Sink {
+        controller_id: String,
+        queued: Arc<Mutex<Vec<ReplayTask>>>,
+    }
+
+    impl Issue365Sink {
+        fn register(controller_id: &str) -> Self {
+            let queued: Arc<Mutex<Vec<ReplayTask>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink_queue = Arc::clone(&queued);
+            test_replay_sinks().lock_unpoisoned().insert(
+                controller_id.to_string(),
+                Arc::new(move |task| sink_queue.lock_unpoisoned().push(task)),
+            );
+            Self {
+                controller_id: controller_id.to_string(),
+                queued,
+            }
+        }
+
+        fn summary(&self) -> Vec<(RemoteControlType, Option<RemoteControlAction>, u64, bool)> {
+            self.queued
+                .lock_unpoisoned()
+                .iter()
+                .map(|task| {
+                    (
+                        task.message.message_type,
+                        task.message.action,
+                        task.message.seq,
+                        task.synthetic_release,
+                    )
+                })
+                .collect()
+        }
+
+        /// Every Down queued for replay must be followed by a release of the
+        /// same key or button, or the host is left holding it.
+        fn assert_no_stranded_down(&self) {
+            let queued = self.queued.lock_unpoisoned();
+            for (index, task) in queued.iter().enumerate() {
+                if task.message.action != Some(RemoteControlAction::Down) {
+                    continue;
+                }
+                let released = queued[index + 1..].iter().any(|later| {
+                    later.message.action == Some(RemoteControlAction::Up)
+                        && later.message.message_type == task.message.message_type
+                        && later.message.code == task.message.code
+                        && later.message.button == task.message.button
+                });
+                assert!(
+                    released,
+                    "Down seq={} was queued for injection with no release after it: {:?}",
+                    task.message.seq,
+                    self.summary_locked(&queued)
+                );
+            }
+        }
+
+        fn summary_locked(&self, queued: &[ReplayTask]) -> Vec<(Option<RemoteControlAction>, u64, bool)> {
+            queued
+                .iter()
+                .map(|task| (task.message.action, task.message.seq, task.synthetic_release))
+                .collect()
+        }
+    }
+
+    impl Drop for Issue365Sink {
+        fn drop(&mut self) {
+            test_replay_sinks().lock_unpoisoned().remove(&self.controller_id);
+        }
+    }
+
+    const ISSUE365_PID: i32 = 4242;
+
+    fn issue365_input(
+        message_type: RemoteControlType,
+        action: RemoteControlAction,
+        seq: u64,
+        ids: &RemoteControlTestIds,
+        grant_token: &str,
+    ) -> RemoteControlMessage {
+        let mut message = test_message(
+            message_type,
+            Some(action),
+            seq,
+            ids.window_id,
+            ids.controller_id.clone(),
+        );
+        message.grant_token = Some(grant_token.to_string());
+        if message_type == RemoteControlType::Key {
+            message.key = Some("Escape".to_string());
+            message.code = Some("Escape".to_string());
+        } else {
+            message.button = Some(0);
+            message.buttons = Some(if action == RemoteControlAction::Down { 1 } else { 0 });
+        }
+        message
+    }
+
+    /// `resolve_one_task`'s auth gate and final commit, minus the
+    /// AppHandle-bound frame/pid lookup that runs between them.
+    fn issue365_resolve(message: RemoteControlMessage) {
+        if resolve_task_still_authorized(&message) {
+            let _ = commit_resolved_input(message, frame(0, 0, 100, 100), ISSUE365_PID, None, None);
+        }
+    }
+
+    fn issue365_revoke_between_auth_and_commit(message_type: RemoteControlType, name: &str) {
+        let _guard = pressed_input_test_lock();
+        let ids = remote_control_test_ids(name);
+        let sink = Issue365Sink::register(&ids.controller_id);
+        let token = authorize_shared(ids.window_id, &ids.controller_id);
+        let down = issue365_input(message_type, RemoteControlAction::Down, 12, &ids, &token);
+        let up = issue365_input(message_type, RemoteControlAction::Up, 13, &ids, &token);
+
+        // The resolver pops Down 12 and passes its auth gate...
+        assert!(resolve_task_still_authorized(&down));
+        // ...the controller's Release is then handled inline on the receive path...
+        revoke(ids.window_id, &ids.controller_id);
+        // ...before the resolver records and queues Down 12, then pops Up 13.
+        let _ = commit_resolved_input(down, frame(0, 0, 100, 100), ISSUE365_PID, None, None);
+        issue365_resolve(up);
+
+        sink.assert_no_stranded_down();
+        assert!(
+            !pressed_inputs()
+                .lock_unpoisoned()
+                .contains_key(&(ids.window_id, ids.controller_id.clone())),
+            "revoked controller still has a held input: {:?}",
+            sink.summary()
+        );
+    }
+
+    #[test]
+    fn issue365_revoke_between_resolver_auth_and_commit_never_strands_a_key() {
+        issue365_revoke_between_auth_and_commit(
+            RemoteControlType::Key,
+            "issue365_revoke_between_resolver_auth_and_commit_never_strands_a_key",
+        );
+    }
+
+    #[test]
+    fn issue365_revoke_between_resolver_auth_and_commit_never_strands_a_button() {
+        issue365_revoke_between_auth_and_commit(
+            RemoteControlType::Pointer,
+            "issue365_revoke_between_resolver_auth_and_commit_never_strands_a_button",
+        );
+    }
+
+    #[test]
+    fn issue365_release_of_a_held_key_survives_a_regrant() {
+        let _guard = pressed_input_test_lock();
+        let ids = remote_control_test_ids("issue365_release_of_a_held_key_survives_a_regrant");
+        let sink = Issue365Sink::register(&ids.controller_id);
+        let first = authorize_shared(ids.window_id, &ids.controller_id);
+        issue365_resolve(issue365_input(
+            RemoteControlType::Key,
+            RemoteControlAction::Down,
+            12,
+            &ids,
+            &first,
+        ));
+        // A re-grant rotates the token while the key is still held.
+        let second = authorize_shared(ids.window_id, &ids.controller_id);
+        assert_ne!(first, second);
+        issue365_resolve(issue365_input(
+            RemoteControlType::Key,
+            RemoteControlAction::Up,
+            13,
+            &ids,
+            &first,
+        ));
+
+        sink.assert_no_stranded_down();
+        assert!(!pressed_inputs()
+            .lock_unpoisoned()
+            .contains_key(&(ids.window_id, ids.controller_id.clone())));
+        revoke(ids.window_id, &ids.controller_id);
     }
 
     #[test]
