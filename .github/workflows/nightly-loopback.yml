@@ -187,6 +187,13 @@ jobs:
       # #106 is its tracking issue.
       E2E_QUARANTINE_COCKPIT: "SHARE-DESKTOP"
       E2E_QUARANTINE_RC_CASES: ""
+      # Cases that must PASS (scripts/ci/e2e-gate-verdict.mjs --required): a
+      # skip, a missing result or a fail -- quarantined or not -- fails the
+      # gate. 37-41 are the whole-display share cases: macOS display-share
+      # pointer input went to placeholder pid 1 (#334/#349) and its
+      # keyboard/text was never delivered (#335/#353) while every window case
+      # stayed green. To quarantine one, remove it from this list first.
+      E2E_REQUIRED_RC_CASES: "37,38,39,40,41"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -685,7 +692,10 @@ jobs:
 
           echo "==> Run live remote-control local loopback" | tee -a "$HARNESS_LOG"
           set +e
-          PETAL_AUTOTEST_SOCK="$SOCKET" \
+          # PETAL_LOG_PATH: the display cases (37-41) read the host's replay
+          # lines from THIS log; ~/Library/Logs/Petal/petal.log never gets them
+          # on the runner, and the cases refuse to pass on a blind log.
+          PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_LOG_PATH="$PETAL_LOG" \
             node apps/desktop/scripts/remote-control-local-loopback.mjs --live --json "$RESULTS_JSON" \
             2>&1 | tee -a "$HARNESS_LOG"
           status=${PIPESTATUS[0]}
@@ -744,7 +754,8 @@ jobs:
           # script's evidence-backed EXPECTED_LOOPBACK_SKIPS allow-list (cases
           # 23 and 30 on this single-display macOS runner) or the quarantine
           # list, summary.tokenlessDrops > 0 (#580), and a non-zero harness exit
-          # that no quarantined failure explains. Never a pass by absence.
+          # that no quarantined failure explains, and any --required case that
+          # did not pass (missing, skipped or failed). Never a pass by absence.
           echo "==> Post-suite: scorecard" | tee -a "$HARNESS_LOG"
           VERDICT="scripts/ci/e2e-gate-verdict.mjs"
           if [ ! -f "$VERDICT" ]; then
@@ -753,7 +764,7 @@ jobs:
           else
             set +e
             node "$VERDICT" loopback --results "$RESULTS_JSON" --harness-exit "$status" \
-              --quarantine "$E2E_QUARANTINE_RC_CASES" 2>&1 | tee -a "$HARNESS_LOG"
+              --quarantine "$E2E_QUARANTINE_RC_CASES" --required "$E2E_REQUIRED_RC_CASES" 2>&1 | tee -a "$HARNESS_LOG"
             scorecard_status=${PIPESTATUS[0]}
             set -e
             [ "$scorecard_status" -eq 0 ] || gate_fail=1

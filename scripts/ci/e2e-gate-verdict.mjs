@@ -8,7 +8,7 @@
 // newest -- including one left by an EARLIER run. Absence of evidence is
 // never a pass here. Unit tests (both directions): scripts/test-e2e-gate-verdict.mjs.
 //
-//   node scripts/ci/e2e-gate-verdict.mjs loopback --results <json> --harness-exit <n> [--quarantine <ids>]
+//   node scripts/ci/e2e-gate-verdict.mjs loopback --results <json> --harness-exit <n> [--quarantine <ids>] [--required <ids>]
 //   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> --engine-exit <n> [--quarantine <ids>]
 //
 // Prints GitHub ::error/::warning annotations; exits 0 (pass) or 1 (fail).
@@ -47,7 +47,9 @@ function clip(value, n = 300) {
 
 /// report: the parsed --json results file (or null when it is missing).
 /// harnessExit: remote-control-local-loopback.mjs's exit status.
-export function loopbackVerdict({ report, harnessExit, quarantine = new Set() }) {
+/// required: case ids that must PASS -- missing, skipped or failed (even
+/// quarantined) fails. The display-share cases 37-41 (#349/#353) use it.
+export function loopbackVerdict({ report, harnessExit, quarantine = new Set(), required = new Set() }) {
   const errors = [];
   const warnings = [];
   const notes = [];
@@ -108,6 +110,16 @@ export function loopbackVerdict({ report, harnessExit, quarantine = new Set() })
       continue;
     }
     errors.push(`${label}: unknown status '${c.status}'`);
+  }
+
+  for (const id of required) {
+    const c = results.find((r) => String(r.caseId) === id);
+    if (!c) {
+      errors.push(`required loopback case ${id} produced no result`);
+    } else if (c.status !== 'pass') {
+      const quarantined = quarantine.has(id) ? ' (quarantine does not excuse a required case; remove it from E2E_REQUIRED_RC_CASES first)' : '';
+      errors.push(`required loopback case ${id} '${c.name ?? ''}' did not pass: ${c.status}${quarantined} -- ${clip(c.detail)}`);
+    }
   }
 
   // #580: a tokenless drop means the host never injected what the suite
@@ -279,7 +291,7 @@ function main(argv) {
   let verdict;
   if (tier === 'loopback') {
     const report = args.results && fs.existsSync(args.results) ? readJson(args.results) : null;
-    verdict = loopbackVerdict({ report, harnessExit: args['harness-exit'], quarantine: parseIdList(args.quarantine) });
+    verdict = loopbackVerdict({ report, harnessExit: args['harness-exit'], quarantine: parseIdList(args.quarantine), required: parseIdList(args.required) });
   } else if (tier === 'cockpit') {
     const dir = args['run-dir'] || '';
     verdict = cockpitVerdict({

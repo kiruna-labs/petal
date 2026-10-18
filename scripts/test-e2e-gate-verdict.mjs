@@ -299,6 +299,52 @@ test('cockpit: engine exit -- 0 passes; non-zero fails unless a quarantined fail
   assert.equal(cockpit(healthyCockpit({ verdicts: { 'SHARE-DESKTOP': 'skipped' } }), { engineExit: 1 }).ok, false);
 });
 
+// Required cases (display share 37-41, #349/#353): must PASS.
+function withDisplayCases(report) {
+  const r = structuredClone(report);
+  for (let id = 37; id <= 41; id += 1) r.results.push({ caseId: id, name: `display ${id}`, status: 'pass', detail: 'ok' });
+  r.summary.total = r.results.length;
+  r.summary.pass = r.results.filter((x) => x.status === 'pass').length;
+  return r;
+}
+const REQUIRED = parseIdList('37,38,39,40,41');
+
+test('loopback required: all required cases passing passes (no false red)', () => {
+  const v = loopbackVerdict({ report: withDisplayCases(healthyReport()), harnessExit: 0, required: REQUIRED });
+  assert.deepEqual(v.errors, []);
+});
+
+test('loopback required: a missing required case fails', () => {
+  const r = withDisplayCases(healthyReport());
+  r.results = r.results.filter((c) => c.caseId !== 39);
+  r.summary.total = r.results.length;
+  const v = loopbackVerdict({ report: r, harnessExit: 0, required: REQUIRED });
+  assert.equal(v.ok, false);
+  assert.ok(errorsMatch(v, /required loopback case 39 produced no result/));
+});
+
+test('loopback required: a required skip fails even when quarantined as a skip', () => {
+  const r = withCase(withDisplayCases(healthyReport()), 41, { status: 'skip', detail: 'no geometry' });
+  const v = loopbackVerdict({ report: r, harnessExit: 0, required: REQUIRED });
+  assert.ok(errorsMatch(v, /required loopback case 41 .*did not pass: skip/));
+  const q = loopbackVerdict({ report: r, harnessExit: 0, required: REQUIRED, quarantine: parseIdList('41') });
+  assert.equal(q.ok, false);
+  assert.ok(errorsMatch(q, /required loopback case 41 .*quarantine does not excuse/));
+});
+
+test('loopback required: a required fail fails, and quarantine does not excuse it', () => {
+  const r = withCase(withDisplayCases(healthyReport()), 38, { status: 'fail', detail: 'marker never landed' });
+  const q = loopbackVerdict({ report: r, harnessExit: 1, required: REQUIRED, quarantine: parseIdList('38') });
+  assert.equal(q.ok, false);
+  assert.ok(errorsMatch(q, /required loopback case 38 .*did not pass: fail .*quarantine does not excuse/));
+  // Without --required the same quarantined fail still warns-and-passes.
+  assert.equal(loopbackVerdict({ report: r, harnessExit: 1, quarantine: parseIdList('38') }).ok, true);
+});
+
+test('loopback required: an empty list requires nothing', () => {
+  assert.equal(loopbackVerdict({ report: healthyReport(), harnessExit: 0, required: parseIdList('') }).ok, true);
+});
+
 // ---------------------------------------------------------------- CLI
 
 function runCli(args) {
@@ -318,6 +364,13 @@ test('CLI loopback: real files, both directions, and a missing file', () => {
   assert.match(bad.out, /::error::harness exited 1/);
   const missing = runCli(['loopback', '--results', join(dir, 'nope.json'), '--harness-exit', '0']);
   assert.equal(missing.status, 1);
+  const requiredMissing = runCli(['loopback', '--results', good, '--harness-exit', '0', '--required', '37,38']);
+  assert.equal(requiredMissing.status, 1, requiredMissing.out);
+  assert.match(requiredMissing.out, /::error::required loopback case 37 produced no result/);
+  const display = join(dir, 'display.json');
+  writeFileSync(display, JSON.stringify(withDisplayCases(healthyReport())));
+  const requiredOk = runCli(['loopback', '--results', display, '--harness-exit', '0', '--required', '37,38,39,40,41']);
+  assert.equal(requiredOk.status, 0, requiredOk.out);
   const garbage = join(dir, 'garbage.json');
   writeFileSync(garbage, '{not json');
   assert.equal(runCli(['loopback', '--results', garbage, '--harness-exit', '0']).status, 1);
@@ -356,6 +409,8 @@ const WORKFLOW = fileURLToPath(new URL('../.github/workflows/nightly-loopback.ym
 const RELEASE = fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url));
 
 const WIRING = [
+  ['workflow', 'loopback verdict is called with the required cases', /--required "\$E2E_REQUIRED_RC_CASES"/],
+  ['workflow', 'the display-share cases are required', /E2E_REQUIRED_RC_CASES: "37,38,39,40,41"/],
   ['workflow', 'loopback verdict is called with the harness exit', /node "\$VERDICT" loopback --results "\$RESULTS_JSON" --harness-exit "\$status"/],
   ['workflow', 'cockpit verdict is called with the step start time', /node "\$VERDICT" cockpit --run-dir "\$\{RUN_DIR:-\}" --started-at-ms "\$COCKPIT_STARTED_MS"/],
   ['workflow', 'cockpit verdict is called with the engine exit', /--engine-exit "\$engine_exit"/],
