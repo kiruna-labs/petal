@@ -8,6 +8,9 @@
 // unreachable Chrome CDP endpoint made the scenario print one `# SKIP` line,
 // execute ZERO cases, and exit 0 -- a false green no gate could catch.
 
+import os from 'node:os';
+import path from 'node:path';
+
 export const NO_RESULT_EXIT_CODE = 2;
 
 // Canonical key set of the numbered suite's SUMMARY line and of the `summary`
@@ -24,6 +27,9 @@ export const SUITE_SUMMARY_KEYS = Object.freeze([
   'skip',
   'recoveries',
   'tokenlessDrops',
+  // Which host log `tokenlessDrops` was counted from, and whether it can be
+  // trusted: see assessHostLogEvidence below.
+  'hostLogEvidence',
   // 6c: which gate this run actually ran. `shareReadiness` is 'live-tile' for
   // the full gate and 'target-present' for --input-only, so no consumer can
   // mistake a relaxed run for the full one.
@@ -51,4 +57,54 @@ export function suiteExitCode(summary) {
   // zero cases executed, or cases executed with not one of them passing.
   if (total === 0 || pass === 0) return NO_RESULT_EXIT_CODE;
   return fail > 0 ? 1 : 0;
+}
+
+// ---- #580 tokenless-drop evidence: read the log the host actually writes ----
+//
+// `tokenlessDrops` is counted from the host's own log. On the CI VM the host
+// writes to PETAL_LOG_PATH (petal-dev.log), not ~/Library/Logs/Petal/petal.log,
+// and the scenario used to read only the latter -- so the check counted 0 from
+// a log that never saw the run. A zero from a blind log is not a zero.
+
+/// Logged by the host for every remote-control packet it receives (high-rate
+/// pointer moves are sampled, everything else is logged), at info level, from
+/// the same module as the tokenless-drop warning.
+export const HOST_RC_LINE_NEEDLE = 'remote-control: received kind=';
+export const TOKENLESS_DROP_NEEDLE = 'dropping tokenless input';
+
+/// The host log the scenario reads. PETAL_LOG_PATH wins because it is where a
+/// harness-launched host writes; PETAL_ACCEPTANCE_LOG is the older override.
+export function resolvePetalLogPath(env = process.env, homedir = os.homedir()) {
+  return env.PETAL_LOG_PATH
+    || env.PETAL_ACCEPTANCE_LOG
+    || path.join(homedir, 'Library', 'Logs', 'Petal', 'petal.log');
+}
+
+/// Count tokenless drops in `logText`, the host log written during this run.
+/// If remote-control cases ran but the log holds not one host remote-control
+/// line, the reader is looking at the wrong file (or an empty one): the count
+/// is unknown, `tokenlessDrops` is null, and the run is infra-invalid.
+export function assessHostLogEvidence({ logText, logPath, rcCasesRan }) {
+  const lines = String(logText ?? '').split('\n');
+  const remoteControlLines = lines.filter((line) => line.includes(HOST_RC_LINE_NEEDLE)).length;
+  const drops = lines.filter((line) => line.includes(TOKENLESS_DROP_NEEDLE)).length;
+  const blind = rcCasesRan > 0 && remoteControlLines === 0;
+  return {
+    tokenlessDrops: blind ? null : drops,
+    hostLogEvidence: {
+      path: logPath ?? null,
+      remoteControlLines,
+      verdict: blind ? 'infra-invalid' : 'ok',
+    },
+  };
+}
+
+/// Exit code of the numbered suite. An infra-invalid host log means the #580
+/// check proved nothing, so the run is "no result" (2), never a pass. A
+/// tokenless drop or a missed --input-only pass bar turns a clean run into 1.
+export function numberedSuiteExitCode(summary, passBarShortfall = 0) {
+  const base = suiteExitCode(summary);
+  if (summary?.hostLogEvidence?.verdict !== 'ok') return Math.max(base, NO_RESULT_EXIT_CODE);
+  if (base === 0 && (summary.tokenlessDrops > 0 || passBarShortfall > 0)) return 1;
+  return base;
 }

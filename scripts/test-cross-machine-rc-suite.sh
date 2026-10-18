@@ -384,6 +384,7 @@ const values = {
   skip: 0,
   recoveries: 0,
   tokenlessDrops: 0,
+  hostLogEvidence: { path: '/tmp/petal-dev.log', remoteControlLines: 4, verdict: 'ok' },
   mode: 'numbered',
   shareReadiness: 'live-tile',
   targetObservationLatency: { budgetMs: 500, samples: 1, maxMs: 12, p95Ms: 12 },
@@ -416,6 +417,24 @@ NODE
 assert_contains "$TMP_ROOT/producer-shaped-summary.json" '"suiteExit":0'
 assert_contains "$TMP_ROOT/producer-shaped-summary.json" '"tokenlessDrops":0'
 assert_contains "$TMP_ROOT/producer-shaped-summary.json" '"shareReadiness":"live-tile"'
+
+# #580: the same producer-shaped run with an infra-invalid host log (the
+# scenario read a log the host never wrote) must not reduce to a pass, even
+# with a zero child exit.
+BLIND_HOST_LOG="$TMP_ROOT/blind-host-log.json"
+node - "$PRODUCER_SHAPED" "$BLIND_HOST_LOG" <<'NODE'
+const fs = require('node:fs');
+const [source, target] = process.argv.slice(2);
+const report = JSON.parse(fs.readFileSync(source, 'utf8'));
+report.summary.tokenlessDrops = null;
+report.summary.hostLogEvidence = { path: '/Users/runner/Library/Logs/Petal/petal.log', remoteControlLines: 0, verdict: 'infra-invalid' };
+fs.writeFileSync(target, `${JSON.stringify(report)}\n`);
+NODE
+(
+  source "$HARNESS"
+  reduce_suite_results "$BLIND_HOST_LOG" "$TMP_ROOT/blind-host-log-summary.json" 0
+)
+assert_contains "$TMP_ROOT/blind-host-log-summary.json" '"suiteExit":1'
 
 # 6c: a relaxed --input-only run must be distinguishable in the privacy-safe
 # artifact. It must never be readable as the full gate.

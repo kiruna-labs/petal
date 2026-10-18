@@ -3061,7 +3061,7 @@ still rejects translated execution for release evidence, and that stays true.
 | `PETAL_AX_OBS_DIAG` | `apps/desktop/src-tauri/src/platform/ax_observer.rs` | Verbose AX-observer diagnostics. |
 | `PETAL_TEST_REAL_WINEVENTS` / `PETAL_TEST_REAL_OVERLAY_WINEVENTS` | `apps/desktop/src-tauri/src/window_change_watcher.rs` (Windows) | Opt the Windows watcher tests into real WinEvent hooks. |
 | `PETAL_REMOTE_CONTROL_WEB_JOIN_TIMEOUT_MS` | `apps/desktop/scripts/remote-control-scenario.mjs` | Web-peer join timeout for the remote-control scenario (sibling of `…SHARE_READY_TIMEOUT_MS` below). |
-| `PETAL_LOG_PATH` | `apps/desktop/scripts/remote-control-scenario.mjs` | Override the petal.log path the scenario tails. |
+| `PETAL_LOG_PATH` | `apps/desktop/scripts/remote-control-scenario.mjs` | The host log the scenario reads (wins over `PETAL_ACCEPTANCE_LOG` and `~/Library/Logs/Petal/petal.log`). Set it to wherever the host under test writes; on the CI VM that is `petal-dev.log`. If remote-control cases ran and this log holds no host `remote-control: received kind=` line, the run is infra-invalid (`summary.hostLogEvidence.verdict`, exit 2) rather than reporting 0 tokenless drops (#580). |
 | `PETAL_RC_SENTINEL_CLICK_DELAY_MS`, `PETAL_RC_BURST_*` (`CADENCES`, `DRAIN_MS`, `MIN_CLICKS`, `SECONDS`, `SETTLE_MS`) | `apps/desktop/scripts/remote-control-scenario.mjs` | Rapid-click-burst mode tuning. |
 | `PETAL_ACCEPTANCE_416_TRIALS` / `_ACCESS_CODE` / `_LOG` | `apps/desktop/scripts` (#416 acceptance rig) | Trial count, room, and log path for the #416 resize-fight acceptance sampler. |
 | `PETAL_BUILD_DATE`, `PETAL_GIT_COMMIT`, `PETAL_RELEASE_BUNDLE_ID` | `build.rs` / `lib.rs` | Build-time bakes shown in Settings → Updates and used by the release identity checks. |
