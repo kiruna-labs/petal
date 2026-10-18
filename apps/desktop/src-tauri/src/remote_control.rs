@@ -22190,6 +22190,32 @@ mod tests {
     }
 
     #[test]
+    fn issue365_held_button_lets_through_only_its_own_up() {
+        let _guard = pressed_input_test_lock();
+        let ids = remote_control_test_ids("issue365_held_button_lets_through_only_its_own_up");
+        let _sink = Issue365Sink::register(&ids.controller_id);
+        let first = authorize_shared(ids.window_id, &ids.controller_id);
+        issue365_resolve(issue365_input(
+            RemoteControlType::Pointer,
+            RemoteControlAction::Down,
+            12,
+            &ids,
+            &first,
+        ));
+        let _second = authorize_shared(ids.window_id, &ids.controller_id);
+        let own_up =
+            issue365_input(RemoteControlType::Pointer, RemoteControlAction::Up, 13, &ids, &first);
+        let mut other_up = own_up.clone();
+        other_up.button = Some(2);
+        assert!(releases_held_input(&own_up));
+        assert!(
+            !releases_held_input(&other_up),
+            "an Up for a button that is not held must not bypass authorization"
+        );
+        revoke(ids.window_id, &ids.controller_id);
+    }
+
+    #[test]
     fn issue365_revoke_waits_for_an_in_flight_commit_and_releases_its_down() {
         let _guard = pressed_input_test_lock();
         let ids =

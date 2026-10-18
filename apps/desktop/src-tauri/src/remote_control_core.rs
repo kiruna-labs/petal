@@ -2245,7 +2245,11 @@ pub(crate) fn releases_held_input(message: &RemoteControlMessage) -> bool {
         return false;
     };
     match message.message_type {
-        RemoteControlType::Pointer => !pressed.buttons.is_empty(),
+        // A pointer Up clicks at its own position, so only the held button's
+        // own Up passes; never "any Up while any button is held" (#365 review).
+        RemoteControlType::Pointer => pressed
+            .buttons
+            .contains_key(&button_from_wire(message.button)),
         RemoteControlType::Key => {
             matching_key_release_identity(&pressed.keys, &key_identity(message)).is_some()
         }
