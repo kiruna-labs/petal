@@ -101,19 +101,24 @@ contact any of these.
 - **No location:** every event sets `$geoip_disable` and an empty `$ip`, and
   the PostHog project anonymizes IP addresses. PostHog still sees the
   connection's IP address in transit, as any web server does.
-- **Remote-control latency summary (planned, #369/#370):** while someone is
-  controlling a shared window, a release that ships this summary sends one
-  event per participant per minute of active control, plus a final partial
-  one. It carries integer-millisecond percentiles (p50, p95, max and sample
-  count) for each stage of the press-to-photon path, such as the input leg,
-  the replay, capture, encode, network, jitter buffer and decode. It also
-  carries coarse context: role (host or controller), a random per-session id,
-  the LiveKit edge region (the server's region, not yours), whether both
-  sides use the same edge, the ICE candidate type and protocol, the input
-  channel and the window codec. It never carries identities, room names,
-  window titles, coordinates or key data. The point is to find which stage
-  makes remote control feel slow, which is why it uses milliseconds instead
-  of the coarse buckets above. The allowlist is updated before it ships.
+- **Remote-control latency summary (`remote_control_latency_summary`, #370):**
+  builds that include it send one event per participant per 60 seconds of
+  active remote control, plus a final partial one when control ends, capped
+  at 120 per control session. It is never sent per input, and builds without
+  #370 do not send it at all. Each event carries integer-millisecond
+  percentiles (p50, p95, max and sample count) for each stage of the
+  press-to-photon path, such as the input leg, the replay, capture, encode,
+  network, jitter buffer, decode and presentation. It also carries interval
+  counters (input stalls, dropped frames, freezes, NACKs, PLIs, peak packet
+  loss) and coarse context: role (host or controller), a random per-session
+  id, the interval length, the LiveKit edge region (the server's region, not
+  yours), whether both sides use the same edge (`same_edge`), whether the SFU
+  is self-hosted (`self_hosted_sfu`), the ICE candidate type and protocol, the
+  window codec and whether a content change was detected (`content_change`).
+  It never carries identities, room names, window titles, coordinates or key
+  data. The point is to find which stage makes remote control feel slow,
+  which is why it uses milliseconds instead of the coarse buckets above. The
+  exact field list is in the allowlist.
 - **Turning it off:** Settings → Diagnostics → **Share anonymous usage and
   performance statistics** on desktop (macOS and Windows), or the same switch
   in the profile card in the browser (click your avatar on the home screen).
