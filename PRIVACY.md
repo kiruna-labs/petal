@@ -70,10 +70,58 @@ contact any of these.
 - **Not collected:** no session replay, no screen recording, and no performance
   tracing. This is deliberate and enforced in code — Petal's UI displays other
   people's shared screens, so recording it would be a serious breach.
-- **Builds without a DSN send nothing at all**, and no fallback DSN is
-  substituted. Official builds of both clients configure one; if you build
-  Petal yourself, omit `PETAL_SENTRY_DSN` / `VITE_SENTRY_DSN` and this
-  subsystem is compiled out.
+- **Turning it off:** Settings → Diagnostics → **Send crash and error reports
+  to Sentry**, on macOS and Windows. It is on by default.
+- **Desktop builds without a DSN send nothing at all**, and no fallback DSN is
+  substituted: omit `PETAL_SENTRY_DSN` and this subsystem is inert.
+- **The browser client is different.** Its build defaults to Petal's own
+  Sentry DSN (`web-harness/vite.config.ts`) unless `VITE_SENTRY_DSN` overrides
+  it, so a web-harness build from source reports crashes to Kiruna Labs'
+  Sentry project. Set `VITE_SENTRY_DSN` to your own DSN when you self-host the
+  browser client.
+
+### Usage and performance statistics (PostHog)
+
+- **When:** once per product event, such as joining or leaving a meeting,
+  starting or stopping a share, a reconnect, or a video stall. Events are not
+  sent per frame or per keystroke.
+- **Where:** PostHog (US cloud), configured at build time with
+  `PETAL_POSTHOG_KEY` for the desktop app and `VITE_PETAL_POSTHOG_KEY` for the
+  browser client.
+- **What is sent:** only the closed list of events and properties in
+  [`docs/POSTHOG_EVENT_ALLOWLIST.md`](docs/POSTHOG_EVENT_ALLOWLIST.md). Every
+  event carries the app version, OS, OS version, CPU architecture and
+  `client` (`native` or `web`). Durations are sent as coarse buckets. Room
+  names, identities, display names, window titles, device names, key codes,
+  clipboard contents, pointer coordinates and tokens are never sent.
+- **Anonymous id:** each install picks a random 128-bit id, stored locally
+  (`analytics-id` in the app's data folder on desktop, `petal-analytics-id` in
+  browser storage). It is not derived from your name, account or machine, and
+  clearing it makes you a new, unrelated id.
+- **No location:** every event sets `$geoip_disable` and an empty `$ip`, and
+  the PostHog project anonymizes IP addresses. PostHog still sees the
+  connection's IP address in transit, as any web server does.
+- **Remote-control latency summary (planned, #369/#370):** while someone is
+  controlling a shared window, a release that ships this summary sends one
+  event per participant per minute of active control, plus a final partial
+  one. It carries integer-millisecond percentiles (p50, p95, max and sample
+  count) for each stage of the press-to-photon path, such as the input leg,
+  the replay, capture, encode, network, jitter buffer and decode. It also
+  carries coarse context: role (host or controller), a random per-session id,
+  the LiveKit edge region (the server's region, not yours), whether both
+  sides use the same edge, the ICE candidate type and protocol, the input
+  channel and the window codec. It never carries identities, room names,
+  window titles, coordinates or key data. The point is to find which stage
+  makes remote control feel slow, which is why it uses milliseconds instead
+  of the coarse buckets above. The allowlist is updated before it ships.
+- **Turning it off:** Settings → Diagnostics → **Share anonymous usage and
+  performance statistics** on desktop (macOS and Windows), or the same switch
+  in the profile card in the browser (click your avatar on the home screen).
+  It is on by default. While it is off, nothing is sent. On desktop, events
+  from the first moments after launch are held until the app has read your
+  saved choice, so an opt-out also covers startup.
+- **Builds without a key send nothing at all.** A build from source without
+  `PETAL_POSTHOG_KEY` / `VITE_PETAL_POSTHOG_KEY` never contacts PostHog.
 
 ### Feedback submission
 
@@ -116,7 +164,9 @@ contact any of these.
   browser drops it with the tab's session. After a disconnect you did not
   ask for, it is kept while the disconnect notice is up (a reload then
   rejoins), and cleared when you go back to the home screen.
-- Window layout and app preferences.
+- Window layout and app preferences, including your crash-report and
+  usage-statistics choices (`petal-usage-stats` in the browser).
+- The random anonymous id described under usage statistics.
 - The email address you last sent feedback with, so the form can fill it in
   next time (you can change it there). The desktop app clears it on a factory
   reset; in the browser it goes when you clear the site's data.

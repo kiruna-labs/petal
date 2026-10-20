@@ -248,3 +248,46 @@ test('web call sites exist; host emulator and hold-last-frame are not event sour
   assert.match(analyticsSrc, /VIDEO_STALL_MS = 10_000/);
   assert.doesNotMatch(analyticsSrc, /HOLD_STALL_MS/);
 });
+
+test('#377: a stored usage-stats opt-out means no request at all; opting back in sends', () => {
+  const saved = {
+    key: process.env.VITE_PETAL_POSTHOG_KEY,
+    fetch: globalThis.fetch,
+    storage: Object.getOwnPropertyDescriptor(globalThis, 'localStorage'),
+  };
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k: string) => values.get(k) ?? null,
+      setItem: (k: string, v: string) => void values.set(k, v),
+      removeItem: (k: string) => void values.delete(k),
+    },
+  });
+  const posts: string[] = [];
+  globalThis.fetch = (async (url: string) => {
+    posts.push(String(url));
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  process.env.VITE_PETAL_POSTHOG_KEY = 'phc_test_only';
+  try {
+    uninstallTestSink();
+    values.set('petal-usage-stats', '0');
+    meetingJoined();
+    shareStarted('window');
+    meetingLeft();
+    assert.deepEqual(posts, [], 'an opted-out browser must make no PostHog request');
+
+    values.set('petal-usage-stats', '1');
+    meetingJoined();
+    assert.equal(posts.length, 1, 'opting back in must resume sending');
+    assert.match(posts[0], /\/i\/v0\/e\/$/);
+  } finally {
+    if (saved.key === undefined) delete process.env.VITE_PETAL_POSTHOG_KEY;
+    else process.env.VITE_PETAL_POSTHOG_KEY = saved.key;
+    globalThis.fetch = saved.fetch;
+    if (saved.storage) Object.defineProperty(globalThis, 'localStorage', saved.storage);
+    else delete (globalThis as { localStorage?: unknown }).localStorage;
+    meetingLeft();
+  }
+});

@@ -74,6 +74,12 @@ interface StoredSession {
    */
   sentryEnabled: boolean;
   /**
+   * #377: "Share anonymous usage and performance statistics" (PostHog).
+   * Default ON with opt-out, matching `sentryEnabled`. Mirrored to Rust via
+   * `set_usage_stats_enabled`, which drops every product event while off.
+   */
+  usageStatsEnabled: boolean;
+  /**
    * Refs #378: opt-in, default OFF. When enabled, the controller overlay
    * (compositor/control route + web-harness equivalent) renders purely
    * local, ephemeral "input sent" feedback (Phase 1 gesture echo: click
@@ -104,6 +110,7 @@ const defaults: StoredSession = {
   cameraMode: null,
   remoteControlPolicy: 'ask',
   sentryEnabled: true,
+  usageStatsEnabled: true,
   localEchoEnabled: false
 };
 
@@ -285,6 +292,14 @@ export function updateSentryEnabled(enabled: boolean) {
   commit(session);
   if (browser && hasTauriBridge()) {
     void invoke(COMMANDS.setSentryEnabled, { enabled }).catch(() => {});
+  }
+}
+
+export function updateUsageStatsEnabled(enabled: boolean) {
+  session.usageStatsEnabled = enabled;
+  commit(session);
+  if (browser && hasTauriBridge()) {
+    void invoke(COMMANDS.setUsageStatsEnabled, { enabled }).catch(() => {});
   }
 }
 
