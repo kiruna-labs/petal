@@ -801,6 +801,8 @@ enum SendOutcome {
     Http5xx,
     HttpOther,
     TransportOther,
+    /// #377: the user opted out while this event was in flight.
+    OptedOut,
 }
 
 impl SendOutcome {
@@ -814,6 +816,7 @@ impl SendOutcome {
             Self::Http5xx => "http_5xx",
             Self::HttpOther => "http_other",
             Self::TransportOther => "transport_other",
+            Self::OptedOut => "opted_out",
         }
     }
 
@@ -860,13 +863,19 @@ async fn attempt_send(
 /// returns immediately instead of wasting a retry cycle on something that
 /// cannot succeed. Cannot wedge the worker (the loop always terminates) and
 /// cannot grow memory (no buffering beyond the one in-flight `body`).
+/// #377: consent is re-checked before EVERY attempt, the retry included, so
+/// an opt-out stops an in-flight event instead of letting its retry go out.
 async fn send_with_retry(
     client: &reqwest::Client,
     url: &str,
     body: &serde_json::Value,
+    consent: &AtomicU8,
 ) -> Result<(), SendOutcome> {
     let mut attempt = 0u32;
     loop {
+        if consent.load(Ordering::Relaxed) != CONSENT_GRANTED {
+            return Err(SendOutcome::OptedOut);
+        }
         match attempt_send(client, url, body).await {
             Ok(()) => return Ok(()),
             Err(outcome) => {
@@ -929,13 +938,23 @@ async fn drain_queue(
     url: &str,
     api_key: &str,
 ) {
+    let mut held_discard_logged = false;
     while let Some(mut body) = rx.recv().await {
+        let held = consent.load(Ordering::Relaxed) == CONSENT_UNKNOWN;
         if !await_consent_decision(consent).await {
+            if held && !held_discard_logged {
+                held_discard_logged = true;
+                log::info!("analytics: usage stats off -- discarding events held since launch");
+            }
             PENDING.fetch_sub(1, Ordering::Relaxed);
             continue;
         }
         body["api_key"] = serde_json::Value::String(api_key.to_string());
-        let result = send_with_retry(client, url, &body).await;
+        let result = send_with_retry(client, url, &body, consent).await;
+        if result == Err(SendOutcome::OptedOut) {
+            PENDING.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        }
         let message = FAILURE_TRACKER.lock_unpoisoned().note_result(
             result.is_ok(),
             Instant::now(),
@@ -1014,10 +1033,21 @@ pub fn set_usage_stats_enabled(enabled: bool) {
 pub(crate) async fn flush(timeout: Duration) {
     // #377: held events never drain while the choice is unknown, and a
     // DENIED worker discards without network -- only wait when sending.
-    if WORKER.get().is_none()
-        || USAGE_STATS_CONSENT.load(Ordering::Relaxed) != CONSENT_GRANTED
-    {
+    if WORKER.get().is_none() {
         return;
+    }
+    match USAGE_STATS_CONSENT.load(Ordering::Relaxed) {
+        CONSENT_GRANTED => {}
+        CONSENT_UNKNOWN => {
+            let held = PENDING.load(Ordering::Relaxed);
+            if held > 0 {
+                log::info!(
+                    "analytics: {held} event(s) held for the usage-stats choice discarded at quit (choice never synced)"
+                );
+            }
+            return;
+        }
+        _ => return,
     }
     wait_for_pending_to_drain(timeout).await;
 }
@@ -2221,7 +2251,7 @@ mod tests {
             .build()
             .unwrap();
         let body = json!({"event": "test"});
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         assert!(result.is_ok(), "one retry must recover a transient failure: {result:?}");
     }
 
@@ -2255,7 +2285,7 @@ mod tests {
         // attempts" -- instead of a number that happens to hold on one OS.
         let worst_case = SEND_TIMEOUT * (MAX_SEND_RETRIES + 1) + RETRY_BACKOFF * MAX_SEND_RETRIES;
         let start = Instant::now();
-        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body))
+        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)))
             .await
             .expect("send_with_retry must terminate, never wedge the worker");
         let elapsed = start.elapsed();
@@ -2305,7 +2335,7 @@ mod tests {
             .unwrap();
         let body = json!({"event": "test"});
         let worst_case = SEND_TIMEOUT * (MAX_SEND_RETRIES + 1) + RETRY_BACKOFF * MAX_SEND_RETRIES;
-        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body))
+        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)))
             .await
             .expect("send_with_retry must terminate, never wedge the worker");
         assert!(
@@ -2327,7 +2357,7 @@ mod tests {
             .build()
             .unwrap();
         let body = json!({"event": "test"});
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         assert_eq!(
             result,
             Err(SendOutcome::Http401),
@@ -2350,7 +2380,7 @@ mod tests {
             .unwrap();
         let body = json!({"event": "test"});
         let start = Instant::now();
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         let elapsed = start.elapsed();
         assert_eq!(result, Err(SendOutcome::Http401));
         assert!(
@@ -2384,6 +2414,7 @@ mod tests {
             SendOutcome::Http5xx,
             SendOutcome::HttpOther,
             SendOutcome::TransportOther,
+            SendOutcome::OptedOut,
         ] {
             let s = outcome.as_str();
             assert!(!s.contains("://"), "must never look like a URL: {s}");
@@ -2422,7 +2453,7 @@ mod tests {
             .timeout(SEND_TIMEOUT)
             .build()
             .unwrap();
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         assert!(result.is_err(), "both attempts were configured to fail");
 
         // Call the SAME function the worker's failure branch calls. Do not
@@ -2527,6 +2558,30 @@ mod tests {
             PENDING.load(Ordering::Relaxed),
             0,
             "discarded events must settle PENDING so quit's flush is not delayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_opt_out_between_attempts_stops_the_retry() {
+        let (url, requests) =
+            spawn_counting_server("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+        let client = reqwest::Client::builder()
+            .timeout(SEND_TIMEOUT)
+            .build()
+            .unwrap();
+        let consent = AtomicU8::new(CONSENT_GRANTED);
+        let body = json!({"event": "test"});
+        let opt_out = async {
+            // Inside RETRY_BACKOFF: after the first attempt, before the retry.
+            tokio::time::sleep(RETRY_BACKOFF / 2).await;
+            store_consent(&consent, false);
+        };
+        let (result, ()) = tokio::join!(send_with_retry(&client, &url, &body, &consent), opt_out);
+        assert_eq!(result, Err(SendOutcome::OptedOut));
+        assert_eq!(
+            requests.lock_unpoisoned().len(),
+            1,
+            "the retry of an in-flight event must not go out after an opt-out"
         );
     }
 }

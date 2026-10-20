@@ -5,10 +5,11 @@
 // PETAL_POSTHOG_HOST=http://127.0.0.1:<port>; this script serves that port as
 // a mock ingest endpoint and records every POST. Three phases, all through
 // the autotest socket's `set_usage_stats` (the Settings toggle's command):
-//   1. ON  (positive control): one share cycle must reach the mock, or the
+//   1. ON  (positive control): the share cycle's share_started AND
+//      share_stopped must both reach the mock, or the
 //      opt-out proof below would be vacuous.
 //   2. OFF: share churn for --off-seconds; any POST at all is a failure.
-//   3. ON again: sending must resume (the gate is not stuck closed).
+//   3. ON again: both cycle events must arrive again (gate not stuck closed).
 // Consent is left ON at exit. Exit 0 = pass, 1 = fail, 2 = could not run.
 import { writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -80,14 +81,16 @@ async function shareCycle() {
   await sleep(500);
 }
 
-async function waitForPostsSince(since, wanted, timeoutMs) {
+// The share cycle's own events: a stray event (e.g. a late
+// remote_control_input) must not stand in for proof the pipe is live.
+const CYCLE_EVENTS = ['share_started', 'share_stopped'];
+
+async function waitForCycleEventsSince(since, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const seen = posts.filter((post) => post.at >= since);
-    if (seen.length >= wanted) return seen;
-    await sleep(250);
-  }
-  return posts.filter((post) => post.at >= since);
+  const seen = () => posts.filter((post) => post.at >= since);
+  const complete = () => CYCLE_EVENTS.every((name) => seen().some((post) => post.event === name));
+  while (Date.now() < deadline && !complete()) await sleep(250);
+  return { posts: seen(), complete: complete() };
 }
 
 const details = { port, offSeconds };
@@ -96,14 +99,14 @@ try {
   await command({ cmd: 'set_usage_stats', enabled: true });
   const controlStart = Date.now();
   await shareCycle();
-  const control = await waitForPostsSince(controlStart, 2, CONTROL_WAIT_MS);
-  details.onPosts = control.length;
-  details.onEvents = [...new Set(control.map((post) => post.event))];
-  log(`phase ON: ${control.length} POST(s) ${JSON.stringify(details.onEvents)}`);
-  if (control.length === 0) {
+  const control = await waitForCycleEventsSince(controlStart, CONTROL_WAIT_MS);
+  details.onPosts = control.posts.length;
+  details.onEvents = [...new Set(control.posts.map((post) => post.event))];
+  log(`phase ON: ${control.posts.length} POST(s) ${JSON.stringify(details.onEvents)}`);
+  if (!control.complete) {
     finish(2, 'CANNOT-RUN', {
       ...details,
-      reason: 'no POST reached the mock with consent ON -- the pipe is not live, so an opt-out proof would be vacuous',
+      reason: `share_started + share_stopped did not both reach the mock with consent ON -- the pipe is not proven live, so an opt-out proof would be vacuous`,
     });
   }
 
@@ -129,12 +132,13 @@ try {
   await command({ cmd: 'set_usage_stats', enabled: true });
   const resumeStart = Date.now();
   await shareCycle();
-  const resumed = await waitForPostsSince(resumeStart, 1, CONTROL_WAIT_MS);
-  details.resumedPosts = resumed.length;
-  log(`phase ON again: ${resumed.length} POST(s)`);
+  const resumed = await waitForCycleEventsSince(resumeStart, CONTROL_WAIT_MS);
+  details.resumedPosts = resumed.posts.length;
+  details.resumedEvents = [...new Set(resumed.posts.map((post) => post.event))];
+  log(`phase ON again: ${resumed.posts.length} POST(s) ${JSON.stringify(details.resumedEvents)}`);
 
   if (leaked.length > 0) finish(1, 'FAIL', { ...details, reason: 'PostHog POSTs arrived while usage stats were OFF' });
-  if (resumed.length === 0) finish(1, 'FAIL', { ...details, reason: 'sending did not resume after opting back in' });
+  if (!resumed.complete) finish(1, 'FAIL', { ...details, reason: 'share_started + share_stopped did not resume after opting back in' });
   finish(0, 'PASS', details);
 } catch (error) {
   try {
