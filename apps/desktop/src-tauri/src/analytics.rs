@@ -676,7 +676,15 @@ fn os_label() -> &'static str {
     }
 }
 
+// #377: cached per process. Uncached, every event spawned `sw_vers` on the
+// caller's thread -- including remote-control replay -- which lifted the VM's
+// host receive->inject p95 from ~9ms to 19ms once a key was present.
 fn os_version() -> String {
+    static OS_VERSION: OnceLock<String> = OnceLock::new();
+    OS_VERSION.get_or_init(read_os_version).clone()
+}
+
+fn read_os_version() -> String {
     #[cfg(target_os = "macos")]
     {
         command_stdout("sw_vers", &["-productVersion"]).unwrap_or_else(|| "unknown".into())
