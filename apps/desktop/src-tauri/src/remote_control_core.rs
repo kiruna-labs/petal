@@ -1482,6 +1482,25 @@ pub struct RemoteControlStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<RemoteControlReason>,
 }
+
+/// What a host status packet does to the controller's session. Only `active`
+/// starts it and only `stopped`/`disabled` end it; every other status is
+/// feedback about one input and leaves a still-valid grant running (#311).
+/// Mirrors `remoteControlStatusEffect` in `remoteControlFeedback.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControllerStatusEffect {
+    Activate,
+    Feedback,
+    Terminate,
+}
+
+pub(crate) fn controller_status_effect(status: &str) -> ControllerStatusEffect {
+    match status {
+        "active" => ControllerStatusEffect::Activate,
+        "stopped" | "disabled" => ControllerStatusEffect::Terminate,
+        _ => ControllerStatusEffect::Feedback,
+    }
+}
 #[derive(Debug, Clone)]
 pub(crate) struct ReplayTask {
     pub(crate) message: RemoteControlMessage,
@@ -2328,6 +2347,41 @@ pub(crate) fn drain_expired_pressed(now: Instant) -> Vec<ReplayTask> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_status_effect_only_ends_control_on_stopped_or_disabled() {
+        assert_eq!(
+            controller_status_effect("active"),
+            ControllerStatusEffect::Activate
+        );
+        for status in ["stopped", "disabled"] {
+            assert_eq!(
+                controller_status_effect(status),
+                ControllerStatusEffect::Terminate
+            );
+        }
+        // #311: a single undeliverable input (a scroll AX/SkyLight could not
+        // route, a wheel burst past the injection deadline) is reported as
+        // targetUnavailable while the host still holds the grant.
+        for status in [
+            "targetUnavailable",
+            "targetPaused",
+            "accessibilityDenied",
+            "requestFailed",
+            "requestUnavailable",
+            "notForeground",
+            "occluded",
+            "unsupportedRoute",
+            "injectionTimeout",
+            "textTruncated",
+        ] {
+            assert_eq!(
+                controller_status_effect(status),
+                ControllerStatusEffect::Feedback,
+                "{status}"
+            );
+        }
+    }
 
     #[test]
     fn control_mode_defaults_and_wire_parsing() {

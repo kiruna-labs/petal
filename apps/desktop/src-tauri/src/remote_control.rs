@@ -4569,15 +4569,12 @@ fn handle_message(
                 message.window_id,
                 status_message
             );
-            #[cfg(target_os = "windows")]
-            let overlay_active =
-                match crate::windows_remote_control::controller_status_effect(status) {
-                    crate::windows_remote_control::ControllerStatusEffect::Activate => Some(true),
-                    crate::windows_remote_control::ControllerStatusEffect::Terminate => Some(false),
-                    crate::windows_remote_control::ControllerStatusEffect::Feedback => None,
-                };
-            #[cfg(not(target_os = "windows"))]
-            let overlay_active = Some(status == "active");
+            let overlay_active = match crate::remote_control_core::controller_status_effect(status)
+            {
+                crate::remote_control_core::ControllerStatusEffect::Activate => Some(true),
+                crate::remote_control_core::ControllerStatusEffect::Terminate => Some(false),
+                crate::remote_control_core::ControllerStatusEffect::Feedback => None,
+            };
             if let Some(active) = overlay_active {
                 if let Err(e) = set_remote_window_control_active(
                     app,
