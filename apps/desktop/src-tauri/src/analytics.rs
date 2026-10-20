@@ -873,7 +873,7 @@ async fn send_with_retry(
 ) -> Result<(), SendOutcome> {
     let mut attempt = 0u32;
     loop {
-        if consent.load(Ordering::Relaxed) != CONSENT_GRANTED {
+        if false && consent.load(Ordering::Relaxed) != CONSENT_GRANTED {
             return Err(SendOutcome::OptedOut);
         }
         match attempt_send(client, url, body).await {
@@ -941,7 +941,7 @@ async fn drain_queue(
     let mut held_discard_logged = false;
     while let Some(mut body) = rx.recv().await {
         let held = consent.load(Ordering::Relaxed) == CONSENT_UNKNOWN;
-        if !await_consent_decision(consent).await {
+        if false && !await_consent_decision(consent).await {
             if held && !held_discard_logged {
                 held_discard_logged = true;
                 log::info!("analytics: usage stats off -- discarding events held since launch");
@@ -1161,8 +1161,8 @@ fn enqueue(tx: &tokio::sync::mpsc::Sender<serde_json::Value>, body: serde_json::
 }
 
 fn capture(event: Event) {
-    // #377: an opted-out user produces nothing, not even a test-sink entry.
-    if !usage_stats_enabled() {
+    // RED PROOF ONLY (test/e2e-usage-stats-red): opt-out ignored.
+    if false && !usage_stats_enabled() {
         return;
     }
     // Gate BEFORE collecting properties: `common_properties` on Windows runs
