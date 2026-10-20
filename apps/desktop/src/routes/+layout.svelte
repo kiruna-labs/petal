@@ -143,7 +143,10 @@
         unResilience.then((un) => un()).catch(() => {});
       };
     }
-    if (!isOverlayRoute) void syncSentryEnabled();
+    if (!isOverlayRoute) {
+      void syncSentryEnabled();
+      void syncUsageStatsEnabled();
+    }
     void reportFrontendReady();
 
     return () => {
@@ -213,6 +216,18 @@
       await invoke(COMMANDS.setSentryEnabled, { enabled: session.sentryEnabled });
     } catch (e) {
       console.warn('layout: failed to sync sentryEnabled on startup', e);
+    }
+  }
+
+  // #377: Rust holds every PostHog event until this sync lands (its consent
+  // starts UNKNOWN, not ON), then sends or discards them. Without this call
+  // nothing is ever sent, so it runs on every platform.
+  async function syncUsageStatsEnabled() {
+    if (!hasTauriBridge()) return;
+    try {
+      await invoke(COMMANDS.setUsageStatsEnabled, { enabled: session.usageStatsEnabled });
+    } catch (e) {
+      console.warn('layout: failed to sync usageStatsEnabled on startup', e);
     }
   }
 

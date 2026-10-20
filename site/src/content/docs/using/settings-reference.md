@@ -86,17 +86,19 @@ so this section doesn't appear there.
   Explorer on Windows) so you can attach it to a bug report. The dropdown
   beside it picks the range: **Last 2 days**, **Last 7 days**, or **All
   logs**. Nothing leaves your machine on its own.
-- **Send crash and error reports to Sentry** (macOS) — on by default. Sends
-  diagnostic reports (not just crashes) to help identify problems. Turn it
-  off if you don't want any diagnostic data leaving your Mac.
-
-Petal also records a small set of anonymous product events (things like
-"meeting joined", "share started", "reconnect recovered") to help the
-maintainers see where real users hit trouble. The exact event list is
-published in the repository's `docs/POSTHOG_EVENT_ALLOWLIST.md`, and it
-never includes window titles, room names, or content. There is no in-app
-toggle for it yet; a build from source without an analytics key sends
-nothing.
+- **Send crash and error reports to Sentry** — on by default, on macOS and
+  Windows. Sends diagnostic reports (not just crashes) to help identify
+  problems. Turn it off if you don't want any diagnostic data leaving your
+  computer.
+- **Share anonymous usage and performance statistics** — on by default, on
+  macOS and Windows. Sends a small set of anonymous product events (things
+  like "meeting joined", "share started", "reconnect recovered") to help the
+  maintainers see where real users hit trouble. The exact event list is
+  published in the repository's `docs/POSTHOG_EVENT_ALLOWLIST.md`, and it
+  never includes window titles, room names, or content. Turn it off and
+  nothing is sent. In the browser, the same switch is in the profile card
+  (click your avatar on the home screen). A build from source without an
+  analytics key sends nothing either way.
 
 ## Account
 

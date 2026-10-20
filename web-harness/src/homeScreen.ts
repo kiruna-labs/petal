@@ -445,14 +445,19 @@ export function setupHomeScreen(options: HomeScreenOptions): HomeScreenApi {
     if (profileOnboardingDone) profileOnboardingDone.disabled = !displayNameInput.value.trim();
   }
 
+  // #377: the first-visit card stays name + colour only (it must fit a
+  // landscape phone, #243); the usage-stats opt-out shows when the user opens
+  // the card from the avatar.
   function showProfileOnboarding() {
     if (!showFirstVisitOnboarding) return;
+    profileOnboarding?.classList.add('first-visit');
     openProfileOnboarding();
   }
 
   function toggleProfileOnboarding() {
     if (!profileOnboarding) return;
     if (profileOnboarding.classList.contains('hidden')) {
+      profileOnboarding.classList.remove('first-visit');
       openProfileOnboarding();
     } else {
       hideProfileOnboarding();

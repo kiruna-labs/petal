@@ -32,6 +32,7 @@ import { setupChat } from './chat/setupChat.svelte.ts';
 import { setupControlOverflow } from './controlOverflow';
 import { addSentryBreadcrumb, initSentry, installGlobalErrorMirror } from './sentryReporting';
 import { initAnalytics } from './analytics';
+import { installUsageStatsToggle } from './usageStatsToggle';
 import { FeedbackReportController } from './feedbackReport';
 import { sensitiveStringRegistry } from './sensitiveStrings';
 import { isPhoneOrTablet } from './mobileDevice';
@@ -732,6 +733,7 @@ ctx.cb.updateUnifiedCtaLabel = updateUnifiedCtaLabel;
 ctx.cb.recordRecentRoom = recordRecentRoom;
 ctx.cb.refreshRecentRooms = refreshRecentRooms;
 ctx.cb.roomDisplayLabelForCredential = roomDisplayLabelForCredential;
+installUsageStatsToggle(document);
 
 controls.installControls();
 

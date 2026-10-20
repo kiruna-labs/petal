@@ -28,7 +28,8 @@
     updateIdentity,
     updateRemoteControlPolicy,
     updateLocalEchoEnabled,
-    updateSentryEnabled
+    updateSentryEnabled,
+    updateUsageStatsEnabled
   } from '$lib/stores/session.svelte';
   import {
     checkScreenRecording,
@@ -129,6 +130,8 @@
     onLocalEchoEnabledChange={updateLocalEchoEnabled}
     sentryEnabled={session.sentryEnabled}
     onSentryEnabledChange={updateSentryEnabled}
+    usageStatsEnabled={session.usageStatsEnabled}
+    onUsageStatsEnabledChange={updateUsageStatsEnabled}
   />
 </main>
 

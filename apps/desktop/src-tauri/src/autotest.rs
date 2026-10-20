@@ -635,6 +635,12 @@ mod command_server {
             #[serde(default)]
             journal_tail: Option<usize>,
         },
+        /// #377 live check (`scripts/posthog-consent-live.mjs`): flip the
+        /// usage-stats consent through the same command the Settings toggle
+        /// invokes, so the fixture can prove an opt-out sends nothing.
+        SetUsageStats {
+            enabled: bool,
+        },
     }
 
     /// The two LiveKit SDK reconnection paths we need to distinguish in the
@@ -1002,6 +1008,12 @@ mod command_server {
                     None => Err("diagnostics state unavailable".to_string()),
                 }
             }
+            Command::SetUsageStats { enabled } => {
+                crate::analytics::set_usage_stats_enabled(enabled);
+                Ok(serde_json::json!({
+                    "usageStatsEnabled": crate::analytics::usage_stats_enabled(),
+                }))
+            }
         };
         json_response(result)
     }
@@ -1316,6 +1328,14 @@ mod command_server {
                     .unwrap();
             assert!(matches!(switch, Command::SetCameraDevice { device_id } if device_id == "cam-2"));
             assert!(serde_json::from_str::<Command>(r#"{"cmd":"set_camera_device"}"#).is_err());
+        }
+
+        #[test]
+        fn set_usage_stats_needs_an_explicit_choice() {
+            let command: Command =
+                serde_json::from_str(r#"{"cmd":"set_usage_stats","enabled":false}"#).unwrap();
+            assert!(matches!(command, Command::SetUsageStats { enabled: false }));
+            assert!(serde_json::from_str::<Command>(r#"{"cmd":"set_usage_stats"}"#).is_err());
         }
 
         #[test]

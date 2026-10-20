@@ -47,6 +47,7 @@
   import Button from './Button.svelte';
   import CloseButton from './CloseButton.svelte';
   import Switch from '@petal/shared/ui/components/Switch.svelte';
+  import { USAGE_STATS_DESCRIPTION, USAGE_STATS_LABEL } from '@petal/shared/logic/usageStats';
   import {
     REMOTE_CONTROL_POLICY_DESCRIPTION,
     REMOTE_CONTROL_POLICY_OPTIONS,
@@ -162,6 +163,8 @@
     onLocalEchoEnabledChange?: (enabled: boolean) => void;
     sentryEnabled?: boolean;
     onSentryEnabledChange?: (enabled: boolean) => void;
+    usageStatsEnabled?: boolean;
+    onUsageStatsEnabledChange?: (enabled: boolean) => void;
     onOpenSettings?: () => void;
     /** Real routes pass true so the panel IS the window (edge-to-edge, no
      * fixed-size floating card). Default false preserves the card look for
@@ -194,6 +197,8 @@
     onLocalEchoEnabledChange,
     sentryEnabled = true,
     onSentryEnabledChange,
+    usageStatsEnabled = true,
+    onUsageStatsEnabledChange,
     onOpenSettings,
     frameless = false,
     onClose
@@ -1847,7 +1852,8 @@
             <span class="device-note error">{exportLogsError}</span>
           {/if}
         </div>
-        {#if isMac()}
+        <!-- #377: both privacy toggles show on macOS and Windows; Sentry and
+             PostHog run on both. Never gate these behind isMac() again. -->
         <label class="row switch-row">
           <span class="row-copy">
             <span class="row-title">Send crash and error reports to Sentry</span>
@@ -1860,7 +1866,16 @@
             onchange={(e) => onSentryEnabledChange?.(e.currentTarget.checked)}
           />
         </label>
-        {/if}
+        <label class="row switch-row" data-testid="usage-stats-row">
+          <span class="row-copy">
+            <span class="row-title">{USAGE_STATS_LABEL}</span>
+            <span class="row-description">{USAGE_STATS_DESCRIPTION}</span>
+          </span>
+          <Switch
+            checked={usageStatsEnabled}
+            onchange={(e) => onUsageStatsEnabledChange?.(e.currentTarget.checked)}
+          />
+        </label>
       </div>
     </section>
 

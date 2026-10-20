@@ -10,6 +10,7 @@ import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 import { build } from 'vite';
 
 import { platformKey } from '../src/lib/platform.ts';
+import { USAGE_STATS_LABEL } from '@petal/shared/logic/usageStats';
 
 const tokensSource = readFileSync(new URL('../../../shared/ui/tokens.css', import.meta.url), 'utf8');
 const appCssSource = readFileSync(new URL('../src/styles/app.css', import.meta.url), 'utf8');
@@ -118,9 +119,16 @@ test('root layout stamps the platform onto the document element', () => {
 test('Settings gates macOS-only rows and copy behind isMac()', () => {
   assert.match(settingsSource, /import\s*\{\s*isMac\s*\}\s*from\s*'\$lib\/platform'/);
   assert.ok(
-    (settingsSource.match(/\{#if isMac\(\)\}/g) ?? []).length >= 3,
-    'expected at least 3 isMac() gates (sentry toggle, permissions section, reset TCC instructions)'
+    (settingsSource.match(/\{#if isMac\(\)\}/g) ?? []).length >= 2,
+    'expected at least 2 isMac() gates (permissions section, reset TCC instructions)'
   );
+  // #377: the privacy toggles are cross-platform -- no isMac() gate may wrap
+  // either the Sentry or the usage-stats switch.
+  const privacyRows = settingsSource.slice(
+    settingsSource.indexOf('Send crash and error reports to Sentry') - 400,
+    settingsSource.indexOf('{USAGE_STATS_DESCRIPTION}') + 400
+  );
+  assert.doesNotMatch(privacyRows, /\{#if isMac\(\)\}/);
   // The whole Permissions section (Screen Recording/Microphone/Camera/
   // Accessibility rows) is macOS-gated: Windows has no TCC permission model.
   assert.match(
@@ -200,9 +208,10 @@ test('cross-platform backend commands are registered in the Windows handler', ()
   assert.match(windowsHandler, /diagnostics::get_event_journal/);
   assert.match(windowsHandler, /diagnostics::set_cockpit_open/);
   assert.match(windowsHandler, /diagnostics::record_video_stream_state/);
-  // Sentry stays macOS-only (its SDK + state are macOS-wired); the toggle is
-  // hidden on Windows.
-  assert.doesNotMatch(windowsHandler, /logging::set_sentry_enabled/);
+  // #377: Sentry and PostHog both run on Windows, so both opt-outs are
+  // registered (and shown in Settings) there too.
+  assert.match(windowsHandler, /logging::set_sentry_enabled/);
+  assert.match(windowsHandler, /analytics::set_usage_stats_enabled/);
   // The native corner-radius toggle must exist on Windows: pill mode flips
   // the main window between opaque-native-rounded (gallery) and the
   // transparent blur-behind window (pill).
@@ -653,18 +662,23 @@ test('Windows Settings renders without macOS copy; both platforms compute dark c
       {
         name: 'windows',
         userAgent: WINDOWS_WEBVIEW2_UA,
-        // Export logs is cross-platform (the backend command is registered on
-        // Windows and reveals in Explorer); only Sentry stays macOS-only.
+        // Export logs and both privacy toggles (#377) are cross-platform.
         absent: [
           'Finder',
           'Terminal',
           'this Mac',
-          'Sentry',
           'Permissions',
           'Screen Recording',
           'Accessibility'
         ],
-        present: ['Reset Petal', 'Reset and quit', 'Diagnostics', 'Export logs']
+        present: [
+          'Reset Petal',
+          'Reset and quit',
+          'Diagnostics',
+          'Export logs',
+          'Sentry',
+          USAGE_STATS_LABEL
+        ]
       },
       {
         name: 'macos',
@@ -675,6 +689,7 @@ test('Windows Settings renders without macOS copy; both platforms compute dark c
           'Export logs',
           'Terminal',
           'Sentry',
+          USAGE_STATS_LABEL,
           'Permissions',
           'Screen Recording',
           'Accessibility'
@@ -764,6 +779,26 @@ test('Windows Settings renders without macOS copy; both platforms compute dark c
           `${scenario.name} Settings must contain "${word}"`
         );
       }
+
+      // #377 / never-truncate rule: every Diagnostics switch row's copy is
+      // fully visible at the 400px minimum width, on both platforms.
+      const clipped = (await browser.evaluate(
+        sessionId,
+        `(() => {
+          const bad = [];
+          const pageWidth = document.documentElement.clientWidth;
+          const rows = Array.from(document.querySelectorAll('.switch-row'));
+          for (const el of rows.flatMap((row) => Array.from(row.querySelectorAll('.row-title, .row-description')))) {
+            const r = el.getBoundingClientRect();
+            if (el.scrollWidth > el.clientWidth + 1) bad.push(el.textContent.trim() + ': scrollWidth ' + el.scrollWidth + ' > ' + el.clientWidth);
+            if (r.right > pageWidth + 0.5) bad.push(el.textContent.trim() + ': right ' + r.right + ' > ' + pageWidth);
+            if (getComputedStyle(el).textOverflow === 'ellipsis') bad.push(el.textContent.trim() + ': ellipsis');
+          }
+          if (!rows.some((row) => row.textContent.includes(${JSON.stringify(USAGE_STATS_LABEL)}))) bad.push('usage-stats row missing');
+          return bad;
+        })()`
+      )) as string[];
+      assert.deepEqual(clipped, [], `${scenario.name} switch-row copy must not clip at 400px`);
 
       const colorScheme = (await browser.evaluate(
         sessionId,

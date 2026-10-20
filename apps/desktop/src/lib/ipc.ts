@@ -168,6 +168,7 @@ export const COMMANDS = {
   setRemoteControlAllowed: 'set_remote_control_allowed',
   setRemoteControlPolicy: 'set_remote_control_policy',
   setSentryEnabled: 'set_sentry_enabled',
+  setUsageStatsEnabled: 'set_usage_stats_enabled',
   /** #172: where this launch runs from -- a closed class string, never a
    * path. The launch router diverts to /relocate when the class needs the
    * user to move the app (disk image, App Translocation, read-only). */
@@ -1748,6 +1749,7 @@ export interface CommandArgs {
   [COMMANDS.remoteControlAnswerConsent]: { windowId: number; controllerId: string; approve: boolean };
   [COMMANDS.remoteControlAnswerEscalation]: { windowId: number; controllerId: string; approve: boolean };
   [COMMANDS.setSentryEnabled]: { enabled: boolean };
+  [COMMANDS.setUsageStatsEnabled]: { enabled: boolean };
   [COMMANDS.controlConsentDismiss]: Record<string, never>;
   /** Measured content height, same resize-to-content pattern as shareNoticePresent. */
   [COMMANDS.controlConsentPresent]: { height: number };
@@ -1931,6 +1933,7 @@ export interface CommandReturns {
   [COMMANDS.setRemoteControlPolicy]: RemoteControlPolicy;
   [COMMANDS.remoteControlAnswerEscalation]: boolean;
   [COMMANDS.setSentryEnabled]: void;
+  [COMMANDS.setUsageStatsEnabled]: void;
   [COMMANDS.shareOverlaySetDrawActive]: void;
   [COMMANDS.setHoverTabMenuOpen]: void;
   [COMMANDS.shareWindow]: boolean;
