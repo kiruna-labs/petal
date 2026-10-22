@@ -34,6 +34,11 @@ export const EXPECTED_LOOPBACK_SKIPS = Object.freeze([
     why: 'the Tart guest has one 1920x1080 display (scripts/runner/tart/make-golden.sh)',
   }),
   Object.freeze({
+    caseId: '29',
+    reason: /^one-shot reconnect already used by an earlier pass in this Petal process \(PETAL_RC_RECONNECT_ALREADY_USED\)$/,
+    why: 'the #378 impaired pass reuses the clean pass\'s Petal, whose reconnect simulation is one-shot (autotest.rs); only set for that pass',
+  }),
+  Object.freeze({
     caseId: '30',
     reason: /^host advertises legacy control \(macOS by contract; docs\/CONTRACTS\.md\)/,
     why: 'a macOS host speaks legacy control by contract, so v2 cached-terminal replay is unreachable',

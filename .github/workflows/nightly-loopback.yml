@@ -841,7 +841,7 @@ jobs:
           else
             set +e
             PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_LOG_PATH="$PETAL_LOG" \
-            PETAL_RC_OBSERVATION_BUDGET_MS="$IMPAIRED_OBSERVATION_BUDGET_MS" \
+            PETAL_RC_OBSERVATION_BUDGET_MS="$IMPAIRED_OBSERVATION_BUDGET_MS" PETAL_RC_RECONNECT_ALREADY_USED=1 \
               node apps/desktop/scripts/remote-control-local-loopback.mjs --live --skip-preflight --json "$IMPAIRED_RESULTS_JSON" \
               2>&1 | tee -a "$HARNESS_LOG"
             impaired_status=${PIPESTATUS[0]}

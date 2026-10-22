@@ -65,7 +65,7 @@ import {
   shareReadyPredicate,
   tileFailureDetail,
 } from './remote-control-share-readiness.mjs';
-import { freezeProbeExpression, summarizePresentedGaps } from './remote-control-freeze-probe.mjs';
+import { freezeProbeExpression, summarizePresentedGaps, summarizeVideoLegs } from './remote-control-freeze-probe.mjs';
 
 const positional = [];
 let jsonOutputPath = null;
@@ -137,6 +137,7 @@ const photonWarmupSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOT
 const photonSampleTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_TIMEOUT_MS || 2000);
 const photonP95BudgetMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS || 250);
 // #378 presented-freeze probe (press-to-photon mode only; 0 = off).
+const RECONNECT_ALREADY_USED_SKIP = 'one-shot reconnect already used by an earlier pass in this Petal process (PETAL_RC_RECONNECT_ALREADY_USED)';
 const freezeProbeMs = Math.max(0, Number(process.env.PETAL_RC_FREEZE_PROBE_MS || 0));
 const freezeProbeRedPauseMs = Math.max(0, Number(process.env.PETAL_RC_FREEZE_PROBE_RED_PAUSE_MS || 0));
 const maxTextEditRecoveries = 2;
@@ -1930,6 +1931,7 @@ async function runFreezeProbe(ctx) {
     const report = {
       ...summary,
       redPauseMs: freezeProbeRedPauseMs || null,
+      videoLegs: summarizeVideoLegs(raw.legs),
       playback: raw.playback,
       decodeStall: raw.decodeStall,
       videoSize: raw.videoSize,
@@ -3262,6 +3264,12 @@ const CASES = [
     features: 'lifecycle/reconnect',
     sequence: 'request -> held pointer -> reconnect -> input -> release',
     run: async (ctx) => {
+      // #378: the reconnect simulation is one-shot per Petal process
+      // (autotest.rs OneShotReconnect); the gate's impaired pass reuses the
+      // clean pass's process. Allow-listed by this exact reason only.
+      if (process.env.PETAL_RC_RECONNECT_ALREADY_USED === '1') {
+        return skipCase(RECONNECT_ALREADY_USED_SKIP);
+      }
       await send(ctx, `api.pointer({ target, action: 'down', ...${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteHeldInput)}, button: ${REMOTE_CONTROL_BUTTONS.left}, buttons: 1 }); return true;`);
       const before = await waitUntil('held input tracked before reconnect', async () => {
         const snapshot = await command(ctx.client, { cmd: 'remote-control-status', window_id: ctx.target.windowId });

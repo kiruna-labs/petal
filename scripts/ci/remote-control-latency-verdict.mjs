@@ -210,6 +210,14 @@ export function presentedFreezeMetric(photonReport) {
   };
 }
 
+// Video leg from the freeze probe's rVFC metadata (#378): one sample per
+// presented frame, p50 only (the probe already summarised it).
+export function videoLegMetric(photonReport, field) {
+  const legs = photonReport?.summary?.freezeProbe?.videoLegs;
+  const value = legs?.[field];
+  return { samples: Number.isFinite(value) ? legs.frames : 0, p50Ms: Number.isFinite(value) ? value : null };
+}
+
 export function collectLatencyMetrics({ results = null, photon = null, hostLog = '' }) {
   const hostEvents = parseHostLatencyLog(hostLog);
   const publishes = [...(results?.controllerPublishes ?? []), ...(photon?.controllerPublishes ?? [])];
@@ -241,6 +249,8 @@ export function collectLatencyMetrics({ results = null, photon = null, hostLog =
       byInput: photon?.summary?.pressToPhoton?.byInput ?? null,
     },
     presentedFreeze: presentedFreezeMetric(photon),
+    videoCaptureToReceive: videoLegMetric(photon, 'captureToReceiveP50Ms'),
+    videoReceiveToDisplay: videoLegMetric(photon, 'receiveToDisplayP50Ms'),
   };
 }
 
@@ -295,7 +305,7 @@ export function latencyVerdict({ results = null, photon = null, hostLog = '', en
   notes.push('remote-control latency (ms)        samples    p50     p95     max');
   for (const [name, metric] of Object.entries(metrics)) {
     if (!metric || typeof metric !== 'object' || !('samples' in metric) || name === 'presentedFreeze') continue;
-    notes.push(`  ${name.padEnd(30)} ${String(metric.samples).padStart(7)} ${String(metric.p50Ms).padStart(6)} ${String(metric.p95Ms).padStart(7)} ${String(metric.maxMs).padStart(7)}`);
+    notes.push(`  ${name.padEnd(30)} ${String(metric.samples).padStart(7)} ${String(metric.p50Ms ?? 'n/a').padStart(6)} ${String(metric.p95Ms ?? 'n/a').padStart(7)} ${String(metric.maxMs ?? 'n/a').padStart(7)}`);
   }
   notes.push(`  host replay timeouts: ${metrics.hostReplayTimeouts}; send->inject paired ${metrics.sendToInject.paired}/${metrics.sendToInject.publishes} controller publishes; observation methods ${JSON.stringify(metrics.targetObservation.methods)}, watcher max read gap ${metrics.targetObservation.maxReadGapMs ?? 'n/a'}ms`);
   const freeze = metrics.presentedFreeze;
@@ -314,15 +324,19 @@ export function latencyVerdict({ results = null, photon = null, hostLog = '', en
 // `--json` outputs of the two `latency` verdicts of one run; `delayMs` is the
 // one-way delay per SFU traversal scripts/ci/net-impair.sh applied. Proves the
 // impairment landed on the NETWORK stages and nowhere else: a web input
-// crosses two traversals (controller->SFU->host), press-to-photon four (input
-// there, video back). 0.75 absorbs dummynet's 10ms tick; the host stage must
+// crosses two traversals (controller->SFU->host), and so does the video back
+// (host->SFU->viewer). 0.75 absorbs dummynet's 10ms tick; the host stage must
 // not move by more than 10ms. Without this, an impairment that silently did
 // not apply would make the "impaired" pass a second clean one.
 export const ATTRIBUTION_MOVE_FRACTION = 0.75;
 export const ATTRIBUTION_STILL_TOLERANCE_MS = 10;
+// pressToPhoton is held only to its input leg (2): run 39837860987 moved the
+// input leg +40ms but photon p50 only +14.8ms, so the video return leg is
+// asserted on its own (rVFC capture->receive) instead of inferred.
 export const ATTRIBUTION_ROWS = [
   { metric: 'sendToReceive', traversals: 2, rule: 'must-move' },
-  { metric: 'pressToPhoton', traversals: 4, rule: 'must-move' },
+  { metric: 'videoCaptureToReceive', traversals: 2, rule: 'must-move' },
+  { metric: 'pressToPhoton', traversals: 2, rule: 'must-move' },
   { metric: 'hostReceiveToInject', traversals: 0, rule: 'must-not-move' },
 ];
 

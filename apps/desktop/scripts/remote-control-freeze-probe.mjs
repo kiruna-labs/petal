@@ -35,6 +35,20 @@ export function summarizePresentedGaps(times, { startMs, endMs, thresholdMs = FR
   };
 }
 
+// Medians of the per-frame [captureToReceive, receiveToDisplay] pairs.
+export function summarizeVideoLegs(legs) {
+  const valid = (legs ?? []).filter((leg) => Array.isArray(leg) && leg.every(Number.isFinite));
+  const median = (values) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted.length ? round(sorted[Math.ceil(sorted.length / 2) - 1]) : null;
+  };
+  return {
+    frames: valid.length,
+    captureToReceiveP50Ms: median(valid.map((leg) => leg[0])),
+    receiveToDisplayP50Ms: median(valid.map((leg) => leg[1])),
+  };
+}
+
 // Browser-side: resolves with the raw rVFC times plus decode-side context
 // (playback quality deltas, the harness's own stall stats when present).
 export function freezeProbeExpression({ windowId, tileId = null, durationMs }) {
@@ -50,7 +64,17 @@ export function freezeProbeExpression({ windowId, tileId = null, durationMs }) {
     const times = [];
     let stop = false;
     const startMs = performance.now();
-    const onFrame = (now) => { times.push(now); if (!stop) video.requestVideoFrameCallback(onFrame); };
+    // receiveTime/captureTime (WebRTC, RTCP-SR clock sync) split the video
+    // leg: capture->receive is network + pacing, receive->display is the
+    // receiver's jitter buffer + decode + render.
+    const legs = [];
+    const onFrame = (now, meta) => {
+      times.push(now);
+      if (Number.isFinite(meta?.receiveTime) && Number.isFinite(meta?.captureTime) && Number.isFinite(meta?.expectedDisplayTime)) {
+        legs.push([meta.receiveTime - meta.captureTime, meta.expectedDisplayTime - meta.receiveTime]);
+      }
+      if (!stop) video.requestVideoFrameCallback(onFrame);
+    };
     video.requestVideoFrameCallback(onFrame);
     await new Promise((resolve) => setTimeout(resolve, ${Number(durationMs)}));
     stop = true;
@@ -59,7 +83,7 @@ export function freezeProbeExpression({ windowId, tileId = null, durationMs }) {
     let stall = null;
     try { stall = measurement?.stallStats?.(${Number(windowId)}) ?? null; } catch {}
     return {
-      startMs, endMs, times,
+      startMs, endMs, times, legs,
       playback: q0 && q1 ? { framesDelta: q1.total - q0.total, droppedDelta: q1.dropped - q0.dropped } : null,
       decodeStall: stall,
       videoSize: { width: video.videoWidth, height: video.videoHeight }
