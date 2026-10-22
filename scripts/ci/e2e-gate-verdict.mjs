@@ -10,6 +10,7 @@
 //
 //   node scripts/ci/e2e-gate-verdict.mjs loopback --results <json> --harness-exit <n> [--quarantine <ids>] [--required <ids>]
 //   node scripts/ci/e2e-gate-verdict.mjs latency  --results <json> --photon <json> --host-log <petal log> [--json <out>]
+//   node scripts/ci/e2e-gate-verdict.mjs attribution --clean <latency json> --impaired <latency json> --delay-ms <n>
 //   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> --engine-exit <n> [--quarantine <ids>]
 //
 // Prints GitHub ::error/::warning annotations; exits 0 (pass) or 1 (fail).
@@ -17,7 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { latencyVerdict } from './remote-control-latency-verdict.mjs';
+import { attributionVerdict, latencyVerdict } from './remote-control-latency-verdict.mjs';
 
 // Skips that are structurally unavoidable on the release runner and carry no
 // signal there. Keyed by case id AND reason: the same case skipping for any
@@ -316,8 +317,15 @@ function main(argv) {
     if (args.json) {
       fs.writeFileSync(args.json, `${JSON.stringify({ pass: verdict.ok, budgets: verdict.budgets, metrics: verdict.metrics, checks: verdict.checks }, null, 2)}\n`);
     }
+  } else if (tier === 'attribution') {
+    // #378: the impaired pass's delay must land on the network stages only.
+    verdict = attributionVerdict({
+      clean: args.clean && fs.existsSync(args.clean) ? readJson(args.clean) : null,
+      impaired: args.impaired && fs.existsSync(args.impaired) ? readJson(args.impaired) : null,
+      delayMs: args['delay-ms'],
+    });
   } else {
-    console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|latency|cockpit)`);
+    console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|latency|attribution|cockpit)`);
     return 1;
   }
   emit(verdict);

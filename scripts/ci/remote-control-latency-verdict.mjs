@@ -52,6 +52,10 @@ export const LATENCY_CHECKS = [
   { id: 'send-to-inject-p95', metric: 'sendToInject', stat: 'p95Ms', env: 'PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS', defaultBudgetMs: 50, minSamples: 30 },
   { id: 'press-to-photon-p50', metric: 'pressToPhoton', stat: 'p50Ms', env: 'PETAL_RC_PHOTON_P50_BUDGET_MS', defaultBudgetMs: 250, minSamples: 30 },
   { id: 'press-to-photon-p95', metric: 'pressToPhoton', stat: 'p95Ms', env: 'PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS', defaultBudgetMs: 400, minSamples: 30 },
+  // #378: longest gap between presented frames at the web viewer while the
+  // sentinel animates continuously (samples = presented frames; 100 over the
+  // 20s probe is a 5fps floor). Frozen video is what users report first.
+  { id: 'presented-freeze-max-gap', metric: 'presentedFreeze', stat: 'maxGapMs', env: 'PETAL_RC_PRESENTED_FREEZE_BUDGET_MS', defaultBudgetMs: 500, minSamples: 100 },
 ];
 
 export function resolveLatencyBudgets(env = {}) {
@@ -188,6 +192,24 @@ export function photonValues(photonReport) {
   return { values, complete, misses, reason };
 }
 
+export function presentedFreezeMetric(photonReport) {
+  const probe = photonReport?.summary?.freezeProbe;
+  if (!probe) return { samples: 0, maxGapMs: null, error: 'no freeze probe in the press-to-photon report (PETAL_RC_FREEZE_PROBE_MS unset?)' };
+  if (probe.error) return { samples: 0, maxGapMs: null, error: probe.error };
+  return {
+    samples: probe.frames ?? 0,
+    maxGapMs: probe.maxGapMs ?? null,
+    fps: probe.fps ?? null,
+    freezes: probe.freezes ?? null,
+    frozenMs: probe.frozenMs ?? null,
+    durationMs: probe.durationMs ?? null,
+    worstGaps: probe.worstGaps ?? [],
+    decodeStall: probe.decodeStall ?? null,
+    playback: probe.playback ?? null,
+    error: null,
+  };
+}
+
 export function collectLatencyMetrics({ results = null, photon = null, hostLog = '' }) {
   const hostEvents = parseHostLatencyLog(hostLog);
   const publishes = [...(results?.controllerPublishes ?? []), ...(photon?.controllerPublishes ?? [])];
@@ -218,6 +240,7 @@ export function collectLatencyMetrics({ results = null, photon = null, hostLog =
       incompleteReason: photonData.reason,
       byInput: photon?.summary?.pressToPhoton?.byInput ?? null,
     },
+    presentedFreeze: presentedFreezeMetric(photon),
   };
 }
 
@@ -233,12 +256,18 @@ export function evaluateLatencyGate(metrics, budgets) {
     if (check.metric === 'pressToPhoton' && metric.complete === false) {
       status = 'insufficient';
       detail = `press-to-photon run incomplete: ${metric.incompleteReason}`;
+    } else if (check.metric === 'presentedFreeze' && metric.error) {
+      status = 'insufficient';
+      detail = `freeze probe did not run: ${metric.error}`;
     } else if ((metric.samples ?? 0) < check.minSamples || value === null) {
       status = 'insufficient';
       detail = `${metric.samples ?? 0} sample(s) < ${check.minSamples} required`;
     } else if (value > budgetMs) {
       status = 'fail';
       detail = `${check.stat.replace('Ms', '')} ${value}ms > ${budgetMs}ms budget over ${metric.samples} samples`;
+      if (check.metric === 'presentedFreeze') {
+        detail += ` (${metric.freezes} freeze(s), ${metric.frozenMs}ms frozen in ${metric.durationMs}ms; worst ${JSON.stringify(metric.worstGaps.slice(0, 3))})`;
+      }
     } else {
       status = 'pass';
       detail = `${check.stat.replace('Ms', '')} ${value}ms <= ${budgetMs}ms over ${metric.samples} samples`;
@@ -265,14 +294,65 @@ export function latencyVerdict({ results = null, photon = null, hostLog = '', en
   const verdict = evaluateLatencyGate(metrics, budgets);
   notes.push('remote-control latency (ms)        samples    p50     p95     max');
   for (const [name, metric] of Object.entries(metrics)) {
-    if (!metric || typeof metric !== 'object' || !('samples' in metric)) continue;
+    if (!metric || typeof metric !== 'object' || !('samples' in metric) || name === 'presentedFreeze') continue;
     notes.push(`  ${name.padEnd(30)} ${String(metric.samples).padStart(7)} ${String(metric.p50Ms).padStart(6)} ${String(metric.p95Ms).padStart(7)} ${String(metric.maxMs).padStart(7)}`);
   }
   notes.push(`  host replay timeouts: ${metrics.hostReplayTimeouts}; send->inject paired ${metrics.sendToInject.paired}/${metrics.sendToInject.publishes} controller publishes; observation methods ${JSON.stringify(metrics.targetObservation.methods)}, watcher max read gap ${metrics.targetObservation.maxReadGapMs ?? 'n/a'}ms`);
+  const freeze = metrics.presentedFreeze;
+  notes.push(freeze.error
+    ? `  presented-video freeze probe: n/a (${freeze.error})`
+    : `  presented-video freeze probe: ${freeze.samples} frames in ${freeze.durationMs}ms (${freeze.fps} fps), max gap ${freeze.maxGapMs}ms, ${freeze.freezes} gap(s) > 500ms totalling ${freeze.frozenMs}ms; decode-side ${JSON.stringify(freeze.decodeStall)}, playback ${JSON.stringify(freeze.playback)}`);
   for (const check of verdict.checks) {
     const line = `latency ${check.id}: ${check.status.toUpperCase()} -- ${check.detail} (${check.env})`;
     if (check.status === 'pass') notes.push(line);
     else errors.push(line);
   }
   return { ok: verdict.pass, errors, warnings, notes, budgets, metrics, checks: verdict.checks };
+}
+
+// #378 stage attribution for the impaired pass. `clean`/`impaired` are the
+// `--json` outputs of the two `latency` verdicts of one run; `delayMs` is the
+// one-way delay per SFU traversal scripts/ci/net-impair.sh applied. Proves the
+// impairment landed on the NETWORK stages and nowhere else: a web input
+// crosses two traversals (controller->SFU->host), press-to-photon four (input
+// there, video back). 0.75 absorbs dummynet's 10ms tick; the host stage must
+// not move by more than 10ms. Without this, an impairment that silently did
+// not apply would make the "impaired" pass a second clean one.
+export const ATTRIBUTION_MOVE_FRACTION = 0.75;
+export const ATTRIBUTION_STILL_TOLERANCE_MS = 10;
+export const ATTRIBUTION_ROWS = [
+  { metric: 'sendToReceive', traversals: 2, rule: 'must-move' },
+  { metric: 'pressToPhoton', traversals: 4, rule: 'must-move' },
+  { metric: 'hostReceiveToInject', traversals: 0, rule: 'must-not-move' },
+];
+
+export function attributionVerdict({ clean, impaired, delayMs }) {
+  const errors = [];
+  const notes = [];
+  const delay = Number(delayMs);
+  if (!Number.isFinite(delay) || delay <= 0) {
+    errors.push(`attribution: impairment delay must be a positive number of ms, got ${JSON.stringify(delayMs)}`);
+    return { ok: false, errors, warnings: [], notes, rows: [] };
+  }
+  const rows = ATTRIBUTION_ROWS.map((row) => {
+    const before = clean?.metrics?.[row.metric]?.p50Ms ?? null;
+    const after = impaired?.metrics?.[row.metric]?.p50Ms ?? null;
+    if (!Number.isFinite(before) || !Number.isFinite(after)) {
+      return { ...row, before, after, movedMs: null, status: 'insufficient', detail: `p50 missing (clean ${before}, impaired ${after})` };
+    }
+    const movedMs = Math.round((after - before) * 10) / 10;
+    if (row.rule === 'must-move') {
+      const needMs = ATTRIBUTION_MOVE_FRACTION * row.traversals * delay;
+      const ok = movedMs >= needMs;
+      return { ...row, before, after, movedMs, status: ok ? 'pass' : 'fail', detail: `p50 ${before} -> ${after}ms moved ${movedMs}ms; expected ~${row.traversals * delay}ms (${row.traversals} x ${delay}ms), need >= ${needMs}ms` };
+    }
+    const ok = Math.abs(movedMs) <= ATTRIBUTION_STILL_TOLERANCE_MS;
+    return { ...row, before, after, movedMs, status: ok ? 'pass' : 'fail', detail: `p50 ${before} -> ${after}ms moved ${movedMs}ms; host stage must stay within ${ATTRIBUTION_STILL_TOLERANCE_MS}ms` };
+  });
+  for (const row of rows) {
+    const line = `attribution ${row.metric} (${row.rule}): ${row.status.toUpperCase()} -- ${row.detail}`;
+    if (row.status === 'pass') notes.push(line);
+    else errors.push(line);
+  }
+  return { ok: errors.length === 0, errors, warnings: [], notes, rows };
 }

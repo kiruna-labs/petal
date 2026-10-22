@@ -65,6 +65,7 @@ import {
   shareReadyPredicate,
   tileFailureDetail,
 } from './remote-control-share-readiness.mjs';
+import { freezeProbeExpression, summarizePresentedGaps } from './remote-control-freeze-probe.mjs';
 
 const positional = [];
 let jsonOutputPath = null;
@@ -135,6 +136,9 @@ const photonSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_SAM
 const photonWarmupSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_WARMUP_SAMPLES || 2);
 const photonSampleTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_TIMEOUT_MS || 2000);
 const photonP95BudgetMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS || 250);
+// #378 presented-freeze probe (press-to-photon mode only; 0 = off).
+const freezeProbeMs = Math.max(0, Number(process.env.PETAL_RC_FREEZE_PROBE_MS || 0));
+const freezeProbeRedPauseMs = Math.max(0, Number(process.env.PETAL_RC_FREEZE_PROBE_RED_PAUSE_MS || 0));
 const maxTextEditRecoveries = 2;
 const photonSentinelSource = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -1898,6 +1902,48 @@ async function photonFailureContext(ctx, sinceMs) {
   return { lastFrame, sentinelActionsSinceStart: landed.length, sentinelActions: landed.slice(-4) };
 }
 
+// #378: presented-video freeze probe. The sentinel animates (SIGUSR1) so
+// every rVFC gap is a freeze the viewer saw; scored by the latency verdict's
+// `presented-freeze-max-gap` check. RED_PAUSE (red-proof only) stops the
+// motion mid-window to prove the check sees a freeze.
+async function runFreezeProbe(ctx) {
+  const pid = photonSentinelProcess?.pid;
+  if (!Number.isInteger(pid)) return { error: 'photon sentinel is not running' };
+  try {
+    process.kill(pid, 'SIGUSR1');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    let redPause = null;
+    if (freezeProbeRedPauseMs > 0) {
+      redPause = (async () => {
+        await new Promise((resolve) => setTimeout(resolve, Math.floor(freezeProbeMs / 3)));
+        process.kill(pid, 'SIGUSR2');
+        await new Promise((resolve) => setTimeout(resolve, freezeProbeRedPauseMs));
+        process.kill(pid, 'SIGUSR1');
+      })();
+    }
+    const raw = await evaluate(
+      ctx.cdp,
+      freezeProbeExpression({ windowId: ctx.target.windowId, tileId: ctx.target.tileId ?? null, durationMs: freezeProbeMs })
+    );
+    await redPause;
+    const summary = summarizePresentedGaps(raw.times, { startMs: raw.startMs, endMs: raw.endMs });
+    const report = {
+      ...summary,
+      redPauseMs: freezeProbeRedPauseMs || null,
+      playback: raw.playback,
+      decodeStall: raw.decodeStall,
+      videoSize: raw.videoSize,
+    };
+    console.log(`FREEZE_PROBE ${JSON.stringify(report)}`);
+    return report;
+  } catch (error) {
+    console.log(`FREEZE_PROBE ${JSON.stringify({ error: error.message })}`);
+    return { error: error.message };
+  } finally {
+    try { process.kill(pid, 'SIGUSR2'); } catch {}
+  }
+}
+
 async function runPressToPhotonSuite(ctx) {
   const suiteStarted = performance.now();
   ctx.caseStartedAt = Date.now();
@@ -1973,6 +2019,8 @@ async function runPressToPhotonSuite(ctx) {
     }
   }
 
+  const freezeProbe = freezeProbeMs > 0 ? await runFreezeProbe(ctx) : null;
+
   const expectedSamples = photonSamplesPerInput * 2;
   const stats = summarizePhotonSamples(photonSamples, photonP95BudgetMs);
   const elapsedTimeVsLatency = summarizeElapsedTimeVsLatency(photonSamples);
@@ -1998,6 +2046,7 @@ async function runPressToPhotonSuite(ctx) {
     fail: gatePass ? 0 : 1,
     skip: 0,
     inputOrderSeed: photonShuffleSeed,
+    freezeProbe,
     pressToPhoton: {
       ...stats,
       expectedSamples,
