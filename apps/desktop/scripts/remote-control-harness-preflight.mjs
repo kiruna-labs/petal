@@ -154,7 +154,7 @@ const expectedRemoteControl = [
   ['pointer-up', true],
   ['pointer-click', true],
   ['pointer-double-click', true],
-  ['wheel', false],
+  ['wheel', true],
   ['key', true],
   ['text', true],
   ['pointer-click-v2-canonical-fingerprint', true],
@@ -219,7 +219,7 @@ requireMarkers(webContractsPath, [
   'remote-control fixture pins representative variant payloads'
 ]);
 requireMarkers(webRemoteControlPath, [
-  'remoteControlPublishOptions sends motion and wheel streams unreliably',
+  'remoteControlPublishOptions sends only hover moves unreliably',
   'remoteControlModifiers exposes the stable modifier field names',
   'remote-control live scenario separates case duration from measured target-observation latency',
   'remote-control harness records native host status packets'
