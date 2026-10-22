@@ -114,6 +114,10 @@ const acquisitionTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_ACQUIRE_TIM
 const statusTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_STATUS_TIMEOUT_MS || acquisitionTimeoutMs);
 const shareReadyTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_SHARE_READY_TIMEOUT_MS || 8000);
 const caseSettleMs = Number(process.env.PETAL_REMOTE_CONTROL_CASE_SETTLE_MS || 500);
+// #390: case 42's wheel pairs. Each gap must exceed the host's
+// AX_RESOLUTION_CACHE_TTL (350ms) and stay under CONTROL_FRAME_CACHE_TTL (1s),
+// whose refresh clears the scroll-target cache and hides the #311 deadlock.
+const SCROLL_CACHE_REPEAT_GAPS_MS = [650, 800];
 // #45: the target-observation budget is RUNNER-AWARE, not one global number.
 // Bare metal keeps the 500ms default; the self-hosted Tart guest sets
 // PETAL_RC_OBSERVATION_BUDGET_MS in .github/workflows/nightly-loopback.yml
@@ -3030,6 +3034,64 @@ const CASES = [
       if (before === null || after === null) return skipCase('AX visible character range unavailable; line scroll assertion needs AX or sentinel app');
       if (after === before) throw new Error(`line scroll did not change AX visible character range (${before})`);
       return pass(`AX visible character range changed ${before} -> ${after}`);
+    },
+  },
+  {
+    // #390 / #311: the host deadlocked evicting a stale AX scroll-target cache
+    // entry and then silently replayed nothing. Cases 19/20 scroll the same
+    // point seconds apart, and the >1s control-frame refresh clears that cache
+    // first; the bug needs the second scroll 350ms..1s after the first.
+    id: 42,
+    name: 'repeat scroll past the AX cache TTL keeps the host replaying',
+    features: 'scroll,pointer,text',
+    sequence: 'wheel, +650ms wheel (same point) x2 -> left click -> text',
+    run: async (ctx) => {
+      setTextEditDocument(Array.from({ length: 400 }, (_, index) => `repeat scroll line ${index + 1}`).join('\n'));
+      const logOffset = petalLogSize();
+      const wheel = `api.wheel({ target, ...${JSON.stringify(REMOTE_CONTROL_SCROLL_DELTAS.pixel)} }); return true;`;
+      const before = maybeReadTextEditScrollValue();
+      const ranges = [];
+      for (const gapMs of SCROLL_CACHE_REPEAT_GAPS_MS) {
+        // Idle past CONTROL_FRAME_CACHE_TTL (1s) so the first wheel refreshes
+        // the frame and the second one finds the frame fresh, the
+        // scroll-target entry stale, and nothing in between clearing it.
+        await sleep(1200);
+        const first = performance.now();
+        await send(ctx, wheel);
+        await sleep(Math.max(0, gapMs - (performance.now() - first)));
+        await send(ctx, wheel);
+        await sleep(caseSettleMs + 200);
+        ranges.push(maybeReadTextEditScrollValue());
+      }
+      const hostStalls = () => readPetalLogSince(logOffset).split('\n').filter(
+        (line) => /host replay timeout_ts_ms=|previous target injection is still in progress/.test(line)
+      );
+      let measurement;
+      try {
+        measurement = await measureDocumentInput(ctx, 'click-plus-text marker visible after repeat scroll', (attempt) => {
+          const marker = ` S${Date.now()}-${attempt} `;
+          return {
+            fragment: marker,
+            body: `api.click({ target, x: 0.18, y: 0.28, button: 0 }); api.text({ target, text: ${JSON.stringify(marker)} }); return true;`,
+          };
+        });
+      } catch (error) {
+        const stalls = hostStalls();
+        error.message = `input after the repeat scroll never landed (${error.message}); `
+          + `host stall lines=${stalls.length}${stalls.length ? `: ${stalls[0].trim().slice(0, 240)}` : ''}`;
+        throw error;
+      }
+      const stalls = hostStalls();
+      if (stalls.length) {
+        throw new Error(`host replay stalled during the repeat scroll (${stalls.length} line(s)): ${stalls[0].trim().slice(0, 240)}`);
+      }
+      await assertReleased(ctx, 'click after repeat scroll');
+      if (before === null || ranges.includes(null)) {
+        return skipCase('AX visible character range unavailable; repeat-scroll assertion needs AX');
+      }
+      if (ranges[0] === before) throw new Error(`first scroll pair did not move the document (${before})`);
+      if (ranges[1] === ranges[0]) throw new Error(`second scroll pair did not move the document (${ranges[0]}): host stopped replaying wheel input`);
+      return pass(`visible range ${before} -> ${ranges.join(' -> ')}; later click+text landed; no host replay timeout; host confirms no held input`, measurement);
     },
   },
   {

@@ -410,7 +410,7 @@ const RELEASE = fileURLToPath(new URL('../.github/workflows/release.yml', import
 
 const WIRING = [
   ['workflow', 'loopback verdict is called with the required cases', /--required "\$E2E_REQUIRED_RC_CASES"/],
-  ['workflow', 'the display-share cases are required', /E2E_REQUIRED_RC_CASES: "37,38,39,40,41"/],
+  ['workflow', 'the display-share and repeat-scroll cases are required', /E2E_REQUIRED_RC_CASES: "37,38,39,40,41,42"/],
   ['workflow', 'loopback verdict is called with the harness exit', /node "\$VERDICT" loopback --results "\$RESULTS_JSON" --harness-exit "\$status"/],
   ['workflow', 'cockpit verdict is called with the step start time', /node "\$VERDICT" cockpit --run-dir "\$\{RUN_DIR:-\}" --started-at-ms "\$COCKPIT_STARTED_MS"/],
   ['workflow', 'cockpit verdict is called with the engine exit', /--engine-exit "\$engine_exit"/],
