@@ -1325,6 +1325,138 @@ fn snapshot_pull_fresh_within(window_id: u32, now_us: u64, max_age_us: u64) -> b
         .is_some_and(|at| now_us.saturating_sub(*at) <= max_age_us)
 }
 
+/// (successful pulls, content-changing pulls) since the raw stream last
+/// delivered, per window (#393). Written by the pump, read by the watchdog.
+fn snapshot_pulls_since_raw() -> &'static Mutex<std::collections::HashMap<u32, (u64, u64)>> {
+    static PULLS: std::sync::OnceLock<Mutex<std::collections::HashMap<u32, (u64, u64)>>> =
+        std::sync::OnceLock::new();
+    PULLS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn set_snapshot_pulls_since_raw(window_id: u32, pulls: u64, changed: u64) {
+    snapshot_pulls_since_raw()
+        .lock_unpoisoned()
+        .insert(window_id, (pulls, changed));
+}
+
+fn snapshot_pulls_since_raw_of(window_id: u32) -> (u64, u64) {
+    snapshot_pulls_since_raw()
+        .lock_unpoisoned()
+        .get(&window_id)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn snapshot_content_tag((pulls, changed): (u64, u64)) -> crate::logging::SnapshotContentTag {
+    use crate::logging::SnapshotContentTag;
+    match (pulls, changed) {
+        (0, _) => SnapshotContentTag::NoPulls,
+        (_, 0) => SnapshotContentTag::Static,
+        _ => SnapshotContentTag::Changing,
+    }
+}
+
+fn raw_silence_cause_tag(
+    cause: crate::capture::RawSilenceCause,
+) -> crate::logging::RawSilenceCauseTag {
+    use crate::capture::RawSilenceCause as Cause;
+    use crate::logging::RawSilenceCauseTag as Tag;
+    match cause {
+        Cause::NoCallbacks => Tag::NoCallbacks,
+        Cause::IdleSamplesOnly => Tag::IdleSamplesOnly,
+        Cause::LayoutDeferred => Tag::LayoutDeferred,
+        Cause::LayoutRejected => Tag::LayoutRejected,
+        Cause::PixelFormatRejected => Tag::PixelFormatRejected,
+        Cause::RegionDropped => Tag::RegionDropped,
+        Cause::Unclassified => Tag::Unclassified,
+    }
+}
+
+fn silent_for_bucket(silent_for_us: u64) -> crate::logging::SinceLastFrameBucketTag {
+    use crate::logging::SinceLastFrameBucketTag as Bucket;
+    match silent_for_us / 1_000_000 {
+        0..=59 => Bucket::UnderOneMinute,
+        60..=299 => Bucket::OneToFiveMinutes,
+        300..=899 => Bucket::FiveToFifteenMinutes,
+        _ => Bucket::OverFifteenMinutes,
+    }
+}
+
+/// Sender-side evidence for one raw-capture stall verdict (#393): one
+/// `capture-stall-evidence:` log line plus a rate-limited Sentry event.
+fn capture_raw_stall_diagnostic(
+    window_id: u32,
+    source: SourceSelectionClass,
+    action: crate::logging::RawCaptureActionTag,
+    silent_for_us: u64,
+    evidence: crate::capture::RawSilenceEvidence,
+    recovery_burst: u32,
+    concurrent_shares: usize,
+) -> crate::logging::CaptureRawStalledDiagnostic {
+    use crate::logging::SmallCountBucketTag as Count;
+    let (pulls, changed) = snapshot_pulls_since_raw_of(window_id);
+    let cause = evidence.cause();
+    log::warn!(
+        "capture-stall-evidence: window {window_id} action={} silent={:.1}s cause={cause:?} sck_callbacks={} no_image={} last_no_image_status={:?} layout_deferred={} layout_rejected={} pixel_format_rejected={} region_dropped={} stream_updates={} held_surfaces={} pulls={pulls} pulls_changed={changed} recovery_burst={recovery_burst} concurrent_shares={concurrent_shares} (#393)",
+        action_label(action),
+        silent_for_us as f64 / 1_000_000.0,
+        evidence.callbacks,
+        evidence.no_image,
+        evidence.last_no_image_status,
+        evidence.layout_deferred,
+        evidence.layout_rejected,
+        evidence.pixel_format_rejected,
+        evidence.region_dropped,
+        evidence.config_updates,
+        evidence.held_surfaces,
+    );
+    crate::logging::CaptureRawStalledDiagnostic {
+        source,
+        action,
+        cause: raw_silence_cause_tag(cause),
+        snapshot_content: snapshot_content_tag((pulls, changed)),
+        stream_updates: Count::from_count(evidence.config_updates),
+        held_surfaces: Count::from_count(evidence.held_surfaces),
+        recovery_burst: Count::from_count(u64::from(recovery_burst)),
+        concurrent_shares: Count::from_count(concurrent_shares as u64),
+        silent_for: silent_for_bucket(silent_for_us),
+    }
+}
+
+fn report_raw_capture_stall(
+    app: &tauri::AppHandle,
+    window_id: u32,
+    source: SourceSelectionClass,
+    action: crate::logging::RawCaptureActionTag,
+    silent_for_us: u64,
+    capture_config: &crate::capture::WindowCaptureConfig,
+    now_us: u64,
+) {
+    let concurrent_shares = tauri::Manager::try_state::<SessionState>(app)
+        .map(|state| state.active_share_ids().len())
+        .unwrap_or(1);
+    let diagnostic = capture_raw_stall_diagnostic(
+        window_id,
+        source,
+        action,
+        silent_for_us,
+        capture_config.raw_silence_evidence(),
+        pump_recovery_burst_len(window_id, now_us),
+        concurrent_shares,
+    );
+    crate::logging::capture_sentry_diagnostic(
+        crate::logging::SentryDiagnosticEvent::CaptureRawStalled(diagnostic),
+    );
+}
+
+fn action_label(action: crate::logging::RawCaptureActionTag) -> &'static str {
+    match action {
+        crate::logging::RawCaptureActionTag::Restart => "restart",
+        crate::logging::RawCaptureActionTag::HoldOnPulls => "hold_on_pulls",
+        crate::logging::RawCaptureActionTag::NotApplicable => "none",
+    }
+}
+
 #[derive(Default)]
 struct InteractionSignal {
     epoch: AtomicU64,
@@ -5585,6 +5717,9 @@ fn spawn_share_pump(
         let mut first_pushed_frame_recorded = false;
         let mut interaction_push_trace = InteractionPushTrace::default();
         let mut rejected_push_retry = RejectedPushRetry::default();
+        // #393: pulls (and changed pulls) since the last raw frame.
+        let mut pulls_since_raw: (u64, u64) = (0, 0);
+        set_snapshot_pulls_since_raw(window_id, 0, 0);
         log::info!(
             "session: window {window_id} frame pump loop started (seq {started_seq}, restart_generation {restart_generation})"
         );
@@ -5864,6 +5999,13 @@ fn spawn_share_pump(
                                     hash,
                                     snapshot_completed_us,
                                 );
+                                pulls_since_raw.0 += 1;
+                                pulls_since_raw.1 += u64::from(hash_changed);
+                                set_snapshot_pulls_since_raw(
+                                    window_id,
+                                    pulls_since_raw.0,
+                                    pulls_since_raw.1,
+                                );
                                 if hash_changed && dims_match {
                                     last_pull_hash = Some(hash);
                                     pull_changed += 1;
@@ -6014,6 +6156,10 @@ fn spawn_share_pump(
                     "session: window {window_id} dropped frame from stale region generation"
                 );
                 continue;
+            }
+            if pulls_since_raw.0 > 0 {
+                pulls_since_raw = (0, 0);
+                set_snapshot_pulls_since_raw(window_id, 0, 0);
             }
             if pull_engaged {
                 pull_engaged = false;
@@ -6632,6 +6778,15 @@ fn spawn_share_monitor(
                                     if let Some(diagnostics) = diagnostics.as_ref() {
                                         diagnostics.mark_capture_wedged(window_id);
                                     }
+                                    report_raw_capture_stall(
+                                        &app,
+                                        window_id,
+                                        diagnostic_source,
+                                        crate::logging::RawCaptureActionTag::HoldOnPulls,
+                                        silent_for_us,
+                                        &capture_config,
+                                        now,
+                                    );
                                     log::error!(
                                         "session: window {window_id} capture held on snapshot pulls after {} restart(s) within {}s -- raw ScreenCaptureKit stream keeps wedging (silent {:.1}s); share stays up at pull-only frame rate",
                                         pump_recovery_burst_len(window_id, now),
@@ -6660,6 +6815,15 @@ fn spawn_share_monitor(
                             if let Some(diagnostics) = diagnostics.as_ref() {
                                 diagnostics.mark_capture_wedged(window_id);
                             }
+                            report_raw_capture_stall(
+                                &app,
+                                window_id,
+                                diagnostic_source,
+                                crate::logging::RawCaptureActionTag::Restart,
+                                silent_for_us,
+                                &capture_config,
+                                now,
+                            );
                             // warn, not error: a restart-in-place is a recovered
                             // quality event (logging.rs policy); a restart that
                             // fails or trips the breaker still logs at error.
@@ -14018,6 +14182,63 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             last_applied_us + 5_000_000,
             last_applied_us
         ));
+    }
+
+    /// #393: the field shape -- raw stream silent 90s while pulls keep seeing
+    /// the content change -- must reach Sentry as "SCK should have delivered".
+    #[test]
+    fn raw_capture_stall_diagnostic_reports_sender_side_evidence_393() {
+        use crate::logging::{
+            RawCaptureActionTag, RawSilenceCauseTag, SinceLastFrameBucketTag,
+            SmallCountBucketTag, SnapshotContentTag,
+        };
+        const WINDOW_ID: u32 = 393_001;
+        set_snapshot_pulls_since_raw(WINDOW_ID, 550, 532);
+        let evidence = crate::capture::RawSilenceEvidence {
+            config_updates: 1,
+            held_surfaces: 2,
+            ..Default::default()
+        };
+        let diagnostic = capture_raw_stall_diagnostic(
+            WINDOW_ID,
+            SourceSelectionClass::Window,
+            RawCaptureActionTag::Restart,
+            91_000_000,
+            evidence,
+            3,
+            2,
+        );
+        assert_eq!(diagnostic.action, RawCaptureActionTag::Restart);
+        assert_eq!(diagnostic.cause, RawSilenceCauseTag::NoCallbacks);
+        assert_eq!(diagnostic.snapshot_content, SnapshotContentTag::Changing);
+        assert_eq!(diagnostic.stream_updates, SmallCountBucketTag::One);
+        assert_eq!(diagnostic.held_surfaces, SmallCountBucketTag::Two);
+        assert_eq!(diagnostic.recovery_burst, SmallCountBucketTag::ThreePlus);
+        assert_eq!(diagnostic.concurrent_shares, SmallCountBucketTag::Two);
+        assert_eq!(diagnostic.silent_for, SinceLastFrameBucketTag::OneToFiveMinutes);
+    }
+
+    #[test]
+    fn snapshot_content_tag_separates_static_changing_and_no_pulls_393() {
+        use crate::logging::SnapshotContentTag;
+        const WINDOW_ID: u32 = 393_002;
+        let content = |pulls, changed| {
+            set_snapshot_pulls_since_raw(WINDOW_ID, pulls, changed);
+            snapshot_content_tag(snapshot_pulls_since_raw_of(WINDOW_ID))
+        };
+        assert_eq!(content(0, 0), SnapshotContentTag::NoPulls);
+        assert_eq!(content(488, 0), SnapshotContentTag::Static);
+        assert_eq!(content(488, 2), SnapshotContentTag::Changing);
+        assert_eq!(snapshot_pulls_since_raw_of(393_999), (0, 0));
+    }
+
+    #[test]
+    fn raw_silence_buckets_match_the_watchdog_thresholds_393() {
+        use crate::logging::SinceLastFrameBucketTag as Bucket;
+        assert_eq!(silent_for_bucket(45_100_000), Bucket::UnderOneMinute);
+        assert_eq!(silent_for_bucket(90_000_000), Bucket::OneToFiveMinutes);
+        assert_eq!(silent_for_bucket(300_000_000), Bucket::FiveToFifteenMinutes);
+        assert_eq!(silent_for_bucket(3_600_000_000), Bucket::OverFifteenMinutes);
     }
 
     /// #806 REGRESSION GUARD -- the exact live teardown.

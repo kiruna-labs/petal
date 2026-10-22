@@ -258,6 +258,25 @@ pub enum SentryDiagnosticEvent {
     PointerReleaseNotInjected(PointerReleaseNotInjectedDiagnostic),
     WgcBorderRequestFailed(WgcBorderRequestFailedDiagnostic),
     RemoteVideoStalled(RemoteVideoStalledDiagnostic),
+    CaptureRawStalled(CaptureRawStalledDiagnostic),
+}
+
+/// Emitted (rate-limited) when the SHARER's raw ScreenCaptureKit watchdog
+/// restarts a silent stream or holds it on snapshot pulls (#393). Before this
+/// the restart was a warn breadcrumb and the hold (PETAL-DESKTOP-3H) a bare
+/// log line. Neither said WHY the stream was silent: SCK sent nothing, sent
+/// only idle samples, or sent frames Petal dropped before the liveness stamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureRawStalledDiagnostic {
+    pub source: SourceSelectionClass,
+    pub action: RawCaptureActionTag,
+    pub cause: RawSilenceCauseTag,
+    pub snapshot_content: SnapshotContentTag,
+    pub stream_updates: SmallCountBucketTag,
+    pub held_surfaces: SmallCountBucketTag,
+    pub recovery_burst: SmallCountBucketTag,
+    pub concurrent_shares: SmallCountBucketTag,
+    pub silent_for: SinceLastFrameBucketTag,
 }
 
 /// Emitted (rate-limited) when a remote-control pointer RELEASE (an Up) fails
@@ -625,6 +644,52 @@ diagnostic_enum!(ProbeFailureBucketTag {
 // event fires. Coarse on purpose: this is a stall-SEVERITY signal for triage,
 // not a latency metric (the product's real latency number is measured
 // elsewhere, see CLAUDE.md's glass-to-glass note).
+// #393: what the sharer's raw-capture watchdog did about a silent stream.
+diagnostic_enum!(RawCaptureActionTag {
+    Restart => "restart",
+    HoldOnPulls => "hold_on_pulls",
+    NotApplicable => "not_applicable"
+});
+// #393: mirrors `capture::RawSilenceCause` -- what the SCK output handler saw
+// since the last accepted frame.
+diagnostic_enum!(RawSilenceCauseTag {
+    NoCallbacks => "no_callbacks",
+    IdleSamplesOnly => "idle_samples_only",
+    LayoutDeferred => "layout_deferred",
+    LayoutRejected => "layout_rejected",
+    PixelFormatRejected => "pixel_format_rejected",
+    RegionDropped => "region_dropped",
+    Unclassified => "unclassified",
+    NotApplicable => "not_applicable"
+});
+// #393: whether snapshot pulls saw the content change while the raw stream
+// was silent. `changing` means SCK should have delivered.
+diagnostic_enum!(SnapshotContentTag {
+    Changing => "changing",
+    Static => "static",
+    NoPulls => "no_pulls",
+    NotApplicable => "not_applicable"
+});
+// #393: small counts, bucketed so the tag vocabulary stays closed.
+diagnostic_enum!(SmallCountBucketTag {
+    Zero => "0",
+    One => "1",
+    Two => "2",
+    ThreePlus => "3_plus",
+    NotApplicable => "not_applicable"
+});
+
+impl SmallCountBucketTag {
+    pub fn from_count(count: u64) -> Self {
+        match count {
+            0 => Self::Zero,
+            1 => Self::One,
+            2 => Self::Two,
+            _ => Self::ThreePlus,
+        }
+    }
+}
+
 diagnostic_enum!(SinceLastFrameBucketTag {
     UnderOneMinute => "under_1m",
     OneToFiveMinutes => "1_5m",
@@ -635,7 +700,7 @@ diagnostic_enum!(SinceLastFrameBucketTag {
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 19] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 20] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -655,6 +720,7 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 19] = [
     "pointer-release-not-injected",
     "wgc-border-request-failed",
     "remote-video-stalled",
+    "capture-raw-stalled",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -696,6 +762,13 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "remote_video_hold_reason",
     "probe_failure_bucket",
     "since_last_frame_bucket",
+    "raw_capture_action",
+    "raw_silence_cause",
+    "snapshot_content",
+    "stream_updates_since_frame",
+    "held_native_surfaces",
+    "recovery_burst",
+    "concurrent_shares",
     "dedup_count_bucket",
 ];
 
@@ -735,6 +808,13 @@ const REMOTE_VIDEO_STALLED_MESSAGE_TAGS: &[&str] = &[
     "remote_video_hold_reason",
     "probe_failure_bucket",
     "since_last_frame_bucket",
+];
+const CAPTURE_RAW_STALLED_MESSAGE_TAGS: &[&str] = &[
+    "raw_capture_action",
+    "raw_silence_cause",
+    "snapshot_content",
+    "stream_updates_since_frame",
+    "held_native_surfaces",
 ];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
@@ -779,6 +859,7 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "pointer-release-not-injected" => Some(POINTER_RELEASE_NOT_INJECTED_MESSAGE_TAGS),
         "wgc-border-request-failed" => Some(WGC_BORDER_REQUEST_FAILED_MESSAGE_TAGS),
         "remote-video-stalled" => Some(REMOTE_VIDEO_STALLED_MESSAGE_TAGS),
+        "capture-raw-stalled" => Some(CAPTURE_RAW_STALLED_MESSAGE_TAGS),
         _ => None,
     }
 }
@@ -1127,6 +1208,7 @@ impl SentryDiagnosticEvent {
             Self::PointerReleaseNotInjected(_) => "pointer-release-not-injected",
             Self::WgcBorderRequestFailed(_) => "wgc-border-request-failed",
             Self::RemoteVideoStalled(_) => "remote-video-stalled",
+            Self::CaptureRawStalled(_) => "capture-raw-stalled",
         }
     }
 }
@@ -1151,6 +1233,18 @@ fn build_sentry_diagnostic_event(
             _ => "other",
         },
     );
+    // #393's tags, overwritten only by `CaptureRawStalled` below.
+    for key in [
+        "raw_capture_action",
+        "raw_silence_cause",
+        "snapshot_content",
+        "stream_updates_since_frame",
+        "held_native_surfaces",
+        "recovery_burst",
+        "concurrent_shares",
+    ] {
+        insert(key, "not_applicable");
+    }
     match diagnostic {
         SentryDiagnosticEvent::CaptureLayoutInvalid(value) => {
             insert("session_role", value.role.tag());
@@ -1835,6 +1929,53 @@ fn build_sentry_diagnostic_event(
             insert("remote_video_hold_reason", value.hold_reason.tag());
             insert("probe_failure_bucket", value.probe_failures.tag());
             insert("since_last_frame_bucket", value.since_last_frame.tag());
+        }
+        SentryDiagnosticEvent::CaptureRawStalled(value) => {
+            insert("session_role", "sharer");
+            insert("source_selection", value.source.tag());
+            for key in [
+                "capture_geometry",
+                "configured_geometry",
+                "pixel_format",
+                "scale_bucket",
+                "encoder_implementation",
+                "stage_code",
+                "camera_direction",
+                "capture_cadence",
+                "encode_cadence",
+                "queue_backpressure",
+                "decoder_render_health",
+                "stall_cause",
+                "recovery_action",
+                "playout_transition",
+                "storm_scope",
+                "install_failure_stage",
+                "install_failure_kind",
+                "install_volume_boundary",
+                "install_destination_class",
+                "overlay_clear_reason",
+                "crash_report_status",
+                "pressure_level",
+                "browser_url_extraction_cause",
+                "descriptor_pressure_stage",
+                "pointer_button",
+                "pointer_release_failure_cause",
+                "memory_top_owner",
+                "wgc_border_failure",
+                "sharer_kind",
+                "remote_video_hold_reason",
+                "probe_failure_bucket",
+            ] {
+                insert(key, "not_applicable");
+            }
+            insert("since_last_frame_bucket", value.silent_for.tag());
+            insert("raw_capture_action", value.action.tag());
+            insert("raw_silence_cause", value.cause.tag());
+            insert("snapshot_content", value.snapshot_content.tag());
+            insert("stream_updates_since_frame", value.stream_updates.tag());
+            insert("held_native_surfaces", value.held_surfaces.tag());
+            insert("recovery_burst", value.recovery_burst.tag());
+            insert("concurrent_shares", value.concurrent_shares.tag());
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
@@ -5781,6 +5922,25 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
             "stream_paused" | "decode_stale" | "decode_zero" | "not_applicable"
         ),
         "dedup_count_bucket" => matches!(value, "1" | "2_9" | "10_99" | "100_plus"),
+        "raw_capture_action" => matches!(value, "restart" | "hold_on_pulls" | "not_applicable"),
+        "raw_silence_cause" => matches!(
+            value,
+            "no_callbacks"
+                | "idle_samples_only"
+                | "layout_deferred"
+                | "layout_rejected"
+                | "pixel_format_rejected"
+                | "region_dropped"
+                | "unclassified"
+                | "not_applicable"
+        ),
+        "snapshot_content" => {
+            matches!(value, "changing" | "static" | "no_pulls" | "not_applicable")
+        }
+        "stream_updates_since_frame"
+        | "held_native_surfaces"
+        | "recovery_burst"
+        | "concurrent_shares" => matches!(value, "0" | "1" | "2" | "3_plus" | "not_applicable"),
         "sharer_kind" => matches!(value, "native" | "web" | "not_applicable"),
         "remote_video_hold_reason" => {
             matches!(value, "no_frame_watchdog" | "not_held" | "not_applicable")
@@ -9881,6 +10041,73 @@ mod tests {
             )
         });
         assert_eq!(keys, ["browser_url_extraction_cause"]);
+    }
+
+    #[test]
+    fn capture_raw_stalled_event_carries_sender_evidence_and_is_valid() {
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::CaptureRawStalled(CaptureRawStalledDiagnostic {
+                source: SourceSelectionClass::Window,
+                action: RawCaptureActionTag::HoldOnPulls,
+                cause: RawSilenceCauseTag::NoCallbacks,
+                snapshot_content: SnapshotContentTag::Changing,
+                stream_updates: SmallCountBucketTag::One,
+                held_surfaces: SmallCountBucketTag::from_count(7),
+                recovery_burst: SmallCountBucketTag::from_count(3),
+                concurrent_shares: SmallCountBucketTag::Two,
+                silent_for: SinceLastFrameBucketTag::OneToFiveMinutes,
+            }),
+            "1",
+        );
+        let tag = |key: &str| event.tags.get(key).map(String::as_str);
+        assert_eq!(tag("event_name"), Some("capture-raw-stalled"));
+        assert_eq!(tag("session_role"), Some("sharer"));
+        assert_eq!(tag("source_selection"), Some("window"));
+        assert_eq!(tag("held_native_surfaces"), Some("3_plus"));
+        assert_eq!(tag("recovery_burst"), Some("3_plus"));
+        assert_eq!(tag("concurrent_shares"), Some("2"));
+        assert_eq!(tag("since_last_frame_bucket"), Some("1_5m"));
+        assert_eq!(
+            event.message.as_deref(),
+            Some(
+                "diagnostic: capture-raw-stalled raw_capture_action=hold_on_pulls \
+                 raw_silence_cause=no_callbacks snapshot_content=changing \
+                 stream_updates_since_frame=1 held_native_surfaces=3_plus"
+            )
+        );
+        assert!(valid_sentry_diagnostic_event(&event));
+        assert!(scrub_event_for_sentry(event).is_some());
+    }
+
+    #[test]
+    fn every_other_diagnostic_event_reports_not_applicable_raw_capture_tags() {
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::DescriptorPressure(DescriptorPressureDiagnostic {
+                stage: DescriptorPressureStageTag::Exhausted,
+            }),
+            "1",
+        );
+        for key in [
+            "raw_capture_action",
+            "raw_silence_cause",
+            "snapshot_content",
+            "stream_updates_since_frame",
+            "held_native_surfaces",
+            "recovery_burst",
+            "concurrent_shares",
+        ] {
+            assert_eq!(event.tags.get(key).map(String::as_str), Some("not_applicable"), "{key}");
+        }
+        assert!(valid_sentry_diagnostic_event(&event));
+    }
+
+    #[test]
+    fn capture_raw_stalled_is_a_registered_diagnostic_event() {
+        assert!(DIAGNOSTIC_EVENT_NAMES.contains(&"capture-raw-stalled"));
+        assert_eq!(
+            diagnostic_message_tags("capture-raw-stalled"),
+            Some(CAPTURE_RAW_STALLED_MESSAGE_TAGS)
+        );
     }
 
     #[test]
