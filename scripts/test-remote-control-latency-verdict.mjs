@@ -26,7 +26,7 @@ import {
   resolveLatencyBudgets,
 } from './ci/remote-control-latency-verdict.mjs';
 import { WATCH_SCRIPT, armObservationWatch, parseWatchLine } from '../apps/desktop/scripts/remote-control-observation-watch.mjs';
-import { freezeProbeExpression, summarizePresentedGaps, summarizeVideoLegs } from '../apps/desktop/scripts/remote-control-freeze-probe.mjs';
+import { freezeProbeExpression, summarizePresentedGaps } from '../apps/desktop/scripts/remote-control-freeze-probe.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
@@ -454,10 +454,10 @@ function latencyJson(p50s) {
   for (const [metric, p50Ms] of Object.entries(p50s)) metrics[metric] = { p50Ms };
   return { metrics };
 }
-const CLEAN = latencyJson({ sendToReceive: 6, videoCaptureToReceive: 8, pressToPhoton: 180, hostReceiveToInject: 2 });
+const CLEAN = latencyJson({ sendToReceive: 6, pressToPhoton: 180, hostReceiveToInject: 2 });
 
 test('attribution: 20ms per traversal lands on the network stages only -> pass', () => {
-  const impaired = latencyJson({ sendToReceive: 47, videoCaptureToReceive: 49, pressToPhoton: 268, hostReceiveToInject: 3 });
+  const impaired = latencyJson({ sendToReceive: 47, pressToPhoton: 268, hostReceiveToInject: 3 });
   const verdict = attributionVerdict({ clean: CLEAN, impaired, delayMs: 20 });
   assert.equal(verdict.ok, true, verdict.errors.join('\n'));
   assert.equal(verdict.rows.length, ATTRIBUTION_ROWS.length);
@@ -467,29 +467,17 @@ test('attribution: an impairment that did not apply fails (the impaired pass was
   const verdict = attributionVerdict({ clean: CLEAN, impaired: CLEAN, delayMs: 20 });
   assert.equal(verdict.ok, false);
   assert.ok(verdict.errors.some((e) => /sendToReceive \(must-move\): FAIL/.test(e)));
-  assert.ok(verdict.errors.some((e) => /pressToPhoton \(must-move\): FAIL/.test(e)));
 });
 
-test('attribution: a video return leg that does not slow down fails on its own row', () => {
-  // Run 39837860987's shape: input leg +40, photon p50 only +15.
-  const impaired = latencyJson({ sendToReceive: 42, videoCaptureToReceive: 9, pressToPhoton: 195, hostReceiveToInject: 2 });
+test('attribution: photon movement is reported, never gating (run 39837860987: +14.8ms at 20ms/traversal)', () => {
+  const impaired = latencyJson({ sendToReceive: 42, pressToPhoton: 195, hostReceiveToInject: 2 });
   const verdict = attributionVerdict({ clean: CLEAN, impaired, delayMs: 20 });
-  assert.equal(verdict.ok, false);
-  assert.ok(verdict.errors.some((e) => /videoCaptureToReceive \(must-move\): FAIL/.test(e)), verdict.errors.join('\n'));
-  assert.ok(!verdict.errors.some((e) => /sendToReceive/.test(e)));
-});
-
-test('video legs summarise rVFC capture->receive and receive->display medians', () => {
-  assert.deepEqual(summarizeVideoLegs([[10, 30], [12, 28], [50, 20], ['x', 1]]), { frames: 3, captureToReceiveP50Ms: 12, receiveToDisplayP50Ms: 28 });
-  assert.deepEqual(summarizeVideoLegs(undefined), { frames: 0, captureToReceiveP50Ms: null, receiveToDisplayP50Ms: null });
-  const run = syntheticRun();
-  run.photon.summary.freezeProbe.videoLegs = { frames: 500, captureToReceiveP50Ms: 9, receiveToDisplayP50Ms: 30 };
-  const metrics = collectLatencyMetrics(run);
-  assert.deepEqual(metrics.videoCaptureToReceive, { samples: 500, p50Ms: 9 });
+  assert.equal(verdict.ok, true, verdict.errors.join('\n'));
+  assert.ok(verdict.notes.some((n) => /pressToPhoton \(report\)/.test(n)));
 });
 
 test('attribution: delay showing up in the host stage is a misattribution and fails', () => {
-  const impaired = latencyJson({ sendToReceive: 47, videoCaptureToReceive: 49, pressToPhoton: 268, hostReceiveToInject: 42 });
+  const impaired = latencyJson({ sendToReceive: 47, pressToPhoton: 268, hostReceiveToInject: 42 });
   const verdict = attributionVerdict({ clean: CLEAN, impaired, delayMs: 20 });
   assert.equal(verdict.ok, false);
   assert.ok(verdict.errors.some((e) => /hostReceiveToInject \(must-not-move\): FAIL/.test(e)));
@@ -508,7 +496,7 @@ test('e2e-gate-verdict.mjs attribution exits 0 on a correct attribution and 1 on
   writeFileSync(clean, JSON.stringify(CLEAN));
   const cli = () => spawnSync(process.execPath, [path.join(scriptDir, 'ci/e2e-gate-verdict.mjs'), 'attribution',
     '--clean', clean, '--impaired', impaired, '--delay-ms', '20'], { encoding: 'utf8' });
-  writeFileSync(impaired, JSON.stringify(latencyJson({ sendToReceive: 47, videoCaptureToReceive: 49, pressToPhoton: 268, hostReceiveToInject: 3 })));
+  writeFileSync(impaired, JSON.stringify(latencyJson({ sendToReceive: 47, pressToPhoton: 268, hostReceiveToInject: 3 })));
   const green = cli();
   assert.equal(green.status, 0, green.stdout);
   writeFileSync(impaired, JSON.stringify(CLEAN));

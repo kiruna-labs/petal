@@ -65,7 +65,7 @@ import {
   shareReadyPredicate,
   tileFailureDetail,
 } from './remote-control-share-readiness.mjs';
-import { freezeProbeExpression, summarizePresentedGaps, summarizeVideoLegs } from './remote-control-freeze-probe.mjs';
+import { freezeProbeExpression, summarizePresentedGaps } from './remote-control-freeze-probe.mjs';
 
 const positional = [];
 let jsonOutputPath = null;
@@ -1931,7 +1931,6 @@ async function runFreezeProbe(ctx) {
     const report = {
       ...summary,
       redPauseMs: freezeProbeRedPauseMs || null,
-      videoLegs: summarizeVideoLegs(raw.legs),
       playback: raw.playback,
       decodeStall: raw.decodeStall,
       videoSize: raw.videoSize,
