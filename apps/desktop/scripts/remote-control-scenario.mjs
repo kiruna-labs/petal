@@ -13,7 +13,7 @@ import {
   REMOTE_CONTROL_SCROLL_DELTAS,
   REMOTE_CONTROL_SHORTCUTS,
 } from './remote-control-gestures.mjs';
-import { summarizePhotonSamples } from './remote-control-photon-metrics.mjs';
+import { photonStageSplit, summarizePhotonSamples } from './remote-control-photon-metrics.mjs';
 // #134: the host-side release oracle. See that module's header for why a
 // per-case assertion replaced case 7's shared tripwire, and why the stress
 // case that repeats the left drag reports `skip` rather than `fail`.
@@ -1904,6 +1904,7 @@ async function photonFailureContext(ctx, sinceMs) {
 
 async function runPressToPhotonSuite(ctx) {
   const suiteStarted = performance.now();
+  const photonHostLogOffset = petalLogSize();
   ctx.caseStartedAt = Date.now();
   await send(ctx, 'api.resetMetrics(); api.request(target); return true;');
   await waitForActiveStatus(ctx, ctx.caseStartedAt);
@@ -1975,6 +1976,15 @@ async function runPressToPhotonSuite(ctx) {
       sampleFailures.push(failure);
       console.log(`PHOTON_SAMPLE ${JSON.stringify({ ...failure, status: 'fail' })}`);
     }
+  }
+
+  // Per-sample stage split (inject -> sentinel input -> redraw -> encoder
+  // pushes), so a slow sample says WHERE its time went.
+  const ledger = sentinelEvents();
+  const hostLogText = readPetalLogSince(photonHostLogOffset);
+  for (const sample of photonSamples) {
+    sample.stages = photonStageSplit(sample, ledger, hostLogText);
+    console.log(`PHOTON_STAGES ${JSON.stringify({ sample: sample.sample, inputKind: sample.inputKind, ...sample.stages })}`);
   }
 
   const expectedSamples = photonSamplesPerInput * 2;

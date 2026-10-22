@@ -1405,6 +1405,69 @@ fn interaction_snapshot_decision(
     epoch > handled_epoch && last_raw_frame_us <= input_applied_at_us
 }
 
+/// Press-to-photon waterfall: how many encoder pushes after each applied
+/// remote input get a `frame_pushed` line, and for how long after it.
+const INTERACTION_PUSH_TRACE_FRAMES: u8 = 3;
+const INTERACTION_PUSH_TRACE_WINDOW_US: u64 = 1_500_000;
+
+/// Bounded per-input trace of what the pump handed WebRTC after a remote
+/// input landed, and whether the source accepted it. `inject_to_frame_ms`
+/// only proves SOME frame arrived; this says which push carried it.
+#[derive(Default)]
+struct InteractionPushTrace {
+    epoch: u64,
+    remaining: u8,
+}
+
+impl InteractionPushTrace {
+    /// `Some((input_seq, since_input_us))` when this push should be logged.
+    fn observe(
+        &mut self,
+        epoch: u64,
+        input_seq: u64,
+        applied_at_us: u64,
+        now_us: u64,
+    ) -> Option<(u64, u64)> {
+        if epoch == 0 || applied_at_us == 0 {
+            return None;
+        }
+        if epoch != self.epoch {
+            self.epoch = epoch;
+            self.remaining = INTERACTION_PUSH_TRACE_FRAMES;
+        }
+        let since_input_us = now_us.saturating_sub(applied_at_us);
+        if self.remaining == 0 || since_input_us > INTERACTION_PUSH_TRACE_WINDOW_US {
+            return None;
+        }
+        self.remaining -= 1;
+        Some((input_seq, since_input_us))
+    }
+}
+
+fn trace_interaction_push(
+    trace: &mut InteractionPushTrace,
+    signal: &InteractionSignal,
+    window_id: u32,
+    path: &str,
+    timing: Option<crate::transport::publisher::PublishedFrameTiming>,
+) {
+    let now = now_us();
+    let Some((input_seq, since_input_us)) = trace.observe(
+        signal.epoch.load(Ordering::Acquire),
+        signal.input_seq.load(Ordering::Relaxed),
+        signal.applied_at_us.load(Ordering::Acquire),
+        now,
+    ) else {
+        return;
+    };
+    let (accepted, frame_id) = timing.map_or((false, 0), |t| (t.source_accepted, t.frame_id));
+    log::info!(
+        "remote-control-latency: host frame_pushed_ts_ms={} window={window_id} input_seq={input_seq} since_input_ms={} path={path} accepted={accepted} frame_id={frame_id}",
+        now / 1_000,
+        since_input_us / 1_000
+    );
+}
+
 /// Per-window "last remote input applied" timestamp for the interaction-burst
 /// policy (#290 step 5). Reuses `note_remote_interaction`'s existing
 /// epoch/timestamp plumbing -- every typing/wheel/drag event that lands on
@@ -5479,6 +5542,7 @@ fn spawn_share_pump(
         let mut pull_backoff_us: u64 = SNAPSHOT_PULL_MIN_INTERVAL_US;
         let mut handled_interaction_epoch: u64 = 0;
         let mut first_pushed_frame_recorded = false;
+        let mut interaction_push_trace = InteractionPushTrace::default();
         log::info!(
             "session: window {window_id} frame pump loop started (seq {started_seq}, restart_generation {restart_generation})"
         );
@@ -5587,6 +5651,13 @@ fn spawn_share_pump(
                         "session: window {window_id} pump decision={last_push_decision}; pushing parked static refresh frame after notify idle"
                     );
                     let timing = current.push_frame(frame, refresh_at_us);
+                    trace_interaction_push(
+                        &mut interaction_push_trace,
+                        &interaction_signal,
+                        window_id,
+                        "idle_refresh",
+                        timing,
+                    );
                     record_published_frame_timing(&pump_diagnostics, window_id, timing);
                     if !first_pushed_frame_recorded {
                         first_pushed_frame_recorded = true;
@@ -5730,6 +5801,13 @@ fn spawn_share_pump(
                                         dirty_rect_pump.parked_frame()
                                     {
                                         let timing = current.push_frame(parked, parked_ts);
+                                        trace_interaction_push(
+                                            &mut interaction_push_trace,
+                                            &interaction_signal,
+                                            window_id,
+                                            "snapshot",
+                                            timing,
+                                        );
                                         record_published_frame_timing(
                                             &pump_diagnostics,
                                             window_id,
@@ -6050,6 +6128,13 @@ fn spawn_share_pump(
                     );
                 }
             }
+            trace_interaction_push(
+                &mut interaction_push_trace,
+                &interaction_signal,
+                window_id,
+                "raw",
+                timing,
+            );
             record_published_frame_timing(&pump_diagnostics, window_id, timing);
             if !first_pushed_frame_recorded {
                 first_pushed_frame_recorded = true;
@@ -13749,6 +13834,27 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
     }
 
     // -- Interaction-burst policy (#290 step 5) --------------------------
+
+    #[test]
+    fn interaction_push_trace_logs_a_bounded_number_of_pushes_per_input() {
+        let mut trace = InteractionPushTrace::default();
+        // No input applied yet: nothing to attribute.
+        assert_eq!(trace.observe(0, 0, 0, 1_000), None);
+        let applied = 10_000_000;
+        for push in 0..INTERACTION_PUSH_TRACE_FRAMES as u64 {
+            assert_eq!(
+                trace.observe(1, 7, applied, applied + push * 1_000),
+                Some((7, push * 1_000))
+            );
+        }
+        assert_eq!(trace.observe(1, 7, applied, applied + 9_000), None);
+        // A new input re-arms the budget; a push outside the window is skipped.
+        assert_eq!(trace.observe(2, 8, applied, applied + 5_000), Some((8, 5_000)));
+        assert_eq!(
+            trace.observe(2, 8, applied, applied + INTERACTION_PUSH_TRACE_WINDOW_US + 1),
+            None
+        );
+    }
 
     #[test]
     fn interaction_burst_is_inactive_with_no_recorded_interaction() {

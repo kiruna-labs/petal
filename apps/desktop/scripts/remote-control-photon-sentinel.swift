@@ -166,6 +166,12 @@ private final class SentinelPatternView: NSView {
         lastInput = input
         needsDisplay = true
         displayIfNeeded()
+        // Press-to-photon stage split: when the new Gray code was drawn into
+        // the backing store (WindowServer sees it at the next commit).
+        appendEvent([
+            "kind": "redraw", "generation": Int(generation), "input": input,
+            "tMs": Date().timeIntervalSince1970 * 1000,
+        ])
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -562,7 +568,10 @@ private final class SentinelAppDelegate: NSObject, NSApplicationDelegate, NSText
     }
 
     func controlTextDidChange(_ notification: Notification) {
-        appendEvent(["kind": "axAction", "action": "setValue", "element": "Remote text input sentinel"])
+        appendEvent([
+            "kind": "axAction", "action": "setValue", "element": "Remote text input sentinel",
+            "tMs": Date().timeIntervalSince1970 * 1000,
+        ])
         patternView.recordInput("text")
     }
 
