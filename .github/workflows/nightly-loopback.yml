@@ -224,8 +224,10 @@ jobs:
       # gate. 37-41 are the whole-display share cases: macOS display-share
       # pointer input went to placeholder pid 1 (#334/#349) and its
       # keyboard/text was never delivered (#335/#353) while every window case
-      # stayed green. To quarantine one, remove it from this list first.
-      E2E_REQUIRED_RC_CASES: "37,38,39,40,41"
+      # stayed green. 42 repeats a scroll inside the AX scroll-cache window:
+      # the host deadlocked there and replayed nothing after it (#311/#390).
+      # To quarantine one, remove it from this list first.
+      E2E_REQUIRED_RC_CASES: "37,38,39,40,41,42"
     steps:
       - uses: actions/checkout@v7
         with:
