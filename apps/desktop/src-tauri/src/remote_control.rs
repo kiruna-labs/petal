@@ -369,7 +369,13 @@ struct ResolveQueue(BoundedCoalescingQueue<ResolveTask, ReplayCoalesceKey>);
 
 impl ResolveQueue {
     fn new(high_rate_capacity: usize) -> Self {
-        Self(BoundedCoalescingQueue::new(high_rate_capacity))
+        Self(BoundedCoalescingQueue::with_merge(
+            high_rate_capacity,
+            |queued: ResolveTask, mut incoming: ResolveTask| {
+                incoming.message = coalesce_high_rate_message(&queued.message, incoming.message);
+                incoming
+            },
+        ))
     }
 
     fn push(&self, task: ResolveTask) -> ResolveQueuePush {
@@ -3067,6 +3073,8 @@ fn coalesce_ready_replay_task(
                 task.message.seq,
                 next.message.seq
             );
+            let mut next = next;
+            next.message = coalesce_high_rate_message(&task.message, next.message);
             task = next;
         } else {
             pending.push_back(next);
@@ -20820,8 +20828,14 @@ mod tests {
         let fixture = contract_fixture();
         assert_eq!(
             fixture.rules.reliability.lossy,
-            ["pointer.move.buttons==0", "wheel"]
+            ["pointer.move.buttons==0"]
         );
+        assert!(fixture
+            .rules
+            .reliability
+            .reliable
+            .iter()
+            .any(|rule| rule == "wheel"));
         assert!(fixture
             .rules
             .reliability
@@ -20850,7 +20864,7 @@ mod tests {
                 "host",
                 "authenticatedController",
             ),
-            ("wheelLegacy", "lossy", "host", "authenticatedController"),
+            ("wheelLegacy", "reliable", "host", "authenticatedController"),
             (
                 "scrollDiscrete",
                 "reliable",
@@ -21205,6 +21219,74 @@ mod tests {
         assert_eq!(queue.try_pop().unwrap().message.seq, 3);
         assert_eq!(queue.try_pop().unwrap().message.seq, 2);
         assert!(queue.try_pop().is_none());
+    }
+
+    fn wheel_test_message(seq: u64, window_id: u32, controller_id: &str, dy: f64) -> RemoteControlMessage {
+        let mut message = test_message(
+            RemoteControlType::Wheel,
+            None,
+            seq,
+            window_id,
+            controller_id.to_string(),
+        );
+        message.delta_x = Some(1.0);
+        message.delta_y = Some(dy);
+        message.delta_mode = Some(0);
+        message
+    }
+
+    /// #400: wheel deltas add up. A burst of wheel packets released together
+    /// (e.g. behind a reliable-channel retransmit) must coalesce to the SUM,
+    /// not the newest packet, or the earlier scroll distance silently vanishes.
+    #[test]
+    fn coalescing_a_wheel_burst_sums_deltas_instead_of_dropping_them() {
+        let ids = remote_control_test_ids(
+            "coalescing_a_wheel_burst_sums_deltas_instead_of_dropping_them",
+        );
+        let queue = ResolveQueue::new(1);
+        for (seq, dy) in [(1, 120.0), (2, 40.0), (3, -10.0)] {
+            queue.push(ResolveTask {
+                message: wheel_test_message(seq, ids.window_id, &ids.controller_id, dy),
+                local_identity: "host".to_string(),
+                admission: None,
+                result_sender: None,
+            });
+        }
+        let merged = queue.try_pop().expect("one coalesced wheel");
+        assert!(queue.try_pop().is_none());
+        assert_eq!(merged.message.seq, 3);
+        assert_eq!(merged.message.delta_y, Some(150.0));
+        assert_eq!(merged.message.delta_x, Some(3.0));
+
+        let (tx, rx) = mpsc::sync_channel(4);
+        for (seq, dy) in [(5, 40.0), (6, 40.0)] {
+            tx.send(replay_task(
+                wheel_test_message(seq, ids.window_id, &ids.controller_id, dy),
+                frame(0, 0, 100, 100),
+                Some(10),
+                false,
+            ))
+            .unwrap();
+        }
+        drop(tx);
+        let first = replay_task(
+            wheel_test_message(4, ids.window_id, &ids.controller_id, 40.0),
+            frame(0, 0, 100, 100),
+            Some(10),
+            false,
+        );
+        let task = coalesce_ready_replay_task(first, &rx, &mut VecDeque::new());
+        assert_eq!(task.message.seq, 6);
+        assert_eq!(task.message.delta_y, Some(120.0));
+
+        // Mismatched delta modes cannot be summed; the newer packet wins.
+        let mut lines = wheel_test_message(8, ids.window_id, &ids.controller_id, 3.0);
+        lines.delta_mode = Some(1);
+        let kept = coalesce_high_rate_message(
+            &wheel_test_message(7, ids.window_id, &ids.controller_id, 40.0),
+            lines,
+        );
+        assert_eq!(kept.delta_y, Some(3.0));
     }
 
     #[test]

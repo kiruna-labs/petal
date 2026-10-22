@@ -50,10 +50,17 @@ pub(crate) struct BoundedCoalescingQueue<T, K> {
     state: Mutex<BoundedQueueState<T, K>>,
     ready: Condvar,
     high_rate_capacity: usize,
+    /// `(queued, incoming) -> stored`. Latest-wins by default; wheel must
+    /// sum its deltas instead (#400).
+    merge: fn(T, T) -> T,
 }
 
 impl<T, K: PartialEq> BoundedCoalescingQueue<T, K> {
     pub(crate) fn new(high_rate_capacity: usize) -> Self {
+        Self::with_merge(high_rate_capacity, |_queued, incoming| incoming)
+    }
+
+    pub(crate) fn with_merge(high_rate_capacity: usize, merge: fn(T, T) -> T) -> Self {
         Self {
             state: Mutex::new(BoundedQueueState {
                 discrete: VecDeque::new(),
@@ -61,6 +68,7 @@ impl<T, K: PartialEq> BoundedCoalescingQueue<T, K> {
             }),
             ready: Condvar::new(),
             high_rate_capacity,
+            merge,
         }
     }
 
@@ -71,12 +79,13 @@ impl<T, K: PartialEq> BoundedCoalescingQueue<T, K> {
             return BoundedQueuePush::Enqueued;
         };
         let mut state = self.state.lock_unpoisoned();
-        if let Some((_, queued)) = state
+        if let Some(index) = state
             .high_rate
-            .iter_mut()
-            .find(|(queued_key, _)| *queued_key == key)
+            .iter()
+            .position(|(queued_key, _)| *queued_key == key)
         {
-            *queued = task;
+            let (key, queued) = state.high_rate.remove(index).expect("index is in range");
+            state.high_rate.insert(index, (key, (self.merge)(queued, task)));
             return BoundedQueuePush::Coalesced;
         }
         if state.high_rate.len() >= self.high_rate_capacity {
@@ -614,7 +623,7 @@ impl RemoteControlEngine {
         livekit::DataPacket {
             payload,
             topic: Some(TOPIC.to_string()),
-            reliable: unreliable_seq_stream(message).is_none(),
+            reliable: !rides_lossy_transport(message),
             destination_identities: if target.is_empty() {
                 Vec::new()
             } else {
@@ -1637,6 +1646,37 @@ impl TerminalDisposition {
         }
     }
 }
+/// Only hover moves ride the lossy channel: each one fully replaces the last.
+/// A legacy wheel is NOT self-replacing -- its deltas add up, so a dropped
+/// packet is a scroll that never happens (#400). It keeps its seq watermark
+/// and coalescing stream, but is published reliable.
+pub(crate) fn rides_lossy_transport(message: &RemoteControlMessage) -> bool {
+    unreliable_seq_stream(message) == Some(UnreliableSeqStream::PointerMove)
+}
+
+/// Merges a queued high-rate message with a newer one for the same stream.
+/// Hover moves are latest-wins; wheel deltas are summed so coalescing a burst
+/// (e.g. reliable packets released together after a retransmit) never drops
+/// scroll distance (#400). Mismatched delta modes cannot be summed, so the
+/// newer packet wins as before.
+pub(crate) fn coalesce_high_rate_message(
+    queued: &RemoteControlMessage,
+    mut incoming: RemoteControlMessage,
+) -> RemoteControlMessage {
+    if queued.message_type == RemoteControlType::Wheel
+        && incoming.message_type == RemoteControlType::Wheel
+        && queued.delta_mode.unwrap_or(0) == incoming.delta_mode.unwrap_or(0)
+    {
+        let sum = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+        };
+        incoming.delta_x = sum(queued.delta_x, incoming.delta_x);
+        incoming.delta_y = sum(queued.delta_y, incoming.delta_y);
+    }
+    incoming
+}
+
 pub(crate) fn unreliable_seq_stream(message: &RemoteControlMessage) -> Option<UnreliableSeqStream> {
     match (message.message_type, message.action) {
         // Plain hover moves are high-rate state updates and may be lossy.
@@ -2788,6 +2828,22 @@ mod tests {
             r#"{"v":1,"kind":"result","targetUserId":"web-1","controllerId":"native-1","windowId":42,"seq":3,"outcome":"submitted"}"#,
         );
         assert!(engine.data_packet_for(&result).reliable);
+
+        // #400: a legacy wheel (macOS host, no v2 envelope) is reliable, on
+        // both the JSON and the binary hot-path encodings. A lossy wheel is a
+        // scroll that silently never happens.
+        let wheel = message(
+            r#"{"v":1,"kind":"wheel","targetUserId":"native-1","controllerId":"web-1","windowId":42,"seq":4,"grantToken":"0123456789abcdef0123456789abcdef","x":0.5,"y":0.5,"deltaX":0,"deltaY":40,"deltaMode":0}"#,
+        );
+        assert_eq!(unreliable_seq_stream(&wheel), Some(UnreliableSeqStream::Wheel));
+        assert!(engine.data_packet_for(&wheel).reliable);
+        engine
+            .hot_path_capable_targets()
+            .lock_unpoisoned()
+            .insert((wheel.window_id, wheel.target_user_id.clone()));
+        let binary = engine.data_packet_for(&wheel);
+        assert_eq!(binary.payload.first(), Some(&BINARY_MAGIC));
+        assert!(binary.reliable);
     }
 
     #[test]
