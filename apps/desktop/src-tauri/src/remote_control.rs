@@ -4569,15 +4569,12 @@ fn handle_message(
                 message.window_id,
                 status_message
             );
-            #[cfg(target_os = "windows")]
-            let overlay_active =
-                match crate::windows_remote_control::controller_status_effect(status) {
-                    crate::windows_remote_control::ControllerStatusEffect::Activate => Some(true),
-                    crate::windows_remote_control::ControllerStatusEffect::Terminate => Some(false),
-                    crate::windows_remote_control::ControllerStatusEffect::Feedback => None,
-                };
-            #[cfg(not(target_os = "windows"))]
-            let overlay_active = Some(status == "active");
+            let overlay_active = match crate::remote_control_core::controller_status_effect(status)
+            {
+                crate::remote_control_core::ControllerStatusEffect::Activate => Some(true),
+                crate::remote_control_core::ControllerStatusEffect::Terminate => Some(false),
+                crate::remote_control_core::ControllerStatusEffect::Feedback => None,
+            };
             if let Some(active) = overlay_active {
                 if let Err(e) = set_remote_window_control_active(
                     app,
@@ -8516,11 +8513,14 @@ pub(crate) mod input {
     ) -> Result<Option<CachedAxScrollTarget>, AxError> {
         let key = ax_point_key(window_id, point);
         let now = Instant::now();
-        if let Some(cached) = ax_scroll_target_cache()
+        // Bind the lookup first: in an `if let` scrutinee the guard would live
+        // through the block, and re-locking below to evict a stale entry would
+        // self-deadlock this injection thread and every later caller.
+        let cached = ax_scroll_target_cache()
             .lock_unpoisoned()
             .get(&key)
-            .cloned()
-        {
+            .cloned();
+        if let Some(cached) = cached {
             if now.saturating_duration_since(cached.cached_at) < AX_RESOLUTION_CACHE_TTL {
                 return Ok(Some(cached));
             }
@@ -12776,6 +12776,38 @@ pub(crate) mod input {
         use crate::remote_control::VERSION;
         use std::collections::HashMap;
         use std::sync::Mutex;
+
+        #[test]
+        fn stale_scroll_target_cache_entry_is_evicted_without_deadlocking() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let window_id = 4242;
+            let point = super::super::GlobalPoint { x: 10.0, y: 10.0 };
+            let key = ax_point_key(window_id, point);
+            ax_scroll_target_cache().lock_unpoisoned().insert(
+                key,
+                CachedAxScrollTarget {
+                    scroll_area: None,
+                    vertical: None,
+                    horizontal: None,
+                    cached_at: Instant::now() - AX_RESOLUTION_CACHE_TTL * 2,
+                },
+            );
+
+            // Before the fix this looked up the stale entry while still
+            // holding the cache lock, then re-locked to evict it and hung.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = cached_scroll_target(window_id, point, &AxElementHandle::Test(1));
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+                "cached_scroll_target deadlocked evicting a stale entry"
+            );
+            assert!(!ax_scroll_target_cache().lock_unpoisoned().contains_key(&key));
+            clear_all_ax_control_state();
+        }
 
         /// #779 live identity gate. Unlike the RecordingAxBackend tests below,
         /// this reads real AXWindow elements and the real CG-backed registry.

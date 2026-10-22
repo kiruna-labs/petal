@@ -46,8 +46,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::platform::cg::WindowFrame;
 use crate::remote_control_core::{
-    RemoteControlAction, RemoteControlCapability, RemoteControlMessage, RemoteControlMode,
-    RemoteControlTargetKind, RemoteControlType,
+    controller_status_effect, ControllerStatusEffect, RemoteControlAction, RemoteControlCapability,
+    RemoteControlMessage, RemoteControlMode, RemoteControlTargetKind, RemoteControlType,
 };
 use crate::sync_ext::MutexExt;
 use crate::windows_capture_target::TargetKind;
@@ -251,21 +251,6 @@ pub(crate) fn validate_host_request(
     }
     Ok(())
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ControllerStatusEffect {
-    Activate,
-    Feedback,
-    Terminate,
-}
-
-pub(crate) fn controller_status_effect(status: &str) -> ControllerStatusEffect {
-    match status {
-        "active" => ControllerStatusEffect::Activate,
-        "stopped" | "disabled" => ControllerStatusEffect::Terminate,
-        _ => ControllerStatusEffect::Feedback,
-    }
-}
-
 pub(crate) fn record_controller_status(message: &RemoteControlMessage, status: &str) -> bool {
     let engine = crate::remote_control_core::remote_control_engine();
     match controller_status_effect(status) {
