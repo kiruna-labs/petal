@@ -44,6 +44,11 @@ pub const CONTROL_CONSENT_LABEL: &str = "control-consent";
 /// copy + padding so a long participant name only ever grows the card
 /// downward, which `control_consent_present` handles.
 const CONTROL_CONSENT_WIDTH: f64 = 420.0;
+/// Transparent gutter around the card for its CSS `--shadow-float` (#406).
+/// `CONTROL_CONSENT_WIDTH` and the heights are the CARD's; the window is
+/// larger by this gutter, which passes clicks through.
+const CONTROL_CONSENT_SHADOW_GUTTER: crate::shadow_gutter::ShadowGutter =
+    crate::shadow_gutter::FLOAT;
 /// Floor for the measured height (a single-line card never needs less).
 const CONTROL_CONSENT_DEFAULT_HEIGHT: f64 = 120.0;
 /// Cap on how tall the card can grow: several wrapped lines of a very long
@@ -69,7 +74,9 @@ pub fn create_control_consent_panel(app: &AppHandle) {
     }
 
     match PanelBuilder::<_, ControlConsentPanel>::new(app, CONTROL_CONSENT_LABEL)
-        .url(WebviewUrl::App("control-consent.html".into()))
+        .url(WebviewUrl::App(
+            crate::shadow_gutter::route_with_gutter("control-consent.html", CONTROL_CONSENT_SHADOW_GUTTER).into(),
+        ))
         .title("Petal")
         .position(tauri::Position::Logical(tauri::LogicalPosition {
             x: -10000.0,
@@ -80,11 +87,14 @@ pub fn create_control_consent_panel(app: &AppHandle) {
         // and time out to deny. Unlike the transient share notice, this one
         // waits for an answer.
         .level(PanelLevel::Floating)
-        .size(tauri::Size::Logical(tauri::LogicalSize {
-            width: CONTROL_CONSENT_WIDTH,
-            height: CONTROL_CONSENT_DEFAULT_HEIGHT,
-        }))
-        .has_shadow(true)
+        .size({
+            let (width, height) =
+                CONTROL_CONSENT_SHADOW_GUTTER.window_size(CONTROL_CONSENT_WIDTH, CONTROL_CONSENT_DEFAULT_HEIGHT);
+            tauri::Size::Logical(tauri::LogicalSize { width, height })
+        })
+        // Native shadow off (#406): it outlined the card's CSS shadow on
+        // macOS 26. The CSS shadow is the only elevation and has a gutter.
+        .has_shadow(false)
         .transparent(true)
         .no_activate(true)
         .style_mask(tauri_nspanel::StyleMask::empty().nonactivating_panel())
@@ -100,10 +110,13 @@ pub fn create_control_consent_panel(app: &AppHandle) {
         Ok(panel) => {
             panel.hide();
             if let Some(window) = app.get_webview_window(CONTROL_CONSENT_LABEL) {
-                // Allow / Deny are real buttons -- never click-through.
+                // Allow / Deny are real buttons -- the card is never
+                // click-through; only its shadow gutter is (shadow_gutter.rs).
                 let _ = window.set_ignore_cursor_events(false);
                 crate::webview_transparency::apply_or_retry(app, &window);
             }
+        }
+            crate::shadow_gutter::track(app, CONTROL_CONSENT_LABEL, CONTROL_CONSENT_SHADOW_GUTTER);
         }
         Err(e) => {
             log::error!("control_consent: failed to create panel: {e}");
@@ -145,10 +158,10 @@ pub fn control_consent_present(app: AppHandle, height: f64) {
             log::warn!("control_consent: present called but the panel does not exist");
             return;
         };
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-            width: CONTROL_CONSENT_WIDTH,
-            height,
-        }));
+        // The page measures the card; the window adds the shadow gutter.
+        let (width, height) = CONTROL_CONSENT_SHADOW_GUTTER.window_size(CONTROL_CONSENT_WIDTH, height);
+        let (x, y) = CONTROL_CONSENT_SHADOW_GUTTER.window_origin(x, y);
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         if !CONTROL_CONSENT_TRANSPARENCY_APPLIED.load(Ordering::Relaxed)
             && crate::webview_transparency::force_window_transparent(&window)
