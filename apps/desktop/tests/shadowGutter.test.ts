@@ -14,7 +14,6 @@ import {
   shadowGutterPadding,
   type ShadowGutter,
 } from '../src/lib/shadowGutter.ts';
-// @ts-expect-error -- plain .mjs lint script, no type declarations
 import { findViolations } from '../scripts/check-transparent-shadow.mjs';
 
 const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8');
