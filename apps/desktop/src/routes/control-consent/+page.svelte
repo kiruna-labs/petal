@@ -11,6 +11,7 @@
   share mode or grants control.
 -->
 <script lang="ts">
+  import { shadowGutterFromSearch, shadowGutterPadding } from '$lib/shadowGutter';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { onMount, tick } from 'svelte';
@@ -210,8 +211,12 @@
       unRoomLeft.then((u) => u()).catch(() => {});
     };
   });
+  // Native shadow is off; pad the card so its CSS shadow fits the window's
+  // transparent, click-through gutter (#406). No gutter on Windows.
+  const gutterPadding = shadowGutterPadding(shadowGutterFromSearch());
 </script>
 
+<div class="shadow-gutter" style={gutterPadding}>
 <div class="consent-host" bind:this={host}>
   {#if current}
     <div
@@ -247,8 +252,14 @@
     </div>
   {/if}
 </div>
+</div>
 
 <style>
+  .shadow-gutter {
+    box-sizing: border-box;
+    width: 100%;
+  }
+
   :global(html),
   :global(body) {
     background: transparent !important;

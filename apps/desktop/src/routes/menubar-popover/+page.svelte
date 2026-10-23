@@ -29,6 +29,7 @@
     the button treatment, aria-labels stay state-descriptive.
 -->
 <script lang="ts">
+  import { shadowGutterFromSearch, shadowGutterPadding } from '$lib/shadowGutter';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -398,8 +399,12 @@
       copiedLink = '';
     }, 2200);
   }
+  // Native shadow is off; pad the card so its CSS shadow fits the window's
+  // transparent, click-through gutter (#406). No gutter on Windows.
+  const gutterPadding = shadowGutterPadding(shadowGutterFromSearch());
 </script>
 
+<div class="shadow-gutter" style={gutterPadding}>
 <div class="menubar-popover-host" bind:this={host}>
   {#if roomName}
     <div class="roster-scroll">
@@ -521,8 +526,14 @@
     <MenuItem label="Quit" icon="quit" tone="danger" onclick={onQuit} />
   </div>
 </div>
+</div>
 
 <style>
+  .shadow-gutter {
+    box-sizing: border-box;
+    width: 100%;
+  }
+
   :global(html),
   :global(body) {
     background: transparent;

@@ -131,7 +131,7 @@ export function findViolations(source) {
     seen.add(start);
     const code = masked.slice(start, end);
     if (/\.\s*(?:has_)?shadow\s*\(\s*(?:true|false)\s*\)/.test(code)) continue;
-    if (/shadow-lint:\s*allow\s+\S/.test(source.slice(start, end))) continue;
+    if (/shadow-lint:[ \t]*allow[ \t]+\S/.test(source.slice(start, end))) continue;
     const line = source.slice(0, match.index).split('\n').length;
     violations.push({ line, text: source.split('\n')[line - 1].trim() });
   }

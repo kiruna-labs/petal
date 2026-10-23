@@ -2361,6 +2361,9 @@ pub(crate) async fn create_window(
     let window = match WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::App(url.into()))
         .decorations(false)
         .transparent(true)
+        // The shared-window surface is a real window: keep the native
+        // shadow, stated explicitly for the #406 shadow lint.
+        .shadow(true)
         .additional_browser_args(crate::webview2_args::WEBVIEW2_ACCEL_ARGS)
         .resizable(true)
         .title(&title)

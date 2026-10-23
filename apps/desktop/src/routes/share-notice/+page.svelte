@@ -12,6 +12,7 @@
   of a bespoke pill; only the HOST panel around it is new.
 -->
 <script lang="ts">
+  import { shadowGutterFromSearch, shadowGutterPadding } from '$lib/shadowGutter';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { onMount, tick } from 'svelte';
@@ -115,15 +116,25 @@
       unlisten.then((u) => u()).catch(() => {});
     };
   });
+  // Native shadow is off; pad the card so its CSS shadow fits the window's
+  // transparent, click-through gutter (#406). No gutter on Windows.
+  const gutterPadding = shadowGutterPadding(shadowGutterFromSearch());
 </script>
 
+<div class="shadow-gutter" style={gutterPadding}>
 <div class="share-notice-host" bind:this={host}>
   {#if current}
     <Toast variant="info" {message} actionLabel="Bring to foreground" onAction={onBringToForeground} />
   {/if}
 </div>
+</div>
 
 <style>
+  .shadow-gutter {
+    box-sizing: border-box;
+    width: 100%;
+  }
+
   /* Keep the standalone overlay document transparent even if global body
      styles load after the route CSS (same pattern as hover-tab/+page.svelte). */
   :global(html),

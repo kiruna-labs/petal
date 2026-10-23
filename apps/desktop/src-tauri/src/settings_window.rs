@@ -144,6 +144,9 @@ impl SettingsWindowOps for TauriSettingsWindow<'_> {
         .min_inner_size(400.0, 520.0)
         .decorations(false)
         .transparent(true)
+        // A real window whose page fills it: keep the native shadow (#406
+        // lint: transparent builders state their shadow explicitly).
+        .shadow(true)
         // Build hidden and reveal only once the page has loaded: on Windows the
         // visible HWND paints blank white before WebView2 attaches (same
         // hidden-build pattern as the cockpit, picker, and main window).
