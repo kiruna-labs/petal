@@ -7927,29 +7927,48 @@ pub(crate) mod input {
             let Some(app) = ax_app_element_for_pid(pid) else {
                 return Ok(None);
             };
-            // Candidate windows, most-likely-active first: the app's focused/main
-            // window, then every AXWindows entry. We deliberately AVOID the
-            // app-scoped AXFocusedUIElement here — for a backgrounded app it
-            // resolves up to AXApplication (the #170 root cause). Window objects,
-            // by contrast, are reachable regardless of key/frontmost state.
-            let mut windows: Vec<AxElementHandle> = Vec::new();
-            for attr in [ax_focused_window_attribute(), ax_main_window_attribute()] {
-                if let Ok(window) = copy_attribute(&app, attr.as_ptr()) {
-                    if is_ax_ui_element(window.as_ptr()) {
-                        windows.push(AxElementHandle::Real(window));
+            // #419: the app-scoped AXFocusedUIElement first. Standard AppKit
+            // windows do not support the window-scoped attribute (-25205), so
+            // without this the trusted provenance is unreachable for ordinary
+            // apps. It is trusted only when it is a text element inside the
+            // authorized window and not the AXApplication itself (the #170
+            // case, where a backgrounded app's focus resolves up to the app).
+            let app_focused = copy_attribute(&app, ax_focused_ui_element_attribute().as_ptr())
+                .ok()
+                .filter(|focused| is_ax_ui_element(focused.as_ptr()))
+                .map(AxElementHandle::Real);
+            let trusted_app_focus = trusted_app_focused_text_element(
+                app_focused,
+                window_id,
+                |focused| ax_element_is_application(focused, &app),
+                element_is_text_selectable,
+                |focused| ax_focused_element_window_id(focused, pid),
+            );
+            let resolved = resolve_text_element_preferring_app_focus(trusted_app_focus, || {
+                // Candidate windows, most-likely-active first: the app's
+                // focused/main window, then every AXWindows entry. Window
+                // objects are reachable regardless of key/frontmost state.
+                let mut windows: Vec<AxElementHandle> = Vec::new();
+                for attr in [ax_focused_window_attribute(), ax_main_window_attribute()] {
+                    if let Ok(window) = copy_attribute(&app, attr.as_ptr()) {
+                        if is_ax_ui_element(window.as_ptr()) {
+                            windows.push(AxElementHandle::Real(window));
+                        }
                     }
                 }
-            }
-            if let Ok(list) = copy_attribute(&app, ax_windows_attribute().as_ptr()) {
-                push_ax_element_array(&list, &mut windows);
-            }
-            let resolved = find_text_element_in_window_candidates(
-                &windows,
-                window_id,
-                |window| ax_element_window_id(window, pid),
-                window_text_element,
-            )?;
-            if let Some((element, source)) = resolved {
+                if let Ok(list) = copy_attribute(&app, ax_windows_attribute().as_ptr()) {
+                    push_ax_element_array(&list, &mut windows);
+                }
+                find_text_element_in_window_candidates(
+                    &windows,
+                    window_id,
+                    |window| ax_element_window_id(window, pid),
+                    window_text_element,
+                )
+            })?;
+            if let Some((element, provenance)) = resolved {
+                log::info!("remote-control: text focus source={}", provenance.label());
+                let source = provenance.source();
                 if let Some(ptr) = element.as_real_ptr() {
                     let error = unsafe {
                         AXUIElementSetMessagingTimeout(ptr, AX_APP_MESSAGING_TIMEOUT_SECONDS)
@@ -8194,6 +8213,46 @@ pub(crate) mod input {
                 }
             }
         }
+    }
+
+    /// #419: the trust gate for the app-scoped AXFocusedUIElement. All three
+    /// must hold: it is not the AXApplication element (#170: a backgrounded
+    /// app's focus can resolve up to the app), it is text-selectable, and its
+    /// window resolves to the authorized `window_id`. Any failure -- including
+    /// an unresolvable window identity -- means "not trusted", and the caller
+    /// falls back to the window-scoped attempt and then BFS. Checks run
+    /// cheapest first so a rejected element costs no window-identity lookup.
+    fn trusted_app_focused_text_element<T>(
+        focused: Option<T>,
+        window_id: u32,
+        is_application: impl FnOnce(&T) -> bool,
+        is_text_selectable: impl FnOnce(&T) -> bool,
+        focused_window_id: impl FnOnce(&T) -> Result<u32, AxError>,
+    ) -> Option<T> {
+        let focused = focused?;
+        if is_application(&focused) || !is_text_selectable(&focused) {
+            return None;
+        }
+        matches!(focused_window_id(&focused), Ok(id) if id == window_id).then_some(focused)
+    }
+
+    /// #419: a trusted app-scoped focus wins; otherwise the window-scoped
+    /// resolution runs (window focus, then BFS). The window path is only
+    /// evaluated when the app path did not produce a trusted element.
+    fn resolve_text_element_preferring_app_focus<T>(
+        trusted_app_focus: Option<T>,
+        window_scoped: impl FnOnce() -> Result<Option<(T, TextElementSource)>, AxError>,
+    ) -> Result<Option<(T, TextFocusProvenance)>, AxError> {
+        if let Some(element) = trusted_app_focus {
+            return Ok(Some((element, TextFocusProvenance::AppFocused)));
+        }
+        Ok(window_scoped()?.map(|(element, source)| {
+            let provenance = match source {
+                TextElementSource::FocusedElement => TextFocusProvenance::WindowFocused,
+                TextElementSource::BfsFallback => TextFocusProvenance::Bfs,
+            };
+            (element, provenance)
+        }))
     }
 
     fn find_text_element_in_window_candidates<T, R>(
@@ -8725,6 +8784,34 @@ pub(crate) mod input {
     fn element_is_text_selectable(element: &AxElementHandle) -> bool {
         let attribute = ax_selected_text_range_attribute();
         attribute_settable(element, attribute.as_ptr())
+    }
+
+    /// #419: is `element` the AXApplication element itself? CF equality with
+    /// the app element, or an `AXApplication` role (the #170 guard).
+    fn ax_element_is_application(element: &AxElementHandle, app: &AxElementHandle) -> bool {
+        if let (Some(element_ptr), Some(app_ptr)) = (element.as_real_ptr(), app.as_real_ptr()) {
+            if unsafe { CFEqual(element_ptr, app_ptr) } {
+                return true;
+            }
+        }
+        let role_attribute = ax_role_attribute();
+        let application_role = ax_application_role();
+        matches!(
+            copy_attribute(element, role_attribute.as_ptr()),
+            Ok(role) if unsafe { CFEqual(role.as_ptr(), application_role.as_ptr()) }
+        )
+    }
+
+    /// #419: the CGWindowID of the window that contains a focused element,
+    /// via its `AXWindow` attribute and the shared `ax_element_window_id`
+    /// path. No AXWindow means the identity is unavailable (untrusted).
+    fn ax_focused_element_window_id(element: &AxElementHandle, pid: i32) -> Result<u32, AxError> {
+        let window_attribute = ax_window_attribute();
+        let window = copy_attribute(element, window_attribute.as_ptr())?;
+        if !is_ax_ui_element(window.as_ptr()) {
+            return Err(AxError::new(K_AX_ERROR_WINDOW_IDENTITY_UNAVAILABLE));
+        }
+        ax_element_window_id(&AxElementHandle::Real(window), pid)
     }
 
     /// #170: resolve a window's editable text element without app-scoped focus.
@@ -9292,6 +9379,14 @@ pub(crate) mod input {
 
     fn ax_role_attribute() -> CfObject {
         cf_string(b"AXRole\0")
+    }
+
+    fn ax_window_attribute() -> CfObject {
+        cf_string(b"AXWindow\0")
+    }
+
+    fn ax_application_role() -> CfObject {
+        cf_string(b"AXApplication\0")
     }
 
     fn ax_scroll_area_role() -> CfObject {
@@ -12382,6 +12477,34 @@ pub(crate) mod input {
         }
     }
 
+    /// #419: where a resolved text element came from, for the per-shortcut
+    /// provenance log. Both focus sources are trusted; BFS is not.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TextFocusProvenance {
+        AppFocused,
+        WindowFocused,
+        Bfs,
+    }
+
+    impl TextFocusProvenance {
+        fn label(self) -> &'static str {
+            match self {
+                TextFocusProvenance::AppFocused => "app-focused",
+                TextFocusProvenance::WindowFocused => "window-focused",
+                TextFocusProvenance::Bfs => "bfs",
+            }
+        }
+
+        fn source(self) -> TextElementSource {
+            match self {
+                TextFocusProvenance::AppFocused | TextFocusProvenance::WindowFocused => {
+                    TextElementSource::FocusedElement
+                }
+                TextFocusProvenance::Bfs => TextElementSource::BfsFallback,
+            }
+        }
+    }
+
     /// Classify a key-down message as one of the AX-serviced text shortcuts.
     /// Requires exactly Cmd (+A/+C/+V) with no Shift/Ctrl/Alt, so Cmd+Shift+A,
     /// Ctrl+A, plain A, etc. are left to the normal CGEvent path.
@@ -13847,6 +13970,13 @@ pub(crate) mod input {
             // Defaults to FocusedElement (trusted) so existing happy-path tests
             // still exercise the destructive-op AX path.
             text_source: Mutex<TextElementSource>,
+            // #419: the app-scoped AXFocusedUIElement, run through the same
+            // production trust gate before the window-scoped `text_resolved`.
+            app_focused: Mutex<Option<u64>>,
+            // #419: element ids that are the AXApplication element itself.
+            application_ids: Mutex<std::collections::HashSet<u64>>,
+            // #419: the last provenance the fake resolver reported.
+            last_text_provenance: Mutex<Option<TextFocusProvenance>>,
             text_lengths: Mutex<HashMap<u64, i64>>,
             selected_texts: Mutex<HashMap<u64, String>>,
             capabilities: Mutex<HashMap<u64, AxCapabilities>>,
@@ -14303,6 +14433,20 @@ pub(crate) mod input {
                 *self.text_source.lock_unpoisoned() = TextElementSource::BfsFallback;
             }
 
+            // #419: model the app-scoped AXFocusedUIElement.
+            fn focus_app_on(&self, id: u64) {
+                *self.app_focused.lock_unpoisoned() = Some(id);
+            }
+
+            // #419: mark an element id as the AXApplication element itself.
+            fn mark_as_application(&self, id: u64) {
+                self.application_ids.lock_unpoisoned().insert(id);
+            }
+
+            fn last_text_provenance(&self) -> Option<TextFocusProvenance> {
+                *self.last_text_provenance.lock_unpoisoned()
+            }
+
             // F4: make subsequent AX act calls fail with the given error.
             fn fail_acts_with(&self, error: AxError) {
                 *self.act_error.lock_unpoisoned() = Some(error);
@@ -14391,19 +14535,41 @@ pub(crate) mod input {
                 if let Some(error) = *self.text_resolve_error.lock_unpoisoned() {
                     return Err(error);
                 }
-                let source = *self.text_source.lock_unpoisoned();
-                let resolved = self.text_resolved.lock_unpoisoned().clone();
-                if let Some(id) = resolved.as_ref().and_then(AxElementHandle::test_id) {
-                    if self
-                        .element_window_ids
-                        .lock_unpoisoned()
-                        .get(&id)
-                        .is_some_and(|candidate| *candidate != window_id)
-                    {
-                        return Err(AxError::new(K_AX_ERROR_WINDOW_ID_MISMATCH));
+                let app_focused = self.app_focused.lock_unpoisoned().map(Self::element);
+                let trusted_app_focus = trusted_app_focused_text_element(
+                    app_focused,
+                    window_id,
+                    |focused| {
+                        focused
+                            .test_id()
+                            .is_some_and(|id| self.application_ids.lock_unpoisoned().contains(&id))
+                    },
+                    |focused| self.capabilities(focused).text_selectable,
+                    |focused| {
+                        focused
+                            .test_id()
+                            .and_then(|id| self.element_window_ids.lock_unpoisoned().get(&id).copied())
+                            .ok_or_else(|| AxError::new(K_AX_ERROR_WINDOW_IDENTITY_UNAVAILABLE))
+                    },
+                );
+                let resolved = resolve_text_element_preferring_app_focus(trusted_app_focus, || {
+                    let source = *self.text_source.lock_unpoisoned();
+                    let resolved = self.text_resolved.lock_unpoisoned().clone();
+                    if let Some(id) = resolved.as_ref().and_then(AxElementHandle::test_id) {
+                        if self
+                            .element_window_ids
+                            .lock_unpoisoned()
+                            .get(&id)
+                            .is_some_and(|candidate| *candidate != window_id)
+                        {
+                            return Err(AxError::new(K_AX_ERROR_WINDOW_ID_MISMATCH));
+                        }
                     }
-                }
-                Ok(resolved.map(|element| (element, source)))
+                    Ok(resolved.map(|element| (element, source)))
+                })?;
+                *self.last_text_provenance.lock_unpoisoned() =
+                    resolved.as_ref().map(|(_, provenance)| *provenance);
+                Ok(resolved.map(|(element, provenance)| (element, provenance.source())))
             }
 
             fn text_length(&self, element: &AxElementHandle) -> Result<i64, AxError> {
@@ -15746,6 +15912,197 @@ pub(crate) mod input {
             let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
             assert_eq!(outcome, AxReplayOutcome::PassThrough);
             assert!(ax.ops().is_empty());
+        }
+
+        // ---- #419: trust the app-scoped focused text element ----
+
+        /// #419 fixture: the window-scoped focus is unsupported (AppKit
+        /// -25205), so the window path only reaches a BFS element (70) in the
+        /// shared window 42. `app_focus` is the app-scoped focused element.
+        fn app_focus_fixture(app_focus: u64) -> RecordingAxBackend {
+            let ax = RecordingAxBackend::default();
+            ax.place_element_in_window(70, 42);
+            ax.resolve_text_via_bfs_to(70);
+            ax.set_capabilities(70, text_selectable_caps());
+            ax.set_text_length(70, 3);
+            ax.focus_app_on(app_focus);
+            ax.set_capabilities(app_focus, text_selectable_caps());
+            ax.set_text_length(app_focus, 11);
+            ax
+        }
+
+        #[test]
+        fn app_focus_in_shared_window_is_trusted_for_select_all_and_paste() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            let ax = app_focus_fixture(71);
+            ax.place_element_in_window(71, 42);
+            let pb = RecordingPasteboard::default();
+            let message = key_message("KeyA", "a", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::Handled);
+            assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::AppFocused));
+            assert_eq!(
+                ax.ops(),
+                vec![AxOp::SetSelectedRange {
+                    id: 71,
+                    start: 0,
+                    len: 11,
+                }]
+            );
+
+            let ax = app_focus_fixture(71);
+            ax.place_element_in_window(71, 42);
+            let pb = RecordingPasteboard::with_text("pasted-419");
+            let message = key_message("KeyV", "v", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::Handled);
+            assert_eq!(
+                ax.ops(),
+                vec![AxOp::SetSelectedText {
+                    id: 71,
+                    text: "pasted-419".to_string(),
+                }]
+            );
+        }
+
+        #[test]
+        fn app_focus_in_another_window_of_the_same_app_is_untrusted() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            for (message, pasteboard) in [
+                (
+                    key_message("KeyA", "a", meta_only()),
+                    RecordingPasteboard::default(),
+                ),
+                (
+                    key_message("KeyV", "v", meta_only()),
+                    RecordingPasteboard::with_text("must-not-land"),
+                ),
+            ] {
+                let ax = app_focus_fixture(72);
+                ax.place_element_in_window(72, 43);
+                let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pasteboard).unwrap();
+                assert_eq!(outcome, AxReplayOutcome::PassThrough);
+                assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::Bfs));
+                assert!(ax.ops().is_empty(), "acted on a sibling window's focus");
+            }
+        }
+
+        #[test]
+        fn app_focus_resolving_to_the_application_is_untrusted() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            let ax = app_focus_fixture(73);
+            // #170: even if the app element were reported in the shared window
+            // and text-selectable, it is never trusted.
+            ax.place_element_in_window(73, 42);
+            ax.mark_as_application(73);
+            let pb = RecordingPasteboard::with_text("must-not-land");
+            let message = key_message("KeyV", "v", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::PassThrough);
+            assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::Bfs));
+            assert!(ax.ops().is_empty());
+        }
+
+        #[test]
+        fn app_focus_that_is_not_text_or_has_no_window_is_untrusted() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            // Not text-selectable.
+            let ax = app_focus_fixture(74);
+            ax.place_element_in_window(74, 42);
+            ax.set_capabilities(74, AxCapabilities::default());
+            let pb = RecordingPasteboard::default();
+            let message = key_message("KeyA", "a", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::PassThrough);
+            assert!(ax.ops().is_empty());
+
+            // Window identity unavailable.
+            let ax = app_focus_fixture(75);
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::PassThrough);
+            assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::Bfs));
+            assert!(ax.ops().is_empty());
+        }
+
+        #[test]
+        fn app_focus_is_used_when_the_window_scoped_attribute_is_unsupported() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            // The window path reaches nothing at all (window AXFocusedUIElement
+            // unsupported and no BFS hit): the app-scoped focus still serves.
+            let ax = RecordingAxBackend::default();
+            ax.focus_app_on(76);
+            ax.place_element_in_window(76, 42);
+            ax.set_capabilities(76, text_selectable_caps());
+            ax.set_text_length(76, 4);
+            let pb = RecordingPasteboard::default();
+            let message = key_message("KeyA", "a", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::Handled);
+            assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::AppFocused));
+            assert_eq!(
+                ax.ops(),
+                vec![AxOp::SetSelectedRange {
+                    id: 76,
+                    start: 0,
+                    len: 4,
+                }]
+            );
+        }
+
+        #[test]
+        fn window_scoped_focus_keeps_its_trusted_provenance() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            let ax = RecordingAxBackend::default();
+            ax.resolve_text_to(77);
+            ax.set_capabilities(77, text_selectable_caps());
+            ax.set_text_length(77, 2);
+            let pb = RecordingPasteboard::default();
+            let message = key_message("KeyA", "a", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::Handled);
+            assert_eq!(
+                ax.last_text_provenance(),
+                Some(TextFocusProvenance::WindowFocused)
+            );
+        }
+
+        #[test]
+        fn text_focus_provenance_labels_and_trust() {
+            assert_eq!(TextFocusProvenance::AppFocused.label(), "app-focused");
+            assert_eq!(TextFocusProvenance::WindowFocused.label(), "window-focused");
+            assert_eq!(TextFocusProvenance::Bfs.label(), "bfs");
+            assert!(TextFocusProvenance::AppFocused.source().is_trusted_focus());
+            assert!(TextFocusProvenance::WindowFocused.source().is_trusted_focus());
+            assert!(!TextFocusProvenance::Bfs.source().is_trusted_focus());
+        }
+
+        #[test]
+        fn trusted_app_focus_skips_the_window_lookup_for_rejected_elements() {
+            let mut window_lookups = 0;
+            let trusted = trusted_app_focused_text_element(
+                Some(1_u64),
+                42,
+                |_| true,
+                |_| true,
+                |_| {
+                    window_lookups += 1;
+                    Ok(42)
+                },
+            );
+            assert_eq!(trusted, None);
+            assert_eq!(window_lookups, 0);
         }
 
         #[test]
