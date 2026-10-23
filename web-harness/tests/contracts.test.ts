@@ -214,9 +214,12 @@ test('remote-control binary fixtures and reliability rule are shared', () => {
     v: 1 as const, kind: 'wheel' as const, targetUserId: 'native-1', controllerId: 'web-1', windowId: 42, seq: 43,
     grantToken, x: 0.5, y: 0.25, deltaX: -12, deltaY: 120, deltaMode: 0 as const, modifiers: { alt: false, ctrl: true, meta: false, shift: false }
   };
-  assert.deepEqual(contractFixture.rules.reliability.lossy, ['pointer.move.buttons==0', 'wheel']);
+  assert.deepEqual(contractFixture.rules.reliability.lossy, ['pointer.move.buttons==0']);
+  assert.ok(contractFixture.rules.reliability.reliable.includes('wheel'));
   assert.equal(remoteControlPublishOptions(pointer).reliable, false);
-  assert.equal(remoteControlPublishOptions(wheel).reliable, false);
+  // #400: a legacy wheel (macOS host, no v2 envelope) is reliable too -- its
+  // deltas add up, so a dropped packet is a lost scroll.
+  assert.equal(remoteControlPublishOptions(wheel).reliable, true);
   assert.equal(remoteControlPublishOptions({ ...pointer, buttons: 1 }).reliable, true);
   assert.deepEqual(remoteControlPublishOptions(pointer).destinationIdentities, ['native-1']);
   // #370 corrective pass (Bug A): no grant token to fingerprint means no
@@ -905,7 +908,7 @@ test('remote-control packet policy pins reliability, destination, and authority'
     { packet: 'result', reliability: 'reliable', destination: 'controller', authority: 'authenticatedHost' },
     { packet: 'pointerMoveNoButtons', reliability: 'lossy', destination: 'host', authority: 'authenticatedController' },
     { packet: 'pointerHeldOrDiscrete', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
-    { packet: 'wheelLegacy', reliability: 'lossy', destination: 'host', authority: 'authenticatedController' },
+    { packet: 'wheelLegacy', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'scrollDiscrete', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'key', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'text', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },

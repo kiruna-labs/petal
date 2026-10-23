@@ -1039,13 +1039,19 @@ Transport policy is authoritative in the contract fixture:
 | `status`, `result` | reliable | controller | authenticated host |
 | pointer move with no held buttons | lossy | host | authenticated controller |
 | held-pointer or discrete pointer | reliable | host | authenticated controller |
-| legacy wheel | lossy | host | authenticated controller |
+| legacy wheel | reliable | host | authenticated controller |
 | discrete scroll, key, text | reliable | host | authenticated controller |
 | `copyRequest` | reliable | host | authenticated controller |
 | `clipboardTextStream` | reliable | one targeted native participant | active remote-control grant |
 
 The exact machine-readable matrix is
 `contracts/petal-contracts.json.remoteControlPacketPolicy`.
+
+Only a hover move (no held buttons) is lossy, because each one fully replaces
+the last. Wheel deltas add up, so a dropped wheel packet is a scroll that never
+happens; every wheel is reliable (#400). For the same reason a host that
+coalesces a queued burst of legacy wheel packets sums their deltas (same
+`deltaMode`) instead of keeping only the newest.
 
 #### Binary hot-path frame (pointer-move / wheel only)
 

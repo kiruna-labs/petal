@@ -211,7 +211,7 @@ test('normalizedPointInContainedMedia can reject or clamp letterbox hits', () =>
   });
 });
 
-test('remoteControlPublishOptions sends motion and wheel streams unreliably', () => {
+test('remoteControlPublishOptions sends only hover moves unreliably', () => {
   for (const vector of contractFixture.remoteControlMessages) {
     assert.deepEqual(
       remoteControlPublishOptions(vector.message),

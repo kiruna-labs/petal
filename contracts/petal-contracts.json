@@ -1095,7 +1095,7 @@
     },
     {
       "name": "wheel",
-      "reliable": false,
+      "reliable": true,
       "message": {
         "v": 1,
         "targetUserId": "native-1",
@@ -1685,7 +1685,7 @@
     },
     {
       "packet": "wheelLegacy",
-      "reliability": "lossy",
+      "reliability": "reliable",
       "destination": "host",
       "authority": "authenticatedController"
     },
@@ -2288,10 +2288,10 @@
   "rules": {
     "reliability": {
       "lossy": [
-        "pointer.move.buttons==0",
-        "wheel"
+        "pointer.move.buttons==0"
       ],
       "reliable": [
+        "wheel",
         "pointer.move.buttons!=0",
         "pointer.down",
         "pointer.up",
