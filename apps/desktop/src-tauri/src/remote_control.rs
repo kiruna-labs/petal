@@ -205,6 +205,39 @@ thread_local! {
     /// never leaks across events or shards.
     static INJECTION_CANCELLED: std::cell::RefCell<Option<Arc<AtomicBool>>> =
         std::cell::RefCell::new(None);
+
+    /// #404: set when THIS injection actually delivered a key-down to the
+    /// target (posted past the focus gate, or serviced through AX). Same
+    /// one-thread-per-event scoping as `INJECTION_CANCELLED`. A replay that
+    /// returns `Ok` without delivering -- an unmapped key, a cancelled
+    /// injection -- leaves it false.
+    static KEY_DOWN_DELIVERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// #404: record that the current injection delivered a key-down.
+pub(crate) fn note_key_down_delivered() {
+    KEY_DOWN_DELIVERED.with(|cell| cell.set(true));
+}
+
+fn take_key_down_delivered() -> bool {
+    KEY_DOWN_DELIVERED.with(|cell| cell.replace(false))
+}
+
+/// #404: does a successfully completed replay count toward the
+/// `remote_control_input` telemetry? `type` used to fire for ANY key packet
+/// that returned `Ok` -- releases, host-synthesized releases, unmapped keys
+/// and cancelled injections included -- so it reported typing that never
+/// reached the target. Only a key-DOWN counts, and on macOS only one the key
+/// path reports as delivered. Other platforms do not report delivery yet and
+/// keep the down-only `Ok` count.
+fn replay_counts_as_applied_input(message: &RemoteControlMessage, key_down_delivered: bool) -> bool {
+    if message.message_type != RemoteControlType::Key {
+        return true;
+    }
+    if message.action != Some(RemoteControlAction::Down) {
+        return false;
+    }
+    !cfg!(target_os = "macos") || key_down_delivered
 }
 
 /// Returns true if the currently-running injection was abandoned by its
@@ -3161,13 +3194,26 @@ enum ReplayRunOutcome {
 /// caller, worse. A spawn failure is treated as an ordinary injection
 /// failure instead.
 fn run_replay_with_deadline(task: &ReplayTask, inject: &ReplayInjector) -> ReplayRunOutcome {
+    run_replay_with_deadline_tracked(task, inject).0
+}
+
+/// `run_replay_with_deadline`, plus whether the injection delivered a
+/// key-down (#404, see `KEY_DOWN_DELIVERED`). Always `false` unless the
+/// outcome is `Completed`.
+fn run_replay_with_deadline_tracked(
+    task: &ReplayTask,
+    inject: &ReplayInjector,
+) -> (ReplayRunOutcome, bool) {
     let shard_key = ReplayShardKey::for_task(task);
     if !active_injection_keys().lock_unpoisoned().insert(shard_key) {
-        return ReplayRunOutcome::Completed(Err(
-            "previous target injection is still in progress".to_string()
-        ));
+        return (
+            ReplayRunOutcome::Completed(Err(
+                "previous target injection is still in progress".to_string()
+            )),
+            false,
+        );
     }
-    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let (tx, rx) = mpsc::channel::<(Result<(), String>, bool)>();
     let inject = Arc::clone(inject);
     let message = task.message.clone();
     let frame = task.frame;
@@ -3179,11 +3225,13 @@ fn run_replay_with_deadline(task: &ReplayTask, inject: &ReplayInjector) -> Repla
         .name("petal-rc-inject".to_string())
         .spawn(move || {
             INJECTION_CANCELLED.with(|cell| *cell.borrow_mut() = Some(thread_cancelled));
+            take_key_down_delivered();
             let result = inject(&message, frame, target_pid);
+            let key_down_delivered = take_key_down_delivered();
             active_injection_keys()
                 .lock_unpoisoned()
                 .remove(&thread_shard_key);
-            let _ = tx.send(result);
+            let _ = tx.send((result, key_down_delivered));
         });
     let _handle = match spawn_result {
         Ok(handle) => handle,
@@ -3194,16 +3242,19 @@ fn run_replay_with_deadline(task: &ReplayTask, inject: &ReplayInjector) -> Repla
                 task.message.window_id,
                 task.message.controller_id
             );
-            return ReplayRunOutcome::Completed(Err(format!(
-                "failed to spawn injection thread: {error}"
-            )));
+            return (
+                ReplayRunOutcome::Completed(Err(format!(
+                    "failed to spawn injection thread: {error}"
+                ))),
+                false,
+            );
         }
     };
     match rx.recv_timeout(REPLAY_EVENT_DEADLINE) {
-        Ok(result) => ReplayRunOutcome::Completed(result),
+        Ok((result, key_down_delivered)) => (ReplayRunOutcome::Completed(result), key_down_delivered),
         Err(_) => {
             cancelled.store(true, Ordering::Release);
-            ReplayRunOutcome::TimedOut
+            (ReplayRunOutcome::TimedOut, false)
         }
     }
     // `_handle` drops here without joining -- `JoinHandle::drop` detaches
@@ -3330,7 +3381,8 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
             task.target_pid
         );
     }
-    match run_replay_with_deadline(&task, inject) {
+    let (run_outcome, key_down_delivered) = run_replay_with_deadline_tracked(&task, inject);
+    match run_outcome {
         ReplayRunOutcome::Completed(Ok(())) => {
             let injected_at_ms = now_ms();
             record_input_latency_marker(&task.message, injected_at_ms);
@@ -3357,7 +3409,9 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
             // #819: observer only -- see `cockpit_ledger`.
             #[cfg(feature = "cockpit-privileged")]
             cockpit_ledger::record_replay(&task.message, "applied");
-            crate::analytics::note_remote_control_applied(&task.message);
+            if replay_counts_as_applied_input(&task.message, key_down_delivered) {
+                crate::analytics::note_remote_control_applied(&task.message);
+            }
             complete_replay_task(
                 &task,
                 TerminalDisposition::success(
@@ -10496,6 +10550,13 @@ pub(crate) mod input {
             note_pointer_release_not_injected(message, PointerReleaseFailure::InjectionCancelled);
             return Ok(());
         }
+        // #404: an AX-serviced shortcut (Cmd+A/C/V) is a delivered key-down.
+        if ax_outcome == AxReplayOutcome::Handled
+            && message.message_type == RemoteControlType::Key
+            && message.action == Some(RemoteControlAction::Down)
+        {
+            super::note_key_down_delivered();
+        }
         let result = match ax_outcome {
             AxReplayOutcome::Handled => Ok(()),
             AxReplayOutcome::PassThrough
@@ -12651,13 +12712,19 @@ pub(crate) mod input {
                     key_down,
                     cg_flags_for_modifiers(&message.modifiers),
                     unicode.as_deref(),
-                )
+                )?;
+                if key_down {
+                    super::note_key_down_delivered();
+                }
+                Ok(())
             }
             // Text is never a release -- `plain_text_for_key` returns None
             // unless `key_down` -- so this arm stays fully gated.
             KeyReplayPlan::Text(text) => {
                 sink.verify_key_window_with_recovery(message.window_id)?;
-                sink.text(&text)
+                sink.text(&text)?;
+                super::note_key_down_delivered();
+                Ok(())
             }
         }
     }

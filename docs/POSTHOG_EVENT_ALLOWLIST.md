@@ -144,7 +144,7 @@ separate `down`/`up`, never key names.
 | `kind` | Coalesce | Maps from |
 |---|---|---|
 | `click` | Once per discrete click (`pointer` `click`, or a completed down+up). Not every mouse-down. | `petal.remote-control` `pointer` |
-| `type` | Once per typing burst (idle ≥1s). A held-key repeat is still one burst. | `key` packets |
+| `type` | Once per typing burst (idle ≥1s). A held-key repeat is still one burst. | `key` `down` packets the host actually delivered (#404). Never a release, a host-synthesized release, an unmapped key or a cancelled injection. |
 | `paste` | Once per paste. | `text` paste packets (#375) |
 | `scroll` | Once per wheel burst (idle ≥500ms). Not per wheel tick. | `wheel` packets |
 
