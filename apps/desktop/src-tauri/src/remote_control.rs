@@ -5592,8 +5592,8 @@ fn deliver_sequenced_inputs(
         log::debug!("remote-control: dropping input bundle from a retired stream of '{sender}'");
     }
     if output.recovered > 0 {
-        log::info!(
-            "remote-control: recovered {} input(s) from bundle redundancy for window {window_id} from '{sender}' (#399)",
+        log::debug!(
+            "remote-control: {} input(s) delivered from a bundle's earlier slots (redundant copy or paced batch) for window {window_id} from '{sender}' (#399)",
             output.recovered
         );
     }

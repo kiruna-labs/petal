@@ -251,8 +251,8 @@ impl RedundantInputSender {
 pub(crate) struct SequencerOutput {
     /// Inputs to hand to the ordinary per-message path, in order.
     pub deliver: Vec<RemoteControlMessage>,
-    /// Delivered inputs whose own packet never arrived (recovered from a
-    /// later bundle's redundancy).
+    /// Delivered inputs that were not the newest in the bundle that carried
+    /// them (a redundant copy or a paced batch).
     pub recovered: u64,
     pub duplicates: u64,
     /// Inputs given up on. Non-zero means held input must be released first.
