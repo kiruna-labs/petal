@@ -8987,7 +8987,22 @@ async fn run_remote_control_native_to_native_scenario(
             ]);
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
-        let script = rc_n2n::drive_script(&step);
+        let Some(script) = rc_n2n::drive_script(&step) else {
+            // The release step: the same command the header's control toggle
+            // invokes (see `DriveStep::Release` for why it is not an Escape).
+            if let Err(error) = crate::remote_control::remote_control_set_active(
+                app.clone(),
+                host_window_id,
+                Some(host_identity.clone()),
+                false,
+            )
+            .await
+            {
+                drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
+            }
+            tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
+            continue;
+        };
         if let Err(error) =
             crate::compositor::cockpit_eval_in_control_overlay(app, &host_identity, host_window_id, script)
         {
@@ -9477,10 +9492,9 @@ async fn run_remote_control_native_to_chrome_scenario(
     let mut omnibox_after: Result<String, String> = Err("never read".to_string());
     let mut omnibox_focused_after: Option<bool> = None;
     for step in rc_n2n_chrome::keystone_steps(shape, click) {
-        if matches!(step, rc_n2n::DriveStep::ReleaseViaEscape) {
-            // Read the verdict inputs BEFORE the release: Escape is the
-            // release key, and an Escape reaching the address bar would revert
-            // exactly the evidence this case exists to catch.
+        if matches!(step, rc_n2n::DriveStep::Release) {
+            // Read the verdict inputs BEFORE the release, so nothing the
+            // release does to focus can change the evidence.
             let deadline = Instant::now() + Duration::from_millis(rc_n2n_chrome::TYPED_VALUE_POLL_MS);
             loop {
                 typed_state = chrome.page_state().await;
@@ -9493,7 +9507,22 @@ async fn run_remote_control_native_to_chrome_scenario(
             omnibox_after = live::omnibox_value(chrome_pid);
             omnibox_focused_after = live::omnibox_is_focused(chrome_pid).ok();
         }
-        let script = rc_n2n::drive_script(&step);
+        let Some(script) = rc_n2n::drive_script(&step) else {
+            // The release step: the same command the header's control toggle
+            // invokes (see `DriveStep::Release` for why it is not an Escape).
+            if let Err(error) = crate::remote_control::remote_control_set_active(
+                app.clone(),
+                host_window_id,
+                Some(host_identity.clone()),
+                false,
+            )
+            .await
+            {
+                drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
+            }
+            tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
+            continue;
+        };
         if let Err(error) =
             crate::compositor::cockpit_eval_in_control_overlay(app, &host_identity, host_window_id, script)
         {
@@ -9782,7 +9811,22 @@ async fn run_remote_control_native_to_web_scenario(
     let granted_locally = await_controller_grant(host_window_id, Duration::from_secs(15)).await;
     let mut drive_errors: Vec<String> = Vec::new();
     for step in rc_n2n::delivery_keystone_steps() {
-        let script = rc_n2n::drive_script(&step);
+        let Some(script) = rc_n2n::drive_script(&step) else {
+            // The release step: the same command the header's control toggle
+            // invokes (see `DriveStep::Release` for why it is not an Escape).
+            if let Err(error) = crate::remote_control::remote_control_set_active(
+                app.clone(),
+                host_window_id,
+                Some(host_identity.clone()),
+                false,
+            )
+            .await
+            {
+                drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
+            }
+            tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
+            continue;
+        };
         if let Err(error) = crate::compositor::cockpit_eval_in_control_overlay(
             app,
             &host_identity,

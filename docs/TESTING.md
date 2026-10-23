@@ -1301,6 +1301,12 @@ the console must be UNLOCKED (the scenario preflights this and says so). Separat
 already contains its keystone text, so "the typed text landed" can never be
 satisfied by content that was there before the drive.
 
+The release step calls `remote_control_set_active(active: false)`, the command
+the remote window header's control toggle invokes. It used to be an Escape
+dispatched at the control overlay, but the overlay forwards Escape to the host
+as an ordinary key and has no release binding, so on e602a873 every RC-N2N run
+failed with "Escape did not release control" before reaching its real checks.
+
 `RC-N2W` is the same controller against a browser peer. It proves DELIVERY
 only — the harness records what it receives and never claims an input was
 applied, because a browser cannot inject OS input. Its keystone deliberately
@@ -1347,15 +1353,14 @@ It reproduces the #404 incident condition measured as T1 case 8:
   omnibox, no activation) right before the drive, and the run records that it
   took (`rc-n2n-chrome-predrive` → `omniboxFocused`).
 - The controller then clicks the field's text area and types the keystone
-  through the real native controller route, and releases with Escape. No Command chords: a Cmd+V would paste the machine's
+  through the real native controller route, then releases. No Command chords: a Cmd+V would paste the machine's
   clipboard into the very field the oracle reads.
 
 Oracle (`test_cockpit/rc_n2n_chrome.rs`, `evaluate`): **PASS only when the
 page's `input.value`, read over the DevTools protocol, equals the keystone
 exactly, and the address bar's AX value did not receive it.** Keys that went to
 the address bar are reported by name as the #404 failure. The field and the
-address bar are read after the typing settles and *before* the release, since
-an Escape reaching the address bar would revert the evidence. A field or
+address bar are read after the typing settles and *before* the release. A field or
 address bar that cannot be read is INFRA-FAIL, never "empty". Chrome and its
 profile are killed and deleted on every exit path (the target's `Drop`).
 

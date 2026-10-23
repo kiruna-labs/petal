@@ -101,7 +101,7 @@ pub(crate) fn keystone_steps(shape: PageShape, click: (u32, u32)) -> Vec<super::
             y_permille: click.1,
         },
         DriveStep::Type(shape.keystone().to_string()),
-        DriveStep::ReleaseViaEscape,
+        DriveStep::Release,
     ]
 }
 
@@ -438,7 +438,8 @@ pub(crate) fn evaluate(obs: ChromeObservations<'_>) -> RcVerdict {
     }
     if !obs.driven.iter().any(|input| input.kind == "release") {
         return RcVerdict::TestFail(
-            "Escape did not release control: the route published no release message".to_string(),
+            "the release never reached the wire: the controller published no release message"
+                .to_string(),
         );
     }
     if obs.host_effects.is_empty() {
@@ -1096,7 +1097,7 @@ mod tests {
                         y_permille: 640
                     },
                     DriveStep::Type(shape.keystone().to_string()),
-                    DriveStep::ReleaseViaEscape
+                    DriveStep::Release
                 ]
             );
         }

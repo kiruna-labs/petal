@@ -55,11 +55,14 @@ pub(crate) enum DriveStep {
     /// A Command chord (Cmd+A, Cmd+C, Cmd+V); Copy/Paste are normalized by
     /// the native control overlay, while Cmd+A remains ordinary key input.
     MetaChord(char),
-    /// Escape — the route's own release path, which invokes
-    /// `remote_control_set_active(active: false)`. Releasing through the real
-    /// key handler rather than a second Rust call keeps the release in the
-    /// same code path a user takes.
-    ReleaseViaEscape,
+    /// Release control through `remote_control_set_active(active: false)`,
+    /// the command the remote window header's control toggle invokes
+    /// (`routes/compositor/surface`). This used to be an Escape dispatched at
+    /// the control overlay, but the overlay now forwards Escape to the host
+    /// as an ordinary key and has no release binding (measured on e602a873:
+    /// RC-N2N published `key Escape down/up` and no release message). The
+    /// step has no overlay script; the scenarios run it from Rust.
+    Release,
 }
 
 /// The ordered keystone plan. Kept as one function so the scenario, the docs
@@ -71,7 +74,7 @@ pub(crate) fn keystone_steps() -> Vec<DriveStep> {
         DriveStep::MetaChord('a'),
         DriveStep::MetaChord('c'),
         DriveStep::MetaChord('v'),
-        DriveStep::ReleaseViaEscape,
+        DriveStep::Release,
     ]
 }
 
@@ -82,7 +85,7 @@ pub(crate) fn delivery_keystone_steps() -> Vec<DriveStep> {
         DriveStep::Click,
         DriveStep::Type(KEYSTONE_TEXT.to_string()),
         DriveStep::MetaChord('a'),
-        DriveStep::ReleaseViaEscape,
+        DriveStep::Release,
     ]
 }
 
@@ -92,7 +95,7 @@ pub(crate) fn step_id(step: &DriveStep) -> String {
         DriveStep::Click | DriveStep::ClickAt { .. } => "click".to_string(),
         DriveStep::Type(_) => "type".to_string(),
         DriveStep::MetaChord(key) => format!("cmd-{key}"),
-        DriveStep::ReleaseViaEscape => "release".to_string(),
+        DriveStep::Release => "release".to_string(),
     }
 }
 
@@ -131,8 +134,9 @@ fn key_code_for(ch: char) -> String {
 /// Svelte route decides what to publish. `drive_script_never_invokes_the_send_command`
 /// is the guard that keeps a future edit from quietly turning this back into
 /// wire injection.
-pub(crate) fn drive_script(step: &DriveStep) -> String {
-    match step {
+/// `None` for `Release`, which is not an overlay gesture (see the variant).
+pub(crate) fn drive_script(step: &DriveStep) -> Option<String> {
+    Some(match step {
         DriveStep::Click => click_script(500, 500),
         DriveStep::ClickAt {
             x_permille,
@@ -167,13 +171,8 @@ pub(crate) fn drive_script(step: &DriveStep) -> String {
             js_string(&key.to_string()),
             js_string(&key_code_for(*key))
         ),
-        DriveStep::ReleaseViaEscape => "(() => {\n\
-             const init = { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true };\n\
-             window.dispatchEvent(new KeyboardEvent('keydown', init));\n\
-             window.dispatchEvent(new KeyboardEvent('keyup', init));\n\
-           })();"
-            .to_string(),
-    }
+        DriveStep::Release => return None,
+    })
 }
 
 /// The click gesture: a real pointer down+up pair dispatched at the
@@ -377,7 +376,8 @@ pub(crate) fn evaluate(obs: RcN2nObservations<'_>) -> RcVerdict {
     }
     if !obs.driven.iter().any(|input| input.kind == "release") {
         return RcVerdict::TestFail(
-            "Escape did not release control: the route published no release message".to_string(),
+            "the release never reached the wire: the controller published no release message"
+                .to_string(),
         );
     }
 
@@ -860,7 +860,9 @@ mod tests {
         // script calls the Tauri command itself, it stops exercising the
         // controller route and starts impersonating it.
         for step in keystone_steps() {
-            let script = drive_script(&step);
+            let Some(script) = drive_script(&step) else {
+                continue;
+            };
             for forbidden in [
                 "remote_control_send",
                 "remoteControlSend",
@@ -879,7 +881,7 @@ mod tests {
 
     #[test]
     fn click_script_dispatches_a_real_pointer_pair_at_the_overlay() {
-        let script = drive_script(&DriveStep::Click);
+        let script = drive_script(&DriveStep::Click).unwrap();
         assert!(script.contains(".control-overlay"), "{script}");
         assert!(script.contains("new PointerEvent"), "{script}");
         assert!(script.contains("'pointerdown'"), "{script}");
@@ -895,21 +897,25 @@ mod tests {
         let script = drive_script(&DriveStep::ClickAt {
             x_permille: 120,
             y_permille: 640,
-        });
+        })
+        .unwrap();
         assert!(script.contains("r.width * 120 / 1000"), "{script}");
         assert!(script.contains("r.height * 640 / 1000"), "{script}");
         assert!(script.contains("'pointerdown'") && script.contains("'pointerup'"));
         let clamped = drive_script(&DriveStep::ClickAt {
             x_permille: 5000,
             y_permille: 0,
-        });
+        })
+        .unwrap();
         assert!(clamped.contains("r.width * 1000 / 1000"), "{clamped}");
-        assert!(drive_script(&DriveStep::Click).contains("r.width * 500 / 1000"));
+        assert!(drive_script(&DriveStep::Click)
+            .unwrap()
+            .contains("r.width * 500 / 1000"));
     }
 
     #[test]
     fn type_script_emits_one_key_pair_per_character_with_real_codes() {
-        let script = drive_script(&DriveStep::Type("ab".to_string()));
+        let script = drive_script(&DriveStep::Type("ab".to_string())).unwrap();
         assert!(script.contains("[\"a\", \"KeyA\"]"), "{script}");
         assert!(script.contains("[\"b\", \"KeyB\"]"), "{script}");
         assert!(script.contains("'keydown'"), "{script}");
@@ -922,7 +928,7 @@ mod tests {
 
     #[test]
     fn typing_is_paced_and_finishes_inside_the_settle_window() {
-        let script = drive_script(&DriveStep::Type(KEYSTONE_TEXT.to_string()));
+        let script = drive_script(&DriveStep::Type(KEYSTONE_TEXT.to_string())).unwrap();
         assert!(
             script.contains(&format!("setTimeout(resolve, {KEYSTROKE_INTERVAL_MS})")),
             "a burst can be collapsed by the host's coalescing replay queue, and a dropped \
@@ -938,17 +944,18 @@ mod tests {
 
     #[test]
     fn meta_chord_script_sets_the_command_modifier() {
-        let script = drive_script(&DriveStep::MetaChord('a'));
+        let script = drive_script(&DriveStep::MetaChord('a')).unwrap();
         assert!(script.contains("metaKey: true"), "{script}");
         assert!(script.contains("\"a\""), "{script}");
         assert!(script.contains("\"KeyA\""), "{script}");
     }
 
     #[test]
-    fn release_script_uses_escape_so_the_route_owns_the_release() {
-        let script = drive_script(&DriveStep::ReleaseViaEscape);
-        assert!(script.contains("'Escape'"), "{script}");
-        assert!(script.contains("window.dispatchEvent"), "{script}");
+    fn release_is_not_an_overlay_gesture() {
+        // The overlay forwards Escape to the host; releasing must go through
+        // remote_control_set_active(false) instead of a dispatched key.
+        assert_eq!(drive_script(&DriveStep::Release), None);
+        assert_eq!(step_id(&DriveStep::Release), "release");
     }
 
     #[test]
