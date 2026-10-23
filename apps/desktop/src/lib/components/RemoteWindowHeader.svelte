@@ -981,16 +981,17 @@
     font-weight: 500;
   }
 
+  /* One line, always (#407): the header is a 44px strip. Every status label
+     is a short phrase, so the chip never shrinks and never clips (UI text
+     must never truncate); the sanctioned-ellipsis .title gives way instead. */
   .status-chip {
-    flex: 0 1 auto;
-    min-height: 24px;
-    height: auto;
+    flex: 0 0 auto;
+    height: 24px;
+    box-sizing: border-box;
     display: inline-flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 6px;
-    min-width: 0;
-    max-width: 220px;
-    padding: 4px 9px;
+    padding: 0 9px;
     border-radius: var(--radius-chip);
     background: color-mix(in srgb, var(--identity-header-ink) 9%, transparent);
     border: 1px solid color-mix(in srgb, var(--identity-header-ink) 16%, transparent);
@@ -1000,10 +1001,7 @@
     font-weight: 600;
     line-height: 1.2;
     letter-spacing: 0;
-    overflow: visible;
-    overflow-wrap: anywhere;
-    text-wrap: pretty;
-    white-space: normal;
+    white-space: nowrap;
   }
 
   .status-chip-dot {
@@ -1015,11 +1013,7 @@
   }
 
   .status-chip-text {
-    min-width: 0;
-    overflow: visible;
-    overflow-wrap: anywhere;
-    text-wrap: pretty;
-    white-space: normal;
+    white-space: nowrap;
   }
 
   .status-chip.warning {
