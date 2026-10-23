@@ -77,6 +77,21 @@ on:
         required: false
         default: ""
         type: string
+      net_delay_ms:
+        description: "RED-PROOF ONLY (#378): override the impaired pass's one-way delay per SFU traversal (default PETAL_NET_IMPAIR_DELAY_MS). Budgets stay fixed, so a larger value must fail the network stages. Leave empty."
+        required: false
+        default: ""
+        type: string
+      net_loss_pct:
+        description: "RED-PROOF ONLY (#378): override the impaired pass's loss % each way (default PETAL_NET_IMPAIR_LOSS_PCT). Leave empty."
+        required: false
+        default: ""
+        type: string
+      freeze_probe_red_pause_ms:
+        description: "RED-PROOF ONLY (#378): pause the freeze probe's animated source this many ms mid-probe to prove the presented-freeze check fails. Leave empty."
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       ref:
@@ -204,6 +219,34 @@ jobs:
       PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS: "50"
       PETAL_RC_PHOTON_P50_BUDGET_MS: "250"
       PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS: "400"
+      # #378 PRESENTED-VIDEO FREEZE. After the photon samples the sentinel
+      # animates at 30Hz for PETAL_RC_FREEZE_PROBE_MS and the web viewer's
+      # requestVideoFrameCallback gaps are scored: no presented frame for
+      # > 500ms while the source is moving is a freeze a user sees. Same
+      # budget clean and impaired -- a network that freezes video is the bug.
+      PETAL_RC_FREEZE_PROBE_MS: "20000"
+      PETAL_RC_PRESENTED_FREEZE_BUDGET_MS: "500"
+      # #378 IMPAIRED PASS. The loopback runs on localhost (0ms, lossless),
+      # which no meeting has. After the clean pass the same suites run again
+      # with dummynet on the LiveKit ports (scripts/ci/net-impair.sh): every
+      # participant gets 20ms each way to the SFU (40ms RTT -- a good home
+      # connection to an in-region SFU) and 1% loss each way (~2% end to end
+      # over the two hops of a meeting: ordinary Wi-Fi, not a bad network).
+      PETAL_NET_IMPAIR_DELAY_MS: "20"
+      PETAL_NET_IMPAIR_LOSS_PCT: "1"
+      # Impaired budgets are the clean ones plus the delay the profile adds on
+      # the stage's path -- 2 traversals for an input (controller->SFU->host),
+      # 4 for press-to-photon (input there, video back) -- and nothing for
+      # loss: loss that slows the median or the tail is a finding, not noise.
+      # Host-only stages keep the clean budgets (the network is not on their
+      # path; the attribution verdict also checks they did not move). Fixed
+      # constants: a red-proof raises net_delay_ms and must FAIL these.
+      IMPAIRED_OBSERVATION_BUDGET_MS: "660"     # 620 + 2x20
+      IMPAIRED_OBSERVATION_P50_MS: "240"        # 200 + 2x20
+      IMPAIRED_OBSERVATION_P95_MS: "440"        # 400 + 2x20
+      IMPAIRED_SEND_TO_INJECT_P95_MS: "90"      #  50 + 2x20
+      IMPAIRED_PHOTON_P50_MS: "330"             # 250 + 4x20
+      IMPAIRED_PHOTON_P95_MS: "480"             # 400 + 4x20
       # QUARANTINE (release gate). Comma-separated. A listed failure is
       # printed as a ::warning "QUARANTINED" -- never counted as a pass -- and
       # does not fail the gate; anything NOT listed does. Every entry needs a
@@ -526,6 +569,9 @@ jobs:
           PETAL_WEDGE_EVIDENCE_DIR: ${{ runner.temp }}/petal-nightly-loopback
           PETAL_DEV_LOG: ${{ runner.temp }}/petal-nightly-loopback/petal-dev.log
           RC_TEST_REPLAY_DELAY_MS: ${{ inputs.rc_test_replay_delay_ms || '' }}
+          NET_DELAY_MS_OVERRIDE: ${{ inputs.net_delay_ms || '' }}
+          NET_LOSS_PCT_OVERRIDE: ${{ inputs.net_loss_pct || '' }}
+          PETAL_RC_FREEZE_PROBE_RED_PAUSE_MS: ${{ inputs.freeze_probe_red_pause_ms || '' }}
         run: |
           set -euo pipefail
 
@@ -587,16 +633,28 @@ jobs:
           RESULTS_JSON="$LOG_DIR/remote-control-results.json"
           PHOTON_JSON="$LOG_DIR/remote-control-photon.json"
           LATENCY_JSON="$LOG_DIR/remote-control-latency.json"
+          IMPAIRED_RESULTS_JSON="$LOG_DIR/remote-control-results-impaired.json"
+          IMPAIRED_PHOTON_JSON="$LOG_DIR/remote-control-photon-impaired.json"
+          IMPAIRED_LATENCY_JSON="$LOG_DIR/remote-control-latency-impaired.json"
+          CLEAN_PETAL_LOG="$LOG_DIR/petal-dev-clean.log"
+          IMPAIRED_PETAL_LOG="$LOG_DIR/petal-dev-impaired.log"
+          NET_DELAY_MS="${NET_DELAY_MS_OVERRIDE:-$PETAL_NET_IMPAIR_DELAY_MS}"
+          NET_LOSS_PCT="${NET_LOSS_PCT_OVERRIDE:-$PETAL_NET_IMPAIR_LOSS_PCT}"
           HARNESS_LOG="$LOG_DIR/remote-control-live.log"
           LIVEKIT_LOG="$LOG_DIR/livekit.log"
           WEB_LOG="$LOG_DIR/web-harness.log"
           CHROME_LOG="$LOG_DIR/chrome-cdp.log"
           PETAL_LOG="$LOG_DIR/petal-dev.log"
-          rm -f "$SOCKET" "$RESULTS_JSON" "$PHOTON_JSON" "$LATENCY_JSON"
+          rm -f "$SOCKET" "$RESULTS_JSON" "$PHOTON_JSON" "$LATENCY_JSON" \
+            "$IMPAIRED_RESULTS_JSON" "$IMPAIRED_PHOTON_JSON" "$IMPAIRED_LATENCY_JSON"
           CRASH_MARK="$LOG_DIR/loopback-start.mark"; touch "$CRASH_MARK"
 
           pids=()
+          IMPAIR_ON=0
           cleanup() {
+            # #378: never leave dummynet on the runner (the always() step
+            # below checks again and fails the job if anything survived).
+            if [ "$IMPAIR_ON" = 1 ]; then bash scripts/ci/net-impair.sh off || true; fi
             for pid in "${pids[@]:-}"; do
               if kill -0 "$pid" >/dev/null 2>&1; then
                 kill "$pid" >/dev/null 2>&1 || true
@@ -761,6 +819,49 @@ jobs:
 
           gate_fail=0
 
+          # -- #378 IMPAIRED PASS: the same two suites, same Petal, with
+          # dummynet on the LiveKit ports only. Each tier's host log slice is
+          # cut by byte offset so the two latency verdicts never mix events.
+          CLEAN_LOG_BYTES="$(wc -c < "$PETAL_LOG" | tr -d ' ')"
+          head -c "$CLEAN_LOG_BYTES" "$PETAL_LOG" > "$CLEAN_PETAL_LOG"
+          if [ -n "$NET_DELAY_MS_OVERRIDE$NET_LOSS_PCT_OVERRIDE" ]; then
+            echo "::warning::RED-PROOF RUN: impaired pass at ${NET_DELAY_MS}ms/${NET_LOSS_PCT}% instead of the gate profile ${PETAL_NET_IMPAIR_DELAY_MS}ms/${PETAL_NET_IMPAIR_LOSS_PCT}%; impaired network budgets are expected to FAIL." | tee -a "$HARNESS_LOG"
+          fi
+          echo "==> Impaired pass (#378): ${NET_DELAY_MS}ms each way per SFU traversal, ${NET_LOSS_PCT}% loss each way" | tee -a "$HARNESS_LOG"
+          set +e
+          IMPAIR_ON=1
+          bash scripts/ci/net-impair.sh on "$NET_DELAY_MS" "$NET_LOSS_PCT" 2>&1 | tee -a "$HARNESS_LOG"
+          impair_on_status=${PIPESTATUS[0]}
+          set -e
+          impaired_status=""
+          impaired_photon_status=""
+          if [ "$impair_on_status" -ne 0 ]; then
+            echo "::error::Could not apply the network impairment ($impair_on_status); the impaired pass did not run, so the gate cannot pass." | tee -a "$HARNESS_LOG"
+            gate_fail=1
+          else
+            set +e
+            PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_LOG_PATH="$PETAL_LOG" \
+            PETAL_RC_OBSERVATION_BUDGET_MS="$IMPAIRED_OBSERVATION_BUDGET_MS" PETAL_RC_RECONNECT_ALREADY_USED=1 \
+              node apps/desktop/scripts/remote-control-local-loopback.mjs --live --skip-preflight --json "$IMPAIRED_RESULTS_JSON" \
+              2>&1 | tee -a "$HARNESS_LOG"
+            impaired_status=${PIPESTATUS[0]}
+            PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_LOG_PATH="$PETAL_LOG" \
+              node apps/desktop/scripts/remote-control-local-loopback.mjs --live --skip-preflight --press-to-photon --json "$IMPAIRED_PHOTON_JSON" \
+              2>&1 | tee -a "$HARNESS_LOG"
+            impaired_photon_status=${PIPESTATUS[0]}
+            set -e
+            echo "impaired pass: matrix exit $impaired_status, press-to-photon exit $impaired_photon_status" | tee -a "$HARNESS_LOG"
+          fi
+          set +e
+          bash scripts/ci/net-impair.sh off 2>&1 | tee -a "$HARNESS_LOG"
+          impair_off_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$impair_off_status" -eq 0 ]; then IMPAIR_ON=0; else
+            echo "::error::Network impairment teardown failed ($impair_off_status)." | tee -a "$HARNESS_LOG"
+            gate_fail=1
+          fi
+          tail -c +"$((CLEAN_LOG_BYTES + 1))" "$PETAL_LOG" > "$IMPAIRED_PETAL_LOG"
+
           # -- Survival. The 0.9.7 telepointer SIGSEGV lived on a background
           # thread the harness never talks to; a green scorecard alone would
           # not have caught it. The native app must still be alive after the
@@ -832,10 +933,36 @@ jobs:
             echo "==> Post-suite: remote-control latency gate" | tee -a "$HARNESS_LOG"
             set +e
             node "$VERDICT" latency --results "$RESULTS_JSON" --photon "$PHOTON_JSON" \
-              --host-log "$PETAL_LOG" --json "$LATENCY_JSON" 2>&1 | tee -a "$HARNESS_LOG"
+              --host-log "$CLEAN_PETAL_LOG" --json "$LATENCY_JSON" 2>&1 | tee -a "$HARNESS_LOG"
             latency_status=${PIPESTATUS[0]}
             set -e
             [ "$latency_status" -eq 0 ] || gate_fail=1
+
+            # -- #378 impaired pass: same scorecard rules, impaired budgets
+            # for the network-inclusive stages, and stage attribution.
+            if [ -n "$impaired_status" ]; then
+              echo "==> Post-suite: IMPAIRED scorecard (${NET_DELAY_MS}ms/${NET_LOSS_PCT}%)" | tee -a "$HARNESS_LOG"
+              set +e
+              node "$VERDICT" loopback --results "$IMPAIRED_RESULTS_JSON" --harness-exit "$impaired_status" \
+                --quarantine "$E2E_QUARANTINE_RC_CASES" --required "$E2E_REQUIRED_RC_CASES" 2>&1 | tee -a "$HARNESS_LOG"
+              [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
+              echo "==> Post-suite: IMPAIRED remote-control latency gate" | tee -a "$HARNESS_LOG"
+              PETAL_RC_OBSERVATION_P50_BUDGET_MS="$IMPAIRED_OBSERVATION_P50_MS" \
+              PETAL_RC_OBSERVATION_P95_BUDGET_MS="$IMPAIRED_OBSERVATION_P95_MS" \
+              PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS="$IMPAIRED_SEND_TO_INJECT_P95_MS" \
+              PETAL_RC_PHOTON_P50_BUDGET_MS="$IMPAIRED_PHOTON_P50_MS" \
+              PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS="$IMPAIRED_PHOTON_P95_MS" \
+                node "$VERDICT" latency --results "$IMPAIRED_RESULTS_JSON" --photon "$IMPAIRED_PHOTON_JSON" \
+                --host-log "$IMPAIRED_PETAL_LOG" --json "$IMPAIRED_LATENCY_JSON" 2>&1 | tee -a "$HARNESS_LOG"
+              [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
+              if [ "$NET_DELAY_MS" -gt 0 ]; then
+                echo "==> Post-suite: stage attribution (clean vs impaired)" | tee -a "$HARNESS_LOG"
+                node "$VERDICT" attribution --clean "$LATENCY_JSON" --impaired "$IMPAIRED_LATENCY_JSON" \
+                  --delay-ms "$NET_DELAY_MS" 2>&1 | tee -a "$HARNESS_LOG"
+                [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
+              fi
+              set -e
+            fi
           fi
 
           if [ "$gate_fail" -ne 0 ]; then
@@ -843,6 +970,18 @@ jobs:
             exit 1
           fi
           echo "==> Live e2e gate passed" | tee -a "$HARNESS_LOG"
+
+      # #378: the impairment must never outlive the job. The harness step's
+      # trap removes it; this runs even when that step was killed, and FAILS
+      # the job if any dummynet rule or pipe is still installed.
+      - name: Remove network impairment (always) and verify none remains
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/ci/net-impair.sh ]; then echo "no scripts/ci/net-impair.sh in this checkout; nothing was impaired"; exit 0; fi
+          bash scripts/ci/net-impair.sh off || true
+          bash scripts/ci/net-impair.sh check-clear
 
       # #42: Actions masks a secret in the LOG; it does not touch uploaded
       # ARTIFACTS. The bypass secret reaches Chrome's argv (and therefore
