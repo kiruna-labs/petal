@@ -312,6 +312,16 @@ const FULL_SIMULCAST_TOTAL_BUDGET_BPS: u64 = 8_000_000;
 /// combined budget. It is intentionally below the raw 4 Mbps floor because
 /// the total-budget invariant is more important than layer ordering.
 const FULL_SIMULCAST_TOP_BUDGETED_MIN_BITRATE_BPS: u64 = 1_500_000;
+/// #409: the most the lower rungs of a full-share ladder may ask, together,
+/// once their own ceilings would otherwise leave the top rung at or below one
+/// of them -- as a fraction (7/16) of [`FULL_SIMULCAST_TOTAL_BUDGET_BPS`].
+/// Under 1/2 so that what `budgeted_top_bitrate` leaves for the top rung
+/// (at least 9/16 of the budget) is always strictly more than the lower
+/// rungs' total, and therefore more than any single lower rung. On macOS's
+/// 8 Mbps budget this is 3.5 Mbps for the lower rungs and 4.5 Mbps for the
+/// top. See `keep_lower_rungs_below_top`.
+const FULL_SIMULCAST_LOWER_RUNGS_SHARE_NUM: u64 = 7;
+const FULL_SIMULCAST_LOWER_RUNGS_SHARE_DEN: u64 = 16;
 
 /// Divisor that keeps an allocation floor from consuming the whole budget.
 ///
@@ -379,11 +389,15 @@ const EXPECTED_TWO_RUNG_TOP_BPS: u64 = if cfg!(target_os = "windows") {
 } else {
     5_187_500
 };
+/// #409: the macOS arm was 2,375,000 -- below the 5,000,000 half rung, the
+/// inversion this issue removes. The lower rungs (625,000 + 5,000,000) are now
+/// scaled to 7/16 of the 8 Mbps budget (388,888 + 3,111,111 = 3,499,999) and
+/// the top gets the rest. Windows' budget never inverted here: unchanged.
 #[cfg(test)]
 const EXPECTED_4K_LEGACY_TOP_BPS: u64 = if cfg!(target_os = "windows") {
     7_375_000
 } else {
-    2_375_000
+    4_500_001
 };
 /// Measurement-only q-rung ceiling. This leaves the normal two-rung ladder
 /// unchanged while testing whether the lower rung monopolizes startup budget.
@@ -1011,7 +1025,6 @@ impl ShareQuality {
         let layers = full_share_simulcast_layers(width, height, ladder);
         let reduced = self == Self::Reduced;
         let mut updates = Vec::with_capacity(layers.len() + 1);
-        let mut lower_rungs_bitrate_bps: u64 = 0;
         for (rid, preset) in ladder.lower_rids().iter().zip(layers.iter()) {
             let max_bitrate = if reduced {
                 (preset.encoding.max_bitrate / 2).max(FULL_SIMULCAST_QUARTER_MIN_BITRATE_BPS)
@@ -1023,7 +1036,6 @@ impl ShareQuality {
             } else {
                 max_bitrate
             };
-            lower_rungs_bitrate_bps = lower_rungs_bitrate_bps.saturating_add(max_bitrate);
             updates.push(livekit::prelude::PublishingLayerParameters {
                 rid: (*rid).to_string(),
                 max_bitrate,
@@ -1040,6 +1052,13 @@ impl ShareQuality {
         // silently re-widen the top rung back to its raw, unbudgeted
         // ceiling.
         let top = self.video_encoding(width, height);
+        // #409: the same lower-below-top ordering the initial publish applies.
+        let mut lower_bitrates: Vec<u64> = updates.iter().map(|update| update.max_bitrate).collect();
+        keep_lower_rungs_below_top(&mut lower_bitrates, top.max_bitrate);
+        for (update, bitrate) in updates.iter_mut().zip(&lower_bitrates) {
+            update.max_bitrate = *bitrate;
+        }
+        let lower_rungs_bitrate_bps: u64 = lower_bitrates.iter().sum();
         updates.push(livekit::prelude::PublishingLayerParameters {
             // A non-simulcast track receives LiveKit's single default RID
             // (`q`), even though the experiment is conceptually the HIGH
@@ -1086,10 +1105,49 @@ impl ShareQuality {
 /// very large (4K-class) source sizes, the nominal top rung's configured
 /// ceiling can end up smaller than a lower rung's. See #907's tests for the
 /// exact before/after numbers this produced.
+///
+/// #409: that inversion is no longer published. On a 2x Retina Mac nearly
+/// every ordinary window is "4K-class" in pixels, so it was the default case,
+/// not an edge. Both publish paths now pass the lower rungs through
+/// [`keep_lower_rungs_below_top`] first, which shrinks THEM instead of the
+/// top, so both invariants hold: total inside budget, top above every lower
+/// rung. This function is unchanged and still does not order rungs by itself.
 fn budgeted_top_bitrate(raw_top_bitrate_bps: u64, lower_rungs_bitrate_bps: u64) -> u64 {
     let available = FULL_SIMULCAST_TOTAL_BUDGET_BPS.saturating_sub(lower_rungs_bitrate_bps);
     let floor = available.max(FULL_SIMULCAST_TOP_BUDGETED_MIN_BITRATE_BPS);
     raw_top_bitrate_bps.min(floor)
+}
+
+/// #409: scale a full-share ladder's lower-rung ceilings down, proportionally,
+/// when [`budgeted_top_bitrate`] would otherwise leave the top rung's ceiling
+/// at or below one of them -- the inverted ladder logged in the field at
+/// Retina window sizes (`rid=q 2400x1707 6000000bps; rid=h 3200x2276
+/// 2000000bps`: the lower-resolution rung had 3x the top rung's ceiling, and
+/// it was the rung the sender left unfunded when bandwidth dipped, so a
+/// receiver's LOW fallback landed on nothing).
+///
+/// The budgeted-top rule itself is unchanged: the combined ask still fits the
+/// total budget, and is never raised. What changes is which side of the
+/// ladder gives way once a lower rung's own ceiling meets the budget: the
+/// lower rungs now shrink to at most `7/16` of the budget (and to under the
+/// top rung's own raw ceiling), so the top keeps at least `9/16` and the
+/// ceilings are strictly ordered by resolution for every source size.
+///
+/// A ladder that is already ordered is returned untouched, bit for bit: every
+/// 1080p-class ladder (the web-parity fixtures), and every Windows ladder up
+/// to 4K on its larger budget.
+fn keep_lower_rungs_below_top(lower_bitrates_bps: &mut [u64], raw_top_bitrate_bps: u64) {
+    let total: u64 = lower_bitrates_bps.iter().sum();
+    let largest = lower_bitrates_bps.iter().copied().max().unwrap_or(0);
+    if total == 0 || budgeted_top_bitrate(raw_top_bitrate_bps, total) > largest {
+        return;
+    }
+    let cap = (FULL_SIMULCAST_TOTAL_BUDGET_BPS * FULL_SIMULCAST_LOWER_RUNGS_SHARE_NUM
+        / FULL_SIMULCAST_LOWER_RUNGS_SHARE_DEN)
+        .min(raw_top_bitrate_bps * 3 / 4);
+    for bitrate in lower_bitrates_bps.iter_mut() {
+        *bitrate = (u128::from(*bitrate) * u128::from(cap) / u128::from(total)) as u64;
+    }
 }
 
 /// A connected room, capable of publishing zero or more independent video
@@ -2841,7 +2899,7 @@ fn window_publish_options_for_region(
     // receiver's HIGH request path.
     let high_only = simulcast_ladder == FullShareSimulcastLadder::HighOnly;
     let simulcast = !is_display_region && !high_only;
-    let simulcast_layers = (!is_display_region && !high_only)
+    let mut simulcast_layers = (!is_display_region && !high_only)
         .then(|| share_simulcast_layers(width, height, quality, simulcast_ladder));
     let video_codec = window_video_codec();
     // #907: the top rung's published ceiling must reflect the SAME total
@@ -2853,6 +2911,16 @@ fn window_publish_options_for_region(
         height,
         published_share_cadence(quality, width, height, pinned_cadence_fps),
     );
+    // #409: never publish a lower rung whose ceiling is at or above the top
+    // rung's (see `keep_lower_rungs_below_top`).
+    if let Some(layers) = simulcast_layers.as_mut() {
+        let mut lower_bitrates: Vec<u64> =
+            layers.iter().map(|layer| layer.encoding.max_bitrate).collect();
+        keep_lower_rungs_below_top(&mut lower_bitrates, raw_top_encoding.max_bitrate);
+        for (layer, bitrate) in layers.iter_mut().zip(lower_bitrates) {
+            layer.encoding.max_bitrate = bitrate;
+        }
+    }
     let top_encoding = match &simulcast_layers {
         Some(layers) => {
             let lower_rungs_bitrate_bps: u64 =
@@ -5179,37 +5247,173 @@ mod track_name_tests {
         assert_eq!(hd_half.encoding.max_bitrate, 1_250_000);
         assert_eq!(uhd_half.width, 1920);
         assert_eq!(uhd_half.height, 1080);
-        assert_eq!(uhd_half.encoding.max_bitrate, 5_000_000);
+        // #409: macOS scales the 4K lower rungs below the top (see
+        // `EXPECTED_4K_LEGACY_TOP_BPS`); Windows' ladder was already ordered.
+        assert_eq!(
+            uhd_half.encoding.max_bitrate,
+            if cfg!(target_os = "windows") {
+                5_000_000
+            } else {
+                3_111_111
+            }
+        );
         assert!(
             uhd_half.encoding.max_bitrate > hd_half.encoding.max_bitrate,
             "4K shares need a stronger half-res layer than 1080p shares"
         );
         // #907: 4K's Legacy ladder asks 625,000 + 5,000,000 = 5,625,000 from
-        // its OWN lower rungs, leaving the rest of the platform budget for the
-        // top rung -- comfortably above the absolute 1.5 Mbps floor, so the
-        // budget is hit exactly rather than clamped.
+        // its OWN lower rungs. #409: on macOS that left the top rung at
+        // 2,375,000, below the half rung -- an "accepted 4K-class limitation"
+        // that a 2x Retina Mac hit on nearly every window. The lower rungs now
+        // give way instead, and the total still fits the budget.
         assert_eq!(uhd_top.max_bitrate, EXPECTED_4K_LEGACY_TOP_BPS);
-        // #907 review (counselors): the top rung is deliberately NOT floored
-        // at "never below a lower rung's own ceiling" -- an earlier version
-        // of `budgeted_top_bitrate` did exactly that and it doubled the
-        // total ask at 4K on ladders including the shipped default
-        // (`TwoRung`). On the web-parity budget the nominal top rung's
-        // configured ceiling (3,625,000) is genuinely BELOW the half rung's
-        // own (5,000,000); that is a known, accepted limitation for 4K-class
-        // shares now that the runtime starvation guards, not a static
-        // ceiling ordering, are what protect a viewer from a badly-funded top
-        // rung. Windows' raised budget leaves 7,375,000 here, which is above
-        // the half rung: the limitation is not reached, not lifted. See
-        // `budgeted_top_bitrate`'s doc comment.
-        if cfg!(target_os = "windows") {
-            assert!(uhd_top.max_bitrate > uhd_half.encoding.max_bitrate);
-        } else {
+        assert!(uhd_top.max_bitrate > uhd_half.encoding.max_bitrate);
+        let uhd_lower_total: u64 = uhd_options
+            .simulcast_layers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|layer| layer.encoding.max_bitrate)
+            .sum();
+        assert!(uhd_lower_total + uhd_top.max_bitrate <= FULL_SIMULCAST_TOTAL_BUDGET_BPS);
+    }
+
+    // ---- #409: lower rungs never out-ask the top rung -----------------------
+
+    const ALL_FULL_SHARE_LADDERS: [FullShareSimulcastLadder; 6] = [
+        FullShareSimulcastLadder::Legacy,
+        FullShareSimulcastLadder::LegacyBottom30,
+        FullShareSimulcastLadder::Raised,
+        FullShareSimulcastLadder::TwoRung,
+        FullShareSimulcastLadder::HighOnly,
+        FullShareSimulcastLadder::ReducedQ,
+    ];
+
+    /// Every source from 1512x949 (a 1x MacBook Air window) to 3200x2582,
+    /// on a grid, plus the exact sizes the field logs recorded.
+    fn retina_class_source_sizes() -> Vec<(u32, u32)> {
+        let mut sizes = vec![
+            (1512, 949),
+            (1920, 1080),
+            (2560, 1820),
+            (3024, 1538),
+            (3024, 1734),
+            (3024, 1964),
+            (3024, 2582),
+            (3200, 2276),
+            (3200, 2582),
+        ];
+        for width in (1512..=3200).step_by(48) {
+            for height in (949..=2582).step_by(48) {
+                sizes.push((width, height));
+            }
+        }
+        sizes
+    }
+
+    fn assert_ordered_ceilings(lower: &[u64], top: u64, context: &str) {
+        for (index, bitrate) in lower.iter().enumerate() {
             assert!(
-                uhd_top.max_bitrate < uhd_half.encoding.max_bitrate,
-                "documents the accepted 4K-class limitation, not a requirement"
+                *bitrate < top,
+                "{context}: lower rung {index} asks {bitrate} >= top {top} (lower={lower:?})"
             );
         }
+        for pair in lower.windows(2) {
+            assert!(pair[0] <= pair[1], "{context}: lower rungs out of order {lower:?}");
+        }
+        // The #907 total-budget invariant still holds alongside the ordering.
+        assert!(
+            lower.iter().sum::<u64>() + top <= FULL_SIMULCAST_TOTAL_BUDGET_BPS,
+            "{context}: ladder exceeds the total budget (lower={lower:?} top={top})"
+        );
     }
+
+    #[test]
+    fn full_share_ladder_ceilings_are_monotonic_in_resolution_for_retina_sources() {
+        for (width, height) in retina_class_source_sizes() {
+            for ladder in ALL_FULL_SHARE_LADDERS {
+                for quality in [ShareQuality::Full, ShareQuality::Reduced] {
+                    let context = format!("{width}x{height} {ladder:?} {quality:?}");
+                    let options = window_publish_options(width, height, quality, ladder);
+                    let top = options
+                        .video_encoding
+                        .as_ref()
+                        .expect("a full share keeps an explicit top ceiling")
+                        .max_bitrate;
+                    let lower: Vec<u64> = options
+                        .simulcast_layers
+                        .iter()
+                        .flatten()
+                        .map(|layer| layer.encoding.max_bitrate)
+                        .collect();
+                    assert_ordered_ceilings(&lower, top, &format!("publish {context}"));
+
+                    // The live quality-switch path must agree on the ordering.
+                    let updates = quality.layer_parameters(width, height, ladder);
+                    let (top_update, lower_updates) =
+                        updates.split_last().expect("at least the top rung");
+                    let lower: Vec<u64> =
+                        lower_updates.iter().map(|update| update.max_bitrate).collect();
+                    assert_ordered_ceilings(
+                        &lower,
+                        top_update.max_bitrate,
+                        &format!("layer_parameters {context}"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retina_two_rung_ladder_is_no_longer_inverted() {
+        // The field ladder: `rid=q 2400x1707 6000000bps; rid=h 3200x2276
+        // 2000000bps`, and after the receiver cap `rid=q 1920x1365 6Mbps;
+        // rid=h 2560x1820 2Mbps`. On macOS the default `TwoRung` now
+        // publishes q at 7/16 of the budget and h at the remaining 9/16.
+        for (width, height) in [(3200, 2276), (2560, 1820), (3024, 1734)] {
+            let options = window_publish_options(
+                width,
+                height,
+                ShareQuality::Full,
+                FullShareSimulcastLadder::TwoRung,
+            );
+            let q = options.simulcast_layers.as_ref().unwrap()[0].encoding.max_bitrate;
+            let h = options.video_encoding.as_ref().unwrap().max_bitrate;
+            assert!(q < h, "{width}x{height}: q={q} h={h}");
+            if cfg!(not(target_os = "windows")) {
+                assert_eq!((q, h), (3_500_000, 4_500_000), "{width}x{height}");
+            }
+        }
+    }
+
+    #[test]
+    fn keep_lower_rungs_below_top_leaves_an_ordered_ladder_untouched() {
+        // The 1080p two-rung lower rung against its own top: already ordered.
+        let mut lower = [EXPECTED_TWO_RUNG_LOWER_BPS];
+        keep_lower_rungs_below_top(&mut lower, 11_197_440);
+        assert_eq!(lower, [EXPECTED_TWO_RUNG_LOWER_BPS]);
+        // A ladder with no lower rungs.
+        let mut none: [u64; 0] = [];
+        keep_lower_rungs_below_top(&mut none, 16_000_000);
+    }
+
+    #[test]
+    fn keep_lower_rungs_below_top_scales_an_inverted_ladder_proportionally() {
+        let budget_share = FULL_SIMULCAST_TOTAL_BUDGET_BPS * FULL_SIMULCAST_LOWER_RUNGS_SHARE_NUM
+            / FULL_SIMULCAST_LOWER_RUNGS_SHARE_DEN;
+        // A lower ladder that takes the whole budget on either platform.
+        let mut lower = [4_000_000, 12_000_000];
+        keep_lower_rungs_below_top(&mut lower, 16_000_000);
+        assert_eq!(lower, [budget_share / 4, budget_share * 3 / 4]);
+        let top = budgeted_top_bitrate(16_000_000, lower.iter().sum());
+        assert!(lower.iter().all(|bitrate| *bitrate < top), "{lower:?} top={top}");
+        // A small raw top binds the cap too: lower stays under it.
+        let mut lower = [6_000_000];
+        keep_lower_rungs_below_top(&mut lower, 2_000_000);
+        assert_eq!(lower, [1_500_000]);
+        assert!(lower[0] < budgeted_top_bitrate(2_000_000, lower[0]));
+    }
+
 
     // ---- #907: total-ladder-budget clamp -----------------------------------
     //
