@@ -215,6 +215,9 @@ fn update_for_authenticated_sender(
     sender_identity: Option<String>,
     display_name: Option<String>,
     palette_index: Option<u8>,
+    local_identity: &str,
+    sender_owns_window: impl FnOnce(u32, &str) -> bool,
+    participant_label: impl FnOnce(&str) -> (Option<String>, Option<u8>),
 ) -> Option<TelepointerUpdate> {
     let sender_identity = sender_identity?;
     let sender_identity = sender_identity.trim();
@@ -239,29 +242,80 @@ fn update_for_authenticated_sender(
     // authenticated sender is verifiably the window's own owner (so an
     // unrelated participant still can't forge someone else's activity
     // marker for a window they don't share).
-    let trust_payload_identity = message.activity.is_some() && {
-        // macOS: the compositor knows which windows it owns.
-        // Windows: the compositor also tracks owner identity, but this path
-        // does not consult it yet; it fails closed and keeps the authenticated
-        // sender identity rather than trusting the payload's activity identity.
-        #[cfg(target_os = "macos")]
-        {
-            crate::compositor::owner_identity_for_window(message.window_id, None)
-                .is_some_and(|owner| owner == sender_identity)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            false
-        }
-    };
+    let trust_payload_identity =
+        message.activity.is_some() && sender_owns_window(message.window_id, sender_identity);
     if !trust_payload_identity {
         message.user_id = sender_identity.to_string();
+        return Some(TelepointerUpdate::from_message(
+            message,
+            display_name,
+            palette_index,
+        ));
     }
+    let relayed_identity = message.user_id.trim();
+    if relayed_identity.is_empty() || relayed_identity == sender_identity {
+        message.user_id = sender_identity.to_string();
+        return Some(TelepointerUpdate::from_message(
+            message,
+            display_name,
+            palette_index,
+        ));
+    }
+    // Issue #405: the owner relays the controller's own click/type activity
+    // back to the whole room, including the controller. The controller
+    // already draws local echo for its own input, so rendering the relay
+    // would add a second pointer for itself at its last click spot.
+    if relayed_identity == local_identity.trim() {
+        return None;
+    }
+    // The pointer belongs to the relayed participant, not the sender: label
+    // and colour it as that participant, never as the sharer who relayed it.
+    let relayed_identity = relayed_identity.to_string();
+    let (relayed_name, relayed_palette) = participant_label(&relayed_identity);
+    message.user_id = relayed_identity;
     Some(TelepointerUpdate::from_message(
         message,
-        display_name,
-        palette_index,
+        relayed_name,
+        relayed_palette,
     ))
+}
+
+/// Whether `sender_identity` owns the shared window `window_id`, i.e. may
+/// relay activity on behalf of a controller it authorized.
+#[cfg(target_os = "macos")]
+fn sender_owns_window(window_id: u32, sender_identity: &str) -> bool {
+    crate::compositor::owner_identity_for_window(window_id, None)
+        .is_some_and(|owner| owner == sender_identity)
+}
+
+/// Windows: the compositor also tracks owner identity, but this path does not
+/// consult it yet; it fails closed and keeps the authenticated sender identity
+/// rather than trusting the payload's activity identity.
+#[cfg(not(target_os = "macos"))]
+fn sender_owns_window(_window_id: u32, _sender_identity: &str) -> bool {
+    false
+}
+
+/// Display name and palette index a receiver shows for a remote participant.
+fn participant_display_label(
+    participant: &livekit::participant::RemoteParticipant,
+) -> (Option<String>, Option<u8>) {
+    let name = participant.name();
+    let trimmed = name.trim();
+    let display_name = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    let palette_index =
+        crate::transport::publisher::identity_palette_index_from_metadata(&participant.metadata());
+    (display_name, palette_index)
+}
+
+/// Display label for `identity` from the room roster; `(None, None)` when the
+/// participant is not (or no longer) in the room.
+fn roster_display_label(room: &livekit::Room, identity: &str) -> (Option<String>, Option<u8>) {
+    room.remote_participants()
+        .iter()
+        .find(|(key, _)| key.as_str() == identity)
+        .map(|(_, participant)| participant_display_label(participant))
+        .unwrap_or((None, None))
 }
 
 /// Compute normalized (0-1) coordinates of `cursor` (global logical points)
@@ -434,23 +488,29 @@ fn pointer_targets_with_owners(
             panel_family_ids: Vec::new(),
             is_visible: true,
         })
-        .chain(remote_content_frames.iter().map(|(window_id, frame, owner)| {
-            let meta = remote_family_meta
+        .chain(
+            remote_content_frames
                 .iter()
-                .find(|meta| meta.window_id == *window_id && meta.owner_identity == *owner);
-            PointerTarget {
-                kind: PointerTargetKind::RemoteCompositor,
-                window_id: *window_id,
-                frame: *frame,
-                surface_owner_id: Some(owner.clone()),
-                display_like: false,
-                panel_family_ids: meta.map(|meta| meta.family_ids.clone()).unwrap_or_default(),
-                // No meta yet (e.g. the ~9Hz refresh hasn't run since this
-                // window opened) fails CLOSED: never claim a panel is visible
-                // without having actually observed it (#906 DoD).
-                is_visible: meta.is_some_and(|meta| meta.is_visible),
-            }
-        }))
+                .map(|(window_id, frame, owner)| {
+                    let meta = remote_family_meta
+                        .iter()
+                        .find(|meta| meta.window_id == *window_id && meta.owner_identity == *owner);
+                    PointerTarget {
+                        kind: PointerTargetKind::RemoteCompositor,
+                        window_id: *window_id,
+                        frame: *frame,
+                        surface_owner_id: Some(owner.clone()),
+                        display_like: false,
+                        panel_family_ids: meta
+                            .map(|meta| meta.family_ids.clone())
+                            .unwrap_or_default(),
+                        // No meta yet (e.g. the ~9Hz refresh hasn't run since this
+                        // window opened) fails CLOSED: never claim a panel is visible
+                        // without having actually observed it (#906 DoD).
+                        is_visible: meta.is_some_and(|meta| meta.is_visible),
+                    }
+                }),
+        )
         .collect()
 }
 
@@ -517,7 +577,11 @@ fn vanished_visible_keys(
         .filter(|(key, visible)| {
             **visible
                 && !targets.iter().any(|target| {
-                    (target.kind, target.window_id, target.surface_owner_id.clone()) == **key
+                    (
+                        target.kind,
+                        target.window_id,
+                        target.surface_owner_id.clone(),
+                    ) == **key
                 })
         })
         .map(|(key, _)| key.clone())
@@ -581,7 +645,12 @@ fn select_macos_pointer_target<'a>(
                 && target.is_visible
                 && topmost_window_id.is_some_and(|wid| target.panel_family_ids.contains(&wid))
         })
-        .or_else(|| targets.iter().filter(|target| target.display_like).find(inside))
+        .or_else(|| {
+            targets
+                .iter()
+                .filter(|target| target.display_like)
+                .find(inside)
+        })
         // #906: this final fallback must NEVER re-match a `RemoteCompositor`
         // target -- it exists only to pick a plain LOCAL share when nothing
         // else matched, not to undo the occlusion gate above. Without this
@@ -839,7 +908,11 @@ fn sender_loop(app: AppHandle) {
                 None => (0.5, 0.5, false),
             };
 
-            let key = (target.kind, target.window_id, target.surface_owner_id.clone());
+            let key = (
+                target.kind,
+                target.window_id,
+                target.surface_owner_id.clone(),
+            );
             let was_visible = last_visible.get(&key).copied().unwrap_or(false);
             if !inside && !was_visible {
                 // Already told the receiver this pointer is hidden; nothing
@@ -1329,26 +1402,32 @@ pub fn start_receiver_for_room(
                     continue;
                 };
                 let sender_identity = participant.as_ref().map(|p| p.identity().to_string());
-                let display_name = participant.as_ref().and_then(|p| {
-                    let name = p.name();
-                    let trimmed = name.trim();
-                    (!trimmed.is_empty()).then(|| trimmed.to_string())
-                });
-                let palette_index = participant.as_ref().and_then(|p| {
-                    crate::transport::publisher::identity_palette_index_from_metadata(&p.metadata())
-                });
+                let (display_name, palette_index) = participant
+                    .as_ref()
+                    .map(participant_display_label)
+                    .unwrap_or((None, None));
                 let surface_owner = message
                     .surface_owner_id
                     .clone()
                     .or_else(|| sender_identity.clone())
                     .unwrap_or_default();
+                let has_sender = sender_identity
+                    .as_deref()
+                    .is_some_and(|identity| !identity.trim().is_empty());
                 let Some(mut update) = update_for_authenticated_sender(
                     message,
                     sender_identity,
                     display_name,
                     palette_index,
+                    &local_identity,
+                    sender_owns_window,
+                    |identity| roster_display_label(&room, identity),
                 ) else {
-                    log::warn!("telepointer: ignored update without authenticated sender identity");
+                    if !has_sender {
+                        log::warn!(
+                            "telepointer: ignored update without authenticated sender identity"
+                        );
+                    }
                     continue;
                 };
                 update.surface_owner_id =
@@ -1466,14 +1545,10 @@ pub fn start_receiver_for_room(
                     continue;
                 };
                 let sender_identity = participant.as_ref().map(|p| p.identity().to_string());
-                let display_name = participant.as_ref().and_then(|p| {
-                    let name = p.name();
-                    let trimmed = name.trim();
-                    (!trimmed.is_empty()).then(|| trimmed.to_string())
-                });
-                let palette_index = participant.as_ref().and_then(|p| {
-                    crate::transport::publisher::identity_palette_index_from_metadata(&p.metadata())
-                });
+                let (display_name, palette_index) = participant
+                    .as_ref()
+                    .map(participant_display_label)
+                    .unwrap_or((None, None));
                 // Surface owner for routing: a capable sender names the shared
                 // surface (its owner) it is over, so a receiver renders the
                 // cursor on exactly that surface. Old clients omit it and we
@@ -1485,13 +1560,23 @@ pub fn start_receiver_for_room(
                     .clone()
                     .unwrap_or_else(|| sender_identity.clone().unwrap_or_default());
                 let local_identity = room.local_participant().identity().to_string();
+                let has_sender = sender_identity
+                    .as_deref()
+                    .is_some_and(|identity| !identity.trim().is_empty());
                 let Some(mut update) = update_for_authenticated_sender(
                     message,
                     sender_identity,
                     display_name,
                     palette_index,
+                    &local_identity,
+                    sender_owns_window,
+                    |identity| roster_display_label(&room, identity),
                 ) else {
-                    log::warn!("telepointer: ignored update without authenticated sender identity");
+                    if !has_sender {
+                        log::warn!(
+                            "telepointer: ignored update without authenticated sender identity"
+                        );
+                    }
                     continue;
                 };
                 let window_id = update.window_id;
@@ -2025,6 +2110,9 @@ mod tests {
             Some(" authenticated-sender ".to_string()),
             Some("Ada Lovelace".to_string()),
             Some(2),
+            "receiver",
+            |_, _| false,
+            |_| panic!("an untrusted payload identity must not be looked up"),
         )
         .unwrap();
 
@@ -2046,7 +2134,140 @@ mod tests {
             surface_owner_id: None,
         };
 
-        assert!(update_for_authenticated_sender(message, None, None, None).is_none());
+        assert!(update_for_authenticated_sender(
+            message,
+            None,
+            None,
+            None,
+            "receiver",
+            |_, _| true,
+            |_| (None, None),
+        )
+        .is_none());
+    }
+
+    fn relayed_activity(user_id: &str) -> PointerMessage {
+        PointerMessage {
+            window_id: 42,
+            user_id: user_id.to_string(),
+            x: 0.5,
+            y: 0.5,
+            visible: true,
+            activity: Some(PointerActivity::Click),
+            surface_owner_id: Some("sharer".to_string()),
+        }
+    }
+
+    #[test]
+    fn receiver_update_drops_owner_relayed_activity_for_the_local_controller() {
+        // Issue #405: the sharer relays the controller's own click back to
+        // the room; the controller must not render it as a second pointer.
+        let update = update_for_authenticated_sender(
+            relayed_activity("controller"),
+            Some("sharer".to_string()),
+            Some("Sharer".to_string()),
+            Some(3),
+            "controller",
+            |window_id, sender| window_id == 42 && sender == "sharer",
+            |_| panic!("a dropped self-echo must not be looked up"),
+        );
+
+        assert!(update.is_none());
+    }
+
+    #[test]
+    fn receiver_update_labels_owner_relayed_activity_as_the_controller_not_the_sharer() {
+        // A third participant watching the share sees the controller's
+        // activity attributed, named and coloured as the controller.
+        let update = update_for_authenticated_sender(
+            relayed_activity("controller"),
+            Some("sharer".to_string()),
+            Some("Sharer".to_string()),
+            Some(3),
+            "viewer",
+            |window_id, sender| window_id == 42 && sender == "sharer",
+            |identity| {
+                assert_eq!(identity, "controller");
+                (Some("Controller".to_string()), Some(6))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(update.user_id, "controller");
+        assert_eq!(update.display_name.as_deref(), Some("Controller"));
+        assert_eq!(update.palette_index, Some(6));
+        assert_eq!(update.activity, Some(PointerActivity::Click));
+    }
+
+    #[test]
+    fn receiver_update_relayed_activity_for_unknown_participant_never_borrows_sharer_label() {
+        let update = update_for_authenticated_sender(
+            relayed_activity("departed-controller"),
+            Some("sharer".to_string()),
+            Some("Sharer".to_string()),
+            Some(3),
+            "viewer",
+            |_, _| true,
+            |_| (None, None),
+        )
+        .unwrap();
+
+        assert_eq!(update.user_id, "departed-controller");
+        assert_eq!(update.display_name, None);
+        assert_eq!(update.palette_index, None);
+    }
+
+    #[test]
+    fn receiver_update_keeps_sharer_own_activity_and_stream_on_the_sharer() {
+        // The owner's own activity (payload id == sender) and its plain
+        // position stream keep the sender's label, even on the controller.
+        let own_activity = update_for_authenticated_sender(
+            relayed_activity("sharer"),
+            Some("sharer".to_string()),
+            Some("Sharer".to_string()),
+            Some(3),
+            "controller",
+            |_, _| true,
+            |_| panic!("the sender's own activity must not be looked up"),
+        )
+        .unwrap();
+        assert_eq!(own_activity.user_id, "sharer");
+        assert_eq!(own_activity.display_name.as_deref(), Some("Sharer"));
+        assert_eq!(own_activity.palette_index, Some(3));
+
+        let mut stream = relayed_activity("controller");
+        stream.activity = None;
+        let stream = update_for_authenticated_sender(
+            stream,
+            Some("sharer".to_string()),
+            Some("Sharer".to_string()),
+            Some(3),
+            "controller",
+            |_, _| true,
+            |_| panic!("the position stream must not be looked up"),
+        )
+        .unwrap();
+        assert_eq!(stream.user_id, "sharer");
+        assert_eq!(stream.display_name.as_deref(), Some("Sharer"));
+    }
+
+    #[test]
+    fn receiver_update_ignores_forged_activity_from_a_non_owner() {
+        // A participant that does not own the window cannot relay activity
+        // for someone else, and cannot get the receiver to drop it either.
+        let update = update_for_authenticated_sender(
+            relayed_activity("controller"),
+            Some("other".to_string()),
+            Some("Other".to_string()),
+            Some(1),
+            "controller",
+            |_, sender| sender == "sharer",
+            |_| panic!("a forged identity must not be looked up"),
+        )
+        .unwrap();
+
+        assert_eq!(update.user_id, "other");
+        assert_eq!(update.display_name.as_deref(), Some("Other"));
     }
 
     #[test]
@@ -2563,8 +2784,7 @@ mod tests {
         );
         for family_member in [300u32, 301, 302, 303] {
             let selected =
-                select_macos_pointer_target((100.0, 100.0), Some(family_member), &targets)
-                    .unwrap();
+                select_macos_pointer_target((100.0, 100.0), Some(family_member), &targets).unwrap();
             assert_eq!(selected.window_id, 3);
         }
     }
@@ -2647,7 +2867,11 @@ mod tests {
     /// revisits a key that no longer has a target at all.
     #[test]
     fn vanished_visible_keys_reports_a_key_with_no_target_left() {
-        let key = (PointerTargetKind::RemoteCompositor, 9, Some("alice".to_string()));
+        let key = (
+            PointerTargetKind::RemoteCompositor,
+            9,
+            Some("alice".to_string()),
+        );
         let last_visible = HashMap::from([(key.clone(), true)]);
         assert_eq!(vanished_visible_keys(&[], &last_visible), vec![key]);
     }
@@ -2657,7 +2881,11 @@ mod tests {
         // Only entries the loop last published as visible=true need a
         // falling-edge hide; one already recorded false has nothing new to
         // say by disappearing.
-        let key = (PointerTargetKind::RemoteCompositor, 9, Some("alice".to_string()));
+        let key = (
+            PointerTargetKind::RemoteCompositor,
+            9,
+            Some("alice".to_string()),
+        );
         let last_visible = HashMap::from([(key, false)]);
         assert!(vanished_visible_keys(&[], &last_visible).is_empty());
     }
@@ -2671,7 +2899,11 @@ mod tests {
             &meta,
             "local",
         );
-        let key = (PointerTargetKind::RemoteCompositor, 9, Some("alice".to_string()));
+        let key = (
+            PointerTargetKind::RemoteCompositor,
+            9,
+            Some("alice".to_string()),
+        );
         let last_visible = HashMap::from([(key, true)]);
         assert!(
             vanished_visible_keys(&targets, &last_visible).is_empty(),
@@ -2715,7 +2947,8 @@ mod tests {
     /// ORDER is what answers "what's on top," and the first frame-containing
     /// record, whatever its layer, IS the real topmost thing at that point.
     #[test]
-    fn resolve_topmost_window_id_fallback_never_skips_a_layer_ineligible_occluder_above_the_panel() {
+    fn resolve_topmost_window_id_fallback_never_skips_a_layer_ineligible_occluder_above_the_panel()
+    {
         // The occluder (e.g. the menu bar) is FIRST in front-to-back order,
         // ahead of the panel it covers -- the walk must return the occluder,
         // not reach past it to the panel.
