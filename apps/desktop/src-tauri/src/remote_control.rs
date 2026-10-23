@@ -7183,6 +7183,13 @@ pub(crate) mod input {
             start: i64,
             len: i64,
         ) -> Result<(), AxError>;
+        /// #404: set `AXFocused = true` on a clicked text element. This is the
+        /// only measured way to move Chrome's own keyboard focus (the view
+        /// that pid-posted keys reach) into the page without activating the
+        /// app: `AXPress` and `AXSelectedTextRange` move DOM focus but leave
+        /// Chrome's keyboard focus in the address bar, so typed keys land
+        /// there. Never sets `AXFrontmost`.
+        fn set_focused(&self, element: &AxElementHandle) -> Result<(), AxError>;
         fn scroll_by(
             &self,
             window_id: u32,
@@ -7291,6 +7298,12 @@ pub(crate) mod input {
         AxPressable {
             element: AxElementHandle,
             action: AxClickAction,
+            /// #404: the pressed element is also an editable/selectable text
+            /// element (a web `<input>` is both pressable and text-selectable,
+            /// and pressable wins the route). After a successful press, also
+            /// move the app's keyboard focus onto it -- see
+            /// `AxInputBackend::set_focused`.
+            focus_text: bool,
         },
         AxText {
             element: AxElementHandle,
@@ -7966,6 +7979,11 @@ pub(crate) mod input {
             let value = create_ax_value(K_AX_VALUE_TYPE_CF_RANGE, &range)?;
             let attribute = ax_selected_text_range_attribute();
             set_attribute(element, attribute.as_ptr(), value.as_ptr())
+        }
+
+        fn set_focused(&self, element: &AxElementHandle) -> Result<(), AxError> {
+            let attribute = ax_focused_attribute();
+            set_attribute(element, attribute.as_ptr(), unsafe { kCFBooleanTrue })
         }
 
         fn scroll_by(
@@ -8795,6 +8813,11 @@ pub(crate) mod input {
 
     fn ax_number_of_characters_attribute() -> CfObject {
         cf_string(b"AXNumberOfCharacters\0")
+    }
+
+    /// #404: see `AxInputBackend::set_focused`.
+    fn ax_focused_attribute() -> CfObject {
+        cf_string(b"AXFocused\0")
     }
 
     fn ax_focused_ui_element_attribute() -> CfObject {
@@ -11059,6 +11082,7 @@ pub(crate) mod input {
                 GestureMode::AxPressable {
                     element,
                     action: AxClickAction::ShowMenu,
+                    focus_text: false,
                 }
             } else {
                 log::info!(
@@ -11072,6 +11096,7 @@ pub(crate) mod input {
             return Ok(GestureMode::AxPressable {
                 element,
                 action: AxClickAction::Press,
+                focus_text: caps.text_selectable,
             });
         }
         // #373: a double/triple-click down on a text view is routed
@@ -11351,7 +11376,11 @@ pub(crate) mod input {
                 );
                 Ok(outcome)
             }
-            GestureMode::AxPressable { element, action } => {
+            GestureMode::AxPressable {
+                element,
+                action,
+                focus_text,
+            } => {
                 if action == AxClickAction::ShowMenu
                     && displacement >= AX_CLICK_DRAG_THRESHOLD_POINTS
                 {
@@ -11374,6 +11403,14 @@ pub(crate) mod input {
                     AxClickAction::ShowMenu => ax.show_menu(&element),
                 };
                 let outcome = ax_action_outcome(result, "pressable pointer gesture")?;
+                // #404: only after the AX press itself landed. A PassThrough
+                // falls back to a real posted click below, which the target
+                // app focuses for itself.
+                let focused = if focus_text && outcome == AxReplayOutcome::Handled {
+                    Some(focus_clicked_text_element(window_id, &element, ax))
+                } else {
+                    None
+                };
                 let final_outcome = if outcome == AxReplayOutcome::PassThrough {
                     sl_click_or_passthrough(
                         pid,
@@ -11387,10 +11424,11 @@ pub(crate) mod input {
                     outcome
                 };
                 log::info!(
-                    "remote-control: AX pointer up window_id={window_id} mode=AxPressable action={} displacement={displacement:.2} ax_outcome={} outcome={}",
+                    "remote-control: AX pointer up window_id={window_id} mode=AxPressable action={} displacement={displacement:.2} ax_outcome={} outcome={} text_focus={}",
                     ax_click_action_name(action),
                     ax_replay_outcome_name(outcome),
-                    ax_replay_outcome_name(final_outcome)
+                    ax_replay_outcome_name(final_outcome),
+                    text_focus_summary(focused)
                 );
                 Ok(final_outcome)
             }
@@ -11428,6 +11466,10 @@ pub(crate) mod input {
                     let start = anchor_offset.min(up_offset);
                     (start, (up_offset - anchor_offset).abs())
                 };
+                // #404: focus BEFORE placing the selection, so the caret the
+                // controller clicked is the one that survives -- focusing a
+                // field can move its selection.
+                let focused = focus_clicked_text_element(window_id, &element, ax);
                 let outcome = ax_action_outcome(
                     ax.set_selected_range(&element, start, len),
                     "AX selected text range update",
@@ -11445,12 +11487,44 @@ pub(crate) mod input {
                     outcome
                 };
                 log::info!(
-                    "remote-control: AX pointer up window_id={window_id} mode=AxText anchor_offset={anchor_offset} displacement={displacement:.2} up_offset={up_offset} selection_start={start} selection_len={len} ax_outcome={} outcome={}",
+                    "remote-control: AX pointer up window_id={window_id} mode=AxText anchor_offset={anchor_offset} displacement={displacement:.2} up_offset={up_offset} selection_start={start} selection_len={len} ax_outcome={} outcome={} text_focus={}",
                     ax_replay_outcome_name(outcome),
-                    ax_replay_outcome_name(final_outcome)
+                    ax_replay_outcome_name(final_outcome),
+                    text_focus_summary(Some(focused))
                 );
                 Ok(final_outcome)
             }
+        }
+    }
+
+    /// #404: best-effort `AXFocused = true` on the text element a remote click
+    /// just landed on. Pid-posted keys reach whatever view holds the app's own
+    /// keyboard focus; in Chrome that can be the address bar even though the
+    /// click put DOM focus on a page field, and then every typed key lands in
+    /// the address bar. A failure never fails the click itself -- the click
+    /// already happened -- it is only logged. Returns whether focus was set.
+    fn focus_clicked_text_element(
+        window_id: u32,
+        element: &AxElementHandle,
+        ax: &dyn AxInputBackend,
+    ) -> bool {
+        match ax.set_focused(element) {
+            Ok(()) => true,
+            Err(error) => {
+                log::info!(
+                    "remote-control: AX text focus failed window_id={window_id} role={} error={error:?}",
+                    ax_role_description(element)
+                );
+                false
+            }
+        }
+    }
+
+    fn text_focus_summary(focused: Option<bool>) -> &'static str {
+        match focused {
+            Some(true) => "set",
+            Some(false) => "failed",
+            None => "n/a",
         }
     }
 
@@ -13320,6 +13394,8 @@ pub(crate) mod input {
             // modelling a cached element that was destroyed before the press.
             press_error_ids: Mutex<std::collections::HashSet<u64>>,
             ops: Mutex<Vec<AxOp>>,
+            // #404: element ids that received `set_focused`, in order.
+            focused: Mutex<Vec<u64>>,
         }
 
         #[derive(Debug, Clone, PartialEq)]
@@ -13801,6 +13877,10 @@ pub(crate) mod input {
             fn ops(&self) -> Vec<AxOp> {
                 self.ops.lock_unpoisoned().clone()
             }
+
+            fn focused_ids(&self) -> Vec<u64> {
+                self.focused.lock_unpoisoned().clone()
+            }
         }
 
         impl AxInputBackend for RecordingAxBackend {
@@ -13938,6 +14018,15 @@ pub(crate) mod input {
                 self.ops
                     .lock_unpoisoned()
                     .push(AxOp::SetSelectedRange { id, start, len });
+                Ok(())
+            }
+
+            fn set_focused(&self, element: &AxElementHandle) -> Result<(), AxError> {
+                let id = element.test_id().unwrap();
+                // #404: recorded apart from `ops` so the many existing exact
+                // `ops()` assertions keep describing the press/selection
+                // sequence alone.
+                self.focused.lock_unpoisoned().push(id);
                 Ok(())
             }
 
