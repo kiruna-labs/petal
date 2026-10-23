@@ -15,6 +15,7 @@
 //   verdict is REPORT-ONLY (failures print as warnings, exit 0) unless
 //   E2E_IMPAIRED_BLOCKING=true (#378; report-only until #421 lands).
 //   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> --engine-exit <n> [--quarantine <ids>]
+//   node scripts/ci/e2e-gate-verdict.mjs freeze   --raw <share-freeze-raw.json> [--sender-log <sharer petal log>] [--json <report out>]
 //
 // Prints GitHub ::error/::warning annotations; exits 0 (pass) or 1 (fail).
 
@@ -22,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { attributionVerdict, envFlagTrue, IMPAIRED_BLOCKING_ENV, latencyVerdict } from './remote-control-latency-verdict.mjs';
+import { freezeVerdict } from './share-freeze-verdict.mjs';
 
 // Skips that are structurally unavoidable on the release runner and carry no
 // signal there. Keyed by case id AND reason: the same case skipping for any
@@ -351,8 +353,15 @@ function main(argv) {
       impaired: args.impaired && fs.existsSync(args.impaired) ? readJson(args.impaired) : null,
       delayMs: args['delay-ms'],
     });
+  } else if (tier === 'freeze') {
+    // Share-freeze soak (#391): scripts/ci/share-freeze-verdict.mjs. The
+    // report is written even when the run was INFRA-INVALID.
+    const senderLog = args['sender-log'] && fs.existsSync(args['sender-log']) ? fs.readFileSync(args['sender-log'], 'utf8') : null;
+    verdict = freezeVerdict({ raw: args.raw && fs.existsSync(args.raw) ? readJson(args.raw) : null, senderLogText: senderLog });
+    if (args.json) fs.writeFileSync(args.json, `${JSON.stringify(verdict.report, null, 2)}\n`);
+    console.log(`share-freeze outcome: ${verdict.outcome.toUpperCase()}`);
   } else {
-    console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|latency|attribution|cockpit)`);
+    console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|latency|attribution|cockpit|freeze)`);
     return 1;
   }
   if (pass === 'impaired') {

@@ -7968,6 +7968,12 @@ impl PublishedTrack {
         captured: &CapturedFrame,
         capture_wall_time_us: u64,
     ) -> Option<PublishedFrameTiming> {
+        // #391 red proof: a debug-only, env-gated sender freeze. No-op unless
+        // PETAL_TEST_SHARE_PAUSE is set; never compiled into a release.
+        #[cfg(debug_assertions)]
+        if super::test_share_pause::should_drop(&self.track.name()) {
+            return None;
+        }
         let result = self.push_frame_inner(captured, capture_wall_time_us);
         if let Some(timing) = result {
             self.log_source_boundary(timing);

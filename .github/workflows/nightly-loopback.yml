@@ -92,6 +92,16 @@ on:
         required: false
         default: ""
         type: string
+      share_freeze_soak_ms:
+        description: "Share-freeze soak: how long the native share is measured on two web viewers, ms (60000-1500000; default 600000)"
+        required: false
+        default: ""
+        type: string
+      share_freeze_pause:
+        description: "RED-PROOF ONLY: '<afterMs>:<durationMs>' drops every window-share frame once (debug knob PETAL_TEST_SHARE_PAUSE) to prove the freeze gate fails. Leave empty."
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       ref:
@@ -132,6 +142,11 @@ on:
         required: false
         default: true
         type: boolean
+      share_freeze_soak_ms:
+        description: "Share-freeze soak: how long the native share is measured on two web viewers, ms (60000-1500000; default 600000)"
+        required: false
+        default: ""
+        type: string
     secrets:
       vercel_bypass_secret:
         description: "Vercel Protection Bypass for Automation secret, required ONLY when harness_url/backend_url point at a protected staged deployment. Empty for production targets."
@@ -1081,4 +1096,167 @@ jobs:
             ${{ runner.temp }}/petal-nightly-loopback/*.txt
             ${{ runner.temp }}/petal-nightly-loopback/crashes/**
             ${{ runner.temp }}/petal-cockpit/**
+          if-no-files-found: warn
+
+  # SHARE-FREEZE SOAK (#391). Users report intermittent freezes for EVERY
+  # participant in real meetings; nothing above can see that (local
+  # livekit-server --dev, one viewer, seconds-long checks). This job holds a
+  # native window share open for minutes on the REAL LiveKit deployment the
+  # backend hands out (production, or the staged one for a release) with two
+  # independent web viewers, and fails on any presented-frame gap over
+  # FREEZE_GAP_THRESHOLD_MS (scripts/ci/share-freeze-verdict.mjs) while the
+  # source was changing. Its own job, not a step of live-loopback: a 10-minute
+  # soak does not fit that job's 45-minute cap with headroom. release.yml's
+  # `e2e-gate` calls this whole workflow, so it is release-blocking.
+  share-freeze-soak:
+    name: Share-freeze soak (LiveKit Cloud, two viewers)
+    needs: live-loopback
+    # Its verdict is independent of the loopback tiers'; run it either way.
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: ""
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      CARGO_INCREMENTAL: 0
+      PETAL_DISABLE_AUDIO: 1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          # Same runner as live-loopback: keep its target/ so only the
+          # desktop crate relinks.
+          clean: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build desktop app (frontend + debug Rust)
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run build
+          cd src-tauri && cargo build --locked
+
+      - name: Run share-freeze soak
+        shell: bash
+        timeout-minutes: 38
+        env:
+          FREEZE_BACKEND_URL: ${{ inputs.backend_url || 'https://app.petal.live' }}
+          FREEZE_HARNESS_URL: ${{ inputs.harness_url || 'https://meet.petal.live' }}
+          FREEZE_SOAK_MS: ${{ inputs.share_freeze_soak_ms || '600000' }}
+          FREEZE_PAUSE: ${{ inputs.share_freeze_pause || '' }}
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret || secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          LOG_DIR="$RUNNER_TEMP/petal-share-freeze"
+          rm -rf "$LOG_DIR"; mkdir -p "$LOG_DIR"
+          SOCKET="$LOG_DIR/petal-freeze.sock"
+          PETAL_LOG="$LOG_DIR/petal-sharer.log"
+          CRASH_MARK="$LOG_DIR/start.mark"; touch "$CRASH_MARK"
+          BIN="apps/desktop/src-tauri/target/debug/desktop"
+
+          for f in scripts/ci/e2e-gate-verdict.mjs scripts/ci/share-freeze-verdict.mjs apps/desktop/scripts/share-freeze-soak.mjs scripts/petal-instance-guard.sh; do
+            if [ ! -f "$f" ]; then echo "::error::CANNOT CHECK: $f is not in this checkout; no freeze verdict can be computed."; exit 1; fi
+          done
+          case "$FREEZE_SOAK_MS" in *[!0-9]*|"") echo "::error::share_freeze_soak_ms must be an integer"; exit 1 ;; esac
+          if [ "$FREEZE_SOAK_MS" -lt 60000 ] || [ "$FREEZE_SOAK_MS" -gt 1500000 ]; then
+            echo "::error::share_freeze_soak_ms must be 60000-1500000 (got $FREEZE_SOAK_MS)"; exit 1
+          fi
+          if [ -n "$FREEZE_PAUSE" ]; then
+            if ! [[ "$FREEZE_PAUSE" =~ ^[0-9]+:[0-9]+$ ]]; then echo "::error::share_freeze_pause must be '<afterMs>:<durationMs>'"; exit 1; fi
+            echo "::warning::RED-PROOF RUN: window-share frames dropped once ($FREEZE_PAUSE); the freeze gate is expected to FAIL."
+          fi
+
+          # The loopback job's Petal must be gone (single-instance lock). Wait
+          # by pid, never kill (#150, #846).
+          # shellcheck source=scripts/petal-instance-guard.sh
+          source scripts/petal-instance-guard.sh
+          petal_guard_wait_for_instances_exit 300
+
+          echo "share-freeze target: backend=$FREEZE_BACKEND_URL harness=$FREEZE_HARNESS_URL soak=${FREEZE_SOAK_MS}ms"
+          # The real deployment, so no local LiveKit vars. The bypass secret
+          # only matters for a staged backend; transport/backend_http.rs sends it.
+          env -u LIVEKIT_URL -u LIVEKIT_API_KEY -u LIVEKIT_API_SECRET \
+            PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_BACKEND_URL="$FREEZE_BACKEND_URL" \
+            PETAL_TEST_SHARE_PAUSE="$FREEZE_PAUSE" RUST_LOG=info \
+            "$BIN" >"$PETAL_LOG" 2>&1 &
+          PETAL_PID=$!
+          stop_petal() {
+            if ps -p "$PETAL_PID" >/dev/null 2>&1; then
+              kill "$PETAL_PID" 2>/dev/null || true
+              for _ in $(seq 1 20); do ps -p "$PETAL_PID" >/dev/null 2>&1 || break; sleep 0.5; done
+              ps -p "$PETAL_PID" >/dev/null 2>&1 && kill -9 "$PETAL_PID" 2>/dev/null || true
+            fi
+            ps -p "$PETAL_PID" >/dev/null 2>&1 && echo "::warning::Petal pid $PETAL_PID survived teardown" || true
+          }
+          trap stop_petal EXIT
+          waited=0
+          until [ -S "$SOCKET" ]; do
+            if ! ps -p "$PETAL_PID" >/dev/null 2>&1; then echo "::error::INFRA-INVALID: Petal exited before opening its autotest socket; see petal-sharer.log"; exit 1; fi
+            if [ "$waited" -ge 180 ]; then echo "::error::INFRA-INVALID: Petal did not open $SOCKET within 180s"; exit 1; fi
+            sleep 1; waited=$((waited + 1))
+          done
+
+          set +e
+          PETAL_HARNESS_URL="$FREEZE_HARNESS_URL" PETAL_TEST_SHARE_PAUSE="$FREEZE_PAUSE" \
+            node apps/desktop/scripts/share-freeze-soak.mjs --socket "$SOCKET" \
+              --harness-url "$FREEZE_HARNESS_URL" --duration-ms "$FREEZE_SOAK_MS" --out "$LOG_DIR"
+          soak_exit=$?
+          set -e
+          echo "share-freeze harness exit $soak_exit (2 = it recorded infra/fatal problems; the verdict scores them)"
+          grep -E "TEST share pause" "$PETAL_LOG" || true
+          stop_petal
+
+          gate_fail=0
+          NEW_CRASHES="$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'desktop*.ips' -newer "$CRASH_MARK" 2>/dev/null || true)"
+          if [ -n "$NEW_CRASHES" ]; then
+            echo "::error::Petal wrote crash report(s) during the share-freeze soak:"; echo "$NEW_CRASHES"
+            mkdir -p "$LOG_DIR/crashes"
+            while IFS= read -r f; do [ -n "$f" ] && cp "$f" "$LOG_DIR/crashes/" 2>/dev/null || true; done <<< "$NEW_CRASHES"
+            gate_fail=1
+          fi
+          echo "sharer host: macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+          node scripts/ci/e2e-gate-verdict.mjs freeze --raw "$LOG_DIR/share-freeze-raw.json" \
+            --sender-log "$PETAL_LOG" --json "$LOG_DIR/share-freeze-report.json" || gate_fail=1
+          [ "$gate_fail" -eq 0 ] || { echo "::error::Share-freeze soak FAILED (report: share-freeze-report.json)."; exit 1; }
+          echo "==> Share-freeze soak passed"
+
+      - name: Scrub the deployment-protection bypass secret from artifacts
+        if: always()
+        env:
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret || secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${PETAL_VERCEL_BYPASS_SECRET:-}" ] || { echo "no bypass secret in play; nothing to scrub"; exit 0; }
+          python3 - "$RUNNER_TEMP/petal-share-freeze" <<'PY'
+          import os, sys
+          needle = os.environ["PETAL_VERCEL_BYPASS_SECRET"].strip().encode()
+          for root, _dirs, files in os.walk(sys.argv[1]):
+              for name in files:
+                  path = os.path.join(root, name)
+                  try:
+                      data = open(path, "rb").read()
+                  except OSError:
+                      continue
+                  if needle in data:
+                      open(path, "wb").write(data.replace(needle, b"<redacted>"))
+          PY
+
+      - name: Upload share-freeze artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: share-freeze-soak-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/petal-share-freeze/*.json
+            ${{ runner.temp }}/petal-share-freeze/*.log
+            ${{ runner.temp }}/petal-share-freeze/crashes/**
           if-no-files-found: warn

@@ -46,6 +46,9 @@ mod negotiation_recovery;
 pub mod reconcile;
 pub mod room_directory;
 pub mod subscriber;
+// Red-proof knob for the share-freeze soak (#391). Debug builds only.
+#[cfg(debug_assertions)]
+pub(crate) mod test_share_pause;
 pub mod token;
 
 pub use audio::{enable_managed_playout, AudioError, MicTrack};
