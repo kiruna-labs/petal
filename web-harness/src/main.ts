@@ -10,6 +10,7 @@ import { createTelepointerSender } from './telepointerSender';
 import { autoJoinFromUrl } from './deepLink';
 import type { HarnessContext, HarnessHook } from './context';
 import { setupTileLayout } from './tileLayout';
+import { parseTileLayoutMode } from '@petal/shared/logic/tileLayoutMode';
 import { setupMeetingViewport } from './meetingViewport';
 import { setupTelepointerDisplay } from './telepointerDisplay';
 import { setupDrawDisplay } from './drawDisplay';
@@ -322,8 +323,7 @@ const ctx: HarnessContext = {
     realMicOn: false,
     webcamOn: false,
     currentMeetingCode: null,
-    tileLayoutMode:
-      localStorage.getItem(HARNESS_TILE_LAYOUT_STORAGE_KEY) === 'spotlight' ? 'spotlight' : 'grid',
+    tileLayoutMode: parseTileLayoutMode(localStorage.getItem(HARNESS_TILE_LAYOUT_STORAGE_KEY)),
     pinnedTileId: null,
     layoutModeButtons: null,
     speakerSmoothingTimer: null,

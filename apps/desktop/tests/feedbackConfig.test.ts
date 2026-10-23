@@ -67,14 +67,14 @@ test('feedback is compiled off entirely (no trigger, no SDK reference) when the 
   assert.match(mainMenuSource, /\{#if feedbackEnabled\}/);
 });
 
-test('#786: the meeting topbar bug-report cell sits between the layout toggle and Connection stats', () => {
+test('#786: the meeting topbar bug-report cell sits between the layout picker and Connection stats', () => {
   const topbarRightAt = gallerySource.indexOf('<div class="topbar-right">');
-  const layoutToggleAt = gallerySource.indexOf('layout-toggle', topbarRightAt);
+  const layoutPickerAt = gallerySource.indexOf('layout-picker', topbarRightAt);
   const reportBugAt = gallerySource.indexOf('report-bug', topbarRightAt);
   const netBtnAt = gallerySource.indexOf('net-btn', topbarRightAt);
-  assert.ok(topbarRightAt !== -1 && layoutToggleAt !== -1, 'gallery topbar-right lost its layout toggle');
+  assert.ok(topbarRightAt !== -1 && layoutPickerAt !== -1, 'gallery topbar-right lost its layout picker');
   assert.ok(reportBugAt !== -1, 'the bug-report button must render inside the gallery topbar');
-  assert.ok(layoutToggleAt < reportBugAt, 'the bug report belongs immediately right of the layout toggle');
+  assert.ok(layoutPickerAt < reportBugAt, 'the bug report belongs immediately right of the layout picker');
   assert.ok(reportBugAt < netBtnAt, 'the bug report belongs left of the Connection stats cell');
 
   // It reuses the existing cell + tooltip chrome (whose wrap-not-truncate

@@ -133,7 +133,7 @@ async function openMeeting(context: Record<string, unknown>, count: number, opti
   return page;
 }
 
-async function setLayout(page: Page, label: 'Grid view' | 'Spotlight view') {
+async function setLayout(page: Page, label: 'Grid view' | 'Vertical view' | 'Spotlight view') {
   await page.evaluate((wanted: string) => {
     document.querySelector<HTMLButtonElement>(`.layout-mode-button[aria-label="${wanted}"]`)!.click();
   }, label);
@@ -534,12 +534,13 @@ test('#239 the portrait top bar stays one slim row, with fingertip-sized hit are
     // an `__name` helper that does not exist inside the page.)
     const hits = await page.evaluate(() => {
       const fullscreen = document.querySelector('#topbar-fullscreen')!;
-      const [grid, spotlight] = [...document.querySelectorAll('.layout-mode-button')];
+      const [grid, column, spotlight] = [...document.querySelectorAll('.layout-mode-button')];
       const probes: Array<[string, Element, number, number]> = [
         ['fullscreenBelow', fullscreen, 0, 5],
         ['fullscreenLeft', fullscreen, -5, 0],
         ['gridBelow', grid, 0, 8],
         ['gridLeft', grid, -6, 0],
+        ['columnBelow', column, 0, 8],
         ['spotlightAbove', spotlight, 0, -8],
       ];
       return {
@@ -559,6 +560,7 @@ test('#239 the portrait top bar stays one slim row, with fingertip-sized hit are
       fullscreenLeft: true,
       gridBelow: true,
       gridLeft: true,
+      columnBelow: true,
       spotlightAbove: true,
       visibleSize: 32,
     });
@@ -786,5 +788,34 @@ test('#239 full screen is one tap, hides the navigation UI, and is absent where 
     assert.equal(await iphone.locator('#topbar-fullscreen, #ctl-fullscreen').count(), 0);
   } finally {
     await iphone.context().close();
+  }
+});
+
+test('#204 vertical view stacks tiles in one column on a wide window', { timeout: 60_000 }, async () => {
+  const page = await openMeeting(DESKTOP, 4);
+  try {
+    await setLayout(page, 'Grid view');
+    const gridCols = await page.evaluate(() =>
+      getComputedStyle(document.querySelector('#tiles')!).getPropertyValue('--gallery-cols').trim()
+    );
+    assert.equal(gridCols, '2', `grid should pack 2 columns, got ${gridCols}`);
+    await setLayout(page, 'Vertical view');
+    const column = await page.evaluate(() => ({
+      cols: getComputedStyle(document.querySelector('#tiles')!).getPropertyValue('--gallery-cols').trim(),
+      pressed: document.querySelector('[data-layout-mode="column"]')?.getAttribute('aria-pressed'),
+      modes: [...document.querySelectorAll('.layout-mode-button')].map((button) => [
+        (button as HTMLElement).dataset.layoutMode,
+        button.getAttribute('aria-label'),
+      ]),
+    }));
+    assert.deepEqual(column.modes, [
+      ['grid', 'Grid view'],
+      ['column', 'Vertical view'],
+      ['spotlight', 'Spotlight view'],
+    ]);
+    assert.equal(column.pressed, 'true');
+    assert.equal(column.cols, '1', `vertical view should pack 1 column, got ${column.cols}`);
+  } finally {
+    await page.context().close();
   }
 });

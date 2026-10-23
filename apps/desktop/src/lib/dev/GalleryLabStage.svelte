@@ -71,13 +71,12 @@
   let expanded = $state(true);
 
   // The layout mode lives inside Gallery; reach it the way a person does,
-  // through the top-bar view toggle, so the lab exercises the real path.
+  // through the top-bar layout picker, so the lab exercises the real path.
   async function syncLayoutMode(mode: GalleryLabScenario['mode']) {
     await tick();
-    const toggle = chromeEl?.querySelector<HTMLButtonElement>('.layout-toggle');
-    if (!toggle) return;
-    const showing = chromeEl?.querySelector('.tiles.spotlight') ? 'spotlight' : 'grid';
-    if (showing !== mode) toggle.click();
+    chromeEl
+      ?.querySelector<HTMLButtonElement>(`.layout-mode-button[data-layout-mode="${mode}"]`)
+      ?.click();
     await tick();
     onSettled?.();
   }

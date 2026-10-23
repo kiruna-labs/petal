@@ -1,4 +1,4 @@
-import type { HarnessContext, HarnessState, TileLayoutMode } from './context';
+import type { HarnessContext, HarnessState } from './context';
 import { HARNESS_TILE_LAYOUT_STORAGE_KEY } from './constants';
 import { getTileReflowController } from './tileReflow.ts';
 import { computeGalleryLayoutScrollingColumn } from '@petal/shared/logic/galleryGeometry';
@@ -12,12 +12,15 @@ import {
   autoSpotlight,
   chooseSpotlightHero,
   manualTileLayoutMode,
+  TILE_LAYOUT_LABELS,
+  TILE_LAYOUT_MODES,
+  type TileLayoutMode,
   type TileLayoutModeState,
   type TileLayoutModeTransition,
 } from '@petal/shared/logic/tileLayoutMode';
 
 // ---------------------------------------------------------------------------
-// Tile layout: grid/spotlight picker + click-to-pin, plus active-speaker
+// Tile layout: grid/column/spotlight picker + click-to-pin, plus active-speaker
 // smoothing (LiveKit emits a changing ordered active-speaker list; ease scores
 // toward/away from it so rings do not flicker).
 //
@@ -176,7 +179,7 @@ export function setupTileLayout(ctx: HarnessContext) {
     // column of minimum-height tiles and `.tiles` (overflow: auto) scrolls it.
     const layout = computeGalleryLayoutScrollingColumn(count, width, height, {
       gap,
-      arrangement: 'auto',
+      arrangement: state.tileLayoutMode === 'column' ? 'column' : 'auto',
       previous: lastGalleryLayout,
       previousOverflowed: lastGalleryLayout?.count === count && lastGalleryLayout.overflow,
       tileAspectRange: cameraOnly ? CAMERA_TILE_ASPECT_RANGE : null,
@@ -397,6 +400,16 @@ export function setupTileLayout(ctx: HarnessContext) {
         '</svg>',
       ].join(' ');
     }
+    if (mode === 'column') {
+      return [
+        '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"',
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
+        '<rect x="6" y="3" width="12" height="5" rx="1.5"></rect>',
+        '<rect x="6" y="10" width="12" height="5" rx="1.5"></rect>',
+        '<rect x="6" y="17" width="12" height="5" rx="1.5"></rect>',
+        '</svg>',
+      ].join(' ');
+    }
     return [
       '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"',
       'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">',
@@ -412,6 +425,7 @@ export function setupTileLayout(ctx: HarnessContext) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'layout-mode-button';
+    button.dataset.layoutMode = mode;
     button.innerHTML = iconButtonSvg(mode);
     button.setAttribute('aria-label', label);
     button.title = label;
@@ -423,10 +437,13 @@ export function setupTileLayout(ctx: HarnessContext) {
     const picker = document.createElement('div');
     picker.className = 'layout-picker';
     picker.setAttribute('aria-label', 'Tile layout');
-    const gridButton = makeLayoutModeButton('grid', 'Grid view');
-    const spotlightButton = makeLayoutModeButton('spotlight', 'Spotlight view');
-    state.layoutModeButtons = { grid: gridButton, spotlight: spotlightButton };
-    picker.append(gridButton, spotlightButton);
+    const buttons = {} as Record<TileLayoutMode, HTMLButtonElement>;
+    for (const mode of TILE_LAYOUT_MODES) {
+      const button = makeLayoutModeButton(mode, TILE_LAYOUT_LABELS[mode]);
+      buttons[mode] = button;
+      picker.append(button);
+    }
+    state.layoutModeButtons = buttons;
     topbarRight.insertBefore(picker, topbarRight.firstChild);
     applyTileLayout();
   }

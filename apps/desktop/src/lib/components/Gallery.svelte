@@ -31,7 +31,16 @@
   import { CAMERA_TILE_ASPECT_RANGE } from '@petal/shared/logic/cameraCrop';
   import { computeSpotlightGeometry } from '@petal/shared/logic/spotlightGeometry';
   import { uniformFlip, uniformFlipKeyframes, visibleFlipRect, type FlipRect } from '@petal/shared/logic/tileFlip';
-  import { chooseSpotlightHero } from '@petal/shared/logic/tileLayoutMode';
+  import {
+    TILE_LAYOUT_LABELS,
+    TILE_LAYOUT_MODES,
+    autoSpotlight,
+    chooseSpotlightHero,
+    dismissSpotlight,
+    initialTileLayoutModeState,
+    manualTileLayoutMode,
+    type TileLayoutMode
+  } from '@petal/shared/logic/tileLayoutMode';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
   import { tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight } from '$lib/motion';
   import { stepFitLadder } from '$lib/meeting/fitLadder';
@@ -173,10 +182,10 @@
     onReportBug
   }: Props = $props();
 
-  type GalleryLayout = 'grid' | 'spotlight';
   type ParticipantEntry = GalleryParticipant & { key: string };
 
-  let layoutMode = $state<GalleryLayout>('grid');
+  let layoutState = $state(initialTileLayoutModeState('grid'));
+  const layoutMode = $derived(layoutState.mode);
   let manualPinnedKey = $state<string | null>(null);
   let renamingRoom = $state(false);
   let roomNameDraft = $state('');
@@ -399,7 +408,8 @@
       previousWasLine: lastGalleryLayout?.count === participantEntries.length && lastGalleryLayout.line,
       previousOverflowed: lastGalleryLayout?.count === participantEntries.length && lastGalleryLayout.overflow,
       tileAspectRange: CAMERA_TILE_ASPECT_RANGE,
-      gap: compactWindow ? COMPACT_TILE_GAP_PX : undefined
+      gap: compactWindow ? COMPACT_TILE_GAP_PX : undefined,
+      arrangement: layoutMode === 'column' ? 'column' : 'auto'
     });
     lastGalleryLayout = { count: participantEntries.length, columns: layout.columns, rows: layout.rows, line: layout.line, overflow: layout.overflow };
     return layout;
@@ -446,9 +456,6 @@
     spotlightActive && spotlightRailWidth > 0 && spotlightRailHeight > 0
       ? `--hero-w: ${spotlightGeometry.heroWidth}px; --hero-h: ${spotlightGeometry.heroHeight}px; --thumb-w: ${spotlightGeometry.thumbnailWidth}px; --thumb-h: ${spotlightGeometry.thumbnailHeight}px; --strip-cols: ${Math.max(1, spotlightGeometry.stripColumns)}; --strip-rows: ${Math.max(1, Math.ceil(thumbnailEntries.length / Math.max(1, spotlightGeometry.stripColumns)))}; --spotlight-gap: ${spotlightGap}px;`
       : undefined
-  );
-  const layoutToggleLabel = $derived(
-    layoutMode === 'grid' ? 'Switch to spotlight' : 'Switch to gallery grid'
   );
   // Bug report (#786): a submission is refused while a window is shared
   // (feedback.rs) so a diagnostic can never carry shared content. The topbar
@@ -547,27 +554,34 @@
     };
   });
 
-  function setLayoutMode(next: GalleryLayout) {
+  function setLayoutMode(next: TileLayoutMode) {
+    const transition = manualTileLayoutMode(layoutState, next);
     transitionGalleryLayout(() => {
-      layoutMode = next;
-      if (next === 'grid') manualPinnedKey = null;
+      layoutState = transition.state;
+      if (next !== 'spotlight') manualPinnedKey = null;
     });
   }
 
   function pinParticipant(key: string) {
     // Clicking the current spotlight main acts as a toggle: unpin and return
-    // to grid. This gives every tile a visible response on click — the prior
-    // "re-pin same key" was a no-op the user read as broken.
+    // to the gallery mode we left (grid or vertical). This gives every tile a
+    // visible response on click — the prior "re-pin same key" was a no-op
+    // the user read as broken.
     if (spotlightActive && spotlightEntry?.key === key) {
+      const transition = dismissSpotlight(layoutState);
       transitionGalleryLayout(() => {
         manualPinnedKey = null;
-        layoutMode = 'grid';
+        layoutState = transition.state;
       });
       return;
     }
+    const transition =
+      layoutMode === 'spotlight'
+        ? manualTileLayoutMode(layoutState, 'spotlight')
+        : autoSpotlight(layoutState);
     transitionGalleryLayout(() => {
       manualPinnedKey = key;
-      layoutMode = 'spotlight';
+      layoutState = transition.state;
     });
     // Keep keyboard activation deterministic after the variant class changes.
     // The keyed tile remains mounted, so this is a harmless focus restoration
@@ -962,33 +976,46 @@
       </span>
     </div>
     <div class="topbar-right">
-      <div class="topbar-control-cell">
-        <!-- View toggle (#186): one destination-state button, not simultaneous
-             gallery/window icons. Grid mode shows the spotlight/window glyph;
-             spotlight mode shows the gallery-grid glyph to get back. -->
-        <button
-          type="button"
-          class="chrome-icon-button layout-toggle"
-          aria-label={layoutToggleLabel}
-          onclick={() => setLayoutMode(layoutMode === 'grid' ? 'spotlight' : 'grid')}
-        >
-          {#if layoutMode === 'grid'}
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="2" y="2" width="20" height="11" rx="2"></rect>
-              <rect x="2" y="17" width="6" height="5" rx="1"></rect>
-              <rect x="9" y="17" width="6" height="5" rx="1"></rect>
-              <rect x="16" y="17" width="6" height="5" rx="1"></rect>
-            </svg>
-          {:else}
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="4" y="4" width="6" height="6" rx="1.5"></rect>
-              <rect x="14" y="4" width="6" height="6" rx="1.5"></rect>
-              <rect x="4" y="14" width="6" height="6" rx="1.5"></rect>
-              <rect x="14" y="14" width="6" height="6" rx="1.5"></rect>
-            </svg>
-          {/if}
-        </button>
-        <span class="topbar-tooltip" aria-hidden="true">{layoutToggleLabel}</span>
+      <div class="topbar-control-cell layout-picker-cell">
+        <!-- Layout picker (#204): grid, a stacked vertical column, and
+             spotlight as three simultaneous destinations — not a two-way
+             toggle that skipped the column. -->
+        <div class="layout-picker" role="group" aria-label="Tile layout">
+          {#each TILE_LAYOUT_MODES as mode (mode)}
+            <button
+              type="button"
+              class="layout-mode-button"
+              class:is-active={layoutMode === mode}
+              data-layout-mode={mode}
+              aria-label={TILE_LAYOUT_LABELS[mode]}
+              aria-pressed={layoutMode === mode}
+              onclick={() => setLayoutMode(mode)}
+            >
+              {#if mode === 'grid'}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+                  <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+                  <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+                  <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+                </svg>
+              {:else if mode === 'column'}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="6" y="3" width="12" height="5" rx="1.5"></rect>
+                  <rect x="6" y="10" width="12" height="5" rx="1.5"></rect>
+                  <rect x="6" y="17" width="12" height="5" rx="1.5"></rect>
+                </svg>
+              {:else}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="3" y="4" width="12" height="16" rx="2"></rect>
+                  <rect x="18" y="5" width="3" height="4" rx="1"></rect>
+                  <rect x="18" y="10" width="3" height="4" rx="1"></rect>
+                  <rect x="18" y="15" width="3" height="4" rx="1"></rect>
+                </svg>
+              {/if}
+            </button>
+          {/each}
+        </div>
+        <span class="topbar-tooltip" aria-hidden="true">Tile layout</span>
       </div>
       <!-- Bug report (#786): renders ONLY when the route hands down a
            trigger, which it does only for a build carrying a UserDispatch
@@ -1670,18 +1697,35 @@
     transform: translate(0, 0);
   }
 
-  .layout-toggle {
-    position: relative;
-    display: flex;
+  .topbar-control-cell.layout-picker-cell {
+    width: auto;
+  }
+
+  .layout-picker {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    height: var(--topbar-control-height);
+    padding: 2px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--hairline);
+    background: rgba(255, 255, 255, 0.035);
+  }
+
+  .layout-mode-button {
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: var(--topbar-control-height);
-    height: var(--topbar-control-height);
+    width: 28px;
+    /* Fills the pill: the top-bar control height less its 2px padding and
+       1px border on each side, so the pill matches the bug-report button
+       beside it (#241). */
+    height: 100%;
     padding: 0;
-    border: none;
-    border-radius: var(--radius-chip);
+    border: 0;
+    border-radius: var(--radius-pill);
     background: transparent;
-    color: var(--text-soft);
+    color: var(--text-faint);
     cursor: pointer;
     transition:
       background-color var(--motion-fast) var(--ease-standard),
@@ -1689,29 +1733,22 @@
       scale var(--motion-fast) var(--ease-standard);
   }
 
-  .layout-toggle::after {
-    content: '';
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    width: 40px;
-    height: 40px;
-    transform: translate(-50%, -50%);
-    pointer-events: none;
-  }
-
-  .layout-toggle:hover,
-  .layout-toggle:focus-visible {
-    background: var(--fill-bright);
+  .layout-mode-button:hover,
+  .layout-mode-button:focus-visible {
     color: var(--text-strong);
   }
 
-  .layout-toggle:focus-visible {
+  .layout-mode-button.is-active {
+    background: rgba(255, 255, 255, 0.09);
+    color: var(--text-primary);
+  }
+
+  .layout-mode-button:focus-visible {
     outline: 2px solid var(--id-blue);
     outline-offset: 2px;
   }
 
-  .layout-toggle:active {
+  .layout-mode-button:active {
     scale: var(--press-scale, 0.96);
   }
 
@@ -1838,14 +1875,14 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .layout-toggle,
+    .layout-mode-button,
     .net-btn,
     .report-bug,
     .topbar-right :global(.control-button.size-compact) {
       transition: none;
     }
 
-    .layout-toggle:active,
+    .layout-mode-button:active,
     .net-btn:active,
     .report-bug:active {
       scale: 1;
