@@ -249,7 +249,11 @@ pub(crate) fn evaluate(obs: ChromeObservations<'_>) -> RcVerdict {
         let seen: Vec<&str> = obs.statuses.iter().map(|s| s.status.as_str()).collect();
         return RcVerdict::TestFail(format!(
             "the host never granted control: no 'active' status carrying a grant token (saw: {})",
-            if seen.is_empty() { "nothing".to_string() } else { seen.join(", ") }
+            if seen.is_empty() {
+                "nothing".to_string()
+            } else {
+                seen.join(", ")
+            }
         ));
     }
     let inputs: Vec<&DrivenInput> = obs.driven.iter().filter(|i| is_input(&i.kind)).collect();
@@ -305,7 +309,8 @@ pub(crate) fn evaluate(obs: ChromeObservations<'_>) -> RcVerdict {
         }
     };
     // The #404 signature first: the address bar took the keystrokes.
-    if !obs.omnibox_before.contains(obs.expected_text) && omnibox_after.contains(obs.expected_text) {
+    if !obs.omnibox_before.contains(obs.expected_text) && omnibox_after.contains(obs.expected_text)
+    {
         return RcVerdict::TestFail(format!(
             "the typed keys went to Chrome's ADDRESS BAR, not the web field the controller \
              clicked (#404): address bar read '{omnibox_after}', field read '{input_value}'"
@@ -494,7 +499,9 @@ pub(crate) mod live {
             }
         }
         fallback.ok_or_else(|| {
-            format!("no native AXTextField (address bar) under Chrome pid {pid} ({visited} AX nodes)")
+            format!(
+                "no native AXTextField (address bar) under Chrome pid {pid} ({visited} AX nodes)"
+            )
         })
     }
 
@@ -604,7 +611,8 @@ pub(crate) mod live {
                     if let Ok(text) =
                         std::fs::read_to_string(target.user_data_dir.join("DevToolsActivePort"))
                     {
-                        target.devtools_port = super::parse_devtools_active_port(&text).unwrap_or(0);
+                        target.devtools_port =
+                            super::parse_devtools_active_port(&text).unwrap_or(0);
                     }
                 }
                 if target.browser_pid == 0 {
@@ -794,7 +802,13 @@ mod tests {
     #[test]
     fn exact_value_with_a_clean_address_bar_passes() {
         let (d, s, e) = (driven(), granted(), effects());
-        let verdict = evaluate(obs(&d, &s, &e, Ok(KEYSTONE_TEXT), Ok("file:///tmp/x/target.html")));
+        let verdict = evaluate(obs(
+            &d,
+            &s,
+            &e,
+            Ok(KEYSTONE_TEXT),
+            Ok("file:///tmp/x/target.html"),
+        ));
         assert!(matches!(verdict, RcVerdict::Pass(_)), "{verdict:?}");
     }
 
@@ -833,9 +847,16 @@ mod tests {
     #[test]
     fn a_partial_or_padded_value_is_not_exact() {
         let (d, s, e) = (driven(), granted(), effects());
-        for value in ["petalrcnativ", "xpetalrcnative", "petalrcnativepetalrcnative"] {
+        for value in [
+            "petalrcnativ",
+            "xpetalrcnative",
+            "petalrcnativepetalrcnative",
+        ] {
             let verdict = evaluate(obs(&d, &s, &e, Ok(value), Ok("file:///t")));
-            assert!(matches!(verdict, RcVerdict::TestFail(_)), "{value}: {verdict:?}");
+            assert!(
+                matches!(verdict, RcVerdict::TestFail(_)),
+                "{value}: {verdict:?}"
+            );
         }
     }
 
@@ -910,12 +931,30 @@ mod tests {
     #[test]
     fn page_has_one_unfocused_input_and_escapes_the_marker() {
         let html = target_page_html("petal-rc-n2n-chrome-1<x>");
-        assert!(html.contains(&format!("id=\"{INPUT_ELEMENT_ID}\"")), "{html}");
-        assert!(html.contains("<title>petal-rc-n2n-chrome-1&lt;x&gt;</title>"), "{html}");
-        assert!(!html.contains("autofocus"), "nothing but the click may focus it: {html}");
-        assert!(html.contains("100vh"), "the field must cover the click point: {html}");
-        assert!(html.contains("animation"), "the window must keep drawing for SCK: {html}");
-        assert!(!html.contains(KEYSTONE_TEXT), "the page must not seed the keystone");
+        assert!(
+            html.contains(&format!("id=\"{INPUT_ELEMENT_ID}\"")),
+            "{html}"
+        );
+        assert!(
+            html.contains("<title>petal-rc-n2n-chrome-1&lt;x&gt;</title>"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("autofocus"),
+            "nothing but the click may focus it: {html}"
+        );
+        assert!(
+            html.contains("100vh"),
+            "the field must cover the click point: {html}"
+        );
+        assert!(
+            html.contains("animation"),
+            "the window must keep drawing for SCK: {html}"
+        );
+        assert!(
+            !html.contains(KEYSTONE_TEXT),
+            "the page must not seed the keystone"
+        );
     }
 
     #[test]
@@ -930,13 +969,19 @@ mod tests {
         let args = chrome_args("/tmp/p");
         assert!(args.contains(&"--user-data-dir=/tmp/p".to_string()));
         assert!(args.contains(&"--remote-debugging-port=0".to_string()));
-        assert!(!args.iter().any(|a| a.starts_with("--headless")), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a.starts_with("--headless")),
+            "{args:?}"
+        );
         assert!(!args.iter().any(|a| a.contains("9222")), "{args:?}");
     }
 
     #[test]
     fn devtools_active_port_parses_the_first_line() {
-        assert_eq!(parse_devtools_active_port("58258\n/devtools/browser/abc\n"), Some(58258));
+        assert_eq!(
+            parse_devtools_active_port("58258\n/devtools/browser/abc\n"),
+            Some(58258)
+        );
         assert_eq!(parse_devtools_active_port(""), None);
         assert_eq!(parse_devtools_active_port("0\n"), None);
         assert_eq!(parse_devtools_active_port("x\n"), None);
