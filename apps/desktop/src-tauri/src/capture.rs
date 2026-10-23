@@ -171,7 +171,7 @@ impl Drop for NativeCapturedPixelBuffer {
 ///
 /// The BGRA arm is retained as a parked fallback for tests and any future
 /// non-SCK source. The live ScreenCaptureKit window path should produce
-/// `Native` after issue #179, with `Nv12` retained for snapshot/copy fallback.
+/// `Native` after issue #179 (snapshots too), with `Nv12` retained for copy fallback.
 pub enum CapturedFramePayload {
     Bgra {
         data: PooledFrameData,
@@ -213,7 +213,8 @@ impl CapturedFramePayload {
 ///
 /// Native window frames own the retained `CVPixelBuffer` returned by
 /// `sample.image_buffer()`, so the IOSurface survives the callback. Snapshot
-/// and fallback frames may still carry copied BGRA/NV12 planes.
+/// frames own their `SCScreenshotManager` buffer the same way; fallback
+/// frames may still carry copied BGRA/NV12 planes.
 pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
@@ -2531,22 +2532,27 @@ impl WindowCaptureConfig {
                 "capture-layout-deferred".into(),
             ));
         }
-        let lock_copy_started = std::time::Instant::now();
         let fmt = pixel_buffer.pixel_format();
         if fmt != FMT_NV12_VIDEO_RANGE {
             return Err(CaptureError::ScreenCaptureKit(format!(
                 "snapshot: unexpected pixel format 0x{fmt:08x} (wanted '420v' NV12)"
             )));
         }
-        let payload = copy_nv12_payload(&pixel_buffer, None)?;
-        let lock_copy_ms = lock_copy_started.elapsed().as_secs_f64() * 1000.0;
+        let (width, height) = (pixel_buffer.width() as u32, pixel_buffer.height() as u32);
+        let color_profile = color_profile_for_nv12_pixel_buffer(&pixel_buffer, self.color_profile);
+        // Publish the snapshot's own '420v' buffer natively, like raw frames.
+        // A copied (I420) snapshot flips VideoToolbox's session pixel format,
+        // which resets the session: two keyframes per remote-control input (#433).
+        let payload = CapturedFramePayload::Native {
+            pixel_buffer: NativeCapturedPixelBuffer::new(pixel_buffer),
+        };
         Ok(CapturedFrame {
-            width: pixel_buffer.width() as u32,
-            height: pixel_buffer.height() as u32,
+            width,
+            height,
             payload,
             source_scale: configured_state.source_scale,
             layout_validated: true,
-            color_profile: color_profile_for_nv12_pixel_buffer(&pixel_buffer, self.color_profile),
+            color_profile,
             sequence: 0,
             frame_status: None,
             dirty_rect_count: 0,
@@ -2555,7 +2561,7 @@ impl WindowCaptureConfig {
             // all (this bypasses the dirty-rect-skip gate via force_push_frame
             // anyway, but mark it honestly rather than "known-zero").
             dirty_rects_known: false,
-            lock_copy_ms,
+            lock_copy_ms: 0.0,
             region_generation,
         })
     }
