@@ -1709,7 +1709,7 @@
     padding: 2px;
     border-radius: var(--radius-pill);
     border: 1px solid var(--hairline);
-    background: rgba(255, 255, 255, 0.035);
+    background: var(--fill-weak);
   }
 
   .layout-mode-button {
@@ -1739,7 +1739,7 @@
   }
 
   .layout-mode-button.is-active {
-    background: rgba(255, 255, 255, 0.09);
+    background: var(--fill-strong);
     color: var(--text-primary);
   }
 
