@@ -981,16 +981,19 @@
     font-weight: 500;
   }
 
+  /* One line, always: the header is a 44px strip, so long feedback ends in an
+     ellipsis (full text in the title tooltip and the control overlay's
+     banner) instead of wrapping to a second line. */
   .status-chip {
     flex: 0 1 auto;
-    min-height: 24px;
-    height: auto;
+    height: 24px;
+    box-sizing: border-box;
     display: inline-flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 6px;
     min-width: 0;
     max-width: 220px;
-    padding: 4px 9px;
+    padding: 0 9px;
     border-radius: var(--radius-chip);
     background: color-mix(in srgb, var(--identity-header-ink) 9%, transparent);
     border: 1px solid color-mix(in srgb, var(--identity-header-ink) 16%, transparent);
@@ -1000,10 +1003,8 @@
     font-weight: 600;
     line-height: 1.2;
     letter-spacing: 0;
-    overflow: visible;
-    overflow-wrap: anywhere;
-    text-wrap: pretty;
-    white-space: normal;
+    overflow: hidden;
+    white-space: nowrap;
   }
 
   .status-chip-dot {
@@ -1016,10 +1017,9 @@
 
   .status-chip-text {
     min-width: 0;
-    overflow: visible;
-    overflow-wrap: anywhere;
-    text-wrap: pretty;
-    white-space: normal;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .status-chip.warning {
