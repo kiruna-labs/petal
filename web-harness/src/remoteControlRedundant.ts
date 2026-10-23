@@ -10,9 +10,14 @@ import type { RemoteControlMessage } from './trackNames.ts';
  */
 export const INPUT_BUNDLE_KIND = 'inputBundle';
 export const INPUT_BUNDLE_VERSION = 1;
-export const MAX_BUNDLE_INPUTS = 4;
+export const MAX_REDUNDANT_COPIES = 3;
+export const MAX_BUNDLE_INPUTS = 48;
 export const MAX_BUNDLE_PAYLOAD_BYTES = 1200;
 export const MAX_REDUNDANT_AGE_MS = 500;
+/** One bundle per interval at most: a same-millisecond burst of one bundle per
+ * input overflowed the lossy send buffer and LiveKit dropped the tail. */
+export const MIN_BUNDLE_INTERVAL_MS = 8;
+export const IMMEDIATE_COPIES = 2;
 export const TRAILING_COPY_DELAYS_MS = [30, 100] as const;
 
 export interface RemoteControlInputBundle {
@@ -30,50 +35,82 @@ export function ridesRedundantStream(message: RemoteControlMessage): boolean {
   return message.kind === 'wheel' || message.kind === 'key' || message.kind === 'text';
 }
 
-interface SentInput {
+interface QueuedInput {
   rseq: number;
-  sentAt: number;
+  queuedAt: number;
   encodedLength: number;
   message: RemoteControlMessage;
 }
+
+export type PushOutcome =
+  | { kind: 'publish'; bundle: RemoteControlInputBundle; flush: number }
+  | { kind: 'flushAfter'; waitMs: number }
+  | { kind: 'queued' };
 
 const encoder = new TextEncoder();
 
 /** One per (window, host) grant. rseq starts at 1 for each new stream. */
 export class RedundantInputSender {
-  private nextRseq = 1;
-  private recent: SentInput[] = [];
-
   readonly windowId: number;
   readonly stream: string;
+  private nextRseq = 1;
+  /** Published inputs kept for redundancy, then `unsent` new ones. */
+  private recent: QueuedInput[] = [];
+  private unsent = 0;
+  private lastFlushAt: number | null = null;
+  private flushScheduled = false;
+  private lastFlushLength = 0;
+  flushes = 0;
 
   constructor(windowId: number, stream: string) {
     this.windowId = windowId;
     this.stream = stream;
   }
 
-  get latestRseq(): number | undefined {
-    return this.recent.at(-1)?.rseq;
-  }
-
-  push(message: RemoteControlMessage, now: number): RemoteControlInputBundle {
+  push(message: RemoteControlMessage, now: number): PushOutcome {
     const rseq = this.nextRseq++;
-    this.recent.push({ rseq, sentAt: now, encodedLength: encoder.encode(JSON.stringify(message)).length, message });
-    if (this.recent.length > MAX_BUNDLE_INPUTS) this.recent.splice(0, this.recent.length - MAX_BUNDLE_INPUTS);
-    return this.bundle(now)!;
+    this.recent.push({ rseq, queuedAt: now, encodedLength: encoder.encode(JSON.stringify(message)).length, message });
+    this.unsent += 1;
+    const waitMs = this.lastFlushAt === null ? 0 : Math.max(0, MIN_BUNDLE_INTERVAL_MS - (now - this.lastFlushAt));
+    if (waitMs === 0 || this.unsent >= MAX_BUNDLE_INPUTS) {
+      const bundle = this.flush(now)!;
+      return { kind: 'publish', bundle, flush: this.flushes };
+    }
+    if (this.flushScheduled) return { kind: 'queued' };
+    this.flushScheduled = true;
+    return { kind: 'flushAfter', waitMs };
   }
 
-  /** The newest input plus as many contiguous older ones as fit the bounds. */
-  bundle(now: number): RemoteControlInputBundle | null {
-    const newest = this.recent.at(-1);
-    if (!newest) return null;
-    let taken = 1;
-    let bytes = newest.encodedLength;
-    for (let i = this.recent.length - 2; i >= 0; i -= 1) {
+  /** Bundle for every queued input; null when a forced flush already sent them. */
+  flush(now: number): RemoteControlInputBundle | null {
+    this.flushScheduled = false;
+    if (this.unsent === 0) return null;
+    const bundle = this.build(now, this.unsent);
+    this.lastFlushLength = this.unsent;
+    this.unsent = 0;
+    this.flushes += 1;
+    this.lastFlushAt = now;
+    const keep = this.lastFlushLength + MAX_REDUNDANT_COPIES;
+    if (this.recent.length > keep) this.recent.splice(0, this.recent.length - keep);
+    return bundle;
+  }
+
+  /** Trailing copy of flush `flush`, unless a newer input superseded it. */
+  trailing(flush: number, now: number): RemoteControlInputBundle | null {
+    if (this.flushes !== flush || this.unsent !== 0 || this.recent.length === 0) return null;
+    return this.build(now, this.lastFlushLength);
+  }
+
+  /** The `fresh` newest inputs plus as many contiguous older copies as fit. */
+  private build(now: number, freshCount: number): RemoteControlInputBundle {
+    const fresh = Math.min(Math.max(freshCount, 1), this.recent.length);
+    let taken = fresh;
+    let bytes = this.recent.slice(this.recent.length - fresh).reduce((sum, input) => sum + input.encodedLength, 0);
+    for (let i = this.recent.length - fresh - 1; i >= 0; i -= 1) {
       const older = this.recent[i];
       if (
-        taken >= MAX_BUNDLE_INPUTS ||
-        now - older.sentAt > MAX_REDUNDANT_AGE_MS ||
+        taken - fresh >= MAX_REDUNDANT_COPIES ||
+        now - older.queuedAt > MAX_REDUNDANT_AGE_MS ||
         bytes + older.encodedLength > MAX_BUNDLE_PAYLOAD_BYTES
       ) {
         break;
@@ -101,29 +138,48 @@ export function newRedundantStreamId(): string {
 }
 
 type Timer = ReturnType<typeof setTimeout>;
+export interface RedundantClock {
+  now: () => number;
+  setTimeout: (fn: () => void, ms: number) => Timer;
+}
+const realClock: RedundantClock = { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms) };
+
+function publishFlushed(
+  sender: RedundantInputSender,
+  bundle: RemoteControlInputBundle,
+  flush: number,
+  publish: (bundle: RemoteControlInputBundle) => Promise<void>,
+  clock: RedundantClock
+): Promise<void> {
+  const first = publish(bundle);
+  for (let copy = 1; copy < IMMEDIATE_COPIES; copy += 1) void publish(bundle).catch(() => {});
+  for (const delay of TRAILING_COPY_DELAYS_MS) {
+    clock.setTimeout(() => {
+      const trailing = sender.trailing(flush, clock.now());
+      if (trailing) void publish(trailing).catch(() => {});
+    }, delay);
+  }
+  return first;
+}
 
 /**
- * Publishes `message` through `sender` and schedules the trailing copies that
- * recover a lost final input. A newer push supersedes pending trailing copies
- * (its own bundle already carries the older inputs).
+ * Queues `message` on `sender` and publishes per the pacing decision: now
+ * (sent IMMEDIATE_COPIES times, then trailing copies), after a short paced
+ * flush, or as part of a flush already scheduled.
  */
 export function publishRedundantInput(
   sender: RedundantInputSender,
   message: RemoteControlMessage,
   publish: (bundle: RemoteControlInputBundle) => Promise<void>,
-  clock: {
-    now: () => number;
-    setTimeout: (fn: () => void, ms: number) => Timer;
-  } = { now: () => Date.now(), setTimeout: (fn, ms) => setTimeout(fn, ms) }
+  clock: RedundantClock = realClock
 ): Promise<void> {
-  const bundle = sender.push(message, clock.now());
-  const rseq = sender.latestRseq;
-  for (const delay of TRAILING_COPY_DELAYS_MS) {
+  const outcome = sender.push(message, clock.now());
+  if (outcome.kind === 'publish') return publishFlushed(sender, outcome.bundle, outcome.flush, publish, clock);
+  if (outcome.kind === 'flushAfter') {
     clock.setTimeout(() => {
-      if (sender.latestRseq !== rseq) return;
-      const trailing = sender.bundle(clock.now());
-      if (trailing) void publish(trailing).catch(() => {});
-    }, delay);
+      const bundle = sender.flush(clock.now());
+      if (bundle) void publishFlushed(sender, bundle, sender.flushes, publish, clock).catch(() => {});
+    }, outcome.waitMs);
   }
-  return publish(bundle);
+  return Promise.resolve();
 }

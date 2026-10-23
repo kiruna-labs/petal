@@ -5776,19 +5776,55 @@ async fn publish_message(
 }
 
 /// #399: controller input goes out as a lossy redundant bundle when the host
-/// advertised support, plus trailing copies so a lost last input is still
-/// recovered; anything else keeps the legacy per-message packet.
+/// advertised support (paced, sent twice, plus trailing copies so a lost last
+/// input is still recovered); anything else keeps the legacy packet.
 async fn publish_controller_input(
     room_connection: Arc<RoomConnection>,
     message: RemoteControlMessage,
 ) -> Result<(), String> {
-    let engine = remote_control_engine();
-    let Some(bundle) = engine.push_redundant_input(&message, Instant::now()) else {
+    let Some((stream, outcome)) =
+        remote_control_engine().push_redundant_input(&message, Instant::now())
+    else {
         return publish_message(room_connection, message).await;
     };
+    let window_id = message.window_id;
     let host = message.target_user_id.clone();
+    match outcome {
+        redundant::PushOutcome::Publish(bundle, flush) => {
+            publish_flushed_bundle(room_connection, bundle, flush, host).await
+        }
+        redundant::PushOutcome::FlushAfter(wait) => {
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(wait).await;
+                if let Some((bundle, flush)) = remote_control_engine().flush_redundant_input(
+                    window_id,
+                    &host,
+                    &stream,
+                    Instant::now(),
+                ) {
+                    if let Err(error) =
+                        publish_flushed_bundle(room_connection, bundle, flush, host).await
+                    {
+                        log::warn!("remote-control: paced input bundle publish failed: {error}");
+                    }
+                }
+            });
+            Ok(())
+        }
+        redundant::PushOutcome::Queued => Ok(()),
+    }
+}
+
+async fn publish_flushed_bundle(
+    room_connection: Arc<RoomConnection>,
+    bundle: InputBundle,
+    flush: u64,
+    host: String,
+) -> Result<(), String> {
     publish_input_bundle(&room_connection, &bundle, &host).await?;
-    let rseq = bundle.first + bundle.inputs.len() as u64 - 1;
+    for _ in 1..redundant::IMMEDIATE_COPIES {
+        let _ = publish_input_bundle(&room_connection, &bundle, &host).await;
+    }
     tauri::async_runtime::spawn(async move {
         let mut waited = Duration::ZERO;
         for delay in redundant::TRAILING_COPY_DELAYS {
@@ -5798,7 +5834,7 @@ async fn publish_controller_input(
                 bundle.window_id,
                 &host,
                 &bundle.stream,
-                rseq,
+                flush,
                 Instant::now(),
             ) else {
                 return;
@@ -22538,7 +22574,13 @@ mod tests {
         assert_eq!(contract["topic"], TOPIC);
         assert_eq!(contract["reliable"], false);
         assert_eq!(contract["capabilityField"], "supportsRedundantInput");
-        assert_eq!(contract["maxInputs"], redundant::MAX_BUNDLE_INPUTS);
+        assert_eq!(contract["maxRedundantCopies"], redundant::MAX_REDUNDANT_COPIES);
+        assert_eq!(contract["maxBundleInputs"], redundant::MAX_BUNDLE_INPUTS);
+        assert_eq!(
+            contract["minBundleIntervalMs"],
+            redundant::MIN_BUNDLE_INTERVAL.as_millis() as u64
+        );
+        assert_eq!(contract["immediateCopies"], redundant::IMMEDIATE_COPIES);
         assert_eq!(contract["maxPayloadBytes"], redundant::MAX_BUNDLE_PAYLOAD_BYTES);
         assert_eq!(
             contract["maxRedundantAgeMs"],
@@ -22631,35 +22673,48 @@ mod tests {
         hover.action = Some(RemoteControlAction::Move);
         hover.buttons = Some(0);
         let now = Instant::now();
+        let publish = |outcome: Option<(String, redundant::PushOutcome)>| match outcome {
+            Some((_, redundant::PushOutcome::Publish(bundle, flush))) => (bundle, flush),
+            other => panic!("expected an immediate bundle, got {other:?}"),
+        };
         // Old host: never advertised support, legacy path.
         assert!(engine.push_redundant_input(&key, now).is_none());
         engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, Some("grant-1"));
-        let first = engine.push_redundant_input(&key, now).expect("capable host gets bundles");
+        let (first, _) = publish(engine.push_redundant_input(&key, now));
         assert_eq!(first.first, 1);
         assert!(!engine.redundant_bundle_packet(&first, &ids.other_controller_id).reliable);
         assert!(engine.push_redundant_input(&hover, now).is_none(), "hover stays latest-wins");
-        let second = engine.push_redundant_input(&key, now).unwrap();
+        // Within the pacing interval the next input waits for a paced flush.
+        let Some((stream, redundant::PushOutcome::FlushAfter(_))) =
+            engine.push_redundant_input(&key, now)
+        else {
+            panic!("second input inside the pacing interval must be paced");
+        };
+        let (second, flush) = engine
+            .flush_redundant_input(ids.window_id, &ids.other_controller_id, &stream, now)
+            .expect("paced flush publishes the queued input");
         assert_eq!((second.first, second.inputs.len()), (1, 2));
+        let later = now + redundant::MIN_BUNDLE_INTERVAL;
         assert!(engine
-            .redundant_trailing_bundle(ids.window_id, &ids.other_controller_id, &second.stream, 2, now)
+            .redundant_trailing_bundle(ids.window_id, &ids.other_controller_id, &stream, flush, later)
             .is_some());
         assert!(
             engine
-                .redundant_trailing_bundle(ids.window_id, &ids.other_controller_id, &second.stream, 1, now)
+                .redundant_trailing_bundle(ids.window_id, &ids.other_controller_id, &stream, flush - 1, later)
                 .is_none(),
             "a superseded trailing copy is not sent"
         );
         // A repeated `active` for the same grant keeps the stream.
         engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, Some("grant-1"));
-        assert_eq!(engine.push_redundant_input(&key, now).unwrap().stream, second.stream);
+        assert_eq!(publish(engine.push_redundant_input(&key, later)).0.stream, second.stream);
         // A new grant opens a new stream from rseq 1.
         engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, Some("grant-2"));
-        let renewed = engine.push_redundant_input(&key, now).unwrap();
+        let renewed = publish(engine.push_redundant_input(&key, later)).0;
         assert_ne!(renewed.stream, second.stream);
         assert_eq!(renewed.first, 1);
         // Stopped / downgraded host: back to the legacy path.
         engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, None);
-        assert!(engine.push_redundant_input(&key, now).is_none());
+        assert!(engine.push_redundant_input(&key, later).is_none());
     }
 
     #[test]

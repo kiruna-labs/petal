@@ -3,15 +3,19 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
+  IMMEDIATE_COPIES,
   INPUT_BUNDLE_KIND,
   INPUT_BUNDLE_VERSION,
   MAX_BUNDLE_INPUTS,
   MAX_BUNDLE_PAYLOAD_BYTES,
   MAX_REDUNDANT_AGE_MS,
+  MAX_REDUNDANT_COPIES,
+  MIN_BUNDLE_INTERVAL_MS,
   TRAILING_COPY_DELAYS_MS,
   RedundantInputSender,
   publishRedundantInput,
   ridesRedundantStream,
+  type PushOutcome,
   type RemoteControlInputBundle
 } from '../src/remoteControlRedundant.ts';
 import { setupRemoteControlUi } from '../src/remoteControlUi.ts';
@@ -26,7 +30,10 @@ const contract = JSON.parse(
   topic: string;
   reliable: boolean;
   capabilityField: string;
-  maxInputs: number;
+  maxRedundantCopies: number;
+  maxBundleInputs: number;
+  minBundleIntervalMs: number;
+  immediateCopies: number;
   maxPayloadBytes: number;
   maxRedundantAgeMs: number;
   trailingCopyDelaysMs: number[];
@@ -78,47 +85,65 @@ test('redundant input constants and wire shape match the shared contract', () =>
   assert.equal(contract.topic, 'petal.remote-control');
   assert.equal(contract.reliable, false);
   assert.equal(contract.capabilityField, 'supportsRedundantInput');
-  assert.equal(contract.maxInputs, MAX_BUNDLE_INPUTS);
+  assert.equal(contract.maxRedundantCopies, MAX_REDUNDANT_COPIES);
+  assert.equal(contract.maxBundleInputs, MAX_BUNDLE_INPUTS);
+  assert.equal(contract.minBundleIntervalMs, MIN_BUNDLE_INTERVAL_MS);
+  assert.equal(contract.immediateCopies, IMMEDIATE_COPIES);
   assert.equal(contract.maxPayloadBytes, MAX_BUNDLE_PAYLOAD_BYTES);
   assert.equal(contract.maxRedundantAgeMs, MAX_REDUNDANT_AGE_MS);
   assert.deepEqual(contract.trailingCopyDelaysMs, [...TRAILING_COPY_DELAYS_MS]);
   assert.deepEqual(Object.keys(contract.example).sort(), contract.fields);
 
   const sender = new RedundantInputSender(42, contract.example.stream);
-  for (let i = 1; i < contract.example.first; i += 1) sender.push(key(i, 'down'), 0);
-  sender.push(contract.example.inputs[0], MAX_REDUNDANT_AGE_MS + 1);
-  const bundle = sender.push(contract.example.inputs[1], MAX_REDUNDANT_AGE_MS + 1);
+  for (let i = 1; i < contract.example.first; i += 1) sender.push(key(i, 'down'), i * 10);
+  published(sender.push(contract.example.inputs[0], 1_000));
+  const bundle = published(sender.push(contract.example.inputs[1], 1_010));
   assert.deepEqual(bundle, contract.example);
 });
 
+function published(outcome: PushOutcome): RemoteControlInputBundle {
+  assert.equal(outcome.kind, 'publish');
+  return (outcome as Extract<PushOutcome, { kind: 'publish' }>).bundle;
+}
+
 test('each bundle carries the newest input plus the ones before it, so one loss is recovered', () => {
   const sender = new RedundantInputSender(7, 's1');
-  const bundles = [1, 2, 3].map((seq) => sender.push(key(seq, 'down'), seq * 10));
+  const bundles = [1, 2, 3].map((seq) => published(sender.push(key(seq, 'down'), seq * 10)));
   // If bundles[1] is lost, bundles[2] still carries seq 2.
   assert.equal(bundles[2].first, 1);
   assert.deepEqual(bundles[2].inputs.map((input) => input.seq), [1, 2, 3]);
-  for (let seq = 4; seq <= 8; seq += 1) sender.push(key(seq, 'down'), 50);
-  const capped = sender.bundle(50)!;
-  assert.equal(capped.inputs.length, MAX_BUNDLE_INPUTS);
-  assert.equal(capped.first, 5);
+  let last = bundles[2];
+  for (let seq = 4; seq <= 8; seq += 1) last = published(sender.push(key(seq, 'down'), seq * 10));
+  assert.equal(last.inputs.length, MAX_REDUNDANT_COPIES + 1);
+  assert.equal(last.first, 5);
 });
 
-test('age and size bounds drop old or oversized redundancy but always send the newest input', () => {
+test('a same-instant burst is paced into one bundle that carries every queued input', () => {
   const sender = new RedundantInputSender(7, 's1');
-  sender.push(key(1, 'down'), 0);
-  const late = sender.push(key(2, 'up'), MAX_REDUNDANT_AGE_MS + 1);
+  published(sender.push(key(1, 'down'), 0));
+  assert.deepEqual(sender.push(key(2, 'down'), 0), { kind: 'flushAfter', waitMs: MIN_BUNDLE_INTERVAL_MS });
+  for (let seq = 3; seq <= 12; seq += 1) assert.deepEqual(sender.push(key(seq, 'down'), 0), { kind: 'queued' });
+  const flushed = sender.flush(MIN_BUNDLE_INTERVAL_MS)!;
+  assert.deepEqual(flushed.inputs.map((input) => input.seq), [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.equal(sender.flush(MIN_BUNDLE_INTERVAL_MS), null);
+});
+
+test('age and size bounds drop old or oversized redundancy but always send the new input', () => {
+  const sender = new RedundantInputSender(7, 's1');
+  published(sender.push(key(1, 'down'), 0));
+  const late = published(sender.push(key(2, 'up'), MAX_REDUNDANT_AGE_MS + 1));
   assert.deepEqual(late.inputs.map((input) => input.seq), [2]);
 
   const big = new RedundantInputSender(7, 's2');
   const text = (seq: number) =>
     ({ ...key(seq, 'down'), kind: 'text', text: 'x'.repeat(MAX_BUNDLE_PAYLOAD_BYTES) }) as unknown as RemoteControlMessage;
-  big.push(text(1), 0);
-  const alone = big.push(text(2), 0);
+  published(big.push(text(1), 0));
+  const alone = published(big.push(text(2), MIN_BUNDLE_INTERVAL_MS));
   assert.deepEqual(alone.inputs.map((input) => input.seq), [2]);
   assert.equal(alone.first, 2);
 });
 
-test('a trailing copy resends the final input of a burst and a newer input supersedes it', async () => {
+test('bundles go out twice, then a trailing copy resends the burst\'s last bundle unless superseded', async () => {
   const clock = fakeClock();
   const sender = new RedundantInputSender(7, 's1');
   const sent: RemoteControlInputBundle[] = [];
@@ -127,18 +152,28 @@ test('a trailing copy resends the final input of a burst and a newer input super
     return Promise.resolve();
   };
   await publishRedundantInput(sender, key(1, 'down'), publish, clock);
+  assert.equal(sent.length, IMMEDIATE_COPIES);
   clock.advance(10);
   await publishRedundantInput(sender, key(2, 'up'), publish, clock);
-  assert.equal(sent.length, 2);
+  assert.equal(sent.length, 2 * IMMEDIATE_COPIES);
   clock.advance(TRAILING_COPY_DELAYS_MS[0]);
-  // Only the copy for the burst's last input (rseq 2) fires; rseq 1's was superseded.
-  assert.equal(sent.length, 3);
-  assert.deepEqual(sent[2].inputs.map((input) => input.seq), [1, 2]);
+  // Only the copy for the burst's last bundle fires; the first one was superseded.
+  assert.equal(sent.length, 2 * IMMEDIATE_COPIES + 1);
+  assert.deepEqual(sent.at(-1)!.inputs.map((input) => input.seq), [1, 2]);
   clock.advance(TRAILING_COPY_DELAYS_MS[1]);
-  assert.equal(sent.length, 4);
-  assert.deepEqual(sent[3], sent[2]);
+  assert.equal(sent.length, 2 * IMMEDIATE_COPIES + 2);
   clock.advance(1_000);
-  assert.equal(sent.length, 4, 'no copies beyond the configured trailing delays');
+  assert.equal(sent.length, 2 * IMMEDIATE_COPIES + 2, 'no copies beyond the configured trailing delays');
+
+  // A burst inside the pacing interval publishes once, after the interval.
+  await publishRedundantInput(sender, key(3, 'down'), publish, clock);
+  const before = sent.length;
+  await publishRedundantInput(sender, key(4, 'up'), publish, clock);
+  await publishRedundantInput(sender, key(5, 'down'), publish, clock);
+  assert.equal(sent.length, before);
+  clock.advance(MIN_BUNDLE_INTERVAL_MS);
+  assert.equal(sent.length, before + IMMEDIATE_COPIES);
+  assert.deepEqual(sent.at(-1)!.inputs.map((input) => input.seq).slice(-2), [4, 5]);
 });
 
 test('hover moves stay off the redundant stream; drags, clicks, wheel, key, and text ride it', () => {
@@ -223,6 +258,7 @@ test('the controller sends bundles only after the host advertises supportsRedund
     // A repeated active for the same grant keeps the stream going.
     const stream = bundle.stream;
     ui.handleRemoteControlPayload(activeStatus({ supportsRedundantInput: true }), 'native-host');
+    await new Promise((resolve) => setTimeout(resolve, MIN_BUNDLE_INTERVAL_MS + 5));
     await ui.publishRemoteControl(key(3, 'down'));
     const next = JSON.parse(new TextDecoder().decode(published.at(-1)!.data));
     assert.equal(next.stream, stream);
