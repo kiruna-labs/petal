@@ -2351,7 +2351,7 @@ impl AdaptiveIdleTick {
 }
 
 fn frame_fingerprint(frame: &crate::capture::CapturedFrame) -> FrameFingerprint {
-    let Some((data, bytes_per_row)) = frame.payload.primary_plane() else {
+    if frame.payload.primary_plane().is_none() {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         hash = fnv1a_u64(hash, &frame.width.to_le_bytes());
         hash = fnv1a_u64(hash, &frame.height.to_le_bytes());
@@ -2365,39 +2365,59 @@ fn frame_fingerprint(frame: &crate::capture::CapturedFrame) -> FrameFingerprint 
             bytes_per_row: 0,
             hash,
         };
-    };
+    }
+    payload_fingerprint(frame.width, frame.height, &frame.payload)
+}
+
+/// Dense per-row hash of a copied payload's primary plane.
+fn payload_fingerprint(
+    width: u32,
+    height: u32,
+    payload: &crate::capture::CapturedFramePayload,
+) -> FrameFingerprint {
+    let (data, bytes_per_row) = payload.primary_plane().unwrap_or((&[], 0));
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    hash = fnv1a_u64(hash, &frame.width.to_le_bytes());
-    hash = fnv1a_u64(hash, &frame.height.to_le_bytes());
+    hash = fnv1a_u64(hash, &width.to_le_bytes());
+    hash = fnv1a_u64(hash, &height.to_le_bytes());
     hash = fnv1a_u64(hash, &bytes_per_row.to_le_bytes());
 
-    let height = frame.height as usize;
-    let visible_row_bytes = match &frame.payload {
-        crate::capture::CapturedFramePayload::Bgra { .. } => {
-            (frame.width as usize).saturating_mul(4)
-        }
-        crate::capture::CapturedFramePayload::Nv12 { .. } => frame.width as usize,
+    let rows = height as usize;
+    let visible_row_bytes = match payload {
+        crate::capture::CapturedFramePayload::Bgra { .. } => (width as usize).saturating_mul(4),
+        crate::capture::CapturedFramePayload::Nv12 { .. } => width as usize,
         crate::capture::CapturedFramePayload::Native { .. } => 0,
     };
-    if height == 0 || visible_row_bytes == 0 || bytes_per_row == 0 {
+    if rows == 0 || visible_row_bytes == 0 || bytes_per_row == 0 {
         return FrameFingerprint {
-            width: frame.width,
-            height: frame.height,
+            width,
+            height,
             bytes_per_row,
             hash,
         };
     }
 
-    for row in 0..height {
+    for row in 0..rows {
         hash = hash_frame_row(hash, data, bytes_per_row, row, visible_row_bytes);
     }
 
     FrameFingerprint {
-        width: frame.width,
-        height: frame.height,
+        width,
+        height,
         bytes_per_row,
         hash,
     }
+}
+
+/// The snapshot push gate's dense pixel hash. Snapshots are published as
+/// native buffers (see `WindowCapture::snapshot_frame`), whose metadata-only
+/// `frame_fingerprint` never changes; hash a temporary NV12 copy instead.
+/// `None` when the copy fails: the caller skips that pull.
+fn snapshot_content_hash(frame: &crate::capture::CapturedFrame) -> Option<u64> {
+    let crate::capture::CapturedFramePayload::Native { pixel_buffer } = &frame.payload else {
+        return Some(frame_fingerprint(frame).hash);
+    };
+    let payload = pixel_buffer.copy_nv12_payload().ok()?;
+    Some(payload_fingerprint(frame.width, frame.height, &payload).hash)
 }
 
 fn hash_frame_row(
@@ -5992,7 +6012,12 @@ fn spawn_share_pump(
                                 // updated line in a big document, a status indicator
                                 // -- is invisible not just for one cycle but FOREVER
                                 // while the window size stays constant.
-                                let hash = frame_fingerprint(&frame).hash;
+                                let Some(hash) = snapshot_content_hash(&frame) else {
+                                    log::warn!(
+                                        "capture-pull: window {window_id} could not read the snapshot's pixels; skipping this pull"
+                                    );
+                                    continue;
+                                };
                                 let hash_changed = observe_snapshot_pull(
                                     window_id,
                                     last_pull_hash,
@@ -12991,6 +13016,46 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             lock_copy_ms: 0.0,
             region_generation: None,
         }
+    }
+
+    fn test_native_frame_with_luma(fill: u8, changed: Option<(usize, usize)>) -> crate::capture::CapturedFrame {
+        let pixel_buffer = screencapturekit::cv::CVPixelBuffer::create(4, 4, 0x3432_3076)
+            .expect("headless CoreVideo NV12 pixel buffer");
+        {
+            let mut guard = pixel_buffer
+                .lock(screencapturekit::cv::CVPixelBufferLockFlags::NONE)
+                .expect("test CVPixelBuffer must lock for writing");
+            let y_stride = guard.bytes_per_row_of_plane(0);
+            let rows = guard.height_of_plane(0);
+            let y = guard
+                .base_address_of_plane_mut(0)
+                .expect("test NV12 buffer must expose a writable Y plane");
+            for row in 0..rows {
+                let dst = unsafe { std::slice::from_raw_parts_mut(y.add(row * y_stride), 4) };
+                dst.fill(fill);
+            }
+            if let Some((row, col)) = changed {
+                unsafe { *y.add(row * y_stride + col) = fill.wrapping_add(1) };
+            }
+        }
+        crate::capture::CapturedFrame {
+            payload: crate::capture::CapturedFramePayload::Native {
+                pixel_buffer: crate::capture::NativeCapturedPixelBuffer::new(pixel_buffer),
+            },
+            ..test_native_frame(1, 0, 0, None)
+        }
+    }
+
+    // Snapshots are pushed as native buffers so VideoToolbox never resets its
+    // session per input; the push gate must still see a one-pixel change.
+    #[test]
+    fn snapshot_content_hash_reads_native_snapshot_pixels() {
+        let base = snapshot_content_hash(&test_native_frame_with_luma(40, None));
+        let same = snapshot_content_hash(&test_native_frame_with_luma(40, None));
+        let edited = snapshot_content_hash(&test_native_frame_with_luma(40, Some((3, 2))));
+        assert!(base.is_some());
+        assert_eq!(base, same);
+        assert_ne!(base, edited);
     }
 
     // Fable finding 3: a frame whose SCK dirtyRects attachment was missing or
