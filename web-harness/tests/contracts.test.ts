@@ -55,6 +55,7 @@ import {
 } from '../src/trackNames.ts';
 import { decodeRemoteControlHotPath, encodeRemoteControlHotPath, fixedPointCoordinateKey, fnv1a32, parseRemoteControlJson, remoteControlPublishOptions } from '../src/remoteControl.ts';
 import { drawPublishOptions, parseDrawPayload } from '../src/draw.ts';
+import { parsePipelineStatsPayload } from '../src/pipelineStats.ts';
 import { aiChatPublishOptions, authorizeAiChatMessage, parseAiChatPayload } from '../src/aiChat.ts';
 import { createDrawMessageBuilder } from '../src/drawSender.ts';
 import { IDENTITY_COLOR_PALETTE } from '../src/telepointer.ts';
@@ -155,6 +156,7 @@ const contractFixture = JSON.parse(
     captureStateFields: string[];
     captureCpuFields: string[];
     receiverFreezeFields: string[];
+    lowerRungsFields?: string[];
   }>;
   drawMessages: Array<{
     name: string;
@@ -633,6 +635,12 @@ test('pipeline-stats topic and sender/receiver JSON field names are pinned', () 
     }
     if (parsed.receiverFreeze !== null) {
       assert.deepEqual(Object.keys(parsed.receiverFreeze).sort(), vector.receiverFreezeFields, vector.name);
+    }
+    // #408: the sender-only lower-rung verdict and its field list are pinned together.
+    assert.equal(parsed.lowerRungs !== undefined, vector.lowerRungsFields !== undefined, vector.name);
+    if (parsed.lowerRungs !== undefined) {
+      assert.deepEqual(Object.keys(parsed.lowerRungs).sort(), vector.lowerRungsFields, vector.name);
+      assert.deepEqual(parsePipelineStatsPayload(JSON.stringify(vector.message))?.lowerRungs, parsed.lowerRungs, vector.name);
     }
   }
 });
