@@ -58,6 +58,9 @@ step "Source provenance wrapper + signed cross-machine integration"
 step "Harness: owned-process cleanup contract (plan Item 7)"
 "$ROOT/scripts/test-owned-process-cleanup.sh"
 
+step "Git hooks: pre-push gates the pushed worktree against the pushed remote's base"
+"$ROOT/scripts/test-pre-push-hook.sh"
+
 step "Harness: rc-live-suite foreign-instance guard (both directions)"
 "$ROOT/scripts/test-rc-suite-instance-guard.sh"
 
@@ -87,7 +90,11 @@ step "CI: PR-gate path filter, both directions (#133)"
 # every push from this checkout automatically, the first time anyone runs
 # this script, with no separate "remember to install the hook" step. Repo
 # config (not global), so it's shared by every worktree of this repo on this
-# machine via the common .git dir.
+# machine via the common .git dir. Keep the value RELATIVE: git resolves a
+# relative hooksPath against the worktree running the hook, so each linked
+# worktree runs its own copy. An absolute path would make every worktree run
+# the main checkout's copy (the check below resets any other value, absolute
+# ones included; the hook also no longer trusts its own location for ROOT).
 # Repo-local config, so it needs a repo: the gate also runs in a Mutagen sync
 # target that has no .git at all.
 if git rev-parse --git-dir >/dev/null 2>&1; then
