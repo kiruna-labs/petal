@@ -11143,10 +11143,21 @@ pub(crate) mod input {
                     ));
                 }
             } else if caps.pressable {
-                ax.press(&element)
+                let pressed = ax.press(&element);
+                // #404: a pressable text field (a web `<input>`) also needs
+                // the app's keyboard focus, or typed keys miss it.
+                if pressed.is_ok() && caps.text_selectable {
+                    focus_clicked_text_element(window_id, &element, ax);
+                }
+                pressed
             } else if caps.text_selectable {
                 match ax.offset_at_point(&element, point) {
-                    Ok(offset) => ax.set_selected_range(&element, offset, 0),
+                    Ok(offset) => {
+                        // #404: focus before placing the caret -- see
+                        // `ax_pointer_up`'s AxText branch.
+                        focus_clicked_text_element(window_id, &element, ax);
+                        ax.set_selected_range(&element, offset, 0)
+                    }
                     Err(error) => {
                         if attempt == 0 && error.is_invalid_ui_element() {
                             clear_ax_resolution_cache_key(ax_point_key(window_id, point));
@@ -14961,6 +14972,360 @@ pub(crate) mod input {
                     len: 0,
                 }]
             );
+        }
+
+        // ---- #404: move the app's keyboard focus onto a clicked text element ----
+
+        #[test]
+        fn ax_click_on_text_element_also_sets_ax_focused() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(2);
+            ax.set_capabilities(2, text_selectable_caps());
+            ax.set_offset(2, 12.0, 20.0, 5);
+
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.20,
+                RemoteControlButton::Left,
+                1,
+            );
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.12,
+                0.20,
+                RemoteControlButton::Left,
+                0,
+            );
+            assert!(replay_events_with_ax(&down, frame, &ax).is_empty());
+            assert!(ax.focused_ids().is_empty(), "nothing is focused at Down");
+            assert!(replay_events_with_ax(&up, frame, &ax).is_empty());
+
+            assert_eq!(ax.focused_ids(), vec![2]);
+            assert_eq!(
+                ax.ops(),
+                vec![AxOp::SetSelectedRange {
+                    id: 2,
+                    start: 5,
+                    len: 0,
+                }]
+            );
+        }
+
+        #[test]
+        fn ax_press_on_an_editable_text_element_also_sets_ax_focused() {
+            // A web `<input>` is both pressable and text-selectable; pressable
+            // wins the route, and the press alone leaves Chrome's keyboard
+            // focus in the address bar (T1 case 8).
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(3);
+            ax.set_capabilities(
+                3,
+                AxCapabilities {
+                    pressable: true,
+                    text_selectable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message =
+                    pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+            }
+            assert_eq!(ax.ops(), vec![AxOp::Press(3)]);
+            assert_eq!(ax.focused_ids(), vec![3]);
+        }
+
+        #[test]
+        fn semantic_click_on_text_elements_sets_ax_focused() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                0.10,
+                0.20,
+                RemoteControlButton::Left,
+                0,
+            );
+
+            let text = RecordingAxBackend::default();
+            text.resolve_to(4);
+            text.set_capabilities(4, text_selectable_caps());
+            assert!(replay_events_with_ax(&click, frame, &text).is_empty());
+            assert_eq!(text.focused_ids(), vec![4]);
+
+            clear_all_ax_control_state();
+            let field = RecordingAxBackend::default();
+            field.resolve_to(5);
+            field.set_capabilities(
+                5,
+                AxCapabilities {
+                    pressable: true,
+                    text_selectable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            assert!(replay_events_with_ax(&click, frame, &field).is_empty());
+            assert_eq!(field.ops(), vec![AxOp::Press(5)]);
+            assert_eq!(field.focused_ids(), vec![5]);
+        }
+
+        #[test]
+        fn ax_press_on_a_plain_button_does_not_move_keyboard_focus() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(6);
+            ax.set_capabilities(
+                6,
+                AxCapabilities {
+                    pressable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message =
+                    pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+            }
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                0.10,
+                0.20,
+                RemoteControlButton::Left,
+                0,
+            );
+            assert!(replay_events_with_ax(&click, frame, &ax).is_empty());
+            assert_eq!(ax.ops(), vec![AxOp::Press(6), AxOp::Press(6)]);
+            assert!(ax.focused_ids().is_empty());
+        }
+
+        // ---- #404: `type` telemetry counts only delivered key-downs ----
+
+        /// Replay one key message through the REAL `replay_with_backends` and
+        /// report whether it marked a key-down as delivered.
+        fn key_delivery_for(message: &RemoteControlMessage, sink: &RecordingSink) -> bool {
+            let ax = RecordingAxBackend::default();
+            let sl = RecordingSlClickBackend::unavailable();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::untrusted();
+            super::super::take_key_down_delivered();
+            let _ = replay_with_backends(
+                message,
+                unit_frame(),
+                Some(1234),
+                sink,
+                &ax,
+                &sl,
+                &pb,
+                &tap,
+            );
+            super::super::take_key_down_delivered()
+        }
+
+        #[test]
+        fn only_a_posted_key_down_is_marked_delivered() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let down = key_message("KeyA", "a", RemoteControlModifiers::default());
+            let sink = RecordingSink::default();
+            assert!(key_delivery_for(&down, &sink));
+            assert!(!sink.events().is_empty());
+
+            let mut up = down.clone();
+            up.action = Some(RemoteControlAction::Up);
+            let sink = RecordingSink::default();
+            assert!(!key_delivery_for(&up, &sink), "a key release types nothing");
+            assert!(!sink.events().is_empty(), "the release itself is still posted");
+
+            // Refused by the focus gate: nothing posted, nothing delivered.
+            let sink = RecordingSink::default();
+            sink.focus_window(down.window_id + 1);
+            assert!(!key_delivery_for(&down, &sink));
+            assert!(sink.events().is_empty());
+
+            // Unmapped: `replay_key` returns Ok without posting.
+            let unmapped = key_message("NotARealKey", "Unidentified", RemoteControlModifiers::default());
+            let sink = RecordingSink::default();
+            assert!(!key_delivery_for(&unmapped, &sink));
+            assert!(sink.events().is_empty());
+
+            // Cancelled injection: Ok without posting.
+            let sink = RecordingSink::default();
+            {
+                let _cancelled = super::super::InjectionCancelledForTests::set();
+                assert!(!key_delivery_for(&down, &sink));
+            }
+            assert!(sink.events().is_empty());
+        }
+
+        #[test]
+        fn key_up_and_undelivered_key_down_do_not_count_as_typing() {
+            use super::super::replay_counts_as_applied_input;
+            let down = key_message("KeyA", "a", RemoteControlModifiers::default());
+            let mut up = down.clone();
+            up.action = Some(RemoteControlAction::Up);
+            assert!(replay_counts_as_applied_input(&down, true));
+            assert!(!replay_counts_as_applied_input(&down, false));
+            // A release -- controller-sent or host-synthesized on revoke/TTL
+            // -- never counts, delivered or not.
+            assert!(!replay_counts_as_applied_input(&up, true));
+            assert!(!replay_counts_as_applied_input(&up, false));
+            // Non-key input keeps the completed-replay count.
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                0.1,
+                0.2,
+                RemoteControlButton::Left,
+                0,
+            );
+            assert!(replay_counts_as_applied_input(&click, false));
+        }
+
+        // ---- #404: Chromium web accessibility for the life of a grant ----
+
+        #[derive(Default)]
+        struct FakeWebAx {
+            window_pids: HashMap<u32, i32>,
+            bundles: HashMap<i32, String>,
+            enhanced: Mutex<HashMap<i32, bool>>,
+            writes: Mutex<Vec<(i32, bool)>>,
+            bundle_queries: Mutex<u32>,
+        }
+
+        impl FakeWebAx {
+            fn with_app(mut self, pid: i32, bundle: &str, windows: &[u32]) -> Self {
+                self.bundles.insert(pid, bundle.to_string());
+                for window_id in windows {
+                    self.window_pids.insert(*window_id, pid);
+                }
+                self
+            }
+
+            fn writes(&self) -> Vec<(i32, bool)> {
+                self.writes.lock_unpoisoned().clone()
+            }
+        }
+
+        impl WebAccessibilityBackend for FakeWebAx {
+            fn window_pid(&self, window_id: u32) -> Option<i32> {
+                self.window_pids.get(&window_id).copied()
+            }
+
+            fn bundle_id(&self, pid: i32) -> Option<String> {
+                *self.bundle_queries.lock_unpoisoned() += 1;
+                self.bundles.get(&pid).cloned()
+            }
+
+            fn enhanced_user_interface(&self, pid: i32) -> Option<bool> {
+                self.enhanced.lock_unpoisoned().get(&pid).copied()
+            }
+
+            fn set_enhanced_user_interface(&self, pid: i32, enabled: bool) -> i32 {
+                self.writes.lock_unpoisoned().push((pid, enabled));
+                self.enhanced.lock_unpoisoned().insert(pid, enabled);
+                // What Chrome 155 answers even though the write takes effect.
+                -25208
+            }
+
+            fn window_has_web_area(&self, _pid: i32, _window_id: u32) -> bool {
+                true
+            }
+        }
+
+        fn granted(windows: &[u32]) -> HashSet<u32> {
+            windows.iter().copied().collect()
+        }
+
+        #[test]
+        fn chromium_family_bundle_ids_are_recognised() {
+            for bundle in [
+                "com.google.Chrome",
+                "com.google.Chrome.canary",
+                "org.chromium.Chromium",
+                "com.microsoft.edgemac",
+                "com.microsoft.edgemac.Beta",
+                "com.brave.Browser",
+                "company.thebrowser.Browser",
+            ] {
+                assert!(is_chromium_bundle_id(bundle), "{bundle}");
+            }
+            for bundle in ["com.apple.Safari", "com.apple.TextEdit", "org.mozilla.firefox", ""] {
+                assert!(!is_chromium_bundle_id(bundle), "{bundle}");
+            }
+        }
+
+        #[test]
+        fn chromium_grant_enables_web_accessibility_and_release_restores_it() {
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]);
+            let mut state = WebAccessibilityState::default();
+
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true)], "the -25208 answer is not a failure");
+            // A second reconcile with the same grants is a no-op.
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true)]);
+
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true), (10, false)]);
+            assert!(state.enabled.is_empty());
+        }
+
+        #[test]
+        fn web_accessibility_stays_on_until_the_apps_last_grant_ends() {
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100, 101]);
+            let mut state = WebAccessibilityState::default();
+            reconcile_web_accessibility(&granted(&[100, 101]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true)], "one write per app, not per window");
+            reconcile_web_accessibility(&granted(&[101]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true)]);
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true), (10, false)]);
+        }
+
+        #[test]
+        fn web_accessibility_already_on_is_left_on() {
+            let backend = FakeWebAx::default().with_app(10, "com.brave.Browser", &[100]);
+            backend.enhanced.lock_unpoisoned().insert(10, true);
+            let mut state = WebAccessibilityState::default();
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert!(backend.writes().is_empty(), "never write, never turn it off");
+        }
+
+        #[test]
+        fn non_chromium_grants_are_never_touched_and_checked_once() {
+            let backend = FakeWebAx::default().with_app(20, "com.apple.TextEdit", &[200]);
+            let mut state = WebAccessibilityState::default();
+            reconcile_web_accessibility(&granted(&[200]), &mut state, &backend);
+            reconcile_web_accessibility(&granted(&[200]), &mut state, &backend);
+            assert!(backend.writes().is_empty());
+            assert_eq!(*backend.bundle_queries.lock_unpoisoned(), 1);
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert!(state.not_chromium.is_empty());
+        }
+
+        #[test]
+        fn exit_restores_every_enabled_browser() {
+            let backend = FakeWebAx::default()
+                .with_app(10, "com.google.Chrome", &[100])
+                .with_app(11, "com.microsoft.edgemac", &[110]);
+            let mut state = WebAccessibilityState::default();
+            reconcile_web_accessibility(&granted(&[100, 110]), &mut state, &backend);
+            restore_all_web_accessibility(&mut state, &backend);
+            assert_eq!(
+                backend.writes(),
+                vec![(10, true), (11, true), (10, false), (11, false)]
+            );
+            assert!(state.enabled.is_empty());
         }
 
         // ---- #170: AX-direct clipboard / select-all key shortcuts ----
