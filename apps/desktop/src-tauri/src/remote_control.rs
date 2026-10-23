@@ -7233,10 +7233,12 @@ pub(crate) mod input {
             point: super::GlobalPoint,
         ) -> Result<Option<AxElementHandle>, AxError>;
         /// #170: resolve the app's currently editable text element WITHOUT relying
-        /// on the app being frontmost/key. App-scoped `AXFocusedUIElement` resolves
-        /// to `AXApplication` while the controller (not the target) stays frontmost
-        /// (Petal never steals focus — case 27), so we descend `AXWindows` and look
-        /// for a window-scoped focused text element / role-based text descendant.
+        /// on the app being frontmost/key. #419: the app-scoped
+        /// `AXFocusedUIElement` is tried first and trusted only when it is a text
+        /// element inside the authorized window and not `AXApplication` itself
+        /// (the #170 case: Petal never steals focus — case 27). Otherwise we
+        /// descend `AXWindows` and look for a window-scoped focused text element /
+        /// role-based text descendant.
         /// Returns `Ok(None)` when no editable text element is reachable, in which
         /// case the caller falls back to the (already-broken-when-backgrounded)
         /// CGEvent key-equivalent path. The `TextElementSource` reports whether the
