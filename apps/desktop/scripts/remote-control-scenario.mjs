@@ -65,6 +65,7 @@ import {
   shareReadyPredicate,
   tileFailureDetail,
 } from './remote-control-share-readiness.mjs';
+import { freezeProbeExpression, summarizePresentedGaps } from './remote-control-freeze-probe.mjs';
 
 const positional = [];
 let jsonOutputPath = null;
@@ -139,6 +140,10 @@ const photonSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_SAM
 const photonWarmupSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_WARMUP_SAMPLES || 2);
 const photonSampleTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_TIMEOUT_MS || 2000);
 const photonP95BudgetMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS || 250);
+// #378 presented-freeze probe (press-to-photon mode only; 0 = off).
+const RECONNECT_ALREADY_USED_SKIP = 'one-shot reconnect already used by an earlier pass in this Petal process (PETAL_RC_RECONNECT_ALREADY_USED)';
+const freezeProbeMs = Math.max(0, Number(process.env.PETAL_RC_FREEZE_PROBE_MS || 0));
+const freezeProbeRedPauseMs = Math.max(0, Number(process.env.PETAL_RC_FREEZE_PROBE_RED_PAUSE_MS || 0));
 const maxTextEditRecoveries = 2;
 const photonSentinelSource = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -1902,6 +1907,48 @@ async function photonFailureContext(ctx, sinceMs) {
   return { lastFrame, sentinelActionsSinceStart: landed.length, sentinelActions: landed.slice(-4) };
 }
 
+// #378: presented-video freeze probe. The sentinel animates (SIGUSR1) so
+// every rVFC gap is a freeze the viewer saw; scored by the latency verdict's
+// `presented-freeze-max-gap` check. RED_PAUSE (red-proof only) stops the
+// motion mid-window to prove the check sees a freeze.
+async function runFreezeProbe(ctx) {
+  const pid = photonSentinelProcess?.pid;
+  if (!Number.isInteger(pid)) return { error: 'photon sentinel is not running' };
+  try {
+    process.kill(pid, 'SIGUSR1');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    let redPause = null;
+    if (freezeProbeRedPauseMs > 0) {
+      redPause = (async () => {
+        await new Promise((resolve) => setTimeout(resolve, Math.floor(freezeProbeMs / 3)));
+        process.kill(pid, 'SIGUSR2');
+        await new Promise((resolve) => setTimeout(resolve, freezeProbeRedPauseMs));
+        process.kill(pid, 'SIGUSR1');
+      })();
+    }
+    const raw = await evaluate(
+      ctx.cdp,
+      freezeProbeExpression({ windowId: ctx.target.windowId, tileId: ctx.target.tileId ?? null, durationMs: freezeProbeMs })
+    );
+    await redPause;
+    const summary = summarizePresentedGaps(raw.times, { startMs: raw.startMs, endMs: raw.endMs });
+    const report = {
+      ...summary,
+      redPauseMs: freezeProbeRedPauseMs || null,
+      playback: raw.playback,
+      decodeStall: raw.decodeStall,
+      videoSize: raw.videoSize,
+    };
+    console.log(`FREEZE_PROBE ${JSON.stringify(report)}`);
+    return report;
+  } catch (error) {
+    console.log(`FREEZE_PROBE ${JSON.stringify({ error: error.message })}`);
+    return { error: error.message };
+  } finally {
+    try { process.kill(pid, 'SIGUSR2'); } catch {}
+  }
+}
+
 async function runPressToPhotonSuite(ctx) {
   const suiteStarted = performance.now();
   const photonHostLogOffset = petalLogSize();
@@ -1986,6 +2033,7 @@ async function runPressToPhotonSuite(ctx) {
     sample.stages = photonStageSplit(sample, ledger, hostLogText);
     console.log(`PHOTON_STAGES ${JSON.stringify({ sample: sample.sample, inputKind: sample.inputKind, ...sample.stages })}`);
   }
+  const freezeProbe = freezeProbeMs > 0 ? await runFreezeProbe(ctx) : null;
 
   const expectedSamples = photonSamplesPerInput * 2;
   const stats = summarizePhotonSamples(photonSamples, photonP95BudgetMs);
@@ -2012,6 +2060,7 @@ async function runPressToPhotonSuite(ctx) {
     fail: gatePass ? 0 : 1,
     skip: 0,
     inputOrderSeed: photonShuffleSeed,
+    freezeProbe,
     pressToPhoton: {
       ...stats,
       expectedSamples,
@@ -3285,6 +3334,12 @@ const CASES = [
     features: 'lifecycle/reconnect',
     sequence: 'request -> held pointer -> reconnect -> input -> release',
     run: async (ctx) => {
+      // #378: the reconnect simulation is one-shot per Petal process
+      // (autotest.rs OneShotReconnect); the gate's impaired pass reuses the
+      // clean pass's process. Allow-listed by this exact reason only.
+      if (process.env.PETAL_RC_RECONNECT_ALREADY_USED === '1') {
+        return skipCase(RECONNECT_ALREADY_USED_SKIP);
+      }
       await send(ctx, `api.pointer({ target, action: 'down', ...${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteHeldInput)}, button: ${REMOTE_CONTROL_BUTTONS.left}, buttons: 1 }); return true;`);
       const before = await waitUntil('held input tracked before reconnect', async () => {
         const snapshot = await command(ctx.client, { cmd: 'remote-control-status', window_id: ctx.target.windowId });

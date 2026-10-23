@@ -104,8 +104,15 @@ test('loopback: an allow-listed case skipping for a DIFFERENT reason fails', () 
   assert.equal(loopbackVerdict({ report: r30, harnessExit: 0 }).ok, false);
 });
 
-test('loopback: the allow-list is exactly cases 23 and 30', () => {
-  assert.deepEqual(EXPECTED_LOOPBACK_SKIPS.map((s) => s.caseId), ['23', '30']);
+test('loopback: the allow-list is exactly cases 23, 29 (impaired pass only) and 30', () => {
+  assert.deepEqual(EXPECTED_LOOPBACK_SKIPS.map((s) => s.caseId), ['23', '29', '30']);
+});
+
+test('loopback: case 29 may skip ONLY for the #378 one-shot-reconnect reason', () => {
+  const ok = withCase(healthyReport(), 29, { status: 'skip', detail: 'one-shot reconnect already used by an earlier pass in this Petal process (PETAL_RC_RECONNECT_ALREADY_USED)' });
+  assert.equal(loopbackVerdict({ report: ok, harnessExit: 0 }).ok, true);
+  const other = withCase(healthyReport(), 29, { status: 'skip', detail: 'reconnect failed: reconnect already requested in this test process' });
+  assert.equal(loopbackVerdict({ report: other, harnessExit: 0 }).ok, false);
 });
 
 test('loopback: tokenlessDrops > 0 fails; a missing tokenlessDrops fails', () => {

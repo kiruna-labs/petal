@@ -71,6 +71,9 @@ step "CI: live e2e gate verdict (loopback + latency + Cockpit), both directions"
 node --test "$ROOT/scripts/test-e2e-gate-verdict.mjs"
 node --test "$ROOT/scripts/test-remote-control-latency-verdict.mjs"
 
+step "CI: loopback network impairment helper, both directions (#378)"
+"$ROOT/scripts/test-ci-net-impair.sh"
+
 step "Harness: capture-preflight contract (plan 6d step 2)"
 "$ROOT/scripts/test-capture-preflight.sh"
 
