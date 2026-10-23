@@ -21287,6 +21287,7 @@ mod tests {
                 local_identity: "host".to_string(),
                 admission: None,
                 result_sender: None,
+                received_at: None,
             });
         }
         let merged = queue.try_pop().expect("one coalesced wheel");

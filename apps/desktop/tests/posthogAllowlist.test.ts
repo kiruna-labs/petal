@@ -77,5 +77,7 @@ test('allowlist documents the latency-summary exception and every stage', () => 
   }
   // The stale row (#370 cleanup): duration_bucket was removed from the event.
   assert.doesNotMatch(allowlist, /\| `remote_video_stalled` \| `duration_bucket`/);
-  assert.match(analytics, /fn usage_stats_consented\(\) -> bool/);
+  // #377: the one consent gate is usage_stats_enabled(); no second check.
+  assert.match(analytics, /fn capture\(event: Event\) \{[\s\S]{0,200}if !usage_stats_enabled\(\) \{/);
+  assert.doesNotMatch(analytics, /usage_stats_consented/);
 });
