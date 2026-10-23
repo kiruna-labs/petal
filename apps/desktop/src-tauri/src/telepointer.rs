@@ -488,29 +488,23 @@ fn pointer_targets_with_owners(
             panel_family_ids: Vec::new(),
             is_visible: true,
         })
-        .chain(
-            remote_content_frames
+        .chain(remote_content_frames.iter().map(|(window_id, frame, owner)| {
+            let meta = remote_family_meta
                 .iter()
-                .map(|(window_id, frame, owner)| {
-                    let meta = remote_family_meta
-                        .iter()
-                        .find(|meta| meta.window_id == *window_id && meta.owner_identity == *owner);
-                    PointerTarget {
-                        kind: PointerTargetKind::RemoteCompositor,
-                        window_id: *window_id,
-                        frame: *frame,
-                        surface_owner_id: Some(owner.clone()),
-                        display_like: false,
-                        panel_family_ids: meta
-                            .map(|meta| meta.family_ids.clone())
-                            .unwrap_or_default(),
-                        // No meta yet (e.g. the ~9Hz refresh hasn't run since this
-                        // window opened) fails CLOSED: never claim a panel is visible
-                        // without having actually observed it (#906 DoD).
-                        is_visible: meta.is_some_and(|meta| meta.is_visible),
-                    }
-                }),
-        )
+                .find(|meta| meta.window_id == *window_id && meta.owner_identity == *owner);
+            PointerTarget {
+                kind: PointerTargetKind::RemoteCompositor,
+                window_id: *window_id,
+                frame: *frame,
+                surface_owner_id: Some(owner.clone()),
+                display_like: false,
+                panel_family_ids: meta.map(|meta| meta.family_ids.clone()).unwrap_or_default(),
+                // No meta yet (e.g. the ~9Hz refresh hasn't run since this
+                // window opened) fails CLOSED: never claim a panel is visible
+                // without having actually observed it (#906 DoD).
+                is_visible: meta.is_some_and(|meta| meta.is_visible),
+            }
+        }))
         .collect()
 }
 
@@ -577,11 +571,7 @@ fn vanished_visible_keys(
         .filter(|(key, visible)| {
             **visible
                 && !targets.iter().any(|target| {
-                    (
-                        target.kind,
-                        target.window_id,
-                        target.surface_owner_id.clone(),
-                    ) == **key
+                    (target.kind, target.window_id, target.surface_owner_id.clone()) == **key
                 })
         })
         .map(|(key, _)| key.clone())
@@ -645,12 +635,7 @@ fn select_macos_pointer_target<'a>(
                 && target.is_visible
                 && topmost_window_id.is_some_and(|wid| target.panel_family_ids.contains(&wid))
         })
-        .or_else(|| {
-            targets
-                .iter()
-                .filter(|target| target.display_like)
-                .find(inside)
-        })
+        .or_else(|| targets.iter().filter(|target| target.display_like).find(inside))
         // #906: this final fallback must NEVER re-match a `RemoteCompositor`
         // target -- it exists only to pick a plain LOCAL share when nothing
         // else matched, not to undo the occlusion gate above. Without this
@@ -908,11 +893,7 @@ fn sender_loop(app: AppHandle) {
                 None => (0.5, 0.5, false),
             };
 
-            let key = (
-                target.kind,
-                target.window_id,
-                target.surface_owner_id.clone(),
-            );
+            let key = (target.kind, target.window_id, target.surface_owner_id.clone());
             let was_visible = last_visible.get(&key).copied().unwrap_or(false);
             if !inside && !was_visible {
                 // Already told the receiver this pointer is hidden; nothing
@@ -2784,7 +2765,8 @@ mod tests {
         );
         for family_member in [300u32, 301, 302, 303] {
             let selected =
-                select_macos_pointer_target((100.0, 100.0), Some(family_member), &targets).unwrap();
+                select_macos_pointer_target((100.0, 100.0), Some(family_member), &targets)
+                    .unwrap();
             assert_eq!(selected.window_id, 3);
         }
     }
@@ -2867,11 +2849,7 @@ mod tests {
     /// revisits a key that no longer has a target at all.
     #[test]
     fn vanished_visible_keys_reports_a_key_with_no_target_left() {
-        let key = (
-            PointerTargetKind::RemoteCompositor,
-            9,
-            Some("alice".to_string()),
-        );
+        let key = (PointerTargetKind::RemoteCompositor, 9, Some("alice".to_string()));
         let last_visible = HashMap::from([(key.clone(), true)]);
         assert_eq!(vanished_visible_keys(&[], &last_visible), vec![key]);
     }
@@ -2881,11 +2859,7 @@ mod tests {
         // Only entries the loop last published as visible=true need a
         // falling-edge hide; one already recorded false has nothing new to
         // say by disappearing.
-        let key = (
-            PointerTargetKind::RemoteCompositor,
-            9,
-            Some("alice".to_string()),
-        );
+        let key = (PointerTargetKind::RemoteCompositor, 9, Some("alice".to_string()));
         let last_visible = HashMap::from([(key, false)]);
         assert!(vanished_visible_keys(&[], &last_visible).is_empty());
     }
@@ -2899,11 +2873,7 @@ mod tests {
             &meta,
             "local",
         );
-        let key = (
-            PointerTargetKind::RemoteCompositor,
-            9,
-            Some("alice".to_string()),
-        );
+        let key = (PointerTargetKind::RemoteCompositor, 9, Some("alice".to_string()));
         let last_visible = HashMap::from([(key, true)]);
         assert!(
             vanished_visible_keys(&targets, &last_visible).is_empty(),
@@ -2947,8 +2917,7 @@ mod tests {
     /// ORDER is what answers "what's on top," and the first frame-containing
     /// record, whatever its layer, IS the real topmost thing at that point.
     #[test]
-    fn resolve_topmost_window_id_fallback_never_skips_a_layer_ineligible_occluder_above_the_panel()
-    {
+    fn resolve_topmost_window_id_fallback_never_skips_a_layer_ineligible_occluder_above_the_panel() {
         // The occluder (e.g. the menu bar) is FIRST in front-to-back order,
         // ahead of the panel it covers -- the walk must return the occluder,
         // not reach past it to the panel.
