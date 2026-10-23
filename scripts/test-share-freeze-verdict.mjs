@@ -299,10 +299,10 @@ test('CLI report-only (default): a freeze or infra problem exits 0 but is printe
   assert.match(green.stdout, /e2e-gate-verdict freeze: PASS/);
 });
 
-test('wiring: the soak job is report-only by default and still uploads its report', () => {
+test('wiring: the soak job is release-blocking (#391) and still uploads its report', () => {
   const workflow = readFileSync(fileURLToPath(new URL('../.github/workflows/nightly-loopback.yml', import.meta.url)), 'utf8');
   const job = workflow.slice(workflow.indexOf('  share-freeze-soak:'));
-  assert.match(job, /\n      E2E_FREEZE_SOAK_BLOCKING: "false"\n/);
+  assert.match(job, /\n      E2E_FREEZE_SOAK_BLOCKING: "true"\n/);
   assert.match(job, /- name: Build desktop app[^\n]*\n\s+continue-on-error: \$\{\{ env\.E2E_FREEZE_SOAK_BLOCKING != 'true' \}\}/);
   assert.match(job, /- name: Run share-freeze soak\n\s+continue-on-error: \$\{\{ env\.E2E_FREEZE_SOAK_BLOCKING != 'true' \}\}/);
   assert.match(job, /node scripts\/ci\/e2e-gate-verdict\.mjs freeze --raw/);
