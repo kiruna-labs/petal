@@ -43,7 +43,7 @@ import {
 } from './remote-control-observation.mjs';
 import { armObservationWatch } from './remote-control-observation-watch.mjs';
 import { ProcessLeaseLedger, psIdentity } from './process-lease-ledger.mjs';
-import { classifyShareBorderStackReport } from './remote-control-share-border.mjs';
+import { awaitShareBorderStacked } from './remote-control-share-border.mjs';
 import {
   boundsCoverDisplayRightEdge,
   hotCornerActive,
@@ -1478,13 +1478,14 @@ async function ensureShareReady(client, cdp, shared) {
 // specifically for this kind of QA assertion -- this was the one caller
 // missing to make it load-bearing rather than dead code.
 async function assertShareBorderStacked(client, windowId) {
-  const report = await command(client, { cmd: 'share_border_stack', window_id: windowId });
   // #154: classification lives in remote-control-share-border.mjs so it is
   // unit-testable, and so "the border broke" can never again be reported for
-  // "the source window went away". Deliberately NOT a retry loop -- retrying
-  // would make the real product failure invisible instead of merely
-  // misattributed.
-  const verdict = classifyShareBorderStackReport(report, windowId);
+  // "the source window went away". Not a retry loop: only a behind-source
+  // read is re-checked, and only for the tracker's own settle bound.
+  const verdict = await awaitShareBorderStacked(
+    () => command(client, { cmd: 'share_border_stack', window_id: windowId }),
+    windowId
+  );
   if (!verdict.ok) {
     const error = new Error(verdict.message);
     error.shareBorderReason = verdict.reason;
