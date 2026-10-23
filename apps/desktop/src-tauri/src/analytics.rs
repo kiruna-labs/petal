@@ -628,7 +628,12 @@ fn classify_remote_control(message: &RemoteControlMessage) -> Option<ClassifiedI
             Some(RemoteControlAction::Up) => Some(ClassifiedInput::PointerUp),
             Some(RemoteControlAction::Move) | Some(RemoteControlAction::Unknown) | None => None,
         },
-        RemoteControlType::Key => Some(ClassifiedInput::Type),
+        // #404: only a key-DOWN is typing. A release (controller-sent or
+        // host-synthesized) types nothing.
+        RemoteControlType::Key => match message.action {
+            Some(RemoteControlAction::Down) => Some(ClassifiedInput::Type),
+            _ => None,
+        },
         RemoteControlType::Text => Some(ClassifiedInput::Paste),
         RemoteControlType::Wheel => Some(ClassifiedInput::Scroll),
         RemoteControlType::Request
@@ -1757,9 +1762,13 @@ mod tests {
             Some(ClassifiedInput::Click)
         );
         assert_eq!(
-            classify_remote_control(&fixture("key", None)),
+            classify_remote_control(&fixture("key", Some("down"))),
             Some(ClassifiedInput::Type)
         );
+        // #404: a key release -- controller-sent or host-synthesized on
+        // revoke/TTL -- types nothing and must never count as `type`.
+        assert_eq!(classify_remote_control(&fixture("key", Some("up"))), None);
+        assert_eq!(classify_remote_control(&fixture("key", None)), None);
         assert_eq!(
             classify_remote_control(&fixture("text", None)),
             Some(ClassifiedInput::Paste)
@@ -1942,12 +1951,14 @@ mod tests {
             at(t0, "pointer", Some("move"));
             at(t0, "pointer", Some("click"));
             at(t0, "pointer", Some("click"));
-            at(t0, "key", None);
+            at(t0, "key", Some("down"));
+            // #404: a release never starts or extends a typing burst.
+            at(t0 + Duration::from_millis(5), "key", Some("up"));
             // Inside TYPE_IDLE: coalesced into the burst above.
-            at(t0 + TYPE_IDLE - Duration::from_millis(1), "key", None);
+            at(t0 + TYPE_IDLE - Duration::from_millis(1), "key", Some("down"));
             // Idle window elapsed. It is measured from the PREVIOUS key, not
             // from the start of the burst, so this must clear the key above.
-            at(t0 + TYPE_IDLE * 2, "key", None);
+            at(t0 + TYPE_IDLE * 2, "key", Some("down"));
         });
         assert_eq!(
             events
@@ -1971,7 +1982,7 @@ mod tests {
             let stop = std::sync::Arc::clone(&stop);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    note_remote_control_applied(&fixture("key", None));
+                    note_remote_control_applied(&fixture("key", Some("down")));
                 }
             })
         };
@@ -1979,7 +1990,7 @@ mod tests {
         let coalescer = Mutex::new(InputCoalescer::new());
         let t0 = Instant::now();
         let (_, events) = with_sink(|| {
-            note_remote_control_applied_in(&coalescer, t0, &fixture("key", None));
+            note_remote_control_applied_in(&coalescer, t0, &fixture("key", Some("down")));
         });
 
         stop.store(true, Ordering::Relaxed);

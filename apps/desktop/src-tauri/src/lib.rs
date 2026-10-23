@@ -1556,6 +1556,11 @@ pub fn run() {
             // itself -- NOT the event's `has_visible_windows`, which a visible
             // pill or share panel makes true while main is hidden, re-stranding
             // exactly the user this handler exists for.
+            // #404: remote control may have switched a shared browser's web
+            // accessibility on for a grant; hand it back on the way out.
+            if let tauri::RunEvent::Exit = event {
+                remote_control::restore_web_accessibility_on_exit();
+            }
             if let tauri::RunEvent::Reopen { .. } = event {
                 if let Some(window) = tauri::Manager::get_webview_window(app_handle, "main") {
                     // Both defaults mean "assume there is nothing to restore".
