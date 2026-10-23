@@ -1043,15 +1043,55 @@ Transport policy is authoritative in the contract fixture:
 | discrete scroll, key, text | reliable | host | authenticated controller |
 | `copyRequest` | reliable | host | authenticated controller |
 | `clipboardTextStream` | reliable | one targeted native participant | active remote-control grant |
+| `inputBundle` (redundant input, below) | lossy | host | authenticated controller |
 
 The exact machine-readable matrix is
 `contracts/petal-contracts.json.remoteControlPacketPolicy`.
 
-Only a hover move (no held buttons) is lossy, because each one fully replaces
-the last. Wheel deltas add up, so a dropped wheel packet is a scroll that never
-happens; every wheel is reliable (#400). For the same reason a host that
+Only a hover move (no held buttons) is sent as a bare lossy packet, because
+each one fully replaces the last. Wheel deltas add up, so a dropped wheel
+packet is a scroll that never happens: on the per-message path every wheel is
+reliable (#400), and with a redundant-input host it rides the `inputBundle`
+below, whose redundancy and gap handling deliver it. For the same reason a host that
 coalesces a queued burst of legacy wheel packets sums their deltas (same
 `deltaMode`) instead of keeping only the newest.
+
+#### Redundant lossy input (`inputBundle`, #399)
+
+The reliable channel is ordered, so one lost SCTP packet holds back every input
+behind it until the SFU's retransmit timer fires (measured at 1% loss: bursts
+of keystrokes landing ~450ms late). When the host's `active` status carries
+`supportsRedundantInput: true`, the controller sends every input except a
+hover move (pointer move with no held buttons) as an `inputBundle` on the
+**lossy** channel instead:
+
+```json
+{"v":1,"kind":"inputBundle","windowId":42,"stream":"5f2c0a9e1b7d3c48","first":7,
+ "inputs":[{ ...ordinary key/pointer/wheel/text message, rseq 7... },
+           { ...rseq 8 (the newest)... }]}
+```
+
+- `inputs[i]` has bundle sequence `rseq = first + i`. rseq starts at 1 and
+  `stream` is a fresh random id per grant (a repeated `active` for the same
+  grant token keeps the stream). Each inner message is the unchanged legacy or
+  v2 message, so the grant token, v2 envelope, and `seq` all still apply.
+- Each bundle carries the newest input plus up to 3 older ones (at most 4
+  inputs, older ones only while the bundle stays <= 1200 bytes and they are
+  <= 500ms old). After an input, the controller resends the current bundle at
+  +30ms and +100ms unless a newer input superseded it, so a lost final input
+  of a burst is recovered too.
+- The host dedupes by `(sender, windowId, stream, rseq)` and replays strictly
+  in rseq order. A gap is held for at most 60ms; after that the host skips
+  ahead and first releases any key/button that controller holds (a skipped
+  input may have been an Up). A retired `stream` is ignored.
+- Hover moves keep the lossy latest-wins path with no redundancy.
+- A controller that never saw `supportsRedundantInput` (old host) keeps the
+  reliable per-message path. An old controller never sends a bundle, and a new
+  host still accepts its per-message packets unchanged.
+
+Pinned by `contracts/petal-contracts.json.remoteControlInputBundle` and by
+tests on both sides (`remote_control_redundant.rs`,
+`web-harness/tests/remoteControlRedundant.test.ts`).
 
 #### Binary hot-path frame (pointer-move / wheel only)
 

@@ -1,3 +1,4 @@
+import type { RedundantInputSender } from './remoteControlRedundant.ts';
 import type {
   Room,
   LocalVideoTrack,
@@ -401,6 +402,10 @@ export interface ActiveRemoteControl {
    * binary encode on this, never assumes support. Defaults to false/absent
    * so a not-yet-upgraded host is always sent JSON. */
   supportsBinaryHotPath?: boolean;
+  /** #399: present only while the host's latest `active` status advertised
+   * `supportsRedundantInput`; input then rides lossy redundant bundles. */
+  redundantInput?: RedundantInputSender;
+  redundantInputGrantToken?: string;
 }
 
 export interface RemoteTelepointerState {
