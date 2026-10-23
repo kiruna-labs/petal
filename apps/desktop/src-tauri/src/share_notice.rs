@@ -81,6 +81,11 @@ pub fn emit_remote_share_started(app: &AppHandle, payload: RemoteShareStartedPay
 /// message's HEIGHT is ever in question, which `share_notice_present`
 /// handles.
 const SHARE_NOTICE_WIDTH: f64 = 620.0;
+/// Transparent gutter around the notice for its CSS `--shadow-float` (#406).
+/// `SHARE_NOTICE_WIDTH` and the heights are the content's; the window is
+/// larger by this gutter, which passes clicks through.
+const SHARE_NOTICE_SHADOW_GUTTER: crate::shadow_gutter::ShadowGutter =
+    crate::shadow_gutter::FLOAT;
 /// Height before the very first real content measurement lands, and the
 /// floor `share_notice_present` clamps to (a single-line pill never needs
 /// less than this).
@@ -116,7 +121,9 @@ pub fn create_share_notice_panel(app: &AppHandle) {
     }
 
     match PanelBuilder::<_, ShareNoticePanel>::new(app, SHARE_NOTICE_LABEL)
-        .url(WebviewUrl::App("share-notice.html".into()))
+        .url(WebviewUrl::App(
+            crate::shadow_gutter::route_with_gutter("share-notice.html", SHARE_NOTICE_SHADOW_GUTTER).into(),
+        ))
         .title("Petal")
         .position(tauri::Position::Logical(tauri::LogicalPosition {
             x: -10000.0,
@@ -126,11 +133,14 @@ pub fn create_share_notice_panel(app: &AppHandle) {
         // it needs no special stacking beyond every other normal window --
         // it is only ever on screen for a few seconds at a time.
         .level(PanelLevel::Normal)
-        .size(tauri::Size::Logical(tauri::LogicalSize {
-            width: SHARE_NOTICE_WIDTH,
-            height: SHARE_NOTICE_DEFAULT_HEIGHT,
-        }))
-        .has_shadow(true)
+        .size({
+            let (width, height) =
+                SHARE_NOTICE_SHADOW_GUTTER.window_size(SHARE_NOTICE_WIDTH, SHARE_NOTICE_DEFAULT_HEIGHT);
+            tauri::Size::Logical(tauri::LogicalSize { width, height })
+        })
+        // Native shadow off (#406): it outlined the card's CSS shadow on
+        // macOS 26. The CSS shadow is the only elevation and has a gutter.
+        .has_shadow(false)
         .transparent(true)
         .no_activate(true)
         .style_mask(tauri_nspanel::StyleMask::empty().nonactivating_panel())
@@ -160,6 +170,7 @@ pub fn create_share_notice_panel(app: &AppHandle) {
                 // call.
                 crate::webview_transparency::apply_or_retry(app, &window);
             }
+            crate::shadow_gutter::track(app, SHARE_NOTICE_LABEL, SHARE_NOTICE_SHADOW_GUTTER);
         }
         Err(e) => {
             log::error!("share_notice: failed to create panel: {e}");
@@ -212,10 +223,10 @@ pub fn share_notice_present(app: AppHandle, height: f64) {
             log::warn!("share_notice: present called but the panel does not exist");
             return;
         };
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-            width: SHARE_NOTICE_WIDTH,
-            height,
-        }));
+        // The page measures the card; the window adds the shadow gutter.
+        let (width, height) = SHARE_NOTICE_SHADOW_GUTTER.window_size(SHARE_NOTICE_WIDTH, height);
+        let (x, y) = SHARE_NOTICE_SHADOW_GUTTER.window_origin(x, y);
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         if !SHARE_NOTICE_TRANSPARENCY_APPLIED.load(Ordering::Relaxed)
             && crate::webview_transparency::force_window_transparent(&window)
@@ -229,6 +240,7 @@ pub fn share_notice_present(app: AppHandle, height: f64) {
         if let Err(e) = window.show() {
             log::warn!("share_notice: failed to show panel: {e}");
         }
+        crate::shadow_gutter::panel_shown(SHARE_NOTICE_LABEL);
     });
 }
 

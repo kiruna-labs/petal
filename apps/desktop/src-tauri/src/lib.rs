@@ -110,6 +110,9 @@ mod instance_lock;
 #[cfg(target_os = "macos")]
 mod latency_probe;
 mod launch_location;
+// Shadow gutter + gutter click-through for transparent card panels (#406).
+#[cfg(target_os = "macos")]
+mod shadow_gutter;
 // Top-center "<Name> is sharing a window" notice pill (#679).
 #[cfg(target_os = "macos")]
 mod share_notice;

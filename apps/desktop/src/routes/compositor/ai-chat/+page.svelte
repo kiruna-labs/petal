@@ -31,6 +31,7 @@
   the typed-message input, which need the video-covered area, live here.
 -->
 <script lang="ts">
+  import { shadowGutterFromSearch, shadowGutterPadding } from '$lib/shadowGutter';
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import { page } from '$app/state';
@@ -142,8 +143,12 @@
       window.removeEventListener('keydown', onWindowKeydown);
     };
   });
+  // Native shadow is off; pad the card so its CSS shadow fits the window's
+  // transparent, click-through gutter (#406). No gutter on Windows.
+  const gutterPadding = shadowGutterPadding(shadowGutterFromSearch());
 </script>
 
+<div class="shadow-gutter" style={gutterPadding}>
 <div class="overlay">
   {#if turns.length > 0}
     <div class="transcript" bind:this={transcriptEl} aria-live="polite">
@@ -180,8 +185,15 @@
     <button type="submit" class="composer-send" disabled={!canSend}>Send</button>
   </form>
 </div>
+</div>
 
 <style>
+  .shadow-gutter {
+    box-sizing: border-box;
+    width: 100vw;
+    height: 100vh;
+  }
+
   :global(html),
   :global(body) {
     background: transparent;

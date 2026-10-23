@@ -324,6 +324,12 @@ mod platform {
     const POPOVER_WIDTH: f64 = 280.0;
     const POPOVER_MIN_HEIGHT: f64 = 80.0;
     const POPOVER_MAX_HEIGHT: f64 = 480.0;
+    /// Transparent gutter around the popover card for its CSS
+    /// `--shadow-panel` (#406). The width/heights above are the CARD's; the
+    /// window is larger by this gutter, which passes clicks through (a click
+    /// there lands on whatever is below and resigns key, dismissing it).
+    const POPOVER_SHADOW_GUTTER: crate::shadow_gutter::ShadowGutter =
+        crate::shadow_gutter::PANEL;
 
     // Approved-comp colors (canvas.html §3) -- the ONLY place these greens/
     // inks appear; the pill is the one full-color surface the design allows.
@@ -1288,21 +1294,29 @@ mod platform {
         }
 
         match PanelBuilder::<_, MenubarPopoverPanel>::new(app, MENUBAR_POPOVER_LABEL)
-            .url(WebviewUrl::App("menubar-popover.html".into()))
+            .url(WebviewUrl::App(
+                crate::shadow_gutter::route_with_gutter("menubar-popover.html", POPOVER_SHADOW_GUTTER)
+                    .into(),
+            ))
             .title("Petal")
             .position(tauri::Position::Logical(tauri::LogicalPosition {
                 x: -10000.0,
                 y: -10000.0,
             }))
             .level(PanelLevel::Status)
-            .size(tauri::Size::Logical(tauri::LogicalSize {
-                width: POPOVER_WIDTH,
-                height: 360.0, // provisional; content-fit resize on mount (resize_menubar_popover)
-            }))
-            .has_shadow(true)
+            .size({
+                // Provisional card height; content-fit resize on mount
+                // (resize_menubar_popover).
+                let (width, height) = POPOVER_SHADOW_GUTTER.window_size(POPOVER_WIDTH, 360.0);
+                tauri::Size::Logical(tauri::LogicalSize { width, height })
+            })
+            // Native shadow off (#406): it outlined the card's CSS shadow on
+            // macOS 26. The CSS shadow is the only elevation and has a
+            // gutter; the card's CSS radius rounds it, so no window mask.
+            .has_shadow(false)
             .transparent(true)
             .no_activate(false)
-            .corner_radius(14.0)
+            .corner_radius(0.0)
             .with_window(|w| w.decorations(false).transparent(true))
             .collection_behavior(
                 CollectionBehavior::new()
@@ -1330,6 +1344,7 @@ mod platform {
                     hide_popover(&app_for_resign);
                 });
                 panel.set_event_handler(Some(handler.as_ref()));
+                crate::shadow_gutter::track(app, MENUBAR_POPOVER_LABEL, POPOVER_SHADOW_GUTTER);
 
                 if let Some(window) = app.get_webview_window(MENUBAR_POPOVER_LABEL) {
                     // Without this the panel composites an opaque black rect
@@ -1388,10 +1403,10 @@ mod platform {
             if let Ok(Some(monitor)) = app.primary_monitor() {
                 let screen_height = monitor.size().height as f64 / monitor.scale_factor();
                 let flipped_y = screen_height - y;
-                let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition {
-                    x,
-                    y: flipped_y,
-                }));
+                // (x, flipped_y) is the card's top-left; the window starts
+                // the shadow gutter above and to the left of it.
+                let (x, y) = POPOVER_SHADOW_GUTTER.window_origin(x, flipped_y);
+                let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
             }
         }
 
@@ -1408,6 +1423,7 @@ mod platform {
             let _ = window.show();
             let _ = window.set_focus();
         }
+        crate::shadow_gutter::panel_shown(MENUBAR_POPOVER_LABEL);
 
         // Belt-and-suspenders data refresh: nudge the popover page to
         // re-fetch room/presence + re-measure its height. The page also
@@ -1438,10 +1454,8 @@ mod platform {
         let _ = app.clone().run_on_main_thread(move || {
             use tauri::Manager;
             if let Some(window) = app.get_webview_window(MENUBAR_POPOVER_LABEL) {
-                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                    width: POPOVER_WIDTH,
-                    height,
-                }));
+                let (width, height) = POPOVER_SHADOW_GUTTER.window_size(POPOVER_WIDTH, height);
+                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
             }
         });
     }

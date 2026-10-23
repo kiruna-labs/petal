@@ -37,6 +37,9 @@ pub fn create_ai_chat_panel(app: &AppHandle) {
     .title("AI Chat")
     .decorations(false)
     .transparent(true)
+    // Windows: unchanged default (DWM shadow/border); the #406 outline is a
+    // macOS alpha-shadow artifact. Stated explicitly for the shadow lint.
+    .shadow(true)
     // Transparent WebView2 default background: the panel is shown and hidden
     // repeatedly (its compositor throttles while hidden), and the pre-paint/
     // resume gap must not flash as a hollow white rectangle next to the

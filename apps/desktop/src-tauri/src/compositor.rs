@@ -2735,6 +2735,31 @@ const AI_CHAT_OVERLAY_MARGIN: f64 = 12.0;
 /// Frame for the AI-chat overlay (#844): a fixed-size panel anchored to the
 /// top-right of the video content area, clamped so it never overflows a
 /// small window.
+/// The ai-chat overlay card draws its own `--shadow-float`; its window is the
+/// card plus this gutter, with the native shadow off (#406).
+const AI_CHAT_OVERLAY_SHADOW_GUTTER: crate::shadow_gutter::ShadowGutter =
+    crate::shadow_gutter::FLOAT;
+
+/// Window frame of the ai-chat overlay: its card frame plus the shadow gutter.
+fn ai_chat_overlay_window_frame_for_panel_bounds(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> ChromeFrame {
+    let card = ai_chat_overlay_frame_for_panel_bounds(x, y, width, height);
+    let (wx, wy) = AI_CHAT_OVERLAY_SHADOW_GUTTER.window_origin(card.x, card.y);
+    let (ww, wh) = AI_CHAT_OVERLAY_SHADOW_GUTTER.window_size(card.width, card.height);
+    ChromeFrame {
+        x: wx,
+        y: wy,
+        width: ww,
+        height: wh,
+    }
+}
+
+/// Card frame of the ai-chat overlay (what the user sees), docked inside the
+/// panel's content area.
 fn ai_chat_overlay_frame_for_panel_bounds(x: f64, y: f64, width: f64, height: f64) -> ChromeFrame {
     let content_h = (height - HEADER_HEIGHT).max(1.0);
     let content_y = y + HEADER_HEIGHT;
@@ -2772,7 +2797,7 @@ fn chrome_frames_for_panel_bounds(x: f64, y: f64, width: f64, height: f64) -> Ch
             width,
             height: content_h,
         },
-        ai_chat: ai_chat_overlay_frame_for_panel_bounds(x, y, width, height),
+        ai_chat: ai_chat_overlay_window_frame_for_panel_bounds(x, y, width, height),
     }
 }
 
@@ -3352,6 +3377,11 @@ fn create_chrome_webview(app: &AppHandle, parent_label: &str, spec: ChromeWebvie
         .inner_size(spec.width, spec.height)
         .decorations(false)
         .transparent(true)
+        // No native shadow (#406): AppKit outlines the alpha of a transparent
+        // window's content, so the banner's CSS shadow and every telepointer
+        // got a dark hairline "bubble" on macOS 26. Same as the sharer-side
+        // overlays and every Windows overlay.
+        .shadow(false)
         .accept_first_mouse(true)
         .skip_taskbar(true)
         .resizable(false)
@@ -3707,9 +3737,12 @@ fn create_pointer_overlay(
 /// window reuse (same `RemoteWindowKey` throughout), so no `sourceWidth`/
 /// `sourceHeight`-style refresh machinery is required for this overlay.
 fn ai_chat_route_url(window_id: u32, owner_identity: &str) -> String {
-    format!(
-        "compositor/ai-chat.html?windowId={window_id}&owner={}",
-        percent_encode(owner_identity),
+    crate::shadow_gutter::route_with_gutter(
+        &format!(
+            "compositor/ai-chat.html?windowId={window_id}&owner={}",
+            percent_encode(owner_identity),
+        ),
+        AI_CHAT_OVERLAY_SHADOW_GUTTER,
     )
 }
 
@@ -3729,6 +3762,9 @@ fn ai_chat_route_url(window_id: u32, owner_identity: &str) -> String {
 /// overlay must call this; every call site that hides it must call
 /// `detach_ai_chat_overlay` below.
 fn attach_ai_chat_overlay(app: &AppHandle, key: &RemoteWindowKey) {
+    // Every show path of the ai-chat overlay attaches it right after
+    // `show()`, so this is the one place to wake its gutter pass-through.
+    crate::shadow_gutter::panel_shown(&ai_chat_label_for_key(key));
     let Some(panel) = app.get_webview_window(&panel_label_for_key(key)) else {
         return;
     };
@@ -3837,7 +3873,8 @@ fn create_ai_chat_overlay(
     let window_id = key.window_id;
     let label = ai_chat_label_for_key(key);
     let url = ai_chat_route_url(window_id, &key.owner_identity);
-    let frame = ai_chat_overlay_frame_for_panel_bounds(panel_x, panel_y, panel_width, panel_height);
+    let frame =
+        ai_chat_overlay_window_frame_for_panel_bounds(panel_x, panel_y, panel_width, panel_height);
     match PanelBuilder::<_, AiChatOverlayPanel>::new(app, &label)
         .url(WebviewUrl::App(url.into()))
         .title("")
@@ -3850,11 +3887,13 @@ fn create_ai_chat_overlay(
             width: frame.width,
             height: frame.height,
         }))
-        .has_shadow(true)
+        // Native shadow off, CSS shadow inside a transparent gutter (#406).
+        // The card's own CSS radius rounds it, so the window is not masked.
+        .has_shadow(false)
         .transparent(true)
         .no_activate(true)
         .style_mask(tauri_nspanel::StyleMask::empty().nonactivating_panel())
-        .corner_radius(SCREENSHARE_BORDER_RADIUS_PX)
+        .corner_radius(0.0)
         .with_window(|w| {
             w.decorations(false)
                 .resizable(false)
@@ -3869,6 +3908,7 @@ fn create_ai_chat_overlay(
                 let _ = win.hide();
                 crate::webview_transparency::apply_or_retry(app, &win);
             }
+            crate::shadow_gutter::track(app, &label, AI_CHAT_OVERLAY_SHADOW_GUTTER);
         }
         Err(e) => log::warn!(
             "compositor: failed to create ai-chat overlay '{label}' for window {window_id}: {e}"
@@ -10053,12 +10093,14 @@ mod tests {
                 // #844: fixed-size overlay anchored to the content area's
                 // top-right, inset by AI_CHAT_OVERLAY_MARGIN (12pt), clamped
                 // to AI_CHAT_OVERLAY_WIDTH/MAX_HEIGHT (300x360) -- both fit
-                // inside this 640x400 content area unclamped.
+                // inside this 640x400 content area unclamped. The WINDOW adds
+                // the --shadow-float gutter (26 sides, 8 top, 44 bottom; #406)
+                // around that card.
                 ai_chat: ChromeFrame {
-                    x: 120.0 + 640.0 - 300.0 - 12.0,
-                    y: 80.0 + HEADER_HEIGHT + 12.0,
-                    width: 300.0,
-                    height: 360.0,
+                    x: 120.0 + 640.0 - 300.0 - 12.0 - 26.0,
+                    y: 80.0 + HEADER_HEIGHT + 12.0 - 8.0,
+                    width: 300.0 + 52.0,
+                    height: 360.0 + 52.0,
                 },
             }
         );
