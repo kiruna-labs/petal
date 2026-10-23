@@ -692,6 +692,7 @@ enum SharePumpWake {
     Interaction,
     IdleTick,
     RegionTick,
+    RejectedPushRetry,
 }
 
 struct ShareRestartSnapshot {
@@ -1441,6 +1442,46 @@ impl InteractionPushTrace {
         }
         self.remaining -= 1;
         Some((input_seq, since_input_us))
+    }
+}
+
+/// Re-push cadence after WebRTC's source rejects a frame, and how many tries.
+/// 15 x 20ms spans a full frame interval down to the 4fps Reduced tier.
+const REJECTED_PUSH_RETRY_DELAY: Duration = Duration::from_millis(20);
+const REJECTED_PUSH_RETRY_MAX_ATTEMPTS: u8 = 15;
+
+/// WebRTC's frame-rate limiter (`VideoAdapter`) silently drops a frame that
+/// arrives within one interval of the last accepted one. A snapshot pushed a
+/// few ms before the raw frame carrying a keystroke made the raw frame's
+/// content invisible until the next unrelated repaint (~800ms text stalls,
+/// #392). Never let a rejected push be the last word: re-push the newest
+/// parked frame once the limiter will take it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RejectedPushRetry {
+    deadline: Option<Instant>,
+    attempts: u8,
+}
+
+impl RejectedPushRetry {
+    /// Record the outcome of any push to the source. `accepted` is `None`
+    /// when the push never reached the source (conversion failure, stale
+    /// region): there is nothing a retry could fix, so the state clears.
+    fn observe_push(&mut self, accepted: Option<bool>, now: Instant) {
+        if accepted != Some(false) {
+            *self = Self::default();
+            return;
+        }
+        if self.attempts >= REJECTED_PUSH_RETRY_MAX_ATTEMPTS {
+            *self = Self::default();
+            return;
+        }
+        self.attempts += 1;
+        self.deadline = Some(now + REJECTED_PUSH_RETRY_DELAY);
+    }
+
+    /// Consumes the pending deadline when the retry fires.
+    fn take_due(&mut self) -> bool {
+        self.deadline.take().is_some()
     }
 }
 
@@ -5543,6 +5584,7 @@ fn spawn_share_pump(
         let mut handled_interaction_epoch: u64 = 0;
         let mut first_pushed_frame_recorded = false;
         let mut interaction_push_trace = InteractionPushTrace::default();
+        let mut rejected_push_retry = RejectedPushRetry::default();
         log::info!(
             "session: window {window_id} frame pump loop started (seq {started_seq}, restart_generation {restart_generation})"
         );
@@ -5567,12 +5609,44 @@ fn spawn_share_pump(
                 _ = latest_frame_notify.notified() => SharePumpWake::RawFrame,
                 _ = interaction_signal.notify.notified() => SharePumpWake::Interaction,
                 _ = region_tick.tick(), if is_region_share => SharePumpWake::RegionTick,
+                _ = tokio::time::sleep_until(
+                    rejected_push_retry
+                        .deadline
+                        .map(tokio::time::Instant::from_std)
+                        .unwrap_or_else(tokio::time::Instant::now),
+                ), if rejected_push_retry.deadline.is_some() => SharePumpWake::RejectedPushRetry,
                 _ = tokio::time::sleep(adaptive_idle_tick.interval()) => SharePumpWake::IdleTick,
             };
             if wake != SharePumpWake::IdleTick && wake != SharePumpWake::RegionTick {
                 adaptive_idle_tick.reset_on_wake();
             }
             pump_activity_for_task.store(now_us(), Ordering::Relaxed);
+
+            if wake == SharePumpWake::RejectedPushRetry {
+                if rejected_push_retry.take_due() {
+                    let current = pump_published.lock_unpoisoned().clone();
+                    let timing = dirty_rect_pump.parked_frame().and_then(|(frame, ts)| {
+                        pump_capture_config
+                            .with_current_region_frame(frame, || current.push_frame(frame, ts))
+                            .flatten()
+                    });
+                    trace_interaction_push(
+                        &mut interaction_push_trace,
+                        &interaction_signal,
+                        window_id,
+                        "retry",
+                        timing,
+                    );
+                    record_published_frame_timing(&pump_diagnostics, window_id, timing);
+                    rejected_push_retry
+                        .observe_push(timing.map(|t| t.source_accepted), Instant::now());
+                    if timing.is_some_and(|t| t.source_accepted) {
+                        pump_last_push_for_task.store(now_us(), Ordering::Relaxed);
+                        pump_pushed_frames_for_task.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                continue;
+            }
 
             // Poll the selector geometry at the pump cadence. The capture
             // owner applies the newest immutable generation before accepting
@@ -5659,6 +5733,8 @@ fn spawn_share_pump(
                         timing,
                     );
                     record_published_frame_timing(&pump_diagnostics, window_id, timing);
+                    rejected_push_retry
+                        .observe_push(timing.map(|t| t.source_accepted), Instant::now());
                     if !first_pushed_frame_recorded {
                         first_pushed_frame_recorded = true;
                         if let Some(diagnostics) = pump_diagnostics.as_ref() {
@@ -5807,6 +5883,10 @@ fn spawn_share_pump(
                                             window_id,
                                             "snapshot",
                                             timing,
+                                        );
+                                        rejected_push_retry.observe_push(
+                                            timing.map(|t| t.source_accepted),
+                                            Instant::now(),
                                         );
                                         record_published_frame_timing(
                                             &pump_diagnostics,
@@ -6135,6 +6215,7 @@ fn spawn_share_pump(
                 "raw",
                 timing,
             );
+            rejected_push_retry.observe_push(timing.map(|t| t.source_accepted), Instant::now());
             record_published_frame_timing(&pump_diagnostics, window_id, timing);
             if !first_pushed_frame_recorded {
                 first_pushed_frame_recorded = true;
@@ -13834,6 +13915,38 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
     }
 
     // -- Interaction-burst policy (#290 step 5) --------------------------
+
+    #[test]
+    fn rejected_push_arms_a_retry_and_an_accepted_push_clears_it() {
+        let now = Instant::now();
+        let mut retry = RejectedPushRetry::default();
+        // #392: a snapshot is accepted, then the raw frame carrying the
+        // keystroke lands inside the limiter interval and is rejected.
+        retry.observe_push(Some(true), now);
+        assert_eq!(retry.deadline, None);
+        retry.observe_push(Some(false), now);
+        assert_eq!(retry.deadline, Some(now + REJECTED_PUSH_RETRY_DELAY));
+        assert!(retry.take_due());
+        assert!(!retry.take_due(), "a deadline fires once");
+        retry.observe_push(Some(true), now);
+        assert_eq!(retry, RejectedPushRetry::default());
+    }
+
+    #[test]
+    fn rejected_push_retry_gives_up_after_its_budget_and_ignores_failed_pushes() {
+        let now = Instant::now();
+        let mut retry = RejectedPushRetry::default();
+        for _ in 0..REJECTED_PUSH_RETRY_MAX_ATTEMPTS {
+            retry.observe_push(Some(false), now);
+            assert!(retry.take_due());
+        }
+        retry.observe_push(Some(false), now);
+        assert_eq!(retry, RejectedPushRetry::default(), "bounded, never a hot loop");
+        // A push that never reached the source has nothing to retry.
+        retry.observe_push(Some(false), now);
+        retry.observe_push(None, now);
+        assert_eq!(retry, RejectedPushRetry::default());
+    }
 
     #[test]
     fn interaction_push_trace_logs_a_bounded_number_of_pushes_per_input() {
