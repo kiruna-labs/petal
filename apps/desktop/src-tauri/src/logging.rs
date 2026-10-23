@@ -2640,6 +2640,10 @@ impl<L: log::Log> RepeatSuppressingLog<L> {
             return;
         }
         let message = record.args().to_string();
+        // #411: count VideoToolbox encode failures from the RAW stream -- the
+        // suppression below collapses ~20/s of them into one rollup per 30 s,
+        // which is fine for the file and useless for a per-interval count.
+        crate::transport::encoder_health::note_native_webrtc_message(&message);
         let key = NativeWebrtcRepeatKey {
             target: target.to_string(),
             level: record.level(),

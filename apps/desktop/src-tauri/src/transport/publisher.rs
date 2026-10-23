@@ -8034,6 +8034,61 @@ impl PublishedTrack {
         Ok(())
     }
 
+    /// #411: tear this camera's sender down and publish the SAME
+    /// `LocalVideoTrack` again, which builds a new sender, a new libwebrtc
+    /// `VideoStreamEncoder` and a new `VTCompressionSession`. This is the one
+    /// lever Petal has over a wedged VideoToolbox session: libwebrtc only
+    /// resets one itself for a synchronous `kVTInvalidSessionErr` /
+    /// `kVTVideoEncoderMalfunctionErr`, never for the asynchronous callback
+    /// failures #411 logged for 37 minutes. Same shape as the SDK's own
+    /// `handle_restarted` republish (unpublish, then publish the same track)
+    /// and as [`Self::republish_camera_after_reconnect`]. Unlike
+    /// [`Self::unpublish`] it leaves `background_cancel` alone: the track's
+    /// diagnostics and its encoder-health monitor outlive the re-creation.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) async fn recreate_camera_encoder(&self) -> Result<(), RoomConnectionError> {
+        let sid = self.sid();
+        if let Err(error) = self.room.local_participant().unpublish_track(&sid).await {
+            // Already gone (a reconnect raced us): publishing below is still
+            // the right repair.
+            log::warn!(
+                "publisher: camera encoder re-create: unpublish of the wedged sender failed ({error}); publishing anyway"
+            );
+        }
+        self.republish_camera_after_reconnect().await?;
+        log::info!(
+            "publisher: camera track '{}' re-created its encoder (#411)",
+            self.track.name()
+        );
+        Ok(())
+    }
+
+    /// #411: this track's encoded-frame total, summed over its video
+    /// `outbound-rtp` entries. `None` when stats cannot be read or carry no
+    /// video entry (between an unpublish and the next publish).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) async fn frames_encoded(&self) -> Option<u64> {
+        let stats = self.track.get_stats().await.ok()?;
+        let mut total = None;
+        for stat in stats {
+            let livekit::webrtc::stats::RtcStats::OutboundRtp(outbound) = stat else {
+                continue;
+            };
+            if outbound.stream.kind != "video" {
+                continue;
+            }
+            total = Some(total.unwrap_or(0u64) + u64::from(outbound.outbound.frames_encoded));
+        }
+        total
+    }
+
+    /// Cancelled when this track is terminally unpublished ([`Self::unpublish`]).
+    /// Background tasks bound to the publication's lifetime observe it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn lifecycle_token(&self) -> CancellationToken {
+        self.background_cancel.clone()
+    }
+
     /// Unpublish this track from its room. Does NOT close/disconnect the
     /// room itself -- callers with multiple tracks published on one room
     /// (SPEC.md §4.3 multi-window sharing) decide separately whether the
