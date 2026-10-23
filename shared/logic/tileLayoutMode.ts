@@ -17,7 +17,20 @@
 // transition themselves (the web client writes localStorage only when
 // `persist` is non-null; the desktop gallery persists nothing at all).
 
-export type TileLayoutMode = 'grid' | 'spotlight';
+export type TileLayoutMode = 'grid' | 'column' | 'spotlight';
+
+export const TILE_LAYOUT_MODES: readonly TileLayoutMode[] = ['grid', 'column', 'spotlight'];
+
+export const TILE_LAYOUT_LABELS: Record<TileLayoutMode, string> = {
+  grid: 'Grid view',
+  column: 'Vertical view',
+  spotlight: 'Spotlight view'
+};
+
+export function parseTileLayoutMode(raw: string | null | undefined): TileLayoutMode {
+  if (raw === 'spotlight' || raw === 'column' || raw === 'grid') return raw;
+  return 'grid';
+}
 
 export interface TileLayoutModeState {
   /** The layout the client is showing right now. */

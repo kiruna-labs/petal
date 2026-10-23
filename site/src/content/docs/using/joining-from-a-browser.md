@@ -109,8 +109,9 @@ invite link, Back only asks once you've tapped or clicked something in the
 meeting; until then it leaves like any other page.
 
 The top bar shows the room name (click the pencil to rename it for
-everyone), an elapsed timer, a layout switch between the grid and a
-**spotlight** view that enlarges one share, and a bug-report button.
+everyone), an elapsed timer, a layout switch among the grid, a **vertical**
+view that stacks faces in a column, and a **spotlight** view that enlarges
+one share, and a bug-report button.
 
 A shared window's tile has the same header as the desktop app's windows:
 the source and sharer, an **AI chat** button, **Open URL** when the share is

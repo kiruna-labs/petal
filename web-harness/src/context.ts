@@ -37,7 +37,8 @@ import type {
 // wired once at bootstrap and passed in unchanged.
 // ---------------------------------------------------------------------------
 
-export type TileLayoutMode = 'grid' | 'spotlight';
+import type { TileLayoutMode } from '@petal/shared/logic/tileLayoutMode';
+export type { TileLayoutMode };
 
 export interface CodecCheck {
   label: string;

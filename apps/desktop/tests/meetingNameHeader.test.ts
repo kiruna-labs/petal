@@ -122,13 +122,15 @@ test('desktop top bar centres the title row and sizes its controls from one toke
   assert.match(gallerySource, /\.room-title\s*{[^}]*align-items:\s*center;/);
   assert.match(gallerySource, /\.room-name\s*{[^}]*font:\s*600 14\.5px \/ 1\.12 var\(--font-ui\);/);
   assert.match(gallerySource, /\.elapsed\s*{[^}]*font:\s*500 12\.5px \/ 1\.12 var\(--font-mono\);/);
-  for (const selector of ['.topbar-control-cell', '.layout-toggle', '.report-bug']) {
+  for (const selector of ['.topbar-control-cell', '.report-bug']) {
     assert.match(
       gallerySource,
       new RegExp(`\\${selector}\\s*{[^}]*width:\\s*var\\(--topbar-control-height\\);\\s*height:\\s*var\\(--topbar-control-height\\);`),
       `${selector} is not sized from --topbar-control-height`
     );
   }
+  assert.match(gallerySource, /\.layout-picker\s*{[^}]*height:\s*var\(--topbar-control-height\);[^}]*padding:\s*2px;/);
+  assert.match(gallerySource, /\.layout-mode-button\s*{[^}]*height:\s*100%;/);
 });
 
 test('desktop room title icon buttons are matching square controls', () => {

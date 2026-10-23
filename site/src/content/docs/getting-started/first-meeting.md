@@ -69,10 +69,11 @@ person's name when it's off). Along the bottom:
   **Disable remote control** / **Allow remote control** for this call.
 - **Leave**.
 
-The icons in the top-right switch between the gallery and a spotlight layout,
-open the connection stats (Network Cockpit), and **collapse the window to a
-compact bar** — a small floating pill with the same controls that stays out
-of the way while you work. Expand it again from the pill. On macOS the global
+The icons in the top-right switch between **grid**, **vertical** (a stacked
+column of faces), and **spotlight** layouts, open the connection stats
+(Network Cockpit), and **collapse the window to a compact bar** — a small
+floating pill with the same controls that stays out of the way while you
+work. Expand it again from the pill. On macOS the global
 shortcut `⌘⌃⇧P` brings the pill back to the front from anywhere, and
 `⌘⌃⇧S` toggles sharing of the window you last shared.
 
