@@ -33,14 +33,19 @@ const SHARED_EVENTS = [
 // #872: native-only — the sharer-side drawing overlay that captures the
 // cursor exists only in the desktop app, so the web client never emits it.
 // #370: the latency summary is native-only until the web producer lands (#375).
-const NATIVE_ONLY_EVENTS = ['annotation_toggled', 'remote_control_latency_summary'];
+// #411: the VideoToolbox encoder recovery lives in the native publisher.
+const NATIVE_ONLY_EVENTS = [
+  'annotation_toggled',
+  'remote_control_latency_summary',
+  'video_encoder_recovery'
+];
 
-test('allowlist and analytics.rs lock the same fourteen event names', () => {
+test('allowlist and analytics.rs lock the same fifteen event names', () => {
   for (const name of [...SHARED_EVENTS, ...NATIVE_ONLY_EVENTS]) {
     assert.match(allowlist, new RegExp(`\`${name}\``));
     assert.match(analytics, new RegExp(`"${name}"`));
   }
-  assert.match(analytics, /const EVENT_NAMES: \[&str; 14\]/);
+  assert.match(analytics, /const EVENT_NAMES: \[&str; 15\]/);
   assert.match(analytics, /starts_with\("phc_"\)/);
   assert.match(analytics, /"client"/);
   assert.match(analytics, /"native"/);
