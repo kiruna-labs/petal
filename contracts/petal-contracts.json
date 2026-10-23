@@ -857,7 +857,8 @@
         "kind": "status",
         "status": "active",
         "message": "Remote control active for shared window",
-        "supportsBinaryHotPath": true
+        "supportsBinaryHotPath": true,
+        "supportsRedundantInput": true
       },
       "fields": [
         "controllerId",
@@ -867,6 +868,7 @@
         "seq",
         "status",
         "supportsBinaryHotPath",
+        "supportsRedundantInput",
         "targetUserId",
         "v",
         "windowId"
@@ -1718,8 +1720,81 @@
       "reliability": "reliable",
       "destination": "targetParticipant",
       "authority": "authenticatedRemoteControlGrant"
+    },
+    {
+      "packet": "redundantInputBundle",
+      "reliability": "lossy",
+      "destination": "host",
+      "authority": "authenticatedController"
     }
   ],
+  "remoteControlInputBundle": {
+    "kind": "inputBundle",
+    "version": 1,
+    "topic": "petal.remote-control",
+    "reliable": false,
+    "capabilityField": "supportsRedundantInput",
+    "maxInputs": 4,
+    "maxPayloadBytes": 1200,
+    "maxRedundantAgeMs": 500,
+    "trailingCopyDelaysMs": [30, 100],
+    "hostGapHoldMs": 60,
+    "ridesBundle": [
+      "pointer.move.buttons!=0",
+      "pointer.down",
+      "pointer.up",
+      "pointer.click",
+      "wheel",
+      "key",
+      "text"
+    ],
+    "staysLossyLatestWins": [
+      "pointer.move.buttons==0"
+    ],
+    "fields": [
+      "first",
+      "inputs",
+      "kind",
+      "stream",
+      "v",
+      "windowId"
+    ],
+    "example": {
+      "v": 1,
+      "kind": "inputBundle",
+      "windowId": 42,
+      "stream": "5f2c0a9e1b7d3c48",
+      "first": 7,
+      "inputs": [
+        {
+          "v": 1,
+          "targetUserId": "native-1",
+          "controllerId": "web-1",
+          "windowId": 42,
+          "seq": 30,
+          "grantToken": "0123456789abcdef0123456789abcdef",
+          "kind": "key",
+          "action": "down",
+          "key": "a",
+          "code": "KeyA",
+          "modifiers": { "alt": false, "ctrl": false, "meta": false, "shift": false }
+        },
+        {
+          "v": 1,
+          "targetUserId": "native-1",
+          "controllerId": "web-1",
+          "windowId": 42,
+          "seq": 31,
+          "grantToken": "0123456789abcdef0123456789abcdef",
+          "kind": "key",
+          "action": "up",
+          "key": "a",
+          "code": "KeyA",
+          "modifiers": { "alt": false, "ctrl": false, "meta": false, "shift": false }
+        }
+      ]
+    }
+  },
   "testCockpitJourneys": [
     {
       "id": "SHARE-01",

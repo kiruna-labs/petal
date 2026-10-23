@@ -172,6 +172,7 @@ mod quit;
 mod remote_clipboard;
 mod remote_control;
 mod remote_control_core;
+mod remote_control_redundant;
 #[cfg(target_os = "windows")]
 mod windows_remote_control;
 #[cfg(target_os = "windows")]

@@ -258,6 +258,7 @@ fn base_message(window_id: u32, kind: RemoteControlType) -> RemoteControlMessage
         message: None,
         grant_token: None,
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers: RemoteControlModifiers::default(),
     }
 }

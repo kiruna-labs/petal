@@ -911,6 +911,7 @@ test('remote-control packet policy pins reliability, destination, and authority'
     { packet: 'text', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'copyRequest', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'clipboardTextStream', reliability: 'reliable', destination: 'targetParticipant', authority: 'authenticatedRemoteControlGrant' },
+    { packet: 'redundantInputBundle', reliability: 'lossy', destination: 'host', authority: 'authenticatedController' },
   ]);
 });
 
@@ -947,6 +948,7 @@ test('remote-control fixture pins representative variant payloads', () => {
     status: 'active',
     message: 'Remote control active for shared window',
     supportsBinaryHotPath: true,
+    supportsRedundantInput: true,
   });
   assert.equal(byName.get('status-request-unavailable')?.status, 'requestUnavailable');
   assert.deepEqual(byName.get('pointer-move'), {
