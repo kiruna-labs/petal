@@ -5,7 +5,7 @@
   scaffolding, matches the /dev/components pattern.
 -->
 <script lang="ts">
-  import Settings from '$lib/components/Settings.svelte';
+  import Settings from '#lib/components/Settings.svelte';
 </script>
 
 <div class="harness">

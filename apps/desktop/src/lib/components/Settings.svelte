@@ -52,15 +52,15 @@
     REMOTE_CONTROL_POLICY_DESCRIPTION,
     REMOTE_CONTROL_POLICY_OPTIONS,
     REMOTE_CONTROL_POLICY_TITLE
-  } from '$lib/remoteControlPolicyCopy';
-  import type { RemoteControlPolicy } from '$lib/ipc';
+  } from '#lib/remoteControlPolicyCopy.js';
+  import type { RemoteControlPolicy } from '#lib/ipc.js';
   import DeviceSelect from './DeviceSelect.svelte';
-  import PluginSettingsRows from '$lib/plugins/PluginSettingsRows.svelte';
-  import PluginRegistryBrowser from '$lib/plugins/PluginRegistryBrowser.svelte';
-  import { setInstalledEnabled, uninstallPlugin, type CatalogEntry } from '$lib/plugins/pluginCatalog';
+  import PluginSettingsRows from '#lib/plugins/PluginSettingsRows.svelte';
+  import PluginRegistryBrowser from '#lib/plugins/PluginRegistryBrowser.svelte';
+  import { setInstalledEnabled, uninstallPlugin, type CatalogEntry } from '#lib/plugins/pluginCatalog.js';
   import { getVersion } from '@tauri-apps/api/app';
-  import { installedPlugins } from '$lib/plugins/pluginCatalog';
-  import { browserStorage } from '$lib/data/storageKeys';
+  import { installedPlugins } from '#lib/plugins/pluginCatalog.js';
+  import { browserStorage } from '#lib/data/storageKeys.js';
   import IdentitySetup from './IdentitySetup.svelte';
   import PermissionRow from './PermissionRow.svelte';
   import TestCockpitResults from './TestCockpitResults.svelte';
@@ -70,22 +70,22 @@
     ensureCameraAccess,
     openPrivacySettings,
     type AuthStatus
-  } from '$lib/data/permissions';
-  import { cameraPreviewConstraints } from '$lib/data/cameraConstraints';
+  } from '#lib/data/permissions.js';
+  import { cameraPreviewConstraints } from '#lib/data/cameraConstraints.js';
   import {
     previewCameraIdFor,
     streamCameraId,
     webCamerasFrom,
     type WebCamera
-  } from '$lib/data/cameraPreviewDevice';
-  import { listAudioDevices, setAudioDevices } from '$lib/data/audioDevices';
+  } from '#lib/data/cameraPreviewDevice.js';
+  import { listAudioDevices, setAudioDevices } from '#lib/data/audioDevices.js';
   import {
     MISSING_DEVICE,
     MISSING_DEVICE_LABEL,
     pickerValue,
     switchNote
-  } from '$lib/data/audioDeviceSelection';
-  import { listCameraDevices, setCameraDevice } from '$lib/data/cameraDevices';
+  } from '#lib/data/audioDeviceSelection.js';
+  import { listCameraDevices, setCameraDevice } from '#lib/data/cameraDevices.js';
   import {
     CAMERA_FPS_PRESETS,
     CAMERA_RESOLUTION_PRESETS,
@@ -93,8 +93,8 @@
     cameraSupportsResolution,
     listCameraModes,
     setCameraPrefs
-  } from '$lib/data/cameraModes';
-  import type { CameraMode } from '$lib/data/cameraModes';
+  } from '#lib/data/cameraModes.js';
+  import type { CameraMode } from '#lib/data/cameraModes.js';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import {
     AI_CHAT_API_KEY_URL,
@@ -103,8 +103,8 @@
     AI_CHAT_CONSENT_TITLE,
     AI_CHAT_COST_NOTE,
     AI_CHAT_KEY_DATA_USE_NOTE
-  } from '$lib/data/aiChat';
-  import { DEBUG_MODE_SETTING_DESCRIPTION, DEBUG_MODE_SETTING_TITLE } from '$lib/data/debugMode';
+  } from '#lib/data/aiChat.js';
+  import { DEBUG_MODE_SETTING_DESCRIPTION, DEBUG_MODE_SETTING_TITLE } from '#lib/data/debugMode.js';
   import {
     COMMANDS,
     EVENTS,
@@ -121,12 +121,12 @@
     type TestCockpitRunDetail,
     type TestCockpitRunSummary,
     type TestProgressEvent
-  } from '$lib/ipc';
-  import { displayBuildVersion } from '$lib/buildInfo';
-  import { isMac } from '$lib/platform';
-  import { resetOnboarding, session, updateAudioDevices, updateCameraMode } from '$lib/stores/session.svelte';
-  import { checkForUpdate } from '$lib/updater';
-  import { clearLocalFactoryResetState, tccResetCommand } from '$lib/data/factoryReset';
+  } from '#lib/ipc.js';
+  import { displayBuildVersion } from '#lib/buildInfo.js';
+  import { isMac } from '#lib/platform.js';
+  import { resetOnboarding, session, updateAudioDevices, updateCameraMode } from '#lib/stores/session.svelte';
+  import { checkForUpdate } from '#lib/updater.js';
+  import { clearLocalFactoryResetState, tccResetCommand } from '#lib/data/factoryReset.js';
   import {
     cockpitSummaryLine,
     latestCockpitMessage,
@@ -141,7 +141,7 @@
     JOURNEY_LIVE_LABELS,
     COCKPIT_PRESETS,
     type JourneyLiveState
-  } from '$lib/data/testCockpit';
+  } from '#lib/data/testCockpit.js';
 
   interface DeviceOption {
     id: string;

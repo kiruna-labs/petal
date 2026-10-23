@@ -7,15 +7,15 @@
   import { page } from '$app/state';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { beginCompositorResizeDrag, type CompositorResizeDirection } from '$lib/compositorResize';
+  import { beginCompositorResizeDrag, type CompositorResizeDirection } from '#lib/compositorResize.js';
   import {
     normalizedControlPoint,
     remoteClipboardChord,
     type RemoteClipboardOperation
-  } from '$lib/data/compositorControl';
-  import { identityColorCss } from '$lib/data/identityColor';
-  import { platformKey } from '$lib/platform';
-  import { createOrderedSender } from '$lib/orderedSend';
+  } from '#lib/data/compositorControl.js';
+  import { identityColorCss } from '#lib/data/identityColor.js';
+  import { platformKey } from '#lib/platform.js';
+  import { createOrderedSender } from '#lib/orderedSend.js';
   import {
     findRemoteWindowDebugTrack,
     formatDebugMetric,
@@ -26,8 +26,8 @@
     formatLastFrameAge,
     formatPacketLossCumulative,
     formatSharedBy
-  } from '$lib/data/remoteWindowDebug';
-  import { COMMANDS, EVENTS } from '$lib/ipc';
+  } from '#lib/data/remoteWindowDebug.js';
+  import { COMMANDS, EVENTS } from '#lib/ipc.js';
   import type {
     DrawDraft,
     NetworkSnapshot,
@@ -35,15 +35,15 @@
     RemoteControlModifiers,
     RemoteWindowDebugStats,
     RemoteControlStatus
-  } from '$lib/ipc';
-  import { session } from '$lib/stores/session.svelte';
+  } from '#lib/ipc.js';
+  import { session } from '#lib/stores/session.svelte';
   import {
     controlBannerShowsLabel,
     remoteControlFeedbackIsNeutral,
     remoteControlFeedbackLabel,
     remoteControlFeedbackTitle,
     type RemoteControlFeedbackStatus
-  } from '$lib/remoteControlFeedback';
+  } from '#lib/remoteControlFeedback.js';
   import {
     applyLocalEchoKey,
     clampLocalEchoAnchor,
@@ -52,7 +52,7 @@
     nextLocalEchoRippleId,
     type EchoPoint,
     type LocalEchoRipple
-  } from '$lib/data/localEcho';
+  } from '#lib/data/localEcho.js';
 
   const windowId = $derived(Number(page.url.searchParams.get('windowId') ?? '0'));
   const ownerIdentity = $derived(page.url.searchParams.get('owner') ?? '');

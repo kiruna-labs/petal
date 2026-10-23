@@ -33,7 +33,7 @@ window.__feedbackModal = {
   async open() {
     const [{ mount }, { default: FeedbackModal }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/FeedbackModal.svelte')
+      import('#lib/components/FeedbackModal.svelte')
     ]);
     instance = mount(FeedbackModal, {
       target: document.querySelector('#app'),

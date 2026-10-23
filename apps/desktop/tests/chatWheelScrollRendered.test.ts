@@ -60,7 +60,7 @@ for (const [name, type] of [['chromium', chromium], ['webkit', webkit]] as Array
         resolve: {
           alias: {
             $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
-            '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+            '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
             '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot))),
           },
         },

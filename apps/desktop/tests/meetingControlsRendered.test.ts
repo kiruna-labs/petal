@@ -87,7 +87,7 @@ test('expanded gallery device selectors stay open and restore focus', { timeout:
       resolve: {
         alias: {
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
-          '$app/environment': fixturePath('sveltekit-environment.ts'),
+          '$app/env': fixturePath('sveltekit-environment.ts'),
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
         }
       },

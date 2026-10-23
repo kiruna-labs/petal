@@ -23,7 +23,7 @@ export type {
   RoomOccupancy,
   RoomOccupancyParticipant,
   RoomRecord
-} from '$lib/ipc';
+} from '#lib/ipc.js';
 
 /** List every durable room record known to this machine. */
 export async function listRooms(): Promise<RoomRecord[]> {

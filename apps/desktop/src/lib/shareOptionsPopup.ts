@@ -1,8 +1,8 @@
 import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { CheckMenuItem, Menu, MenuItem, PredefinedMenuItem } from '@tauri-apps/api/menu';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import type { ShareOptionsMenuEntry, ControlMode, HoverTabPosition } from '$lib/data/shareOptionsMenu';
-import type { SharePriority } from '$lib/ipc';
+import type { ShareOptionsMenuEntry, ControlMode, HoverTabPosition } from '#lib/data/shareOptionsMenu.js';
+import type { SharePriority } from '#lib/ipc.js';
 
 export interface ShareOptionsMenuPopupOptions {
   position?: LogicalPosition;

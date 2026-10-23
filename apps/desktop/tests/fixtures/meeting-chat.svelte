@@ -1,8 +1,8 @@
 <script lang="ts">
-  import MeetingChrome from '$lib/components/MeetingChrome.svelte';
+  import MeetingChrome from '#lib/components/MeetingChrome.svelte';
   import ChatDrawer from '@petal/shared/ui/components/ChatDrawer.svelte';
   import type { ChatMessage } from '@petal/shared/logic/chat';
-  import PluginToolbarButtons from '$lib/plugins/PluginToolbarButtons.svelte';
+  import PluginToolbarButtons from '#lib/plugins/PluginToolbarButtons.svelte';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
 
   // The real desktop meeting chrome with the chat drawer open beside the

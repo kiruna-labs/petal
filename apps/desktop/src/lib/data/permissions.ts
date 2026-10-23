@@ -10,9 +10,9 @@
 // codebase (see `rooms.ts`, `/main`, etc.).
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { COMMANDS } from '$lib/ipc';
-import type { AuthStatus, PermissionRequestOutcome } from '$lib/ipc';
-export type { AuthStatus, PermissionRequestOutcome } from '$lib/ipc';
+import { COMMANDS } from '#lib/ipc.js';
+import type { AuthStatus, PermissionRequestOutcome } from '#lib/ipc.js';
+export type { AuthStatus, PermissionRequestOutcome } from '#lib/ipc.js';
 
 /**
  * The four `AVAuthorizationStatus` values, as returned by the Rust

@@ -1,7 +1,7 @@
 // Silent auto-update (issue #103, the production plan "make it updatable").
 //
 // On app startup the frontend calls `checkForUpdate()` once, and thereafter
-// `$lib/updateScheduler` keeps calling it every 6 hours -- plus on wake from
+// `#lib/updateScheduler.js` keeps calling it every 6 hours -- plus on wake from
 // sleep and on network reconnect -- for the whole life of the process. Before
 // that, a Petal left running for days learned about a release only when it was
 // restarted (#90). Either way the check asks
@@ -31,7 +31,7 @@
 // through the existing in-webview ToastHost and otherwise stays quiet.
 
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { COMMANDS } from '$lib/ipc';
+import { COMMANDS } from '#lib/ipc.js';
 import {
   clearUpdateStatus,
   markUpdateDownloading,
@@ -39,13 +39,13 @@ import {
   markUpdateFailed,
   markUpdateRelaunching,
   type UpdateRecovery
-} from '$lib/stores/updateStatus.svelte';
+} from '#lib/stores/updateStatus.svelte.js';
 import {
   friendlyUpdateErrorMessage,
   updateFailureLogLevel,
   updateFailureOffersManualDownload
-} from '$lib/data/updaterErrors';
-import { isQuietUpdateCheckReason, type UpdateCheckReason } from '$lib/updateScheduler';
+} from '#lib/data/updaterErrors.js';
+import { isQuietUpdateCheckReason, type UpdateCheckReason } from '#lib/updateScheduler.js';
 
 export interface UpdateResult {
   status: 'up-to-date' | 'available' | 'installed' | 'unavailable' | 'error';
@@ -95,7 +95,7 @@ function updateErrorMessage(err: unknown): string {
  * @param opts.skipRelaunch  legacy no-op kept for older callers; checks are
  *   always non-installing now.
  * @param opts.reason  who asked. `launch` takes the once-per-process Rust
- *   latch; `periodic`/`wake`/`network` come from `$lib/updateScheduler` and
+ *   latch; `periodic`/`wake`/`network` come from `#lib/updateScheduler.js` and
  *   are quiet (no progress toast, no failure toast); `main-menu`/`manual`
  *   behave exactly as they always have.
  */

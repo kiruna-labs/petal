@@ -7,13 +7,13 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { COMMANDS, hasTauriBridge, type CommandArgs } from '$lib/ipc';
+import { COMMANDS, hasTauriBridge, type CommandArgs } from '#lib/ipc.js';
 import { bytesToBase64 } from '@petal/shared/plugin-host/topics';
 import type { Json, MeetingPhase, Participant } from '@petal/shared/plugin-host/api';
 import { bridgeFailure } from '@petal/shared/plugin-host/broker';
 import type { PluginHostAdapter } from '@petal/shared/plugin-host/host';
 import { PLUGIN_KV_STORAGE_PREFIX } from '@petal/shared/plugin-host/settingsModel';
-import { browserStorage } from '$lib/data/storageKeys';
+import { browserStorage } from '#lib/data/storageKeys.js';
 
 export interface TauriAdapterDeps {
   participants(): Participant[];

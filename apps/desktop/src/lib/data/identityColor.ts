@@ -1,4 +1,4 @@
-import type { IdentityColor } from '$lib/components/Avatar.svelte';
+import type { IdentityColor } from '#lib/components/Avatar.svelte';
 import { identityPaletteIndex, isValidIdentityPaletteIndex } from '@petal/shared/logic/identityPalette';
 
 // Keep these hex values in lockstep with shared/ui/tokens.css's

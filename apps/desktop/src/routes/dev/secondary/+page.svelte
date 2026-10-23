@@ -7,11 +7,11 @@
   Throwaway scaffolding, matches the /dev/components pattern.
 -->
 <script lang="ts">
-  import RosterPopover from '$lib/components/RosterPopover.svelte';
-  import type { RosterParticipant } from '$lib/components/RosterPopover.svelte';
+  import RosterPopover from '#lib/components/RosterPopover.svelte';
+  import type { RosterParticipant } from '#lib/components/RosterPopover.svelte';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
-  import EmptyState from '$lib/components/EmptyState.svelte';
-  import OfflineState from '$lib/components/OfflineState.svelte';
+  import EmptyState from '#lib/components/EmptyState.svelte';
+  import OfflineState from '#lib/components/OfflineState.svelte';
 
   const rosterFull: RosterParticipant[] = [
     { name: 'Jordan Kim', identity: 'plum', isYou: true },

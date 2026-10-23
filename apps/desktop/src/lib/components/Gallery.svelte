@@ -42,9 +42,9 @@
     type TileLayoutMode
   } from '@petal/shared/logic/tileLayoutMode';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
-  import { tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight } from '$lib/motion';
-  import { stepFitLadder } from '$lib/meeting/fitLadder';
-  import type { DrawUpdate } from '$lib/ipc';
+  import { tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight } from '#lib/motion.js';
+  import { stepFitLadder } from '#lib/meeting/fitLadder.js';
+  import type { DrawUpdate } from '#lib/ipc.js';
 
   export interface GalleryParticipant {
     /** Stable participant identity when the real route has one. Falls back to

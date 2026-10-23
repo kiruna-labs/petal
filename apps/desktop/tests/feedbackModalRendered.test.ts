@@ -66,7 +66,7 @@ test('FeedbackModal requires a well-formed email, sends it as the SDK field, and
       resolve: {
         alias: {
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
-          '$app/environment': fixturePath('sveltekit-environment.ts'),
+          '$app/env': fixturePath('sveltekit-environment.ts'),
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
         }
       },

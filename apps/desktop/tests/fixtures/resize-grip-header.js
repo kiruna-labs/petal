@@ -69,7 +69,7 @@ async function renderFixture() {
 
     const [{ mount }, { default: RemoteWindowHeader }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/RemoteWindowHeader.svelte')
+      import('#lib/components/RemoteWindowHeader.svelte')
     ]);
 
     const chrome = document.createElement('div');

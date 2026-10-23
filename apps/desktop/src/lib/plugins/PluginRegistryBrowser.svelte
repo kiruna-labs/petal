@@ -9,8 +9,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import Button from '$lib/components/Button.svelte';
-  import { COMMANDS, hasTauriBridge, type CommandArgs, type CommandReturns, type PluginRegistryVerifiedIndex } from '$lib/ipc';
+  import Button from '#lib/components/Button.svelte';
+  import { COMMANDS, hasTauriBridge, type CommandArgs, type CommandReturns, type PluginRegistryVerifiedIndex } from '#lib/ipc.js';
   import { compareVersions } from '@petal/shared/plugin-host/manifest';
   import { installableVersion, parseRegistryIndex, type RegistryIndex, type RegistryPlugin, type RegistryVersion } from '@petal/shared/plugin-host/registry';
   import { permissionLabel } from '@petal/shared/plugin-host/settingsModel';

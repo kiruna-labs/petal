@@ -13,13 +13,13 @@
     after first run);
   - a best-effort `listRooms()` warm-up so `/main` paints with data.
 
-  Route decision (`$lib/data/launchLocation`'s `launchRoute`, in order):
+  Route decision (`#lib/data/launchLocation`'s `launchRoute`, in order):
   - running from the disk image / App Translocation / read-only → /relocate
     (#172) — before everything else, so returning users see it too;
   - onboarding never completed → /onboarding immediately;
   - onboarding completed → /main immediately, then permission checks redirect
     to /onboarding only if a REQUIRED permission is missing.
-  Navigation uses `replaceState` so Back never returns here and re-runs
+  Navigation uses `replace: true` so Back never returns here and re-runs
   checks pointlessly.
 
   Graceful browser fallback (no `__TAURI_INTERNALS__` bridge): the permission
@@ -39,15 +39,15 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { session } from '$lib/stores/session.svelte';
+  import { session } from '#lib/stores/session.svelte.js';
   import {
     checkScreenRecording,
     checkMicrophone,
     checkAccessibility
-  } from '$lib/data/permissions';
-  import { listRooms } from '$lib/data/rooms';
-  import { fetchLaunchLocationClass, launchRoute } from '$lib/data/launchLocation';
-  import { hasTauriBridge } from '$lib/ipc';
+  } from '#lib/data/permissions.js';
+  import { listRooms } from '#lib/data/rooms.js';
+  import { fetchLaunchLocationClass, launchRoute } from '#lib/data/launchLocation.js';
+  import { hasTauriBridge } from '#lib/ipc.js';
 
   async function permissionsOk() {
     const [screen, mic, accessibility] = await Promise.all([
@@ -72,7 +72,7 @@
       if (early === '/relocate' || !onboardingComplete || !hasBridge) {
         // Browser fallback (no bridge): localStorage-only decision (see
         // header comment).
-        goto(early, { replaceState: true });
+        goto(early, { replace: true });
         return;
       }
 
@@ -88,7 +88,7 @@
         location,
         permissionsOk: await permissionsOk()
       });
-      goto(route, { replaceState: true });
+      goto(route, { replace: true });
     } catch (e) {
       console.error('launch: startup checks failed', e);
     }

@@ -16,7 +16,7 @@
     type EnabledOverrides,
     type InstalledPlugin
   } from '@petal/shared/plugin-host/settingsModel';
-  import type { StorageLike } from '$lib/data/storageKeys';
+  import type { StorageLike } from '#lib/data/storageKeys.js';
 
   interface Props {
     installed: InstalledPlugin[];

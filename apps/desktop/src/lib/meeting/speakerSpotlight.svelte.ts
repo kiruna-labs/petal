@@ -10,7 +10,7 @@
 // - `activeSpeakerIdentity`: the promoted spotlight, updated only after a
 //   candidate has been the top speaker continuously for SPEAKER_PROMOTE_MS.
 
-import type { GalleryBridgeSignals } from '$lib/data/galleryBridge';
+import type { GalleryBridgeSignals } from '#lib/data/galleryBridge.js';
 
 const SPEAKER_PROMOTE_MS = 1200;
 const SPEAKER_RING_HOLD_MS = 1600;

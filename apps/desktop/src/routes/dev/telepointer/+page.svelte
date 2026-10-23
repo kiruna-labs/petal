@@ -67,11 +67,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import Pointer from '$lib/components/Pointer.svelte';
-  import type { IdentityColor } from '$lib/components/Avatar.svelte';
-  import { friendlyTelepointerName } from '$lib/data/telepointerDisplay';
-  import { EVENTS } from '$lib/ipc';
-  import type { TelepointerUpdate } from '$lib/ipc';
+  import Pointer from '#lib/components/Pointer.svelte';
+  import type { IdentityColor } from '#lib/components/Avatar.svelte';
+  import { friendlyTelepointerName } from '#lib/data/telepointerDisplay.js';
+  import { EVENTS } from '#lib/ipc.js';
+  import type { TelepointerUpdate } from '#lib/ipc.js';
 
   interface TrackedPointer {
     userId: string;

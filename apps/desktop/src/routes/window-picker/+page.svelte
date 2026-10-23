@@ -3,8 +3,8 @@
   import { emit } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import WindowPicker, { prewarmWindowPicker } from '$lib/components/WindowPicker.svelte';
-  import { EVENTS, hasTauriBridge } from '$lib/ipc';
+  import WindowPicker, { prewarmWindowPicker } from '#lib/components/WindowPicker.svelte';
+  import { EVENTS, hasTauriBridge } from '#lib/ipc.js';
 
   const hasTauri = hasTauriBridge();
 

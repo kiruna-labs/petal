@@ -16,7 +16,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { onMount, tick } from 'svelte';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
-  import { COMMANDS, EVENTS, remoteWindowOwnerLabel, type RemoteShareStartedEvent } from '$lib/ipc';
+  import { COMMANDS, EVENTS, remoteWindowOwnerLabel, type RemoteShareStartedEvent } from '#lib/ipc.js';
 
   const AUTO_DISMISS_MS = 4000;
 

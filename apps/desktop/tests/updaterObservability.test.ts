@@ -54,7 +54,7 @@ test('updater failures surface as a degraded visible toast', () => {
   // The raw error (which can be an arbitrarily long/technical string, e.g. a
   // temp-file path) must never reach the toast directly -- see #105/the
   // AppleDouble incident, where it did and broke the layout.
-  assert.match(updaterSource, /friendlyUpdateErrorMessage\s*\n?[^;]*from '\$lib\/data\/updaterErrors'/);
+  assert.match(updaterSource, /friendlyUpdateErrorMessage\s*\n?[^;]*from '#lib\/data\/updaterErrors\.js'/);
   assert.match(toastHostSource, /Update check failed: \$\{updateStatus\.message\}/);
   assert.match(toastHostSource, /variant=\{updateStatus\.kind === 'failed' \? 'degraded' : 'info'\}/);
 });

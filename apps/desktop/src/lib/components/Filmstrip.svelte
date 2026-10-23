@@ -30,7 +30,7 @@
 <script lang="ts">
   import { fade } from 'svelte/transition';
   import ParticipantTile from './ParticipantTile.svelte';
-  import { tileTransitionDuration } from '$lib/motion';
+  import { tileTransitionDuration } from '#lib/motion.js';
 
   export interface FilmstripParticipant {
     /** Stable identity key (the room identity). Two participants can share

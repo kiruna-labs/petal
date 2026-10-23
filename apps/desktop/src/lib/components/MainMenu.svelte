@@ -38,12 +38,12 @@
   import {
     meetingCredentialFromInviteInput,
     normalizeMeetingCredential
-  } from '$lib/data/meetingCode';
-  import { submitMainMenuMeetingAction } from '$lib/data/mainMenuMeetingAction';
-  import { hideMainWindow, minimizeMainWindow } from '$lib/data/mainWindowControls';
-  import { isFeedbackEnabled } from '$lib/feedback/config';
+  } from '#lib/data/meetingCode.js';
+  import { submitMainMenuMeetingAction } from '#lib/data/mainMenuMeetingAction.js';
+  import { hideMainWindow, minimizeMainWindow } from '#lib/data/mainWindowControls.js';
+  import { isFeedbackEnabled } from '#lib/feedback/config.js';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { isMac } from '$lib/platform';
+  import { isMac } from '#lib/platform.js';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
 
   interface RoomParticipant {
@@ -97,7 +97,7 @@
     /** Join a meeting this machine doesn't know yet by typing a code or
      * pasting an invite link (issue #15). Receives the PARSED room name
      * (petal://join/... and web ?code= links already unwrapped — see
-     * `$lib/data/joinInput.ts`). Optional, same convention as the other
+     * `#lib/data/joinInput.ts`). Optional, same convention as the other
      * callbacks: without it the join field doesn't render. */
     onJoinByCode?: (name: string, accessCode: string) => void | Promise<void>;
     meetingActionError?: string | null;

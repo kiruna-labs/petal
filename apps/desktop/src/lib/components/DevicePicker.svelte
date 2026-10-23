@@ -1,17 +1,17 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import { listAudioDevices, setAudioDevices } from '$lib/data/audioDevices';
+  import { listAudioDevices, setAudioDevices } from '#lib/data/audioDevices.js';
   import {
     MISSING_DEVICE,
     MISSING_DEVICE_LABEL,
     pickerValue,
     silentMicNote,
     switchNote
-  } from '$lib/data/audioDeviceSelection';
-  import { listCameraDevices, setCameraDevice } from '$lib/data/cameraDevices';
-  import { session, updateAudioDevices } from '$lib/stores/session.svelte';
-  import { EVENTS, hasTauriBridge, listenUntilDestroy, type ResilienceEvent } from '$lib/ipc';
+  } from '#lib/data/audioDeviceSelection.js';
+  import { listCameraDevices, setCameraDevice } from '#lib/data/cameraDevices.js';
+  import { session, updateAudioDevices } from '#lib/stores/session.svelte';
+  import { EVENTS, hasTauriBridge, listenUntilDestroy, type ResilienceEvent } from '#lib/ipc.js';
 
   interface DeviceOption {
     id: string;

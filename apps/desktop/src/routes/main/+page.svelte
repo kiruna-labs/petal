@@ -1,7 +1,7 @@
 <!--
   Real main-menu home (task brief item 2). Renders the existing `MainMenu`
   component, now backed by REAL room data (task brief item 5): `list_rooms`/
-  `create_room` (src-tauri/src/rooms.rs, via `$lib/data/rooms.ts`). Rooms with
+  `create_room` (src-tauri/src/rooms.rs, via `#lib/data/rooms.ts`). Rooms with
   a non-empty live presence roster are promoted into `MainMenu`'s hero slot
   (same "one hero, rest are rows" layout the component already supports);
   joined rooms stay in the row list as the current row.
@@ -27,9 +27,9 @@
     LogicalSize,
     PhysicalPosition
   } from '@tauri-apps/api/window';
-  import MainMenu from '$lib/components/MainMenu.svelte';
-  import Button from '$lib/components/Button.svelte';
-  import { session, startSessionSync } from '$lib/stores/session.svelte';
+  import MainMenu from '#lib/components/MainMenu.svelte';
+  import Button from '#lib/components/Button.svelte';
+  import { session, startSessionSync } from '#lib/stores/session.svelte.js';
   import {
     listRooms,
     createRoom,
@@ -47,24 +47,24 @@
     type RoomRecord,
     type RoomOccupancy,
     type PresenceUpdate
-  } from '$lib/data/rooms';
-  import { inviteLinkForRoom } from '$lib/data/inviteLinks';
-  import { createMainMeetingActions } from '$lib/data/mainMeetingActions';
-  import { prepareMeetingWindow } from '$lib/meeting/pillWindow.svelte';
+  } from '#lib/data/rooms.js';
+  import { inviteLinkForRoom } from '#lib/data/inviteLinks.js';
+  import { createMainMeetingActions } from '#lib/data/mainMeetingActions.js';
+  import { prepareMeetingWindow } from '#lib/meeting/pillWindow.svelte.js';
   import {
     autotestMeetingRoute,
     onceAutotestJoinResult,
     replayAutotestJoinResult,
     shouldExitMainInitialization,
     subscribeToAutotestJoinResult
-  } from '$lib/data/autotestJoinRoute';
-  import { rememberPendingRoomDisplayName } from '$lib/data/pendingRoomLabels';
+  } from '#lib/data/autotestJoinRoute.js';
+  import { rememberPendingRoomDisplayName } from '#lib/data/pendingRoomLabels.js';
   import {
     loadFavoriteRooms,
     orderRoomsForMenu,
     roomKey,
     saveFavoriteRooms
-  } from '$lib/data/roomOrdering';
+  } from '#lib/data/roomOrdering.js';
   import {
     HOME_DEFAULT,
     HOME_MIN,
@@ -74,14 +74,14 @@
     safeWindowPosition,
     saveMainWindowFrame,
     type WindowSize
-  } from '$lib/data/windowGeometry';
-  import { prefersReducedMotion } from '$lib/motion';
-  import { COMMANDS, EVENTS, hasTauriBridge, type AutotestJoinResult } from '$lib/ipc';
+  } from '#lib/data/windowGeometry.js';
+  import { prefersReducedMotion } from '#lib/motion.js';
+  import { COMMANDS, EVENTS, hasTauriBridge, type AutotestJoinResult } from '#lib/ipc.js';
   import {
     checkAccessibility,
     checkMicrophone,
     checkScreenRecording
-  } from '$lib/data/permissions';
+  } from '#lib/data/permissions.js';
 
   const displayName = $derived(session.name || 'Guest');
   const hasTauri = hasTauriBridge();
@@ -309,7 +309,7 @@
     if (!hasTauri) return;
     try {
       if (!(await requiredPermissionsOk()) && routeActive) {
-        await goto('/onboarding', { replaceState: true });
+        await goto('/onboarding', { replace: true });
       }
     } catch (e) {
       console.error('Failed to re-check startup permissions on /main', e);
@@ -484,7 +484,7 @@
   onMount(async () => {
     routeActive = true;
     if (!session.onboardingComplete) {
-      await goto('/onboarding', { replaceState: true });
+      await goto('/onboarding', { replace: true });
       return;
     }
     void recheckRequiredPermissions();

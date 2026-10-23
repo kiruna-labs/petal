@@ -23,10 +23,10 @@
   import { getVersion } from '@tauri-apps/api/app';
   import type { Participant } from '@petal/shared/plugin-host/api';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
-  import PluginSurfaces from '$lib/plugins/PluginSurfaces.svelte';
-  import { hostLog } from '$lib/plugins/tauriAdapter';
-  import { installedPlugins } from '$lib/plugins/pluginCatalog';
-  import type { CatalogEntry } from '$lib/plugins/pluginCatalog';
+  import PluginSurfaces from '#lib/plugins/PluginSurfaces.svelte';
+  import { hostLog } from '#lib/plugins/tauriAdapter.js';
+  import { installedPlugins } from '#lib/plugins/pluginCatalog.js';
+  import type { CatalogEntry } from '#lib/plugins/pluginCatalog.js';
 
   /** Kept byte-identical with `plugin_boot::PROBE_MOUNTED_LINE`. */
   const PROBE_MOUNTED_LINE = 'plugin-boot probe: page mounted';

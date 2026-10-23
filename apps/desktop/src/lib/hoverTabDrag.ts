@@ -1,4 +1,4 @@
-import type { HoverTabSide } from '$lib/ipc';
+import type { HoverTabSide } from '#lib/ipc.js';
 
 export const HOVER_TAB_DRAG_THRESHOLD_PX = 6;
 export const HOVER_TAB_DRAG_TAB_HEIGHT = 40;

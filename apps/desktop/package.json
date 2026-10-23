@@ -50,7 +50,7 @@
     "esbuild@0.25.12": true,
     "esbuild@0.28.1": true
   },
-  "overrides": {
-    "cookie": "^0.7.2"
+  "imports": {
+    "#lib/*": "./src/lib/*"
   }
 }

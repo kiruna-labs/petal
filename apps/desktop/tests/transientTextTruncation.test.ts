@@ -434,7 +434,7 @@ test('available update toast fits the documented main-window widths in rendered 
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
           // This standalone Vite build intentionally skips SvelteKit config,
           // so provide the browser-only virtual module used by session.svelte.
-          '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+          '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
           // ...and the shared-package alias (SvelteKit's kit.alias injects it
           // in the real build; this bare Vite instance needs it manually).
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
@@ -596,7 +596,7 @@ test('a rejected update archive renders an untruncated "Download installer" reco
       resolve: {
         alias: {
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
-          '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+          '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
         }
       },
@@ -1342,7 +1342,7 @@ test('desktop gallery grid reflow uses restrained list motion and FLIP', () => {
   // change shape as cameras crop), not svelte/animate's `scale(sx, sy)` flip.
   assert.doesNotMatch(gallerySource, /from 'svelte\/animate'/);
   assert.match(gallerySource, /import \{ fade \} from 'svelte\/transition';/);
-  assert.match(gallerySource, /import \{ tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight \} from '\$lib\/motion';/);
+  assert.match(gallerySource, /import \{ tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight \} from '#lib\/motion\.js';/);
   assert.match(gallerySource, /function transitionGalleryLayout\(mutate: \(\) => void\)/);
   assert.match(gallerySource, /tile\.animate\(/);
   assert.match(gallerySource, /data-participant-key=\{p\.key\}/);
