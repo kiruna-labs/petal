@@ -32,6 +32,7 @@ use crate::session::{RoomGeneration, SessionState, SharedWindowScreenStatus};
 use crate::transport::publisher::RoomConnection;
 
 use crate::remote_control_core::*;
+use crate::remote_control_redundant::{self as redundant, InputBundle, SequencerOutput};
 struct MacPlatformControl;
 
 impl PlatformControl for MacPlatformControl {
@@ -390,6 +391,7 @@ fn message_from_binary(
         message: None,
         grant_token: Some(active_token),
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers: RemoteControlModifiers {
             alt: modifiers & 1 != 0,
             ctrl: modifiers & 2 != 0,
@@ -3927,6 +3929,9 @@ fn status_packet_for(status: &RemoteControlStatus, local_identity: &str) -> Remo
         // are negotiated regardless of platform, and the controller relies
         // on this flag to switch pointer/wheel sends to the binary encoding.
         supports_binary_hot_path: status.status == "active",
+        // #399: same presence-is-the-signal rule; an old host never sets it,
+        // so its controllers keep the reliable ordered path.
+        supports_redundant_input: status.status == "active",
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -3975,6 +3980,7 @@ fn discrete_result_packet(
         message: None,
         grant_token: None,
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4733,6 +4739,16 @@ fn handle_message(
                 hot_path_capable_targets().lock_unpoisoned().insert(key);
             } else if matches!(status, "active" | "stopped" | "disabled") {
                 hot_path_capable_targets().lock_unpoisoned().remove(&key);
+            }
+            // #399: same latest-wins rule for the redundant input path.
+            if matches!(status, "active" | "stopped" | "disabled") {
+                remote_control_engine().set_redundant_input_target(
+                    message.window_id,
+                    &message.controller_id,
+                    (status == "active" && message.supports_redundant_input)
+                        .then_some(message.grant_token.as_deref())
+                        .flatten(),
+                );
             }
             emit_status(
                 app,
@@ -5530,6 +5546,106 @@ fn dispatch_clipboard_copy_request(
     });
 }
 
+/// #399: one lock around sequencing AND delivery, so a gap-timer flush and
+/// the receive loop can never hand inputs to `handle_message` out of order.
+fn input_bundle_delivery_fence() -> &'static Mutex<()> {
+    static FENCE: OnceLock<Mutex<()>> = OnceLock::new();
+    FENCE.get_or_init(|| Mutex::new(()))
+}
+
+fn handle_input_bundle(
+    app: &AppHandle,
+    local_identity: &str,
+    sender: &str,
+    bundle: InputBundle,
+    generation: &RoomGeneration,
+) {
+    let _fence = input_bundle_delivery_fence().lock_unpoisoned();
+    let window_id = bundle.window_id;
+    let output = remote_control_engine().accept_input_bundle(sender, bundle, Instant::now());
+    deliver_sequenced_inputs(app, local_identity, sender, window_id, output, generation);
+}
+
+/// Held input to release before a sequenced batch runs: a skipped input may
+/// have been the Up for something this controller still holds.
+fn releases_for_sequencer_gap(
+    window_id: u32,
+    sender: &str,
+    output: &SequencerOutput,
+) -> Vec<ReplayTask> {
+    if output.skipped == 0 {
+        return Vec::new();
+    }
+    drain_pressed_for_controller(window_id, sender)
+}
+
+/// Caller holds `input_bundle_delivery_fence`.
+fn deliver_sequenced_inputs(
+    app: &AppHandle,
+    local_identity: &str,
+    sender: &str,
+    window_id: u32,
+    output: SequencerOutput,
+    generation: &RoomGeneration,
+) {
+    if output.stale_stream {
+        log::debug!("remote-control: dropping input bundle from a retired stream of '{sender}'");
+    }
+    if output.recovered > 0 {
+        log::debug!(
+            "remote-control: {} input(s) delivered from a bundle's earlier slots (redundant copy or paced batch) for window {window_id} from '{sender}' (#399)",
+            output.recovered
+        );
+    }
+    if output.skipped > 0 {
+        // A skipped input may have been an Up: release what this controller
+        // holds before later input runs (#365 posture: stuck beats lost).
+        log::warn!(
+            "remote-control: {} input(s) from '{sender}' for window {window_id} lost past the {}ms gap hold -- skipping ahead and releasing held input (#399)",
+            output.skipped,
+            redundant::GAP_HOLD.as_millis()
+        );
+        enqueue_synthetic_releases(
+            releases_for_sequencer_gap(window_id, sender, &output),
+            "redundant input gap",
+        );
+    }
+    if let Some(state) = app.try_state::<SessionState>() {
+        for message in output.deliver {
+            handle_message(
+                app,
+                state.inner(),
+                local_identity,
+                Some(sender.to_string()),
+                message,
+            );
+        }
+    }
+    if output.arm_gap_timer {
+        let app = app.clone();
+        let local_identity = local_identity.to_string();
+        let sender = sender.to_string();
+        let generation = generation.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(redundant::GAP_HOLD).await;
+            if !generation.is_current() {
+                return;
+            }
+            let _fence = input_bundle_delivery_fence().lock_unpoisoned();
+            let output =
+                remote_control_engine().flush_input_bundle_gap(&sender, window_id, Instant::now());
+            deliver_sequenced_inputs(
+                &app,
+                &local_identity,
+                &sender,
+                window_id,
+                output,
+                &generation,
+            );
+        });
+    }
+}
+
 fn roster_contains(room: &livekit::Room, identity: &str) -> bool {
     room.remote_participants()
         .keys()
@@ -5575,6 +5691,19 @@ pub fn start_receiver_for_room(
                         continue;
                     }
                     let trusted_sender = participant.as_ref().map(|p| p.identity().to_string());
+                    if let Some(bundle) = redundant::parse_input_bundle(payload.as_slice()) {
+                        match trusted_sender.as_deref() {
+                            Some(sender) => handle_input_bundle(
+                                &app,
+                                &local_identity,
+                                sender,
+                                bundle,
+                                &generation,
+                            ),
+                            None => log::debug!("remote-control: dropping anonymous input bundle"),
+                        }
+                        continue;
+                    }
                     if payload.first().copied() != Some(BINARY_MAGIC) {
                         if let (Some(request), Some(sender), Some(state)) = (
                             parse_clipboard_copy_request(payload.as_slice()),
@@ -5769,6 +5898,92 @@ async fn publish_message(
     remote_control_engine()
         .publish_message(room_connection, message)
         .await
+}
+
+/// #399: controller input goes out as a lossy redundant bundle when the host
+/// advertised support (paced, sent twice, plus trailing copies so a lost last
+/// input is still recovered); anything else keeps the legacy packet.
+async fn publish_controller_input(
+    room_connection: Arc<RoomConnection>,
+    message: RemoteControlMessage,
+) -> Result<(), String> {
+    let Some((stream, outcome)) =
+        remote_control_engine().push_redundant_input(&message, Instant::now())
+    else {
+        return publish_message(room_connection, message).await;
+    };
+    let window_id = message.window_id;
+    let host = message.target_user_id.clone();
+    match outcome {
+        redundant::PushOutcome::Publish(bundle, flush) => {
+            publish_flushed_bundle(room_connection, bundle, flush, host).await
+        }
+        redundant::PushOutcome::FlushAfter(wait) => {
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(wait).await;
+                if let Some((bundle, flush)) = remote_control_engine().flush_redundant_input(
+                    window_id,
+                    &host,
+                    &stream,
+                    Instant::now(),
+                ) {
+                    if let Err(error) =
+                        publish_flushed_bundle(room_connection, bundle, flush, host).await
+                    {
+                        log::warn!("remote-control: paced input bundle publish failed: {error}");
+                    }
+                }
+            });
+            Ok(())
+        }
+        redundant::PushOutcome::Queued => Ok(()),
+    }
+}
+
+async fn publish_flushed_bundle(
+    room_connection: Arc<RoomConnection>,
+    bundle: InputBundle,
+    flush: u64,
+    host: String,
+) -> Result<(), String> {
+    publish_input_bundle(&room_connection, &bundle, &host).await?;
+    for _ in 1..redundant::IMMEDIATE_COPIES {
+        let _ = publish_input_bundle(&room_connection, &bundle, &host).await;
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut waited = Duration::ZERO;
+        for delay in redundant::TRAILING_COPY_DELAYS {
+            tokio::time::sleep(delay.saturating_sub(waited)).await;
+            waited = delay;
+            let Some(trailing) = remote_control_engine().redundant_trailing_bundle(
+                bundle.window_id,
+                &host,
+                &bundle.stream,
+                flush,
+                Instant::now(),
+            ) else {
+                return;
+            };
+            if let Err(error) = publish_input_bundle(&room_connection, &trailing, &host).await {
+                log::debug!("remote-control: trailing input bundle publish failed: {error}");
+            }
+        }
+    });
+    Ok(())
+}
+
+async fn publish_input_bundle(
+    room_connection: &Arc<RoomConnection>,
+    bundle: &InputBundle,
+    host: &str,
+) -> Result<(), String> {
+    let packet = remote_control_engine().redundant_bundle_packet(bundle, host);
+    room_connection
+        .room()
+        .local_participant()
+        .publish_data(packet)
+        .await
+        .map_err(|error| format!("publish remote-control input bundle: {error}"))
 }
 
 async fn publish_message_with_retry(
@@ -5981,6 +6196,7 @@ fn clipboard_key_message(
         message: None,
         grant_token: Some(grant_token.to_string()),
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers,
     }
 }
@@ -6240,7 +6456,7 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
                     );
                 }
                 let summary = message_summary(&chunk_message);
-                if let Err(e) = publish_message(publisher.clone(), chunk_message).await {
+                if let Err(e) = publish_controller_input(publisher.clone(), chunk_message).await {
                     log::warn!("remote-control: chunked text publish failed for {summary}: {e}");
                     return Err(e);
                 }
@@ -6261,7 +6477,7 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
         return Err("operation is unsupported by the active Windows control grant".to_string());
     }
     let summary = message_summary(&message);
-    match publish_message(publisher, message).await {
+    match publish_controller_input(publisher, message).await {
         Ok(()) => Ok(()),
         Err(e) => {
             log::warn!("remote-control: publish failed for {summary}: {e}");
@@ -6330,6 +6546,7 @@ pub async fn remote_control_set_active(
         message: None,
         grant_token: None,
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -6472,6 +6689,7 @@ pub async fn remote_control_request_escalation(
         message: None,
         grant_token: None,
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -14832,6 +15050,7 @@ pub(crate) mod input {
                 message: None,
                 grant_token: None,
                 supports_binary_hot_path: false,
+                supports_redundant_input: false,
                 modifiers: RemoteControlModifiers::default(),
             }
         }
@@ -20578,6 +20797,8 @@ mod tests {
         remote_control_packet_policy: Vec<RemoteControlPacketPolicyFixture>,
         #[serde(default, rename = "remoteClipboardMessages")]
         remote_clipboard_messages: Vec<RemoteControlMessageFixture>,
+        #[serde(rename = "remoteControlInputBundle")]
+        remote_control_input_bundle: serde_json::Value,
         #[serde(rename = "remoteClipboardStreams")]
         remote_clipboard_streams: RemoteClipboardStreamFixture,
         rules: ContractRules,
@@ -20744,6 +20965,7 @@ mod tests {
             message: None,
             grant_token: None,
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: RemoteControlModifiers::default(),
         }
     }
@@ -21665,6 +21887,7 @@ mod tests {
             message: None,
             grant_token: None,
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: RemoteControlModifiers::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -21892,6 +22115,7 @@ mod tests {
             message: None,
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: RemoteControlModifiers {
                 alt: false,
                 ctrl: false,
@@ -21966,6 +22190,7 @@ mod tests {
             message: None,
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: RemoteControlModifiers::default(),
         };
         let value = serde_json::to_value(msg).unwrap();
@@ -22219,6 +22444,12 @@ mod tests {
                 "reliable",
                 "targetParticipant",
                 "authenticatedRemoteControlGrant",
+            ),
+            (
+                "redundantInputBundle",
+                "lossy",
+                "host",
+                "authenticatedController",
             ),
         ];
         assert_eq!(fixture.remote_control_packet_policy.len(), expected.len());
@@ -23811,6 +24042,169 @@ mod tests {
         assert!(!should_accept_unreliable_seq(&pointer_9));
         assert!(should_accept_unreliable_seq(&pointer_11));
         assert!(should_accept_unreliable_seq(&wheel_1));
+    }
+
+    #[test]
+    fn redundant_input_bundle_matches_shared_contract_fixture() {
+        let contract = contract_fixture().remote_control_input_bundle;
+        assert_eq!(contract["kind"], redundant::BUNDLE_KIND);
+        assert_eq!(contract["version"], redundant::BUNDLE_VERSION);
+        assert_eq!(contract["topic"], TOPIC);
+        assert_eq!(contract["reliable"], false);
+        assert_eq!(contract["capabilityField"], "supportsRedundantInput");
+        assert_eq!(contract["maxRedundantCopies"], redundant::MAX_REDUNDANT_COPIES);
+        assert_eq!(contract["maxBundleInputs"], redundant::MAX_BUNDLE_INPUTS);
+        assert_eq!(
+            contract["minBundleIntervalMs"],
+            redundant::MIN_BUNDLE_INTERVAL.as_millis() as u64
+        );
+        assert_eq!(contract["immediateCopies"], redundant::IMMEDIATE_COPIES);
+        assert_eq!(contract["maxPayloadBytes"], redundant::MAX_BUNDLE_PAYLOAD_BYTES);
+        assert_eq!(
+            contract["maxRedundantAgeMs"],
+            redundant::MAX_REDUNDANT_AGE.as_millis() as u64
+        );
+        assert_eq!(
+            contract["trailingCopyDelaysMs"],
+            serde_json::json!(redundant::TRAILING_COPY_DELAYS.map(|d| d.as_millis() as u64))
+        );
+        assert_eq!(contract["hostGapHoldMs"], redundant::GAP_HOLD.as_millis() as u64);
+        let example = &contract["example"];
+        let mut keys: Vec<_> = example.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(serde_json::json!(keys), contract["fields"]);
+        let parsed = redundant::parse_input_bundle(&serde_json::to_vec(example).unwrap())
+            .expect("contract example parses as a bundle");
+        assert_eq!(parsed.first, 7);
+        assert_eq!(parsed.inputs.len(), 2);
+        assert_eq!(parsed.inputs[1].action, Some(RemoteControlAction::Up));
+        assert_eq!(&serde_json::to_value(&parsed).unwrap(), example);
+    }
+
+    #[test]
+    fn redundant_input_gap_that_loses_an_up_releases_the_held_key() {
+        let ids = remote_control_test_ids("redundant_input_gap_that_loses_an_up_releases_the_held_key");
+        let frame = WindowFrame { x: 0, y: 0, width: 100, height: 100 };
+        let key = |seq: u64, action: RemoteControlAction| {
+            let mut message = test_message(
+                RemoteControlType::Key,
+                Some(action),
+                seq,
+                ids.window_id,
+                ids.controller_id.clone(),
+            );
+            message.key = Some("a".to_string());
+            message.code = Some("KeyA".to_string());
+            message
+        };
+        let bundle = |first: u64, inputs: Vec<RemoteControlMessage>| InputBundle {
+            v: redundant::BUNDLE_VERSION,
+            kind: redundant::BUNDLE_KIND.to_string(),
+            window_id: ids.window_id,
+            stream: "gap-test".to_string(),
+            first,
+            inputs,
+        };
+        let engine = remote_control_engine();
+        let t0 = Instant::now();
+        let down = engine.accept_input_bundle(
+            &ids.controller_id,
+            bundle(1, vec![key(1, RemoteControlAction::Down)]),
+            t0,
+        );
+        assert_eq!(down.deliver.len(), 1);
+        // The host replays the Down, so it is now held.
+        track_pressed_input(&down.deliver[0], frame, Some(99));
+        // rseq 2 (the Up) and every copy of it are lost; rseq 3 arrives.
+        let later = engine.accept_input_bundle(
+            &ids.controller_id,
+            bundle(3, vec![key(3, RemoteControlAction::Down)]),
+            t0,
+        );
+        assert!(later.deliver.is_empty());
+        assert!(later.arm_gap_timer);
+        assert!(releases_for_sequencer_gap(ids.window_id, &ids.controller_id, &later).is_empty());
+        let flushed =
+            engine.flush_input_bundle_gap(&ids.controller_id, ids.window_id, t0 + redundant::GAP_HOLD);
+        assert_eq!(flushed.skipped, 1);
+        let releases = releases_for_sequencer_gap(ids.window_id, &ids.controller_id, &flushed);
+        assert_eq!(releases.len(), 1, "the lost Up must not leave the key stuck");
+        assert_eq!(releases[0].message.action, Some(RemoteControlAction::Up));
+        assert_eq!(releases[0].message.code.as_deref(), Some("KeyA"));
+        assert_eq!(flushed.deliver.len(), 1, "input after the gap still runs");
+    }
+
+    #[test]
+    fn controller_routes_input_through_bundles_only_for_a_capable_host() {
+        let ids = remote_control_test_ids("controller_routes_input_through_bundles_only_for_a_capable_host");
+        let engine = remote_control_engine();
+        let mut key = test_message(
+            RemoteControlType::Key,
+            Some(RemoteControlAction::Down),
+            1,
+            ids.window_id,
+            ids.controller_id.clone(),
+        );
+        key.target_user_id = ids.other_controller_id.clone();
+        let mut hover = key.clone();
+        hover.message_type = RemoteControlType::Pointer;
+        hover.action = Some(RemoteControlAction::Move);
+        hover.buttons = Some(0);
+        let now = Instant::now();
+        let publish = |outcome: Option<(String, redundant::PushOutcome)>| match outcome {
+            Some((_, redundant::PushOutcome::Publish(bundle, flush))) => (bundle, flush),
+            other => panic!("expected an immediate bundle, got {other:?}"),
+        };
+        // Old host: never advertised support, legacy path.
+        assert!(engine.push_redundant_input(&key, now).is_none());
+        engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, Some("grant-1"));
+        let (first, _) = publish(engine.push_redundant_input(&key, now));
+        assert_eq!(first.first, 1);
+        assert!(!engine.redundant_bundle_packet(&first, &ids.other_controller_id).reliable);
+        assert!(engine.push_redundant_input(&hover, now).is_none(), "hover stays latest-wins");
+        // Within the pacing interval the next input waits for a paced flush.
+        let Some((stream, redundant::PushOutcome::FlushAfter(_))) =
+            engine.push_redundant_input(&key, now)
+        else {
+            panic!("second input inside the pacing interval must be paced");
+        };
+        let (second, flush) = engine
+            .flush_redundant_input(ids.window_id, &ids.other_controller_id, &stream, now)
+            .expect("paced flush publishes the queued input");
+        assert_eq!((second.first, second.inputs.len()), (1, 2));
+        let later = now + redundant::MIN_BUNDLE_INTERVAL;
+        assert!(engine
+            .redundant_trailing_bundle(ids.window_id, &ids.other_controller_id, &stream, flush, later)
+            .is_some());
+        assert!(
+            engine
+                .redundant_trailing_bundle(ids.window_id, &ids.other_controller_id, &stream, flush - 1, later)
+                .is_none(),
+            "a superseded trailing copy is not sent"
+        );
+        // A repeated `active` for the same grant keeps the stream.
+        engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, Some("grant-1"));
+        assert_eq!(publish(engine.push_redundant_input(&key, later)).0.stream, second.stream);
+        // A new grant opens a new stream from rseq 1.
+        engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, Some("grant-2"));
+        let renewed = publish(engine.push_redundant_input(&key, later)).0;
+        assert_ne!(renewed.stream, second.stream);
+        assert_eq!(renewed.first, 1);
+        // Stopped / downgraded host: back to the legacy path.
+        engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, None);
+        assert!(engine.push_redundant_input(&key, later).is_none());
+    }
+
+    #[test]
+    fn active_status_advertises_redundant_input_support() {
+        let status = active_status_for_session(7, "ctl".to_string(), "tok".to_string());
+        let packet = status_packet_for(&status, "host");
+        assert!(packet.supports_redundant_input);
+        let json = serde_json::to_value(&packet).unwrap();
+        assert_eq!(json["supportsRedundantInput"], serde_json::json!(true));
+        let mut stopped = status;
+        stopped.status = "stopped";
+        assert!(!status_packet_for(&stopped, "host").supports_redundant_input);
     }
 
     #[test]

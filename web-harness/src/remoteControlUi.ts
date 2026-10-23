@@ -1,5 +1,11 @@
 import type { ActiveRemoteControl, HarnessContext } from './context.ts';
-import type { RemoteControlCapability, RemoteControlMessage } from './trackNames.ts';
+import { REMOTE_CONTROL_TOPIC, type RemoteControlCapability, type RemoteControlMessage } from './trackNames.ts';
+import {
+  newRedundantStreamId,
+  publishRedundantInput,
+  RedundantInputSender,
+  ridesRedundantStream,
+} from './remoteControlRedundant.ts';
 import {
   chunkRemoteText,
   EMPTY_REMOTE_CONTROL_MODIFIERS,
@@ -445,6 +451,17 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       // not-yet-upgraded host's status packet never sets the field, so this
       // is `false` against it and we keep sending JSON.
       active.supportsBinaryHotPath = message.supportsBinaryHotPath === true;
+      // #399: latest-wins like the hot path. A repeated `active` for the same
+      // grant keeps the stream; a new grant opens a new one.
+      if (message.supportsRedundantInput === true && typeof message.grantToken === 'string' && message.grantToken) {
+        if (!active.redundantInput || active.redundantInputGrantToken !== message.grantToken) {
+          active.redundantInput = new RedundantInputSender(active.windowId, newRedundantStreamId());
+          active.redundantInputGrantToken = message.grantToken;
+        }
+      } else {
+        delete active.redundantInput;
+        delete active.redundantInputGrantToken;
+      }
     } else if (
       active &&
       senderIsHost &&
@@ -496,6 +513,27 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       active.windowId === message.windowId &&
       active.supportsBinaryHotPath
     );
+    const redundantInput =
+      active &&
+      active.targetUserId === message.targetUserId &&
+      active.windowId === message.windowId &&
+      ridesRedundantStream(message)
+        ? active.redundantInput
+        : undefined;
+    if (redundantInput) {
+      const room = state.room;
+      return publishRedundantInput(redundantInput, message, (bundle) =>
+        room.localParticipant.publishData(remoteControlEncoder.encode(JSON.stringify(bundle)), {
+          topic: REMOTE_CONTROL_TOPIC,
+          reliable: false,
+          ...(message.targetUserId ? { destinationIdentities: [message.targetUserId] } : {})
+        })
+      ).catch((err) => {
+        if (message.kind === 'wheel') return;
+        logEvent(`remote control publish failed: ${(err as Error).message ?? err}`, 'warn');
+        throw err;
+      });
+    }
     const bytes =
       (hotPathCapable ? encodeRemoteControlHotPath(message) : null) ??
       remoteControlEncoder.encode(JSON.stringify(message));

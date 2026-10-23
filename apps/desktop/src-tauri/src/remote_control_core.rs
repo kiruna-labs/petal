@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::platform::cg::WindowFrame;
+use crate::remote_control_redundant::{
+    rides_redundant_stream, InputBundle, InputSequencer, PushOutcome, RedundantInputSender,
+    SequencerOutput,
+};
 use crate::sync_ext::MutexExt;
 use crate::transport::publisher::RoomConnection;
 
@@ -216,6 +220,11 @@ pub(crate) struct RemoteControlEngine {
     replay_epochs: Mutex<HashMap<(u32, String), u64>>,
     pending_requests: Mutex<HashMap<ControlGrantKey, RemoteControlMessage>>,
     controller_grants: Mutex<HashMap<(u32, String), ControllerGrantEnvelope>>,
+    /// #399 controller side, keyed by (window, host): present only while the
+    /// host advertised `supports_redundant_input` for the current grant.
+    redundant_senders: Mutex<HashMap<(u32, String), (String, RedundantInputSender)>>,
+    /// #399 host side, keyed by (trusted sender, window).
+    input_sequencers: Mutex<HashMap<(String, u32), InputSequencer>>,
 }
 
 impl RemoteControlEngine {
@@ -233,6 +242,133 @@ impl RemoteControlEngine {
             replay_epochs: Mutex::new(HashMap::new()),
             pending_requests: Mutex::new(HashMap::new()),
             controller_grants: Mutex::new(HashMap::new()),
+            redundant_senders: Mutex::new(HashMap::new()),
+            input_sequencers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// #399: record whether the host's latest status lets this controller use
+    /// the redundant lossy input path. A new grant token opens a new stream;
+    /// a repeated `active` for the same grant keeps the stream (and its
+    /// in-flight redundancy) intact.
+    pub(crate) fn set_redundant_input_target(
+        &self,
+        window_id: u32,
+        host: &str,
+        grant_token: Option<&str>,
+    ) {
+        let mut senders = self.redundant_senders.lock_unpoisoned();
+        let key = (window_id, host.to_string());
+        let Some(grant_token) = grant_token.filter(|token| !token.is_empty()) else {
+            senders.remove(&key);
+            return;
+        };
+        if senders
+            .get(&key)
+            .is_some_and(|(stored, _)| stored == grant_token)
+        {
+            return;
+        }
+        senders.insert(
+            key,
+            (
+                grant_token.to_string(),
+                RedundantInputSender::new(window_id, new_redundant_stream_id()),
+            ),
+        );
+    }
+
+    /// Queues `message` on the redundant stream of a capable host and says
+    /// what to publish; `None` keeps the legacy path.
+    pub(crate) fn push_redundant_input(
+        &self,
+        message: &RemoteControlMessage,
+        now: Instant,
+    ) -> Option<(String, PushOutcome)> {
+        if !rides_redundant_stream(message) {
+            return None;
+        }
+        let mut senders = self.redundant_senders.lock_unpoisoned();
+        let (_, sender) =
+            senders.get_mut(&(message.window_id, message.target_user_id.clone()))?;
+        Some((sender.stream().to_string(), sender.push(message.clone(), now)))
+    }
+
+    /// Runs a paced flush; returns the bundle and its flush number.
+    pub(crate) fn flush_redundant_input(
+        &self,
+        window_id: u32,
+        host: &str,
+        stream: &str,
+        now: Instant,
+    ) -> Option<(InputBundle, u64)> {
+        let mut senders = self.redundant_senders.lock_unpoisoned();
+        let (_, sender) = senders.get_mut(&(window_id, host.to_string()))?;
+        if sender.stream() != stream {
+            return None;
+        }
+        let bundle = sender.flush(now)?;
+        Some((bundle, sender.flushes()))
+    }
+
+    /// The trailing copy of flush `flush`, unless a newer input (which
+    /// carries its own redundancy) superseded it.
+    pub(crate) fn redundant_trailing_bundle(
+        &self,
+        window_id: u32,
+        host: &str,
+        stream: &str,
+        flush: u64,
+        now: Instant,
+    ) -> Option<InputBundle> {
+        let senders = self.redundant_senders.lock_unpoisoned();
+        let (_, sender) = senders.get(&(window_id, host.to_string()))?;
+        if sender.stream() != stream {
+            return None;
+        }
+        sender.trailing(flush, now)
+    }
+
+    pub(crate) fn accept_input_bundle(
+        &self,
+        sender: &str,
+        bundle: InputBundle,
+        now: Instant,
+    ) -> SequencerOutput {
+        self.input_sequencers
+            .lock_unpoisoned()
+            .entry((sender.to_string(), bundle.window_id))
+            .or_default()
+            .accept(bundle, now)
+    }
+
+    pub(crate) fn flush_input_bundle_gap(
+        &self,
+        sender: &str,
+        window_id: u32,
+        now: Instant,
+    ) -> SequencerOutput {
+        self.input_sequencers
+            .lock_unpoisoned()
+            .get_mut(&(sender.to_string(), window_id))
+            .map(|sequencer| sequencer.flush_expired(now))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn redundant_bundle_packet(
+        &self,
+        bundle: &InputBundle,
+        target: &str,
+    ) -> livekit::DataPacket {
+        livekit::DataPacket {
+            payload: serde_json::to_vec(bundle).expect("input bundle is serializable"),
+            topic: Some(TOPIC.to_string()),
+            reliable: false,
+            destination_identities: if target.is_empty() {
+                Vec::new()
+            } else {
+                vec![livekit::prelude::ParticipantIdentity(target.to_string())]
+            },
         }
     }
 
@@ -819,6 +955,17 @@ impl RemoteControlEngine {
 // was removed).
 static ENGINE: LazyLock<RemoteControlEngine> = LazyLock::new(RemoteControlEngine::new);
 
+fn new_redundant_stream_id() -> String {
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_err() {
+        bytes = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos() as u64))
+        .to_le_bytes();
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 pub(crate) fn remote_control_engine() -> &'static RemoteControlEngine {
     &ENGINE
 }
@@ -1400,6 +1547,11 @@ pub struct RemoteControlMessage {
     /// sets this field at all -- no negotiation round-trip needed.
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_binary_hot_path: bool,
+    /// #399: true only on a host's `active` status. A controller that saw it
+    /// sends input as lossy redundant `inputBundle`s
+    /// (`remote_control_redundant`); otherwise it keeps the reliable path.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supports_redundant_input: bool,
     #[serde(default)]
     pub modifiers: RemoteControlModifiers,
 }
@@ -1461,6 +1613,7 @@ impl RemoteControlDraft {
             message: None,
             grant_token: self.grant_token,
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: self.modifiers,
         }
     }

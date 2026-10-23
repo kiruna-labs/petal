@@ -777,6 +777,9 @@ export type RemoteControlMessage =
        * for this (windowId, targetUserId) session. Absent on any packet
        * from a not-yet-upgraded host. */
       supportsBinaryHotPath?: boolean;
+      /** #399: true only on a host's `active` status; the controller may then
+       * send input as lossy redundant `inputBundle`s. */
+      supportsRedundantInput?: boolean;
     })
   | (RemoteControlBase & {
       kind: 'pointer';
