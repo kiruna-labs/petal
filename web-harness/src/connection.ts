@@ -31,6 +31,7 @@ import {
 } from './trackNames.ts';
 import { IDENTITY_COLOR_PALETTE, windowIdFromTrackName } from './telepointer.ts';
 import { HARNESS_COLOR_STORAGE_KEY, HARNESS_ROOM_STORAGE_KEY } from './constants.ts';
+import { currentWebBackendApiUrl } from './serverSettings.ts';
 import { localParticipantMetadata } from './participantMetadata.ts';
 import { displayNameFromInput, inviteLinkForCredential, tokenRequestBody } from './controls.ts';
 import { displayNameForParticipant } from './tiles.ts';
@@ -451,16 +452,17 @@ export function setupConnection(
   }
 
   function backendApiUrl(path: string): string {
-    // Prefer an explicit build-time backend URL. In a PRODUCTION build with none
-    // set, fall back to the deployed backend so a public deploy can always mint
-    // tokens (issue #177 -- the web counterpart of the native "no baked
-    // backend URL" bug). In DEV, leave it empty so `/api/token` hits the local
-    // Vite token middleware (server/tokenPlugin.ts) talking to a local
-    // livekit-server, never the production backend.
+    // Prefer a Settings / home-screen override, then the Vite bake. In a
+    // PRODUCTION build with none set, fall back to the deployed backend so a
+    // public deploy can always mint tokens (issue #177). In DEV, leave it
+    // empty so `/api/token` hits the local Vite token middleware
+    // (server/tokenPlugin.ts) talking to a local livekit-server, never the
+    // production backend.
     const env = (import.meta as ViteImportMeta).env;
-    const configured = env?.VITE_PETAL_BACKEND_URL?.trim().replace(/\/$/, '');
-    const base = configured || (env?.PROD ? 'https://app.petal.live' : '');
-    return `${base}${path}`;
+    return currentWebBackendApiUrl(path, {
+      bakedUrl: env?.VITE_PETAL_BACKEND_URL,
+      isProduction: Boolean(env?.PROD),
+    });
   }
 
   function syncAddressBar(meetingCode: string) {

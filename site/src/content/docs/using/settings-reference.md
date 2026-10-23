@@ -7,9 +7,9 @@ Open Settings from the profile menu in the main window (click your avatar,
 then **Settings**) or from the menubar popover's **Settings** item. A row of
 chips under the title jumps to each section; the sections appear in this
 order, top to bottom: Devices, Permissions (macOS only), Privacy & Sharing,
-AI chat, Diagnostics, Account, About. Every on/off setting is a switch on its
+AI chat, Diagnostics, Server, Account, About. Every on/off setting is a switch on its
 row and takes effect as soon as you flip it — except AI chat, which asks you
-to confirm first.
+to confirm first, and Server, which applies the next time you join.
 
 ## Devices
 
@@ -97,6 +97,19 @@ published in the repository's `docs/POSTHOG_EVENT_ALLOWLIST.md`, and it
 never includes window titles, room names, or content. There is no in-app
 toggle for it yet; a build from source without an analytics key sends
 nothing.
+
+## Server
+
+- **Token server** — the address Petal uses to join meetings. Leave blank to
+  use this build’s default. **Save** stores the origin on this machine;
+  **Use default** clears it. The next join uses the saved server. If this
+  launch was started with `PETAL_BACKEND_URL`, that value still wins until
+  you open Petal without it.
+- **Invite links** — origin copied invite links start with. Set this if you
+  host your own meeting page. Same **Save** / **Use default** controls.
+
+The browser client exposes the same two fields on the home screen under
+**Server**.
 
 ## Account
 

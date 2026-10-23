@@ -163,6 +163,8 @@ export const COMMANDS = {
   setCameraPrefs: 'set_camera_prefs',
   setCockpitOpen: 'set_cockpit_open',
   setDebugMode: 'set_debug_mode',
+  serverSettings: 'server_settings',
+  setServerSettings: 'set_server_settings',
   setMainPillMode: 'set_main_pill_mode',
   setMicMuted: 'set_mic_muted',
   setRemoteControlAllowed: 'set_remote_control_allowed',
@@ -262,6 +264,14 @@ export const EVENTS = {
    * equivalent (a documented gap); this setting does not repeat it.
    */
   debugModeChanged: 'debug-mode-changed',
+  /**
+   * Token-server / invite-origin setting (#310) changed, from
+   * `set_server_settings`. Ask AND listen: every webview that copies invite
+   * links reads `COMMANDS.serverSettings` on mount, then follows this event
+   * so a Settings save reaches the main window and the menubar without a
+   * reload. Payload is the full `ServerSettingsView`.
+   */
+  serverSettingsChanged: 'server-settings-changed',
   /**
    * Debounced Rust event (window_change_watcher.rs): the desktop's window set
    * changed (a window was created, closed, minimized, or restored). The
@@ -367,6 +377,20 @@ export interface AiChatSettings {
  */
 export interface DebugModeSettings {
   enabled: boolean;
+}
+
+/**
+ * Token-server and invite-origin user setting (#310). Mirrors Rust's
+ * `server_settings::ServerSettingsView`. `backendUrl` / `inviteOrigin` are
+ * the saved overrides (`null` = use this build's default). The `effective*`
+ * fields are what this launch will actually use.
+ */
+export interface ServerSettingsView {
+  backendUrl: string | null;
+  inviteOrigin: string | null;
+  effectiveBackendUrl: string | null;
+  effectiveInviteOrigin: string;
+  backendSource: 'env' | 'settings' | 'build' | 'none';
 }
 
 /**
@@ -1577,6 +1601,8 @@ export interface CommandArgs {
   [COMMANDS.compositorWindowDebugStats]: { windowId: number; ownerIdentity?: string };
   [COMMANDS.createRoom]: { name: string; open: boolean; displayName?: string | null };
   [COMMANDS.debugModeSettings]: Record<string, never>;
+  [COMMANDS.serverSettings]: Record<string, never>;
+  [COMMANDS.setServerSettings]: { backendUrl: string | null; inviteOrigin: string | null };
   [COMMANDS.drawSend]: { draft: DrawDraft };
   [COMMANDS.pluginPublishData]: {
     pluginId: string;
@@ -1852,6 +1878,8 @@ export interface CommandReturns {
   [COMMANDS.createRoom]: RoomRecord;
   [COMMANDS.debugModeSettings]: DebugModeSettings;
   [COMMANDS.setDebugMode]: DebugModeSettings;
+  [COMMANDS.serverSettings]: ServerSettingsView;
+  [COMMANDS.setServerSettings]: ServerSettingsView;
   [COMMANDS.setMainPillMode]: void;
   [COMMANDS.drawSend]: void;
   [COMMANDS.pluginPublishData]: void;
@@ -1960,6 +1988,7 @@ export interface EventPayloads {
   [EVENTS.cameraPublishState]: CameraPublishState;
   [EVENTS.cameraIntentChanged]: CameraIntentChanged;
   [EVENTS.debugModeChanged]: DebugModeSettings;
+  [EVENTS.serverSettingsChanged]: ServerSettingsView;
   [EVENTS.desktopWindowsChanged]: void;
   [EVENTS.hoverTabHide]: void;
   [EVENTS.hoverTabUpdate]: HoverTabUpdate;

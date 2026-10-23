@@ -98,6 +98,19 @@
     AI_CHAT_KEY_DATA_USE_NOTE
   } from '$lib/data/aiChat';
   import { DEBUG_MODE_SETTING_DESCRIPTION, DEBUG_MODE_SETTING_TITLE } from '$lib/data/debugMode';
+  import { applyInviteOrigin } from '$lib/data/inviteLinks';
+  import {
+    DEFAULT_INVITE_ORIGIN,
+    SERVER_BACKEND_DESCRIPTION,
+    SERVER_BACKEND_TITLE,
+    SERVER_CLEAR_LABEL,
+    SERVER_ENV_OVERRIDE_NOTE,
+    SERVER_INVITE_DESCRIPTION,
+    SERVER_INVITE_TITLE,
+    SERVER_SAVE_LABEL,
+    backendJoiningLabel,
+    parseServerOriginInput
+  } from '@petal/shared/logic/serverEndpoints';
   import {
     COMMANDS,
     EVENTS,
@@ -110,6 +123,7 @@
     type CockpitJourney,
     type CockpitStatus,
     type DebugModeSettings,
+    type ServerSettingsView,
     type TestCockpitEvent,
     type TestCockpitRunDetail,
     type TestCockpitRunSummary,
@@ -311,6 +325,27 @@
   let debugSettings = $state<DebugModeSettings>({ enabled: false });
   let debugSettingsLoaded = $state(false);
   let debugModeError = $state<string | null>(null);
+
+  // Token server / invite origin (#310): Rust-owned JSON, same shape as
+  // debug settings, because Settings is its own webview and the token
+  // client that reads the URL is native.
+  const emptyServerSettings = (): ServerSettingsView => ({
+    backendUrl: null,
+    inviteOrigin: null,
+    effectiveBackendUrl: null,
+    effectiveInviteOrigin: DEFAULT_INVITE_ORIGIN,
+    backendSource: 'none'
+  });
+  let serverSettings = $state<ServerSettingsView>(emptyServerSettings());
+  let serverSettingsLoaded = $state(false);
+  let backendDraft = $state('');
+  let inviteDraft = $state('');
+  let serverBusy = $state(false);
+  let serverNote = $state<string | null>(null);
+  let serverError = $state<string | null>(null);
+  const serverJoiningLabel = $derived(
+    backendJoiningLabel(serverSettings.effectiveBackendUrl, serverSettings.backendSource)
+  );
 
   let resetConfirmOpen = $state(false);
   let resetBusy = $state(false);
@@ -665,6 +700,79 @@
       debugSettings = previous;
       debugModeError = `Could not change the debug mode setting: ${e}`;
     }
+  }
+
+  function adoptServerSettings(next: ServerSettingsView) {
+    serverSettings = next;
+    backendDraft = next.backendUrl ?? '';
+    inviteDraft = next.inviteOrigin ?? '';
+    applyInviteOrigin(next.inviteOrigin);
+  }
+
+  async function persistServerSettings(backendUrl: string | null, inviteOrigin: string | null) {
+    serverBusy = true;
+    serverNote = null;
+    serverError = null;
+    try {
+      if (!hasTauri) {
+        adoptServerSettings({
+          ...serverSettings,
+          backendUrl,
+          inviteOrigin,
+          effectiveBackendUrl: backendUrl ?? serverSettings.effectiveBackendUrl,
+          effectiveInviteOrigin: inviteOrigin ?? serverSettings.effectiveInviteOrigin,
+          backendSource: backendUrl ? 'settings' : serverSettings.backendSource
+        });
+        serverNote = 'Saved';
+        return;
+      }
+      adoptServerSettings(
+        await invoke<ServerSettingsView>(COMMANDS.setServerSettings, { backendUrl, inviteOrigin })
+      );
+      serverNote = 'Saved';
+    } catch (e) {
+      serverError = `Could not save the server settings: ${e}`;
+    } finally {
+      serverBusy = false;
+    }
+  }
+
+  async function handleSaveServerSettings() {
+    const backend = parseServerOriginInput(backendDraft);
+    const invite = parseServerOriginInput(inviteDraft);
+    if (!backend.ok) {
+      serverError = backend.error;
+      serverNote = null;
+      return;
+    }
+    if (!invite.ok) {
+      serverError = invite.error;
+      serverNote = null;
+      return;
+    }
+    await persistServerSettings(backend.origin, invite.origin);
+  }
+
+  async function handleClearBackendUrl() {
+    const invite = parseServerOriginInput(inviteDraft);
+    if (!invite.ok) {
+      serverError = invite.error;
+      serverNote = null;
+      return;
+    }
+    backendDraft = '';
+    await persistServerSettings(null, invite.origin);
+  }
+
+  async function handleClearInviteOrigin() {
+    const backend = parseServerOriginInput(backendDraft);
+    if (!backend.ok) {
+      serverError = backend.error;
+      serverNote = null;
+      return;
+    }
+    inviteDraft = '';
+    await persistServerSettings(backend.origin, null);
   }
 
   async function handleAiChatSaveKey() {
@@ -1304,6 +1412,19 @@
   });
 
   $effect(() => {
+    if (!hasTauri || serverSettingsLoaded) return;
+    void (async () => {
+      try {
+        adoptServerSettings(await invoke<ServerSettingsView>(COMMANDS.serverSettings));
+      } catch (e) {
+        serverError = `Could not load the server settings: ${e}`;
+      } finally {
+        serverSettingsLoaded = true;
+      }
+    })();
+  });
+
+  $effect(() => {
     if (!hasTauri || buildInfo) return;
     void invoke<BuildInfo>(COMMANDS.getBuildInfo).then(
       (info) => (buildInfo = info),
@@ -1352,7 +1473,7 @@
     if (isMac()) chips.push({ label: 'Permissions' });
     chips.push({ label: 'Privacy' }, { label: 'AI chat' }, { label: 'Diagnostics' });
     if (showTestCockpit) chips.push({ label: 'Cockpit' });
-    chips.push({ label: 'Account' }, { label: 'About' });
+    chips.push({ label: 'Server' }, { label: 'Account' }, { label: 'About' });
     return chips;
   });
   let settingsBody = $state<HTMLElement | null>(null);
@@ -2022,6 +2143,88 @@
       </section>
     {/if}
 
+    <!-- ============ Server (#310) ============ -->
+    <section class="section">
+      <h2 class="section-title">Server</h2>
+      <div class="group">
+        <div class="row stack">
+          <span class="row-copy">
+            <span class="row-title">{SERVER_BACKEND_TITLE}</span>
+            <span class="row-description">{SERVER_BACKEND_DESCRIPTION}</span>
+          </span>
+          <span class="row-description server-effective">{serverJoiningLabel}</span>
+          {#if serverSettings.backendSource === 'env'}
+            <span class="row-description">{SERVER_ENV_OVERRIDE_NOTE}</span>
+          {/if}
+          <div class="server-url-row">
+            <input
+              class="input server-url-input"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder={serverSettings.effectiveBackendUrl ?? 'https://petal.example.com'}
+              bind:value={backendDraft}
+            />
+            <Button
+              variant="primary"
+              disabled={serverBusy}
+              onclick={() => void handleSaveServerSettings()}
+            >
+              {SERVER_SAVE_LABEL}
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={serverBusy}
+              onclick={() => void handleClearBackendUrl()}
+            >
+              {SERVER_CLEAR_LABEL}
+            </Button>
+          </div>
+        </div>
+        <div class="row stack">
+          <span class="row-copy">
+            <span class="row-title">{SERVER_INVITE_TITLE}</span>
+            <span class="row-description">{SERVER_INVITE_DESCRIPTION}</span>
+          </span>
+          <span class="row-description server-effective">
+            Copied links start with {serverSettings.inviteOrigin ?? serverSettings.effectiveInviteOrigin}.
+          </span>
+          <div class="server-url-row">
+            <input
+              class="input server-url-input"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder={serverSettings.effectiveInviteOrigin}
+              bind:value={inviteDraft}
+            />
+            <Button
+              variant="primary"
+              disabled={serverBusy}
+              onclick={() => void handleSaveServerSettings()}
+            >
+              {SERVER_SAVE_LABEL}
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={serverBusy}
+              onclick={() => void handleClearInviteOrigin()}
+            >
+              {SERVER_CLEAR_LABEL}
+            </Button>
+          </div>
+        </div>
+        {#if serverNote}
+          <div class="row stack"><span class="device-note">{serverNote}</span></div>
+        {/if}
+        {#if serverError}
+          <div class="row stack"><span class="device-note error">{serverError}</span></div>
+        {/if}
+      </div>
+    </section>
+
     <!-- ============ Account ============ -->
     <section class="section">
       <h2 class="section-title">Account</h2>
@@ -2588,6 +2791,28 @@
   /* Button labels are the thing that must never shrink or clip. */
   .ai-key-row :global(.btn) {
     flex-shrink: 0;
+  }
+
+  /* Token-server / invite-origin fields (#310). Same shrink-the-input
+     contract as the AI chat key row so labels never clip at 400px. */
+  .server-url-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .server-url-input {
+    flex: 1 1 160px;
+    min-width: 0;
+  }
+
+  .server-url-row :global(.btn) {
+    flex-shrink: 0;
+  }
+
+  .server-effective {
+    overflow-wrap: anywhere;
   }
 
   .ai-key-saved {

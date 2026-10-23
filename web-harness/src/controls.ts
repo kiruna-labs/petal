@@ -46,6 +46,7 @@ import { AUDIBILITY_RMS_BAR, assertRemoteAudioOraclesAgree } from './audioOracle
 import { setRoomDisplayLabel } from './roomLabels.ts';
 import { registerMeetingAliases, sensitiveStringRegistry } from './sensitiveStrings.ts';
 import { inviteLinkCopiedToastMessage } from './inviteToast.ts';
+import { currentWebInviteOrigin } from './serverSettings.ts';
 import type { FeedbackReportController } from './feedbackReport.ts';
 import { PresentationSourceHost } from './presentationSourceHost.ts';
 import { setupDeviceMenu } from './deviceMenu.ts';
@@ -376,7 +377,7 @@ export function setupControls(ctx: HarnessContext, feedbackReport?: FeedbackRepo
     if (!state.currentMeetingCode) return;
     const url = inviteLinkForCredential(
       state.currentMeetingCode,
-      location.origin,
+      currentWebInviteOrigin(location.origin),
       cb.roomDisplayLabelForCredential(state.currentMeetingCode)
     );
     // The link itself is never logged (#245): it carries the joinable access

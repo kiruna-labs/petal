@@ -7,8 +7,8 @@ LiveKit tokens; the LiveKit API secret stays on the backend and is never baked
 into the desktop app or sent to a browser.
 
 There are no application-code changes needed for this setup. Configure the
-backend, then build the desktop client with its backend URL embedded at build
-time.
+backend, then either build the desktop client with its backend URL embedded
+at build time, or save the URL later in **Settings → Server**.
 
 ## Architecture
 
@@ -178,10 +178,17 @@ same `PETAL_BACKEND_URL` environment variable at build time. The value should
 be the backend origin only, without `/api/token`; the app appends endpoint
 paths itself.
 
+You can also point an already-built desktop app at your backend without
+rebuilding: **Settings → Server → Token server**. Saved values persist across
+restarts. A launch-time `PETAL_BACKEND_URL` still wins for that process
+(including an empty value, which keeps the debug local-mint path). The
+browser client has the same fields on the home screen under **Server**.
+
 Copied invite links default to `https://meet.petal.live/<label>/<code>`. If
 you host your own browser peer (`web-harness/`), set
 `VITE_PETAL_INVITE_ORIGIN=https://meet.example.com` in the same build
-environment so the desktop app's invite links point at your deployment.
+environment so the desktop app's invite links point at your deployment, or
+save the origin in **Settings → Server → Invite links**.
 
 The desktop app also links `GET /api/download?platform=macos|windows` from the
 updater's failure toast, so a client whose update archive is rejected can still

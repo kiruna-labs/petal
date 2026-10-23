@@ -8,6 +8,7 @@ import {
 } from './constants.ts';
 import { inviteLinkForCredential } from './controls.ts';
 import { inviteLinkCopiedToastMessage } from './inviteToast.ts';
+import { currentWebInviteOrigin } from './serverSettings.ts';
 import { looksLikeJoinAttempt, parseJoinInput } from '@petal/shared/logic/joinInput';
 import { accessCodeForCredential, registerAccessCodeForCredential } from '@petal/shared/logic/meetingCode';
 import { roomDisplayLabelForCredential } from './roomLabels.ts';
@@ -342,6 +343,7 @@ export function setupHomeScreen(options: HomeScreenOptions): HomeScreenApi {
         void copyRecentRoomInviteLink({
           credential: roomRecord.code,
           displayLabel: roomLabel,
+          origin: currentWebInviteOrigin(location.origin),
           showToast,
           logEvent,
         });

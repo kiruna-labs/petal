@@ -39,7 +39,15 @@
   import { displayBuildVersion } from '$lib/buildInfo';
   import { platformKey } from '$lib/platform';
   import { stripNativeTooltipTitles } from '$lib/data/suppressNativeTooltips';
-  import { COMMANDS, EVENTS, hasTauriBridge, type BuildInfo, type ResilienceEvent } from '$lib/ipc';
+  import { applyInviteOrigin } from '$lib/data/inviteLinks';
+  import {
+    COMMANDS,
+    EVENTS,
+    hasTauriBridge,
+    type BuildInfo,
+    type ResilienceEvent,
+    type ServerSettingsView
+  } from '$lib/ipc';
   import { checkForUpdate } from '$lib/updater';
   import {
     startUpdateScheduler,
@@ -146,9 +154,26 @@
     if (!isOverlayRoute) void syncSentryEnabled();
     void reportFrontendReady();
 
+    // #310: seed the invite-link origin in every webview that might copy
+    // a link (main window, menubar, meeting), then follow Settings saves.
+    let unlistenServerSettings: (() => void) | null = null;
+    if (hasTauriBridge()) {
+      void invoke<ServerSettingsView>(COMMANDS.serverSettings)
+        .then((view) => {
+          applyInviteOrigin(view.inviteOrigin);
+        })
+        .catch(() => {});
+      void listen<ServerSettingsView>(EVENTS.serverSettingsChanged, (event) => {
+        applyInviteOrigin(event.payload.inviteOrigin);
+      }).then((fn) => {
+        unlistenServerSettings = fn;
+      });
+    }
+
     return () => {
       if (petalWindow.__petalNavigate === navigate) delete petalWindow.__petalNavigate;
       stopUpdateScheduler?.();
+      unlistenServerSettings?.();
     };
   });
 
