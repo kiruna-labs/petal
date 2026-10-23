@@ -420,6 +420,10 @@ test('user-facing shipped styles do not introduce ellipsis truncation', () => {
     // #318 (user directive 2026-10-15): the remote window title is the one
     // sanctioned exception -- shortened, single line, ellipsis as last resort.
     if (label.endsWith('RemoteWindowHeader.svelte')) styles = styles.replace(/\n  \.title\s*\{[^}]*\}/, '');
+    // #407: the header status chip is the second exception -- one line in the
+    // 44px strip, ellipsis as last resort; the full text stays in its title
+    // tooltip and in the control overlay's feedback banner.
+    if (label.endsWith('RemoteWindowHeader.svelte')) styles = styles.replace(/\n  \.status-chip-text\s*\{[^}]*\}/, '');
     if (/text-overflow:\s*ellipsis/.test(styles)) {
       failures.push(label);
     }
