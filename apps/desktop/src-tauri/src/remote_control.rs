@@ -1559,7 +1559,33 @@ fn authorize_shared_key(key: ControlGrantKey) -> String {
         .lock_unpoisoned()
         .remove(&(window_id, controller_id.clone()));
     reset_unreliable_seq(window_id, &controller_id);
+    note_control_grants_changed();
     grant_token
+}
+
+/// Every window that currently holds at least one grant.
+#[cfg_attr(any(test, not(target_os = "macos")), allow(dead_code))]
+fn granted_window_ids() -> HashSet<u32> {
+    sessions()
+        .lock_unpoisoned()
+        .keys()
+        .map(|key| key.window_id)
+        .collect()
+}
+
+/// #404: the set of granted windows changed (grant, revoke, release, share
+/// teardown). macOS switches Chromium web accessibility on for granted
+/// browser windows and back off when the last grant on that app ends -- see
+/// `input::note_control_grants_changed`. Call it AFTER the grant map changed.
+fn note_control_grants_changed() {
+    #[cfg(target_os = "macos")]
+    input::note_control_grants_changed();
+}
+
+/// #404: app exit. Hand every browser back the accessibility setting it had.
+#[cfg(target_os = "macos")]
+pub(crate) fn restore_web_accessibility_on_exit() {
+    input::restore_web_accessibility_on_exit();
 }
 
 fn revoke(window_id: u32, controller_id: &str) {
@@ -1611,6 +1637,7 @@ fn revoke(window_id: u32, controller_id: &str) {
     }
     reset_unreliable_seq(window_id, controller_id);
     enqueue_synthetic_releases(releases, "controller revoked");
+    note_control_grants_changed();
 }
 
 fn drain_window_control(window_id: u32) -> (Vec<String>, Vec<ReplayTask>) {
@@ -1682,6 +1709,7 @@ fn drain_window_control_releasing(
     // Refs #288: same insert-only leak class as the maps above -- see
     // `clear_discrete_admissions`.
     clear_discrete_admissions(|w, _| w != window_id);
+    note_control_grants_changed();
     // #446: a session-tap gesture holds a REAL mouse button down in the target
     // app. If control is torn down mid-drag (revoke, disconnect, share ended,
     // deadline abandon) nothing else will ever post the matching Up, and the
@@ -1754,6 +1782,7 @@ pub(crate) fn revoke_all(app: &AppHandle) {
             .collect()
     };
     drop(fence);
+    note_control_grants_changed();
     enqueue_synthetic_releases(releases, "all control revoked");
     warned_tokenless_inputs().lock_unpoisoned().clear();
     last_unreliable_seqs().lock_unpoisoned().clear();
@@ -1813,6 +1842,7 @@ pub(crate) fn revoke_controller(app: &AppHandle, controller_id: &str, reason: &'
         }
     });
     drop(fence);
+    note_control_grants_changed();
     enqueue_synthetic_releases(releases, reason);
     last_unreliable_seqs()
         .lock_unpoisoned()
@@ -8293,6 +8323,324 @@ pub(crate) mod input {
             return false;
         };
         perform_action(&window, ax_raise_action().as_ptr()).is_ok()
+    }
+
+    // ---- #404: Chromium web accessibility for the life of a grant ----------
+    //
+    // Measured on Chrome 155 (issue #404, T1): a stock Chrome exposes NO
+    // `AXWebArea` to the host's AX hit-test -- a point over the page resolves
+    // only to `AXScrollArea` -- so the AX click routes can never reach a web
+    // field. `AXManualAccessibility` is rejected (-25205); setting
+    // `AXEnhancedUserInterface = true` on the app element returns -25208 yet
+    // DOES build the web tree. That attribute has known side effects on window
+    // animation in some apps, so it is set only while a grant on one of the
+    // app's windows exists and the previous value is restored when the last
+    // such grant ends.
+
+    /// Bundle-id prefixes of the Chromium family whose web content needs the
+    /// switch above.
+    const CHROMIUM_BUNDLE_PREFIXES: &[&str] = &[
+        "com.google.Chrome",
+        "org.chromium.",
+        "com.microsoft.edgemac",
+        "com.brave.",
+        "company.thebrowser.",
+    ];
+
+    fn is_chromium_bundle_id(bundle_id: &str) -> bool {
+        CHROMIUM_BUNDLE_PREFIXES
+            .iter()
+            .any(|prefix| bundle_id.starts_with(prefix))
+    }
+
+    /// The OS seam behind `reconcile_web_accessibility`, so the grant/release
+    /// bookkeeping is unit-testable without a real browser.
+    trait WebAccessibilityBackend {
+        fn window_pid(&self, window_id: u32) -> Option<i32>;
+        fn bundle_id(&self, pid: i32) -> Option<String>;
+        /// The app's current `AXEnhancedUserInterface`; `None` when unreadable.
+        fn enhanced_user_interface(&self, pid: i32) -> Option<bool>;
+        /// Raw AX error code. Chrome answers -25208 even when the write takes
+        /// effect, so callers log it and never treat it as a failure.
+        fn set_enhanced_user_interface(&self, pid: i32, enabled: bool) -> i32;
+        /// Does an `AXWebArea` now exist under the shared window?
+        fn window_has_web_area(&self, pid: i32, window_id: u32) -> bool;
+    }
+
+    #[derive(Debug)]
+    struct WebAccessibilityGrant {
+        /// What `AXEnhancedUserInterface` was before Petal touched it.
+        previous: bool,
+        /// Granted windows of this app keeping the switch on.
+        windows: HashSet<u32>,
+    }
+
+    #[derive(Debug, Default)]
+    struct WebAccessibilityState {
+        enabled: HashMap<i32, WebAccessibilityGrant>,
+        /// Granted windows already found not to be Chromium, so a reconcile
+        /// does not re-query their bundle id on every grant change.
+        not_chromium: HashSet<u32>,
+    }
+
+    /// Bring the switch in line with the set of windows that currently hold a
+    /// grant. Idempotent and driven only by that set, so every grant, revoke,
+    /// release and teardown path converges by calling it -- no path has to
+    /// remember to undo its own enable.
+    fn reconcile_web_accessibility(
+        granted: &HashSet<u32>,
+        state: &mut WebAccessibilityState,
+        backend: &dyn WebAccessibilityBackend,
+    ) {
+        state
+            .not_chromium
+            .retain(|window_id| granted.contains(window_id));
+        let mut released: Vec<i32> = Vec::new();
+        for (pid, grant) in state.enabled.iter_mut() {
+            grant
+                .windows
+                .retain(|window_id| granted.contains(window_id));
+            if grant.windows.is_empty() {
+                released.push(*pid);
+            }
+        }
+        released.sort_unstable();
+        for pid in released {
+            if let Some(grant) = state.enabled.remove(&pid) {
+                restore_web_accessibility(pid, grant.previous, backend);
+            }
+        }
+        let mut windows: Vec<u32> = granted.iter().copied().collect();
+        windows.sort_unstable();
+        for window_id in windows {
+            if state.not_chromium.contains(&window_id)
+                || state
+                    .enabled
+                    .values()
+                    .any(|grant| grant.windows.contains(&window_id))
+            {
+                continue;
+            }
+            // pid 1 is the display-share sentinel, never a process.
+            let Some(pid) = backend.window_pid(window_id).filter(|pid| *pid > 1) else {
+                continue;
+            };
+            if let Some(grant) = state.enabled.get_mut(&pid) {
+                grant.windows.insert(window_id);
+                continue;
+            }
+            let Some(bundle_id) = backend.bundle_id(pid) else {
+                continue;
+            };
+            if !is_chromium_bundle_id(&bundle_id) {
+                state.not_chromium.insert(window_id);
+                continue;
+            }
+            let previous = backend.enhanced_user_interface(pid).unwrap_or(false);
+            let set_code = (!previous).then(|| backend.set_enhanced_user_interface(pid, true));
+            let web_area = backend.window_has_web_area(pid, window_id);
+            log::info!(
+                "remote-control: chromium web accessibility enabled pid={pid} bundle={bundle_id} window_id={window_id} previous={previous} set_code={set_code:?} web_area={web_area}"
+            );
+            state.enabled.insert(
+                pid,
+                WebAccessibilityGrant {
+                    previous,
+                    windows: HashSet::from([window_id]),
+                },
+            );
+        }
+    }
+
+    fn restore_web_accessibility(pid: i32, previous: bool, backend: &dyn WebAccessibilityBackend) {
+        if previous {
+            log::info!(
+                "remote-control: chromium web accessibility released pid={pid} (was already on; left on)"
+            );
+            return;
+        }
+        let code = backend.set_enhanced_user_interface(pid, false);
+        log::info!("remote-control: chromium web accessibility restored pid={pid} set_code={code}");
+    }
+
+    fn restore_all_web_accessibility(
+        state: &mut WebAccessibilityState,
+        backend: &dyn WebAccessibilityBackend,
+    ) {
+        state.not_chromium.clear();
+        let mut pids: Vec<i32> = state.enabled.keys().copied().collect();
+        pids.sort_unstable();
+        for pid in pids {
+            if let Some(grant) = state.enabled.remove(&pid) {
+                restore_web_accessibility(pid, grant.previous, backend);
+            }
+        }
+    }
+
+    fn web_accessibility_state() -> &'static Mutex<WebAccessibilityState> {
+        static STATE: OnceLock<Mutex<WebAccessibilityState>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(WebAccessibilityState::default()))
+    }
+
+    /// Called after every change to the set of granted windows. The AX work
+    /// (one app attribute write plus a bounded tree walk) runs on one
+    /// dedicated worker so a slow target app never stalls the grant or revoke
+    /// path; the worker reads the CURRENT grant set each time, so coalesced or
+    /// reordered signals still converge on the right state.
+    ///
+    /// Compiled out of unit tests: tests mint and revoke grants on fake window
+    /// ids, which must never reach a real app on the test machine. The
+    /// bookkeeping is tested through `reconcile_web_accessibility`.
+    pub(crate) fn note_control_grants_changed() {
+        #[cfg(not(test))]
+        {
+            static WORKER: OnceLock<Option<Mutex<std::sync::mpsc::Sender<()>>>> = OnceLock::new();
+            let worker = WORKER.get_or_init(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<()>();
+                let spawned = thread::Builder::new()
+                    .name("petal-rc-webax".to_string())
+                    .spawn(move || {
+                        while rx.recv().is_ok() {
+                            while rx.try_recv().is_ok() {}
+                            let granted = super::granted_window_ids();
+                            reconcile_web_accessibility(
+                                &granted,
+                                &mut web_accessibility_state().lock_unpoisoned(),
+                                &SystemWebAccessibilityBackend,
+                            );
+                        }
+                    });
+                match spawned {
+                    Ok(_) => Some(Mutex::new(tx)),
+                    Err(error) => {
+                        log::warn!(
+                            "remote-control: failed to spawn chromium web accessibility worker: {error}"
+                        );
+                        None
+                    }
+                }
+            });
+            if let Some(tx) = worker {
+                let _ = tx.lock_unpoisoned().send(());
+            }
+        }
+    }
+
+    /// App exit: restore every app Petal switched on, synchronously, since
+    /// the worker will not get another chance.
+    pub(crate) fn restore_web_accessibility_on_exit() {
+        restore_all_web_accessibility(
+            &mut web_accessibility_state().lock_unpoisoned(),
+            &SystemWebAccessibilityBackend,
+        );
+    }
+
+    struct SystemWebAccessibilityBackend;
+
+    /// Bounds for the `AXWebArea` probe. Chrome builds the web tree
+    /// asynchronously after the switch, so the probe retries briefly; it is a
+    /// log-only diagnostic and never gates anything.
+    const WEB_AREA_PROBE_ATTEMPTS: u32 = 5;
+    const WEB_AREA_PROBE_INTERVAL: Duration = Duration::from_millis(200);
+    const WEB_AREA_PROBE_MAX_NODES: usize = 800;
+    const WEB_AREA_PROBE_MAX_DEPTH: usize = 14;
+
+    fn ax_enhanced_user_interface_attribute() -> CfObject {
+        cf_string(b"AXEnhancedUserInterface\0")
+    }
+
+    impl WebAccessibilityBackend for SystemWebAccessibilityBackend {
+        fn window_pid(&self, window_id: u32) -> Option<i32> {
+            crate::window_registry::global()
+                .map(|registry| registry.owner_pid_fresh(window_id))
+                .unwrap_or_else(|| crate::platform::cg::owner_pid_for_window_id(window_id))
+        }
+
+        fn bundle_id(&self, pid: i32) -> Option<String> {
+            crate::share_target::bundle_id_for_pid(pid)
+        }
+
+        fn enhanced_user_interface(&self, pid: i32) -> Option<bool> {
+            let app = ax_app_element_for_pid(pid)?;
+            let value = copy_attribute(&app, ax_enhanced_user_interface_attribute().as_ptr()).ok()?;
+            if std::ptr::eq(value.as_ptr(), unsafe { kCFBooleanTrue }) {
+                Some(true)
+            } else if std::ptr::eq(value.as_ptr(), unsafe { kCFBooleanFalse }) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+
+        fn set_enhanced_user_interface(&self, pid: i32, enabled: bool) -> i32 {
+            let Some(app) = ax_app_element_for_pid(pid) else {
+                return K_AX_ERROR_INVALID_UI_ELEMENT;
+            };
+            let Some(app_ptr) = app.as_real_ptr() else {
+                return K_AX_ERROR_INVALID_UI_ELEMENT;
+            };
+            let value = if enabled {
+                unsafe { kCFBooleanTrue }
+            } else {
+                unsafe { kCFBooleanFalse }
+            };
+            let attribute = ax_enhanced_user_interface_attribute();
+            unsafe { AXUIElementSetAttributeValue(app_ptr, attribute.as_ptr(), value) }
+        }
+
+        fn window_has_web_area(&self, pid: i32, window_id: u32) -> bool {
+            for attempt in 0..WEB_AREA_PROBE_ATTEMPTS {
+                if attempt > 0 {
+                    thread::sleep(WEB_AREA_PROBE_INTERVAL);
+                }
+                if authorized_window_has_web_area(pid, window_id) {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
+    /// Bounded breadth-first walk of the authorized window for an `AXWebArea`.
+    fn authorized_window_has_web_area(pid: i32, window_id: u32) -> bool {
+        let Some(app) = ax_app_element_for_pid(pid) else {
+            return false;
+        };
+        let Ok(list) = copy_attribute(&app, ax_windows_attribute().as_ptr()) else {
+            return false;
+        };
+        let mut windows = Vec::new();
+        push_ax_element_array(&list, &mut windows);
+        let Some(window) = windows
+            .into_iter()
+            .find(|window| ax_element_window_id(window, pid) == Ok(window_id))
+        else {
+            return false;
+        };
+        let role_attribute = ax_role_attribute();
+        let children_attribute = ax_children_attribute();
+        let mut queue = std::collections::VecDeque::from([(window, 0usize)]);
+        let mut visited = 0usize;
+        while let Some((element, depth)) = queue.pop_front() {
+            visited += 1;
+            if visited > WEB_AREA_PROBE_MAX_NODES {
+                return false;
+            }
+            if let Ok(role) = copy_attribute(&element, role_attribute.as_ptr()) {
+                if cf_string_to_string(role.as_ptr()).as_deref() == Some("AXWebArea") {
+                    return true;
+                }
+            }
+            if depth >= WEB_AREA_PROBE_MAX_DEPTH {
+                continue;
+            }
+            if let Ok(children) = copy_attribute(&element, children_attribute.as_ptr()) {
+                let mut found = Vec::new();
+                push_ax_element_array(&children, &mut found);
+                queue.extend(found.into_iter().map(|child| (child, depth + 1)));
+            }
+        }
+        false
     }
 
     /// Pure decision behind `verify_key_window`'s one-shot raise recovery.
