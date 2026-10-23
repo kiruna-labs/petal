@@ -87,6 +87,11 @@ export interface HarnessPressToPhotonResult {
   publishCompleteMs: number;
   mediaTime: number;
   presentedFrames: number;
+  /** Host wall clock at publish, for joining against host-side stages. */
+  sentAtEpochMs: number;
+  /** Press to the frame's network arrival (rVFC `receiveTime`), if exposed. */
+  pressToReceiveMs: number | null;
+  rtpTimestamp: number | null;
 }
 
 export interface HarnessRemoteControlApi {
