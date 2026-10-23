@@ -1311,7 +1311,23 @@ Copy request and clipboard byte-stream topic.
 
 ```bash
 RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME > /tmp/rc-n2n-chrome.log 2>&1 &
+RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME-FORM > /tmp/rc-n2n-chrome-form.log 2>&1 &
 ```
+
+Two page shapes, each its own scenario with its own keystone and its own
+oracle, because in the #404 incident every click took the host's
+`AxPressable` route and it is not known whether the pressed element was the
+input or a pressable container around it:
+
+| Scenario | Page | Keystone |
+|---|---|---|
+| `RC-N2N-CHROME` | one bare `<input>` filling the viewport | `petalrcnative` |
+| `RC-N2N-CHROME-FORM` | an application-form field: a `<label>` wrapping a padded, bordered `role="group"` box (`tabindex=-1`, a click handler that focuses the input, an icon) containing an `<input>` with a placeholder | `petalrcwebform` |
+
+In both, the click is aimed at the input's visible text area (a little right
+of its left padding, at its vertical centre), computed from the page's own
+geometry read over DevTools and converted to shared-window coordinates
+(Chrome's toolbar included), not at the window centre.
 
 Same controller, same test-peer host and same grants as RC-N2N, but the shared
 target is a **Google Chrome window the run launches itself**: its own
@@ -1330,9 +1346,8 @@ It reproduces the #404 incident condition measured as T1 case 8:
 - **Chrome's keyboard focus is put in the address bar** (AX `AXFocused` on the
   omnibox, no activation) right before the drive, and the run records that it
   took (`rc-n2n-chrome-predrive` → `omniboxFocused`).
-- The controller then clicks the centre of the remote window (inside the
-  input) and types the keystone through the real native controller route, and
-  releases with Escape. No Command chords: a Cmd+V would paste the machine's
+- The controller then clicks the field's text area and types the keystone
+  through the real native controller route, and releases with Escape. No Command chords: a Cmd+V would paste the machine's
   clipboard into the very field the oracle reads.
 
 Oracle (`test_cockpit/rc_n2n_chrome.rs`, `evaluate`): **PASS only when the

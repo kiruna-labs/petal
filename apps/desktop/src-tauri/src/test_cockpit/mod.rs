@@ -2305,6 +2305,16 @@ const SCENARIO_TABLE: &[ScenarioSpec] = &[
         kind: ScenarioKind::RemoteControlNativeToNative,
         requires_native_share: false,
     },
+    // The same case against a realistic application-form field: a <label>
+    // wrapping a clickable role="group" box that contains the <input>. In the
+    // #404 incident every click took the host's AxPressable route; this shape
+    // covers a pressed CONTAINER rather than the input itself.
+    ScenarioSpec {
+        id: "RC-N2N-CHROME-FORM",
+        tier: "gap",
+        kind: ScenarioKind::RemoteControlNativeToNative,
+        requires_native_share: false,
+    },
     ScenarioSpec {
         id: "RC-N2W",
         tier: "gap",
@@ -3604,7 +3614,7 @@ fn source_issue_for_scenario(scenario_id: &str) -> &'static str {
         "P-3"
     } else if scenario_id == "RC-N2N" || scenario_id == "RC-N2W" {
         "#819"
-    } else if scenario_id == "RC-N2N-CHROME" {
+    } else if scenario_id == "RC-N2N-CHROME" || scenario_id == "RC-N2N-CHROME-FORM" {
         "#404"
     } else if scenario_id == "CAM-N2W" {
         "#815"
@@ -3640,7 +3650,7 @@ fn coverage_kind_for_scenario(scenario_id: &str) -> &'static str {
         "test-cockpit-remote-control-scaled"
     } else if scenario_id == "RC-N2N" {
         "test-cockpit-native-controller-native-host"
-    } else if scenario_id == "RC-N2N-CHROME" {
+    } else if scenario_id == "RC-N2N-CHROME" || scenario_id == "RC-N2N-CHROME-FORM" {
         "test-cockpit-native-controller-chrome-host"
     } else if scenario_id == "RC-N2W" {
         "test-cockpit-native-controller-web-host"
@@ -9212,6 +9222,10 @@ async fn run_remote_control_native_to_chrome_scenario(
     children: &mut RunChildren,
 ) -> ScenarioOutcome {
     use rc_n2n_chrome::live;
+    let Some(shape) = rc_n2n_chrome::PageShape::for_scenario(scenario.id) else {
+        return infra_fail_outcome(scenario, "INFRA-FAIL not an RC-N2N-CHROME scenario id");
+    };
+    let keystone = shape.keystone();
     let peer_bin = test_peer_binary_path();
     let _ = writer.write(
         "scenario-scaffold",
@@ -9221,6 +9235,8 @@ async fn run_remote_control_native_to_chrome_scenario(
             "sourceIssue": source_issue_for_scenario(scenario.id),
             "coverageKind": coverage_kind_for_scenario(scenario.id),
             "testPeerBinaryPresent": peer_bin.is_some(),
+            "pageShape": shape.label(),
+            "keystone": keystone,
             "subcases": [
                 "launch-isolated-chrome-target",
                 "launch-test-peer-control-host",
@@ -9248,10 +9264,10 @@ async fn run_remote_control_native_to_chrome_scenario(
         return infra_fail_outcome(scenario, "INFRA-FAIL parent join did not provide a real access code");
     };
 
-    let marker = rc_n2n_chrome::marker_for_run(&run_id());
+    let marker = rc_n2n_chrome::marker_for_run(shape, &run_id());
     let frontmost_before_launch = live::frontmost_pid();
     let chrome_log_path = writer.dir.join("rc-n2n-chrome-browser.log");
-    let chrome = match live::ChromeTarget::launch(&chrome_path(), marker.clone(), &chrome_log_path).await {
+    let chrome = match live::ChromeTarget::launch(&chrome_path(), shape, marker.clone(), &chrome_log_path).await {
         Ok(chrome) => chrome,
         Err(error) => return infra_fail_outcome(scenario, format!("INFRA-FAIL test Chrome: {error}")),
     };
@@ -9406,7 +9422,7 @@ async fn run_remote_control_native_to_chrome_scenario(
         Err(error) => give_up!(writer, &mut child, "page", format!("read the page field before the drive: {error}")),
     }
     let omnibox_before = match live::omnibox_value(chrome_pid) {
-        Ok(value) if !value.contains(rc_n2n::KEYSTONE_TEXT) => value,
+        Ok(value) if !value.contains(keystone) => value,
         Ok(value) => give_up!(writer, &mut child, "address-bar", format!("the address bar already held the keystone before the drive: '{value}'")),
         Err(error) => give_up!(writer, &mut child, "address-bar", format!("read the address bar before the drive: {error}")),
     };
@@ -9424,6 +9440,16 @@ async fn run_remote_control_native_to_chrome_scenario(
     }
     let granted = await_controller_grant(host_window_id, Duration::from_secs(15)).await;
 
+    // Aim the click at the field's visible text area, in shared-window
+    // coordinates, from the page's own geometry.
+    let geometry = match chrome.click_geometry().await {
+        Ok(geometry) => geometry,
+        Err(error) => give_up!(writer, &mut child, "geometry", format!("read the field geometry: {error}")),
+    };
+    let Some(click) = rc_n2n_chrome::click_permille(&geometry) else {
+        give_up!(writer, &mut child, "geometry", format!("the field geometry places no click inside the window: {geometry:?}"))
+    };
+
     // The T1 case-8 condition: Chrome's own keyboard focus in the address
     // bar. Set over AX on the omnibox (no activation), right before the drive
     // so nothing the grant does can move it first. Deliberately NO
@@ -9437,6 +9463,8 @@ async fn run_remote_control_native_to_chrome_scenario(
         serde_json::json!({
             "granted": granted,
             "hostWindowId": host_window_id,
+            "clickGeometry": geometry,
+            "clickPermille": [click.0, click.1],
             "omniboxFocused": live::omnibox_is_focused(chrome_pid).ok(),
             "omniboxBefore": omnibox_before,
             "frontmostPid": live::frontmost_pid(),
@@ -9448,7 +9476,7 @@ async fn run_remote_control_native_to_chrome_scenario(
     let mut typed_state: Result<rc_n2n_chrome::PageState, String> = Err("never read".to_string());
     let mut omnibox_after: Result<String, String> = Err("never read".to_string());
     let mut omnibox_focused_after: Option<bool> = None;
-    for step in rc_n2n_chrome::keystone_steps() {
+    for step in rc_n2n_chrome::keystone_steps(shape, click) {
         if matches!(step, rc_n2n::DriveStep::ReleaseViaEscape) {
             // Read the verdict inputs BEFORE the release: Escape is the
             // release key, and an Escape reaching the address bar would revert
@@ -9456,7 +9484,7 @@ async fn run_remote_control_native_to_chrome_scenario(
             let deadline = Instant::now() + Duration::from_millis(rc_n2n_chrome::TYPED_VALUE_POLL_MS);
             loop {
                 typed_state = chrome.page_state().await;
-                let done = matches!(&typed_state, Ok(state) if state.value.as_deref() == Some(rc_n2n::KEYSTONE_TEXT));
+                let done = matches!(&typed_state, Ok(state) if state.value.as_deref() == Some(keystone));
                 if done || Instant::now() >= deadline {
                     break;
                 }
@@ -9536,7 +9564,7 @@ async fn run_remote_control_native_to_chrome_scenario(
         input_value: typed_value.as_deref().map_err(String::as_str),
         omnibox_before: &omnibox_before,
         omnibox_after: omnibox_after.as_deref().map_err(String::as_str),
-        expected_text: rc_n2n::KEYSTONE_TEXT,
+        expected_text: keystone,
     });
     let _ = writer.write(
         "rc-n2n-chrome-evidence",
@@ -9596,8 +9624,9 @@ async fn run_remote_control_native_to_chrome_scenario(
                     name: "web-field-holds-the-keystone".to_string(),
                     passed: true,
                     detail: format!(
-                        "input.value == '{}' with Chrome's focus starting in the address bar",
-                        rc_n2n::KEYSTONE_TEXT
+                        "{} shape: input.value == '{}' with Chrome's focus starting in the address bar",
+                        shape.label(),
+                        keystone
                     ),
                 },
             ],
@@ -11726,7 +11755,7 @@ async fn run_scenario(
                      compositor panels get zero-sized geometry; unlock the Mac and re-run",
                 );
             }
-            if scenario.id == "RC-N2N-CHROME" {
+            if rc_n2n_chrome::PageShape::for_scenario(scenario.id).is_some() {
                 return run_remote_control_native_to_chrome_scenario(
                     app, scenario, run_meta, writer, children,
                 )

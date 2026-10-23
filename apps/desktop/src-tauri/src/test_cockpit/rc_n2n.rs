@@ -46,6 +46,10 @@ pub(crate) const DRIVE_STEP_SETTLE_MS: u32 = 900;
 pub(crate) enum DriveStep {
     /// A left click at the centre of the remote window.
     Click,
+    /// A left click at a point of the remote window given in thousandths of
+    /// its width/height from the top-left corner (RC-N2N-CHROME aims at a web
+    /// field's visible text area, which is not the window centre).
+    ClickAt { x_permille: u32, y_permille: u32 },
     /// Type `text` one key at a time, exactly as a user's keyboard would.
     Type(String),
     /// A Command chord (Cmd+A, Cmd+C, Cmd+V); Copy/Paste are normalized by
@@ -85,7 +89,7 @@ pub(crate) fn delivery_keystone_steps() -> Vec<DriveStep> {
 /// Short label used in evidence records and failure messages.
 pub(crate) fn step_id(step: &DriveStep) -> String {
     match step {
-        DriveStep::Click => "click".to_string(),
+        DriveStep::Click | DriveStep::ClickAt { .. } => "click".to_string(),
         DriveStep::Type(_) => "type".to_string(),
         DriveStep::MetaChord(key) => format!("cmd-{key}"),
         DriveStep::ReleaseViaEscape => "release".to_string(),
@@ -129,21 +133,11 @@ fn key_code_for(ch: char) -> String {
 /// wire injection.
 pub(crate) fn drive_script(step: &DriveStep) -> String {
     match step {
-        DriveStep::Click => "(() => {\n\
-             const el = document.querySelector('.control-overlay');\n\
-             if (!el) return;\n\
-             const r = el.getBoundingClientRect();\n\
-             if (!(r.width > 0 && r.height > 0)) return;\n\
-             const x = r.left + r.width / 2;\n\
-             const y = r.top + r.height / 2;\n\
-             const p = (type, extra) => el.dispatchEvent(new PointerEvent(type, Object.assign({\n\
-               bubbles: true, cancelable: true, composed: true, pointerId: 1,\n\
-               pointerType: 'mouse', isPrimary: true, clientX: x, clientY: y, detail: 1\n\
-             }, extra)));\n\
-             p('pointerdown', { button: 0, buttons: 1 });\n\
-             p('pointerup', { button: 0, buttons: 0 });\n\
-           })();"
-            .to_string(),
+        DriveStep::Click => click_script(500, 500),
+        DriveStep::ClickAt {
+            x_permille,
+            y_permille,
+        } => click_script((*x_permille).min(1000), (*y_permille).min(1000)),
         // Paced, not blasted. A tight loop hands the host a burst its bounded
         // coalescing replay queue is entitled to collapse, and a dropped
         // character would read as "the text never landed" -- a product verdict
@@ -180,6 +174,27 @@ pub(crate) fn drive_script(step: &DriveStep) -> String {
            })();"
             .to_string(),
     }
+}
+
+/// The click gesture: a real pointer down+up pair dispatched at the
+/// `.control-overlay` element, at a point given in thousandths of its rect.
+fn click_script(x_permille: u32, y_permille: u32) -> String {
+    format!(
+        "(() => {{\n\
+             const el = document.querySelector('.control-overlay');\n\
+             if (!el) return;\n\
+             const r = el.getBoundingClientRect();\n\
+             if (!(r.width > 0 && r.height > 0)) return;\n\
+             const x = r.left + r.width * {x_permille} / 1000;\n\
+             const y = r.top + r.height * {y_permille} / 1000;\n\
+             const p = (type, extra) => el.dispatchEvent(new PointerEvent(type, Object.assign({{\n\
+               bubbles: true, cancelable: true, composed: true, pointerId: 1,\n\
+               pointerType: 'mouse', isPrimary: true, clientX: x, clientY: y, detail: 1\n\
+             }}, extra)));\n\
+             p('pointerdown', {{ button: 0, buttons: 1 }});\n\
+             p('pointerup', {{ button: 0, buttons: 0 }});\n\
+           }})();"
+    )
 }
 
 fn js_key_entries(text: &str) -> String {
@@ -260,7 +275,10 @@ pub(crate) struct RcN2nObservations<'a> {
 }
 
 fn is_input(kind: &str) -> bool {
-    matches!(kind, "pointer" | "key" | "text" | "wheel" | "copy" | "paste")
+    matches!(
+        kind,
+        "pointer" | "key" | "text" | "wheel" | "copy" | "paste"
+    )
 }
 
 fn is_delivery_input(kind: &str) -> bool {
@@ -647,7 +665,10 @@ mod tests {
         match verdict {
             RcVerdict::TestFail(detail) => {
                 assert!(detail.contains("never granted control"), "{detail}");
-                assert!(detail.contains("denied"), "must name what it did see: {detail}");
+                assert!(
+                    detail.contains("denied"),
+                    "must name what it did see: {detail}"
+                );
             }
             other => panic!("expected TestFail, got {other:?}"),
         }
@@ -806,7 +827,9 @@ mod tests {
         );
         obs.sessions_after = 2;
         match evaluate(obs) {
-            RcVerdict::TestFail(detail) => assert!(detail.contains("survived the release"), "{detail}"),
+            RcVerdict::TestFail(detail) => {
+                assert!(detail.contains("survived the release"), "{detail}")
+            }
             other => panic!("expected TestFail, got {other:?}"),
         }
     }
@@ -865,6 +888,23 @@ mod tests {
             script.contains("getBoundingClientRect"),
             "coordinates must come from the real element rect: {script}"
         );
+    }
+
+    #[test]
+    fn click_at_aims_at_the_requested_fraction_of_the_overlay_and_clamps() {
+        let script = drive_script(&DriveStep::ClickAt {
+            x_permille: 120,
+            y_permille: 640,
+        });
+        assert!(script.contains("r.width * 120 / 1000"), "{script}");
+        assert!(script.contains("r.height * 640 / 1000"), "{script}");
+        assert!(script.contains("'pointerdown'") && script.contains("'pointerup'"));
+        let clamped = drive_script(&DriveStep::ClickAt {
+            x_permille: 5000,
+            y_permille: 0,
+        });
+        assert!(clamped.contains("r.width * 1000 / 1000"), "{clamped}");
+        assert!(drive_script(&DriveStep::Click).contains("r.width * 500 / 1000"));
     }
 
     #[test]

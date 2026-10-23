@@ -57,7 +57,7 @@ pub fn for_scenario(id: &str) -> EvidenceBasis {
         "RC-N2N" => EvidenceBasis::HostEffect,
         // RC-N2N-CHROME (#404) reads the page's own input.value over DevTools
         // and the address bar over AX: host-side effects, not wire shape.
-        "RC-N2N-CHROME" => EvidenceBasis::HostEffect,
+        "RC-N2N-CHROME" | "RC-N2N-CHROME-FORM" => EvidenceBasis::HostEffect,
         "RC-N2W" => EvidenceBasis::WireShape,
         // The oracle reads the host's own plugin journal for a named plugin id
         // that only the frame's executed scripts can put there -- a host-side

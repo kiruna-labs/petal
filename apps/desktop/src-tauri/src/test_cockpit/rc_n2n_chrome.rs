@@ -27,11 +27,6 @@ use super::rc_n2n::{DrivenInput, GrantStatus, HostEffect, RcVerdict};
 /// Element id of the page's single text field. The DevTools oracle reads it.
 pub(crate) const INPUT_ELEMENT_ID: &str = "petal-rc-target";
 
-/// Prefix of the per-run title marker. The peer finds the window by it, so it
-/// must be unique per run (a Chrome left behind by a killed run can never be
-/// picked up by the next one).
-pub(crate) const MARKER_PREFIX: &str = "petal-rc-n2n-chrome-";
-
 /// AX description Chrome gives its omnibox. Used to prefer the right text
 /// field if Chrome ever exposes a second native one (find bar, side panel).
 pub(crate) const OMNIBOX_AX_DESCRIPTION: &str = "Address and search bar";
@@ -41,22 +36,78 @@ pub(crate) const OMNIBOX_AX_DESCRIPTION: &str = "Address and search bar";
 /// asynchronous; a single fixed settle would turn rig timing into a verdict.
 pub(crate) const TYPED_VALUE_POLL_MS: u64 = 6_000;
 
-/// The ordered drive plan: click into the field, type, release. No Command
-/// chords on purpose: a Cmd+V would paste whatever the machine's clipboard
-/// holds into the very field the oracle reads, and Cmd+A/C prove nothing here
-/// that RC-N2N does not already prove.
-pub(crate) fn keystone_steps() -> Vec<super::rc_n2n::DriveStep> {
-    use super::rc_n2n::{DriveStep, KEYSTONE_TEXT};
+/// The two page shapes the case runs, each its own scenario with its own
+/// keystone and oracle. In the #404 incident every click took the host's
+/// `AxPressable` route, and it is not known whether the pressed element was
+/// the `<input>` itself or a pressable container around it, so both shapes
+/// must pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageShape {
+    /// `RC-N2N-CHROME`: one bare `<input>` filling the viewport.
+    BareInput,
+    /// `RC-N2N-CHROME-FORM`: a realistic application-form field -- a
+    /// `<label>` wrapping a styled, clickable `role="group"` box (padding,
+    /// border, icon, click handler that focuses the input) containing an
+    /// `<input>` with a placeholder.
+    FormField,
+}
+
+impl PageShape {
+    pub(crate) fn for_scenario(scenario_id: &str) -> Option<Self> {
+        match scenario_id {
+            "RC-N2N-CHROME" => Some(Self::BareInput),
+            "RC-N2N-CHROME-FORM" => Some(Self::FormField),
+            _ => None,
+        }
+    }
+
+    /// Typed by the controller. Distinct per shape, letters only (see
+    /// `rc_n2n::KEYSTONE_TEXT`), so one shape's evidence can never satisfy the
+    /// other's oracle.
+    pub(crate) fn keystone(self) -> &'static str {
+        match self {
+            Self::BareInput => super::rc_n2n::KEYSTONE_TEXT,
+            Self::FormField => "petalrcwebform",
+        }
+    }
+
+    /// Prefix of the per-run title marker. The peer finds the window by it,
+    /// so it must be unique per run (a Chrome left behind by a killed run can
+    /// never be picked up by the next one).
+    pub(crate) fn marker_prefix(self) -> &'static str {
+        match self {
+            Self::BareInput => "petal-rc-n2n-chrome-",
+            Self::FormField => "petal-rc-n2n-chromeform-",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::BareInput => "bare-input",
+            Self::FormField => "form-field",
+        }
+    }
+}
+
+/// The ordered drive plan: click into the field's visible text area, type,
+/// release. No Command chords on purpose: a Cmd+V would paste whatever the
+/// machine's clipboard holds into the very field the oracle reads, and
+/// Cmd+A/C prove nothing here that RC-N2N does not already prove.
+pub(crate) fn keystone_steps(shape: PageShape, click: (u32, u32)) -> Vec<super::rc_n2n::DriveStep> {
+    use super::rc_n2n::DriveStep;
     vec![
-        DriveStep::Click,
-        DriveStep::Type(KEYSTONE_TEXT.to_string()),
+        DriveStep::ClickAt {
+            x_permille: click.0,
+            y_permille: click.1,
+        },
+        DriveStep::Type(shape.keystone().to_string()),
         DriveStep::ReleaseViaEscape,
     ]
 }
 
 /// The run's title marker, unique per run.
-pub(crate) fn marker_for_run(run_id: &str) -> String {
-    format!("{MARKER_PREFIX}{run_id}")
+pub(crate) fn marker_for_run(shape: PageShape, run_id: &str) -> String {
+    format!("{}{run_id}", shape.marker_prefix())
 }
 
 fn html_escape(value: &str) -> String {
@@ -74,28 +125,147 @@ fn html_escape(value: &str) -> String {
     out
 }
 
-/// The local target page. One `<input>` that fills the whole viewport, so the
-/// controller's click at the centre of the shared window (the RC-N2N click
-/// plan) always lands inside it, below Chrome's toolbar. No `autofocus`: the
+const PAGE_TICK_CSS: &str = "#petal-rc-tick { position: fixed; right: 6px; bottom: 6px; \
+     width: 14px; height: 14px; background: #c33; pointer-events: none; \
+     animation: petal-rc-spin 1s linear infinite; }\n\
+     @keyframes petal-rc-spin { to { transform: rotate(360deg); } }\n";
+
+/// The local target page for `shape`. No `autofocus` in either shape: the
 /// whole point is that nothing but the controller's click puts focus there.
 /// A small CSS animation keeps the window drawing, because a static window
 /// starves ScreenCaptureKit and the share would never read ready.
-pub(crate) fn target_page_html(marker: &str) -> String {
+pub(crate) fn target_page_html(shape: PageShape, marker: &str) -> String {
+    let (style, body) = match shape {
+        PageShape::BareInput => (
+            format!(
+                "html, body {{ margin: 0; height: 100%; background: #fff; }}\n\
+                 #{id} {{ position: fixed; inset: 0; width: 100vw; height: 100vh; \
+                 box-sizing: border-box; border: 0; padding: 0 24px; \
+                 font: 40px/1.2 -apple-system, sans-serif; }}\n",
+                id = INPUT_ELEMENT_ID
+            ),
+            format!(
+                "<input id=\"{id}\" type=\"text\" autocomplete=\"off\" spellcheck=\"false\">",
+                id = INPUT_ELEMENT_ID
+            ),
+        ),
+        PageShape::FormField => (
+            format!(
+                "html, body {{ margin: 0; height: 100%; background: #f4f5f7; \
+                 font: 15px/1.4 -apple-system, sans-serif; color: #1d1f24; }}\n\
+                 main {{ max-width: 640px; margin: 0 auto; padding: 28px 32px; }}\n\
+                 h1 {{ font-size: 22px; margin: 0 0 4px; }} p {{ margin: 0 0 22px; color: #5b616e; }}\n\
+                 .field {{ display: block; margin: 0 0 18px; font-weight: 600; }}\n\
+                 .field-box {{ display: flex; align-items: center; gap: 10px; margin-top: 6px; \
+                 padding: 12px 14px; background: #fff; border: 1px solid #c9ced8; \
+                 border-radius: 8px; cursor: text; font-weight: 400; }}\n\
+                 .field-box:focus-within {{ border-color: #3b6ef5; box-shadow: 0 0 0 3px #3b6ef533; }}\n\
+                 .field-icon {{ color: #8a90a0; }}\n\
+                 #{id} {{ flex: 1; min-width: 0; border: 0; outline: 0; padding: 4px 0; \
+                 font: inherit; font-size: 17px; background: transparent; }}\n",
+                id = INPUT_ELEMENT_ID
+            ),
+            format!(
+                "<main><h1>Job application</h1><p>Tell us a little about yourself.</p>\
+                 <form onsubmit=\"return false\">\
+                 <label class=\"field\">Full name\
+                 <div class=\"field-box\" role=\"group\" tabindex=\"-1\" \
+                 onclick=\"this.querySelector('input').focus()\">\
+                 <span class=\"field-icon\" aria-hidden=\"true\">&#9998;</span>\
+                 <input id=\"{id}\" name=\"fullname\" type=\"text\" placeholder=\"Jane Doe\" \
+                 autocomplete=\"off\" spellcheck=\"false\"></div></label>\
+                 <label class=\"field\">Email\
+                 <div class=\"field-box\" role=\"group\"><input name=\"email\" type=\"email\" \
+                 placeholder=\"jane@example.com\" autocomplete=\"off\" \
+                 style=\"flex:1;border:0;outline:0;font:inherit;background:transparent\"></div></label>\
+                 </form></main>",
+                id = INPUT_ELEMENT_ID
+            ),
+        ),
+    };
     format!(
         "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>{title}</title>\n\
-         <style>\n\
-         html, body {{ margin: 0; height: 100%; background: #fff; }}\n\
-         #{id} {{ position: fixed; inset: 0; width: 100vw; height: 100vh; box-sizing: border-box; \
-         border: 0; padding: 0 24px; font: 40px/1.2 -apple-system, sans-serif; }}\n\
-         #petal-rc-tick {{ position: fixed; right: 6px; bottom: 6px; width: 14px; height: 14px; \
-         background: #c33; pointer-events: none; animation: petal-rc-spin 1s linear infinite; }}\n\
-         @keyframes petal-rc-spin {{ to {{ transform: rotate(360deg); }} }}\n\
-         </style></head>\n\
-         <body><input id=\"{id}\" type=\"text\" autocomplete=\"off\" spellcheck=\"false\">\
-         <div id=\"petal-rc-tick\"></div></body></html>\n",
+         <style>\n{style}{tick}</style></head>\n<body>{body}<div id=\"petal-rc-tick\"></div>\
+         </body></html>\n",
         title = html_escape(marker),
-        id = INPUT_ELEMENT_ID,
+        tick = PAGE_TICK_CSS,
     )
+}
+
+/// Where the click must land, as read from the page over DevTools: Chrome's
+/// outer window size, its viewport size, and the target input's rect and left
+/// padding, all in CSS pixels (= points at 100% zoom).
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClickGeometry {
+    pub outer_width: f64,
+    pub outer_height: f64,
+    pub inner_width: f64,
+    pub inner_height: f64,
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+    pub padding_left: f64,
+}
+
+pub(crate) fn click_geometry_expression() -> String {
+    format!(
+        "JSON.stringify((() => {{ const el = document.getElementById('{INPUT_ELEMENT_ID}'); \
+         const r = el.getBoundingClientRect(); \
+         return {{ outerWidth: window.outerWidth, outerHeight: window.outerHeight, \
+         innerWidth: window.innerWidth, innerHeight: window.innerHeight, left: r.left, \
+         top: r.top, width: r.width, height: r.height, \
+         paddingLeft: parseFloat(getComputedStyle(el).paddingLeft) || 0 }}; }})())"
+    )
+}
+
+/// The click point in thousandths of the SHARED WINDOW (the whole Chrome
+/// window, toolbar included -- that is what the controller's overlay maps
+/// to). Aimed at the input's visible text area: a little right of its left
+/// padding, at its vertical centre. Chrome on macOS has all its chrome on top,
+/// so the viewport's offset inside the window is the size difference.
+/// `None` when the geometry cannot place a point inside the window.
+pub(crate) fn click_permille(geometry: &ClickGeometry) -> Option<(u32, u32)> {
+    let g = geometry;
+    if !(g.outer_width > 0.0 && g.outer_height > 0.0 && g.width > 0.0 && g.height > 0.0) {
+        return None;
+    }
+    let offset_x = (g.outer_width - g.inner_width).max(0.0);
+    let offset_y = (g.outer_height - g.inner_height).max(0.0);
+    let x = offset_x + g.left + (g.padding_left + 24.0).min(g.width / 2.0);
+    let y = offset_y + g.top + g.height / 2.0;
+    if !(x > 0.0 && x < g.outer_width && y > offset_y && y < g.outer_height) {
+        return None;
+    }
+    Some((
+        (x * 1000.0 / g.outer_width).round() as u32,
+        (y * 1000.0 / g.outer_height).round() as u32,
+    ))
+}
+
+/// Decode a `Runtime.evaluate` response whose expression returned a JSON
+/// string. Any protocol error or exception is an `Err`: "could not read the
+/// page" must never collapse into a value.
+pub(crate) fn parse_json_eval_response<T: serde::de::DeserializeOwned>(
+    response: &serde_json::Value,
+) -> Result<T, String> {
+    if let Some(error) = response.get("error") {
+        return Err(format!("DevTools error: {error}"));
+    }
+    let result = response
+        .get("result")
+        .ok_or("DevTools response carried no result")?;
+    if let Some(exception) = result.get("exceptionDetails") {
+        return Err(format!("page threw while being read: {exception}"));
+    }
+    let encoded = result
+        .get("result")
+        .and_then(|inner| inner.get("value"))
+        .and_then(|value| value.as_str())
+        .ok_or("DevTools result carried no string value")?;
+    serde_json::from_str(encoded)
+        .map_err(|error| format!("page answer was not the expected JSON: {error}"))
 }
 
 /// Chrome's command line, minus the binary and the page URL. Headed (the host
@@ -166,21 +336,7 @@ pub(crate) struct PageState {
 /// protocol error or exception is an `Err`: "could not read the field" must
 /// never collapse into "the field is empty".
 pub(crate) fn parse_page_state_response(response: &serde_json::Value) -> Result<PageState, String> {
-    if let Some(error) = response.get("error") {
-        return Err(format!("DevTools error: {error}"));
-    }
-    let result = response
-        .get("result")
-        .ok_or("DevTools response carried no result")?;
-    if let Some(exception) = result.get("exceptionDetails") {
-        return Err(format!("page threw while reading the field: {exception}"));
-    }
-    let encoded = result
-        .get("result")
-        .and_then(|inner| inner.get("value"))
-        .and_then(|value| value.as_str())
-        .ok_or("DevTools result carried no string value")?;
-    serde_json::from_str(encoded).map_err(|error| format!("page state was not JSON: {error}"))
+    parse_json_eval_response(response)
 }
 
 /// Pick Chrome's BROWSER process for `user_data_dir` out of `ps -axo
@@ -567,6 +723,7 @@ pub(crate) mod live {
     impl ChromeTarget {
         pub(crate) async fn launch(
             chrome: &Path,
+            shape: super::PageShape,
             marker: String,
             log_path: &Path,
         ) -> Result<Self, String> {
@@ -578,7 +735,7 @@ pub(crate) mod live {
             let page_path = run_dir.join("target.html");
             std::fs::create_dir_all(&user_data_dir)
                 .map_err(|error| format!("create Chrome profile dir: {error}"))?;
-            std::fs::write(&page_path, super::target_page_html(&marker))
+            std::fs::write(&page_path, super::target_page_html(shape, &marker))
                 .map_err(|error| format!("write target page: {error}"))?;
             let log = std::fs::File::create(log_path)
                 .map_err(|error| format!("create Chrome log: {error}"))?;
@@ -653,6 +810,18 @@ pub(crate) mod live {
 
         /// Read the page's field over DevTools (`Runtime.evaluate`).
         pub(crate) async fn page_state(&self) -> Result<super::PageState, String> {
+            self.eval_json(super::page_state_expression()).await
+        }
+
+        /// Read where the click must land (window + input geometry).
+        pub(crate) async fn click_geometry(&self) -> Result<super::ClickGeometry, String> {
+            self.eval_json(super::click_geometry_expression()).await
+        }
+
+        async fn eval_json<T: serde::de::DeserializeOwned>(
+            &self,
+            expression: String,
+        ) -> Result<T, String> {
             use futures_util::{SinkExt, StreamExt};
             use tokio_tungstenite::tungstenite::Message;
             let ws_url = self.page_ws_url().await?;
@@ -666,7 +835,7 @@ pub(crate) mod live {
             let request = serde_json::json!({
                 "id": 1,
                 "method": "Runtime.evaluate",
-                "params": { "expression": super::page_state_expression(), "returnByValue": true },
+                "params": { "expression": expression, "returnByValue": true },
             });
             socket
                 .send(Message::Text(request.to_string().into()))
@@ -686,7 +855,7 @@ pub(crate) mod live {
                     let value: serde_json::Value = serde_json::from_str(text.as_str())
                         .map_err(|error| format!("DevTools reply was not JSON: {error}"))?;
                     if value.get("id").and_then(|id| id.as_u64()) == Some(1) {
-                        break super::parse_page_state_response(&value);
+                        break super::parse_json_eval_response(&value);
                     }
                 }
             };
@@ -917,20 +1086,124 @@ mod tests {
 
     #[test]
     fn the_plan_is_click_type_release_with_no_clipboard_chords() {
-        let steps = keystone_steps();
+        for shape in [PageShape::BareInput, PageShape::FormField] {
+            let steps = keystone_steps(shape, (120, 640));
+            assert_eq!(
+                steps,
+                vec![
+                    DriveStep::ClickAt {
+                        x_permille: 120,
+                        y_permille: 640
+                    },
+                    DriveStep::Type(shape.keystone().to_string()),
+                    DriveStep::ReleaseViaEscape
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn each_shape_is_its_own_scenario_with_its_own_keystone_and_marker() {
         assert_eq!(
-            steps,
-            vec![
-                DriveStep::Click,
-                DriveStep::Type(KEYSTONE_TEXT.to_string()),
-                DriveStep::ReleaseViaEscape
-            ]
+            PageShape::for_scenario("RC-N2N-CHROME"),
+            Some(PageShape::BareInput)
         );
+        assert_eq!(
+            PageShape::for_scenario("RC-N2N-CHROME-FORM"),
+            Some(PageShape::FormField)
+        );
+        assert_eq!(PageShape::for_scenario("RC-N2N"), None);
+        let (a, b) = (PageShape::BareInput, PageShape::FormField);
+        assert_ne!(a.keystone(), b.keystone());
+        assert!(!a.keystone().contains(b.keystone()) && !b.keystone().contains(a.keystone()));
+        assert!(b.keystone().chars().all(|c| c.is_ascii_lowercase()));
+        let (ma, mb) = (marker_for_run(a, "1"), marker_for_run(b, "1"));
+        assert!(!ma.contains(&mb) && !mb.contains(&ma), "{ma} / {mb}");
+        for shape in [a, b] {
+            let marker = marker_for_run(shape, "1785084128968");
+            for other in [a, b] {
+                assert!(!marker.contains(other.keystone()), "{marker}");
+            }
+        }
+    }
+
+    #[test]
+    fn form_shape_wraps_the_input_in_a_pressable_labelled_container() {
+        let html = target_page_html(PageShape::FormField, "petal-rc-n2n-chromeform-1");
+        assert!(html.contains("<label class=\"field\">"), "{html}");
+        assert!(html.contains("role=\"group\""), "{html}");
+        assert!(html.contains("tabindex=\"-1\""), "{html}");
+        assert!(html.contains("onclick="), "{html}");
+        assert!(html.contains("placeholder=\"Jane Doe\""), "{html}");
+        assert!(html.contains("padding: 12px 14px"), "{html}");
+        assert_eq!(
+            html.matches(&format!("id=\"{INPUT_ELEMENT_ID}\"")).count(),
+            1
+        );
+        assert!(!html.contains("autofocus"), "{html}");
+        assert!(html.contains("animation"), "{html}");
+        for shape in [PageShape::BareInput, PageShape::FormField] {
+            assert!(!html.contains(shape.keystone()));
+        }
+    }
+
+    fn geometry(top: f64, height: f64) -> ClickGeometry {
+        ClickGeometry {
+            outer_width: 900.0,
+            outer_height: 700.0,
+            inner_width: 900.0,
+            inner_height: 612.0,
+            left: 46.0,
+            top,
+            width: 560.0,
+            height,
+            padding_left: 0.0,
+        }
+    }
+
+    #[test]
+    fn click_lands_in_the_inputs_text_area_in_window_coordinates() {
+        // Input at viewport y 150..176 -> window y 88+163 = 251 of 700.
+        let (x, y) = click_permille(&geometry(150.0, 26.0)).unwrap();
+        assert_eq!(y, 359, "toolbar offset must be added: {y}");
+        assert_eq!(x, 78, "a little right of the field's left edge: {x}");
+        // The bare shape fills the viewport: the click sits in the content.
+        let full = ClickGeometry {
+            left: 0.0,
+            top: 0.0,
+            width: 900.0,
+            height: 612.0,
+            padding_left: 24.0,
+            ..geometry(0.0, 0.0)
+        };
+        let (fx, fy) = click_permille(&full).unwrap();
+        assert!(fy > (88.0 * 1000.0 / 700.0) as u32 && fy < 1000, "{fy}");
+        assert_eq!(fx, 53);
+    }
+
+    #[test]
+    fn click_geometry_that_cannot_place_a_point_is_refused() {
+        assert_eq!(click_permille(&geometry(150.0, 0.0)), None);
+        assert_eq!(
+            click_permille(&geometry(900.0, 26.0)),
+            None,
+            "below the window"
+        );
+        assert_eq!(
+            click_permille(&geometry(-200.0, 26.0)),
+            None,
+            "inside the toolbar"
+        );
+        let geometry_json = serde_json::json!({"id": 1, "result": {"result": {"type": "string",
+            "value": "{\"outerWidth\":900,\"outerHeight\":700,\"innerWidth\":900,\"innerHeight\":612,\"left\":46,\"top\":150,\"width\":560,\"height\":26,\"paddingLeft\":0}"}}});
+        let parsed: ClickGeometry = parse_json_eval_response(&geometry_json).unwrap();
+        assert_eq!(parsed, geometry(150.0, 26.0));
+        assert!(click_geometry_expression().contains(INPUT_ELEMENT_ID));
     }
 
     #[test]
     fn page_has_one_unfocused_input_and_escapes_the_marker() {
-        let html = target_page_html("petal-rc-n2n-chrome-1<x>");
+        let html = target_page_html(PageShape::BareInput, "petal-rc-n2n-chrome-1<x>");
         assert!(
             html.contains(&format!("id=\"{INPUT_ELEMENT_ID}\"")),
             "{html}"
@@ -959,7 +1232,7 @@ mod tests {
 
     #[test]
     fn marker_is_per_run_and_does_not_contain_the_keystone() {
-        let marker = marker_for_run("1785084128968");
+        let marker = marker_for_run(PageShape::BareInput, "1785084128968");
         assert_eq!(marker, "petal-rc-n2n-chrome-1785084128968");
         assert!(!marker.contains(KEYSTONE_TEXT));
     }
