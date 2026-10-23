@@ -17,8 +17,9 @@ use crate::screen_audio::{
 use crate::share_priority::SharePriority;
 use crate::time_util::now_us;
 use crate::transport::publisher::{
-    CaptureResolution, PostWakeEncoderFallbackRecovery, RoomConnection, RoomConnectionError,
-    ShareQuality, SharedSourceKind,
+    CaptureResolution, EncoderRecoveryStep, EncoderWedgeRecovery,
+    PostWakeEncoderFallbackRecovery, RoomConnection, RoomConnectionError, ShareQuality,
+    SharedSourceKind,
 };
 use crate::video_color::VideoColorProfile;
 use screencapturekit::stream::content_filter::SCContentFilter;
@@ -5220,16 +5221,24 @@ async fn start_share_with_capture_source(
     }
     let (published_result, metadata_outcome, metadata_elapsed) = match publish_origin {
         SharePublishOrigin::Ordinary => {
+            // #427: an ordinary share is where a wedged VideoToolbox encoder
+            // actually shows up (a fresh share after the wedge publishes an
+            // empty track for the rest of the process), so it is also where the
+            // recovery action has to be attached.
+            let encoder_wedge_recovery =
+                wedge_recovery_for_share(&app, window_id, started_seq, 0);
             publish_media_while_metadata_runs(
                 metadata_task,
                 publish_with_reconnect_retry(
                     window_id,
                     || {
-                        room_connection.publish_window_at(
+                        room_connection.publish_window_at_with_recovery_context(
                             width,
                             height,
                             ShareQuality::Full,
                             Some(window_id),
+                            Some(encoder_wedge_recovery.clone()),
+                            false,
                         )
                     },
                     || room_connection.room().connection_state(),
@@ -8822,12 +8831,124 @@ async fn retry_post_wake_software_encoder_fallback(
         true,
         1,
         None,
+        false,
+        None,
     )
     .await;
     log::info!(
         "session: window {window_id} one-shot post-wake encoder republish {}",
         if outcome.replaced() {
             "succeeded"
+        } else {
+            "did not replace the active track"
+        }
+    );
+}
+
+/// [#427] The recovery action an active share reports a wedged encoder
+/// through. Built here rather than in the publisher because only the session
+/// owns the share slot, the republish intent and the capture config; the
+/// publisher owns the only stats poll that can see the wedge.
+///
+/// `steps_used` carries the share's already-spent recovery budget into a
+/// republication created by a recovery, so a permanently broken encoder
+/// escalates once more and then stops instead of republishing in a loop.
+fn wedge_recovery_for_share(
+    app: &tauri::AppHandle,
+    window_id: u32,
+    started_seq: u64,
+    steps_used: u32,
+) -> EncoderWedgeRecovery {
+    let app_for_action = app.clone();
+    EncoderWedgeRecovery::new(steps_used, move |step| {
+        let app = app_for_action.clone();
+        tokio::spawn(async move {
+            recover_wedged_encoder_publication(app, window_id, started_seq, step).await;
+        });
+    })
+}
+
+/// [#427] Repair a share whose encoder stopped producing frames while it was
+/// funded -- the VideoToolbox `-12912`/`-12915` wedge, where the publisher keeps
+/// a track published but encodes nothing, so every later share carries zero
+/// RTP for the rest of the process.
+///
+/// Step 1 (`Republish`) recreates the encoder at the share's current geometry;
+/// step 2 (`FallBackToSoftware`) republishes onto libwebrtc's software H.264
+/// encoder when a fresh VideoToolbox session is still unavailable. Both reuse
+/// the ordinary republish transaction (slot swap, intent generation, capture
+/// reconfiguration), so there is exactly one republish path.
+///
+/// A share that disappeared (a new share started, the window was closed) or a
+/// room that is gone simply logs and returns: a stale recovery must never
+/// publish a track nobody asked for.
+pub(crate) async fn recover_wedged_encoder_publication(
+    app: tauri::AppHandle,
+    window_id: u32,
+    started_seq: u64,
+    step: EncoderRecoveryStep,
+) {
+    let state = app.state::<SessionState>();
+    let state = state.inner();
+    let Some((room_connection, slot, republish_intent, intent_generation, capture_config)) = ({
+        let guard = state.inner.lock_unpoisoned();
+        let share = guard
+            .shares
+            .get(&window_id)
+            .filter(|share| share.started_seq == started_seq);
+        share.and_then(|share| {
+            let room_connection = guard
+                .joined
+                .as_ref()
+                .map(|joined| joined.room_connection.clone())?;
+            let capture_config = share.capture.configuration_handle();
+            let intent_generation = begin_republish_intent(&share.republish_intent);
+            Some((
+                room_connection,
+                share.published.clone(),
+                share.republish_intent.clone(),
+                intent_generation,
+                capture_config,
+            ))
+        })
+    }) else {
+        log::info!(
+            "session: skipping wedged-encoder recovery for stale share {window_id}/{started_seq} ({})",
+            step.description()
+        );
+        return;
+    };
+
+    let force_software_encoder = step == EncoderRecoveryStep::FallBackToSoftware;
+    let steps_used = if force_software_encoder { 2 } else { 1 };
+    let next_recovery = wedge_recovery_for_share(&app, window_id, started_seq, steps_used);
+    let reason = format!("wedged encoder: {}", step.description());
+    let outcome = republish_window_with_target(
+        room_connection,
+        slot,
+        republish_intent,
+        intent_generation,
+        &capture_config,
+        window_id,
+        |current, _capture_config, resolution| RepublishTarget {
+            width: current.width(),
+            height: current.height(),
+            quality: current.quality(),
+            resolution,
+        },
+        &reason,
+        true,
+        1,
+        None,
+        force_software_encoder,
+        Some(next_recovery),
+    )
+    .await;
+    log::warn!(
+        "session: window {window_id} wedged-encoder recovery ({}) {}",
+        step.description(),
+        if outcome.replaced() {
+            "republished the track"
         } else {
             "did not replace the active track"
         }
@@ -8878,6 +8999,8 @@ pub async fn repair_active_share_publication(state: &SessionState, window_id: u3
         "receiver watchdog repair",
         true,
         REPUBLISH_RETRY_ATTEMPTS,
+        None,
+        false,
         None,
     )
     .await
@@ -9037,10 +9160,19 @@ async fn publish_window_with_timeout(
     height: u32,
     quality: ShareQuality,
     reason: &str,
+    force_software_encoder: bool,
+    encoder_wedge_recovery: Option<crate::transport::publisher::EncoderWedgeRecovery>,
 ) -> Option<Arc<crate::transport::publisher::PublishedTrack>> {
     match tokio::time::timeout(
         REPUBLISH_AWAIT_TIMEOUT,
-        room_connection.publish_window_at(width, height, quality, Some(window_id)),
+        room_connection.publish_window_at_with_recovery_context(
+            width,
+            height,
+            quality,
+            Some(window_id),
+            encoder_wedge_recovery,
+            force_software_encoder,
+        ),
     )
     .await
     {
@@ -9155,6 +9287,14 @@ async fn republish_window_with_target(
     force_republish: bool,
     max_publish_attempts: usize,
     reconnect_guard: Option<&ReconnectRepublishGuard<'_>>,
+    // [#427] `force_software_encoder` publishes the replacement onto libwebrtc's
+    // software H.264 encoder; only the wedged-encoder escalation sets it.
+    // `encoder_wedge_recovery` is the action the REPLACEMENT publication
+    // inherits, carrying the recovery steps already spent so a permanently
+    // broken encoder escalates once more and then stops instead of republishing
+    // in a loop (the budget is per share, not per publication).
+    force_software_encoder: bool,
+    encoder_wedge_recovery: Option<crate::transport::publisher::EncoderWedgeRecovery>,
 ) -> RepublishOutcome {
     // Capture the resolution once for this transaction. Reading the config's
     // mutex at each await boundary could mix the old and new preference and
@@ -9214,6 +9354,8 @@ async fn republish_window_with_target(
             target.height,
             target.quality,
             reason,
+            force_software_encoder,
+            encoder_wedge_recovery.clone(),
         )
         .await
         else {
@@ -9454,6 +9596,8 @@ async fn republish_window_for_quality(
         false,
         REPUBLISH_RETRY_ATTEMPTS,
         None,
+        false,
+        None,
     )
     .await
     .replaced()
@@ -9498,6 +9642,8 @@ async fn republish_window_for_quality_forced(
         true,
         REPUBLISH_RETRY_ATTEMPTS,
         Some(&transaction_guard),
+        false,
+        None,
     )
     .await
 }
@@ -9544,6 +9690,8 @@ async fn republish_window_for_resize(
         false,
         REPUBLISH_RETRY_ATTEMPTS,
         None,
+        false,
+        None,
     )
     .await
     .replaced()
@@ -9578,6 +9726,8 @@ async fn republish_window_for_resolution(
         "resolution",
         false,
         REPUBLISH_RETRY_ATTEMPTS,
+        None,
+        false,
         None,
     )
     .await
