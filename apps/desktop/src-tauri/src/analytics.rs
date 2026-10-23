@@ -81,7 +81,7 @@ thread_local! {
 #[cfg(test)]
 const COMMON_KEYS: [&str; 5] = ["build_version", "os", "os_version", "arch", "client"];
 #[cfg(test)]
-const EVENT_NAMES: [&str; 13] = [
+const EVENT_NAMES: [&str; 14] = [
     "meeting_joined",
     "meeting_left",
     "join_failed",
@@ -100,6 +100,9 @@ const EVENT_NAMES: [&str; 13] = [
     // whether they had it enabled. Bucketed on/off only -- no strokes, no
     // coordinates, no window titles.
     "annotation_toggled",
+    // #370: one per participant per 60 s of active remote control. Integer-ms
+    // latency percentiles, the scoped exception to "buckets, never raw ms".
+    "remote_control_latency_summary",
 ];
 
 #[derive(Clone, Copy)]
@@ -454,6 +457,7 @@ enum Event {
     AnnotationToggled {
         state: AnnotationState,
     },
+    RemoteControlLatencySummary(Box<crate::rc_latency_telemetry::Summary>),
 }
 
 impl Event {
@@ -472,6 +476,7 @@ impl Event {
             Self::RemoteControlInput { .. } => "remote_control_input",
             Self::DeviceChanged { .. } => "device_changed",
             Self::AnnotationToggled { .. } => "annotation_toggled",
+            Self::RemoteControlLatencySummary(_) => "remote_control_latency_summary",
         }
     }
 
@@ -518,8 +523,18 @@ impl Event {
             Self::AnnotationToggled { state } => {
                 extras.insert("state", state.as_str());
             }
+            Self::RemoteControlLatencySummary(_) => {}
         }
         extras
+    }
+
+    /// Non-string properties (#370's latency summary). Every other event is
+    /// closed-enum strings only and returns nothing here.
+    fn typed_properties(&self) -> Vec<(String, serde_json::Value)> {
+        match self {
+            Self::RemoteControlLatencySummary(summary) => summary.properties(),
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -1087,6 +1102,13 @@ fn event_properties(event: &Event) -> BTreeMap<String, String> {
     for (key, value) in event.extras() {
         properties.insert(key.to_string(), value.to_string());
     }
+    for (key, value) in event.typed_properties() {
+        let text = match value {
+            serde_json::Value::String(text) => text,
+            other => other.to_string(),
+        };
+        properties.insert(key, text);
+    }
     properties
 }
 
@@ -1118,6 +1140,10 @@ fn build_body(event: &Event, distinct_id: &str, dropped_since_last: u64) -> serd
     props.insert("$ip".into(), serde_json::Value::Null);
     for (key, value) in event_properties(event) {
         props.insert(key, serde_json::Value::String(value));
+    }
+    // #370: numbers and booleans go out typed so PostHog can aggregate them.
+    for (key, value) in event.typed_properties() {
+        props.insert(key, value);
     }
     if dropped_since_last > 0 {
         // #908: `internal/docs/POSTHOG_EVENT_ALLOWLIST.md` documents this
@@ -1353,6 +1379,12 @@ fn device_changed_in(
 /// #872: the sharer turned annotation/drawing on or off. That flag is what makes
 /// the share overlay capture the cursor, so without this a report of "I cannot
 /// click anything" is undiagnosable from telemetry.
+/// #370: one per-interval remote-control latency summary (see
+/// `rc_latency_telemetry`). Never per input.
+pub(crate) fn remote_control_latency_summary(summary: &crate::rc_latency_telemetry::Summary) {
+    capture(Event::RemoteControlLatencySummary(Box::new(summary.clone())));
+}
+
 pub(crate) fn annotation_toggled(active: bool) {
     capture(Event::AnnotationToggled {
         state: if active { AnnotationState::On } else { AnnotationState::Off },
@@ -1457,11 +1489,77 @@ mod tests {
             Event::AnnotationToggled {
                 state: AnnotationState::On,
             },
+            Event::RemoteControlLatencySummary(Box::new(sample_latency_summary())),
         ]
         .iter()
         .map(Event::name)
         .collect();
         assert_eq!(names, EVENT_NAMES);
+    }
+
+    fn sample_latency_summary() -> crate::rc_latency_telemetry::Summary {
+        use crate::rc_latency_telemetry::{Dimension, HistogramStats, RcRole, Stage, Summary};
+        Summary {
+            role: RcRole::Host,
+            rc_session_id: "ab".repeat(16),
+            interval_s: 60,
+            is_final: true,
+            stages: vec![(
+                Stage::ReplayCompleteMs,
+                HistogramStats { p50: 4, p95: 108, max: 240, n: 400 },
+            )],
+            dimensions: vec![(Dimension::WindowCodec, "h264".to_string())],
+        }
+    }
+
+    #[test]
+    fn latency_summary_sends_typed_numbers_and_only_schema_keys() {
+        let event = Event::RemoteControlLatencySummary(Box::new(sample_latency_summary()));
+        let body = build_body(&event, "id", 0);
+        let props = &body["properties"];
+        assert_eq!(body["event"], "remote_control_latency_summary");
+        assert_eq!(props["replay_complete_ms_p95"], json!(108));
+        assert_eq!(props["replay_complete_ms_n"], json!(400));
+        assert_eq!(props["interval_s"], json!(60));
+        assert_eq!(props["final"], json!(true));
+        assert_eq!(props["role"], json!("host"));
+        assert_eq!(props["window_codec"], json!("h264"));
+        assert!(props.get("replay_inject_ms_p50").is_none(), "n = 0 stages are omitted");
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/petal-contracts.json"
+        ))
+        .unwrap();
+        let schema = &contract["remoteControlLatencySummary"];
+        let mut allowed: Vec<String> = COMMON_KEYS.iter().map(|k| k.to_string()).collect();
+        allowed.extend(["$geoip_disable".to_string(), "$ip".to_string()]);
+        for key in schema["alwaysPresent"].as_array().unwrap() {
+            allowed.push(key.as_str().unwrap().to_string());
+        }
+        for stage in schema["stages"].as_array().unwrap() {
+            for suffix in schema["stageSuffixes"].as_array().unwrap() {
+                allowed.push(format!("{}{}", stage.as_str().unwrap(), suffix.as_str().unwrap()));
+            }
+        }
+        for dimension in schema["dimensions"].as_object().unwrap().keys() {
+            allowed.push(dimension.clone());
+        }
+        for key in props.as_object().unwrap().keys() {
+            assert!(allowed.contains(key), "latency summary leaked property {key}");
+        }
+    }
+
+    #[test]
+    fn the_consent_gate_blocks_every_event_and_reopens() {
+        let ((), events) = with_sink(|| {
+            let _reset = ResetConsent;
+            set_usage_stats_enabled(false);
+            remote_control_latency_summary(&sample_latency_summary());
+            meeting_joined();
+            set_usage_stats_enabled(true);
+            remote_control_latency_summary(&sample_latency_summary());
+        });
+        assert_eq!(names(&events), ["remote_control_latency_summary"]);
+        assert_eq!(extra(&events[0], "replay_complete_ms_p50"), "4");
     }
 
     #[test]

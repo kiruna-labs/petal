@@ -703,6 +703,7 @@ impl RemoteControlEngine {
             admission,
             terminal_on_success: true,
             result_sender: None,
+            received_at: None,
         }
     }
 
@@ -1522,6 +1523,9 @@ pub(crate) struct ReplayTask {
     pub(crate) admission: Option<DiscreteAdmission>,
     pub(crate) terminal_on_success: bool,
     pub(crate) result_sender: Option<TerminalResultSender>,
+    /// #370: host receive instant for the latency summary; `None` for
+    /// synthetic releases, which no controller sent.
+    pub(crate) received_at: Option<std::time::Instant>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DiscreteAdmission {
@@ -2102,6 +2106,7 @@ pub(crate) fn replay_task(
         admission,
         terminal_on_success: true,
         result_sender: None,
+        received_at: None,
     }
 }
 
