@@ -23,6 +23,12 @@ use tauri_nspanel::{tauri_panel, CollectionBehavior, PanelBuilder, PanelLevel};
 pub const AI_CHAT_PANEL_LABEL: &str = "ai-chat-panel";
 pub const AI_CHAT_PANEL_WIDTH: f64 = 340.0;
 pub const AI_CHAT_PANEL_HEIGHT: f64 = 440.0;
+/// Transparent gutter around the chat card for its CSS `--shadow-float`
+/// (#406). The width/height above are the CARD's and the positions computed
+/// below are the card's top-left; the window is larger by this gutter, which
+/// passes clicks through.
+const AI_CHAT_PANEL_SHADOW_GUTTER: crate::shadow_gutter::ShadowGutter =
+    crate::shadow_gutter::FLOAT;
 
 static AI_CHAT_PANEL_TRANSPARENCY_APPLIED: AtomicBool = AtomicBool::new(false);
 
@@ -53,18 +59,24 @@ tauri_panel! {
 /// Create the singleton AI chat panel at app setup.
 pub fn create_ai_chat_panel(app: &AppHandle) {
     match PanelBuilder::<_, AiChatPanel>::new(app, AI_CHAT_PANEL_LABEL)
-        .url(WebviewUrl::App("ai-chat-panel.html".into()))
+        .url(WebviewUrl::App(
+            crate::shadow_gutter::route_with_gutter("ai-chat-panel.html", AI_CHAT_PANEL_SHADOW_GUTTER)
+                .into(),
+        ))
         .title("AI Chat")
         .position(tauri::Position::Logical(tauri::LogicalPosition {
             x: -10000.0,
             y: -10000.0,
         }))
         .level(PanelLevel::Normal)
-        .size(tauri::Size::Logical(tauri::LogicalSize {
-            width: AI_CHAT_PANEL_WIDTH,
-            height: AI_CHAT_PANEL_HEIGHT,
-        }))
-        .has_shadow(true)
+        .size({
+            let (width, height) =
+                AI_CHAT_PANEL_SHADOW_GUTTER.window_size(AI_CHAT_PANEL_WIDTH, AI_CHAT_PANEL_HEIGHT);
+            tauri::Size::Logical(tauri::LogicalSize { width, height })
+        })
+        // Native shadow off (#406): it outlined the card's CSS shadow on
+        // macOS 26. The CSS shadow is the only elevation and has a gutter.
+        .has_shadow(false)
         .transparent(true)
         .no_activate(true)
         .style_mask(tauri_nspanel::StyleMask::empty().nonactivating_panel())
@@ -83,6 +95,7 @@ pub fn create_ai_chat_panel(app: &AppHandle) {
                 let _ = window.set_ignore_cursor_events(false);
                 crate::webview_transparency::apply_or_retry(app, &window);
             }
+            crate::shadow_gutter::track(app, AI_CHAT_PANEL_LABEL, AI_CHAT_PANEL_SHADOW_GUTTER);
         }
         Err(e) => {
             log::error!("ai_chat_panel: failed to create panel: {e}");
@@ -201,6 +214,7 @@ pub fn ai_chat_panel_present(app: AppHandle, window_id: u32) -> Result<AiChatPan
             return;
         };
 
+        let (x, y) = AI_CHAT_PANEL_SHADOW_GUTTER.window_origin(x, y);
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         if !AI_CHAT_PANEL_TRANSPARENCY_APPLIED.load(Ordering::Relaxed)
             && crate::webview_transparency::force_window_transparent(&window)
@@ -292,10 +306,8 @@ pub fn update_ai_chat_panel_frame(app: &AppHandle, window_id: u32, frame: Window
     let app_main = app.clone();
     crate::platform::on_main(&app, "ai_chat_panel: update_frame", move || {
         if let Some(window) = app_main.get_webview_window(AI_CHAT_PANEL_LABEL) {
-            let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition {
-                x: new_x,
-                y: new_y,
-            }));
+            let (x, y) = AI_CHAT_PANEL_SHADOW_GUTTER.window_origin(new_x, new_y);
+            let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         }
         raise_ai_chat_panel_if_active_on_main(&app_main, window_id);
     });

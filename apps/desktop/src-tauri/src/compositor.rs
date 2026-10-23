@@ -10090,12 +10090,14 @@ mod tests {
                 // #844: fixed-size overlay anchored to the content area's
                 // top-right, inset by AI_CHAT_OVERLAY_MARGIN (12pt), clamped
                 // to AI_CHAT_OVERLAY_WIDTH/MAX_HEIGHT (300x360) -- both fit
-                // inside this 640x400 content area unclamped.
+                // inside this 640x400 content area unclamped. The WINDOW adds
+                // the --shadow-float gutter (26 sides, 8 top, 44 bottom; #406)
+                // around that card.
                 ai_chat: ChromeFrame {
-                    x: 120.0 + 640.0 - 300.0 - 12.0,
-                    y: 80.0 + HEADER_HEIGHT + 12.0,
-                    width: 300.0,
-                    height: 360.0,
+                    x: 120.0 + 640.0 - 300.0 - 12.0 - 26.0,
+                    y: 80.0 + HEADER_HEIGHT + 12.0 - 8.0,
+                    width: 300.0 + 52.0,
+                    height: 360.0 + 52.0,
                 },
             }
         );

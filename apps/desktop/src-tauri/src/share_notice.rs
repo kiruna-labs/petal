@@ -170,7 +170,6 @@ pub fn create_share_notice_panel(app: &AppHandle) {
                 // call.
                 crate::webview_transparency::apply_or_retry(app, &window);
             }
-        }
             crate::shadow_gutter::track(app, SHARE_NOTICE_LABEL, SHARE_NOTICE_SHADOW_GUTTER);
         }
         Err(e) => {

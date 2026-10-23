@@ -115,7 +115,6 @@ pub fn create_control_consent_panel(app: &AppHandle) {
                 let _ = window.set_ignore_cursor_events(false);
                 crate::webview_transparency::apply_or_retry(app, &window);
             }
-        }
             crate::shadow_gutter::track(app, CONTROL_CONSENT_LABEL, CONTROL_CONSENT_SHADOW_GUTTER);
         }
         Err(e) => {
