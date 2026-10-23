@@ -4423,6 +4423,17 @@ canvas#test-canvas.p613-presentation-source {
     padding-block: max(8px, env(safe-area-inset-top)) 8px;
   }
 
+  /* Three layout destinations on a 360px phone: keep the pill compact so
+     the room name stays one line beside it. */
+  .layout-picker {
+    gap: 0;
+    padding: 1px;
+  }
+
+  .layout-mode-button {
+    width: 22px;
+  }
+
   .room-title {
     flex: 1 1 150px;
   }
