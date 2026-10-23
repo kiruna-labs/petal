@@ -981,18 +981,16 @@
     font-weight: 500;
   }
 
-  /* One line, always: the header is a 44px strip, so long feedback ends in an
-     ellipsis (full text in the title tooltip and the control overlay's
-     banner) instead of wrapping to a second line. */
+  /* One line, always (#407): the header is a 44px strip. Every status label
+     is a short phrase, so the chip never shrinks and never clips (UI text
+     must never truncate); the sanctioned-ellipsis .title gives way instead. */
   .status-chip {
-    flex: 0 1 auto;
+    flex: 0 0 auto;
     height: 24px;
     box-sizing: border-box;
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    min-width: 0;
-    max-width: 220px;
     padding: 0 9px;
     border-radius: var(--radius-chip);
     background: color-mix(in srgb, var(--identity-header-ink) 9%, transparent);
@@ -1003,7 +1001,6 @@
     font-weight: 600;
     line-height: 1.2;
     letter-spacing: 0;
-    overflow: hidden;
     white-space: nowrap;
   }
 
@@ -1016,9 +1013,6 @@
   }
 
   .status-chip-text {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
   }
 

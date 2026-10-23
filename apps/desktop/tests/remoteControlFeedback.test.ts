@@ -156,12 +156,15 @@ test('the feedback banner uses design tokens and stays clear of the shared app t
   assert.doesNotMatch(detail, /--warning|currentColor/);
 });
 
-test('the header status chip stays on one line with an ellipsis (#407)', () => {
+test('the header status chip stays on one line and never truncates (#407)', () => {
   const chip = headerComponent.match(/\n  \.status-chip \{[\s\S]*?\n  \}/)?.[0] ?? '';
   assert.match(chip, /height: 24px;/);
   assert.match(chip, /align-items: center;/);
   assert.match(chip, /white-space: nowrap;/);
+  // Never shrinks or clips: the sanctioned-ellipsis title gives way instead.
+  assert.match(chip, /flex: 0 0 auto;/);
+  assert.doesNotMatch(chip, /overflow: hidden|max-width/);
   const text = headerComponent.match(/\n  \.status-chip-text \{[\s\S]*?\n  \}/)?.[0] ?? '';
-  assert.match(text, /text-overflow: ellipsis;/);
   assert.match(text, /white-space: nowrap;/);
+  assert.doesNotMatch(text, /text-overflow|overflow: hidden/);
 });
