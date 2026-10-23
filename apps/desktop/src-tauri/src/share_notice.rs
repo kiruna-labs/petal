@@ -240,6 +240,7 @@ pub fn share_notice_present(app: AppHandle, height: f64) {
         if let Err(e) = window.show() {
             log::warn!("share_notice: failed to show panel: {e}");
         }
+        crate::shadow_gutter::panel_shown(SHARE_NOTICE_LABEL);
     });
 }
 

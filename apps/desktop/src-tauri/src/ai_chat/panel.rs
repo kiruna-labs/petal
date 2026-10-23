@@ -225,6 +225,7 @@ pub fn ai_chat_panel_present(app: AppHandle, window_id: u32) -> Result<AiChatPan
         if let Err(e) = crate::platform::appkit::raise_panel_only(&window) {
             log::warn!("ai_chat_panel: failed to raise panel without focus: {e}");
         }
+        crate::shadow_gutter::panel_shown(AI_CHAT_PANEL_LABEL);
     });
 
     Ok(AiChatPanelInfo { owner_app_name })

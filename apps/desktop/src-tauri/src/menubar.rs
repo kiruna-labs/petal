@@ -1423,6 +1423,7 @@ mod platform {
             let _ = window.show();
             let _ = window.set_focus();
         }
+        crate::shadow_gutter::panel_shown(MENUBAR_POPOVER_LABEL);
 
         // Belt-and-suspenders data refresh: nudge the popover page to
         // re-fetch room/presence + re-measure its height. The page also

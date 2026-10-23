@@ -3762,6 +3762,9 @@ fn ai_chat_route_url(window_id: u32, owner_identity: &str) -> String {
 /// overlay must call this; every call site that hides it must call
 /// `detach_ai_chat_overlay` below.
 fn attach_ai_chat_overlay(app: &AppHandle, key: &RemoteWindowKey) {
+    // Every show path of the ai-chat overlay attaches it right after
+    // `show()`, so this is the one place to wake its gutter pass-through.
+    crate::shadow_gutter::panel_shown(&ai_chat_label_for_key(key));
     let Some(panel) = app.get_webview_window(&panel_label_for_key(key)) else {
         return;
     };

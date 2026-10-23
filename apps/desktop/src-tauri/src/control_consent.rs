@@ -170,6 +170,7 @@ pub fn control_consent_present(app: AppHandle, height: f64) {
         if let Err(e) = window.show() {
             log::warn!("control_consent: failed to show panel: {e}");
         }
+        crate::shadow_gutter::panel_shown(CONTROL_CONSENT_LABEL);
     });
 }
 

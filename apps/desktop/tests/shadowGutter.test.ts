@@ -76,6 +76,7 @@ test('every macOS card panel: native shadow off, gutter sized, gutter click-thro
     assert.match(source, /has_shadow\(false\)/, `${rs} must turn the native shadow off`);
     assert.match(source, /shadow_gutter::route_with_gutter\(/, `${rs} must tell the page its gutter`);
     assert.match(source, /shadow_gutter::track\(/, `${rs} must make its gutter click-through`);
+    assert.match(source, /shadow_gutter::panel_shown\(/, `${rs} must wake the (parked) gutter poll where it shows the panel`);
     assert.match(source, /_SHADOW_GUTTER\.window_size\(/, `${rs} must size the window by the gutter`);
     const page = read(route);
     assert.match(page, /shadowGutterPadding\(shadowGutterFromSearch\(\)\)/, `${route} must pad its card`);
