@@ -94,6 +94,33 @@ const STARVATION_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const STARVATION_PROBE_BASE: Duration = Duration::from_secs(30);
 /// Exponential backoff cap for repeated probe failures.
 const STARVATION_PROBE_MAX: Duration = Duration::from_secs(120);
+/// #408: the first downgrade of a stall episode used to sit on LOW for the
+/// full `STARVATION_PROBE_BASE` (30s) no matter what LOW delivered. The
+/// comment on `STARVATION_DOWNGRADE_AFTER` assumes the lower layer "kept
+/// encoding live content", which held for the old three-rung ladder but not
+/// for the two-rung ladder at Retina sizes, where the lower rung is often the
+/// one the sender's allocator leaves unfunded. In the field incident the HIGH
+/// gap was ~5s and LOW then delivered 1-2.5 fps for 30s, so the fallback was
+/// the larger part of a ~35s freeze; the moment HIGH was re-requested it
+/// delivered ~29 fps again.
+///
+/// So on the FIRST liveness downgrade of an episode (no probe has failed
+/// yet), LOW gets a short trial instead of the full probe delay:
+/// - LOW yields no frame at all within this long of the downgrade -> it is
+///   not a fallback, it is a second dead layer: re-request HIGH now.
+///   Sized just under `STARVATION_DOWNGRADE_AFTER` (the SFU's layer switch
+///   is a keyframe away, well under a second on a live layer).
+const LOW_FALLBACK_DEAD_AFTER: Duration = Duration::from_secs(4);
+/// - LOW IS delivering -> keep it, but probe HIGH after this long rather
+///   than `STARVATION_PROBE_BASE`: the HIGH dip this policy reacts to is
+///   usually a short bandwidth/keyframe hiccup, not a lasting loss.
+///
+/// Neither shortcut applies once a probe has failed in this episode
+/// (`consecutive_probe_failures > 0`): from then on the existing 60s/120s
+/// backoff and the repair-request escalation govern, unchanged. Neither
+/// applies to a quality-triggered (sustained high QP, #907) downgrade
+/// either: there HIGH is delivering, and LOW is the better picture.
+const LOW_FALLBACK_FIRST_PROBE: Duration = Duration::from_secs(10);
 /// Consecutive failed probes before this receiver treats its own probing as
 /// insufficient and additionally asks the sharer to repair the publication
 /// (`viewer_demand::publish_window_repair_request`, macOS only -- see the
@@ -1466,6 +1493,11 @@ pub(crate) fn start_compositor_feed(
                         let mut starved_since: Option<std::time::Instant> = None;
                         let mut consecutive_probe_failures: u32 = 0;
                         let mut probe_outstanding = false;
+                        // #408: when the last recovery probe was sent (restarts the
+                        // liveness clock, see `starvation_liveness_elapsed`) and what
+                        // LOW has delivered since the last downgrade.
+                        let mut probe_sent_at: Option<std::time::Instant> = None;
+                        let mut low_progress = LowFallbackProgress::default();
                         // Gates `record_remote_video_stalled` to ONCE per
                         // stall episode (the diagnostic event, not the
                         // repair-request resend, which still fires on every
@@ -1599,7 +1631,10 @@ pub(crate) fn start_compositor_feed(
                                         }
                                         }
                                     }
-                                    let since_last_frame = last_frame_seen.elapsed();
+                                    let since_last_frame = starvation_liveness_elapsed(
+                                        last_frame_seen.elapsed(),
+                                        probe_sent_at.map(|t| t.elapsed()),
+                                    );
                                     let since_starved = starved_since.map(|t| t.elapsed());
                                     match starvation_action_for_macos(
                                         since_last_frame,
@@ -1607,6 +1642,7 @@ pub(crate) fn start_compositor_feed(
                                         since_starved,
                                         consecutive_probe_failures,
                                         consecutive_high_qp_samples,
+                                        low_progress,
                                     ) {
                                         StarvationAction::Keep => {}
                                         StarvationAction::DowngradeToLow => {
@@ -1617,6 +1653,11 @@ pub(crate) fn start_compositor_feed(
                                                 consecutive_probe_failures = 0;
                                             }
                                             probe_outstanding = false;
+                                            probe_sent_at = None;
+                                            low_progress = LowFallbackProgress {
+                                                frames_since_downgrade: 0,
+                                                liveness_downgrade: since_last_frame >= STARVATION_DOWNGRADE_AFTER,
+                                            };
                                             starved = true;
                                             starved_since = Some(std::time::Instant::now());
                                             // Reset the quality counter: the
@@ -1650,6 +1691,7 @@ pub(crate) fn start_compositor_feed(
                                             let past_repair_cap =
                                                 consecutive_probe_failures >= STARVATION_PROBE_FAILURE_CAP;
                                             probe_outstanding = true;
+                                            probe_sent_at = Some(std::time::Instant::now());
                                             starved = false;
                                             starved_since = None;
                                             let publication = window_publications()
@@ -1660,8 +1702,9 @@ pub(crate) fn start_compositor_feed(
                                                 pub_.set_video_quality(VideoQuality::High);
                                             }
                                             log::warn!(
-                                                "compositor feed: window {window_id} recovery probe: re-requesting HIGH after {}s on LOW (probe failure {})",
+                                                "compositor feed: window {window_id} recovery probe: re-requesting HIGH after {}s on LOW ({} frames on LOW; probe failure {})",
                                                 since_starved.unwrap_or_default().as_secs(),
+                                                low_progress.frames_since_downgrade,
                                                 consecutive_probe_failures + 1
                                             );
                                             crate::diagnostics::journal_media(
@@ -1725,6 +1768,10 @@ pub(crate) fn start_compositor_feed(
                                         first_frame_received = true;
                                     }
                                     last_frame_seen = std::time::Instant::now();
+                                    if starved {
+                                        low_progress.frames_since_downgrade =
+                                            low_progress.frames_since_downgrade.saturating_add(1);
+                                    }
                                     // #907 review finding 7: the FIRST frame
                                     // received after issuing a recovery probe
                                     // is conclusive success evidence for THAT
@@ -2981,6 +3028,72 @@ fn starvation_action(
     }
 }
 
+/// What the receiver has seen since its most recent downgrade to LOW (#408).
+/// Fed into `starvation_action_with_low_fallback` so the first downgrade of a
+/// stall episode can be cut short when LOW is not a real fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct LowFallbackProgress {
+    /// Frames received since the downgrade was requested.
+    frames_since_downgrade: u32,
+    /// The downgrade was a liveness one (no frame for
+    /// `STARVATION_DOWNGRADE_AFTER`), not a quality-triggered one.
+    liveness_downgrade: bool,
+}
+
+/// #408: should the receiver re-request HIGH before the regular probe delay?
+/// Only for the first liveness downgrade of an episode -- see
+/// `LOW_FALLBACK_DEAD_AFTER` / `LOW_FALLBACK_FIRST_PROBE`.
+fn early_high_probe_due(
+    since_starved: Duration,
+    consecutive_probe_failures: u32,
+    low: LowFallbackProgress,
+) -> bool {
+    if consecutive_probe_failures != 0 || !low.liveness_downgrade {
+        return false;
+    }
+    if low.frames_since_downgrade == 0 {
+        since_starved >= LOW_FALLBACK_DEAD_AFTER
+    } else {
+        since_starved >= LOW_FALLBACK_FIRST_PROBE
+    }
+}
+
+/// `starvation_action` plus the #408 early-probe rule. Both decode loops
+/// (macOS via `starvation_action_for_macos`, Windows directly) use this.
+fn starvation_action_with_low_fallback(
+    since_last_frame: Duration,
+    starved: bool,
+    since_starved: Option<Duration>,
+    consecutive_probe_failures: u32,
+    low: LowFallbackProgress,
+) -> StarvationAction {
+    if starved
+        && since_starved
+            .is_some_and(|since| early_high_probe_due(since, consecutive_probe_failures, low))
+    {
+        return StarvationAction::ProbeHigh;
+    }
+    starvation_action(
+        since_last_frame,
+        starved,
+        since_starved,
+        consecutive_probe_failures,
+    )
+}
+
+/// #408: the liveness clock the starvation policy reads. A recovery probe
+/// restarts it, so a HIGH re-request gets the full `STARVATION_DOWNGRADE_AFTER`
+/// to deliver before it counts as failed. Without this, a probe issued while
+/// LOW was silent (the last frame long past) was re-downgraded -- and counted
+/// as a probe failure -- on the very next 1s tick, before the SFU could even
+/// switch layers.
+fn starvation_liveness_elapsed(since_last_frame: Duration, since_probe: Option<Duration>) -> Duration {
+    match since_probe {
+        Some(since_probe) => since_last_frame.min(since_probe),
+        None => since_last_frame,
+    }
+}
+
 /// One inbound-RTP QP poll compared against the previous poll (#907's
 /// macOS quality-based starvation trigger). `frames_decoded` and `qp_sum`
 /// are both monotonically non-decreasing counters read from
@@ -3032,22 +3145,25 @@ fn quality_downgrade_due(consecutive_high_qp_samples: u32) -> bool {
 /// ARE arriving) as long as the layer isn't already starved; once starved,
 /// the existing probe/backoff policy in `starvation_action` governs recovery
 /// unchanged, so the two triggers share one downgrade/probe/give-up state
-/// machine rather than fighting each other.
+/// machine rather than fighting each other. The #408 early probe
+/// (`starvation_action_with_low_fallback`) applies to liveness downgrades only.
 fn starvation_action_for_macos(
     since_last_frame: Duration,
     starved: bool,
     since_starved: Option<Duration>,
     consecutive_probe_failures: u32,
     consecutive_high_qp_samples: u32,
+    low: LowFallbackProgress,
 ) -> StarvationAction {
     if !starved && quality_downgrade_due(consecutive_high_qp_samples) {
         return StarvationAction::DowngradeToLow;
     }
-    starvation_action(
+    starvation_action_with_low_fallback(
         since_last_frame,
         starved,
         since_starved,
         consecutive_probe_failures,
+        low,
     )
 }
 
@@ -3092,6 +3208,9 @@ fn spawn_windows_decode_loop(
         // Set when a recovery probe is outstanding; the next stall-downgrade
         // counts as a probe failure, any other downgrade resets the count.
         let mut probe_outstanding = false;
+        // #408: see the macOS decode loop's twins of these two.
+        let mut probe_sent_at: Option<std::time::Instant> = None;
+        let mut low_progress = LowFallbackProgress::default();
         // #907 review finding 1: this MUST be a persistent `Interval` created
         // once here, not `tokio::time::sleep(STARVATION_CHECK_INTERVAL)`
         // constructed fresh inside the `select!` below. A `sleep` built
@@ -3156,6 +3275,7 @@ fn spawn_windows_decode_loop(
                     starved = false;
                     starved_since = None;
                     probe_outstanding = false;
+                    probe_sent_at = None;
                 }
                 log::debug!(
                     "windows compositor feed: window {:?} {} — track {}",
@@ -3192,13 +3312,17 @@ fn spawn_windows_decode_loop(
                         // whose first frame is merely slow to land.
                         continue;
                     }
-                    let since_last_frame = last_frame_seen.elapsed();
+                    let since_last_frame = starvation_liveness_elapsed(
+                        last_frame_seen.elapsed(),
+                        probe_sent_at.map(|t| t.elapsed()),
+                    );
                     let since_starved = starved_since.map(|t| t.elapsed());
-                    match starvation_action(
+                    match starvation_action_with_low_fallback(
                         since_last_frame,
                         starved,
                         since_starved,
                         consecutive_probe_failures,
+                        low_progress,
                     ) {
                         StarvationAction::Keep => {}
                         StarvationAction::DowngradeToLow => {
@@ -3212,6 +3336,12 @@ fn spawn_windows_decode_loop(
                                 consecutive_probe_failures = 0;
                             }
                             probe_outstanding = false;
+                            probe_sent_at = None;
+                            // Windows has only the liveness trigger.
+                            low_progress = LowFallbackProgress {
+                                frames_since_downgrade: 0,
+                                liveness_downgrade: true,
+                            };
                             starved = true;
                             starved_since = Some(std::time::Instant::now());
                             // On-demand fetch: a sender republish replaces
@@ -3232,6 +3362,7 @@ fn spawn_windows_decode_loop(
                         }
                         StarvationAction::ProbeHigh => {
                             probe_outstanding = true;
+                            probe_sent_at = Some(std::time::Instant::now());
                             starved = false;
                             starved_since = None;
                             let publication = window_publications()
@@ -3242,10 +3373,11 @@ fn spawn_windows_decode_loop(
                                 pub_.set_video_quality(VideoQuality::High);
                             }
                             log::warn!(
-                                "windows compositor feed: window {key:?} recovery probe: re-requesting HIGH after {}s on LOW (probe failure {})",
+                                "windows compositor feed: window {key:?} recovery probe: re-requesting HIGH after {}s on LOW ({} frames on LOW; probe failure {})",
                                 since_starved
                                     .unwrap_or_default()
                                     .as_secs(),
+                                low_progress.frames_since_downgrade,
                                 consecutive_probe_failures + 1
                             );
                         }
@@ -3294,6 +3426,10 @@ fn spawn_windows_decode_loop(
                 first_frame_received = true;
             }
             last_frame_seen = std::time::Instant::now();
+            if starved {
+                low_progress.frames_since_downgrade =
+                    low_progress.frames_since_downgrade.saturating_add(1);
+            }
             // #907 review finding 7: a probe is outstanding exactly when we
             // re-requested HIGH after a downgrade and are waiting to find out
             // whether it recovered. The FIRST frame received afterward is
@@ -4292,6 +4428,233 @@ mod tests {
         );
     }
 
+    // ---- #408 LOW fallback: fail fast on a dead LOW, probe sooner on a live one
+
+    const LOW_DEAD: LowFallbackProgress = LowFallbackProgress {
+        frames_since_downgrade: 0,
+        liveness_downgrade: true,
+    };
+    const LOW_ALIVE: LowFallbackProgress = LowFallbackProgress {
+        frames_since_downgrade: 12,
+        liveness_downgrade: true,
+    };
+
+    #[test]
+    fn low_fallback_dead_low_re_requests_high_immediately() {
+        // HIGH went quiet, we downgraded, and LOW has not produced a single
+        // frame: LOW is a second dead layer, not a fallback. Re-request HIGH
+        // as soon as the short trial elapses instead of waiting 30s.
+        assert_eq!(
+            starvation_action_with_low_fallback(
+                Duration::from_secs(9),
+                true,
+                Some(LOW_FALLBACK_DEAD_AFTER - Duration::from_millis(1)),
+                0,
+                LOW_DEAD,
+            ),
+            StarvationAction::Keep
+        );
+        assert_eq!(
+            starvation_action_with_low_fallback(
+                Duration::from_secs(9),
+                true,
+                Some(LOW_FALLBACK_DEAD_AFTER),
+                0,
+                LOW_DEAD,
+            ),
+            StarvationAction::ProbeHigh
+        );
+        // Well under the old 30s probe delay.
+        assert!(LOW_FALLBACK_DEAD_AFTER < STARVATION_PROBE_BASE);
+    }
+
+    #[test]
+    fn low_fallback_live_low_probes_high_earlier_than_the_base_delay() {
+        // LOW is delivering (the incident: 1-2.5 fps): stay on it, but probe
+        // HIGH at LOW_FALLBACK_FIRST_PROBE rather than STARVATION_PROBE_BASE.
+        assert_eq!(
+            starvation_action_with_low_fallback(
+                Duration::from_millis(400),
+                true,
+                Some(LOW_FALLBACK_DEAD_AFTER),
+                0,
+                LOW_ALIVE,
+            ),
+            StarvationAction::Keep,
+            "a delivering LOW must not be abandoned on the dead-LOW deadline"
+        );
+        assert_eq!(
+            starvation_action_with_low_fallback(
+                Duration::from_millis(400),
+                true,
+                Some(LOW_FALLBACK_FIRST_PROBE - Duration::from_millis(1)),
+                0,
+                LOW_ALIVE,
+            ),
+            StarvationAction::Keep
+        );
+        assert_eq!(
+            starvation_action_with_low_fallback(
+                Duration::from_millis(400),
+                true,
+                Some(LOW_FALLBACK_FIRST_PROBE),
+                0,
+                LOW_ALIVE,
+            ),
+            StarvationAction::ProbeHigh
+        );
+        assert!(LOW_FALLBACK_DEAD_AFTER < LOW_FALLBACK_FIRST_PROBE);
+        assert!(LOW_FALLBACK_FIRST_PROBE < STARVATION_PROBE_BASE);
+    }
+
+    #[test]
+    fn low_fallback_repeated_probe_failures_keep_the_existing_backoff() {
+        // Once a probe has failed in this episode, the shortcuts are off and
+        // the 60s/120s backoff governs exactly as before -- for a dead LOW
+        // and a live LOW alike.
+        for low in [LOW_DEAD, LOW_ALIVE] {
+            for failures in [1, 2, STARVATION_PROBE_FAILURE_CAP, 1_000] {
+                let delay = starvation_probe_delay(failures);
+                assert_eq!(
+                    starvation_action_with_low_fallback(
+                        Duration::from_secs(600),
+                        true,
+                        Some(delay - Duration::from_secs(1)),
+                        failures,
+                        low,
+                    ),
+                    StarvationAction::Keep,
+                    "failures={failures} low={low:?} must wait the full backoff"
+                );
+                assert_eq!(
+                    starvation_action_with_low_fallback(
+                        Duration::from_secs(600),
+                        true,
+                        Some(delay),
+                        failures,
+                        low,
+                    ),
+                    starvation_action(Duration::from_secs(600), true, Some(delay), failures),
+                    "failures={failures} low={low:?} must match the legacy policy"
+                );
+            }
+        }
+        assert_eq!(starvation_probe_delay(1), Duration::from_secs(60));
+        assert_eq!(starvation_probe_delay(2), STARVATION_PROBE_MAX);
+    }
+
+    #[test]
+    fn low_fallback_does_not_shorten_a_quality_triggered_downgrade() {
+        // #907 QP downgrade: HIGH was delivering (just badly), LOW is the
+        // better picture -- keep the regular probe delay.
+        let quality = LowFallbackProgress {
+            frames_since_downgrade: 0,
+            liveness_downgrade: false,
+        };
+        assert_eq!(
+            starvation_action_for_macos(
+                Duration::from_secs(9),
+                true,
+                Some(LOW_FALLBACK_FIRST_PROBE),
+                0,
+                0,
+                quality,
+            ),
+            StarvationAction::Keep
+        );
+        assert_eq!(
+            starvation_action_for_macos(
+                Duration::from_secs(9),
+                true,
+                Some(STARVATION_PROBE_BASE),
+                0,
+                0,
+                quality,
+            ),
+            StarvationAction::ProbeHigh
+        );
+        // And the macOS wrapper does apply the early probe to a liveness one.
+        assert_eq!(
+            starvation_action_for_macos(
+                Duration::from_secs(9),
+                true,
+                Some(LOW_FALLBACK_DEAD_AFTER),
+                0,
+                0,
+                LOW_DEAD,
+            ),
+            StarvationAction::ProbeHigh
+        );
+    }
+
+    #[test]
+    fn low_fallback_not_starved_paths_are_unchanged() {
+        for low in [LowFallbackProgress::default(), LOW_DEAD, LOW_ALIVE] {
+            assert_eq!(
+                starvation_action_with_low_fallback(Duration::from_secs(1), false, None, 0, low),
+                StarvationAction::Keep
+            );
+            assert_eq!(
+                starvation_action_with_low_fallback(STARVATION_DOWNGRADE_AFTER, false, None, 0, low),
+                StarvationAction::DowngradeToLow
+            );
+        }
+    }
+
+    #[test]
+    fn probe_restarts_the_liveness_clock() {
+        // A probe sent while LOW was silent: the last frame is 9s old, but
+        // the HIGH re-request is 1s old -- it must get the full downgrade
+        // window to deliver, not be counted as failed on the next tick.
+        let elapsed =
+            starvation_liveness_elapsed(Duration::from_secs(9), Some(Duration::from_secs(1)));
+        assert_eq!(elapsed, Duration::from_secs(1));
+        assert_eq!(
+            starvation_action(elapsed, false, None, 0),
+            StarvationAction::Keep
+        );
+        // ...and a probe that stays silent for the full window still fails.
+        let elapsed =
+            starvation_liveness_elapsed(Duration::from_secs(13), Some(STARVATION_DOWNGRADE_AFTER));
+        assert_eq!(
+            starvation_action(elapsed, false, None, 0),
+            StarvationAction::DowngradeToLow
+        );
+        // Frames after the probe win: the clock follows the newer event.
+        assert_eq!(
+            starvation_liveness_elapsed(Duration::from_millis(30), Some(Duration::from_secs(3))),
+            Duration::from_millis(30)
+        );
+        assert_eq!(
+            starvation_liveness_elapsed(Duration::from_secs(2), None),
+            Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn low_fallback_incident_timeline_shrinks_the_freeze() {
+        // The incident: HIGH gap ~5s, LOW then delivered 1-2.5 fps, HIGH
+        // came straight back once re-requested. Old policy: HIGH back at
+        // 5s + 30s = 35s. New policy: 5s + LOW_FALLBACK_FIRST_PROBE.
+        let mut since_starved = Duration::ZERO;
+        let probe_at = loop {
+            if starvation_action_with_low_fallback(
+                Duration::from_millis(500),
+                true,
+                Some(since_starved),
+                0,
+                LOW_ALIVE,
+            ) == StarvationAction::ProbeHigh
+            {
+                break since_starved;
+            }
+            since_starved += STARVATION_CHECK_INTERVAL;
+            assert!(since_starved <= STARVATION_PROBE_BASE, "never probed");
+        };
+        assert_eq!(probe_at, LOW_FALLBACK_FIRST_PROBE);
+        assert!(STARVATION_DOWNGRADE_AFTER + probe_at <= Duration::from_secs(15));
+    }
+
     // ---- #907 macOS quality-based trigger: QP sampling + hysteresis -------
 
     #[test]
@@ -4331,6 +4694,7 @@ mod tests {
                 None,
                 0,
                 QUALITY_DOWNGRADE_SUSTAINED_SAMPLES,
+                LowFallbackProgress::default(),
             ),
             StarvationAction::DowngradeToLow
         );
@@ -4342,6 +4706,7 @@ mod tests {
                 None,
                 0,
                 QUALITY_DOWNGRADE_SUSTAINED_SAMPLES - 1,
+                LowFallbackProgress::default(),
             ),
             StarvationAction::Keep
         );
@@ -4354,6 +4719,7 @@ mod tests {
                 Some(Duration::from_secs(1)),
                 0,
                 QUALITY_DOWNGRADE_SUSTAINED_SAMPLES,
+                LowFallbackProgress::default(),
             ),
             StarvationAction::Keep
         );
