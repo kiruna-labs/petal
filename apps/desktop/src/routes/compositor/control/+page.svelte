@@ -15,6 +15,7 @@
   } from '$lib/data/compositorControl';
   import { identityColorCss } from '$lib/data/identityColor';
   import { platformKey } from '$lib/platform';
+  import { createOrderedSender } from '$lib/orderedSend';
   import {
     findRemoteWindowDebugTrack,
     formatDebugMetric,
@@ -321,8 +322,13 @@
     sourceHeight = height;
   }
 
+  // Ordered: concurrent invokes let a Down and its Up reach the host reversed.
+  const sendOrdered = createOrderedSender((draft: Draft | RemoteControlDraft) =>
+    invoke(COMMANDS.remoteControlSend, { draft })
+  );
+
   function send(draft: Draft | RemoteControlDraft) {
-    invoke(COMMANDS.remoteControlSend, { draft }).catch(() => {});
+    void sendOrdered(draft);
   }
 
   function isClipboardModifier(event: KeyboardEvent): boolean {
