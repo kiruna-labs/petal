@@ -7181,6 +7181,11 @@ pub(crate) mod input {
         pub(super) pressable: bool,
         pub(super) show_menu: bool,
         pub(super) text_selectable: bool,
+        /// #404: the element is an editable text element -- settable
+        /// `AXSelectedTextRange`, a text role, or a settable string `AXValue`.
+        /// A web `<input>` reports pressable and wins the AxPressable route;
+        /// this is what tells that route to also move keyboard focus onto it.
+        pub(super) editable_text: bool,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7974,6 +7979,11 @@ pub(crate) mod input {
             if attribute_settable(element, selected_text_range.as_ptr()) {
                 caps.text_selectable = true;
             }
+            // #404: only the pressable route needs the extra probe (the
+            // non-pressable text route already focuses), so a plain hit-test
+            // pays nothing more.
+            caps.editable_text =
+                caps.text_selectable || (caps.pressable && element_is_editable_text(element));
             caps
         }
 
@@ -9215,6 +9225,25 @@ pub(crate) mod input {
 
     fn ax_number_of_characters_attribute() -> CfObject {
         cf_string(b"AXNumberOfCharacters\0")
+    }
+
+    /// #404: AX roles that are editable text whatever else they report.
+    const EDITABLE_TEXT_ROLES: &[&str] = &["AXTextField", "AXTextArea", "AXComboBox"];
+
+    /// #404: a text role, or a settable `AXValue` that holds a string (a
+    /// slider's settable value is a number, so it does not qualify).
+    fn element_is_editable_text(element: &AxElementHandle) -> bool {
+        if let Ok(role) = copy_attribute(element, ax_role_attribute().as_ptr()) {
+            if cf_string_to_string(role.as_ptr())
+                .is_some_and(|role| EDITABLE_TEXT_ROLES.contains(&role.as_str()))
+            {
+                return true;
+            }
+        }
+        let value_attribute = ax_value_attribute();
+        attribute_settable(element, value_attribute.as_ptr())
+            && copy_attribute(element, value_attribute.as_ptr())
+                .is_ok_and(|value| is_cf_string(value.as_ptr()))
     }
 
     /// #404: see `AxInputBackend::set_focused`.
@@ -11146,7 +11175,7 @@ pub(crate) mod input {
                 let pressed = ax.press(&element);
                 // #404: a pressable text field (a web `<input>`) also needs
                 // the app's keyboard focus, or typed keys miss it.
-                if pressed.is_ok() && caps.text_selectable {
+                if pressed.is_ok() && (caps.editable_text || caps.text_selectable) {
                     focus_clicked_text_element(window_id, &element, ax);
                 }
                 pressed
@@ -11516,7 +11545,7 @@ pub(crate) mod input {
             return Ok(GestureMode::AxPressable {
                 element,
                 action: AxClickAction::Press,
-                focus_text: caps.text_selectable,
+                focus_text: caps.editable_text || caps.text_selectable,
             });
         }
         // #373: a double/triple-click down on a text view is routed
@@ -11588,11 +11617,27 @@ pub(crate) mod input {
             GestureMode::PassThrough => "PassThrough".to_string(),
             GestureMode::SlDrag => "SlDrag".to_string(),
             GestureMode::SessionTap => "SessionTap".to_string(),
-            GestureMode::AxPressable { action, .. } => {
-                format!("AxPressable action={}", ax_click_action_name(*action))
+            // #404: name the pressed element's role, so a field log tells a
+            // pressed `<input>` apart from a pressable container around it.
+            GestureMode::AxPressable {
+                element,
+                action,
+                focus_text,
+            } => {
+                format!(
+                    "AxPressable action={} role={} focus_text={focus_text}",
+                    ax_click_action_name(*action),
+                    ax_role_description(element)
+                )
             }
-            GestureMode::AxText { anchor_offset, .. } => {
-                format!("AxText anchor_offset={anchor_offset}")
+            GestureMode::AxText {
+                element,
+                anchor_offset,
+            } => {
+                format!(
+                    "AxText anchor_offset={anchor_offset} role={}",
+                    ax_role_description(element)
+                )
             }
         }
     }
@@ -15075,6 +15120,34 @@ pub(crate) mod input {
             assert!(replay_events_with_ax(&click, frame, &field).is_empty());
             assert_eq!(field.ops(), vec![AxOp::Press(5)]);
             assert_eq!(field.focused_ids(), vec![5]);
+        }
+
+        #[test]
+        fn ax_press_on_an_editable_element_without_a_selection_range_sets_ax_focused() {
+            // The incident route: every click was `mode=AxPressable
+            // action=Press`. A field that is editable by role or settable
+            // string AXValue, but whose AXSelectedTextRange is not settable,
+            // must still get keyboard focus.
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(7);
+            ax.set_capabilities(
+                7,
+                AxCapabilities {
+                    pressable: true,
+                    editable_text: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message =
+                    pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+            }
+            assert_eq!(ax.ops(), vec![AxOp::Press(7)]);
+            assert_eq!(ax.focused_ids(), vec![7]);
         }
 
         #[test]
