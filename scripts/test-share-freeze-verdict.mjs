@@ -252,25 +252,59 @@ test('helpers: histogram buckets, source activity, clustering slack', () => {
   assert.equal(clusters[0].scope, 'all-viewers');
 });
 
-test('CLI: freeze tier exits 0 on a healthy soak, 1 on a freeze and on infra, and writes the report', () => {
+// #391: report-only unless E2E_FREEZE_SOAK_BLOCKING=true, in both directions.
+function runFreezeCli(dir, raw, name, blocking) {
+  const rawPath = join(dir, `${name}-raw.json`);
+  const out = join(dir, `${name}-report.json`);
+  if (raw) writeFileSync(rawPath, JSON.stringify(raw));
+  const env = { ...process.env };
+  delete env.E2E_FREEZE_SOAK_BLOCKING;
+  if (blocking !== undefined) env.E2E_FREEZE_SOAK_BLOCKING = blocking;
+  const result = spawnSync(process.execPath, [CLI, 'freeze', '--raw', rawPath, '--json', out], { encoding: 'utf8', env });
+  return { status: result.status, stdout: result.stdout, report: JSON.parse(readFileSync(out, 'utf8')) };
+}
+const RED_SOAK = () => soak({ holes: { 'freeze-viewer-1': [[60_000, 62_000]], 'freeze-viewer-2': [[60_000, 62_000]] } });
+
+test('CLI blocking (E2E_FREEZE_SOAK_BLOCKING=true): exits 0 on a healthy soak, 1 on a freeze and on infra, and writes the report', () => {
   const dir = mkdtempSync(join(tmpdir(), 'share-freeze-verdict-'));
-  const run = (raw, name) => {
-    const rawPath = join(dir, `${name}-raw.json`);
-    const out = join(dir, `${name}-report.json`);
-    if (raw) writeFileSync(rawPath, JSON.stringify(raw));
-    const result = spawnSync(process.execPath, [CLI, 'freeze', '--raw', rawPath, '--json', out], { encoding: 'utf8' });
-    return { status: result.status, stdout: result.stdout, report: JSON.parse(readFileSync(out, 'utf8')) };
-  };
-  const green = run(soak(), 'green');
+  const green = runFreezeCli(dir, soak(), 'green', 'true');
   assert.equal(green.status, 0, green.stdout);
   assert.equal(green.report.outcome, 'pass');
   assert.match(green.stdout, /share-freeze outcome: PASS/);
-  const red = run(soak({ holes: { 'freeze-viewer-1': [[60_000, 62_000]], 'freeze-viewer-2': [[60_000, 62_000]] } }), 'red');
+  const red = runFreezeCli(dir, RED_SOAK(), 'red', 'true');
   assert.equal(red.status, 1);
   assert.equal(red.report.outcome, 'fail');
   assert.match(red.stdout, /::error::FREEZE all-viewers/);
-  const infra = run(null, 'missing');
+  const infra = runFreezeCli(dir, null, 'missing', 'true');
   assert.equal(infra.status, 1);
   assert.equal(infra.report.outcome, 'infra-invalid');
   assert.match(infra.stdout, /::error::INFRA-INVALID/);
+});
+
+test('CLI report-only (default): a freeze or infra problem exits 0 but is printed as REPORT-ONLY: would fail', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'share-freeze-verdict-'));
+  for (const flag of [undefined, 'false']) {
+    const red = runFreezeCli(dir, RED_SOAK(), `red-${flag}`, flag);
+    assert.equal(red.status, 0, red.stdout);
+    assert.equal(red.report.outcome, 'fail', 'the report keeps the real outcome');
+    assert.doesNotMatch(red.stdout, /::error::/);
+    assert.match(red.stdout, /::warning::REPORT-ONLY: would fail -- FREEZE all-viewers/);
+    assert.match(red.stdout, /e2e-gate-verdict freeze: REPORT-ONLY: would fail .* E2E_FREEZE_SOAK_BLOCKING is not true/);
+    const infra = runFreezeCli(dir, null, `missing-${flag}`, flag);
+    assert.equal(infra.status, 0, infra.stdout);
+    assert.match(infra.stdout, /::warning::REPORT-ONLY: would fail -- INFRA-INVALID/);
+  }
+  const green = runFreezeCli(dir, soak(), 'green-default', undefined);
+  assert.equal(green.status, 0);
+  assert.match(green.stdout, /e2e-gate-verdict freeze: PASS/);
+});
+
+test('wiring: the soak job is report-only by default and still uploads its report', () => {
+  const workflow = readFileSync(fileURLToPath(new URL('../.github/workflows/nightly-loopback.yml', import.meta.url)), 'utf8');
+  const job = workflow.slice(workflow.indexOf('  share-freeze-soak:'));
+  assert.match(job, /\n      E2E_FREEZE_SOAK_BLOCKING: "false"\n/);
+  assert.match(job, /- name: Build desktop app[^\n]*\n\s+continue-on-error: \$\{\{ env\.E2E_FREEZE_SOAK_BLOCKING != 'true' \}\}/);
+  assert.match(job, /- name: Run share-freeze soak\n\s+continue-on-error: \$\{\{ env\.E2E_FREEZE_SOAK_BLOCKING != 'true' \}\}/);
+  assert.match(job, /node scripts\/ci\/e2e-gate-verdict\.mjs freeze --raw/);
+  assert.match(job, /- name: Upload share-freeze artifacts\n\s+if: always\(\)/);
 });

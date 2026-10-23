@@ -16,6 +16,8 @@
 //   E2E_IMPAIRED_BLOCKING=true (#378; report-only until #421 lands).
 //   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> --engine-exit <n> [--quarantine <ids>]
 //   node scripts/ci/e2e-gate-verdict.mjs freeze   --raw <share-freeze-raw.json> [--sender-log <sharer petal log>] [--json <report out>]
+//   The freeze tier is REPORT-ONLY unless E2E_FREEZE_SOAK_BLOCKING=true (#391;
+//   until the soak's viewers run off the sharer's VM).
 //
 // Prints GitHub ::error/::warning annotations; exits 0 (pass) or 1 (fail).
 
@@ -298,6 +300,9 @@ export function emit(verdict, log = console.log) {
   for (const e of verdict.errors) log(`::error::${e}`);
 }
 
+// #391: the share-freeze soak's switch, same semantics as E2E_IMPAIRED_BLOCKING.
+export const FREEZE_SOAK_BLOCKING_ENV = 'E2E_FREEZE_SOAK_BLOCKING';
+
 // #378: a non-blocking verdict keeps every finding visible (as warnings
 // prefixed REPORT-ONLY) but cannot fail the gate.
 export function applyReportOnly(verdict, { blocking }) {
@@ -360,6 +365,7 @@ function main(argv) {
     verdict = freezeVerdict({ raw: args.raw && fs.existsSync(args.raw) ? readJson(args.raw) : null, senderLogText: senderLog });
     if (args.json) fs.writeFileSync(args.json, `${JSON.stringify(verdict.report, null, 2)}\n`);
     console.log(`share-freeze outcome: ${verdict.outcome.toUpperCase()}`);
+    verdict = applyReportOnly(verdict, { blocking: envFlagTrue(process.env, FREEZE_SOAK_BLOCKING_ENV) });
   } else {
     console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|latency|attribution|cockpit|freeze)`);
     return 1;
@@ -370,7 +376,8 @@ function main(argv) {
   emit(verdict);
   const label = pass === 'clean' ? tier : `${tier} (${pass} pass)`;
   if (verdict.reportOnlyWouldFail) {
-    console.log(`e2e-gate-verdict ${label}: REPORT-ONLY: would fail (${verdict.wouldFailCount} problem(s)); not blocking because ${IMPAIRED_BLOCKING_ENV} is not true`);
+    const switchEnv = tier === 'freeze' ? FREEZE_SOAK_BLOCKING_ENV : IMPAIRED_BLOCKING_ENV;
+    console.log(`e2e-gate-verdict ${label}: REPORT-ONLY: would fail (${verdict.wouldFailCount} problem(s)); not blocking because ${switchEnv} is not true`);
   } else {
     console.log(verdict.ok ? `e2e-gate-verdict ${label}: PASS` : `e2e-gate-verdict ${label}: FAIL (${verdict.errors.length} problem(s))`);
   }

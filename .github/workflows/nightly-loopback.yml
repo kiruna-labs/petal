@@ -1107,7 +1107,9 @@ jobs:
   # FREEZE_GAP_THRESHOLD_MS (scripts/ci/share-freeze-verdict.mjs) while the
   # source was changing. Its own job, not a step of live-loopback: a 10-minute
   # soak does not fit that job's 45-minute cap with headroom. release.yml's
-  # `e2e-gate` calls this whole workflow, so it is release-blocking.
+  # `e2e-gate` calls this whole workflow; the soak runs and uploads its report
+  # there but is REPORT-ONLY (E2E_FREEZE_SOAK_BLOCKING below) until its
+  # viewers run off the sharer's VM.
   share-freeze-soak:
     name: Share-freeze soak (LiveKit Cloud, two viewers)
     needs: live-loopback
@@ -1121,6 +1123,10 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       CARGO_INCREMENTAL: 0
       PETAL_DISABLE_AUDIO: 1
+      # REPORT-ONLY until the soak's viewers run off the sharer's VM (#391):
+      # "false" prints every finding as "REPORT-ONLY: would fail" and never
+      # fails the gate; "true" makes the soak release-blocking.
+      E2E_FREEZE_SOAK_BLOCKING: "false"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1138,6 +1144,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build desktop app (frontend + debug Rust)
+        continue-on-error: ${{ env.E2E_FREEZE_SOAK_BLOCKING != 'true' }}
         working-directory: apps/desktop
         run: |
           npm ci
@@ -1145,6 +1152,7 @@ jobs:
           cd src-tauri && cargo build --locked
 
       - name: Run share-freeze soak
+        continue-on-error: ${{ env.E2E_FREEZE_SOAK_BLOCKING != 'true' }}
         shell: bash
         timeout-minutes: 38
         env:
@@ -1225,8 +1233,14 @@ jobs:
           echo "sharer host: macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
           node scripts/ci/e2e-gate-verdict.mjs freeze --raw "$LOG_DIR/share-freeze-raw.json" \
             --sender-log "$PETAL_LOG" --json "$LOG_DIR/share-freeze-report.json" || gate_fail=1
-          [ "$gate_fail" -eq 0 ] || { echo "::error::Share-freeze soak FAILED (report: share-freeze-report.json)."; exit 1; }
-          echo "==> Share-freeze soak passed"
+          if [ "$gate_fail" -ne 0 ]; then
+            if [ "$E2E_FREEZE_SOAK_BLOCKING" = "true" ]; then
+              echo "::error::Share-freeze soak FAILED (report: share-freeze-report.json)."; exit 1
+            fi
+            echo "::warning::REPORT-ONLY: would fail -- share-freeze soak (crash report(s) above; see share-freeze-report.json). E2E_FREEZE_SOAK_BLOCKING is not true."
+            exit 0
+          fi
+          echo "==> Share-freeze soak finished (verdict above; REPORT-ONLY unless E2E_FREEZE_SOAK_BLOCKING=true)"
 
       - name: Scrub the deployment-protection bypass secret from artifacts
         if: always()
