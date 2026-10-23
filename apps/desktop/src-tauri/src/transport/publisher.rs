@@ -3064,6 +3064,18 @@ fn native_publish_disabled_by_env() -> bool {
     }
 }
 
+/// #370: the window-share codec as the closed `window_codec` latency-summary
+/// dimension (`rc_latency_telemetry::Dimension::WindowCodec`).
+pub(crate) fn window_codec_label() -> &'static str {
+    match window_video_codec() {
+        VideoCodec::H264 => "h264",
+        VideoCodec::H265 => "h265",
+        VideoCodec::VP8 => "vp8",
+        VideoCodec::VP9 => "vp9",
+        VideoCodec::AV1 => "av1",
+    }
+}
+
 fn forced_video_codec_from_value(value: &str) -> Option<VideoCodec> {
     match value.trim().to_ascii_lowercase().as_str() {
         "h264" => Some(VideoCodec::H264),

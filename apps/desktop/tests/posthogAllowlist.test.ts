@@ -32,14 +32,15 @@ const SHARED_EVENTS = [
 
 // #872: native-only — the sharer-side drawing overlay that captures the
 // cursor exists only in the desktop app, so the web client never emits it.
-const NATIVE_ONLY_EVENTS = ['annotation_toggled'];
+// #370: the latency summary is native-only until the web producer lands (#375).
+const NATIVE_ONLY_EVENTS = ['annotation_toggled', 'remote_control_latency_summary'];
 
-test('allowlist and analytics.rs lock the same thirteen event names', () => {
+test('allowlist and analytics.rs lock the same fourteen event names', () => {
   for (const name of [...SHARED_EVENTS, ...NATIVE_ONLY_EVENTS]) {
     assert.match(allowlist, new RegExp(`\`${name}\``));
     assert.match(analytics, new RegExp(`"${name}"`));
   }
-  assert.match(analytics, /const EVENT_NAMES: \[&str; 13\]/);
+  assert.match(analytics, /const EVENT_NAMES: \[&str; 14\]/);
   assert.match(analytics, /starts_with\("phc_"\)/);
   assert.match(analytics, /"client"/);
   assert.match(analytics, /"native"/);
@@ -63,4 +64,18 @@ test('desktop and web analytics are host-side capture: no posthog-js', () => {
   for (const name of NATIVE_ONLY_EVENTS) {
     assert.doesNotMatch(webAnalytics, new RegExp(`'${name}'`));
   }
+});
+
+// #370: the latency summary is the one event allowed integer-ms values. The
+// doc must scope that exception explicitly and list every contract stage.
+test('allowlist documents the latency-summary exception and every stage', () => {
+  const contract = JSON.parse(readFileSync(join(root, 'contracts', 'petal-contracts.json'), 'utf8'));
+  const schema = contract.remoteControlLatencySummary;
+  assert.match(allowlist, /\*\*Exception \(#370\): `remote_control_latency_summary`/);
+  for (const key of [...schema.stages, ...Object.keys(schema.dimensions), ...schema.alwaysPresent]) {
+    assert.match(allowlist, new RegExp(`\`${key}\``), `allowlist is missing ${key}`);
+  }
+  // The stale row (#370 cleanup): duration_bucket was removed from the event.
+  assert.doesNotMatch(allowlist, /\| `remote_video_stalled` \| `duration_bucket`/);
+  assert.match(analytics, /fn usage_stats_consented\(\) -> bool/);
 });

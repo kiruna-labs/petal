@@ -21,6 +21,8 @@ import {
   latencyVerdict,
   pairControllerPublishes,
   parseHostLatencyLog,
+  parseLatencySummaryLog,
+  summarizeLatencySummaries,
   resolveLatencyBudgets,
 } from './ci/remote-control-latency-verdict.mjs';
 import { WATCH_SCRIPT, armObservationWatch, parseWatchLine } from '../apps/desktop/scripts/remote-control-observation-watch.mjs';
@@ -382,4 +384,33 @@ test('the JXA watcher sleeps between reads instead of spinning, and reports read
   assert.match(WATCH_SCRIPT, /\$\.usleep\(\d+\)/);
   assert.doesNotMatch(WATCH_SCRIPT, /while \(nowMs\(\) < next\) \{\}/);
   assert.match(WATCH_SCRIPT, /'SEEN ' \+ readAt\.toFixed\(1\) \+ ' reads=' \+ reads \+ ' maxGapMs='/);
+});
+
+// #370: the aggregated summary mirror is parsed and reported, never gated.
+test('latency-summary mirror lines are parsed and reported without gating', () => {
+  const contract = JSON.parse(readFileSync(path.join(repoRoot, 'contracts/petal-contracts.json'), 'utf8'));
+  const prefix = '2026-10-19 10:00:00.000 [INFO] [desktop_lib::rc_latency_telemetry] ';
+  const finalLine = contract.remoteControlLatencySummary.example.logLine
+    .replace('final=false', 'final=true')
+    .replace('replay_complete_ms_p95=108', 'replay_complete_ms_p95=131');
+  const log = [prefix + contract.remoteControlLatencySummary.example.logLine, prefix + finalLine, 'noise line'].join('\n');
+  const intervals = parseLatencySummaryLog(log);
+  assert.equal(intervals.length, 2);
+  assert.equal(intervals[0].rc_session_id, '0123456789abcdef0123456789abcdef');
+  assert.equal(intervals[0].replay_complete_ms_p95, 108);
+  assert.equal(intervals[1].final, true);
+  const summary = summarizeLatencySummaries(intervals);
+  assert.equal(summary.intervals, 2);
+  assert.equal(summary.finals, 1);
+  assert.equal(summary.replayComplete.p95MaxMs, 131);
+  assert.equal(summary.replayComplete.samples, 796);
+  assert.equal(summary.replayInject.p95MaxMs, 9);
+  assert.equal(summarizeLatencySummaries(intervals, 'controller').intervals, 0);
+  assert.equal(summarizeLatencySummaries([]).replayComplete.p95MaxMs, null);
+  // Not gated: a run with no summary lines still produces the same checks.
+  const metrics = collectLatencyMetrics({ hostLog: log });
+  assert.equal(metrics.latencySummary.replayComplete.p95MaxMs, 131);
+  assert.ok(!LATENCY_CHECKS.some((check) => check.metric === 'latencySummary'));
+  const verdict = latencyVerdict({ hostLog: log });
+  assert.ok(verdict.notes.some((note) => note.includes('latency summary (#370, not gated): 2 host interval(s), 1 final')));
 });

@@ -118,6 +118,49 @@ export function parseHostLatencyLog(text) {
   return events;
 }
 
+// #370: the aggregated `remote-control-latency-summary:` mirror lines (one per
+// 60 s of control, plus a final partial). Reported next to the per-event log
+// numbers, never gated: the summary covers every input while the per-event
+// lines sample moves/wheels, so the two agree only to within a bucket or so.
+export function parseLatencySummaryLog(text) {
+  const intervals = [];
+  for (const line of String(text ?? '').split('\n')) {
+    const at = line.indexOf('remote-control-latency-summary: ');
+    if (at < 0) continue;
+    const fields = {};
+    for (const pair of line.slice(at + 'remote-control-latency-summary: '.length).trim().split(/\s+/)) {
+      const eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      const key = pair.slice(0, eq);
+      const raw = pair.slice(eq + 1);
+      fields[key] = /^-?\d+$/.test(raw) ? Number(raw) : raw === 'true' ? true : raw === 'false' ? false : raw;
+    }
+    if (typeof fields.role === 'string') intervals.push(fields);
+  }
+  return intervals;
+}
+
+export function summarizeLatencySummaries(intervals, role = 'host') {
+  const mine = (intervals ?? []).filter((fields) => fields.role === role);
+  const stage = (name) => {
+    const withData = mine.filter((fields) => Number.isFinite(fields[`${name}_n`]) && fields[`${name}_n`] > 0);
+    return {
+      intervals: withData.length,
+      samples: withData.reduce((sum, fields) => sum + fields[`${name}_n`], 0),
+      // Worst interval: the run-level analogue of the gate's p95 checks.
+      p95MaxMs: withData.length ? Math.max(...withData.map((fields) => fields[`${name}_p95`])) : null,
+      p50MaxMs: withData.length ? Math.max(...withData.map((fields) => fields[`${name}_p50`])) : null,
+    };
+  };
+  return {
+    role,
+    intervals: mine.length,
+    finals: mine.filter((fields) => fields.final === true).length,
+    replayInject: stage('replay_inject_ms'),
+    replayComplete: stage('replay_complete_ms'),
+  };
+}
+
 const INPUT_KINDS = new Set(['pointer', 'key', 'text', 'wheel']);
 // The host cannot receive before the controller sent (one clock); 5ms covers
 // the ms rounding on both sides. 5s is far past any healthy delivery.
@@ -199,7 +242,9 @@ export function collectLatencyMetrics({ results = null, photon = null, hostLog =
   const receiveToComplete = hostEvents
     .filter((event) => Number.isFinite(event.receiveTsMs) && Number.isFinite(event.completeTsMs))
     .map((event) => event.completeTsMs - event.receiveTsMs);
+  const latencySummary = summarizeLatencySummaries(parseLatencySummaryLog(hostLog));
   return {
+    latencySummary,
     targetObservation: {
       ...distribution(observationSamples(results?.results)),
       methods: results?.summary?.targetObservationLatency?.methods ?? null,
@@ -268,6 +313,14 @@ export function latencyVerdict({ results = null, photon = null, hostLog = '', en
     if (!metric || typeof metric !== 'object' || !('samples' in metric)) continue;
     notes.push(`  ${name.padEnd(30)} ${String(metric.samples).padStart(7)} ${String(metric.p50Ms).padStart(6)} ${String(metric.p95Ms).padStart(7)} ${String(metric.maxMs).padStart(7)}`);
   }
+  const summary = metrics.latencySummary;
+  notes.push(
+    `  latency summary (#370, not gated): ${summary.intervals} host interval(s), ${summary.finals} final; ` +
+      `replay_inject_ms worst p95 ${summary.replayInject.p95MaxMs ?? 'n/a'} over ${summary.replayInject.samples} samples ` +
+      `(log receive->inject p95 ${metrics.hostReceiveToInject.p95Ms ?? 'n/a'}); ` +
+      `replay_complete_ms worst p95 ${summary.replayComplete.p95MaxMs ?? 'n/a'} over ${summary.replayComplete.samples} samples ` +
+      `(log receive->complete p95 ${metrics.hostReceiveToComplete.p95Ms ?? 'n/a'})`
+  );
   notes.push(`  host replay timeouts: ${metrics.hostReplayTimeouts}; send->inject paired ${metrics.sendToInject.paired}/${metrics.sendToInject.publishes} controller publishes; observation methods ${JSON.stringify(metrics.targetObservation.methods)}, watcher max read gap ${metrics.targetObservation.maxReadGapMs ?? 'n/a'}ms`);
   for (const check of verdict.checks) {
     const line = `latency ${check.id}: ${check.status.toUpperCase()} -- ${check.detail} (${check.env})`;
