@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -63,6 +63,15 @@ static PENDING: AtomicU64 = AtomicU64::new(0);
 // `warn` line (visible in a shipped build's `info`-level file sink) instead
 // of the previous `debug!` that never reached it.
 static FAILURE_TRACKER: Mutex<FailureTracker> = Mutex::new(FailureTracker::new());
+// #377: the "Share anonymous usage and performance statistics" setting.
+// UNKNOWN until the frontend syncs the stored choice: events captured before
+// then wait in the bounded queue (QUEUE_CAP) and go out only once GRANTED.
+// Never start this GRANTED -- that is the Sentry startup race #377 avoids.
+const CONSENT_UNKNOWN: u8 = 0;
+const CONSENT_GRANTED: u8 = 1;
+const CONSENT_DENIED: u8 = 2;
+const CONSENT_POLL: Duration = Duration::from_millis(100);
+static USAGE_STATS_CONSENT: AtomicU8 = AtomicU8::new(CONSENT_UNKNOWN);
 
 #[cfg(test)]
 thread_local! {
@@ -667,7 +676,15 @@ fn os_label() -> &'static str {
     }
 }
 
+// #377: cached per process. Uncached, every event spawned `sw_vers` on the
+// caller's thread -- including remote-control replay -- which lifted the VM's
+// host receive->inject p95 from ~9ms to 19ms once a key was present.
 fn os_version() -> String {
+    static OS_VERSION: OnceLock<String> = OnceLock::new();
+    OS_VERSION.get_or_init(read_os_version).clone()
+}
+
+fn read_os_version() -> String {
     #[cfg(target_os = "macos")]
     {
         command_stdout("sw_vers", &["-productVersion"]).unwrap_or_else(|| "unknown".into())
@@ -784,6 +801,8 @@ enum SendOutcome {
     Http5xx,
     HttpOther,
     TransportOther,
+    /// #377: the user opted out while this event was in flight.
+    OptedOut,
 }
 
 impl SendOutcome {
@@ -797,6 +816,7 @@ impl SendOutcome {
             Self::Http5xx => "http_5xx",
             Self::HttpOther => "http_other",
             Self::TransportOther => "transport_other",
+            Self::OptedOut => "opted_out",
         }
     }
 
@@ -843,13 +863,19 @@ async fn attempt_send(
 /// returns immediately instead of wasting a retry cycle on something that
 /// cannot succeed. Cannot wedge the worker (the loop always terminates) and
 /// cannot grow memory (no buffering beyond the one in-flight `body`).
+/// #377: consent is re-checked before EVERY attempt, the retry included, so
+/// an opt-out stops an in-flight event instead of letting its retry go out.
 async fn send_with_retry(
     client: &reqwest::Client,
     url: &str,
     body: &serde_json::Value,
+    consent: &AtomicU8,
 ) -> Result<(), SendOutcome> {
     let mut attempt = 0u32;
     loop {
+        if consent.load(Ordering::Relaxed) != CONSENT_GRANTED {
+            return Err(SendOutcome::OptedOut);
+        }
         match attempt_send(client, url, body).await {
             Ok(()) => return Ok(()),
             Err(outcome) => {
@@ -897,31 +923,107 @@ fn start_worker() {
         // and #908 review blocker 4 -- a configurable host can carry
         // userinfo, query parameters, or an internal IP).
         log::info!("analytics: worker started");
-        while let Some(mut body) = rx.recv().await {
-            body["api_key"] = serde_json::Value::String(api_key.clone());
-            let result = send_with_retry(client, &url, &body).await;
-            let message = FAILURE_TRACKER.lock_unpoisoned().note_result(
-                result.is_ok(),
-                Instant::now(),
-                result.err().map(SendOutcome::as_str),
-            );
-            if let Some(message) = message {
-                log::warn!("{message}");
-            }
-            if result.is_err() {
-                // #908 review blocker 2: this event may have been carrying
-                // an earlier `dropped_since_last` count (see
-                // `take_dropped_since_last`/`build_body`). That count was
-                // only ever restored when `try_send` itself failed --  if
-                // the event reached the queue but then failed HTTP delivery
-                // (exactly the outage scenario where drops are most likely),
-                // the count silently vanished. Read it back out of the body
-                // and restore it so it still reaches a later event.
-                restore_carried_drop_count(&body);
+        drain_queue(&mut rx, &USAGE_STATS_CONSENT, client, &url, &api_key).await;
+    });
+}
+
+/// The worker loop: every queued event first waits for a usage-stats
+/// decision (#377), then is sent when GRANTED or discarded when DENIED.
+/// Split out so tests drive this exact loop against a local server and a
+/// local consent cell.
+async fn drain_queue(
+    rx: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
+    consent: &AtomicU8,
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) {
+    let mut held_discard_logged = false;
+    while let Some(mut body) = rx.recv().await {
+        let held = consent.load(Ordering::Relaxed) == CONSENT_UNKNOWN;
+        if !await_consent_decision(consent).await {
+            if held && !held_discard_logged {
+                held_discard_logged = true;
+                log::info!("analytics: usage stats off -- discarding events held since launch");
             }
             PENDING.fetch_sub(1, Ordering::Relaxed);
+            continue;
         }
-    });
+        body["api_key"] = serde_json::Value::String(api_key.to_string());
+        let result = send_with_retry(client, url, &body, consent).await;
+        if result == Err(SendOutcome::OptedOut) {
+            PENDING.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        }
+        let message = FAILURE_TRACKER.lock_unpoisoned().note_result(
+            result.is_ok(),
+            Instant::now(),
+            result.err().map(SendOutcome::as_str),
+        );
+        if let Some(message) = message {
+            log::warn!("{message}");
+        }
+        if result.is_err() {
+            // #908 review blocker 2: this event may have been carrying
+            // an earlier `dropped_since_last` count (see
+            // `take_dropped_since_last`/`build_body`). That count was
+            // only ever restored when `try_send` itself failed --  if
+            // the event reached the queue but then failed HTTP delivery
+            // (exactly the outage scenario where drops are most likely),
+            // the count silently vanished. Read it back out of the body
+            // and restore it so it still reaches a later event.
+            restore_carried_drop_count(&body);
+        }
+        PENDING.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Resolves once the user's usage-stats choice is known: `true` to send,
+/// `false` to discard. Polls only while UNKNOWN, i.e. the first moments
+/// after launch before the frontend's startup sync (#377).
+async fn await_consent_decision(consent: &AtomicU8) -> bool {
+    loop {
+        match consent.load(Ordering::Relaxed) {
+            CONSENT_GRANTED => return true,
+            CONSENT_DENIED => return false,
+            _ => tokio::time::sleep(CONSENT_POLL).await,
+        }
+    }
+}
+
+/// The one consent check for usage telemetry (#377). `false` only once the
+/// user has turned "Share anonymous usage and performance statistics" off.
+/// Before the stored choice syncs it is `true`, and `capture()` holds events
+/// until the choice is known. Producers (e.g. the #370 latency aggregator)
+/// call this to skip work while opted out.
+pub(crate) fn usage_stats_enabled() -> bool {
+    USAGE_STATS_CONSENT.load(Ordering::Relaxed) != CONSENT_DENIED
+}
+
+fn consent_value(enabled: bool) -> u8 {
+    if enabled {
+        CONSENT_GRANTED
+    } else {
+        CONSENT_DENIED
+    }
+}
+
+/// Records a usage-stats choice; returns whether the state changed.
+fn store_consent(consent: &AtomicU8, enabled: bool) -> bool {
+    consent.swap(consent_value(enabled), Ordering::Relaxed) != consent_value(enabled)
+}
+
+/// Tauri command backing Settings -> Diagnostics' "Share anonymous usage and
+/// performance statistics" toggle (#377). The frontend also calls it at
+/// startup with the stored value, which releases or discards held events.
+#[tauri::command]
+pub fn set_usage_stats_enabled(enabled: bool) {
+    if store_consent(&USAGE_STATS_CONSENT, enabled) {
+        log::info!(
+            "analytics: usage stats {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
+    }
 }
 
 /// Wait (up to `timeout`) for every event already accepted onto the queue to
@@ -929,8 +1031,23 @@ fn start_worker() {
 /// drains -- never delays a healthy-network quit -- and is hard-bounded by
 /// `timeout` so a dead network cannot block shutdown.
 pub(crate) async fn flush(timeout: Duration) {
+    // #377: held events never drain while the choice is unknown, and a
+    // DENIED worker discards without network -- only wait when sending.
     if WORKER.get().is_none() {
         return;
+    }
+    match USAGE_STATS_CONSENT.load(Ordering::Relaxed) {
+        CONSENT_GRANTED => {}
+        CONSENT_UNKNOWN => {
+            let held = PENDING.load(Ordering::Relaxed);
+            if held > 0 {
+                log::info!(
+                    "analytics: {held} event(s) held for the usage-stats choice discarded at quit (choice never synced)"
+                );
+            }
+            return;
+        }
+        _ => return,
     }
     wait_for_pending_to_drain(timeout).await;
 }
@@ -1044,6 +1161,10 @@ fn enqueue(tx: &tokio::sync::mpsc::Sender<serde_json::Value>, body: serde_json::
 }
 
 fn capture(event: Event) {
+    // #377: an opted-out user produces nothing, not even a test-sink entry.
+    if !usage_stats_enabled() {
+        return;
+    }
     // Gate BEFORE collecting properties: `common_properties` on Windows runs
     // `os_version` (RtlGetVersion — previously `cmd /C ver`, a console-process
     // spawn). With no PostHog key the events are disabled, and the old spawn
@@ -2130,7 +2251,7 @@ mod tests {
             .build()
             .unwrap();
         let body = json!({"event": "test"});
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         assert!(result.is_ok(), "one retry must recover a transient failure: {result:?}");
     }
 
@@ -2164,7 +2285,7 @@ mod tests {
         // attempts" -- instead of a number that happens to hold on one OS.
         let worst_case = SEND_TIMEOUT * (MAX_SEND_RETRIES + 1) + RETRY_BACKOFF * MAX_SEND_RETRIES;
         let start = Instant::now();
-        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body))
+        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)))
             .await
             .expect("send_with_retry must terminate, never wedge the worker");
         let elapsed = start.elapsed();
@@ -2214,7 +2335,7 @@ mod tests {
             .unwrap();
         let body = json!({"event": "test"});
         let worst_case = SEND_TIMEOUT * (MAX_SEND_RETRIES + 1) + RETRY_BACKOFF * MAX_SEND_RETRIES;
-        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body))
+        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)))
             .await
             .expect("send_with_retry must terminate, never wedge the worker");
         assert!(
@@ -2236,7 +2357,7 @@ mod tests {
             .build()
             .unwrap();
         let body = json!({"event": "test"});
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         assert_eq!(
             result,
             Err(SendOutcome::Http401),
@@ -2259,7 +2380,7 @@ mod tests {
             .unwrap();
         let body = json!({"event": "test"});
         let start = Instant::now();
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         let elapsed = start.elapsed();
         assert_eq!(result, Err(SendOutcome::Http401));
         assert!(
@@ -2293,6 +2414,7 @@ mod tests {
             SendOutcome::Http5xx,
             SendOutcome::HttpOther,
             SendOutcome::TransportOther,
+            SendOutcome::OptedOut,
         ] {
             let s = outcome.as_str();
             assert!(!s.contains("://"), "must never look like a URL: {s}");
@@ -2331,7 +2453,7 @@ mod tests {
             .timeout(SEND_TIMEOUT)
             .build()
             .unwrap();
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         assert!(result.is_err(), "both attempts were configured to fail");
 
         // Call the SAME function the worker's failure branch calls. Do not
@@ -2347,5 +2469,119 @@ mod tests {
              restored, not silently lost"
         );
         DROPPED.store(0, Ordering::Relaxed);
+    }
+
+    /// Puts the process-wide consent back to UNKNOWN even if a test panics,
+    /// so one failing #377 test cannot silently opt every later test out.
+    struct ResetConsent;
+
+    impl Drop for ResetConsent {
+        fn drop(&mut self) {
+            USAGE_STATS_CONSENT.store(CONSENT_UNKNOWN, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn opted_out_capture_records_nothing_and_opting_back_in_resumes() {
+        let (_, events) = with_sink(|| {
+            let _reset = ResetConsent;
+            assert!(usage_stats_enabled(), "unknown consent must not block producers");
+            set_usage_stats_enabled(false);
+            assert!(!usage_stats_enabled());
+            share_started(ShareStartedSource::Window);
+            meeting_joined();
+            annotation_toggled(true);
+            set_usage_stats_enabled(true);
+            assert!(usage_stats_enabled());
+            share_stopped(ShareStoppedReason::User);
+        });
+        assert_eq!(names(&events), ["share_stopped"]);
+    }
+
+    #[test]
+    fn store_consent_reports_only_real_changes() {
+        let consent = AtomicU8::new(CONSENT_UNKNOWN);
+        assert!(store_consent(&consent, false));
+        assert!(!store_consent(&consent, false));
+        assert!(store_consent(&consent, true));
+        assert_eq!(consent.load(Ordering::Relaxed), CONSENT_GRANTED);
+    }
+
+    /// Queues `count` events through the real `enqueue`, then runs the real
+    /// worker loop while `decide` lands a choice after a hold. Returns
+    /// (requests seen during the hold, requests seen in total).
+    async fn drain_with_late_decision(count: usize, enabled: bool) -> (usize, usize) {
+        let (url, requests) =
+            spawn_counting_server("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+        let client = reqwest::Client::builder()
+            .timeout(SEND_TIMEOUT)
+            .build()
+            .unwrap();
+        let consent = AtomicU8::new(CONSENT_UNKNOWN);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(QUEUE_CAP);
+        for _ in 0..count {
+            assert!(enqueue(&tx, json!({"event": "test", "properties": {}})));
+        }
+        drop(tx);
+        let decide = async {
+            tokio::time::sleep(CONSENT_POLL * 4).await;
+            let held = requests.lock_unpoisoned().len();
+            store_consent(&consent, enabled);
+            held
+        };
+        let (held, ()) = tokio::join!(
+            decide,
+            drain_queue(&mut rx, &consent, &client, &url, "phc_test")
+        );
+        let total = requests.lock_unpoisoned().len();
+        (held, total)
+    }
+
+    #[tokio::test]
+    async fn events_before_the_startup_sync_wait_and_then_send_when_granted() {
+        let _guard = TEST_LOCK.lock_unpoisoned();
+        PENDING.store(0, Ordering::Relaxed);
+        let (held, total) = drain_with_late_decision(3, true).await;
+        assert_eq!(held, 0, "nothing may be sent before the stored choice is known");
+        assert_eq!(total, 3, "held events must all go out once granted");
+        assert_eq!(PENDING.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn events_before_the_startup_sync_are_discarded_when_denied() {
+        let _guard = TEST_LOCK.lock_unpoisoned();
+        PENDING.store(0, Ordering::Relaxed);
+        let (held, total) = drain_with_late_decision(3, false).await;
+        assert_eq!(held, 0);
+        assert_eq!(total, 0, "an opted-out user's held events must never be sent");
+        assert_eq!(
+            PENDING.load(Ordering::Relaxed),
+            0,
+            "discarded events must settle PENDING so quit's flush is not delayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_opt_out_between_attempts_stops_the_retry() {
+        let (url, requests) =
+            spawn_counting_server("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+        let client = reqwest::Client::builder()
+            .timeout(SEND_TIMEOUT)
+            .build()
+            .unwrap();
+        let consent = AtomicU8::new(CONSENT_GRANTED);
+        let body = json!({"event": "test"});
+        let opt_out = async {
+            // Inside RETRY_BACKOFF: after the first attempt, before the retry.
+            tokio::time::sleep(RETRY_BACKOFF / 2).await;
+            store_consent(&consent, false);
+        };
+        let (result, ()) = tokio::join!(send_with_retry(&client, &url, &body, &consent), opt_out);
+        assert_eq!(result, Err(SendOutcome::OptedOut));
+        assert_eq!(
+            requests.lock_unpoisoned().len(),
+            1,
+            "the retry of an in-flight event must not go out after an opt-out"
+        );
     }
 }

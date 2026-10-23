@@ -11,6 +11,8 @@
 // exception capture stay locked off). Never send room names, identities,
 // window titles, device names, key codes, clipboard, coordinates, or tokens.
 
+import { usageStatsEnabled } from '@petal/shared/logic/usageStats';
+
 declare const __PETAL_BUILD_INFO__: { version: string } | undefined;
 
 const DEFAULT_HOST = 'https://us.i.posthog.com';
@@ -280,6 +282,9 @@ function extrasFor(spec: EventSpec): Record<string, string> {
 }
 
 function send(body: Record<string, unknown>): void {
+  // #377: the user's opt-out wins over everything, checked per request so a
+  // toggle mid-session takes effect on the very next event.
+  if (!usageStatsEnabled()) return;
   const key = apiKey();
   if (!key) return;
   const payload = JSON.stringify({ ...body, api_key: key });
@@ -303,6 +308,7 @@ function send(body: Record<string, unknown>): void {
 }
 
 function capture(spec: EventSpec): void {
+  if (!usageStatsEnabled()) return;
   const properties = extrasFor(spec);
   if (testSink) {
     testSink.push({ name: spec.name, properties });

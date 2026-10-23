@@ -1096,6 +1096,7 @@ pub fn run() {
             logging::export_logs,
             logging::log_updater_event,
             logging::set_sentry_enabled,
+            analytics::set_usage_stats_enabled,
             logging::record_camera_receive_health,
             feedback::prepare_feedback_diagnostics,
             updater::check_compatible_update_available,
@@ -1841,6 +1842,10 @@ pub fn run() {
             // an NSIS stub's machine type says nothing about its payload, #116).
             logging::export_logs,
             logging::log_updater_event,
+            // Privacy toggles (#377): Sentry and PostHog both run on Windows,
+            // so both opt-outs must be reachable here too.
+            logging::set_sentry_enabled,
+            analytics::set_usage_stats_enabled,
             updater::check_compatible_update_available,
             updater::run_launch_update_check,
             updater::download_and_install_compatible_update,

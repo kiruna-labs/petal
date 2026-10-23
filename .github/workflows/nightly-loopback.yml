@@ -528,6 +528,9 @@ jobs:
           PETAL_WEDGE_EVIDENCE_DIR: ${{ runner.temp }}/petal-nightly-loopback
           PETAL_DEV_LOG: ${{ runner.temp }}/petal-nightly-loopback/petal-dev.log
           RC_TEST_REPLAY_DELAY_MS: ${{ inputs.rc_test_replay_delay_ms || '' }}
+          # #377: the usage-stats opt-out check serves a mock PostHog ingest on
+          # this port; Petal gets a throwaway key pointed at it (launch only).
+          PETAL_POSTHOG_CONSENT_PORT: "18977"
         run: |
           set -euo pipefail
 
@@ -667,6 +670,8 @@ jobs:
             PETAL_BACKEND_URL= \
             PETAL_AUTOTEST_SOCK="$SOCKET" \
             PETAL_RC_TEST_REPLAY_DELAY_MS="$RC_TEST_REPLAY_DELAY_MS" \
+            PETAL_POSTHOG_KEY=phc_loopback_consent_probe \
+            PETAL_POSTHOG_HOST="http://127.0.0.1:${PETAL_POSTHOG_CONSENT_PORT}" \
             npm run dev:clean
           ) >"$PETAL_LOG" 2>&1 &
           # The launcher's own pid (this subshell, which runs `npm run
@@ -761,6 +766,17 @@ jobs:
           set -e
           echo "press-to-photon harness exit $photon_status (verdict: latency gate below)" | tee -a "$HARNESS_LOG"
 
+          # #377: with usage stats OFF, 30s of share churn must produce zero
+          # PostHog POSTs; the script proves the pipe is live first (ON) and
+          # that sending resumes after (ON again), so a 0 is never vacuous.
+          echo "==> PostHog usage-stats opt-out (#377)" | tee -a "$HARNESS_LOG"
+          set +e
+          PETAL_AUTOTEST_SOCK="$SOCKET" \
+            node apps/desktop/scripts/posthog-consent-live.mjs --port "$PETAL_POSTHOG_CONSENT_PORT" \
+            --off-seconds 30 --json "$LOG_DIR/posthog-consent.json" 2>&1 | tee -a "$HARNESS_LOG"
+          consent_status=${PIPESTATUS[0]}
+          set -e
+
           gate_fail=0
 
           # -- Survival. The 0.9.7 telepointer SIGSEGV lived on a background
@@ -838,6 +854,11 @@ jobs:
             latency_status=${PIPESTATUS[0]}
             set -e
             [ "$latency_status" -eq 0 ] || gate_fail=1
+          fi
+
+          if [ "$consent_status" -ne 0 ]; then
+            echo "::error::PostHog usage-stats opt-out check did not pass (exit $consent_status); see posthog-consent.json." | tee -a "$HARNESS_LOG"
+            gate_fail=1
           fi
 
           if [ "$gate_fail" -ne 0 ]; then

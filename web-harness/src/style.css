@@ -751,6 +751,49 @@ input[type='text'] {
   min-width: 96px;
 }
 
+/* #377: usage-stats opt-out. Copy wraps freely; it must never truncate. */
+.usage-stats-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+}
+
+.profile-onboarding.first-visit .usage-stats-row {
+  display: none;
+}
+
+.usage-stats-row input[type='checkbox'] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  accent-color: var(--accent, #34c759);
+  cursor: pointer;
+}
+
+.usage-stats-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.usage-stats-title {
+  font: 600 12px var(--font-ui);
+  color: var(--text-primary);
+  overflow-wrap: break-word;
+}
+
+.usage-stats-description {
+  font: 500 11px var(--font-ui);
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.6);
+  overflow-wrap: break-word;
+}
+
 .meeting-field input[type='text'] {
   font-size: 14px;
 }

@@ -13,6 +13,13 @@ The ingest host can be overridden the same way (`PETAL_POSTHOG_HOST` /
 key per slice before publishing.
 Do not add events from the backend. Do not add `posthog-js`.
 
+**Consent (#377):** every client honors the "Share anonymous usage and
+performance statistics" switch (default on, opt-out). Producers check the one
+consent function before doing work: `analytics::usage_stats_enabled()` in
+Rust and `usageStatsEnabled()` from `shared/logic/usageStats.ts` on the web.
+Native events captured before the frontend syncs the stored choice wait in
+the bounded queue and are sent or discarded once it is known.
+
 Dedicated project: **Petal** (id `317298`) in org Kiruna Labs, US cloud —
 [project home](https://us.posthog.com/project/317298/home). Project token
 lives in PostHog project settings, never in git.
