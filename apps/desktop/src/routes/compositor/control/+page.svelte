@@ -36,7 +36,7 @@
     RemoteWindowDebugStats,
     RemoteControlStatus
   } from '#lib/ipc.js';
-  import { session } from '#lib/stores/session.svelte';
+  import { session } from '#lib/stores/session.svelte.js';
   import {
     controlBannerShowsLabel,
     remoteControlFeedbackIsNeutral,

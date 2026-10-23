@@ -52,9 +52,9 @@
   } from '#lib/data/launchLocation.js';
   import { openPrivacySettings } from '#lib/data/permissions.js';
   import { shareErrorDisplay } from '#lib/data/shareErrors.js';
-  import { clearUpdateStatus, updateStatus } from '#lib/stores/updateStatus.svelte';
-  import { setToastHostVisible } from '#lib/stores/toastHost.svelte';
-  import { updateAudioDevices } from '#lib/stores/session.svelte';
+  import { clearUpdateStatus, updateStatus } from '#lib/stores/updateStatus.svelte.js';
+  import { setToastHostVisible } from '#lib/stores/toastHost.svelte.js';
+  import { updateAudioDevices } from '#lib/stores/session.svelte.js';
   import { SILENT_MIC_OFFER_ACTION, silentMicNote, silentMicOffer } from '#lib/data/audioDeviceSelection.js';
   import { switchFromSilentMic } from '#lib/data/audioDevices.js';
   import { EVENTS } from '#lib/ipc.js';

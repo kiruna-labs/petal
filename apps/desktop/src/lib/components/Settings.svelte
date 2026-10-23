@@ -124,7 +124,7 @@
   } from '#lib/ipc.js';
   import { displayBuildVersion } from '#lib/buildInfo.js';
   import { isMac } from '#lib/platform.js';
-  import { resetOnboarding, session, updateAudioDevices, updateCameraMode } from '#lib/stores/session.svelte';
+  import { resetOnboarding, session, updateAudioDevices, updateCameraMode } from '#lib/stores/session.svelte.js';
   import { checkForUpdate } from '#lib/updater.js';
   import { clearLocalFactoryResetState, tccResetCommand } from '#lib/data/factoryReset.js';
   import {

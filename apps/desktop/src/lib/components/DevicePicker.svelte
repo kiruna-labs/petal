@@ -10,7 +10,7 @@
     switchNote
   } from '#lib/data/audioDeviceSelection.js';
   import { listCameraDevices, setCameraDevice } from '#lib/data/cameraDevices.js';
-  import { session, updateAudioDevices } from '#lib/stores/session.svelte';
+  import { session, updateAudioDevices } from '#lib/stores/session.svelte.js';
   import { EVENTS, hasTauriBridge, listenUntilDestroy, type ResilienceEvent } from '#lib/ipc.js';
 
   interface DeviceOption {
