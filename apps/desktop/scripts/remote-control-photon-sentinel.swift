@@ -154,9 +154,17 @@ private let calibrationSquares = [
     CalibrationSquare(rect: NSRect(x: 920, y: 560, width: 24, height: 24), color: NSColor(calibratedRed: 1, green: 212 / 255, blue: 0, alpha: 1)),
 ]
 
+// #378 freeze probe: a strip between the top calibration squares that moves
+// at 30Hz while the harness has sent SIGUSR1 (SIGUSR2 stops it). Continuous
+// motion makes every presented-frame gap at the viewer a real freeze, never an
+// idle source. Clear of the Gray code (y 88..118) and the squares.
+private let motionStripRect = NSRect(x: 52, y: 18, width: 856, height: 20)
+private let motionBlockWidth: CGFloat = 48
+
 private final class SentinelPatternView: NSView {
     private(set) var generation: UInt16 = 0
     private(set) var lastInput = "ready"
+    var motionTick = 0
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
@@ -181,6 +189,13 @@ private final class SentinelPatternView: NSView {
         for square in calibrationSquares {
             square.color.setFill()
             square.rect.fill()
+        }
+
+        if motionTick > 0 {
+            let travel = motionStripRect.width - motionBlockWidth
+            let offset = CGFloat((motionTick * 12) % Int(travel))
+            NSColor.white.setFill()
+            NSRect(x: motionStripRect.minX + offset, y: motionStripRect.minY, width: motionBlockWidth, height: motionStripRect.height).fill()
         }
 
         let value = Int(generation)
@@ -399,8 +414,34 @@ private final class SentinelAppDelegate: NSObject, NSApplicationDelegate, NSText
     fileprivate var hostileCanvas: HostileCanvasView!
     private var scrollStrip: NSScrollView!
     private var lastHScrollOriginX: CGFloat = 0
+    private var motionTimer: Timer?
+    private var signalSources: [DispatchSourceSignal] = []
+
+    private func setMotion(_ on: Bool) {
+        motionTimer?.invalidate()
+        motionTimer = nil
+        if on {
+            motionTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+                guard let view = self?.patternView else { return }
+                view.motionTick += 1
+                view.setNeedsDisplay(motionStripRect)
+            }
+        }
+        appendEvent(["kind": "motion", "on": on, "tMs": Int(Date().timeIntervalSince1970 * 1000)])
+    }
+
+    private func installMotionSignals() {
+        for (sig, on) in [(SIGUSR1, true), (SIGUSR2, false)] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [weak self] in self?.setMotion(on) }
+            source.resume()
+            signalSources.append(source)
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installMotionSignals()
         patternView = SentinelPatternView(frame: NSRect(x: 0, y: 0, width: sentinelWidth, height: sentinelHeight))
 
         textField = NSTextField(frame: NSRect(x: 90, y: 285, width: 360, height: 72))
