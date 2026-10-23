@@ -357,6 +357,30 @@ test('latencyVerdict speaks the verdict-script shape, both directions', () => {
   assert.equal(garbage.ok, false);
 });
 
+// #378: the presented-freeze check is REPORT-ONLY (until #421 lands) unless
+// E2E_IMPAIRED_BLOCKING=true -- so the clean pass keeps its pre-#378 checks.
+test('presented-freeze check blocks only when E2E_IMPAIRED_BLOCKING=true', () => {
+  const frozen = syntheticRun({ freezeGapMs: 650 });
+  const blocking = latencyVerdict({ ...frozen, env: { E2E_IMPAIRED_BLOCKING: 'true' } });
+  assert.equal(blocking.ok, false);
+  assert.ok(blocking.errors.some((line) => line.startsWith('latency presented-freeze-max-gap: FAIL')));
+  for (const env of [{}, { E2E_IMPAIRED_BLOCKING: 'false' }]) {
+    const reportOnly = latencyVerdict({ ...frozen, env });
+    assert.equal(reportOnly.ok, true, reportOnly.errors.join('\n'));
+    assert.deepEqual(reportOnly.errors, []);
+    assert.ok(reportOnly.warnings.some((line) => line.startsWith('REPORT-ONLY: would fail -- latency presented-freeze-max-gap: FAIL')));
+    assert.equal(reportOnly.checks.find((c) => c.id === 'presented-freeze-max-gap').reportOnly, true);
+  }
+  // A missing probe is also non-blocking by default, never a silent pass.
+  const missing = syntheticRun();
+  delete missing.photon.summary.freezeProbe;
+  const noProbe = latencyVerdict(missing);
+  assert.equal(noProbe.ok, true);
+  assert.ok(noProbe.warnings.some((line) => /REPORT-ONLY: would fail -- latency presented-freeze-max-gap: INSUFFICIENT/.test(line)));
+  // Every other check still blocks with the switch off.
+  assert.equal(latencyVerdict(syntheticRun({ slowMs: 150 })).ok, false);
+});
+
 // The real CLI path the workflow runs: e2e-gate-verdict.mjs latency.
 test('e2e-gate-verdict.mjs latency exits 0 on a healthy run and 1 on a stalled one', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'rc-latency-verdict-'));

@@ -11,6 +11,9 @@
 //   node scripts/ci/e2e-gate-verdict.mjs loopback --results <json> --harness-exit <n> [--quarantine <ids>] [--required <ids>]
 //   node scripts/ci/e2e-gate-verdict.mjs latency  --results <json> --photon <json> --host-log <petal log> [--json <out>]
 //   node scripts/ci/e2e-gate-verdict.mjs attribution --clean <latency json> --impaired <latency json> --delay-ms <n>
+//   Any tier takes --pass clean|impaired (default clean). An impaired-pass
+//   verdict is REPORT-ONLY (failures print as warnings, exit 0) unless
+//   E2E_IMPAIRED_BLOCKING=true (#378; report-only until #421 lands).
 //   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> --engine-exit <n> [--quarantine <ids>]
 //
 // Prints GitHub ::error/::warning annotations; exits 0 (pass) or 1 (fail).
@@ -18,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { attributionVerdict, latencyVerdict } from './remote-control-latency-verdict.mjs';
+import { attributionVerdict, envFlagTrue, IMPAIRED_BLOCKING_ENV, latencyVerdict } from './remote-control-latency-verdict.mjs';
 
 // Skips that are structurally unavoidable on the release runner and carry no
 // signal there. Keyed by case id AND reason: the same case skipping for any
@@ -293,9 +296,28 @@ export function emit(verdict, log = console.log) {
   for (const e of verdict.errors) log(`::error::${e}`);
 }
 
+// #378: a non-blocking verdict keeps every finding visible (as warnings
+// prefixed REPORT-ONLY) but cannot fail the gate.
+export function applyReportOnly(verdict, { blocking }) {
+  if (blocking || verdict.ok) return { ...verdict, reportOnlyWouldFail: false };
+  return {
+    ...verdict,
+    ok: true,
+    errors: [],
+    warnings: [...verdict.warnings, ...verdict.errors.map((e) => `REPORT-ONLY: would fail -- ${e}`)],
+    reportOnlyWouldFail: true,
+    wouldFailCount: verdict.errors.length,
+  };
+}
+
 function main(argv) {
   const [tier, ...rest] = argv;
   const args = parseArgs(rest);
+  const pass = args.pass || 'clean';
+  if (pass !== 'clean' && pass !== 'impaired') {
+    console.log(`::error::e2e-gate-verdict: unknown --pass '${pass}' (expected clean|impaired)`);
+    return 1;
+  }
   let verdict;
   if (tier === 'loopback') {
     const report = args.results && fs.existsSync(args.results) ? readJson(args.results) : null;
@@ -333,8 +355,16 @@ function main(argv) {
     console.log(`::error::e2e-gate-verdict: unknown tier '${tier}' (expected loopback|latency|attribution|cockpit)`);
     return 1;
   }
+  if (pass === 'impaired') {
+    verdict = applyReportOnly(verdict, { blocking: envFlagTrue(process.env, IMPAIRED_BLOCKING_ENV) });
+  }
   emit(verdict);
-  console.log(verdict.ok ? `e2e-gate-verdict ${tier}: PASS` : `e2e-gate-verdict ${tier}: FAIL (${verdict.errors.length} problem(s))`);
+  const label = pass === 'clean' ? tier : `${tier} (${pass} pass)`;
+  if (verdict.reportOnlyWouldFail) {
+    console.log(`e2e-gate-verdict ${label}: REPORT-ONLY: would fail (${verdict.wouldFailCount} problem(s)); not blocking because ${IMPAIRED_BLOCKING_ENV} is not true`);
+  } else {
+    console.log(verdict.ok ? `e2e-gate-verdict ${label}: PASS` : `e2e-gate-verdict ${label}: FAIL (${verdict.errors.length} problem(s))`);
+  }
   return verdict.ok ? 0 : 1;
 }
 

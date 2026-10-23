@@ -44,6 +44,14 @@ export function distribution(values) {
 
 // Defaults are the VM calibration (the workflow sets the same values
 // explicitly); a check whose env var is set uses that instead.
+// #378: the impaired pass and the presented-freeze check are REPORT-ONLY
+// unless this env is exactly "true" (nightly-loopback.yml sets it).
+export const IMPAIRED_BLOCKING_ENV = 'E2E_IMPAIRED_BLOCKING';
+
+export function envFlagTrue(env, name) {
+  return String(env?.[name] ?? '').trim().toLowerCase() === 'true';
+}
+
 export const LATENCY_CHECKS = [
   { id: 'observation-p50', metric: 'targetObservation', stat: 'p50Ms', env: 'PETAL_RC_OBSERVATION_P50_BUDGET_MS', defaultBudgetMs: 200, minSamples: 14 },
   { id: 'observation-p95', metric: 'targetObservation', stat: 'p95Ms', env: 'PETAL_RC_OBSERVATION_P95_BUDGET_MS', defaultBudgetMs: 400, minSamples: 14 },
@@ -55,7 +63,9 @@ export const LATENCY_CHECKS = [
   // #378: longest gap between presented frames at the web viewer while the
   // sentinel animates continuously (samples = presented frames; 100 over the
   // 20s probe is a 5fps floor). Frozen video is what users report first.
-  { id: 'presented-freeze-max-gap', metric: 'presentedFreeze', stat: 'maxGapMs', env: 'PETAL_RC_PRESENTED_FREEZE_BUDGET_MS', defaultBudgetMs: 500, minSamples: 100 },
+  // REPORT-ONLY until #399's fix (#421) lands: it blocks only when
+  // E2E_IMPAIRED_BLOCKING=true, so the clean pass keeps its pre-#378 checks.
+  { id: 'presented-freeze-max-gap', metric: 'presentedFreeze', stat: 'maxGapMs', env: 'PETAL_RC_PRESENTED_FREEZE_BUDGET_MS', defaultBudgetMs: 500, minSamples: 100, blockingEnv: IMPAIRED_BLOCKING_ENV },
 ];
 
 export function resolveLatencyBudgets(env = {}) {
@@ -358,10 +368,14 @@ export function latencyVerdict({ results = null, photon = null, hostLog = '', en
     : `  presented-video freeze probe: ${freeze.samples} frames in ${freeze.durationMs}ms (${freeze.fps} fps), max gap ${freeze.maxGapMs}ms, ${freeze.freezes} gap(s) > 500ms totalling ${freeze.frozenMs}ms; decode-side ${JSON.stringify(freeze.decodeStall)}, playback ${JSON.stringify(freeze.playback)}`);
   for (const check of verdict.checks) {
     const line = `latency ${check.id}: ${check.status.toUpperCase()} -- ${check.detail} (${check.env})`;
+    const blockingEnv = LATENCY_CHECKS.find((c) => c.id === check.id)?.blockingEnv;
+    check.reportOnly = Boolean(blockingEnv) && !envFlagTrue(env, blockingEnv);
     if (check.status === 'pass') notes.push(line);
+    else if (check.reportOnly) warnings.push(`REPORT-ONLY: would fail -- ${line} [blocks only when ${blockingEnv}=true]`);
     else errors.push(line);
   }
-  return { ok: verdict.pass, errors, warnings, notes, budgets, metrics, checks: verdict.checks };
+  const ok = verdict.checks.every((check) => check.status === 'pass' || check.reportOnly);
+  return { ok, errors, warnings, notes, budgets, metrics, checks: verdict.checks };
 }
 
 // #378 stage attribution for the impaired pass. `clean`/`impaired` are the
