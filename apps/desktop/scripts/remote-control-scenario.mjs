@@ -48,6 +48,7 @@ import {
   boundsCoverDisplayRightEdge,
   hotCornerActive,
   boundsOverlap,
+  displayTextEditBounds,
   displayRoutingVerdict,
   normalizedPointOnDisplay,
   parseAppleScriptBounds,
@@ -2655,9 +2656,17 @@ function readTextEditWindowBounds() {
 // clamped x = 1.0 click of case 41 lands inside TextEdit. macOS keeps the
 // window above the Dock, so the bottom edge is whatever the system allows.
 function placeTextEditForDisplayCases(frame) {
-  const right = frame.x + frame.width;
-  const bottom = frame.y + frame.height;
-  const wanted = [right - DISPLAY_TEXTEDIT_WIDTH, frame.y + DISPLAY_TEXTEDIT_TOP_INSET, right, bottom];
+  // Computed from the display frame and the sentinel's real bounds, never
+  // hard-coded: on a display too narrow for an 800-point strip beside the
+  // sentinel the strip starts right of it instead of overlapping it.
+  const sentinelBefore = sentinelTopLeftBounds(frame);
+  const wanted = displayTextEditBounds(frame, sentinelBefore, {
+    width: DISPLAY_TEXTEDIT_WIDTH,
+    topInset: DISPLAY_TEXTEDIT_TOP_INSET,
+  });
+  if (!wanted) {
+    throw new Error(`display ${JSON.stringify(frame)} has no room for a TextEdit strip right of the photon sentinel ${sentinelBefore}`);
+  }
   osascript(
     'tell application "TextEdit"',
     `set bounds of (first window whose name contains "${sacrificialDocMarker}") to {${wanted.join(', ')}}`,

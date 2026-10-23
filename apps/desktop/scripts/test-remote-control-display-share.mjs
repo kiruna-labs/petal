@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   boundsCoverDisplayRightEdge,
   boundsOverlap,
+  displayTextEditBounds,
   displayRoutingVerdict,
   hotCornerActive,
   normalizedPointOnDisplay,
@@ -31,6 +32,27 @@ test('AppleScript bounds parse, point and overlap helpers', () => {
   const sentinel = [120, 360, 1080, 960];
   assert.equal(boundsOverlap(bounds, sentinel), false);
   assert.equal(boundsOverlap([213, 77, 886, 516], sentinel), true);
+});
+
+test('the display-case TextEdit strip never overlaps the photon sentinel', () => {
+  // 1920x1080 runner: the preferred 800-point strip already clears it.
+  const wide = displayTextEditBounds(DISPLAY, [120, 360, 1080, 960]);
+  assert.deepEqual(wide, [1120, 40, 1920, 1080]);
+  // 1512x982 laptop display (measured): 800 points would start at 712 and
+  // cover the sentinel (120..1080), so the strip starts right of it.
+  const laptop = { x: 0, y: 0, width: 1512, height: 982 };
+  const sentinel = [120, 262, 1080, 862];
+  const narrow = displayTextEditBounds(laptop, sentinel);
+  assert.deepEqual(narrow, [1096, 40, 1512, 982]);
+  assert.equal(boundsOverlap(narrow, sentinel), false);
+  assert.equal(boundsCoverDisplayRightEdge(narrow, laptop, 500), true);
+  // A secondary display at a negative origin keeps the same rule.
+  const offset = displayTextEditBounds({ x: -1512, y: 0, width: 1512, height: 982 }, [-1392, 262, -432, 862]);
+  assert.deepEqual(offset, [-416, 40, 0, 982]);
+  // No room at all -> null, never an overlapping strip.
+  assert.equal(displayTextEditBounds({ x: 0, y: 0, width: 1280, height: 800 }, [120, 80, 1080, 680]), null);
+  // A sentinel that does not overlap leaves the preferred width alone.
+  assert.deepEqual(displayTextEditBounds(laptop, [0, 0, 100, 100]), [712, 40, 1512, 982]);
 });
 
 test('the clamped x = 1.0 point must land inside the target window', () => {

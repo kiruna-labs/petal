@@ -1261,6 +1261,7 @@ is not driven by a scenario JSON file.
 | Fast, Test Cockpit-embedded, or prod-realistic smoke check | `node apps/desktop/scripts/cockpit.mjs --test-case=RC-P1080` | Runs the intentionally narrow RC-P1080 smoke check through the Test Cockpit's in-process Rust engine against prod LiveKit; it is not comprehensive coverage or a replacement for the 30-case suite. |
 | Latency-specific validation | `scripts/rc-live-suite.sh --press-to-photon` | Replaces the matrix with the press-to-photon gate, measuring web input through native reaction to the estimated browser display. |
 | Second-Mac validation | `scripts/cross-machine-rc-suite.sh` | Runs the remote-control suite with the sharer on a genuinely separate, SSH-reachable Mac, exercising the cross-machine path. |
+| Petal as the CONTROLLER typing into a web field in a shared Chrome | `--test-case=RC-N2N-CHROME` (see below) | Chrome routes pid-posted keys to its own keyboard-focused view; this is the only case that starts with that focus in the address bar (#404). |
 | Petal as the CONTROLLER (native→native, native→web) | `--test-case=RC-N2N` / `--test-case=RC-N2W` (see below) | Everything above drives a WEB controller against a native host. RC-N2N is the only harness that drives the real native controller route, which is the direction two Petal users at two Macs actually use. |
 
 #### RC-N2N / RC-N2W — Petal as the controller (#819)
@@ -1300,11 +1301,81 @@ the console must be UNLOCKED (the scenario preflights this and says so). Separat
 already contains its keystone text, so "the typed text landed" can never be
 satisfied by content that was there before the drive.
 
+Cmd+A's effect (the selection must contain the keystone) is read right after
+the Cmd+A step, polled for up to 3 s while the host replays. It used to be read
+at the end of the drive, after the Cmd+V, and a paste replaces the selection
+and collapses it to a caret, so that reading could never show what Cmd+A did.
+The post-paste selection is still recorded in the evidence
+(`selectionAfterPaste`).
+
+The release step calls `remote_control_set_active(active: false)`, the command
+the remote window header's control toggle invokes. It used to be an Escape
+dispatched at the control overlay, but the overlay forwards Escape to the host
+as an ordinary key and has no release binding, so on e602a873 every RC-N2N run
+failed with "Escape did not release control" before reaching its real checks.
+
 `RC-N2W` is the same controller against a browser peer. It proves DELIVERY
 only — the harness records what it receives and never claims an input was
 applied, because a browser cannot inject OS input. Its keystone deliberately
 excludes the native-only clipboard commands; a browser peer ignores the native
 Copy request and clipboard byte-stream topic.
+
+#### RC-N2N-CHROME — typing into a web field while Chrome's focus is in the address bar (#404)
+
+```bash
+RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME > /tmp/rc-n2n-chrome.log 2>&1 &
+RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME-FORM > /tmp/rc-n2n-chrome-form.log 2>&1 &
+```
+
+Two page shapes, each its own scenario with its own keystone and its own
+oracle, because in the #404 incident every click took the host's
+`AxPressable` route and it is not known whether the pressed element was the
+input or a pressable container around it:
+
+| Scenario | Page | Keystone |
+|---|---|---|
+| `RC-N2N-CHROME` | one bare `<input>` filling the viewport | `petalrcnative` |
+| `RC-N2N-CHROME-FORM` | an application-form field: a `<label>` wrapping a padded, bordered `role="group"` box (`tabindex=-1`, a click handler that focuses the input, an icon) containing an `<input>` with a placeholder | `petalrcwebform` |
+
+In both, the click is aimed at the input's visible text area (a little right
+of its left padding, at its vertical centre), computed from the page's own
+geometry read over DevTools and converted to shared-window coordinates
+(Chrome's toolbar included), not at the window centre.
+
+Same controller, same test-peer host and same grants as RC-N2N, but the shared
+target is a **Google Chrome window the run launches itself**: its own
+`--user-data-dir` under the temp dir, DevTools on an ephemeral port
+(`--remote-debugging-port=0`, read back from `DevToolsActivePort`, so it never
+collides with another harness on 9222), and a local `file://` page whose only
+control is one `<input>` filling the viewport. The page title carries a
+per-run marker (`petal-rc-n2n-chrome-<runid>`), which is how the peer finds
+the window.
+
+It reproduces the #404 incident condition measured as T1 case 8:
+
+- **No pre-activation and no pre-focus of the web field.** RC-N2N activates
+  TextEdit and sets `AXFocused` on its text area before driving, which is
+  exactly what masked #404. This case does neither.
+- **Chrome's keyboard focus is put in the address bar** (AX `AXFocused` on the
+  omnibox, no activation) right before the drive, and the run records that it
+  took (`rc-n2n-chrome-predrive` → `omniboxFocused`).
+- The controller then clicks the field's text area and types the keystone
+  through the real native controller route, then releases. No Command chords: a Cmd+V would paste the machine's
+  clipboard into the very field the oracle reads.
+
+Oracle (`test_cockpit/rc_n2n_chrome.rs`, `evaluate`): **PASS only when the
+page's `input.value`, read over the DevTools protocol, equals the keystone
+exactly, and the address bar's AX value did not receive it.** Keys that went to
+the address bar are reported by name as the #404 failure. The field and the
+address bar are read after the typing settles and *before* the release. A field or
+address bar that cannot be read is INFRA-FAIL, never "empty". Chrome and its
+profile are killed and deleted on every exit path (the target's `Drop`).
+
+Notes: the run launches a headed Chrome, which activates itself once at
+launch (Chrome does this; the harness does not). Querying Chrome over AX can
+switch on its web accessibility tree as a side effect, so this case does not
+reproduce the "stock Chrome exposes no `AXWebArea`" sub-condition (T1 case 3);
+it targets the focus routing (case 8), which is what made the typing vanish.
 
 #### Native clipboard checks
 

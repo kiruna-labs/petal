@@ -72,6 +72,9 @@ mod gap_oracles;
 // keystone gesture plan, the script that drives the REAL compositor/control
 // route, and the pass/fail oracle over what a run observed.
 mod rc_n2n;
+// RC-N2N-CHROME (#404): the same native controller against a host sharing a
+// test-launched Chrome whose keyboard focus is in the address bar.
+mod rc_n2n_chrome;
 
 // PLUGIN-BOOT (#37 / PR #82): the one scenario that loads a plugin at all, so
 // "do srcdoc plugin frames boot in WKWebView under the shipped CSP?" stops
@@ -2292,6 +2295,26 @@ const SCENARIO_TABLE: &[ScenarioSpec] = &[
         kind: ScenarioKind::RemoteControlNativeToNative,
         requires_native_share: false,
     },
+    // RC-N2N-CHROME (#404): RC-N2N's controller against a test-launched
+    // Google Chrome whose keyboard focus is in the ADDRESS BAR, with no
+    // pre-activation or pre-focus of the target. Same opt-in tier and the
+    // same grants as RC-N2N, plus Google Chrome itself.
+    ScenarioSpec {
+        id: "RC-N2N-CHROME",
+        tier: "gap",
+        kind: ScenarioKind::RemoteControlNativeToNative,
+        requires_native_share: false,
+    },
+    // The same case against a realistic application-form field: a <label>
+    // wrapping a clickable role="group" box that contains the <input>. In the
+    // #404 incident every click took the host's AxPressable route; this shape
+    // covers a pressed CONTAINER rather than the input itself.
+    ScenarioSpec {
+        id: "RC-N2N-CHROME-FORM",
+        tier: "gap",
+        kind: ScenarioKind::RemoteControlNativeToNative,
+        requires_native_share: false,
+    },
     ScenarioSpec {
         id: "RC-N2W",
         tier: "gap",
@@ -3591,6 +3614,8 @@ fn source_issue_for_scenario(scenario_id: &str) -> &'static str {
         "P-3"
     } else if scenario_id == "RC-N2N" || scenario_id == "RC-N2W" {
         "#819"
+    } else if scenario_id == "RC-N2N-CHROME" || scenario_id == "RC-N2N-CHROME-FORM" {
+        "#404"
     } else if scenario_id == "CAM-N2W" {
         "#815"
     } else if scenario_id == "AUD-N2W" {
@@ -3625,6 +3650,8 @@ fn coverage_kind_for_scenario(scenario_id: &str) -> &'static str {
         "test-cockpit-remote-control-scaled"
     } else if scenario_id == "RC-N2N" {
         "test-cockpit-native-controller-native-host"
+    } else if scenario_id == "RC-N2N-CHROME" || scenario_id == "RC-N2N-CHROME-FORM" {
+        "test-cockpit-native-controller-chrome-host"
     } else if scenario_id == "RC-N2W" {
         "test-cockpit-native-controller-web-host"
     } else if scenario_id == "CAM-N2W" {
@@ -8942,6 +8969,11 @@ async fn run_remote_control_native_to_native_scenario(
     // Drive the keystone set through the REAL control route. Each step is a
     // DOM dispatch into the overlay webview; nothing here builds a draft.
     let mut drive_errors: Vec<String> = Vec::new();
+    // Cmd+A's effect is measured right after Cmd+A, not at the end of the
+    // drive: the keystone then copies and PASTES, and a paste replaces the
+    // selection and collapses it to a caret, so a selection read after Cmd+V
+    // says nothing about what Cmd+A did (it read '' on every run, #419 review).
+    let mut selection_after_select_all: Option<String> = None;
     for step in rc_n2n::keystone_steps() {
         // Single-Mac wrinkle: the PEER (another `desktop` binary starting up
         // on this machine) re-activates itself during the drive, backgrounding
@@ -8960,13 +8992,45 @@ async fn run_remote_control_native_to_native_scenario(
             ]);
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
-        let script = rc_n2n::drive_script(&step);
+        let Some(script) = rc_n2n::drive_script(&step) else {
+            // The release step: the same command the header's control toggle
+            // invokes (see `DriveStep::Release` for why it is not an Escape).
+            if let Err(error) = crate::remote_control::remote_control_set_active(
+                app.clone(),
+                host_window_id,
+                Some(host_identity.clone()),
+                false,
+            )
+            .await
+            {
+                drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
+            }
+            tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
+            continue;
+        };
         if let Err(error) =
             crate::compositor::cockpit_eval_in_control_overlay(app, &host_identity, host_window_id, script)
         {
             drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
         }
         tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
+        if step == rc_n2n::DriveStep::MetaChord('a') {
+            // The host replays asynchronously: poll (bounded) for the
+            // selection to cover the keystone, keeping the last reading.
+            // The bar is unchanged -- the oracle still requires it to contain
+            // the typed text; this only fixes WHEN it is read.
+            let deadline = Instant::now() + Duration::from_millis(3_000);
+            loop {
+                selection_after_select_all = read_sacrificial_selection(&document.marker);
+                let selected = selection_after_select_all
+                    .as_deref()
+                    .is_some_and(|selection| selection.contains(rc_n2n::KEYSTONE_TEXT));
+                if selected || Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
     }
     if !drive_errors.is_empty() {
         give_up!(
@@ -9069,7 +9133,8 @@ async fn run_remote_control_native_to_native_scenario(
             format!("read the sacrificial document after the drive: {error}")
         ),
     };
-    let selection = read_sacrificial_selection(&document.marker);
+    // Evidence only: what the selection is after the paste (see above).
+    let selection_after_paste = read_sacrificial_selection(&document.marker);
     let (driven, statuses) = controller_ledger_projection(host_window_id);
 
     let verdict = rc_n2n::evaluate(rc_n2n::RcN2nObservations {
@@ -9079,7 +9144,7 @@ async fn run_remote_control_native_to_native_scenario(
         pressed_inputs_after,
         sessions_after,
         document_text: &document_after,
-        selection_after_select_all: selection.as_deref(),
+        selection_after_select_all: selection_after_select_all.as_deref(),
         expected_text: rc_n2n::KEYSTONE_TEXT,
     });
 
@@ -9095,7 +9160,8 @@ async fn run_remote_control_native_to_native_scenario(
             "sessionsAfter": sessions_after,
             "documentBefore": document_before,
             "documentAfter": document_after,
-            "selectionAfterSelectAll": selection,
+            "selectionAfterSelectAll": selection_after_select_all,
+            "selectionAfterPaste": selection_after_paste,
         }),
     );
 
@@ -9172,6 +9238,498 @@ async fn run_remote_control_native_to_native_scenario(
     _children: &mut RunChildren,
 ) -> ScenarioOutcome {
     infra_fail_outcome(scenario, "RC-N2N is macOS-only")
+}
+
+/// App name the peer matches the test Chrome's window by (with the per-run
+/// title marker, which is what makes the match unique).
+#[cfg(target_os = "macos")]
+const RC_N2N_CHROME_APP_NAME: &str = "Google Chrome";
+
+/// RC-N2N-CHROME (#404). RC-N2N's native controller and test-peer host, but
+/// the shared target is a test-launched Google Chrome window whose keyboard
+/// focus is in the ADDRESS BAR, and nothing pre-activates or pre-focuses the
+/// target. Oracle: `rc_n2n_chrome::evaluate` over the controller ledger, the
+/// host replay ledger, the page's `input.value` (DevTools) and the address
+/// bar's AX value. The Chrome instance and its profile are torn down on every
+/// exit path by `ChromeTarget`'s Drop.
+#[cfg(target_os = "macos")]
+async fn run_remote_control_native_to_chrome_scenario(
+    app: &AppHandle,
+    scenario: ScenarioSpec,
+    run_meta: &RunMeta,
+    writer: &mut ResultsWriter,
+    children: &mut RunChildren,
+) -> ScenarioOutcome {
+    use rc_n2n_chrome::live;
+    let Some(shape) = rc_n2n_chrome::PageShape::for_scenario(scenario.id) else {
+        return infra_fail_outcome(scenario, "INFRA-FAIL not an RC-N2N-CHROME scenario id");
+    };
+    let keystone = shape.keystone();
+    let peer_bin = test_peer_binary_path();
+    let _ = writer.write(
+        "scenario-scaffold",
+        Some(scenario.id),
+        serde_json::json!({
+            "tier": scenario.tier,
+            "sourceIssue": source_issue_for_scenario(scenario.id),
+            "coverageKind": coverage_kind_for_scenario(scenario.id),
+            "testPeerBinaryPresent": peer_bin.is_some(),
+            "pageShape": shape.label(),
+            "keystone": keystone,
+            "subcases": [
+                "launch-isolated-chrome-target",
+                "launch-test-peer-control-host",
+                "peer-shares-the-chrome-window",
+                "controller-requests-control-through-the-real-route",
+                "chrome-keyboard-focus-in-the-address-bar-before-the-drive",
+                "click-and-type-published-by-the-control-route",
+                "page-input-value-equals-the-keystone",
+                "address-bar-did-not-receive-the-keystone",
+                "release-left-no-held-input-or-session",
+            ],
+            "oracle": "rc_n2n_chrome::evaluate over the controller publish ledger, the peer's host replay ledger, the page input.value (DevTools) and the address bar AXValue",
+        }),
+    );
+    let Some(peer_path) = peer_bin else {
+        return skipped_outcome(
+            scenario,
+            format!(
+                "SKIPPED(setup): Native Test Client binary missing at {}; run apps/desktop/scripts/build-test-peer.sh then apps/desktop/scripts/cockpit-setup.sh",
+                native_peer::TEST_PEER_BIN_RELATIVE
+            ),
+        );
+    };
+    let Some(access_code) = run_meta.access_code.clone() else {
+        return infra_fail_outcome(scenario, "INFRA-FAIL parent join did not provide a real access code");
+    };
+
+    let marker = rc_n2n_chrome::marker_for_run(shape, &run_id());
+    let frontmost_before_launch = live::frontmost_pid();
+    let chrome_log_path = writer.dir.join(format!("rc-n2n-chrome-{}-browser.log", shape.label()));
+    let chrome = match live::ChromeTarget::launch(&chrome_path(), shape, marker.clone(), &chrome_log_path).await {
+        Ok(chrome) => chrome,
+        Err(error) => return infra_fail_outcome(scenario, format!("INFRA-FAIL test Chrome: {error}")),
+    };
+    let chrome_pid = chrome.browser_pid;
+    let _ = writer.write(
+        "rc-n2n-chrome-target",
+        Some(scenario.id),
+        serde_json::json!({
+            "browserPid": chrome_pid,
+            "devtoolsPort": chrome.devtools_port,
+            "titleMarker": marker,
+            "userDataDir": chrome.user_data_dir.display().to_string(),
+            "page": chrome.page_path.display().to_string(),
+            "logArtifact": chrome_log_path.display().to_string(),
+            "frontmostPidBeforeLaunch": frontmost_before_launch,
+            "frontmostPidAfterLaunch": live::frontmost_pid(),
+        }),
+    );
+
+    let socket_path = native_peer_socket_path(&writer.dir);
+    let token = native_peer_token();
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(listener) => listener,
+        Err(error) => {
+            return infra_fail_outcome(
+                scenario,
+                format!("INFRA-FAIL create native-peer socket {}: {error}", socket_path.display()),
+            )
+        }
+    };
+    let peer_identity_env = format!("p-rcn2nhost-{}", rand_hex());
+    // Per-shape names: a run of both shapes (and RC-N2N) shares one results
+    // dir, and the host log is where the click route is recorded.
+    let peer_stdout_path = writer.dir.join(format!("rc-n2n-chrome-{}-peer.stdout.log", shape.label()));
+    let peer_stderr_path = writer.dir.join(format!("rc-n2n-chrome-{}-peer.stderr.log", shape.label()));
+    let (peer_stdout, peer_stderr) = match (File::create(&peer_stdout_path), File::create(&peer_stderr_path)) {
+        (Ok(out), Ok(err)) => (out, err),
+        _ => {
+            let _ = fs::remove_file(&socket_path);
+            return infra_fail_outcome(scenario, "INFRA-FAIL create Native Test Client log artifacts");
+        }
+    };
+    let mut child = match Command::new(&peer_path)
+        .arg(TEST_CASE_ARG)
+        .arg(NATIVE_PEER_CONTROL_HOST_SELECTOR)
+        .env(NATIVE_PEER_SOCKET_ENV, &socket_path)
+        .env(NATIVE_PEER_TOKEN_ENV, &token)
+        .env(NATIVE_PEER_ROOM_ENV, &access_code)
+        .env(NATIVE_PEER_IDENTITY_ENV, &peer_identity_env)
+        .env(NATIVE_PEER_TARGET_APP_ENV, RC_N2N_CHROME_APP_NAME)
+        .env(NATIVE_PEER_TARGET_TITLE_ENV, &marker)
+        .env("PETAL_DISABLE_AUDIO", "1")
+        .env("PETAL_ACCESSORY_UI", "1")
+        .stdout(Stdio::from(peer_stdout))
+        .stderr(Stdio::from(peer_stderr))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = fs::remove_file(&socket_path);
+            return infra_fail_outcome(scenario, format!("INFRA-FAIL launch Native Test Client: {error}"));
+        }
+    };
+    children.record_native_peer(&child);
+    let _ = writer.write(
+        "native-peer-launch",
+        Some(scenario.id),
+        serde_json::json!({
+            "role": "control-host",
+            "pid": child.id(),
+            "binary": peer_path.display().to_string(),
+            "targetApp": RC_N2N_CHROME_APP_NAME,
+            "targetTitleMarker": marker,
+            "stdoutArtifact": peer_stdout_path.display().to_string(),
+            "stderrArtifact": peer_stderr_path.display().to_string(),
+            "liveExecutionAttempted": true,
+        }),
+    );
+
+    // `chrome` is dropped (killed + profile deleted) on every return below.
+    macro_rules! give_up {
+        ($writer:expr, $child:expr, $step:expr, $detail:expr) => {{
+            let detail: String = $detail;
+            let _ = stop_native_peer_with_failure(
+                $writer,
+                scenario.id,
+                $child,
+                $step,
+                &detail,
+                &peer_stdout_path,
+                &peer_stderr_path,
+            );
+            let _ = fs::remove_file(&socket_path);
+            drop(chrome);
+            return infra_fail_outcome(scenario, format!("INFRA-FAIL {detail}"));
+        }};
+    }
+
+    let stream = match tokio::time::timeout(NATIVE_PEER_TIMEOUT, listener.accept()).await {
+        Ok(Ok((stream, _))) => stream,
+        Ok(Err(error)) => give_up!(writer, &mut child, "accept", format!("accept Native Test Client socket: {error}")),
+        Err(_) => give_up!(writer, &mut child, "accept", "native peer accept timed out".to_string()),
+    };
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = TokioBufReader::new(read_half);
+    let ready = match read_native_peer_message_with_timeout(&mut reader, "readiness").await {
+        Ok(message) if message.token == token && message.event == "ready" => message,
+        Ok(message) => give_up!(writer, &mut child, "readiness", format!("unauthenticated native peer readiness: {}", message.event)),
+        Err(error) => give_up!(writer, &mut child, "readiness", format!("native peer readiness: {error}")),
+    };
+    let (Some(host_window_id), Some(host_identity)) = (ready.shared_window_id, ready.peer_identity.clone()) else {
+        give_up!(writer, &mut child, "readiness", "native peer ready message omitted its shared window or identity".to_string())
+    };
+    if ready.accessibility_trusted != Some(true) {
+        give_up!(
+            writer,
+            &mut child,
+            "readiness",
+            format!(
+                "the Native Test Client is not Accessibility-trusted, so it can accept a control \
+                 grant and inject nothing. Grant Accessibility to {} (apps/desktop/scripts/\
+                 cockpit-setup.sh prints the exact steps), then re-run",
+                peer_path.display()
+            )
+        );
+    }
+    let readiness_started = Instant::now();
+    let mut readiness = native_peer::ReceiverReadinessTracker::new();
+    loop {
+        match crate::compositor::cockpit_remote_window_binding(app, &host_identity, host_window_id) {
+            Ok(binding) if readiness.observe(&binding) => break,
+            Ok(_) | Err(_) if readiness_started.elapsed() >= NATIVE_PEER_TIMEOUT => {
+                give_up!(writer, &mut child, "remote-window", readiness.timeout_error(&host_identity, host_window_id))
+            }
+            Ok(_) => tokio::time::sleep(native_peer::RECEIVER_READINESS_SAMPLE_INTERVAL).await,
+            Err(error) => {
+                readiness.observe_error(&error);
+                tokio::time::sleep(native_peer::RECEIVER_READINESS_SAMPLE_INTERVAL).await;
+            }
+        }
+    }
+    match remote_control_is_offered(&host_identity, host_window_id) {
+        Ok(true) => {}
+        Ok(false) => give_up!(writer, &mut child, "remote-control-offer", "the peer's shared window does not advertise remote control".to_string()),
+        Err(error) => give_up!(writer, &mut child, "remote-control-offer", format!("could not read the remote window's control availability: {error}")),
+    }
+
+    // Preconditions: the field starts empty and the address bar does not
+    // already hold the keystone, so neither half of the oracle can be
+    // satisfied (or tripped) by state from before the drive.
+    match chrome.page_state().await {
+        Ok(state) if state.value.as_deref() == Some("") => {}
+        Ok(state) => give_up!(writer, &mut child, "page", format!("the page field was not empty before the drive: {state:?}")),
+        Err(error) => give_up!(writer, &mut child, "page", format!("read the page field before the drive: {error}")),
+    }
+    let omnibox_before = match live::omnibox_value(chrome_pid) {
+        Ok(value) if !value.contains(keystone) => value,
+        Ok(value) => give_up!(writer, &mut child, "address-bar", format!("the address bar already held the keystone before the drive: '{value}'")),
+        Err(error) => give_up!(writer, &mut child, "address-bar", format!("read the address bar before the drive: {error}")),
+    };
+
+    crate::remote_control::cockpit_ledger::reset();
+    if let Err(error) = crate::remote_control::remote_control_set_active(
+        app.clone(),
+        host_window_id,
+        Some(host_identity.clone()),
+        true,
+    )
+    .await
+    {
+        give_up!(writer, &mut child, "request", format!("the controller could not publish a control request: {error}"));
+    }
+    let granted = await_controller_grant(host_window_id, Duration::from_secs(15)).await;
+
+    // Aim the click at the field's visible text area, in shared-window
+    // coordinates, from the page's own geometry.
+    let geometry = match chrome.click_geometry().await {
+        Ok(geometry) => geometry,
+        Err(error) => give_up!(writer, &mut child, "geometry", format!("read the field geometry: {error}")),
+    };
+    let Some(click) = rc_n2n_chrome::click_permille(&geometry) else {
+        give_up!(writer, &mut child, "geometry", format!("the field geometry places no click inside the window: {geometry:?}"))
+    };
+
+    // The T1 case-8 condition: Chrome's own keyboard focus in the address
+    // bar. Set over AX on the omnibox (no activation), right before the drive
+    // so nothing the grant does can move it first. Deliberately NO
+    // frontmost/AXFocused on the web field: that is what masks #404 in RC-N2N.
+    if let Err(error) = live::focus_omnibox(chrome_pid) {
+        give_up!(writer, &mut child, "address-bar", format!("could not put Chrome's keyboard focus in the address bar (the condition under test): {error}"));
+    }
+    let _ = writer.write(
+        "rc-n2n-chrome-predrive",
+        Some(scenario.id),
+        serde_json::json!({
+            "granted": granted,
+            "hostWindowId": host_window_id,
+            "clickGeometry": geometry,
+            "clickPermille": [click.0, click.1],
+            "omniboxFocused": live::omnibox_is_focused(chrome_pid).ok(),
+            "omniboxBefore": omnibox_before,
+            "frontmostPid": live::frontmost_pid(),
+            "chromeIsFrontmost": live::frontmost_pid() == Some(chrome_pid),
+        }),
+    );
+
+    let mut drive_errors: Vec<String> = Vec::new();
+    let mut typed_state: Result<rc_n2n_chrome::PageState, String> = Err("never read".to_string());
+    let mut omnibox_after: Result<String, String> = Err("never read".to_string());
+    let mut omnibox_focused_after: Option<bool> = None;
+    for step in rc_n2n_chrome::keystone_steps(shape, click) {
+        if matches!(step, rc_n2n::DriveStep::Release) {
+            // Read the verdict inputs BEFORE the release, so nothing the
+            // release does to focus can change the evidence.
+            let deadline = Instant::now() + Duration::from_millis(rc_n2n_chrome::TYPED_VALUE_POLL_MS);
+            loop {
+                typed_state = chrome.page_state().await;
+                let done = matches!(&typed_state, Ok(state) if state.value.as_deref() == Some(keystone));
+                if done || Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            omnibox_after = live::omnibox_value(chrome_pid);
+            omnibox_focused_after = live::omnibox_is_focused(chrome_pid).ok();
+        }
+        let Some(script) = rc_n2n::drive_script(&step) else {
+            // The release step: the same command the header's control toggle
+            // invokes (see `DriveStep::Release` for why it is not an Escape).
+            if let Err(error) = crate::remote_control::remote_control_set_active(
+                app.clone(),
+                host_window_id,
+                Some(host_identity.clone()),
+                false,
+            )
+            .await
+            {
+                drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
+            }
+            tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
+            continue;
+        };
+        if let Err(error) =
+            crate::compositor::cockpit_eval_in_control_overlay(app, &host_identity, host_window_id, script)
+        {
+            drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
+        }
+        tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
+    }
+    if !drive_errors.is_empty() {
+        give_up!(writer, &mut child, "drive", format!("could not reach the control overlay for {} step(s): {}", drive_errors.len(), drive_errors.join("; ")));
+    }
+
+    // Poll the host's effect report until it catches up or stalls (the same
+    // bounded loop RC-N2N uses; rig timing must not become a verdict).
+    let expected_replays = controller_ledger_projection(host_window_id).0.len();
+    let mut host_report = serde_json::Value::Null;
+    let mut host_effects = Vec::new();
+    let mut pressed_inputs_after = 0usize;
+    let mut sessions_after = 0usize;
+    let mut previous_count: Option<usize> = None;
+    for poll in 1..=12usize {
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if let Err(error) = write_native_peer_message_with_timeout(
+            &mut write_half,
+            &NativePeerSocketMessage { token: token.clone(), event: "report".to_string(), ..Default::default() },
+            "report write",
+        )
+        .await
+        {
+            give_up!(writer, &mut child, "report", format!("request the host-side effect report: {error}"));
+        }
+        let report = match read_native_peer_message_with_timeout(&mut reader, "report response").await {
+            Ok(message) if message.token == token && message.event == "report" => message,
+            Ok(message) => give_up!(writer, &mut child, "report", format!("unauthenticated native peer report: {}", message.event)),
+            Err(error) => give_up!(writer, &mut child, "report", format!("native peer report: {error}")),
+        };
+        let Some(report_payload) = report.host_report.clone() else {
+            give_up!(writer, &mut child, "report", "native peer report carried no host-side effect record".to_string())
+        };
+        let (effects, pressed, sessions) = match host_report_projection(&report_payload, &run_meta.native_identity) {
+            Ok(projection) => projection,
+            Err(error) => give_up!(writer, &mut child, "report", format!("host-side effect report: {error}")),
+        };
+        let count = effects.len();
+        host_report = report_payload;
+        host_effects = effects;
+        pressed_inputs_after = pressed;
+        sessions_after = sessions;
+        let complete = expected_replays > 0 && count >= expected_replays;
+        let stalled = previous_count == Some(count) && poll >= 3;
+        previous_count = Some(count);
+        if complete || stalled {
+            break;
+        }
+    }
+    let state_after_release = chrome.page_state().await;
+    let (driven, statuses) = controller_ledger_projection(host_window_id);
+
+    let typed_value: Result<String, String> = match &typed_state {
+        Ok(state) => state.value.clone().ok_or_else(|| "the page field disappeared".to_string()),
+        Err(error) => Err(error.clone()),
+    };
+    let verdict = rc_n2n_chrome::evaluate(rc_n2n_chrome::ChromeObservations {
+        driven: &driven,
+        statuses: &statuses,
+        host_effects: &host_effects,
+        pressed_inputs_after,
+        sessions_after,
+        input_value: typed_value.as_deref().map_err(String::as_str),
+        omnibox_before: &omnibox_before,
+        omnibox_after: omnibox_after.as_deref().map_err(String::as_str),
+        expected_text: keystone,
+    });
+    let _ = writer.write(
+        "rc-n2n-chrome-evidence",
+        Some(scenario.id),
+        serde_json::json!({
+            "driven": driven,
+            "statuses": statuses,
+            "hostEffects": host_effects,
+            "hostReport": host_report,
+            "pressedInputsAfter": pressed_inputs_after,
+            "sessionsAfter": sessions_after,
+            "pageStateAfterTyping": typed_state.as_ref().map_err(String::clone),
+            "pageStateAfterRelease": state_after_release.as_ref().map_err(String::clone),
+            "omniboxBefore": omnibox_before,
+            "omniboxAfterTyping": omnibox_after,
+            "omniboxFocusedAfterTyping": omnibox_focused_after,
+        }),
+    );
+
+    let shutdown_result = write_native_peer_message_with_timeout(
+        &mut write_half,
+        &NativePeerSocketMessage { token, event: "shutdown".to_string(), ..Default::default() },
+        "shutdown write",
+    )
+    .await;
+    let exit = child.wait();
+    // Keep the host's own record of how it routed the click (AX pointer
+    // down/up lines: mode, pressed role, text focus) before the log is
+    // trimmed to its tail -- it is the evidence for which element was pressed.
+    let host_pointer_lines: Vec<String> = [&peer_stdout_path, &peer_stderr_path]
+        .iter()
+        .filter_map(|path| fs::read(path).ok())
+        .flat_map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter(|line| {
+                    line.contains("AX pointer")
+                        || line.contains("text_focus")
+                        || line.contains("focus_text")
+                        || line.contains("web accessibility")
+                })
+                .map(|line| crate::logging::redact_for_export(line))
+                .collect::<Vec<_>>()
+        })
+        .take(60)
+        .collect();
+    let _ = writer.write(
+        "rc-n2n-chrome-host-pointer-log",
+        Some(scenario.id),
+        serde_json::json!({ "pageShape": shape.label(), "lines": host_pointer_lines }),
+    );
+    retain_native_peer_log_tail(&peer_stdout_path);
+    retain_native_peer_log_tail(&peer_stderr_path);
+    let _ = fs::remove_file(&socket_path);
+    drop(chrome);
+    if let Err(error) = shutdown_result {
+        record_native_peer_failure(
+            writer,
+            scenario.id,
+            "shutdown",
+            &format!("native peer shutdown command: {error}"),
+            &peer_stdout_path,
+            &peer_stderr_path,
+            &exit,
+        );
+    }
+    match verdict {
+        rc_n2n::RcVerdict::Pass(detail) => ScenarioOutcome {
+            scenario_id: scenario.id.to_string(),
+            verdict: ScenarioVerdict::Pass,
+            message: format!("{} PASS {detail}", scenario.id),
+            delivered_fps: 0.0,
+            delivered_width: 0,
+            delivered_height: 0,
+            assertions: vec![
+                AssertionOutcome {
+                    name: "native-controller-published-through-the-real-route".to_string(),
+                    passed: true,
+                    detail: format!("{} controller messages recorded", driven.len()),
+                },
+                AssertionOutcome {
+                    name: "web-field-holds-the-keystone".to_string(),
+                    passed: true,
+                    detail: format!(
+                        "{} shape: input.value == '{}' with Chrome's focus starting in the address bar",
+                        shape.label(),
+                        keystone
+                    ),
+                },
+            ],
+        },
+        rc_n2n::RcVerdict::TestFail(detail) => {
+            let mut outcome = infra_fail_outcome(scenario, format!("{} TEST-FAIL {detail}", scenario.id));
+            outcome.verdict = ScenarioVerdict::TestFail;
+            outcome.message = format!("{} TEST-FAIL {detail}", scenario.id);
+            outcome
+        }
+        rc_n2n::RcVerdict::InfraFail(detail) => infra_fail_outcome(scenario, format!("INFRA-FAIL {detail}")),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn run_remote_control_native_to_chrome_scenario(
+    _app: &AppHandle,
+    scenario: ScenarioSpec,
+    _run_meta: &RunMeta,
+    _writer: &mut ResultsWriter,
+    _children: &mut RunChildren,
+) -> ScenarioOutcome {
+    infra_fail_outcome(scenario, "RC-N2N-CHROME is macOS-only")
 }
 
 /// Find the remote window a web peer is publishing: its owner identity and the
@@ -9304,7 +9862,22 @@ async fn run_remote_control_native_to_web_scenario(
     let granted_locally = await_controller_grant(host_window_id, Duration::from_secs(15)).await;
     let mut drive_errors: Vec<String> = Vec::new();
     for step in rc_n2n::delivery_keystone_steps() {
-        let script = rc_n2n::drive_script(&step);
+        let Some(script) = rc_n2n::drive_script(&step) else {
+            // The release step: the same command the header's control toggle
+            // invokes (see `DriveStep::Release` for why it is not an Escape).
+            if let Err(error) = crate::remote_control::remote_control_set_active(
+                app.clone(),
+                host_window_id,
+                Some(host_identity.clone()),
+                false,
+            )
+            .await
+            {
+                drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
+            }
+            tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
+            continue;
+        };
         if let Err(error) = crate::compositor::cockpit_eval_in_control_overlay(
             app,
             &host_identity,
@@ -11276,6 +11849,12 @@ async fn run_scenario(
                     "the console session is LOCKED -- SCK cannot capture the peer's window and \
                      compositor panels get zero-sized geometry; unlock the Mac and re-run",
                 );
+            }
+            if rc_n2n_chrome::PageShape::for_scenario(scenario.id).is_some() {
+                return run_remote_control_native_to_chrome_scenario(
+                    app, scenario, run_meta, writer, children,
+                )
+                .await;
             }
             return run_remote_control_native_to_native_scenario(
                 app, scenario, run_meta, writer, children,
