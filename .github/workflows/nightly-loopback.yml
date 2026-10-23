@@ -843,17 +843,6 @@ jobs:
           set -e
           echo "press-to-photon harness exit $photon_status (verdict: latency gate below)" | tee -a "$HARNESS_LOG"
 
-          # #377: with usage stats OFF, 30s of share churn must produce zero
-          # PostHog POSTs; the script proves the pipe is live first (ON) and
-          # that sending resumes after (ON again), so a 0 is never vacuous.
-          echo "==> PostHog usage-stats opt-out (#377)" | tee -a "$HARNESS_LOG"
-          set +e
-          PETAL_AUTOTEST_SOCK="$SOCKET" \
-            node apps/desktop/scripts/posthog-consent-live.mjs --port "$PETAL_POSTHOG_CONSENT_PORT" \
-            --off-seconds 30 --json "$LOG_DIR/posthog-consent.json" 2>&1 | tee -a "$HARNESS_LOG"
-          consent_status=${PIPESTATUS[0]}
-          set -e
-
           gate_fail=0
 
           # -- #378 IMPAIRED PASS: the same two suites, same Petal, with
@@ -906,6 +895,21 @@ jobs:
             fi
           fi
           tail -c +"$((CLEAN_LOG_BYTES + 1))" "$PETAL_LOG" > "$IMPAIRED_PETAL_LOG"
+
+          # Runs AFTER the impaired pass, never before it: its ~16 back-to-back
+          # 1080p display shares wedge the VM's VideoToolbox encoder (-12912 then
+          # -12915 on every frame), so every later share publishes no RTP and the
+          # impaired pass measured nothing (run 39976252014, #426; #427).
+          # #377: with usage stats OFF, 30s of share churn must produce zero
+          # PostHog POSTs; the script proves the pipe is live first (ON) and
+          # that sending resumes after (ON again), so a 0 is never vacuous.
+          echo "==> PostHog usage-stats opt-out (#377)" | tee -a "$HARNESS_LOG"
+          set +e
+          PETAL_AUTOTEST_SOCK="$SOCKET" \
+            node apps/desktop/scripts/posthog-consent-live.mjs --port "$PETAL_POSTHOG_CONSENT_PORT" \
+            --off-seconds 30 --json "$LOG_DIR/posthog-consent.json" 2>&1 | tee -a "$HARNESS_LOG"
+          consent_status=${PIPESTATUS[0]}
+          set -e
 
           # -- Survival. The 0.9.7 telepointer SIGSEGV lived on a background
           # thread the harness never talks to; a green scorecard alone would
