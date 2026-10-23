@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 
 use crate::platform::cg::WindowFrame;
 use crate::remote_control_redundant::{
-    rides_redundant_stream, InputBundle, InputSequencer, RedundantInputSender, SequencerOutput,
+    rides_redundant_stream, InputBundle, InputSequencer, PushOutcome, RedundantInputSender,
+    SequencerOutput,
 };
 use crate::sync_ext::MutexExt;
 use crate::transport::publisher::RoomConnection;
@@ -277,37 +278,55 @@ impl RemoteControlEngine {
         );
     }
 
-    /// Returns the bundle to publish when `message` belongs on the redundant
-    /// stream for a capable host; `None` keeps the legacy path.
+    /// Queues `message` on the redundant stream of a capable host and says
+    /// what to publish; `None` keeps the legacy path.
     pub(crate) fn push_redundant_input(
         &self,
         message: &RemoteControlMessage,
         now: Instant,
-    ) -> Option<InputBundle> {
+    ) -> Option<(String, PushOutcome)> {
         if !rides_redundant_stream(message) {
             return None;
         }
         let mut senders = self.redundant_senders.lock_unpoisoned();
         let (_, sender) =
             senders.get_mut(&(message.window_id, message.target_user_id.clone()))?;
-        Some(sender.push(message.clone(), now))
+        Some((sender.stream().to_string(), sender.push(message.clone(), now)))
     }
 
-    /// The trailing copy for the burst that ended at `rseq`, unless a newer
-    /// input (which carries its own redundancy) superseded it.
+    /// Runs a paced flush; returns the bundle and its flush number.
+    pub(crate) fn flush_redundant_input(
+        &self,
+        window_id: u32,
+        host: &str,
+        stream: &str,
+        now: Instant,
+    ) -> Option<(InputBundle, u64)> {
+        let mut senders = self.redundant_senders.lock_unpoisoned();
+        let (_, sender) = senders.get_mut(&(window_id, host.to_string()))?;
+        if sender.stream() != stream {
+            return None;
+        }
+        let bundle = sender.flush(now)?;
+        Some((bundle, sender.flushes()))
+    }
+
+    /// The trailing copy of flush `flush`, unless a newer input (which
+    /// carries its own redundancy) superseded it.
     pub(crate) fn redundant_trailing_bundle(
         &self,
         window_id: u32,
         host: &str,
         stream: &str,
-        rseq: u64,
+        flush: u64,
         now: Instant,
     ) -> Option<InputBundle> {
         let senders = self.redundant_senders.lock_unpoisoned();
         let (_, sender) = senders.get(&(window_id, host.to_string()))?;
-        (sender.stream() == stream && sender.latest_rseq() == Some(rseq))
-            .then(|| sender.bundle(now))
-            .flatten()
+        if sender.stream() != stream {
+            return None;
+        }
+        sender.trailing(flush, now)
     }
 
     pub(crate) fn accept_input_bundle(

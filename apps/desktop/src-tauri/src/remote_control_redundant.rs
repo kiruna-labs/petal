@@ -28,16 +28,26 @@ use crate::remote_control_core::{RemoteControlAction, RemoteControlMessage, Remo
 /// JSON `kind` of a bundle packet on the remote-control topic.
 pub(crate) const BUNDLE_KIND: &str = "inputBundle";
 pub(crate) const BUNDLE_VERSION: u8 = 1;
-/// Inputs per bundle, newest included.
-pub(crate) const MAX_BUNDLE_INPUTS: usize = 4;
-/// Older inputs are added only while the encoded bundle stays under this, so
-/// a typical bundle fits one SCTP chunk. The newest input is always sent.
+/// Already-published inputs resent in each bundle after the new ones.
+pub(crate) const MAX_REDUNDANT_COPIES: usize = 3;
+/// New inputs in one bundle; reaching it flushes without waiting for pacing.
+pub(crate) const MAX_BUNDLE_INPUTS: usize = 48;
+/// Redundant copies are added only while the bundle stays under this, so a
+/// typical bundle fits one SCTP chunk. New inputs are always sent.
 pub(crate) const MAX_BUNDLE_PAYLOAD_BYTES: usize = 1_200;
 /// Older inputs past this age are no longer worth resending: the host has
 /// either delivered them or skipped the gap by then.
 pub(crate) const MAX_REDUNDANT_AGE: Duration = Duration::from_millis(500);
-/// After the last input of a burst the same bundle is resent at these offsets,
-/// so a lost final keystroke or Up is still recovered.
+/// At most one bundle per interval; inputs arriving sooner ride the next one.
+/// A same-millisecond burst of one-bundle-per-input overflowed the lossy
+/// channel's send buffer and LiveKit silently dropped the tail (#399 VM run
+/// 39912633182: gaps on the CLEAN pass).
+pub(crate) const MIN_BUNDLE_INTERVAL: Duration = Duration::from_millis(8);
+/// Each bundle is published this many times back to back, so one loss does
+/// not depend on a timer (background-tab timers can be throttled).
+pub(crate) const IMMEDIATE_COPIES: usize = 2;
+/// After the last bundle of a burst it is resent at these offsets, so a lost
+/// final keystroke or Up is still recovered.
 pub(crate) const TRAILING_COPY_DELAYS: [Duration; 2] =
     [Duration::from_millis(30), Duration::from_millis(100)];
 /// Longest the host holds later inputs waiting for a missing one.
@@ -83,7 +93,7 @@ pub(crate) fn parse_input_bundle(payload: &[u8]) -> Option<InputBundle> {
         && !bundle.stream.is_empty()
         && bundle.first >= 1
         && !bundle.inputs.is_empty()
-        && bundle.inputs.len() <= MAX_BUNDLE_INPUTS * 4
+        && bundle.inputs.len() <= MAX_BUNDLE_INPUTS + MAX_REDUNDANT_COPIES
         && bundle
             .inputs
             .iter()
@@ -94,9 +104,20 @@ pub(crate) fn parse_input_bundle(payload: &[u8]) -> Option<InputBundle> {
 #[derive(Debug, Clone)]
 struct SentInput {
     rseq: u64,
-    sent_at: Instant,
+    queued_at: Instant,
     encoded_len: usize,
     message: RemoteControlMessage,
+}
+
+/// What a controller does with a pushed input.
+#[derive(Debug)]
+pub(crate) enum PushOutcome {
+    /// Publish this bundle now (flush number for its trailing copies).
+    Publish(InputBundle, u64),
+    /// Paced: call `flush` after this long.
+    FlushAfter(Duration),
+    /// A flush is already scheduled and will carry this input.
+    Queued,
 }
 
 /// Controller side: one per (window, host) grant.
@@ -105,7 +126,13 @@ pub(crate) struct RedundantInputSender {
     window_id: u32,
     stream: String,
     next_rseq: u64,
+    /// Published inputs kept for redundancy, then `unsent` new ones.
     recent: VecDeque<SentInput>,
+    unsent: usize,
+    last_flush_at: Option<Instant>,
+    flush_scheduled: bool,
+    flushes: u64,
+    last_flush_len: usize,
 }
 
 impl RedundantInputSender {
@@ -115,6 +142,11 @@ impl RedundantInputSender {
             stream,
             next_rseq: 1,
             recent: VecDeque::new(),
+            unsent: 0,
+            last_flush_at: None,
+            flush_scheduled: false,
+            flushes: 0,
+            last_flush_len: 0,
         }
     }
 
@@ -122,38 +154,79 @@ impl RedundantInputSender {
         &self.stream
     }
 
-    /// rseq of the newest input, used by trailing-copy timers to tell whether
-    /// a newer input has superseded them.
-    pub(crate) fn latest_rseq(&self) -> Option<u64> {
-        self.recent.back().map(|input| input.rseq)
-    }
-
-    /// Assigns the next rseq and returns the bundle to publish now.
-    pub(crate) fn push(&mut self, message: RemoteControlMessage, now: Instant) -> InputBundle {
+    /// Assigns the next rseq and paces publication.
+    pub(crate) fn push(&mut self, message: RemoteControlMessage, now: Instant) -> PushOutcome {
         let encoded_len = serde_json::to_vec(&message).map_or(0, |bytes| bytes.len());
         let rseq = self.next_rseq;
         self.next_rseq = self.next_rseq.saturating_add(1);
         self.recent.push_back(SentInput {
             rseq,
-            sent_at: now,
+            queued_at: now,
             encoded_len,
             message,
         });
-        while self.recent.len() > MAX_BUNDLE_INPUTS {
-            self.recent.pop_front();
+        self.unsent += 1;
+        let wait = self.last_flush_at.map_or(Duration::ZERO, |last| {
+            MIN_BUNDLE_INTERVAL.saturating_sub(now.saturating_duration_since(last))
+        });
+        if wait.is_zero() || self.unsent >= MAX_BUNDLE_INPUTS {
+            let bundle = self.flush(now).expect("an input was just queued");
+            return PushOutcome::Publish(bundle, self.flushes);
         }
-        self.bundle(now).expect("an input was just pushed")
+        if self.flush_scheduled {
+            return PushOutcome::Queued;
+        }
+        self.flush_scheduled = true;
+        PushOutcome::FlushAfter(wait)
     }
 
-    /// The newest input plus as many contiguous older ones as fit the count,
-    /// age, and size bounds.
-    pub(crate) fn bundle(&self, now: Instant) -> Option<InputBundle> {
-        let newest = self.recent.back()?;
-        let mut taken = 1;
-        let mut bytes = newest.encoded_len;
-        for older in self.recent.iter().rev().skip(1) {
-            if taken >= MAX_BUNDLE_INPUTS
-                || now.saturating_duration_since(older.sent_at) > MAX_REDUNDANT_AGE
+    /// Builds the bundle for every queued input; `None` when nothing is queued
+    /// (a forced flush already sent it).
+    pub(crate) fn flush(&mut self, now: Instant) -> Option<InputBundle> {
+        self.flush_scheduled = false;
+        if self.unsent == 0 {
+            return None;
+        }
+        let bundle = self.build(now);
+        self.last_flush_len = self.unsent;
+        self.unsent = 0;
+        self.flushes += 1;
+        self.last_flush_at = Some(now);
+        while self.recent.len() > self.last_flush_len + MAX_REDUNDANT_COPIES {
+            self.recent.pop_front();
+        }
+        Some(bundle)
+    }
+
+    pub(crate) fn flushes(&self) -> u64 {
+        self.flushes
+    }
+
+    /// The trailing copy of flush `flush`, unless a newer input superseded it.
+    pub(crate) fn trailing(&self, flush: u64, now: Instant) -> Option<InputBundle> {
+        (self.flushes == flush && self.unsent == 0 && !self.recent.is_empty())
+            .then(|| self.build_with_newest(now, self.last_flush_len))
+    }
+
+    fn build(&self, now: Instant) -> InputBundle {
+        self.build_with_newest(now, self.unsent)
+    }
+
+    /// The `fresh` newest inputs plus as many contiguous older ones as fit
+    /// the copy, age, and size bounds.
+    fn build_with_newest(&self, now: Instant, fresh: usize) -> InputBundle {
+        let fresh = fresh.clamp(1, self.recent.len());
+        let mut taken = fresh;
+        let mut bytes: usize = self
+            .recent
+            .iter()
+            .rev()
+            .take(fresh)
+            .map(|input| input.encoded_len)
+            .sum();
+        for older in self.recent.iter().rev().skip(fresh) {
+            if taken - fresh >= MAX_REDUNDANT_COPIES
+                || now.saturating_duration_since(older.queued_at) > MAX_REDUNDANT_AGE
                 || bytes + older.encoded_len > MAX_BUNDLE_PAYLOAD_BYTES
             {
                 break;
@@ -161,19 +234,15 @@ impl RedundantInputSender {
             taken += 1;
             bytes += older.encoded_len;
         }
-        let inputs: Vec<_> = self
-            .recent
-            .iter()
-            .skip(self.recent.len() - taken)
-            .collect();
-        Some(InputBundle {
+        let inputs: Vec<_> = self.recent.iter().skip(self.recent.len() - taken).collect();
+        InputBundle {
             v: BUNDLE_VERSION,
             kind: BUNDLE_KIND.to_string(),
             window_id: self.window_id,
             stream: self.stream.clone(),
             first: inputs[0].rseq,
             inputs: inputs.into_iter().map(|input| input.message.clone()).collect(),
-        })
+        }
     }
 }
 
@@ -311,10 +380,19 @@ mod tests {
         messages.iter().map(|message| message.seq).collect()
     }
 
-    /// Types `count` keydowns through a sender and returns every bundle sent.
+    fn published(outcome: PushOutcome) -> (InputBundle, u64) {
+        match outcome {
+            PushOutcome::Publish(bundle, flush) => (bundle, flush),
+            other => panic!("expected an immediate publish, got {other:?}"),
+        }
+    }
+
+    /// Keydowns 10ms apart (slower than the pacing interval): one bundle each.
     fn send_burst(sender: &mut RedundantInputSender, count: u64, t0: Instant) -> Vec<InputBundle> {
         (1..=count)
-            .map(|seq| sender.push(key(seq, "down", "a"), t0 + Duration::from_millis(seq * 10)))
+            .map(|seq| {
+                published(sender.push(key(seq, "down", "a"), t0 + Duration::from_millis(seq * 10))).0
+            })
             .collect()
     }
 
@@ -337,20 +415,58 @@ mod tests {
     fn lost_final_input_is_recovered_by_the_trailing_copy() {
         let t0 = Instant::now();
         let mut sender = RedundantInputSender::new(7, "s1".into());
-        let bundles = send_burst(&mut sender, 2, t0);
+        let first = published(sender.push(key(1, "down", "a"), t0)).0;
+        let (last, flush) = published(sender.push(key(2, "up", "a"), t0 + Duration::from_millis(20)));
         let mut host = InputSequencer::default();
-        assert_eq!(seqs(&host.accept(bundles[0].clone(), t0).deliver), vec![1]);
-        // bundles[1] (the last input of the burst) is lost; the trailing copy
-        // the controller sends TRAILING_COPY_DELAYS[0] later is the same bundle.
+        assert_eq!(seqs(&host.accept(first, t0).deliver), vec![1]);
+        // `last` (the burst's final input) and its immediate copy are lost; the
+        // trailing copy sent TRAILING_COPY_DELAYS[0] later carries the same inputs.
         let trailing = sender
-            .bundle(t0 + Duration::from_millis(20) + TRAILING_COPY_DELAYS[0])
+            .trailing(flush, t0 + Duration::from_millis(20) + TRAILING_COPY_DELAYS[0])
             .unwrap();
-        assert_eq!(json(&trailing), json(&bundles[1]));
+        assert_eq!(json(&trailing), json(&last));
         assert_eq!(seqs(&host.accept(trailing.clone(), t0).deliver), vec![2]);
-        // The second trailing copy is pure duplicate.
         let out = host.accept(trailing, t0);
         assert!(out.deliver.is_empty());
         assert_eq!(out.duplicates, 2);
+        // A newer input supersedes the old trailing copy.
+        published(sender.push(key(3, "down", "b"), t0 + Duration::from_millis(40)));
+        assert!(sender.trailing(flush, t0 + Duration::from_millis(140)).is_none());
+    }
+
+    #[test]
+    fn a_same_instant_burst_is_paced_into_one_bundle_carrying_every_input() {
+        let t0 = Instant::now();
+        let mut sender = RedundantInputSender::new(7, "s1".into());
+        let (first, _) = published(sender.push(key(1, "down", "a"), t0));
+        assert!(matches!(
+            sender.push(key(2, "down", "a"), t0),
+            PushOutcome::FlushAfter(wait) if wait == MIN_BUNDLE_INTERVAL
+        ));
+        for seq in 3..=12 {
+            assert!(matches!(sender.push(key(seq, "down", "a"), t0), PushOutcome::Queued));
+        }
+        let flushed = sender.flush(t0 + MIN_BUNDLE_INTERVAL).unwrap();
+        // All 11 queued inputs ride one bundle; at this size the byte budget
+        // leaves no room for an older copy (it is sent twice instead).
+        assert_eq!(seqs(&flushed.inputs), (2..=12).collect::<Vec<_>>());
+        assert!(sender.flush(t0 + MIN_BUNDLE_INTERVAL).is_none());
+        let mut host = InputSequencer::default();
+        let mut delivered = seqs(&host.accept(first, t0).deliver);
+        delivered.extend(seqs(&host.accept(flushed, t0).deliver));
+        assert_eq!(delivered, (1..=12).collect::<Vec<_>>());
+        // A runaway burst flushes at MAX_BUNDLE_INPUTS without waiting.
+        let mut big = RedundantInputSender::new(7, "s2".into());
+        published(big.push(key(1, "down", "a"), t0));
+        let mut forced = None;
+        for seq in 2..=(MAX_BUNDLE_INPUTS as u64 + 1) {
+            if let PushOutcome::Publish(bundle, _) = big.push(key(seq, "down", "a"), t0) {
+                forced = Some(bundle);
+            }
+        }
+        let forced = forced.expect("a full queue publishes immediately");
+        assert!(forced.inputs.len() <= MAX_BUNDLE_INPUTS + MAX_REDUNDANT_COPIES);
+        assert!(parse_input_bundle(&serde_json::to_vec(&forced).unwrap()).is_some());
     }
 
     #[test]
@@ -363,9 +479,9 @@ mod tests {
         text.message_type = RemoteControlType::Text;
         text.action = None;
         text.text = Some("x".repeat(MAX_BUNDLE_PAYLOAD_BYTES));
-        let first = sender.push(text.clone(), t0);
+        let first = published(sender.push(text.clone(), t0)).0;
         text.seq = 2;
-        let second = sender.push(text, t0);
+        let second = published(sender.push(text, t0 + MIN_BUNDLE_INTERVAL)).0;
         assert_eq!(second.inputs.len(), 1, "size bound keeps the big input alone");
         let mut host = InputSequencer::default();
         let out = host.accept(second, t0);
@@ -394,18 +510,15 @@ mod tests {
     fn unrecoverable_gap_is_skipped_after_the_hold_and_reports_the_loss() {
         let t0 = Instant::now();
         let mut sender = RedundantInputSender::new(7, "s1".into());
-        sender.push(key(1, "down", "a"), t0);
-        // The Up and every bundle carrying it are lost; later inputs arrive
+        let (down_a, _) = published(sender.push(key(1, "down", "a"), t0));
+        // The Up and every bundle carrying it are lost; the next input comes
         // after the redundancy window has aged it out.
-        let _lost_up = sender.push(key(2, "up", "a"), t0);
-        let later = t0 + MAX_REDUNDANT_AGE + Duration::from_millis(1);
-        let down_b = sender.push(key(3, "down", "b"), later);
+        published(sender.push(key(2, "up", "a"), t0 + MIN_BUNDLE_INTERVAL));
+        let later = t0 + MAX_REDUNDANT_AGE + Duration::from_millis(20);
+        let (down_b, _) = published(sender.push(key(3, "down", "b"), later));
         assert_eq!(down_b.first, 3, "the aged-out Up is no longer resent");
         let mut host = InputSequencer::default();
-        assert_eq!(
-            seqs(&host.accept(sender_bundle_for(1, key(1, "down", "a")), t0).deliver),
-            vec![1]
-        );
+        assert_eq!(seqs(&host.accept(down_a, t0).deliver), vec![1]);
         let out = host.accept(down_b, later);
         assert!(out.deliver.is_empty(), "held while the gap may still fill");
         assert!(out.arm_gap_timer);
@@ -418,12 +531,12 @@ mod tests {
         assert!(!out.arm_gap_timer);
     }
 
-    fn sender_bundle_for(first: u64, message: RemoteControlMessage) -> InputBundle {
+    fn bundle_for(stream: &str, first: u64, message: RemoteControlMessage) -> InputBundle {
         InputBundle {
             v: BUNDLE_VERSION,
             kind: BUNDLE_KIND.into(),
             window_id: 7,
-            stream: "s1".into(),
+            stream: stream.into(),
             first,
             inputs: vec![message],
         }
@@ -433,11 +546,9 @@ mod tests {
     fn new_stream_restarts_sequence_and_stale_stream_is_dropped() {
         let t0 = Instant::now();
         let mut host = InputSequencer::default();
-        assert_eq!(host.accept(sender_bundle_for(1, key(1, "down", "a")), t0).deliver.len(), 1);
-        let mut fresh = sender_bundle_for(1, key(9, "down", "b"));
-        fresh.stream = "s2".into();
-        assert_eq!(seqs(&host.accept(fresh, t0).deliver), vec![9]);
-        let out = host.accept(sender_bundle_for(2, key(2, "up", "a")), t0);
+        assert_eq!(host.accept(bundle_for("s1", 1, key(1, "down", "a")), t0).deliver.len(), 1);
+        assert_eq!(seqs(&host.accept(bundle_for("s2", 1, key(9, "down", "b")), t0).deliver), vec![9]);
+        let out = host.accept(bundle_for("s1", 2, key(2, "up", "a")), t0);
         assert!(out.stale_stream);
         assert!(out.deliver.is_empty());
     }

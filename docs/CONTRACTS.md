@@ -1075,11 +1075,15 @@ hover move (pointer move with no held buttons) as an `inputBundle` on the
   `stream` is a fresh random id per grant (a repeated `active` for the same
   grant token keeps the stream). Each inner message is the unchanged legacy or
   v2 message, so the grant token, v2 envelope, and `seq` all still apply.
-- Each bundle carries the newest input plus up to 3 older ones (at most 4
-  inputs, older ones only while the bundle stays <= 1200 bytes and they are
-  <= 500ms old). After an input, the controller resends the current bundle at
-  +30ms and +100ms unless a newer input superseded it, so a lost final input
-  of a burst is recovered too.
+- Pacing: at most one bundle per 8ms. Inputs that arrive sooner are queued
+  and all ride the next bundle (up to 48, which flushes at once). A burst of
+  one bundle per input in the same millisecond overflowed the lossy send
+  buffer, and LiveKit silently drops lossy sends past that buffer.
+- Each bundle carries every queued input plus up to 3 already-sent ones, while
+  the copies keep the bundle <= 1200 bytes and are <= 500ms old. Every bundle
+  is published twice back to back. The controller then resends the latest
+  bundle at +30ms and +100ms unless a newer bundle superseded it, so a lost
+  final input of a burst is recovered too.
 - The host dedupes by `(sender, windowId, stream, rseq)` and replays strictly
   in rseq order. A gap is held for at most 60ms; after that the host skips
   ahead and first releases any key/button that controller holds (a skipped
