@@ -1301,6 +1301,13 @@ the console must be UNLOCKED (the scenario preflights this and says so). Separat
 already contains its keystone text, so "the typed text landed" can never be
 satisfied by content that was there before the drive.
 
+Cmd+A's effect (the selection must contain the keystone) is read right after
+the Cmd+A step, polled for up to 3 s while the host replays. It used to be read
+at the end of the drive, after the Cmd+V, and a paste replaces the selection
+and collapses it to a caret, so that reading could never show what Cmd+A did.
+The post-paste selection is still recorded in the evidence
+(`selectionAfterPaste`).
+
 The release step calls `remote_control_set_active(active: false)`, the command
 the remote window header's control toggle invokes. It used to be an Escape
 dispatched at the control overlay, but the overlay forwards Escape to the host

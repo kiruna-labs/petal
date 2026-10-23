@@ -8969,6 +8969,11 @@ async fn run_remote_control_native_to_native_scenario(
     // Drive the keystone set through the REAL control route. Each step is a
     // DOM dispatch into the overlay webview; nothing here builds a draft.
     let mut drive_errors: Vec<String> = Vec::new();
+    // Cmd+A's effect is measured right after Cmd+A, not at the end of the
+    // drive: the keystone then copies and PASTES, and a paste replaces the
+    // selection and collapses it to a caret, so a selection read after Cmd+V
+    // says nothing about what Cmd+A did (it read '' on every run, #419 review).
+    let mut selection_after_select_all: Option<String> = None;
     for step in rc_n2n::keystone_steps() {
         // Single-Mac wrinkle: the PEER (another `desktop` binary starting up
         // on this machine) re-activates itself during the drive, backgrounding
@@ -9009,6 +9014,23 @@ async fn run_remote_control_native_to_native_scenario(
             drive_errors.push(format!("{}: {error}", rc_n2n::step_id(&step)));
         }
         tokio::time::sleep(Duration::from_millis(rc_n2n::DRIVE_STEP_SETTLE_MS.into())).await;
+        if step == rc_n2n::DriveStep::MetaChord('a') {
+            // The host replays asynchronously: poll (bounded) for the
+            // selection to cover the keystone, keeping the last reading.
+            // The bar is unchanged -- the oracle still requires it to contain
+            // the typed text; this only fixes WHEN it is read.
+            let deadline = Instant::now() + Duration::from_millis(3_000);
+            loop {
+                selection_after_select_all = read_sacrificial_selection(&document.marker);
+                let selected = selection_after_select_all
+                    .as_deref()
+                    .is_some_and(|selection| selection.contains(rc_n2n::KEYSTONE_TEXT));
+                if selected || Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
     }
     if !drive_errors.is_empty() {
         give_up!(
@@ -9111,7 +9133,8 @@ async fn run_remote_control_native_to_native_scenario(
             format!("read the sacrificial document after the drive: {error}")
         ),
     };
-    let selection = read_sacrificial_selection(&document.marker);
+    // Evidence only: what the selection is after the paste (see above).
+    let selection_after_paste = read_sacrificial_selection(&document.marker);
     let (driven, statuses) = controller_ledger_projection(host_window_id);
 
     let verdict = rc_n2n::evaluate(rc_n2n::RcN2nObservations {
@@ -9121,7 +9144,7 @@ async fn run_remote_control_native_to_native_scenario(
         pressed_inputs_after,
         sessions_after,
         document_text: &document_after,
-        selection_after_select_all: selection.as_deref(),
+        selection_after_select_all: selection_after_select_all.as_deref(),
         expected_text: rc_n2n::KEYSTONE_TEXT,
     });
 
@@ -9137,7 +9160,8 @@ async fn run_remote_control_native_to_native_scenario(
             "sessionsAfter": sessions_after,
             "documentBefore": document_before,
             "documentAfter": document_after,
-            "selectionAfterSelectAll": selection,
+            "selectionAfterSelectAll": selection_after_select_all,
+            "selectionAfterPaste": selection_after_paste,
         }),
     );
 
