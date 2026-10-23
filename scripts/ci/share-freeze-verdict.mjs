@@ -30,12 +30,6 @@ const MIN_MEASURED_FRACTION = 0.9;
 const CORRELATION_SLACK_MS = 250;
 /// A viewer page whose event loop stalled this long was itself stalled.
 const VIEWER_LAG_STALL_MS = 300;
-/// A source repaint gap this long inside an all-viewer freeze, with every
-/// viewer page stalled too, means the whole VM hiccupped (run 39838535897:
-/// fixture 327ms, Chrome renderers 329/639ms, capture 8fps for one second).
-const HOST_STALL_SOURCE_GAP_MS = 250;
-/// More host-VM stalls than this in one window: the VM is too noisy to judge.
-const MAX_HOST_STALLS = 2;
 const GAP_BUCKETS = [50, 100, 200, 300, 500, 1000, 2000, 5000];
 /// Sender log events this close to a freeze are attached to it as evidence.
 const SENDER_EVENT_SLACK_MS = 5000;
@@ -278,16 +272,10 @@ export function correlateFreezes(viewerReports, sender, senderLog = { events: []
     const captureFps = senderLog.captureFps.filter(([t]) => near(t)).map(([, fps]) => fps);
     const induced = senderEvents.find((e) => e.kind === 'test-share-pause');
     const captureSide = senderEvents.find((e) => e.kind.startsWith('capture-') || e.kind === 'republish-timeout');
-    // Host stall needs THREE independent processes stalled at once (the fixture
-    // and every viewer's renderer) and no sharer-side evidence. Anything less
-    // is counted as a freeze.
-    const hostStall = scope === 'all-viewers' && !induced && !captureSide && everyRendererStalled
-      && cluster.members.every((m) => m.sourceMaxRepaintGapMs >= HOST_STALL_SOURCE_GAP_MS);
     let attribution;
     if (scope === 'all-viewers') {
       if (induced) attribution = 'sender: the induced PETAL_TEST_SHARE_PAUSE (red proof)';
       else if (captureSide) attribution = `sender-capture: ${captureSide.kind} on the sharer`;
-      else if (hostStall) attribution = 'host-vm-stall: the source fixture and every viewer page stalled at the same moment (VM-wide, not the stream)';
       else if (during.minFps !== null && during.minFps < 1) attribution = 'sender: the encoder stopped producing frames';
       else attribution = 'sender-or-sfu: every viewer froze together while the sender kept encoding';
     } else if (scope === 'single-viewer') {
@@ -306,7 +294,6 @@ export function correlateFreezes(viewerReports, sender, senderLog = { events: []
       viewers,
       scope,
       correlated: scope === 'all-viewers',
-      counted: !hostStall,
       attribution,
       sender: during,
       senderLogEvents: senderEvents,
@@ -423,19 +410,13 @@ export function freezeVerdict({ raw, senderLogText = null, thresholdMs = FREEZE_
     events: senderLog.events.filter((e) => inWindow(e.t)).slice(0, 200),
   };
   report.clusters = correlateFreezes(viewers, raw.sender, senderLog);
-  report.correlatedFreezes = report.clusters.filter((c) => c.correlated && c.counted).length;
+  report.correlatedFreezes = report.clusters.filter((c) => c.correlated).length;
   report.receiverOnlyFreezes = report.clusters.filter((c) => c.scope === 'single-viewer').length;
   report.latency = tickToPresentLatency(raw.viewers ?? [], ticks, start, end);
 
-  const hostStalls = report.clusters.filter((c) => !c.counted);
-  report.hostVmStalls = hostStalls.length;
-  if (hostStalls.length > MAX_HOST_STALLS) {
-    infra.push(`${hostStalls.length} host-VM stalls (fixture and every viewer page frozen together) in one window: the VM is too noisy to judge freezes`);
-  }
   for (const cluster of report.clusters) {
     const detail = cluster.members.map((m) => `${m.viewer} ${m.durationMs}ms`).join(', ');
-    if (cluster.counted) errors.push(`FREEZE ${cluster.scope} at ${cluster.start} (${detail}) -- ${cluster.attribution}`);
-    else warnings.push(`NOT counted: ${cluster.scope} gap at ${cluster.start} (${detail}) -- ${cluster.attribution}`);
+    errors.push(`FREEZE ${cluster.scope} at ${cluster.start} (${detail}) -- ${cluster.attribution}`);
   }
   for (const v of viewers) {
     const inbound = v.inbound;
@@ -448,6 +429,6 @@ export function freezeVerdict({ raw, senderLogText = null, thresholdMs = FREEZE_
   }
   notes.push(`sender capture (sharer log): ${JSON.stringify(report.senderCapture.eventCounts)} capture-diag fps min/p50 ${report.senderCapture.captureFpsMin}/${report.senderCapture.captureFpsP50}; host ${JSON.stringify(report.host)}`);
   notes.push(`source: repaint gap p50/p99/max ${report.source.repaintGapP50Ms}/${report.source.repaintGapP99Ms}/${report.source.repaintGapMaxMs}ms; tick->present latency p50/p95 ${report.latency.p50Ms}/${report.latency.p95Ms}ms (report-only)`);
-  notes.push(`share-freeze: ${report.clusters.length} freeze event(s) over ${thresholdMs}ms in ${Math.round((end - start) / 1000)}s: ${report.correlatedFreezes} correlated (all viewers), ${report.receiverOnlyFreezes} single-viewer, ${report.hostVmStalls} host-VM stall(s) not counted`);
+  notes.push(`share-freeze: ${report.clusters.length} freeze event(s) over ${thresholdMs}ms in ${Math.round((end - start) / 1000)}s: ${report.correlatedFreezes} correlated (all viewers), ${report.receiverOnlyFreezes} single-viewer`);
   return done();
 }

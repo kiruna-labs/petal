@@ -183,7 +183,7 @@ test('a gap where the SOURCE stopped repainting is not counted as a freeze', () 
   assert.match(v.warnings.join('\n'), /NOT counted: the source itself did not repaint/);
 });
 
-test('fixture AND every viewer page stalling together is a host-VM stall: reported, not counted', () => {
+test('fixture AND every viewer page stalling together is still a counted freeze (no host-VM exemption)', () => {
   // Run 39838535897's shape: fixture repaint gap 327ms, renderers 329/639ms.
   const rel = 70_000;
   const lagAt = T0 + 20_000 + rel;
@@ -193,10 +193,9 @@ test('fixture AND every viewer page stalling together is a host-VM stall: report
     lag: { 'freeze-viewer-1': [[lagAt, 329]], 'freeze-viewer-2': [[lagAt, 639]] },
   });
   const v = freezeVerdict({ raw });
-  assert.equal(v.outcome, 'pass', v.errors.join('\n'));
-  assert.equal(v.report.hostVmStalls, 1);
-  assert.match(v.report.clusters[0].attribution, /^host-vm-stall/);
-  assert.match(v.warnings.join('\n'), /NOT counted: all-viewers gap/);
+  assert.equal(v.outcome, 'fail');
+  assert.equal(v.report.correlatedFreezes, 1);
+  assert.match(v.errors.join('\n'), /FREEZE all-viewers/);
 });
 
 test('renderer lag alone (source kept repainting) never excuses a correlated freeze', () => {
@@ -209,24 +208,7 @@ test('renderer lag alone (source kept repainting) never excuses a correlated fre
     }),
   });
   assert.equal(v.outcome, 'fail');
-  assert.equal(v.report.clusters[0].counted, true);
   assert.match(v.report.clusters[0].attribution, /^sender-or-sfu/);
-});
-
-test('more than two host-VM stalls in a window is INFRA-INVALID', () => {
-  const holes = { 'freeze-viewer-1': [], 'freeze-viewer-2': [] };
-  const sourceHoles = [];
-  const lag = { 'freeze-viewer-1': [], 'freeze-viewer-2': [] };
-  for (const rel of [20_000, 50_000, 80_000]) {
-    holes['freeze-viewer-1'].push([rel, rel + 900]);
-    holes['freeze-viewer-2'].push([rel, rel + 900]);
-    sourceHoles.push([rel + 300, rel + 600]);
-    lag['freeze-viewer-1'].push([T0 + 20_000 + rel, 400]);
-    lag['freeze-viewer-2'].push([T0 + 20_000 + rel, 400]);
-  }
-  const v = freezeVerdict({ raw: soak({ holes, sourceHoles, lag }) });
-  assert.equal(v.outcome, 'infra-invalid');
-  assert.match(v.errors[0], /too noisy/);
 });
 
 test('the sharer dying is a FREEZE failure, not infra', () => {
