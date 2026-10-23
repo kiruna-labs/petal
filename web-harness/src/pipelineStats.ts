@@ -10,6 +10,7 @@ import type { HarnessStallStats } from './context.ts';
 import {
   PIPELINE_STATS_TOPIC,
   type CaptureStateReport,
+  type LowerRungsReport,
   type PipelineStageMetrics,
   type PipelineLifecycle,
   type PipelineStatsMessage,
@@ -381,6 +382,17 @@ export function parsePipelineStatsPayload(payload: Uint8Array | string): Pipelin
     };
   };
 
+  // #408: absent/null = unknown (older or single-layer sender) and stays absent;
+  // present but malformed rejects the message like any other bad field.
+  const lowerRungs = (value: unknown): LowerRungsReport | null | undefined => {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== 'object') return undefined;
+    const raw = value as Partial<LowerRungsReport>;
+    if (typeof raw.funded !== 'boolean' || typeof raw.delivering !== 'boolean') return undefined;
+    return { funded: raw.funded, delivering: raw.delivering };
+  };
+  const parsedLowerRungs = lowerRungs(candidate.lowerRungs);
+
   const grabbed = stage(candidate.grabbed);
   const encodedSent = stage(candidate.encodedSent);
   const received = stage(candidate.received);
@@ -393,7 +405,8 @@ export function parsePipelineStatsPayload(payload: Uint8Array | string): Pipelin
     received === undefined ||
     decoded === undefined ||
     parsedCaptureState === undefined ||
-    parsedReceiverFreeze === undefined
+    parsedReceiverFreeze === undefined ||
+    parsedLowerRungs === undefined
   ) {
     return null;
   }
@@ -415,6 +428,7 @@ export function parsePipelineStatsPayload(payload: Uint8Array | string): Pipelin
     publicationSid,
     shareEpoch,
     lifecycle,
+    ...(parsedLowerRungs ? { lowerRungs: parsedLowerRungs } : {}),
   };
 }
 

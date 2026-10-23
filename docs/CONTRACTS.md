@@ -1411,6 +1411,19 @@ Receivers send lifecycle reports directly to the owner. Reducers use local
 receipt order and `(owner, window, reporter, publicationSid, shareEpoch)` to
 ignore duplicates and must never let a terminal epoch erase a successor.
 
+`lowerRungs` (#408) is an additive optional v1 field on **sender** messages
+only: `{ "funded": bool, "delivering": bool }`, the owner's own reading of its
+non-top simulcast rungs from the same outbound-rtp poll that drives the
+publisher's #107 starvation guard (`funded` = some lower rung has a nonzero
+allocator target, `delivering` = some lower rung reports nonzero fps). It is
+omitted -- never `null`/`false` -- when unknown (older build, single-layer
+publish, no poll yet), and a sender message without it clears the receiver's
+previous verdict. Native receivers read it (`pipeline_stats::remote_lower_rungs`,
+fresh for 12 s) so a stalled HIGH layer is re-requested instead of downgraded
+to a LOW layer the owner says is not delivering. The web harness parses and
+validates it but neither emits nor acts on it (its sender is single-layer and
+its receiver relies on livekit-client's adaptive stream).
+
 Files to change together:
 
 - `apps/desktop/src-tauri/src/pipeline_stats.rs`
