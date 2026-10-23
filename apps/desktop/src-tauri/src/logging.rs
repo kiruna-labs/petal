@@ -5492,6 +5492,12 @@ fn install_panic_hook() {
 
         forward_panic_to_sentry(info);
 
+        // #404 follow-up: a main-thread panic ends the app without
+        // `RunEvent::Exit`; hand a shared browser its accessibility setting
+        // back first. Non-blocking, and a no-op on any other thread.
+        #[cfg(all(target_os = "macos", not(test)))]
+        crate::remote_control::restore_web_accessibility_on_panic();
+
         if let Ok(mut guard) = previous.lock() {
             if let Some(hook) = guard.take() {
                 hook(info);

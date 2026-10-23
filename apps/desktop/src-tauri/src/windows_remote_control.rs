@@ -849,6 +849,9 @@ fn replay_display_pointer(
             }
         }
     })
+    .inspect(|_| {
+        crate::remote_control::note_injection_route(crate::analytics::RemoteControlRoute::SendInput)
+    })
 }
 
 /// Display-share wheel: the marked global `SendInput` route, scoped to a
@@ -901,6 +904,7 @@ fn replay_display_wheel(
             }
         }
         submit_inputs(&inputs, true)?;
+        crate::remote_control::note_injection_route(crate::analytics::RemoteControlRoute::SendInput);
         Ok(())
     })
 }
@@ -985,6 +989,9 @@ fn replay_window_pointer_global(
                 submit_inputs(&[mouse_input(down_flag, 0), mouse_input(up_flag, 0)], true)
             }
         }
+    })
+    .inspect(|_| {
+        crate::remote_control::note_injection_route(crate::analytics::RemoteControlRoute::SendInput)
     })
 }
 
@@ -1167,14 +1174,17 @@ fn target_is_foreground(target: HWND) -> bool {
 /// resolved-child approach). We report OS submission, never application; the
 /// user judges the result. Delivery failures are logged: a swallowed post
 /// otherwise looks like "remote typing did nothing" with zero diagnostics.
+///
+/// Returns whether every post was accepted (#404 follow-up: a key-down only
+/// counts as delivered typing when it was).
 fn post_key_message(
     target: HWND,
     code: &str,
     key_up: bool,
     alt_held: bool,
     char_hint: Option<&str>,
-) {
-    let Some(spec) = key_spec(code) else { return };
+) -> bool {
+    let Some(spec) = key_spec(code) else { return false };
     let mut lparam: u32 = (spec.scan as u32 & 0xff) << 16;
     if spec.extended {
         lparam |= 0x0100_0000;
@@ -1182,22 +1192,24 @@ fn post_key_message(
     let lparam_up = lparam | 0xC000_0000; // prev-state + transition (key up)
     let down_msg = if alt_held { WM_SYSKEYDOWN } else { WM_KEYDOWN };
     let up_msg = if alt_held { WM_SYSKEYUP } else { WM_KEYUP };
-    let post = |msg: u32, wparam: usize, lparam: isize| {
+    let post = |msg: u32, wparam: usize, lparam: isize| -> bool {
         let sent = unsafe { PostMessageW(Some(target), msg, WPARAM(wparam), LPARAM(lparam)) };
         if sent.is_err() {
             log::warn!("remote-control: PostMessageW failed for key '{code}' up={key_up}: {sent:?}");
         }
+        sent.is_ok()
     };
     if key_up {
-        post(up_msg, spec.vk as usize, lparam_up as isize);
+        post(up_msg, spec.vk as usize, lparam_up as isize)
     } else {
-        post(down_msg, spec.vk as usize, lparam as isize);
+        let mut posted = post(down_msg, spec.vk as usize, lparam as isize);
         // A printable character the controller produced follows the key-down
         // with WM_CHAR so text entry actually lands (Notepad/cmd insert on
         // WM_CHAR; the 06B child-addressed route).
         if let Some(unit) = single_wm_char(char_hint) {
-            post(WM_CHAR, unit as usize, 0);
+            posted &= post(WM_CHAR, unit as usize, 0);
         }
+        posted
     }
 }
 
@@ -1265,17 +1277,20 @@ fn replay_window_key_cursor_preserving(
         let code = message.code.as_deref().unwrap_or("");
         let key_up = matches!(message.action, Some(RemoteControlAction::Up));
         if key_spec(code).is_some() {
-            if is_normalized_clipboard_shortcut(message) {
+            let posted = if is_normalized_clipboard_shortcut(message) {
                 // The native controller suppresses the raw Ctrl+C/V pair, so
                 // this message is the complete shortcut. The ordinary raw-key
                 // route receives a separate modifier event and must not use
                 // this branch or it would double-press Control.
+                // Both posts always go out (as before); delivery needs both.
                 if key_up {
-                    post_key_message(target, code, true, false, None);
-                    post_key_message(target, "ControlLeft", true, false, None);
+                    let key = post_key_message(target, code, true, false, None);
+                    let control = post_key_message(target, "ControlLeft", true, false, None);
+                    key && control
                 } else {
-                    post_key_message(target, "ControlLeft", false, false, None);
-                    post_key_message(target, code, false, false, None);
+                    let control = post_key_message(target, "ControlLeft", false, false, None);
+                    let key = post_key_message(target, code, false, false, None);
+                    control && key
                 }
             } else {
                 post_key_message(
@@ -1291,7 +1306,17 @@ fn replay_window_key_cursor_preserving(
                     } else {
                         message.key.as_deref()
                     },
+                )
+            };
+            // #404 follow-up: a posted key-down is delivered typing for
+            // telemetry (OS submission, as the `submitted` status says).
+            if posted {
+                crate::remote_control::note_injection_route(
+                    crate::analytics::RemoteControlRoute::PostMessage,
                 );
+                if !key_up {
+                    crate::remote_control::note_key_down_delivered();
+                }
             }
         }
         Ok(())
@@ -1315,6 +1340,7 @@ fn replay_window_text_cursor_preserving(
         with_global_input(|| replay_unicode_text(text))
     } else {
         post_text_message(target, text);
+        crate::remote_control::note_injection_route(crate::analytics::RemoteControlRoute::PostMessage);
         Ok(())
     }
 }
@@ -1463,6 +1489,7 @@ fn replay_uia_invoke(
         ensure_current_target(message, RemoteControlTargetKind::Window, None)?;
         unsafe { invoke.Invoke() }.map_err(|error| format!("UIA invoke failed: {error}"))
     })
+    .inspect(|_| crate::remote_control::note_injection_route(crate::analytics::RemoteControlRoute::Uia))
 }
 
 fn with_uia<T>(operation: impl FnOnce(&IUIAutomation) -> Result<T, String>) -> Result<T, String> {
@@ -1860,6 +1887,9 @@ fn replay_key(message: &RemoteControlMessage) -> Result<(), String> {
             }
             send_inputs(&[input])?;
             SYNTHETIC_KEYS.lock_unpoisoned().insert(key);
+            // #404 follow-up: SendInput accepted the key-down.
+            crate::remote_control::note_key_down_delivered();
+            crate::remote_control::note_injection_route(crate::analytics::RemoteControlRoute::SendInput);
             Ok(())
         }
         Some(RemoteControlAction::Up) => {
@@ -1967,7 +1997,9 @@ fn unicode_text_inputs(text: &str) -> Vec<INPUT> {
 }
 
 fn replay_unicode_text(text: &str) -> Result<(), String> {
-    send_inputs(&unicode_text_inputs(text))
+    send_inputs(&unicode_text_inputs(text)).inspect(|_| {
+        crate::remote_control::note_injection_route(crate::analytics::RemoteControlRoute::SendInput)
+    })
 }
 
 fn normalized_point(
@@ -2199,6 +2231,7 @@ fn replay_window_wheel_postmessage(
         if !posted_any {
             return Ok(()); // sub-unit delta: nothing to post, nothing failed
         }
+        crate::remote_control::note_injection_route(crate::analytics::RemoteControlRoute::PostMessage);
         Ok(())
     })
 }

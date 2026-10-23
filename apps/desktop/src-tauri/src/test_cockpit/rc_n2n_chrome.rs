@@ -27,6 +27,9 @@ use super::rc_n2n::{DrivenInput, GrantStatus, HostEffect, RcVerdict};
 /// Element id of the page's single text field. The DevTools oracle reads it.
 pub(crate) const INPUT_ELEMENT_ID: &str = "petal-rc-target";
 
+/// Element id of `RC-N2N-CHROME-BUTTON`'s button, the click target there.
+pub(crate) const PRESS_ELEMENT_ID: &str = "petal-rc-press";
+
 /// AX description Chrome gives its omnibox. Used to prefer the right text
 /// field if Chrome ever exposes a second native one (find bar, side panel).
 pub(crate) const OMNIBOX_AX_DESCRIPTION: &str = "Address and search bar";
@@ -50,6 +53,14 @@ pub(crate) enum PageShape {
     /// border, icon, click handler that focuses the input) containing an
     /// `<input>` with a placeholder.
     FormField,
+    /// `RC-N2N-CHROME-BUTTON` (#404 follow-up): the click lands on a page
+    /// `<button>` whose click handler focuses the `<input>`, then the
+    /// controller types. In the #404 incident every click was `mode=AxPressable
+    /// action=Press` on page buttons/links; the two shapes above both land on
+    /// the field's text and take the host's AxText route instead. The page
+    /// records whether the button saw a real pointer (`pointerdown`), so a run
+    /// that fell back to a real click cannot pass as AxPressable coverage.
+    ButtonFocus,
 }
 
 impl PageShape {
@@ -57,6 +68,7 @@ impl PageShape {
         match scenario_id {
             "RC-N2N-CHROME" => Some(Self::BareInput),
             "RC-N2N-CHROME-FORM" => Some(Self::FormField),
+            "RC-N2N-CHROME-BUTTON" => Some(Self::ButtonFocus),
             _ => None,
         }
     }
@@ -68,6 +80,7 @@ impl PageShape {
         match self {
             Self::BareInput => super::rc_n2n::KEYSTONE_TEXT,
             Self::FormField => "petalrcwebform",
+            Self::ButtonFocus => "petalrcwebbutton",
         }
     }
 
@@ -78,6 +91,7 @@ impl PageShape {
         match self {
             Self::BareInput => "petal-rc-n2n-chrome-",
             Self::FormField => "petal-rc-n2n-chromeform-",
+            Self::ButtonFocus => "petal-rc-n2n-chromebutton-",
         }
     }
 
@@ -85,7 +99,23 @@ impl PageShape {
         match self {
             Self::BareInput => "bare-input",
             Self::FormField => "form-field",
+            Self::ButtonFocus => "button-then-type",
         }
+    }
+
+    /// The element the controller clicks.
+    pub(crate) fn click_target_id(self) -> &'static str {
+        match self {
+            Self::BareInput | Self::FormField => INPUT_ELEMENT_ID,
+            Self::ButtonFocus => PRESS_ELEMENT_ID,
+        }
+    }
+
+    /// Whether the oracle requires the click to have been an AX press (no
+    /// real pointer on the button), i.e. this shape exists to cover the
+    /// host's AxPressable route.
+    pub(crate) fn requires_ax_press(self) -> bool {
+        matches!(self, Self::ButtonFocus)
     }
 }
 
@@ -182,6 +212,36 @@ pub(crate) fn target_page_html(shape: PageShape, marker: &str) -> String {
                 id = INPUT_ELEMENT_ID
             ),
         ),
+        PageShape::ButtonFocus => (
+            format!(
+                "html, body {{ margin: 0; height: 100%; background: #f4f5f7; \
+                 font: 15px/1.4 -apple-system, sans-serif; color: #1d1f24; }}\n\
+                 main {{ max-width: 640px; margin: 0 auto; padding: 28px 32px; }}\n\
+                 h1 {{ font-size: 22px; margin: 0 0 18px; }}\n\
+                 #{press} {{ display: block; width: 100%; padding: 28px; font: inherit; \
+                 font-size: 22px; border: 1px solid #3b6ef5; border-radius: 10px; \
+                 background: #3b6ef5; color: #fff; cursor: pointer; }}\n\
+                 #{id} {{ display: block; width: 100%; box-sizing: border-box; margin-top: 18px; \
+                 padding: 10px 12px; font: inherit; font-size: 17px; border: 1px solid #c9ced8; \
+                 border-radius: 8px; }}\n",
+                id = INPUT_ELEMENT_ID,
+                press = PRESS_ELEMENT_ID
+            ),
+            format!(
+                "<main><h1>Profile</h1>\
+                 <button id=\"{press}\" type=\"button\">Edit full name</button>\
+                 <input id=\"{id}\" name=\"fullname\" type=\"text\" autocomplete=\"off\" \
+                 spellcheck=\"false\" placeholder=\"Full name\"></main>\
+                 <script>window.__petalPress = {{ clicks: 0, pointerDowns: 0, mouseDowns: 0 }};\
+                 const b = document.getElementById('{press}');\
+                 b.addEventListener('pointerdown', () => window.__petalPress.pointerDowns++);\
+                 b.addEventListener('mousedown', () => window.__petalPress.mouseDowns++);\
+                 b.addEventListener('click', () => {{ window.__petalPress.clicks++; \
+                 document.getElementById('{id}').focus(); }});</script>",
+                id = INPUT_ELEMENT_ID,
+                press = PRESS_ELEMENT_ID
+            ),
+        ),
     };
     format!(
         "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>{title}</title>\n\
@@ -209,9 +269,10 @@ pub(crate) struct ClickGeometry {
     pub padding_left: f64,
 }
 
-pub(crate) fn click_geometry_expression() -> String {
+pub(crate) fn click_geometry_expression(shape: PageShape) -> String {
+    let target = shape.click_target_id();
     format!(
-        "JSON.stringify((() => {{ const el = document.getElementById('{INPUT_ELEMENT_ID}'); \
+        "JSON.stringify((() => {{ const el = document.getElementById('{target}'); \
          const r = el.getBoundingClientRect(); \
          return {{ outerWidth: window.outerWidth, outerHeight: window.outerHeight, \
          innerWidth: window.innerWidth, innerHeight: window.innerHeight, left: r.left, \
@@ -226,14 +287,20 @@ pub(crate) fn click_geometry_expression() -> String {
 /// padding, at its vertical centre. Chrome on macOS has all its chrome on top,
 /// so the viewport's offset inside the window is the size difference.
 /// `None` when the geometry cannot place a point inside the window.
-pub(crate) fn click_permille(geometry: &ClickGeometry) -> Option<(u32, u32)> {
+pub(crate) fn click_permille(shape: PageShape, geometry: &ClickGeometry) -> Option<(u32, u32)> {
     let g = geometry;
     if !(g.outer_width > 0.0 && g.outer_height > 0.0 && g.width > 0.0 && g.height > 0.0) {
         return None;
     }
     let offset_x = (g.outer_width - g.inner_width).max(0.0);
     let offset_y = (g.outer_height - g.inner_height).max(0.0);
-    let x = offset_x + g.left + (g.padding_left + 24.0).min(g.width / 2.0);
+    // A text field is aimed at its text area; a button at its centre.
+    let inset_x = if shape.requires_ax_press() {
+        g.width / 2.0
+    } else {
+        (g.padding_left + 24.0).min(g.width / 2.0)
+    };
+    let x = offset_x + g.left + inset_x;
     let y = offset_y + g.top + g.height / 2.0;
     if !(x > 0.0 && x < g.outer_width && y > offset_y && y < g.outer_height) {
         return None;
@@ -318,7 +385,8 @@ pub(crate) fn page_state_expression() -> String {
     format!(
         "JSON.stringify((() => {{ const el = document.getElementById('{INPUT_ELEMENT_ID}'); \
          return {{ ready: document.readyState, hasInput: !!el, value: el ? el.value : null, \
-         activeId: document.activeElement ? document.activeElement.id : null }}; }})())"
+         activeId: document.activeElement ? document.activeElement.id : null, \
+         press: window.__petalPress || null }}; }})())"
     )
 }
 
@@ -330,6 +398,20 @@ pub(crate) struct PageState {
     pub has_input: bool,
     pub value: Option<String>,
     pub active_id: Option<String>,
+    /// `RC-N2N-CHROME-BUTTON` only: what the button saw. `None` elsewhere.
+    #[serde(default)]
+    pub press: Option<PressRecord>,
+}
+
+/// The button's own event counts. An AX press (`AXPress`) dispatches a
+/// click with no pointer events; a real click (session tap, SkyLight) always
+/// starts with `pointerdown`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PressRecord {
+    pub clicks: u32,
+    pub pointer_downs: u32,
+    pub mouse_downs: u32,
 }
 
 /// Decode a `Runtime.evaluate` response for `page_state_expression`. Any
@@ -376,6 +458,9 @@ pub(crate) struct ChromeObservations<'a> {
     pub omnibox_before: &'a str,
     pub omnibox_after: Result<&'a str, &'a str>,
     pub expected_text: &'a str,
+    /// `Some` when the shape requires the click to be an AX press: what the
+    /// button recorded (`None` inside = the page reported nothing).
+    pub required_ax_press: Option<Option<&'a PressRecord>>,
 }
 
 fn is_input(kind: &str) -> bool {
@@ -489,6 +574,29 @@ pub(crate) fn evaluate(obs: ChromeObservations<'_>) -> RcVerdict {
             ));
         }
     }
+    if let Some(press) = obs.required_ax_press {
+        match press {
+            None => {
+                return RcVerdict::InfraFail(
+                    "the page did not report the button's event counts".to_string(),
+                )
+            }
+            Some(press) if press.clicks == 0 => {
+                return RcVerdict::TestFail(format!(
+                    "the controller's click never reached the page button (no click event); \
+                     field read '{input_value}'"
+                ))
+            }
+            Some(press) if press.pointer_downs > 0 || press.mouse_downs > 0 => {
+                return RcVerdict::InfraFail(format!(
+                    "the button received a real pointer click (pointerdown={}, mousedown={}), \
+                     not an AX press, so this run did not cover the host's AxPressable route",
+                    press.pointer_downs, press.mouse_downs
+                ))
+            }
+            Some(_) => {}
+        }
+    }
     if input_value != obs.expected_text {
         return RcVerdict::TestFail(format!(
             "the web field does not hold the typed text: expected exactly '{}', read \
@@ -548,6 +656,7 @@ pub(crate) mod live {
             value: CFTypeRef,
         ) -> i32;
         fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout: f32) -> i32;
+        fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFTypeRef) -> i32;
     }
 
     /// An owned AX element (released on drop).
@@ -607,6 +716,28 @@ pub(crate) mod live {
                 .collect()
         }
 
+        fn action_names(&self) -> Vec<String> {
+            let mut out: CFTypeRef = std::ptr::null();
+            // SAFETY: Copy rule -- on success we own `out`.
+            let err = unsafe { AXUIElementCopyActionNames(self.0.as_CFTypeRef(), &mut out) };
+            if err != 0 || out.is_null() {
+                return Vec::new();
+            }
+            let value = unsafe { CFType::wrap_under_create_rule(out) };
+            let Some(array) = value.downcast::<CFArray>() else {
+                return Vec::new();
+            };
+            array
+                .iter()
+                .filter(|item| !item.is_null())
+                .filter_map(|item| {
+                    unsafe { CFType::wrap_under_get_rule(*item as CFTypeRef) }
+                        .downcast::<CFString>()
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        }
+
         fn set_true(&self, attribute: &str) -> i32 {
             let name = CFString::new(attribute);
             unsafe {
@@ -617,6 +748,36 @@ pub(crate) mod live {
                 )
             }
         }
+    }
+
+    /// `RC-N2N-CHROME-BUTTON` precondition: does Chrome expose the page
+    /// button (found by its DOM id inside the web area) with an `AXPress`
+    /// action? The host picks the AxPressable route only then. Measured on
+    /// the first live run (2026-10-23): right after the grant switched web
+    /// accessibility on, the button listed only `AXShowMenu` and the host
+    /// fell back to a real session-tap click. `Ok(false)` = found, not
+    /// pressable yet; `Err` = not found.
+    pub(crate) fn page_element_is_ax_pressable(pid: i32, dom_id: &str) -> Result<bool, String> {
+        let app = AxElement::application(pid).ok_or("AXUIElementCreateApplication failed")?;
+        let mut queue: std::collections::VecDeque<(AxElement, usize)> =
+            std::collections::VecDeque::new();
+        queue.push_back((app, 0));
+        let mut visited = 0usize;
+        while let Some((element, depth)) = queue.pop_front() {
+            visited += 1;
+            if visited > 6000 {
+                break;
+            }
+            if element.string("AXDOMIdentifier").as_deref() == Some(dom_id) {
+                return Ok(element.action_names().iter().any(|name| name == "AXPress"));
+            }
+            if depth < 40 {
+                for child in element.children() {
+                    queue.push_back((child, depth + 1));
+                }
+            }
+        }
+        Err(format!("no AX element with DOM id '{dom_id}' in Chrome's tree"))
     }
 
     /// Find Chrome's omnibox: a native `AXTextField` outside every
@@ -815,8 +976,36 @@ pub(crate) mod live {
         }
 
         /// Read where the click must land (window + input geometry).
-        pub(crate) async fn click_geometry(&self) -> Result<super::ClickGeometry, String> {
-            self.eval_json(super::click_geometry_expression()).await
+        pub(crate) async fn click_geometry(
+            &self,
+            shape: super::PageShape,
+        ) -> Result<super::ClickGeometry, String> {
+            self.eval_json(super::click_geometry_expression(shape)).await
+        }
+
+        /// Reload the page (fresh field, fresh press counts) so Chrome
+        /// rebuilds the web tree under the accessibility mode the grant
+        /// switched on. Waits until the reloaded page reports ready.
+        pub(crate) async fn reload_page(&self) -> Result<(), String> {
+            let _: bool = self
+                .eval_json(
+                    "JSON.stringify((() => { setTimeout(() => location.reload(), 0); return true; })())"
+                        .to_string(),
+                )
+                .await?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            loop {
+                if let Ok(state) = self.page_state().await {
+                    if state.ready == "complete" && state.value.as_deref() == Some("") {
+                        return Ok(());
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err("the page did not come back ready after a reload".to_string());
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
         }
 
         async fn eval_json<T: serde::de::DeserializeOwned>(
@@ -966,6 +1155,7 @@ mod tests {
             omnibox_before: "file:///tmp/x/target.html",
             omnibox_after,
             expected_text: KEYSTONE_TEXT,
+            required_ax_press: None,
         }
     }
 
@@ -1165,7 +1355,7 @@ mod tests {
     #[test]
     fn click_lands_in_the_inputs_text_area_in_window_coordinates() {
         // Input at viewport y 150..176 -> window y 88+163 = 251 of 700.
-        let (x, y) = click_permille(&geometry(150.0, 26.0)).unwrap();
+        let (x, y) = click_permille(PageShape::BareInput, &geometry(150.0, 26.0)).unwrap();
         assert_eq!(y, 359, "toolbar offset must be added: {y}");
         assert_eq!(x, 78, "a little right of the field's left edge: {x}");
         // The bare shape fills the viewport: the click sits in the content.
@@ -1177,21 +1367,21 @@ mod tests {
             padding_left: 24.0,
             ..geometry(0.0, 0.0)
         };
-        let (fx, fy) = click_permille(&full).unwrap();
+        let (fx, fy) = click_permille(PageShape::BareInput, &full).unwrap();
         assert!(fy > (88.0 * 1000.0 / 700.0) as u32 && fy < 1000, "{fy}");
         assert_eq!(fx, 53);
     }
 
     #[test]
     fn click_geometry_that_cannot_place_a_point_is_refused() {
-        assert_eq!(click_permille(&geometry(150.0, 0.0)), None);
+        assert_eq!(click_permille(PageShape::BareInput, &geometry(150.0, 0.0)), None);
         assert_eq!(
-            click_permille(&geometry(900.0, 26.0)),
+            click_permille(PageShape::BareInput, &geometry(900.0, 26.0)),
             None,
             "below the window"
         );
         assert_eq!(
-            click_permille(&geometry(-200.0, 26.0)),
+            click_permille(PageShape::BareInput, &geometry(-200.0, 26.0)),
             None,
             "inside the toolbar"
         );
@@ -1199,7 +1389,78 @@ mod tests {
             "value": "{\"outerWidth\":900,\"outerHeight\":700,\"innerWidth\":900,\"innerHeight\":612,\"left\":46,\"top\":150,\"width\":560,\"height\":26,\"paddingLeft\":0}"}}});
         let parsed: ClickGeometry = parse_json_eval_response(&geometry_json).unwrap();
         assert_eq!(parsed, geometry(150.0, 26.0));
-        assert!(click_geometry_expression().contains(INPUT_ELEMENT_ID));
+        assert!(click_geometry_expression(PageShape::BareInput).contains(INPUT_ELEMENT_ID));
+        assert!(click_geometry_expression(PageShape::FormField).contains(INPUT_ELEMENT_ID));
+        assert!(click_geometry_expression(PageShape::ButtonFocus).contains(PRESS_ELEMENT_ID));
+    }
+
+    #[test]
+    fn button_shape_clicks_the_buttons_centre_and_its_page_wires_the_focus() {
+        let button = ClickGeometry {
+            left: 32.0,
+            top: 60.0,
+            width: 576.0,
+            height: 80.0,
+            padding_left: 28.0,
+            ..geometry(0.0, 0.0)
+        };
+        let (x, y) = click_permille(PageShape::ButtonFocus, &button).unwrap();
+        assert_eq!(x, ((32.0 + 288.0) * 1000.0 / 900.0_f64).round() as u32, "button centre");
+        assert_eq!(y, ((88.0 + 60.0 + 40.0) * 1000.0 / 700.0_f64).round() as u32);
+        let html = target_page_html(PageShape::ButtonFocus, "petal-rc-n2n-chromebutton-1");
+        assert!(html.contains(&format!("id=\"{PRESS_ELEMENT_ID}\"")));
+        assert!(html.contains(&format!("id=\"{INPUT_ELEMENT_ID}\"")));
+        assert!(html.contains("addEventListener('pointerdown'"));
+        assert!(html.contains(&format!("document.getElementById('{INPUT_ELEMENT_ID}').focus()")));
+        assert!(!html.contains("autofocus"));
+        assert_eq!(PageShape::for_scenario("RC-N2N-CHROME-BUTTON"), Some(PageShape::ButtonFocus));
+        assert!(PageShape::ButtonFocus.requires_ax_press());
+        assert!(!PageShape::BareInput.requires_ax_press() && !PageShape::FormField.requires_ax_press());
+    }
+
+    #[test]
+    fn button_shape_passes_only_on_an_ax_press_that_lands_the_text() {
+        let driven = driven();
+        let (statuses, effects) = (granted(), effects());
+        let ax_press = PressRecord {
+            clicks: 1,
+            pointer_downs: 0,
+            mouse_downs: 0,
+        };
+        let with = |press: Option<&PressRecord>, value: &'static str, omnibox: &'static str| {
+            let mut o = obs(&driven, &statuses, &effects, Ok(value), Ok(omnibox));
+            o.required_ax_press = Some(press);
+            evaluate(o)
+        };
+        assert!(matches!(
+            with(Some(&ax_press), KEYSTONE_TEXT, "file:///tmp/x/target.html"),
+            RcVerdict::Pass(_)
+        ));
+        // A real pointer click is not AxPressable coverage, even if it typed.
+        let real = PressRecord {
+            pointer_downs: 1,
+            mouse_downs: 1,
+            ..ax_press.clone()
+        };
+        assert!(matches!(
+            with(Some(&real), KEYSTONE_TEXT, "file:///tmp/x/target.html"),
+            RcVerdict::InfraFail(reason) if reason.contains("AxPressable")
+        ));
+        // The click never reached the button.
+        let missed = PressRecord::default();
+        assert!(matches!(
+            with(Some(&missed), "", "file:///tmp/x/target.html"),
+            RcVerdict::TestFail(reason) if reason.contains("never reached the page button")
+        ));
+        assert!(matches!(
+            with(None, KEYSTONE_TEXT, "file:///tmp/x/target.html"),
+            RcVerdict::InfraFail(_)
+        ));
+        // The incident: pressed, keys went to the address bar.
+        assert!(matches!(
+            with(Some(&ax_press), "", "petalrcnativefile:///tmp/x/target.html"),
+            RcVerdict::TestFail(reason) if reason.contains("ADDRESS BAR")
+        ));
     }
 
     #[test]

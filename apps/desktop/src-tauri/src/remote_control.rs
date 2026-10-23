@@ -213,6 +213,48 @@ thread_local! {
     /// returns `Ok` without delivering -- an unmapped key, a cancelled
     /// injection -- leaves it false.
     static KEY_DOWN_DELIVERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// #404 follow-up: the host route that delivered THIS injection, plus
+    /// whether an AX text click moved the app's keyboard focus. Same
+    /// one-thread-per-event scoping; the last route noted wins (a fallback
+    /// that finally delivers overrides an earlier route that passed).
+    static INJECTION_ROUTE: std::cell::Cell<crate::analytics::RemoteControlRouteReport> =
+        const {
+            std::cell::Cell::new(crate::analytics::RemoteControlRouteReport {
+                route: None,
+                focus_moved: None,
+            })
+        };
+}
+
+/// #404 follow-up: record the route that delivered the current injection.
+/// Clears any focus verdict from a route that did not end up delivering.
+pub(crate) fn note_injection_route(route: crate::analytics::RemoteControlRoute) {
+    INJECTION_ROUTE.with(|cell| {
+        cell.set(crate::analytics::RemoteControlRouteReport {
+            route: Some(route),
+            focus_moved: None,
+        })
+    });
+}
+
+/// #404 follow-up: an AX click route plus whether it moved keyboard focus
+/// onto the clicked text element (`None` = not a text element).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn note_injection_route_with_focus(
+    route: crate::analytics::RemoteControlRoute,
+    focus_moved: Option<bool>,
+) {
+    INJECTION_ROUTE.with(|cell| {
+        cell.set(crate::analytics::RemoteControlRouteReport {
+            route: Some(route),
+            focus_moved,
+        })
+    });
+}
+
+fn take_injection_route() -> crate::analytics::RemoteControlRouteReport {
+    INJECTION_ROUTE.with(|cell| cell.replace(crate::analytics::RemoteControlRouteReport::default()))
 }
 
 /// #404: record that the current injection delivered a key-down.
@@ -228,17 +270,15 @@ fn take_key_down_delivered() -> bool {
 /// `remote_control_input` telemetry? `type` used to fire for ANY key packet
 /// that returned `Ok` -- releases, host-synthesized releases, unmapped keys
 /// and cancelled injections included -- so it reported typing that never
-/// reached the target. Only a key-DOWN counts, and on macOS only one the key
-/// path reports as delivered. Other platforms do not report delivery yet and
-/// keep the down-only `Ok` count.
+/// reached the target. Only a key-DOWN counts, and only one the platform key
+/// path reports as delivered (macOS: posted past the focus gate or serviced
+/// through AX; Windows: `SendInput` accepted it, or it was posted to the
+/// target window).
 fn replay_counts_as_applied_input(message: &RemoteControlMessage, key_down_delivered: bool) -> bool {
     if message.message_type != RemoteControlType::Key {
         return true;
     }
-    if message.action != Some(RemoteControlAction::Down) {
-        return false;
-    }
-    !cfg!(target_os = "macos") || key_down_delivered
+    message.action == Some(RemoteControlAction::Down) && key_down_delivered
 }
 
 /// Returns true if the currently-running injection was abandoned by its
@@ -1621,6 +1661,21 @@ fn note_control_grants_changed() {
 #[cfg(target_os = "macos")]
 pub(crate) fn restore_web_accessibility_on_exit() {
     input::restore_web_accessibility_on_exit();
+}
+
+/// #404 follow-up: launch-time recovery of a Chromium web accessibility
+/// switch a crashed or killed run left on (see `input`'s crash journal).
+#[cfg(target_os = "macos")]
+pub(crate) fn init_web_accessibility_journal(app_data_dir: &std::path::Path) {
+    input::init_web_accessibility_journal(app_data_dir);
+}
+
+/// #404 follow-up: called from the panic hook. A no-op off the main thread.
+/// (The hook does not call it in unit tests, which panic on purpose.)
+#[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn restore_web_accessibility_on_panic() {
+    input::restore_web_accessibility_on_panic();
 }
 
 fn revoke(window_id: u32, controller_id: &str) {
@@ -3199,23 +3254,31 @@ fn run_replay_with_deadline(task: &ReplayTask, inject: &ReplayInjector) -> Repla
     run_replay_with_deadline_tracked(task, inject).0
 }
 
-/// `run_replay_with_deadline`, plus whether the injection delivered a
-/// key-down (#404, see `KEY_DOWN_DELIVERED`). Always `false` unless the
-/// outcome is `Completed`.
+/// What a completed injection reported through its thread-locals (#404).
+#[derive(Debug, Clone, Copy, Default)]
+struct InjectionReport {
+    /// See `KEY_DOWN_DELIVERED`.
+    key_down_delivered: bool,
+    /// See `INJECTION_ROUTE`.
+    route: crate::analytics::RemoteControlRouteReport,
+}
+
+/// `run_replay_with_deadline`, plus what the injection reported (#404).
+/// Always the default unless the outcome is `Completed`.
 fn run_replay_with_deadline_tracked(
     task: &ReplayTask,
     inject: &ReplayInjector,
-) -> (ReplayRunOutcome, bool) {
+) -> (ReplayRunOutcome, InjectionReport) {
     let shard_key = ReplayShardKey::for_task(task);
     if !active_injection_keys().lock_unpoisoned().insert(shard_key) {
         return (
             ReplayRunOutcome::Completed(Err(
                 "previous target injection is still in progress".to_string()
             )),
-            false,
+            InjectionReport::default(),
         );
     }
-    let (tx, rx) = mpsc::channel::<(Result<(), String>, bool)>();
+    let (tx, rx) = mpsc::channel::<(Result<(), String>, InjectionReport)>();
     let inject = Arc::clone(inject);
     let message = task.message.clone();
     let frame = task.frame;
@@ -3228,12 +3291,16 @@ fn run_replay_with_deadline_tracked(
         .spawn(move || {
             INJECTION_CANCELLED.with(|cell| *cell.borrow_mut() = Some(thread_cancelled));
             take_key_down_delivered();
+            take_injection_route();
             let result = inject(&message, frame, target_pid);
-            let key_down_delivered = take_key_down_delivered();
+            let report = InjectionReport {
+                key_down_delivered: take_key_down_delivered(),
+                route: take_injection_route(),
+            };
             active_injection_keys()
                 .lock_unpoisoned()
                 .remove(&thread_shard_key);
-            let _ = tx.send((result, key_down_delivered));
+            let _ = tx.send((result, report));
         });
     let _handle = match spawn_result {
         Ok(handle) => handle,
@@ -3248,15 +3315,15 @@ fn run_replay_with_deadline_tracked(
                 ReplayRunOutcome::Completed(Err(format!(
                     "failed to spawn injection thread: {error}"
                 ))),
-                false,
+                InjectionReport::default(),
             );
         }
     };
     match rx.recv_timeout(REPLAY_EVENT_DEADLINE) {
-        Ok((result, key_down_delivered)) => (ReplayRunOutcome::Completed(result), key_down_delivered),
+        Ok((result, report)) => (ReplayRunOutcome::Completed(result), report),
         Err(_) => {
             cancelled.store(true, Ordering::Release);
-            (ReplayRunOutcome::TimedOut, false)
+            (ReplayRunOutcome::TimedOut, InjectionReport::default())
         }
     }
     // `_handle` drops here without joining -- `JoinHandle::drop` detaches
@@ -3383,7 +3450,7 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
             task.target_pid
         );
     }
-    let (run_outcome, key_down_delivered) = run_replay_with_deadline_tracked(&task, inject);
+    let (run_outcome, report) = run_replay_with_deadline_tracked(&task, inject);
     match run_outcome {
         ReplayRunOutcome::Completed(Ok(())) => {
             let injected_at_ms = now_ms();
@@ -3401,18 +3468,24 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
             }
             if should_log_latency_probe(&task.message) {
                 log::info!(
-                    "remote-control-latency: host replay complete_ts_ms={} {} elapsed_ms={} target_pid={:?}",
+                    "remote-control-latency: host replay complete_ts_ms={} {} elapsed_ms={} target_pid={:?} route={} focus_moved={}",
                     injected_at_ms,
                     message_summary(&task.message),
                     elapsed_ms,
-                    task.target_pid
+                    task.target_pid,
+                    report.route.route.map_or("none", |route| route.as_str()),
+                    match report.route.focus_moved {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => "n/a",
+                    }
                 );
             }
             // #819: observer only -- see `cockpit_ledger`.
             #[cfg(feature = "cockpit-privileged")]
             cockpit_ledger::record_replay(&task.message, "applied");
-            if replay_counts_as_applied_input(&task.message, key_down_delivered) {
-                crate::analytics::note_remote_control_applied(&task.message);
+            if replay_counts_as_applied_input(&task.message, report.key_down_delivered) {
+                crate::analytics::note_remote_control_applied(&task.message, report.route);
             }
             complete_replay_task(
                 &task,
@@ -7276,6 +7349,11 @@ pub(crate) mod input {
     }
 
     trait InputSink {
+        /// #404 follow-up: the route this sink's posts take, for telemetry.
+        /// The CGEvent sink posts to the target pid.
+        fn route(&self) -> crate::analytics::RemoteControlRoute {
+            crate::analytics::RemoteControlRoute::PidPost
+        }
         fn verify_key_window(&self, window_id: u32) -> Result<(), String>;
         /// Same check, plus the one-shot AXRaise recovery (#777). Called ONCE
         /// per wire event at the replay entry points -- never per character.
@@ -7499,6 +7577,11 @@ pub(crate) mod input {
         /// Chrome's keyboard focus in the address bar, so typed keys land
         /// there. Never sets `AXFrontmost`.
         fn set_focused(&self, element: &AxElementHandle) -> Result<(), AxError>;
+        /// #404 follow-up: the `AXWebArea` the element sits in, when it is
+        /// page content of a Chromium app whose web accessibility Petal is
+        /// managing for a grant (see `reconcile_web_accessibility`). `None`
+        /// for every other app and for the browser's own toolbar.
+        fn chromium_web_area(&self, pid: i32, element: &AxElementHandle) -> Option<AxElementHandle>;
         fn scroll_by(
             &self,
             window_id: u32,
@@ -8319,6 +8402,29 @@ pub(crate) mod input {
             set_attribute(element, attribute.as_ptr(), unsafe { kCFBooleanTrue })
         }
 
+        fn chromium_web_area(&self, pid: i32, element: &AxElementHandle) -> Option<AxElementHandle> {
+            if !chromium_web_accessibility_pids().lock_unpoisoned().contains(&pid) {
+                return None;
+            }
+            let role_attribute = ax_role_attribute();
+            let parent_attribute = ax_parent_attribute();
+            let mut current = element.clone();
+            for _ in 0..CHROMIUM_WEB_AREA_MAX_ANCESTORS {
+                let role = copy_attribute(&current, role_attribute.as_ptr())
+                    .ok()
+                    .and_then(|role| cf_string_to_string(role.as_ptr()));
+                if role.as_deref() == Some("AXWebArea") {
+                    return Some(current);
+                }
+                let parent = copy_attribute(&current, parent_attribute.as_ptr()).ok()?;
+                if !is_ax_ui_element(parent.as_ptr()) {
+                    return None;
+                }
+                current = AxElementHandle::Real(parent);
+            }
+            None
+        }
+
         fn scroll_by(
             &self,
             window_id: u32,
@@ -8708,6 +8814,10 @@ pub(crate) mod input {
         fn set_enhanced_user_interface(&self, pid: i32, enabled: bool) -> i32;
         /// Does an `AXWebArea` now exist under the shared window?
         fn window_has_web_area(&self, pid: i32, window_id: u32) -> bool;
+        /// When the process started (microseconds since the epoch), so a
+        /// journal entry can never act on a recycled pid. `None` when the
+        /// process is gone or unreadable.
+        fn process_start_us(&self, pid: i32) -> Option<u64>;
     }
 
     #[derive(Debug)]
@@ -8716,6 +8826,9 @@ pub(crate) mod input {
         previous: bool,
         /// Granted windows of this app keeping the switch on.
         windows: HashSet<u32>,
+        /// Identity recorded in the journal (see `WebAccessibilityJournalEntry`).
+        bundle_id: String,
+        started_us: Option<u64>,
     }
 
     #[derive(Debug, Default)]
@@ -8724,6 +8837,165 @@ pub(crate) mod input {
         /// Granted windows already found not to be Chromium, so a reconcile
         /// does not re-query their bundle id on every grant change.
         not_chromium: HashSet<u32>,
+        /// Where the crash journal lives. `None` until
+        /// `init_web_accessibility_journal` runs (and in most unit tests).
+        journal: Option<std::path::PathBuf>,
+    }
+
+    // ---- Crash journal --------------------------------------------------
+    //
+    // `RunEvent::Exit` and the grant-end reconcile restore the switch on a
+    // clean path. A crash, a SIGKILL or a force quit during a grant takes
+    // neither, and the browser keeps `AXEnhancedUserInterface=true` (window
+    // animation and performance side effects) until it restarts. So every
+    // switch Petal itself turned on is written to a small journal in the app
+    // data dir, and the next launch turns those back off. Only entries Petal
+    // set are recorded: a value that was already on is never journaled and
+    // never touched. An entry acts only on the SAME process (pid + bundle id
+    // + process start time), never on a recycled pid.
+
+    const WEB_ACCESSIBILITY_JOURNAL_FILE: &str = "rc-web-accessibility.json";
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WebAccessibilityJournalEntry {
+        pid: i32,
+        bundle_id: String,
+        started_us: u64,
+    }
+
+    #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+    struct WebAccessibilityJournal {
+        version: u32,
+        enabled: Vec<WebAccessibilityJournalEntry>,
+    }
+
+    fn journal_entries_for(state: &WebAccessibilityState) -> Vec<WebAccessibilityJournalEntry> {
+        let mut entries: Vec<WebAccessibilityJournalEntry> = state
+            .enabled
+            .iter()
+            .filter(|(_, grant)| !grant.previous)
+            .filter_map(|(pid, grant)| {
+                Some(WebAccessibilityJournalEntry {
+                    pid: *pid,
+                    bundle_id: grant.bundle_id.clone(),
+                    started_us: grant.started_us?,
+                })
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.pid);
+        entries
+    }
+
+    /// Rewrite the journal from the in-memory state. An empty set removes the
+    /// file, so a clean session leaves nothing behind.
+    fn persist_web_accessibility_journal(state: &WebAccessibilityState) {
+        let Some(path) = state.journal.as_deref() else {
+            return;
+        };
+        let entries = journal_entries_for(state);
+        if entries.is_empty() {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => log::warn!(
+                    "remote-control: could not clear the chromium web accessibility journal: {error}"
+                ),
+            }
+            return;
+        }
+        let journal = WebAccessibilityJournal {
+            version: 1,
+            enabled: entries,
+        };
+        let result = serde_json::to_vec(&journal)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                let tmp = path.with_extension("json.tmp");
+                std::fs::write(&tmp, bytes).map_err(|error| error.to_string())?;
+                std::fs::rename(&tmp, path).map_err(|error| error.to_string())
+            });
+        if let Err(error) = result {
+            log::warn!(
+                "remote-control: could not write the chromium web accessibility journal: {error}"
+            );
+        }
+    }
+
+    fn read_web_accessibility_journal(path: &std::path::Path) -> Vec<WebAccessibilityJournalEntry> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                log::warn!(
+                    "remote-control: could not read the chromium web accessibility journal: {error}"
+                );
+                return Vec::new();
+            }
+        };
+        match serde_json::from_slice::<WebAccessibilityJournal>(&bytes) {
+            Ok(journal) => journal.enabled,
+            Err(error) => {
+                log::warn!(
+                    "remote-control: ignoring an unreadable chromium web accessibility journal: {error}"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Turn off every journaled switch whose process is still the one Petal
+    /// set it on. Returns how many were turned off. A process that is gone,
+    /// restarted (different start time), or now another app is skipped; so is
+    /// one whose switch is already off (someone else turned it off).
+    fn recover_web_accessibility_journal(
+        entries: &[WebAccessibilityJournalEntry],
+        backend: &dyn WebAccessibilityBackend,
+    ) -> usize {
+        let mut restored = 0;
+        for entry in entries {
+            let pid = entry.pid;
+            if pid <= 1 {
+                continue;
+            }
+            let same_process = backend.process_start_us(pid) == Some(entry.started_us)
+                && backend.bundle_id(pid).as_deref() == Some(entry.bundle_id.as_str());
+            if !same_process {
+                log::info!(
+                    "remote-control: chromium web accessibility journal entry skipped pid={pid} bundle={} reason=process-gone-or-restarted",
+                    entry.bundle_id
+                );
+                continue;
+            }
+            if backend.enhanced_user_interface(pid) != Some(true) {
+                log::info!(
+                    "remote-control: chromium web accessibility journal entry skipped pid={pid} bundle={} reason=already-off",
+                    entry.bundle_id
+                );
+                continue;
+            }
+            let code = backend.set_enhanced_user_interface(pid, false);
+            log::info!(
+                "remote-control: chromium web accessibility restored from journal pid={pid} bundle={} set_code={code}",
+                entry.bundle_id
+            );
+            restored += 1;
+        }
+        restored
+    }
+
+    /// Launch: adopt the journal path and undo whatever a previous run that
+    /// did not exit cleanly left switched on.
+    fn adopt_web_accessibility_journal(
+        path: std::path::PathBuf,
+        state: &mut WebAccessibilityState,
+        backend: &dyn WebAccessibilityBackend,
+    ) -> usize {
+        let entries = read_web_accessibility_journal(&path);
+        let restored = recover_web_accessibility_journal(&entries, backend);
+        state.journal = Some(path);
+        persist_web_accessibility_journal(state);
+        restored
     }
 
     /// Bring the switch in line with the set of windows that currently hold a
@@ -8748,6 +9020,7 @@ pub(crate) mod input {
             }
         }
         released.sort_unstable();
+        let journal_dirty = !released.is_empty();
         for pid in released {
             if let Some(grant) = state.enabled.remove(&pid) {
                 restore_web_accessibility(pid, grant.previous, backend);
@@ -8780,19 +9053,35 @@ pub(crate) mod input {
                 continue;
             }
             let previous = backend.enhanced_user_interface(pid).unwrap_or(false);
-            let set_code = (!previous).then(|| backend.set_enhanced_user_interface(pid, true));
-            let web_area = backend.window_has_web_area(pid, window_id);
-            log::info!(
-                "remote-control: chromium web accessibility enabled pid={pid} bundle={bundle_id} window_id={window_id} previous={previous} set_code={set_code:?} web_area={web_area}"
-            );
+            // Journal BEFORE the write: a crash between the two must still
+            // leave a record of the switch Petal is about to turn on.
+            let started_us = (!previous).then(|| backend.process_start_us(pid)).flatten();
             state.enabled.insert(
                 pid,
                 WebAccessibilityGrant {
                     previous,
                     windows: HashSet::from([window_id]),
+                    bundle_id: bundle_id.clone(),
+                    started_us,
                 },
             );
+            if !previous {
+                persist_web_accessibility_journal(state);
+            }
+            // Visible to the click path now, not after the web-area probe.
+            publish_chromium_web_accessibility_pids(state);
+            let set_code = (!previous).then(|| backend.set_enhanced_user_interface(pid, true));
+            let web_area = backend.window_has_web_area(pid, window_id);
+            log::info!(
+                "remote-control: chromium web accessibility enabled pid={pid} bundle={bundle_id} window_id={window_id} previous={previous} set_code={set_code:?} web_area={web_area} journaled={}",
+                started_us.is_some() && state.journal.is_some()
+            );
         }
+        if journal_dirty {
+            // The released apps are already restored; drop their entries.
+            persist_web_accessibility_journal(state);
+        }
+        publish_chromium_web_accessibility_pids(state);
     }
 
     fn restore_web_accessibility(pid: i32, previous: bool, backend: &dyn WebAccessibilityBackend) {
@@ -8818,6 +9107,25 @@ pub(crate) mod input {
                 restore_web_accessibility(pid, grant.previous, backend);
             }
         }
+        persist_web_accessibility_journal(state);
+        publish_chromium_web_accessibility_pids(state);
+    }
+
+    /// How far up from a hit-tested element `chromium_web_area` looks for the
+    /// page's `AXWebArea` (the probe page's button sat 1-2 levels below it).
+    const CHROMIUM_WEB_AREA_MAX_ANCESTORS: usize = 24;
+
+    /// Chromium pids with web accessibility on for a grant, mirrored out of
+    /// `WebAccessibilityState` so the click path never waits on the state
+    /// mutex (the reconcile worker holds it across slow AX probes).
+    fn chromium_web_accessibility_pids() -> &'static Mutex<HashSet<i32>> {
+        static PIDS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
+        PIDS.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    fn publish_chromium_web_accessibility_pids(state: &WebAccessibilityState) {
+        *chromium_web_accessibility_pids().lock_unpoisoned() =
+            state.enabled.keys().copied().collect();
     }
 
     fn web_accessibility_state() -> &'static Mutex<WebAccessibilityState> {
@@ -8878,6 +9186,63 @@ pub(crate) mod input {
         );
     }
 
+    /// The journal path, also kept outside the state mutex so the panic hook
+    /// can reach it when the panicking thread holds that mutex.
+    static WEB_ACCESSIBILITY_JOURNAL_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+    /// Launch (from `setup`): point the journal at the app data dir and undo
+    /// whatever a run that did not exit cleanly left switched on. The AX
+    /// writes go to other apps, so they run off the main thread; the state
+    /// mutex serializes them with the grant worker.
+    pub(crate) fn init_web_accessibility_journal(app_data_dir: &std::path::Path) {
+        let path = app_data_dir.join(WEB_ACCESSIBILITY_JOURNAL_FILE);
+        let _ = WEB_ACCESSIBILITY_JOURNAL_PATH.set(path.clone());
+        #[cfg(not(test))]
+        {
+            let spawned = thread::Builder::new()
+                .name("petal-rc-webax-journal".to_string())
+                .spawn(move || {
+                    let restored = adopt_web_accessibility_journal(
+                        path,
+                        &mut web_accessibility_state().lock_unpoisoned(),
+                        &SystemWebAccessibilityBackend,
+                    );
+                    if restored > 0 {
+                        log::info!(
+                            "remote-control: restored {restored} chromium web accessibility switch(es) left on by a previous run"
+                        );
+                    }
+                });
+            if let Err(error) = spawned {
+                log::warn!(
+                    "remote-control: failed to spawn chromium web accessibility journal recovery: {error}"
+                );
+            }
+        }
+    }
+
+    /// Panic hook. Only a MAIN-thread panic ends the app (a worker-thread
+    /// panic unwinds that thread and the grant goes on, so turning the switch
+    /// off then would break typing into the page under an active grant).
+    /// The panicking thread may hold the state mutex, so never block on it:
+    /// take it if free, otherwise act from the journal file, which verifies
+    /// each process identity itself. `RunEvent::Exit` does not run after a
+    /// panic, so this is the last chance before the next launch.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn restore_web_accessibility_on_panic() {
+        if thread::current().name() != Some("main") {
+            return;
+        }
+        if let Ok(mut state) = web_accessibility_state().try_lock() {
+            restore_all_web_accessibility(&mut state, &SystemWebAccessibilityBackend);
+            return;
+        }
+        if let Some(path) = WEB_ACCESSIBILITY_JOURNAL_PATH.get() {
+            let entries = read_web_accessibility_journal(path);
+            recover_web_accessibility_journal(&entries, &SystemWebAccessibilityBackend);
+        }
+    }
+
     struct SystemWebAccessibilityBackend;
 
     /// Bounds for the `AXWebArea` probe. Chrome builds the web tree
@@ -8931,6 +9296,10 @@ pub(crate) mod input {
             unsafe { AXUIElementSetAttributeValue(app_ptr, attribute.as_ptr(), value) }
         }
 
+        fn process_start_us(&self, pid: i32) -> Option<u64> {
+            process_start_us(pid)
+        }
+
         fn window_has_web_area(&self, pid: i32, window_id: u32) -> bool {
             for attempt in 0..WEB_AREA_PROBE_ATTEMPTS {
                 if attempt > 0 {
@@ -8942,6 +9311,30 @@ pub(crate) mod input {
             }
             false
         }
+    }
+
+    /// A process's start time from `proc_pidinfo(PROC_PIDTBSDINFO)`, in
+    /// microseconds since the epoch. Stable for the life of the process and
+    /// different for a recycled pid, which is what the journal needs.
+    fn process_start_us(pid: i32) -> Option<u64> {
+        if pid <= 0 {
+            return None;
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        if written != size {
+            return None;
+        }
+        Some(info.pbi_start_tvsec.saturating_mul(1_000_000).saturating_add(info.pbi_start_tvusec))
     }
 
     /// Bounded breadth-first walk of the authorized window for an `AXWebArea`.
@@ -10900,6 +11293,7 @@ pub(crate) mod input {
             && message.action == Some(RemoteControlAction::Down)
         {
             super::note_key_down_delivered();
+            super::note_injection_route(crate::analytics::RemoteControlRoute::AxShortcut);
         }
         let result = match ax_outcome {
             AxReplayOutcome::Handled => Ok(()),
@@ -11073,6 +11467,10 @@ pub(crate) mod input {
     }
 
     impl InputSink for DisplayKeySink<'_> {
+        fn route(&self) -> crate::analytics::RemoteControlRoute {
+            crate::analytics::RemoteControlRoute::SessionTap
+        }
+
         fn verify_key_window(&self, _window_id: u32) -> Result<(), String> {
             Ok(())
         }
@@ -11125,7 +11523,7 @@ pub(crate) mod input {
         frame: WindowFrame,
         sink: &dyn InputSink,
     ) -> Result<(), String> {
-        match message.message_type {
+        let result = match message.message_type {
             RemoteControlType::Pointer => replay_pointer(message, frame, sink),
             RemoteControlType::Wheel => replay_wheel(message, frame, sink),
             RemoteControlType::Key => replay_key(message, sink),
@@ -11134,8 +11532,12 @@ pub(crate) mod input {
             | RemoteControlType::Release
             | RemoteControlType::Status
             | RemoteControlType::Result
-            | RemoteControlType::Unknown => Ok(()),
+            | RemoteControlType::Unknown => return Ok(()),
+        };
+        if result.is_ok() {
+            super::note_injection_route(sink.route());
         }
+        result
     }
 
     fn replay_pointer_via_ax(
@@ -11320,6 +11722,9 @@ pub(crate) mod input {
             "remote-control: semantic click window_id={window_id} button={button:?} click_count={click_count} mode=SessionTap outcome={}",
             if result.is_ok() { "Handled" } else { "Error" }
         );
+        if result.is_ok() {
+            super::note_injection_route(crate::analytics::RemoteControlRoute::SessionTap);
+        }
         result.map(|()| AxReplayOutcome::Handled)
     }
 
@@ -11377,6 +11782,7 @@ pub(crate) mod input {
             // real click with side effects, not a health probe.
             match sl.post_click(pid, point, button, click_count) {
                 Ok(()) => {
+                    super::note_injection_route(crate::analytics::RemoteControlRoute::SkyLight);
                     log::info!(
                         "remote-control: semantic click route=direct pid={pid} point=({:.1},{:.1})",
                         point.x,
@@ -11412,6 +11818,7 @@ pub(crate) mod input {
             } else {
                 resolve_at_point(window_id, pid, point, ax, use_cache)
             };
+            let mut focus_moved: Option<bool> = None;
             let (element, caps) = match resolution {
                 Ok(Some(resolved)) => resolved,
                 Ok(None) => {
@@ -11487,11 +11894,15 @@ pub(crate) mod input {
                     ));
                 }
             } else if caps.pressable {
+                if !(caps.editable_text || caps.text_selectable) {
+                    // #404 follow-up: see `focus_chromium_page_before_press`.
+                    focus_moved = focus_chromium_page_before_press(window_id, pid, &element, ax);
+                }
                 let pressed = ax.press(&element);
                 // #404: a pressable text field (a web `<input>`) also needs
                 // the app's keyboard focus, or typed keys miss it.
                 if pressed.is_ok() && (caps.editable_text || caps.text_selectable) {
-                    focus_clicked_text_element(window_id, &element, ax);
+                    focus_moved = Some(focus_clicked_text_element(window_id, &element, ax));
                 }
                 pressed
             } else if caps.text_selectable {
@@ -11499,7 +11910,7 @@ pub(crate) mod input {
                     Ok(offset) => {
                         // #404: focus before placing the caret -- see
                         // `ax_pointer_up`'s AxText branch.
-                        focus_clicked_text_element(window_id, &element, ax);
+                        focus_moved = Some(focus_clicked_text_element(window_id, &element, ax));
                         ax.set_selected_range(&element, offset, 0)
                     }
                     Err(error) => {
@@ -11546,7 +11957,16 @@ pub(crate) mod input {
                         "text_selectable"
                     };
                     log::info!(
-                        "remote-control: semantic click window_id={window_id} button={button:?} click_count={click_count} mode=Ax route={route} outcome=Handled"
+                        "remote-control: semantic click window_id={window_id} button={button:?} click_count={click_count} mode=Ax route={route} outcome=Handled text_focus={}",
+                        text_focus_summary(focus_moved)
+                    );
+                    super::note_injection_route_with_focus(
+                        if route == "text_selectable" {
+                            crate::analytics::RemoteControlRoute::AxText
+                        } else {
+                            crate::analytics::RemoteControlRoute::AxPressable
+                        },
+                        focus_moved,
                     );
                     return Ok(AxReplayOutcome::Handled);
                 }
@@ -12122,6 +12542,9 @@ pub(crate) mod input {
         match state.mode {
             GestureMode::SessionTap => {
                 let result = session_tap_pointer_up(window_id, up_point, state.button, tap);
+                if result.is_ok() {
+                    super::note_injection_route(crate::analytics::RemoteControlRoute::SessionTap);
+                }
                 log::info!(
                     "remote-control: AX pointer up window_id={window_id} mode=SessionTap displacement={displacement:.2} outcome={}",
                     if result.is_ok() { "Handled" } else { "Error" }
@@ -12151,6 +12574,7 @@ pub(crate) mod input {
                     }
                     Err(SlClickError::Failed(error)) => return Err(error),
                 };
+                super::note_injection_route(crate::analytics::RemoteControlRoute::SkyLight);
                 log::info!(
                     "remote-control: AX pointer up window_id={window_id} mode=SlDrag displacement={displacement:.2} outcome=Handled"
                 );
@@ -12178,6 +12602,13 @@ pub(crate) mod input {
                     );
                     return Ok(outcome);
                 }
+                // #404 follow-up: a pressed page button/link needs Chrome's
+                // keyboard focus in the page BEFORE the press.
+                let page_focus = if action == AxClickAction::Press && !focus_text {
+                    focus_chromium_page_before_press(window_id, pid, &element, ax)
+                } else {
+                    None
+                };
                 let result = match action {
                     AxClickAction::Press => ax.press(&element),
                     AxClickAction::ShowMenu => ax.show_menu(&element),
@@ -12189,7 +12620,7 @@ pub(crate) mod input {
                 let focused = if focus_text && outcome == AxReplayOutcome::Handled {
                     Some(focus_clicked_text_element(window_id, &element, ax))
                 } else {
-                    None
+                    page_focus
                 };
                 let final_outcome = if outcome == AxReplayOutcome::PassThrough {
                     sl_click_or_passthrough(
@@ -12201,14 +12632,19 @@ pub(crate) mod input {
                         sl,
                     )
                 } else {
+                    super::note_injection_route_with_focus(
+                        crate::analytics::RemoteControlRoute::AxPressable,
+                        focused,
+                    );
                     outcome
                 };
                 log::info!(
-                    "remote-control: AX pointer up window_id={window_id} mode=AxPressable action={} displacement={displacement:.2} ax_outcome={} outcome={} text_focus={}",
+                    "remote-control: AX pointer up window_id={window_id} mode=AxPressable action={} displacement={displacement:.2} ax_outcome={} outcome={} text_focus={} page_focus={}",
                     ax_click_action_name(action),
                     ax_replay_outcome_name(outcome),
                     ax_replay_outcome_name(final_outcome),
-                    text_focus_summary(focused)
+                    text_focus_summary(if focus_text { focused } else { None }),
+                    text_focus_summary(page_focus)
                 );
                 Ok(final_outcome)
             }
@@ -12264,6 +12700,10 @@ pub(crate) mod input {
                         sl,
                     )
                 } else {
+                    super::note_injection_route_with_focus(
+                        crate::analytics::RemoteControlRoute::AxText,
+                        Some(focused),
+                    );
                     outcome
                 };
                 log::info!(
@@ -12296,6 +12736,41 @@ pub(crate) mod input {
                     ax_role_description(element)
                 );
                 false
+            }
+        }
+    }
+
+    /// #404 follow-up: before an `AXPress` on Chromium page content that is
+    /// NOT itself a text field (a button, a link, a clickable container),
+    /// put Chrome's keyboard focus into the page. Measured on Chrome
+    /// (2026-10-23, own isolated profile, omnibox focused first): `AXPress`
+    /// on a `<button>` whose click handler focuses an `<input>` moves DOM
+    /// focus to the input but leaves `document.hasFocus()` false, so every
+    /// pid-posted key lands in the address bar. `AXFocused = true` on the
+    /// pressed element BEFORE the press makes the same keys land in the
+    /// input, for a button and for a link. Focusing the `AXWebArea` AFTER the
+    /// press instead dropped DOM focus to the document, so the web area is
+    /// only the fallback when the element refuses focus, and only before the
+    /// press. Returns `None` when this does not apply (not Chromium page
+    /// content), otherwise whether keyboard focus was moved.
+    fn focus_chromium_page_before_press(
+        window_id: u32,
+        pid: i32,
+        element: &AxElementHandle,
+        ax: &dyn AxInputBackend,
+    ) -> Option<bool> {
+        let web_area = ax.chromium_web_area(pid, element)?;
+        if ax.set_focused(element).is_ok() {
+            return Some(true);
+        }
+        match ax.set_focused(&web_area) {
+            Ok(()) => Some(true),
+            Err(error) => {
+                log::info!(
+                    "remote-control: AX page focus before press failed window_id={window_id} role={} error={error:?}",
+                    ax_role_description(element)
+                );
+                Some(false)
             }
         }
     }
@@ -12426,7 +12901,10 @@ pub(crate) mod input {
             return AxReplayOutcome::PassThrough;
         }
         match post_sl_click_with_priming(pid, point, button, click_count.max(1), sl) {
-            SlClickOutcome::Posted => AxReplayOutcome::Handled,
+            SlClickOutcome::Posted => {
+                super::note_injection_route(crate::analytics::RemoteControlRoute::SkyLight);
+                AxReplayOutcome::Handled
+            }
             SlClickOutcome::PassThrough => AxReplayOutcome::PassThrough,
         }
     }
@@ -12596,7 +13074,10 @@ pub(crate) mod input {
             // #368 F1 invalidation is applied centrally in replay_with_backends
             // (which also covers the Ok(false) synthetic-scroll passthrough that
             // still scrolls the content — see message_mutates_ui for Wheel).
-            Ok(true) => Ok(AxReplayOutcome::Handled),
+            Ok(true) => {
+                super::note_injection_route(crate::analytics::RemoteControlRoute::AxScroll);
+                Ok(AxReplayOutcome::Handled)
+            }
             Ok(false) => wheel_sl_fallback(message, frame, pid, point, sl, tap),
             Err(error) => ax_action_outcome(Err(error), "AX scroll replay"),
         }
@@ -12614,7 +13095,10 @@ pub(crate) mod input {
         let flags = cg_flags_for_modifiers(&message.modifiers);
         if direct_scroll_enabled() {
             match sl.post_scroll(pid, point, dy, dx, flags) {
-                Ok(()) => return Ok(AxReplayOutcome::Handled),
+                Ok(()) => {
+                    super::note_injection_route(crate::analytics::RemoteControlRoute::SkyLight);
+                    return Ok(AxReplayOutcome::Handled);
+                }
                 Err(SlClickError::Unavailable) => {}
                 Err(SlClickError::Failed(error)) => {
                     SL_FAILURE_LOGGED.get_or_init(|| {
@@ -12647,6 +13131,7 @@ pub(crate) mod input {
         }
         match tap.post_scroll(point, delta_y, delta_x, flags) {
             Ok(()) => {
+                super::note_injection_route(crate::analytics::RemoteControlRoute::SessionTap);
                 note_cursor_posted(window_id, point, Some(SESSION_TAP_WHEEL_SETTLE));
                 Ok(AxReplayOutcome::Handled)
             }
@@ -14217,6 +14702,13 @@ pub(crate) mod input {
             ops: Mutex<Vec<AxOp>>,
             // #404: element ids that received `set_focused`, in order.
             focused: Mutex<Vec<u64>>,
+            // #404 follow-up: `ops().len()` at each `set_focused`, so a test
+            // can tell a focus BEFORE the press from one after it.
+            focused_at_op: Mutex<Vec<(u64, usize)>>,
+            // #404 follow-up: element id -> its Chromium `AXWebArea` id.
+            web_areas: Mutex<HashMap<u64, u64>>,
+            // #404 follow-up: element ids whose `set_focused` fails.
+            focus_error_ids: Mutex<std::collections::HashSet<u64>>,
         }
 
         #[derive(Debug, Clone, PartialEq)]
@@ -14716,6 +15208,10 @@ pub(crate) mod input {
             fn focused_ids(&self) -> Vec<u64> {
                 self.focused.lock_unpoisoned().clone()
             }
+
+            fn focused_at_op(&self) -> Vec<(u64, usize)> {
+                self.focused_at_op.lock_unpoisoned().clone()
+            }
         }
 
         impl AxInputBackend for RecordingAxBackend {
@@ -14883,8 +15379,25 @@ pub(crate) mod input {
                 // #404: recorded apart from `ops` so the many existing exact
                 // `ops()` assertions keep describing the press/selection
                 // sequence alone.
+                if self.focus_error_ids.lock_unpoisoned().contains(&id) {
+                    return Err(AxError::new(K_AX_ERROR_ATTRIBUTE_UNSUPPORTED));
+                }
                 self.focused.lock_unpoisoned().push(id);
+                let at = self.ops.lock_unpoisoned().len();
+                self.focused_at_op.lock_unpoisoned().push((id, at));
                 Ok(())
+            }
+
+            fn chromium_web_area(
+                &self,
+                _pid: i32,
+                element: &AxElementHandle,
+            ) -> Option<AxElementHandle> {
+                let id = element.test_id()?;
+                self.web_areas
+                    .lock_unpoisoned()
+                    .get(&id)
+                    .map(|area| AxElementHandle::Test(*area))
             }
 
             fn scroll_by(
@@ -15627,6 +16140,227 @@ pub(crate) mod input {
             assert!(sink.events().is_empty());
         }
 
+        // ---- #404 follow-up: page focus before pressing Chromium content ----
+
+        fn chromium_button(ax: &RecordingAxBackend, id: u64, web_area: u64) {
+            ax.resolve_to(id);
+            ax.set_capabilities(
+                id,
+                AxCapabilities {
+                    pressable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            ax.web_areas.lock_unpoisoned().insert(id, web_area);
+        }
+
+        #[test]
+        fn a_pressed_chromium_page_button_gets_keyboard_focus_before_the_press() {
+            // The incident shape: a page button/link whose click handler
+            // focuses a field. Without focus first, Chrome's keyboard focus
+            // stays in the address bar and every typed key lands there.
+            let _guard = ax_test_lock();
+            let frame = unit_frame();
+            for legacy in [true, false] {
+                clear_all_ax_control_state();
+                let ax = RecordingAxBackend::default();
+                chromium_button(&ax, 8, 80);
+                let route = route_after(|| {
+                    if legacy {
+                        for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                            let message =
+                                pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                            assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+                        }
+                    } else {
+                        let click = pointer_message(
+                            RemoteControlAction::Click,
+                            0.10,
+                            0.20,
+                            RemoteControlButton::Left,
+                            0,
+                        );
+                        assert!(replay_events_with_ax(&click, frame, &ax).is_empty());
+                    }
+                });
+                assert_eq!(ax.ops(), vec![AxOp::Press(8)], "legacy={legacy}");
+                assert_eq!(ax.focused_at_op(), vec![(8, 0)], "focused BEFORE the press, legacy={legacy}");
+                assert_eq!(
+                    route,
+                    report(crate::analytics::RemoteControlRoute::AxPressable, Some(true)),
+                    "legacy={legacy}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_chromium_element_that_refuses_focus_falls_back_to_its_web_area() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            chromium_button(&ax, 9, 90);
+            ax.focus_error_ids.lock_unpoisoned().insert(9);
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message = pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+            }
+            assert_eq!(ax.ops(), vec![AxOp::Press(9)]);
+            assert_eq!(ax.focused_at_op(), vec![(90, 0)]);
+        }
+
+        #[test]
+        fn non_chromium_buttons_and_right_clicks_never_get_pre_press_focus() {
+            let _guard = ax_test_lock();
+            let frame = unit_frame();
+            // A native button (no Chromium web area): a real click on it does
+            // not take keyboard focus, so neither may the AX press.
+            clear_all_ax_control_state();
+            let native = RecordingAxBackend::default();
+            native.resolve_to(6);
+            native.set_capabilities(
+                6,
+                AxCapabilities {
+                    pressable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message = pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &native).is_empty());
+            }
+            assert!(native.focused_ids().is_empty());
+
+            // A right click on page content opens the menu; no focus move.
+            clear_all_ax_control_state();
+            let page = RecordingAxBackend::default();
+            chromium_button(&page, 8, 80);
+            page.set_capabilities(
+                8,
+                AxCapabilities {
+                    pressable: true,
+                    show_menu: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message = pointer_message(action, 0.10, 0.20, RemoteControlButton::Right, 0);
+                let _ = replay_events_with_ax(&message, frame, &page);
+            }
+            assert!(page.focused_ids().is_empty());
+
+            // A pressable Chromium TEXT field keeps the #404 after-press focus.
+            clear_all_ax_control_state();
+            let field = RecordingAxBackend::default();
+            chromium_button(&field, 7, 70);
+            field.set_capabilities(
+                7,
+                AxCapabilities {
+                    pressable: true,
+                    editable_text: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message = pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &field).is_empty());
+            }
+            assert_eq!(field.focused_at_op(), vec![(7, 1)], "after the press, as #404 measured");
+        }
+
+        // ---- #404 follow-up: the route dimension on remote_control_input ----
+
+        fn route_after(f: impl FnOnce()) -> crate::analytics::RemoteControlRouteReport {
+            super::super::take_injection_route();
+            f();
+            super::super::take_injection_route()
+        }
+
+        fn report(
+            route: crate::analytics::RemoteControlRoute,
+            focus_moved: Option<bool>,
+        ) -> crate::analytics::RemoteControlRouteReport {
+            crate::analytics::RemoteControlRouteReport {
+                route: Some(route),
+                focus_moved,
+            }
+        }
+
+        #[test]
+        fn the_incident_press_reports_ax_pressable_and_whether_focus_moved() {
+            use crate::analytics::RemoteControlRoute;
+            let _guard = ax_test_lock();
+            let frame = unit_frame();
+            let down = pointer_message(RemoteControlAction::Down, 0.10, 0.20, RemoteControlButton::Left, 0);
+            let up = pointer_message(RemoteControlAction::Up, 0.10, 0.20, RemoteControlButton::Left, 0);
+
+            // A web field that is pressable and editable: press + focus.
+            clear_all_ax_control_state();
+            let field = RecordingAxBackend::default();
+            field.resolve_to(7);
+            field.set_capabilities(
+                7,
+                AxCapabilities {
+                    pressable: true,
+                    editable_text: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            assert!(replay_events_with_ax(&down, frame, &field).is_empty());
+            let up_route = route_after(|| {
+                assert!(replay_events_with_ax(&up, frame, &field).is_empty());
+            });
+            assert_eq!(up_route, report(RemoteControlRoute::AxPressable, Some(true)));
+
+            // A plain button: pressed, focus not attempted.
+            clear_all_ax_control_state();
+            let button = RecordingAxBackend::default();
+            button.resolve_to(6);
+            button.set_capabilities(
+                6,
+                AxCapabilities {
+                    pressable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            assert!(replay_events_with_ax(&down, frame, &button).is_empty());
+            let up_route = route_after(|| {
+                assert!(replay_events_with_ax(&up, frame, &button).is_empty());
+            });
+            assert_eq!(up_route, report(RemoteControlRoute::AxPressable, None));
+
+            // A semantic click on a text element: AxText + focus.
+            clear_all_ax_control_state();
+            let text = RecordingAxBackend::default();
+            text.resolve_to(4);
+            text.set_capabilities(4, text_selectable_caps());
+            let click = pointer_message(RemoteControlAction::Click, 0.10, 0.20, RemoteControlButton::Left, 0);
+            let click_route = route_after(|| {
+                assert!(replay_events_with_ax(&click, frame, &text).is_empty());
+            });
+            assert_eq!(click_route, report(RemoteControlRoute::AxText, Some(true)));
+        }
+
+        #[test]
+        fn a_posted_key_reports_pid_post_and_a_refused_one_reports_nothing() {
+            use crate::analytics::RemoteControlRoute;
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let down = key_message("KeyA", "a", RemoteControlModifiers::default());
+            let sink = RecordingSink::default();
+            let posted = route_after(|| {
+                assert!(key_delivery_for(&down, &sink));
+            });
+            assert_eq!(posted, report(RemoteControlRoute::PidPost, None));
+
+            let refused_sink = RecordingSink::default();
+            refused_sink.focus_window(down.window_id + 1);
+            let refused = route_after(|| {
+                assert!(!key_delivery_for(&down, &refused_sink));
+            });
+            assert_eq!(refused, crate::analytics::RemoteControlRouteReport::default());
+        }
+
         #[test]
         fn key_up_and_undelivered_key_down_do_not_count_as_typing() {
             use super::super::replay_counts_as_applied_input;
@@ -15659,10 +16393,13 @@ pub(crate) mod input {
             enhanced: Mutex<HashMap<i32, bool>>,
             writes: Mutex<Vec<(i32, bool)>>,
             bundle_queries: Mutex<u32>,
+            /// Process start times; a pid without one reads as gone.
+            starts: HashMap<i32, u64>,
         }
 
         impl FakeWebAx {
             fn with_app(mut self, pid: i32, bundle: &str, windows: &[u32]) -> Self {
+                self.starts.insert(pid, 1_000_000 + pid as u64);
                 self.bundles.insert(pid, bundle.to_string());
                 for window_id in windows {
                     self.window_pids.insert(*window_id, pid);
@@ -15699,6 +16436,203 @@ pub(crate) mod input {
             fn window_has_web_area(&self, _pid: i32, _window_id: u32) -> bool {
                 true
             }
+
+            fn process_start_us(&self, pid: i32) -> Option<u64> {
+                self.starts.get(&pid).copied()
+            }
+        }
+
+        /// A fresh, per-test journal path (no tempfile crate here).
+        fn journal_path(name: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "petal-webax-journal-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("journal dir");
+            dir.join(WEB_ACCESSIBILITY_JOURNAL_FILE)
+        }
+
+        fn journaled_state(path: &std::path::Path) -> WebAccessibilityState {
+            WebAccessibilityState {
+                journal: Some(path.to_path_buf()),
+                ..WebAccessibilityState::default()
+            }
+        }
+
+        #[test]
+        fn web_accessibility_journal_records_only_what_petal_switched_on() {
+            let path = journal_path("records");
+            let backend = FakeWebAx::default()
+                .with_app(10, "com.google.Chrome", &[100])
+                .with_app(11, "com.brave.Browser", &[110]);
+            // Brave already had it on: never journaled, never touched.
+            backend.enhanced.lock_unpoisoned().insert(11, true);
+            let mut state = journaled_state(&path);
+            reconcile_web_accessibility(&granted(&[100, 110]), &mut state, &backend);
+            assert_eq!(
+                read_web_accessibility_journal(&path),
+                vec![WebAccessibilityJournalEntry {
+                    pid: 10,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 1_000_010,
+                }]
+            );
+            // The grant ends: restored and the journal is gone.
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert!(!path.exists(), "a clean release leaves no journal behind");
+            assert_eq!(backend.writes(), vec![(10, true), (10, false)]);
+        }
+
+        #[test]
+        fn web_accessibility_journal_is_written_before_the_switch() {
+            // A crash right after the write must still find the entry: the
+            // journal exists by the time `set_enhanced_user_interface` runs.
+            struct CheckingBackend {
+                inner: FakeWebAx,
+                path: std::path::PathBuf,
+                journal_existed_at_write: Mutex<Vec<bool>>,
+            }
+            impl WebAccessibilityBackend for CheckingBackend {
+                fn window_pid(&self, window_id: u32) -> Option<i32> {
+                    self.inner.window_pid(window_id)
+                }
+                fn bundle_id(&self, pid: i32) -> Option<String> {
+                    self.inner.bundle_id(pid)
+                }
+                fn enhanced_user_interface(&self, pid: i32) -> Option<bool> {
+                    self.inner.enhanced_user_interface(pid)
+                }
+                fn set_enhanced_user_interface(&self, pid: i32, enabled: bool) -> i32 {
+                    if enabled {
+                        self.journal_existed_at_write
+                            .lock_unpoisoned()
+                            .push(!read_web_accessibility_journal(&self.path).is_empty());
+                    }
+                    self.inner.set_enhanced_user_interface(pid, enabled)
+                }
+                fn window_has_web_area(&self, pid: i32, window_id: u32) -> bool {
+                    self.inner.window_has_web_area(pid, window_id)
+                }
+                fn process_start_us(&self, pid: i32) -> Option<u64> {
+                    self.inner.process_start_us(pid)
+                }
+            }
+            let path = journal_path("before");
+            let backend = CheckingBackend {
+                inner: FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]),
+                path: path.clone(),
+                journal_existed_at_write: Mutex::new(Vec::new()),
+            };
+            let mut state = journaled_state(&path);
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            assert_eq!(*backend.journal_existed_at_write.lock_unpoisoned(), vec![true]);
+        }
+
+        #[test]
+        fn launch_restores_what_a_crashed_run_left_on() {
+            let path = journal_path("crash");
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]);
+            // Run 1 enables, then "crashes": the state is simply dropped.
+            {
+                let mut state = journaled_state(&path);
+                reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            }
+            assert!(path.exists());
+            // Run 2 launches.
+            let mut state = WebAccessibilityState::default();
+            let restored = adopt_web_accessibility_journal(path.clone(), &mut state, &backend);
+            assert_eq!(restored, 1);
+            assert_eq!(backend.writes(), vec![(10, true), (10, false)]);
+            assert!(!path.exists(), "recovered entries are cleared");
+            assert_eq!(state.journal.as_deref(), Some(path.as_path()));
+        }
+
+        #[test]
+        fn launch_recovery_never_acts_on_a_recycled_pid_or_another_app() {
+            let path = journal_path("recycled");
+            let entries = vec![
+                // Same pid, same app, but restarted: the switch is fresh.
+                WebAccessibilityJournalEntry {
+                    pid: 10,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 42,
+                },
+                // The pid now belongs to another app.
+                WebAccessibilityJournalEntry {
+                    pid: 11,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 1_000_011,
+                },
+                // Gone.
+                WebAccessibilityJournalEntry {
+                    pid: 12,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 1_000_012,
+                },
+                // The display-share sentinel is never a process.
+                WebAccessibilityJournalEntry {
+                    pid: 1,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 1,
+                },
+            ];
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&WebAccessibilityJournal {
+                    version: 1,
+                    enabled: entries,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let backend = FakeWebAx::default()
+                .with_app(10, "com.google.Chrome", &[])
+                .with_app(11, "com.apple.TextEdit", &[]);
+            backend.enhanced.lock_unpoisoned().insert(10, true);
+            backend.enhanced.lock_unpoisoned().insert(11, true);
+            let mut state = WebAccessibilityState::default();
+            assert_eq!(adopt_web_accessibility_journal(path.clone(), &mut state, &backend), 0);
+            assert!(backend.writes().is_empty());
+            assert!(!path.exists());
+        }
+
+        #[test]
+        fn launch_recovery_leaves_a_switch_someone_else_turned_off() {
+            let path = journal_path("off");
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]);
+            {
+                let mut state = journaled_state(&path);
+                reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            }
+            backend.enhanced.lock_unpoisoned().insert(10, false);
+            let mut state = WebAccessibilityState::default();
+            assert_eq!(adopt_web_accessibility_journal(path.clone(), &mut state, &backend), 0);
+            assert_eq!(backend.writes(), vec![(10, true)], "no second write");
+        }
+
+        #[test]
+        fn exit_clears_the_journal_and_a_corrupt_journal_is_ignored() {
+            let path = journal_path("exit");
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]);
+            let mut state = journaled_state(&path);
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            restore_all_web_accessibility(&mut state, &backend);
+            assert!(!path.exists());
+
+            std::fs::write(&path, b"{not json").unwrap();
+            let mut state = WebAccessibilityState::default();
+            assert_eq!(adopt_web_accessibility_journal(path.clone(), &mut state, &backend), 0);
+            assert!(!path.exists(), "an unreadable journal is replaced, not kept forever");
+        }
+
+        #[test]
+        fn process_start_time_identifies_this_process() {
+            let me = std::process::id() as i32;
+            let first = process_start_us(me).expect("own start time");
+            assert_eq!(process_start_us(me), Some(first), "stable for the life of the process");
+            assert!(process_start_us(0).is_none());
+            assert!(process_start_us(-5).is_none());
         }
 
         fn granted(windows: &[u32]) -> HashSet<u32> {
