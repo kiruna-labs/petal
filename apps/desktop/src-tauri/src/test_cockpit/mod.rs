@@ -9281,7 +9281,7 @@ async fn run_remote_control_native_to_chrome_scenario(
 
     let marker = rc_n2n_chrome::marker_for_run(shape, &run_id());
     let frontmost_before_launch = live::frontmost_pid();
-    let chrome_log_path = writer.dir.join("rc-n2n-chrome-browser.log");
+    let chrome_log_path = writer.dir.join(format!("rc-n2n-chrome-{}-browser.log", shape.label()));
     let chrome = match live::ChromeTarget::launch(&chrome_path(), shape, marker.clone(), &chrome_log_path).await {
         Ok(chrome) => chrome,
         Err(error) => return infra_fail_outcome(scenario, format!("INFRA-FAIL test Chrome: {error}")),
@@ -9314,8 +9314,10 @@ async fn run_remote_control_native_to_chrome_scenario(
         }
     };
     let peer_identity_env = format!("p-rcn2nhost-{}", rand_hex());
-    let peer_stdout_path = writer.dir.join("rc-n2n-peer.stdout.log");
-    let peer_stderr_path = writer.dir.join("rc-n2n-peer.stderr.log");
+    // Per-shape names: a run of both shapes (and RC-N2N) shares one results
+    // dir, and the host log is where the click route is recorded.
+    let peer_stdout_path = writer.dir.join(format!("rc-n2n-chrome-{}-peer.stdout.log", shape.label()));
+    let peer_stderr_path = writer.dir.join(format!("rc-n2n-chrome-{}-peer.stderr.log", shape.label()));
     let (peer_stdout, peer_stderr) = match (File::create(&peer_stdout_path), File::create(&peer_stderr_path)) {
         (Ok(out), Ok(err)) => (out, err),
         _ => {
@@ -9620,6 +9622,31 @@ async fn run_remote_control_native_to_chrome_scenario(
     )
     .await;
     let exit = child.wait();
+    // Keep the host's own record of how it routed the click (AX pointer
+    // down/up lines: mode, pressed role, text focus) before the log is
+    // trimmed to its tail -- it is the evidence for which element was pressed.
+    let host_pointer_lines: Vec<String> = [&peer_stdout_path, &peer_stderr_path]
+        .iter()
+        .filter_map(|path| fs::read(path).ok())
+        .flat_map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter(|line| {
+                    line.contains("AX pointer")
+                        || line.contains("text_focus")
+                        || line.contains("focus_text")
+                        || line.contains("web accessibility")
+                })
+                .map(|line| crate::logging::redact_for_export(line))
+                .collect::<Vec<_>>()
+        })
+        .take(60)
+        .collect();
+    let _ = writer.write(
+        "rc-n2n-chrome-host-pointer-log",
+        Some(scenario.id),
+        serde_json::json!({ "pageShape": shape.label(), "lines": host_pointer_lines }),
+    );
     retain_native_peer_log_tail(&peer_stdout_path);
     retain_native_peer_log_tail(&peer_stderr_path);
     let _ = fs::remove_file(&socket_path);
