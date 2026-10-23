@@ -48,6 +48,15 @@ export async function setAudioDevices(opts: {
 }
 
 /**
+ * Windows: the user accepted a `micSilentOffer`, so move capture off the
+ * silent microphone. Resolves to the new device's name; rejects with the
+ * backend's error. The saved choice is unchanged.
+ */
+export async function switchFromSilentMic(silentDeviceId: string, deviceId: string): Promise<string> {
+  return await invoke<string>(COMMANDS.switchFromSilentMic, { silentDeviceId, deviceId });
+}
+
+/**
  * Push the persisted (localStorage) device preference into the Rust side's
  * in-memory mirror on startup, so a join that happens before Settings is
  * ever opened still publishes from the chosen devices. No-op without a

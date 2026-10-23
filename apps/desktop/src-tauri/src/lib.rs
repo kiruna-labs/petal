@@ -252,6 +252,8 @@ pub mod window_source;
 #[cfg(target_os = "windows")]
 mod windows_audio_device;
 #[cfg(target_os = "windows")]
+mod windows_mic_signal;
+#[cfg(target_os = "windows")]
 mod windows_capture_target;
 #[cfg(target_os = "windows")]
 mod windows_screen_audio;
@@ -1759,6 +1761,8 @@ pub fn run() {
             open_settings_window,
             transport::audio::list_audio_devices,
             transport::audio::set_audio_devices,
+            #[cfg(target_os = "windows")]
+            session::switch_from_silent_mic,
             camera_session::list_camera_devices,
             camera_session::list_camera_modes,
             camera_session::set_camera_device,
