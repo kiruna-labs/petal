@@ -157,6 +157,16 @@ const VM_LOG = [
   hostLine(`${HOST_RC_LINE_NEEDLE}Pointer action=Some(Click) window=165 seq=7 controller='web-1'`),
 ].join('\n');
 
+test('resolvePetalLogPath finds the dated user log #905 writes when petal.log is gone', () => {
+  const home = '/Users/runner';
+  const dir = '/Users/runner/Library/Logs/Petal';
+  const listing = ['petal.log.2026-10-20.gz', 'petal.log.2026-10-22', 'petal.log.2026-10-23', 'petal.log.release-smoke-baseline', 'test-runs'];
+  assert.equal(resolvePetalLogPath({}, home, () => listing), `${dir}/petal.log.2026-10-23`);
+  assert.equal(resolvePetalLogPath({}, home, () => [...listing, 'petal.log']), `${dir}/petal.log`);
+  assert.equal(resolvePetalLogPath({}, home, () => ['petal.log.2026-10-20.gz']), `${dir}/petal.log`);
+  assert.equal(resolvePetalLogPath({ PETAL_LOG_PATH: '/tmp/x.log' }, home, () => listing), '/tmp/x.log');
+});
+
 test('resolvePetalLogPath prefers PETAL_LOG_PATH, then PETAL_ACCEPTANCE_LOG, then the user log', () => {
   const home = '/Users/runner';
   assert.equal(
