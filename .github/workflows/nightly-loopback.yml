@@ -247,10 +247,10 @@ jobs:
       # participant gets 20ms each way to the SFU (40ms RTT -- a good home
       # connection to an in-region SFU) and 1% loss each way (~2% end to end
       # over the two hops of a meeting: ordinary Wi-Fi, not a bad network).
-      # REPORT-ONLY until #399's fix (#421) lands: the impaired pass and the
-      # presented-freeze check run and publish their verdicts (REPORT-ONLY:
-      # would fail) but block the gate only when this is "true".
-      E2E_IMPAIRED_BLOCKING: "false"
+      # Release-blocking since #421 landed (user decision 2026-10-23): the
+      # impaired pass and the presented-freeze check fail the gate. "false"
+      # turns them back into REPORT-ONLY: would fail.
+      E2E_IMPAIRED_BLOCKING: "true"
       PETAL_NET_IMPAIR_DELAY_MS: "20"
       PETAL_NET_IMPAIR_LOSS_PCT: "1"
       # Impaired budgets are the clean ones plus the delay the profile adds on
@@ -1112,8 +1112,7 @@ jobs:
   # source was changing. Its own job, not a step of live-loopback: a 10-minute
   # soak does not fit that job's 45-minute cap with headroom. release.yml's
   # `e2e-gate` calls this whole workflow; the soak runs and uploads its report
-  # there but is REPORT-ONLY (E2E_FREEZE_SOAK_BLOCKING below) until its
-  # viewers run off the sharer's VM.
+  # there and is release-blocking (E2E_FREEZE_SOAK_BLOCKING below).
   share-freeze-soak:
     name: Share-freeze soak (LiveKit Cloud, two viewers)
     needs: live-loopback
@@ -1127,10 +1126,10 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       CARGO_INCREMENTAL: 0
       PETAL_DISABLE_AUDIO: 1
-      # REPORT-ONLY until the soak's viewers run off the sharer's VM (#391):
-      # "false" prints every finding as "REPORT-ONLY: would fail" and never
-      # fails the gate; "true" makes the soak release-blocking.
-      E2E_FREEZE_SOAK_BLOCKING: "false"
+      # Release-blocking (user decision 2026-10-23, #391): releases stay
+      # blocked until a soak is freeze-free. "false" prints every finding as
+      # "REPORT-ONLY: would fail" and never fails the gate.
+      E2E_FREEZE_SOAK_BLOCKING: "true"
     steps:
       - uses: actions/checkout@v7
         with:

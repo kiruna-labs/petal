@@ -13,11 +13,11 @@
 //   node scripts/ci/e2e-gate-verdict.mjs attribution --clean <latency json> --impaired <latency json> --delay-ms <n>
 //   Any tier takes --pass clean|impaired (default clean). An impaired-pass
 //   verdict is REPORT-ONLY (failures print as warnings, exit 0) unless
-//   E2E_IMPAIRED_BLOCKING=true (#378; report-only until #421 lands).
+//   E2E_IMPAIRED_BLOCKING=true (#378; nightly-loopback.yml sets it).
 //   node scripts/ci/e2e-gate-verdict.mjs cockpit  --run-dir <dir> --started-at-ms <ms> --selector <sel> --engine-exit <n> [--quarantine <ids>]
 //   node scripts/ci/e2e-gate-verdict.mjs freeze   --raw <share-freeze-raw.json> [--sender-log <sharer petal log>] [--json <report out>]
 //   The freeze tier is REPORT-ONLY unless E2E_FREEZE_SOAK_BLOCKING=true (#391;
-//   until the soak's viewers run off the sharer's VM).
+//   nightly-loopback.yml sets it).
 //
 // Prints GitHub ::error/::warning annotations; exits 0 (pass) or 1 (fail).
 

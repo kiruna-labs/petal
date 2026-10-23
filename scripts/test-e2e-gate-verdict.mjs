@@ -436,9 +436,9 @@ test('CLI impaired pass: report-only unless E2E_IMPAIRED_BLOCKING=true; the clea
   assert.equal(runCliWith([...failing, '--pass', 'dirty'], undefined).status, 1);
 });
 
-test('wiring: the impaired pass is report-only by default and only its verdicts carry --pass impaired', () => {
+test('wiring: the impaired pass is release-blocking (#378) and only its verdicts carry --pass impaired', () => {
   const workflow = readFileSync(WORKFLOW, 'utf8');
-  assert.match(workflow, /\n      E2E_IMPAIRED_BLOCKING: "false"\n/);
+  assert.match(workflow, /\n      E2E_IMPAIRED_BLOCKING: "true"\n/);
   const impairedCalls = workflow.match(/node "\$VERDICT" \w+ --pass impaired /g) ?? [];
   assert.equal(impairedCalls.length, 3, 'loopback, latency and attribution of the impaired pass');
   assert.match(workflow, /node "\$VERDICT" loopback --results "\$RESULTS_JSON"/);
