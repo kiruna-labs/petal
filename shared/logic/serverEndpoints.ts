@@ -1,7 +1,8 @@
 // SINGLE SOURCE OF TRUTH for the token-server and invite-origin addresses
-// a user can pick without rebuilding (#310). Desktop Settings, the browser
-// client's home screen, and the native token client all share these rules
-// so a URL that Settings accepts is the same origin Rust will call.
+// a user can pick without rebuilding (#310). Desktop Settings and the
+// native token client share these rules so a URL Settings accepts is the
+// same origin Rust will call. The browser client does not expose this
+// override.
 //
 // An empty input means "no override": the launch-time env var, the URL
 // baked into the build, or (web production only) the hosted default.
@@ -19,7 +20,9 @@ export const SERVER_INVITE_DESCRIPTION =
 export const SERVER_SAVE_LABEL = 'Save';
 export const SERVER_CLEAR_LABEL = 'Use default';
 export const SERVER_INVALID_ORIGIN =
-  'Enter an http:// or https:// address, origin only — no path.';
+  'Enter an https:// address, or http:// for localhost, 127.0.0.1, and [::1]. Origin only — no path.';
+export const SERVER_HTTP_ORIGIN =
+  'http:// is only allowed for localhost, 127.0.0.1, and [::1].';
 export const SERVER_ENV_OVERRIDE_NOTE =
   'This launch is using PETAL_BACKEND_URL from the environment, which overrides the saved server until Petal is opened without it.';
 
@@ -33,34 +36,67 @@ export type ServerOriginParse =
   | { ok: false; error: string };
 
 /**
- * Trim, require http(s), drop a trailing slash, and accept `/api` or
- * `/api/token` as a courtesy (the client appends those itself). Anything
- * else — other schemes, userinfo, or a real path — is rejected.
+ * `http://` is cleartext. Settings may use it only for loopback so a local
+ * token server still works; every other host must be `https://`.
+ * `hostname` includes brackets in Node and omits them in browsers.
  */
-export function normalizeServerOrigin(raw: string | null | undefined): string | null {
-  if (raw == null) return null;
+function isHttpLoopback(hostname: string): boolean {
+  const bare = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return bare === 'localhost' || bare === '127.0.0.1' || bare === '::1';
+}
+
+function classifyServerOrigin(raw: string, allowInsecureHttp: boolean): ServerOriginParse {
   const trimmed = raw.trim();
-  if (!trimmed || trimmed.length > MAX_ORIGIN_CHARS) return null;
+  if (!trimmed || trimmed.length > MAX_ORIGIN_CHARS) {
+    return { ok: false, error: SERVER_INVALID_ORIGIN };
+  }
   let url: URL;
   try {
     url = new URL(trimmed);
   } catch {
-    return null;
+    return { ok: false, error: SERVER_INVALID_ORIGIN };
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-  if (!url.hostname) return null;
-  if (url.username || url.password) return null;
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { ok: false, error: SERVER_INVALID_ORIGIN };
+  }
+  if (!url.hostname) return { ok: false, error: SERVER_INVALID_ORIGIN };
+  if (url.username || url.password) return { ok: false, error: SERVER_INVALID_ORIGIN };
   const path = url.pathname.replace(/\/+$/, '');
-  if (!STRIP_PATHS.has(path)) return null;
-  return `${url.protocol}//${url.host}`;
+  if (!STRIP_PATHS.has(path)) return { ok: false, error: SERVER_INVALID_ORIGIN };
+  if (url.protocol === 'http:' && !allowInsecureHttp && !isHttpLoopback(url.hostname)) {
+    return { ok: false, error: SERVER_HTTP_ORIGIN };
+  }
+  return { ok: true, origin: `${url.protocol}//${url.host}` };
+}
+
+/**
+ * Trim, require http(s), drop a trailing slash, and accept `/api` or
+ * `/api/token` as a courtesy (the client appends those itself). `http://`
+ * is accepted only for `localhost`, `127.0.0.1`, and `[::1]`. Anything
+ * else — other schemes, userinfo, a real path, or cleartext to a
+ * non-loopback host — is rejected. Pinned by `contracts/petal-contracts.json`
+ * `serverOrigins` (see docs/CONTRACTS.md).
+ */
+export function normalizeServerOrigin(raw: string | null | undefined): string | null {
+  if (raw == null) return null;
+  const parsed = classifyServerOrigin(raw, false);
+  return parsed.ok ? parsed.origin : null;
+}
+
+/**
+ * Runtime `PETAL_BACKEND_URL` is a developer override and keeps the previous
+ * rule: `http://` is allowed for any host. Settings must not call this.
+ */
+function normalizeRuntimeBackendOrigin(raw: string | null | undefined): string | null {
+  if (raw == null) return null;
+  const parsed = classifyServerOrigin(raw, true);
+  return parsed.ok ? parsed.origin : null;
 }
 
 /** Empty input clears the override. Non-empty input must normalize. */
 export function parseServerOriginInput(raw: string): ServerOriginParse {
   if (raw.trim() === '') return { ok: true, origin: null };
-  const origin = normalizeServerOrigin(raw);
-  if (!origin) return { ok: false, error: SERVER_INVALID_ORIGIN };
-  return { ok: true, origin };
+  return classifyServerOrigin(raw, false);
 }
 
 export interface ResolveBackendBaseUrlInput {
@@ -95,7 +131,7 @@ function presentOrigin(raw: string | null | undefined): string | null {
 export function resolveBackendBaseUrl(input: ResolveBackendBaseUrlInput): ResolvedBackendBaseUrl {
   if (input.runtimeEnv != null) {
     if (input.runtimeEnv.trim() === '') return { url: null, source: 'none' };
-    const fromEnv = presentOrigin(input.runtimeEnv);
+    const fromEnv = normalizeRuntimeBackendOrigin(input.runtimeEnv);
     if (fromEnv) return { url: fromEnv, source: 'env' };
   }
   const fromSettings = presentOrigin(input.settingsUrl);
@@ -120,6 +156,25 @@ export function resolveInviteOrigin(input: ResolveInviteOriginInput): string {
     presentOrigin(input.fallback) ??
     DEFAULT_INVITE_ORIGIN
   );
+}
+
+/**
+ * Persistent label for a launch that is actually using the saved server.
+ * Env and the build bake are not called out here — only `settings`, which
+ * is the quiet redirect an invite link would otherwise follow.
+ */
+export function customServerIndicator(
+  url: string | null | undefined,
+  source: BackendUrlSource
+): string | null {
+  if (source !== 'settings' || !url) return null;
+  try {
+    const host = new URL(url).host;
+    if (!host) return null;
+    return `Custom server: ${host}`;
+  } catch {
+    return null;
+  }
 }
 
 export function backendJoiningLabel(url: string | null, source: BackendUrlSource): string {

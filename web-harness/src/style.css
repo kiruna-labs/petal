@@ -841,63 +841,6 @@ input[type='text']:disabled {
   text-wrap: pretty;
 }
 
-.server-settings {
-  margin: 8px 0 16px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-popover);
-  background: var(--surface);
-  padding: 0 12px 10px;
-}
-
-.server-settings > summary {
-  cursor: pointer;
-  list-style: none;
-  padding: 10px 0;
-  font: 600 12px var(--font-ui);
-  color: var(--text-muted);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.server-settings > summary::-webkit-details-marker {
-  display: none;
-}
-
-.server-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0 0 8px;
-  min-width: 0;
-}
-
-.server-field-label {
-  font: 600 12px var(--font-ui);
-  color: var(--text-primary);
-}
-
-.server-field input {
-  width: 100%;
-  min-width: 0;
-  height: 36px;
-  box-sizing: border-box;
-  border-radius: var(--radius-input);
-  background: var(--fill-base);
-  border: 1px solid var(--hairline-strong);
-  padding: 0 10px;
-  font: 500 13px var(--font-ui);
-  color: var(--text-primary);
-}
-
-.server-actions {
-  margin: 0 0 6px;
-}
-
-.server-status {
-  overflow-wrap: anywhere;
-  margin: 0 0 12px;
-}
-
 .meeting-actions {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -113,45 +113,81 @@ fn persist(path: &Path, settings: &ServerSettings) -> Result<(), String> {
     std::fs::write(path, json).map_err(|e| format!("write settings: {e}"))
 }
 
+const INVALID_SERVER_ORIGIN: &str = "Enter an https:// address, or http:// for localhost, 127.0.0.1, and [::1]. Origin only — no path.";
+const INSECURE_SERVER_ORIGIN: &str = "http:// is only allowed for localhost, 127.0.0.1, and [::1].";
+
+/// `hostname` from the `url` crate omits IPv6 brackets; Node's `URL.hostname`
+/// sometimes includes them. Compare the bare address either way.
+fn http_host_is_loopback(host: &str) -> bool {
+    let bare = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    bare == "localhost" || bare == "127.0.0.1" || bare == "::1"
+}
+
 /// Mirror of `shared/logic/serverEndpoints.ts` `normalizeServerOrigin`.
-/// Keep the two in lockstep: http(s) origin only, `/api` and `/api/token`
-/// stripped as a courtesy, everything else refused.
-pub fn normalize_server_origin(raw: &str) -> Option<String> {
+/// Keep the two in lockstep (`contracts/petal-contracts.json` `serverOrigins`):
+/// http(s) origin only, `/api` and `/api/token` stripped as a courtesy.
+/// `http://` is accepted only for `localhost`, `127.0.0.1`, and `[::1]`
+/// unless `allow_insecure_http` (the runtime `PETAL_BACKEND_URL` override).
+fn normalize_server_origin_inner(
+    raw: &str,
+    allow_insecure_http: bool,
+) -> Result<String, &'static str> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_ORIGIN_CHARS {
-        return None;
+        return Err(INVALID_SERVER_ORIGIN);
     }
-    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    let parsed = reqwest::Url::parse(trimmed).map_err(|_| INVALID_SERVER_ORIGIN)?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
-        return None;
+        return Err(INVALID_SERVER_ORIGIN);
     }
-    let host = parsed.host_str()?.to_string();
-    if host.is_empty() {
-        return None;
-    }
+    let raw_host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or(INVALID_SERVER_ORIGIN)?;
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return None;
+        return Err(INVALID_SERVER_ORIGIN);
     }
     let path = parsed.path().trim_end_matches('/');
     if path != "" && path != "/api" && path != "/api/token" {
-        return None;
+        return Err(INVALID_SERVER_ORIGIN);
     }
-    Some(match parsed.port() {
+    if scheme == "http" && !allow_insecure_http && !http_host_is_loopback(raw_host) {
+        return Err(INSECURE_SERVER_ORIGIN);
+    }
+    // Bracket IPv6 so the saved origin matches `new URL(input).host`.
+    let host = if raw_host.contains(':') && !raw_host.starts_with('[') {
+        format!("[{raw_host}]")
+    } else {
+        raw_host.to_string()
+    };
+    Ok(match parsed.port() {
         Some(port) => format!("{scheme}://{host}:{port}"),
         None => format!("{scheme}://{host}"),
     })
+}
+
+/// Settings / persisted override. `http://` only for loopback.
+pub fn normalize_server_origin(raw: &str) -> Option<String> {
+    normalize_server_origin_inner(raw, false).ok()
+}
+
+/// Developer override (`PETAL_BACKEND_URL`). Same shape rules, but `http://`
+/// is allowed for any host — a launch helper is an explicit choice.
+pub fn normalize_runtime_backend_origin(raw: &str) -> Option<String> {
+    normalize_server_origin_inner(raw, true).ok()
 }
 
 fn parse_optional_origin(raw: Option<String>) -> Result<Option<String>, String> {
     match raw {
         None => Ok(None),
         Some(value) if value.trim().is_empty() => Ok(None),
-        Some(value) => normalize_server_origin(&value)
+        Some(value) => normalize_server_origin_inner(&value, false)
             .map(Some)
-            .ok_or_else(|| {
-                "Enter an http:// or https:// address, origin only — no path.".to_string()
-            }),
+            .map_err(str::to_string),
     }
 }
 
@@ -169,9 +205,7 @@ pub fn view() -> ServerSettingsView {
         backend_url: settings.backend_url,
         invite_origin: settings.invite_origin.clone(),
         effective_backend_url,
-        effective_invite_origin: settings
-            .invite_origin
-            .unwrap_or_else(default_invite_origin),
+        effective_invite_origin: settings.invite_origin.unwrap_or_else(default_invite_origin),
         backend_source,
     }
 }
@@ -225,26 +259,46 @@ mod tests {
     }
 
     #[test]
-    fn normalize_accepts_http_s_origins_and_strips_api_paths() {
+    fn normalize_matches_shared_contract_fixture() {
+        let contracts: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../contracts/petal-contracts.json"))
+                .expect("contract fixtures should parse");
+        let cases = contracts["serverOrigins"]
+            .as_array()
+            .expect("serverOrigins fixture");
+        assert!(
+            !cases.is_empty(),
+            "serverOrigins fixture must pin the normalizer"
+        );
+        for case in cases {
+            let input = case["input"].as_str().expect("input");
+            let expected = case["origin"].as_str().map(str::to_string);
+            assert_eq!(
+                normalize_server_origin(input),
+                expected,
+                "normalize_server_origin({input:?})"
+            );
+            if let Some(error) = case["error"].as_str() {
+                assert_eq!(
+                    parse_optional_origin(Some(input.to_string())),
+                    Err(error.to_string()),
+                    "parse_optional_origin({input:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_override_still_allows_http_for_a_non_loopback_host() {
         assert_eq!(
-            normalize_server_origin(" https://petal.example.test/// "),
-            Some("https://petal.example.test".to_string())
+            normalize_runtime_backend_origin("http://petal.example.test/api/token"),
+            Some("http://petal.example.test".to_string())
         );
         assert_eq!(
-            normalize_server_origin("https://petal.example.test/api/token"),
-            Some("https://petal.example.test".to_string())
+            normalize_server_origin("http://petal.example.test"),
+            None,
+            "Settings must refuse cleartext to a non-loopback host"
         );
-        assert_eq!(
-            normalize_server_origin("http://127.0.0.1:8787"),
-            Some("http://127.0.0.1:8787".to_string())
-        );
-        assert_eq!(normalize_server_origin("https://petal.example.test/extra"), None);
-        assert_eq!(normalize_server_origin("file:///tmp"), None);
-        assert_eq!(
-            normalize_server_origin("https://user:pass@petal.example.test"),
-            None
-        );
-        assert_eq!(normalize_server_origin(""), None);
     }
 
     #[test]
@@ -292,30 +346,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Local `Store` only. `initialize` / `update` touch the process-global
+    /// store that `transport::token` tests also reset; those tests hold
+    /// `env_lock()`, and taking the global here raced them under the parallel
+    /// runner. Persistence is `read_from` + `persist`.
     #[test]
     fn initialize_then_update_persists_across_a_simulated_restart() {
         let dir = unique_dir("e2e");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(SETTINGS_FILE);
 
-        reset_store_for_tests();
-        initialize(&dir);
-        assert!(backend_url().is_none(), "fresh app data dir must start empty");
+        let mut settings = read_from(&path).unwrap_or_default();
+        assert!(
+            settings.backend_url.is_none(),
+            "fresh app data dir must start empty"
+        );
 
-        update(|s| {
-            s.backend_url = Some("https://petal.example.test".to_string());
-        })
-        .unwrap();
-        assert_eq!(backend_url().as_deref(), Some("https://petal.example.test"));
+        settings.backend_url = Some("https://petal.example.test".to_string());
+        persist(&path, &settings).unwrap();
 
-        initialize(&dir);
+        let reloaded = read_from(&path).expect("settings should read back");
         assert_eq!(
-            backend_url().as_deref(),
+            reloaded.backend_url.as_deref(),
             Some("https://petal.example.test"),
             "server URL must persist across restart"
         );
 
-        reset_store_for_tests();
+        // A previously saved cleartext non-loopback URL must not come back.
+        persist(
+            &path,
+            &ServerSettings {
+                backend_url: Some("http://petal.example.test".to_string()),
+                invite_origin: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(read_from(&path).and_then(|loaded| loaded.backend_url), None);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

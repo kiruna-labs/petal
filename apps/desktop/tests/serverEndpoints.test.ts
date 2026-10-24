@@ -5,8 +5,10 @@ import test from 'node:test';
 import {
   DEFAULT_INVITE_ORIGIN,
   DEFAULT_WEB_BACKEND_ORIGIN,
+  SERVER_HTTP_ORIGIN,
   SERVER_INVALID_ORIGIN,
   backendJoiningLabel,
+  customServerIndicator,
   normalizeServerOrigin,
   parseServerOriginInput,
   resolveBackendBaseUrl,
@@ -18,18 +20,49 @@ import {
 import { applyInviteOrigin, inviteLinkForAccessCode, inviteOrigin, INVITE_ORIGIN } from '../src/lib/data/inviteLinks.ts';
 import { COMMANDS, EVENTS } from '../src/lib/ipc.ts';
 
-test('#310: normalizeServerOrigin accepts http(s) origins and strips /api paths', () => {
-  assert.equal(normalizeServerOrigin(' https://petal.example.test/// '), 'https://petal.example.test');
-  assert.equal(
-    normalizeServerOrigin('https://petal.example.test/api/token'),
-    'https://petal.example.test'
-  );
-  assert.equal(normalizeServerOrigin('http://127.0.0.1:8787'), 'http://127.0.0.1:8787');
-  assert.equal(normalizeServerOrigin('https://petal.example.test/extra'), null);
-  assert.equal(normalizeServerOrigin('file:///tmp'), null);
-  assert.equal(normalizeServerOrigin('https://user:pass@petal.example.test'), null);
+test('#310: normalizeServerOrigin follows the shared serverOrigins fixture', () => {
+  const contracts = JSON.parse(
+    readFileSync(new URL('../../../contracts/petal-contracts.json', import.meta.url), 'utf8')
+  ) as {
+    serverOrigins: Array<{ input: string; origin: string | null; error?: string }>;
+  };
+  assert.ok(contracts.serverOrigins.length > 0);
+  for (const row of contracts.serverOrigins) {
+    assert.equal(normalizeServerOrigin(row.input), row.origin, row.input);
+    if (row.error) {
+      assert.deepEqual(parseServerOriginInput(row.input), { ok: false, error: row.error }, row.input);
+    }
+  }
   assert.equal(normalizeServerOrigin(''), null);
   assert.equal(normalizeServerOrigin(null), null);
+  assert.equal(SERVER_HTTP_ORIGIN, 'http:// is only allowed for localhost, 127.0.0.1, and [::1].');
+  assert.equal(
+    SERVER_INVALID_ORIGIN,
+    'Enter an https:// address, or http:// for localhost, 127.0.0.1, and [::1]. Origin only — no path.'
+  );
+});
+
+test('#310: runtime PETAL_BACKEND_URL still accepts http for a non-loopback host', () => {
+  assert.deepEqual(
+    resolveBackendBaseUrl({ runtimeEnv: 'http://petal.example.test/api/token' }),
+    { url: 'http://petal.example.test', source: 'env' }
+  );
+  assert.equal(normalizeServerOrigin('http://petal.example.test'), null);
+});
+
+test('#310: custom server indicator names the host only when Settings is the source', () => {
+  assert.equal(
+    customServerIndicator('https://petal.example.com', 'settings'),
+    'Custom server: petal.example.com'
+  );
+  assert.equal(
+    customServerIndicator('https://petal.example.com:8443', 'settings'),
+    'Custom server: petal.example.com:8443'
+  );
+  assert.equal(customServerIndicator('https://petal.example.com', 'env'), null);
+  assert.equal(customServerIndicator('https://petal.example.com', 'build'), null);
+  assert.equal(customServerIndicator('https://petal.example.com', 'none'), null);
+  assert.equal(customServerIndicator(null, 'settings'), null);
 });
 
 test('#310: parseServerOriginInput treats empty as clear and rejects junk', () => {
@@ -225,6 +258,11 @@ test('#310: Settings exposes Token server and Invite links fields that save thro
   assert.match(settings, /COMMANDS\.setServerSettings/);
   assert.match(settings, /COMMANDS\.serverSettings/);
   assert.match(settings, /handleSaveServerSettings/);
+  assert.equal(
+    settings.match(/void handleSaveServerSettings\(\)/g)?.length,
+    1,
+    'the Server section has one Save for both fields'
+  );
   assert.match(settings, /overflow-wrap: anywhere/);
   assert.match(settings, /class="input server-url-input"/);
 });
@@ -236,7 +274,7 @@ test('#310: every webview seeds invite origin from Rust and follows the change e
   assert.match(layout, /EVENTS\.serverSettingsChanged/);
 });
 
-test('#310: browser client mirrors the same two fields on the home screen', () => {
+test('#310: the browser client has no Server panel and joins as on main', () => {
   const indexHtml = readFileSync(
     new URL('../../../web-harness/index.html', import.meta.url),
     'utf8'
@@ -246,8 +284,46 @@ test('#310: browser client mirrors the same two fields on the home screen', () =
     new URL('../../../web-harness/src/connection.ts', import.meta.url),
     'utf8'
   );
-  assert.match(indexHtml, /id="backend-url-input"/);
-  assert.match(indexHtml, /id="invite-origin-input"/);
-  assert.match(main, /setupServerSettingsPanel/);
-  assert.match(connection, /currentWebBackendApiUrl/);
+  const controls = readFileSync(
+    new URL('../../../web-harness/src/controls.ts', import.meta.url),
+    'utf8'
+  );
+  assert.doesNotMatch(indexHtml, /id="server-settings"/);
+  assert.doesNotMatch(indexHtml, /id="backend-url-input"/);
+  assert.doesNotMatch(main, /setupServerSettingsPanel/);
+  assert.doesNotMatch(connection, /currentWebBackendApiUrl|serverSettings/);
+  assert.match(connection, /https:\/\/app\.petal\.live/);
+  assert.doesNotMatch(controls, /currentWebInviteOrigin/);
+
+  const menu = readFileSync(
+    new URL('../src/lib/components/MainMenu.svelte', import.meta.url),
+    'utf8'
+  );
+  const gallery = readFileSync(
+    new URL('../src/lib/components/Gallery.svelte', import.meta.url),
+    'utf8'
+  );
+  const chrome = readFileSync(
+    new URL('../src/lib/components/MeetingChrome.svelte', import.meta.url),
+    'utf8'
+  );
+  const layout = readFileSync(new URL('../src/routes/+layout.svelte', import.meta.url), 'utf8');
+  const mainPage = readFileSync(new URL('../src/routes/main/+page.svelte', import.meta.url), 'utf8');
+  const meetingPage = readFileSync(
+    new URL('../src/routes/meeting/[room]/+page.svelte', import.meta.url),
+    'utf8'
+  );
+  const store = readFileSync(
+    new URL('../src/lib/data/customServer.svelte.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(menu, /data-testid="custom-server"/);
+  assert.match(gallery, /data-testid="custom-server"/);
+  assert.match(menu, /customServerLabel/);
+  assert.match(gallery, /customServerLabel/);
+  assert.match(chrome, /customServerLabel/);
+  assert.match(layout, /noteCustomServer/);
+  assert.match(mainPage, /customServerLabel=\{customServerState\.label\}/);
+  assert.match(meetingPage, /customServerLabel=\{customServerState\.label\}/);
+  assert.match(store, /customServerIndicator/);
 });

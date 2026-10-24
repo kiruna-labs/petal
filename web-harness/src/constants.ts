@@ -15,12 +15,6 @@ export const HARNESS_LOCAL_ECHO_STORAGE_KEY = 'petal-harness-local-echo-enabled'
 // button (mirrors desktop's Rust-owned debug_settings.rs, minus the
 // cross-webview propagation problem localStorage has no way to solve there).
 export const HARNESS_DEBUG_MODE_STORAGE_KEY = 'petal-harness-debug-mode-enabled';
-// #310: optional token-server and invite-origin overrides. Empty / absent
-// means use this build's default (Vite bake, or the hosted backend in a
-// production deploy). Mirrors desktop Settings → Server, minus the Rust
-// store — a browser tab is one JS realm.
-export const HARNESS_BACKEND_URL_STORAGE_KEY = 'petal-harness-backend-url';
-export const HARNESS_INVITE_ORIGIN_STORAGE_KEY = 'petal-harness-invite-origin';
 // #244: sessionStorage (this tab only), the access code of the meeting this
 // tab is in. Lockstep with REJOIN_SESSION_KEY in api/j.ts, whose invite page
 // reads it on a reload to send the tab back into the meeting.

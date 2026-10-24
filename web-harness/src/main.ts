@@ -27,7 +27,6 @@ import { setupConnection } from './connection';
 import { setupMeetingContinuity } from './meetingContinuity';
 import { installEncodedAudioWorkaroundFromUrl } from './encodedAudioProbe';
 import { setupControls, shouldShowFirstVisitOnboarding } from './controls';
-import { setupServerSettingsPanel } from './serverSettings';
 import { setupPlugins } from './plugins/setupPlugins';
 import { setupChat } from './chat/setupChat.svelte.ts';
 import { setupControlOverflow } from './controlOverflow';
@@ -355,30 +354,6 @@ localEchoCheckbox.checked = ctx.state.localEchoEnabled;
 // #669: same reflect-persisted-state-into-the-checkbox step as local echo
 // above.
 debugModeCheckbox.checked = ctx.state.debugModeEnabled;
-
-const backendUrlInput = document.querySelector<HTMLInputElement>('#backend-url-input')!;
-const backendUrlSave = document.querySelector<HTMLButtonElement>('#backend-url-save')!;
-const backendUrlClear = document.querySelector<HTMLButtonElement>('#backend-url-clear')!;
-const backendUrlStatus = document.querySelector<HTMLElement>('#backend-url-status')!;
-const inviteOriginInput = document.querySelector<HTMLInputElement>('#invite-origin-input')!;
-const inviteOriginSave = document.querySelector<HTMLButtonElement>('#invite-origin-save')!;
-const inviteOriginClear = document.querySelector<HTMLButtonElement>('#invite-origin-clear')!;
-const inviteOriginStatus = document.querySelector<HTMLElement>('#invite-origin-status')!;
-const viteEnv = (import.meta as ImportMeta & { env?: { VITE_PETAL_BACKEND_URL?: string; PROD?: boolean } }).env;
-setupServerSettingsPanel({
-  storage: localStorage,
-  backendInput: backendUrlInput,
-  backendSave: backendUrlSave,
-  backendClear: backendUrlClear,
-  backendStatus: backendUrlStatus,
-  inviteInput: inviteOriginInput,
-  inviteSave: inviteOriginSave,
-  inviteClear: inviteOriginClear,
-  inviteStatus: inviteOriginStatus,
-  bakedBackendUrl: viteEnv?.VITE_PETAL_BACKEND_URL,
-  isProduction: Boolean(viteEnv?.PROD),
-  pageOrigin: location.origin,
-});
 
 getSessionLogContext = () => ({
   identity: ctx.state.room?.localParticipant.identity,

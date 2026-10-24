@@ -60,8 +60,8 @@ anything you don't control the audience of (a calendar
 invite, a public-ish channel, a link a bot posts) because it works whether or
 not the recipient has Petal installed. A self-hosted desktop build can point
 copied links at another origin with **Settings → Server → Invite links**
-(or `VITE_PETAL_INVITE_ORIGIN` at build time); the browser client's home
-screen **Server** field does the same for that tab.
+(or `VITE_PETAL_INVITE_ORIGIN` at build time). The browser client copies
+links from the page it is open on.
 
 Format:
 

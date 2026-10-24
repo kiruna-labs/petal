@@ -73,30 +73,6 @@
 
           <p id="conn-error" class="error hidden"></p>
           <p id="join-hint" class="join-hint hidden"></p>
-
-          <details id="server-settings" class="server-settings">
-            <summary>Server</summary>
-            <p class="hint">Address this tab uses to join meetings. Leave blank to use this build’s default. Applies the next time you join.</p>
-            <label class="server-field">
-              <span class="server-field-label">Token server</span>
-              <input id="backend-url-input" type="url" inputmode="url" placeholder="https://petal.example.com" autocomplete="off" spellcheck="false" aria-label="Token server" />
-            </label>
-            <div class="row server-actions">
-              <button id="backend-url-save" class="btn ghost" type="button">Save</button>
-              <button id="backend-url-clear" class="btn ghost" type="button">Use default</button>
-            </div>
-            <p id="backend-url-status" class="hint server-status"></p>
-            <p class="hint">Origin copied invite links start with. Set this if you host your own meeting page.</p>
-            <label class="server-field">
-              <span class="server-field-label">Invite links</span>
-              <input id="invite-origin-input" type="url" inputmode="url" placeholder="https://meet.example.com" autocomplete="off" spellcheck="false" aria-label="Invite links origin" />
-            </label>
-            <div class="row server-actions">
-              <button id="invite-origin-save" class="btn ghost" type="button">Save</button>
-              <button id="invite-origin-clear" class="btn ghost" type="button">Use default</button>
-            </div>
-            <p id="invite-origin-status" class="hint server-status"></p>
-          </details>
         </main>
 
         <footer id="build-version" class="web-status-bar" aria-label="Build information">

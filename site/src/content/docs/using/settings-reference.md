@@ -101,15 +101,16 @@ nothing.
 ## Server
 
 - **Token server** — the address Petal uses to join meetings. Leave blank to
-  use this build’s default. **Save** stores the origin on this machine;
-  **Use default** clears it. The next join uses the saved server. If this
-  launch was started with `PETAL_BACKEND_URL`, that value still wins until
-  you open Petal without it.
+  use this build’s default. Use `https://`, or `http://` only for
+  `localhost`, `127.0.0.1`, and `[::1]`. **Save** stores both fields in this
+  section; **Use default** clears that one. The next join uses the saved
+  server. If this launch was started with `PETAL_BACKEND_URL`, that value
+  still wins until you open Petal without it. While a saved server is the
+  one this launch will call, the home screen and the meeting show
+  "Custom server: <host>".
 - **Invite links** — origin copied invite links start with. Set this if you
-  host your own meeting page. Same **Save** / **Use default** controls.
-
-The browser client exposes the same two fields on the home screen under
-**Server**.
+  host your own meeting page. The section's **Save** stores it with the
+  token server; **Use default** clears just this field.
 
 ## Account
 

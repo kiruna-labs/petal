@@ -42,6 +42,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import MeetingChrome from '$lib/components/MeetingChrome.svelte';
+  import { customServerState } from '$lib/data/customServer.svelte';
   import ChatDrawer from '@petal/shared/ui/components/ChatDrawer.svelte';
   import { createChatHost } from '$lib/chat/chatHost.svelte';
   import type { ChatCommandOption } from '@petal/shared/logic/chat';
@@ -800,6 +801,7 @@
         onOpenSettings={openSettingsWindow}
         onRenameRoom={meeting.handleRenameRoom}
         onReportBug={feedbackEnabled ? () => (feedbackOpen = true) : undefined}
+        customServerLabel={customServerState.label}
         {pluginActions}
         chatOpen={chat.open}
         chatUnread={chat.unread}

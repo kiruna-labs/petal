@@ -39,6 +39,7 @@
   import { displayBuildVersion } from '$lib/buildInfo';
   import { platformKey } from '$lib/platform';
   import { stripNativeTooltipTitles } from '$lib/data/suppressNativeTooltips';
+  import { noteCustomServer } from '$lib/data/customServer.svelte';
   import { applyInviteOrigin } from '$lib/data/inviteLinks';
   import {
     COMMANDS,
@@ -161,10 +162,12 @@
       void invoke<ServerSettingsView>(COMMANDS.serverSettings)
         .then((view) => {
           applyInviteOrigin(view.inviteOrigin);
+          noteCustomServer(view);
         })
         .catch(() => {});
       void listen<ServerSettingsView>(EVENTS.serverSettingsChanged, (event) => {
         applyInviteOrigin(event.payload.inviteOrigin);
+        noteCustomServer(event.payload);
       }).then((fn) => {
         unlistenServerSettings = fn;
       });

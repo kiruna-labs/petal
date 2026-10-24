@@ -2167,13 +2167,6 @@
               bind:value={backendDraft}
             />
             <Button
-              variant="primary"
-              disabled={serverBusy}
-              onclick={() => void handleSaveServerSettings()}
-            >
-              {SERVER_SAVE_LABEL}
-            </Button>
-            <Button
               variant="ghost"
               disabled={serverBusy}
               onclick={() => void handleClearBackendUrl()}
@@ -2201,13 +2194,6 @@
               bind:value={inviteDraft}
             />
             <Button
-              variant="primary"
-              disabled={serverBusy}
-              onclick={() => void handleSaveServerSettings()}
-            >
-              {SERVER_SAVE_LABEL}
-            </Button>
-            <Button
               variant="ghost"
               disabled={serverBusy}
               onclick={() => void handleClearInviteOrigin()}
@@ -2215,6 +2201,15 @@
               {SERVER_CLEAR_LABEL}
             </Button>
           </div>
+        </div>
+        <div class="row server-save-row">
+          <Button
+            variant="primary"
+            disabled={serverBusy}
+            onclick={() => void handleSaveServerSettings()}
+          >
+            {SERVER_SAVE_LABEL}
+          </Button>
         </div>
         {#if serverNote}
           <div class="row stack"><span class="device-note">{serverNote}</span></div>
@@ -2809,6 +2804,10 @@
 
   .server-url-row :global(.btn) {
     flex-shrink: 0;
+  }
+
+  .server-save-row {
+    justify-content: flex-end;
   }
 
   .server-effective {

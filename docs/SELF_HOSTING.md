@@ -180,9 +180,11 @@ paths itself.
 
 You can also point an already-built desktop app at your backend without
 rebuilding: **Settings → Server → Token server**. Saved values persist across
-restarts. A launch-time `PETAL_BACKEND_URL` still wins for that process
-(including an empty value, which keeps the debug local-mint path). The
-browser client has the same fields on the home screen under **Server**.
+restarts. The address must be `https://`, except `http://localhost`,
+`http://127.0.0.1`, and `http://[::1]`. A launch-time `PETAL_BACKEND_URL`
+still wins for that process (including an empty value, which keeps the
+debug local-mint path) and is not limited to loopback. The browser client
+has no server field: bake `VITE_PETAL_BACKEND_URL` into that build.
 
 Copied invite links default to `https://meet.petal.live/<label>/<code>`. If
 you host your own browser peer (`web-harness/`), set

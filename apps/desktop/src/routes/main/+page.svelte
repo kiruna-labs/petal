@@ -49,6 +49,7 @@
     type PresenceUpdate
   } from '$lib/data/rooms';
   import { inviteLinkForRoom } from '$lib/data/inviteLinks';
+  import { customServerState } from '$lib/data/customServer.svelte';
   import { createMainMeetingActions } from '$lib/data/mainMeetingActions';
   import { prepareMeetingWindow } from '$lib/meeting/pillWindow.svelte';
   import {
@@ -789,6 +790,7 @@
         onJoinByCode={joinAndGo}
         onToggleFavoriteRoom={toggleFavoriteRoom}
         onRemoveRoom={removeRoom}
+        customServerLabel={customServerState.label}
       />
     </div>
   {/if}

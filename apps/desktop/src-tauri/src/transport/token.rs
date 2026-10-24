@@ -105,7 +105,7 @@ pub fn backend_base_url_source() -> (Option<String>, String) {
     match std::env::var("PETAL_BACKEND_URL") {
         Ok(value) if value.trim().is_empty() => return (None, "none".to_string()),
         Ok(value) => {
-            if let Some(origin) = crate::server_settings::normalize_server_origin(&value) {
+            if let Some(origin) = crate::server_settings::normalize_runtime_backend_origin(&value) {
                 return (Some(origin), "env".to_string());
             }
             let trimmed = value.trim().trim_end_matches('/').to_string();
@@ -422,6 +422,22 @@ mod tests {
         std::env::remove_var("PETAL_BACKEND_URL");
         crate::server_settings::reset_store_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backend_base_url_runtime_env_still_allows_http_for_any_host() {
+        let _guard = env_lock();
+        crate::server_settings::reset_store_for_tests();
+        std::env::set_var("PETAL_BACKEND_URL", "http://petal.example.test/api/token");
+
+        assert_eq!(
+            backend_base_url().unwrap(),
+            "http://petal.example.test".to_string()
+        );
+        assert_eq!(backend_base_url_source().1, "env");
+
+        std::env::remove_var("PETAL_BACKEND_URL");
+        crate::server_settings::reset_store_for_tests();
     }
 
     #[test]

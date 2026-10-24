@@ -139,6 +139,8 @@
     /** Pass-through to Gallery: real routes render the gallery edge-to-edge
      * (the gallery IS the window); the /dev harness keeps the framed card. */
     frameless?: boolean;
+    /** Pass-through to Gallery: persistent custom-server line, or null. */
+    customServerLabel?: string | null;
     /** Pill orientation (issue #12): 'vertical' stacks the pill —
      * avatar/identity circle on top, control circles below in the same
      * order. The room name is HIDDEN in vertical (pre-approved judgment
@@ -186,6 +188,7 @@
     chatUnread = 0,
     chatDrawer,
     frameless = false,
+    customServerLabel = null,
     pillHost,
     localVideoStream = null,
   }: Props = $props();
@@ -802,6 +805,7 @@
       {onRenameRoom}
       {onReportBug}
       {frameless}
+      {customServerLabel}
       {pluginActions}
       {chatOpen}
       {chatUnread}
