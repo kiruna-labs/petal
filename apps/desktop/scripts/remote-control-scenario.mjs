@@ -1603,6 +1603,17 @@ async function send(ctx, body) {
   return evaluate(ctx.cdp, harnessExpression(ctx.target, body));
 }
 
+// Diagnostic only: livekit-client silently drops a lossy send while the
+// channel's buffer is over its threshold; this reads its private counter.
+async function lossyDataDrops(ctx) {
+  try {
+    const count = await evaluate(ctx.cdp, 'window.__petalHarness?.room?.engine?.lossyChannel?.dropCount ?? null');
+    return typeof count === 'number' ? count : null;
+  } catch {
+    return null;
+  }
+}
+
 // rc-latency gate: the controller's own publish ledger (seq + wall-clock send
 // time) for every case, so scripts/ci/remote-control-latency-verdict.mjs can pair each input
 // with the host's `remote-control-latency:` receive/inject lines. Both peers
@@ -2837,7 +2848,11 @@ const CASES = [
     sequence: 'left drag',
     run: async (ctx) => {
       setTextEditDocument('remote-control drag target line\n'.repeat(12));
+      const lossyDropsBefore = await lossyDataDrops(ctx);
       await send(ctx, `return api.drag({ target, from: ${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteDragFrom)}, to: ${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteDragTo)}, steps: ${REMOTE_CONTROL_DRAG_STEPS.suite}, button: ${REMOTE_CONTROL_BUTTONS.left} });`);
+      await sleep(300);
+      const lossyDropsAfter = await lossyDataDrops(ctx);
+      console.log(`# case 6 controller lossy sends dropped by livekit-client during the drag: ${lossyDropsAfter === null || lossyDropsBefore === null ? 'unavailable' : lossyDropsAfter - lossyDropsBefore}`);
       const selected = await waitForTextEditSelection();
       if (selected === null) return skipCase('AXSelectedText unavailable; deterministic drag assertion needs sentinel app');
       if (!selected) throw new Error('AXSelectedText was available but empty after left drag');
