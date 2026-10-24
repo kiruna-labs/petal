@@ -143,6 +143,11 @@
      * ONLY when the build carries a UserDispatch public key
      * (`isFeedbackEnabled()`); absent → the topbar cell never renders. */
     onReportBug?: () => void;
+    /**
+     * Persistent "Custom server: <host>" line while Settings is the token
+     * server. Stays for the whole meeting — not a toast.
+     */
+    customServerLabel?: string | null;
   }
 
   let {
@@ -179,7 +184,8 @@
     chatUnread = 0,
     sidePanel,
     pluginActions,
-    onReportBug
+    onReportBug,
+    customServerLabel = null
   }: Props = $props();
 
   type ParticipantEntry = GalleryParticipant & { key: string };
@@ -1175,6 +1181,10 @@
   {/if}
   </div>
 
+  {#if customServerLabel}
+    <p class="custom-server" data-testid="custom-server">{customServerLabel}</p>
+  {/if}
+
   <!-- The gallery keeps the common actions visible and moves specialist
        actions into More. Labels remain stable while accessible names describe
        the current state. -->
@@ -1400,6 +1410,24 @@
     /* Comp: rgba(255,255,255,.07) — --hairline now carries it (issue #14 item 6). */
     border-bottom: 1px solid var(--hairline);
     background: var(--fill-weak);
+  }
+
+  /* Own row above the controls so a long host wraps in the full window
+     width instead of squeezing the room name. Full text, never ellipsized.
+     In the short-window rail it sits on the bottom of the tile column. */
+  .custom-server {
+    flex: 0 0 auto;
+    margin: 0;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 6px 18px 7px;
+    border-top: 1px solid var(--hairline);
+    background: var(--warning-bg);
+    color: var(--warning);
+    font: 500 12px/1.35 var(--font-ui);
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   .topbar-drag-layer {
@@ -2612,6 +2640,12 @@
     padding: 8px;
     border-top: none;
     border-left: 1px solid var(--hairline);
+  }
+
+  .gallery.rail-controls > .custom-server {
+    grid-area: 1 / 1;
+    align-self: end;
+    z-index: 6;
   }
 
   /* The floating top bar (a bar of faces, or a short column): over the top

@@ -109,6 +109,12 @@
      * real route wires this to the `quit_app` Tauri command (clean leave_room
      * + app.exit(0)). */
     onQuit?: () => void;
+    /**
+     * Persistent line on the join/create surface when this launch uses the
+     * saved server (`Custom server: <host>`). Null for env, the build bake,
+     * and no server — those are not the quiet redirect.
+     */
+    customServerLabel?: string | null;
     /** Real routes pass true so the menu IS the window (edge-to-edge, no
      * fixed-width floating card). Default false preserves the canvas.html
      * card-mockup chrome for the /dev/* harnesses. */
@@ -138,6 +144,7 @@
     favoriteRooms = [],
     onToggleFavoriteRoom,
     onRemoveRoom,
+    customServerLabel = null,
     frameless = false
   }: Props = $props();
 
@@ -350,6 +357,9 @@
   <div class="body">
     {#if onCreateMeeting || onJoinByCode}
       <div class="meeting-actions">
+        {#if customServerLabel}
+          <p class="custom-server" data-testid="custom-server">{customServerLabel}</p>
+        {/if}
         <form
           class="meeting-form"
           onsubmit={(e) => {
@@ -655,6 +665,21 @@
     flex-direction: column;
     gap: 10px;
     margin-bottom: 14px;
+  }
+
+  /* Full text at the 400px main window: wrap anywhere, never ellipsize. */
+  .custom-server {
+    margin: 0;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 6px 10px;
+    border-radius: var(--radius-chip);
+    background: var(--warning-bg);
+    color: var(--warning);
+    font: 500 12px/1.35 var(--font-ui);
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   .meeting-form {

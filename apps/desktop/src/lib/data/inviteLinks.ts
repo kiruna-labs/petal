@@ -5,14 +5,31 @@ import {
   normalizeAccessCode
 } from './meetingCode.ts';
 import type { RoomRecord } from '#lib/ipc.js';
+import {
+  DEFAULT_INVITE_ORIGIN,
+  normalizeServerOrigin
+} from '@petal/shared/logic/serverEndpoints';
 
-// Origin for copied invite links. A self-hosted deployment overrides it at
-// build time with `VITE_PETAL_INVITE_ORIGIN` (docs/SELF_HOSTING.md); the
-// official value is the default so official builds need no extra env.
+// Origin for copied invite links. Settings can override this at runtime
+// (#310) without a rebuild. A self-hosted deployment can still bake
+// `VITE_PETAL_INVITE_ORIGIN` (docs/SELF_HOSTING.md); the official value is
+// the default so official builds need no extra env.
 export const INVITE_ORIGIN =
-  (import.meta.env?.VITE_PETAL_INVITE_ORIGIN as string | undefined)?.trim().replace(/\/$/, '') ||
-  'https://meet.petal.live';
+  normalizeServerOrigin(import.meta.env?.VITE_PETAL_INVITE_ORIGIN as string | undefined) ||
+  DEFAULT_INVITE_ORIGIN;
 export const INVITE_LINK_COPIED_LABEL = 'Invite link copied to clipboard:';
+
+let inviteOriginOverride: string | null = null;
+
+/** Apply a saved Settings override (or `null` to use the baked origin). */
+export function applyInviteOrigin(origin: string | null | undefined): string {
+  inviteOriginOverride = origin ? normalizeServerOrigin(origin) : null;
+  return inviteOrigin();
+}
+
+export function inviteOrigin(): string {
+  return inviteOriginOverride ?? INVITE_ORIGIN;
+}
 
 /**
  * Copy controls may receive a short access code while the meeting is joining,
@@ -70,7 +87,7 @@ export function inviteLinkCopiedToastMessage(link: string): string {
 
 export function inviteLinkForAccessCode(label: string, accessCode: string | null | undefined): string | null {
   const invitePath = buildMeetingInvitePath(label, accessCode);
-  return invitePath ? `${INVITE_ORIGIN}${invitePath}` : null;
+  return invitePath ? `${inviteOrigin()}${invitePath}` : null;
 }
 
 export function inviteLinkForRoom(
