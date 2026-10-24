@@ -44,23 +44,23 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import Onboarding from '$lib/components/Onboarding.svelte';
-  import IdentitySetup from '$lib/components/IdentitySetup.svelte';
-  import Button from '$lib/components/Button.svelte';
-  import Wordmark from '$lib/components/Wordmark.svelte';
-  import Logo from '$lib/components/Logo.svelte';
+  import Onboarding from '#lib/components/Onboarding.svelte';
+  import IdentitySetup from '#lib/components/IdentitySetup.svelte';
+  import Button from '#lib/components/Button.svelte';
+  import Wordmark from '#lib/components/Wordmark.svelte';
+  import Logo from '#lib/components/Logo.svelte';
   import type {
     ScreenRecordingStatus,
     MicStatus,
     CameraStatus,
     AccessibilityStatus
-  } from '$lib/components/Onboarding.svelte';
-  import type { IdentityColor } from '$lib/components/Avatar.svelte';
-  import { session, completeOnboarding } from '$lib/stores/session.svelte';
+  } from '#lib/components/Onboarding.svelte';
+  import type { IdentityColor } from '#lib/components/Avatar.svelte';
+  import { session, completeOnboarding } from '#lib/stores/session.svelte.js';
   import {
     transitionAccessibilityRepair,
     type AccessibilityRepairEvent
-  } from '$lib/data/accessibilityRepair';
+  } from '#lib/data/accessibilityRepair.js';
   import {
     checkScreenRecording,
     requestScreenRecording,
@@ -73,7 +73,7 @@
     openPrivacySettings,
     restartApp,
     type AuthStatus
-  } from '$lib/data/permissions';
+  } from '#lib/data/permissions.js';
 
   const IDENTITY_COLORS: IdentityColor[] = ['plum', 'blue', 'green', 'amber', 'lilac', 'slate'];
 

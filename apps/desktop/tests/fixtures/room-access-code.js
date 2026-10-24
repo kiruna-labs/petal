@@ -76,7 +76,7 @@ async function renderFixture() {
 
     const [{ mount }, { default: MainMenu }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/MainMenu.svelte')
+      import('#lib/components/MainMenu.svelte')
     ]);
 
     mount(MainMenu, {

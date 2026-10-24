@@ -7,8 +7,8 @@
   In the real app the component overwrites them with real stats on mount.
 -->
 <script lang="ts">
-  import NetworkCockpit from '$lib/components/NetworkCockpit.svelte';
-  import type { JournalEntry, NetworkSnapshot } from '$lib/ipc';
+  import NetworkCockpit from '#lib/components/NetworkCockpit.svelte';
+  import type { JournalEntry, NetworkSnapshot } from '#lib/ipc.js';
 
   // Synthetic 2-minute history: a plausible RTT/jitter/bandwidth session
   // with a mid-session wobble so the sparklines have visible shape.

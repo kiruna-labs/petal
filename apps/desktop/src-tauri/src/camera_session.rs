@@ -481,6 +481,13 @@ pub(crate) async fn start_camera_publish_with_device(
 
     tokio::time::sleep(CAMERA_SUBSCRIBER_NEGOTIATION_DELAY).await;
 
+    #[cfg(target_os = "macos")]
+    start_camera_encoder_health_monitor(
+        app.clone(),
+        generation.clone(),
+        published.clone(),
+        telemetry.clone(),
+    );
     let pump = start_camera_frame_pump(latest_frame, frame_ready, published.clone(), telemetry);
     let loss_monitor = start_camera_loss_monitor(app.clone(), generation.clone(), status.clone());
     let used_default_fallback = capture.used_default_fallback();
@@ -577,6 +584,185 @@ fn start_camera_frame_pump(
             }
         }
     })
+}
+
+/// #411: watch the camera's VideoToolbox encoder and re-create it when it has
+/// stopped producing frames. See `transport::encoder_health` for the evidence
+/// and the decision rule; this is the thin I/O loop around that state machine:
+/// it samples pushed frames (the pump's counter), the track's own
+/// `frames_encoded`, and the process-wide VideoToolbox failure counts, and acts
+/// on what the detector says.
+///
+/// Bound to the publication: it exits when the track is terminally unpublished
+/// (`PublishedTrack::lifecycle_token`) or the room generation moves on. The
+/// re-creation runs under the camera control lock so it cannot interleave with
+/// a manual stop/device switch; a leave that tears the camera down without that
+/// lock is caught by the post-check (the token is cancelled first thing in
+/// `unpublish`), which takes the just-republished sender back down.
+#[cfg(target_os = "macos")]
+fn start_camera_encoder_health_monitor(
+    app: tauri::AppHandle,
+    generation: RoomGeneration,
+    published: Arc<PublishedTrack>,
+    telemetry: Arc<Mutex<CameraPublishTelemetry>>,
+) {
+    use crate::analytics::{EncoderRecoveryOutcome, EncoderTrackKind};
+    use crate::transport::encoder_health::{
+        vt_encode_failure_counts, EncoderHealthAction, EncoderHealthSample,
+        EncoderStarvationDetector, SampleVerdict, ENCODER_HEALTH_SAMPLE_INTERVAL,
+    };
+
+    /// Log the per-interval counts every Nth sample while healthy (every
+    /// failing sample is logged): ~30 s at the 2 s sample interval.
+    const HEALTHY_LOG_EVERY: u32 = 15;
+
+    let token = published.lifecycle_token();
+    tauri::async_runtime::spawn(async move {
+        let mut detector = EncoderStarvationDetector::new();
+        let mut interval = tokio::time::interval(ENCODER_HEALTH_SAMPLE_INTERVAL);
+        let mut samples: u32 = 0;
+        let mut reported_first_failure = false;
+        // What the last re-creation was for, so a `recovered` event names the
+        // failure it recovered from rather than a placeholder.
+        let mut last_recreate = None;
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+            if !generation.is_current() {
+                break;
+            }
+            let encoded_frames = tokio::select! {
+                _ = token.cancelled() => break,
+                encoded = published.frames_encoded() => encoded,
+            };
+            let pushed_frames = telemetry.lock_unpoisoned().pushed_frames;
+            let action = detector.observe(EncoderHealthSample {
+                pushed_frames,
+                encoded_frames,
+                vt_failures: vt_encode_failure_counts(),
+                at: Instant::now(),
+            });
+            samples = samples.wrapping_add(1);
+            let verdict = detector.last_verdict();
+            if let Some((pushed, encoded, failures)) = detector.last_interval() {
+                // A baseline sample judged nothing; its `last_interval` is the
+                // previous one's, so do not report it as current.
+                let judged = verdict.is_some_and(|verdict| verdict != SampleVerdict::Baseline);
+                if judged
+                    && (verdict == Some(SampleVerdict::Failing) || samples % HEALTHY_LOG_EVERY == 0)
+                {
+                    // The per-track encode counter #411 asked for: `encode_fps`
+                    // in `camera publish health` counts frames PUSHED, this
+                    // counts frames the encoder EMITTED.
+                    log::info!(
+                        "session: camera encoder health -- pushed={pushed} encoded={encoded} vt_encode_failures={failures} verdict={verdict:?} streak={}",
+                        detector.failing_streak()
+                    );
+                }
+            }
+            match action {
+                EncoderHealthAction::None => {}
+                EncoderHealthAction::Recreate {
+                    attempt,
+                    vt_failures,
+                    dominant,
+                } => {
+                    log::warn!(
+                        "session: camera encoder produced almost nothing for {} samples while VideoToolbox logged {vt_failures} encode failures (mostly {}); re-creating the encoder (attempt {attempt})",
+                        crate::transport::encoder_health::FAILING_SAMPLES_BEFORE_RECREATE,
+                        dominant.tag()
+                    );
+                    if !reported_first_failure {
+                        reported_first_failure = true;
+                        // Fixed text so Sentry groups every occurrence into ONE
+                        // issue; the counts ride on the warn breadcrumb above.
+                        log::error!(
+                            "session: camera VideoToolbox encoder stopped producing frames; re-creating it (#411)"
+                        );
+                    }
+                    let Some(state) = app.try_state::<crate::session::SessionState>() else {
+                        break;
+                    };
+                    let _control = state.lock_camera_control().await;
+                    if token.is_cancelled() || !generation.is_current() {
+                        break;
+                    }
+                    match published.recreate_camera_encoder().await {
+                        Ok(()) => {
+                            detector.note_recreated();
+                            last_recreate = Some((dominant, vt_failures));
+                            crate::analytics::video_encoder_recovery(
+                                EncoderTrackKind::Camera,
+                                EncoderRecoveryOutcome::Recreated,
+                                dominant,
+                                vt_failures,
+                                attempt,
+                            );
+                            if token.is_cancelled() || !generation.is_current() {
+                                // A leave tore the camera down while we were
+                                // republishing: do not leave a sender behind.
+                                if let Err(error) = published.unpublish().await {
+                                    log::warn!(
+                                        "session: camera encoder re-create raced a teardown; cleanup unpublish failed: {error}"
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            detector.note_recreate_failed();
+                            log::warn!("session: camera encoder re-create failed: {error}");
+                            crate::analytics::video_encoder_recovery(
+                                EncoderTrackKind::Camera,
+                                EncoderRecoveryOutcome::RecreateFailed,
+                                dominant,
+                                vt_failures,
+                                attempt,
+                            );
+                        }
+                    }
+                }
+                EncoderHealthAction::Recovered { attempts } => {
+                    log::info!(
+                        "session: camera encoder producing frames again after {attempts} re-creation(s) (#411)"
+                    );
+                    if let Some((dominant, vt_failures)) = last_recreate.take() {
+                        crate::analytics::video_encoder_recovery(
+                            EncoderTrackKind::Camera,
+                            EncoderRecoveryOutcome::Recovered,
+                            dominant,
+                            vt_failures,
+                            attempts,
+                        );
+                    }
+                }
+                EncoderHealthAction::GiveUp {
+                    attempts,
+                    vt_failures,
+                    dominant,
+                } => {
+                    log::warn!(
+                        "session: camera encoder still failing after {attempts} re-creation(s) inside {}s ({vt_failures} VideoToolbox failures, mostly {}); giving up for this publication",
+                        crate::transport::encoder_health::RECREATE_WINDOW.as_secs(),
+                        dominant.tag()
+                    );
+                    log::error!(
+                        "session: camera VideoToolbox encoder keeps failing after re-creation; stopped retrying (#411)"
+                    );
+                    crate::analytics::video_encoder_recovery(
+                        EncoderTrackKind::Camera,
+                        EncoderRecoveryOutcome::GaveUp,
+                        dominant,
+                        vt_failures,
+                        attempts,
+                    );
+                    break;
+                }
+            }
+        }
+    });
 }
 
 /// Terminal-capture watchdog: stops the publish when the capture reports a

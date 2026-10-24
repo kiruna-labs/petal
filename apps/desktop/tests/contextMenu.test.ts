@@ -54,5 +54,5 @@ test('root layout mounts the menu on every platform', () => {
   // No platform gate around the mount: the menu replaces the engine default
   // on Windows and macOS alike.
   assert.doesNotMatch(layoutSource, /platformKey\(\) === 'windows'[\s\S]*?<ContextMenu/);
-  assert.match(layoutSource, /import ContextMenu from '\$lib\/components\/ContextMenu\.svelte'/);
+  assert.match(layoutSource, /import ContextMenu from '#lib\/components\/ContextMenu\.svelte'/);
 });

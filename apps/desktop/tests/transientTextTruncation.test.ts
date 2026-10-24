@@ -434,7 +434,7 @@ test('available update toast fits the documented main-window widths in rendered 
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
           // This standalone Vite build intentionally skips SvelteKit config,
           // so provide the browser-only virtual module used by session.svelte.
-          '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+          '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
           // ...and the shared-package alias (SvelteKit's kit.alias injects it
           // in the real build; this bare Vite instance needs it manually).
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
@@ -596,7 +596,7 @@ test('a rejected update archive renders an untruncated "Download installer" reco
       resolve: {
         alias: {
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
-          '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+          '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
         }
       },
@@ -927,7 +927,7 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     while (Date.now() < deadline) {
       const ready = await browser.evaluate(
         sessionId,
-        `document.querySelectorAll('.tile-wrap').length === 3 && !!document.querySelector('.layout-toggle')`
+        `document.querySelectorAll('.tile-wrap').length === 3 && !!document.querySelector('.layout-picker')`
       );
       if (ready) break;
       await new Promise((resolvePoll) => setTimeout(resolvePoll, 50));
@@ -981,7 +981,7 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     );
     assert.deepEqual(paintedVideoState, { ready: true, visible: true });
 
-    await browser.evaluate(sessionId, armMotionLatchAndClick('.layout-toggle', ANY_RUNNING_ANIMATION));
+    await browser.evaluate(sessionId, armMotionLatchAndClick('[data-layout-mode="spotlight"]', ANY_RUNNING_ANIMATION));
     // #97: this 60ms is deliberately a mid-morph sample, and it is safe under
     // load because every reading it takes holds at ANY point in the morph --
     // the same three video elements stay connected, reused, ready and opaque
@@ -1104,10 +1104,9 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     // here: the layout asserted below already holds before the retarget, so
     // polling could return a pre-retarget sample.
     await browser.evaluate(sessionId, `(async () => {
-      const toggle = document.querySelector('.layout-toggle');
-      toggle?.click();
+      document.querySelector('[data-layout-mode="grid"]')?.click();
       await new Promise((resolve) => setTimeout(resolve, 20));
-      document.querySelector('.layout-toggle')?.click();
+      document.querySelector('[data-layout-mode="spotlight"]')?.click();
     })()`);
     await settleMotion(browser, sessionId);
     assert.deepEqual(
@@ -1118,8 +1117,8 @@ test('desktop gallery and spotlight morph persistent tiles, retarget rapidly, an
     await browser.call('Emulation.setEmulatedMedia', {
       features: [{ name: 'prefers-reduced-motion', value: 'reduce' }]
     }, sessionId);
-    await browser.evaluate(sessionId, `document.querySelector('.layout-toggle')?.click()`);
-    await browser.evaluate(sessionId, `document.querySelector('.layout-toggle')?.click()`);
+    await browser.evaluate(sessionId, `document.querySelector('[data-layout-mode="grid"]')?.click()`);
+    await browser.evaluate(sessionId, `document.querySelector('[data-layout-mode="spotlight"]')?.click()`);
     // #97: both clicks are already awaited, so the only thing left to wait for
     // is a rendered frame -- not 40ms of wall clock. Polling would be wrong
     // here for the same reason as the retarget above.
@@ -1343,7 +1342,7 @@ test('desktop gallery grid reflow uses restrained list motion and FLIP', () => {
   // change shape as cameras crop), not svelte/animate's `scale(sx, sy)` flip.
   assert.doesNotMatch(gallerySource, /from 'svelte\/animate'/);
   assert.match(gallerySource, /import \{ fade \} from 'svelte\/transition';/);
-  assert.match(gallerySource, /import \{ tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight \} from '\$lib\/motion';/);
+  assert.match(gallerySource, /import \{ tileLayoutDuration, tileTransitionDuration, uniformTileFlip, uniformTileFlipInFlight \} from '#lib\/motion\.js';/);
   assert.match(gallerySource, /function transitionGalleryLayout\(mutate: \(\) => void\)/);
   assert.match(gallerySource, /tile\.animate\(/);
   assert.match(gallerySource, /data-participant-key=\{p\.key\}/);

@@ -27,10 +27,12 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::platform::cg::WindowFrame;
 use crate::remote_clipboard;
+use crate::rc_latency_telemetry::{self, Dimension, RcRole, Stage};
 use crate::session::{RoomGeneration, SessionState, SharedWindowScreenStatus};
 use crate::transport::publisher::RoomConnection;
 
 use crate::remote_control_core::*;
+use crate::remote_control_redundant::{self as redundant, InputBundle, SequencerOutput};
 struct MacPlatformControl;
 
 impl PlatformControl for MacPlatformControl {
@@ -204,6 +206,79 @@ thread_local! {
     /// never leaks across events or shards.
     static INJECTION_CANCELLED: std::cell::RefCell<Option<Arc<AtomicBool>>> =
         std::cell::RefCell::new(None);
+
+    /// #404: set when THIS injection actually delivered a key-down to the
+    /// target (posted past the focus gate, or serviced through AX). Same
+    /// one-thread-per-event scoping as `INJECTION_CANCELLED`. A replay that
+    /// returns `Ok` without delivering -- an unmapped key, a cancelled
+    /// injection -- leaves it false.
+    static KEY_DOWN_DELIVERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// #404 follow-up: the host route that delivered THIS injection, plus
+    /// whether an AX text click moved the app's keyboard focus. Same
+    /// one-thread-per-event scoping; the last route noted wins (a fallback
+    /// that finally delivers overrides an earlier route that passed).
+    static INJECTION_ROUTE: std::cell::Cell<crate::analytics::RemoteControlRouteReport> =
+        const {
+            std::cell::Cell::new(crate::analytics::RemoteControlRouteReport {
+                route: None,
+                focus_moved: None,
+            })
+        };
+}
+
+/// #404 follow-up: record the route that delivered the current injection.
+/// Clears any focus verdict from a route that did not end up delivering.
+pub(crate) fn note_injection_route(route: crate::analytics::RemoteControlRoute) {
+    INJECTION_ROUTE.with(|cell| {
+        cell.set(crate::analytics::RemoteControlRouteReport {
+            route: Some(route),
+            focus_moved: None,
+        })
+    });
+}
+
+/// #404 follow-up: an AX click route plus whether it moved keyboard focus
+/// onto the clicked text element (`None` = not a text element).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn note_injection_route_with_focus(
+    route: crate::analytics::RemoteControlRoute,
+    focus_moved: Option<bool>,
+) {
+    INJECTION_ROUTE.with(|cell| {
+        cell.set(crate::analytics::RemoteControlRouteReport {
+            route: Some(route),
+            focus_moved,
+        })
+    });
+}
+
+fn take_injection_route() -> crate::analytics::RemoteControlRouteReport {
+    INJECTION_ROUTE.with(|cell| cell.replace(crate::analytics::RemoteControlRouteReport::default()))
+}
+
+/// #404: record that the current injection delivered a key-down.
+pub(crate) fn note_key_down_delivered() {
+    KEY_DOWN_DELIVERED.with(|cell| cell.set(true));
+}
+
+fn take_key_down_delivered() -> bool {
+    KEY_DOWN_DELIVERED.with(|cell| cell.replace(false))
+}
+
+/// #404: does a successfully completed replay count toward the
+/// `remote_control_input` telemetry? `type` used to fire for ANY key packet
+/// that returned `Ok` -- releases, host-synthesized releases, unmapped keys
+/// and cancelled injections included -- so it reported typing that never
+/// reached the target. Only a key-DOWN counts, and only one the platform key
+/// path reports as delivered (macOS: posted past the focus gate or serviced
+/// through AX; Windows: `SendInput` accepted it, or it was posted to the
+/// target window).
+fn replay_counts_as_applied_input(message: &RemoteControlMessage, key_down_delivered: bool) -> bool {
+    if message.message_type != RemoteControlType::Key {
+        return true;
+    }
+    message.action == Some(RemoteControlAction::Down) && key_down_delivered
 }
 
 /// Returns true if the currently-running injection was abandoned by its
@@ -256,6 +331,8 @@ struct ResolveTask {
     local_identity: String,
     admission: Option<DiscreteAdmission>,
     result_sender: Option<TerminalResultSender>,
+    /// #370: host receive instant, carried to replay for the latency summary.
+    received_at: Option<Instant>,
 }
 
 /// Best-effort correlation for an invalid v2 envelope. We only emit a terminal
@@ -354,6 +431,7 @@ fn message_from_binary(
         message: None,
         grant_token: Some(active_token),
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers: RemoteControlModifiers {
             alt: modifiers & 1 != 0,
             ctrl: modifiers & 2 != 0,
@@ -369,7 +447,13 @@ struct ResolveQueue(BoundedCoalescingQueue<ResolveTask, ReplayCoalesceKey>);
 
 impl ResolveQueue {
     fn new(high_rate_capacity: usize) -> Self {
-        Self(BoundedCoalescingQueue::new(high_rate_capacity))
+        Self(BoundedCoalescingQueue::with_merge(
+            high_rate_capacity,
+            |queued: ResolveTask, mut incoming: ResolveTask| {
+                incoming.message = coalesce_high_rate_message(&queued.message, incoming.message);
+                incoming
+            },
+        ))
     }
 
     fn push(&self, task: ResolveTask) -> ResolveQueuePush {
@@ -1436,6 +1520,10 @@ fn ensure_pressed_ttl_sweeper() {
             std::thread::sleep(HELD_INPUT_SWEEP_INTERVAL);
             let releases = drain_expired_pressed(Instant::now());
             enqueue_synthetic_releases(releases, "held input TTL expired");
+            // #370: reconcile the host latency-summary session with the live
+            // grant state (authority, not event order) and emit due intervals.
+            let hosting = !sessions().lock_unpoisoned().is_empty();
+            rc_latency_telemetry::sync(RcRole::Host, hosting);
             ticks_since_summary += 1;
             if ticks_since_summary >= LATENCY_SUMMARY_TICK_INTERVAL {
                 ticks_since_summary = 0;
@@ -1536,11 +1624,58 @@ fn authorize_shared_key(key: ControlGrantKey) -> String {
     let controller_id = key.controller_id.clone();
     let grant_token = new_grant_token();
     remote_control_engine().install_grant(key, grant_token.clone());
+    rc_latency_telemetry::sync(RcRole::Host, true);
+    rc_latency_telemetry::set_dimension(
+        RcRole::Host,
+        Dimension::WindowCodec,
+        crate::transport::publisher::window_codec_label(),
+    );
     warned_tokenless_inputs()
         .lock_unpoisoned()
         .remove(&(window_id, controller_id.clone()));
     reset_unreliable_seq(window_id, &controller_id);
+    note_control_grants_changed();
     grant_token
+}
+
+/// Every window that currently holds at least one grant.
+#[cfg_attr(any(test, not(target_os = "macos")), allow(dead_code))]
+fn granted_window_ids() -> HashSet<u32> {
+    sessions()
+        .lock_unpoisoned()
+        .keys()
+        .map(|key| key.window_id)
+        .collect()
+}
+
+/// #404: the set of granted windows changed (grant, revoke, release, share
+/// teardown). macOS switches Chromium web accessibility on for granted
+/// browser windows and back off when the last grant on that app ends -- see
+/// `input::note_control_grants_changed`. Call it AFTER the grant map changed.
+fn note_control_grants_changed() {
+    #[cfg(target_os = "macos")]
+    input::note_control_grants_changed();
+}
+
+/// #404: app exit. Hand every browser back the accessibility setting it had.
+#[cfg(target_os = "macos")]
+pub(crate) fn restore_web_accessibility_on_exit() {
+    input::restore_web_accessibility_on_exit();
+}
+
+/// #404 follow-up: launch-time recovery of a Chromium web accessibility
+/// switch a crashed or killed run left on (see `input`'s crash journal).
+#[cfg(target_os = "macos")]
+pub(crate) fn init_web_accessibility_journal(app_data_dir: &std::path::Path) {
+    input::init_web_accessibility_journal(app_data_dir);
+}
+
+/// #404 follow-up: called from the panic hook. A no-op off the main thread.
+/// (The hook does not call it in unit tests, which panic on purpose.)
+#[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn restore_web_accessibility_on_panic() {
+    input::restore_web_accessibility_on_panic();
 }
 
 fn revoke(window_id: u32, controller_id: &str) {
@@ -1592,6 +1727,7 @@ fn revoke(window_id: u32, controller_id: &str) {
     }
     reset_unreliable_seq(window_id, controller_id);
     enqueue_synthetic_releases(releases, "controller revoked");
+    note_control_grants_changed();
 }
 
 fn drain_window_control(window_id: u32) -> (Vec<String>, Vec<ReplayTask>) {
@@ -1663,6 +1799,7 @@ fn drain_window_control_releasing(
     // Refs #288: same insert-only leak class as the maps above -- see
     // `clear_discrete_admissions`.
     clear_discrete_admissions(|w, _| w != window_id);
+    note_control_grants_changed();
     // #446: a session-tap gesture holds a REAL mouse button down in the target
     // app. If control is torn down mid-drag (revoke, disconnect, share ended,
     // deadline abandon) nothing else will ever post the matching Up, and the
@@ -1735,6 +1872,7 @@ pub(crate) fn revoke_all(app: &AppHandle) {
             .collect()
     };
     drop(fence);
+    note_control_grants_changed();
     enqueue_synthetic_releases(releases, "all control revoked");
     warned_tokenless_inputs().lock_unpoisoned().clear();
     last_unreliable_seqs().lock_unpoisoned().clear();
@@ -1794,6 +1932,7 @@ pub(crate) fn revoke_controller(app: &AppHandle, controller_id: &str, reason: &'
         }
     });
     drop(fence);
+    note_control_grants_changed();
     enqueue_synthetic_releases(releases, reason);
     last_unreliable_seqs()
         .lock_unpoisoned()
@@ -3067,6 +3206,8 @@ fn coalesce_ready_replay_task(
                 task.message.seq,
                 next.message.seq
             );
+            let mut next = next;
+            next.message = coalesce_high_rate_message(&task.message, next.message);
             task = next;
         } else {
             pending.push_back(next);
@@ -3110,13 +3251,34 @@ enum ReplayRunOutcome {
 /// caller, worse. A spawn failure is treated as an ordinary injection
 /// failure instead.
 fn run_replay_with_deadline(task: &ReplayTask, inject: &ReplayInjector) -> ReplayRunOutcome {
+    run_replay_with_deadline_tracked(task, inject).0
+}
+
+/// What a completed injection reported through its thread-locals (#404).
+#[derive(Debug, Clone, Copy, Default)]
+struct InjectionReport {
+    /// See `KEY_DOWN_DELIVERED`.
+    key_down_delivered: bool,
+    /// See `INJECTION_ROUTE`.
+    route: crate::analytics::RemoteControlRouteReport,
+}
+
+/// `run_replay_with_deadline`, plus what the injection reported (#404).
+/// Always the default unless the outcome is `Completed`.
+fn run_replay_with_deadline_tracked(
+    task: &ReplayTask,
+    inject: &ReplayInjector,
+) -> (ReplayRunOutcome, InjectionReport) {
     let shard_key = ReplayShardKey::for_task(task);
     if !active_injection_keys().lock_unpoisoned().insert(shard_key) {
-        return ReplayRunOutcome::Completed(Err(
-            "previous target injection is still in progress".to_string()
-        ));
+        return (
+            ReplayRunOutcome::Completed(Err(
+                "previous target injection is still in progress".to_string()
+            )),
+            InjectionReport::default(),
+        );
     }
-    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let (tx, rx) = mpsc::channel::<(Result<(), String>, InjectionReport)>();
     let inject = Arc::clone(inject);
     let message = task.message.clone();
     let frame = task.frame;
@@ -3128,11 +3290,17 @@ fn run_replay_with_deadline(task: &ReplayTask, inject: &ReplayInjector) -> Repla
         .name("petal-rc-inject".to_string())
         .spawn(move || {
             INJECTION_CANCELLED.with(|cell| *cell.borrow_mut() = Some(thread_cancelled));
+            take_key_down_delivered();
+            take_injection_route();
             let result = inject(&message, frame, target_pid);
+            let report = InjectionReport {
+                key_down_delivered: take_key_down_delivered(),
+                route: take_injection_route(),
+            };
             active_injection_keys()
                 .lock_unpoisoned()
                 .remove(&thread_shard_key);
-            let _ = tx.send(result);
+            let _ = tx.send((result, report));
         });
     let _handle = match spawn_result {
         Ok(handle) => handle,
@@ -3143,16 +3311,19 @@ fn run_replay_with_deadline(task: &ReplayTask, inject: &ReplayInjector) -> Repla
                 task.message.window_id,
                 task.message.controller_id
             );
-            return ReplayRunOutcome::Completed(Err(format!(
-                "failed to spawn injection thread: {error}"
-            )));
+            return (
+                ReplayRunOutcome::Completed(Err(format!(
+                    "failed to spawn injection thread: {error}"
+                ))),
+                InjectionReport::default(),
+            );
         }
     };
     match rx.recv_timeout(REPLAY_EVENT_DEADLINE) {
-        Ok(result) => ReplayRunOutcome::Completed(result),
+        Ok((result, report)) => (ReplayRunOutcome::Completed(result), report),
         Err(_) => {
             cancelled.store(true, Ordering::Release);
-            ReplayRunOutcome::TimedOut
+            (ReplayRunOutcome::TimedOut, InjectionReport::default())
         }
     }
     // `_handle` drops here without joining -- `JoinHandle::drop` detaches
@@ -3263,6 +3434,14 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
     }
     let started = Instant::now();
     let inject_started_ms = now_ms();
+    // #370: every real input feeds the summary; the log lines stay sampled.
+    if let Some(received_at) = task.received_at {
+        rc_latency_telemetry::record_stage(
+            RcRole::Host,
+            Stage::ReplayInjectMs,
+            started.saturating_duration_since(received_at).as_secs_f64() * 1000.0,
+        );
+    }
     if should_log_latency_probe(&task.message) {
         log::info!(
             "remote-control-latency: host inject_ts_ms={} {} target_pid={:?}",
@@ -3271,7 +3450,8 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
             task.target_pid
         );
     }
-    match run_replay_with_deadline(&task, inject) {
+    let (run_outcome, report) = run_replay_with_deadline_tracked(&task, inject);
+    match run_outcome {
         ReplayRunOutcome::Completed(Ok(())) => {
             let injected_at_ms = now_ms();
             record_input_latency_marker(&task.message, injected_at_ms);
@@ -3279,19 +3459,34 @@ fn replay_one_task(task: ReplayTask, inject: &ReplayInjector) {
             crate::session::note_remote_interaction(task.message.window_id, task.message.seq);
             let elapsed_ms = started.elapsed().as_millis() as u64;
             record_latency_summary_success(elapsed_ms);
+            if let Some(received_at) = task.received_at {
+                rc_latency_telemetry::record_stage(
+                    RcRole::Host,
+                    Stage::ReplayCompleteMs,
+                    received_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
             if should_log_latency_probe(&task.message) {
                 log::info!(
-                    "remote-control-latency: host replay complete_ts_ms={} {} elapsed_ms={} target_pid={:?}",
+                    "remote-control-latency: host replay complete_ts_ms={} {} elapsed_ms={} target_pid={:?} route={} focus_moved={}",
                     injected_at_ms,
                     message_summary(&task.message),
                     elapsed_ms,
-                    task.target_pid
+                    task.target_pid,
+                    report.route.route.map_or("none", |route| route.as_str()),
+                    match report.route.focus_moved {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => "n/a",
+                    }
                 );
             }
             // #819: observer only -- see `cockpit_ledger`.
             #[cfg(feature = "cockpit-privileged")]
             cockpit_ledger::record_replay(&task.message, "applied");
-            crate::analytics::note_remote_control_applied(&task.message);
+            if replay_counts_as_applied_input(&task.message, report.key_down_delivered) {
+                crate::analytics::note_remote_control_applied(&task.message, report.route);
+            }
             complete_replay_task(
                 &task,
                 TerminalDisposition::success(
@@ -3807,6 +4002,9 @@ fn status_packet_for(status: &RemoteControlStatus, local_identity: &str) -> Remo
         // are negotiated regardless of platform, and the controller relies
         // on this flag to switch pointer/wheel sends to the binary encoding.
         supports_binary_hot_path: status.status == "active",
+        // #399: same presence-is-the-signal rule; an old host never sets it,
+        // so its controllers keep the reliable ordered path.
+        supports_redundant_input: status.status == "active",
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -3855,6 +4053,7 @@ fn discrete_result_packet(
         message: None,
         grant_token: None,
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4110,6 +4309,7 @@ fn resolve_one_task(app: &AppHandle, task: ResolveTask) {
     let state = state.inner();
     let admission = task.admission.clone();
     let result_sender = task.result_sender.clone();
+    let received_at = task.received_at;
     let mut message = task.message;
     let local_identity = task.local_identity.clone();
     let frame = match fresh_control_frame(state, message.window_id) {
@@ -4318,7 +4518,7 @@ fn resolve_one_task(app: &AppHandle, task: ResolveTask) {
     // The #209 cache here has pid/frame freshness, not z-order/occlusion;
     // confirming frontmost-at-point would require a per-event CG scan.
     publish_control_activity(state, &message);
-    commit_resolved_input(message, frame, target_pid, admission, result_sender);
+    commit_resolved_input(message, frame, target_pid, admission, result_sender, received_at);
 }
 
 /// The resolver's last step: record the input as held, then queue its replay.
@@ -4329,6 +4529,7 @@ fn commit_resolved_input(
     target_pid: i32,
     admission: Option<DiscreteAdmission>,
     result_sender: Option<TerminalResultSender>,
+    received_at: Option<Instant>,
 ) -> bool {
     // #365: re-check auth, track and enqueue under the fence every grant
     // removal drains under. Checking only at the top of `resolve_one_task`
@@ -4373,6 +4574,7 @@ fn commit_resolved_input(
     let mut replay = replay_task(message, frame, Some(target_pid), false);
     replay.admission = admission;
     replay.result_sender = result_sender;
+    replay.received_at = received_at;
     enqueue_replay(replay);
     true
 }
@@ -4514,6 +4716,7 @@ fn handle_message(
             message.controller_id
         );
     }
+    let received_at = Instant::now();
     if should_log_latency_probe(&message) {
         log::info!(
             "remote-control-latency: host receive_ts_ms={} {}",
@@ -4609,6 +4812,16 @@ fn handle_message(
                 hot_path_capable_targets().lock_unpoisoned().insert(key);
             } else if matches!(status, "active" | "stopped" | "disabled") {
                 hot_path_capable_targets().lock_unpoisoned().remove(&key);
+            }
+            // #399: same latest-wins rule for the redundant input path.
+            if matches!(status, "active" | "stopped" | "disabled") {
+                remote_control_engine().set_redundant_input_target(
+                    message.window_id,
+                    &message.controller_id,
+                    (status == "active" && message.supports_redundant_input)
+                        .then_some(message.grant_token.as_deref())
+                        .flatten(),
+                );
             }
             emit_status(
                 app,
@@ -4985,6 +5198,7 @@ fn handle_message(
                                     local_identity: local_identity.to_string(),
                                 },
                             ),
+                            received_at: Some(received_at),
                         },
                     )
                 }
@@ -5405,6 +5619,106 @@ fn dispatch_clipboard_copy_request(
     });
 }
 
+/// #399: one lock around sequencing AND delivery, so a gap-timer flush and
+/// the receive loop can never hand inputs to `handle_message` out of order.
+fn input_bundle_delivery_fence() -> &'static Mutex<()> {
+    static FENCE: OnceLock<Mutex<()>> = OnceLock::new();
+    FENCE.get_or_init(|| Mutex::new(()))
+}
+
+fn handle_input_bundle(
+    app: &AppHandle,
+    local_identity: &str,
+    sender: &str,
+    bundle: InputBundle,
+    generation: &RoomGeneration,
+) {
+    let _fence = input_bundle_delivery_fence().lock_unpoisoned();
+    let window_id = bundle.window_id;
+    let output = remote_control_engine().accept_input_bundle(sender, bundle, Instant::now());
+    deliver_sequenced_inputs(app, local_identity, sender, window_id, output, generation);
+}
+
+/// Held input to release before a sequenced batch runs: a skipped input may
+/// have been the Up for something this controller still holds.
+fn releases_for_sequencer_gap(
+    window_id: u32,
+    sender: &str,
+    output: &SequencerOutput,
+) -> Vec<ReplayTask> {
+    if output.skipped == 0 {
+        return Vec::new();
+    }
+    drain_pressed_for_controller(window_id, sender)
+}
+
+/// Caller holds `input_bundle_delivery_fence`.
+fn deliver_sequenced_inputs(
+    app: &AppHandle,
+    local_identity: &str,
+    sender: &str,
+    window_id: u32,
+    output: SequencerOutput,
+    generation: &RoomGeneration,
+) {
+    if output.stale_stream {
+        log::debug!("remote-control: dropping input bundle from a retired stream of '{sender}'");
+    }
+    if output.recovered > 0 {
+        log::debug!(
+            "remote-control: {} input(s) delivered from a bundle's earlier slots (redundant copy or paced batch) for window {window_id} from '{sender}' (#399)",
+            output.recovered
+        );
+    }
+    if output.skipped > 0 {
+        // A skipped input may have been an Up: release what this controller
+        // holds before later input runs (#365 posture: stuck beats lost).
+        log::warn!(
+            "remote-control: {} input(s) from '{sender}' for window {window_id} lost past the {}ms gap hold -- skipping ahead and releasing held input (#399)",
+            output.skipped,
+            redundant::GAP_HOLD.as_millis()
+        );
+        enqueue_synthetic_releases(
+            releases_for_sequencer_gap(window_id, sender, &output),
+            "redundant input gap",
+        );
+    }
+    if let Some(state) = app.try_state::<SessionState>() {
+        for message in output.deliver {
+            handle_message(
+                app,
+                state.inner(),
+                local_identity,
+                Some(sender.to_string()),
+                message,
+            );
+        }
+    }
+    if output.arm_gap_timer {
+        let app = app.clone();
+        let local_identity = local_identity.to_string();
+        let sender = sender.to_string();
+        let generation = generation.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(redundant::GAP_HOLD).await;
+            if !generation.is_current() {
+                return;
+            }
+            let _fence = input_bundle_delivery_fence().lock_unpoisoned();
+            let output =
+                remote_control_engine().flush_input_bundle_gap(&sender, window_id, Instant::now());
+            deliver_sequenced_inputs(
+                &app,
+                &local_identity,
+                &sender,
+                window_id,
+                output,
+                &generation,
+            );
+        });
+    }
+}
+
 fn roster_contains(room: &livekit::Room, identity: &str) -> bool {
     room.remote_participants()
         .keys()
@@ -5450,6 +5764,19 @@ pub fn start_receiver_for_room(
                         continue;
                     }
                     let trusted_sender = participant.as_ref().map(|p| p.identity().to_string());
+                    if let Some(bundle) = redundant::parse_input_bundle(payload.as_slice()) {
+                        match trusted_sender.as_deref() {
+                            Some(sender) => handle_input_bundle(
+                                &app,
+                                &local_identity,
+                                sender,
+                                bundle,
+                                &generation,
+                            ),
+                            None => log::debug!("remote-control: dropping anonymous input bundle"),
+                        }
+                        continue;
+                    }
                     if payload.first().copied() != Some(BINARY_MAGIC) {
                         if let (Some(request), Some(sender), Some(state)) = (
                             parse_clipboard_copy_request(payload.as_slice()),
@@ -5644,6 +5971,92 @@ async fn publish_message(
     remote_control_engine()
         .publish_message(room_connection, message)
         .await
+}
+
+/// #399: controller input goes out as a lossy redundant bundle when the host
+/// advertised support (paced, sent twice, plus trailing copies so a lost last
+/// input is still recovered); anything else keeps the legacy packet.
+async fn publish_controller_input(
+    room_connection: Arc<RoomConnection>,
+    message: RemoteControlMessage,
+) -> Result<(), String> {
+    let Some((stream, outcome)) =
+        remote_control_engine().push_redundant_input(&message, Instant::now())
+    else {
+        return publish_message(room_connection, message).await;
+    };
+    let window_id = message.window_id;
+    let host = message.target_user_id.clone();
+    match outcome {
+        redundant::PushOutcome::Publish(bundle, flush) => {
+            publish_flushed_bundle(room_connection, bundle, flush, host).await
+        }
+        redundant::PushOutcome::FlushAfter(wait) => {
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(wait).await;
+                if let Some((bundle, flush)) = remote_control_engine().flush_redundant_input(
+                    window_id,
+                    &host,
+                    &stream,
+                    Instant::now(),
+                ) {
+                    if let Err(error) =
+                        publish_flushed_bundle(room_connection, bundle, flush, host).await
+                    {
+                        log::warn!("remote-control: paced input bundle publish failed: {error}");
+                    }
+                }
+            });
+            Ok(())
+        }
+        redundant::PushOutcome::Queued => Ok(()),
+    }
+}
+
+async fn publish_flushed_bundle(
+    room_connection: Arc<RoomConnection>,
+    bundle: InputBundle,
+    flush: u64,
+    host: String,
+) -> Result<(), String> {
+    publish_input_bundle(&room_connection, &bundle, &host).await?;
+    for _ in 1..redundant::IMMEDIATE_COPIES {
+        let _ = publish_input_bundle(&room_connection, &bundle, &host).await;
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut waited = Duration::ZERO;
+        for delay in redundant::TRAILING_COPY_DELAYS {
+            tokio::time::sleep(delay.saturating_sub(waited)).await;
+            waited = delay;
+            let Some(trailing) = remote_control_engine().redundant_trailing_bundle(
+                bundle.window_id,
+                &host,
+                &bundle.stream,
+                flush,
+                Instant::now(),
+            ) else {
+                return;
+            };
+            if let Err(error) = publish_input_bundle(&room_connection, &trailing, &host).await {
+                log::debug!("remote-control: trailing input bundle publish failed: {error}");
+            }
+        }
+    });
+    Ok(())
+}
+
+async fn publish_input_bundle(
+    room_connection: &Arc<RoomConnection>,
+    bundle: &InputBundle,
+    host: &str,
+) -> Result<(), String> {
+    let packet = remote_control_engine().redundant_bundle_packet(bundle, host);
+    room_connection
+        .room()
+        .local_participant()
+        .publish_data(packet)
+        .await
+        .map_err(|error| format!("publish remote-control input bundle: {error}"))
 }
 
 async fn publish_message_with_retry(
@@ -5856,6 +6269,7 @@ fn clipboard_key_message(
         message: None,
         grant_token: Some(grant_token.to_string()),
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers,
     }
 }
@@ -6115,7 +6529,7 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
                     );
                 }
                 let summary = message_summary(&chunk_message);
-                if let Err(e) = publish_message(publisher.clone(), chunk_message).await {
+                if let Err(e) = publish_controller_input(publisher.clone(), chunk_message).await {
                     log::warn!("remote-control: chunked text publish failed for {summary}: {e}");
                     return Err(e);
                 }
@@ -6136,7 +6550,7 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
         return Err("operation is unsupported by the active Windows control grant".to_string());
     }
     let summary = message_summary(&message);
-    match publish_message(publisher, message).await {
+    match publish_controller_input(publisher, message).await {
         Ok(()) => Ok(()),
         Err(e) => {
             log::warn!("remote-control: publish failed for {summary}: {e}");
@@ -6205,6 +6619,7 @@ pub async fn remote_control_set_active(
         message: None,
         grant_token: None,
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -6347,6 +6762,7 @@ pub async fn remote_control_request_escalation(
         message: None,
         grant_token: None,
         supports_binary_hot_path: false,
+        supports_redundant_input: false,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -6933,6 +7349,11 @@ pub(crate) mod input {
     }
 
     trait InputSink {
+        /// #404 follow-up: the route this sink's posts take, for telemetry.
+        /// The CGEvent sink posts to the target pid.
+        fn route(&self) -> crate::analytics::RemoteControlRoute {
+            crate::analytics::RemoteControlRoute::PidPost
+        }
         fn verify_key_window(&self, window_id: u32) -> Result<(), String>;
         /// Same check, plus the one-shot AXRaise recovery (#777). Called ONCE
         /// per wire event at the replay entry points -- never per character.
@@ -7056,6 +7477,11 @@ pub(crate) mod input {
         pub(super) pressable: bool,
         pub(super) show_menu: bool,
         pub(super) text_selectable: bool,
+        /// #404: the element is an editable text element -- settable
+        /// `AXSelectedTextRange`, a text role, or a settable string `AXValue`.
+        /// A web `<input>` reports pressable and wins the AxPressable route;
+        /// this is what tells that route to also move keyboard focus onto it.
+        pub(super) editable_text: bool,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7103,10 +7529,12 @@ pub(crate) mod input {
             point: super::GlobalPoint,
         ) -> Result<Option<AxElementHandle>, AxError>;
         /// #170: resolve the app's currently editable text element WITHOUT relying
-        /// on the app being frontmost/key. App-scoped `AXFocusedUIElement` resolves
-        /// to `AXApplication` while the controller (not the target) stays frontmost
-        /// (Petal never steals focus — case 27), so we descend `AXWindows` and look
-        /// for a window-scoped focused text element / role-based text descendant.
+        /// on the app being frontmost/key. #419: the app-scoped
+        /// `AXFocusedUIElement` is tried first and trusted only when it is a text
+        /// element inside the authorized window and not `AXApplication` itself
+        /// (the #170 case: Petal never steals focus — case 27). Otherwise we
+        /// descend `AXWindows` and look for a window-scoped focused text element /
+        /// role-based text descendant.
         /// Returns `Ok(None)` when no editable text element is reachable, in which
         /// case the caller falls back to the (already-broken-when-backgrounded)
         /// CGEvent key-equivalent path. The `TextElementSource` reports whether the
@@ -7142,6 +7570,18 @@ pub(crate) mod input {
             start: i64,
             len: i64,
         ) -> Result<(), AxError>;
+        /// #404: set `AXFocused = true` on a clicked text element. This is the
+        /// only measured way to move Chrome's own keyboard focus (the view
+        /// that pid-posted keys reach) into the page without activating the
+        /// app: `AXPress` and `AXSelectedTextRange` move DOM focus but leave
+        /// Chrome's keyboard focus in the address bar, so typed keys land
+        /// there. Never sets `AXFrontmost`.
+        fn set_focused(&self, element: &AxElementHandle) -> Result<(), AxError>;
+        /// #404 follow-up: the `AXWebArea` the element sits in, when it is
+        /// page content of a Chromium app whose web accessibility Petal is
+        /// managing for a grant (see `reconcile_web_accessibility`). `None`
+        /// for every other app and for the browser's own toolbar.
+        fn chromium_web_area(&self, pid: i32, element: &AxElementHandle) -> Option<AxElementHandle>;
         fn scroll_by(
             &self,
             window_id: u32,
@@ -7250,6 +7690,12 @@ pub(crate) mod input {
         AxPressable {
             element: AxElementHandle,
             action: AxClickAction,
+            /// #404: the pressed element is also an editable/selectable text
+            /// element (a web `<input>` is both pressable and text-selectable,
+            /// and pressable wins the route). After a successful press, also
+            /// move the app's keyboard focus onto it -- see
+            /// `AxInputBackend::set_focused`.
+            focus_text: bool,
         },
         AxText {
             element: AxElementHandle,
@@ -7784,29 +8230,48 @@ pub(crate) mod input {
             let Some(app) = ax_app_element_for_pid(pid) else {
                 return Ok(None);
             };
-            // Candidate windows, most-likely-active first: the app's focused/main
-            // window, then every AXWindows entry. We deliberately AVOID the
-            // app-scoped AXFocusedUIElement here — for a backgrounded app it
-            // resolves up to AXApplication (the #170 root cause). Window objects,
-            // by contrast, are reachable regardless of key/frontmost state.
-            let mut windows: Vec<AxElementHandle> = Vec::new();
-            for attr in [ax_focused_window_attribute(), ax_main_window_attribute()] {
-                if let Ok(window) = copy_attribute(&app, attr.as_ptr()) {
-                    if is_ax_ui_element(window.as_ptr()) {
-                        windows.push(AxElementHandle::Real(window));
+            // #419: the app-scoped AXFocusedUIElement first. Standard AppKit
+            // windows do not support the window-scoped attribute (-25205), so
+            // without this the trusted provenance is unreachable for ordinary
+            // apps. It is trusted only when it is a text element inside the
+            // authorized window and not the AXApplication itself (the #170
+            // case, where a backgrounded app's focus resolves up to the app).
+            let app_focused = copy_attribute(&app, ax_focused_ui_element_attribute().as_ptr())
+                .ok()
+                .filter(|focused| is_ax_ui_element(focused.as_ptr()))
+                .map(AxElementHandle::Real);
+            let trusted_app_focus = trusted_app_focused_text_element(
+                app_focused,
+                window_id,
+                |focused| ax_element_is_application(focused, &app),
+                element_is_text_selectable,
+                |focused| ax_focused_element_window_id(focused, pid),
+            );
+            let resolved = resolve_text_element_preferring_app_focus(trusted_app_focus, || {
+                // Candidate windows, most-likely-active first: the app's
+                // focused/main window, then every AXWindows entry. Window
+                // objects are reachable regardless of key/frontmost state.
+                let mut windows: Vec<AxElementHandle> = Vec::new();
+                for attr in [ax_focused_window_attribute(), ax_main_window_attribute()] {
+                    if let Ok(window) = copy_attribute(&app, attr.as_ptr()) {
+                        if is_ax_ui_element(window.as_ptr()) {
+                            windows.push(AxElementHandle::Real(window));
+                        }
                     }
                 }
-            }
-            if let Ok(list) = copy_attribute(&app, ax_windows_attribute().as_ptr()) {
-                push_ax_element_array(&list, &mut windows);
-            }
-            let resolved = find_text_element_in_window_candidates(
-                &windows,
-                window_id,
-                |window| ax_element_window_id(window, pid),
-                window_text_element,
-            )?;
-            if let Some((element, source)) = resolved {
+                if let Ok(list) = copy_attribute(&app, ax_windows_attribute().as_ptr()) {
+                    push_ax_element_array(&list, &mut windows);
+                }
+                find_text_element_in_window_candidates(
+                    &windows,
+                    window_id,
+                    |window| ax_element_window_id(window, pid),
+                    window_text_element,
+                )
+            })?;
+            if let Some((element, provenance)) = resolved {
+                log::info!("remote-control: text focus source={}", provenance.label());
+                let source = provenance.source();
                 if let Some(ptr) = element.as_real_ptr() {
                     let error = unsafe {
                         AXUIElementSetMessagingTimeout(ptr, AX_APP_MESSAGING_TIMEOUT_SECONDS)
@@ -7836,6 +8301,11 @@ pub(crate) mod input {
             if attribute_settable(element, selected_text_range.as_ptr()) {
                 caps.text_selectable = true;
             }
+            // #404: only the pressable route needs the extra probe (the
+            // non-pressable text route already focuses), so a plain hit-test
+            // pays nothing more.
+            caps.editable_text =
+                caps.text_selectable || (caps.pressable && element_is_editable_text(element));
             caps
         }
 
@@ -7925,6 +8395,34 @@ pub(crate) mod input {
             let value = create_ax_value(K_AX_VALUE_TYPE_CF_RANGE, &range)?;
             let attribute = ax_selected_text_range_attribute();
             set_attribute(element, attribute.as_ptr(), value.as_ptr())
+        }
+
+        fn set_focused(&self, element: &AxElementHandle) -> Result<(), AxError> {
+            let attribute = ax_focused_attribute();
+            set_attribute(element, attribute.as_ptr(), unsafe { kCFBooleanTrue })
+        }
+
+        fn chromium_web_area(&self, pid: i32, element: &AxElementHandle) -> Option<AxElementHandle> {
+            if !chromium_web_accessibility_pids().lock_unpoisoned().contains(&pid) {
+                return None;
+            }
+            let role_attribute = ax_role_attribute();
+            let parent_attribute = ax_parent_attribute();
+            let mut current = element.clone();
+            for _ in 0..CHROMIUM_WEB_AREA_MAX_ANCESTORS {
+                let role = copy_attribute(&current, role_attribute.as_ptr())
+                    .ok()
+                    .and_then(|role| cf_string_to_string(role.as_ptr()));
+                if role.as_deref() == Some("AXWebArea") {
+                    return Some(current);
+                }
+                let parent = copy_attribute(&current, parent_attribute.as_ptr()).ok()?;
+                if !is_ax_ui_element(parent.as_ptr()) {
+                    return None;
+                }
+                current = AxElementHandle::Real(parent);
+            }
+            None
         }
 
         fn scroll_by(
@@ -8041,6 +8539,46 @@ pub(crate) mod input {
                 }
             }
         }
+    }
+
+    /// #419: the trust gate for the app-scoped AXFocusedUIElement. All three
+    /// must hold: it is not the AXApplication element (#170: a backgrounded
+    /// app's focus can resolve up to the app), it is text-selectable, and its
+    /// window resolves to the authorized `window_id`. Any failure -- including
+    /// an unresolvable window identity -- means "not trusted", and the caller
+    /// falls back to the window-scoped attempt and then BFS. Checks run
+    /// cheapest first so a rejected element costs no window-identity lookup.
+    fn trusted_app_focused_text_element<T>(
+        focused: Option<T>,
+        window_id: u32,
+        is_application: impl FnOnce(&T) -> bool,
+        is_text_selectable: impl FnOnce(&T) -> bool,
+        focused_window_id: impl FnOnce(&T) -> Result<u32, AxError>,
+    ) -> Option<T> {
+        let focused = focused?;
+        if is_application(&focused) || !is_text_selectable(&focused) {
+            return None;
+        }
+        matches!(focused_window_id(&focused), Ok(id) if id == window_id).then_some(focused)
+    }
+
+    /// #419: a trusted app-scoped focus wins; otherwise the window-scoped
+    /// resolution runs (window focus, then BFS). The window path is only
+    /// evaluated when the app path did not produce a trusted element.
+    fn resolve_text_element_preferring_app_focus<T>(
+        trusted_app_focus: Option<T>,
+        window_scoped: impl FnOnce() -> Result<Option<(T, TextElementSource)>, AxError>,
+    ) -> Result<Option<(T, TextFocusProvenance)>, AxError> {
+        if let Some(element) = trusted_app_focus {
+            return Ok(Some((element, TextFocusProvenance::AppFocused)));
+        }
+        Ok(window_scoped()?.map(|(element, source)| {
+            let provenance = match source {
+                TextElementSource::FocusedElement => TextFocusProvenance::WindowFocused,
+                TextElementSource::BfsFallback => TextFocusProvenance::Bfs,
+            };
+            (element, provenance)
+        }))
     }
 
     fn find_text_element_in_window_candidates<T, R>(
@@ -8236,6 +8774,611 @@ pub(crate) mod input {
         perform_action(&window, ax_raise_action().as_ptr()).is_ok()
     }
 
+    // ---- #404: Chromium web accessibility for the life of a grant ----------
+    //
+    // Measured on Chrome 155 (issue #404, T1): a stock Chrome exposes NO
+    // `AXWebArea` to the host's AX hit-test -- a point over the page resolves
+    // only to `AXScrollArea` -- so the AX click routes can never reach a web
+    // field. `AXManualAccessibility` is rejected (-25205); setting
+    // `AXEnhancedUserInterface = true` on the app element returns -25208 yet
+    // DOES build the web tree. That attribute has known side effects on window
+    // animation in some apps, so it is set only while a grant on one of the
+    // app's windows exists and the previous value is restored when the last
+    // such grant ends.
+
+    /// Bundle-id prefixes of the Chromium family whose web content needs the
+    /// switch above.
+    const CHROMIUM_BUNDLE_PREFIXES: &[&str] = &[
+        "com.google.Chrome",
+        "org.chromium.",
+        "com.microsoft.edgemac",
+        "com.brave.",
+        "company.thebrowser.",
+    ];
+
+    fn is_chromium_bundle_id(bundle_id: &str) -> bool {
+        CHROMIUM_BUNDLE_PREFIXES
+            .iter()
+            .any(|prefix| bundle_id.starts_with(prefix))
+    }
+
+    /// The OS seam behind `reconcile_web_accessibility`, so the grant/release
+    /// bookkeeping is unit-testable without a real browser.
+    trait WebAccessibilityBackend {
+        fn window_pid(&self, window_id: u32) -> Option<i32>;
+        fn bundle_id(&self, pid: i32) -> Option<String>;
+        /// The app's current `AXEnhancedUserInterface`; `None` when unreadable.
+        fn enhanced_user_interface(&self, pid: i32) -> Option<bool>;
+        /// Raw AX error code. Chrome answers -25208 even when the write takes
+        /// effect, so callers log it and never treat it as a failure.
+        fn set_enhanced_user_interface(&self, pid: i32, enabled: bool) -> i32;
+        /// Does an `AXWebArea` now exist under the shared window?
+        fn window_has_web_area(&self, pid: i32, window_id: u32) -> bool;
+        /// When the process started (microseconds since the epoch), so a
+        /// journal entry can never act on a recycled pid. `None` when the
+        /// process is gone or unreadable.
+        fn process_start_us(&self, pid: i32) -> Option<u64>;
+    }
+
+    #[derive(Debug)]
+    struct WebAccessibilityGrant {
+        /// What `AXEnhancedUserInterface` was before Petal touched it.
+        previous: bool,
+        /// Granted windows of this app keeping the switch on.
+        windows: HashSet<u32>,
+        /// Identity recorded in the journal (see `WebAccessibilityJournalEntry`).
+        bundle_id: String,
+        started_us: Option<u64>,
+    }
+
+    #[derive(Debug, Default)]
+    struct WebAccessibilityState {
+        enabled: HashMap<i32, WebAccessibilityGrant>,
+        /// Granted windows already found not to be Chromium, so a reconcile
+        /// does not re-query their bundle id on every grant change.
+        not_chromium: HashSet<u32>,
+        /// Where the crash journal lives. `None` until
+        /// `init_web_accessibility_journal` runs (and in most unit tests).
+        journal: Option<std::path::PathBuf>,
+    }
+
+    // ---- Crash journal --------------------------------------------------
+    //
+    // `RunEvent::Exit` and the grant-end reconcile restore the switch on a
+    // clean path. A crash, a SIGKILL or a force quit during a grant takes
+    // neither, and the browser keeps `AXEnhancedUserInterface=true` (window
+    // animation and performance side effects) until it restarts. So every
+    // switch Petal itself turned on is written to a small journal in the app
+    // data dir, and the next launch turns those back off. Only entries Petal
+    // set are recorded: a value that was already on is never journaled and
+    // never touched. An entry acts only on the SAME process (pid + bundle id
+    // + process start time), never on a recycled pid.
+
+    const WEB_ACCESSIBILITY_JOURNAL_FILE: &str = "rc-web-accessibility.json";
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WebAccessibilityJournalEntry {
+        pid: i32,
+        bundle_id: String,
+        started_us: u64,
+    }
+
+    #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+    struct WebAccessibilityJournal {
+        version: u32,
+        enabled: Vec<WebAccessibilityJournalEntry>,
+    }
+
+    fn journal_entries_for(state: &WebAccessibilityState) -> Vec<WebAccessibilityJournalEntry> {
+        let mut entries: Vec<WebAccessibilityJournalEntry> = state
+            .enabled
+            .iter()
+            .filter(|(_, grant)| !grant.previous)
+            .filter_map(|(pid, grant)| {
+                Some(WebAccessibilityJournalEntry {
+                    pid: *pid,
+                    bundle_id: grant.bundle_id.clone(),
+                    started_us: grant.started_us?,
+                })
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.pid);
+        entries
+    }
+
+    /// Rewrite the journal from the in-memory state. An empty set removes the
+    /// file, so a clean session leaves nothing behind.
+    fn persist_web_accessibility_journal(state: &WebAccessibilityState) {
+        let Some(path) = state.journal.as_deref() else {
+            return;
+        };
+        let entries = journal_entries_for(state);
+        if entries.is_empty() {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => log::warn!(
+                    "remote-control: could not clear the chromium web accessibility journal: {error}"
+                ),
+            }
+            return;
+        }
+        let journal = WebAccessibilityJournal {
+            version: 1,
+            enabled: entries,
+        };
+        let result = serde_json::to_vec(&journal)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                let tmp = path.with_extension("json.tmp");
+                std::fs::write(&tmp, bytes).map_err(|error| error.to_string())?;
+                std::fs::rename(&tmp, path).map_err(|error| error.to_string())
+            });
+        if let Err(error) = result {
+            log::warn!(
+                "remote-control: could not write the chromium web accessibility journal: {error}"
+            );
+        }
+    }
+
+    fn read_web_accessibility_journal(path: &std::path::Path) -> Vec<WebAccessibilityJournalEntry> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => {
+                log::warn!(
+                    "remote-control: could not read the chromium web accessibility journal: {error}"
+                );
+                return Vec::new();
+            }
+        };
+        match serde_json::from_slice::<WebAccessibilityJournal>(&bytes) {
+            Ok(journal) => journal.enabled,
+            Err(error) => {
+                log::warn!(
+                    "remote-control: ignoring an unreadable chromium web accessibility journal: {error}"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Turn off every journaled switch whose process is still the one Petal
+    /// set it on. Returns how many were turned off. A process that is gone,
+    /// restarted (different start time), or now another app is skipped; so is
+    /// one whose switch is already off (someone else turned it off).
+    fn recover_web_accessibility_journal(
+        entries: &[WebAccessibilityJournalEntry],
+        backend: &dyn WebAccessibilityBackend,
+    ) -> usize {
+        let mut restored = 0;
+        for entry in entries {
+            let pid = entry.pid;
+            if pid <= 1 {
+                continue;
+            }
+            let same_process = backend.process_start_us(pid) == Some(entry.started_us)
+                && backend.bundle_id(pid).as_deref() == Some(entry.bundle_id.as_str());
+            if !same_process {
+                log::info!(
+                    "remote-control: chromium web accessibility journal entry skipped pid={pid} bundle={} reason=process-gone-or-restarted",
+                    entry.bundle_id
+                );
+                continue;
+            }
+            if backend.enhanced_user_interface(pid) != Some(true) {
+                log::info!(
+                    "remote-control: chromium web accessibility journal entry skipped pid={pid} bundle={} reason=already-off",
+                    entry.bundle_id
+                );
+                continue;
+            }
+            let code = backend.set_enhanced_user_interface(pid, false);
+            log::info!(
+                "remote-control: chromium web accessibility restored from journal pid={pid} bundle={} set_code={code}",
+                entry.bundle_id
+            );
+            restored += 1;
+        }
+        restored
+    }
+
+    /// Launch: adopt the journal path and undo whatever a previous run that
+    /// did not exit cleanly left switched on.
+    fn adopt_web_accessibility_journal(
+        path: std::path::PathBuf,
+        state: &mut WebAccessibilityState,
+        backend: &dyn WebAccessibilityBackend,
+    ) -> usize {
+        let entries = read_web_accessibility_journal(&path);
+        let restored = recover_web_accessibility_journal(&entries, backend);
+        state.journal = Some(path);
+        persist_web_accessibility_journal(state);
+        restored
+    }
+
+    /// Bring the switch in line with the set of windows that currently hold a
+    /// grant. Idempotent and driven only by that set, so every grant, revoke,
+    /// release and teardown path converges by calling it -- no path has to
+    /// remember to undo its own enable.
+    fn reconcile_web_accessibility(
+        granted: &HashSet<u32>,
+        state: &mut WebAccessibilityState,
+        backend: &dyn WebAccessibilityBackend,
+    ) {
+        state
+            .not_chromium
+            .retain(|window_id| granted.contains(window_id));
+        let mut released: Vec<i32> = Vec::new();
+        for (pid, grant) in state.enabled.iter_mut() {
+            grant
+                .windows
+                .retain(|window_id| granted.contains(window_id));
+            if grant.windows.is_empty() {
+                released.push(*pid);
+            }
+        }
+        released.sort_unstable();
+        let journal_dirty = !released.is_empty();
+        for pid in released {
+            if let Some(grant) = state.enabled.remove(&pid) {
+                restore_web_accessibility(pid, grant.previous, backend);
+            }
+        }
+        let mut windows: Vec<u32> = granted.iter().copied().collect();
+        windows.sort_unstable();
+        for window_id in windows {
+            if state.not_chromium.contains(&window_id)
+                || state
+                    .enabled
+                    .values()
+                    .any(|grant| grant.windows.contains(&window_id))
+            {
+                continue;
+            }
+            // pid 1 is the display-share sentinel, never a process.
+            let Some(pid) = backend.window_pid(window_id).filter(|pid| *pid > 1) else {
+                continue;
+            };
+            if let Some(grant) = state.enabled.get_mut(&pid) {
+                grant.windows.insert(window_id);
+                continue;
+            }
+            let Some(bundle_id) = backend.bundle_id(pid) else {
+                continue;
+            };
+            if !is_chromium_bundle_id(&bundle_id) {
+                state.not_chromium.insert(window_id);
+                continue;
+            }
+            let previous = backend.enhanced_user_interface(pid).unwrap_or(false);
+            // Journal BEFORE the write: a crash between the two must still
+            // leave a record of the switch Petal is about to turn on.
+            let started_us = (!previous).then(|| backend.process_start_us(pid)).flatten();
+            state.enabled.insert(
+                pid,
+                WebAccessibilityGrant {
+                    previous,
+                    windows: HashSet::from([window_id]),
+                    bundle_id: bundle_id.clone(),
+                    started_us,
+                },
+            );
+            if !previous {
+                persist_web_accessibility_journal(state);
+            }
+            // Visible to the click path now, not after the web-area probe.
+            publish_chromium_web_accessibility_pids(state);
+            let set_code = (!previous).then(|| backend.set_enhanced_user_interface(pid, true));
+            let web_area = backend.window_has_web_area(pid, window_id);
+            log::info!(
+                "remote-control: chromium web accessibility enabled pid={pid} bundle={bundle_id} window_id={window_id} previous={previous} set_code={set_code:?} web_area={web_area} journaled={}",
+                started_us.is_some() && state.journal.is_some()
+            );
+        }
+        if journal_dirty {
+            // The released apps are already restored; drop their entries.
+            persist_web_accessibility_journal(state);
+        }
+        publish_chromium_web_accessibility_pids(state);
+    }
+
+    fn restore_web_accessibility(pid: i32, previous: bool, backend: &dyn WebAccessibilityBackend) {
+        if previous {
+            log::info!(
+                "remote-control: chromium web accessibility released pid={pid} (was already on; left on)"
+            );
+            return;
+        }
+        let code = backend.set_enhanced_user_interface(pid, false);
+        log::info!("remote-control: chromium web accessibility restored pid={pid} set_code={code}");
+    }
+
+    fn restore_all_web_accessibility(
+        state: &mut WebAccessibilityState,
+        backend: &dyn WebAccessibilityBackend,
+    ) {
+        state.not_chromium.clear();
+        let mut pids: Vec<i32> = state.enabled.keys().copied().collect();
+        pids.sort_unstable();
+        for pid in pids {
+            if let Some(grant) = state.enabled.remove(&pid) {
+                restore_web_accessibility(pid, grant.previous, backend);
+            }
+        }
+        persist_web_accessibility_journal(state);
+        publish_chromium_web_accessibility_pids(state);
+    }
+
+    /// How far up from a hit-tested element `chromium_web_area` looks for the
+    /// page's `AXWebArea` (the probe page's button sat 1-2 levels below it).
+    const CHROMIUM_WEB_AREA_MAX_ANCESTORS: usize = 24;
+
+    /// Chromium pids with web accessibility on for a grant, mirrored out of
+    /// `WebAccessibilityState` so the click path never waits on the state
+    /// mutex (the reconcile worker holds it across slow AX probes).
+    fn chromium_web_accessibility_pids() -> &'static Mutex<HashSet<i32>> {
+        static PIDS: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
+        PIDS.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    fn publish_chromium_web_accessibility_pids(state: &WebAccessibilityState) {
+        *chromium_web_accessibility_pids().lock_unpoisoned() =
+            state.enabled.keys().copied().collect();
+    }
+
+    fn web_accessibility_state() -> &'static Mutex<WebAccessibilityState> {
+        static STATE: OnceLock<Mutex<WebAccessibilityState>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(WebAccessibilityState::default()))
+    }
+
+    /// Called after every change to the set of granted windows. The AX work
+    /// (one app attribute write plus a bounded tree walk) runs on one
+    /// dedicated worker so a slow target app never stalls the grant or revoke
+    /// path; the worker reads the CURRENT grant set each time, so coalesced or
+    /// reordered signals still converge on the right state.
+    ///
+    /// Compiled out of unit tests: tests mint and revoke grants on fake window
+    /// ids, which must never reach a real app on the test machine. The
+    /// bookkeeping is tested through `reconcile_web_accessibility`.
+    pub(crate) fn note_control_grants_changed() {
+        #[cfg(not(test))]
+        {
+            static WORKER: OnceLock<Option<Mutex<std::sync::mpsc::Sender<()>>>> = OnceLock::new();
+            let worker = WORKER.get_or_init(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<()>();
+                let spawned = thread::Builder::new()
+                    .name("petal-rc-webax".to_string())
+                    .spawn(move || {
+                        while rx.recv().is_ok() {
+                            while rx.try_recv().is_ok() {}
+                            let granted = super::granted_window_ids();
+                            reconcile_web_accessibility(
+                                &granted,
+                                &mut web_accessibility_state().lock_unpoisoned(),
+                                &SystemWebAccessibilityBackend,
+                            );
+                        }
+                    });
+                match spawned {
+                    Ok(_) => Some(Mutex::new(tx)),
+                    Err(error) => {
+                        log::warn!(
+                            "remote-control: failed to spawn chromium web accessibility worker: {error}"
+                        );
+                        None
+                    }
+                }
+            });
+            if let Some(tx) = worker {
+                let _ = tx.lock_unpoisoned().send(());
+            }
+        }
+    }
+
+    /// App exit: restore every app Petal switched on, synchronously, since
+    /// the worker will not get another chance.
+    pub(crate) fn restore_web_accessibility_on_exit() {
+        restore_all_web_accessibility(
+            &mut web_accessibility_state().lock_unpoisoned(),
+            &SystemWebAccessibilityBackend,
+        );
+    }
+
+    /// The journal path, also kept outside the state mutex so the panic hook
+    /// can reach it when the panicking thread holds that mutex.
+    static WEB_ACCESSIBILITY_JOURNAL_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+    /// Launch (from `setup`): point the journal at the app data dir and undo
+    /// whatever a run that did not exit cleanly left switched on. The AX
+    /// writes go to other apps, so they run off the main thread; the state
+    /// mutex serializes them with the grant worker.
+    pub(crate) fn init_web_accessibility_journal(app_data_dir: &std::path::Path) {
+        let path = app_data_dir.join(WEB_ACCESSIBILITY_JOURNAL_FILE);
+        let _ = WEB_ACCESSIBILITY_JOURNAL_PATH.set(path.clone());
+        #[cfg(not(test))]
+        {
+            let spawned = thread::Builder::new()
+                .name("petal-rc-webax-journal".to_string())
+                .spawn(move || {
+                    let restored = adopt_web_accessibility_journal(
+                        path,
+                        &mut web_accessibility_state().lock_unpoisoned(),
+                        &SystemWebAccessibilityBackend,
+                    );
+                    if restored > 0 {
+                        log::info!(
+                            "remote-control: restored {restored} chromium web accessibility switch(es) left on by a previous run"
+                        );
+                    }
+                });
+            if let Err(error) = spawned {
+                log::warn!(
+                    "remote-control: failed to spawn chromium web accessibility journal recovery: {error}"
+                );
+            }
+        }
+    }
+
+    /// Panic hook. Only a MAIN-thread panic ends the app (a worker-thread
+    /// panic unwinds that thread and the grant goes on, so turning the switch
+    /// off then would break typing into the page under an active grant).
+    /// The panicking thread may hold the state mutex, so never block on it:
+    /// take it if free, otherwise act from the journal file, which verifies
+    /// each process identity itself. `RunEvent::Exit` does not run after a
+    /// panic, so this is the last chance before the next launch.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn restore_web_accessibility_on_panic() {
+        if thread::current().name() != Some("main") {
+            return;
+        }
+        if let Ok(mut state) = web_accessibility_state().try_lock() {
+            restore_all_web_accessibility(&mut state, &SystemWebAccessibilityBackend);
+            return;
+        }
+        if let Some(path) = WEB_ACCESSIBILITY_JOURNAL_PATH.get() {
+            let entries = read_web_accessibility_journal(path);
+            recover_web_accessibility_journal(&entries, &SystemWebAccessibilityBackend);
+        }
+    }
+
+    struct SystemWebAccessibilityBackend;
+
+    /// Bounds for the `AXWebArea` probe. Chrome builds the web tree
+    /// asynchronously after the switch, so the probe retries briefly; it is a
+    /// log-only diagnostic and never gates anything.
+    const WEB_AREA_PROBE_ATTEMPTS: u32 = 5;
+    const WEB_AREA_PROBE_INTERVAL: Duration = Duration::from_millis(200);
+    const WEB_AREA_PROBE_MAX_NODES: usize = 800;
+    const WEB_AREA_PROBE_MAX_DEPTH: usize = 14;
+
+    fn ax_enhanced_user_interface_attribute() -> CfObject {
+        cf_string(b"AXEnhancedUserInterface\0")
+    }
+
+    impl WebAccessibilityBackend for SystemWebAccessibilityBackend {
+        fn window_pid(&self, window_id: u32) -> Option<i32> {
+            crate::window_registry::global()
+                .map(|registry| registry.owner_pid_fresh(window_id))
+                .unwrap_or_else(|| crate::platform::cg::owner_pid_for_window_id(window_id))
+        }
+
+        fn bundle_id(&self, pid: i32) -> Option<String> {
+            crate::share_target::bundle_id_for_pid(pid)
+        }
+
+        fn enhanced_user_interface(&self, pid: i32) -> Option<bool> {
+            let app = ax_app_element_for_pid(pid)?;
+            let value = copy_attribute(&app, ax_enhanced_user_interface_attribute().as_ptr()).ok()?;
+            if std::ptr::eq(value.as_ptr(), unsafe { kCFBooleanTrue }) {
+                Some(true)
+            } else if std::ptr::eq(value.as_ptr(), unsafe { kCFBooleanFalse }) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+
+        fn set_enhanced_user_interface(&self, pid: i32, enabled: bool) -> i32 {
+            let Some(app) = ax_app_element_for_pid(pid) else {
+                return K_AX_ERROR_INVALID_UI_ELEMENT;
+            };
+            let Some(app_ptr) = app.as_real_ptr() else {
+                return K_AX_ERROR_INVALID_UI_ELEMENT;
+            };
+            let value = if enabled {
+                unsafe { kCFBooleanTrue }
+            } else {
+                unsafe { kCFBooleanFalse }
+            };
+            let attribute = ax_enhanced_user_interface_attribute();
+            unsafe { AXUIElementSetAttributeValue(app_ptr, attribute.as_ptr(), value) }
+        }
+
+        fn process_start_us(&self, pid: i32) -> Option<u64> {
+            process_start_us(pid)
+        }
+
+        fn window_has_web_area(&self, pid: i32, window_id: u32) -> bool {
+            for attempt in 0..WEB_AREA_PROBE_ATTEMPTS {
+                if attempt > 0 {
+                    thread::sleep(WEB_AREA_PROBE_INTERVAL);
+                }
+                if authorized_window_has_web_area(pid, window_id) {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
+    /// A process's start time from `proc_pidinfo(PROC_PIDTBSDINFO)`, in
+    /// microseconds since the epoch. Stable for the life of the process and
+    /// different for a recycled pid, which is what the journal needs.
+    fn process_start_us(pid: i32) -> Option<u64> {
+        if pid <= 0 {
+            return None;
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        if written != size {
+            return None;
+        }
+        Some(info.pbi_start_tvsec.saturating_mul(1_000_000).saturating_add(info.pbi_start_tvusec))
+    }
+
+    /// Bounded breadth-first walk of the authorized window for an `AXWebArea`.
+    fn authorized_window_has_web_area(pid: i32, window_id: u32) -> bool {
+        let Some(app) = ax_app_element_for_pid(pid) else {
+            return false;
+        };
+        let Ok(list) = copy_attribute(&app, ax_windows_attribute().as_ptr()) else {
+            return false;
+        };
+        let mut windows = Vec::new();
+        push_ax_element_array(&list, &mut windows);
+        let Some(window) = windows
+            .into_iter()
+            .find(|window| ax_element_window_id(window, pid) == Ok(window_id))
+        else {
+            return false;
+        };
+        let role_attribute = ax_role_attribute();
+        let children_attribute = ax_children_attribute();
+        let mut queue = std::collections::VecDeque::from([(window, 0usize)]);
+        let mut visited = 0usize;
+        while let Some((element, depth)) = queue.pop_front() {
+            visited += 1;
+            if visited > WEB_AREA_PROBE_MAX_NODES {
+                return false;
+            }
+            if let Ok(role) = copy_attribute(&element, role_attribute.as_ptr()) {
+                if cf_string_to_string(role.as_ptr()).as_deref() == Some("AXWebArea") {
+                    return true;
+                }
+            }
+            if depth >= WEB_AREA_PROBE_MAX_DEPTH {
+                continue;
+            }
+            if let Ok(children) = copy_attribute(&element, children_attribute.as_ptr()) {
+                let mut found = Vec::new();
+                push_ax_element_array(&children, &mut found);
+                queue.extend(found.into_iter().map(|child| (child, depth + 1)));
+            }
+        }
+        false
+    }
+
     /// Pure decision behind `verify_key_window`'s one-shot raise recovery.
     /// `focus_verdict` is `Some(matched)`, or `None` when the focus check itself
     /// errored. Raise only when the authorized window is NOT confirmed focused
@@ -8254,6 +9397,34 @@ pub(crate) mod input {
     fn element_is_text_selectable(element: &AxElementHandle) -> bool {
         let attribute = ax_selected_text_range_attribute();
         attribute_settable(element, attribute.as_ptr())
+    }
+
+    /// #419: is `element` the AXApplication element itself? CF equality with
+    /// the app element, or an `AXApplication` role (the #170 guard).
+    fn ax_element_is_application(element: &AxElementHandle, app: &AxElementHandle) -> bool {
+        if let (Some(element_ptr), Some(app_ptr)) = (element.as_real_ptr(), app.as_real_ptr()) {
+            if unsafe { CFEqual(element_ptr, app_ptr) } {
+                return true;
+            }
+        }
+        let role_attribute = ax_role_attribute();
+        let application_role = ax_application_role();
+        matches!(
+            copy_attribute(element, role_attribute.as_ptr()),
+            Ok(role) if unsafe { CFEqual(role.as_ptr(), application_role.as_ptr()) }
+        )
+    }
+
+    /// #419: the CGWindowID of the window that contains a focused element,
+    /// via its `AXWindow` attribute and the shared `ax_element_window_id`
+    /// path. No AXWindow means the identity is unavailable (untrusted).
+    fn ax_focused_element_window_id(element: &AxElementHandle, pid: i32) -> Result<u32, AxError> {
+        let window_attribute = ax_window_attribute();
+        let window = copy_attribute(element, window_attribute.as_ptr())?;
+        if !is_ax_ui_element(window.as_ptr()) {
+            return Err(AxError::new(K_AX_ERROR_WINDOW_IDENTITY_UNAVAILABLE));
+        }
+        ax_element_window_id(&AxElementHandle::Real(window), pid)
     }
 
     /// #170: resolve a window's editable text element without app-scoped focus.
@@ -8756,6 +9927,30 @@ pub(crate) mod input {
         cf_string(b"AXNumberOfCharacters\0")
     }
 
+    /// #404: AX roles that are editable text whatever else they report.
+    const EDITABLE_TEXT_ROLES: &[&str] = &["AXTextField", "AXTextArea", "AXComboBox"];
+
+    /// #404: a text role, or a settable `AXValue` that holds a string (a
+    /// slider's settable value is a number, so it does not qualify).
+    fn element_is_editable_text(element: &AxElementHandle) -> bool {
+        if let Ok(role) = copy_attribute(element, ax_role_attribute().as_ptr()) {
+            if cf_string_to_string(role.as_ptr())
+                .is_some_and(|role| EDITABLE_TEXT_ROLES.contains(&role.as_str()))
+            {
+                return true;
+            }
+        }
+        let value_attribute = ax_value_attribute();
+        attribute_settable(element, value_attribute.as_ptr())
+            && copy_attribute(element, value_attribute.as_ptr())
+                .is_ok_and(|value| is_cf_string(value.as_ptr()))
+    }
+
+    /// #404: see `AxInputBackend::set_focused`.
+    fn ax_focused_attribute() -> CfObject {
+        cf_string(b"AXFocused\0")
+    }
+
     fn ax_focused_ui_element_attribute() -> CfObject {
         cf_string(b"AXFocusedUIElement\0")
     }
@@ -8797,6 +9992,14 @@ pub(crate) mod input {
 
     fn ax_role_attribute() -> CfObject {
         cf_string(b"AXRole\0")
+    }
+
+    fn ax_window_attribute() -> CfObject {
+        cf_string(b"AXWindow\0")
+    }
+
+    fn ax_application_role() -> CfObject {
+        cf_string(b"AXApplication\0")
     }
 
     fn ax_scroll_area_role() -> CfObject {
@@ -10084,6 +11287,14 @@ pub(crate) mod input {
             note_pointer_release_not_injected(message, PointerReleaseFailure::InjectionCancelled);
             return Ok(());
         }
+        // #404: an AX-serviced shortcut (Cmd+A/C/V) is a delivered key-down.
+        if ax_outcome == AxReplayOutcome::Handled
+            && message.message_type == RemoteControlType::Key
+            && message.action == Some(RemoteControlAction::Down)
+        {
+            super::note_key_down_delivered();
+            super::note_injection_route(crate::analytics::RemoteControlRoute::AxShortcut);
+        }
         let result = match ax_outcome {
             AxReplayOutcome::Handled => Ok(()),
             AxReplayOutcome::PassThrough
@@ -10256,6 +11467,10 @@ pub(crate) mod input {
     }
 
     impl InputSink for DisplayKeySink<'_> {
+        fn route(&self) -> crate::analytics::RemoteControlRoute {
+            crate::analytics::RemoteControlRoute::SessionTap
+        }
+
         fn verify_key_window(&self, _window_id: u32) -> Result<(), String> {
             Ok(())
         }
@@ -10308,7 +11523,7 @@ pub(crate) mod input {
         frame: WindowFrame,
         sink: &dyn InputSink,
     ) -> Result<(), String> {
-        match message.message_type {
+        let result = match message.message_type {
             RemoteControlType::Pointer => replay_pointer(message, frame, sink),
             RemoteControlType::Wheel => replay_wheel(message, frame, sink),
             RemoteControlType::Key => replay_key(message, sink),
@@ -10317,8 +11532,12 @@ pub(crate) mod input {
             | RemoteControlType::Release
             | RemoteControlType::Status
             | RemoteControlType::Result
-            | RemoteControlType::Unknown => Ok(()),
+            | RemoteControlType::Unknown => return Ok(()),
+        };
+        if result.is_ok() {
+            super::note_injection_route(sink.route());
         }
+        result
     }
 
     fn replay_pointer_via_ax(
@@ -10503,6 +11722,9 @@ pub(crate) mod input {
             "remote-control: semantic click window_id={window_id} button={button:?} click_count={click_count} mode=SessionTap outcome={}",
             if result.is_ok() { "Handled" } else { "Error" }
         );
+        if result.is_ok() {
+            super::note_injection_route(crate::analytics::RemoteControlRoute::SessionTap);
+        }
         result.map(|()| AxReplayOutcome::Handled)
     }
 
@@ -10560,6 +11782,7 @@ pub(crate) mod input {
             // real click with side effects, not a health probe.
             match sl.post_click(pid, point, button, click_count) {
                 Ok(()) => {
+                    super::note_injection_route(crate::analytics::RemoteControlRoute::SkyLight);
                     log::info!(
                         "remote-control: semantic click route=direct pid={pid} point=({:.1},{:.1})",
                         point.x,
@@ -10595,6 +11818,7 @@ pub(crate) mod input {
             } else {
                 resolve_at_point(window_id, pid, point, ax, use_cache)
             };
+            let mut focus_moved: Option<bool> = None;
             let (element, caps) = match resolution {
                 Ok(Some(resolved)) => resolved,
                 Ok(None) => {
@@ -10670,10 +11894,25 @@ pub(crate) mod input {
                     ));
                 }
             } else if caps.pressable {
-                ax.press(&element)
+                if !(caps.editable_text || caps.text_selectable) {
+                    // #404 follow-up: see `focus_chromium_page_before_press`.
+                    focus_moved = focus_chromium_page_before_press(window_id, pid, &element, ax);
+                }
+                let pressed = ax.press(&element);
+                // #404: a pressable text field (a web `<input>`) also needs
+                // the app's keyboard focus, or typed keys miss it.
+                if pressed.is_ok() && (caps.editable_text || caps.text_selectable) {
+                    focus_moved = Some(focus_clicked_text_element(window_id, &element, ax));
+                }
+                pressed
             } else if caps.text_selectable {
                 match ax.offset_at_point(&element, point) {
-                    Ok(offset) => ax.set_selected_range(&element, offset, 0),
+                    Ok(offset) => {
+                        // #404: focus before placing the caret -- see
+                        // `ax_pointer_up`'s AxText branch.
+                        focus_moved = Some(focus_clicked_text_element(window_id, &element, ax));
+                        ax.set_selected_range(&element, offset, 0)
+                    }
                     Err(error) => {
                         if attempt == 0 && error.is_invalid_ui_element() {
                             clear_ax_resolution_cache_key(ax_point_key(window_id, point));
@@ -10718,7 +11957,16 @@ pub(crate) mod input {
                         "text_selectable"
                     };
                     log::info!(
-                        "remote-control: semantic click window_id={window_id} button={button:?} click_count={click_count} mode=Ax route={route} outcome=Handled"
+                        "remote-control: semantic click window_id={window_id} button={button:?} click_count={click_count} mode=Ax route={route} outcome=Handled text_focus={}",
+                        text_focus_summary(focus_moved)
+                    );
+                    super::note_injection_route_with_focus(
+                        if route == "text_selectable" {
+                            crate::analytics::RemoteControlRoute::AxText
+                        } else {
+                            crate::analytics::RemoteControlRoute::AxPressable
+                        },
+                        focus_moved,
                     );
                     return Ok(AxReplayOutcome::Handled);
                 }
@@ -11018,6 +12266,7 @@ pub(crate) mod input {
                 GestureMode::AxPressable {
                     element,
                     action: AxClickAction::ShowMenu,
+                    focus_text: false,
                 }
             } else {
                 log::info!(
@@ -11031,6 +12280,7 @@ pub(crate) mod input {
             return Ok(GestureMode::AxPressable {
                 element,
                 action: AxClickAction::Press,
+                focus_text: caps.editable_text || caps.text_selectable,
             });
         }
         // #373: a double/triple-click down on a text view is routed
@@ -11102,11 +12352,27 @@ pub(crate) mod input {
             GestureMode::PassThrough => "PassThrough".to_string(),
             GestureMode::SlDrag => "SlDrag".to_string(),
             GestureMode::SessionTap => "SessionTap".to_string(),
-            GestureMode::AxPressable { action, .. } => {
-                format!("AxPressable action={}", ax_click_action_name(*action))
+            // #404: name the pressed element's role, so a field log tells a
+            // pressed `<input>` apart from a pressable container around it.
+            GestureMode::AxPressable {
+                element,
+                action,
+                focus_text,
+            } => {
+                format!(
+                    "AxPressable action={} role={} focus_text={focus_text}",
+                    ax_click_action_name(*action),
+                    ax_role_description(element)
+                )
             }
-            GestureMode::AxText { anchor_offset, .. } => {
-                format!("AxText anchor_offset={anchor_offset}")
+            GestureMode::AxText {
+                element,
+                anchor_offset,
+            } => {
+                format!(
+                    "AxText anchor_offset={anchor_offset} role={}",
+                    ax_role_description(element)
+                )
             }
         }
     }
@@ -11276,6 +12542,9 @@ pub(crate) mod input {
         match state.mode {
             GestureMode::SessionTap => {
                 let result = session_tap_pointer_up(window_id, up_point, state.button, tap);
+                if result.is_ok() {
+                    super::note_injection_route(crate::analytics::RemoteControlRoute::SessionTap);
+                }
                 log::info!(
                     "remote-control: AX pointer up window_id={window_id} mode=SessionTap displacement={displacement:.2} outcome={}",
                     if result.is_ok() { "Handled" } else { "Error" }
@@ -11305,12 +12574,17 @@ pub(crate) mod input {
                     }
                     Err(SlClickError::Failed(error)) => return Err(error),
                 };
+                super::note_injection_route(crate::analytics::RemoteControlRoute::SkyLight);
                 log::info!(
                     "remote-control: AX pointer up window_id={window_id} mode=SlDrag displacement={displacement:.2} outcome=Handled"
                 );
                 Ok(outcome)
             }
-            GestureMode::AxPressable { element, action } => {
+            GestureMode::AxPressable {
+                element,
+                action,
+                focus_text,
+            } => {
                 if action == AxClickAction::ShowMenu
                     && displacement >= AX_CLICK_DRAG_THRESHOLD_POINTS
                 {
@@ -11328,11 +12602,26 @@ pub(crate) mod input {
                     );
                     return Ok(outcome);
                 }
+                // #404 follow-up: a pressed page button/link needs Chrome's
+                // keyboard focus in the page BEFORE the press.
+                let page_focus = if action == AxClickAction::Press && !focus_text {
+                    focus_chromium_page_before_press(window_id, pid, &element, ax)
+                } else {
+                    None
+                };
                 let result = match action {
                     AxClickAction::Press => ax.press(&element),
                     AxClickAction::ShowMenu => ax.show_menu(&element),
                 };
                 let outcome = ax_action_outcome(result, "pressable pointer gesture")?;
+                // #404: only after the AX press itself landed. A PassThrough
+                // falls back to a real posted click below, which the target
+                // app focuses for itself.
+                let focused = if focus_text && outcome == AxReplayOutcome::Handled {
+                    Some(focus_clicked_text_element(window_id, &element, ax))
+                } else {
+                    page_focus
+                };
                 let final_outcome = if outcome == AxReplayOutcome::PassThrough {
                     sl_click_or_passthrough(
                         pid,
@@ -11343,13 +12632,19 @@ pub(crate) mod input {
                         sl,
                     )
                 } else {
+                    super::note_injection_route_with_focus(
+                        crate::analytics::RemoteControlRoute::AxPressable,
+                        focused,
+                    );
                     outcome
                 };
                 log::info!(
-                    "remote-control: AX pointer up window_id={window_id} mode=AxPressable action={} displacement={displacement:.2} ax_outcome={} outcome={}",
+                    "remote-control: AX pointer up window_id={window_id} mode=AxPressable action={} displacement={displacement:.2} ax_outcome={} outcome={} text_focus={} page_focus={}",
                     ax_click_action_name(action),
                     ax_replay_outcome_name(outcome),
-                    ax_replay_outcome_name(final_outcome)
+                    ax_replay_outcome_name(final_outcome),
+                    text_focus_summary(if focus_text { focused } else { None }),
+                    text_focus_summary(page_focus)
                 );
                 Ok(final_outcome)
             }
@@ -11387,6 +12682,10 @@ pub(crate) mod input {
                     let start = anchor_offset.min(up_offset);
                     (start, (up_offset - anchor_offset).abs())
                 };
+                // #404: focus BEFORE placing the selection, so the caret the
+                // controller clicked is the one that survives -- focusing a
+                // field can move its selection.
+                let focused = focus_clicked_text_element(window_id, &element, ax);
                 let outcome = ax_action_outcome(
                     ax.set_selected_range(&element, start, len),
                     "AX selected text range update",
@@ -11401,15 +12700,86 @@ pub(crate) mod input {
                         sl,
                     )
                 } else {
+                    super::note_injection_route_with_focus(
+                        crate::analytics::RemoteControlRoute::AxText,
+                        Some(focused),
+                    );
                     outcome
                 };
                 log::info!(
-                    "remote-control: AX pointer up window_id={window_id} mode=AxText anchor_offset={anchor_offset} displacement={displacement:.2} up_offset={up_offset} selection_start={start} selection_len={len} ax_outcome={} outcome={}",
+                    "remote-control: AX pointer up window_id={window_id} mode=AxText anchor_offset={anchor_offset} displacement={displacement:.2} up_offset={up_offset} selection_start={start} selection_len={len} ax_outcome={} outcome={} text_focus={}",
                     ax_replay_outcome_name(outcome),
-                    ax_replay_outcome_name(final_outcome)
+                    ax_replay_outcome_name(final_outcome),
+                    text_focus_summary(Some(focused))
                 );
                 Ok(final_outcome)
             }
+        }
+    }
+
+    /// #404: best-effort `AXFocused = true` on the text element a remote click
+    /// just landed on. Pid-posted keys reach whatever view holds the app's own
+    /// keyboard focus; in Chrome that can be the address bar even though the
+    /// click put DOM focus on a page field, and then every typed key lands in
+    /// the address bar. A failure never fails the click itself -- the click
+    /// already happened -- it is only logged. Returns whether focus was set.
+    fn focus_clicked_text_element(
+        window_id: u32,
+        element: &AxElementHandle,
+        ax: &dyn AxInputBackend,
+    ) -> bool {
+        match ax.set_focused(element) {
+            Ok(()) => true,
+            Err(error) => {
+                log::info!(
+                    "remote-control: AX text focus failed window_id={window_id} role={} error={error:?}",
+                    ax_role_description(element)
+                );
+                false
+            }
+        }
+    }
+
+    /// #404 follow-up: before an `AXPress` on Chromium page content that is
+    /// NOT itself a text field (a button, a link, a clickable container),
+    /// put Chrome's keyboard focus into the page. Measured on Chrome
+    /// (2026-10-23, own isolated profile, omnibox focused first): `AXPress`
+    /// on a `<button>` whose click handler focuses an `<input>` moves DOM
+    /// focus to the input but leaves `document.hasFocus()` false, so every
+    /// pid-posted key lands in the address bar. `AXFocused = true` on the
+    /// pressed element BEFORE the press makes the same keys land in the
+    /// input, for a button and for a link. Focusing the `AXWebArea` AFTER the
+    /// press instead dropped DOM focus to the document, so the web area is
+    /// only the fallback when the element refuses focus, and only before the
+    /// press. Returns `None` when this does not apply (not Chromium page
+    /// content), otherwise whether keyboard focus was moved.
+    fn focus_chromium_page_before_press(
+        window_id: u32,
+        pid: i32,
+        element: &AxElementHandle,
+        ax: &dyn AxInputBackend,
+    ) -> Option<bool> {
+        let web_area = ax.chromium_web_area(pid, element)?;
+        if ax.set_focused(element).is_ok() {
+            return Some(true);
+        }
+        match ax.set_focused(&web_area) {
+            Ok(()) => Some(true),
+            Err(error) => {
+                log::info!(
+                    "remote-control: AX page focus before press failed window_id={window_id} role={} error={error:?}",
+                    ax_role_description(element)
+                );
+                Some(false)
+            }
+        }
+    }
+
+    fn text_focus_summary(focused: Option<bool>) -> &'static str {
+        match focused {
+            Some(true) => "set",
+            Some(false) => "failed",
+            None => "n/a",
         }
     }
 
@@ -11531,7 +12901,10 @@ pub(crate) mod input {
             return AxReplayOutcome::PassThrough;
         }
         match post_sl_click_with_priming(pid, point, button, click_count.max(1), sl) {
-            SlClickOutcome::Posted => AxReplayOutcome::Handled,
+            SlClickOutcome::Posted => {
+                super::note_injection_route(crate::analytics::RemoteControlRoute::SkyLight);
+                AxReplayOutcome::Handled
+            }
             SlClickOutcome::PassThrough => AxReplayOutcome::PassThrough,
         }
     }
@@ -11701,7 +13074,10 @@ pub(crate) mod input {
             // #368 F1 invalidation is applied centrally in replay_with_backends
             // (which also covers the Ok(false) synthetic-scroll passthrough that
             // still scrolls the content — see message_mutates_ui for Wheel).
-            Ok(true) => Ok(AxReplayOutcome::Handled),
+            Ok(true) => {
+                super::note_injection_route(crate::analytics::RemoteControlRoute::AxScroll);
+                Ok(AxReplayOutcome::Handled)
+            }
             Ok(false) => wheel_sl_fallback(message, frame, pid, point, sl, tap),
             Err(error) => ax_action_outcome(Err(error), "AX scroll replay"),
         }
@@ -11719,7 +13095,10 @@ pub(crate) mod input {
         let flags = cg_flags_for_modifiers(&message.modifiers);
         if direct_scroll_enabled() {
             match sl.post_scroll(pid, point, dy, dx, flags) {
-                Ok(()) => return Ok(AxReplayOutcome::Handled),
+                Ok(()) => {
+                    super::note_injection_route(crate::analytics::RemoteControlRoute::SkyLight);
+                    return Ok(AxReplayOutcome::Handled);
+                }
                 Err(SlClickError::Unavailable) => {}
                 Err(SlClickError::Failed(error)) => {
                     SL_FAILURE_LOGGED.get_or_init(|| {
@@ -11752,6 +13131,7 @@ pub(crate) mod input {
         }
         match tap.post_scroll(point, delta_y, delta_x, flags) {
             Ok(()) => {
+                super::note_injection_route(crate::analytics::RemoteControlRoute::SessionTap);
                 note_cursor_posted(window_id, point, Some(SESSION_TAP_WHEEL_SETTLE));
                 Ok(AxReplayOutcome::Handled)
             }
@@ -11799,6 +13179,34 @@ pub(crate) mod input {
     impl TextElementSource {
         fn is_trusted_focus(self) -> bool {
             matches!(self, TextElementSource::FocusedElement)
+        }
+    }
+
+    /// #419: where a resolved text element came from, for the per-shortcut
+    /// provenance log. Both focus sources are trusted; BFS is not.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TextFocusProvenance {
+        AppFocused,
+        WindowFocused,
+        Bfs,
+    }
+
+    impl TextFocusProvenance {
+        fn label(self) -> &'static str {
+            match self {
+                TextFocusProvenance::AppFocused => "app-focused",
+                TextFocusProvenance::WindowFocused => "window-focused",
+                TextFocusProvenance::Bfs => "bfs",
+            }
+        }
+
+        fn source(self) -> TextElementSource {
+            match self {
+                TextFocusProvenance::AppFocused | TextFocusProvenance::WindowFocused => {
+                    TextElementSource::FocusedElement
+                }
+                TextFocusProvenance::Bfs => TextElementSource::BfsFallback,
+            }
         }
     }
 
@@ -12188,13 +13596,19 @@ pub(crate) mod input {
                     key_down,
                     cg_flags_for_modifiers(&message.modifiers),
                     unicode.as_deref(),
-                )
+                )?;
+                if key_down {
+                    super::note_key_down_delivered();
+                }
+                Ok(())
             }
             // Text is never a release -- `plain_text_for_key` returns None
             // unless `key_down` -- so this arm stays fully gated.
             KeyReplayPlan::Text(text) => {
                 sink.verify_key_window_with_recovery(message.window_id)?;
-                sink.text(&text)
+                sink.text(&text)?;
+                super::note_key_down_delivered();
+                Ok(())
             }
         }
     }
@@ -13261,6 +14675,13 @@ pub(crate) mod input {
             // Defaults to FocusedElement (trusted) so existing happy-path tests
             // still exercise the destructive-op AX path.
             text_source: Mutex<TextElementSource>,
+            // #419: the app-scoped AXFocusedUIElement, run through the same
+            // production trust gate before the window-scoped `text_resolved`.
+            app_focused: Mutex<Option<u64>>,
+            // #419: element ids that are the AXApplication element itself.
+            application_ids: Mutex<std::collections::HashSet<u64>>,
+            // #419: the last provenance the fake resolver reported.
+            last_text_provenance: Mutex<Option<TextFocusProvenance>>,
             text_lengths: Mutex<HashMap<u64, i64>>,
             selected_texts: Mutex<HashMap<u64, String>>,
             capabilities: Mutex<HashMap<u64, AxCapabilities>>,
@@ -13279,6 +14700,15 @@ pub(crate) mod input {
             // modelling a cached element that was destroyed before the press.
             press_error_ids: Mutex<std::collections::HashSet<u64>>,
             ops: Mutex<Vec<AxOp>>,
+            // #404: element ids that received `set_focused`, in order.
+            focused: Mutex<Vec<u64>>,
+            // #404 follow-up: `ops().len()` at each `set_focused`, so a test
+            // can tell a focus BEFORE the press from one after it.
+            focused_at_op: Mutex<Vec<(u64, usize)>>,
+            // #404 follow-up: element id -> its Chromium `AXWebArea` id.
+            web_areas: Mutex<HashMap<u64, u64>>,
+            // #404 follow-up: element ids whose `set_focused` fails.
+            focus_error_ids: Mutex<std::collections::HashSet<u64>>,
         }
 
         #[derive(Debug, Clone, PartialEq)]
@@ -13715,6 +15145,20 @@ pub(crate) mod input {
                 *self.text_source.lock_unpoisoned() = TextElementSource::BfsFallback;
             }
 
+            // #419: model the app-scoped AXFocusedUIElement.
+            fn focus_app_on(&self, id: u64) {
+                *self.app_focused.lock_unpoisoned() = Some(id);
+            }
+
+            // #419: mark an element id as the AXApplication element itself.
+            fn mark_as_application(&self, id: u64) {
+                self.application_ids.lock_unpoisoned().insert(id);
+            }
+
+            fn last_text_provenance(&self) -> Option<TextFocusProvenance> {
+                *self.last_text_provenance.lock_unpoisoned()
+            }
+
             // F4: make subsequent AX act calls fail with the given error.
             fn fail_acts_with(&self, error: AxError) {
                 *self.act_error.lock_unpoisoned() = Some(error);
@@ -13760,6 +15204,14 @@ pub(crate) mod input {
             fn ops(&self) -> Vec<AxOp> {
                 self.ops.lock_unpoisoned().clone()
             }
+
+            fn focused_ids(&self) -> Vec<u64> {
+                self.focused.lock_unpoisoned().clone()
+            }
+
+            fn focused_at_op(&self) -> Vec<(u64, usize)> {
+                self.focused_at_op.lock_unpoisoned().clone()
+            }
         }
 
         impl AxInputBackend for RecordingAxBackend {
@@ -13799,19 +15251,41 @@ pub(crate) mod input {
                 if let Some(error) = *self.text_resolve_error.lock_unpoisoned() {
                     return Err(error);
                 }
-                let source = *self.text_source.lock_unpoisoned();
-                let resolved = self.text_resolved.lock_unpoisoned().clone();
-                if let Some(id) = resolved.as_ref().and_then(AxElementHandle::test_id) {
-                    if self
-                        .element_window_ids
-                        .lock_unpoisoned()
-                        .get(&id)
-                        .is_some_and(|candidate| *candidate != window_id)
-                    {
-                        return Err(AxError::new(K_AX_ERROR_WINDOW_ID_MISMATCH));
+                let app_focused = self.app_focused.lock_unpoisoned().map(Self::element);
+                let trusted_app_focus = trusted_app_focused_text_element(
+                    app_focused,
+                    window_id,
+                    |focused| {
+                        focused
+                            .test_id()
+                            .is_some_and(|id| self.application_ids.lock_unpoisoned().contains(&id))
+                    },
+                    |focused| self.capabilities(focused).text_selectable,
+                    |focused| {
+                        focused
+                            .test_id()
+                            .and_then(|id| self.element_window_ids.lock_unpoisoned().get(&id).copied())
+                            .ok_or_else(|| AxError::new(K_AX_ERROR_WINDOW_IDENTITY_UNAVAILABLE))
+                    },
+                );
+                let resolved = resolve_text_element_preferring_app_focus(trusted_app_focus, || {
+                    let source = *self.text_source.lock_unpoisoned();
+                    let resolved = self.text_resolved.lock_unpoisoned().clone();
+                    if let Some(id) = resolved.as_ref().and_then(AxElementHandle::test_id) {
+                        if self
+                            .element_window_ids
+                            .lock_unpoisoned()
+                            .get(&id)
+                            .is_some_and(|candidate| *candidate != window_id)
+                        {
+                            return Err(AxError::new(K_AX_ERROR_WINDOW_ID_MISMATCH));
+                        }
                     }
-                }
-                Ok(resolved.map(|element| (element, source)))
+                    Ok(resolved.map(|element| (element, source)))
+                })?;
+                *self.last_text_provenance.lock_unpoisoned() =
+                    resolved.as_ref().map(|(_, provenance)| *provenance);
+                Ok(resolved.map(|(element, provenance)| (element, provenance.source())))
             }
 
             fn text_length(&self, element: &AxElementHandle) -> Result<i64, AxError> {
@@ -13898,6 +15372,32 @@ pub(crate) mod input {
                     .lock_unpoisoned()
                     .push(AxOp::SetSelectedRange { id, start, len });
                 Ok(())
+            }
+
+            fn set_focused(&self, element: &AxElementHandle) -> Result<(), AxError> {
+                let id = element.test_id().unwrap();
+                // #404: recorded apart from `ops` so the many existing exact
+                // `ops()` assertions keep describing the press/selection
+                // sequence alone.
+                if self.focus_error_ids.lock_unpoisoned().contains(&id) {
+                    return Err(AxError::new(K_AX_ERROR_ATTRIBUTE_UNSUPPORTED));
+                }
+                self.focused.lock_unpoisoned().push(id);
+                let at = self.ops.lock_unpoisoned().len();
+                self.focused_at_op.lock_unpoisoned().push((id, at));
+                Ok(())
+            }
+
+            fn chromium_web_area(
+                &self,
+                _pid: i32,
+                element: &AxElementHandle,
+            ) -> Option<AxElementHandle> {
+                let id = element.test_id()?;
+                self.web_areas
+                    .lock_unpoisoned()
+                    .get(&id)
+                    .map(|area| AxElementHandle::Test(*area))
             }
 
             fn scroll_by(
@@ -14063,6 +15563,7 @@ pub(crate) mod input {
                 message: None,
                 grant_token: None,
                 supports_binary_hot_path: false,
+                supports_redundant_input: false,
                 modifiers: RemoteControlModifiers::default(),
             }
         }
@@ -14418,6 +15919,809 @@ pub(crate) mod input {
             );
         }
 
+        // ---- #404: move the app's keyboard focus onto a clicked text element ----
+
+        #[test]
+        fn ax_click_on_text_element_also_sets_ax_focused() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(2);
+            ax.set_capabilities(2, text_selectable_caps());
+            ax.set_offset(2, 12.0, 20.0, 5);
+
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.20,
+                RemoteControlButton::Left,
+                1,
+            );
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.12,
+                0.20,
+                RemoteControlButton::Left,
+                0,
+            );
+            assert!(replay_events_with_ax(&down, frame, &ax).is_empty());
+            assert!(ax.focused_ids().is_empty(), "nothing is focused at Down");
+            assert!(replay_events_with_ax(&up, frame, &ax).is_empty());
+
+            assert_eq!(ax.focused_ids(), vec![2]);
+            assert_eq!(
+                ax.ops(),
+                vec![AxOp::SetSelectedRange {
+                    id: 2,
+                    start: 5,
+                    len: 0,
+                }]
+            );
+        }
+
+        #[test]
+        fn ax_press_on_an_editable_text_element_also_sets_ax_focused() {
+            // A web `<input>` is both pressable and text-selectable; pressable
+            // wins the route, and the press alone leaves Chrome's keyboard
+            // focus in the address bar (T1 case 8).
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(3);
+            ax.set_capabilities(
+                3,
+                AxCapabilities {
+                    pressable: true,
+                    text_selectable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message =
+                    pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+            }
+            assert_eq!(ax.ops(), vec![AxOp::Press(3)]);
+            assert_eq!(ax.focused_ids(), vec![3]);
+        }
+
+        #[test]
+        fn semantic_click_on_text_elements_sets_ax_focused() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                0.10,
+                0.20,
+                RemoteControlButton::Left,
+                0,
+            );
+
+            let text = RecordingAxBackend::default();
+            text.resolve_to(4);
+            text.set_capabilities(4, text_selectable_caps());
+            assert!(replay_events_with_ax(&click, frame, &text).is_empty());
+            assert_eq!(text.focused_ids(), vec![4]);
+
+            clear_all_ax_control_state();
+            let field = RecordingAxBackend::default();
+            field.resolve_to(5);
+            field.set_capabilities(
+                5,
+                AxCapabilities {
+                    pressable: true,
+                    text_selectable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            assert!(replay_events_with_ax(&click, frame, &field).is_empty());
+            assert_eq!(field.ops(), vec![AxOp::Press(5)]);
+            assert_eq!(field.focused_ids(), vec![5]);
+        }
+
+        #[test]
+        fn ax_press_on_an_editable_element_without_a_selection_range_sets_ax_focused() {
+            // The incident route: every click was `mode=AxPressable
+            // action=Press`. A field that is editable by role or settable
+            // string AXValue, but whose AXSelectedTextRange is not settable,
+            // must still get keyboard focus.
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(7);
+            ax.set_capabilities(
+                7,
+                AxCapabilities {
+                    pressable: true,
+                    editable_text: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message =
+                    pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+            }
+            assert_eq!(ax.ops(), vec![AxOp::Press(7)]);
+            assert_eq!(ax.focused_ids(), vec![7]);
+        }
+
+        #[test]
+        fn ax_press_on_a_plain_button_does_not_move_keyboard_focus() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(6);
+            ax.set_capabilities(
+                6,
+                AxCapabilities {
+                    pressable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message =
+                    pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+            }
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                0.10,
+                0.20,
+                RemoteControlButton::Left,
+                0,
+            );
+            assert!(replay_events_with_ax(&click, frame, &ax).is_empty());
+            assert_eq!(ax.ops(), vec![AxOp::Press(6), AxOp::Press(6)]);
+            assert!(ax.focused_ids().is_empty());
+        }
+
+        // ---- #404: `type` telemetry counts only delivered key-downs ----
+
+        /// Replay one key message through the REAL `replay_with_backends` and
+        /// report whether it marked a key-down as delivered.
+        fn key_delivery_for(message: &RemoteControlMessage, sink: &RecordingSink) -> bool {
+            let ax = RecordingAxBackend::default();
+            let sl = RecordingSlClickBackend::unavailable();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::untrusted();
+            super::super::take_key_down_delivered();
+            let _ = replay_with_backends(
+                message,
+                unit_frame(),
+                Some(1234),
+                sink,
+                &ax,
+                &sl,
+                &pb,
+                &tap,
+            );
+            super::super::take_key_down_delivered()
+        }
+
+        #[test]
+        fn only_a_posted_key_down_is_marked_delivered() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let down = key_message("KeyA", "a", RemoteControlModifiers::default());
+            let sink = RecordingSink::default();
+            assert!(key_delivery_for(&down, &sink));
+            assert!(!sink.events().is_empty());
+
+            let mut up = down.clone();
+            up.action = Some(RemoteControlAction::Up);
+            let sink = RecordingSink::default();
+            assert!(!key_delivery_for(&up, &sink), "a key release types nothing");
+            assert!(!sink.events().is_empty(), "the release itself is still posted");
+
+            // Refused by the focus gate: nothing posted, nothing delivered.
+            let sink = RecordingSink::default();
+            sink.focus_window(down.window_id + 1);
+            assert!(!key_delivery_for(&down, &sink));
+            assert!(sink.events().is_empty());
+
+            // Unmapped: `replay_key` returns Ok without posting.
+            let unmapped = key_message("NotARealKey", "Unidentified", RemoteControlModifiers::default());
+            let sink = RecordingSink::default();
+            assert!(!key_delivery_for(&unmapped, &sink));
+            assert!(sink.events().is_empty());
+
+            // Cancelled injection: Ok without posting.
+            let sink = RecordingSink::default();
+            {
+                let _cancelled = super::super::InjectionCancelledForTests::set();
+                assert!(!key_delivery_for(&down, &sink));
+            }
+            assert!(sink.events().is_empty());
+        }
+
+        // ---- #404 follow-up: page focus before pressing Chromium content ----
+
+        fn chromium_button(ax: &RecordingAxBackend, id: u64, web_area: u64) {
+            ax.resolve_to(id);
+            ax.set_capabilities(
+                id,
+                AxCapabilities {
+                    pressable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            ax.web_areas.lock_unpoisoned().insert(id, web_area);
+        }
+
+        #[test]
+        fn a_pressed_chromium_page_button_gets_keyboard_focus_before_the_press() {
+            // The incident shape: a page button/link whose click handler
+            // focuses a field. Without focus first, Chrome's keyboard focus
+            // stays in the address bar and every typed key lands there.
+            let _guard = ax_test_lock();
+            let frame = unit_frame();
+            for legacy in [true, false] {
+                clear_all_ax_control_state();
+                let ax = RecordingAxBackend::default();
+                chromium_button(&ax, 8, 80);
+                let route = route_after(|| {
+                    if legacy {
+                        for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                            let message =
+                                pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                            assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+                        }
+                    } else {
+                        let click = pointer_message(
+                            RemoteControlAction::Click,
+                            0.10,
+                            0.20,
+                            RemoteControlButton::Left,
+                            0,
+                        );
+                        assert!(replay_events_with_ax(&click, frame, &ax).is_empty());
+                    }
+                });
+                assert_eq!(ax.ops(), vec![AxOp::Press(8)], "legacy={legacy}");
+                assert_eq!(ax.focused_at_op(), vec![(8, 0)], "focused BEFORE the press, legacy={legacy}");
+                assert_eq!(
+                    route,
+                    report(crate::analytics::RemoteControlRoute::AxPressable, Some(true)),
+                    "legacy={legacy}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_chromium_element_that_refuses_focus_falls_back_to_its_web_area() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            chromium_button(&ax, 9, 90);
+            ax.focus_error_ids.lock_unpoisoned().insert(9);
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message = pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &ax).is_empty());
+            }
+            assert_eq!(ax.ops(), vec![AxOp::Press(9)]);
+            assert_eq!(ax.focused_at_op(), vec![(90, 0)]);
+        }
+
+        #[test]
+        fn non_chromium_buttons_and_right_clicks_never_get_pre_press_focus() {
+            let _guard = ax_test_lock();
+            let frame = unit_frame();
+            // A native button (no Chromium web area): a real click on it does
+            // not take keyboard focus, so neither may the AX press.
+            clear_all_ax_control_state();
+            let native = RecordingAxBackend::default();
+            native.resolve_to(6);
+            native.set_capabilities(
+                6,
+                AxCapabilities {
+                    pressable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message = pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &native).is_empty());
+            }
+            assert!(native.focused_ids().is_empty());
+
+            // A right click on page content opens the menu; no focus move.
+            clear_all_ax_control_state();
+            let page = RecordingAxBackend::default();
+            chromium_button(&page, 8, 80);
+            page.set_capabilities(
+                8,
+                AxCapabilities {
+                    pressable: true,
+                    show_menu: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message = pointer_message(action, 0.10, 0.20, RemoteControlButton::Right, 0);
+                let _ = replay_events_with_ax(&message, frame, &page);
+            }
+            assert!(page.focused_ids().is_empty());
+
+            // A pressable Chromium TEXT field keeps the #404 after-press focus.
+            clear_all_ax_control_state();
+            let field = RecordingAxBackend::default();
+            chromium_button(&field, 7, 70);
+            field.set_capabilities(
+                7,
+                AxCapabilities {
+                    pressable: true,
+                    editable_text: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            for action in [RemoteControlAction::Down, RemoteControlAction::Up] {
+                let message = pointer_message(action, 0.10, 0.20, RemoteControlButton::Left, 0);
+                assert!(replay_events_with_ax(&message, frame, &field).is_empty());
+            }
+            assert_eq!(field.focused_at_op(), vec![(7, 1)], "after the press, as #404 measured");
+        }
+
+        // ---- #404 follow-up: the route dimension on remote_control_input ----
+
+        fn route_after(f: impl FnOnce()) -> crate::analytics::RemoteControlRouteReport {
+            super::super::take_injection_route();
+            f();
+            super::super::take_injection_route()
+        }
+
+        fn report(
+            route: crate::analytics::RemoteControlRoute,
+            focus_moved: Option<bool>,
+        ) -> crate::analytics::RemoteControlRouteReport {
+            crate::analytics::RemoteControlRouteReport {
+                route: Some(route),
+                focus_moved,
+            }
+        }
+
+        #[test]
+        fn the_incident_press_reports_ax_pressable_and_whether_focus_moved() {
+            use crate::analytics::RemoteControlRoute;
+            let _guard = ax_test_lock();
+            let frame = unit_frame();
+            let down = pointer_message(RemoteControlAction::Down, 0.10, 0.20, RemoteControlButton::Left, 0);
+            let up = pointer_message(RemoteControlAction::Up, 0.10, 0.20, RemoteControlButton::Left, 0);
+
+            // A web field that is pressable and editable: press + focus.
+            clear_all_ax_control_state();
+            let field = RecordingAxBackend::default();
+            field.resolve_to(7);
+            field.set_capabilities(
+                7,
+                AxCapabilities {
+                    pressable: true,
+                    editable_text: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            assert!(replay_events_with_ax(&down, frame, &field).is_empty());
+            let up_route = route_after(|| {
+                assert!(replay_events_with_ax(&up, frame, &field).is_empty());
+            });
+            assert_eq!(up_route, report(RemoteControlRoute::AxPressable, Some(true)));
+
+            // A plain button: pressed, focus not attempted.
+            clear_all_ax_control_state();
+            let button = RecordingAxBackend::default();
+            button.resolve_to(6);
+            button.set_capabilities(
+                6,
+                AxCapabilities {
+                    pressable: true,
+                    ..AxCapabilities::default()
+                },
+            );
+            assert!(replay_events_with_ax(&down, frame, &button).is_empty());
+            let up_route = route_after(|| {
+                assert!(replay_events_with_ax(&up, frame, &button).is_empty());
+            });
+            assert_eq!(up_route, report(RemoteControlRoute::AxPressable, None));
+
+            // A semantic click on a text element: AxText + focus.
+            clear_all_ax_control_state();
+            let text = RecordingAxBackend::default();
+            text.resolve_to(4);
+            text.set_capabilities(4, text_selectable_caps());
+            let click = pointer_message(RemoteControlAction::Click, 0.10, 0.20, RemoteControlButton::Left, 0);
+            let click_route = route_after(|| {
+                assert!(replay_events_with_ax(&click, frame, &text).is_empty());
+            });
+            assert_eq!(click_route, report(RemoteControlRoute::AxText, Some(true)));
+        }
+
+        #[test]
+        fn a_posted_key_reports_pid_post_and_a_refused_one_reports_nothing() {
+            use crate::analytics::RemoteControlRoute;
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let down = key_message("KeyA", "a", RemoteControlModifiers::default());
+            let sink = RecordingSink::default();
+            let posted = route_after(|| {
+                assert!(key_delivery_for(&down, &sink));
+            });
+            assert_eq!(posted, report(RemoteControlRoute::PidPost, None));
+
+            let refused_sink = RecordingSink::default();
+            refused_sink.focus_window(down.window_id + 1);
+            let refused = route_after(|| {
+                assert!(!key_delivery_for(&down, &refused_sink));
+            });
+            assert_eq!(refused, crate::analytics::RemoteControlRouteReport::default());
+        }
+
+        #[test]
+        fn key_up_and_undelivered_key_down_do_not_count_as_typing() {
+            use super::super::replay_counts_as_applied_input;
+            let down = key_message("KeyA", "a", RemoteControlModifiers::default());
+            let mut up = down.clone();
+            up.action = Some(RemoteControlAction::Up);
+            assert!(replay_counts_as_applied_input(&down, true));
+            assert!(!replay_counts_as_applied_input(&down, false));
+            // A release -- controller-sent or host-synthesized on revoke/TTL
+            // -- never counts, delivered or not.
+            assert!(!replay_counts_as_applied_input(&up, true));
+            assert!(!replay_counts_as_applied_input(&up, false));
+            // Non-key input keeps the completed-replay count.
+            let click = pointer_message(
+                RemoteControlAction::Click,
+                0.1,
+                0.2,
+                RemoteControlButton::Left,
+                0,
+            );
+            assert!(replay_counts_as_applied_input(&click, false));
+        }
+
+        // ---- #404: Chromium web accessibility for the life of a grant ----
+
+        #[derive(Default)]
+        struct FakeWebAx {
+            window_pids: HashMap<u32, i32>,
+            bundles: HashMap<i32, String>,
+            enhanced: Mutex<HashMap<i32, bool>>,
+            writes: Mutex<Vec<(i32, bool)>>,
+            bundle_queries: Mutex<u32>,
+            /// Process start times; a pid without one reads as gone.
+            starts: HashMap<i32, u64>,
+        }
+
+        impl FakeWebAx {
+            fn with_app(mut self, pid: i32, bundle: &str, windows: &[u32]) -> Self {
+                self.starts.insert(pid, 1_000_000 + pid as u64);
+                self.bundles.insert(pid, bundle.to_string());
+                for window_id in windows {
+                    self.window_pids.insert(*window_id, pid);
+                }
+                self
+            }
+
+            fn writes(&self) -> Vec<(i32, bool)> {
+                self.writes.lock_unpoisoned().clone()
+            }
+        }
+
+        impl WebAccessibilityBackend for FakeWebAx {
+            fn window_pid(&self, window_id: u32) -> Option<i32> {
+                self.window_pids.get(&window_id).copied()
+            }
+
+            fn bundle_id(&self, pid: i32) -> Option<String> {
+                *self.bundle_queries.lock_unpoisoned() += 1;
+                self.bundles.get(&pid).cloned()
+            }
+
+            fn enhanced_user_interface(&self, pid: i32) -> Option<bool> {
+                self.enhanced.lock_unpoisoned().get(&pid).copied()
+            }
+
+            fn set_enhanced_user_interface(&self, pid: i32, enabled: bool) -> i32 {
+                self.writes.lock_unpoisoned().push((pid, enabled));
+                self.enhanced.lock_unpoisoned().insert(pid, enabled);
+                // What Chrome 155 answers even though the write takes effect.
+                -25208
+            }
+
+            fn window_has_web_area(&self, _pid: i32, _window_id: u32) -> bool {
+                true
+            }
+
+            fn process_start_us(&self, pid: i32) -> Option<u64> {
+                self.starts.get(&pid).copied()
+            }
+        }
+
+        /// A fresh, per-test journal path (no tempfile crate here).
+        fn journal_path(name: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "petal-webax-journal-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("journal dir");
+            dir.join(WEB_ACCESSIBILITY_JOURNAL_FILE)
+        }
+
+        fn journaled_state(path: &std::path::Path) -> WebAccessibilityState {
+            WebAccessibilityState {
+                journal: Some(path.to_path_buf()),
+                ..WebAccessibilityState::default()
+            }
+        }
+
+        #[test]
+        fn web_accessibility_journal_records_only_what_petal_switched_on() {
+            let path = journal_path("records");
+            let backend = FakeWebAx::default()
+                .with_app(10, "com.google.Chrome", &[100])
+                .with_app(11, "com.brave.Browser", &[110]);
+            // Brave already had it on: never journaled, never touched.
+            backend.enhanced.lock_unpoisoned().insert(11, true);
+            let mut state = journaled_state(&path);
+            reconcile_web_accessibility(&granted(&[100, 110]), &mut state, &backend);
+            assert_eq!(
+                read_web_accessibility_journal(&path),
+                vec![WebAccessibilityJournalEntry {
+                    pid: 10,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 1_000_010,
+                }]
+            );
+            // The grant ends: restored and the journal is gone.
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert!(!path.exists(), "a clean release leaves no journal behind");
+            assert_eq!(backend.writes(), vec![(10, true), (10, false)]);
+        }
+
+        #[test]
+        fn web_accessibility_journal_is_written_before_the_switch() {
+            // A crash right after the write must still find the entry: the
+            // journal exists by the time `set_enhanced_user_interface` runs.
+            struct CheckingBackend {
+                inner: FakeWebAx,
+                path: std::path::PathBuf,
+                journal_existed_at_write: Mutex<Vec<bool>>,
+            }
+            impl WebAccessibilityBackend for CheckingBackend {
+                fn window_pid(&self, window_id: u32) -> Option<i32> {
+                    self.inner.window_pid(window_id)
+                }
+                fn bundle_id(&self, pid: i32) -> Option<String> {
+                    self.inner.bundle_id(pid)
+                }
+                fn enhanced_user_interface(&self, pid: i32) -> Option<bool> {
+                    self.inner.enhanced_user_interface(pid)
+                }
+                fn set_enhanced_user_interface(&self, pid: i32, enabled: bool) -> i32 {
+                    if enabled {
+                        self.journal_existed_at_write
+                            .lock_unpoisoned()
+                            .push(!read_web_accessibility_journal(&self.path).is_empty());
+                    }
+                    self.inner.set_enhanced_user_interface(pid, enabled)
+                }
+                fn window_has_web_area(&self, pid: i32, window_id: u32) -> bool {
+                    self.inner.window_has_web_area(pid, window_id)
+                }
+                fn process_start_us(&self, pid: i32) -> Option<u64> {
+                    self.inner.process_start_us(pid)
+                }
+            }
+            let path = journal_path("before");
+            let backend = CheckingBackend {
+                inner: FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]),
+                path: path.clone(),
+                journal_existed_at_write: Mutex::new(Vec::new()),
+            };
+            let mut state = journaled_state(&path);
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            assert_eq!(*backend.journal_existed_at_write.lock_unpoisoned(), vec![true]);
+        }
+
+        #[test]
+        fn launch_restores_what_a_crashed_run_left_on() {
+            let path = journal_path("crash");
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]);
+            // Run 1 enables, then "crashes": the state is simply dropped.
+            {
+                let mut state = journaled_state(&path);
+                reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            }
+            assert!(path.exists());
+            // Run 2 launches.
+            let mut state = WebAccessibilityState::default();
+            let restored = adopt_web_accessibility_journal(path.clone(), &mut state, &backend);
+            assert_eq!(restored, 1);
+            assert_eq!(backend.writes(), vec![(10, true), (10, false)]);
+            assert!(!path.exists(), "recovered entries are cleared");
+            assert_eq!(state.journal.as_deref(), Some(path.as_path()));
+        }
+
+        #[test]
+        fn launch_recovery_never_acts_on_a_recycled_pid_or_another_app() {
+            let path = journal_path("recycled");
+            let entries = vec![
+                // Same pid, same app, but restarted: the switch is fresh.
+                WebAccessibilityJournalEntry {
+                    pid: 10,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 42,
+                },
+                // The pid now belongs to another app.
+                WebAccessibilityJournalEntry {
+                    pid: 11,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 1_000_011,
+                },
+                // Gone.
+                WebAccessibilityJournalEntry {
+                    pid: 12,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 1_000_012,
+                },
+                // The display-share sentinel is never a process.
+                WebAccessibilityJournalEntry {
+                    pid: 1,
+                    bundle_id: "com.google.Chrome".to_string(),
+                    started_us: 1,
+                },
+            ];
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&WebAccessibilityJournal {
+                    version: 1,
+                    enabled: entries,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let backend = FakeWebAx::default()
+                .with_app(10, "com.google.Chrome", &[])
+                .with_app(11, "com.apple.TextEdit", &[]);
+            backend.enhanced.lock_unpoisoned().insert(10, true);
+            backend.enhanced.lock_unpoisoned().insert(11, true);
+            let mut state = WebAccessibilityState::default();
+            assert_eq!(adopt_web_accessibility_journal(path.clone(), &mut state, &backend), 0);
+            assert!(backend.writes().is_empty());
+            assert!(!path.exists());
+        }
+
+        #[test]
+        fn launch_recovery_leaves_a_switch_someone_else_turned_off() {
+            let path = journal_path("off");
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]);
+            {
+                let mut state = journaled_state(&path);
+                reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            }
+            backend.enhanced.lock_unpoisoned().insert(10, false);
+            let mut state = WebAccessibilityState::default();
+            assert_eq!(adopt_web_accessibility_journal(path.clone(), &mut state, &backend), 0);
+            assert_eq!(backend.writes(), vec![(10, true)], "no second write");
+        }
+
+        #[test]
+        fn exit_clears_the_journal_and_a_corrupt_journal_is_ignored() {
+            let path = journal_path("exit");
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]);
+            let mut state = journaled_state(&path);
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            restore_all_web_accessibility(&mut state, &backend);
+            assert!(!path.exists());
+
+            std::fs::write(&path, b"{not json").unwrap();
+            let mut state = WebAccessibilityState::default();
+            assert_eq!(adopt_web_accessibility_journal(path.clone(), &mut state, &backend), 0);
+            assert!(!path.exists(), "an unreadable journal is replaced, not kept forever");
+        }
+
+        #[test]
+        fn process_start_time_identifies_this_process() {
+            let me = std::process::id() as i32;
+            let first = process_start_us(me).expect("own start time");
+            assert_eq!(process_start_us(me), Some(first), "stable for the life of the process");
+            assert!(process_start_us(0).is_none());
+            assert!(process_start_us(-5).is_none());
+        }
+
+        fn granted(windows: &[u32]) -> HashSet<u32> {
+            windows.iter().copied().collect()
+        }
+
+        #[test]
+        fn chromium_family_bundle_ids_are_recognised() {
+            for bundle in [
+                "com.google.Chrome",
+                "com.google.Chrome.canary",
+                "org.chromium.Chromium",
+                "com.microsoft.edgemac",
+                "com.microsoft.edgemac.Beta",
+                "com.brave.Browser",
+                "company.thebrowser.Browser",
+            ] {
+                assert!(is_chromium_bundle_id(bundle), "{bundle}");
+            }
+            for bundle in ["com.apple.Safari", "com.apple.TextEdit", "org.mozilla.firefox", ""] {
+                assert!(!is_chromium_bundle_id(bundle), "{bundle}");
+            }
+        }
+
+        #[test]
+        fn chromium_grant_enables_web_accessibility_and_release_restores_it() {
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100]);
+            let mut state = WebAccessibilityState::default();
+
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true)], "the -25208 answer is not a failure");
+            // A second reconcile with the same grants is a no-op.
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true)]);
+
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true), (10, false)]);
+            assert!(state.enabled.is_empty());
+        }
+
+        #[test]
+        fn web_accessibility_stays_on_until_the_apps_last_grant_ends() {
+            let backend = FakeWebAx::default().with_app(10, "com.google.Chrome", &[100, 101]);
+            let mut state = WebAccessibilityState::default();
+            reconcile_web_accessibility(&granted(&[100, 101]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true)], "one write per app, not per window");
+            reconcile_web_accessibility(&granted(&[101]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true)]);
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert_eq!(backend.writes(), vec![(10, true), (10, false)]);
+        }
+
+        #[test]
+        fn web_accessibility_already_on_is_left_on() {
+            let backend = FakeWebAx::default().with_app(10, "com.brave.Browser", &[100]);
+            backend.enhanced.lock_unpoisoned().insert(10, true);
+            let mut state = WebAccessibilityState::default();
+            reconcile_web_accessibility(&granted(&[100]), &mut state, &backend);
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert!(backend.writes().is_empty(), "never write, never turn it off");
+        }
+
+        #[test]
+        fn non_chromium_grants_are_never_touched_and_checked_once() {
+            let backend = FakeWebAx::default().with_app(20, "com.apple.TextEdit", &[200]);
+            let mut state = WebAccessibilityState::default();
+            reconcile_web_accessibility(&granted(&[200]), &mut state, &backend);
+            reconcile_web_accessibility(&granted(&[200]), &mut state, &backend);
+            assert!(backend.writes().is_empty());
+            assert_eq!(*backend.bundle_queries.lock_unpoisoned(), 1);
+            reconcile_web_accessibility(&granted(&[]), &mut state, &backend);
+            assert!(state.not_chromium.is_empty());
+        }
+
+        #[test]
+        fn exit_restores_every_enabled_browser() {
+            let backend = FakeWebAx::default()
+                .with_app(10, "com.google.Chrome", &[100])
+                .with_app(11, "com.microsoft.edgemac", &[110]);
+            let mut state = WebAccessibilityState::default();
+            reconcile_web_accessibility(&granted(&[100, 110]), &mut state, &backend);
+            restore_all_web_accessibility(&mut state, &backend);
+            assert_eq!(
+                backend.writes(),
+                vec![(10, true), (11, true), (10, false), (11, false)]
+            );
+            assert!(state.enabled.is_empty());
+        }
+
         // ---- #170: AX-direct clipboard / select-all key shortcuts ----
 
         fn meta_only() -> RemoteControlModifiers {
@@ -14763,6 +17067,197 @@ pub(crate) mod input {
             let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
             assert_eq!(outcome, AxReplayOutcome::PassThrough);
             assert!(ax.ops().is_empty());
+        }
+
+        // ---- #419: trust the app-scoped focused text element ----
+
+        /// #419 fixture: the window-scoped focus is unsupported (AppKit
+        /// -25205), so the window path only reaches a BFS element (70) in the
+        /// shared window 42. `app_focus` is the app-scoped focused element.
+        fn app_focus_fixture(app_focus: u64) -> RecordingAxBackend {
+            let ax = RecordingAxBackend::default();
+            ax.place_element_in_window(70, 42);
+            ax.resolve_text_via_bfs_to(70);
+            ax.set_capabilities(70, text_selectable_caps());
+            ax.set_text_length(70, 3);
+            ax.focus_app_on(app_focus);
+            ax.set_capabilities(app_focus, text_selectable_caps());
+            ax.set_text_length(app_focus, 11);
+            ax
+        }
+
+        #[test]
+        fn app_focus_in_shared_window_is_trusted_for_select_all_and_paste() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            let ax = app_focus_fixture(71);
+            ax.place_element_in_window(71, 42);
+            let pb = RecordingPasteboard::default();
+            let message = key_message("KeyA", "a", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::Handled);
+            assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::AppFocused));
+            assert_eq!(
+                ax.ops(),
+                vec![AxOp::SetSelectedRange {
+                    id: 71,
+                    start: 0,
+                    len: 11,
+                }]
+            );
+
+            let ax = app_focus_fixture(71);
+            ax.place_element_in_window(71, 42);
+            let pb = RecordingPasteboard::with_text("pasted-419");
+            let message = key_message("KeyV", "v", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::Handled);
+            assert_eq!(
+                ax.ops(),
+                vec![AxOp::SetSelectedText {
+                    id: 71,
+                    text: "pasted-419".to_string(),
+                }]
+            );
+        }
+
+        #[test]
+        fn app_focus_in_another_window_of_the_same_app_is_untrusted() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            for (message, pasteboard) in [
+                (
+                    key_message("KeyA", "a", meta_only()),
+                    RecordingPasteboard::default(),
+                ),
+                (
+                    key_message("KeyV", "v", meta_only()),
+                    RecordingPasteboard::with_text("must-not-land"),
+                ),
+            ] {
+                let ax = app_focus_fixture(72);
+                ax.place_element_in_window(72, 43);
+                let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pasteboard).unwrap();
+                assert_eq!(outcome, AxReplayOutcome::PassThrough);
+                assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::Bfs));
+                assert!(ax.ops().is_empty(), "acted on a sibling window's focus");
+            }
+        }
+
+        #[test]
+        fn app_focus_resolving_to_the_application_is_untrusted() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            let ax = app_focus_fixture(73);
+            // #170: even if the app element were reported in the shared window
+            // and text-selectable, it is never trusted.
+            ax.place_element_in_window(73, 42);
+            ax.mark_as_application(73);
+            let pb = RecordingPasteboard::with_text("must-not-land");
+            let message = key_message("KeyV", "v", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::PassThrough);
+            assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::Bfs));
+            assert!(ax.ops().is_empty());
+        }
+
+        #[test]
+        fn app_focus_that_is_not_text_or_has_no_window_is_untrusted() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            // Not text-selectable.
+            let ax = app_focus_fixture(74);
+            ax.place_element_in_window(74, 42);
+            ax.set_capabilities(74, AxCapabilities::default());
+            let pb = RecordingPasteboard::default();
+            let message = key_message("KeyA", "a", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::PassThrough);
+            assert!(ax.ops().is_empty());
+
+            // Window identity unavailable.
+            let ax = app_focus_fixture(75);
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::PassThrough);
+            assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::Bfs));
+            assert!(ax.ops().is_empty());
+        }
+
+        #[test]
+        fn app_focus_is_used_when_the_window_scoped_attribute_is_unsupported() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            // The window path reaches nothing at all (window AXFocusedUIElement
+            // unsupported and no BFS hit): the app-scoped focus still serves.
+            let ax = RecordingAxBackend::default();
+            ax.focus_app_on(76);
+            ax.place_element_in_window(76, 42);
+            ax.set_capabilities(76, text_selectable_caps());
+            ax.set_text_length(76, 4);
+            let pb = RecordingPasteboard::default();
+            let message = key_message("KeyA", "a", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::Handled);
+            assert_eq!(ax.last_text_provenance(), Some(TextFocusProvenance::AppFocused));
+            assert_eq!(
+                ax.ops(),
+                vec![AxOp::SetSelectedRange {
+                    id: 76,
+                    start: 0,
+                    len: 4,
+                }]
+            );
+        }
+
+        #[test]
+        fn window_scoped_focus_keeps_its_trusted_provenance() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+
+            let ax = RecordingAxBackend::default();
+            ax.resolve_text_to(77);
+            ax.set_capabilities(77, text_selectable_caps());
+            ax.set_text_length(77, 2);
+            let pb = RecordingPasteboard::default();
+            let message = key_message("KeyA", "a", meta_only());
+            let outcome = replay_key_via_ax(&message, Some(1234), &ax, &pb).unwrap();
+            assert_eq!(outcome, AxReplayOutcome::Handled);
+            assert_eq!(
+                ax.last_text_provenance(),
+                Some(TextFocusProvenance::WindowFocused)
+            );
+        }
+
+        #[test]
+        fn text_focus_provenance_labels_and_trust() {
+            assert_eq!(TextFocusProvenance::AppFocused.label(), "app-focused");
+            assert_eq!(TextFocusProvenance::WindowFocused.label(), "window-focused");
+            assert_eq!(TextFocusProvenance::Bfs.label(), "bfs");
+            assert!(TextFocusProvenance::AppFocused.source().is_trusted_focus());
+            assert!(TextFocusProvenance::WindowFocused.source().is_trusted_focus());
+            assert!(!TextFocusProvenance::Bfs.source().is_trusted_focus());
+        }
+
+        #[test]
+        fn trusted_app_focus_skips_the_window_lookup_for_rejected_elements() {
+            let mut window_lookups = 0;
+            let trusted = trusted_app_focused_text_element(
+                Some(1_u64),
+                42,
+                |_| true,
+                |_| true,
+                |_| {
+                    window_lookups += 1;
+                    Ok(42)
+                },
+            );
+            assert_eq!(trusted, None);
+            assert_eq!(window_lookups, 0);
         }
 
         #[test]
@@ -19236,6 +21731,8 @@ mod tests {
         remote_control_packet_policy: Vec<RemoteControlPacketPolicyFixture>,
         #[serde(default, rename = "remoteClipboardMessages")]
         remote_clipboard_messages: Vec<RemoteControlMessageFixture>,
+        #[serde(rename = "remoteControlInputBundle")]
+        remote_control_input_bundle: serde_json::Value,
         #[serde(rename = "remoteClipboardStreams")]
         remote_clipboard_streams: RemoteClipboardStreamFixture,
         rules: ContractRules,
@@ -19402,6 +21899,7 @@ mod tests {
             message: None,
             grant_token: None,
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: RemoteControlModifiers::default(),
         }
     }
@@ -19711,6 +22209,7 @@ mod tests {
             admission: Some(enqueued_admission.clone()),
             terminal_on_success: true,
             result_sender: None,
+            received_at: None,
         };
         // Refs #288: `push_replay`/`ReplayQueuePush` no longer exist -- #369
         // replaced the single global replay queue with per-target-pid shards
@@ -20322,6 +22821,7 @@ mod tests {
             message: None,
             grant_token: None,
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: RemoteControlModifiers::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -20549,6 +23049,7 @@ mod tests {
             message: None,
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: RemoteControlModifiers {
                 alt: false,
                 ctrl: false,
@@ -20623,6 +23124,7 @@ mod tests {
             message: None,
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: RemoteControlModifiers::default(),
         };
         let value = serde_json::to_value(msg).unwrap();
@@ -20820,8 +23322,14 @@ mod tests {
         let fixture = contract_fixture();
         assert_eq!(
             fixture.rules.reliability.lossy,
-            ["pointer.move.buttons==0", "wheel"]
+            ["pointer.move.buttons==0"]
         );
+        assert!(fixture
+            .rules
+            .reliability
+            .reliable
+            .iter()
+            .any(|rule| rule == "wheel"));
         assert!(fixture
             .rules
             .reliability
@@ -20850,7 +23358,7 @@ mod tests {
                 "host",
                 "authenticatedController",
             ),
-            ("wheelLegacy", "lossy", "host", "authenticatedController"),
+            ("wheelLegacy", "reliable", "host", "authenticatedController"),
             (
                 "scrollDiscrete",
                 "reliable",
@@ -20870,6 +23378,12 @@ mod tests {
                 "reliable",
                 "targetParticipant",
                 "authenticatedRemoteControlGrant",
+            ),
+            (
+                "redundantInputBundle",
+                "lossy",
+                "host",
+                "authenticatedController",
             ),
         ];
         assert_eq!(fixture.remote_control_packet_policy.len(), expected.len());
@@ -21165,6 +23679,7 @@ mod tests {
             local_identity: "host".to_string(),
             admission: None,
             result_sender: None,
+            received_at: None,
         };
         let second_move = ResolveTask {
             message: test_message(
@@ -21177,6 +23692,7 @@ mod tests {
             local_identity: "host".to_string(),
             admission: None,
             result_sender: None,
+            received_at: None,
         };
         let key_down = ResolveTask {
             message: test_message(
@@ -21189,6 +23705,7 @@ mod tests {
             local_identity: "host".to_string(),
             admission: None,
             result_sender: None,
+            received_at: None,
         };
 
         assert!(matches!(queue.push(first_move), ResolveQueuePush::Enqueued));
@@ -21205,6 +23722,75 @@ mod tests {
         assert_eq!(queue.try_pop().unwrap().message.seq, 3);
         assert_eq!(queue.try_pop().unwrap().message.seq, 2);
         assert!(queue.try_pop().is_none());
+    }
+
+    fn wheel_test_message(seq: u64, window_id: u32, controller_id: &str, dy: f64) -> RemoteControlMessage {
+        let mut message = test_message(
+            RemoteControlType::Wheel,
+            None,
+            seq,
+            window_id,
+            controller_id.to_string(),
+        );
+        message.delta_x = Some(1.0);
+        message.delta_y = Some(dy);
+        message.delta_mode = Some(0);
+        message
+    }
+
+    /// #400: wheel deltas add up. A burst of wheel packets released together
+    /// (e.g. behind a reliable-channel retransmit) must coalesce to the SUM,
+    /// not the newest packet, or the earlier scroll distance silently vanishes.
+    #[test]
+    fn coalescing_a_wheel_burst_sums_deltas_instead_of_dropping_them() {
+        let ids = remote_control_test_ids(
+            "coalescing_a_wheel_burst_sums_deltas_instead_of_dropping_them",
+        );
+        let queue = ResolveQueue::new(1);
+        for (seq, dy) in [(1, 120.0), (2, 40.0), (3, -10.0)] {
+            queue.push(ResolveTask {
+                message: wheel_test_message(seq, ids.window_id, &ids.controller_id, dy),
+                local_identity: "host".to_string(),
+                admission: None,
+                result_sender: None,
+                received_at: None,
+            });
+        }
+        let merged = queue.try_pop().expect("one coalesced wheel");
+        assert!(queue.try_pop().is_none());
+        assert_eq!(merged.message.seq, 3);
+        assert_eq!(merged.message.delta_y, Some(150.0));
+        assert_eq!(merged.message.delta_x, Some(3.0));
+
+        let (tx, rx) = mpsc::sync_channel(4);
+        for (seq, dy) in [(5, 40.0), (6, 40.0)] {
+            tx.send(replay_task(
+                wheel_test_message(seq, ids.window_id, &ids.controller_id, dy),
+                frame(0, 0, 100, 100),
+                Some(10),
+                false,
+            ))
+            .unwrap();
+        }
+        drop(tx);
+        let first = replay_task(
+            wheel_test_message(4, ids.window_id, &ids.controller_id, 40.0),
+            frame(0, 0, 100, 100),
+            Some(10),
+            false,
+        );
+        let task = coalesce_ready_replay_task(first, &rx, &mut VecDeque::new());
+        assert_eq!(task.message.seq, 6);
+        assert_eq!(task.message.delta_y, Some(120.0));
+
+        // Mismatched delta modes cannot be summed; the newer packet wins.
+        let mut lines = wheel_test_message(8, ids.window_id, &ids.controller_id, 3.0);
+        lines.delta_mode = Some(1);
+        let kept = coalesce_high_rate_message(
+            &wheel_test_message(7, ids.window_id, &ids.controller_id, 40.0),
+            lines,
+        );
+        assert_eq!(kept.delta_y, Some(3.0));
     }
 
     #[test]
@@ -21414,6 +24000,63 @@ mod tests {
             started.elapsed()
                 < Duration::from_millis(REPLAY_EVENT_DEADLINE.as_millis() as u64 + 400)
         );
+    }
+
+    /// #370: the real replay path feeds the host latency summary from the
+    /// receive instant the task carries (receive -> inject, receive -> complete).
+    #[test]
+    fn replay_one_task_records_host_replay_stages_from_the_receive_instant() {
+        let ids = remote_control_test_ids(
+            "replay_one_task_records_host_replay_stages_from_the_receive_instant",
+        );
+        let _guard = platform_input_test_lock();
+        // record_stage drops a sample when another test thread briefly holds
+        // the global host lock (the designed hot-path behaviour), so retry.
+        let mut inject_max = 0;
+        let mut complete_max = 0;
+        let mut line = String::new();
+        for seq in 1..=5u64 {
+            rc_latency_telemetry::sync(RcRole::Host, true);
+            let mut task = replay_task(
+                test_message(
+                    RemoteControlType::Key,
+                    Some(RemoteControlAction::Down),
+                    seq,
+                    ids.window_id,
+                    ids.controller_id.clone(),
+                ),
+                frame(0, 0, 100, 100),
+                // Unique pid: a shared one (1234) is held busy for 5 s by
+                // the injection-timeout test and the replay is refused.
+                Some(ids.window_id as i32),
+                false,
+            );
+            task.received_at = Some(Instant::now() - Duration::from_millis(80));
+            let inject = test_injector(|_message, _frame, _target_pid| {
+                std::thread::sleep(Duration::from_millis(30));
+                Ok(())
+            });
+            replay_one_task(task, &inject);
+            let Some(summary) = rc_latency_telemetry::take_host_interval_for_test() else {
+                continue;
+            };
+            let max_of = |wanted: Stage| {
+                summary
+                    .stages
+                    .iter()
+                    .find(|(stage, _)| *stage == wanted)
+                    .map_or(0, |(_, stats)| stats.max)
+            };
+            inject_max = inject_max.max(max_of(Stage::ReplayInjectMs));
+            complete_max = complete_max.max(max_of(Stage::ReplayCompleteMs));
+            line = summary.log_line();
+            if inject_max >= 75 && complete_max >= 105 {
+                break;
+            }
+        }
+        assert!(inject_max >= 75, "replay_inject_ms max {inject_max}");
+        assert!(complete_max >= 105, "replay_complete_ms max {complete_max}");
+        assert!(line.starts_with("remote-control-latency-summary: role=host "));
     }
 
     #[test]
@@ -22146,7 +24789,7 @@ mod tests {
     /// AppHandle-bound frame/pid lookup that runs between them.
     fn issue365_resolve(message: RemoteControlMessage) {
         if resolve_task_still_authorized(&message) {
-            let _ = commit_resolved_input(message, frame(0, 0, 100, 100), ISSUE365_PID, None, None);
+            let _ = commit_resolved_input(message, frame(0, 0, 100, 100), ISSUE365_PID, None, None, None);
         }
     }
 
@@ -22163,7 +24806,7 @@ mod tests {
         // ...the controller's Release is then handled inline on the receive path...
         revoke(ids.window_id, &ids.controller_id);
         // ...before the resolver records and queues Down 12, then pops Up 13.
-        let _ = commit_resolved_input(down, frame(0, 0, 100, 100), ISSUE365_PID, None, None);
+        let _ = commit_resolved_input(down, frame(0, 0, 100, 100), ISSUE365_PID, None, None, None);
         issue365_resolve(up);
 
         sink.assert_no_stranded_down();
@@ -22277,7 +24920,7 @@ mod tests {
             });
         }
 
-        assert!(commit_resolved_input(down, frame(0, 0, 100, 100), ISSUE365_PID, None, None));
+        assert!(commit_resolved_input(down, frame(0, 0, 100, 100), ISSUE365_PID, None, None, None));
         let handle = revoker.lock_unpoisoned().take().expect("commit hook ran");
         handle.join().expect("revoke thread");
 
@@ -22333,6 +24976,169 @@ mod tests {
         assert!(!should_accept_unreliable_seq(&pointer_9));
         assert!(should_accept_unreliable_seq(&pointer_11));
         assert!(should_accept_unreliable_seq(&wheel_1));
+    }
+
+    #[test]
+    fn redundant_input_bundle_matches_shared_contract_fixture() {
+        let contract = contract_fixture().remote_control_input_bundle;
+        assert_eq!(contract["kind"], redundant::BUNDLE_KIND);
+        assert_eq!(contract["version"], redundant::BUNDLE_VERSION);
+        assert_eq!(contract["topic"], TOPIC);
+        assert_eq!(contract["reliable"], false);
+        assert_eq!(contract["capabilityField"], "supportsRedundantInput");
+        assert_eq!(contract["maxRedundantCopies"], redundant::MAX_REDUNDANT_COPIES);
+        assert_eq!(contract["maxBundleInputs"], redundant::MAX_BUNDLE_INPUTS);
+        assert_eq!(
+            contract["minBundleIntervalMs"],
+            redundant::MIN_BUNDLE_INTERVAL.as_millis() as u64
+        );
+        assert_eq!(contract["immediateCopies"], redundant::IMMEDIATE_COPIES);
+        assert_eq!(contract["maxPayloadBytes"], redundant::MAX_BUNDLE_PAYLOAD_BYTES);
+        assert_eq!(
+            contract["maxRedundantAgeMs"],
+            redundant::MAX_REDUNDANT_AGE.as_millis() as u64
+        );
+        assert_eq!(
+            contract["trailingCopyDelaysMs"],
+            serde_json::json!(redundant::TRAILING_COPY_DELAYS.map(|d| d.as_millis() as u64))
+        );
+        assert_eq!(contract["hostGapHoldMs"], redundant::GAP_HOLD.as_millis() as u64);
+        let example = &contract["example"];
+        let mut keys: Vec<_> = example.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(serde_json::json!(keys), contract["fields"]);
+        let parsed = redundant::parse_input_bundle(&serde_json::to_vec(example).unwrap())
+            .expect("contract example parses as a bundle");
+        assert_eq!(parsed.first, 7);
+        assert_eq!(parsed.inputs.len(), 2);
+        assert_eq!(parsed.inputs[1].action, Some(RemoteControlAction::Up));
+        assert_eq!(&serde_json::to_value(&parsed).unwrap(), example);
+    }
+
+    #[test]
+    fn redundant_input_gap_that_loses_an_up_releases_the_held_key() {
+        let ids = remote_control_test_ids("redundant_input_gap_that_loses_an_up_releases_the_held_key");
+        let frame = WindowFrame { x: 0, y: 0, width: 100, height: 100 };
+        let key = |seq: u64, action: RemoteControlAction| {
+            let mut message = test_message(
+                RemoteControlType::Key,
+                Some(action),
+                seq,
+                ids.window_id,
+                ids.controller_id.clone(),
+            );
+            message.key = Some("a".to_string());
+            message.code = Some("KeyA".to_string());
+            message
+        };
+        let bundle = |first: u64, inputs: Vec<RemoteControlMessage>| InputBundle {
+            v: redundant::BUNDLE_VERSION,
+            kind: redundant::BUNDLE_KIND.to_string(),
+            window_id: ids.window_id,
+            stream: "gap-test".to_string(),
+            first,
+            inputs,
+        };
+        let engine = remote_control_engine();
+        let t0 = Instant::now();
+        let down = engine.accept_input_bundle(
+            &ids.controller_id,
+            bundle(1, vec![key(1, RemoteControlAction::Down)]),
+            t0,
+        );
+        assert_eq!(down.deliver.len(), 1);
+        // The host replays the Down, so it is now held.
+        track_pressed_input(&down.deliver[0], frame, Some(99));
+        // rseq 2 (the Up) and every copy of it are lost; rseq 3 arrives.
+        let later = engine.accept_input_bundle(
+            &ids.controller_id,
+            bundle(3, vec![key(3, RemoteControlAction::Down)]),
+            t0,
+        );
+        assert!(later.deliver.is_empty());
+        assert!(later.arm_gap_timer);
+        assert!(releases_for_sequencer_gap(ids.window_id, &ids.controller_id, &later).is_empty());
+        let flushed =
+            engine.flush_input_bundle_gap(&ids.controller_id, ids.window_id, t0 + redundant::GAP_HOLD);
+        assert_eq!(flushed.skipped, 1);
+        let releases = releases_for_sequencer_gap(ids.window_id, &ids.controller_id, &flushed);
+        assert_eq!(releases.len(), 1, "the lost Up must not leave the key stuck");
+        assert_eq!(releases[0].message.action, Some(RemoteControlAction::Up));
+        assert_eq!(releases[0].message.code.as_deref(), Some("KeyA"));
+        assert_eq!(flushed.deliver.len(), 1, "input after the gap still runs");
+    }
+
+    #[test]
+    fn controller_routes_input_through_bundles_only_for_a_capable_host() {
+        let ids = remote_control_test_ids("controller_routes_input_through_bundles_only_for_a_capable_host");
+        let engine = remote_control_engine();
+        let mut key = test_message(
+            RemoteControlType::Key,
+            Some(RemoteControlAction::Down),
+            1,
+            ids.window_id,
+            ids.controller_id.clone(),
+        );
+        key.target_user_id = ids.other_controller_id.clone();
+        let mut hover = key.clone();
+        hover.message_type = RemoteControlType::Pointer;
+        hover.action = Some(RemoteControlAction::Move);
+        hover.buttons = Some(0);
+        let now = Instant::now();
+        let publish = |outcome: Option<(String, redundant::PushOutcome)>| match outcome {
+            Some((_, redundant::PushOutcome::Publish(bundle, flush))) => (bundle, flush),
+            other => panic!("expected an immediate bundle, got {other:?}"),
+        };
+        // Old host: never advertised support, legacy path.
+        assert!(engine.push_redundant_input(&key, now).is_none());
+        engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, Some("grant-1"));
+        let (first, _) = publish(engine.push_redundant_input(&key, now));
+        assert_eq!(first.first, 1);
+        assert!(!engine.redundant_bundle_packet(&first, &ids.other_controller_id).reliable);
+        assert!(engine.push_redundant_input(&hover, now).is_none(), "hover stays latest-wins");
+        // Within the pacing interval the next input waits for a paced flush.
+        let Some((stream, redundant::PushOutcome::FlushAfter(_))) =
+            engine.push_redundant_input(&key, now)
+        else {
+            panic!("second input inside the pacing interval must be paced");
+        };
+        let (second, flush) = engine
+            .flush_redundant_input(ids.window_id, &ids.other_controller_id, &stream, now)
+            .expect("paced flush publishes the queued input");
+        assert_eq!((second.first, second.inputs.len()), (1, 2));
+        let later = now + redundant::MIN_BUNDLE_INTERVAL;
+        assert!(engine
+            .redundant_trailing_bundle(ids.window_id, &ids.other_controller_id, &stream, flush, later)
+            .is_some());
+        assert!(
+            engine
+                .redundant_trailing_bundle(ids.window_id, &ids.other_controller_id, &stream, flush - 1, later)
+                .is_none(),
+            "a superseded trailing copy is not sent"
+        );
+        // A repeated `active` for the same grant keeps the stream.
+        engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, Some("grant-1"));
+        assert_eq!(publish(engine.push_redundant_input(&key, later)).0.stream, second.stream);
+        // A new grant opens a new stream from rseq 1.
+        engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, Some("grant-2"));
+        let renewed = publish(engine.push_redundant_input(&key, later)).0;
+        assert_ne!(renewed.stream, second.stream);
+        assert_eq!(renewed.first, 1);
+        // Stopped / downgraded host: back to the legacy path.
+        engine.set_redundant_input_target(ids.window_id, &ids.other_controller_id, None);
+        assert!(engine.push_redundant_input(&key, later).is_none());
+    }
+
+    #[test]
+    fn active_status_advertises_redundant_input_support() {
+        let status = active_status_for_session(7, "ctl".to_string(), "tok".to_string());
+        let packet = status_packet_for(&status, "host");
+        assert!(packet.supports_redundant_input);
+        let json = serde_json::to_value(&packet).unwrap();
+        assert_eq!(json["supportsRedundantInput"], serde_json::json!(true));
+        let mut stopped = status;
+        stopped.status = "stopped";
+        assert!(!status_packet_for(&stopped, "host").supports_redundant_input);
     }
 
     #[test]
@@ -23362,6 +26168,7 @@ mod tests {
             local_identity: "host-id".to_string(),
             admission: None,
             result_sender: None,
+            received_at: None,
         };
 
         assert!(!resolve_task_still_authorized(&task.message));

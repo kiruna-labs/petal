@@ -1,4 +1,4 @@
-// #241, rendered: the Gallery top bar's room name, time, view toggle and
+// #241, rendered: the Gallery top bar's room name, time, layout picker and
 // bug-report button share one control height and one centre line. The centre
 // line falls out of flex alignment and line-heights together, so measure the
 // REAL component (tests/fixtures/gallery-topbar.js mounts Gallery.svelte) in
@@ -19,10 +19,10 @@ const fixtureRoot = new URL('./fixtures/', import.meta.url);
 type Box = { height: number; centre: number };
 type TopbarReading = {
   controlHeight: number;
-  boxes: Record<'name' | 'time' | 'titleAction' | 'toggle' | 'bug', Box | null>;
+  boxes: Record<'name' | 'time' | 'titleAction' | 'picker' | 'bug', Box | null>;
 };
 
-test('gallery top bar: name, time, view toggle and bug-report button share one height and one centre line (#241)', { timeout: 60_000 }, async () => {
+test('gallery top bar: name, time, layout picker and bug-report button share one height and one centre line (#241)', { timeout: 60_000 }, async () => {
   const buildDir = await mkdtemp(join(tmpdir(), 'petal-gallery-topbar-alignment-build-'));
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
 
@@ -81,7 +81,7 @@ test('gallery top bar: name, time, view toggle and bug-report button share one h
             name: box('.room-name'),
             time: box('.elapsed'),
             titleAction: box('.room-title-action'),
-            toggle: box('.layout-toggle'),
+            picker: box('.layout-picker'),
             bug: box('.report-bug')
           }
         };
@@ -93,12 +93,12 @@ test('gallery top bar: name, time, view toggle and bug-report button share one h
       for (const [part, box] of Object.entries(boxes)) {
         assert.ok(box && box.height > 0, `${part} did not render at ${where}`);
       }
-      assert.equal(boxes.toggle!.height, controlHeight, `view toggle height at ${where}`);
+      assert.equal(boxes.picker!.height, controlHeight, `layout picker height at ${where}`);
       assert.equal(boxes.bug!.height, controlHeight, `bug-report button height at ${where}`);
       const centres = Object.values(boxes).map((box) => box!.centre);
       assert.ok(
         Math.max(...centres) - Math.min(...centres) <= 1,
-        `name, time, title actions, view toggle and bug-report button are off one centre line at ${where}`
+        `name, time, title actions, layout picker and bug-report button are off one centre line at ${where}`
       );
       await page.close();
     }

@@ -118,7 +118,7 @@ owned_release_one() {
 }
 
 release_owned_processes() {
-  local pid child survivors=0
+  local pid child survivors=0 owned_count=0
   local -a descendants=()
   # #798: snapshot descendants BEFORE any signal. Once the wrapper dies its
   # children reparent to PID 1 and the only way left to find them is a
@@ -133,6 +133,7 @@ release_owned_processes() {
     echo "== cleanup: ${#descendants[@]} descendant pid(s) recorded before signalling: ${descendants[*]} =="
   fi
   for pid in ${OWNED_PIDS[@]+"${OWNED_PIDS[@]}"}; do
+    owned_count=$((owned_count + 1))
     if ! kill -0 "$pid" 2>/dev/null; then
       echo "== cleanup: pid $pid already exited =="
       continue
@@ -146,8 +147,11 @@ release_owned_processes() {
     echo "== cleanup: descendant $pid outlived its parent; releasing it too =="
     owned_release_one "$pid" "descendant" || survivors=$((survivors + 1))
   done
+  # The owned count comes from the loop above, not `${#OWNED_PIDS[@]-0}`: a
+  # default on a length expansion is not valid syntax -- bash 3.2 tolerated it,
+  # bash 5.3 rejects it as "bad substitution" and aborts the caller under -e.
   if [ "$survivors" -eq 0 ]; then
-    echo "== cleanup: nothing this script started is still alive (checked ${#OWNED_PIDS[@]-0} owned + ${#descendants[@]} descendant pid(s)) =="
+    echo "== cleanup: nothing this script started is still alive (checked $owned_count owned + ${#descendants[@]} descendant pid(s)) =="
   fi
   return 0
 }

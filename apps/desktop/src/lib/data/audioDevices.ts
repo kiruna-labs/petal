@@ -13,12 +13,12 @@
 // root layout on startup) pushes the persisted choice into that mirror so
 // "apply on next join" survives an app restart.
 import { invoke } from '@tauri-apps/api/core';
-import { session } from '$lib/stores/session.svelte';
-import { COMMANDS, hasTauriBridge } from '$lib/ipc';
-import type { AppliedAudioDevices, AudioDeviceInfo, AudioDeviceLists } from '$lib/ipc';
+import { session } from '#lib/stores/session.svelte.js';
+import { COMMANDS, hasTauriBridge } from '#lib/ipc.js';
+import type { AppliedAudioDevices, AudioDeviceInfo, AudioDeviceLists } from '#lib/ipc.js';
 
-export { hasTauriBridge } from '$lib/ipc';
-export type { AppliedAudioDevices, AudioDeviceInfo, AudioDeviceLists } from '$lib/ipc';
+export { hasTauriBridge } from '#lib/ipc.js';
+export type { AppliedAudioDevices, AudioDeviceInfo, AudioDeviceLists } from '#lib/ipc.js';
 
 /**
  * Enumerate the machine's real recording/playout devices. Returns null when
@@ -45,6 +45,15 @@ export async function setAudioDevices(opts: {
     recordingId: opts.recordingId ?? null,
     playoutId: opts.playoutId ?? null
   });
+}
+
+/**
+ * Windows: the user accepted a `micSilentOffer`, so move capture off the
+ * silent microphone. Resolves to the new device's name; rejects with the
+ * backend's error. The saved choice is unchanged.
+ */
+export async function switchFromSilentMic(silentDeviceId: string, deviceId: string): Promise<string> {
+  return await invoke<string>(COMMANDS.switchFromSilentMic, { silentDeviceId, deviceId });
 }
 
 /**

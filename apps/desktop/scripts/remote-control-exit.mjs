@@ -8,6 +8,7 @@
 // unreachable Chrome CDP endpoint made the scenario print one `# SKIP` line,
 // execute ZERO cases, and exit 0 -- a false green no gate could catch.
 
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -74,10 +75,28 @@ export const TOKENLESS_DROP_NEEDLE = 'dropping tokenless input';
 
 /// The host log the scenario reads. PETAL_LOG_PATH wins because it is where a
 /// harness-launched host writes; PETAL_ACCEPTANCE_LOG is the older override.
-export function resolvePetalLogPath(env = process.env, homedir = os.homedir()) {
-  return env.PETAL_LOG_PATH
-    || env.PETAL_ACCEPTANCE_LOG
-    || path.join(homedir, 'Library', 'Logs', 'Petal', 'petal.log');
+///
+/// Without an override it is the user log. Since #905 the active file is
+/// `petal.log.<YYYY-MM-DD>` and a bare `petal.log` no longer exists, so a run
+/// that read `petal.log` counted 0 host lines and went infra-invalid (and the
+/// display-share cases 37-41 read their routing slice from the same blind
+/// file). Prefer a live `petal.log`, else the newest dated, uncompressed file.
+export function resolvePetalLogPath(env = process.env, homedir = os.homedir(), listDir = defaultListDir) {
+  if (env.PETAL_LOG_PATH) return env.PETAL_LOG_PATH;
+  if (env.PETAL_ACCEPTANCE_LOG) return env.PETAL_ACCEPTANCE_LOG;
+  const dir = path.join(homedir, 'Library', 'Logs', 'Petal');
+  const names = listDir(dir);
+  if (names.includes('petal.log')) return path.join(dir, 'petal.log');
+  const dated = names.filter((name) => /^petal\.log\.\d{4}-\d{2}-\d{2}$/.test(name)).sort();
+  return path.join(dir, dated.length > 0 ? dated[dated.length - 1] : 'petal.log');
+}
+
+function defaultListDir(dir) {
+  try {
+    return fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
 }
 
 /// Count tokenless drops in `logText`, the host log written during this run.

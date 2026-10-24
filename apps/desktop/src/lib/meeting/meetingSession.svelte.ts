@@ -10,8 +10,8 @@
 import { goto } from '$app/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { GalleryParticipant } from '$lib/components/Gallery.svelte';
-import { session } from '$lib/stores/session.svelte';
+import type { GalleryParticipant } from '#lib/components/Gallery.svelte';
+import { session } from '#lib/stores/session.svelte.js';
 import {
   currentRoom,
   joinRoom,
@@ -27,10 +27,10 @@ import {
   roomDisplayLabel,
   type PresenceUpdate,
   type RoomRecord
-} from '$lib/data/rooms';
-import { meetingDisplayLabelFromCredential } from '$lib/data/meetingCode';
-import { findRoomRecord, meetingInviteAccessCode } from '$lib/data/inviteLinks';
-import { consumePendingRoomDisplayName } from '$lib/data/pendingRoomLabels';
+} from '#lib/data/rooms.js';
+import { meetingDisplayLabelFromCredential } from '#lib/data/meetingCode.js';
+import { findRoomRecord, meetingInviteAccessCode } from '#lib/data/inviteLinks.js';
+import { consumePendingRoomDisplayName } from '#lib/data/pendingRoomLabels.js';
 import {
   cameraTrackNameForIdentity,
   cameraWindowId,
@@ -39,12 +39,12 @@ import {
   type GalleryBridgeConfig,
   type GalleryBridgeSignals,
   type RemoteCamera
-} from '$lib/data/galleryBridge';
-import { COMMANDS, EVENTS, hasTauriBridge } from '$lib/ipc';
-import type { PresentParticipant, ResilienceEvent, RoomLeftEvent } from '$lib/ipc';
+} from '#lib/data/galleryBridge.js';
+import { COMMANDS, EVENTS, hasTauriBridge } from '#lib/ipc.js';
+import type { PresentParticipant, ResilienceEvent, RoomLeftEvent } from '#lib/ipc.js';
 import { createSpeakerSpotlight } from './speakerSpotlight.svelte';
-import { clearMeetingRouteRoom, setMeetingRouteRoom } from '$lib/stores/meetingRoute';
-import { joinFailureMessage } from '$lib/data/joinFailure';
+import { clearMeetingRouteRoom, setMeetingRouteRoom } from '#lib/stores/meetingRoute.js';
+import { joinFailureMessage } from '#lib/data/joinFailure.js';
 import {
   GALLERY_BRIDGE_MAX_RESTARTS,
   galleryBridgeRestartDelayMs,
@@ -57,7 +57,7 @@ export interface MeetingSessionOptions {
   /** The route param room name. */
   roomName: () => string;
   /** ?lkUrl/?lkToken query params for the browser-preview bridge fallback. */
-  bridgeQueryParams: () => URLSearchParams;
+  bridgeQueryParams: () => Pick<URLSearchParams, 'get'>;
   /** Live route-owned state that feeds the derived gallery model. */
   micMuted: () => boolean;
   shareActive: () => boolean;
@@ -492,7 +492,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
         paletteIndexForIdentityColor(session.identity)
       );
       if (joinedRoom.name !== roomName) {
-        await goto(`/meeting/${encodeURIComponent(joinedRoom.name)}`, { replaceState: true });
+        await goto(`/meeting/${encodeURIComponent(joinedRoom.name)}`, { replace: true });
         return true;
       }
       const snapshotRevision = presenceRevision;

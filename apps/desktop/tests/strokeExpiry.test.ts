@@ -83,13 +83,13 @@ const webHarnessDrawDisplaySource = readFileSync(
 );
 
 test('native compositor pointer overlay imports the shared stroke-expiry predicate', () => {
-  assert.match(pointerOverlaySource, /from '\$lib\/data\/strokeExpiry'/);
+  assert.match(pointerOverlaySource, /from '#lib\/data\/strokeExpiry\.js'/);
   assert.match(pointerOverlaySource, /isStrokeExpired/);
   assert.match(pointerOverlaySource, /strokeFadeOpacity/);
 });
 
 test('meeting-tile camera draw layer imports the shared stroke-expiry predicate', () => {
-  assert.match(participantTileSource, /from '\$lib\/data\/strokeExpiry'/);
+  assert.match(participantTileSource, /from '#lib\/data\/strokeExpiry\.js'/);
   assert.match(participantTileSource, /isStrokeExpired/);
   assert.match(participantTileSource, /strokeFadeOpacity/);
 });

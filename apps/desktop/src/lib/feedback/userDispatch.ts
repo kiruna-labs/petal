@@ -5,7 +5,7 @@
 // `config.ts`) never even fetches/evaluates the SDK module.
 
 import { invoke } from '@tauri-apps/api/core';
-import { COMMANDS, type FeedbackDiagnostics } from '$lib/ipc';
+import { COMMANDS, type FeedbackDiagnostics } from '#lib/ipc.js';
 import { userDispatchPublicKey } from './config';
 import { normalizedFeedbackEmail } from './email';
 import { normalizedFeedbackMessage, FEEDBACK_MAX_MESSAGE_CHARS } from './messageSanitizer';

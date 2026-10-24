@@ -4,7 +4,7 @@ import {
   meetingDisplayLabelFromCredential,
   normalizeAccessCode
 } from './meetingCode.ts';
-import type { RoomRecord } from '$lib/ipc';
+import type { RoomRecord } from '#lib/ipc.js';
 import {
   DEFAULT_INVITE_ORIGIN,
   normalizeServerOrigin

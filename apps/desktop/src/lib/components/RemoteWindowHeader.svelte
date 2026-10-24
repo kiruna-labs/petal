@@ -7,17 +7,17 @@
 -->
 <script lang="ts">
   import type { IdentityColor } from './Avatar.svelte';
-  import { identityHeaderCss } from '$lib/data/identityColor';
-  import { isWindows } from '$lib/platform';
+  import { identityHeaderCss } from '#lib/data/identityColor.js';
+  import { isWindows } from '#lib/platform.js';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { formatRemoteWindowHeaderTooltip, remoteWindowSourceLabel } from '$lib/ipc';
+  import { formatRemoteWindowHeaderTooltip, remoteWindowSourceLabel } from '#lib/ipc.js';
   import {
     remoteControlFeedbackLabel,
     remoteControlFeedbackTitle,
     type RemoteControlFeedbackStatus,
     remoteControlFeedbackIsNeutral
-  } from '$lib/remoteControlFeedback';
-  import type { GlassToGlassChip } from '$lib/data/remoteWindowDebug';
+  } from '#lib/remoteControlFeedback.js';
+  import type { GlassToGlassChip } from '#lib/data/remoteWindowDebug.js';
   import {
     AI_CHAT_ACTIVE_BADGE_LABEL,
     AI_CHAT_ACTIVE_DISCLOSURE,
@@ -30,8 +30,8 @@
     aiChatPttFloorTakenByOther,
     aiChatRemotePttDisabled,
     aiChatRemotePttLabel
-  } from '$lib/data/aiChat';
-  import type { AiChatEndReason } from '$lib/ipc';
+  } from '#lib/data/aiChat.js';
+  import type { AiChatEndReason } from '#lib/ipc.js';
   import { sparkleIconSvg } from '@petal/shared/ui/icons';
 
   interface Props {
@@ -981,16 +981,17 @@
     font-weight: 500;
   }
 
+  /* One line, always (#407): the header is a 44px strip. Every status label
+     is a short phrase, so the chip never shrinks and never clips (UI text
+     must never truncate); the sanctioned-ellipsis .title gives way instead. */
   .status-chip {
-    flex: 0 1 auto;
-    min-height: 24px;
-    height: auto;
+    flex: 0 0 auto;
+    height: 24px;
+    box-sizing: border-box;
     display: inline-flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 6px;
-    min-width: 0;
-    max-width: 220px;
-    padding: 4px 9px;
+    padding: 0 9px;
     border-radius: var(--radius-chip);
     background: color-mix(in srgb, var(--identity-header-ink) 9%, transparent);
     border: 1px solid color-mix(in srgb, var(--identity-header-ink) 16%, transparent);
@@ -1000,10 +1001,7 @@
     font-weight: 600;
     line-height: 1.2;
     letter-spacing: 0;
-    overflow: visible;
-    overflow-wrap: anywhere;
-    text-wrap: pretty;
-    white-space: normal;
+    white-space: nowrap;
   }
 
   .status-chip-dot {
@@ -1015,11 +1013,7 @@
   }
 
   .status-chip-text {
-    min-width: 0;
-    overflow: visible;
-    overflow-wrap: anywhere;
-    text-wrap: pretty;
-    white-space: normal;
+    white-space: nowrap;
   }
 
   .status-chip.warning {

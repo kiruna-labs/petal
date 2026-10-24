@@ -47,19 +47,20 @@
   import Button from './Button.svelte';
   import CloseButton from './CloseButton.svelte';
   import Switch from '@petal/shared/ui/components/Switch.svelte';
+  import { USAGE_STATS_DESCRIPTION, USAGE_STATS_LABEL } from '@petal/shared/logic/usageStats';
   import {
     REMOTE_CONTROL_POLICY_DESCRIPTION,
     REMOTE_CONTROL_POLICY_OPTIONS,
     REMOTE_CONTROL_POLICY_TITLE
-  } from '$lib/remoteControlPolicyCopy';
-  import type { RemoteControlPolicy } from '$lib/ipc';
+  } from '#lib/remoteControlPolicyCopy.js';
+  import type { RemoteControlPolicy } from '#lib/ipc.js';
   import DeviceSelect from './DeviceSelect.svelte';
-  import PluginSettingsRows from '$lib/plugins/PluginSettingsRows.svelte';
-  import PluginRegistryBrowser from '$lib/plugins/PluginRegistryBrowser.svelte';
-  import { setInstalledEnabled, uninstallPlugin, type CatalogEntry } from '$lib/plugins/pluginCatalog';
+  import PluginSettingsRows from '#lib/plugins/PluginSettingsRows.svelte';
+  import PluginRegistryBrowser from '#lib/plugins/PluginRegistryBrowser.svelte';
+  import { setInstalledEnabled, uninstallPlugin, type CatalogEntry } from '#lib/plugins/pluginCatalog.js';
   import { getVersion } from '@tauri-apps/api/app';
-  import { installedPlugins } from '$lib/plugins/pluginCatalog';
-  import { browserStorage } from '$lib/data/storageKeys';
+  import { installedPlugins } from '#lib/plugins/pluginCatalog.js';
+  import { browserStorage } from '#lib/data/storageKeys.js';
   import IdentitySetup from './IdentitySetup.svelte';
   import PermissionRow from './PermissionRow.svelte';
   import TestCockpitResults from './TestCockpitResults.svelte';
@@ -69,16 +70,22 @@
     ensureCameraAccess,
     openPrivacySettings,
     type AuthStatus
-  } from '$lib/data/permissions';
-  import { cameraPreviewConstraints } from '$lib/data/cameraConstraints';
+  } from '#lib/data/permissions.js';
+  import { cameraPreviewConstraints } from '#lib/data/cameraConstraints.js';
   import {
     previewCameraIdFor,
     streamCameraId,
     webCamerasFrom,
     type WebCamera
-  } from '$lib/data/cameraPreviewDevice';
-  import { listAudioDevices, setAudioDevices } from '$lib/data/audioDevices';
-  import { listCameraDevices, setCameraDevice } from '$lib/data/cameraDevices';
+  } from '#lib/data/cameraPreviewDevice.js';
+  import { listAudioDevices, setAudioDevices } from '#lib/data/audioDevices.js';
+  import {
+    MISSING_DEVICE,
+    MISSING_DEVICE_LABEL,
+    pickerValue,
+    switchNote
+  } from '#lib/data/audioDeviceSelection.js';
+  import { listCameraDevices, setCameraDevice } from '#lib/data/cameraDevices.js';
   import {
     CAMERA_FPS_PRESETS,
     CAMERA_RESOLUTION_PRESETS,
@@ -86,8 +93,8 @@
     cameraSupportsResolution,
     listCameraModes,
     setCameraPrefs
-  } from '$lib/data/cameraModes';
-  import type { CameraMode } from '$lib/data/cameraModes';
+  } from '#lib/data/cameraModes.js';
+  import type { CameraMode } from '#lib/data/cameraModes.js';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import {
     AI_CHAT_API_KEY_URL,
@@ -96,9 +103,9 @@
     AI_CHAT_CONSENT_TITLE,
     AI_CHAT_COST_NOTE,
     AI_CHAT_KEY_DATA_USE_NOTE
-  } from '$lib/data/aiChat';
-  import { DEBUG_MODE_SETTING_DESCRIPTION, DEBUG_MODE_SETTING_TITLE } from '$lib/data/debugMode';
-  import { applyInviteOrigin } from '$lib/data/inviteLinks';
+  } from '#lib/data/aiChat.js';
+  import { DEBUG_MODE_SETTING_DESCRIPTION, DEBUG_MODE_SETTING_TITLE } from '#lib/data/debugMode.js';
+  import { applyInviteOrigin } from '#lib/data/inviteLinks.js';
   import {
     DEFAULT_INVITE_ORIGIN,
     SERVER_BACKEND_DESCRIPTION,
@@ -128,12 +135,12 @@
     type TestCockpitRunDetail,
     type TestCockpitRunSummary,
     type TestProgressEvent
-  } from '$lib/ipc';
-  import { displayBuildVersion } from '$lib/buildInfo';
-  import { isMac } from '$lib/platform';
-  import { resetOnboarding, session, updateAudioDevices, updateCameraMode } from '$lib/stores/session.svelte';
-  import { checkForUpdate } from '$lib/updater';
-  import { clearLocalFactoryResetState, tccResetCommand } from '$lib/data/factoryReset';
+  } from '#lib/ipc.js';
+  import { displayBuildVersion } from '#lib/buildInfo.js';
+  import { isMac } from '#lib/platform.js';
+  import { resetOnboarding, session, updateAudioDevices, updateCameraMode } from '#lib/stores/session.svelte.js';
+  import { checkForUpdate } from '#lib/updater.js';
+  import { clearLocalFactoryResetState, tccResetCommand } from '#lib/data/factoryReset.js';
   import {
     cockpitSummaryLine,
     latestCockpitMessage,
@@ -148,7 +155,7 @@
     JOURNEY_LIVE_LABELS,
     COCKPIT_PRESETS,
     type JourneyLiveState
-  } from '$lib/data/testCockpit';
+  } from '#lib/data/testCockpit.js';
 
   interface DeviceOption {
     id: string;
@@ -176,6 +183,8 @@
     onLocalEchoEnabledChange?: (enabled: boolean) => void;
     sentryEnabled?: boolean;
     onSentryEnabledChange?: (enabled: boolean) => void;
+    usageStatsEnabled?: boolean;
+    onUsageStatsEnabledChange?: (enabled: boolean) => void;
     onOpenSettings?: () => void;
     /** Real routes pass true so the panel IS the window (edge-to-edge, no
      * fixed-size floating card). Default false preserves the card look for
@@ -208,6 +217,8 @@
     onLocalEchoEnabledChange,
     sentryEnabled = true,
     onSentryEnabledChange,
+    usageStatsEnabled = true,
+    onUsageStatsEnabledChange,
     onOpenSettings,
     frameless = false,
     onClose
@@ -448,20 +459,22 @@
   // pass a specific selection, so the dropdowns never render empty. Derived
   // (not a mutation of the bindable prop itself) so it stays reactive to
   // late-arriving device lists without the "state referenced locally" pitfall.
-  // Mic/speaker additionally fall back to the first option when the persisted
-  // selection no longer exists (device unplugged since it was saved).
+  // Mic/speaker instead show "Saved device not connected" when the persisted
+  // selection is not in the list, rather than naming another device.
   const cameraValue = $derived(
     cameraOptions.some((c) => c.id === selectedCamera)
       ? selectedCamera
       : (cameraOptions[0]?.id ?? '')
   );
-  const micValue = $derived(
-    micOptions.some((m) => m.id === selectedMic) ? selectedMic : (micOptions[0]?.id ?? '')
+  const micValue = $derived(pickerValue(micOptions, selectedMic));
+  const speakerValue = $derived(pickerValue(speakerOptions, selectedSpeaker));
+  const missingDeviceOption = { id: MISSING_DEVICE, label: MISSING_DEVICE_LABEL };
+  const missingDeviceDisabled = new Set([MISSING_DEVICE]);
+  const micSelectOptions = $derived(
+    micValue === MISSING_DEVICE ? [missingDeviceOption, ...micOptions] : micOptions
   );
-  const speakerValue = $derived(
-    speakerOptions.some((s) => s.id === selectedSpeaker)
-      ? selectedSpeaker
-      : (speakerOptions[0]?.id ?? '')
+  const speakerSelectOptions = $derived(
+    speakerValue === MISSING_DEVICE ? [missingDeviceOption, ...speakerOptions] : speakerOptions
   );
   const showTestCockpit = $derived(Boolean(buildInfo?.cockpitPrivileged));
   const cockpitMessage = $derived(latestCockpitMessage(cockpitStatus, cockpitProgress));
@@ -528,13 +541,8 @@
     updateAudioDevices(id, undefined);
     micNote = null;
     try {
-      const applied = await setAudioDevices({ recordingId: id });
-      if (!applied) return; // plain browser — nothing real to apply
-      if (applied.micApplied) micNote = 'Switched microphone';
-      else if (!applied.inRoom) micNote = 'Saved — applies when you join a room';
-      else if (applied.micError === 'no live microphone track')
-        micNote = 'Saved — microphone isn’t active in this meeting (check mic permission)';
-      else micNote = applied.micError ?? 'Could not switch microphone';
+      // Null in a plain browser: nothing real to apply.
+      micNote = switchNote(await setAudioDevices({ recordingId: id }), 'microphone');
     } catch (e) {
       micNote = `Could not switch microphone: ${e}`;
     }
@@ -545,11 +553,7 @@
     updateAudioDevices(undefined, id);
     speakerNote = null;
     try {
-      const applied = await setAudioDevices({ playoutId: id });
-      if (!applied) return;
-      if (applied.speakerApplied) speakerNote = 'Switched speaker';
-      else if (!applied.inRoom) speakerNote = 'Saved — applies when you join a room';
-      else speakerNote = applied.speakerError ?? 'Could not switch speaker';
+      speakerNote = switchNote(await setAudioDevices({ playoutId: id }), 'speaker');
     } catch (e) {
       speakerNote = `Could not switch speaker: ${e}`;
     }
@@ -1681,7 +1685,8 @@
             id="microphone-device"
             label="Microphone"
             value={micValue}
-            options={micOptions}
+            options={micSelectOptions}
+            disabledOptions={missingDeviceDisabled}
             emptyLabel="No microphones found"
             disabled={noMics || audioDevicesError !== null}
             onchange={(value) => void handleMicSelect(value)}
@@ -1697,7 +1702,8 @@
             id="speaker-device"
             label="Speaker"
             value={speakerValue}
-            options={speakerOptions}
+            options={speakerSelectOptions}
+            disabledOptions={missingDeviceDisabled}
             emptyLabel="No speakers found"
             disabled={noSpeakers || audioDevicesError !== null}
             onchange={(value) => void handleSpeakerSelect(value)}
@@ -1968,7 +1974,8 @@
             <span class="device-note error">{exportLogsError}</span>
           {/if}
         </div>
-        {#if isMac()}
+        <!-- #377: both privacy toggles show on macOS and Windows; Sentry and
+             PostHog run on both. Never gate these behind isMac() again. -->
         <label class="row switch-row">
           <span class="row-copy">
             <span class="row-title">Send crash and error reports to Sentry</span>
@@ -1981,7 +1988,16 @@
             onchange={(e) => onSentryEnabledChange?.(e.currentTarget.checked)}
           />
         </label>
-        {/if}
+        <label class="row switch-row" data-testid="usage-stats-row">
+          <span class="row-copy">
+            <span class="row-title">{USAGE_STATS_LABEL}</span>
+            <span class="row-description">{USAGE_STATS_DESCRIPTION}</span>
+          </span>
+          <Switch
+            checked={usageStatsEnabled}
+            onchange={(e) => onUsageStatsEnabledChange?.(e.currentTarget.checked)}
+          />
+        </label>
       </div>
     </section>
 

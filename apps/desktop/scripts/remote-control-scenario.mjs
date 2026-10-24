@@ -13,7 +13,7 @@ import {
   REMOTE_CONTROL_SCROLL_DELTAS,
   REMOTE_CONTROL_SHORTCUTS,
 } from './remote-control-gestures.mjs';
-import { summarizePhotonSamples } from './remote-control-photon-metrics.mjs';
+import { photonStageSplit, summarizePhotonSamples } from './remote-control-photon-metrics.mjs';
 // #134: the host-side release oracle. See that module's header for why a
 // per-case assertion replaced case 7's shared tripwire, and why the stress
 // case that repeats the left drag reports `skip` rather than `fail`.
@@ -43,11 +43,12 @@ import {
 } from './remote-control-observation.mjs';
 import { armObservationWatch } from './remote-control-observation-watch.mjs';
 import { ProcessLeaseLedger, psIdentity } from './process-lease-ledger.mjs';
-import { classifyShareBorderStackReport } from './remote-control-share-border.mjs';
+import { awaitShareBorderStacked } from './remote-control-share-border.mjs';
 import {
   boundsCoverDisplayRightEdge,
   hotCornerActive,
   boundsOverlap,
+  displayTextEditBounds,
   displayRoutingVerdict,
   normalizedPointOnDisplay,
   parseAppleScriptBounds,
@@ -65,6 +66,7 @@ import {
   shareReadyPredicate,
   tileFailureDetail,
 } from './remote-control-share-readiness.mjs';
+import { freezeProbeExpression, summarizePresentedGaps } from './remote-control-freeze-probe.mjs';
 
 const positional = [];
 let jsonOutputPath = null;
@@ -114,6 +116,10 @@ const acquisitionTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_ACQUIRE_TIM
 const statusTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_STATUS_TIMEOUT_MS || acquisitionTimeoutMs);
 const shareReadyTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_SHARE_READY_TIMEOUT_MS || 8000);
 const caseSettleMs = Number(process.env.PETAL_REMOTE_CONTROL_CASE_SETTLE_MS || 500);
+// #390: case 42's wheel pairs. Each gap must exceed the host's
+// AX_RESOLUTION_CACHE_TTL (350ms) and stay under CONTROL_FRAME_CACHE_TTL (1s),
+// whose refresh clears the scroll-target cache and hides the #311 deadlock.
+const SCROLL_CACHE_REPEAT_GAPS_MS = [650, 800];
 // #45: the target-observation budget is RUNNER-AWARE, not one global number.
 // Bare metal keeps the 500ms default; the self-hosted Tart guest sets
 // PETAL_RC_OBSERVATION_BUDGET_MS in .github/workflows/nightly-loopback.yml
@@ -135,6 +141,10 @@ const photonSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_SAM
 const photonWarmupSamplesPerInput = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_WARMUP_SAMPLES || 2);
 const photonSampleTimeoutMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_TIMEOUT_MS || 2000);
 const photonP95BudgetMs = Number(process.env.PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS || 250);
+// #378 presented-freeze probe (press-to-photon mode only; 0 = off).
+const RECONNECT_ALREADY_USED_SKIP = 'one-shot reconnect already used by an earlier pass in this Petal process (PETAL_RC_RECONNECT_ALREADY_USED)';
+const freezeProbeMs = Math.max(0, Number(process.env.PETAL_RC_FREEZE_PROBE_MS || 0));
+const freezeProbeRedPauseMs = Math.max(0, Number(process.env.PETAL_RC_FREEZE_PROBE_RED_PAUSE_MS || 0));
 const maxTextEditRecoveries = 2;
 const photonSentinelSource = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -1468,13 +1478,14 @@ async function ensureShareReady(client, cdp, shared) {
 // specifically for this kind of QA assertion -- this was the one caller
 // missing to make it load-bearing rather than dead code.
 async function assertShareBorderStacked(client, windowId) {
-  const report = await command(client, { cmd: 'share_border_stack', window_id: windowId });
   // #154: classification lives in remote-control-share-border.mjs so it is
   // unit-testable, and so "the border broke" can never again be reported for
-  // "the source window went away". Deliberately NOT a retry loop -- retrying
-  // would make the real product failure invisible instead of merely
-  // misattributed.
-  const verdict = classifyShareBorderStackReport(report, windowId);
+  // "the source window went away". Not a retry loop: only a behind-source
+  // read is re-checked, and only for the tracker's own settle bound.
+  const verdict = await awaitShareBorderStacked(
+    () => command(client, { cmd: 'share_border_stack', window_id: windowId }),
+    windowId
+  );
   if (!verdict.ok) {
     const error = new Error(verdict.message);
     error.shareBorderReason = verdict.reason;
@@ -1898,8 +1909,51 @@ async function photonFailureContext(ctx, sinceMs) {
   return { lastFrame, sentinelActionsSinceStart: landed.length, sentinelActions: landed.slice(-4) };
 }
 
+// #378: presented-video freeze probe. The sentinel animates (SIGUSR1) so
+// every rVFC gap is a freeze the viewer saw; scored by the latency verdict's
+// `presented-freeze-max-gap` check. RED_PAUSE (red-proof only) stops the
+// motion mid-window to prove the check sees a freeze.
+async function runFreezeProbe(ctx) {
+  const pid = photonSentinelProcess?.pid;
+  if (!Number.isInteger(pid)) return { error: 'photon sentinel is not running' };
+  try {
+    process.kill(pid, 'SIGUSR1');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    let redPause = null;
+    if (freezeProbeRedPauseMs > 0) {
+      redPause = (async () => {
+        await new Promise((resolve) => setTimeout(resolve, Math.floor(freezeProbeMs / 3)));
+        process.kill(pid, 'SIGUSR2');
+        await new Promise((resolve) => setTimeout(resolve, freezeProbeRedPauseMs));
+        process.kill(pid, 'SIGUSR1');
+      })();
+    }
+    const raw = await evaluate(
+      ctx.cdp,
+      freezeProbeExpression({ windowId: ctx.target.windowId, tileId: ctx.target.tileId ?? null, durationMs: freezeProbeMs })
+    );
+    await redPause;
+    const summary = summarizePresentedGaps(raw.times, { startMs: raw.startMs, endMs: raw.endMs });
+    const report = {
+      ...summary,
+      redPauseMs: freezeProbeRedPauseMs || null,
+      playback: raw.playback,
+      decodeStall: raw.decodeStall,
+      videoSize: raw.videoSize,
+    };
+    console.log(`FREEZE_PROBE ${JSON.stringify(report)}`);
+    return report;
+  } catch (error) {
+    console.log(`FREEZE_PROBE ${JSON.stringify({ error: error.message })}`);
+    return { error: error.message };
+  } finally {
+    try { process.kill(pid, 'SIGUSR2'); } catch {}
+  }
+}
+
 async function runPressToPhotonSuite(ctx) {
   const suiteStarted = performance.now();
+  const photonHostLogOffset = petalLogSize();
   ctx.caseStartedAt = Date.now();
   await send(ctx, 'api.resetMetrics(); api.request(target); return true;');
   await waitForActiveStatus(ctx, ctx.caseStartedAt);
@@ -1973,6 +2027,16 @@ async function runPressToPhotonSuite(ctx) {
     }
   }
 
+  // Per-sample stage split (inject -> sentinel input -> redraw -> encoder
+  // pushes), so a slow sample says WHERE its time went.
+  const ledger = sentinelEvents();
+  const hostLogText = readPetalLogSince(photonHostLogOffset);
+  for (const sample of photonSamples) {
+    sample.stages = photonStageSplit(sample, ledger, hostLogText);
+    console.log(`PHOTON_STAGES ${JSON.stringify({ sample: sample.sample, inputKind: sample.inputKind, ...sample.stages })}`);
+  }
+  const freezeProbe = freezeProbeMs > 0 ? await runFreezeProbe(ctx) : null;
+
   const expectedSamples = photonSamplesPerInput * 2;
   const stats = summarizePhotonSamples(photonSamples, photonP95BudgetMs);
   const elapsedTimeVsLatency = summarizeElapsedTimeVsLatency(photonSamples);
@@ -1998,6 +2062,7 @@ async function runPressToPhotonSuite(ctx) {
     fail: gatePass ? 0 : 1,
     skip: 0,
     inputOrderSeed: photonShuffleSeed,
+    freezeProbe,
     pressToPhoton: {
       ...stats,
       expectedSamples,
@@ -2592,9 +2657,17 @@ function readTextEditWindowBounds() {
 // clamped x = 1.0 click of case 41 lands inside TextEdit. macOS keeps the
 // window above the Dock, so the bottom edge is whatever the system allows.
 function placeTextEditForDisplayCases(frame) {
-  const right = frame.x + frame.width;
-  const bottom = frame.y + frame.height;
-  const wanted = [right - DISPLAY_TEXTEDIT_WIDTH, frame.y + DISPLAY_TEXTEDIT_TOP_INSET, right, bottom];
+  // Computed from the display frame and the sentinel's real bounds, never
+  // hard-coded: on a display too narrow for an 800-point strip beside the
+  // sentinel the strip starts right of it instead of overlapping it.
+  const sentinelBefore = sentinelTopLeftBounds(frame);
+  const wanted = displayTextEditBounds(frame, sentinelBefore, {
+    width: DISPLAY_TEXTEDIT_WIDTH,
+    topInset: DISPLAY_TEXTEDIT_TOP_INSET,
+  });
+  if (!wanted) {
+    throw new Error(`display ${JSON.stringify(frame)} has no room for a TextEdit strip right of the photon sentinel ${sentinelBefore}`);
+  }
   osascript(
     'tell application "TextEdit"',
     `set bounds of (first window whose name contains "${sacrificialDocMarker}") to {${wanted.join(', ')}}`,
@@ -3033,6 +3106,64 @@ const CASES = [
     },
   },
   {
+    // #390 / #311: the host deadlocked evicting a stale AX scroll-target cache
+    // entry and then silently replayed nothing. Cases 19/20 scroll the same
+    // point seconds apart, and the >1s control-frame refresh clears that cache
+    // first; the bug needs the second scroll 350ms..1s after the first.
+    id: 42,
+    name: 'repeat scroll past the AX cache TTL keeps the host replaying',
+    features: 'scroll,pointer,text',
+    sequence: 'wheel, +650ms wheel (same point) x2 -> left click -> text',
+    run: async (ctx) => {
+      setTextEditDocument(Array.from({ length: 400 }, (_, index) => `repeat scroll line ${index + 1}`).join('\n'));
+      const logOffset = petalLogSize();
+      const wheel = `api.wheel({ target, ...${JSON.stringify(REMOTE_CONTROL_SCROLL_DELTAS.pixel)} }); return true;`;
+      const before = maybeReadTextEditScrollValue();
+      const ranges = [];
+      for (const gapMs of SCROLL_CACHE_REPEAT_GAPS_MS) {
+        // Idle past CONTROL_FRAME_CACHE_TTL (1s) so the first wheel refreshes
+        // the frame and the second one finds the frame fresh, the
+        // scroll-target entry stale, and nothing in between clearing it.
+        await sleep(1200);
+        const first = performance.now();
+        await send(ctx, wheel);
+        await sleep(Math.max(0, gapMs - (performance.now() - first)));
+        await send(ctx, wheel);
+        await sleep(caseSettleMs + 200);
+        ranges.push(maybeReadTextEditScrollValue());
+      }
+      const hostStalls = () => readPetalLogSince(logOffset).split('\n').filter(
+        (line) => /host replay timeout_ts_ms=|previous target injection is still in progress/.test(line)
+      );
+      let measurement;
+      try {
+        measurement = await measureDocumentInput(ctx, 'click-plus-text marker visible after repeat scroll', (attempt) => {
+          const marker = ` S${Date.now()}-${attempt} `;
+          return {
+            fragment: marker,
+            body: `api.click({ target, x: 0.18, y: 0.28, button: 0 }); api.text({ target, text: ${JSON.stringify(marker)} }); return true;`,
+          };
+        });
+      } catch (error) {
+        const stalls = hostStalls();
+        error.message = `input after the repeat scroll never landed (${error.message}); `
+          + `host stall lines=${stalls.length}${stalls.length ? `: ${stalls[0].trim().slice(0, 240)}` : ''}`;
+        throw error;
+      }
+      const stalls = hostStalls();
+      if (stalls.length) {
+        throw new Error(`host replay stalled during the repeat scroll (${stalls.length} line(s)): ${stalls[0].trim().slice(0, 240)}`);
+      }
+      await assertReleased(ctx, 'click after repeat scroll');
+      if (before === null || ranges.includes(null)) {
+        return skipCase('AX visible character range unavailable; repeat-scroll assertion needs AX');
+      }
+      if (ranges[0] === before) throw new Error(`first scroll pair did not move the document (${before})`);
+      if (ranges[1] === ranges[0]) throw new Error(`second scroll pair did not move the document (${ranges[0]}): host stopped replaying wheel input`);
+      return pass(`visible range ${before} -> ${ranges.join(' -> ')}; later click+text landed; no host replay timeout; host confirms no held input`, measurement);
+    },
+  },
+  {
     id: 21,
     target: 'sentinel',
     name: 'horizontal scroll sign',
@@ -3213,6 +3344,12 @@ const CASES = [
     features: 'lifecycle/reconnect',
     sequence: 'request -> held pointer -> reconnect -> input -> release',
     run: async (ctx) => {
+      // #378: the reconnect simulation is one-shot per Petal process
+      // (autotest.rs OneShotReconnect); the gate's impaired pass reuses the
+      // clean pass's process. Allow-listed by this exact reason only.
+      if (process.env.PETAL_RC_RECONNECT_ALREADY_USED === '1') {
+        return skipCase(RECONNECT_ALREADY_USED_SKIP);
+      }
       await send(ctx, `api.pointer({ target, action: 'down', ...${JSON.stringify(REMOTE_CONTROL_COORDINATES.suiteHeldInput)}, button: ${REMOTE_CONTROL_BUTTONS.left}, buttons: 1 }); return true;`);
       const before = await waitUntil('held input tracked before reconnect', async () => {
         const snapshot = await command(ctx.client, { cmd: 'remote-control-status', window_id: ctx.target.windowId });

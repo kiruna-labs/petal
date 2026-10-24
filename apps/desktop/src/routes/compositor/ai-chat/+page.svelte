@@ -40,8 +40,8 @@
     aiChatEndReasonMessage,
     appendTranscriptDelta,
     type AiChatTranscriptTurn
-  } from '$lib/data/aiChat';
-  import { COMMANDS, type AiChatRemoteSessionState, type AiChatRemoteTranscriptEvent } from '$lib/ipc';
+  } from '#lib/data/aiChat.js';
+  import { COMMANDS, type AiChatRemoteSessionState, type AiChatRemoteTranscriptEvent } from '#lib/ipc.js';
 
   const windowId = $derived(Number(page.url.searchParams.get('windowId') ?? '0'));
   const ownerIdentity = $derived(page.url.searchParams.get('owner') ?? '');

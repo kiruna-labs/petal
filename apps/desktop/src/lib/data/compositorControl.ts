@@ -1,4 +1,4 @@
-import { platformKey, type PlatformKey } from '$lib/platform';
+import { platformKey, type PlatformKey } from '#lib/platform.js';
 
 export type RectLike = {
   left: number;

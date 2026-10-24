@@ -1039,13 +1039,63 @@ Transport policy is authoritative in the contract fixture:
 | `status`, `result` | reliable | controller | authenticated host |
 | pointer move with no held buttons | lossy | host | authenticated controller |
 | held-pointer or discrete pointer | reliable | host | authenticated controller |
-| legacy wheel | lossy | host | authenticated controller |
+| legacy wheel | reliable | host | authenticated controller |
 | discrete scroll, key, text | reliable | host | authenticated controller |
 | `copyRequest` | reliable | host | authenticated controller |
 | `clipboardTextStream` | reliable | one targeted native participant | active remote-control grant |
+| `inputBundle` (redundant input, below) | lossy | host | authenticated controller |
 
 The exact machine-readable matrix is
 `contracts/petal-contracts.json.remoteControlPacketPolicy`.
+
+Only a hover move (no held buttons) is sent as a bare lossy packet, because
+each one fully replaces the last. Wheel deltas add up, so a dropped wheel
+packet is a scroll that never happens: on the per-message path every wheel is
+reliable (#400), and with a redundant-input host it rides the `inputBundle`
+below, whose redundancy and gap handling deliver it. For the same reason a host that
+coalesces a queued burst of legacy wheel packets sums their deltas (same
+`deltaMode`) instead of keeping only the newest.
+
+#### Redundant lossy input (`inputBundle`, #399)
+
+The reliable channel is ordered, so one lost SCTP packet holds back every input
+behind it until the SFU's retransmit timer fires (measured at 1% loss: bursts
+of keystrokes landing ~450ms late). When the host's `active` status carries
+`supportsRedundantInput: true`, the controller sends every input except a
+hover move (pointer move with no held buttons) as an `inputBundle` on the
+**lossy** channel instead:
+
+```json
+{"v":1,"kind":"inputBundle","windowId":42,"stream":"5f2c0a9e1b7d3c48","first":7,
+ "inputs":[{ ...ordinary key/pointer/wheel/text message, rseq 7... },
+           { ...rseq 8 (the newest)... }]}
+```
+
+- `inputs[i]` has bundle sequence `rseq = first + i`. rseq starts at 1 and
+  `stream` is a fresh random id per grant (a repeated `active` for the same
+  grant token keeps the stream). Each inner message is the unchanged legacy or
+  v2 message, so the grant token, v2 envelope, and `seq` all still apply.
+- Pacing: at most one bundle per 8ms. Inputs that arrive sooner are queued
+  and all ride the next bundle (up to 48, which flushes at once). A burst of
+  one bundle per input in the same millisecond overflowed the lossy send
+  buffer, and LiveKit silently drops lossy sends past that buffer.
+- Each bundle carries every queued input plus up to 3 already-sent ones, while
+  the copies keep the bundle <= 1200 bytes and are <= 500ms old. Every bundle
+  is published twice back to back. The controller then resends the latest
+  bundle at +30ms and +100ms unless a newer bundle superseded it, so a lost
+  final input of a burst is recovered too.
+- The host dedupes by `(sender, windowId, stream, rseq)` and replays strictly
+  in rseq order. A gap is held for at most 60ms; after that the host skips
+  ahead and first releases any key/button that controller holds (a skipped
+  input may have been an Up). A retired `stream` is ignored.
+- Hover moves keep the lossy latest-wins path with no redundancy.
+- A controller that never saw `supportsRedundantInput` (old host) keeps the
+  reliable per-message path. An old controller never sends a bundle, and a new
+  host still accepts its per-message packets unchanged.
+
+Pinned by `contracts/petal-contracts.json.remoteControlInputBundle` and by
+tests on both sides (`remote_control_redundant.rs`,
+`web-harness/tests/remoteControlRedundant.test.ts`).
 
 #### Binary hot-path frame (pointer-move / wheel only)
 
@@ -1361,6 +1411,19 @@ Receivers send lifecycle reports directly to the owner. Reducers use local
 receipt order and `(owner, window, reporter, publicationSid, shareEpoch)` to
 ignore duplicates and must never let a terminal epoch erase a successor.
 
+`lowerRungs` (#408) is an additive optional v1 field on **sender** messages
+only: `{ "funded": bool, "delivering": bool }`, the owner's own reading of its
+non-top simulcast rungs from the same outbound-rtp poll that drives the
+publisher's #107 starvation guard (`funded` = some lower rung has a nonzero
+allocator target, `delivering` = some lower rung reports nonzero fps). It is
+omitted -- never `null`/`false` -- when unknown (older build, single-layer
+publish, no poll yet), and a sender message without it clears the receiver's
+previous verdict. Native receivers read it (`pipeline_stats::remote_lower_rungs`,
+fresh for 12 s) so a stalled HIGH layer is re-requested instead of downgraded
+to a LOW layer the owner says is not delivering. The web harness parses and
+validates it but neither emits nor acts on it (its sender is single-layer and
+its receiver relies on livekit-client's adaptive stream).
+
 Files to change together:
 
 - `apps/desktop/src-tauri/src/pipeline_stats.rs`
@@ -1371,6 +1434,31 @@ Files to change together:
 - `web-harness/src/pipelineStats.ts`
 - `web-harness/tests/contracts.test.ts`
 - `contracts/petal-contracts.json`
+
+## Remote-control latency summary (#370)
+
+Not a wire format: no client sends it to another. It is pinned here because
+the PostHog event and the log line follow one schema, the release-gate
+verdict parses the line, and the web client must reproduce it when it gains
+a producer (#375).
+
+- `latencyHistogramVectors`: inputs and expected `n`/`rejected`/`p50`/`p95`/
+  `max` for the histogram in `rc_latency_telemetry.rs`. Buckets are `[0, 1)`
+  then edges built by repeated `*= 1.05` up to 5000 ms (176 buckets); values
+  above 5000 clamp, negatives and non-finite values are rejected and
+  counted. Percentiles are nearest-rank `ceil(n*p) - 1`, reported as the
+  bucket's geometric midpoint clamped to the observed min/max and rounded.
+  A `null` sample means NaN. The TS mirror (#375) must pass the same vectors.
+- `remoteControlLatencySummary`: the closed stage and dimension keys (in
+  emission order), the roles measured today, the cadence (60 s interval,
+  final partial at n >= 5, 120 events per session cap, empty intervals never
+  emit) and an `example` summary with its exact properties and
+  `remote-control-latency-summary:` log line. Counters (#371) and the
+  degraded thresholds (#371/#376) are added here with their producers.
+
+No wire field changed in #370, so there is no old-peer fixture. The
+`telemetrySessionId` status field from #369's design is not added yet; the
+host mints its own `rc_session_id`.
 
 ## Plugin registry
 

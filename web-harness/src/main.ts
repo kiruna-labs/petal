@@ -10,6 +10,7 @@ import { createTelepointerSender } from './telepointerSender';
 import { autoJoinFromUrl } from './deepLink';
 import type { HarnessContext, HarnessHook } from './context';
 import { setupTileLayout } from './tileLayout';
+import { parseTileLayoutMode } from '@petal/shared/logic/tileLayoutMode';
 import { setupMeetingViewport } from './meetingViewport';
 import { setupTelepointerDisplay } from './telepointerDisplay';
 import { setupDrawDisplay } from './drawDisplay';
@@ -32,6 +33,7 @@ import { setupChat } from './chat/setupChat.svelte.ts';
 import { setupControlOverflow } from './controlOverflow';
 import { addSentryBreadcrumb, initSentry, installGlobalErrorMirror } from './sentryReporting';
 import { initAnalytics } from './analytics';
+import { installUsageStatsToggle } from './usageStatsToggle';
 import { FeedbackReportController } from './feedbackReport';
 import { sensitiveStringRegistry } from './sensitiveStrings';
 import { isPhoneOrTablet } from './mobileDevice';
@@ -321,8 +323,7 @@ const ctx: HarnessContext = {
     realMicOn: false,
     webcamOn: false,
     currentMeetingCode: null,
-    tileLayoutMode:
-      localStorage.getItem(HARNESS_TILE_LAYOUT_STORAGE_KEY) === 'spotlight' ? 'spotlight' : 'grid',
+    tileLayoutMode: parseTileLayoutMode(localStorage.getItem(HARNESS_TILE_LAYOUT_STORAGE_KEY)),
     pinnedTileId: null,
     layoutModeButtons: null,
     speakerSmoothingTimer: null,
@@ -732,6 +733,7 @@ ctx.cb.updateUnifiedCtaLabel = updateUnifiedCtaLabel;
 ctx.cb.recordRecentRoom = recordRecentRoom;
 ctx.cb.refreshRecentRooms = refreshRecentRooms;
 ctx.cb.roomDisplayLabelForCredential = roomDisplayLabelForCredential;
+installUsageStatsToggle(document);
 
 controls.installControls();
 

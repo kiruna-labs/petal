@@ -28,14 +28,14 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import { page } from '$app/state';
-  import Pointer from '$lib/components/Pointer.svelte';
-  import type { IdentityColor } from '$lib/components/Avatar.svelte';
-  import { colorForIdentity, identityColorCss, identityColorFromPaletteIndex } from '$lib/data/identityColor';
-  import { friendlyTelepointerName } from '$lib/data/telepointerDisplay';
-  import { COMMANDS } from '$lib/ipc';
-  import type { DrawDraft, DrawPoint, DrawUpdate, TelepointerUpdate } from '$lib/ipc';
-  import { isStrokeExpired, strokeFadeOpacity } from '$lib/data/strokeExpiry';
-  import { session } from '$lib/stores/session.svelte';
+  import Pointer from '#lib/components/Pointer.svelte';
+  import type { IdentityColor } from '#lib/components/Avatar.svelte';
+  import { colorForIdentity, identityColorCss, identityColorFromPaletteIndex } from '#lib/data/identityColor.js';
+  import { friendlyTelepointerName } from '#lib/data/telepointerDisplay.js';
+  import { COMMANDS } from '#lib/ipc.js';
+  import type { DrawDraft, DrawPoint, DrawUpdate, TelepointerUpdate } from '#lib/ipc.js';
+  import { isStrokeExpired, strokeFadeOpacity } from '#lib/data/strokeExpiry.js';
+  import { session } from '#lib/stores/session.svelte.js';
 
   const routeWindowId = $derived(Number(page.url.searchParams.get('windowId') ?? '0'));
   const sharerSurface = $derived(page.url.searchParams.get('surface') === 'sharer');

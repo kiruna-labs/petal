@@ -18,13 +18,13 @@
 // `join_room` call). So the *values* here are real inputs to a real system;
 // only the *storage mechanism* (localStorage, not a native profile) remains
 // a stand-in.
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { IdentityColor } from '$lib/components/Avatar.svelte';
-import { COMMANDS, EVENTS, hasTauriBridge, type RemoteControlPolicy } from '$lib/ipc';
-import { migrateRemoteControlPolicy } from '$lib/remoteControlPolicy';
-import { STORAGE_KEYS } from '$lib/data/storageKeys';
+import type { IdentityColor } from '#lib/components/Avatar.svelte';
+import { COMMANDS, EVENTS, hasTauriBridge, type RemoteControlPolicy } from '#lib/ipc.js';
+import { migrateRemoteControlPolicy } from '#lib/remoteControlPolicy.js';
+import { STORAGE_KEYS } from '#lib/data/storageKeys.js';
 
 const STORAGE_KEY = STORAGE_KEYS.onboardingSession;
 
@@ -74,6 +74,12 @@ interface StoredSession {
    */
   sentryEnabled: boolean;
   /**
+   * #377: "Share anonymous usage and performance statistics" (PostHog).
+   * Default ON with opt-out, matching `sentryEnabled`. Mirrored to Rust via
+   * `set_usage_stats_enabled`, which drops every product event while off.
+   */
+  usageStatsEnabled: boolean;
+  /**
    * Refs #378: opt-in, default OFF. When enabled, the controller overlay
    * (compositor/control route + web-harness equivalent) renders purely
    * local, ephemeral "input sent" feedback (Phase 1 gesture echo: click
@@ -104,6 +110,7 @@ const defaults: StoredSession = {
   cameraMode: null,
   remoteControlPolicy: 'ask',
   sentryEnabled: true,
+  usageStatsEnabled: true,
   localEchoEnabled: false
 };
 
@@ -285,6 +292,14 @@ export function updateSentryEnabled(enabled: boolean) {
   commit(session);
   if (browser && hasTauriBridge()) {
     void invoke(COMMANDS.setSentryEnabled, { enabled }).catch(() => {});
+  }
+}
+
+export function updateUsageStatsEnabled(enabled: boolean) {
+  session.usageStatsEnabled = enabled;
+  commit(session);
+  if (browser && hasTauriBridge()) {
+    void invoke(COMMANDS.setUsageStatsEnabled, { enabled }).catch(() => {});
   }
 }
 

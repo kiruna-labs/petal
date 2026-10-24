@@ -7,14 +7,15 @@
   import { page } from '$app/state';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { beginCompositorResizeDrag, type CompositorResizeDirection } from '$lib/compositorResize';
+  import { beginCompositorResizeDrag, type CompositorResizeDirection } from '#lib/compositorResize.js';
   import {
     normalizedControlPoint,
     remoteClipboardChord,
     type RemoteClipboardOperation
-  } from '$lib/data/compositorControl';
-  import { identityColorCss } from '$lib/data/identityColor';
-  import { platformKey } from '$lib/platform';
+  } from '#lib/data/compositorControl.js';
+  import { identityColorCss } from '#lib/data/identityColor.js';
+  import { platformKey } from '#lib/platform.js';
+  import { createOrderedSender } from '#lib/orderedSend.js';
   import {
     findRemoteWindowDebugTrack,
     formatDebugMetric,
@@ -25,8 +26,8 @@
     formatLastFrameAge,
     formatPacketLossCumulative,
     formatSharedBy
-  } from '$lib/data/remoteWindowDebug';
-  import { COMMANDS, EVENTS } from '$lib/ipc';
+  } from '#lib/data/remoteWindowDebug.js';
+  import { COMMANDS, EVENTS } from '#lib/ipc.js';
   import type {
     DrawDraft,
     NetworkSnapshot,
@@ -34,13 +35,15 @@
     RemoteControlModifiers,
     RemoteWindowDebugStats,
     RemoteControlStatus
-  } from '$lib/ipc';
-  import { session } from '$lib/stores/session.svelte';
+  } from '#lib/ipc.js';
+  import { session } from '#lib/stores/session.svelte.js';
   import {
+    controlBannerShowsLabel,
+    remoteControlFeedbackIsNeutral,
     remoteControlFeedbackLabel,
     remoteControlFeedbackTitle,
     type RemoteControlFeedbackStatus
-  } from '$lib/remoteControlFeedback';
+  } from '#lib/remoteControlFeedback.js';
   import {
     applyLocalEchoKey,
     clampLocalEchoAnchor,
@@ -49,7 +52,7 @@
     nextLocalEchoRippleId,
     type EchoPoint,
     type LocalEchoRipple
-  } from '$lib/data/localEcho';
+  } from '#lib/data/localEcho.js';
 
   const windowId = $derived(Number(page.url.searchParams.get('windowId') ?? '0'));
   const ownerIdentity = $derived(page.url.searchParams.get('owner') ?? '');
@@ -101,10 +104,14 @@
       };
 
   let active = $state(false);
-  // Transient operation feedback (e.g. "Covered"): shown as a prominent,
-  // pointer-transparent top-center banner over the controlled video, using a
-  // replace-don't-stack 3-second timer. Distinct from the header chip so a
-  // refusal is never reduced to an unnoticed icon-only dot at narrow widths.
+  // Transient operation feedback (e.g. "Covered"): shown as a pointer-
+  // transparent bottom-center banner over the controlled video (clear of the
+  // shared app's own tab strip / toolbar at the top), using a
+  // replace-don't-stack 3-second timer. The header chip carries the status
+  // label; the banner carries what happened and what to do. Only when the
+  // chip has collapsed to an icon-only dot (narrow windows) does the banner
+  // repeat the label, so a refusal is never reduced to an unnoticed dot and
+  // never shown twice.
   let feedbackStatus = $state<RemoteControlFeedbackStatus>(null);
   let feedbackMessage = $state<string | null>(null);
   let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -115,6 +122,14 @@
     remoteControlFeedbackTitle(feedbackStatus, feedbackMessage)
   );
   const FEEDBACK_BANNER_MS = 3000;
+  let overlayWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 0);
+  const feedbackShowsLabel = $derived(controlBannerShowsLabel(overlayWidth));
+  const feedbackWarning = $derived(
+    feedbackStatus !== null &&
+      feedbackStatus !== 'targetPaused' &&
+      feedbackStatus !== 'textTruncated' &&
+      !remoteControlFeedbackIsNeutral(feedbackStatus)
+  );
   // #376/#450: the cue is for native-window focus loss, not DOM focus loss.
   // Keyboard listeners below are window-level so in-document focus changes do
   // not interrupt control; OS-level focus loss still needs the cue.
@@ -307,8 +322,13 @@
     sourceHeight = height;
   }
 
+  // Ordered: concurrent invokes let a Down and its Up reach the host reversed.
+  const sendOrdered = createOrderedSender((draft: Draft | RemoteControlDraft) =>
+    invoke(COMMANDS.remoteControlSend, { draft })
+  );
+
   function send(draft: Draft | RemoteControlDraft) {
-    invoke(COMMANDS.remoteControlSend, { draft }).catch(() => {});
+    void sendOrdered(draft);
   }
 
   function isClipboardModifier(event: KeyboardEvent): boolean {
@@ -1013,6 +1033,8 @@
   });
 </script>
 
+<svelte:window bind:innerWidth={overlayWidth} />
+
 <div class="control-shell">
   <button
     type="button"
@@ -1040,13 +1062,17 @@
   {#if feedbackLabel}
     <div
       class="control-feedback-banner"
-      class:warning={feedbackStatus !== null && feedbackStatus !== 'targetPaused' && feedbackStatus !== 'textTruncated'}
+      class:warning={feedbackWarning}
       role="status"
       aria-live="assertive"
-      title={feedbackTitle ?? undefined}
+      aria-label={feedbackTitle ? `${feedbackLabel}: ${feedbackTitle}` : feedbackLabel}
     >
-      <span class="control-feedback-dot" aria-hidden="true"></span>
-      <span class="control-feedback-text">{feedbackLabel}</span>
+      {#if feedbackShowsLabel || !feedbackTitle}
+        <span class="control-feedback-heading">
+          <span class="control-feedback-dot" aria-hidden="true"></span>
+          <span class="control-feedback-text">{feedbackLabel}</span>
+        </span>
+      {/if}
       {#if feedbackTitle}
         <span class="control-feedback-detail">{feedbackTitle}</span>
       {/if}
@@ -1210,38 +1236,48 @@
     backdrop-filter: blur(6px);
   }
 
-  /* Prominent, pointer-transparent transient operation-feedback banner. Sits
-     above the video (and the focus-lost hint) but never intercepts input:
+  /* Pointer-transparent transient operation-feedback banner. Sits above the
+     video (and the focus-lost hint) but never intercepts input:
      `pointer-events: none` so a click aimed through it lands on the control
-     overlay. Replace-don't-stack: exactly one instance, restarted by each
-     new transient status. */
+     overlay. Bottom-center, so it never covers the shared app's own top
+     chrome (tab strip, URL bar, toolbar). Same raised-graphite family as the
+     consent card and share notice (shared/ui/tokens.css). Replace-don't-
+     stack: exactly one instance, restarted by each new transient status. */
   .control-feedback-banner {
     position: absolute;
-    top: 16px;
+    bottom: 16px;
     left: 50%;
     z-index: 6;
     transform: translateX(-50%);
+    box-sizing: border-box;
     display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 6px;
-    max-width: min(360px, calc(100% - 32px));
-    padding: 8px 14px;
-    border-radius: var(--radius-tile);
-    background: rgba(20, 20, 24, 0.9);
-    border: 1px solid rgba(255, 255, 255, 0.22);
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: max-content;
+    max-width: min(380px, calc(100% - 32px));
+    padding: 8px 12px;
+    border-radius: var(--radius-popover);
+    background: var(--surface-raised);
+    border: 1px solid var(--hairline-strong);
     color: var(--text-strong);
-    font: 600 13px/1.35 var(--font-ui);
-    text-align: center;
-    white-space: normal;
+    font-family: var(--font-ui);
+    text-align: left;
     pointer-events: none;
-    backdrop-filter: blur(8px);
     box-shadow: var(--shadow-float);
   }
 
-  .control-feedback-banner.warning {
-    border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  .control-feedback-heading {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-strong);
+    font-size: var(--text-caption);
+    font-weight: 700;
+    line-height: 1.3;
+  }
+
+  .control-feedback-banner.warning .control-feedback-heading {
     color: var(--warning);
   }
 
@@ -1253,14 +1289,11 @@
     background: currentColor;
   }
 
-  .control-feedback-text {
-    font-weight: 700;
-  }
-
   .control-feedback-detail {
-    color: color-mix(in srgb, currentColor 75%, var(--text-soft));
-    font-size: 11px;
+    color: var(--text-soft);
+    font-size: var(--text-micro);
     font-weight: 500;
+    line-height: 1.35;
     white-space: normal;
     overflow-wrap: anywhere;
   }

@@ -5,7 +5,7 @@
   watches the bound toolbar-button models and the logic frames in the DOM.
 -->
 <script lang="ts">
-  import PluginSurfaces from '$lib/plugins/PluginSurfaces.svelte';
+  import PluginSurfaces from '#lib/plugins/PluginSurfaces.svelte';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
 
   let hostVersion = $state<string | null>(null);

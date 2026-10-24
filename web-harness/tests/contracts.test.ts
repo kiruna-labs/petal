@@ -55,6 +55,7 @@ import {
 } from '../src/trackNames.ts';
 import { decodeRemoteControlHotPath, encodeRemoteControlHotPath, fixedPointCoordinateKey, fnv1a32, parseRemoteControlJson, remoteControlPublishOptions } from '../src/remoteControl.ts';
 import { drawPublishOptions, parseDrawPayload } from '../src/draw.ts';
+import { parsePipelineStatsPayload } from '../src/pipelineStats.ts';
 import { aiChatPublishOptions, authorizeAiChatMessage, parseAiChatPayload } from '../src/aiChat.ts';
 import { createDrawMessageBuilder } from '../src/drawSender.ts';
 import { IDENTITY_COLOR_PALETTE } from '../src/telepointer.ts';
@@ -155,6 +156,7 @@ const contractFixture = JSON.parse(
     captureStateFields: string[];
     captureCpuFields: string[];
     receiverFreezeFields: string[];
+    lowerRungsFields?: string[];
   }>;
   drawMessages: Array<{
     name: string;
@@ -214,9 +216,12 @@ test('remote-control binary fixtures and reliability rule are shared', () => {
     v: 1 as const, kind: 'wheel' as const, targetUserId: 'native-1', controllerId: 'web-1', windowId: 42, seq: 43,
     grantToken, x: 0.5, y: 0.25, deltaX: -12, deltaY: 120, deltaMode: 0 as const, modifiers: { alt: false, ctrl: true, meta: false, shift: false }
   };
-  assert.deepEqual(contractFixture.rules.reliability.lossy, ['pointer.move.buttons==0', 'wheel']);
+  assert.deepEqual(contractFixture.rules.reliability.lossy, ['pointer.move.buttons==0']);
+  assert.ok(contractFixture.rules.reliability.reliable.includes('wheel'));
   assert.equal(remoteControlPublishOptions(pointer).reliable, false);
-  assert.equal(remoteControlPublishOptions(wheel).reliable, false);
+  // #400: a legacy wheel (macOS host, no v2 envelope) is reliable too -- its
+  // deltas add up, so a dropped packet is a lost scroll.
+  assert.equal(remoteControlPublishOptions(wheel).reliable, true);
   assert.equal(remoteControlPublishOptions({ ...pointer, buttons: 1 }).reliable, true);
   assert.deepEqual(remoteControlPublishOptions(pointer).destinationIdentities, ['native-1']);
   // #370 corrective pass (Bug A): no grant token to fingerprint means no
@@ -631,6 +636,12 @@ test('pipeline-stats topic and sender/receiver JSON field names are pinned', () 
     if (parsed.receiverFreeze !== null) {
       assert.deepEqual(Object.keys(parsed.receiverFreeze).sort(), vector.receiverFreezeFields, vector.name);
     }
+    // #408: the sender-only lower-rung verdict and its field list are pinned together.
+    assert.equal(parsed.lowerRungs !== undefined, vector.lowerRungsFields !== undefined, vector.name);
+    if (parsed.lowerRungs !== undefined) {
+      assert.deepEqual(Object.keys(parsed.lowerRungs).sort(), vector.lowerRungsFields, vector.name);
+      assert.deepEqual(parsePipelineStatsPayload(JSON.stringify(vector.message))?.lowerRungs, parsed.lowerRungs, vector.name);
+    }
   }
 });
 
@@ -905,12 +916,13 @@ test('remote-control packet policy pins reliability, destination, and authority'
     { packet: 'result', reliability: 'reliable', destination: 'controller', authority: 'authenticatedHost' },
     { packet: 'pointerMoveNoButtons', reliability: 'lossy', destination: 'host', authority: 'authenticatedController' },
     { packet: 'pointerHeldOrDiscrete', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
-    { packet: 'wheelLegacy', reliability: 'lossy', destination: 'host', authority: 'authenticatedController' },
+    { packet: 'wheelLegacy', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'scrollDiscrete', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'key', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'text', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'copyRequest', reliability: 'reliable', destination: 'host', authority: 'authenticatedController' },
     { packet: 'clipboardTextStream', reliability: 'reliable', destination: 'targetParticipant', authority: 'authenticatedRemoteControlGrant' },
+    { packet: 'redundantInputBundle', reliability: 'lossy', destination: 'host', authority: 'authenticatedController' },
   ]);
 });
 
@@ -947,6 +959,7 @@ test('remote-control fixture pins representative variant payloads', () => {
     status: 'active',
     message: 'Remote control active for shared window',
     supportsBinaryHotPath: true,
+    supportsRedundantInput: true,
   });
   assert.equal(byName.get('status-request-unavailable')?.status, 'requestUnavailable');
   assert.deepEqual(byName.get('pointer-move'), {

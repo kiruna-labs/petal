@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -63,6 +63,15 @@ static PENDING: AtomicU64 = AtomicU64::new(0);
 // `warn` line (visible in a shipped build's `info`-level file sink) instead
 // of the previous `debug!` that never reached it.
 static FAILURE_TRACKER: Mutex<FailureTracker> = Mutex::new(FailureTracker::new());
+// #377: the "Share anonymous usage and performance statistics" setting.
+// UNKNOWN until the frontend syncs the stored choice: events captured before
+// then wait in the bounded queue (QUEUE_CAP) and go out only once GRANTED.
+// Never start this GRANTED -- that is the Sentry startup race #377 avoids.
+const CONSENT_UNKNOWN: u8 = 0;
+const CONSENT_GRANTED: u8 = 1;
+const CONSENT_DENIED: u8 = 2;
+const CONSENT_POLL: Duration = Duration::from_millis(100);
+static USAGE_STATS_CONSENT: AtomicU8 = AtomicU8::new(CONSENT_UNKNOWN);
 
 #[cfg(test)]
 thread_local! {
@@ -72,7 +81,7 @@ thread_local! {
 #[cfg(test)]
 const COMMON_KEYS: [&str; 5] = ["build_version", "os", "os_version", "arch", "client"];
 #[cfg(test)]
-const EVENT_NAMES: [&str; 13] = [
+const EVENT_NAMES: [&str; 15] = [
     "meeting_joined",
     "meeting_left",
     "join_failed",
@@ -91,6 +100,14 @@ const EVENT_NAMES: [&str; 13] = [
     // whether they had it enabled. Bucketed on/off only -- no strokes, no
     // coordinates, no window titles.
     "annotation_toggled",
+    // #370: one per participant per 60 s of active remote control. Integer-ms
+    // latency percentiles, the scoped exception to "buckets, never raw ms".
+    "remote_control_latency_summary",
+    // #411: a VideoToolbox H.264 encoder that stopped producing frames, and
+    // what the publisher did about it. Before this the only trace was a
+    // libwebrtc log line (breadcrumb-only for Sentry): ~58,000 of them in one
+    // meeting, zero field signal. Closed enums and a count BUCKET only.
+    "video_encoder_recovery",
 ];
 
 #[derive(Clone, Copy)]
@@ -345,6 +362,76 @@ impl RemoteControlInputKind {
     }
 }
 
+/// #404 follow-up: which host injection route delivered the input. A closed
+/// enum of route names -- never an element role, title, key or coordinate.
+/// Native host only: the web client cannot inject OS input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteControlRoute {
+    /// macOS: `AXPress` / `AXShowMenu` on a pressable element.
+    AxPressable,
+    /// macOS: `AXSelectedTextRange` caret/selection on a text element.
+    AxText,
+    /// macOS: AX scroll (scrollbar `AXValue`).
+    AxScroll,
+    /// macOS: Cmd+A/C/V serviced through AX (#170).
+    AxShortcut,
+    /// macOS: a real event on the HID session tap (moves the cursor).
+    SessionTap,
+    /// macOS: `SLEventPostToPid`.
+    SkyLight,
+    /// macOS: `CGEventPostToPid` (the keyboard route).
+    PidPost,
+    /// Windows: global `SendInput`.
+    SendInput,
+    /// Windows: `PostMessageW` into the target window.
+    PostMessage,
+    /// Windows: UI Automation invoke.
+    Uia,
+}
+
+impl RemoteControlRoute {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 10] = [
+        Self::AxPressable,
+        Self::AxText,
+        Self::AxScroll,
+        Self::AxShortcut,
+        Self::SessionTap,
+        Self::SkyLight,
+        Self::PidPost,
+        Self::SendInput,
+        Self::PostMessage,
+        Self::Uia,
+    ];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AxPressable => "ax_pressable",
+            Self::AxText => "ax_text",
+            Self::AxScroll => "ax_scroll",
+            Self::AxShortcut => "ax_shortcut",
+            Self::SessionTap => "session_tap",
+            Self::SkyLight => "skylight",
+            Self::PidPost => "pid_post",
+            Self::SendInput => "send_input",
+            Self::PostMessage => "post_message",
+            Self::Uia => "uia",
+        }
+    }
+}
+
+/// What one completed injection reported about its route. Both fields stay
+/// `None` when the injection did not say -- the event then omits them rather
+/// than guessing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemoteControlRouteReport {
+    pub(crate) route: Option<RemoteControlRoute>,
+    /// #404: an AX click on a text element also moves the app's keyboard
+    /// focus onto it. `Some(true)` = moved, `Some(false)` = the focus write
+    /// failed, `None` = not attempted (not a text click).
+    pub(crate) focus_moved: Option<bool>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeviceKind {
     Display,
@@ -398,6 +485,46 @@ impl DeviceChange {
     }
 }
 
+/// Which track's encoder failed (#411). Only the camera recovers today.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EncoderTrackKind {
+    Camera,
+}
+
+impl EncoderTrackKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Camera => "camera",
+        }
+    }
+}
+
+/// What the publisher did about a failing encoder (#411).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EncoderRecoveryOutcome {
+    /// The encoder was re-created (track republished).
+    Recreated,
+    /// A re-created encoder produced frames again.
+    Recovered,
+    /// The republish itself failed.
+    RecreateFailed,
+    /// Re-creating did not help within the flap budget; stopped trying.
+    GaveUp,
+}
+
+impl EncoderRecoveryOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Recreated => "recreated",
+            Self::Recovered => "recovered",
+            Self::RecreateFailed => "recreate_failed",
+            Self::GaveUp => "gave_up",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Event {
     MeetingJoined,
@@ -437,6 +564,10 @@ enum Event {
     },
     RemoteControlInput {
         kind: RemoteControlInputKind,
+        /// The route of the input that opened this burst / completed this
+        /// click. `type`/`scroll` coalesce, so later inputs of the same burst
+        /// are not represented.
+        route: RemoteControlRouteReport,
     },
     DeviceChanged {
         kind: DeviceKind,
@@ -444,6 +575,17 @@ enum Event {
     },
     AnnotationToggled {
         state: AnnotationState,
+    },
+    RemoteControlLatencySummary(Box<crate::rc_latency_telemetry::Summary>),
+    VideoEncoderRecovery {
+        track_kind: EncoderTrackKind,
+        outcome: EncoderRecoveryOutcome,
+        /// `encoder_health::VtFailureClass::tag()`, a closed set.
+        failure_class: &'static str,
+        /// `encoder_health::failure_count_bucket()`, a closed set.
+        failure_count_bucket: &'static str,
+        /// 1-based re-creation attempt inside the flap window, as a bucket.
+        attempt_bucket: &'static str,
     },
 }
 
@@ -463,6 +605,8 @@ impl Event {
             Self::RemoteControlInput { .. } => "remote_control_input",
             Self::DeviceChanged { .. } => "device_changed",
             Self::AnnotationToggled { .. } => "annotation_toggled",
+            Self::RemoteControlLatencySummary(_) => "remote_control_latency_summary",
+            Self::VideoEncoderRecovery { .. } => "video_encoder_recovery",
         }
     }
 
@@ -499,8 +643,14 @@ impl Event {
             Self::PermissionDenied { kind } => {
                 extras.insert("kind", kind.as_str());
             }
-            Self::RemoteControlInput { kind } => {
+            Self::RemoteControlInput { kind, route } => {
                 extras.insert("kind", kind.as_str());
+                if let Some(name) = route.route {
+                    extras.insert("route", name.as_str());
+                }
+                if let Some(moved) = route.focus_moved {
+                    extras.insert("focus_moved", if moved { "yes" } else { "no" });
+                }
             }
             Self::DeviceChanged { kind, change } => {
                 extras.insert("kind", kind.as_str());
@@ -509,8 +659,31 @@ impl Event {
             Self::AnnotationToggled { state } => {
                 extras.insert("state", state.as_str());
             }
+            Self::RemoteControlLatencySummary(_) => {}
+            Self::VideoEncoderRecovery {
+                track_kind,
+                outcome,
+                failure_class,
+                failure_count_bucket,
+                attempt_bucket,
+            } => {
+                extras.insert("track_kind", track_kind.as_str());
+                extras.insert("outcome", outcome.as_str());
+                extras.insert("failure_class", failure_class);
+                extras.insert("failure_count_bucket", failure_count_bucket);
+                extras.insert("attempt_bucket", attempt_bucket);
+            }
         }
         extras
+    }
+
+    /// Non-string properties (#370's latency summary). Every other event is
+    /// closed-enum strings only and returns nothing here.
+    fn typed_properties(&self) -> Vec<(String, serde_json::Value)> {
+        match self {
+            Self::RemoteControlLatencySummary(summary) => summary.properties(),
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -604,7 +777,12 @@ fn classify_remote_control(message: &RemoteControlMessage) -> Option<ClassifiedI
             Some(RemoteControlAction::Up) => Some(ClassifiedInput::PointerUp),
             Some(RemoteControlAction::Move) | Some(RemoteControlAction::Unknown) | None => None,
         },
-        RemoteControlType::Key => Some(ClassifiedInput::Type),
+        // #404: only a key-DOWN is typing. A release (controller-sent or
+        // host-synthesized) types nothing.
+        RemoteControlType::Key => match message.action {
+            Some(RemoteControlAction::Down) => Some(ClassifiedInput::Type),
+            _ => None,
+        },
         RemoteControlType::Text => Some(ClassifiedInput::Paste),
         RemoteControlType::Wheel => Some(ClassifiedInput::Scroll),
         RemoteControlType::Request
@@ -667,7 +845,15 @@ fn os_label() -> &'static str {
     }
 }
 
+// #377: cached per process. Uncached, every event spawned `sw_vers` on the
+// caller's thread -- including remote-control replay -- which lifted the VM's
+// host receive->inject p95 from ~9ms to 19ms once a key was present.
 fn os_version() -> String {
+    static OS_VERSION: OnceLock<String> = OnceLock::new();
+    OS_VERSION.get_or_init(read_os_version).clone()
+}
+
+fn read_os_version() -> String {
     #[cfg(target_os = "macos")]
     {
         command_stdout("sw_vers", &["-productVersion"]).unwrap_or_else(|| "unknown".into())
@@ -784,6 +970,8 @@ enum SendOutcome {
     Http5xx,
     HttpOther,
     TransportOther,
+    /// #377: the user opted out while this event was in flight.
+    OptedOut,
 }
 
 impl SendOutcome {
@@ -797,6 +985,7 @@ impl SendOutcome {
             Self::Http5xx => "http_5xx",
             Self::HttpOther => "http_other",
             Self::TransportOther => "transport_other",
+            Self::OptedOut => "opted_out",
         }
     }
 
@@ -843,13 +1032,19 @@ async fn attempt_send(
 /// returns immediately instead of wasting a retry cycle on something that
 /// cannot succeed. Cannot wedge the worker (the loop always terminates) and
 /// cannot grow memory (no buffering beyond the one in-flight `body`).
+/// #377: consent is re-checked before EVERY attempt, the retry included, so
+/// an opt-out stops an in-flight event instead of letting its retry go out.
 async fn send_with_retry(
     client: &reqwest::Client,
     url: &str,
     body: &serde_json::Value,
+    consent: &AtomicU8,
 ) -> Result<(), SendOutcome> {
     let mut attempt = 0u32;
     loop {
+        if consent.load(Ordering::Relaxed) != CONSENT_GRANTED {
+            return Err(SendOutcome::OptedOut);
+        }
         match attempt_send(client, url, body).await {
             Ok(()) => return Ok(()),
             Err(outcome) => {
@@ -897,31 +1092,107 @@ fn start_worker() {
         // and #908 review blocker 4 -- a configurable host can carry
         // userinfo, query parameters, or an internal IP).
         log::info!("analytics: worker started");
-        while let Some(mut body) = rx.recv().await {
-            body["api_key"] = serde_json::Value::String(api_key.clone());
-            let result = send_with_retry(client, &url, &body).await;
-            let message = FAILURE_TRACKER.lock_unpoisoned().note_result(
-                result.is_ok(),
-                Instant::now(),
-                result.err().map(SendOutcome::as_str),
-            );
-            if let Some(message) = message {
-                log::warn!("{message}");
-            }
-            if result.is_err() {
-                // #908 review blocker 2: this event may have been carrying
-                // an earlier `dropped_since_last` count (see
-                // `take_dropped_since_last`/`build_body`). That count was
-                // only ever restored when `try_send` itself failed --  if
-                // the event reached the queue but then failed HTTP delivery
-                // (exactly the outage scenario where drops are most likely),
-                // the count silently vanished. Read it back out of the body
-                // and restore it so it still reaches a later event.
-                restore_carried_drop_count(&body);
+        drain_queue(&mut rx, &USAGE_STATS_CONSENT, client, &url, &api_key).await;
+    });
+}
+
+/// The worker loop: every queued event first waits for a usage-stats
+/// decision (#377), then is sent when GRANTED or discarded when DENIED.
+/// Split out so tests drive this exact loop against a local server and a
+/// local consent cell.
+async fn drain_queue(
+    rx: &mut tokio::sync::mpsc::Receiver<serde_json::Value>,
+    consent: &AtomicU8,
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) {
+    let mut held_discard_logged = false;
+    while let Some(mut body) = rx.recv().await {
+        let held = consent.load(Ordering::Relaxed) == CONSENT_UNKNOWN;
+        if !await_consent_decision(consent).await {
+            if held && !held_discard_logged {
+                held_discard_logged = true;
+                log::info!("analytics: usage stats off -- discarding events held since launch");
             }
             PENDING.fetch_sub(1, Ordering::Relaxed);
+            continue;
         }
-    });
+        body["api_key"] = serde_json::Value::String(api_key.to_string());
+        let result = send_with_retry(client, url, &body, consent).await;
+        if result == Err(SendOutcome::OptedOut) {
+            PENDING.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        }
+        let message = FAILURE_TRACKER.lock_unpoisoned().note_result(
+            result.is_ok(),
+            Instant::now(),
+            result.err().map(SendOutcome::as_str),
+        );
+        if let Some(message) = message {
+            log::warn!("{message}");
+        }
+        if result.is_err() {
+            // #908 review blocker 2: this event may have been carrying
+            // an earlier `dropped_since_last` count (see
+            // `take_dropped_since_last`/`build_body`). That count was
+            // only ever restored when `try_send` itself failed --  if
+            // the event reached the queue but then failed HTTP delivery
+            // (exactly the outage scenario where drops are most likely),
+            // the count silently vanished. Read it back out of the body
+            // and restore it so it still reaches a later event.
+            restore_carried_drop_count(&body);
+        }
+        PENDING.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Resolves once the user's usage-stats choice is known: `true` to send,
+/// `false` to discard. Polls only while UNKNOWN, i.e. the first moments
+/// after launch before the frontend's startup sync (#377).
+async fn await_consent_decision(consent: &AtomicU8) -> bool {
+    loop {
+        match consent.load(Ordering::Relaxed) {
+            CONSENT_GRANTED => return true,
+            CONSENT_DENIED => return false,
+            _ => tokio::time::sleep(CONSENT_POLL).await,
+        }
+    }
+}
+
+/// The one consent check for usage telemetry (#377). `false` only once the
+/// user has turned "Share anonymous usage and performance statistics" off.
+/// Before the stored choice syncs it is `true`, and `capture()` holds events
+/// until the choice is known. Producers (e.g. the #370 latency aggregator)
+/// call this to skip work while opted out.
+pub(crate) fn usage_stats_enabled() -> bool {
+    USAGE_STATS_CONSENT.load(Ordering::Relaxed) != CONSENT_DENIED
+}
+
+fn consent_value(enabled: bool) -> u8 {
+    if enabled {
+        CONSENT_GRANTED
+    } else {
+        CONSENT_DENIED
+    }
+}
+
+/// Records a usage-stats choice; returns whether the state changed.
+fn store_consent(consent: &AtomicU8, enabled: bool) -> bool {
+    consent.swap(consent_value(enabled), Ordering::Relaxed) != consent_value(enabled)
+}
+
+/// Tauri command backing Settings -> Diagnostics' "Share anonymous usage and
+/// performance statistics" toggle (#377). The frontend also calls it at
+/// startup with the stored value, which releases or discards held events.
+#[tauri::command]
+pub fn set_usage_stats_enabled(enabled: bool) {
+    if store_consent(&USAGE_STATS_CONSENT, enabled) {
+        log::info!(
+            "analytics: usage stats {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
+    }
 }
 
 /// Wait (up to `timeout`) for every event already accepted onto the queue to
@@ -929,8 +1200,23 @@ fn start_worker() {
 /// drains -- never delays a healthy-network quit -- and is hard-bounded by
 /// `timeout` so a dead network cannot block shutdown.
 pub(crate) async fn flush(timeout: Duration) {
+    // #377: held events never drain while the choice is unknown, and a
+    // DENIED worker discards without network -- only wait when sending.
     if WORKER.get().is_none() {
         return;
+    }
+    match USAGE_STATS_CONSENT.load(Ordering::Relaxed) {
+        CONSENT_GRANTED => {}
+        CONSENT_UNKNOWN => {
+            let held = PENDING.load(Ordering::Relaxed);
+            if held > 0 {
+                log::info!(
+                    "analytics: {held} event(s) held for the usage-stats choice discarded at quit (choice never synced)"
+                );
+            }
+            return;
+        }
+        _ => return,
     }
     wait_for_pending_to_drain(timeout).await;
 }
@@ -970,6 +1256,13 @@ fn event_properties(event: &Event) -> BTreeMap<String, String> {
     for (key, value) in event.extras() {
         properties.insert(key.to_string(), value.to_string());
     }
+    for (key, value) in event.typed_properties() {
+        let text = match value {
+            serde_json::Value::String(text) => text,
+            other => other.to_string(),
+        };
+        properties.insert(key, text);
+    }
     properties
 }
 
@@ -1001,6 +1294,10 @@ fn build_body(event: &Event, distinct_id: &str, dropped_since_last: u64) -> serd
     props.insert("$ip".into(), serde_json::Value::Null);
     for (key, value) in event_properties(event) {
         props.insert(key, serde_json::Value::String(value));
+    }
+    // #370: numbers and booleans go out typed so PostHog can aggregate them.
+    for (key, value) in event.typed_properties() {
+        props.insert(key, value);
     }
     if dropped_since_last > 0 {
         // #908: `internal/docs/POSTHOG_EVENT_ALLOWLIST.md` documents this
@@ -1044,6 +1341,10 @@ fn enqueue(tx: &tokio::sync::mpsc::Sender<serde_json::Value>, body: serde_json::
 }
 
 fn capture(event: Event) {
+    // #377: an opted-out user produces nothing, not even a test-sink entry.
+    if !usage_stats_enabled() {
+        return;
+    }
     // Gate BEFORE collecting properties: `common_properties` on Windows runs
     // `os_version` (RtlGetVersion — previously `cmd /C ver`, a console-process
     // spawn). With no PostHog key the events are disabled, and the old spawn
@@ -1172,8 +1473,11 @@ pub(crate) fn permission_denied(kind: PermissionKind) {
     capture(Event::PermissionDenied { kind });
 }
 
-pub(crate) fn note_remote_control_applied(message: &RemoteControlMessage) {
-    note_remote_control_applied_in(&COALESCER, Instant::now(), message);
+pub(crate) fn note_remote_control_applied(
+    message: &RemoteControlMessage,
+    route: RemoteControlRouteReport,
+) {
+    note_remote_control_applied_in(&COALESCER, Instant::now(), message, route);
 }
 
 /// Split out so tests drive coalescing with their OWN state and an explicit
@@ -1185,6 +1489,7 @@ fn note_remote_control_applied_in(
     coalescer: &Mutex<InputCoalescer>,
     now: Instant,
     message: &RemoteControlMessage,
+    route: RemoteControlRouteReport,
 ) {
     let Some(classified) = classify_remote_control(message) else {
         return;
@@ -1194,7 +1499,7 @@ fn note_remote_control_applied_in(
     let Some(kind) = kind else {
         return;
     };
-    capture(Event::RemoteControlInput { kind });
+    capture(Event::RemoteControlInput { kind, route });
 }
 
 pub(crate) fn device_changed(kind: DeviceKind, change: DeviceChange) {
@@ -1232,9 +1537,44 @@ fn device_changed_in(
 /// #872: the sharer turned annotation/drawing on or off. That flag is what makes
 /// the share overlay capture the cursor, so without this a report of "I cannot
 /// click anything" is undiagnosable from telemetry.
+/// #370: one per-interval remote-control latency summary (see
+/// `rc_latency_telemetry`). Never per input.
+pub(crate) fn remote_control_latency_summary(summary: &crate::rc_latency_telemetry::Summary) {
+    capture(Event::RemoteControlLatencySummary(Box::new(summary.clone())));
+}
+
 pub(crate) fn annotation_toggled(active: bool) {
     capture(Event::AnnotationToggled {
         state: if active { AnnotationState::On } else { AnnotationState::Off },
+    });
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn encoder_attempt_bucket(attempt: u32) -> &'static str {
+    match attempt {
+        0 => "0",
+        1 => "1",
+        2 => "2",
+        _ => "3_plus",
+    }
+}
+
+/// #411: one event per encoder-recovery transition (never per frame or per
+/// sample). Every value is a closed tag or a bucket.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn video_encoder_recovery(
+    track_kind: EncoderTrackKind,
+    outcome: EncoderRecoveryOutcome,
+    failure_class: crate::transport::encoder_health::VtFailureClass,
+    failure_count: u64,
+    attempt: u32,
+) {
+    capture(Event::VideoEncoderRecovery {
+        track_kind,
+        outcome,
+        failure_class: failure_class.tag(),
+        failure_count_bucket: crate::transport::encoder_health::failure_count_bucket(failure_count),
+        attempt_bucket: encoder_attempt_bucket(attempt),
     });
 }
 
@@ -1260,6 +1600,47 @@ mod tests {
         *COALESCER.lock_unpoisoned() = InputCoalescer::new();
         *LAST_DISPLAY_RECONFIG.lock_unpoisoned() = None;
         (result, events)
+    }
+
+    #[test]
+    fn video_encoder_recovery_carries_only_closed_tags_and_buckets() {
+        use crate::transport::encoder_health::VtFailureClass;
+        let ((), events) = with_sink(|| {
+            video_encoder_recovery(
+                EncoderTrackKind::Camera,
+                EncoderRecoveryOutcome::Recreated,
+                VtFailureClass::Parameter,
+                58_000,
+                1,
+            );
+            video_encoder_recovery(
+                EncoderTrackKind::Camera,
+                EncoderRecoveryOutcome::GaveUp,
+                VtFailureClass::NotAvailableNow,
+                42,
+                7,
+            );
+        });
+        assert_eq!(names(&events), vec!["video_encoder_recovery", "video_encoder_recovery"]);
+        assert_eq!(extra(&events[0], "track_kind"), "camera");
+        assert_eq!(extra(&events[0], "outcome"), "recreated");
+        assert_eq!(extra(&events[0], "failure_class"), "parameter");
+        assert_eq!(extra(&events[0], "failure_count_bucket"), "1000_plus");
+        assert_eq!(extra(&events[0], "attempt_bucket"), "1");
+        assert_eq!(extra(&events[1], "outcome"), "gave_up");
+        assert_eq!(extra(&events[1], "failure_class"), "not_available_now");
+        assert_eq!(extra(&events[1], "failure_count_bucket"), "1_99");
+        assert_eq!(extra(&events[1], "attempt_bucket"), "3_plus");
+        // No raw number survives into a property value.
+        for event in &events {
+            for key in ["track_kind", "outcome", "failure_class", "failure_count_bucket", "attempt_bucket"] {
+                let value = extra(event, key);
+                assert!(
+                    !value.chars().all(|c| c.is_ascii_digit()) || value.len() <= 1,
+                    "{key}={value} looks like a raw count"
+                );
+            }
+        }
     }
 
     fn names(events: &[CapturedEvent]) -> Vec<&str> {
@@ -1328,6 +1709,7 @@ mod tests {
             },
             Event::RemoteControlInput {
                 kind: RemoteControlInputKind::Click,
+                route: RemoteControlRouteReport::default(),
             },
             Event::DeviceChanged {
                 kind: DeviceKind::Display,
@@ -1336,11 +1718,84 @@ mod tests {
             Event::AnnotationToggled {
                 state: AnnotationState::On,
             },
+            Event::RemoteControlLatencySummary(Box::new(sample_latency_summary())),
+            Event::VideoEncoderRecovery {
+                track_kind: EncoderTrackKind::Camera,
+                outcome: EncoderRecoveryOutcome::Recreated,
+                failure_class: "parameter",
+                failure_count_bucket: "1000_plus",
+                attempt_bucket: "1",
+            },
         ]
         .iter()
         .map(Event::name)
         .collect();
         assert_eq!(names, EVENT_NAMES);
+    }
+
+    fn sample_latency_summary() -> crate::rc_latency_telemetry::Summary {
+        use crate::rc_latency_telemetry::{Dimension, HistogramStats, RcRole, Stage, Summary};
+        Summary {
+            role: RcRole::Host,
+            rc_session_id: "ab".repeat(16),
+            interval_s: 60,
+            is_final: true,
+            stages: vec![(
+                Stage::ReplayCompleteMs,
+                HistogramStats { p50: 4, p95: 108, max: 240, n: 400 },
+            )],
+            dimensions: vec![(Dimension::WindowCodec, "h264".to_string())],
+        }
+    }
+
+    #[test]
+    fn latency_summary_sends_typed_numbers_and_only_schema_keys() {
+        let event = Event::RemoteControlLatencySummary(Box::new(sample_latency_summary()));
+        let body = build_body(&event, "id", 0);
+        let props = &body["properties"];
+        assert_eq!(body["event"], "remote_control_latency_summary");
+        assert_eq!(props["replay_complete_ms_p95"], json!(108));
+        assert_eq!(props["replay_complete_ms_n"], json!(400));
+        assert_eq!(props["interval_s"], json!(60));
+        assert_eq!(props["final"], json!(true));
+        assert_eq!(props["role"], json!("host"));
+        assert_eq!(props["window_codec"], json!("h264"));
+        assert!(props.get("replay_inject_ms_p50").is_none(), "n = 0 stages are omitted");
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/petal-contracts.json"
+        ))
+        .unwrap();
+        let schema = &contract["remoteControlLatencySummary"];
+        let mut allowed: Vec<String> = COMMON_KEYS.iter().map(|k| k.to_string()).collect();
+        allowed.extend(["$geoip_disable".to_string(), "$ip".to_string()]);
+        for key in schema["alwaysPresent"].as_array().unwrap() {
+            allowed.push(key.as_str().unwrap().to_string());
+        }
+        for stage in schema["stages"].as_array().unwrap() {
+            for suffix in schema["stageSuffixes"].as_array().unwrap() {
+                allowed.push(format!("{}{}", stage.as_str().unwrap(), suffix.as_str().unwrap()));
+            }
+        }
+        for dimension in schema["dimensions"].as_object().unwrap().keys() {
+            allowed.push(dimension.clone());
+        }
+        for key in props.as_object().unwrap().keys() {
+            assert!(allowed.contains(key), "latency summary leaked property {key}");
+        }
+    }
+
+    #[test]
+    fn the_consent_gate_blocks_every_event_and_reopens() {
+        let ((), events) = with_sink(|| {
+            let _reset = ResetConsent;
+            set_usage_stats_enabled(false);
+            remote_control_latency_summary(&sample_latency_summary());
+            meeting_joined();
+            set_usage_stats_enabled(true);
+            remote_control_latency_summary(&sample_latency_summary());
+        });
+        assert_eq!(names(&events), ["remote_control_latency_summary"]);
+        assert_eq!(extra(&events[0], "replay_complete_ms_p50"), "4");
     }
 
     #[test]
@@ -1378,6 +1833,14 @@ mod tests {
             },
             Event::RemoteControlInput {
                 kind: RemoteControlInputKind::Scroll,
+                route: RemoteControlRouteReport::default(),
+            },
+            Event::RemoteControlInput {
+                kind: RemoteControlInputKind::Click,
+                route: RemoteControlRouteReport {
+                    route: Some(RemoteControlRoute::AxPressable),
+                    focus_moved: Some(true),
+                },
             },
             Event::DeviceChanged {
                 kind: DeviceKind::Mic,
@@ -1538,9 +2001,13 @@ mod tests {
             Some(ClassifiedInput::Click)
         );
         assert_eq!(
-            classify_remote_control(&fixture("key", None)),
+            classify_remote_control(&fixture("key", Some("down"))),
             Some(ClassifiedInput::Type)
         );
+        // #404: a key release -- controller-sent or host-synthesized on
+        // revoke/TTL -- types nothing and must never count as `type`.
+        assert_eq!(classify_remote_control(&fixture("key", Some("up"))), None);
+        assert_eq!(classify_remote_control(&fixture("key", None)), None);
         assert_eq!(
             classify_remote_control(&fixture("text", None)),
             Some(ClassifiedInput::Paste)
@@ -1718,17 +2185,24 @@ mod tests {
         let t0 = Instant::now();
         let (_, events) = with_sink(|| {
             let at = |now: Instant, kind: &str, action: Option<&str>| {
-                note_remote_control_applied_in(&coalescer, now, &fixture(kind, action));
+                note_remote_control_applied_in(
+                    &coalescer,
+                    now,
+                    &fixture(kind, action),
+                    RemoteControlRouteReport::default(),
+                );
             };
             at(t0, "pointer", Some("move"));
             at(t0, "pointer", Some("click"));
             at(t0, "pointer", Some("click"));
-            at(t0, "key", None);
+            at(t0, "key", Some("down"));
+            // #404: a release never starts or extends a typing burst.
+            at(t0 + Duration::from_millis(5), "key", Some("up"));
             // Inside TYPE_IDLE: coalesced into the burst above.
-            at(t0 + TYPE_IDLE - Duration::from_millis(1), "key", None);
+            at(t0 + TYPE_IDLE - Duration::from_millis(1), "key", Some("down"));
             // Idle window elapsed. It is measured from the PREVIOUS key, not
             // from the start of the burst, so this must clear the key above.
-            at(t0 + TYPE_IDLE * 2, "key", None);
+            at(t0 + TYPE_IDLE * 2, "key", Some("down"));
         });
         assert_eq!(
             events
@@ -1737,6 +2211,63 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["click", "click", "type", "type"]
         );
+    }
+
+    /// #404 follow-up: the route of the input that emits rides on the event;
+    /// an unreported route is omitted, never sent as a guess.
+    #[test]
+    fn remote_control_input_carries_the_injection_route() {
+        let coalescer = Mutex::new(InputCoalescer::new());
+        let t0 = Instant::now();
+        let pressed = RemoteControlRouteReport {
+            route: Some(RemoteControlRoute::AxPressable),
+            focus_moved: Some(true),
+        };
+        let posted = RemoteControlRouteReport {
+            route: Some(RemoteControlRoute::PidPost),
+            focus_moved: None,
+        };
+        let (_, events) = with_sink(|| {
+            note_remote_control_applied_in(&coalescer, t0, &fixture("pointer", Some("click")), pressed);
+            note_remote_control_applied_in(&coalescer, t0, &fixture("key", Some("down")), posted);
+            note_remote_control_applied_in(
+                &coalescer,
+                t0,
+                &fixture("pointer", Some("click")),
+                RemoteControlRouteReport::default(),
+            );
+        });
+        let routes: Vec<_> = events
+            .iter()
+            .map(|event| {
+                (
+                    extra(event, "kind").to_string(),
+                    event.properties.get("route").cloned(),
+                    event.properties.get("focus_moved").cloned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            routes,
+            vec![
+                ("click".to_string(), Some("ax_pressable".to_string()), Some("yes".to_string())),
+                ("type".to_string(), Some("pid_post".to_string()), None),
+                ("click".to_string(), None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_control_route_names_are_closed_snake_case_tokens() {
+        let mut seen = std::collections::HashSet::new();
+        for route in RemoteControlRoute::ALL {
+            let name = route.as_str();
+            assert!(seen.insert(name), "duplicate route {name}");
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1752,7 +2283,10 @@ mod tests {
             let stop = std::sync::Arc::clone(&stop);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    note_remote_control_applied(&fixture("key", None));
+                    note_remote_control_applied(
+                        &fixture("key", Some("down")),
+                        RemoteControlRouteReport::default(),
+                    );
                 }
             })
         };
@@ -1760,7 +2294,12 @@ mod tests {
         let coalescer = Mutex::new(InputCoalescer::new());
         let t0 = Instant::now();
         let (_, events) = with_sink(|| {
-            note_remote_control_applied_in(&coalescer, t0, &fixture("key", None));
+            note_remote_control_applied_in(
+                &coalescer,
+                t0,
+                &fixture("key", Some("down")),
+                RemoteControlRouteReport::default(),
+            );
         });
 
         stop.store(true, Ordering::Relaxed);
@@ -2130,7 +2669,7 @@ mod tests {
             .build()
             .unwrap();
         let body = json!({"event": "test"});
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         assert!(result.is_ok(), "one retry must recover a transient failure: {result:?}");
     }
 
@@ -2164,7 +2703,7 @@ mod tests {
         // attempts" -- instead of a number that happens to hold on one OS.
         let worst_case = SEND_TIMEOUT * (MAX_SEND_RETRIES + 1) + RETRY_BACKOFF * MAX_SEND_RETRIES;
         let start = Instant::now();
-        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body))
+        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)))
             .await
             .expect("send_with_retry must terminate, never wedge the worker");
         let elapsed = start.elapsed();
@@ -2214,7 +2753,7 @@ mod tests {
             .unwrap();
         let body = json!({"event": "test"});
         let worst_case = SEND_TIMEOUT * (MAX_SEND_RETRIES + 1) + RETRY_BACKOFF * MAX_SEND_RETRIES;
-        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body))
+        let result = tokio::time::timeout(worst_case * 2, send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)))
             .await
             .expect("send_with_retry must terminate, never wedge the worker");
         assert!(
@@ -2236,7 +2775,7 @@ mod tests {
             .build()
             .unwrap();
         let body = json!({"event": "test"});
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         assert_eq!(
             result,
             Err(SendOutcome::Http401),
@@ -2259,7 +2798,7 @@ mod tests {
             .unwrap();
         let body = json!({"event": "test"});
         let start = Instant::now();
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         let elapsed = start.elapsed();
         assert_eq!(result, Err(SendOutcome::Http401));
         assert!(
@@ -2293,6 +2832,7 @@ mod tests {
             SendOutcome::Http5xx,
             SendOutcome::HttpOther,
             SendOutcome::TransportOther,
+            SendOutcome::OptedOut,
         ] {
             let s = outcome.as_str();
             assert!(!s.contains("://"), "must never look like a URL: {s}");
@@ -2331,7 +2871,7 @@ mod tests {
             .timeout(SEND_TIMEOUT)
             .build()
             .unwrap();
-        let result = send_with_retry(&client, &url, &body).await;
+        let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
         assert!(result.is_err(), "both attempts were configured to fail");
 
         // Call the SAME function the worker's failure branch calls. Do not
@@ -2347,5 +2887,119 @@ mod tests {
              restored, not silently lost"
         );
         DROPPED.store(0, Ordering::Relaxed);
+    }
+
+    /// Puts the process-wide consent back to UNKNOWN even if a test panics,
+    /// so one failing #377 test cannot silently opt every later test out.
+    struct ResetConsent;
+
+    impl Drop for ResetConsent {
+        fn drop(&mut self) {
+            USAGE_STATS_CONSENT.store(CONSENT_UNKNOWN, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn opted_out_capture_records_nothing_and_opting_back_in_resumes() {
+        let (_, events) = with_sink(|| {
+            let _reset = ResetConsent;
+            assert!(usage_stats_enabled(), "unknown consent must not block producers");
+            set_usage_stats_enabled(false);
+            assert!(!usage_stats_enabled());
+            share_started(ShareStartedSource::Window);
+            meeting_joined();
+            annotation_toggled(true);
+            set_usage_stats_enabled(true);
+            assert!(usage_stats_enabled());
+            share_stopped(ShareStoppedReason::User);
+        });
+        assert_eq!(names(&events), ["share_stopped"]);
+    }
+
+    #[test]
+    fn store_consent_reports_only_real_changes() {
+        let consent = AtomicU8::new(CONSENT_UNKNOWN);
+        assert!(store_consent(&consent, false));
+        assert!(!store_consent(&consent, false));
+        assert!(store_consent(&consent, true));
+        assert_eq!(consent.load(Ordering::Relaxed), CONSENT_GRANTED);
+    }
+
+    /// Queues `count` events through the real `enqueue`, then runs the real
+    /// worker loop while `decide` lands a choice after a hold. Returns
+    /// (requests seen during the hold, requests seen in total).
+    async fn drain_with_late_decision(count: usize, enabled: bool) -> (usize, usize) {
+        let (url, requests) =
+            spawn_counting_server("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+        let client = reqwest::Client::builder()
+            .timeout(SEND_TIMEOUT)
+            .build()
+            .unwrap();
+        let consent = AtomicU8::new(CONSENT_UNKNOWN);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(QUEUE_CAP);
+        for _ in 0..count {
+            assert!(enqueue(&tx, json!({"event": "test", "properties": {}})));
+        }
+        drop(tx);
+        let decide = async {
+            tokio::time::sleep(CONSENT_POLL * 4).await;
+            let held = requests.lock_unpoisoned().len();
+            store_consent(&consent, enabled);
+            held
+        };
+        let (held, ()) = tokio::join!(
+            decide,
+            drain_queue(&mut rx, &consent, &client, &url, "phc_test")
+        );
+        let total = requests.lock_unpoisoned().len();
+        (held, total)
+    }
+
+    #[tokio::test]
+    async fn events_before_the_startup_sync_wait_and_then_send_when_granted() {
+        let _guard = TEST_LOCK.lock_unpoisoned();
+        PENDING.store(0, Ordering::Relaxed);
+        let (held, total) = drain_with_late_decision(3, true).await;
+        assert_eq!(held, 0, "nothing may be sent before the stored choice is known");
+        assert_eq!(total, 3, "held events must all go out once granted");
+        assert_eq!(PENDING.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn events_before_the_startup_sync_are_discarded_when_denied() {
+        let _guard = TEST_LOCK.lock_unpoisoned();
+        PENDING.store(0, Ordering::Relaxed);
+        let (held, total) = drain_with_late_decision(3, false).await;
+        assert_eq!(held, 0);
+        assert_eq!(total, 0, "an opted-out user's held events must never be sent");
+        assert_eq!(
+            PENDING.load(Ordering::Relaxed),
+            0,
+            "discarded events must settle PENDING so quit's flush is not delayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_opt_out_between_attempts_stops_the_retry() {
+        let (url, requests) =
+            spawn_counting_server("HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+        let client = reqwest::Client::builder()
+            .timeout(SEND_TIMEOUT)
+            .build()
+            .unwrap();
+        let consent = AtomicU8::new(CONSENT_GRANTED);
+        let body = json!({"event": "test"});
+        let opt_out = async {
+            // Inside RETRY_BACKOFF: after the first attempt, before the retry.
+            tokio::time::sleep(RETRY_BACKOFF / 2).await;
+            store_consent(&consent, false);
+        };
+        let (result, ()) = tokio::join!(send_with_retry(&client, &url, &body, &consent), opt_out);
+        assert_eq!(result, Err(SendOutcome::OptedOut));
+        assert_eq!(
+            requests.lock_unpoisoned().len(),
+            1,
+            "the retry of an in-flight event must not go out after an opt-out"
+        );
     }
 }

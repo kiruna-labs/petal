@@ -52,7 +52,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { onDestroy } from 'svelte';
-  import { attachVideoStream } from '$lib/videoAttachment';
+  import { attachVideoStream } from '#lib/videoAttachment.js';
   import Gallery, { type GalleryParticipant } from './Gallery.svelte';
   import Pill from '@petal/shared/ui/components/Pill.svelte';
   import Avatar from './Avatar.svelte';
@@ -62,10 +62,10 @@
   import {
     restrainedSurfaceEnterTransition,
     restrainedSurfaceExitTransition
-  } from '$lib/motion';
+  } from '#lib/motion.js';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
   import type { IdentityColor } from './Avatar.svelte';
-  import type { DrawUpdate } from '$lib/ipc';
+  import type { DrawUpdate } from '#lib/ipc.js';
 
   type PillResizeDirection =
     | 'East'

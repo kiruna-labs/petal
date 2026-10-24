@@ -1,5 +1,5 @@
 import { listen, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
-import type { ShareSessionError } from '$lib/data/shareErrors';
+import type { ShareSessionError } from '#lib/data/shareErrors.js';
 import {
   remoteWindowFullSourceLabel,
   remoteWindowSourceLabel
@@ -159,6 +159,7 @@ export const COMMANDS = {
   roomPresence: 'room_presence',
   runLaunchUpdateCheck: 'run_launch_update_check',
   setAudioDevices: 'set_audio_devices',
+  switchFromSilentMic: 'switch_from_silent_mic',
   setCameraDevice: 'set_camera_device',
   setCameraPrefs: 'set_camera_prefs',
   setCockpitOpen: 'set_cockpit_open',
@@ -170,6 +171,7 @@ export const COMMANDS = {
   setRemoteControlAllowed: 'set_remote_control_allowed',
   setRemoteControlPolicy: 'set_remote_control_policy',
   setSentryEnabled: 'set_sentry_enabled',
+  setUsageStatsEnabled: 'set_usage_stats_enabled',
   /** #172: where this launch runs from -- a closed class string, never a
    * path. The launch router diverts to /relocate when the class needs the
    * user to move the app (disk image, App Translocation, read-only). */
@@ -245,6 +247,13 @@ export const EVENTS = {
    * Tauri bus so the main window (which owns the toast surfaces) can render it.
    */
   aiChatRefused: 'ai-chat-refused',
+  /**
+   * Windows, in a call: a microphone or speaker connected or disconnected.
+   * No payload. The in-call device watcher sends it after it has switched to
+   * or away from the affected device, so an open picker re-lists and shows
+   * the settled state.
+   */
+  audioDevicesChanged: 'audio-devices-changed',
   autotestJoinResult: 'autotest-join-result',
   cameraPublishState: 'camera-publish-state',
   /**
@@ -1299,6 +1308,14 @@ export type ResilienceEvent =
   | { kind: 'networkChanged' }
   | { kind: 'micDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'micDeviceFailed'; message: string }
+  | {
+      kind: 'micSilentOffer';
+      silentDevice: string;
+      silentDeviceId: string;
+      deviceName: string;
+      deviceId: string;
+    }
+  | { kind: 'micSwitchedFromSilent'; silentDevice: string; deviceName: string }
   | { kind: 'speakerDeviceChanged'; deviceName: string; usingDefault?: boolean }
   | { kind: 'speakerDeviceFailed'; message: string }
   | { kind: 'sharePublicationRepairRecovering'; windowId: number }
@@ -1750,6 +1767,7 @@ export interface CommandArgs {
     which: 'screenRecording' | 'microphone' | 'camera' | 'accessibility';
   };
   [COMMANDS.setAudioDevices]: { recordingId: string | null; playoutId: string | null };
+  [COMMANDS.switchFromSilentMic]: { silentDeviceId: string; deviceId: string };
   [COMMANDS.listCameraModes]: { preferredDeviceId: string | null };
   [COMMANDS.setCameraDevice]: { deviceId: string };
   /** Settings' camera-preview edge, written to petal.log so a #76 camera-intent
@@ -1774,6 +1792,7 @@ export interface CommandArgs {
   [COMMANDS.remoteControlAnswerConsent]: { windowId: number; controllerId: string; approve: boolean };
   [COMMANDS.remoteControlAnswerEscalation]: { windowId: number; controllerId: string; approve: boolean };
   [COMMANDS.setSentryEnabled]: { enabled: boolean };
+  [COMMANDS.setUsageStatsEnabled]: { enabled: boolean };
   [COMMANDS.controlConsentDismiss]: Record<string, never>;
   /** Measured content height, same resize-to-content pattern as shareNoticePresent. */
   [COMMANDS.controlConsentPresent]: { height: number };
@@ -1950,6 +1969,7 @@ export interface CommandReturns {
   [COMMANDS.restartApp]: boolean;
   [COMMANDS.roomPresence]: PresentParticipant[];
   [COMMANDS.setAudioDevices]: AppliedAudioDevices;
+  [COMMANDS.switchFromSilentMic]: string;
   [COMMANDS.setCameraDevice]: AppliedCameraDevice;
   [COMMANDS.setCameraPrefs]: AppliedCameraDevice;
   [COMMANDS.startTestCockpit]: CockpitStatus;
@@ -1959,6 +1979,7 @@ export interface CommandReturns {
   [COMMANDS.setRemoteControlPolicy]: RemoteControlPolicy;
   [COMMANDS.remoteControlAnswerEscalation]: boolean;
   [COMMANDS.setSentryEnabled]: void;
+  [COMMANDS.setUsageStatsEnabled]: void;
   [COMMANDS.shareOverlaySetDrawActive]: void;
   [COMMANDS.setHoverTabMenuOpen]: void;
   [COMMANDS.shareWindow]: boolean;

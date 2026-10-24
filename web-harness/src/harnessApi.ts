@@ -910,6 +910,8 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
       expectedDisplayTimeMs: number;
       mediaTime: number;
       presentedFrames: number;
+      receiveTimeMs: number | null;
+      rtpTimestamp: number | null;
     }>((resolve, reject) => {
       rejectObservation = reject;
       const onFrame: VideoFrameRequestCallback = (now, metadata) => {
@@ -924,7 +926,9 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
             callbackNowMs: now,
             expectedDisplayTimeMs: metadata.expectedDisplayTime,
             mediaTime: metadata.mediaTime,
-            presentedFrames: metadata.presentedFrames
+            presentedFrames: metadata.presentedFrames,
+            receiveTimeMs: typeof metadata.receiveTime === 'number' ? metadata.receiveTime : null,
+            rtpTimestamp: typeof metadata.rtpTimestamp === 'number' ? metadata.rtpTimestamp : null
           });
           return;
         }
@@ -953,6 +957,9 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
     const timeoutMs = Math.min(10_000, Math.max(100, Math.round(input.timeoutMs ?? 2_000)));
     const observer = observePhotonGeneration(video, target, expectedGeneration, timeoutMs);
     const sentAt = performance.now();
+    // Host wall clock (same machine in the loopback), so the driver can join
+    // this sample against the sentinel ledger and the host's log stages.
+    const sentAtEpochMs = Date.now();
 
     try {
       if (input.kind === 'click') {
@@ -995,7 +1002,12 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
         pressToEstimatedPhotonMs: Math.max(0, estimatedDisplayTime - sentAt),
         publishCompleteMs: Math.max(0, publishCompleteMs),
         mediaTime: observed.mediaTime,
-        presentedFrames: observed.presentedFrames
+        presentedFrames: observed.presentedFrames,
+        sentAtEpochMs,
+        pressToReceiveMs: observed.receiveTimeMs === null
+          ? null
+          : Math.max(0, observed.receiveTimeMs - sentAt),
+        rtpTimestamp: observed.rtpTimestamp
       };
     } catch (error) {
       observer.cancel(error);

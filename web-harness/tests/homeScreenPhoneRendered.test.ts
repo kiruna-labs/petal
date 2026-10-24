@@ -13,6 +13,7 @@ import { extname, join, normalize, resolve } from 'node:path';
 import test from 'node:test';
 import { build } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { USAGE_STATS_DESCRIPTION, USAGE_STATS_LABEL } from '@petal/shared/logic/usageStats';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 const webRoot = resolve(repoRoot, 'web-harness');
@@ -88,6 +89,23 @@ async function boxes(page: { evaluate(script: string): Promise<unknown> }): Prom
 
 const centerY = (box: Box) => box.top + box.height / 2;
 
+// #377 / never-truncate rule: the usage-stats opt-out in the name card shows
+// the shared copy in full, inside the card, with nothing clipped.
+async function usageStatsClipping(page: { evaluate(script: string): Promise<unknown> }): Promise<string[]> {
+  return (await page.evaluate(`(() => {
+    const bad = [];
+    const card = document.querySelector('#profile-onboarding').getBoundingClientRect();
+    for (const sel of ['#usage-stats-title', '#usage-stats-description', '#usage-stats-checkbox']) {
+      const el = document.querySelector(sel);
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) bad.push(sel + ' is not rendered');
+      if (el.scrollWidth > el.clientWidth + 1) bad.push(sel + ' scrollWidth ' + el.scrollWidth + ' > ' + el.clientWidth);
+      if (r.left < card.left - 0.5 || r.right > card.right + 0.5) bad.push(sel + ' leaves the card');
+    }
+    return bad;
+  })()`)) as string[];
+}
+
 test('#243: the home screen fills a phone in both orientations', { timeout: 120_000 }, async () => {
   const buildDir = await mkdtemp(join(tmpdir(), 'petal-home-phone-build-'));
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
@@ -136,6 +154,7 @@ test('#243: the home screen fills a phone in both orientations', { timeout: 120_
       await page.evaluate(() => document.fonts.ready);
 
       assert.equal(await page.textContent('#conn-error'), '', at('a first visit shows an error'));
+      assert.equal(await page.isVisible('#usage-stats-checkbox'), false, at('the first-visit card must stay name + colour only'));
       const first = await boxes(page);
       assert.ok(Math.abs(centerY(first.bubble) - centerY(first.save)) <= 1, at('the colour bubble and Save are not on one row'));
       assert.ok(first.bubble.right < first.save.left, at('the colour bubble must sit left of Save'));
@@ -190,6 +209,13 @@ test('#243: the home screen fills a phone in both orientations', { timeout: 120_
         assert.ok(above > 0 && Math.abs(below - 2 * above) <= 3, at(`free space is not split 1:2 (${above}px above, ${below}px below)`));
       }
       assert.ok(home.scrollWidth <= viewport.width, at('the page scrolls sideways'));
+      // #377: the avatar reopens the card with the usage-stats opt-out, copy in full.
+      await page.click('#profile-avatar-button');
+      await page.waitForSelector('#usage-stats-checkbox', { state: 'visible' });
+      assert.deepEqual(await usageStatsClipping(page), [], at('usage-stats copy clips'));
+      assert.equal(await page.textContent('#usage-stats-title'), USAGE_STATS_LABEL);
+      assert.equal(await page.textContent('#usage-stats-description'), USAGE_STATS_DESCRIPTION);
+      await page.click('#profile-avatar-button');
       assert.equal(home.downloadDisplay, 'none', at('a phone was offered the desktop download'));
       // Rubber-banding past the top shows the backdrop's top colour, not a
       // darker band.
@@ -207,6 +233,18 @@ test('#243: the home screen fills a phone in both orientations', { timeout: 120_
     assert.ok(desktop.card.left > 0 && desktop.card.top > 0, 'the desktop card must float, not fill the window');
     assert.notEqual(desktop.downloadDisplay, 'none', 'desktop browsers keep the desktop download');
     assert.ok(Math.abs(centerY(desktop.bubble) - centerY(desktop.save)) <= 1, 'desktop: bubble and Save share a row');
+    // #377 on the 380px desktop card: reopen from the avatar, check the copy,
+    // and untick -- the stored opt-out is what the analytics pipe reads.
+    await page.fill('#display-name', 'Ada');
+    await page.click('#profile-onboarding-done');
+    await page.click('#profile-avatar-button');
+    await page.waitForSelector('#usage-stats-checkbox', { state: 'visible' });
+    assert.deepEqual(await usageStatsClipping(page), [], 'desktop: usage-stats copy clips');
+    assert.equal(await page.isChecked('#usage-stats-checkbox'), true, 'usage stats default ON');
+    await page.click('#usage-stats-checkbox');
+    assert.equal(await page.evaluate(() => localStorage.getItem('petal-usage-stats')), '0');
+    await page.reload({ waitUntil: 'load' });
+    assert.equal(await page.isChecked('#usage-stats-checkbox'), false, 'desktop: the opt-out must survive a reload');
   } finally {
     await browser?.close();
     await server?.close();

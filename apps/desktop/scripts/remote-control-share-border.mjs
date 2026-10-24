@@ -98,3 +98,50 @@ export function classifyShareBorderStackReport(report, windowId) {
     summary: `# share-border-stack window=${windowId} border=${report.border.stackIndex} source=${report.source.stackIndex} (border in front) ${state}`,
   };
 }
+
+// share_border.rs's tracker polls every 100ms and reorders a border found
+// BEHIND its source on the very next tick (no debounce; #300 bounds even the
+// debounced in-front case to ~400ms). A single stack read can land inside
+// that tick -- run 40004629026 read border=11 source=10 at 18:51:13.790 and
+// the tracker reordered at 13.804 -- so a behind-source read is re-checked
+// for this long, and only a misorder that outlives it fails.
+export const BORDER_TRACKER_SETTLE_MS = 500;
+
+/**
+ * Read and classify the border stack, re-reading ONLY a `border-behind-source`
+ * verdict until it converges or `settleMs` passes. Every other failure
+ * (border missing, source lost) is returned from the first read unchanged.
+ *
+ * @param {() => Promise<unknown>} readReport one `share_border_stack` call
+ */
+export async function awaitShareBorderStacked(
+  readReport,
+  windowId,
+  {
+    settleMs = BORDER_TRACKER_SETTLE_MS,
+    pollMs = 50,
+    now = () => Date.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = {}
+) {
+  const started = now();
+  const first = classifyShareBorderStackReport(await readReport(), windowId);
+  if (first.ok || first.reason !== 'border-behind-source') return first;
+  let last = first;
+  while (now() - started < settleMs) {
+    await sleep(pollMs);
+    last = classifyShareBorderStackReport(await readReport(), windowId);
+    if (last.ok) {
+      const elapsedMs = now() - started;
+      return {
+        ...last,
+        summary: `${last.summary} -- converged after ${elapsedMs}ms; first read had the border behind its source (within the ${settleMs}ms tracker settle bound)`,
+      };
+    }
+    if (last.reason !== 'border-behind-source') return last;
+  }
+  return {
+    ...last,
+    message: `${last.message} (still behind after the ${settleMs}ms border-tracker settle bound; first read: ${first.message})`,
+  };
+}

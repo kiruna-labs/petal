@@ -12,8 +12,8 @@ import type { LoadedPlugin } from '@petal/shared/plugin-host/broker';
 import { parseBundle } from '@petal/shared/plugin-host/bundle';
 import { compareVersions, isPermission, type Permission } from '@petal/shared/plugin-host/manifest';
 import { isPluginEnabled, readEnabledOverrides, type InstalledPlugin } from '@petal/shared/plugin-host/settingsModel';
-import { browserStorage } from '$lib/data/storageKeys';
-import { COMMANDS, hasTauriBridge, type CommandArgs, type CommandReturns } from '$lib/ipc';
+import { browserStorage } from '#lib/data/storageKeys.js';
+import { COMMANDS, hasTauriBridge, type CommandArgs, type CommandReturns } from '#lib/ipc.js';
 
 export interface CatalogEntry extends InstalledPlugin {
   /** Store record fields for registry installs; undefined for built-ins. */

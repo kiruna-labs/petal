@@ -97,7 +97,7 @@ test('main menu room rows expose the canonical access-code copy target and feedb
 
 test('main route copies each saved room invite with native clipboard fallback', () => {
   assert.match(mainRoute, /import \{ writeText \} from '@tauri-apps\/plugin-clipboard-manager'/);
-  assert.match(mainRoute, /import \{ inviteLinkForRoom \} from '\$lib\/data\/inviteLinks'/);
+  assert.match(mainRoute, /import \{ inviteLinkForRoom \} from '#lib\/data\/inviteLinks\.js'/);
   assert.match(mainRoute, /const link = inviteLinkForRoom\(room, displayLabelForRoom\(room\)\)/);
   assert.match(mainRoute, /async function copyRoomInviteLink\(name: string\): Promise<boolean>/);
   assert.match(mainRoute, /await writeText\(link\)/);
@@ -162,7 +162,7 @@ test('meeting and menubar copy paths share invite-link construction', () => {
   assert.match(meetingRoute, /return inviteLinkForAccessCode\(/);
   assert.match(meetingRoute, /inviteToast\.show\(inviteLinkCopiedToastMessage\(link\)\)/);
   assert.doesNotMatch(meetingRoute, /const INVITE_ORIGIN/);
-  assert.match(menubarRoute, /import \{ findRoomRecord, inviteLinkCopiedToastMessage, inviteLinkForRoom \} from '\$lib\/data\/inviteLinks'/);
+  assert.match(menubarRoute, /import \{ findRoomRecord, inviteLinkCopiedToastMessage, inviteLinkForRoom \} from '#lib\/data\/inviteLinks\.js'/);
   assert.match(menubarRoute, /room \? inviteLinkForRoom\(room, label\) : null/);
   assert.match(menubarRoute, /copiedLink = ok \? inviteLinkCopiedToastMessage\(link\) : ''/);
   assert.match(menubarRoute, /overflow-wrap: anywhere;/);

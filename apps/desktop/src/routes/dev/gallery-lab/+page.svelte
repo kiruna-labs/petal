@@ -13,20 +13,20 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import GalleryLabStage from '$lib/dev/GalleryLabStage.svelte';
+  import GalleryLabStage from '#lib/dev/GalleryLabStage.svelte';
   import {
     LAB_WINDOW_PRESETS,
     clampScenario,
     scenarioFromQuery,
     scenarioToQuery,
     type GalleryLabScenario
-  } from '$lib/dev/galleryLab';
+  } from '#lib/dev/galleryLab.js';
   import {
     judgeGalleryLab,
     measureGalleryLab,
     sampleIdleLayoutChanges,
     type GalleryLabReading
-  } from '$lib/dev/galleryLabMeasure';
+  } from '#lib/dev/galleryLabMeasure.js';
 
   let scenario = $state<GalleryLabScenario>(scenarioFromQuery(typeof location === 'undefined' ? '' : location.hash));
   let reading = $state<GalleryLabReading | null>(null);

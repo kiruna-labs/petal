@@ -52,9 +52,9 @@ import {
   savePillWindowFrame,
   type WindowFrame,
   type WindowSize
-} from '$lib/data/windowGeometry';
-import { COMMANDS, hasTauriBridge } from '$lib/ipc';
-import { isWindows } from '$lib/platform';
+} from '#lib/data/windowGeometry.js';
+import { COMMANDS, hasTauriBridge } from '#lib/ipc.js';
+import { isWindows } from '#lib/platform.js';
 
 export type PillResizeDirection =
   | 'East'

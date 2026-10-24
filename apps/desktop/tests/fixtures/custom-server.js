@@ -47,9 +47,9 @@ async function renderFixture() {
     const surface = params.get('surface') === 'meeting' ? 'meeting' : 'menu';
     const [{ mount }, { default: MainMenu }, { default: Gallery }, server] = await Promise.all([
       import('svelte'),
-      import('$lib/components/MainMenu.svelte'),
-      import('$lib/components/Gallery.svelte'),
-      import('$lib/data/customServer.svelte.ts')
+      import('#lib/components/MainMenu.svelte'),
+      import('#lib/components/Gallery.svelte'),
+      import('#lib/data/customServer.svelte.js')
     ]);
 
     const host = document.querySelector('#app');

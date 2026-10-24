@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  awaitShareBorderStacked,
+  BORDER_TRACKER_SETTLE_MS,
   classifyShareBorderStackReport,
   shareStateSummary,
   sourceWindowIsGone,
@@ -131,4 +133,80 @@ test('every failure message carries the full report', () => {
 test('a missing report is named rather than throwing on property access', () => {
   const verdict = classifyShareBorderStackReport(null, 163);
   assert.equal(verdict.reason, 'no-report');
+});
+
+// The literal report the clean press-to-photon bootstrap threw on (run
+// 40004629026, 18:51:13.790); the tracker reordered the border 14ms later.
+const BEHIND_SOURCE_REPORT = {
+  windowId: 212,
+  source: { number: 212, stackIndex: 10 },
+  border: { number: 155, stackIndex: 11 },
+  overlays: [{ number: 159, stackIndex: 9 }],
+  shareState: { share: 'onScreen', registered: true, trackerHidden: false, hideRequested: false },
+};
+const CONVERGED_REPORT = {
+  ...BEHIND_SOURCE_REPORT,
+  border: { number: 155, stackIndex: 9 },
+  overlays: [{ number: 159, stackIndex: 8 }],
+};
+
+function fakeClock() {
+  let t = 0;
+  return {
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms;
+    },
+  };
+}
+
+// Serves `reports` in order, repeating the last one; `reads()` counts calls.
+function reportsSequence(...reports) {
+  let count = 0;
+  const read = async () => reports[Math.min(count++, reports.length - 1)];
+  return { read, reads: () => count };
+}
+
+test('a border behind its source for one tracker tick converges and passes, saying so', async () => {
+  const { read, reads } = reportsSequence(BEHIND_SOURCE_REPORT, CONVERGED_REPORT);
+  const verdict = await awaitShareBorderStacked(read, 212, fakeClock());
+  assert.equal(verdict.ok, true);
+  assert.equal(reads(), 2);
+  assert.match(verdict.summary, /converged after 50ms; first read had the border behind its source/);
+});
+
+test('a border that stays behind its source past the settle bound still fails', async () => {
+  const { read, reads } = reportsSequence(BEHIND_SOURCE_REPORT);
+  const verdict = await awaitShareBorderStacked(read, 212, fakeClock());
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.reason, 'border-behind-source');
+  assert.match(verdict.message, /still behind after the 500ms border-tracker settle bound/);
+  assert.equal(reads(), 1 + BORDER_TRACKER_SETTLE_MS / 50);
+});
+
+test('only a behind-source read is re-checked; every other failure is final on the first read', async () => {
+  for (const report of [
+    RELEASE_GATE_REPORT,
+    withShareState(RELEASE_GATE_REPORT, { trackerHidden: false }),
+    null,
+  ]) {
+    const { read, reads } = reportsSequence(report, HEALTHY_REPORT);
+    const verdict = await awaitShareBorderStacked(read, 163, fakeClock());
+    assert.equal(verdict.ok, false, JSON.stringify(report));
+    assert.equal(reads(), 1);
+  }
+});
+
+test('a healthy first read passes without re-reading', async () => {
+  const { read, reads } = reportsSequence(HEALTHY_REPORT, BEHIND_SOURCE_REPORT);
+  const verdict = await awaitShareBorderStacked(read, 163, fakeClock());
+  assert.equal(verdict.ok, true);
+  assert.equal(reads(), 1);
+  assert.doesNotMatch(verdict.summary, /converged/);
+});
+
+test('a behind-source read that turns into a lost source reports the lost source', async () => {
+  const { read } = reportsSequence(BEHIND_SOURCE_REPORT, { ...RELEASE_GATE_REPORT, windowId: 212 });
+  const verdict = await awaitShareBorderStacked(read, 212, fakeClock());
+  assert.equal(verdict.reason, 'source-window-lost');
 });

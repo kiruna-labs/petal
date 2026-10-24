@@ -110,7 +110,7 @@ test('meeting chat keeps composer and controls usable at every gallery size', { 
       resolve: {
         alias: {
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
-          '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+          '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot))),
         },
       },

@@ -47,6 +47,28 @@ export function boundsOverlap(a, b) {
   return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
 }
 
+/// The `[left, top, right, bottom]` strip the sacrificial TextEdit window is
+/// placed in for the display-share cases. It must be flush with the display's
+/// right edge (case 41 clicks the clamped x = 1.0) and must NOT overlap the
+/// photon sentinel, which the click oracles raise to defocus TextEdit. The
+/// preferred width shrinks to start right of the sentinel when the display is
+/// too narrow for both side by side (a 1512-point laptop display put an
+/// 800-point strip over a sentinel ending at x = 1080). Returns null when no
+/// strip of at least `minWidth` fits, so the caller can say so instead of
+/// running cases whose re-arm would cover their own target.
+export function displayTextEditBounds(displayFrame, sentinel, options = {}) {
+  const { width = 800, topInset = 40, minWidth = 320, gap = 16 } = options;
+  const right = displayFrame.x + displayFrame.width;
+  const top = displayFrame.y + topInset;
+  const bottom = displayFrame.y + displayFrame.height;
+  let left = right - width;
+  if (sentinel && boundsOverlap([left, top, right, bottom], sentinel)) {
+    left = Math.max(left, sentinel[2] + gap);
+  }
+  if (right - left < minWidth) return null;
+  return [left, top, right, bottom];
+}
+
 /// True when the window's bounds cover the display's last addressable column
 /// at height `y` -- where the host clamps a normalized x = 1.0 click (#349
 /// review: unclamped, 1.0 mapped one point PAST the display).

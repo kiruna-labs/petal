@@ -6,7 +6,7 @@
 // stamps the sender.
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { COMMANDS, EVENTS, hasTauriBridge, type ChatDataEvent } from '$lib/ipc';
+import { COMMANDS, EVENTS, hasTauriBridge, type ChatDataEvent } from '#lib/ipc.js';
 import {
   CHAT_HISTORY_REQUEST_DELAYS_MS,
   chatMessageWire,

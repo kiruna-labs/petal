@@ -22,9 +22,9 @@
      empty state; this harness shows the same composition with fixture data.
 -->
 <script lang="ts">
-  import ControlButton from '$lib/components/ControlButton.svelte';
-  import RosterPopover from '$lib/components/RosterPopover.svelte';
-  import type { RosterParticipant } from '$lib/components/RosterPopover.svelte';
+  import ControlButton from '#lib/components/ControlButton.svelte';
+  import RosterPopover from '#lib/components/RosterPopover.svelte';
+  import type { RosterParticipant } from '#lib/components/RosterPopover.svelte';
 
   let micMuted = $state(false);
   let participantCount = $state(4);

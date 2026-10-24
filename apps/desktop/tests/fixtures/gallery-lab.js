@@ -12,8 +12,8 @@ import '@fontsource/albert-sans/700.css';
 import '@fontsource/jetbrains-mono/500.css';
 import { mount, tick } from 'svelte';
 import Lab from './gallery-lab.svelte';
-import { scenarioFromQuery } from '$lib/dev/galleryLab';
-import { judgeGalleryLab, measureGalleryLab, sampleIdleLayoutChanges } from '$lib/dev/galleryLabMeasure';
+import { scenarioFromQuery } from '#lib/dev/galleryLab.js';
+import { judgeGalleryLab, measureGalleryLab, sampleIdleLayoutChanges } from '#lib/dev/galleryLabMeasure.js';
 
 const frames = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 

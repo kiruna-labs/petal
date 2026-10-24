@@ -16,7 +16,7 @@ async function renderFixture() {
   try {
     const [{ mount }, { default: Gallery }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/Gallery.svelte')
+      import('#lib/components/Gallery.svelte')
     ]);
 
     const host = document.querySelector('#app');

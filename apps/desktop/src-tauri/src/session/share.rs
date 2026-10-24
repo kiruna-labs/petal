@@ -17,8 +17,9 @@ use crate::screen_audio::{
 use crate::share_priority::SharePriority;
 use crate::time_util::now_us;
 use crate::transport::publisher::{
-    CaptureResolution, PostWakeEncoderFallbackRecovery, RoomConnection, RoomConnectionError,
-    ShareQuality, SharedSourceKind,
+    CaptureResolution, EncoderRecoveryStep, EncoderWedgeRecovery,
+    PostWakeEncoderFallbackRecovery, RoomConnection, RoomConnectionError, ShareQuality,
+    SharedSourceKind,
 };
 use crate::video_color::VideoColorProfile;
 use screencapturekit::stream::content_filter::SCContentFilter;
@@ -692,6 +693,7 @@ enum SharePumpWake {
     Interaction,
     IdleTick,
     RegionTick,
+    RejectedPushRetry,
 }
 
 struct ShareRestartSnapshot {
@@ -1324,6 +1326,138 @@ fn snapshot_pull_fresh_within(window_id: u32, now_us: u64, max_age_us: u64) -> b
         .is_some_and(|at| now_us.saturating_sub(*at) <= max_age_us)
 }
 
+/// (successful pulls, content-changing pulls) since the raw stream last
+/// delivered, per window (#393). Written by the pump, read by the watchdog.
+fn snapshot_pulls_since_raw() -> &'static Mutex<std::collections::HashMap<u32, (u64, u64)>> {
+    static PULLS: std::sync::OnceLock<Mutex<std::collections::HashMap<u32, (u64, u64)>>> =
+        std::sync::OnceLock::new();
+    PULLS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn set_snapshot_pulls_since_raw(window_id: u32, pulls: u64, changed: u64) {
+    snapshot_pulls_since_raw()
+        .lock_unpoisoned()
+        .insert(window_id, (pulls, changed));
+}
+
+fn snapshot_pulls_since_raw_of(window_id: u32) -> (u64, u64) {
+    snapshot_pulls_since_raw()
+        .lock_unpoisoned()
+        .get(&window_id)
+        .copied()
+        .unwrap_or_default()
+}
+
+fn snapshot_content_tag((pulls, changed): (u64, u64)) -> crate::logging::SnapshotContentTag {
+    use crate::logging::SnapshotContentTag;
+    match (pulls, changed) {
+        (0, _) => SnapshotContentTag::NoPulls,
+        (_, 0) => SnapshotContentTag::Static,
+        _ => SnapshotContentTag::Changing,
+    }
+}
+
+fn raw_silence_cause_tag(
+    cause: crate::capture::RawSilenceCause,
+) -> crate::logging::RawSilenceCauseTag {
+    use crate::capture::RawSilenceCause as Cause;
+    use crate::logging::RawSilenceCauseTag as Tag;
+    match cause {
+        Cause::NoCallbacks => Tag::NoCallbacks,
+        Cause::IdleSamplesOnly => Tag::IdleSamplesOnly,
+        Cause::LayoutDeferred => Tag::LayoutDeferred,
+        Cause::LayoutRejected => Tag::LayoutRejected,
+        Cause::PixelFormatRejected => Tag::PixelFormatRejected,
+        Cause::RegionDropped => Tag::RegionDropped,
+        Cause::Unclassified => Tag::Unclassified,
+    }
+}
+
+fn silent_for_bucket(silent_for_us: u64) -> crate::logging::SinceLastFrameBucketTag {
+    use crate::logging::SinceLastFrameBucketTag as Bucket;
+    match silent_for_us / 1_000_000 {
+        0..=59 => Bucket::UnderOneMinute,
+        60..=299 => Bucket::OneToFiveMinutes,
+        300..=899 => Bucket::FiveToFifteenMinutes,
+        _ => Bucket::OverFifteenMinutes,
+    }
+}
+
+/// Sender-side evidence for one raw-capture stall verdict (#393): one
+/// `capture-stall-evidence:` log line plus a rate-limited Sentry event.
+fn capture_raw_stall_diagnostic(
+    window_id: u32,
+    source: SourceSelectionClass,
+    action: crate::logging::RawCaptureActionTag,
+    silent_for_us: u64,
+    evidence: crate::capture::RawSilenceEvidence,
+    recovery_burst: u32,
+    concurrent_shares: usize,
+) -> crate::logging::CaptureRawStalledDiagnostic {
+    use crate::logging::SmallCountBucketTag as Count;
+    let (pulls, changed) = snapshot_pulls_since_raw_of(window_id);
+    let cause = evidence.cause();
+    log::warn!(
+        "capture-stall-evidence: window {window_id} action={} silent={:.1}s cause={cause:?} sck_callbacks={} no_image={} last_no_image_status={:?} layout_deferred={} layout_rejected={} pixel_format_rejected={} region_dropped={} stream_updates={} held_surfaces={} pulls={pulls} pulls_changed={changed} recovery_burst={recovery_burst} concurrent_shares={concurrent_shares} (#393)",
+        action_label(action),
+        silent_for_us as f64 / 1_000_000.0,
+        evidence.callbacks,
+        evidence.no_image,
+        evidence.last_no_image_status,
+        evidence.layout_deferred,
+        evidence.layout_rejected,
+        evidence.pixel_format_rejected,
+        evidence.region_dropped,
+        evidence.config_updates,
+        evidence.held_surfaces,
+    );
+    crate::logging::CaptureRawStalledDiagnostic {
+        source,
+        action,
+        cause: raw_silence_cause_tag(cause),
+        snapshot_content: snapshot_content_tag((pulls, changed)),
+        stream_updates: Count::from_count(evidence.config_updates),
+        held_surfaces: Count::from_count(evidence.held_surfaces),
+        recovery_burst: Count::from_count(u64::from(recovery_burst)),
+        concurrent_shares: Count::from_count(concurrent_shares as u64),
+        silent_for: silent_for_bucket(silent_for_us),
+    }
+}
+
+fn report_raw_capture_stall(
+    app: &tauri::AppHandle,
+    window_id: u32,
+    source: SourceSelectionClass,
+    action: crate::logging::RawCaptureActionTag,
+    silent_for_us: u64,
+    capture_config: &crate::capture::WindowCaptureConfig,
+    now_us: u64,
+) {
+    let concurrent_shares = tauri::Manager::try_state::<SessionState>(app)
+        .map(|state| state.active_share_ids().len())
+        .unwrap_or(1);
+    let diagnostic = capture_raw_stall_diagnostic(
+        window_id,
+        source,
+        action,
+        silent_for_us,
+        capture_config.raw_silence_evidence(),
+        pump_recovery_burst_len(window_id, now_us),
+        concurrent_shares,
+    );
+    crate::logging::capture_sentry_diagnostic(
+        crate::logging::SentryDiagnosticEvent::CaptureRawStalled(diagnostic),
+    );
+}
+
+fn action_label(action: crate::logging::RawCaptureActionTag) -> &'static str {
+    match action {
+        crate::logging::RawCaptureActionTag::Restart => "restart",
+        crate::logging::RawCaptureActionTag::HoldOnPulls => "hold_on_pulls",
+        crate::logging::RawCaptureActionTag::NotApplicable => "none",
+    }
+}
+
 #[derive(Default)]
 struct InteractionSignal {
     epoch: AtomicU64,
@@ -1403,6 +1537,109 @@ fn interaction_snapshot_decision(
     input_applied_at_us: u64,
 ) -> bool {
     epoch > handled_epoch && last_raw_frame_us <= input_applied_at_us
+}
+
+/// Press-to-photon waterfall: how many encoder pushes after each applied
+/// remote input get a `frame_pushed` line, and for how long after it.
+const INTERACTION_PUSH_TRACE_FRAMES: u8 = 3;
+const INTERACTION_PUSH_TRACE_WINDOW_US: u64 = 1_500_000;
+
+/// Bounded per-input trace of what the pump handed WebRTC after a remote
+/// input landed, and whether the source accepted it. `inject_to_frame_ms`
+/// only proves SOME frame arrived; this says which push carried it.
+#[derive(Default)]
+struct InteractionPushTrace {
+    epoch: u64,
+    remaining: u8,
+}
+
+impl InteractionPushTrace {
+    /// `Some((input_seq, since_input_us))` when this push should be logged.
+    fn observe(
+        &mut self,
+        epoch: u64,
+        input_seq: u64,
+        applied_at_us: u64,
+        now_us: u64,
+    ) -> Option<(u64, u64)> {
+        if epoch == 0 || applied_at_us == 0 {
+            return None;
+        }
+        if epoch != self.epoch {
+            self.epoch = epoch;
+            self.remaining = INTERACTION_PUSH_TRACE_FRAMES;
+        }
+        let since_input_us = now_us.saturating_sub(applied_at_us);
+        if self.remaining == 0 || since_input_us > INTERACTION_PUSH_TRACE_WINDOW_US {
+            return None;
+        }
+        self.remaining -= 1;
+        Some((input_seq, since_input_us))
+    }
+}
+
+/// Re-push cadence after WebRTC's source rejects a frame, and how many tries.
+/// 15 x 20ms spans a full frame interval down to the 4fps Reduced tier.
+const REJECTED_PUSH_RETRY_DELAY: Duration = Duration::from_millis(20);
+const REJECTED_PUSH_RETRY_MAX_ATTEMPTS: u8 = 15;
+
+/// WebRTC's frame-rate limiter (`VideoAdapter`) silently drops a frame that
+/// arrives within one interval of the last accepted one. A snapshot pushed a
+/// few ms before the raw frame carrying a keystroke made the raw frame's
+/// content invisible until the next unrelated repaint (~800ms text stalls,
+/// #392). Never let a rejected push be the last word: re-push the newest
+/// parked frame once the limiter will take it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RejectedPushRetry {
+    deadline: Option<Instant>,
+    attempts: u8,
+}
+
+impl RejectedPushRetry {
+    /// Record the outcome of any push to the source. `accepted` is `None`
+    /// when the push never reached the source (conversion failure, stale
+    /// region): there is nothing a retry could fix, so the state clears.
+    fn observe_push(&mut self, accepted: Option<bool>, now: Instant) {
+        if accepted != Some(false) {
+            *self = Self::default();
+            return;
+        }
+        if self.attempts >= REJECTED_PUSH_RETRY_MAX_ATTEMPTS {
+            *self = Self::default();
+            return;
+        }
+        self.attempts += 1;
+        self.deadline = Some(now + REJECTED_PUSH_RETRY_DELAY);
+    }
+
+    /// Consumes the pending deadline when the retry fires.
+    fn take_due(&mut self) -> bool {
+        self.deadline.take().is_some()
+    }
+}
+
+fn trace_interaction_push(
+    trace: &mut InteractionPushTrace,
+    signal: &InteractionSignal,
+    window_id: u32,
+    path: &str,
+    timing: Option<crate::transport::publisher::PublishedFrameTiming>,
+) {
+    let now = now_us();
+    let Some((input_seq, since_input_us)) = trace.observe(
+        signal.epoch.load(Ordering::Acquire),
+        signal.input_seq.load(Ordering::Relaxed),
+        signal.applied_at_us.load(Ordering::Acquire),
+        now,
+    ) else {
+        return;
+    };
+    let (accepted, frame_id) = timing.map_or((false, 0), |t| (t.source_accepted, t.frame_id));
+    log::info!(
+        "remote-control-latency: host frame_pushed_ts_ms={} window={window_id} input_seq={input_seq} since_input_ms={} path={path} accepted={accepted} frame_id={frame_id}",
+        now / 1_000,
+        since_input_us / 1_000
+    );
 }
 
 /// Per-window "last remote input applied" timestamp for the interaction-burst
@@ -2115,7 +2352,7 @@ impl AdaptiveIdleTick {
 }
 
 fn frame_fingerprint(frame: &crate::capture::CapturedFrame) -> FrameFingerprint {
-    let Some((data, bytes_per_row)) = frame.payload.primary_plane() else {
+    if frame.payload.primary_plane().is_none() {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         hash = fnv1a_u64(hash, &frame.width.to_le_bytes());
         hash = fnv1a_u64(hash, &frame.height.to_le_bytes());
@@ -2129,39 +2366,59 @@ fn frame_fingerprint(frame: &crate::capture::CapturedFrame) -> FrameFingerprint 
             bytes_per_row: 0,
             hash,
         };
-    };
+    }
+    payload_fingerprint(frame.width, frame.height, &frame.payload)
+}
+
+/// Dense per-row hash of a copied payload's primary plane.
+fn payload_fingerprint(
+    width: u32,
+    height: u32,
+    payload: &crate::capture::CapturedFramePayload,
+) -> FrameFingerprint {
+    let (data, bytes_per_row) = payload.primary_plane().unwrap_or((&[], 0));
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    hash = fnv1a_u64(hash, &frame.width.to_le_bytes());
-    hash = fnv1a_u64(hash, &frame.height.to_le_bytes());
+    hash = fnv1a_u64(hash, &width.to_le_bytes());
+    hash = fnv1a_u64(hash, &height.to_le_bytes());
     hash = fnv1a_u64(hash, &bytes_per_row.to_le_bytes());
 
-    let height = frame.height as usize;
-    let visible_row_bytes = match &frame.payload {
-        crate::capture::CapturedFramePayload::Bgra { .. } => {
-            (frame.width as usize).saturating_mul(4)
-        }
-        crate::capture::CapturedFramePayload::Nv12 { .. } => frame.width as usize,
+    let rows = height as usize;
+    let visible_row_bytes = match payload {
+        crate::capture::CapturedFramePayload::Bgra { .. } => (width as usize).saturating_mul(4),
+        crate::capture::CapturedFramePayload::Nv12 { .. } => width as usize,
         crate::capture::CapturedFramePayload::Native { .. } => 0,
     };
-    if height == 0 || visible_row_bytes == 0 || bytes_per_row == 0 {
+    if rows == 0 || visible_row_bytes == 0 || bytes_per_row == 0 {
         return FrameFingerprint {
-            width: frame.width,
-            height: frame.height,
+            width,
+            height,
             bytes_per_row,
             hash,
         };
     }
 
-    for row in 0..height {
+    for row in 0..rows {
         hash = hash_frame_row(hash, data, bytes_per_row, row, visible_row_bytes);
     }
 
     FrameFingerprint {
-        width: frame.width,
-        height: frame.height,
+        width,
+        height,
         bytes_per_row,
         hash,
     }
+}
+
+/// The snapshot push gate's dense pixel hash. Snapshots are published as
+/// native buffers (see `WindowCapture::snapshot_frame`), whose metadata-only
+/// `frame_fingerprint` never changes; hash a temporary NV12 copy instead.
+/// `None` when the copy fails: the caller skips that pull.
+fn snapshot_content_hash(frame: &crate::capture::CapturedFrame) -> Option<u64> {
+    let crate::capture::CapturedFramePayload::Native { pixel_buffer } = &frame.payload else {
+        return Some(frame_fingerprint(frame).hash);
+    };
+    let payload = pixel_buffer.copy_nv12_payload().ok()?;
+    Some(payload_fingerprint(frame.width, frame.height, &payload).hash)
 }
 
 fn hash_frame_row(
@@ -4964,16 +5221,24 @@ async fn start_share_with_capture_source(
     }
     let (published_result, metadata_outcome, metadata_elapsed) = match publish_origin {
         SharePublishOrigin::Ordinary => {
+            // #427: an ordinary share is where a wedged VideoToolbox encoder
+            // actually shows up (a fresh share after the wedge publishes an
+            // empty track for the rest of the process), so it is also where the
+            // recovery action has to be attached.
+            let encoder_wedge_recovery =
+                wedge_recovery_for_share(&app, window_id, started_seq, 0);
             publish_media_while_metadata_runs(
                 metadata_task,
                 publish_with_reconnect_retry(
                     window_id,
                     || {
-                        room_connection.publish_window_at(
+                        room_connection.publish_window_at_with_recovery_context(
                             width,
                             height,
                             ShareQuality::Full,
                             Some(window_id),
+                            Some(encoder_wedge_recovery.clone()),
+                            false,
                         )
                     },
                     || room_connection.room().connection_state(),
@@ -5479,6 +5744,11 @@ fn spawn_share_pump(
         let mut pull_backoff_us: u64 = SNAPSHOT_PULL_MIN_INTERVAL_US;
         let mut handled_interaction_epoch: u64 = 0;
         let mut first_pushed_frame_recorded = false;
+        let mut interaction_push_trace = InteractionPushTrace::default();
+        let mut rejected_push_retry = RejectedPushRetry::default();
+        // #393: pulls (and changed pulls) since the last raw frame.
+        let mut pulls_since_raw: (u64, u64) = (0, 0);
+        set_snapshot_pulls_since_raw(window_id, 0, 0);
         log::info!(
             "session: window {window_id} frame pump loop started (seq {started_seq}, restart_generation {restart_generation})"
         );
@@ -5503,12 +5773,44 @@ fn spawn_share_pump(
                 _ = latest_frame_notify.notified() => SharePumpWake::RawFrame,
                 _ = interaction_signal.notify.notified() => SharePumpWake::Interaction,
                 _ = region_tick.tick(), if is_region_share => SharePumpWake::RegionTick,
+                _ = tokio::time::sleep_until(
+                    rejected_push_retry
+                        .deadline
+                        .map(tokio::time::Instant::from_std)
+                        .unwrap_or_else(tokio::time::Instant::now),
+                ), if rejected_push_retry.deadline.is_some() => SharePumpWake::RejectedPushRetry,
                 _ = tokio::time::sleep(adaptive_idle_tick.interval()) => SharePumpWake::IdleTick,
             };
             if wake != SharePumpWake::IdleTick && wake != SharePumpWake::RegionTick {
                 adaptive_idle_tick.reset_on_wake();
             }
             pump_activity_for_task.store(now_us(), Ordering::Relaxed);
+
+            if wake == SharePumpWake::RejectedPushRetry {
+                if rejected_push_retry.take_due() {
+                    let current = pump_published.lock_unpoisoned().clone();
+                    let timing = dirty_rect_pump.parked_frame().and_then(|(frame, ts)| {
+                        pump_capture_config
+                            .with_current_region_frame(frame, || current.push_frame(frame, ts))
+                            .flatten()
+                    });
+                    trace_interaction_push(
+                        &mut interaction_push_trace,
+                        &interaction_signal,
+                        window_id,
+                        "retry",
+                        timing,
+                    );
+                    record_published_frame_timing(&pump_diagnostics, window_id, timing);
+                    rejected_push_retry
+                        .observe_push(timing.map(|t| t.source_accepted), Instant::now());
+                    if timing.is_some_and(|t| t.source_accepted) {
+                        pump_last_push_for_task.store(now_us(), Ordering::Relaxed);
+                        pump_pushed_frames_for_task.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                continue;
+            }
 
             // Poll the selector geometry at the pump cadence. The capture
             // owner applies the newest immutable generation before accepting
@@ -5587,7 +5889,16 @@ fn spawn_share_pump(
                         "session: window {window_id} pump decision={last_push_decision}; pushing parked static refresh frame after notify idle"
                     );
                     let timing = current.push_frame(frame, refresh_at_us);
+                    trace_interaction_push(
+                        &mut interaction_push_trace,
+                        &interaction_signal,
+                        window_id,
+                        "idle_refresh",
+                        timing,
+                    );
                     record_published_frame_timing(&pump_diagnostics, window_id, timing);
+                    rejected_push_retry
+                        .observe_push(timing.map(|t| t.source_accepted), Instant::now());
                     if !first_pushed_frame_recorded {
                         first_pushed_frame_recorded = true;
                         if let Some(diagnostics) = pump_diagnostics.as_ref() {
@@ -5710,12 +6021,24 @@ fn spawn_share_pump(
                                 // updated line in a big document, a status indicator
                                 // -- is invisible not just for one cycle but FOREVER
                                 // while the window size stays constant.
-                                let hash = frame_fingerprint(&frame).hash;
+                                let Some(hash) = snapshot_content_hash(&frame) else {
+                                    log::warn!(
+                                        "capture-pull: window {window_id} could not read the snapshot's pixels; skipping this pull"
+                                    );
+                                    continue;
+                                };
                                 let hash_changed = observe_snapshot_pull(
                                     window_id,
                                     last_pull_hash,
                                     hash,
                                     snapshot_completed_us,
+                                );
+                                pulls_since_raw.0 += 1;
+                                pulls_since_raw.1 += u64::from(hash_changed);
+                                set_snapshot_pulls_since_raw(
+                                    window_id,
+                                    pulls_since_raw.0,
+                                    pulls_since_raw.1,
                                 );
                                 if hash_changed && dims_match {
                                     last_pull_hash = Some(hash);
@@ -5730,6 +6053,17 @@ fn spawn_share_pump(
                                         dirty_rect_pump.parked_frame()
                                     {
                                         let timing = current.push_frame(parked, parked_ts);
+                                        trace_interaction_push(
+                                            &mut interaction_push_trace,
+                                            &interaction_signal,
+                                            window_id,
+                                            "snapshot",
+                                            timing,
+                                        );
+                                        rejected_push_retry.observe_push(
+                                            timing.map(|t| t.source_accepted),
+                                            Instant::now(),
+                                        );
                                         record_published_frame_timing(
                                             &pump_diagnostics,
                                             window_id,
@@ -5856,6 +6190,10 @@ fn spawn_share_pump(
                     "session: window {window_id} dropped frame from stale region generation"
                 );
                 continue;
+            }
+            if pulls_since_raw.0 > 0 {
+                pulls_since_raw = (0, 0);
+                set_snapshot_pulls_since_raw(window_id, 0, 0);
             }
             if pull_engaged {
                 pull_engaged = false;
@@ -6050,6 +6388,14 @@ fn spawn_share_pump(
                     );
                 }
             }
+            trace_interaction_push(
+                &mut interaction_push_trace,
+                &interaction_signal,
+                window_id,
+                "raw",
+                timing,
+            );
+            rejected_push_retry.observe_push(timing.map(|t| t.source_accepted), Instant::now());
             record_published_frame_timing(&pump_diagnostics, window_id, timing);
             if !first_pushed_frame_recorded {
                 first_pushed_frame_recorded = true;
@@ -6466,6 +6812,15 @@ fn spawn_share_monitor(
                                     if let Some(diagnostics) = diagnostics.as_ref() {
                                         diagnostics.mark_capture_wedged(window_id);
                                     }
+                                    report_raw_capture_stall(
+                                        &app,
+                                        window_id,
+                                        diagnostic_source,
+                                        crate::logging::RawCaptureActionTag::HoldOnPulls,
+                                        silent_for_us,
+                                        &capture_config,
+                                        now,
+                                    );
                                     log::error!(
                                         "session: window {window_id} capture held on snapshot pulls after {} restart(s) within {}s -- raw ScreenCaptureKit stream keeps wedging (silent {:.1}s); share stays up at pull-only frame rate",
                                         pump_recovery_burst_len(window_id, now),
@@ -6494,6 +6849,15 @@ fn spawn_share_monitor(
                             if let Some(diagnostics) = diagnostics.as_ref() {
                                 diagnostics.mark_capture_wedged(window_id);
                             }
+                            report_raw_capture_stall(
+                                &app,
+                                window_id,
+                                diagnostic_source,
+                                crate::logging::RawCaptureActionTag::Restart,
+                                silent_for_us,
+                                &capture_config,
+                                now,
+                            );
                             // warn, not error: a restart-in-place is a recovered
                             // quality event (logging.rs policy); a restart that
                             // fails or trips the breaker still logs at error.
@@ -8467,12 +8831,124 @@ async fn retry_post_wake_software_encoder_fallback(
         true,
         1,
         None,
+        false,
+        None,
     )
     .await;
     log::info!(
         "session: window {window_id} one-shot post-wake encoder republish {}",
         if outcome.replaced() {
             "succeeded"
+        } else {
+            "did not replace the active track"
+        }
+    );
+}
+
+/// [#427] The recovery action an active share reports a wedged encoder
+/// through. Built here rather than in the publisher because only the session
+/// owns the share slot, the republish intent and the capture config; the
+/// publisher owns the only stats poll that can see the wedge.
+///
+/// `steps_used` carries the share's already-spent recovery budget into a
+/// republication created by a recovery, so a permanently broken encoder
+/// escalates once more and then stops instead of republishing in a loop.
+fn wedge_recovery_for_share(
+    app: &tauri::AppHandle,
+    window_id: u32,
+    started_seq: u64,
+    steps_used: u32,
+) -> EncoderWedgeRecovery {
+    let app_for_action = app.clone();
+    EncoderWedgeRecovery::new(steps_used, move |step| {
+        let app = app_for_action.clone();
+        tokio::spawn(async move {
+            recover_wedged_encoder_publication(app, window_id, started_seq, step).await;
+        });
+    })
+}
+
+/// [#427] Repair a share whose encoder stopped producing frames while it was
+/// funded -- the VideoToolbox `-12912`/`-12915` wedge, where the publisher keeps
+/// a track published but encodes nothing, so every later share carries zero
+/// RTP for the rest of the process.
+///
+/// Step 1 (`Republish`) recreates the encoder at the share's current geometry;
+/// step 2 (`FallBackToSoftware`) republishes onto libwebrtc's software H.264
+/// encoder when a fresh VideoToolbox session is still unavailable. Both reuse
+/// the ordinary republish transaction (slot swap, intent generation, capture
+/// reconfiguration), so there is exactly one republish path.
+///
+/// A share that disappeared (a new share started, the window was closed) or a
+/// room that is gone simply logs and returns: a stale recovery must never
+/// publish a track nobody asked for.
+pub(crate) async fn recover_wedged_encoder_publication(
+    app: tauri::AppHandle,
+    window_id: u32,
+    started_seq: u64,
+    step: EncoderRecoveryStep,
+) {
+    let state = app.state::<SessionState>();
+    let state = state.inner();
+    let Some((room_connection, slot, republish_intent, intent_generation, capture_config)) = ({
+        let guard = state.inner.lock_unpoisoned();
+        let share = guard
+            .shares
+            .get(&window_id)
+            .filter(|share| share.started_seq == started_seq);
+        share.and_then(|share| {
+            let room_connection = guard
+                .joined
+                .as_ref()
+                .map(|joined| joined.room_connection.clone())?;
+            let capture_config = share.capture.configuration_handle();
+            let intent_generation = begin_republish_intent(&share.republish_intent);
+            Some((
+                room_connection,
+                share.published.clone(),
+                share.republish_intent.clone(),
+                intent_generation,
+                capture_config,
+            ))
+        })
+    }) else {
+        log::info!(
+            "session: skipping wedged-encoder recovery for stale share {window_id}/{started_seq} ({})",
+            step.description()
+        );
+        return;
+    };
+
+    let force_software_encoder = step == EncoderRecoveryStep::FallBackToSoftware;
+    let steps_used = if force_software_encoder { 2 } else { 1 };
+    let next_recovery = wedge_recovery_for_share(&app, window_id, started_seq, steps_used);
+    let reason = format!("wedged encoder: {}", step.description());
+    let outcome = republish_window_with_target(
+        room_connection,
+        slot,
+        republish_intent,
+        intent_generation,
+        &capture_config,
+        window_id,
+        |current, _capture_config, resolution| RepublishTarget {
+            width: current.width(),
+            height: current.height(),
+            quality: current.quality(),
+            resolution,
+        },
+        &reason,
+        true,
+        1,
+        None,
+        force_software_encoder,
+        Some(next_recovery),
+    )
+    .await;
+    log::warn!(
+        "session: window {window_id} wedged-encoder recovery ({}) {}",
+        step.description(),
+        if outcome.replaced() {
+            "republished the track"
         } else {
             "did not replace the active track"
         }
@@ -8523,6 +8999,8 @@ pub async fn repair_active_share_publication(state: &SessionState, window_id: u3
         "receiver watchdog repair",
         true,
         REPUBLISH_RETRY_ATTEMPTS,
+        None,
+        false,
         None,
     )
     .await
@@ -8682,10 +9160,19 @@ async fn publish_window_with_timeout(
     height: u32,
     quality: ShareQuality,
     reason: &str,
+    force_software_encoder: bool,
+    encoder_wedge_recovery: Option<crate::transport::publisher::EncoderWedgeRecovery>,
 ) -> Option<Arc<crate::transport::publisher::PublishedTrack>> {
     match tokio::time::timeout(
         REPUBLISH_AWAIT_TIMEOUT,
-        room_connection.publish_window_at(width, height, quality, Some(window_id)),
+        room_connection.publish_window_at_with_recovery_context(
+            width,
+            height,
+            quality,
+            Some(window_id),
+            encoder_wedge_recovery,
+            force_software_encoder,
+        ),
     )
     .await
     {
@@ -8800,6 +9287,14 @@ async fn republish_window_with_target(
     force_republish: bool,
     max_publish_attempts: usize,
     reconnect_guard: Option<&ReconnectRepublishGuard<'_>>,
+    // [#427] `force_software_encoder` publishes the replacement onto libwebrtc's
+    // software H.264 encoder; only the wedged-encoder escalation sets it.
+    // `encoder_wedge_recovery` is the action the REPLACEMENT publication
+    // inherits, carrying the recovery steps already spent so a permanently
+    // broken encoder escalates once more and then stops instead of republishing
+    // in a loop (the budget is per share, not per publication).
+    force_software_encoder: bool,
+    encoder_wedge_recovery: Option<crate::transport::publisher::EncoderWedgeRecovery>,
 ) -> RepublishOutcome {
     // Capture the resolution once for this transaction. Reading the config's
     // mutex at each await boundary could mix the old and new preference and
@@ -8859,6 +9354,8 @@ async fn republish_window_with_target(
             target.height,
             target.quality,
             reason,
+            force_software_encoder,
+            encoder_wedge_recovery.clone(),
         )
         .await
         else {
@@ -9099,6 +9596,8 @@ async fn republish_window_for_quality(
         false,
         REPUBLISH_RETRY_ATTEMPTS,
         None,
+        false,
+        None,
     )
     .await
     .replaced()
@@ -9143,6 +9642,8 @@ async fn republish_window_for_quality_forced(
         true,
         REPUBLISH_RETRY_ATTEMPTS,
         Some(&transaction_guard),
+        false,
+        None,
     )
     .await
 }
@@ -9189,6 +9690,8 @@ async fn republish_window_for_resize(
         false,
         REPUBLISH_RETRY_ATTEMPTS,
         None,
+        false,
+        None,
     )
     .await
     .replaced()
@@ -9223,6 +9726,8 @@ async fn republish_window_for_resolution(
         "resolution",
         false,
         REPUBLISH_RETRY_ATTEMPTS,
+        None,
+        false,
         None,
     )
     .await
@@ -12663,6 +13168,46 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         }
     }
 
+    fn test_native_frame_with_luma(fill: u8, changed: Option<(usize, usize)>) -> crate::capture::CapturedFrame {
+        let pixel_buffer = screencapturekit::cv::CVPixelBuffer::create(4, 4, 0x3432_3076)
+            .expect("headless CoreVideo NV12 pixel buffer");
+        {
+            let mut guard = pixel_buffer
+                .lock(screencapturekit::cv::CVPixelBufferLockFlags::NONE)
+                .expect("test CVPixelBuffer must lock for writing");
+            let y_stride = guard.bytes_per_row_of_plane(0);
+            let rows = guard.height_of_plane(0);
+            let y = guard
+                .base_address_of_plane_mut(0)
+                .expect("test NV12 buffer must expose a writable Y plane");
+            for row in 0..rows {
+                let dst = unsafe { std::slice::from_raw_parts_mut(y.add(row * y_stride), 4) };
+                dst.fill(fill);
+            }
+            if let Some((row, col)) = changed {
+                unsafe { *y.add(row * y_stride + col) = fill.wrapping_add(1) };
+            }
+        }
+        crate::capture::CapturedFrame {
+            payload: crate::capture::CapturedFramePayload::Native {
+                pixel_buffer: crate::capture::NativeCapturedPixelBuffer::new(pixel_buffer),
+            },
+            ..test_native_frame(1, 0, 0, None)
+        }
+    }
+
+    // Snapshots are pushed as native buffers so VideoToolbox never resets its
+    // session per input; the push gate must still see a one-pixel change.
+    #[test]
+    fn snapshot_content_hash_reads_native_snapshot_pixels() {
+        let base = snapshot_content_hash(&test_native_frame_with_luma(40, None));
+        let same = snapshot_content_hash(&test_native_frame_with_luma(40, None));
+        let edited = snapshot_content_hash(&test_native_frame_with_luma(40, Some((3, 2))));
+        assert!(base.is_some());
+        assert_eq!(base, same);
+        assert_ne!(base, edited);
+    }
+
     // Fable finding 3: a frame whose SCK dirtyRects attachment was missing or
     // unparseable -- dirty_rect_count is 0 but that is NOT an affirmative
     // "nothing changed" signal, unlike every other test_native_frame(...)
@@ -13751,6 +14296,59 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
     // -- Interaction-burst policy (#290 step 5) --------------------------
 
     #[test]
+    fn rejected_push_arms_a_retry_and_an_accepted_push_clears_it() {
+        let now = Instant::now();
+        let mut retry = RejectedPushRetry::default();
+        // #392: a snapshot is accepted, then the raw frame carrying the
+        // keystroke lands inside the limiter interval and is rejected.
+        retry.observe_push(Some(true), now);
+        assert_eq!(retry.deadline, None);
+        retry.observe_push(Some(false), now);
+        assert_eq!(retry.deadline, Some(now + REJECTED_PUSH_RETRY_DELAY));
+        assert!(retry.take_due());
+        assert!(!retry.take_due(), "a deadline fires once");
+        retry.observe_push(Some(true), now);
+        assert_eq!(retry, RejectedPushRetry::default());
+    }
+
+    #[test]
+    fn rejected_push_retry_gives_up_after_its_budget_and_ignores_failed_pushes() {
+        let now = Instant::now();
+        let mut retry = RejectedPushRetry::default();
+        for _ in 0..REJECTED_PUSH_RETRY_MAX_ATTEMPTS {
+            retry.observe_push(Some(false), now);
+            assert!(retry.take_due());
+        }
+        retry.observe_push(Some(false), now);
+        assert_eq!(retry, RejectedPushRetry::default(), "bounded, never a hot loop");
+        // A push that never reached the source has nothing to retry.
+        retry.observe_push(Some(false), now);
+        retry.observe_push(None, now);
+        assert_eq!(retry, RejectedPushRetry::default());
+    }
+
+    #[test]
+    fn interaction_push_trace_logs_a_bounded_number_of_pushes_per_input() {
+        let mut trace = InteractionPushTrace::default();
+        // No input applied yet: nothing to attribute.
+        assert_eq!(trace.observe(0, 0, 0, 1_000), None);
+        let applied = 10_000_000;
+        for push in 0..INTERACTION_PUSH_TRACE_FRAMES as u64 {
+            assert_eq!(
+                trace.observe(1, 7, applied, applied + push * 1_000),
+                Some((7, push * 1_000))
+            );
+        }
+        assert_eq!(trace.observe(1, 7, applied, applied + 9_000), None);
+        // A new input re-arms the budget; a push outside the window is skipped.
+        assert_eq!(trace.observe(2, 8, applied, applied + 5_000), Some((8, 5_000)));
+        assert_eq!(
+            trace.observe(2, 8, applied, applied + INTERACTION_PUSH_TRACE_WINDOW_US + 1),
+            None
+        );
+    }
+
+    #[test]
     fn interaction_burst_is_inactive_with_no_recorded_interaction() {
         // `last_applied_at_us == 0` means "never interacted" -- must not be
         // treated as an interaction that happened at the Unix epoch.
@@ -13799,6 +14397,63 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             last_applied_us + 5_000_000,
             last_applied_us
         ));
+    }
+
+    /// #393: the field shape -- raw stream silent 90s while pulls keep seeing
+    /// the content change -- must reach Sentry as "SCK should have delivered".
+    #[test]
+    fn raw_capture_stall_diagnostic_reports_sender_side_evidence_393() {
+        use crate::logging::{
+            RawCaptureActionTag, RawSilenceCauseTag, SinceLastFrameBucketTag,
+            SmallCountBucketTag, SnapshotContentTag,
+        };
+        const WINDOW_ID: u32 = 393_001;
+        set_snapshot_pulls_since_raw(WINDOW_ID, 550, 532);
+        let evidence = crate::capture::RawSilenceEvidence {
+            config_updates: 1,
+            held_surfaces: 2,
+            ..Default::default()
+        };
+        let diagnostic = capture_raw_stall_diagnostic(
+            WINDOW_ID,
+            SourceSelectionClass::Window,
+            RawCaptureActionTag::Restart,
+            91_000_000,
+            evidence,
+            3,
+            2,
+        );
+        assert_eq!(diagnostic.action, RawCaptureActionTag::Restart);
+        assert_eq!(diagnostic.cause, RawSilenceCauseTag::NoCallbacks);
+        assert_eq!(diagnostic.snapshot_content, SnapshotContentTag::Changing);
+        assert_eq!(diagnostic.stream_updates, SmallCountBucketTag::One);
+        assert_eq!(diagnostic.held_surfaces, SmallCountBucketTag::Two);
+        assert_eq!(diagnostic.recovery_burst, SmallCountBucketTag::ThreePlus);
+        assert_eq!(diagnostic.concurrent_shares, SmallCountBucketTag::Two);
+        assert_eq!(diagnostic.silent_for, SinceLastFrameBucketTag::OneToFiveMinutes);
+    }
+
+    #[test]
+    fn snapshot_content_tag_separates_static_changing_and_no_pulls_393() {
+        use crate::logging::SnapshotContentTag;
+        const WINDOW_ID: u32 = 393_002;
+        let content = |pulls, changed| {
+            set_snapshot_pulls_since_raw(WINDOW_ID, pulls, changed);
+            snapshot_content_tag(snapshot_pulls_since_raw_of(WINDOW_ID))
+        };
+        assert_eq!(content(0, 0), SnapshotContentTag::NoPulls);
+        assert_eq!(content(488, 0), SnapshotContentTag::Static);
+        assert_eq!(content(488, 2), SnapshotContentTag::Changing);
+        assert_eq!(snapshot_pulls_since_raw_of(393_999), (0, 0));
+    }
+
+    #[test]
+    fn raw_silence_buckets_match_the_watchdog_thresholds_393() {
+        use crate::logging::SinceLastFrameBucketTag as Bucket;
+        assert_eq!(silent_for_bucket(45_100_000), Bucket::UnderOneMinute);
+        assert_eq!(silent_for_bucket(90_000_000), Bucket::OneToFiveMinutes);
+        assert_eq!(silent_for_bucket(300_000_000), Bucket::FiveToFifteenMinutes);
+        assert_eq!(silent_for_bucket(3_600_000_000), Bucket::OverFifteenMinutes);
     }
 
     /// #806 REGRESSION GUARD -- the exact live teardown.

@@ -1,4 +1,4 @@
-import type { RemoteControlPolicy } from '$lib/ipc';
+import type { RemoteControlPolicy } from '#lib/ipc.js';
 
 /**
  * Settings copy for the remote-control consent policy. Kept in one place so

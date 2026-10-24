@@ -12,17 +12,17 @@
     type RegionViewOptionsState,
     type ShareCaptureOptions,
     type SharePriority
-  } from '$lib/ipc';
+  } from '#lib/ipc.js';
   import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
   import { fly, fade } from 'svelte/transition';
-  import CloseButton from '$lib/components/CloseButton.svelte';
-  import { enterDuration, exitDuration } from '$lib/motion';
-  import { session } from '$lib/stores/session.svelte';
-  import { identityColorCss, identityInkCss } from '$lib/data/identityColor';
-  import { aiChatEndReasonMessage } from '$lib/data/aiChat';
-  import { buildShareOptionsMenuEntries } from '$lib/data/shareOptionsMenu';
-  import { popupShareOptionsMenu } from '$lib/shareOptionsPopup';
-  import { isWindows } from '$lib/platform';
+  import CloseButton from '#lib/components/CloseButton.svelte';
+  import { enterDuration, exitDuration } from '#lib/motion.js';
+  import { session } from '#lib/stores/session.svelte.js';
+  import { identityColorCss, identityInkCss } from '#lib/data/identityColor.js';
+  import { aiChatEndReasonMessage } from '#lib/data/aiChat.js';
+  import { buildShareOptionsMenuEntries } from '#lib/data/shareOptionsMenu.js';
+  import { popupShareOptionsMenu } from '#lib/shareOptionsPopup.js';
+  import { isWindows } from '#lib/platform.js';
 
   const hasTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   const appWindow = hasTauri ? getCurrentWindow() : null;

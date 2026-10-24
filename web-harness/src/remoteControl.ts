@@ -63,33 +63,17 @@ function isV2DiscreteAttempt(message: RemoteControlMessage): boolean {
   );
 }
 
-function isCapableWheel(message: RemoteControlMessage): boolean {
-  return (
-    message.kind === 'wheel' &&
-    typeof message.controlSessionId === 'string' &&
-    typeof message.inputId === 'string' &&
-    typeof message.inputSeq === 'number' &&
-    message.operationFingerprintVersion === 1 &&
-    typeof message.operationFingerprint === 'string' &&
-    (message.targetKind === 'window' || message.targetKind === 'display') &&
-    typeof message.shareInstanceId === 'string'
-  );
-}
-
 export function remoteControlPublishOptions(message: RemoteControlMessage): {
   reliable: boolean;
   topic: typeof REMOTE_CONTROL_TOPIC;
   destinationIdentities?: string[];
 } {
-  const capableWheel = isCapableWheel(message);
   return {
     topic: REMOTE_CONTROL_TOPIC,
-    // Legacy hover/wheel streams are self-replacing. A capable wheel carries
-    // one exactly-once operation envelope and must be ordered/reliable.
-    reliable: !(
-      (message.kind === 'pointer' && message.action === 'move' && message.buttons === 0) ||
-      (message.kind === 'wheel' && !capableWheel)
-    ),
+    // Only hover moves are self-replacing, so only they may be lossy. Wheel
+    // deltas add up: a dropped wheel packet is a scroll that never happens
+    // (#400), so every wheel -- legacy or capable -- is reliable.
+    reliable: !(message.kind === 'pointer' && message.action === 'move' && message.buttons === 0),
     // #370 corrective pass (Bug B): scope LiveKit delivery to only the
     // intended recipient, mirroring the pattern `harnessApi.ts`'s
     // latency-probe publish already uses. This matters independently of

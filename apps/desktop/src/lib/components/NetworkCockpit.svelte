@@ -25,7 +25,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import CloseButton from './CloseButton.svelte';
-  import { COMMANDS, EVENTS } from '$lib/ipc';
+  import { COMMANDS, EVENTS } from '#lib/ipc.js';
   import {
     buildPipelineRows,
     buildGaugeCockpit,
@@ -47,7 +47,7 @@
     type JournalEntry,
     type NetworkSnapshot,
     type PipelineNodeModel
-  } from '$lib/data/networkCockpit';
+  } from '#lib/data/networkCockpit.js';
 
   interface Props {
     onClose?: () => void;

@@ -2,9 +2,9 @@
   Dedicated webview route for the floating native AI chat panel (#738).
 -->
 <script lang="ts">
-  import AiChatPanel from '$lib/components/AiChatPanel.svelte';
-  import { aiChatEndReasonMessage } from '$lib/data/aiChat';
-  import type { AiChatEndReason } from '$lib/ipc';
+  import AiChatPanel from '#lib/components/AiChatPanel.svelte';
+  import { aiChatEndReasonMessage } from '#lib/data/aiChat.js';
+  import type { AiChatEndReason } from '#lib/ipc.js';
 
   let endMessage = $state<string | null>(null);
 

@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::platform::cg::WindowFrame;
+use crate::remote_control_redundant::{
+    rides_redundant_stream, InputBundle, InputSequencer, PushOutcome, RedundantInputSender,
+    SequencerOutput,
+};
 use crate::sync_ext::MutexExt;
 use crate::transport::publisher::RoomConnection;
 
@@ -50,10 +54,17 @@ pub(crate) struct BoundedCoalescingQueue<T, K> {
     state: Mutex<BoundedQueueState<T, K>>,
     ready: Condvar,
     high_rate_capacity: usize,
+    /// `(queued, incoming) -> stored`. Latest-wins by default; wheel must
+    /// sum its deltas instead (#400).
+    merge: fn(T, T) -> T,
 }
 
 impl<T, K: PartialEq> BoundedCoalescingQueue<T, K> {
     pub(crate) fn new(high_rate_capacity: usize) -> Self {
+        Self::with_merge(high_rate_capacity, |_queued, incoming| incoming)
+    }
+
+    pub(crate) fn with_merge(high_rate_capacity: usize, merge: fn(T, T) -> T) -> Self {
         Self {
             state: Mutex::new(BoundedQueueState {
                 discrete: VecDeque::new(),
@@ -61,6 +72,7 @@ impl<T, K: PartialEq> BoundedCoalescingQueue<T, K> {
             }),
             ready: Condvar::new(),
             high_rate_capacity,
+            merge,
         }
     }
 
@@ -71,12 +83,13 @@ impl<T, K: PartialEq> BoundedCoalescingQueue<T, K> {
             return BoundedQueuePush::Enqueued;
         };
         let mut state = self.state.lock_unpoisoned();
-        if let Some((_, queued)) = state
+        if let Some(index) = state
             .high_rate
-            .iter_mut()
-            .find(|(queued_key, _)| *queued_key == key)
+            .iter()
+            .position(|(queued_key, _)| *queued_key == key)
         {
-            *queued = task;
+            let (key, queued) = state.high_rate.remove(index).expect("index is in range");
+            state.high_rate.insert(index, (key, (self.merge)(queued, task)));
             return BoundedQueuePush::Coalesced;
         }
         if state.high_rate.len() >= self.high_rate_capacity {
@@ -207,6 +220,11 @@ pub(crate) struct RemoteControlEngine {
     replay_epochs: Mutex<HashMap<(u32, String), u64>>,
     pending_requests: Mutex<HashMap<ControlGrantKey, RemoteControlMessage>>,
     controller_grants: Mutex<HashMap<(u32, String), ControllerGrantEnvelope>>,
+    /// #399 controller side, keyed by (window, host): present only while the
+    /// host advertised `supports_redundant_input` for the current grant.
+    redundant_senders: Mutex<HashMap<(u32, String), (String, RedundantInputSender)>>,
+    /// #399 host side, keyed by (trusted sender, window).
+    input_sequencers: Mutex<HashMap<(String, u32), InputSequencer>>,
 }
 
 impl RemoteControlEngine {
@@ -224,6 +242,133 @@ impl RemoteControlEngine {
             replay_epochs: Mutex::new(HashMap::new()),
             pending_requests: Mutex::new(HashMap::new()),
             controller_grants: Mutex::new(HashMap::new()),
+            redundant_senders: Mutex::new(HashMap::new()),
+            input_sequencers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// #399: record whether the host's latest status lets this controller use
+    /// the redundant lossy input path. A new grant token opens a new stream;
+    /// a repeated `active` for the same grant keeps the stream (and its
+    /// in-flight redundancy) intact.
+    pub(crate) fn set_redundant_input_target(
+        &self,
+        window_id: u32,
+        host: &str,
+        grant_token: Option<&str>,
+    ) {
+        let mut senders = self.redundant_senders.lock_unpoisoned();
+        let key = (window_id, host.to_string());
+        let Some(grant_token) = grant_token.filter(|token| !token.is_empty()) else {
+            senders.remove(&key);
+            return;
+        };
+        if senders
+            .get(&key)
+            .is_some_and(|(stored, _)| stored == grant_token)
+        {
+            return;
+        }
+        senders.insert(
+            key,
+            (
+                grant_token.to_string(),
+                RedundantInputSender::new(window_id, new_redundant_stream_id()),
+            ),
+        );
+    }
+
+    /// Queues `message` on the redundant stream of a capable host and says
+    /// what to publish; `None` keeps the legacy path.
+    pub(crate) fn push_redundant_input(
+        &self,
+        message: &RemoteControlMessage,
+        now: Instant,
+    ) -> Option<(String, PushOutcome)> {
+        if !rides_redundant_stream(message) {
+            return None;
+        }
+        let mut senders = self.redundant_senders.lock_unpoisoned();
+        let (_, sender) =
+            senders.get_mut(&(message.window_id, message.target_user_id.clone()))?;
+        Some((sender.stream().to_string(), sender.push(message.clone(), now)))
+    }
+
+    /// Runs a paced flush; returns the bundle and its flush number.
+    pub(crate) fn flush_redundant_input(
+        &self,
+        window_id: u32,
+        host: &str,
+        stream: &str,
+        now: Instant,
+    ) -> Option<(InputBundle, u64)> {
+        let mut senders = self.redundant_senders.lock_unpoisoned();
+        let (_, sender) = senders.get_mut(&(window_id, host.to_string()))?;
+        if sender.stream() != stream {
+            return None;
+        }
+        let bundle = sender.flush(now)?;
+        Some((bundle, sender.flushes()))
+    }
+
+    /// The trailing copy of flush `flush`, unless a newer input (which
+    /// carries its own redundancy) superseded it.
+    pub(crate) fn redundant_trailing_bundle(
+        &self,
+        window_id: u32,
+        host: &str,
+        stream: &str,
+        flush: u64,
+        now: Instant,
+    ) -> Option<InputBundle> {
+        let senders = self.redundant_senders.lock_unpoisoned();
+        let (_, sender) = senders.get(&(window_id, host.to_string()))?;
+        if sender.stream() != stream {
+            return None;
+        }
+        sender.trailing(flush, now)
+    }
+
+    pub(crate) fn accept_input_bundle(
+        &self,
+        sender: &str,
+        bundle: InputBundle,
+        now: Instant,
+    ) -> SequencerOutput {
+        self.input_sequencers
+            .lock_unpoisoned()
+            .entry((sender.to_string(), bundle.window_id))
+            .or_default()
+            .accept(bundle, now)
+    }
+
+    pub(crate) fn flush_input_bundle_gap(
+        &self,
+        sender: &str,
+        window_id: u32,
+        now: Instant,
+    ) -> SequencerOutput {
+        self.input_sequencers
+            .lock_unpoisoned()
+            .get_mut(&(sender.to_string(), window_id))
+            .map(|sequencer| sequencer.flush_expired(now))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn redundant_bundle_packet(
+        &self,
+        bundle: &InputBundle,
+        target: &str,
+    ) -> livekit::DataPacket {
+        livekit::DataPacket {
+            payload: serde_json::to_vec(bundle).expect("input bundle is serializable"),
+            topic: Some(TOPIC.to_string()),
+            reliable: false,
+            destination_identities: if target.is_empty() {
+                Vec::new()
+            } else {
+                vec![livekit::prelude::ParticipantIdentity(target.to_string())]
+            },
         }
     }
 
@@ -614,7 +759,7 @@ impl RemoteControlEngine {
         livekit::DataPacket {
             payload,
             topic: Some(TOPIC.to_string()),
-            reliable: unreliable_seq_stream(message).is_none(),
+            reliable: !rides_lossy_transport(message),
             destination_identities: if target.is_empty() {
                 Vec::new()
             } else {
@@ -694,6 +839,7 @@ impl RemoteControlEngine {
             admission,
             terminal_on_success: true,
             result_sender: None,
+            received_at: None,
         }
     }
 
@@ -808,6 +954,17 @@ impl RemoteControlEngine {
 // design (the earlier SessionState Arc-engine scaffolding was dead code and
 // was removed).
 static ENGINE: LazyLock<RemoteControlEngine> = LazyLock::new(RemoteControlEngine::new);
+
+fn new_redundant_stream_id() -> String {
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_err() {
+        bytes = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos() as u64))
+        .to_le_bytes();
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 pub(crate) fn remote_control_engine() -> &'static RemoteControlEngine {
     &ENGINE
@@ -1390,6 +1547,11 @@ pub struct RemoteControlMessage {
     /// sets this field at all -- no negotiation round-trip needed.
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_binary_hot_path: bool,
+    /// #399: true only on a host's `active` status. A controller that saw it
+    /// sends input as lossy redundant `inputBundle`s
+    /// (`remote_control_redundant`); otherwise it keeps the reliable path.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supports_redundant_input: bool,
     #[serde(default)]
     pub modifiers: RemoteControlModifiers,
 }
@@ -1451,6 +1613,7 @@ impl RemoteControlDraft {
             message: None,
             grant_token: self.grant_token,
             supports_binary_hot_path: false,
+            supports_redundant_input: false,
             modifiers: self.modifiers,
         }
     }
@@ -1513,6 +1676,9 @@ pub(crate) struct ReplayTask {
     pub(crate) admission: Option<DiscreteAdmission>,
     pub(crate) terminal_on_success: bool,
     pub(crate) result_sender: Option<TerminalResultSender>,
+    /// #370: host receive instant for the latency summary; `None` for
+    /// synthetic releases, which no controller sent.
+    pub(crate) received_at: Option<std::time::Instant>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DiscreteAdmission {
@@ -1637,6 +1803,37 @@ impl TerminalDisposition {
         }
     }
 }
+/// Only hover moves ride the lossy channel: each one fully replaces the last.
+/// A legacy wheel is NOT self-replacing -- its deltas add up, so a dropped
+/// packet is a scroll that never happens (#400). It keeps its seq watermark
+/// and coalescing stream, but is published reliable.
+pub(crate) fn rides_lossy_transport(message: &RemoteControlMessage) -> bool {
+    unreliable_seq_stream(message) == Some(UnreliableSeqStream::PointerMove)
+}
+
+/// Merges a queued high-rate message with a newer one for the same stream.
+/// Hover moves are latest-wins; wheel deltas are summed so coalescing a burst
+/// (e.g. reliable packets released together after a retransmit) never drops
+/// scroll distance (#400). Mismatched delta modes cannot be summed, so the
+/// newer packet wins as before.
+pub(crate) fn coalesce_high_rate_message(
+    queued: &RemoteControlMessage,
+    mut incoming: RemoteControlMessage,
+) -> RemoteControlMessage {
+    if queued.message_type == RemoteControlType::Wheel
+        && incoming.message_type == RemoteControlType::Wheel
+        && queued.delta_mode.unwrap_or(0) == incoming.delta_mode.unwrap_or(0)
+    {
+        let sum = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+        };
+        incoming.delta_x = sum(queued.delta_x, incoming.delta_x);
+        incoming.delta_y = sum(queued.delta_y, incoming.delta_y);
+    }
+    incoming
+}
+
 pub(crate) fn unreliable_seq_stream(message: &RemoteControlMessage) -> Option<UnreliableSeqStream> {
     match (message.message_type, message.action) {
         // Plain hover moves are high-rate state updates and may be lossy.
@@ -2062,6 +2259,7 @@ pub(crate) fn replay_task(
         admission,
         terminal_on_success: true,
         result_sender: None,
+        received_at: None,
     }
 }
 
@@ -2788,6 +2986,22 @@ mod tests {
             r#"{"v":1,"kind":"result","targetUserId":"web-1","controllerId":"native-1","windowId":42,"seq":3,"outcome":"submitted"}"#,
         );
         assert!(engine.data_packet_for(&result).reliable);
+
+        // #400: a legacy wheel (macOS host, no v2 envelope) is reliable, on
+        // both the JSON and the binary hot-path encodings. A lossy wheel is a
+        // scroll that silently never happens.
+        let wheel = message(
+            r#"{"v":1,"kind":"wheel","targetUserId":"native-1","controllerId":"web-1","windowId":42,"seq":4,"grantToken":"0123456789abcdef0123456789abcdef","x":0.5,"y":0.5,"deltaX":0,"deltaY":40,"deltaMode":0}"#,
+        );
+        assert_eq!(unreliable_seq_stream(&wheel), Some(UnreliableSeqStream::Wheel));
+        assert!(engine.data_packet_for(&wheel).reliable);
+        engine
+            .hot_path_capable_targets()
+            .lock_unpoisoned()
+            .insert((wheel.window_id, wheel.target_user_id.clone()));
+        let binary = engine.data_packet_for(&wheel);
+        assert_eq!(binary.payload.first(), Some(&BINARY_MAGIC));
+        assert!(binary.reliable);
     }
 
     #[test]

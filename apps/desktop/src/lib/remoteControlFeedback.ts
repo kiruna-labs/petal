@@ -43,8 +43,11 @@ export function remoteControlFeedbackLabel(status: RemoteControlFeedbackStatus):
     case 'targetPaused':
       return 'Paused';
     case 'targetUnavailable':
+      // Control is on, but this input did not reach the shared window.
+      return 'Window out of reach';
     case 'requestUnavailable':
-      return 'Unavailable';
+      // Control cannot be started for this share at all.
+      return 'Control unavailable';
     case 'textTruncated':
       return 'Text capped';
     case 'notForeground':
@@ -66,10 +69,32 @@ export function remoteControlFeedbackLabel(status: RemoteControlFeedbackStatus):
   }
 }
 
+/** Plain-language copy, with the next step, for statuses whose native message
+ * is engineering text ("input could not be delivered to the shared window").
+ * The sharer is the only one who can fix these, so the copy says what to ask. */
+const REMOTE_CONTROL_FEEDBACK_DETAIL: Partial<Record<RemoteControlStatus['status'], string>> = {
+  targetUnavailable:
+    "Your input didn't reach the shared window. Ask the sharer to bring it to the front; it may be minimized or on another desktop.",
+  notForeground: 'Keyboard needs the shared app in front. Ask the sharer to click into it.',
+  occluded: 'Another window is covering the shared window. Ask the sharer to bring it to the front.'
+};
+
 export function remoteControlFeedbackTitle(
   status: RemoteControlFeedbackStatus,
   message: string | null
 ): string | null {
   if (!status || status === 'active' || status === 'stopped') return null;
-  return message || 'Remote control is not available right now.';
+  return REMOTE_CONTROL_FEEDBACK_DETAIL[status] ?? (message || 'Remote control is not available right now.');
+}
+
+/** Below this width the remote window header collapses its status chip to an
+ * icon-only dot (RemoteWindowHeader.svelte `@container (max-width: 720px)`).
+ * The control overlay spans the same width as the header. */
+export const HEADER_STATUS_TEXT_MIN_WIDTH = 720;
+
+/** Whether the control overlay's feedback banner should repeat the status
+ * label. When the header chip already shows it in text, the banner shows only
+ * the detail (what happened and what to do), so the status is never doubled. */
+export function controlBannerShowsLabel(overlayWidth: number): boolean {
+  return !(overlayWidth > HEADER_STATUS_TEXT_MIN_WIDTH);
 }

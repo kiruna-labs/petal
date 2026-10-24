@@ -107,11 +107,24 @@ impl Drop for PooledFrameData {
 /// One owned SCK `CVPixelBuffer` kept alive after the callback returns.
 pub struct NativeCapturedPixelBuffer {
     pixel_buffer: CVPixelBuffer,
+    /// The stream's live held-surface count (#393), released on drop.
+    held_surfaces: Option<Arc<AtomicU64>>,
 }
 
 impl NativeCapturedPixelBuffer {
     pub(crate) fn new(pixel_buffer: CVPixelBuffer) -> Self {
-        Self { pixel_buffer }
+        Self {
+            pixel_buffer,
+            held_surfaces: None,
+        }
+    }
+
+    fn new_counted(pixel_buffer: CVPixelBuffer, held_surfaces: Arc<AtomicU64>) -> Self {
+        held_surfaces.fetch_add(1, Ordering::Relaxed);
+        Self {
+            pixel_buffer,
+            held_surfaces: Some(held_surfaces),
+        }
     }
 
     pub fn pixel_format(&self) -> u32 {
@@ -146,11 +159,19 @@ impl NativeCapturedPixelBuffer {
     }
 }
 
+impl Drop for NativeCapturedPixelBuffer {
+    fn drop(&mut self) {
+        if let Some(held) = &self.held_surfaces {
+            held.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Owned pixel payload for one captured frame.
 ///
 /// The BGRA arm is retained as a parked fallback for tests and any future
 /// non-SCK source. The live ScreenCaptureKit window path should produce
-/// `Native` after issue #179, with `Nv12` retained for snapshot/copy fallback.
+/// `Native` after issue #179 (snapshots too), with `Nv12` retained for copy fallback.
 pub enum CapturedFramePayload {
     Bgra {
         data: PooledFrameData,
@@ -192,7 +213,8 @@ impl CapturedFramePayload {
 ///
 /// Native window frames own the retained `CVPixelBuffer` returned by
 /// `sample.image_buffer()`, so the IOSurface survives the callback. Snapshot
-/// and fallback frames may still carry copied BGRA/NV12 planes.
+/// frames own their `SCScreenshotManager` buffer the same way; fallback
+/// frames may still carry copied BGRA/NV12 planes.
 pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
@@ -340,6 +362,148 @@ impl CaptureDiagnostics {
     }
 }
 
+/// Why a raw stream produced no accepted frame since the last one (#393).
+/// Always on (atomics only). A silent stream otherwise looks the same whether
+/// SCK sent nothing, sent only idle samples, or sent frames that Petal dropped
+/// before the liveness stamp. The field could never tell those apart.
+#[derive(Default)]
+pub(crate) struct RawStreamAccounting {
+    callbacks: AtomicU64,
+    no_image: AtomicU64,
+    /// `SCFrameStatus` of the newest no-image sample, as i32 + 1 (0 = none).
+    last_no_image_status: AtomicU32,
+    layout_deferred: AtomicU64,
+    layout_rejected: AtomicU64,
+    pixel_format_rejected: AtomicU64,
+    region_dropped: AtomicU64,
+    config_updates: AtomicU64,
+    /// Live SCK surfaces Petal itself retains (never reset). Not WebRTC's.
+    held_surfaces: Arc<AtomicU64>,
+}
+
+/// One read of `RawStreamAccounting`. Every count except `held_surfaces` is
+/// "since the last accepted frame".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RawSilenceEvidence {
+    pub callbacks: u64,
+    pub no_image: u64,
+    pub last_no_image_status: Option<i32>,
+    pub layout_deferred: u64,
+    pub layout_rejected: u64,
+    pub pixel_format_rejected: u64,
+    pub region_dropped: u64,
+    pub config_updates: u64,
+    pub held_surfaces: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RawSilenceCause {
+    /// SCK invoked the output handler zero times.
+    NoCallbacks,
+    /// SCK only sent samples without an image (idle/blank/suspended).
+    IdleSamplesOnly,
+    /// SCK sent images; the layout gate deferred them (size mismatch).
+    LayoutDeferred,
+    LayoutRejected,
+    PixelFormatRejected,
+    RegionDropped,
+    /// Callbacks arrived but none of the above explains them.
+    Unclassified,
+}
+
+impl RawSilenceEvidence {
+    /// The dominant reason, image drops first: a dropped image proves SCK
+    /// delivered, which outranks any count of idle samples.
+    pub(crate) fn cause(&self) -> RawSilenceCause {
+        let drops = [
+            (self.layout_deferred, RawSilenceCause::LayoutDeferred),
+            (self.layout_rejected, RawSilenceCause::LayoutRejected),
+            (self.pixel_format_rejected, RawSilenceCause::PixelFormatRejected),
+            (self.region_dropped, RawSilenceCause::RegionDropped),
+        ];
+        if let Some((_, cause)) = drops
+            .into_iter()
+            .filter(|(count, _)| *count > 0)
+            .max_by_key(|(count, _)| *count)
+        {
+            return cause;
+        }
+        if self.callbacks == 0 {
+            RawSilenceCause::NoCallbacks
+        } else if self.no_image > 0 {
+            RawSilenceCause::IdleSamplesOnly
+        } else {
+            RawSilenceCause::Unclassified
+        }
+    }
+}
+
+impl RawStreamAccounting {
+    fn on_callback(&self) {
+        self.callbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_no_image(&self, status: Option<screencapturekit::cm::SCFrameStatus>) {
+        self.no_image.fetch_add(1, Ordering::Relaxed);
+        let encoded = status.map_or(0, |status| (status as i32).saturating_add(1).max(0) as u32);
+        self.last_no_image_status.store(encoded, Ordering::Relaxed);
+    }
+
+    fn on_layout(&self, action: LayoutGateAction) {
+        let counter = match action {
+            LayoutGateAction::Accept => return,
+            LayoutGateAction::Defer => &self.layout_deferred,
+            LayoutGateAction::Reconfigure { .. }
+            | LayoutGateAction::FailFirst
+            | LayoutGateAction::Failed => &self.layout_rejected,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_pixel_format_rejected(&self) {
+        self.pixel_format_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_region_dropped(&self) {
+        self.region_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_config_update(&self) {
+        self.config_updates.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An accepted frame ends the silence: clear every since-counter.
+    fn on_accepted(&self) {
+        for counter in [
+            &self.callbacks,
+            &self.no_image,
+            &self.layout_deferred,
+            &self.layout_rejected,
+            &self.pixel_format_rejected,
+            &self.region_dropped,
+            &self.config_updates,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+        self.last_no_image_status.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn evidence(&self) -> RawSilenceEvidence {
+        let status = self.last_no_image_status.load(Ordering::Relaxed);
+        RawSilenceEvidence {
+            callbacks: self.callbacks.load(Ordering::Relaxed),
+            no_image: self.no_image.load(Ordering::Relaxed),
+            last_no_image_status: (status != 0).then(|| status as i32 - 1),
+            layout_deferred: self.layout_deferred.load(Ordering::Relaxed),
+            layout_rejected: self.layout_rejected.load(Ordering::Relaxed),
+            pixel_format_rejected: self.pixel_format_rejected.load(Ordering::Relaxed),
+            region_dropped: self.region_dropped.load(Ordering::Relaxed),
+            config_updates: self.config_updates.load(Ordering::Relaxed),
+            held_surfaces: self.held_surfaces.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Proof-phase decision for one delivered region sample. Returns the
 /// generation to stamp (`Accept`) or `Drop` for a stale pre-reconfiguration
 /// frame. Same-size moves accept the first delivered frame after
@@ -433,6 +597,7 @@ pub struct WindowCapture {
     /// #108 folded the flap suppression into the same state machine; see
     /// `NoBufferStreakLog`.
     no_buffer_log: Arc<Mutex<NoBufferStreakLog>>,
+    raw_accounting: Arc<RawStreamAccounting>,
 }
 
 
@@ -657,6 +822,7 @@ pub struct WindowCaptureConfig {
     layout_gate: LayoutIntegrityGate,
     layout_error: Arc<dyn Fn(String) + Send + Sync>,
     configured_state: Arc<Mutex<ConfiguredCaptureState>>,
+    raw_accounting: Arc<RawStreamAccounting>,
 }
 
 /// #106: the capture source's PHYSICAL backing-store geometry.
@@ -1410,6 +1576,8 @@ impl WindowCapture {
         let layout_gate_for_handler = layout_gate.clone();
         let layout_error_for_handler = layout_error.clone();
         let diagnostics_for_handler = diagnostics.clone();
+        let raw_accounting = Arc::new(RawStreamAccounting::default());
+        let raw_accounting_for_handler = raw_accounting.clone();
         stream.add_output_handler(
             move |sample: screencapturekit::cm::CMSampleBuffer, of_type| {
                 use screencapturekit::cm::CMSampleBufferSCExt;
@@ -1417,6 +1585,7 @@ impl WindowCapture {
                 if of_type != SCStreamOutputType::Screen {
                     return;
                 }
+                raw_accounting_for_handler.on_callback();
                 // A region reconfiguration is a transaction: no frame is
                 // accepted while the native source is being updated. The
                 // zero-generation gate is applied AFTER the pixel-buffer
@@ -1451,6 +1620,7 @@ impl WindowCapture {
                     if let Some(diagnostics) = &diagnostics_for_handler {
                         diagnostics.record_no_buffer();
                     }
+                    raw_accounting_for_handler.on_no_image(frame_status);
                     let now = crate::time_util::now_us();
                     let actions = no_buffer_log_for_handler
                         .lock_unpoisoned()
@@ -1493,6 +1663,7 @@ impl WindowCapture {
                     if let Some(diagnostics) = &diagnostics_for_handler {
                         diagnostics.record_layout_rejection();
                     }
+                    raw_accounting_for_handler.on_layout(layout_action);
                     if let Some(event) = layout_event(layout_action) {
                         layout_error_for_handler(event);
                     }
@@ -1503,6 +1674,7 @@ impl WindowCapture {
                     if let Some(diagnostics) = &diagnostics_for_handler {
                         diagnostics.record_pixel_format_rejection(fmt);
                     }
+                    raw_accounting_for_handler.on_pixel_format_rejected();
                     if logged_unexpected_format.swap(fmt, Ordering::Relaxed) != fmt {
                         log::warn!(
                             "capture: window {window_id} unexpected pixel format 0x{fmt:08x} (wanted '420v' NV12) -- dropping frames of this format"
@@ -1549,23 +1721,31 @@ impl WindowCapture {
                         }
                         frame_region_generation = (generation != 0).then_some(generation);
                     }
-                    RegionFenceDecision::Drop => return,
+                    RegionFenceDecision::Drop => {
+                        raw_accounting_for_handler.on_region_dropped();
+                        return;
+                    }
                 }
                 if let Some(generation) = frame_region_generation {
                     if generation == 0
                         || region_generation_for_handler.load(Ordering::Acquire) != generation
                     {
+                        raw_accounting_for_handler.on_region_dropped();
                         return;
                     }
                 }
                 if let Some(diagnostics) = &diagnostics_for_handler {
                     diagnostics.record_accepted_frame();
                 }
+                raw_accounting_for_handler.on_accepted();
                 on_frame(CapturedFrame {
                     width,
                     height,
                     payload: CapturedFramePayload::Native {
-                        pixel_buffer: NativeCapturedPixelBuffer::new(pixel_buffer),
+                        pixel_buffer: NativeCapturedPixelBuffer::new_counted(
+                            pixel_buffer,
+                            raw_accounting_for_handler.held_surfaces.clone(),
+                        ),
                     },
                     source_scale,
                     layout_validated: true,
@@ -1606,6 +1786,7 @@ impl WindowCapture {
             layout_error,
             configured_state,
             no_buffer_log,
+            raw_accounting,
         })
     }
 
@@ -1657,6 +1838,7 @@ impl WindowCapture {
             layout_gate: self.layout_gate.clone(),
             layout_error: self.layout_error.clone(),
             configured_state: self.configured_state.clone(),
+            raw_accounting: self.raw_accounting.clone(),
         }
     }
 
@@ -1916,6 +2098,11 @@ fn prepare_direct_display_source(display_id: u32) -> Result<PreparedCaptureSourc
 }
 
 impl WindowCaptureConfig {
+    /// Why the raw stream has produced no accepted frame lately (#393).
+    pub(crate) fn raw_silence_evidence(&self) -> RawSilenceEvidence {
+        self.raw_accounting.evidence()
+    }
+
     pub(crate) fn layout_gate(&self) -> LayoutIntegrityGate {
         self.layout_gate.clone()
     }
@@ -1956,6 +2143,7 @@ impl WindowCaptureConfig {
         self.stream
             .update_configuration(&config)
             .map_err(|e| CaptureError::ScreenCaptureKit(e.to_string()))?;
+        self.raw_accounting.on_config_update();
         committed.source_scale = self.source_scale_for_configured_size_locked(width, height);
         drop(committed);
         self.fps.store(fps, Ordering::Relaxed);
@@ -2122,6 +2310,7 @@ impl WindowCaptureConfig {
                 .store(previous_generation, Ordering::Release);
             return Err(CaptureError::ScreenCaptureKit(error.to_string()));
         }
+        self.raw_accounting.on_config_update();
         if let Some(filter) = replacement_filter {
             *self.filter.lock_unpoisoned() = filter;
             *self.region_display_id.lock_unpoisoned() = Some(display.id);
@@ -2192,6 +2381,7 @@ impl WindowCaptureConfig {
                     .map_err(|e| CaptureError::ScreenCaptureKit(e.to_string()))
             },
         )?;
+        self.raw_accounting.on_config_update();
         self.fps.store(fps, Ordering::Relaxed);
         *self.resolution.lock_unpoisoned() = resolution;
         log::info!(
@@ -2342,22 +2532,27 @@ impl WindowCaptureConfig {
                 "capture-layout-deferred".into(),
             ));
         }
-        let lock_copy_started = std::time::Instant::now();
         let fmt = pixel_buffer.pixel_format();
         if fmt != FMT_NV12_VIDEO_RANGE {
             return Err(CaptureError::ScreenCaptureKit(format!(
                 "snapshot: unexpected pixel format 0x{fmt:08x} (wanted '420v' NV12)"
             )));
         }
-        let payload = copy_nv12_payload(&pixel_buffer, None)?;
-        let lock_copy_ms = lock_copy_started.elapsed().as_secs_f64() * 1000.0;
+        let (width, height) = (pixel_buffer.width() as u32, pixel_buffer.height() as u32);
+        let color_profile = color_profile_for_nv12_pixel_buffer(&pixel_buffer, self.color_profile);
+        // Publish the snapshot's own '420v' buffer natively, like raw frames.
+        // A copied (I420) snapshot flips VideoToolbox's session pixel format,
+        // which resets the session: two keyframes per remote-control input (#433).
+        let payload = CapturedFramePayload::Native {
+            pixel_buffer: NativeCapturedPixelBuffer::new(pixel_buffer),
+        };
         Ok(CapturedFrame {
-            width: pixel_buffer.width() as u32,
-            height: pixel_buffer.height() as u32,
+            width,
+            height,
             payload,
             source_scale: configured_state.source_scale,
             layout_validated: true,
-            color_profile: color_profile_for_nv12_pixel_buffer(&pixel_buffer, self.color_profile),
+            color_profile,
             sequence: 0,
             frame_status: None,
             dirty_rect_count: 0,
@@ -2366,7 +2561,7 @@ impl WindowCaptureConfig {
             // all (this bypasses the dirty-rect-skip gate via force_push_frame
             // anyway, but mark it honestly rather than "known-zero").
             dirty_rects_known: false,
-            lock_copy_ms,
+            lock_copy_ms: 0.0,
             region_generation,
         })
     }
@@ -3133,6 +3328,85 @@ mod tests {
                 last_stream_error: Some("stream stopped".to_string()),
             }
         );
+    }
+
+    /// #393: a stream SCK never called back is told apart from one that sent
+    /// only idle samples, and both from one whose frames Petal dropped.
+    #[test]
+    fn raw_stream_accounting_names_why_a_stream_is_silent() {
+        let accounting = RawStreamAccounting::default();
+        assert_eq!(accounting.evidence().cause(), RawSilenceCause::NoCallbacks);
+
+        accounting.on_callback();
+        accounting.on_no_image(Some(screencapturekit::cm::SCFrameStatus::Idle));
+        let evidence = accounting.evidence();
+        assert_eq!(evidence.cause(), RawSilenceCause::IdleSamplesOnly);
+        assert_eq!(evidence.last_no_image_status, Some(1));
+
+        // One deferred image proves SCK delivered: it outranks idle samples.
+        accounting.on_callback();
+        accounting.on_layout(LayoutGateAction::Accept);
+        accounting.on_layout(LayoutGateAction::Defer);
+        let evidence = accounting.evidence();
+        assert_eq!(evidence.layout_deferred, 1);
+        assert_eq!(evidence.layout_rejected, 0, "Accept is not a rejection");
+        assert_eq!(evidence.cause(), RawSilenceCause::LayoutDeferred);
+
+        // The most frequent drop wins.
+        accounting.on_region_dropped();
+        accounting.on_region_dropped();
+        accounting.on_config_update();
+        let evidence = accounting.evidence();
+        assert_eq!(evidence.cause(), RawSilenceCause::RegionDropped);
+        assert_eq!(evidence.config_updates, 1);
+
+        accounting.on_accepted();
+        assert_eq!(
+            accounting.evidence(),
+            RawSilenceEvidence::default(),
+            "an accepted frame ends the silence"
+        );
+    }
+
+    #[test]
+    fn raw_stream_accounting_counts_layout_rejections_and_pixel_formats() {
+        let accounting = RawStreamAccounting::default();
+        accounting.on_callback();
+        accounting.on_layout(LayoutGateAction::Reconfigure {
+            width: 10,
+            height: 10,
+        });
+        accounting.on_layout(LayoutGateAction::Failed);
+        accounting.on_pixel_format_rejected();
+        let evidence = accounting.evidence();
+        assert_eq!(evidence.layout_rejected, 2);
+        assert_eq!(evidence.pixel_format_rejected, 1);
+        assert_eq!(evidence.cause(), RawSilenceCause::LayoutRejected);
+    }
+
+    /// #393: the held-surface count is live (never reset by an accepted frame)
+    /// and follows every counted wrapper's lifetime.
+    #[test]
+    fn held_surface_count_follows_native_buffer_lifetime() {
+        let accounting = RawStreamAccounting::default();
+        let first = NativeCapturedPixelBuffer::new_counted(
+            CVPixelBuffer::create(4, 4, FMT_NV12_VIDEO_RANGE).expect("headless NV12 buffer"),
+            accounting.held_surfaces.clone(),
+        );
+        let second = NativeCapturedPixelBuffer::new_counted(
+            CVPixelBuffer::create(4, 4, FMT_NV12_VIDEO_RANGE).expect("headless NV12 buffer"),
+            accounting.held_surfaces.clone(),
+        );
+        accounting.on_accepted();
+        assert_eq!(accounting.evidence().held_surfaces, 2);
+        drop(first);
+        assert_eq!(accounting.evidence().held_surfaces, 1);
+        drop(second);
+        assert_eq!(accounting.evidence().held_surfaces, 0);
+        let uncounted =
+            NativeCapturedPixelBuffer::new(CVPixelBuffer::create(4, 4, FMT_NV12_VIDEO_RANGE).unwrap());
+        drop(uncounted);
+        assert_eq!(accounting.evidence().held_surfaces, 0);
     }
 
     #[test]

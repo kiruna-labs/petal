@@ -1,3 +1,4 @@
+import type { RedundantInputSender } from './remoteControlRedundant.ts';
 import type {
   Room,
   LocalVideoTrack,
@@ -37,7 +38,8 @@ import type {
 // wired once at bootstrap and passed in unchanged.
 // ---------------------------------------------------------------------------
 
-export type TileLayoutMode = 'grid' | 'spotlight';
+import type { TileLayoutMode } from '@petal/shared/logic/tileLayoutMode';
+export type { TileLayoutMode };
 
 export interface CodecCheck {
   label: string;
@@ -87,6 +89,11 @@ export interface HarnessPressToPhotonResult {
   publishCompleteMs: number;
   mediaTime: number;
   presentedFrames: number;
+  /** Host wall clock at publish, for joining against host-side stages. */
+  sentAtEpochMs: number;
+  /** Press to the frame's network arrival (rVFC `receiveTime`), if exposed. */
+  pressToReceiveMs: number | null;
+  rtpTimestamp: number | null;
 }
 
 export interface HarnessRemoteControlApi {
@@ -396,6 +403,10 @@ export interface ActiveRemoteControl {
    * binary encode on this, never assumes support. Defaults to false/absent
    * so a not-yet-upgraded host is always sent JSON. */
   supportsBinaryHotPath?: boolean;
+  /** #399: present only while the host's latest `active` status advertised
+   * `supportsRedundantInput`; input then rides lossy redundant bundles. */
+  redundantInput?: RedundantInputSender;
+  redundantInputGrantToken?: string;
 }
 
 export interface RemoteTelepointerState {

@@ -14,12 +14,15 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
+  TILE_LAYOUT_LABELS,
+  TILE_LAYOUT_MODES,
   autoSpotlight,
   chooseSpotlightHero,
   dismissSpotlight,
   endAutoSpotlight,
   initialTileLayoutModeState,
-  manualTileLayoutMode
+  manualTileLayoutMode,
+  parseTileLayoutMode
 } from '@petal/shared/logic/tileLayoutMode';
 
 const gallery = readFileSync(new URL('../src/lib/components/Gallery.svelte', import.meta.url), 'utf8');
@@ -67,7 +70,8 @@ test('ties keep caller order, so an all-equal roster still spotlights its first 
 });
 
 test('Gallery.svelte routes its spotlight fallback through the shared ranking', () => {
-  assert.match(gallery, /import \{ chooseSpotlightHero \} from '@petal\/shared\/logic\/tileLayoutMode'/);
+  assert.match(gallery, /chooseSpotlightHero/);
+  assert.match(gallery, /from '@petal\/shared\/logic\/tileLayoutMode'/);
   assert.match(gallery, /manualPinnedKey \?\? chooseSpotlightHero\(spotlightCandidates\)\?\.key/);
   // The old chain ended in `localEntry?.key ?? participantEntries[0]?.key`.
   // If it ever comes back, the ranking above is decorative.
@@ -126,4 +130,43 @@ test('dismissing an auto-spotlight returns to the previous mode; dismissing a ch
     state: { mode: 'grid', restoreMode: null },
     persist: 'grid'
   });
+});
+
+test('an automatic spotlight from vertical view restores the column, not the grid', () => {
+  const auto = autoSpotlight(initialTileLayoutModeState('column'));
+  assert.deepEqual(auto, { state: { mode: 'spotlight', restoreMode: 'column' }, persist: null });
+  assert.deepEqual(endAutoSpotlight(auto.state), {
+    state: { mode: 'column', restoreMode: null },
+    persist: null
+  });
+  assert.deepEqual(dismissSpotlight(auto.state), {
+    state: { mode: 'column', restoreMode: null },
+    persist: null
+  });
+});
+
+test('parseTileLayoutMode accepts the three picker modes and falls back to grid', () => {
+  assert.equal(parseTileLayoutMode('grid'), 'grid');
+  assert.equal(parseTileLayoutMode('column'), 'column');
+  assert.equal(parseTileLayoutMode('spotlight'), 'spotlight');
+  assert.equal(parseTileLayoutMode(null), 'grid');
+  assert.equal(parseTileLayoutMode(undefined), 'grid');
+  assert.equal(parseTileLayoutMode(''), 'grid');
+  assert.equal(parseTileLayoutMode('row'), 'grid');
+});
+
+test('the picker vocabulary is grid, vertical, and spotlight', () => {
+  assert.deepEqual([...TILE_LAYOUT_MODES], ['grid', 'column', 'spotlight']);
+  assert.equal(TILE_LAYOUT_LABELS.grid, 'Grid view');
+  assert.equal(TILE_LAYOUT_LABELS.column, 'Vertical view');
+  assert.equal(TILE_LAYOUT_LABELS.spotlight, 'Spotlight view');
+});
+
+test('Gallery.svelte exposes the three-mode picker and packs a forced column', () => {
+  assert.match(gallery, /class="layout-picker"/);
+  assert.match(gallery, /\{#each TILE_LAYOUT_MODES as mode \(mode\)\}/);
+  assert.match(gallery, /data-layout-mode=\{mode\}/);
+  assert.match(gallery, /arrangement: layoutMode === 'column' \? 'column' : 'auto'/);
+  assert.match(gallery, /layoutMode === 'spotlight'[\s\S]*manualTileLayoutMode\(layoutState, 'spotlight'\)[\s\S]*: autoSpotlight\(layoutState\)/);
+  assert.doesNotMatch(gallery, /layout-toggle/);
 });

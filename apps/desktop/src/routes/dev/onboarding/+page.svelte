@@ -6,7 +6,7 @@
   pattern.
 -->
 <script lang="ts">
-  import Onboarding from '$lib/components/Onboarding.svelte';
+  import Onboarding from '#lib/components/Onboarding.svelte';
 </script>
 
 <div class="harness">

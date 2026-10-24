@@ -154,7 +154,7 @@ const expectedRemoteControl = [
   ['pointer-up', true],
   ['pointer-click', true],
   ['pointer-double-click', true],
-  ['wheel', false],
+  ['wheel', true],
   ['key', true],
   ['text', true],
   ['pointer-click-v2-canonical-fingerprint', true],
@@ -198,6 +198,21 @@ for (const entry of fixture.remoteControlMessages) {
 }
 pass('all v1 and v2 variants, field names, modifiers, and reliability are pinned');
 
+// #399: capable controllers send non-hover input as lossy redundant bundles.
+const bundle = fixture.remoteControlInputBundle;
+assertDeepEqual(
+  [bundle?.kind, bundle?.reliable, bundle?.capabilityField, bundle?.staysLossyLatestWins],
+  ['inputBundle', false, 'supportsRedundantInput', ['pointer.move.buttons==0']],
+  'redundant input bundle transport'
+);
+assertDeepEqual(Object.keys(bundle.example).sort(), bundle.fields, 'inputBundle field list');
+assertDeepEqual(
+  fixture.remoteControlPacketPolicy.find((entry) => entry.packet === 'redundantInputBundle')?.reliability,
+  'lossy',
+  'redundantInputBundle packet policy'
+);
+pass('redundant lossy input bundle is pinned (lossy, capability-gated, hover excluded)');
+
 section('Harness inventory');
 requireMarkers(remoteControlPath, [
   'trait InputSink',
@@ -212,14 +227,17 @@ requireMarkers(remoteControlPath, [
   'remote_control_reliability_keeps_high_rate_streams_unreliable',
   'stale_unreliable_sequences_are_dropped_per_stream',
   'pointer_revoke_synthesizes_matching_button_release',
-  'key_revoke_synthesizes_matching_key_release'
+  'key_revoke_synthesizes_matching_key_release',
+  'redundant_input_bundle_matches_shared_contract_fixture',
+  'redundant_input_gap_that_loses_an_up_releases_the_held_key',
+  'controller_routes_input_through_bundles_only_for_a_capable_host'
 ]);
 requireMarkers(webContractsPath, [
   'remote-control topic and all-variant JSON field names are pinned',
   'remote-control fixture pins representative variant payloads'
 ]);
 requireMarkers(webRemoteControlPath, [
-  'remoteControlPublishOptions sends motion and wheel streams unreliably',
+  'remoteControlPublishOptions sends only hover moves unreliably',
   'remoteControlModifiers exposes the stable modifier field names',
   'remote-control live scenario separates case duration from measured target-observation latency',
   'remote-control harness records native host status packets'

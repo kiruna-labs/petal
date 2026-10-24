@@ -6,7 +6,7 @@
 // a toast produced a broken, overflowing layout (a 6-line pill with a raw
 // /var/folders/... path spilling past the window edge, see #105). The full
 // raw text is never lost; it's still logged in full by `updater.ts`'s own
-// logUpdaterStep call alongside this. No `$lib` imports here (mirrors
+// logUpdaterStep call alongside this. No `#lib` imports here (mirrors
 // shareErrors.ts) so this stays directly unit-testable under plain
 // `node --test`.
 

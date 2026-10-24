@@ -9,12 +9,12 @@
 -->
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import MeetingChrome from '$lib/components/MeetingChrome.svelte';
-  import PluginToolbarButtons from '$lib/plugins/PluginToolbarButtons.svelte';
+  import MeetingChrome from '#lib/components/MeetingChrome.svelte';
+  import PluginToolbarButtons from '#lib/plugins/PluginToolbarButtons.svelte';
   import ChatDrawer from '@petal/shared/ui/components/ChatDrawer.svelte';
   import type { ChatMessage } from '@petal/shared/logic/chat';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
-  import type { GalleryParticipant } from '$lib/components/Gallery.svelte';
+  import type { GalleryParticipant } from '#lib/components/Gallery.svelte';
   import {
     labGalleryParticipants,
     labParticipantSpecs,
@@ -71,13 +71,12 @@
   let expanded = $state(true);
 
   // The layout mode lives inside Gallery; reach it the way a person does,
-  // through the top-bar view toggle, so the lab exercises the real path.
+  // through the top-bar layout picker, so the lab exercises the real path.
   async function syncLayoutMode(mode: GalleryLabScenario['mode']) {
     await tick();
-    const toggle = chromeEl?.querySelector<HTMLButtonElement>('.layout-toggle');
-    if (!toggle) return;
-    const showing = chromeEl?.querySelector('.tiles.spotlight') ? 'spotlight' : 'grid';
-    if (showing !== mode) toggle.click();
+    chromeEl
+      ?.querySelector<HTMLButtonElement>(`.layout-mode-button[data-layout-mode="${mode}"]`)
+      ?.click();
     await tick();
     onSettled?.();
   }

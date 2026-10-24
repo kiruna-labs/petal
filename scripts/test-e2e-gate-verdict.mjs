@@ -15,6 +15,7 @@ import test from 'node:test';
 
 import {
   EXPECTED_LOOPBACK_SKIPS,
+  applyReportOnly,
   cockpitVerdict,
   loopbackVerdict,
   parseIdList,
@@ -104,8 +105,15 @@ test('loopback: an allow-listed case skipping for a DIFFERENT reason fails', () 
   assert.equal(loopbackVerdict({ report: r30, harnessExit: 0 }).ok, false);
 });
 
-test('loopback: the allow-list is exactly cases 23 and 30', () => {
-  assert.deepEqual(EXPECTED_LOOPBACK_SKIPS.map((s) => s.caseId), ['23', '30']);
+test('loopback: the allow-list is exactly cases 23, 29 (impaired pass only) and 30', () => {
+  assert.deepEqual(EXPECTED_LOOPBACK_SKIPS.map((s) => s.caseId), ['23', '29', '30']);
+});
+
+test('loopback: case 29 may skip ONLY for the #378 one-shot-reconnect reason', () => {
+  const ok = withCase(healthyReport(), 29, { status: 'skip', detail: 'one-shot reconnect already used by an earlier pass in this Petal process (PETAL_RC_RECONNECT_ALREADY_USED)' });
+  assert.equal(loopbackVerdict({ report: ok, harnessExit: 0 }).ok, true);
+  const other = withCase(healthyReport(), 29, { status: 'skip', detail: 'reconnect failed: reconnect already requested in this test process' });
+  assert.equal(loopbackVerdict({ report: other, harnessExit: 0 }).ok, false);
 });
 
 test('loopback: tokenlessDrops > 0 fails; a missing tokenlessDrops fails', () => {
@@ -376,6 +384,68 @@ test('CLI loopback: real files, both directions, and a missing file', () => {
   assert.equal(runCli(['loopback', '--results', garbage, '--harness-exit', '0']).status, 1);
 });
 
+// #378: the impaired pass is REPORT-ONLY until #421 lands. Both directions:
+// E2E_IMPAIRED_BLOCKING=true fails it; unset/false passes it with the
+// would-fail findings still printed. The clean pass blocks either way.
+function runCliWith(args, blocking) {
+  const env = { ...process.env };
+  delete env.E2E_IMPAIRED_BLOCKING;
+  if (blocking !== undefined) env.E2E_IMPAIRED_BLOCKING = blocking;
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env });
+  return { status: r.status, out: r.stdout + r.stderr };
+}
+
+test('applyReportOnly: blocking keeps a failure, non-blocking passes it with the findings as warnings', () => {
+  const failing = { ok: false, errors: ['case 20 failed'], warnings: ['w'], notes: ['n'] };
+  const blocked = applyReportOnly(failing, { blocking: true });
+  assert.equal(blocked.ok, false);
+  assert.deepEqual(blocked.errors, ['case 20 failed']);
+  const reported = applyReportOnly(failing, { blocking: false });
+  assert.equal(reported.ok, true);
+  assert.deepEqual(reported.errors, []);
+  assert.deepEqual(reported.warnings, ['w', 'REPORT-ONLY: would fail -- case 20 failed']);
+  assert.equal(reported.reportOnlyWouldFail, true);
+  const passing = { ok: true, errors: [], warnings: [], notes: [] };
+  assert.equal(applyReportOnly(passing, { blocking: false }).reportOnlyWouldFail, false);
+});
+
+test('CLI impaired pass: report-only unless E2E_IMPAIRED_BLOCKING=true; the clean pass always blocks', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'e2e-gate-verdict-'));
+  const good = join(dir, 'good.json');
+  writeFileSync(good, JSON.stringify(healthyReport()));
+  const failing = ['loopback', '--results', good, '--harness-exit', '1', '--quarantine', ''];
+  const blocking = runCliWith([...failing, '--pass', 'impaired'], 'true');
+  assert.equal(blocking.status, 1, blocking.out);
+  assert.match(blocking.out, /::error::harness exited 1/);
+  assert.match(blocking.out, /e2e-gate-verdict loopback \(impaired pass\): FAIL/);
+  for (const flag of [undefined, 'false', '']) {
+    const reportOnly = runCliWith([...failing, '--pass', 'impaired'], flag);
+    assert.equal(reportOnly.status, 0, reportOnly.out);
+    assert.doesNotMatch(reportOnly.out, /::error::/);
+    assert.match(reportOnly.out, /::warning::REPORT-ONLY: would fail -- harness exited 1/);
+    assert.match(reportOnly.out, /e2e-gate-verdict loopback \(impaired pass\): REPORT-ONLY: would fail \(1 problem\(s\)\)/);
+  }
+  for (const flag of [undefined, 'true']) {
+    const clean = runCliWith(failing, flag);
+    assert.equal(clean.status, 1, clean.out);
+    assert.match(clean.out, /e2e-gate-verdict loopback: FAIL/);
+  }
+  const green = runCliWith(['loopback', '--results', good, '--harness-exit', '0', '--quarantine', '', '--pass', 'impaired'], undefined);
+  assert.equal(green.status, 0, green.out);
+  assert.match(green.out, /e2e-gate-verdict loopback \(impaired pass\): PASS/);
+  assert.equal(runCliWith([...failing, '--pass', 'dirty'], undefined).status, 1);
+});
+
+test('wiring: the impaired pass is release-blocking (#378) and only its verdicts carry --pass impaired', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8');
+  assert.match(workflow, /\n      E2E_IMPAIRED_BLOCKING: "true"\n/);
+  const impairedCalls = workflow.match(/node "\$VERDICT" \w+ --pass impaired /g) ?? [];
+  assert.equal(impairedCalls.length, 3, 'loopback, latency and attribution of the impaired pass');
+  assert.match(workflow, /node "\$VERDICT" loopback --results "\$RESULTS_JSON"/);
+  assert.match(workflow, /node "\$VERDICT" latency --results "\$RESULTS_JSON"/);
+  assert.doesNotMatch(workflow, /node "\$VERDICT" \w+ --pass impaired --results "\$RESULTS_JSON"/);
+});
+
 test('CLI cockpit: real run dir, both directions, and an unknown tier', () => {
   const root = mkdtempSync(join(tmpdir(), 'e2e-gate-verdict-'));
   const runDir = join(root, RUN_ID);
@@ -410,7 +480,7 @@ const RELEASE = fileURLToPath(new URL('../.github/workflows/release.yml', import
 
 const WIRING = [
   ['workflow', 'loopback verdict is called with the required cases', /--required "\$E2E_REQUIRED_RC_CASES"/],
-  ['workflow', 'the display-share cases are required', /E2E_REQUIRED_RC_CASES: "37,38,39,40,41"/],
+  ['workflow', 'the display-share and repeat-scroll cases are required', /E2E_REQUIRED_RC_CASES: "37,38,39,40,41,42"/],
   ['workflow', 'loopback verdict is called with the harness exit', /node "\$VERDICT" loopback --results "\$RESULTS_JSON" --harness-exit "\$status"/],
   ['workflow', 'cockpit verdict is called with the step start time', /node "\$VERDICT" cockpit --run-dir "\$\{RUN_DIR:-\}" --started-at-ms "\$COCKPIT_STARTED_MS"/],
   ['workflow', 'cockpit verdict is called with the engine exit', /--engine-exit "\$engine_exit"/],

@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 
 import type { HarnessContext } from '../src/context.ts';
 import { TILE_REFLOW_ANIMATION_MS } from '../src/tileReflow.ts';
-import { computeSpotlightGeometry, setupTileLayout, spotlightHeroMedia } from '../src/tileLayout.ts';
+import { computeSpotlightGeometry, commitLayoutModeTransition, layoutModeStateOf, setupTileLayout, spotlightHeroMedia } from '../src/tileLayout.ts';
 import { cameraFit, coverCropFractions } from '@petal/shared/logic/cameraCrop';
+import { HARNESS_TILE_LAYOUT_STORAGE_KEY } from '../src/constants.ts';
+import { manualTileLayoutMode, parseTileLayoutMode } from '@petal/shared/logic/tileLayoutMode';
 
 type Listener = (event: Event) => void;
 
@@ -947,6 +949,76 @@ test('#204 the web grid packs tiles with the shared geometry and repacks on resi
     engine.restore();
     fakeDom.restore();
   }
+});
+
+test('#204 an explicit vertical view forces one column on a wide surface that grid packs as 2x2', () => {
+  const fakeDom = installFakeDom();
+  const tilesEl = fakeDom.document.createElement('div');
+  const engine = installFakeLayoutEngine(tilesEl, 20, 16);
+  try {
+    const topbarRight = fakeDom.document.createElement('div');
+    fakeDom.document.root.appendChild(tilesEl);
+    fakeDom.document.root.appendChild(topbarRight);
+    for (let index = 0; index < 4; index += 1) {
+      const tile = fakeDom.document.createElement('div');
+      tile.id = `tile-${index}`;
+      tile.className = 'tile';
+      tile.dataset.owner = `Peer ${index}`;
+      tilesEl.appendChild(tile);
+    }
+    const ctx = {
+      dom: { tilesEl, topbarRight },
+      state: { tileLayoutMode: 'grid', pinnedTileId: null, layoutModeButtons: null, speakerSmoothingTimer: null },
+      ui: { logEvent: () => {} },
+      cb: { activeRemoteControlForTile: () => null, fitTileLabels: () => {} },
+      speakerScores: new Map(),
+      activeSpeakerTargets: new Set(),
+    } as unknown as HarnessContext;
+    const layout = setupTileLayout(ctx);
+    tilesEl.clientWidth = 900 + 40;
+    tilesEl.clientHeight = 500 + 40;
+    layout.applyTileLayout();
+    assert.equal(tilesEl.style.values.get('--gallery-cols'), '2');
+    assert.equal(tilesEl.style.values.get('--gallery-rows'), '2');
+
+    (ctx.state as { tileLayoutMode: string }).tileLayoutMode = 'column';
+    layout.applyTileLayout();
+    assert.equal(tilesEl.style.values.get('--gallery-cols'), '1');
+    assert.equal(tilesEl.style.values.get('--gallery-rows'), '4');
+    assert.equal(tilesEl.style.values.get('--gallery-half-tracks'), '2');
+  } finally {
+    engine.restore();
+    fakeDom.restore();
+  }
+});
+
+test('choosing vertical view persists column and parseTileLayoutMode reads it back', () => {
+  const fakeDom = installFakeDom();
+  try {
+    const state = {
+      tileLayoutMode: 'grid' as const,
+      autoSpotlightRestoreMode: null,
+      pinnedTileId: null,
+      layoutModeButtons: null,
+      speakerSmoothingTimer: null,
+    };
+    commitLayoutModeTransition(
+      state as unknown as HarnessContext['state'],
+      manualTileLayoutMode(layoutModeStateOf(state as unknown as HarnessContext['state']), 'column')
+    );
+    assert.equal(state.tileLayoutMode, 'column');
+    assert.equal(globalThis.localStorage.getItem(HARNESS_TILE_LAYOUT_STORAGE_KEY), 'column');
+    assert.equal(parseTileLayoutMode(globalThis.localStorage.getItem(HARNESS_TILE_LAYOUT_STORAGE_KEY)), 'column');
+  } finally {
+    fakeDom.restore();
+  }
+});
+
+test('the web picker and packer both know the three layout modes', async () => {
+  const source = await readFile(new URL('../src/tileLayout.ts', import.meta.url), 'utf8');
+  assert.match(source, /for \(const mode of TILE_LAYOUT_MODES\)/);
+  assert.match(source, /arrangement: state.tileLayoutMode === 'column' \? 'column' : 'auto'/);
+  assert.match(source, /if \(mode === 'column'\)/);
 });
 
 test('#248 a camera-only grid packs cropping tiles that fill a landscape phone; a share keeps 16:9', () => {

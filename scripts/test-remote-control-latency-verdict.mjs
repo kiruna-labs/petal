@@ -15,15 +15,20 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  ATTRIBUTION_ROWS,
   LATENCY_CHECKS,
+  attributionVerdict,
   collectLatencyMetrics,
   evaluateLatencyGate,
   latencyVerdict,
   pairControllerPublishes,
   parseHostLatencyLog,
+  parseLatencySummaryLog,
+  summarizeLatencySummaries,
   resolveLatencyBudgets,
 } from './ci/remote-control-latency-verdict.mjs';
 import { WATCH_SCRIPT, armObservationWatch, parseWatchLine } from '../apps/desktop/scripts/remote-control-observation-watch.mjs';
+import { freezeProbeExpression, summarizePresentedGaps } from '../apps/desktop/scripts/remote-control-freeze-probe.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
@@ -45,7 +50,7 @@ function hostLines({ seq, window = 165, receive, inject, complete, kind = 'Text'
 // A run shaped like the real thing; `slow` adds a host-side stall before
 // injection (what PETAL_RC_TEST_REPLAY_DELAY_MS does on the VM) and moves the
 // controller-visible numbers by the same amount.
-function syntheticRun({ slowMs = 0, events = 60, observations = 21, photon = 40 } = {}) {
+function syntheticRun({ slowMs = 0, events = 60, observations = 21, photon = 40, freezeGapMs = 70 } = {}) {
   const lines = [];
   const publishes = [];
   let t = 1_792_198_600_000;
@@ -75,8 +80,12 @@ function syntheticRun({ slowMs = 0, events = 60, observations = 21, photon = 40 
     // Shaped like the VM (run 39052137479: p50 188.5, p95 253.9).
     pressToEstimatedPhotonMs: 170 + (i % 10) * 9 + slowMs,
   }));
+  // A 20s probe at ~30fps whose worst presented-frame gap is freezeGapMs.
+  const frameTimes = Array.from({ length: 600 }, (_, i) => 1000 + i * 33.3);
+  frameTimes.splice(300, Math.max(0, Math.round(freezeGapMs / 33.3) - 1));
+  const freezeProbe = summarizePresentedGaps(frameTimes, { startMs: 1000, endMs: 21_000 });
   const photonReport = {
-    summary: { pressToPhoton: { expectedSamples: photon, sampleFailures: [], timingSamples, byInput: {} } },
+    summary: { freezeProbe, pressToPhoton: { expectedSamples: photon, sampleFailures: [], timingSamples, byInput: {} } },
   };
   return { results, photon: photonReport, hostLog: lines.join('\n') };
 }
@@ -348,6 +357,30 @@ test('latencyVerdict speaks the verdict-script shape, both directions', () => {
   assert.equal(garbage.ok, false);
 });
 
+// #378: the presented-freeze check is REPORT-ONLY (until #421 lands) unless
+// E2E_IMPAIRED_BLOCKING=true -- so the clean pass keeps its pre-#378 checks.
+test('presented-freeze check blocks only when E2E_IMPAIRED_BLOCKING=true', () => {
+  const frozen = syntheticRun({ freezeGapMs: 650 });
+  const blocking = latencyVerdict({ ...frozen, env: { E2E_IMPAIRED_BLOCKING: 'true' } });
+  assert.equal(blocking.ok, false);
+  assert.ok(blocking.errors.some((line) => line.startsWith('latency presented-freeze-max-gap: FAIL')));
+  for (const env of [{}, { E2E_IMPAIRED_BLOCKING: 'false' }]) {
+    const reportOnly = latencyVerdict({ ...frozen, env });
+    assert.equal(reportOnly.ok, true, reportOnly.errors.join('\n'));
+    assert.deepEqual(reportOnly.errors, []);
+    assert.ok(reportOnly.warnings.some((line) => line.startsWith('REPORT-ONLY: would fail -- latency presented-freeze-max-gap: FAIL')));
+    assert.equal(reportOnly.checks.find((c) => c.id === 'presented-freeze-max-gap').reportOnly, true);
+  }
+  // A missing probe is also non-blocking by default, never a silent pass.
+  const missing = syntheticRun();
+  delete missing.photon.summary.freezeProbe;
+  const noProbe = latencyVerdict(missing);
+  assert.equal(noProbe.ok, true);
+  assert.ok(noProbe.warnings.some((line) => /REPORT-ONLY: would fail -- latency presented-freeze-max-gap: INSUFFICIENT/.test(line)));
+  // Every other check still blocks with the switch off.
+  assert.equal(latencyVerdict(syntheticRun({ slowMs: 150 })).ok, false);
+});
+
 // The real CLI path the workflow runs: e2e-gate-verdict.mjs latency.
 test('e2e-gate-verdict.mjs latency exits 0 on a healthy run and 1 on a stalled one', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'rc-latency-verdict-'));
@@ -382,4 +415,160 @@ test('the JXA watcher sleeps between reads instead of spinning, and reports read
   assert.match(WATCH_SCRIPT, /\$\.usleep\(\d+\)/);
   assert.doesNotMatch(WATCH_SCRIPT, /while \(nowMs\(\) < next\) \{\}/);
   assert.match(WATCH_SCRIPT, /'SEEN ' \+ readAt\.toFixed\(1\) \+ ' reads=' \+ reads \+ ' maxGapMs='/);
+});
+
+// #370: the aggregated summary mirror is parsed and reported, never gated.
+test('latency-summary mirror lines are parsed and reported without gating', () => {
+  const contract = JSON.parse(readFileSync(path.join(repoRoot, 'contracts/petal-contracts.json'), 'utf8'));
+  const prefix = '2026-10-19 10:00:00.000 [INFO] [desktop_lib::rc_latency_telemetry] ';
+  const finalLine = contract.remoteControlLatencySummary.example.logLine
+    .replace('final=false', 'final=true')
+    .replace('replay_complete_ms_p95=108', 'replay_complete_ms_p95=131');
+  const log = [prefix + contract.remoteControlLatencySummary.example.logLine, prefix + finalLine, 'noise line'].join('\n');
+  const intervals = parseLatencySummaryLog(log);
+  assert.equal(intervals.length, 2);
+  assert.equal(intervals[0].rc_session_id, '0123456789abcdef0123456789abcdef');
+  assert.equal(intervals[0].replay_complete_ms_p95, 108);
+  assert.equal(intervals[1].final, true);
+  const summary = summarizeLatencySummaries(intervals);
+  assert.equal(summary.intervals, 2);
+  assert.equal(summary.finals, 1);
+  assert.equal(summary.replayComplete.p95MaxMs, 131);
+  assert.equal(summary.replayComplete.samples, 796);
+  assert.equal(summary.replayInject.p95MaxMs, 9);
+  assert.equal(summarizeLatencySummaries(intervals, 'controller').intervals, 0);
+  assert.equal(summarizeLatencySummaries([]).replayComplete.p95MaxMs, null);
+  // Not gated: a run with no summary lines still produces the same checks.
+  const metrics = collectLatencyMetrics({ hostLog: log });
+  assert.equal(metrics.latencySummary.replayComplete.p95MaxMs, 131);
+  assert.ok(!LATENCY_CHECKS.some((check) => check.metric === 'latencySummary'));
+  const verdict = latencyVerdict({ hostLog: log });
+  assert.ok(verdict.notes.some((note) => note.includes('latency summary (#370, not gated): 2 host interval(s), 1 final')));
+});
+
+// ---------------------------------------------------------------------------
+// #378: presented-video freeze probe + impaired-pass stage attribution.
+// ---------------------------------------------------------------------------
+
+test('freeze probe summary counts edge gaps, so a stream that never starts is one long freeze', () => {
+  const healthy = summarizePresentedGaps([1033, 1066, 1100, 1999], { startMs: 1000, endMs: 2000 });
+  assert.equal(healthy.frames, 4);
+  assert.equal(healthy.maxGapMs, 899);
+  assert.equal(healthy.freezes, 1);
+  const dead = summarizePresentedGaps([], { startMs: 0, endMs: 20_000 });
+  assert.equal(dead.frames, 0);
+  assert.equal(dead.maxGapMs, 20_000);
+  // Callbacks outside the window are not frames of this probe.
+  assert.equal(summarizePresentedGaps([-5, 10, 5000], { startMs: 0, endMs: 100 }).frames, 1);
+});
+
+test('presented-freeze check: green under 500ms, red on a 650ms freeze, insufficient without a probe', () => {
+  const freezeCheck = (run) => evaluateLatencyGate(collectLatencyMetrics(run), budgets).checks.find((c) => c.id === 'presented-freeze-max-gap');
+  assert.equal(freezeCheck(syntheticRun()).status, 'pass');
+  const red = freezeCheck(syntheticRun({ freezeGapMs: 650 }));
+  assert.equal(red.status, 'fail');
+  assert.match(red.detail, /1 freeze\(s\)/);
+  const missing = syntheticRun();
+  delete missing.photon.summary.freezeProbe;
+  assert.equal(freezeCheck(missing).status, 'insufficient');
+  const errored = syntheticRun();
+  errored.photon.summary.freezeProbe = { error: 'freeze probe: no <video>' };
+  assert.match(freezeCheck(errored).detail, /did not run: freeze probe: no <video>/);
+  // A source that presents almost nothing is insufficient, not a pass.
+  const starved = syntheticRun();
+  starved.photon.summary.freezeProbe = summarizePresentedGaps(Array.from({ length: 50 }, (_, i) => i * 400), { startMs: 0, endMs: 20_000 });
+  assert.notEqual(freezeCheck(starved).status, 'pass');
+});
+
+test('the freeze probe expression is valid JS that targets the share tile video', () => {
+  const expression = freezeProbeExpression({ windowId: 165, durationMs: 20000 });
+  assert.doesNotThrow(() => new Function(`return ${expression};`));
+  assert.match(expression, /\.share-tile\[data-window-id="165"\]/);
+  assert.match(expression, /requestVideoFrameCallback/);
+});
+
+test('the sentinel motion strip stays clear of the Gray code and the calibration squares', () => {
+  const swift = readFileSync(path.join(rcScripts, 'remote-control-photon-sentinel.swift'), 'utf8');
+  const m = /motionStripRect = NSRect\(x: (\d+), y: (\d+), width: (\d+), height: (\d+)\)/.exec(swift);
+  assert.ok(m, 'motionStripRect must be a literal NSRect');
+  const [x, y, w, h] = m.slice(1).map(Number);
+  const strip = { x, y, w, h };
+  const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  for (const other of [
+    { x: 160, y: 88, w: 640, h: 30 }, // Gray code
+    { x: 16, y: 16, w: 24, h: 24 }, { x: 920, y: 16, w: 24, h: 24 }, // top calibration squares
+    { x: 80, y: 45, w: 800, h: 36 }, // title
+  ]) {
+    assert.equal(overlaps(strip, other), false, `motion strip ${JSON.stringify(strip)} overlaps ${JSON.stringify(other)}`);
+  }
+  assert.match(swift, /SIGUSR1, true\), \(SIGUSR2, false\)/, 'motion is toggled by SIGUSR1/SIGUSR2');
+});
+
+function latencyJson(p50s) {
+  const metrics = {};
+  for (const [metric, p50Ms] of Object.entries(p50s)) metrics[metric] = { p50Ms };
+  return { metrics };
+}
+const CLEAN = latencyJson({ sendToReceive: 6, pressToPhoton: 180, hostReceiveToInject: 2 });
+
+test('attribution: 20ms per traversal lands on the network stages only -> pass', () => {
+  const impaired = latencyJson({ sendToReceive: 47, pressToPhoton: 268, hostReceiveToInject: 3 });
+  const verdict = attributionVerdict({ clean: CLEAN, impaired, delayMs: 20 });
+  assert.equal(verdict.ok, true, verdict.errors.join('\n'));
+  assert.equal(verdict.rows.length, ATTRIBUTION_ROWS.length);
+});
+
+test('attribution: an impairment that did not apply fails (the impaired pass was really clean)', () => {
+  const verdict = attributionVerdict({ clean: CLEAN, impaired: CLEAN, delayMs: 20 });
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.errors.some((e) => /sendToReceive \(must-move\): FAIL/.test(e)));
+});
+
+test('attribution: photon movement is reported, never gating (run 39837860987: +14.8ms at 20ms/traversal)', () => {
+  const impaired = latencyJson({ sendToReceive: 42, pressToPhoton: 195, hostReceiveToInject: 2 });
+  const verdict = attributionVerdict({ clean: CLEAN, impaired, delayMs: 20 });
+  assert.equal(verdict.ok, true, verdict.errors.join('\n'));
+  assert.ok(verdict.notes.some((n) => /pressToPhoton \(report\)/.test(n)));
+});
+
+test('attribution: delay showing up in the host stage is a misattribution and fails', () => {
+  const impaired = latencyJson({ sendToReceive: 47, pressToPhoton: 268, hostReceiveToInject: 42 });
+  const verdict = attributionVerdict({ clean: CLEAN, impaired, delayMs: 20 });
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.errors.some((e) => /hostReceiveToInject \(must-not-move\): FAIL/.test(e)));
+});
+
+test('attribution: missing evidence or a bad delay is never a pass', () => {
+  assert.equal(attributionVerdict({ clean: null, impaired: CLEAN, delayMs: 20 }).ok, false);
+  assert.equal(attributionVerdict({ clean: CLEAN, impaired: CLEAN, delayMs: '' }).ok, false);
+  assert.equal(attributionVerdict({ clean: CLEAN, impaired: CLEAN, delayMs: 0 }).ok, false);
+});
+
+test('e2e-gate-verdict.mjs attribution exits 0 on a correct attribution and 1 on a clean "impaired" pass', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'rc-attribution-verdict-'));
+  const clean = path.join(dir, 'clean.json');
+  const impaired = path.join(dir, 'impaired.json');
+  writeFileSync(clean, JSON.stringify(CLEAN));
+  const cli = () => spawnSync(process.execPath, [path.join(scriptDir, 'ci/e2e-gate-verdict.mjs'), 'attribution',
+    '--clean', clean, '--impaired', impaired, '--delay-ms', '20'], { encoding: 'utf8' });
+  writeFileSync(impaired, JSON.stringify(latencyJson({ sendToReceive: 47, pressToPhoton: 268, hostReceiveToInject: 3 })));
+  const green = cli();
+  assert.equal(green.status, 0, green.stdout);
+  writeFileSync(impaired, JSON.stringify(CLEAN));
+  const red = cli();
+  assert.equal(red.status, 1, red.stdout);
+  assert.match(red.stdout, /::error::attribution sendToReceive/);
+});
+
+test('the workflow runs the impaired pass with its own budgets and always tears the impairment down', () => {
+  const workflow = readFileSync(path.join(repoRoot, '.github/workflows/nightly-loopback.yml'), 'utf8');
+  assert.match(workflow, /scripts\/ci\/net-impair\.sh on /);
+  assert.match(workflow, /node "\$VERDICT" attribution /);
+  // Teardown + the post-run check live in an if: always() step.
+  assert.match(workflow, /- name: Remove network impairment[^\n]*\n\s+if: always\(\)/);
+  assert.match(workflow, /net-impair\.sh check-clear/);
+  // Impaired budgets are separate constants, never the clean ones loosened.
+  for (const name of ['IMPAIRED_OBSERVATION_P50_MS', 'IMPAIRED_SEND_TO_INJECT_P95_MS', 'IMPAIRED_PHOTON_P50_MS', 'IMPAIRED_PHOTON_P95_MS']) {
+    assert.match(workflow, new RegExp(`${name}:\\s*"\\d+"`), `${name} must be pinned in the workflow`);
+  }
 });

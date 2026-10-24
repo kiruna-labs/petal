@@ -25,5 +25,5 @@ test('desktop launch opens the final main menu route directly', () => {
   assert.equal(tauriConfig.app.windows[0].url, 'main.html');
   assert.match(layoutSource, /routePath = \$derived\.by/);
   assert.match(layoutSource, /p\.endsWith\('\.html'\)/);
-  assert.match(mainRouteSource, /goto\('\/onboarding', \{ replaceState: true \}\)/);
+  assert.match(mainRouteSource, /goto\('\/onboarding', \{ replace: true \}\)/);
 });

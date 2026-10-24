@@ -62,19 +62,19 @@ test('feedback is compiled off entirely (no trigger, no SDK reference) when the 
   // The main-menu trigger only renders inside a `feedbackEnabled` gate that
   // is derived from `isFeedbackEnabled()` -- an absent/invalid key means
   // `{#if feedbackEnabled}` never renders the button at all.
-  assert.match(mainMenuSource, /import \{ isFeedbackEnabled \} from '\$lib\/feedback\/config'/);
+  assert.match(mainMenuSource, /import \{ isFeedbackEnabled \} from '#lib\/feedback\/config\.js'/);
   assert.match(mainMenuSource, /const feedbackEnabled = isFeedbackEnabled\(\);/);
   assert.match(mainMenuSource, /\{#if feedbackEnabled\}/);
 });
 
-test('#786: the meeting topbar bug-report cell sits between the layout toggle and Connection stats', () => {
+test('#786: the meeting topbar bug-report cell sits between the layout picker and Connection stats', () => {
   const topbarRightAt = gallerySource.indexOf('<div class="topbar-right">');
-  const layoutToggleAt = gallerySource.indexOf('layout-toggle', topbarRightAt);
+  const layoutPickerAt = gallerySource.indexOf('layout-picker', topbarRightAt);
   const reportBugAt = gallerySource.indexOf('report-bug', topbarRightAt);
   const netBtnAt = gallerySource.indexOf('net-btn', topbarRightAt);
-  assert.ok(topbarRightAt !== -1 && layoutToggleAt !== -1, 'gallery topbar-right lost its layout toggle');
+  assert.ok(topbarRightAt !== -1 && layoutPickerAt !== -1, 'gallery topbar-right lost its layout picker');
   assert.ok(reportBugAt !== -1, 'the bug-report button must render inside the gallery topbar');
-  assert.ok(layoutToggleAt < reportBugAt, 'the bug report belongs immediately right of the layout toggle');
+  assert.ok(layoutPickerAt < reportBugAt, 'the bug report belongs immediately right of the layout picker');
   assert.ok(reportBugAt < netBtnAt, 'the bug report belongs left of the Connection stats cell');
 
   // It reuses the existing cell + tooltip chrome (whose wrap-not-truncate
@@ -99,7 +99,7 @@ test('#786: the bug-report cell exists only when the route hands down a trigger,
   assert.match(meetingChromeSource, /onReportBug\?: \(\) => void;/);
   assert.match(meetingChromeSource, /\{onReportBug\}/);
 
-  assert.match(meetingRouteSource, /import \{ isFeedbackEnabled \} from '\$lib\/feedback\/config'/);
+  assert.match(meetingRouteSource, /import \{ isFeedbackEnabled \} from '#lib\/feedback\/config\.js'/);
   assert.match(meetingRouteSource, /const feedbackEnabled = isFeedbackEnabled\(\);/);
   assert.match(
     meetingRouteSource,
@@ -109,7 +109,7 @@ test('#786: the bug-report cell exists only when the route hands down a trigger,
   // FeedbackModal was reachable only from the home MainMenu.
   assert.match(
     meetingRouteSource,
-    /import FeedbackModal from '\$lib\/components\/FeedbackModal\.svelte'/
+    /import FeedbackModal from '#lib\/components\/FeedbackModal\.svelte'/
   );
   assert.match(
     meetingRouteSource,

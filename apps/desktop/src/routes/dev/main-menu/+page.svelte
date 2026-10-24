@@ -5,8 +5,8 @@
   `standup` rows. Throwaway scaffolding, matches the /dev/components pattern.
 -->
 <script lang="ts">
-  import MainMenu from '$lib/components/MainMenu.svelte';
-  import type { IdentityColor } from '$lib/components/Avatar.svelte';
+  import MainMenu from '#lib/components/MainMenu.svelte';
+  import type { IdentityColor } from '#lib/components/Avatar.svelte';
 
   interface RoomParticipant {
     name: string;

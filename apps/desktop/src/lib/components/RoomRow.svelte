@@ -30,8 +30,8 @@
   import { onDestroy } from 'svelte';
   import Avatar from './Avatar.svelte';
   import type { IdentityColor } from './Avatar.svelte';
-  import { participantNamesSummary } from '$lib/data/participantNames';
-  import { placeRowTooltip } from '$lib/data/rowTooltipPlacement';
+  import { participantNamesSummary } from '#lib/data/participantNames.js';
+  import { placeRowTooltip } from '#lib/data/rowTooltipPlacement.js';
 
   interface RoomParticipant {
     name: string;

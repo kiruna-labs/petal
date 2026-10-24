@@ -1261,6 +1261,7 @@ is not driven by a scenario JSON file.
 | Fast, Test Cockpit-embedded, or prod-realistic smoke check | `node apps/desktop/scripts/cockpit.mjs --test-case=RC-P1080` | Runs the intentionally narrow RC-P1080 smoke check through the Test Cockpit's in-process Rust engine against prod LiveKit; it is not comprehensive coverage or a replacement for the 30-case suite. |
 | Latency-specific validation | `scripts/rc-live-suite.sh --press-to-photon` | Replaces the matrix with the press-to-photon gate, measuring web input through native reaction to the estimated browser display. |
 | Second-Mac validation | `scripts/cross-machine-rc-suite.sh` | Runs the remote-control suite with the sharer on a genuinely separate, SSH-reachable Mac, exercising the cross-machine path. |
+| Petal as the CONTROLLER typing into a web field in a shared Chrome | `--test-case=RC-N2N-CHROME` (see below) | Chrome routes pid-posted keys to its own keyboard-focused view; this is the only case that starts with that focus in the address bar (#404). |
 | Petal as the CONTROLLER (native→native, native→web) | `--test-case=RC-N2N` / `--test-case=RC-N2W` (see below) | Everything above drives a WEB controller against a native host. RC-N2N is the only harness that drives the real native controller route, which is the direction two Petal users at two Macs actually use. |
 
 #### RC-N2N / RC-N2W — Petal as the controller (#819)
@@ -1300,11 +1301,98 @@ the console must be UNLOCKED (the scenario preflights this and says so). Separat
 already contains its keystone text, so "the typed text landed" can never be
 satisfied by content that was there before the drive.
 
+Cmd+A's effect (the selection must contain the keystone) is read right after
+the Cmd+A step, polled for up to 3 s while the host replays. It used to be read
+at the end of the drive, after the Cmd+V, and a paste replaces the selection
+and collapses it to a caret, so that reading could never show what Cmd+A did.
+The post-paste selection is still recorded in the evidence
+(`selectionAfterPaste`).
+
+The release step calls `remote_control_set_active(active: false)`, the command
+the remote window header's control toggle invokes. It used to be an Escape
+dispatched at the control overlay, but the overlay forwards Escape to the host
+as an ordinary key and has no release binding, so on e602a873 every RC-N2N run
+failed with "Escape did not release control" before reaching its real checks.
+
 `RC-N2W` is the same controller against a browser peer. It proves DELIVERY
 only — the harness records what it receives and never claims an input was
 applied, because a browser cannot inject OS input. Its keystone deliberately
 excludes the native-only clipboard commands; a browser peer ignores the native
 Copy request and clipboard byte-stream topic.
+
+#### RC-N2N-CHROME — typing into a web field while Chrome's focus is in the address bar (#404)
+
+```bash
+RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME > /tmp/rc-n2n-chrome.log 2>&1 &
+RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME-FORM > /tmp/rc-n2n-chrome-form.log 2>&1 &
+RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME-BUTTON > /tmp/rc-n2n-chrome-button.log 2>&1 &
+```
+
+Two page shapes, each its own scenario with its own keystone and its own
+oracle, because in the #404 incident every click took the host's
+`AxPressable` route and it is not known whether the pressed element was the
+input or a pressable container around it:
+
+| Scenario | Page | Keystone |
+|---|---|---|
+| `RC-N2N-CHROME` | one bare `<input>` filling the viewport | `petalrcnative` |
+| `RC-N2N-CHROME-FORM` | an application-form field: a `<label>` wrapping a padded, bordered `role="group"` box (`tabindex=-1`, a click handler that focuses the input, an icon) containing an `<input>` with a placeholder | `petalrcwebform` |
+| `RC-N2N-CHROME-BUTTON` | a page `<button>` ("Edit full name") whose click handler focuses an `<input>` below it; the click is aimed at the button's centre | `petalrcwebbutton` |
+
+The first two shapes both land on the field's text: the host's AX hit-test
+returns the `AXTextField` and the click takes the `AxText` route, so neither
+covers the incident's `mode=AxPressable action=Press`. `RC-N2N-CHROME-BUTTON`
+does: Chrome exposes the page button as an `AXButton` with `AXPress`, so the
+host presses it over AX. Its oracle also requires that the button saw a
+click with **no** `pointerdown`/`mousedown` (an `AXPress` dispatches a bare
+click; a real session-tap or SkyLight click always starts with
+`pointerdown`), so a run whose click fell back to a real pointer reports
+INFRA-FAIL "did not cover the host's AxPressable route" instead of passing.
+Measured with a standalone AX probe on Chrome (2026-10-23): `AXPress` on that
+button moves DOM focus to the input but leaves `document.hasFocus()` false,
+and pid-posted keys then land in the address bar. The host therefore sets
+`AXFocused` on pressed Chromium page content before the press
+(`focus_chromium_page_before_press`).
+
+In both, the click is aimed at the input's visible text area (a little right
+of its left padding, at its vertical centre), computed from the page's own
+geometry read over DevTools and converted to shared-window coordinates
+(Chrome's toolbar included), not at the window centre.
+
+Same controller, same test-peer host and same grants as RC-N2N, but the shared
+target is a **Google Chrome window the run launches itself**: its own
+`--user-data-dir` under the temp dir, DevTools on an ephemeral port
+(`--remote-debugging-port=0`, read back from `DevToolsActivePort`, so it never
+collides with another harness on 9222), and a local `file://` page whose only
+control is one `<input>` filling the viewport. The page title carries a
+per-run marker (`petal-rc-n2n-chrome-<runid>`), which is how the peer finds
+the window.
+
+It reproduces the #404 incident condition measured as T1 case 8:
+
+- **No pre-activation and no pre-focus of the web field.** RC-N2N activates
+  TextEdit and sets `AXFocused` on its text area before driving, which is
+  exactly what masked #404. This case does neither.
+- **Chrome's keyboard focus is put in the address bar** (AX `AXFocused` on the
+  omnibox, no activation) right before the drive, and the run records that it
+  took (`rc-n2n-chrome-predrive` → `omniboxFocused`).
+- The controller then clicks the field's text area and types the keystone
+  through the real native controller route, then releases. No Command chords: a Cmd+V would paste the machine's
+  clipboard into the very field the oracle reads.
+
+Oracle (`test_cockpit/rc_n2n_chrome.rs`, `evaluate`): **PASS only when the
+page's `input.value`, read over the DevTools protocol, equals the keystone
+exactly, and the address bar's AX value did not receive it.** Keys that went to
+the address bar are reported by name as the #404 failure. The field and the
+address bar are read after the typing settles and *before* the release. A field or
+address bar that cannot be read is INFRA-FAIL, never "empty". Chrome and its
+profile are killed and deleted on every exit path (the target's `Drop`).
+
+Notes: the run launches a headed Chrome, which activates itself once at
+launch (Chrome does this; the harness does not). Querying Chrome over AX can
+switch on its web accessibility tree as a side effect, so this case does not
+reproduce the "stock Chrome exposes no `AXWebArea`" sub-condition (T1 case 3);
+it targets the focus routing (case 8), which is what made the typing vanish.
 
 #### Native clipboard checks
 
@@ -3130,6 +3218,13 @@ still rejects translated execution for release evidence, and that stays true.
 | `PETAL_RC_HOST_RECEIVE_TO_INJECT_P95_BUDGET_MS` / `PETAL_RC_HOST_RECEIVE_TO_COMPLETE_P95_BUDGET_MS` | `scripts/ci/remote-control-latency-verdict.mjs` | p95 of Petal's own host pipeline from the `remote-control-latency:` lines in the app log (receive -> inject start, receive -> replay complete). Isolates Petal from TextEdit/AppleScript noise. |
 | `PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS` | `scripts/ci/remote-control-latency-verdict.mjs` | p95 from the web controller's publish (`api.metrics().published[].at`, drained per case into `controllerPublishes`) to the host's inject line, paired by window+seq; both peers share the runner's clock. |
 | `PETAL_RC_PHOTON_P50_BUDGET_MS` | `scripts/ci/remote-control-latency-verdict.mjs` | Run-level press-to-photon p50 budget. Every latency-gate check fails on a breach AND on too few samples (an incomplete photon run is INSUFFICIENT, not a pass). Defaults equal the VM values pinned in `nightly-loopback.yml` (a unit test enforces the equality). |
+| `PETAL_RC_FREEZE_PROBE_MS` | `apps/desktop/scripts/remote-control-scenario.mjs` | #378: press-to-photon mode only. After the photon samples, animates the sentinel (SIGUSR1, 30Hz strip) for this many ms and records every `requestVideoFrameCallback` on the web viewer; the report's `summary.freezeProbe` carries the max presented-frame gap. `0`/unset = off; the release gate sets `20000`. |
+| `PETAL_RC_FREEZE_PROBE_RED_PAUSE_MS` | `apps/desktop/scripts/remote-control-scenario.mjs` | **Red-proof only** (#378): stops the probe's animation this many ms mid-window, so the presented-freeze check must fail (`nightly-loopback.yml` input `freeze_probe_red_pause_ms`). |
+| `PETAL_RC_PRESENTED_FREEZE_BUDGET_MS` | `scripts/ci/remote-control-latency-verdict.mjs` | #378: max allowed gap between presented frames during the freeze probe (default 500). Fewer than 100 presented frames, or no probe, is INSUFFICIENT. Same budget in the clean and impaired passes. |
+| `E2E_FREEZE_SOAK_BLOCKING` | `.github/workflows/nightly-loopback.yml` (`share-freeze-soak` job), `scripts/ci/e2e-gate-verdict.mjs freeze` | #391: the workflow sets `"true"` (2026-10-23): the share-freeze soak is **release-blocking** in release.yml's e2e-gate. `"false"` (the script default when unset) makes it report-only: it still uploads `share-freeze-report.json` but prints findings as `REPORT-ONLY: would fail` and cannot fail the gate (its build/run steps become `continue-on-error`). |
+| `E2E_IMPAIRED_BLOCKING` | `.github/workflows/nightly-loopback.yml`, `scripts/ci/e2e-gate-verdict.mjs` (`--pass impaired`), `scripts/ci/remote-control-latency-verdict.mjs` | #378: the workflow sets `"true"` (2026-10-23, after #421 landed): the impaired pass and the presented-freeze check are **release-blocking**. `"false"` (the script default when unset) makes them report-only (`REPORT-ONLY: would fail`). The clean pass's other checks always block. |
+| `PETAL_NET_IMPAIR_DELAY_MS` / `PETAL_NET_IMPAIR_LOSS_PCT` | `.github/workflows/nightly-loopback.yml` | #378: the gate's impaired-pass profile, one-way per SFU traversal (20ms, 1%). Dispatch inputs `net_delay_ms`/`net_loss_pct` override them for red-proofs only; the `IMPAIRED_*` budgets stay fixed. |
+| `PETAL_CI_NET_IMPAIR_DRY_RUN` | `scripts/ci/net-impair.sh` | #378: `1` prints the dnctl/pfctl commands instead of running them (no root, no measurement). Other `PETAL_CI_NET_IMPAIR_*` vars (`PORTS`, `PIPE`, `ANCHOR`, `PFCTL`, `DNCTL`, `SUDO`, `PROBE_CMD`, `STATE_DIR`) exist for `scripts/test-ci-net-impair.sh`. |
 | `PETAL_RC_TEST_REPLAY_DELAY_MS` | `apps/desktop/src-tauri/src/remote_control.rs` | **Red-proof only, debug builds only** (`cfg(debug_assertions)`): stalls every host replay by this many ms before injection, so a gate dispatch can show the latency budgets going red (`nightly-loopback.yml` input `rc_test_replay_delay_ms`). Compiled out of release builds. |
 | `PETAL_RC_SENTINEL_EVENT_LOG` | `apps/desktop/scripts/remote-control-photon-sentinel.swift` | Path to the JSONL event log the photon-sentinel helper app writes press/paint timing events to; default `/tmp/petal-rc-sentinel-events.jsonl`. |
 | `PETAL_REMOTE_HOST` | `scripts/cross-machine-rc-suite.sh` | SSH target (`user@host` or `~/.ssh/config` alias) for a second real Mac to run the sharer role on. Required to use that script at all. |

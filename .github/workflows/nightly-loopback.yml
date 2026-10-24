@@ -77,6 +77,31 @@ on:
         required: false
         default: ""
         type: string
+      net_delay_ms:
+        description: "RED-PROOF ONLY (#378): override the impaired pass's one-way delay per SFU traversal (default PETAL_NET_IMPAIR_DELAY_MS). Budgets stay fixed, so a larger value must fail the network stages. Leave empty."
+        required: false
+        default: ""
+        type: string
+      net_loss_pct:
+        description: "RED-PROOF ONLY (#378): override the impaired pass's loss % each way (default PETAL_NET_IMPAIR_LOSS_PCT). Leave empty."
+        required: false
+        default: ""
+        type: string
+      freeze_probe_red_pause_ms:
+        description: "RED-PROOF ONLY (#378): pause the freeze probe's animated source this many ms mid-probe to prove the presented-freeze check fails. Leave empty."
+        required: false
+        default: ""
+        type: string
+      share_freeze_soak_ms:
+        description: "Share-freeze soak: how long the native share is measured on two web viewers, ms (60000-1500000; default 600000)"
+        required: false
+        default: ""
+        type: string
+      share_freeze_pause:
+        description: "RED-PROOF ONLY: '<afterMs>:<durationMs>' drops every window-share frame once (debug knob PETAL_TEST_SHARE_PAUSE) to prove the freeze gate fails. Leave empty."
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       ref:
@@ -117,6 +142,11 @@ on:
         required: false
         default: true
         type: boolean
+      share_freeze_soak_ms:
+        description: "Share-freeze soak: how long the native share is measured on two web viewers, ms (60000-1500000; default 600000)"
+        required: false
+        default: ""
+        type: string
     secrets:
       vercel_bypass_secret:
         description: "Vercel Protection Bypass for Automation secret, required ONLY when harness_url/backend_url point at a protected staged deployment. Empty for production targets."
@@ -204,6 +234,38 @@ jobs:
       PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS: "50"
       PETAL_RC_PHOTON_P50_BUDGET_MS: "250"
       PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS: "400"
+      # #378 PRESENTED-VIDEO FREEZE. After the photon samples the sentinel
+      # animates at 30Hz for PETAL_RC_FREEZE_PROBE_MS and the web viewer's
+      # requestVideoFrameCallback gaps are scored: no presented frame for
+      # > 500ms while the source is moving is a freeze a user sees. Same
+      # budget clean and impaired -- a network that freezes video is the bug.
+      PETAL_RC_FREEZE_PROBE_MS: "20000"
+      PETAL_RC_PRESENTED_FREEZE_BUDGET_MS: "500"
+      # #378 IMPAIRED PASS. The loopback runs on localhost (0ms, lossless),
+      # which no meeting has. After the clean pass the same suites run again
+      # with dummynet on the LiveKit ports (scripts/ci/net-impair.sh): every
+      # participant gets 20ms each way to the SFU (40ms RTT -- a good home
+      # connection to an in-region SFU) and 1% loss each way (~2% end to end
+      # over the two hops of a meeting: ordinary Wi-Fi, not a bad network).
+      # Release-blocking since #421 landed (user decision 2026-10-23): the
+      # impaired pass and the presented-freeze check fail the gate. "false"
+      # turns them back into REPORT-ONLY: would fail.
+      E2E_IMPAIRED_BLOCKING: "true"
+      PETAL_NET_IMPAIR_DELAY_MS: "20"
+      PETAL_NET_IMPAIR_LOSS_PCT: "1"
+      # Impaired budgets are the clean ones plus the delay the profile adds on
+      # the stage's path -- 2 traversals for an input (controller->SFU->host),
+      # 4 for press-to-photon (input there, video back) -- and nothing for
+      # loss: loss that slows the median or the tail is a finding, not noise.
+      # Host-only stages keep the clean budgets (the network is not on their
+      # path; the attribution verdict also checks they did not move). Fixed
+      # constants: a red-proof raises net_delay_ms and must FAIL these.
+      IMPAIRED_OBSERVATION_BUDGET_MS: "660"     # 620 + 2x20
+      IMPAIRED_OBSERVATION_P50_MS: "240"        # 200 + 2x20
+      IMPAIRED_OBSERVATION_P95_MS: "440"        # 400 + 2x20
+      IMPAIRED_SEND_TO_INJECT_P95_MS: "90"      #  50 + 2x20
+      IMPAIRED_PHOTON_P50_MS: "330"             # 250 + 4x20
+      IMPAIRED_PHOTON_P95_MS: "480"             # 400 + 4x20
       # QUARANTINE (release gate). Comma-separated. A listed failure is
       # printed as a ::warning "QUARANTINED" -- never counted as a pass -- and
       # does not fail the gate; anything NOT listed does. Every entry needs a
@@ -224,8 +286,10 @@ jobs:
       # gate. 37-41 are the whole-display share cases: macOS display-share
       # pointer input went to placeholder pid 1 (#334/#349) and its
       # keyboard/text was never delivered (#335/#353) while every window case
-      # stayed green. To quarantine one, remove it from this list first.
-      E2E_REQUIRED_RC_CASES: "37,38,39,40,41"
+      # stayed green. 42 repeats a scroll inside the AX scroll-cache window:
+      # the host deadlocked there and replayed nothing after it (#311/#390).
+      # To quarantine one, remove it from this list first.
+      E2E_REQUIRED_RC_CASES: "37,38,39,40,41,42"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -526,6 +590,12 @@ jobs:
           PETAL_WEDGE_EVIDENCE_DIR: ${{ runner.temp }}/petal-nightly-loopback
           PETAL_DEV_LOG: ${{ runner.temp }}/petal-nightly-loopback/petal-dev.log
           RC_TEST_REPLAY_DELAY_MS: ${{ inputs.rc_test_replay_delay_ms || '' }}
+          # #377: the usage-stats opt-out check serves a mock PostHog ingest on
+          # this port; Petal gets a throwaway key pointed at it (launch only).
+          PETAL_POSTHOG_CONSENT_PORT: "18977"
+          NET_DELAY_MS_OVERRIDE: ${{ inputs.net_delay_ms || '' }}
+          NET_LOSS_PCT_OVERRIDE: ${{ inputs.net_loss_pct || '' }}
+          PETAL_RC_FREEZE_PROBE_RED_PAUSE_MS: ${{ inputs.freeze_probe_red_pause_ms || '' }}
         run: |
           set -euo pipefail
 
@@ -587,16 +657,28 @@ jobs:
           RESULTS_JSON="$LOG_DIR/remote-control-results.json"
           PHOTON_JSON="$LOG_DIR/remote-control-photon.json"
           LATENCY_JSON="$LOG_DIR/remote-control-latency.json"
+          IMPAIRED_RESULTS_JSON="$LOG_DIR/remote-control-results-impaired.json"
+          IMPAIRED_PHOTON_JSON="$LOG_DIR/remote-control-photon-impaired.json"
+          IMPAIRED_LATENCY_JSON="$LOG_DIR/remote-control-latency-impaired.json"
+          CLEAN_PETAL_LOG="$LOG_DIR/petal-dev-clean.log"
+          IMPAIRED_PETAL_LOG="$LOG_DIR/petal-dev-impaired.log"
+          NET_DELAY_MS="${NET_DELAY_MS_OVERRIDE:-$PETAL_NET_IMPAIR_DELAY_MS}"
+          NET_LOSS_PCT="${NET_LOSS_PCT_OVERRIDE:-$PETAL_NET_IMPAIR_LOSS_PCT}"
           HARNESS_LOG="$LOG_DIR/remote-control-live.log"
           LIVEKIT_LOG="$LOG_DIR/livekit.log"
           WEB_LOG="$LOG_DIR/web-harness.log"
           CHROME_LOG="$LOG_DIR/chrome-cdp.log"
           PETAL_LOG="$LOG_DIR/petal-dev.log"
-          rm -f "$SOCKET" "$RESULTS_JSON" "$PHOTON_JSON" "$LATENCY_JSON"
+          rm -f "$SOCKET" "$RESULTS_JSON" "$PHOTON_JSON" "$LATENCY_JSON" \
+            "$IMPAIRED_RESULTS_JSON" "$IMPAIRED_PHOTON_JSON" "$IMPAIRED_LATENCY_JSON"
           CRASH_MARK="$LOG_DIR/loopback-start.mark"; touch "$CRASH_MARK"
 
           pids=()
+          IMPAIR_ON=0
           cleanup() {
+            # #378: never leave dummynet on the runner (the always() step
+            # below checks again and fails the job if anything survived).
+            if [ "$IMPAIR_ON" = 1 ]; then bash scripts/ci/net-impair.sh off || true; fi
             for pid in "${pids[@]:-}"; do
               if kill -0 "$pid" >/dev/null 2>&1; then
                 kill "$pid" >/dev/null 2>&1 || true
@@ -665,6 +747,8 @@ jobs:
             PETAL_BACKEND_URL= \
             PETAL_AUTOTEST_SOCK="$SOCKET" \
             PETAL_RC_TEST_REPLAY_DELAY_MS="$RC_TEST_REPLAY_DELAY_MS" \
+            PETAL_POSTHOG_KEY=phc_loopback_consent_probe \
+            PETAL_POSTHOG_HOST="http://127.0.0.1:${PETAL_POSTHOG_CONSENT_PORT}" \
             npm run dev:clean
           ) >"$PETAL_LOG" 2>&1 &
           # The launcher's own pid (this subshell, which runs `npm run
@@ -761,6 +845,72 @@ jobs:
 
           gate_fail=0
 
+          # -- #378 IMPAIRED PASS: the same two suites, same Petal, with
+          # dummynet on the LiveKit ports only. Each tier's host log slice is
+          # cut by byte offset so the two latency verdicts never mix events.
+          CLEAN_LOG_BYTES="$(wc -c < "$PETAL_LOG" | tr -d ' ')"
+          head -c "$CLEAN_LOG_BYTES" "$PETAL_LOG" > "$CLEAN_PETAL_LOG"
+          if [ -n "$NET_DELAY_MS_OVERRIDE$NET_LOSS_PCT_OVERRIDE" ]; then
+            echo "::warning::RED-PROOF RUN: impaired pass at ${NET_DELAY_MS}ms/${NET_LOSS_PCT}% instead of the gate profile ${PETAL_NET_IMPAIR_DELAY_MS}ms/${PETAL_NET_IMPAIR_LOSS_PCT}%; impaired network budgets are expected to FAIL." | tee -a "$HARNESS_LOG"
+          fi
+          echo "==> Impaired pass (#378): ${NET_DELAY_MS}ms each way per SFU traversal, ${NET_LOSS_PCT}% loss each way" | tee -a "$HARNESS_LOG"
+          set +e
+          IMPAIR_ON=1
+          bash scripts/ci/net-impair.sh on "$NET_DELAY_MS" "$NET_LOSS_PCT" 2>&1 | tee -a "$HARNESS_LOG"
+          impair_on_status=${PIPESTATUS[0]}
+          set -e
+          impaired_status=""
+          impaired_photon_status=""
+          if [ "$impair_on_status" -ne 0 ]; then
+            if [ "$E2E_IMPAIRED_BLOCKING" = "true" ]; then
+              echo "::error::Could not apply the network impairment ($impair_on_status); the impaired pass did not run, so the gate cannot pass." | tee -a "$HARNESS_LOG"
+              gate_fail=1
+            else
+              echo "::warning::REPORT-ONLY: would fail -- could not apply the network impairment ($impair_on_status); the impaired pass did not run." | tee -a "$HARNESS_LOG"
+            fi
+          else
+            set +e
+            PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_LOG_PATH="$PETAL_LOG" \
+            PETAL_RC_OBSERVATION_BUDGET_MS="$IMPAIRED_OBSERVATION_BUDGET_MS" PETAL_RC_RECONNECT_ALREADY_USED=1 \
+              node apps/desktop/scripts/remote-control-local-loopback.mjs --live --skip-preflight --json "$IMPAIRED_RESULTS_JSON" \
+              2>&1 | tee -a "$HARNESS_LOG"
+            impaired_status=${PIPESTATUS[0]}
+            PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_LOG_PATH="$PETAL_LOG" \
+              node apps/desktop/scripts/remote-control-local-loopback.mjs --live --skip-preflight --press-to-photon --json "$IMPAIRED_PHOTON_JSON" \
+              2>&1 | tee -a "$HARNESS_LOG"
+            impaired_photon_status=${PIPESTATUS[0]}
+            set -e
+            echo "impaired pass: matrix exit $impaired_status, press-to-photon exit $impaired_photon_status" | tee -a "$HARNESS_LOG"
+          fi
+          set +e
+          bash scripts/ci/net-impair.sh off 2>&1 | tee -a "$HARNESS_LOG"
+          impair_off_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$impair_off_status" -eq 0 ]; then IMPAIR_ON=0; else
+            if [ "$E2E_IMPAIRED_BLOCKING" = "true" ]; then
+              echo "::error::Network impairment teardown failed ($impair_off_status)." | tee -a "$HARNESS_LOG"
+              gate_fail=1
+            else
+              echo "::warning::REPORT-ONLY: would fail -- network impairment teardown failed ($impair_off_status); the always() teardown step re-checks it." | tee -a "$HARNESS_LOG"
+            fi
+          fi
+          tail -c +"$((CLEAN_LOG_BYTES + 1))" "$PETAL_LOG" > "$IMPAIRED_PETAL_LOG"
+
+          # Runs AFTER the impaired pass, never before it: its ~16 back-to-back
+          # 1080p display shares wedge the VM's VideoToolbox encoder (-12912 then
+          # -12915 on every frame), so every later share publishes no RTP and the
+          # impaired pass measured nothing (run 39976252014, #426; #427).
+          # #377: with usage stats OFF, 30s of share churn must produce zero
+          # PostHog POSTs; the script proves the pipe is live first (ON) and
+          # that sending resumes after (ON again), so a 0 is never vacuous.
+          echo "==> PostHog usage-stats opt-out (#377)" | tee -a "$HARNESS_LOG"
+          set +e
+          PETAL_AUTOTEST_SOCK="$SOCKET" \
+            node apps/desktop/scripts/posthog-consent-live.mjs --port "$PETAL_POSTHOG_CONSENT_PORT" \
+            --off-seconds 30 --json "$LOG_DIR/posthog-consent.json" 2>&1 | tee -a "$HARNESS_LOG"
+          consent_status=${PIPESTATUS[0]}
+          set -e
+
           # -- Survival. The 0.9.7 telepointer SIGSEGV lived on a background
           # thread the harness never talks to; a green scorecard alone would
           # not have caught it. The native app must still be alive after the
@@ -832,10 +982,41 @@ jobs:
             echo "==> Post-suite: remote-control latency gate" | tee -a "$HARNESS_LOG"
             set +e
             node "$VERDICT" latency --results "$RESULTS_JSON" --photon "$PHOTON_JSON" \
-              --host-log "$PETAL_LOG" --json "$LATENCY_JSON" 2>&1 | tee -a "$HARNESS_LOG"
+              --host-log "$CLEAN_PETAL_LOG" --json "$LATENCY_JSON" 2>&1 | tee -a "$HARNESS_LOG"
             latency_status=${PIPESTATUS[0]}
             set -e
             [ "$latency_status" -eq 0 ] || gate_fail=1
+
+            # -- #378 impaired pass: same scorecard rules, impaired budgets
+            # for the network-inclusive stages, and stage attribution.
+            if [ -n "$impaired_status" ]; then
+              echo "==> Post-suite: IMPAIRED scorecard (${NET_DELAY_MS}ms/${NET_LOSS_PCT}%)" | tee -a "$HARNESS_LOG"
+              set +e
+              node "$VERDICT" loopback --pass impaired --results "$IMPAIRED_RESULTS_JSON" --harness-exit "$impaired_status" \
+                --quarantine "$E2E_QUARANTINE_RC_CASES" --required "$E2E_REQUIRED_RC_CASES" 2>&1 | tee -a "$HARNESS_LOG"
+              [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
+              echo "==> Post-suite: IMPAIRED remote-control latency gate" | tee -a "$HARNESS_LOG"
+              PETAL_RC_OBSERVATION_P50_BUDGET_MS="$IMPAIRED_OBSERVATION_P50_MS" \
+              PETAL_RC_OBSERVATION_P95_BUDGET_MS="$IMPAIRED_OBSERVATION_P95_MS" \
+              PETAL_RC_SEND_TO_INJECT_P95_BUDGET_MS="$IMPAIRED_SEND_TO_INJECT_P95_MS" \
+              PETAL_RC_PHOTON_P50_BUDGET_MS="$IMPAIRED_PHOTON_P50_MS" \
+              PETAL_REMOTE_CONTROL_PHOTON_P95_BUDGET_MS="$IMPAIRED_PHOTON_P95_MS" \
+                node "$VERDICT" latency --pass impaired --results "$IMPAIRED_RESULTS_JSON" --photon "$IMPAIRED_PHOTON_JSON" \
+                --host-log "$IMPAIRED_PETAL_LOG" --json "$IMPAIRED_LATENCY_JSON" 2>&1 | tee -a "$HARNESS_LOG"
+              [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
+              if [ "$NET_DELAY_MS" -gt 0 ]; then
+                echo "==> Post-suite: stage attribution (clean vs impaired)" | tee -a "$HARNESS_LOG"
+                node "$VERDICT" attribution --pass impaired --clean "$LATENCY_JSON" --impaired "$IMPAIRED_LATENCY_JSON" \
+                  --delay-ms "$NET_DELAY_MS" 2>&1 | tee -a "$HARNESS_LOG"
+                [ "${PIPESTATUS[0]}" -eq 0 ] || gate_fail=1
+              fi
+              set -e
+            fi
+          fi
+
+          if [ "$consent_status" -ne 0 ]; then
+            echo "::error::PostHog usage-stats opt-out check did not pass (exit $consent_status); see posthog-consent.json." | tee -a "$HARNESS_LOG"
+            gate_fail=1
           fi
 
           if [ "$gate_fail" -ne 0 ]; then
@@ -843,6 +1024,18 @@ jobs:
             exit 1
           fi
           echo "==> Live e2e gate passed" | tee -a "$HARNESS_LOG"
+
+      # #378: the impairment must never outlive the job. The harness step's
+      # trap removes it; this runs even when that step was killed, and FAILS
+      # the job if any dummynet rule or pipe is still installed.
+      - name: Remove network impairment (always) and verify none remains
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f scripts/ci/net-impair.sh ]; then echo "no scripts/ci/net-impair.sh in this checkout; nothing was impaired"; exit 0; fi
+          bash scripts/ci/net-impair.sh off || true
+          bash scripts/ci/net-impair.sh check-clear
 
       # #42: Actions masks a secret in the LOG; it does not touch uploaded
       # ARTIFACTS. The bypass secret reaches Chrome's argv (and therefore
@@ -907,4 +1100,180 @@ jobs:
             ${{ runner.temp }}/petal-nightly-loopback/*.txt
             ${{ runner.temp }}/petal-nightly-loopback/crashes/**
             ${{ runner.temp }}/petal-cockpit/**
+          if-no-files-found: warn
+
+  # SHARE-FREEZE SOAK (#391). Users report intermittent freezes for EVERY
+  # participant in real meetings; nothing above can see that (local
+  # livekit-server --dev, one viewer, seconds-long checks). This job holds a
+  # native window share open for minutes on the REAL LiveKit deployment the
+  # backend hands out (production, or the staged one for a release) with two
+  # independent web viewers, and fails on any presented-frame gap over
+  # FREEZE_GAP_THRESHOLD_MS (scripts/ci/share-freeze-verdict.mjs) while the
+  # source was changing. Its own job, not a step of live-loopback: a 10-minute
+  # soak does not fit that job's 45-minute cap with headroom. release.yml's
+  # `e2e-gate` calls this whole workflow; the soak runs and uploads its report
+  # there and is release-blocking (E2E_FREEZE_SOAK_BLOCKING below).
+  share-freeze-soak:
+    name: Share-freeze soak (LiveKit Cloud, two viewers)
+    needs: live-loopback
+    # Its verdict is independent of the loopback tiers'; run it either way.
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: ""
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      CARGO_INCREMENTAL: 0
+      PETAL_DISABLE_AUDIO: 1
+      # Release-blocking (user decision 2026-10-23, #391): releases stay
+      # blocked until a soak is freeze-free. "false" prints every finding as
+      # "REPORT-ONLY: would fail" and never fails the gate.
+      E2E_FREEZE_SOAK_BLOCKING: "true"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          # Same runner as live-loopback: keep its target/ so only the
+          # desktop crate relinks.
+          clean: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build desktop app (frontend + debug Rust)
+        continue-on-error: ${{ env.E2E_FREEZE_SOAK_BLOCKING != 'true' }}
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run build
+          cd src-tauri && cargo build --locked
+
+      - name: Run share-freeze soak
+        continue-on-error: ${{ env.E2E_FREEZE_SOAK_BLOCKING != 'true' }}
+        shell: bash
+        timeout-minutes: 38
+        env:
+          FREEZE_BACKEND_URL: ${{ inputs.backend_url || 'https://app.petal.live' }}
+          FREEZE_HARNESS_URL: ${{ inputs.harness_url || 'https://meet.petal.live' }}
+          FREEZE_SOAK_MS: ${{ inputs.share_freeze_soak_ms || '600000' }}
+          FREEZE_PAUSE: ${{ inputs.share_freeze_pause || '' }}
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret || secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          LOG_DIR="$RUNNER_TEMP/petal-share-freeze"
+          rm -rf "$LOG_DIR"; mkdir -p "$LOG_DIR"
+          SOCKET="$LOG_DIR/petal-freeze.sock"
+          PETAL_LOG="$LOG_DIR/petal-sharer.log"
+          CRASH_MARK="$LOG_DIR/start.mark"; touch "$CRASH_MARK"
+          BIN="apps/desktop/src-tauri/target/debug/desktop"
+
+          for f in scripts/ci/e2e-gate-verdict.mjs scripts/ci/share-freeze-verdict.mjs apps/desktop/scripts/share-freeze-soak.mjs scripts/petal-instance-guard.sh; do
+            if [ ! -f "$f" ]; then echo "::error::CANNOT CHECK: $f is not in this checkout; no freeze verdict can be computed."; exit 1; fi
+          done
+          case "$FREEZE_SOAK_MS" in *[!0-9]*|"") echo "::error::share_freeze_soak_ms must be an integer"; exit 1 ;; esac
+          if [ "$FREEZE_SOAK_MS" -lt 60000 ] || [ "$FREEZE_SOAK_MS" -gt 1500000 ]; then
+            echo "::error::share_freeze_soak_ms must be 60000-1500000 (got $FREEZE_SOAK_MS)"; exit 1
+          fi
+          if [ -n "$FREEZE_PAUSE" ]; then
+            if ! [[ "$FREEZE_PAUSE" =~ ^[0-9]+:[0-9]+$ ]]; then echo "::error::share_freeze_pause must be '<afterMs>:<durationMs>'"; exit 1; fi
+            echo "::warning::RED-PROOF RUN: window-share frames dropped once ($FREEZE_PAUSE); the freeze gate is expected to FAIL."
+          fi
+
+          # The loopback job's Petal must be gone (single-instance lock). Wait
+          # by pid, never kill (#150, #846).
+          # shellcheck source=scripts/petal-instance-guard.sh
+          source scripts/petal-instance-guard.sh
+          petal_guard_wait_for_instances_exit 300
+
+          echo "share-freeze target: backend=$FREEZE_BACKEND_URL harness=$FREEZE_HARNESS_URL soak=${FREEZE_SOAK_MS}ms"
+          # The real deployment, so no local LiveKit vars. The bypass secret
+          # only matters for a staged backend; transport/backend_http.rs sends it.
+          env -u LIVEKIT_URL -u LIVEKIT_API_KEY -u LIVEKIT_API_SECRET \
+            PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_BACKEND_URL="$FREEZE_BACKEND_URL" \
+            PETAL_TEST_SHARE_PAUSE="$FREEZE_PAUSE" RUST_LOG=info \
+            "$BIN" >"$PETAL_LOG" 2>&1 &
+          PETAL_PID=$!
+          stop_petal() {
+            if ps -p "$PETAL_PID" >/dev/null 2>&1; then
+              kill "$PETAL_PID" 2>/dev/null || true
+              for _ in $(seq 1 20); do ps -p "$PETAL_PID" >/dev/null 2>&1 || break; sleep 0.5; done
+              ps -p "$PETAL_PID" >/dev/null 2>&1 && kill -9 "$PETAL_PID" 2>/dev/null || true
+            fi
+            ps -p "$PETAL_PID" >/dev/null 2>&1 && echo "::warning::Petal pid $PETAL_PID survived teardown" || true
+          }
+          trap stop_petal EXIT
+          waited=0
+          until [ -S "$SOCKET" ]; do
+            if ! ps -p "$PETAL_PID" >/dev/null 2>&1; then echo "::error::INFRA-INVALID: Petal exited before opening its autotest socket; see petal-sharer.log"; exit 1; fi
+            if [ "$waited" -ge 180 ]; then echo "::error::INFRA-INVALID: Petal did not open $SOCKET within 180s"; exit 1; fi
+            sleep 1; waited=$((waited + 1))
+          done
+
+          set +e
+          PETAL_HARNESS_URL="$FREEZE_HARNESS_URL" PETAL_TEST_SHARE_PAUSE="$FREEZE_PAUSE" \
+            node apps/desktop/scripts/share-freeze-soak.mjs --socket "$SOCKET" \
+              --harness-url "$FREEZE_HARNESS_URL" --duration-ms "$FREEZE_SOAK_MS" --out "$LOG_DIR"
+          soak_exit=$?
+          set -e
+          echo "share-freeze harness exit $soak_exit (2 = it recorded infra/fatal problems; the verdict scores them)"
+          grep -E "TEST share pause" "$PETAL_LOG" || true
+          stop_petal
+
+          gate_fail=0
+          NEW_CRASHES="$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'desktop*.ips' -newer "$CRASH_MARK" 2>/dev/null || true)"
+          if [ -n "$NEW_CRASHES" ]; then
+            echo "::error::Petal wrote crash report(s) during the share-freeze soak:"; echo "$NEW_CRASHES"
+            mkdir -p "$LOG_DIR/crashes"
+            while IFS= read -r f; do [ -n "$f" ] && cp "$f" "$LOG_DIR/crashes/" 2>/dev/null || true; done <<< "$NEW_CRASHES"
+            gate_fail=1
+          fi
+          echo "sharer host: macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+          node scripts/ci/e2e-gate-verdict.mjs freeze --raw "$LOG_DIR/share-freeze-raw.json" \
+            --sender-log "$PETAL_LOG" --json "$LOG_DIR/share-freeze-report.json" || gate_fail=1
+          if [ "$gate_fail" -ne 0 ]; then
+            if [ "$E2E_FREEZE_SOAK_BLOCKING" = "true" ]; then
+              echo "::error::Share-freeze soak FAILED (report: share-freeze-report.json)."; exit 1
+            fi
+            echo "::warning::REPORT-ONLY: would fail -- share-freeze soak (crash report(s) above; see share-freeze-report.json). E2E_FREEZE_SOAK_BLOCKING is not true."
+            exit 0
+          fi
+          echo "==> Share-freeze soak finished (verdict above; REPORT-ONLY unless E2E_FREEZE_SOAK_BLOCKING=true)"
+
+      - name: Scrub the deployment-protection bypass secret from artifacts
+        if: always()
+        env:
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.vercel_bypass_secret || secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${PETAL_VERCEL_BYPASS_SECRET:-}" ] || { echo "no bypass secret in play; nothing to scrub"; exit 0; }
+          python3 - "$RUNNER_TEMP/petal-share-freeze" <<'PY'
+          import os, sys
+          needle = os.environ["PETAL_VERCEL_BYPASS_SECRET"].strip().encode()
+          for root, _dirs, files in os.walk(sys.argv[1]):
+              for name in files:
+                  path = os.path.join(root, name)
+                  try:
+                      data = open(path, "rb").read()
+                  except OSError:
+                      continue
+                  if needle in data:
+                      open(path, "wb").write(data.replace(needle, b"<redacted>"))
+          PY
+
+      - name: Upload share-freeze artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: share-freeze-soak-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/petal-share-freeze/*.json
+            ${{ runner.temp }}/petal-share-freeze/*.log
+            ${{ runner.temp }}/petal-share-freeze/crashes/**
           if-no-files-found: warn
