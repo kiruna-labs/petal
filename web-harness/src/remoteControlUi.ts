@@ -497,6 +497,26 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
     tile.dataset.remoteControlStatusSeq = String(message.seq);
   }
 
+  // #399: livekit-client's own lossy-buffer verdict, from its public
+  // DCBufferStatusChanged event. DataChannelKind is a type-only export;
+  // LOSSY is 1. Until the room reports otherwise the buffer counts as low.
+  const lossyBufferStatuses = new WeakMap<object, { low: boolean }>();
+  function lossyBufferStatus(room: NonNullable<typeof state.room>): { low: boolean } {
+    let status = lossyBufferStatuses.get(room);
+    if (!status) {
+      const created = { low: true };
+      status = created;
+      lossyBufferStatuses.set(room, created);
+      (room as { on?: (event: string, listener: (isLow: boolean, kind: number) => void) => unknown }).on?.(
+        'dcBufferStatusChanged',
+        (isLow, kind) => {
+          if (kind === 1) created.low = isLow;
+        }
+      );
+    }
+    return status;
+  }
+
   function publishRemoteControl(message: RemoteControlMessage): Promise<void> {
     if (!state.room) return Promise.resolve();
     // #370 corrective pass (Bug C): never attempt the binary encoding unless
@@ -522,10 +542,15 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
         : undefined;
     if (redundantInput) {
       const room = state.room;
+      const lossy = lossyBufferStatus(room);
       return publishRedundantInput(redundantInput, message, (bundle) =>
         room.localParticipant.publishData(remoteControlEncoder.encode(JSON.stringify(bundle)), {
           topic: REMOTE_CONTROL_TOPIC,
-          reliable: false,
+          // livekit-client silently drops every lossy send while that
+          // channel's buffer is over its threshold, so all copies of a bundle
+          // vanish together (live case 6: every drag move lost). Then the
+          // bundle rides the reliable channel; the host dedupes by rseq.
+          reliable: !lossy.low,
           ...(message.targetUserId ? { destinationIdentities: [message.targetUserId] } : {})
         })
       ).catch((err) => {
