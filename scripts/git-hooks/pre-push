@@ -100,9 +100,22 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 
   base=""
   BASE_SOURCE=""
-  if [ "$remote_sha" != "$ZERO_SHA" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+  if [ "$remote_sha" != "$ZERO_SHA" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null &&
+    git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
     base="$remote_sha"
     BASE_SOURCE="remote tip"
+  elif [ "$remote_sha" != "$ZERO_SHA" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    # Non-fast-forward (rebased branch): old tip..new would include every main
+    # commit the rebase picked up. Use the merge-base with the remote's default
+    # branch; if there is none, the old tip (a superset, never an empty diff).
+    BASE=""
+    if new_ref_base "$local_sha"; then
+      base="$BASE"
+      BASE_SOURCE="$BASE_SOURCE (non-fast-forward)"
+    else
+      base="$remote_sha"
+      BASE_SOURCE="remote tip (non-fast-forward, no merge base)"
+    fi
   else
     # New ref, or an update whose remote tip was never fetched here (so
     # `git diff` against it would fail and, with 2>/dev/null, skip the gate).

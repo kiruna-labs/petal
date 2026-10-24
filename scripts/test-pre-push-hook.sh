@@ -82,4 +82,33 @@ OUT="$(run_hook "$RUST_SHA" 1234567890123456789012345678901234567890 public "$TM
 expect "$OUT" "merge-base with public/"
 expect "$OUT" "decision=gate"
 
+# 6. Force-push of a rebased docs-only branch: main gained a contracts/ change
+#    that the old tip lacks. Diffing old-tip..new would wrongly gate; the base
+#    must be the merge-base with public/main instead -> skip.
+OLD_DOCS_SHA="$DOCS_SHA"
+g -C "$TMP/main" checkout -q main
+echo '{"main":1}' >"$TMP/main/contracts/c.json"
+g -C "$TMP/main" commit -qam "main contracts" && g -C "$TMP/main" push -q public main
+g -C "$TMP/wt" fetch -q public
+g -C "$TMP/wt" rebase -q public/main
+REBASED_SHA="$(git -C "$TMP/wt" rev-parse HEAD)"
+OUT="$(run_hook "$REBASED_SHA" "$OLD_DOCS_SHA" public "$TMP/public.git")"
+expect "$OUT" "(non-fast-forward)"
+expect "$OUT" "decision=skip"
+
+# 7. Fast-forward docs-only follow-up on top of an already-pushed tip: base is
+#    the remote tip -> skip.
+echo doc3 >"$TMP/wt/docs/d.md"
+g -C "$TMP/wt" commit -qam docs3
+OUT="$(run_hook "$(git -C "$TMP/wt" rev-parse HEAD)" "$REBASED_SHA" public "$TMP/public.git")"
+expect "$OUT" "(remote tip)"
+expect "$OUT" "decision=skip"
+
+# 8. Rebased branch that itself changes contracts/: still gated.
+echo '{"main":1,"y":2}' >"$TMP/wt/contracts/c.json"
+g -C "$TMP/wt" commit -qam "branch contracts"
+OUT="$(run_hook "$(git -C "$TMP/wt" rev-parse HEAD)" "$OLD_DOCS_SHA" public "$TMP/public.git")"
+expect "$OUT" "(non-fast-forward)"
+expect "$OUT" "decision=gate"
+
 echo "test result: pre-push hook root/base resolution tests passed"
