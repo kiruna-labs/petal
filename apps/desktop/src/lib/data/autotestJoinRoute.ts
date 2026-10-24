@@ -1,4 +1,4 @@
-import type { AutotestJoinResult } from '$lib/ipc';
+import type { AutotestJoinResult } from '#lib/ipc.js';
 
 export function autotestMeetingRoute(roomName: string): string {
   return `/meeting/${encodeURIComponent(roomName)}`;

@@ -112,12 +112,12 @@ test('app.css styles selection and Windows scrollbars without touching macOS', (
 });
 
 test('root layout stamps the platform onto the document element', () => {
-  assert.match(layoutSource, /import\s*\{\s*platformKey\s*\}\s*from\s*'\$lib\/platform'/);
+  assert.match(layoutSource, /import\s*\{\s*platformKey\s*\}\s*from\s*'#lib\/platform\.js'/);
   assert.match(layoutSource, /document\.documentElement\.dataset\.platform = platformKey\(\)/);
 });
 
 test('Settings gates macOS-only rows and copy behind isMac()', () => {
-  assert.match(settingsSource, /import\s*\{\s*isMac\s*\}\s*from\s*'\$lib\/platform'/);
+  assert.match(settingsSource, /import\s*\{\s*isMac\s*\}\s*from\s*'#lib\/platform\.js'/);
   assert.ok(
     (settingsSource.match(/\{#if isMac\(\)\}/g) ?? []).length >= 2,
     'expected at least 2 isMac() gates (permissions section, reset TCC instructions)'
@@ -175,7 +175,7 @@ test('reset popover animates with the Petal motion tokens', () => {
 
 
 test('Onboarding gates its permission checklist behind isMac()', () => {
-  assert.match(onboardingSource, /import\s*\{\s*isMac\s*\}\s*from\s*'\$lib\/platform'/);
+  assert.match(onboardingSource, /import\s*\{\s*isMac\s*\}\s*from\s*'#lib\/platform\.js'/);
   assert.match(
     onboardingSource,
     /\{#if isMac\(\)\}\s*<PermissionRow[\s\S]*<PermissionRow[\s\S]*\{\/if\}/
@@ -311,7 +311,7 @@ test('pill mode toggles the native Windows window transparency', () => {
   // Gallery mode is an opaque DWM window (native corners); collapsing to the
   // pill flips the native window to the transparent blur-behind state so the
   // desktop shows around the capsule. macOS never invokes (isWindows gate).
-  assert.match(pillWindowSource, /import\s*\{\s*isWindows\s*\}\s*from\s*'\$lib\/platform'/);
+  assert.match(pillWindowSource, /import\s*\{\s*isWindows\s*\}\s*from\s*'#lib\/platform\.js'/);
   assert.match(pillWindowSource, /COMMANDS\.setMainPillMode/);
   assert.match(pillWindowSource, /invoke\(COMMANDS\.setMainPillMode, \{\s*active: pill\s*\}\)/);
 });
@@ -640,7 +640,7 @@ test('Windows Settings renders without macOS copy; both platforms compute dark c
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
           // Standalone Vite build skips SvelteKit config, so provide the
           // browser-only virtual module used by session.svelte.
-          '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+          '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
           // ...and the shared-package alias (SvelteKit's kit.alias injects it
           // in the real build; this bare Vite instance needs it manually).
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))

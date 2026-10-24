@@ -23,7 +23,7 @@ async function renderFixture() {
   try {
     const [{ mount }, { default: Settings }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/Settings.svelte')
+      import('#lib/components/Settings.svelte')
     ]);
     mount(Settings, { target: document.querySelector('#app') });
     await document.fonts.ready;

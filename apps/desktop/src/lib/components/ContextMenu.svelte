@@ -15,7 +15,7 @@
   // and show nothing.
   import { onMount } from 'svelte';
   import { tick } from 'svelte';
-  import { isMac } from '$lib/platform';
+  import { isMac } from '#lib/platform.js';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
 
   interface MenuItem {

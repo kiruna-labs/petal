@@ -2,7 +2,7 @@
   FeedbackModal — Petal-owned "Send feedback" dialog (#292). Reuses the
   shared Modal.svelte shell (scrim, Escape, close affordance). No hosted
   UserDispatch widget/script is ever loaded here -- submission goes through
-  the bundled `@userdispatch/sdk` adapter in `$lib/feedback/userDispatch.ts`,
+  the bundled `@userdispatch/sdk` adapter in `#lib/feedback/userDispatch.ts`,
   dynamically imported only at submit time.
 
   Privacy/safety properties (see #292's issue thread for the full history):
@@ -26,21 +26,21 @@
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
   import Checkbox from '@petal/shared/ui/components/Checkbox.svelte';
-  import { COMMANDS } from '$lib/ipc';
-  import { STORAGE_KEYS } from '$lib/data/storageKeys';
+  import { COMMANDS } from '#lib/ipc.js';
+  import { STORAGE_KEYS } from '#lib/data/storageKeys.js';
   import {
     feedbackEmailError,
     feedbackEmailStorage,
     isValidFeedbackEmail,
     rememberFeedbackEmail,
     rememberedFeedbackEmail
-  } from '$lib/feedback/email';
+  } from '#lib/feedback/email.js';
   import {
     FEEDBACK_MAX_MESSAGE_CHARS,
     prepareDiagnosticsAttachment,
     submitFeedback,
     type PreparedDiagnosticsAttachment
-  } from '$lib/feedback/userDispatch';
+  } from '#lib/feedback/userDispatch.js';
 
   interface Props {
     onClose: () => void;

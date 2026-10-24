@@ -1,6 +1,6 @@
-import type { NetworkSnapshot, TrackHealth } from '$lib/ipc';
+import type { NetworkSnapshot, TrackHealth } from '#lib/ipc.js';
 
-export type { TrackHealth } from '$lib/ipc';
+export type { TrackHealth } from '#lib/ipc.js';
 
 export const DEBUG_LAST_FRAME_STALE_MS = 3000;
 

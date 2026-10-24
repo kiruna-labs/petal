@@ -7,17 +7,17 @@
 -->
 <script lang="ts">
   import type { IdentityColor } from './Avatar.svelte';
-  import { identityHeaderCss } from '$lib/data/identityColor';
-  import { isWindows } from '$lib/platform';
+  import { identityHeaderCss } from '#lib/data/identityColor.js';
+  import { isWindows } from '#lib/platform.js';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { formatRemoteWindowHeaderTooltip, remoteWindowSourceLabel } from '$lib/ipc';
+  import { formatRemoteWindowHeaderTooltip, remoteWindowSourceLabel } from '#lib/ipc.js';
   import {
     remoteControlFeedbackLabel,
     remoteControlFeedbackTitle,
     type RemoteControlFeedbackStatus,
     remoteControlFeedbackIsNeutral
-  } from '$lib/remoteControlFeedback';
-  import type { GlassToGlassChip } from '$lib/data/remoteWindowDebug';
+  } from '#lib/remoteControlFeedback.js';
+  import type { GlassToGlassChip } from '#lib/data/remoteWindowDebug.js';
   import {
     AI_CHAT_ACTIVE_BADGE_LABEL,
     AI_CHAT_ACTIVE_DISCLOSURE,
@@ -30,8 +30,8 @@
     aiChatPttFloorTakenByOther,
     aiChatRemotePttDisabled,
     aiChatRemotePttLabel
-  } from '$lib/data/aiChat';
-  import type { AiChatEndReason } from '$lib/ipc';
+  } from '#lib/data/aiChat.js';
+  import type { AiChatEndReason } from '#lib/ipc.js';
   import { sparkleIconSvg } from '@petal/shared/ui/icons';
 
   interface Props {

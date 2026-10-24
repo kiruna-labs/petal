@@ -33,17 +33,17 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import { onMount, onDestroy, tick } from 'svelte';
-  import ControlButton from '$lib/components/ControlButton.svelte';
-  import MediaSplitControl from '$lib/components/MediaSplitControl.svelte';
-  import DevicePicker from '$lib/components/DevicePicker.svelte';
-  import MenuItem from '$lib/components/MenuItem.svelte';
-  import RosterPopover from '$lib/components/RosterPopover.svelte';
+  import ControlButton from '#lib/components/ControlButton.svelte';
+  import MediaSplitControl from '#lib/components/MediaSplitControl.svelte';
+  import DevicePicker from '#lib/components/DevicePicker.svelte';
+  import MenuItem from '#lib/components/MenuItem.svelte';
+  import RosterPopover from '#lib/components/RosterPopover.svelte';
   import {
     restrainedSurfaceEnterTransition,
     restrainedSurfaceExitTransition
-  } from '$lib/motion';
+  } from '#lib/motion.js';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
-  import type { RosterParticipant } from '$lib/components/RosterPopover.svelte';
+  import type { RosterParticipant } from '#lib/components/RosterPopover.svelte';
   import {
     listRooms,
     roomDisplayLabel,
@@ -51,18 +51,18 @@
     type PresenceUpdate,
     type PresentParticipant,
     type RoomRecord
-  } from '$lib/data/rooms';
-  import { findRoomRecord, inviteLinkCopiedToastMessage, inviteLinkForRoom } from '$lib/data/inviteLinks';
-  import { loadFavoriteRooms, orderRoomsForMenu } from '$lib/data/roomOrdering';
-  import { COMMANDS, EVENTS, formatRemoteWindowHeaderTitle, hasTauriBridge } from '$lib/ipc';
-  import { isMac } from '$lib/platform';
+  } from '#lib/data/rooms.js';
+  import { findRoomRecord, inviteLinkCopiedToastMessage, inviteLinkForRoom } from '#lib/data/inviteLinks.js';
+  import { loadFavoriteRooms, orderRoomsForMenu } from '#lib/data/roomOrdering.js';
+  import { COMMANDS, EVENTS, formatRemoteWindowHeaderTitle, hasTauriBridge } from '#lib/ipc.js';
+  import { isMac } from '#lib/platform.js';
   import type {
     CameraPublishState,
     MenubarPillState,
     MicMuteChanged,
     RemoteWindowSummary,
     RoomLeftEvent
-  } from '$lib/ipc';
+  } from '#lib/ipc.js';
 
   const hasTauri = hasTauriBridge();
 

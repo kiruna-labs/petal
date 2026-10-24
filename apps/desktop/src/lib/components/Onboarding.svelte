@@ -17,7 +17,7 @@
   import Wordmark from './Wordmark.svelte';
   import Logo from './Logo.svelte';
   import Button from './Button.svelte';
-  import { isMac } from '$lib/platform';
+  import { isMac } from '#lib/platform.js';
   import PermissionRow from './PermissionRow.svelte';
   import type { PermissionStatus } from './PermissionRow.svelte';
 

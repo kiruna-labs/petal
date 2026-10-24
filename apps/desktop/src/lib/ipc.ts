@@ -1,5 +1,5 @@
 import { listen, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
-import type { ShareSessionError } from '$lib/data/shareErrors';
+import type { ShareSessionError } from '#lib/data/shareErrors.js';
 import {
   remoteWindowFullSourceLabel,
   remoteWindowSourceLabel

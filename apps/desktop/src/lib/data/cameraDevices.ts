@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
-import { session } from '$lib/stores/session.svelte';
-import { COMMANDS, hasTauriBridge } from '$lib/ipc';
-import type { AppliedCameraDevice, CameraDeviceInfo } from '$lib/ipc';
+import { session } from '#lib/stores/session.svelte.js';
+import { COMMANDS, hasTauriBridge } from '#lib/ipc.js';
+import type { AppliedCameraDevice, CameraDeviceInfo } from '#lib/ipc.js';
 
-export { hasTauriBridge } from '$lib/ipc';
-export type { AppliedCameraDevice, CameraDeviceInfo } from '$lib/ipc';
+export { hasTauriBridge } from '#lib/ipc.js';
+export type { AppliedCameraDevice, CameraDeviceInfo } from '#lib/ipc.js';
 
 export async function listCameraDevices(): Promise<CameraDeviceInfo[] | null> {
   if (!hasTauriBridge()) return null;

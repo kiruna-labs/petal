@@ -80,6 +80,11 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
+      # SvelteKit 3 requires Node >=22.17; never rely on the image default.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
       - name: Install frontend deps
         working-directory: apps/desktop
         run: npm ci

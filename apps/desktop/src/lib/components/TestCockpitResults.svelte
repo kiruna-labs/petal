@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { COMMANDS } from '$lib/ipc';
+  import { COMMANDS } from '#lib/ipc.js';
   import Button from './Button.svelte';
 
   type RunStatus = 'running' | 'passed' | 'failed' | 'cancelled' | 'error' | 'unknown' | string;

@@ -7,7 +7,7 @@
   import { onDestroy, onMount } from 'svelte';
   import type { Snippet } from 'svelte';
   import CloseButton from './CloseButton.svelte';
-  import { exitDuration } from '$lib/motion';
+  import { exitDuration } from '#lib/motion.js';
 
   interface Props {
     title: string;

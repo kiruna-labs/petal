@@ -4,7 +4,7 @@
   import {
     restrainedSurfaceEnterTransition,
     restrainedSurfaceExitTransition
-  } from '$lib/motion';
+  } from '#lib/motion.js';
   import { installDismissibleLayer } from '@petal/shared/ui/dismissibleLayer';
 
   export interface DeviceSelectOption {

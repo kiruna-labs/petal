@@ -3,7 +3,7 @@ import '@fontsource/albert-sans/400.css';
 import '@fontsource/albert-sans/500.css';
 import '@fontsource/albert-sans/600.css';
 import '@fontsource/albert-sans/700.css';
-import { platformKey } from '$lib/platform';
+import { platformKey } from '#lib/platform.js';
 
 document.documentElement.dataset.platform = platformKey();
 
@@ -17,7 +17,7 @@ async function renderFixture() {
   try {
     const [{ mount }, { default: MainMenu }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/MainMenu.svelte')
+      import('#lib/components/MainMenu.svelte')
     ]);
     // userName is a required prop (the real /main route wires it from the
     // session store); the create/join controls render only when at least one

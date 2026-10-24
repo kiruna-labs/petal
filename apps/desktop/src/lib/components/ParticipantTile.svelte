@@ -29,19 +29,19 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { cameraOffNameLabelForFit, firstGrapheme, nameChipLabelForFit } from '$lib/data/nameChipFit';
-  import { colorForIdentity, identityColorCss, identityColorFromPaletteIndex } from '$lib/data/identityColor';
-  import { attachVideoStream } from '$lib/videoAttachment';
-  import { COMMANDS } from '$lib/ipc';
-  import type { DrawUpdate } from '$lib/ipc';
-  import { isStrokeExpired, strokeFadeOpacity } from '$lib/data/strokeExpiry';
+  import { cameraOffNameLabelForFit, firstGrapheme, nameChipLabelForFit } from '#lib/data/nameChipFit.js';
+  import { colorForIdentity, identityColorCss, identityColorFromPaletteIndex } from '#lib/data/identityColor.js';
+  import { attachVideoStream } from '#lib/videoAttachment.js';
+  import { COMMANDS } from '#lib/ipc.js';
+  import type { DrawUpdate } from '#lib/ipc.js';
+  import { isStrokeExpired, strokeFadeOpacity } from '#lib/data/strokeExpiry.js';
   import {
     localShareCountPillAriaLabel,
     shareCountPillAriaLabel,
     shareCountPillLabel,
     shouldShowSharePill
-  } from '$lib/data/shareCountPill';
-  import { startCameraPresentationProbe, type CameraPresentationVideo } from '$lib/data/cameraPresentation';
+  } from '#lib/data/shareCountPill.js';
+  import { startCameraPresentationProbe, type CameraPresentationVideo } from '#lib/data/cameraPresentation.js';
   import { cameraFit, renderedMediaRect, type CameraFit } from '@petal/shared/logic/cameraCrop';
   import ControlButton from './ControlButton.svelte';
 

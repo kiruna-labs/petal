@@ -137,7 +137,7 @@ test('#669: Settings panel exposes a Debug mode toggle mirroring the AI chat tog
     new URL('../src/lib/components/Settings.svelte', import.meta.url),
     'utf8'
   );
-  assert.match(settings, /import \{ DEBUG_MODE_SETTING_DESCRIPTION, DEBUG_MODE_SETTING_TITLE \} from '\$lib\/data\/debugMode';/);
+  assert.match(settings, /import \{ DEBUG_MODE_SETTING_DESCRIPTION, DEBUG_MODE_SETTING_TITLE \} from '#lib\/data\/debugMode\.js';/);
   assert.match(settings, /let debugSettings = \$state<DebugModeSettings>\(\{ enabled: false \}\);/);
   assert.match(
     settings,
@@ -160,7 +160,7 @@ test('#669: the remote-window surface asks AND listens for debug mode, fixing th
     new URL('../src/routes/compositor/surface/+page.svelte', import.meta.url),
     'utf8'
   );
-  assert.match(surfaceRoute, /import \{ debugHeaderControlVisible \} from '\$lib\/data\/debugMode';/);
+  assert.match(surfaceRoute, /import \{ debugHeaderControlVisible \} from '#lib\/data\/debugMode\.js';/);
   assert.match(surfaceRoute, /let debugModeEnabled = \$state\(false\);/);
   assert.match(
     surfaceRoute,

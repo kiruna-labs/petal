@@ -21,7 +21,7 @@
 // available in evergreen WebView2 (Chromium ≥ 94); no fallback needed.
 
 import { invoke } from '@tauri-apps/api/core';
-import { COMMANDS } from '$lib/ipc';
+import { COMMANDS } from '#lib/ipc.js';
 
 /** `[width: u32][height: u32][capture_wall_time_us: u64]` little-endian. */
 const SELF_VIEW_HEADER_BYTES = 16;

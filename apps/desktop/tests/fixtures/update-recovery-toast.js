@@ -65,9 +65,9 @@ async function renderFixture() {
     const [{ mount }, { default: ToastHost }, { installUpdateAndRelaunch }, { updateStatus }] =
       await Promise.all([
         import('svelte'),
-        import('$lib/components/ToastHost.svelte'),
-        import('$lib/updater'),
-        import('$lib/stores/updateStatus.svelte')
+        import('#lib/components/ToastHost.svelte'),
+        import('#lib/updater.js'),
+        import('#lib/stores/updateStatus.svelte.js')
       ]);
 
     mount(ToastHost, { target: document.querySelector('#app') });

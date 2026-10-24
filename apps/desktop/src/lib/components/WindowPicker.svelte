@@ -6,9 +6,9 @@
 -->
 <script lang="ts" module>
   import { invoke } from '@tauri-apps/api/core';
-  import { COMMANDS, EVENTS, hasTauriBridge, listenUntilDestroy } from '$lib/ipc';
-  import { STORAGE_KEYS } from '$lib/data/storageKeys';
-  import type { ShareableWindow, ShareStateChanged } from '$lib/ipc';
+  import { COMMANDS, EVENTS, hasTauriBridge, listenUntilDestroy } from '#lib/ipc.js';
+  import { STORAGE_KEYS } from '#lib/data/storageKeys.js';
+  import type { ShareableWindow, ShareStateChanged } from '#lib/ipc.js';
 
   const thumbnailMemory = new Map<number, string>();
   const failedThumbnails = new Set<number>();
@@ -113,9 +113,9 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import CloseButton from './CloseButton.svelte';
   import RefreshButton from './RefreshButton.svelte';
-  import { identityColorCss } from '$lib/data/identityColor';
-  import { isWindows } from '$lib/platform';
-  import { session } from '$lib/stores/session.svelte';
+  import { identityColorCss } from '#lib/data/identityColor.js';
+  import { isWindows } from '#lib/platform.js';
+  import { session } from '#lib/stores/session.svelte.js';
 
   type ThumbnailState =
     | { status: 'idle' }

@@ -5,7 +5,7 @@ import type {
   PipelineStageMetrics,
   StatsSample,
   TrackHealth
-} from '$lib/ipc';
+} from '#lib/ipc.js';
 
 export type {
   JournalEntry,
@@ -14,7 +14,7 @@ export type {
   PipelineStageMetrics,
   StatsSample,
   TrackHealth
-} from '$lib/ipc';
+} from '#lib/ipc.js';
 
 export type GaugeState = 'known' | 'estimated' | 'unknown';
 export type GaugeTone = 'empty' | 'poor' | 'strained' | 'steady' | 'perfect';

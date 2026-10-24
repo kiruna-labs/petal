@@ -1,7 +1,7 @@
 <!-- Persistent diagnostics window opened from the in-meeting Gallery topbar. -->
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import NetworkCockpit from '$lib/components/NetworkCockpit.svelte';
+  import NetworkCockpit from '#lib/components/NetworkCockpit.svelte';
 
   function closeWindow() {
     try {

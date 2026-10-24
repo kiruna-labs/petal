@@ -1,6 +1,6 @@
 <script lang="ts">
   import { flushSync } from 'svelte';
-  import { uniformTileFlip } from '$lib/motion';
+  import { uniformTileFlip } from '#lib/motion.js';
 
   // A keyed list driven by the real `uniformTileFlip`, as Gallery.svelte's is.
   // Tile "a" stays first while people join, and every count gives it a new

@@ -18,13 +18,13 @@
 // `join_room` call). So the *values* here are real inputs to a real system;
 // only the *storage mechanism* (localStorage, not a native profile) remains
 // a stand-in.
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { IdentityColor } from '$lib/components/Avatar.svelte';
-import { COMMANDS, EVENTS, hasTauriBridge, type RemoteControlPolicy } from '$lib/ipc';
-import { migrateRemoteControlPolicy } from '$lib/remoteControlPolicy';
-import { STORAGE_KEYS } from '$lib/data/storageKeys';
+import type { IdentityColor } from '#lib/components/Avatar.svelte';
+import { COMMANDS, EVENTS, hasTauriBridge, type RemoteControlPolicy } from '#lib/ipc.js';
+import { migrateRemoteControlPolicy } from '#lib/remoteControlPolicy.js';
+import { STORAGE_KEYS } from '#lib/data/storageKeys.js';
 
 const STORAGE_KEY = STORAGE_KEYS.onboardingSession;
 

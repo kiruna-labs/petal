@@ -39,16 +39,16 @@
   import { CheckMenuItem, Menu, MenuItem, PredefinedMenuItem } from '@tauri-apps/api/menu';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { openUrl } from '@tauri-apps/plugin-opener';
-  import { beginCompositorResizeDrag, type CompositorResizeDirection } from '$lib/compositorResize';
-  import RemoteWindowHeader from '$lib/components/RemoteWindowHeader.svelte';
-  import { colorForIdentity, identityColorFromPaletteIndex } from '$lib/data/identityColor';
-  import { isWindows } from '$lib/platform';
+  import { beginCompositorResizeDrag, type CompositorResizeDirection } from '#lib/compositorResize.js';
+  import RemoteWindowHeader from '#lib/components/RemoteWindowHeader.svelte';
+  import { colorForIdentity, identityColorFromPaletteIndex } from '#lib/data/identityColor.js';
+  import { isWindows } from '#lib/platform.js';
   import {
     findRemoteWindowDebugTrack,
     formatGlassToGlassLatencyChip
-  } from '$lib/data/remoteWindowDebug';
-  import { aiChatHeaderAction, aiChatHeaderControlVisible } from '$lib/data/aiChat';
-  import { debugHeaderControlVisible } from '$lib/data/debugMode';
+  } from '#lib/data/remoteWindowDebug.js';
+  import { aiChatHeaderAction, aiChatHeaderControlVisible } from '#lib/data/aiChat.js';
+  import { debugHeaderControlVisible } from '#lib/data/debugMode.js';
   import {
     COMMANDS,
     EVENTS,
@@ -60,7 +60,7 @@
     type PresentParticipant,
     type RemoteControlStatus,
     type RemoteWindowDebugStats
-  } from '$lib/ipc';
+  } from '#lib/ipc.js';
   import {
     REMOTE_CONTROL_REQUEST_TIMEOUT_MS,
     REMOTE_CONTROL_CONSENT_TIMEOUT_MS,
@@ -68,7 +68,7 @@
     REMOTE_CONTROL_TIMEOUT_MESSAGE,
     remoteControlStatusEffect,
     type RemoteControlFeedbackStatus
-  } from '$lib/remoteControlFeedback';
+  } from '#lib/remoteControlFeedback.js';
 
   const windowId = $derived(Number(page.url.searchParams.get('windowId') ?? '0'));
   const ownerName = $derived(page.url.searchParams.get('owner') ?? 'Someone');

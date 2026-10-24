@@ -1,4 +1,4 @@
-import type { CockpitJourney, CockpitStatus, CockpitSummary, TestProgressEvent } from '$lib/ipc';
+import type { CockpitJourney, CockpitStatus, CockpitSummary, TestProgressEvent } from '#lib/ipc.js';
 import contracts from '../../../../../contracts/petal-contracts.json' with { type: 'json' };
 
 interface CockpitScenarioDefinition {

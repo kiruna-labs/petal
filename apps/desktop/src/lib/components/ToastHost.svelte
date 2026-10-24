@@ -42,24 +42,24 @@
   import { listen } from '@tauri-apps/api/event';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import { onMount } from 'svelte';
-  import { toastTransition } from '$lib/motion';
-  import { installUpdateAndRelaunch } from '$lib/updater';
-  import { manualDownloadUrl } from '$lib/data/updateDownload';
+  import { toastTransition } from '#lib/motion.js';
+  import { installUpdateAndRelaunch } from '#lib/updater.js';
+  import { manualDownloadUrl } from '#lib/data/updateDownload.js';
   import {
     fetchLaunchLocationClass,
     needsRelocation,
     openApplicationsFolder
-  } from '$lib/data/launchLocation';
-  import { openPrivacySettings } from '$lib/data/permissions';
-  import { shareErrorDisplay } from '$lib/data/shareErrors';
-  import { clearUpdateStatus, updateStatus } from '$lib/stores/updateStatus.svelte';
-  import { setToastHostVisible } from '$lib/stores/toastHost.svelte';
-  import { updateAudioDevices } from '$lib/stores/session.svelte';
-  import { SILENT_MIC_OFFER_ACTION, silentMicNote, silentMicOffer } from '$lib/data/audioDeviceSelection';
-  import { switchFromSilentMic } from '$lib/data/audioDevices';
-  import { EVENTS } from '$lib/ipc';
-  import type { ResilienceEvent, ShareErrorPayload, RemoteControlStatus, RoomLeftEvent } from '$lib/ipc';
-  import { connectionLossNeedsToast } from '$lib/stores/meetingRoute';
+  } from '#lib/data/launchLocation.js';
+  import { openPrivacySettings } from '#lib/data/permissions.js';
+  import { shareErrorDisplay } from '#lib/data/shareErrors.js';
+  import { clearUpdateStatus, updateStatus } from '#lib/stores/updateStatus.svelte.js';
+  import { setToastHostVisible } from '#lib/stores/toastHost.svelte.js';
+  import { updateAudioDevices } from '#lib/stores/session.svelte.js';
+  import { SILENT_MIC_OFFER_ACTION, silentMicNote, silentMicOffer } from '#lib/data/audioDeviceSelection.js';
+  import { switchFromSilentMic } from '#lib/data/audioDevices.js';
+  import { EVENTS } from '#lib/ipc.js';
+  import type { ResilienceEvent, ShareErrorPayload, RemoteControlStatus, RoomLeftEvent } from '#lib/ipc.js';
+  import { connectionLossNeedsToast } from '#lib/stores/meetingRoute.js';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
   import type { ToastVariant } from '@petal/shared/ui/components/Toast.svelte';
 

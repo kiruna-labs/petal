@@ -55,7 +55,7 @@ test('the native gallery lays out every window shape: a column, a bar, centred s
       resolve: {
         alias: {
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
-          '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+          '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
         }
       },

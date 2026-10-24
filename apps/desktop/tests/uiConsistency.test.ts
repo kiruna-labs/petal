@@ -780,7 +780,7 @@ test('main menu preserves shared colors and in-app shape tokens across platforms
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
           // Standalone Vite build skips SvelteKit config, so provide the
           // browser-only virtual module used by session.svelte.
-          '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+          '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
           // ...and the shared-package alias (SvelteKit's kit.alias injects it
           // in the real build; this bare Vite instance needs it manually).
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
@@ -930,7 +930,7 @@ test('region selector renders tokenized chrome and keeps long titles inside both
       resolve: {
         alias: {
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
-          '$app/environment': resolve(fileURLToPath(new URL('./sveltekit-environment.js', fixtureRoot))),
+          '$app/env': resolve(fileURLToPath(new URL('./sveltekit-environment.js', fixtureRoot))),
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
         }
       },

@@ -32,8 +32,8 @@ import {
   type RemoteTrackPublication
 } from 'livekit-client';
 import { invoke } from '@tauri-apps/api/core';
-import { COMMANDS } from '$lib/ipc';
-import type { GalleryBridgeConfig } from '$lib/ipc';
+import { COMMANDS } from '#lib/ipc.js';
+import type { GalleryBridgeConfig } from '#lib/ipc.js';
 // #247: local freeze-watchdog for remote camera tiles -- decision logic
 // lives in cameraFreezeWatchdog.ts (framework-import-free, so it's directly
 // unit-testable). See that module's header comment for the full rationale.
@@ -59,7 +59,7 @@ import {
 const CAMERA_TRACK_PREFIX = 'petal-camera-';
 const WINDOW_TRACK_PREFIX = 'petal-window-';
 
-export type { GalleryBridgeConfig } from '$lib/ipc';
+export type { GalleryBridgeConfig } from '#lib/ipc.js';
 
 /** One camera feed remote to the hidden bridge, keyed by its publisher's real
  * LiveKit identity (the same identity presence.rs reports, so the meeting

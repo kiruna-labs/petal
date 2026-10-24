@@ -21,7 +21,7 @@
     type ControlConsentRequestedEvent,
     type RemoteControlStatus,
     type ShareControlModeChanged
-  } from '$lib/ipc';
+  } from '#lib/ipc.js';
 
   type QueuedRequest = ControlConsentRequestedEvent & {
     /** Wall-clock deadline mirrored from the host's timeout. */

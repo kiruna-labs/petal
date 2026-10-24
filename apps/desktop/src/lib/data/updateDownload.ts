@@ -5,7 +5,7 @@
 // a Vercel Blob URL: the blob changes every release and a hardcoded one would
 // hand stranded users a stale build -- the exact failure this recovers from.
 //
-// Mirrors `$lib/data/inviteLinks`'s origin pattern: the official host is the
+// Mirrors `#lib/data/inviteLinks`'s origin pattern: the official host is the
 // default so official builds need no extra env, and a self-hosted deployment
 // overrides it at build time (docs/SELF_HOSTING.md).
 import { platformKey, type PlatformKey } from '../platform.ts';

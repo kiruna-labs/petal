@@ -13,7 +13,7 @@
   - `ai-chat-state`  — either a phase change (`state`) or a countdown tick
                        (`secondsLeft`); exactly one per emission.
   - `ai-chat-transcript` — role-tagged deltas, coalesced into bubbles by
-                       `$lib/data/aiChat`'s `appendTranscriptDelta`.
+                       `#lib/data/aiChat`'s `appendTranscriptDelta`.
 
   PUSH-TO-TALK IS THE RISK SURFACE HERE. A mic that stays open because the
   pointer was released outside the button, or because the window lost focus
@@ -27,7 +27,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onDestroy } from 'svelte';
-  import { COMMANDS, EVENTS, listenUntilDestroy } from '$lib/ipc';
+  import { COMMANDS, EVENTS, listenUntilDestroy } from '#lib/ipc.js';
   import type {
     AiChatControlRequestEvent,
     AiChatControlResolvedEvent,
@@ -36,7 +36,7 @@
     AiChatPanelInfo,
     AiChatStateEvent,
     AiChatTranscriptEvent
-  } from '$lib/ipc';
+  } from '#lib/ipc.js';
   import {
     aiChatControlDetailRows,
     aiChatStatusLabel,
@@ -57,7 +57,7 @@
     AI_CHAT_TEXT_MAX_CHARS,
     AI_CHAT_TEXT_SEND_FAILED_NOTE,
     type AiChatTranscriptTurn
-  } from '$lib/data/aiChat';
+  } from '#lib/data/aiChat.js';
   import type { UnlistenFn } from '@tauri-apps/api/event';
 
   interface Props {

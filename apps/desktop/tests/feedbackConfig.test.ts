@@ -62,7 +62,7 @@ test('feedback is compiled off entirely (no trigger, no SDK reference) when the 
   // The main-menu trigger only renders inside a `feedbackEnabled` gate that
   // is derived from `isFeedbackEnabled()` -- an absent/invalid key means
   // `{#if feedbackEnabled}` never renders the button at all.
-  assert.match(mainMenuSource, /import \{ isFeedbackEnabled \} from '\$lib\/feedback\/config'/);
+  assert.match(mainMenuSource, /import \{ isFeedbackEnabled \} from '#lib\/feedback\/config\.js'/);
   assert.match(mainMenuSource, /const feedbackEnabled = isFeedbackEnabled\(\);/);
   assert.match(mainMenuSource, /\{#if feedbackEnabled\}/);
 });
@@ -99,7 +99,7 @@ test('#786: the bug-report cell exists only when the route hands down a trigger,
   assert.match(meetingChromeSource, /onReportBug\?: \(\) => void;/);
   assert.match(meetingChromeSource, /\{onReportBug\}/);
 
-  assert.match(meetingRouteSource, /import \{ isFeedbackEnabled \} from '\$lib\/feedback\/config'/);
+  assert.match(meetingRouteSource, /import \{ isFeedbackEnabled \} from '#lib\/feedback\/config\.js'/);
   assert.match(meetingRouteSource, /const feedbackEnabled = isFeedbackEnabled\(\);/);
   assert.match(
     meetingRouteSource,
@@ -109,7 +109,7 @@ test('#786: the bug-report cell exists only when the route hands down a trigger,
   // FeedbackModal was reachable only from the home MainMenu.
   assert.match(
     meetingRouteSource,
-    /import FeedbackModal from '\$lib\/components\/FeedbackModal\.svelte'/
+    /import FeedbackModal from '#lib\/components\/FeedbackModal\.svelte'/
   );
   assert.match(
     meetingRouteSource,
