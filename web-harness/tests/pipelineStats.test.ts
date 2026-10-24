@@ -86,6 +86,24 @@ test('rejects malformed additive lifecycle fields without rejecting older v1 pac
   assert.equal(parsePipelineStatsPayload(JSON.stringify({ ...baseV1Message(), shareEpoch: '' })), null);
 });
 
+test('parses the #408 sender lowerRungs verdict and keeps it absent for older senders', () => {
+  const parsed = parsePipelineStatsPayload(JSON.stringify({
+    ...baseV1Message(),
+    lowerRungs: { funded: true, delivering: false },
+  }));
+  assert.deepEqual(parsed?.lowerRungs, { funded: true, delivering: false });
+
+  const legacy = parsePipelineStatsPayload(JSON.stringify(baseV1Message()));
+  assert.notEqual(legacy, null);
+  assert.equal(legacy && 'lowerRungs' in legacy, false);
+});
+
+test('rejects a malformed #408 lowerRungs verdict', () => {
+  assert.equal(parsePipelineStatsPayload(JSON.stringify({ ...baseV1Message(), lowerRungs: { funded: 'yes', delivering: false } })), null);
+  assert.equal(parsePipelineStatsPayload(JSON.stringify({ ...baseV1Message(), lowerRungs: { funded: true } })), null);
+  assert.equal(parsePipelineStatsPayload(JSON.stringify({ ...baseV1Message(), lowerRungs: 1 })), null);
+});
+
 test('replacement publications have isolated reducer identities', () => {
   const first = { ...baseV1Message(), publicationSid: 'TR_old', shareEpoch: 'e1' } as never;
   const replacement = { ...baseV1Message(), publicationSid: 'TR_new', shareEpoch: 'e2' } as never;

@@ -6011,6 +6011,103 @@ mod track_name_tests {
         assert_eq!(lower_rung_activity(&only_top, guarded), DARK_LOWER);
     }
 
+    /// #410: the macOS encoder is built with a level token that removes
+    /// RTCVideoEncoderH264's level-derived frame-rate clamp at every size
+    /// Petal encodes, while the negotiated Level 3.1 (what the SFU answers)
+    /// clamps exactly as the field logs showed. Calls the real C++ the ObjC
+    /// encoder factory runs (vendor/webrtc-sys/src/h264_encoder_level.cpp).
+    #[test]
+    fn h264_encoder_level_fits_every_published_resolution() {
+        use webrtc_sys::h264_encoder_level::ffi::{
+            EncoderH264ProfileLevelId, H264EncoderMaxFrameRate,
+        };
+        const NEGOTIATED: &str = "42e01f"; // Constrained Baseline, Level 3.1
+
+        // The negotiated level's clamp, per resolution -- each value matches a
+        // logged "maximal allowed frame rate N" line (#410).
+        for (width, height, logged_cap) in [
+            (1920, 1080, 13), // 1080p camera
+            (2560, 1820, 5),  // demand-capped Retina share
+            (3200, 2276, 3),  // full Retina share
+            (3024, 1964, 4),
+        ] {
+            assert_eq!(
+                H264EncoderMaxFrameRate(NEGOTIATED, width, height),
+                logged_cap,
+                "{width}x{height}"
+            );
+        }
+        // Level 3.1 only covers 30 fps up to ~1280x720-class frames.
+        assert!(H264EncoderMaxFrameRate(NEGOTIATED, 1280, 720) >= 30);
+
+        // Encoder-side id: same profile, AutoLevel token, for every profile
+        // the SFU/HighFirst preference can negotiate.
+        for (negotiated, fitted) in [
+            ("42e01f", "42e016"), // Constrained Baseline 3.1 -> 2.2
+            ("42001f", "420016"), // Baseline 3.1
+            ("4d001f", "4d0016"), // Main 3.1
+            ("640c1f", "640c16"), // Constrained High 3.1
+            ("64001f", "640016"), // High 3.1
+            ("640034", "640016"), // a higher negotiated level is fitted too
+        ] {
+            assert_eq!(EncoderH264ProfileLevelId(negotiated), fitted, "{negotiated}");
+        }
+        // Not an H.264 profile-level-id: passed through untouched.
+        assert_eq!(EncoderH264ProfileLevelId("zz"), "zz");
+        assert_eq!(EncoderH264ProfileLevelId(""), "");
+
+        // No clamp (0 = VideoToolbox decides) at any size up to the
+        // VideoToolbox long-edge cap, so 30 fps sources are encoded at 30 fps.
+        let fitted = EncoderH264ProfileLevelId(NEGOTIATED);
+        for (width, height) in [
+            (640, 360),
+            (1280, 720),
+            (1920, 1080),
+            (2560, 1820),
+            (3200, 2276),
+            (3024, 2582),
+            (VIDEO_TOOLBOX_H264_MAX_LONG_EDGE, 2304),
+        ] {
+            assert_eq!(
+                H264EncoderMaxFrameRate(&fitted, width, height),
+                0,
+                "{width}x{height}"
+            );
+        }
+    }
+
+    /// #408: the verdict receivers get is the guard's own lower-rung summary
+    /// from the same poll; a poll with no lower rung reports nothing
+    /// (unknown), never "not delivering".
+    #[test]
+    fn lower_rungs_report_mirrors_the_guard_summary_and_omits_missing_rungs() {
+        use crate::pipeline_stats::LowerRungsReport;
+        let guarded = "h";
+        let dark = [
+            RungSample { rid: "h".into(), target_bitrate_bps: 566_000.0, frames_per_second: 0.0 },
+            RungSample { rid: "q".into(), target_bitrate_bps: 0.0, frames_per_second: 0.0 },
+        ];
+        assert_eq!(
+            lower_rungs_report(&dark, guarded),
+            Some(LowerRungsReport { funded: false, delivering: false })
+        );
+        let live = [
+            RungSample { rid: "h".into(), target_bitrate_bps: 300_000.0, frames_per_second: 2.0 },
+            RungSample { rid: "q".into(), target_bitrate_bps: 2_000_000.0, frames_per_second: 30.0 },
+        ];
+        assert_eq!(
+            lower_rungs_report(&live, guarded),
+            Some(LowerRungsReport { funded: true, delivering: true })
+        );
+        let only_top = [RungSample {
+            rid: "h".into(),
+            target_bitrate_bps: 3_000_000.0,
+            frames_per_second: 30.0,
+        }];
+        assert_eq!(lower_rungs_report(&only_top, guarded), None);
+        assert_eq!(lower_rungs_report(&[], guarded), None);
+    }
+
     #[test]
     fn starvation_guard_never_protects_a_single_layer_track() {
         // A non-simulcast (single-layer) publish has no lower rung to free
@@ -8289,6 +8386,61 @@ impl PublishedTrack {
         Ok(())
     }
 
+    /// #411: tear this camera's sender down and publish the SAME
+    /// `LocalVideoTrack` again, which builds a new sender, a new libwebrtc
+    /// `VideoStreamEncoder` and a new `VTCompressionSession`. This is the one
+    /// lever Petal has over a wedged VideoToolbox session: libwebrtc only
+    /// resets one itself for a synchronous `kVTInvalidSessionErr` /
+    /// `kVTVideoEncoderMalfunctionErr`, never for the asynchronous callback
+    /// failures #411 logged for 37 minutes. Same shape as the SDK's own
+    /// `handle_restarted` republish (unpublish, then publish the same track)
+    /// and as [`Self::republish_camera_after_reconnect`]. Unlike
+    /// [`Self::unpublish`] it leaves `background_cancel` alone: the track's
+    /// diagnostics and its encoder-health monitor outlive the re-creation.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) async fn recreate_camera_encoder(&self) -> Result<(), RoomConnectionError> {
+        let sid = self.sid();
+        if let Err(error) = self.room.local_participant().unpublish_track(&sid).await {
+            // Already gone (a reconnect raced us): publishing below is still
+            // the right repair.
+            log::warn!(
+                "publisher: camera encoder re-create: unpublish of the wedged sender failed ({error}); publishing anyway"
+            );
+        }
+        self.republish_camera_after_reconnect().await?;
+        log::info!(
+            "publisher: camera track '{}' re-created its encoder (#411)",
+            self.track.name()
+        );
+        Ok(())
+    }
+
+    /// #411: this track's encoded-frame total, summed over its video
+    /// `outbound-rtp` entries. `None` when stats cannot be read or carry no
+    /// video entry (between an unpublish and the next publish).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) async fn frames_encoded(&self) -> Option<u64> {
+        let stats = self.track.get_stats().await.ok()?;
+        let mut total = None;
+        for stat in stats {
+            let livekit::webrtc::stats::RtcStats::OutboundRtp(outbound) = stat else {
+                continue;
+            };
+            if outbound.stream.kind != "video" {
+                continue;
+            }
+            total = Some(total.unwrap_or(0u64) + u64::from(outbound.outbound.frames_encoded));
+        }
+        total
+    }
+
+    /// Cancelled when this track is terminally unpublished ([`Self::unpublish`]).
+    /// Background tasks bound to the publication's lifetime observe it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn lifecycle_token(&self) -> CancellationToken {
+        self.background_cancel.clone()
+    }
+
     /// Unpublish this track from its room. Does NOT close/disconnect the
     /// room itself -- callers with multiple tracks published on one room
     /// (SPEC.md §4.3 multi-window sharing) decide separately whether the
@@ -10208,6 +10360,9 @@ async fn log_window_share_encoder_stats(
         send_delay_s: f64,
     }
     let mut wire_prev: Option<(std::time::Instant, OutboundTotals)> = None;
+    // #408: the SID this poll last published a lower-rung verdict under, so
+    // the verdict is withdrawn when the poll ends (unpublish/republish).
+    let mut reported_lower_rungs_sid: Option<String> = None;
     loop {
         // A publication that no longer exists must not keep polling: the guard
         // riding on this poll has nothing left to observe, and libwebrtc would
@@ -10391,6 +10546,13 @@ async fn log_window_share_encoder_stats(
         }
 
         let Some(guard) = guard.as_mut() else { continue };
+        // #408: tell receivers whether a LOW fallback would land on anything.
+        // Same poll, same summary the guard below reads for its own premise.
+        let sid = track.sid().to_string();
+        if let Some(report) = lower_rungs_report(&samples, &guard.rid) {
+            crate::pipeline_stats::record_local_lower_rungs(&sid, report);
+            reported_lower_rungs_sid = Some(sid);
+        }
         let mut apply = |rid: &str, max_bitrate: u64, max_framerate: f64| {
             format!(
                 "{:?}",
@@ -10405,6 +10567,27 @@ async fn log_window_share_encoder_stats(
         };
         apply_rung_starvation_guard_sample(guard, &samples, current_top.as_ref(), &mut apply);
     }
+    if let Some(sid) = reported_lower_rungs_sid {
+        crate::pipeline_stats::clear_local_lower_rungs(&sid);
+    }
+}
+
+/// #408: the lower-rung verdict this poll publishes to receivers, or `None`
+/// when the poll saw no rung other than the guarded top one (nothing to
+/// report: a missing lower rung is "unknown", never "not delivering", so a
+/// half-read poll cannot suppress a receiver's fallback).
+fn lower_rungs_report(
+    samples: &[RungSample],
+    guarded_rid: &str,
+) -> Option<crate::pipeline_stats::LowerRungsReport> {
+    if !samples.iter().any(|sample| sample.rid != guarded_rid) {
+        return None;
+    }
+    let activity = lower_rung_activity(samples, guarded_rid);
+    Some(crate::pipeline_stats::LowerRungsReport {
+        funded: activity.funded,
+        delivering: activity.delivering,
+    })
 }
 
 /// Effect-injected form of [`log_encoder_once`]. Production and tests both

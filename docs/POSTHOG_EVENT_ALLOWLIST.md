@@ -101,6 +101,8 @@ deltas.
 | `remote_control_latency_summary` | see [below](#remote_control_latency_summary) | One per 60 s of active remote control that produced samples, plus a final partial on stop when any stage has at least 5 samples. Empty intervals never emit. Capped at 120 per control session. Never per input. Native host only today (#370); the web client adds it with its first producer (#375). |
 | `annotation_toggled` | `state`: `on` \| `off` | #872. `draw_active` is the ONLY thing that makes the sharer overlay capture the cursor. Nothing recorded it, so a report of "I cannot click on buttons in my apps" was undiagnosable from telemetry. Emitted on a real state change only. No strokes, coordinates, or window titles. Native only today: the web client's `EVENT_NAMES` has the other twelve and does not emit this one. |
 
+| `video_encoder_recovery` | `track_kind`: `camera`; `outcome`: `recreated` \| `recovered` \| `recreate_failed` \| `gave_up`; `failure_class`: `parameter` \| `invalid_session` \| `malfunction_12911` \| `encoder_malfunction` \| `not_available_now` \| `other`; `failure_count_bucket`: `0` \| `1_99` \| `100_999` \| `1000_plus`; `attempt_bucket`: `0` \| `1` \| `2` \| `3_plus` | #411. The camera's VideoToolbox H.264 encoder stopped producing frames while libwebrtc logged encode failures, and the publisher re-created it (republished the track), saw it recover, could not republish, or gave up after the flap budget. One event per transition, never per sample. `failure_class` is the dominant VideoToolbox status class of the failing streak; counts are buckets. Native macOS only. |
+
 No new event without an explicit add to this table.
 
 ### `remote_control_latency_summary`

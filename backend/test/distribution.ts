@@ -45,6 +45,7 @@ const contractFixture = JSON.parse(
     captureStateFields: string[];
     captureCpuFields: string[];
     receiverFreezeFields: string[];
+    lowerRungsFields?: string[];
   }>;
 };
 
@@ -285,13 +286,25 @@ async function main() {
   });
 
   await test('pipeline-stats fixture pins capture and freeze report fields', () => {
+    // #408: `lowerRungs` is an additive optional sender field. One vector
+    // carries it (current sender), one omits it (older sender) -- both must
+    // stay pinned, and the current-sender shape must exist.
+    let sawLowerRungs = false;
     for (const vector of contractFixture.pipelineStatsMessages) {
+      const hasLowerRungs = vector.fields.includes('lowerRungs');
+      if (hasLowerRungs) {
+        sawLowerRungs = true;
+        assert.deepEqual(vector.lowerRungsFields, ['delivering', 'funded']);
+      } else {
+        assert.equal(vector.lowerRungsFields, undefined);
+      }
       assert.deepEqual(vector.fields, [
         'captureState',
         'decoded',
         'encodedSent',
         'grabbed',
         'lifecycle',
+        ...(hasLowerRungs ? ['lowerRungs'] : []),
         'ownerIdentity',
         'publicationSid',
         'received',
@@ -323,6 +336,7 @@ async function main() {
         'qualityLimitationReason',
       ]);
     }
+    assert.ok(sawLowerRungs, 'no pipeline-stats vector pins the #408 lowerRungs sender field');
   });
 
   await test('/api/updater returns latest.json manifest verbatim', async () => {

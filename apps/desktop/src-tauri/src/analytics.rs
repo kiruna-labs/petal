@@ -81,7 +81,7 @@ thread_local! {
 #[cfg(test)]
 const COMMON_KEYS: [&str; 5] = ["build_version", "os", "os_version", "arch", "client"];
 #[cfg(test)]
-const EVENT_NAMES: [&str; 14] = [
+const EVENT_NAMES: [&str; 15] = [
     "meeting_joined",
     "meeting_left",
     "join_failed",
@@ -103,6 +103,11 @@ const EVENT_NAMES: [&str; 14] = [
     // #370: one per participant per 60 s of active remote control. Integer-ms
     // latency percentiles, the scoped exception to "buckets, never raw ms".
     "remote_control_latency_summary",
+    // #411: a VideoToolbox H.264 encoder that stopped producing frames, and
+    // what the publisher did about it. Before this the only trace was a
+    // libwebrtc log line (breadcrumb-only for Sentry): ~58,000 of them in one
+    // meeting, zero field signal. Closed enums and a count BUCKET only.
+    "video_encoder_recovery",
 ];
 
 #[derive(Clone, Copy)]
@@ -410,6 +415,46 @@ impl DeviceChange {
     }
 }
 
+/// Which track's encoder failed (#411). Only the camera recovers today.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EncoderTrackKind {
+    Camera,
+}
+
+impl EncoderTrackKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Camera => "camera",
+        }
+    }
+}
+
+/// What the publisher did about a failing encoder (#411).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EncoderRecoveryOutcome {
+    /// The encoder was re-created (track republished).
+    Recreated,
+    /// A re-created encoder produced frames again.
+    Recovered,
+    /// The republish itself failed.
+    RecreateFailed,
+    /// Re-creating did not help within the flap budget; stopped trying.
+    GaveUp,
+}
+
+impl EncoderRecoveryOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Recreated => "recreated",
+            Self::Recovered => "recovered",
+            Self::RecreateFailed => "recreate_failed",
+            Self::GaveUp => "gave_up",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Event {
     MeetingJoined,
@@ -458,6 +503,16 @@ enum Event {
         state: AnnotationState,
     },
     RemoteControlLatencySummary(Box<crate::rc_latency_telemetry::Summary>),
+    VideoEncoderRecovery {
+        track_kind: EncoderTrackKind,
+        outcome: EncoderRecoveryOutcome,
+        /// `encoder_health::VtFailureClass::tag()`, a closed set.
+        failure_class: &'static str,
+        /// `encoder_health::failure_count_bucket()`, a closed set.
+        failure_count_bucket: &'static str,
+        /// 1-based re-creation attempt inside the flap window, as a bucket.
+        attempt_bucket: &'static str,
+    },
 }
 
 impl Event {
@@ -477,6 +532,7 @@ impl Event {
             Self::DeviceChanged { .. } => "device_changed",
             Self::AnnotationToggled { .. } => "annotation_toggled",
             Self::RemoteControlLatencySummary(_) => "remote_control_latency_summary",
+            Self::VideoEncoderRecovery { .. } => "video_encoder_recovery",
         }
     }
 
@@ -524,6 +580,19 @@ impl Event {
                 extras.insert("state", state.as_str());
             }
             Self::RemoteControlLatencySummary(_) => {}
+            Self::VideoEncoderRecovery {
+                track_kind,
+                outcome,
+                failure_class,
+                failure_count_bucket,
+                attempt_bucket,
+            } => {
+                extras.insert("track_kind", track_kind.as_str());
+                extras.insert("outcome", outcome.as_str());
+                extras.insert("failure_class", failure_class);
+                extras.insert("failure_count_bucket", failure_count_bucket);
+                extras.insert("attempt_bucket", attempt_bucket);
+            }
         }
         extras
     }
@@ -1396,6 +1465,35 @@ pub(crate) fn annotation_toggled(active: bool) {
     });
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn encoder_attempt_bucket(attempt: u32) -> &'static str {
+    match attempt {
+        0 => "0",
+        1 => "1",
+        2 => "2",
+        _ => "3_plus",
+    }
+}
+
+/// #411: one event per encoder-recovery transition (never per frame or per
+/// sample). Every value is a closed tag or a bucket.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn video_encoder_recovery(
+    track_kind: EncoderTrackKind,
+    outcome: EncoderRecoveryOutcome,
+    failure_class: crate::transport::encoder_health::VtFailureClass,
+    failure_count: u64,
+    attempt: u32,
+) {
+    capture(Event::VideoEncoderRecovery {
+        track_kind,
+        outcome,
+        failure_class: failure_class.tag(),
+        failure_count_bucket: crate::transport::encoder_health::failure_count_bucket(failure_count),
+        attempt_bucket: encoder_attempt_bucket(attempt),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1418,6 +1516,47 @@ mod tests {
         *COALESCER.lock_unpoisoned() = InputCoalescer::new();
         *LAST_DISPLAY_RECONFIG.lock_unpoisoned() = None;
         (result, events)
+    }
+
+    #[test]
+    fn video_encoder_recovery_carries_only_closed_tags_and_buckets() {
+        use crate::transport::encoder_health::VtFailureClass;
+        let ((), events) = with_sink(|| {
+            video_encoder_recovery(
+                EncoderTrackKind::Camera,
+                EncoderRecoveryOutcome::Recreated,
+                VtFailureClass::Parameter,
+                58_000,
+                1,
+            );
+            video_encoder_recovery(
+                EncoderTrackKind::Camera,
+                EncoderRecoveryOutcome::GaveUp,
+                VtFailureClass::NotAvailableNow,
+                42,
+                7,
+            );
+        });
+        assert_eq!(names(&events), vec!["video_encoder_recovery", "video_encoder_recovery"]);
+        assert_eq!(extra(&events[0], "track_kind"), "camera");
+        assert_eq!(extra(&events[0], "outcome"), "recreated");
+        assert_eq!(extra(&events[0], "failure_class"), "parameter");
+        assert_eq!(extra(&events[0], "failure_count_bucket"), "1000_plus");
+        assert_eq!(extra(&events[0], "attempt_bucket"), "1");
+        assert_eq!(extra(&events[1], "outcome"), "gave_up");
+        assert_eq!(extra(&events[1], "failure_class"), "not_available_now");
+        assert_eq!(extra(&events[1], "failure_count_bucket"), "1_99");
+        assert_eq!(extra(&events[1], "attempt_bucket"), "3_plus");
+        // No raw number survives into a property value.
+        for event in &events {
+            for key in ["track_kind", "outcome", "failure_class", "failure_count_bucket", "attempt_bucket"] {
+                let value = extra(event, key);
+                assert!(
+                    !value.chars().all(|c| c.is_ascii_digit()) || value.len() <= 1,
+                    "{key}={value} looks like a raw count"
+                );
+            }
+        }
     }
 
     fn names(events: &[CapturedEvent]) -> Vec<&str> {
@@ -1495,6 +1634,13 @@ mod tests {
                 state: AnnotationState::On,
             },
             Event::RemoteControlLatencySummary(Box::new(sample_latency_summary())),
+            Event::VideoEncoderRecovery {
+                track_kind: EncoderTrackKind::Camera,
+                outcome: EncoderRecoveryOutcome::Recreated,
+                failure_class: "parameter",
+                failure_count_bucket: "1000_plus",
+                attempt_bucket: "1",
+            },
         ]
         .iter()
         .map(Event::name)
