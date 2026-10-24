@@ -2315,6 +2315,16 @@ const SCENARIO_TABLE: &[ScenarioSpec] = &[
         kind: ScenarioKind::RemoteControlNativeToNative,
         requires_native_share: false,
     },
+    // #404 follow-up: the incident's actual host route. Both shapes above
+    // land on the field's text (AxText); this one clicks a page <button>
+    // whose handler focuses the field, so the click is an AX press
+    // (AxPressable), and the page proves no real pointer reached it.
+    ScenarioSpec {
+        id: "RC-N2N-CHROME-BUTTON",
+        tier: "gap",
+        kind: ScenarioKind::RemoteControlNativeToNative,
+        requires_native_share: false,
+    },
     ScenarioSpec {
         id: "RC-N2W",
         tier: "gap",
@@ -3614,7 +3624,10 @@ fn source_issue_for_scenario(scenario_id: &str) -> &'static str {
         "P-3"
     } else if scenario_id == "RC-N2N" || scenario_id == "RC-N2W" {
         "#819"
-    } else if scenario_id == "RC-N2N-CHROME" || scenario_id == "RC-N2N-CHROME-FORM" {
+    } else if matches!(
+        scenario_id,
+        "RC-N2N-CHROME" | "RC-N2N-CHROME-FORM" | "RC-N2N-CHROME-BUTTON"
+    ) {
         "#404"
     } else if scenario_id == "CAM-N2W" {
         "#815"
@@ -3650,7 +3663,10 @@ fn coverage_kind_for_scenario(scenario_id: &str) -> &'static str {
         "test-cockpit-remote-control-scaled"
     } else if scenario_id == "RC-N2N" {
         "test-cockpit-native-controller-native-host"
-    } else if scenario_id == "RC-N2N-CHROME" || scenario_id == "RC-N2N-CHROME-FORM" {
+    } else if matches!(
+        scenario_id,
+        "RC-N2N-CHROME" | "RC-N2N-CHROME-FORM" | "RC-N2N-CHROME-BUTTON"
+    ) {
         "test-cockpit-native-controller-chrome-host"
     } else if scenario_id == "RC-N2W" {
         "test-cockpit-native-controller-web-host"
@@ -9481,13 +9497,46 @@ async fn run_remote_control_native_to_chrome_scenario(
     }
     let granted = await_controller_grant(host_window_id, Duration::from_secs(15)).await;
 
+    // #404 follow-up: RC-N2N-CHROME-BUTTON covers the AxPressable route,
+    // which the host takes only when Chrome lists `AXPress` on the button.
+    // Right after the grant switches web accessibility on it may not yet; a
+    // reload rebuilds the web tree under the new mode. Never drive a run
+    // that cannot cover the route.
+    let mut ax_press_precondition = serde_json::Value::Null;
+    if shape.requires_ax_press() {
+        let started = Instant::now();
+        let mut reloaded = false;
+        let mut last: Result<bool, String>;
+        loop {
+            last = live::page_element_is_ax_pressable(chrome_pid, rc_n2n_chrome::PRESS_ELEMENT_ID);
+            if matches!(last, Ok(true)) {
+                break;
+            }
+            if !reloaded && started.elapsed() >= Duration::from_secs(2) {
+                if let Err(error) = chrome.reload_page().await {
+                    give_up!(writer, &mut child, "page", format!("reload the page so Chrome rebuilds its web tree: {error}"));
+                }
+                reloaded = true;
+            }
+            if started.elapsed() >= Duration::from_secs(12) {
+                give_up!(writer, &mut child, "ax-pressable", format!("Chrome never listed AXPress on the page button, so the host's AxPressable route cannot be covered: {last:?}"));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        ax_press_precondition = serde_json::json!({
+            "axPressable": true,
+            "reloaded": reloaded,
+            "waitedMs": started.elapsed().as_millis() as u64,
+        });
+    }
+
     // Aim the click at the field's visible text area, in shared-window
     // coordinates, from the page's own geometry.
-    let geometry = match chrome.click_geometry().await {
+    let geometry = match chrome.click_geometry(shape).await {
         Ok(geometry) => geometry,
         Err(error) => give_up!(writer, &mut child, "geometry", format!("read the field geometry: {error}")),
     };
-    let Some(click) = rc_n2n_chrome::click_permille(&geometry) else {
+    let Some(click) = rc_n2n_chrome::click_permille(shape, &geometry) else {
         give_up!(writer, &mut child, "geometry", format!("the field geometry places no click inside the window: {geometry:?}"))
     };
 
@@ -9510,6 +9559,7 @@ async fn run_remote_control_native_to_chrome_scenario(
             "omniboxBefore": omnibox_before,
             "frontmostPid": live::frontmost_pid(),
             "chromeIsFrontmost": live::frontmost_pid() == Some(chrome_pid),
+            "axPressPrecondition": ax_press_precondition,
         }),
     );
 
@@ -9620,6 +9670,9 @@ async fn run_remote_control_native_to_chrome_scenario(
         omnibox_before: &omnibox_before,
         omnibox_after: omnibox_after.as_deref().map_err(String::as_str),
         expected_text: keystone,
+        required_ax_press: shape
+            .requires_ax_press()
+            .then(|| typed_state.as_ref().ok().and_then(|state| state.press.as_ref())),
     });
     let _ = writer.write(
         "rc-n2n-chrome-evidence",

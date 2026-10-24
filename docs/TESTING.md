@@ -1325,6 +1325,7 @@ Copy request and clipboard byte-stream topic.
 ```bash
 RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME > /tmp/rc-n2n-chrome.log 2>&1 &
 RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME-FORM > /tmp/rc-n2n-chrome-form.log 2>&1 &
+RUST_LOG=info ./src-tauri/target/debug/desktop --test-case=RC-N2N-CHROME-BUTTON > /tmp/rc-n2n-chrome-button.log 2>&1 &
 ```
 
 Two page shapes, each its own scenario with its own keystone and its own
@@ -1336,6 +1337,22 @@ input or a pressable container around it:
 |---|---|---|
 | `RC-N2N-CHROME` | one bare `<input>` filling the viewport | `petalrcnative` |
 | `RC-N2N-CHROME-FORM` | an application-form field: a `<label>` wrapping a padded, bordered `role="group"` box (`tabindex=-1`, a click handler that focuses the input, an icon) containing an `<input>` with a placeholder | `petalrcwebform` |
+| `RC-N2N-CHROME-BUTTON` | a page `<button>` ("Edit full name") whose click handler focuses an `<input>` below it; the click is aimed at the button's centre | `petalrcwebbutton` |
+
+The first two shapes both land on the field's text: the host's AX hit-test
+returns the `AXTextField` and the click takes the `AxText` route, so neither
+covers the incident's `mode=AxPressable action=Press`. `RC-N2N-CHROME-BUTTON`
+does: Chrome exposes the page button as an `AXButton` with `AXPress`, so the
+host presses it over AX. Its oracle also requires that the button saw a
+click with **no** `pointerdown`/`mousedown` (an `AXPress` dispatches a bare
+click; a real session-tap or SkyLight click always starts with
+`pointerdown`), so a run whose click fell back to a real pointer reports
+INFRA-FAIL "did not cover the host's AxPressable route" instead of passing.
+Measured with a standalone AX probe on Chrome (2026-10-23): `AXPress` on that
+button moves DOM focus to the input but leaves `document.hasFocus()` false,
+and pid-posted keys then land in the address bar. The host therefore sets
+`AXFocused` on pressed Chromium page content before the press
+(`focus_chromium_page_before_press`).
 
 In both, the click is aimed at the input's visible text area (a little right
 of its left padding, at its vertical centre), computed from the page's own

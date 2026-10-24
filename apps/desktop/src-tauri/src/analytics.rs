@@ -357,6 +357,76 @@ impl RemoteControlInputKind {
     }
 }
 
+/// #404 follow-up: which host injection route delivered the input. A closed
+/// enum of route names -- never an element role, title, key or coordinate.
+/// Native host only: the web client cannot inject OS input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteControlRoute {
+    /// macOS: `AXPress` / `AXShowMenu` on a pressable element.
+    AxPressable,
+    /// macOS: `AXSelectedTextRange` caret/selection on a text element.
+    AxText,
+    /// macOS: AX scroll (scrollbar `AXValue`).
+    AxScroll,
+    /// macOS: Cmd+A/C/V serviced through AX (#170).
+    AxShortcut,
+    /// macOS: a real event on the HID session tap (moves the cursor).
+    SessionTap,
+    /// macOS: `SLEventPostToPid`.
+    SkyLight,
+    /// macOS: `CGEventPostToPid` (the keyboard route).
+    PidPost,
+    /// Windows: global `SendInput`.
+    SendInput,
+    /// Windows: `PostMessageW` into the target window.
+    PostMessage,
+    /// Windows: UI Automation invoke.
+    Uia,
+}
+
+impl RemoteControlRoute {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 10] = [
+        Self::AxPressable,
+        Self::AxText,
+        Self::AxScroll,
+        Self::AxShortcut,
+        Self::SessionTap,
+        Self::SkyLight,
+        Self::PidPost,
+        Self::SendInput,
+        Self::PostMessage,
+        Self::Uia,
+    ];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AxPressable => "ax_pressable",
+            Self::AxText => "ax_text",
+            Self::AxScroll => "ax_scroll",
+            Self::AxShortcut => "ax_shortcut",
+            Self::SessionTap => "session_tap",
+            Self::SkyLight => "skylight",
+            Self::PidPost => "pid_post",
+            Self::SendInput => "send_input",
+            Self::PostMessage => "post_message",
+            Self::Uia => "uia",
+        }
+    }
+}
+
+/// What one completed injection reported about its route. Both fields stay
+/// `None` when the injection did not say -- the event then omits them rather
+/// than guessing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemoteControlRouteReport {
+    pub(crate) route: Option<RemoteControlRoute>,
+    /// #404: an AX click on a text element also moves the app's keyboard
+    /// focus onto it. `Some(true)` = moved, `Some(false)` = the focus write
+    /// failed, `None` = not attempted (not a text click).
+    pub(crate) focus_moved: Option<bool>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeviceKind {
     Display,
@@ -449,6 +519,10 @@ enum Event {
     },
     RemoteControlInput {
         kind: RemoteControlInputKind,
+        /// The route of the input that opened this burst / completed this
+        /// click. `type`/`scroll` coalesce, so later inputs of the same burst
+        /// are not represented.
+        route: RemoteControlRouteReport,
     },
     DeviceChanged {
         kind: DeviceKind,
@@ -513,8 +587,14 @@ impl Event {
             Self::PermissionDenied { kind } => {
                 extras.insert("kind", kind.as_str());
             }
-            Self::RemoteControlInput { kind } => {
+            Self::RemoteControlInput { kind, route } => {
                 extras.insert("kind", kind.as_str());
+                if let Some(name) = route.route {
+                    extras.insert("route", name.as_str());
+                }
+                if let Some(moved) = route.focus_moved {
+                    extras.insert("focus_moved", if moved { "yes" } else { "no" });
+                }
             }
             Self::DeviceChanged { kind, change } => {
                 extras.insert("kind", kind.as_str());
@@ -1324,8 +1404,11 @@ pub(crate) fn permission_denied(kind: PermissionKind) {
     capture(Event::PermissionDenied { kind });
 }
 
-pub(crate) fn note_remote_control_applied(message: &RemoteControlMessage) {
-    note_remote_control_applied_in(&COALESCER, Instant::now(), message);
+pub(crate) fn note_remote_control_applied(
+    message: &RemoteControlMessage,
+    route: RemoteControlRouteReport,
+) {
+    note_remote_control_applied_in(&COALESCER, Instant::now(), message, route);
 }
 
 /// Split out so tests drive coalescing with their OWN state and an explicit
@@ -1337,6 +1420,7 @@ fn note_remote_control_applied_in(
     coalescer: &Mutex<InputCoalescer>,
     now: Instant,
     message: &RemoteControlMessage,
+    route: RemoteControlRouteReport,
 ) {
     let Some(classified) = classify_remote_control(message) else {
         return;
@@ -1346,7 +1430,7 @@ fn note_remote_control_applied_in(
     let Some(kind) = kind else {
         return;
     };
-    capture(Event::RemoteControlInput { kind });
+    capture(Event::RemoteControlInput { kind, route });
 }
 
 pub(crate) fn device_changed(kind: DeviceKind, change: DeviceChange) {
@@ -1486,6 +1570,7 @@ mod tests {
             },
             Event::RemoteControlInput {
                 kind: RemoteControlInputKind::Click,
+                route: RemoteControlRouteReport::default(),
             },
             Event::DeviceChanged {
                 kind: DeviceKind::Display,
@@ -1602,6 +1687,14 @@ mod tests {
             },
             Event::RemoteControlInput {
                 kind: RemoteControlInputKind::Scroll,
+                route: RemoteControlRouteReport::default(),
+            },
+            Event::RemoteControlInput {
+                kind: RemoteControlInputKind::Click,
+                route: RemoteControlRouteReport {
+                    route: Some(RemoteControlRoute::AxPressable),
+                    focus_moved: Some(true),
+                },
             },
             Event::DeviceChanged {
                 kind: DeviceKind::Mic,
@@ -1946,7 +2039,12 @@ mod tests {
         let t0 = Instant::now();
         let (_, events) = with_sink(|| {
             let at = |now: Instant, kind: &str, action: Option<&str>| {
-                note_remote_control_applied_in(&coalescer, now, &fixture(kind, action));
+                note_remote_control_applied_in(
+                    &coalescer,
+                    now,
+                    &fixture(kind, action),
+                    RemoteControlRouteReport::default(),
+                );
             };
             at(t0, "pointer", Some("move"));
             at(t0, "pointer", Some("click"));
@@ -1969,6 +2067,63 @@ mod tests {
         );
     }
 
+    /// #404 follow-up: the route of the input that emits rides on the event;
+    /// an unreported route is omitted, never sent as a guess.
+    #[test]
+    fn remote_control_input_carries_the_injection_route() {
+        let coalescer = Mutex::new(InputCoalescer::new());
+        let t0 = Instant::now();
+        let pressed = RemoteControlRouteReport {
+            route: Some(RemoteControlRoute::AxPressable),
+            focus_moved: Some(true),
+        };
+        let posted = RemoteControlRouteReport {
+            route: Some(RemoteControlRoute::PidPost),
+            focus_moved: None,
+        };
+        let (_, events) = with_sink(|| {
+            note_remote_control_applied_in(&coalescer, t0, &fixture("pointer", Some("click")), pressed);
+            note_remote_control_applied_in(&coalescer, t0, &fixture("key", Some("down")), posted);
+            note_remote_control_applied_in(
+                &coalescer,
+                t0,
+                &fixture("pointer", Some("click")),
+                RemoteControlRouteReport::default(),
+            );
+        });
+        let routes: Vec<_> = events
+            .iter()
+            .map(|event| {
+                (
+                    extra(event, "kind").to_string(),
+                    event.properties.get("route").cloned(),
+                    event.properties.get("focus_moved").cloned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            routes,
+            vec![
+                ("click".to_string(), Some("ax_pressable".to_string()), Some("yes".to_string())),
+                ("type".to_string(), Some("pid_post".to_string()), None),
+                ("click".to_string(), None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_control_route_names_are_closed_snake_case_tokens() {
+        let mut seen = std::collections::HashSet::new();
+        for route in RemoteControlRoute::ALL {
+            let name = route.as_str();
+            assert!(seen.insert(name), "duplicate route {name}");
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn a_concurrent_global_coalescer_writer_cannot_perturb_a_local_one() {
         // `remote_control.rs`'s replay worker calls the global entry point
@@ -1982,7 +2137,10 @@ mod tests {
             let stop = std::sync::Arc::clone(&stop);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    note_remote_control_applied(&fixture("key", Some("down")));
+                    note_remote_control_applied(
+                        &fixture("key", Some("down")),
+                        RemoteControlRouteReport::default(),
+                    );
                 }
             })
         };
@@ -1990,7 +2148,12 @@ mod tests {
         let coalescer = Mutex::new(InputCoalescer::new());
         let t0 = Instant::now();
         let (_, events) = with_sink(|| {
-            note_remote_control_applied_in(&coalescer, t0, &fixture("key", Some("down")));
+            note_remote_control_applied_in(
+                &coalescer,
+                t0,
+                &fixture("key", Some("down")),
+                RemoteControlRouteReport::default(),
+            );
         });
 
         stop.store(true, Ordering::Relaxed);

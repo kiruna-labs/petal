@@ -96,7 +96,7 @@ deltas.
 | `capture_restarted` | `outcome`: `recovered` \| `failed` | In-place capture restart finished. Native only today (ScreenCaptureKit). Web has no in-place restart; the function exists for lockstep and has no production call site. |
 | `reconnect` | `outcome`: `recovered` \| `failed` | LiveKit reconnect finished (not each attempt) |
 | `permission_denied` | `kind`: `screen` \| `mic` \| `camera` | User denied or lost a capture/mic/camera grant. Web screen-picker dismiss (`getDisplayMedia` `NotAllowedError`) is not this event. |
-| `remote_control_input` | `kind`: `click` \| `type` \| `paste` \| `scroll` | Host applied a coalesced remote-control input (see below). Web cannot inject OS input; the coalescer is tested but the host emulator must not emit. |
+| `remote_control_input` | `kind`: `click` \| `type` \| `paste` \| `scroll`; native host also sends `route` and, for an AX text click, `focus_moved` (see below) | Host applied a coalesced remote-control input (see below). Web cannot inject OS input; the coalescer is tested but the host emulator must not emit. |
 | `device_changed` | `kind`: `display` \| `camera` \| `mic`, `change`: `switched` \| `failed` \| `reconfigured` \| `sleep` \| `wake` | Display / webcam / mic actually changed (see below) |
 | `remote_control_latency_summary` | see [below](#remote_control_latency_summary) | One per 60 s of active remote control that produced samples, plus a final partial on stop when any stage has at least 5 samples. Empty intervals never emit. Capped at 120 per control session. Never per input. Native host only today (#370); the web client adds it with its first producer (#375). |
 | `annotation_toggled` | `state`: `on` \| `off` | #872. `draw_active` is the ONLY thing that makes the sharer overlay capture the cursor. Nothing recorded it, so a report of "I cannot click on buttons in my apps" was undiagnosable from telemetry. Emitted on a real state change only. No strokes, coordinates, or window titles. Native only today: the web client's `EVENT_NAMES` has the other twelve and does not emit this one. |
@@ -147,6 +147,20 @@ separate `down`/`up`, never key names.
 | `type` | Once per typing burst (idle ≥1s). A held-key repeat is still one burst. | `key` `down` packets the host actually delivered (#404). Never a release, a host-synthesized release, an unmapped key or a cancelled injection. |
 | `paste` | Once per paste. | `text` paste packets (#375) |
 | `scroll` | Once per wheel burst (idle ≥500ms). Not per wheel tick. | `wheel` packets |
+
+Route dimensions (native host only, #404 follow-up). They describe the input
+that emitted the event: the click itself, or the first input of a `type` /
+`scroll` burst. A route the injection did not report is omitted, never
+guessed.
+
+| Property | Values | Meaning |
+|---|---|---|
+| `route` | `ax_pressable` \| `ax_text` \| `ax_scroll` \| `ax_shortcut` \| `session_tap` \| `skylight` \| `pid_post` \| `send_input` \| `post_message` \| `uia` | Which host injection route delivered it. macOS: AX press / show-menu, AX caret or selection, AX scroll, AX-serviced Cmd+A/C/V, the HID session tap, `SLEventPostToPid`, `CGEventPostToPid`. Windows: `SendInput`, a message posted to the target window, UI Automation invoke. |
+| `focus_moved` | `yes` \| `no` | Only on an `ax_pressable` / `ax_text` click on a text element: whether the host also moved the app's keyboard focus onto it (#404). Absent when focus was not attempted. |
+
+Route names only: never an element role, title, key, text or coordinate.
+`petal.log`'s sampled `remote-control-latency: host replay complete` line
+carries the same `route=` / `focus_moved=` for every input it samples.
 
 ### `device_changed`
 
