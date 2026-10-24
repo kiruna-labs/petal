@@ -224,3 +224,63 @@ each function in `@autoreleasepool` (these run on pool-less Rust threads --
 the same hazard as this file's sibling `objc_video_frame_buffer.mm` #886
 patch). Verify with `leaks <pid>` after several share/unshare cycles: the
 `ObjCVideoEncoderFactory` roots must not accumulate.
+
+## #410: build macOS H.264 encoders with a level that fits the frame
+
+### Why
+
+The SFU answers every H.264 track with `profile-level-id=42e01f`
+(Constrained Baseline, **Level 3.1**: max frame 3600 macroblocks ~= 1280x720,
+MaxMBPS 108000). Petal encodes 1920x1080 cameras and Retina window shares up
+to 4096 px wide. libwebrtc's ObjC `RTCVideoEncoderH264` reads the level from
+the codec info it is created with and:
+
+1. clamps the encoder frame rate to `MaxMBPS*256 / (align16(w)*align16(h))`
+   -- the field logs' `Encoder frame rate setting 29 is larger than the
+   maximal allowed frame rate 5` (2560x1820 share), `13` (1080p camera),
+   `3`-`8` for other shares -- so VideoToolbox's `ExpectedFrameRate` is set
+   to 3-13 fps while it is fed 30 fps;
+2. for realtime (camera) content asks VideoToolbox for an explicit
+   `kVTProfileLevel_H264_Baseline_3_1` bitstream at ~2.3x that level's max
+   frame size (screen content already maps Baseline to AutoLevel).
+
+### The fix (buildable here, no libwebrtc rebuild)
+
+`RTCVideoEncoderH264.mm` lives inside the prebuilt libwebrtc, which is
+downloaded, not built, so it cannot be patched in place. This crate DOES
+compile `src/objc_video_factory.mm` itself, so the fix is a thin
+`PetalLevelFittingEncoderFactory` wrapped around `RTCDefaultVideoEncoderFactory`
+(the simulcast factory creates every layer's encoder through it):
+
+- `supportedCodecs` and every optional method are forwarded untouched, so the
+  SDP offer/answer is byte-for-byte what it was. The SFU codec registry (#181)
+  and browser receivers see no change in negotiation.
+- `createEncoder:` for H.264 rebuilds the codec info with the same profile and
+  level token 2.2 (`src/h264_encoder_level.cpp`,
+  `EncoderH264ProfileLevelIdFor`: `42e01f` -> `42e016`, `64001f` -> `640016`).
+  Upstream maps level <= 2.2 to `kVTProfileLevel_H264_*_AutoLevel` for every
+  profile family and to `GetMaxSampleRate() == 0` ("auto rate setting"), so
+  VideoToolbox signals the smallest level that fits the real frame size and
+  rate -- what window-share bitstreams (Baseline AutoLevel) have always carried
+  to every receiver -- and the frame-rate clamp is gone.
+- One `PETAL #410: H.264 encoder created with profile-level-id ...` WARNING
+  line per encoder creation (the app's log sink drops libwebrtc INFO).
+
+`h264_encoder_level.rs` exposes the pure helpers over cxx so the desktop
+crate's `cargo test --lib` exercises this exact C++
+(`h264_encoder_level_fits_every_published_resolution` in
+`transport/publisher.rs`), including the upstream clamp formula reproducing
+the logged 13/5/3/4 fps caps for Level 3.1.
+
+Not done: advertising Level 5.x in SDP. That would change what the SFU and
+browsers negotiate (#181 history: the SFU registry only matched plain
+profile ids) and would need a live W2N/N2W pass before it could ship. The
+negotiated `h264_profile_level_id=42e01f` in Petal's encoder-confirmation log
+line is therefore unchanged by design; the encoder-side level shows in the
+`PETAL #410` line, and the `maximal allowed frame rate` warnings must be
+absent.
+
+### Updating
+
+Drop this patch if upstream derives the level from the frame size (or stops
+clamping the frame rate from the negotiated level).
