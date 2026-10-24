@@ -5640,7 +5640,9 @@ fn handle_input_bundle(
 }
 
 /// Held input to release before a sequenced batch runs: a skipped input may
-/// have been the Up for something this controller still holds.
+/// have been the Up for something this controller still holds. A button the
+/// first input past the gap still holds (or releases itself) stays held, so a
+/// drag that lost a few moves keeps going instead of ending where it started.
 fn releases_for_sequencer_gap(
     window_id: u32,
     sender: &str,
@@ -5649,7 +5651,8 @@ fn releases_for_sequencer_gap(
     if output.skipped == 0 {
         return Vec::new();
     }
-    drain_pressed_for_controller(window_id, sender)
+    let resume = output.resume_at.and_then(|index| output.deliver.get(index));
+    drain_pressed_for_sequencer_gap(window_id, sender, resume)
 }
 
 /// Caller holds `input_bundle_delivery_fence`.
@@ -25066,6 +25069,93 @@ mod tests {
         assert_eq!(releases[0].message.action, Some(RemoteControlAction::Up));
         assert_eq!(releases[0].message.code.as_deref(), Some("KeyA"));
         assert_eq!(flushed.deliver.len(), 1, "input after the gap still runs");
+    }
+
+    #[test]
+    fn redundant_input_gap_that_loses_drag_moves_keeps_the_button_held() {
+        let ids =
+            remote_control_test_ids("redundant_input_gap_that_loses_drag_moves_keeps_the_button_held");
+        let frame = WindowFrame { x: 0, y: 0, width: 100, height: 100 };
+        let pointer = |seq: u64, action: RemoteControlAction, button: i16, buttons: u16| {
+            let mut message = test_message(
+                RemoteControlType::Pointer,
+                Some(action),
+                seq,
+                ids.window_id,
+                ids.controller_id.clone(),
+            );
+            message.button = Some(button);
+            message.buttons = Some(buttons);
+            message
+        };
+        let bundle = |stream: &str, first: u64, inputs: Vec<RemoteControlMessage>| InputBundle {
+            v: redundant::BUNDLE_VERSION,
+            kind: redundant::BUNDLE_KIND.to_string(),
+            window_id: ids.window_id,
+            stream: stream.to_string(),
+            first,
+            inputs,
+        };
+        let engine = remote_control_engine();
+        let t0 = Instant::now();
+        let flushed_gap = |stream: &str, resume: Vec<RemoteControlMessage>| {
+            let down = engine.accept_input_bundle(
+                &ids.controller_id,
+                bundle(stream, 1, vec![pointer(1, RemoteControlAction::Down, 0, 1)]),
+                t0,
+            );
+            assert_eq!(down.deliver.len(), 1);
+            track_pressed_input(&down.deliver[0], frame, Some(99));
+            // Moves rseq 2..=6 and every copy of them are lost (the case-6
+            // shape: a loaded controller's lossy sends dropped in a run).
+            engine.accept_input_bundle(&ids.controller_id, bundle(stream, 7, resume), t0);
+            let flushed = engine.flush_input_bundle_gap(
+                &ids.controller_id,
+                ids.window_id,
+                t0 + redundant::GAP_HOLD,
+            );
+            assert_eq!(flushed.skipped, 5);
+            flushed
+        };
+
+        // The first input past the gap still holds the left button: the drag
+        // goes on, and its real Up releases it where the controller let go.
+        let flushed = flushed_gap(
+            "drag-move",
+            vec![
+                pointer(7, RemoteControlAction::Move, -1, 1),
+                pointer(8, RemoteControlAction::Up, 0, 0),
+            ],
+        );
+        assert!(
+            releases_for_sequencer_gap(ids.window_id, &ids.controller_id, &flushed).is_empty(),
+            "lost drag moves must not end the drag at its press point"
+        );
+        assert!(track_pressed_input(&flushed.deliver[0], frame, Some(99)).is_empty());
+        assert!(track_pressed_input(&flushed.deliver[1], frame, Some(99)).is_empty());
+        assert!(drain_pressed_for_controller(ids.window_id, &ids.controller_id).is_empty());
+
+        // The first input past the gap is the Up itself: it releases the button.
+        let flushed = flushed_gap("drag-up", vec![pointer(7, RemoteControlAction::Up, 0, 0)]);
+        assert!(releases_for_sequencer_gap(ids.window_id, &ids.controller_id, &flushed).is_empty());
+        assert!(track_pressed_input(&flushed.deliver[0], frame, Some(99)).is_empty());
+        assert!(drain_pressed_for_controller(ids.window_id, &ids.controller_id).is_empty());
+
+        // Nothing past the gap speaks for the button: it is released as before.
+        let mut key = test_message(
+            RemoteControlType::Key,
+            Some(RemoteControlAction::Down),
+            7,
+            ids.window_id,
+            ids.controller_id.clone(),
+        );
+        key.key = Some("a".to_string());
+        key.code = Some("KeyA".to_string());
+        let flushed = flushed_gap("drag-key", vec![key]);
+        let releases = releases_for_sequencer_gap(ids.window_id, &ids.controller_id, &flushed);
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].message.action, Some(RemoteControlAction::Up));
+        assert_eq!(releases[0].message.buttons, Some(0));
     }
 
     #[test]
