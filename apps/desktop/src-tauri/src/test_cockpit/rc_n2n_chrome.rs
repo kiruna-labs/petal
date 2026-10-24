@@ -58,7 +58,8 @@ pub(crate) enum PageShape {
     /// controller types. In the #404 incident every click was `mode=AxPressable
     /// action=Press` on page buttons/links; the two shapes above both land on
     /// the field's text and take the host's AxText route instead. The page
-    /// records whether the button saw a real pointer (`pointerdown`), so a run
+    /// records whether the button saw a real-shaped pointer press (`pointerdown`
+    /// with pressure, `mousedown` with a click count), so a run
     /// that fell back to a real click cannot pass as AxPressable coverage.
     ButtonFocus,
 }
@@ -234,8 +235,8 @@ pub(crate) fn target_page_html(shape: PageShape, marker: &str) -> String {
                  spellcheck=\"false\" placeholder=\"Full name\"></main>\
                  <script>window.__petalPress = {{ clicks: 0, pointerDowns: 0, mouseDowns: 0 }};\
                  const b = document.getElementById('{press}');\
-                 b.addEventListener('pointerdown', () => window.__petalPress.pointerDowns++);\
-                 b.addEventListener('mousedown', () => window.__petalPress.mouseDowns++);\
+                 b.addEventListener('pointerdown', (e) => {{ if (e.pressure > 0) window.__petalPress.pointerDowns++; }});\
+                 b.addEventListener('mousedown', (e) => {{ if (e.detail > 0) window.__petalPress.mouseDowns++; }});\
                  b.addEventListener('click', () => {{ window.__petalPress.clicks++; \
                  document.getElementById('{id}').focus(); }});</script>",
                 id = INPUT_ELEMENT_ID,
@@ -403,9 +404,12 @@ pub(crate) struct PageState {
     pub press: Option<PressRecord>,
 }
 
-/// The button's own event counts. An AX press (`AXPress`) dispatches a
-/// click with no pointer events; a real click (session tap, SkyLight) always
-/// starts with `pointerdown`.
+/// The button's own event counts. Chrome's `AXPress` (verified on Chrome 155)
+/// does dispatch trusted `pointerdown`/`mousedown`/`click`, but shaped as a
+/// simulated click: `pointerdown.pressure == 0` and `mousedown.detail == 0`.
+/// A real click (session tap, SkyLight) presses with `pressure > 0` and a
+/// `mousedown` click count `detail >= 1`. The page counts ONLY real-shaped
+/// downs, so `pointer_downs`/`mouse_downs` > 0 means a real pointer click.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PressRecord {
@@ -1411,6 +1415,10 @@ mod tests {
         assert!(html.contains(&format!("id=\"{PRESS_ELEMENT_ID}\"")));
         assert!(html.contains(&format!("id=\"{INPUT_ELEMENT_ID}\"")));
         assert!(html.contains("addEventListener('pointerdown'"));
+        // Chrome's AXPress dispatches pointerdown/mousedown too; only a
+        // real-shaped press (pressure, click count) may count as a pointer.
+        assert!(html.contains("if (e.pressure > 0) window.__petalPress.pointerDowns++"));
+        assert!(html.contains("if (e.detail > 0) window.__petalPress.mouseDowns++"));
         assert!(html.contains(&format!("document.getElementById('{INPUT_ELEMENT_ID}').focus()")));
         assert!(!html.contains("autofocus"));
         assert_eq!(PageShape::for_scenario("RC-N2N-CHROME-BUTTON"), Some(PageShape::ButtonFocus));
