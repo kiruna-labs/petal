@@ -10,7 +10,12 @@
 # depending on GitHub Actions at all.
 #
 # Installed via `git config core.hooksPath scripts/git-hooks` (done
-# automatically by scripts/ci-local.sh; see its top). Runs the same
+# automatically by scripts/ci-local.sh; see its top). Keep that value
+# relative so each linked worktree runs its own copy.
+#
+# Test without pushing: PETAL_PRE_PUSH_DRY_RUN=1 prints the resolved root,
+# remote, base and gate decision and never runs cargo; see
+# scripts/test-pre-push-hook.sh. Runs the same
 # dev-toolchain Rust gate scripts/ci-local.sh already runs (warm target/
 # cache, fast) -- the deeper full-Xcode/no-CLT-rpath portability proof stays
 # at release-build time, matching ci-local.sh's own documented tradeoff.
@@ -20,8 +25,62 @@
 # norms, that should be rare and deliberate, not routine.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Gate the worktree being PUSHED, not the one this file happens to live in.
+# git runs hooks with the pushing worktree as cwd (and GIT_DIR set), so ask git.
+# Deriving ROOT from BASH_SOURCE is wrong whenever core.hooksPath resolves to
+# another checkout's copy (an absolute hooksPath, a worktree-scoped override):
+# the gate then builds and tests the MAIN checkout's code and passes a push it
+# never looked at. BASH_SOURCE is only the fallback for a direct invocation
+# outside any repo.
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$ROOT" ] || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+
+# $1 = remote name (or the URL, for `git push <url>`), $2 = its URL.
+PUSH_REMOTE_ARG="${1:-}"
+PUSH_URL="${2:-}"
+# Dry run: resolve and print root/base/decision, never run cargo. Used to test
+# this hook without pushing (see the PR that added it).
+DRY_RUN="${PETAL_PRE_PUSH_DRY_RUN:-0}"
+
+# The named remote being pushed to; a bare URL is mapped back to the remote
+# whose url/pushurl matches it. Empty when nothing matches.
+resolve_remote() {
+  local r
+  if [ -n "$PUSH_REMOTE_ARG" ] && git config --get "remote.$PUSH_REMOTE_ARG.url" >/dev/null 2>&1; then
+    printf '%s' "$PUSH_REMOTE_ARG"
+    return 0
+  fi
+  for r in $(git remote 2>/dev/null); do
+    if [ -n "$PUSH_URL" ] && { [ "$(git config --get "remote.$r.url" || true)" = "$PUSH_URL" ] ||
+      [ "$(git config --get "remote.$r.pushurl" || true)" = "$PUSH_URL" ]; }; then
+      printf '%s' "$r"
+      return 0
+    fi
+  done
+}
+REMOTE="$(resolve_remote)"
+
+# Base for a ref the remote does not have yet: the merge-base with the pushed
+# remote's default branch. This used to be hard-coded `origin/main`, which on a
+# checkout whose `origin` is a stale mirror with UNRELATED history (no merge
+# base) silently fell back to base=local_sha -- an empty diff, so the gate was
+# skipped for every new branch. Candidates, first hit wins: <remote>/HEAD,
+# <remote>/main, then origin/HEAD, origin/main for a push to an unknown URL.
+# Sets BASE and BASE_SOURCE (globals, so no subshell eats BASE_SOURCE).
+new_ref_base() {
+  local sha="$1" cand mb
+  for cand in ${REMOTE:+"$REMOTE/HEAD" "$REMOTE/main"} origin/HEAD origin/main; do
+    git rev-parse --verify --quiet "$cand^{commit}" >/dev/null || continue
+    mb="$(git merge-base "$sha" "$cand" 2>/dev/null || true)"
+    if [ -n "$mb" ]; then
+      BASE="$mb"
+      BASE_SOURCE="merge-base with $cand"
+      return 0
+    fi
+  done
+  return 1
+}
 
 RUST_PATHS_REGEX='^(apps/desktop/src-tauri/|contracts/|backend/|scripts/ci-local\.sh|scripts/git-hooks/)'
 ZERO_SHA=0000000000000000000000000000000000000000
@@ -33,17 +92,56 @@ touched_rust_paths=0
 # or from a checkout without the pre-commit hook.
 DENYLIST="${PETAL_FORBIDDEN_AUTHOR_EMAILS:-$HOME/.config/petal/forbidden-author-emails}"
 
+dry() { [ "$DRY_RUN" = "1" ] && printf 'pre-push dry-run: %s\n' "$*" >&2 || true; }
+dry "root=$ROOT remote_arg=${PUSH_REMOTE_ARG:-<none>} remote=${REMOTE:-<unresolved>}"
+
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$ZERO_SHA" ] && continue # deleting a ref -- nothing to verify
 
-  if [ "$remote_sha" = "$ZERO_SHA" ]; then
-    # Brand new branch/ref: diff from its merge-base with origin/main so we
-    # only look at what THIS push actually introduces, not all of history.
-    base="$(git merge-base "$local_sha" origin/main 2>/dev/null || true)"
-    [ -z "$base" ] && base="$local_sha"
-  else
+  base=""
+  BASE_SOURCE=""
+  if [ "$remote_sha" != "$ZERO_SHA" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null &&
+    git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
     base="$remote_sha"
+    BASE_SOURCE="remote tip"
+  elif [ "$remote_sha" != "$ZERO_SHA" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    # Non-fast-forward (rebased branch): old tip..new would include every main
+    # commit the rebase picked up. Use the merge-base with the remote's default
+    # branch; if there is none, the old tip (a superset, never an empty diff).
+    BASE=""
+    if new_ref_base "$local_sha"; then
+      base="$BASE"
+      BASE_SOURCE="$BASE_SOURCE (non-fast-forward)"
+    else
+      base="$remote_sha"
+      BASE_SOURCE="remote tip (non-fast-forward, no merge base)"
+    fi
+  else
+    # New ref, or an update whose remote tip was never fetched here (so
+    # `git diff` against it would fail and, with 2>/dev/null, skip the gate).
+    # Diff from the merge-base with the pushed remote's default branch so we
+    # only look at what THIS push introduces, not all of history.
+    BASE=""
+    new_ref_base "$local_sha" || true
+    base="$BASE"
   fi
+
+  if [ -z "$base" ]; then
+    # No usable base at all: fail CLOSED. Run the gate and denylist-check the
+    # commits no remote-tracking ref already has.
+    BASE_SOURCE="none found -- gating unconditionally"
+    dry "$local_ref $local_sha -> $remote_ref: base=<none> ($BASE_SOURCE)"
+    touched_rust_paths=1
+    if [ -f "$DENYLIST" ]; then
+      bad="$(git log --format='%h %ae %ce' "$local_sha" --not --remotes 2>/dev/null | grep -iFf "$DENYLIST" || true)"
+      if [ -n "$bad" ]; then
+        printf '\n\033[1;31mpre-push BLOCKED: commits authored/committed by a forbidden address (%s):\033[0m\n%s\n' "$DENYLIST" "$bad" >&2
+        exit 1
+      fi
+    fi
+    continue
+  fi
+  dry "$local_ref $local_sha -> $remote_ref: base=$base ($BASE_SOURCE)"
 
   if [ -f "$DENYLIST" ]; then
     bad="$(git log --format='%h %ae %ce' "$base..$local_sha" 2>/dev/null | grep -iFf "$DENYLIST" || true)"
@@ -60,6 +158,12 @@ while read -r local_ref local_sha remote_ref remote_sha; do
 done
 
 if [ "$touched_rust_paths" -eq 0 ]; then
+  dry "decision=skip (no Rust/contract paths in the pushed range)"
+  exit 0
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+  dry "decision=gate (would run cargo build/test in $ROOT/apps/desktop/src-tauri)"
   exit 0
 fi
 

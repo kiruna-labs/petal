@@ -174,4 +174,29 @@ await_grandchild() {
   true
 )
 
+# 8. The library works under EVERY bash this machine might pick. The shebang is
+#    `#!/usr/bin/env bash`, so the interpreter is whichever bash is first on
+#    PATH: macOS /bin/bash 3.2 or a Homebrew/MacPorts 5.x. Each has broken
+#    constructs the other accepts (5.3 rejects `${#arr[@]-0}` as a bad
+#    substitution; 3.2 treats an empty "${arr[@]}" as unbound under set -u), so
+#    exercise the empty and one-owned paths under each one found.
+BASHES=""
+for candidate in /bin/bash /opt/homebrew/bin/bash /usr/local/bin/bash /opt/local/bin/bash "$(command -v bash || true)"; do
+  [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+  real="$(cd "$(dirname "$candidate")" && pwd -P)/$(basename "$candidate")"
+  case " $BASHES " in *" $real "*) continue ;; esac
+  BASHES="$BASHES $real"
+done
+for b in $BASHES; do
+  OUTPUT="$("$b" -c 'set -euo pipefail; source "$1"; release_owned_processes' _ "$LIB" 2>&1)" \
+    || fail "$b: release with nothing owned exited non-zero: $OUTPUT"
+  grep -q "checked 0 owned + 0 descendant" <<<"$OUTPUT" \
+    || fail "$b: empty release must report the all-clear with zero counts: $OUTPUT"
+  OUTPUT="$("$b" -c 'set -euo pipefail; source "$1"; sleep 120 & own_process "$!"; release_owned_processes' _ "$LIB" 2>&1)" \
+    || fail "$b: release of one owned pid exited non-zero: $OUTPUT"
+  grep -q "checked 1 owned + 0 descendant" <<<"$OUTPUT" \
+    || fail "$b: one-owned release must report the all-clear with count 1: $OUTPUT"
+  echo "ok: owned-process cleanup sources and releases under $b ($("$b" -c 'echo $BASH_VERSION'))"
+done
+
 echo "test result: owned-process cleanup contract tests passed"
