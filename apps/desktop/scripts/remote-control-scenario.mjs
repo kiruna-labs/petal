@@ -3930,7 +3930,15 @@ try {
       // the full gate just because someone lost the wrapper's output.
       for (const line of INPUT_ONLY_SCOPE_LINES) console.log(`# ${line}`);
     }
-    console.log(`# cases=${CASES.length} targetUserId=${targetUserId} windowId=${shared.windowId}`);
+    // Debug aid: PETAL_RC_SUITE_CASES=6,7 runs only those case ids. A
+    // filtered run prints the filter so it can never be quoted as the full gate.
+    const caseFilter = String(process.env.PETAL_RC_SUITE_CASES || '')
+      .split(',')
+      .map((id) => Number(id.trim()))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    const selectedCases = caseFilter.length ? CASES.filter((testCase) => caseFilter.includes(testCase.id)) : CASES;
+    if (caseFilter.length) console.log(`# FILTERED RUN (PETAL_RC_SUITE_CASES=${caseFilter.join(',')}) -- not the full gate`);
+    console.log(`# cases=${selectedCases.length} targetUserId=${targetUserId} windowId=${shared.windowId}`);
 
     const ctx = {
       client,
@@ -3953,7 +3961,7 @@ try {
     const terminalDeliveries = [];
     // #580: tokenless drops are counted from the host log written by THIS run.
     const hostLogStartOffset = petalLogSize();
-    for (const testCase of CASES) {
+    for (const testCase of selectedCases) {
       textEditWedged = false;
       const result = await runCase(ctx, testCase);
       terminalDeliveries.push(...await collectTerminalDeliveries(ctx));
