@@ -8,7 +8,8 @@
 //     [--sender-log <petal log>] [--json <out.json>] [--markdown <out.md>]
 //
 // REPORT-ONLY: prints a verdict line ("would fail" when any viewer shows a
-// presented-frame gap over GAP_FAIL_MS or a 16 s window under 24 fps), but
+// presented-frame gap over GAP_FAIL_MS, a 16 s window decoding under
+// LOW_DECODED_FPS, or a concurrent share stalling >= 5 s), but
 // always exits 0 unless the raw file is unusable (exit 2).
 import fs from 'node:fs';
 import process from 'node:process';
@@ -16,6 +17,10 @@ import process from 'node:process';
 export const GAP_FAIL_MS = 1000;
 export const WINDOW_MS = 16_000;
 export const LOW_FPS = 24;
+// Decoder-side floor for a 16 s window. The rVFC rate of a headless viewer on
+// the 8-CPU VM sits at 23-25 fps even for a clean 30 fps stream, so the verdict
+// uses the receiver's own framesDecoded rate (the field camera-health signal).
+export const LOW_DECODED_FPS = 20;
 
 function parseArgs(argv) {
   const args = {};
@@ -54,6 +59,14 @@ export function summarizeViewer(record, startMs, endMs) {
     const d = `${f[2]}x${f[3]}`;
     if (frameDims[frameDims.length - 1] !== d) frameDims.push(d);
   }
+  const decodedWindows = [];
+  for (let w = startMs; w + WINDOW_MS <= endMs; w += WINDOW_MS) {
+    const inWindow = stats.filter((s) => s.t >= w && s.t <= w + WINDOW_MS);
+    if (inWindow.length < 2) continue;
+    const a = inWindow[0];
+    const b = inWindow[inWindow.length - 1];
+    decodedWindows.push(Math.round(((b.framesDecoded - a.framesDecoded) / ((b.t - a.t) / 1000)) * 10) / 10);
+  }
   const avail = stats.map((s) => s.availInKbps).filter((v) => typeof v === 'number');
   return {
     label: record.label,
@@ -66,6 +79,9 @@ export function summarizeViewer(record, startMs, endMs) {
     frozenMs: Math.round(gaps.filter((g) => g > 200).reduce((sum, g) => sum + g - 33, 0)),
     windowsFps: windows,
     windowsUnder24: windows.filter((f) => f < LOW_FPS).length,
+    decodedFps: deltas.framesDecoded !== undefined ? Math.round((deltas.framesDecoded / (spanMs / 1000)) * 10) / 10 : null,
+    decodedWindowsFps: decodedWindows,
+    decodedWindowsLow: decodedWindows.filter((f) => f < LOW_DECODED_FPS).length,
     statDeltas: deltas,
     statDims: dims,
     presentedDims: frameDims,
@@ -190,7 +206,7 @@ function main() {
     report.share = raw.withShare ? raw.viewers.map((v) => summarizeShare(v, startMs, endMs, raw.shareStaticMs)) : [];
   }
   if (args['sender-log'] && fs.existsSync(args['sender-log'])) report.senderLog = scanSenderLog(fs.readFileSync(args['sender-log'], 'utf8'));
-  const failing = report.viewers.filter((v) => v.gapsOver1000 > 0 || v.windowsUnder24 > 0);
+  const failing = report.viewers.filter((v) => v.gapsOver1000 > 0 || v.decodedWindowsLow > 0);
   const shareStalled = (report.share ?? []).filter((v) => v && v.stallsOver5s > 0);
   report.verdict = report.infra.length || !report.viewers.length ? 'INFRA-INVALID' : failing.length || shareStalled.length ? 'WOULD-FAIL' : 'PASS';
 
@@ -199,10 +215,10 @@ function main() {
   lines.push('');
   lines.push(`measured ${Math.round(report.measuredMs / 1000)} s, with share: ${report.withShare}, host macOS ${raw.host?.macos}`);
   lines.push('');
-  lines.push('| viewer | fps | gaps >500ms | gaps >1s | max gap ms | frozen ms | 16s windows <24fps | PLI | FIR | keyframes | dims (stats) |');
+  lines.push('| viewer | presented fps | decoded fps | gaps >500ms | gaps >1s | max gap ms | 16s windows decoded <20fps | PLI | FIR | keyframes | dims (stats) |');
   lines.push('|---|---|---|---|---|---|---|---|---|---|---|');
   for (const v of report.viewers) {
-    lines.push(`| ${v.label} | ${v.fps} | ${v.gapsOver500} | ${v.gapsOver1000} | ${v.maxGapMs} | ${v.frozenMs} | ${v.windowsUnder24}/${v.windowsFps.length} | ${v.statDeltas.pliCount ?? '?'} | ${v.statDeltas.firCount ?? '?'} | ${v.statDeltas.keyFramesDecoded ?? '?'} | ${v.statDims.join(' > ')} |`);
+    lines.push(`| ${v.label} | ${v.fps} | ${v.decodedFps} | ${v.gapsOver500} | ${v.gapsOver1000} | ${v.maxGapMs} | ${v.decodedWindowsLow}/${v.decodedWindowsFps.length} | ${v.statDeltas.pliCount ?? '?'} | ${v.statDeltas.firCount ?? '?'} | ${v.statDeltas.keyFramesDecoded ?? '?'} | ${v.statDims.join(' > ')} |`);
   }
   if (report.share?.some(Boolean)) {
     lines.push('');
