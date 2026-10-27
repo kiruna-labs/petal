@@ -1861,6 +1861,15 @@ impl SessionInner {
                 )?;
             }
 
+            // Petal patch: a caller-chosen preference for any other source
+            // (the camera pins MAINTAIN_RESOLUTION on macOS, #456).
+            #[cfg(not(target_arch = "wasm32"))]
+            if options.source != TrackSource::Screenshare {
+                if let Some(preference) = options.degradation_preference {
+                    transceiver.sender().set_degradation_preference(preference)?;
+                }
+            }
+
             transceiver.sender().set_video_encoder_backend(options.video_encoder);
 
             let capabilities = LkRuntime::instance().pc_factory().get_rtp_sender_capabilities(
