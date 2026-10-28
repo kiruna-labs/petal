@@ -79,6 +79,7 @@ use livekit::prelude::*;
 use livekit::webrtc::video_frame::native::NativeBuffer;
 use livekit::webrtc::video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::native::NativeVideoSource;
+use livekit::webrtc::rtp_parameters::DegradationPreference;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use tokio_util::sync::CancellationToken;
 
@@ -2539,6 +2540,7 @@ impl RoomConnection<Arc<Room>> {
         // Captured before `publish_track` consumes `publish_opts`; the startup
         // allocation floor's release task below needs the applied value.
         let startup_floor_bps = publish_opts.min_bitrate;
+        let degradation_preference = publish_opts.degradation_preference;
         let configured_bitrate = publish_opts
             .video_encoding
             .as_ref()
@@ -2554,7 +2556,7 @@ impl RoomConnection<Arc<Room>> {
             .await?;
 
         log::info!(
-            "Published camera track '{track_name}' {width}x{height} (H.264, content type: {} (is_screencast={CAMERA_SOURCE_IS_SCREENCAST}), requested encoder: {requested_encoder:?}, max bitrate: {} kbps, max fps: {}, startup floor: {} kbps)",
+            "Published camera track '{track_name}' {width}x{height} (H.264, content type: {} (is_screencast={CAMERA_SOURCE_IS_SCREENCAST}), requested encoder: {requested_encoder:?}, max bitrate: {} kbps, max fps: {}, startup floor: {} kbps, degradation: {degradation_preference:?})",
             video_content_type_label(CAMERA_SOURCE_IS_SCREENCAST),
             configured_bitrate.unwrap_or_default() / 1000,
             configured_framerate.unwrap_or_default(),
@@ -2659,6 +2661,20 @@ fn validate_video_toolbox_h264_size(width: u32, height: u32) -> Result<(), RoomC
 /// froze the camera into a keyframe-per-PLI loop (#313).
 const CAMERA_SOURCE_IS_SCREENCAST: bool = false;
 
+/// The camera sender's RTP degradation preference. macOS pins
+/// MAINTAIN_RESOLUTION: under libwebrtc's realtime default (MAINTAIN_FRAMERATE)
+/// the initial frame dropper and quality scaler resize the camera, and every
+/// resize re-creates the VideoToolbox encoder -- a keyframe and a frame gap
+/// each time, which receivers saw as repeated freezes from 0.9.31 (#456).
+/// Windows keeps the default so the camera can step down under a share (#313).
+fn camera_degradation_preference() -> Option<DegradationPreference> {
+    if cfg!(target_os = "macos") {
+        Some(DegradationPreference::MaintainResolution)
+    } else {
+        None
+    }
+}
+
 fn camera_video_source(width: u32, height: u32) -> NativeVideoSource {
     NativeVideoSource::new(VideoResolution { width, height }, CAMERA_SOURCE_IS_SCREENCAST)
 }
@@ -2714,6 +2730,7 @@ fn camera_publish_options(width: u32, height: u32, frame_rate: f64) -> TrackPubl
         simulcast: false,
         simulcast_layers: None,
         min_bitrate: startup_allocation_floor(|| camera_min_bitrate_bps(encoding.max_bitrate)),
+        degradation_preference: camera_degradation_preference(),
         video_encoding: Some(encoding),
         frame_metadata_features: {
             let mut f = livekit::options::FrameMetadataFeatures::default();
@@ -6530,6 +6547,26 @@ mod track_name_tests {
         assert!(!CAMERA_SOURCE_IS_SCREENCAST);
         assert_eq!(video_content_type_label(CAMERA_SOURCE_IS_SCREENCAST), "realtime-video");
         assert_eq!(video_content_type_label(true), "screen");
+    }
+
+    #[test]
+    fn camera_holds_its_resolution_on_macos_and_may_step_down_on_windows() {
+        // #456: a realtime camera on macOS was resized by the initial frame
+        // dropper and quality scaler, re-creating the VideoToolbox encoder on
+        // every step. #313: Windows must still be able to step down.
+        let options = camera_publish_options(1280, 720, 30.0);
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                options.degradation_preference,
+                Some(DegradationPreference::MaintainResolution)
+            );
+        } else {
+            assert_eq!(options.degradation_preference, None);
+        }
+        // The content type stays realtime video either way.
+        assert!(!CAMERA_SOURCE_IS_SCREENCAST);
+        // Screen shares are configured by the SDK's screenshare branch, not here.
+        assert_eq!(full_share_publish_options(1920, 1080).degradation_preference, None);
     }
 
     #[test]
