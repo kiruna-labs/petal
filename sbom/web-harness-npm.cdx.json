@@ -874,17 +874,17 @@
       "version": "1.0.1"
     },
     {
-      "bom-ref": "@sentry/browser@11.6.0",
+      "bom-ref": "@sentry/browser@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/browser/-/browser-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/browser/-/browser-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ce4a9421b45cf4708132ca0bebb1ce02be8f49f373252330e09872b421ee0d9e4eecab8ec3080110d1a1561de6af9963d83e3b061bf4d4ca7008930fdf206765"
+          "content": "b810b5936112644ac7bfe45f1baa7db221ebb71bfe404ac3c4bfe3bc40599e8315e8e716759c964c629caab5bb123c250625a4815bded56ef3f2d3430ee550c7"
         }
       ],
       "licenses": [
@@ -895,23 +895,23 @@
         }
       ],
       "name": "@sentry/browser",
-      "purl": "pkg:npm/%40sentry/browser@11.6.0",
+      "purl": "pkg:npm/%40sentry/browser@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/browser-utils@11.6.0",
+      "bom-ref": "@sentry/browser-utils@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/browser-utils/-/browser-utils-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/browser-utils/-/browser-utils-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b38ceeb84ef534e45fc8d77a7224b6effa3deea81fbbbd2a0d174f0a42caf1439cb35444b1a0103e09af3414800d1626e1e785c167a32810902a32f990eccbab"
+          "content": "b53a899a77ee25a432f4bc889c2589b49d0bf959ceabe2fdfa54cc9101fea69b57040b877dd272125d88846a8ee109ac7cac99a476b61957771caa4442c5587a"
         }
       ],
       "licenses": [
@@ -922,23 +922,23 @@
         }
       ],
       "name": "@sentry/browser-utils",
-      "purl": "pkg:npm/%40sentry/browser-utils@11.6.0",
+      "purl": "pkg:npm/%40sentry/browser-utils@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/conventions@0.26.0",
+      "bom-ref": "@sentry/conventions@0.27.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/conventions/-/conventions-0.26.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/conventions/-/conventions-0.27.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b6d4917282dfda4204343205cc7d7668969531dc6789d3182ef54dc045ff2635df5da428b7cbb9338ed09a000538e8552789d0dae53cc130a1f9fc123ebac27e"
+          "content": "32ba9dfe8ee7ff3eea59261f41003bc787c54c0d08a8e1ba24db1b0699c2f7b9213f0664ee7e833ed38eed881a62995297c47c40b45b073f57bf6955853a1202"
         }
       ],
       "licenses": [
@@ -949,23 +949,23 @@
         }
       ],
       "name": "@sentry/conventions",
-      "purl": "pkg:npm/%40sentry/conventions@0.26.0",
+      "purl": "pkg:npm/%40sentry/conventions@0.27.0",
       "scope": "required",
       "type": "library",
-      "version": "0.26.0"
+      "version": "0.27.0"
     },
     {
-      "bom-ref": "@sentry/core@11.6.0",
+      "bom-ref": "@sentry/core@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/core/-/core-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/core/-/core-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "3db2134f591f258289892f5f1f866d39cc0838d2b2b7eb54b136523ed7008cf7645033b330a4fad4c9146b565ed3b57336d2c02d3db865d50e73a77d2b862828"
+          "content": "e0c553b6193a0bfd684058db5487f2807c8d931d9819bc0d2e69749098e2d2f8c95f2e99365b3dcdd229d054c14e2e1edf5f3d21c49ce4e5c3e2a70976611e28"
         }
       ],
       "licenses": [
@@ -976,23 +976,23 @@
         }
       ],
       "name": "@sentry/core",
-      "purl": "pkg:npm/%40sentry/core@11.6.0",
+      "purl": "pkg:npm/%40sentry/core@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/feedback@11.6.0",
+      "bom-ref": "@sentry/feedback@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/feedback/-/feedback-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/feedback/-/feedback-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "579dbff9290c70f76595d1313c2f53592dac67e082fbc052cef55b46d910c6fcbe8d339714025f2276952cf00056df16e166cfc3d880c55333c0719a6769ae07"
+          "content": "b7c312a5b3e839c3ce932c1cbf41f087dec0f368d61598eee4d53f6baa479a7da928592d8028271ca347be5629f1051a0cd6228d8a4bbf9f0d20ce4383b6f2ec"
         }
       ],
       "licenses": [
@@ -1003,23 +1003,23 @@
         }
       ],
       "name": "@sentry/feedback",
-      "purl": "pkg:npm/%40sentry/feedback@11.6.0",
+      "purl": "pkg:npm/%40sentry/feedback@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/replay@11.6.0",
+      "bom-ref": "@sentry/replay@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/replay/-/replay-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/replay/-/replay-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "709c8f62717a40903c00345f016d3a62853b11521e6ed59ecc138253d55a839f96d552c191712f1fb0b82db78c5220e6aeac3ddacba6ab4e8d82a8a923103b04"
+          "content": "d235cc2ddf57081119e6dbb45496b5ba3d47602a6c8ee3636c4061179a54c38147c881f9873d355ae236d121f60add293f59b2913cc92cf1a367cb1488098c9d"
         }
       ],
       "licenses": [
@@ -1030,23 +1030,23 @@
         }
       ],
       "name": "@sentry/replay",
-      "purl": "pkg:npm/%40sentry/replay@11.6.0",
+      "purl": "pkg:npm/%40sentry/replay@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/replay-canvas@11.6.0",
+      "bom-ref": "@sentry/replay-canvas@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/replay-canvas/-/replay-canvas-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/replay-canvas/-/replay-canvas-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "711ba20bc37dc570e868a103a4c3d10ed98602bd06d98331d66d89ae7ae64e732df73fd570828dc1a8944534d6f16f2ef7afd1c9141f7e5307600457ec51bc61"
+          "content": "fcc8a2bc72dd0efde8b79b8999670f8483ae6de739e213dde14fdcd8e139a0dca1337ceb77f4ba6f61447f091efd5d76d1018475972ecc66adc0d2768cd4a481"
         }
       ],
       "licenses": [
@@ -1057,10 +1057,10 @@
         }
       ],
       "name": "@sentry/replay-canvas",
-      "purl": "pkg:npm/%40sentry/replay-canvas@11.6.0",
+      "purl": "pkg:npm/%40sentry/replay-canvas@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
       "bom-ref": "@sveltejs/acorn-typescript@1.0.13",
@@ -1572,17 +1572,17 @@
       "version": "5.9.4"
     },
     {
-      "bom-ref": "dotenv@18.0.7",
+      "bom-ref": "dotenv@18.0.8",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/dotenv/-/dotenv-18.0.7.tgz"
+          "url": "https://registry.npmjs.org/dotenv/-/dotenv-18.0.8.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "404bcc105f1c6b718d64926701b3a0c698f950b841be731c511a7e5caaedbea14d3e08c1bd8a2cc10d0997670eec9cc28f1663261afd66e204865ad1c4c7edfd"
+          "content": "d8a0dea05a0aff346d7276ee9c20e52c6e5559531ccaa79073a88aeb9a36df59df34072e1ab2a8a9441f24552d048f90952864e472881f1c1e6c1b54977ac47c"
         }
       ],
       "licenses": [
@@ -1599,10 +1599,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/dotenv@18.0.7",
+      "purl": "pkg:npm/dotenv@18.0.8",
       "scope": "optional",
       "type": "library",
-      "version": "18.0.7"
+      "version": "18.0.8"
     },
     {
       "bom-ref": "esm-env@1.2.2",
@@ -2220,17 +2220,17 @@
       "version": "1.33.0"
     },
     {
-      "bom-ref": "livekit-client@2.22.4",
+      "bom-ref": "livekit-client@2.23.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/livekit-client/-/livekit-client-2.22.4.tgz"
+          "url": "https://registry.npmjs.org/livekit-client/-/livekit-client-2.23.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "509e4af20a8ff2e20efad8e119e17eb3a4b380b7f164a3f14234aacf3905dbdf1035832785899719044c321dc69ec7da7acc27b071cc4a880c79bed2a1c1f6cf"
+          "content": "8fd2a0f3a9c98c18cd1540feba4a768f030219ad24f980f9814fff47300cf99637a5b1badf5402b5eedf423c2a58c9ad07384324bf67298b8e2ccbfff486c0c6"
         }
       ],
       "licenses": [
@@ -2241,10 +2241,10 @@
         }
       ],
       "name": "livekit-client",
-      "purl": "pkg:npm/livekit-client@2.22.4",
+      "purl": "pkg:npm/livekit-client@2.23.0",
       "scope": "required",
       "type": "library",
-      "version": "2.22.4"
+      "version": "2.23.0"
     },
     {
       "bom-ref": "livekit-server-sdk@2.19.1",
@@ -2910,17 +2910,17 @@
       "version": "5.57.2"
     },
     {
-      "bom-ref": "svelte-check@4.7.6",
+      "bom-ref": "svelte-check@4.7.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/svelte-check/-/svelte-check-4.7.6.tgz"
+          "url": "https://registry.npmjs.org/svelte-check/-/svelte-check-4.7.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b76b1c33ffd9b956d263f4f6c3a152070d6ff6cd8d12687f83eb32d65aada2c5b9ca5055e40178c056f54ecf4a7f731b7cf0d40c90d9f4be37e984f448f4ddbf"
+          "content": "19ed8831d793a5b26eccd14646288c83445681b49ccac290bbbc70732149db6f8353d1799cf5f9d7e437807986a91c5840cc76927ade556b79a02b5f7b4bdfda"
         }
       ],
       "licenses": [
@@ -2937,10 +2937,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/svelte-check@4.7.6",
+      "purl": "pkg:npm/svelte-check@4.7.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.7.6"
+      "version": "4.7.7"
     },
     {
       "bom-ref": "tinyglobby@0.2.17",
@@ -4176,22 +4176,22 @@
   "dependencies": [
     {
       "dependsOn": [
-        "@sentry/browser@11.6.0",
+        "@sentry/browser@11.8.0",
         "@userdispatch/sdk@1.0.1",
-        "livekit-client@2.22.4",
+        "livekit-client@2.23.0",
         "@noble/ed25519@3.2.0",
         "@noble/hashes@2.4.0",
         "@sveltejs/vite-plugin-svelte@7.3.1",
         "@types/node@26.6.5",
-        "dotenv@18.0.7",
+        "dotenv@18.0.8",
         "livekit-server-sdk@2.19.1",
         "svelte@5.57.2",
-        "svelte-check@4.7.6",
+        "svelte-check@4.7.7",
         "tsx@4.23.15",
         "typescript@6.0.3",
         "vite@8.3.4"
       ],
-      "ref": "web-harness@0.9.33"
+      "ref": "web-harness@0.9.34"
     },
     {
       "dependsOn": [],
@@ -4314,52 +4314,52 @@
     },
     {
       "dependsOn": [
-        "@sentry/browser-utils@11.6.0",
-        "@sentry/conventions@0.26.0",
-        "@sentry/core@11.6.0",
-        "@sentry/feedback@11.6.0",
-        "@sentry/replay@11.6.0",
-        "@sentry/replay-canvas@11.6.0"
+        "@sentry/browser-utils@11.8.0",
+        "@sentry/conventions@0.27.0",
+        "@sentry/core@11.8.0",
+        "@sentry/feedback@11.8.0",
+        "@sentry/replay@11.8.0",
+        "@sentry/replay-canvas@11.8.0"
       ],
-      "ref": "@sentry/browser@11.6.0"
+      "ref": "@sentry/browser@11.8.0"
     },
     {
       "dependsOn": [
-        "@sentry/conventions@0.26.0",
-        "@sentry/core@11.6.0",
+        "@sentry/conventions@0.27.0",
+        "@sentry/core@11.8.0",
         "web-vitals@6.2.3"
       ],
-      "ref": "@sentry/browser-utils@11.6.0"
+      "ref": "@sentry/browser-utils@11.8.0"
     },
     {
       "dependsOn": [],
-      "ref": "@sentry/conventions@0.26.0"
+      "ref": "@sentry/conventions@0.27.0"
     },
     {
       "dependsOn": [
-        "@sentry/conventions@0.26.0"
+        "@sentry/conventions@0.27.0"
       ],
-      "ref": "@sentry/core@11.6.0"
+      "ref": "@sentry/core@11.8.0"
     },
     {
       "dependsOn": [
-        "@sentry/core@11.6.0"
+        "@sentry/core@11.8.0"
       ],
-      "ref": "@sentry/feedback@11.6.0"
+      "ref": "@sentry/feedback@11.8.0"
     },
     {
       "dependsOn": [
-        "@sentry/browser-utils@11.6.0",
-        "@sentry/core@11.6.0"
+        "@sentry/browser-utils@11.8.0",
+        "@sentry/core@11.8.0"
       ],
-      "ref": "@sentry/replay@11.6.0"
+      "ref": "@sentry/replay@11.8.0"
     },
     {
       "dependsOn": [
-        "@sentry/core@11.6.0",
-        "@sentry/replay@11.6.0"
+        "@sentry/core@11.8.0",
+        "@sentry/replay@11.8.0"
       ],
-      "ref": "@sentry/replay-canvas@11.6.0"
+      "ref": "@sentry/replay-canvas@11.8.0"
     },
     {
       "dependsOn": [
@@ -4442,7 +4442,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "dotenv@18.0.7"
+      "ref": "dotenv@18.0.8"
     },
     {
       "dependsOn": [],
@@ -4553,7 +4553,7 @@
         "typed-emitter@2.1.0",
         "webrtc-adapter@9.0.6"
       ],
-      "ref": "livekit-client@2.22.4"
+      "ref": "livekit-client@2.23.0"
     },
     {
       "dependsOn": [
@@ -4700,7 +4700,7 @@
         "picocolors@1.1.1",
         "sade@1.8.1"
       ],
-      "ref": "svelte-check@4.7.6"
+      "ref": "svelte-check@4.7.7"
     },
     {
       "dependsOn": [
@@ -4905,7 +4905,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "web-harness@0.9.33",
+      "bom-ref": "web-harness@0.9.34",
       "description": "Petal browser client",
       "licenses": [
         {
@@ -4921,10 +4921,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/web-harness@0.9.33",
+      "purl": "pkg:npm/web-harness@0.9.34",
       "scope": "required",
       "type": "library",
-      "version": "0.9.33"
+      "version": "0.9.34"
     },
     "lifecycles": [
       {

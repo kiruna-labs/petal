@@ -1379,7 +1379,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.9.33"
+version = "0.9.34"
 dependencies = [
  "base64 0.23.1",
  "block2",
