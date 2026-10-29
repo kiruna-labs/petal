@@ -1054,16 +1054,13 @@ pub(crate) async fn ensure_camera_published(
 
     let event = match outcome {
         CameraHealOutcome::Published => {
-            // A stop/leave can land between the winning attempt and this
-            // emit (the control lock serializes the operations, not the
-            // reporting) — never announce a publish that is already gone.
-            if !state.camera_publishing() || !state.camera_intent() {
-                return;
-            }
-            CameraPublishStateEvent {
-                publishing: true,
-                error: None,
-            }
+            announce_heal_published(
+                state,
+                || state.camera_publishing() && state.camera_intent(),
+                || emit_camera_publish_state(app, true, None),
+            )
+            .await;
+            return;
         }
         CameraHealOutcome::Cancelled => return,
         CameraHealOutcome::TerminalFailure(error) => {
@@ -1085,6 +1082,23 @@ pub(crate) async fn ensure_camera_published(
         }
     };
     emit_camera_publish_state(app, event.publishing, event.error);
+}
+
+/// #461: check-and-announce a heal's publish UNDER the control lock. Checked
+/// outside it, a stop queued behind the winning attempt ran after the check,
+/// so the UI was told ON for a camera torn down in the same millisecond and
+/// stayed ON with nothing published. Returns whether it announced.
+async fn announce_heal_published(
+    state: &crate::session::SessionState,
+    still_live: impl FnOnce() -> bool,
+    announce: impl FnOnce(),
+) -> bool {
+    let _control = state.lock_camera_control().await;
+    if !still_live() {
+        return false;
+    }
+    announce();
+    true
 }
 
 /// #713: camera reconnect publication repair, wiring real LiveKit calls into
@@ -1449,6 +1463,10 @@ pub(crate) async fn stop_camera_publish_intent(
     let _control = state.lock_camera_control().await;
     state.set_camera_intent(false);
     stop_camera_publish(app, state).await;
+    // #461: every surface showing ON (meeting route, popover) must drop it.
+    // `camera-intent-changed` alone reaches only Settings. Not in
+    // `stop_camera_publish`, so a device switch's stop/start doesn't flicker.
+    emit_camera_publish_state(app, false, None);
 }
 
 /// Real camera publish/intent snapshot — lets a (re)mounting UI surface
@@ -1606,6 +1624,60 @@ mod tests {
             state.camera_intent(),
             "a successful heal must NOT clear the user's intent"
         );
+    }
+
+    /// #461 (petal.log.2026-10-29): a stop queued on the control lock while
+    /// the heal's winning attempt holds it must win the report. The old
+    /// unlocked check ran before the stop was polled and announced ON; the
+    /// stop then tore the camera down, leaving the UI ON with nothing sent.
+    #[tokio::test]
+    async fn camera_heal_does_not_announce_a_publish_a_queued_stop_tears_down() {
+        let state = Arc::new(crate::session::SessionState::default());
+        state.set_camera_intent(true);
+        let generation = state.begin_room_generation();
+        let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+        let stop_state = state.clone();
+        let stop_events = events.clone();
+        let stop = Arc::new(Mutex::new(None::<tokio::task::JoinHandle<()>>));
+        let outcome = drive_camera_publish_attempts(
+            &state,
+            &generation,
+            &[Duration::ZERO],
+            || {
+                let attempt_state = state.clone();
+                let stop_state = stop_state.clone();
+                let stop_events = stop_events.clone();
+                let stop = stop.clone();
+                async move {
+                    let _control = attempt_state.lock_camera_control().await;
+                    // The user's stop arrives mid-attempt and queues on the lock
+                    // exactly as `stop_camera_publish_intent` does.
+                    *stop.lock_unpoisoned() = Some(tokio::spawn(async move {
+                        let _control = stop_state.lock_camera_control().await;
+                        stop_state.set_camera_intent(false);
+                        stop_events.lock_unpoisoned().push("publishing:false");
+                    }));
+                    tokio::task::yield_now().await;
+                    Ok(())
+                }
+            },
+            |_d| async {},
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Published);
+
+        let announced = announce_heal_published(
+            &state,
+            || state.camera_intent(),
+            || events.lock_unpoisoned().push("publishing:true"),
+        )
+        .await;
+        let stop = stop.lock_unpoisoned().take().expect("stop was queued");
+        stop.await.expect("stop task");
+
+        assert!(!announced, "a publish torn down by a queued stop must not be announced");
+        assert_eq!(*events.lock_unpoisoned(), vec!["publishing:false"]);
     }
 
     /// Turning the camera off mid-heal (the user's newest action) must
