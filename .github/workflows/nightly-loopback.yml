@@ -1441,6 +1441,13 @@ jobs:
           cat "$LOG_DIR/camera-freeze-summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           echo "==> camera-freeze soak finished (REPORT-ONLY)"
 
+      # A step timeout SIGKILLs bash before its EXIT trap runs; never leave the
+      # pf/dummynet uplink cap on the shared runner.
+      - name: Remove the uplink cap
+        if: always() && inputs.camera_soak_uplink_kbps != ''
+        shell: bash
+        run: bash .camsoak-harness/scripts/ci/uplink-cap.sh off || echo "::warning::uplink cap teardown failed"
+
       - name: Scrub the deployment-protection bypass secret from artifacts
         if: always()
         env:

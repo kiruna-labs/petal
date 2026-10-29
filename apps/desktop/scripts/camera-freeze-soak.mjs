@@ -583,4 +583,6 @@ try {
   for (const problem of raw.fatal) console.log(`::error::camera-freeze soak: ${problem}`);
   if (raw.infra.length || raw.fatal.length) exitCode = 2;
 }
-process.exitCode = exitCode;
+// An early infra return skips client.close(); the open autotest socket would
+// keep Node alive until the step's 35-minute timeout. Exit explicitly.
+process.exit(exitCode);
