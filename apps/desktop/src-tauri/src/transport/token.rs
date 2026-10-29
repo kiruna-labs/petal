@@ -79,6 +79,16 @@ pub struct BackendTokenResponse {
 }
 
 pub fn backend_base_url() -> Result<String, TokenError> {
+    backend_base_url_source()
+        .0
+        .ok_or(TokenError::MissingEnv("PETAL_BACKEND_URL"))
+}
+
+/// Resolve the token-server origin and say where it came from (#310).
+/// Runtime `PETAL_BACKEND_URL` wins (including an explicit empty value, which
+/// is the local-mint opt-out). Then the Settings override, then the URL
+/// baked at compile time. A source build still has no hosted default.
+pub fn backend_base_url_source() -> (Option<String>, String) {
     // Both the runtime env lookup AND the compile-time `option_env!` fallback
     // must filter out an empty-but-set value the same way. `option_env!`
     // bakes in whatever was present in the environment of whichever build
@@ -90,19 +100,35 @@ pub fn backend_base_url() -> Result<String, TokenError> {
     // produce a schemeless `/api/token` URL (reqwest "builder error") instead
     // of correctly falling back to the local dev token mint.
     // An explicitly empty runtime value is a deliberate local-LiveKit opt-out
-    // and must suppress the build-time default. An absent runtime value falls
-    // back to the URL baked by build.rs.
-    let raw = match std::env::var("PETAL_BACKEND_URL") {
-        Ok(value) if value.trim().is_empty() => {
-            return Err(TokenError::MissingEnv("PETAL_BACKEND_URL"));
+    // and must suppress the build-time default AND the Settings override.
+    // An absent runtime value falls through to Settings, then the bake.
+    match std::env::var("PETAL_BACKEND_URL") {
+        Ok(value) if value.trim().is_empty() => return (None, "none".to_string()),
+        Ok(value) => {
+            if let Some(origin) = crate::server_settings::normalize_runtime_backend_origin(&value) {
+                return (Some(origin), "env".to_string());
+            }
+            let trimmed = value.trim().trim_end_matches('/').to_string();
+            if !trimmed.is_empty() {
+                return (Some(trimmed), "env".to_string());
+            }
+            return (None, "none".to_string());
         }
-        Ok(value) => Some(value),
-        Err(_) => option_env!("PETAL_BACKEND_URL")
-            .map(str::to_string)
-            .filter(|value| !value.trim().is_empty()),
+        Err(_) => {}
     }
-    .ok_or(TokenError::MissingEnv("PETAL_BACKEND_URL"))?;
-    Ok(raw.trim().trim_end_matches('/').to_string())
+    if let Some(origin) = crate::server_settings::backend_url() {
+        return (Some(origin), "settings".to_string());
+    }
+    match option_env!("PETAL_BACKEND_URL")
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(raw) => {
+            let trimmed = raw.trim().trim_end_matches('/').to_string();
+            (Some(trimmed), "build".to_string())
+        }
+        None => (None, "none".to_string()),
+    }
 }
 
 pub async fn fetch_access_token(
@@ -324,6 +350,7 @@ mod tests {
     #[test]
     fn backend_base_url_uses_the_build_time_bake_when_runtime_env_is_absent() {
         let _guard = env_lock();
+        crate::server_settings::reset_store_for_tests();
         std::env::remove_var("PETAL_BACKEND_URL");
 
         // There is no hosted fallback. An absent runtime value resolves to
@@ -343,6 +370,74 @@ mod tests {
                 Err(TokenError::MissingEnv("PETAL_BACKEND_URL"))
             )),
         }
+    }
+
+    #[test]
+    fn backend_base_url_uses_the_saved_server_when_runtime_env_is_absent() {
+        let _guard = env_lock();
+        crate::server_settings::reset_store_for_tests();
+        std::env::remove_var("PETAL_BACKEND_URL");
+        let dir = std::env::temp_dir().join(format!(
+            "petal-token-server-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::server_settings::initialize(&dir);
+        crate::server_settings::update(|s| {
+            s.backend_url = Some("https://petal.example.test".to_string());
+        })
+        .unwrap();
+
+        assert_eq!(
+            backend_base_url().unwrap(),
+            "https://petal.example.test".to_string()
+        );
+        assert_eq!(
+            backend_base_url_source(),
+            (
+                Some("https://petal.example.test".to_string()),
+                "settings".to_string()
+            )
+        );
+
+        std::env::set_var("PETAL_BACKEND_URL", "https://from-env.example.test");
+        assert_eq!(
+            backend_base_url().unwrap(),
+            "https://from-env.example.test".to_string()
+        );
+        assert_eq!(backend_base_url_source().1, "env");
+
+        std::env::set_var("PETAL_BACKEND_URL", "");
+        assert_eq!(
+            backend_base_url_source(),
+            (None, "none".to_string()),
+            "an empty runtime env is the local-mint opt-out and must not fall through to Settings"
+        );
+
+        std::env::remove_var("PETAL_BACKEND_URL");
+        crate::server_settings::reset_store_for_tests();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backend_base_url_runtime_env_still_allows_http_for_any_host() {
+        let _guard = env_lock();
+        crate::server_settings::reset_store_for_tests();
+        std::env::set_var("PETAL_BACKEND_URL", "http://petal.example.test/api/token");
+
+        assert_eq!(
+            backend_base_url().unwrap(),
+            "http://petal.example.test".to_string()
+        );
+        assert_eq!(backend_base_url_source().1, "env");
+
+        std::env::remove_var("PETAL_BACKEND_URL");
+        crate::server_settings::reset_store_for_tests();
     }
 
     #[test]

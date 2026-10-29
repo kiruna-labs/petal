@@ -85,9 +85,10 @@ permission fixes and updates don't resolve.
 Petal quits automatically after resetting.
 
 **What it leaves alone:** your sharing preferences (sharing priority and
-hover-tab position), the **Debug mode** setting, and your AI chat settings —
-including a saved Gemini API key. Remove the key from **Settings > AI chat**
-yourself if you're handing the machine to someone else.
+hover-tab position), the **Debug mode** setting, **Server** settings (token
+server and invite-link origin), and your AI chat settings — including a
+saved Gemini API key. Remove the key from **Settings > AI chat** yourself if
+you're handing the machine to someone else.
 
 **What it does not clear on its own (macOS only):** macOS permissions
 (Screen Recording, Microphone, Camera, Accessibility). If you also want to reset those — for

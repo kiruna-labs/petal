@@ -59,6 +59,65 @@
       "webJoinQuery": "?code=abc-defg-hjk"
     }
   ],
+  "serverOrigins": [
+    {
+      "input": " https://petal.example.test/// ",
+      "origin": "https://petal.example.test"
+    },
+    {
+      "input": "https://petal.example.test/api/token",
+      "origin": "https://petal.example.test"
+    },
+    {
+      "input": "https://petal.example.test:443",
+      "origin": "https://petal.example.test"
+    },
+    {
+      "input": "https://[2001:db8::1]",
+      "origin": "https://[2001:db8::1]"
+    },
+    {
+      "input": "http://localhost:8787",
+      "origin": "http://localhost:8787"
+    },
+    {
+      "input": "http://127.0.0.1:8787",
+      "origin": "http://127.0.0.1:8787"
+    },
+    {
+      "input": "http://[::1]:8787",
+      "origin": "http://[::1]:8787"
+    },
+    {
+      "input": "http://localhost:80",
+      "origin": "http://localhost"
+    },
+    {
+      "input": "http://petal.example.test",
+      "origin": null,
+      "error": "http:// is only allowed for localhost, 127.0.0.1, and [::1]."
+    },
+    {
+      "input": "http://192.168.0.10",
+      "origin": null,
+      "error": "http:// is only allowed for localhost, 127.0.0.1, and [::1]."
+    },
+    {
+      "input": "http://[2001:db8::1]",
+      "origin": null,
+      "error": "http:// is only allowed for localhost, 127.0.0.1, and [::1]."
+    },
+    {
+      "input": "https://user:pass@petal.example.test",
+      "origin": null,
+      "error": "Enter an https:// address, or http:// for localhost, 127.0.0.1, and [::1]. Origin only — no path."
+    },
+    {
+      "input": "https://petal.example.test/extra",
+      "origin": null,
+      "error": "Enter an https:// address, or http:// for localhost, 127.0.0.1, and [::1]. Origin only — no path."
+    }
+  ],
   "roomMetadataRegistration": {
     "request": {
       "name": "Eng meeting",

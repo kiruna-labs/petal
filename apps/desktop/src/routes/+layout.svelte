@@ -39,7 +39,16 @@
   import { displayBuildVersion } from '#lib/buildInfo.js';
   import { platformKey } from '#lib/platform.js';
   import { stripNativeTooltipTitles } from '#lib/data/suppressNativeTooltips.js';
-  import { COMMANDS, EVENTS, hasTauriBridge, type BuildInfo, type ResilienceEvent } from '#lib/ipc.js';
+  import { noteCustomServer } from '#lib/data/customServer.svelte.js';
+  import { applyInviteOrigin } from '#lib/data/inviteLinks.js';
+  import {
+    COMMANDS,
+    EVENTS,
+    hasTauriBridge,
+    type BuildInfo,
+    type ResilienceEvent,
+    type ServerSettingsView
+  } from '#lib/ipc.js';
   import { checkForUpdate } from '#lib/updater.js';
   import {
     startUpdateScheduler,
@@ -149,9 +158,28 @@
     }
     void reportFrontendReady();
 
+    // #310: seed the invite-link origin in every webview that might copy
+    // a link (main window, menubar, meeting), then follow Settings saves.
+    let unlistenServerSettings: (() => void) | null = null;
+    if (hasTauriBridge()) {
+      void invoke<ServerSettingsView>(COMMANDS.serverSettings)
+        .then((view) => {
+          applyInviteOrigin(view.inviteOrigin);
+          noteCustomServer(view);
+        })
+        .catch(() => {});
+      void listen<ServerSettingsView>(EVENTS.serverSettingsChanged, (event) => {
+        applyInviteOrigin(event.payload.inviteOrigin);
+        noteCustomServer(event.payload);
+      }).then((fn) => {
+        unlistenServerSettings = fn;
+      });
+    }
+
     return () => {
       if (petalWindow.__petalNavigate === navigate) delete petalWindow.__petalNavigate;
       stopUpdateScheduler?.();
+      unlistenServerSettings?.();
     };
   });
 
