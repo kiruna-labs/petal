@@ -257,6 +257,9 @@ pub(crate) struct SequencerOutput {
     pub duplicates: u64,
     /// Inputs given up on. Non-zero means held input must be released first.
     pub skipped: u64,
+    /// Index in `deliver` of the first input past the first skipped gap: the
+    /// earliest evidence of what the lost inputs left held.
+    pub resume_at: Option<usize>,
     /// A gap is open; flush again after [`GAP_HOLD`].
     pub arm_gap_timer: bool,
     pub stale_stream: bool,
@@ -342,6 +345,9 @@ impl InputSequencer {
         let Some(&lowest) = self.buffered.keys().next() else {
             return;
         };
+        if lowest > self.next && out.resume_at.is_none() {
+            out.resume_at = Some(out.deliver.len());
+        }
         out.skipped += lowest.saturating_sub(self.next);
         self.next = lowest;
         self.drain_contiguous(out);
@@ -528,6 +534,7 @@ mod tests {
         let out = host.flush_expired(later + GAP_HOLD);
         assert_eq!(out.skipped, 1, "caller must release held input for the lost Up");
         assert_eq!(seqs(&out.deliver), vec![3]);
+        assert_eq!(out.resume_at, Some(0), "the first input past the gap");
         assert!(!out.arm_gap_timer);
     }
 

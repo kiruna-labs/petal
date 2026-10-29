@@ -2482,6 +2482,45 @@ pub(crate) fn drain_pressed_for_controller(window_id: u32, controller_id: &str) 
         .unwrap_or_default()
 }
 
+/// #399 gap skip: release what the lost inputs may have left held. Held keys
+/// always go -- nothing later says whether their Up was lost. Held buttons go
+/// only when `resume` (the first input past the gap) cannot speak for them: a
+/// pointer event's `buttons` mask says which are still down, and an Up
+/// releases its own button where the controller let go. Releasing those too
+/// would end a drag at its press point after a few lost moves, and leave the
+/// real Up nothing to release.
+pub(crate) fn drain_pressed_for_sequencer_gap(
+    window_id: u32,
+    controller_id: &str,
+    resume: Option<&RemoteControlMessage>,
+) -> Vec<ReplayTask> {
+    let key = (window_id, controller_id.to_string());
+    let mut pressed_by_controller = pressed_inputs().lock_unpoisoned();
+    let Some(pressed) = pressed_by_controller.get_mut(&key) else {
+        return Vec::new();
+    };
+    let still_held = match resume {
+        Some(message) if message.message_type == RemoteControlType::Pointer => {
+            let own = button_mask(button_from_wire(message.button));
+            let buttons = message.buttons.unwrap_or(0);
+            match message.action {
+                Some(RemoteControlAction::Up) => buttons | own,
+                // A Down's mask includes the button it presses; that press is
+                // new, so an older hold of the same button lost its Up.
+                Some(RemoteControlAction::Down) => buttons & !own,
+                _ => buttons,
+            }
+        }
+        _ => 0,
+    };
+    let mut releases = drain_buttons_not_in_mask(pressed, still_held);
+    releases.extend(pressed.keys.drain().map(|(_, held)| held.release));
+    if pressed.is_empty() {
+        pressed_by_controller.remove(&key);
+    }
+    releases
+}
+
 pub(crate) fn drain_pressed_for_window(window_id: u32) -> Vec<ReplayTask> {
     let mut releases = Vec::new();
     pressed_inputs()
