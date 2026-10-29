@@ -1846,17 +1846,17 @@
       "version": "1.0.13"
     },
     {
-      "bom-ref": "@sveltejs/adapter-static@3.0.10",
+      "bom-ref": "@sveltejs/adapter-static@4.0.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sveltejs/adapter-static/-/adapter-static-3.0.10.tgz"
+          "url": "https://registry.npmjs.org/@sveltejs/adapter-static/-/adapter-static-4.0.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ec3f65605589981ef3c59c9313fab18e4b2f32acccb98aebb328757f802566a79978008f4724a36c2dda162639e706f5b5651a28e406f4f55b9bbe0970dd887b"
+          "content": "685d49db747579b2aa531438fea2ebfcbc6eeb734598b02d83c5199771c52f16a80350ff9e14d519c0fd953ab1eb98946e3351da238bd1380ec525fcdb1e8f6b"
         }
       ],
       "licenses": [
@@ -1873,23 +1873,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40sveltejs/adapter-static@3.0.10",
+      "purl": "pkg:npm/%40sveltejs/adapter-static@4.0.0",
       "scope": "optional",
       "type": "library",
-      "version": "3.0.10"
+      "version": "4.0.0"
     },
     {
-      "bom-ref": "@sveltejs/kit@2.70.3",
+      "bom-ref": "@sveltejs/kit@3.1.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sveltejs/kit/-/kit-2.70.3.tgz"
+          "url": "https://registry.npmjs.org/@sveltejs/kit/-/kit-3.1.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "503bc462e66a00c6df07fa17228a8abdb29c6fb61cccae7362bce6b06575cd1264d378e7b70a7c757898a08268b7102776c2af70f16dc7d1f519148a15d48782"
+          "content": "2535a5ab61d0964ab1eaf228c610b447ab1ce1656a6d0a11c849abe5896a2a68986f36355376b0b525939a330b952d39e9ae3d02691047aae7340357204f01d1"
         }
       ],
       "licenses": [
@@ -1906,10 +1906,43 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40sveltejs/kit@2.70.3",
+      "purl": "pkg:npm/%40sveltejs/kit@3.1.0",
       "scope": "optional",
       "type": "library",
-      "version": "2.70.3"
+      "version": "3.1.0"
+    },
+    {
+      "bom-ref": "magic-string@1.4.3",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/magic-string/-/magic-string-1.4.3.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "cf5d8ec6668f184d05e3196919d8ee0147248a92e94254c0b809b21a13680fb383a58533bc37efb7151b8ccfe3c339f23f5efca23bbf2837728b6db4c0d27445"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "magic-string",
+      "properties": [
+        {
+          "name": "cdx:npm:package:development",
+          "value": "true"
+        }
+      ],
+      "purl": "pkg:npm/magic-string@1.4.3",
+      "scope": "optional",
+      "type": "library",
+      "version": "1.4.3"
     },
     {
       "bom-ref": "@sveltejs/load-config@0.2.3",
@@ -2011,17 +2044,17 @@
       "version": "1.2.3"
     },
     {
-      "bom-ref": "@tauri-apps/api@2.12.2",
+      "bom-ref": "@tauri-apps/api@2.12.4",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/api/-/api-2.12.2.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/api/-/api-2.12.4.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "72bd05604b1b49021e12e208a02f1bc1d8875b7625ce2318399d23dd1ec5ea49081d256bad99d5e824a3bff550bc5a32b84446c4573c34cb4b2435e2e7060e62"
+          "content": "a5599f8acfb8cd3f07d10869df13d9c7d26eee4a73bc0eabaff3d224fcaec1fbee71343cb15b7ad4d614f4a3242bbd3750595869d1668ca0381e1c9b3ad37482"
         }
       ],
       "licenses": [
@@ -2030,23 +2063,23 @@
         }
       ],
       "name": "@tauri-apps/api",
-      "purl": "pkg:npm/%40tauri-apps/api@2.12.2",
+      "purl": "pkg:npm/%40tauri-apps/api@2.12.4",
       "scope": "required",
       "type": "library",
-      "version": "2.12.2"
+      "version": "2.12.4"
     },
     {
-      "bom-ref": "@tauri-apps/cli@2.12.1",
+      "bom-ref": "@tauri-apps/cli@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli/-/cli-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9040c4886cc6fb201ce4578bc6d5e9112fd537e1760bc1f4af880356d7d12cac53f67a7dd74d5df51106fca828da5af484a8b42290ec3838879d4dfe9da3a62e"
+          "content": "7fbfcbb18ef84956f50a198e3f0d5a8cea718a2d064b30c082658745c8bc25462eb9a8b4e2b5ec49b1686e9981d2c3f60dd96f303fc1e59a2d127f0638631152"
         }
       ],
       "licenses": [
@@ -2061,23 +2094,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-darwin-arm64@2.12.1",
+      "bom-ref": "@tauri-apps/cli-darwin-arm64@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-darwin-arm64/-/cli-darwin-arm64-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-darwin-arm64/-/cli-darwin-arm64-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "f1b3276e92768ca3bfb9face3cbeb910c1c2de9b70edfcdeadaa1093089bc9f18ba8897e5025ac0b4d79da498d6d6eabf4dbd541db97a80645e661f54204d687"
+          "content": "c6654da0938e2b328b8fb18b1d79972e29916f2f4ce366812096b4b01f3437ba36e1e295e49895993a0a4d12d51fdca12f4e4667f07aad248e99bccd149c0100"
         }
       ],
       "licenses": [
@@ -2092,23 +2125,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-darwin-arm64@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-darwin-arm64@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-darwin-x64@2.12.1",
+      "bom-ref": "@tauri-apps/cli-darwin-x64@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-darwin-x64/-/cli-darwin-x64-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-darwin-x64/-/cli-darwin-x64-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "1bedaab5ef0636a365119f5fb5ddb5adbbbf00f564977aff9f334323b2d5c44a2a25654d7bd19b120414307d6be0f1d3db46765314772a30a496d21bd1efd68e"
+          "content": "51177ed2eb1f994410c9be6434f88ab76393f20a7ba0653b411faa3a9a41e9edf99a954114554d85673da166f7a74bbbd5f0c9d3d0e91784fa9bdc58c68201f2"
         }
       ],
       "licenses": [
@@ -2123,23 +2156,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-darwin-x64@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-darwin-x64@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-arm-gnueabihf@2.12.1",
+      "bom-ref": "@tauri-apps/cli-linux-arm-gnueabihf@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm-gnueabihf/-/cli-linux-arm-gnueabihf-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm-gnueabihf/-/cli-linux-arm-gnueabihf-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e5bde7e036935be035667b67878627e385722eb94f12907c90c38145f5a4ccd9f3a25064f806212887ca8c22e6a02f0ca1bdc44e877100438c904d983ca116cd"
+          "content": "d24c14571d8b6e63a84d1970175a03c30eed878fcd4a5bafe19050e8a459b052a0e20d13953708889d157a1aa441851e0bdc484f5324e97b45e76988d79e5549"
         }
       ],
       "licenses": [
@@ -2154,23 +2187,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm-gnueabihf@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm-gnueabihf@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-arm64-gnu@2.12.1",
+      "bom-ref": "@tauri-apps/cli-linux-arm64-gnu@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-gnu/-/cli-linux-arm64-gnu-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-gnu/-/cli-linux-arm64-gnu-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "00f02b1e10eefbca57482902426bdacf59c3dddf164e6942a124bfa06e3be5327a0004c1bf240e0267f9a842e0b10e2cdbef0c3aca29d1977af7d44a10b1750b"
+          "content": "80a4860f1e9fc7e1c12d0986ea0b82845762b1bac249dc7d6258be8f9b5e39aeb8826d4278cf82e8d2ebbb93e3dd992411ea74e41982163c6f5fe723a80c9c65"
         }
       ],
       "licenses": [
@@ -2185,23 +2218,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm64-gnu@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm64-gnu@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-arm64-musl@2.12.1",
+      "bom-ref": "@tauri-apps/cli-linux-arm64-musl@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-musl/-/cli-linux-arm64-musl-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-arm64-musl/-/cli-linux-arm64-musl-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "25a0b170ba15d281ad9655642ebe14007586ff04df904ba79d4aa7b04b0660ea74551c675301e0eb7c05043d23536ba5e5e15f48b2034b8445da07f3b12a3926"
+          "content": "62be7da8ccbf81cbc07c1b857421a50261a22ec6163050dbb0fe1b008ea2341cdc2531ab6166467a2421183a36f4c4307c5fcd501ab2336aa58d7bb9b59eb08d"
         }
       ],
       "licenses": [
@@ -2216,23 +2249,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm64-musl@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-arm64-musl@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-riscv64-gnu@2.12.1",
+      "bom-ref": "@tauri-apps/cli-linux-riscv64-gnu@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-riscv64-gnu/-/cli-linux-riscv64-gnu-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-riscv64-gnu/-/cli-linux-riscv64-gnu-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "2b9f955ccefe486543c1995e036fa5320bdb4d5b80e5ed6d9225446b0bb56318f6e99c847cef21f314c2d6b05d457db18090d2c0293abcf501092ea2f99e6c95"
+          "content": "8caaf4fd11013272ca0b43b03d0664ca07b498a0da359d1bfc06df1b05720a015fc12ef7d0454b7d50e8de7b7b314bba8c96b2b51ab4f3ec528f9a9fcbe535f9"
         }
       ],
       "licenses": [
@@ -2247,23 +2280,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-riscv64-gnu@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-riscv64-gnu@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-x64-gnu@2.12.1",
+      "bom-ref": "@tauri-apps/cli-linux-x64-gnu@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-gnu/-/cli-linux-x64-gnu-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-gnu/-/cli-linux-x64-gnu-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "6754063ebe3d1c964c92dbbe4a9bba4356ff7fd00d69d5efa99659b76eb8e6e6b5c757afea9ace829f397a21afda3473a2114430ba3a689c9a2e32d45f9288bc"
+          "content": "813904a8900608c44e19a9f11e7cda27343efeb5e5dfd1d6560d3f8433834b5c035811aaa1c7aa182e909b5fa641bc93d75c67b01f262aefe0c95203fd8a4523"
         }
       ],
       "licenses": [
@@ -2278,23 +2311,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-x64-gnu@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-x64-gnu@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-linux-x64-musl@2.12.1",
+      "bom-ref": "@tauri-apps/cli-linux-x64-musl@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-musl/-/cli-linux-x64-musl-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-linux-x64-musl/-/cli-linux-x64-musl-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9c7b848513ce31227ff11461b4c47107d07d955afbc71a5ee036a9073f31d4621abb7bddce31c72758407e6c3e3f26b23cb67a5e86952073e0235eeb5fa8a2f3"
+          "content": "4f6753c4bd6cbd1ca6ef57d9b5a5b8a596176ed85b7c5b0426bd4d78e520fe9ee56965d96d4b7ff0331265ff2b79cbbd7fbfb517f2efd341edcec12eeaf0cef7"
         }
       ],
       "licenses": [
@@ -2309,23 +2342,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-linux-x64-musl@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-linux-x64-musl@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-win32-arm64-msvc@2.12.1",
+      "bom-ref": "@tauri-apps/cli-win32-arm64-msvc@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-arm64-msvc/-/cli-win32-arm64-msvc-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-arm64-msvc/-/cli-win32-arm64-msvc-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "234a0f936b8687ce91f1d02cd97e4ec523fefc6a9273c8e1d4fc7797c12aae8712362bec4470d38769373d53aa76fd7addd955e8f215be685901b1ff94f7d9ac"
+          "content": "7a8890c2911959ba6c54770cf41033aaa7b84c21eccefaf7aec33ba54438a1f2cad251758b577f8d7d10a390d832a72b52dc10b83743b8e09b713d08cdfd55c1"
         }
       ],
       "licenses": [
@@ -2340,23 +2373,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-win32-arm64-msvc@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-win32-arm64-msvc@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-win32-ia32-msvc@2.12.1",
+      "bom-ref": "@tauri-apps/cli-win32-ia32-msvc@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-ia32-msvc/-/cli-win32-ia32-msvc-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-ia32-msvc/-/cli-win32-ia32-msvc-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "6da3594417dea40279a8d151330ce0064f78c509a47264d9acd0e36639f3aeadaf01a4c2dcd0216a595bff3a37872a0219094c4b5dec768be4b6b838e8d673e9"
+          "content": "904f8a520e836db920bdcc349bdf70255213a0543326aa4c0405da87be16ab168bcecb0dc124d471cac7a7af905733218d03f7df4b6f7a41669d017ed0d6c4e9"
         }
       ],
       "licenses": [
@@ -2371,23 +2404,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-win32-ia32-msvc@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-win32-ia32-msvc@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/cli-win32-x64-msvc@2.12.1",
+      "bom-ref": "@tauri-apps/cli-win32-x64-msvc@2.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-x64-msvc/-/cli-win32-x64-msvc-2.12.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/cli-win32-x64-msvc/-/cli-win32-x64-msvc-2.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "74815a2ac96bcdc6deb1bf9b061f84d51f649b6e35a47ca3df6c3a0fd14fb6f41e62945415b8822c46bfd92f92d149c8cad7f17a9a783fe5fc21eac6aa75de62"
+          "content": "2fbc277560205f698b5bb6a5b30a4bdddd51d0ff453765980601da424018101c471c6918e2f157f428dc450d4b0310c0308271ad8eff683ce2149782852f3835"
         }
       ],
       "licenses": [
@@ -2402,23 +2435,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/%40tauri-apps/cli-win32-x64-msvc@2.12.1",
+      "purl": "pkg:npm/%40tauri-apps/cli-win32-x64-msvc@2.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "2.12.1"
+      "version": "2.12.3"
     },
     {
-      "bom-ref": "@tauri-apps/plugin-clipboard-manager@2.4.1",
+      "bom-ref": "@tauri-apps/plugin-clipboard-manager@2.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/plugin-clipboard-manager/-/plugin-clipboard-manager-2.4.1.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/plugin-clipboard-manager/-/plugin-clipboard-manager-2.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e50f615969ec13b505d71001587a51c2a1a2c8e46b3fda3fac989fb7fed5f30a0ffe4495176d56f9b3fd1bb721f1077ba67783594324ea191fa4ba63702ff802"
+          "content": "7626d4cb59ca5116035d132f8cd93875e01b4d9e633d0f30084e27a25b79c678abc96817438b0ad869055e85e51db45d3f37d9a6d663f790512df6a503b9bfd9"
         }
       ],
       "licenses": [
@@ -2427,23 +2460,23 @@
         }
       ],
       "name": "@tauri-apps/plugin-clipboard-manager",
-      "purl": "pkg:npm/%40tauri-apps/plugin-clipboard-manager@2.4.1",
+      "purl": "pkg:npm/%40tauri-apps/plugin-clipboard-manager@2.5.0",
       "scope": "required",
       "type": "library",
-      "version": "2.4.1"
+      "version": "2.5.0"
     },
     {
-      "bom-ref": "@tauri-apps/plugin-opener@2.7.0",
+      "bom-ref": "@tauri-apps/plugin-opener@2.7.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/plugin-opener/-/plugin-opener-2.7.0.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/plugin-opener/-/plugin-opener-2.7.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "981a2b61f54a87d2edeece1916d29b3144f1070f98fec5664a5282b649280603130bf0c86edfe468f9baecbff6763014a83235c1b8b1cb93871d59a2a63b8633"
+          "content": "2f2c9b3f5552cd331089a15872c6c0b1ee3b2a98af9725dd2d9310cc62c49e481069c1844a7a6301f16843a879b2a5a001d6431fdb336233f31cca6fd12cfe4d"
         }
       ],
       "licenses": [
@@ -2452,10 +2485,10 @@
         }
       ],
       "name": "@tauri-apps/plugin-opener",
-      "purl": "pkg:npm/%40tauri-apps/plugin-opener@2.7.0",
+      "purl": "pkg:npm/%40tauri-apps/plugin-opener@2.7.2",
       "scope": "required",
       "type": "library",
-      "version": "2.7.0"
+      "version": "2.7.2"
     },
     {
       "bom-ref": "@tauri-apps/plugin-process@2.4.0",
@@ -2483,17 +2516,17 @@
       "version": "2.4.0"
     },
     {
-      "bom-ref": "@tauri-apps/plugin-updater@2.13.2",
+      "bom-ref": "@tauri-apps/plugin-updater@2.14.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@tauri-apps/plugin-updater/-/plugin-updater-2.13.2.tgz"
+          "url": "https://registry.npmjs.org/@tauri-apps/plugin-updater/-/plugin-updater-2.14.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "7a41a53818acd60cedcc356e2c0239e29d35d7b0495f31621f362572adec942d0b28ab07372e93be721d725f60e432ee18e9d58954fa11285d41ccc2339d1265"
+          "content": "81dca527db607abe219323a7db841977a30d38a568d84879de2c39b61d908f5bca4d1ffebb83c8c095ae8a2b39868858be86e7ea23af96700b7eba883d2ce1ed"
         }
       ],
       "licenses": [
@@ -2502,43 +2535,10 @@
         }
       ],
       "name": "@tauri-apps/plugin-updater",
-      "purl": "pkg:npm/%40tauri-apps/plugin-updater@2.13.2",
+      "purl": "pkg:npm/%40tauri-apps/plugin-updater@2.14.0",
       "scope": "required",
       "type": "library",
-      "version": "2.13.2"
-    },
-    {
-      "bom-ref": "@types/cookie@0.6.0",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/@types/cookie/-/cookie-0.6.0.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "e0a87d6ba0766d07220217fb152b8c45191459e709809bbd9cf9f1df2ce9b1f5d7fdce7444422aa476380bcd9b5cff74aab2ed5ed903c53668b183b75293b094"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "@types/cookie",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/%40types/cookie@0.6.0",
-      "scope": "optional",
-      "type": "library",
-      "version": "0.6.0"
+      "version": "2.14.0"
     },
     {
       "bom-ref": "@types/dom-mediacapture-record@1.0.22",
@@ -2786,17 +2786,17 @@
       "version": "2.1.1"
     },
     {
-      "bom-ref": "cookie@0.7.2",
+      "bom-ref": "cookie@2.0.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/cookie/-/cookie-0.7.2.tgz"
+          "url": "https://registry.npmjs.org/cookie/-/cookie-2.0.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ca48b95e72ae7fbe74979d2e193965b7a90a20b6389d0d5e34841ab685c40726797568272aa6e7aa64eb044e41e0dee5acc24a436cad58c8933b6a34bfa130ff"
+          "content": "cae4e8a95bd1ae3ea97c35d113240002ff12900124ffc192de34114e250c9bae9356d0589aa41ea048cbd8b9aaf11a68eb6ef5bc7efa2274c28538ad1009bae7"
         }
       ],
       "licenses": [
@@ -2813,10 +2813,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/cookie@0.7.2",
+      "purl": "pkg:npm/cookie@2.0.1",
       "scope": "optional",
       "type": "library",
-      "version": "0.7.2"
+      "version": "2.0.1"
     },
     {
       "bom-ref": "deepmerge@4.3.1",
@@ -3168,39 +3168,6 @@
       "scope": "required",
       "type": "library",
       "version": "6.2.3"
-    },
-    {
-      "bom-ref": "kleur@4.1.5",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/kleur/-/kleur-4.1.5.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "a3e34efbc5ab462404138ffb9f044984dd475a9566266e75d690475313cbb69d015084b3941a653916129937250a726f42adad2aefec825df156991ced95ae41"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "kleur",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/kleur@4.1.5",
-      "scope": "optional",
-      "type": "library",
-      "version": "4.1.5"
     },
     {
       "bom-ref": "lightningcss@1.33.0",
@@ -3599,17 +3566,17 @@
       "version": "1.33.0"
     },
     {
-      "bom-ref": "livekit-client@2.22.4",
+      "bom-ref": "livekit-client@2.23.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/livekit-client/-/livekit-client-2.22.4.tgz"
+          "url": "https://registry.npmjs.org/livekit-client/-/livekit-client-2.23.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "509e4af20a8ff2e20efad8e119e17eb3a4b380b7f164a3f14234aacf3905dbdf1035832785899719044c321dc69ec7da7acc27b071cc4a880c79bed2a1c1f6cf"
+          "content": "8fd2a0f3a9c98c18cd1540feba4a768f030219ad24f980f9814fff47300cf99637a5b1badf5402b5eedf423c2a58c9ad07384324bf67298b8e2ccbfff486c0c6"
         }
       ],
       "licenses": [
@@ -3620,10 +3587,10 @@
         }
       ],
       "name": "livekit-client",
-      "purl": "pkg:npm/livekit-client@2.22.4",
+      "purl": "pkg:npm/livekit-client@2.23.0",
       "scope": "required",
       "type": "library",
-      "version": "2.22.4"
+      "version": "2.23.0"
     },
     {
       "bom-ref": "locate-character@3.0.0",
@@ -3944,17 +3911,17 @@
       "version": "4.0.7"
     },
     {
-      "bom-ref": "playwright@1.64.0",
+      "bom-ref": "playwright@1.64.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/playwright/-/playwright-1.64.0.tgz"
+          "url": "https://registry.npmjs.org/playwright/-/playwright-1.64.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "915cd39d815813243d446cc18cd09ddbec84a969956f19770073f29efdea43a2538efe1afa4c11727a90c08a6e3f7367ae722b13f43ac1600802f31f204dbf62"
+          "content": "1c2ad5847af9410bb0628b301141936fb806a79db6c9f95bbff493f27178b05586b8b8d00add7b43f12e6e918648d2989f5b6c4c23d9c6a1e11c27d5511bbb50"
         }
       ],
       "licenses": [
@@ -3971,23 +3938,23 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/playwright@1.64.0",
+      "purl": "pkg:npm/playwright@1.64.1",
       "scope": "optional",
       "type": "library",
-      "version": "1.64.0"
+      "version": "1.64.1"
     },
     {
-      "bom-ref": "playwright-core@1.64.0",
+      "bom-ref": "playwright-core@1.64.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.0.tgz"
+          "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "4fdafe319913102976fa851c676e98819cd3ad889d4ec2216189098b1fba8833b298e6f5141d912cb48ec511a7646bf90d2b6df9a76e2156edf84f16ca05d8a6"
+          "content": "042e2cf32e9211503a435ad2c594eda3c848d4a508df15e51c6660bc6a8fe08a8f748fdae855fd1f6f480cdcfbbcaa3d976d5be8b7d8a2c49c3cbe8cdf1c720d"
         }
       ],
       "licenses": [
@@ -4004,10 +3971,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/playwright-core@1.64.0",
+      "purl": "pkg:npm/playwright-core@1.64.1",
       "scope": "optional",
       "type": "library",
-      "version": "1.64.0"
+      "version": "1.64.1"
     },
     {
       "bom-ref": "postcss@8.5.29",
@@ -4223,39 +4190,6 @@
       "version": "2.15.0"
     },
     {
-      "bom-ref": "set-cookie-parser@3.1.1",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/set-cookie-parser/-/set-cookie-parser-3.1.1.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "bccf525218ec518b3a51e2549b281ce4e7e6e5e4067bce6b8a86f98eee970a0146248e4f2d5e27ac3010a508ddf8b9050690240039f905042967d114364c8bb8"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "set-cookie-parser",
-      "properties": [
-        {
-          "name": "cdx:npm:package:development",
-          "value": "true"
-        }
-      ],
-      "purl": "pkg:npm/set-cookie-parser@3.1.1",
-      "scope": "optional",
-      "type": "library",
-      "version": "3.1.1"
-    },
-    {
       "bom-ref": "sirv@3.0.2",
       "externalReferences": [
         {
@@ -4355,17 +4289,17 @@
       "version": "5.57.2"
     },
     {
-      "bom-ref": "svelte-check@4.7.6",
+      "bom-ref": "svelte-check@4.7.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/svelte-check/-/svelte-check-4.7.6.tgz"
+          "url": "https://registry.npmjs.org/svelte-check/-/svelte-check-4.7.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b76b1c33ffd9b956d263f4f6c3a152070d6ff6cd8d12687f83eb32d65aada2c5b9ca5055e40178c056f54ecf4a7f731b7cf0d40c90d9f4be37e984f448f4ddbf"
+          "content": "19ed8831d793a5b26eccd14646288c83445681b49ccac290bbbc70732149db6f8353d1799cf5f9d7e437807986a91c5840cc76927ade556b79a02b5f7b4bdfda"
         }
       ],
       "licenses": [
@@ -4382,10 +4316,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/svelte-check@4.7.6",
+      "purl": "pkg:npm/svelte-check@4.7.7",
       "scope": "optional",
       "type": "library",
-      "version": "4.7.6"
+      "version": "4.7.7"
     },
     {
       "bom-ref": "tinyglobby@0.2.17",
@@ -4706,25 +4640,25 @@
         "@fontsource/albert-sans@5.3.0",
         "@fontsource/fredoka@5.3.0",
         "@fontsource/jetbrains-mono@5.3.0",
-        "@tauri-apps/api@2.12.2",
-        "@tauri-apps/plugin-clipboard-manager@2.4.1",
-        "@tauri-apps/plugin-opener@2.7.0",
+        "@tauri-apps/api@2.12.4",
+        "@tauri-apps/plugin-clipboard-manager@2.5.0",
+        "@tauri-apps/plugin-opener@2.7.2",
         "@tauri-apps/plugin-process@2.4.0",
-        "@tauri-apps/plugin-updater@2.13.2",
+        "@tauri-apps/plugin-updater@2.14.0",
         "@userdispatch/sdk@1.0.1",
-        "livekit-client@2.22.4",
-        "@sveltejs/adapter-static@3.0.10",
-        "@sveltejs/kit@2.70.3",
+        "livekit-client@2.23.0",
+        "@sveltejs/adapter-static@4.0.0",
+        "@sveltejs/kit@3.1.0",
         "@sveltejs/vite-plugin-svelte@7.3.1",
-        "@tauri-apps/cli@2.12.1",
-        "playwright@1.64.0",
+        "@tauri-apps/cli@2.12.3",
+        "playwright@1.64.1",
         "svelte@5.57.2",
-        "svelte-check@4.7.6",
+        "svelte-check@4.7.7",
         "tsx@4.23.15",
         "typescript@6.0.3",
         "vite@8.3.4"
       ],
-      "ref": "desktop@0.9.33"
+      "ref": "desktop@0.9.34"
     },
     {
       "dependsOn": [],
@@ -4969,9 +4903,9 @@
     },
     {
       "dependsOn": [
-        "@sveltejs/kit@2.70.3"
+        "@sveltejs/kit@3.1.0"
       ],
-      "ref": "@sveltejs/adapter-static@3.0.10"
+      "ref": "@sveltejs/adapter-static@4.0.0"
     },
     {
       "dependsOn": [
@@ -4979,20 +4913,22 @@
         "svelte@5.57.2",
         "vite@8.3.4",
         "typescript@6.0.3",
+        "@rolldown/pluginutils@1.0.1",
         "@standard-schema/spec@1.1.0",
-        "@sveltejs/acorn-typescript@1.0.13",
-        "@types/cookie@0.6.0",
-        "acorn@8.18.0",
-        "cookie@0.7.2",
+        "cookie@2.0.1",
         "devalue@5.9.4",
         "esm-env@1.2.2",
-        "kleur@4.1.5",
-        "magic-string@0.30.21",
+        "magic-string@1.4.3",
         "mrmime@2.0.1",
-        "set-cookie-parser@3.1.1",
         "sirv@3.0.2"
       ],
-      "ref": "@sveltejs/kit@2.70.3"
+      "ref": "@sveltejs/kit@3.1.0"
+    },
+    {
+      "dependsOn": [
+        "@jridgewell/sourcemap-codec@1.6.0"
+      ],
+      "ref": "magic-string@1.4.3"
     },
     {
       "dependsOn": [],
@@ -5017,95 +4953,91 @@
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/api@2.12.2"
+      "ref": "@tauri-apps/api@2.12.4"
     },
     {
       "dependsOn": [
-        "@tauri-apps/cli-darwin-arm64@2.12.1",
-        "@tauri-apps/cli-darwin-x64@2.12.1",
-        "@tauri-apps/cli-linux-arm-gnueabihf@2.12.1",
-        "@tauri-apps/cli-linux-arm64-gnu@2.12.1",
-        "@tauri-apps/cli-linux-arm64-musl@2.12.1",
-        "@tauri-apps/cli-linux-riscv64-gnu@2.12.1",
-        "@tauri-apps/cli-linux-x64-gnu@2.12.1",
-        "@tauri-apps/cli-linux-x64-musl@2.12.1",
-        "@tauri-apps/cli-win32-arm64-msvc@2.12.1",
-        "@tauri-apps/cli-win32-ia32-msvc@2.12.1",
-        "@tauri-apps/cli-win32-x64-msvc@2.12.1"
+        "@tauri-apps/cli-darwin-arm64@2.12.3",
+        "@tauri-apps/cli-darwin-x64@2.12.3",
+        "@tauri-apps/cli-linux-arm-gnueabihf@2.12.3",
+        "@tauri-apps/cli-linux-arm64-gnu@2.12.3",
+        "@tauri-apps/cli-linux-arm64-musl@2.12.3",
+        "@tauri-apps/cli-linux-riscv64-gnu@2.12.3",
+        "@tauri-apps/cli-linux-x64-gnu@2.12.3",
+        "@tauri-apps/cli-linux-x64-musl@2.12.3",
+        "@tauri-apps/cli-win32-arm64-msvc@2.12.3",
+        "@tauri-apps/cli-win32-ia32-msvc@2.12.3",
+        "@tauri-apps/cli-win32-x64-msvc@2.12.3"
       ],
-      "ref": "@tauri-apps/cli@2.12.1"
+      "ref": "@tauri-apps/cli@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-darwin-arm64@2.12.1"
+      "ref": "@tauri-apps/cli-darwin-arm64@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-darwin-x64@2.12.1"
+      "ref": "@tauri-apps/cli-darwin-x64@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-arm-gnueabihf@2.12.1"
+      "ref": "@tauri-apps/cli-linux-arm-gnueabihf@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-arm64-gnu@2.12.1"
+      "ref": "@tauri-apps/cli-linux-arm64-gnu@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-arm64-musl@2.12.1"
+      "ref": "@tauri-apps/cli-linux-arm64-musl@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-riscv64-gnu@2.12.1"
+      "ref": "@tauri-apps/cli-linux-riscv64-gnu@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-x64-gnu@2.12.1"
+      "ref": "@tauri-apps/cli-linux-x64-gnu@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-linux-x64-musl@2.12.1"
+      "ref": "@tauri-apps/cli-linux-x64-musl@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-win32-arm64-msvc@2.12.1"
+      "ref": "@tauri-apps/cli-win32-arm64-msvc@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-win32-ia32-msvc@2.12.1"
+      "ref": "@tauri-apps/cli-win32-ia32-msvc@2.12.3"
     },
     {
       "dependsOn": [],
-      "ref": "@tauri-apps/cli-win32-x64-msvc@2.12.1"
+      "ref": "@tauri-apps/cli-win32-x64-msvc@2.12.3"
     },
     {
       "dependsOn": [
-        "@tauri-apps/api@2.12.2"
+        "@tauri-apps/api@2.12.4"
       ],
-      "ref": "@tauri-apps/plugin-clipboard-manager@2.4.1"
+      "ref": "@tauri-apps/plugin-clipboard-manager@2.5.0"
     },
     {
       "dependsOn": [
-        "@tauri-apps/api@2.12.2"
+        "@tauri-apps/api@2.12.4"
       ],
-      "ref": "@tauri-apps/plugin-opener@2.7.0"
+      "ref": "@tauri-apps/plugin-opener@2.7.2"
     },
     {
       "dependsOn": [
-        "@tauri-apps/api@2.12.2"
+        "@tauri-apps/api@2.12.4"
       ],
       "ref": "@tauri-apps/plugin-process@2.4.0"
     },
     {
       "dependsOn": [
-        "@tauri-apps/api@2.12.2"
+        "@tauri-apps/api@2.12.4"
       ],
-      "ref": "@tauri-apps/plugin-updater@2.13.2"
-    },
-    {
-      "dependsOn": [],
-      "ref": "@types/cookie@0.6.0"
+      "ref": "@tauri-apps/plugin-updater@2.14.0"
     },
     {
       "dependsOn": [],
@@ -5143,7 +5075,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "cookie@0.7.2"
+      "ref": "cookie@2.0.1"
     },
     {
       "dependsOn": [],
@@ -5223,10 +5155,6 @@
       "ref": "jose@6.2.3"
     },
     {
-      "dependsOn": [],
-      "ref": "kleur@4.1.5"
-    },
-    {
       "dependsOn": [
         "detect-libc@2.1.2",
         "lightningcss-android-arm64@1.33.0",
@@ -5301,7 +5229,7 @@
         "typed-emitter@2.1.0",
         "webrtc-adapter@9.0.6"
       ],
-      "ref": "livekit-client@2.22.4"
+      "ref": "livekit-client@2.23.0"
     },
     {
       "dependsOn": [],
@@ -5347,13 +5275,13 @@
     },
     {
       "dependsOn": [
-        "playwright-core@1.64.0"
+        "playwright-core@1.64.1"
       ],
-      "ref": "playwright@1.64.0"
+      "ref": "playwright@1.64.1"
     },
     {
       "dependsOn": [],
-      "ref": "playwright-core@1.64.0"
+      "ref": "playwright-core@1.64.1"
     },
     {
       "dependsOn": [
@@ -5410,10 +5338,6 @@
       "ref": "sdp-transform@2.15.0"
     },
     {
-      "dependsOn": [],
-      "ref": "set-cookie-parser@3.1.1"
-    },
-    {
       "dependsOn": [
         "@polka/url@1.0.0-next.29",
         "mrmime@2.0.1",
@@ -5456,7 +5380,7 @@
         "picocolors@1.1.1",
         "sade@1.8.1"
       ],
-      "ref": "svelte-check@4.7.6"
+      "ref": "svelte-check@4.7.7"
     },
     {
       "dependsOn": [
@@ -5522,7 +5446,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "desktop@0.9.33",
+      "bom-ref": "desktop@0.9.34",
       "description": "Petal desktop app - low-latency, multi-window screensharing for macOS and Windows",
       "licenses": [
         {
@@ -5532,10 +5456,10 @@
         }
       ],
       "name": "desktop",
-      "purl": "pkg:npm/desktop@0.9.33",
+      "purl": "pkg:npm/desktop@0.9.34",
       "scope": "required",
       "type": "library",
-      "version": "0.9.33"
+      "version": "0.9.34"
     },
     "lifecycles": [
       {

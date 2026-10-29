@@ -150,6 +150,11 @@ pub struct TrackPublishOptions {
     /// encoding is produced and that mode is forwarded to libwebrtc to
     /// enable true SVC for VP9/AV1. Has no effect for VP8/H264.
     pub scalability_mode: Option<String>,
+    /// Petal patch: explicit RTP degradation preference for a video sender.
+    /// `None` (the default) keeps libwebrtc's choice, which for a non-screen
+    /// track is MAINTAIN_FRAMERATE. Screen shares keep their own setting.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub degradation_preference: Option<libwebrtc::rtp_parameters::DegradationPreference>,
 }
 
 impl Default for TrackPublishOptions {
@@ -170,6 +175,8 @@ impl Default for TrackPublishOptions {
             video_encoder: VideoEncoderBackend::Auto,
             h264_profile_preference: H264ProfilePreference::ConstrainedBaselineFirst,
             scalability_mode: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            degradation_preference: None,
         }
     }
 }
