@@ -243,7 +243,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["test-util"] }
 # `examples/windows_share_source_probe.rs` frame counter (already resolved
 # transitively via tauri, so this adds no new crate to the build).
-parking_lot = "0.12"
+parking_lot = "0.13"
 # Exercise the real client/scope/envelope path for the closed #550 diagnostics.
 # This only enables Sentry's in-memory TestTransport in test builds.
 sentry = { version = "0.49", default-features = false, features = ["test"] }
