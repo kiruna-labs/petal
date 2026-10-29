@@ -2501,11 +2501,15 @@ pub(crate) fn drain_pressed_for_sequencer_gap(
     };
     let still_held = match resume {
         Some(message) if message.message_type == RemoteControlType::Pointer => {
-            let released_by_resume = match message.action {
-                Some(RemoteControlAction::Up) => button_mask(button_from_wire(message.button)),
-                _ => 0,
-            };
-            message.buttons.unwrap_or(0) | released_by_resume
+            let own = button_mask(button_from_wire(message.button));
+            let buttons = message.buttons.unwrap_or(0);
+            match message.action {
+                Some(RemoteControlAction::Up) => buttons | own,
+                // A Down's mask includes the button it presses; that press is
+                // new, so an older hold of the same button lost its Up.
+                Some(RemoteControlAction::Down) => buttons & !own,
+                _ => buttons,
+            }
         }
         _ => 0,
     };

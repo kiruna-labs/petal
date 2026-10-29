@@ -24207,6 +24207,16 @@ mod tests {
         assert!(track_pressed_input(&flushed.deliver[0], frame, Some(99)).is_empty());
         assert!(drain_pressed_for_controller(ids.window_id, &ids.controller_id).is_empty());
 
+        // The Up was lost and the user clicks again: the resume Down's mask
+        // includes its own button, but that is a NEW press, so the old hold
+        // must still be released before the Down replays.
+        let flushed = flushed_gap("drag-reclick", vec![pointer(7, RemoteControlAction::Down, 0, 1)]);
+        let releases = releases_for_sequencer_gap(ids.window_id, &ids.controller_id, &flushed);
+        assert_eq!(releases.len(), 1, "a lost Up must not survive a fresh click");
+        assert_eq!(releases[0].message.action, Some(RemoteControlAction::Up));
+        assert!(track_pressed_input(&flushed.deliver[0], frame, Some(99)).is_empty());
+        assert_eq!(drain_pressed_for_controller(ids.window_id, &ids.controller_id).len(), 1);
+
         // Nothing past the gap speaks for the button: it is released as before.
         let mut key = test_message(
             RemoteControlType::Key,
