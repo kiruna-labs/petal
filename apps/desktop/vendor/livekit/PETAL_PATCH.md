@@ -366,3 +366,25 @@ Revert with `git checkout -- src/room/options.rs
 src/room/track/local_video_track.rs`, or stop setting
 `TrackPublishOptions::min_bitrate`, which alone restores prior behaviour. Drop
 once upstream exposes an allocation floor on the publish path.
+
+# Petal patch: caller-chosen degradation preference for non-screen video (#456)
+
+## Why this exists
+
+The SDK sets a degradation preference only for `TrackSource::Screenshare`
+(MAINTAIN_RESOLUTION, see the screen-share sender controls above). Every other
+video sender gets libwebrtc's default, which for a non-screencast source is
+MAINTAIN_FRAMERATE: the initial frame dropper and the quality scaler resize the
+stream. On macOS each resize re-creates the VideoToolbox H.264 encoder (a new
+compression session and a keyframe), and a realtime-video camera re-created it
+continuously; receivers saw repeated freezes (#456).
+
+## The fix
+
+`TrackPublishOptions::degradation_preference` (default `None`, i.e. upstream
+behaviour). `RtcSession::create_sender` applies it to the new sender for
+any non-Screenshare video track before the first frame is encoded.
+
+## Updating
+
+Drop this patch once upstream exposes a per-publication degradation preference.
