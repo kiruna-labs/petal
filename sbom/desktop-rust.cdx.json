@@ -21029,7 +21029,7 @@
       "version": "4.6.1"
     },
     {
-      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#zip@9.1.0",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#zip@9.1.3",
       "description": "Library to support the reading and writing of zip files.",
       "externalReferences": [
         {
@@ -21040,7 +21040,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "2886b00003a72c4ccee3f42cfc34908d33b2508a74d827dc2a4244706475c704"
+          "content": "1156b39d142a34b999c2310a50455e0cb3760bf7efad0122f796d813bee26ccb"
         }
       ],
       "licenses": [
@@ -21049,10 +21049,10 @@
         }
       ],
       "name": "zip",
-      "purl": "pkg:cargo/zip@9.1.0",
+      "purl": "pkg:cargo/zip@9.1.3",
       "scope": "required",
       "type": "library",
-      "version": "9.1.0"
+      "version": "9.1.3"
     },
     {
       "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#zlib-rs@0.6.7",
@@ -21333,7 +21333,7 @@
         "registry+https://github.com/rust-lang/crates.io-index#windows-core@0.62.2",
         "registry+https://github.com/rust-lang/crates.io-index#windows-future@0.3.2",
         "registry+https://github.com/rust-lang/crates.io-index#yuv-sys@0.3.15",
-        "registry+https://github.com/rust-lang/crates.io-index#zip@9.1.0"
+        "registry+https://github.com/rust-lang/crates.io-index#zip@9.1.3"
       ],
       "ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.34"
     },
@@ -27011,7 +27011,7 @@
         "registry+https://github.com/rust-lang/crates.io-index#windows-sys@0.61.2",
         "registry+https://github.com/rust-lang/crates.io-index#zopfli@0.8.3"
       ],
-      "ref": "registry+https://github.com/rust-lang/crates.io-index#zip@9.1.0"
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#zip@9.1.3"
     },
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#zlib-rs@0.6.7"
