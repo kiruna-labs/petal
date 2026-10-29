@@ -489,17 +489,17 @@
       "version": "0.42.6"
     },
     {
-      "bom-ref": "@astrojs/telemetry@3.4.0",
+      "bom-ref": "@astrojs/telemetry@3.4.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/telemetry/-/telemetry-3.4.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/telemetry/-/telemetry-3.4.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "42dd93e911ad61a73257c39953721cc856eca7af6ceaa21c9d6bd0be7effa7d30a79b3c2a44b303f9262e118627c6dc37de057eded3b3e38f9b2691df937e9ed"
+          "content": "48c92f32c18ea4cd05300a13e69ce1808dcb642d0948f59fec4bf0a29f9f67737a524bac3ccee523eb0e26330d239389ad5a227a2d7f006a35718eec8a44dce4"
         }
       ],
       "licenses": [
@@ -510,10 +510,10 @@
         }
       ],
       "name": "@astrojs/telemetry",
-      "purl": "pkg:npm/%40astrojs/telemetry@3.4.0",
+      "purl": "pkg:npm/%40astrojs/telemetry@3.4.1",
       "scope": "required",
       "type": "library",
-      "version": "3.4.0"
+      "version": "3.4.1"
     },
     {
       "bom-ref": "@babel/helper-string-parser@7.29.7",
@@ -3484,17 +3484,17 @@
       "version": "5.3.2"
     },
     {
-      "bom-ref": "astro@7.4.0",
+      "bom-ref": "astro@7.4.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/astro/-/astro-7.4.0.tgz"
+          "url": "https://registry.npmjs.org/astro/-/astro-7.4.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e938595366e9edab0649c795727877af6ddd13cf07a58379bf1b67096618ae3afc969423c787835bafd6f1680d95c73e4ff6fccc7990fc4712e03a501b86683a"
+          "content": "1401f871d0e515a5674068daccb4c4202e6f26a1a5a395c035cd7021bcd01c8a808c94e597f4564d4b3e48f356d4975ecc6e181b1319965684e40e354f693384"
         }
       ],
       "licenses": [
@@ -3505,10 +3505,10 @@
         }
       ],
       "name": "astro",
-      "purl": "pkg:npm/astro@7.4.0",
+      "purl": "pkg:npm/astro@7.4.2",
       "scope": "required",
       "type": "library",
-      "version": "7.4.0"
+      "version": "7.4.2"
     },
     {
       "bom-ref": "astro-expressive-code@0.44.2",
@@ -3565,17 +3565,17 @@
       "version": "0.13.0"
     },
     {
-      "bom-ref": "@astrojs/markdown-satteri@0.4.4",
+      "bom-ref": "@astrojs/markdown-satteri@0.4.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/markdown-satteri/-/markdown-satteri-0.4.4.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/markdown-satteri/-/markdown-satteri-0.4.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "07285ef4202218526b84c0022a980dfc53dfe257306a9ab0150001ec4d6c3c42d310920d7c12298271183814d7cebfff7ef4923617e9fd7dc0a8de26515f69f8"
+          "content": "d0878676815bbf47fee38d8a261612e385a0f05dccb87991b3120462e172aa48d1b9b73a74f04567b6b3a2be6de007972d0a13e40e61f47c9588aa5def40e5f7"
         }
       ],
       "licenses": [
@@ -3586,23 +3586,23 @@
         }
       ],
       "name": "@astrojs/markdown-satteri",
-      "purl": "pkg:npm/%40astrojs/markdown-satteri@0.4.4",
+      "purl": "pkg:npm/%40astrojs/markdown-satteri@0.4.5",
       "scope": "required",
       "type": "library",
-      "version": "0.4.4"
+      "version": "0.4.5"
     },
     {
-      "bom-ref": "@astrojs/prism@4.1.0",
+      "bom-ref": "@astrojs/prism@4.1.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/prism/-/prism-4.1.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/prism/-/prism-4.1.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "cef45a2f730a4c05d67d542b1c0958b687116565c133aaee177065ecb73b4201472d14dfc0c2a8df729cce592f9170d8faa732b4a84058e4fd77051460b53103"
+          "content": "b179405c95fab7841fb8b83e0ae083ce983b368c567326f8a5a169ae0b45a692de8ac0819a1f77e61fad2790965dfb171285b6203cbf8a16d132d8aedbc0a18f"
         }
       ],
       "licenses": [
@@ -3613,10 +3613,10 @@
         }
       ],
       "name": "@astrojs/prism",
-      "purl": "pkg:npm/%40astrojs/prism@4.1.0",
+      "purl": "pkg:npm/%40astrojs/prism@4.1.1",
       "scope": "required",
       "type": "library",
-      "version": "4.1.0"
+      "version": "4.1.1"
     },
     {
       "bom-ref": "es-module-lexer@3.0.3",
@@ -10052,7 +10052,7 @@
     {
       "dependsOn": [
         "@astrojs/starlight@0.42.6",
-        "astro@7.4.0",
+        "astro@7.4.2",
         "sharp@0.35.5",
         "starlight-links-validator@0.27.0"
       ],
@@ -10147,7 +10147,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.4.0",
+        "astro@7.4.2",
         "@astrojs/internal-helpers@0.11.0",
         "@astrojs/markdown-satteri@0.4.0",
         "es-module-lexer@2.3.2"
@@ -10169,7 +10169,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.4.0",
+        "astro@7.4.2",
         "@astrojs/markdown-satteri@0.4.0",
         "@astrojs/mdx@8.0.0",
         "@astrojs/sitemap@3.7.4",
@@ -10208,7 +10208,7 @@
         "is-docker@4.0.0",
         "package-manager-detector@1.9.0"
       ],
-      "ref": "@astrojs/telemetry@3.4.0"
+      "ref": "@astrojs/telemetry@3.4.1"
     },
     {
       "dependsOn": [],
@@ -10781,8 +10781,8 @@
       "dependsOn": [
         "@astrojs/compiler-rs@0.5.1",
         "@astrojs/internal-helpers@0.13.0",
-        "@astrojs/markdown-satteri@0.4.4",
-        "@astrojs/telemetry@3.4.0",
+        "@astrojs/markdown-satteri@0.4.5",
+        "@astrojs/telemetry@3.4.1",
         "@capsizecss/unpack@4.0.1",
         "@clack/prompts@1.8.1",
         "@oslojs/encoding@1.1.0",
@@ -10833,11 +10833,11 @@
         "zod@4.6.7",
         "sharp@0.35.5"
       ],
-      "ref": "astro@7.4.0"
+      "ref": "astro@7.4.2"
     },
     {
       "dependsOn": [
-        "astro@7.4.0",
+        "astro@7.4.2",
         "rehype-expressive-code@0.44.2",
         "url-extras@0.1.0"
       ],
@@ -10859,17 +10859,17 @@
     {
       "dependsOn": [
         "@astrojs/internal-helpers@0.13.0",
-        "@astrojs/prism@4.1.0",
+        "@astrojs/prism@4.1.1",
         "github-slugger@2.0.0",
         "satteri@0.10.5"
       ],
-      "ref": "@astrojs/markdown-satteri@0.4.4"
+      "ref": "@astrojs/markdown-satteri@0.4.5"
     },
     {
       "dependsOn": [
         "prismjs@1.30.0"
       ],
-      "ref": "@astrojs/prism@4.1.0"
+      "ref": "@astrojs/prism@4.1.1"
     },
     {
       "dependsOn": [],
@@ -12110,7 +12110,7 @@
     {
       "dependsOn": [
         "@astrojs/starlight@0.42.6",
-        "astro@7.4.0",
+        "astro@7.4.2",
         "@astrojs/markdown-satteri@0.4.0",
         "github-slugger@2.0.0",
         "hast-util-from-html@2.0.3",

@@ -886,17 +886,17 @@
       "version": "0.28.1"
     },
     {
-      "bom-ref": "@google/genai@2.30.0",
+      "bom-ref": "@google/genai@2.31.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@google/genai/-/genai-2.30.0.tgz"
+          "url": "https://registry.npmjs.org/@google/genai/-/genai-2.31.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "1a4bf58b1f2265ecbf577585e251da452f02ef53f9df78de9c34ff940f9f74f4c27d761f982547be8fb41f98d3833a27aac9913901bb429ccb264a683ffc7b6e"
+          "content": "bb57f0d2a122b96c0d723662c491517d01746b04271dbfeb0414147a260617e9e64d7402bdc82947650c84a53d28d76765d6216a16398f04ba9c9d95dad1ad0c"
         }
       ],
       "licenses": [
@@ -907,10 +907,10 @@
         }
       ],
       "name": "@google/genai",
-      "purl": "pkg:npm/%40google/genai@2.30.0",
+      "purl": "pkg:npm/%40google/genai@2.31.0",
       "scope": "required",
       "type": "library",
-      "version": "2.30.0"
+      "version": "2.31.0"
     },
     {
       "bom-ref": "@jridgewell/sourcemap-codec@1.6.0",
@@ -967,17 +967,17 @@
       "version": "1.51.0"
     },
     {
-      "bom-ref": "@opentelemetry/api@1.9.1",
+      "bom-ref": "@opentelemetry/api@1.10.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@opentelemetry/api/-/api-1.9.1.tgz"
+          "url": "https://registry.npmjs.org/@opentelemetry/api/-/api-1.10.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "80bc8994f1cf658740935244340f4b7877a365ed538bbeffa537859bf9cc5e6407fc715995c4bf3b65c907e2fc7e46eb352aa176d96f8c1563c705186a7347e5"
+          "content": "94c9327acf221eb1be9a4e961fb5fbd0c7422c8d914b41703416353f243c51e99a8a31369b99afe40d0d8b2dc7b5b61316b82450442314c5e64809368500ee3d"
         }
       ],
       "licenses": [
@@ -988,10 +988,10 @@
         }
       ],
       "name": "@opentelemetry/api",
-      "purl": "pkg:npm/%40opentelemetry/api@1.9.1",
+      "purl": "pkg:npm/%40opentelemetry/api@1.10.0",
       "scope": "required",
       "type": "library",
-      "version": "1.9.1"
+      "version": "1.10.0"
     },
     {
       "bom-ref": "@oxc-parser/binding-android-arm-eabi@0.152.0",
@@ -1777,17 +1777,17 @@
       "version": "1.1.2"
     },
     {
-      "bom-ref": "@sentry/bundler-plugins@11.8.0",
+      "bom-ref": "@sentry/bundler-plugins@11.9.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/bundler-plugins/-/bundler-plugins-11.8.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/bundler-plugins/-/bundler-plugins-11.9.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ad0adb2f69583f28a23ba9e07696db7cf2b213355542ccf5146f9a13c8d489462cef682f983999991ca5f550c218bac765f204c1a40c4f5b7a5901f99e8a6ee4"
+          "content": "c29cff81c33feab95dff06f83217fc91b0cdf67806e66c8a412642fb8e60cea475c3e19c75f567624a77b072fd015e26af02fcb2485322d7548213303139272a"
         }
       ],
       "licenses": [
@@ -1798,10 +1798,10 @@
         }
       ],
       "name": "@sentry/bundler-plugins",
-      "purl": "pkg:npm/%40sentry/bundler-plugins@11.8.0",
+      "purl": "pkg:npm/%40sentry/bundler-plugins@11.9.0",
       "scope": "required",
       "type": "library",
-      "version": "11.8.0"
+      "version": "11.9.0"
     },
     {
       "bom-ref": "@sentry/conventions@0.27.0",
@@ -1831,17 +1831,17 @@
       "version": "0.27.0"
     },
     {
-      "bom-ref": "@sentry/core@11.8.0",
+      "bom-ref": "@sentry/core@11.9.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/core/-/core-11.8.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/core/-/core-11.9.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e0c553b6193a0bfd684058db5487f2807c8d931d9819bc0d2e69749098e2d2f8c95f2e99365b3dcdd229d054c14e2e1edf5f3d21c49ce4e5c3e2a70976611e28"
+          "content": "b74759c8720bb765d50b815ef54980b72e9845f3ae42ff7972f59e365f87956e0ba618c5e7f8e400b57770909431d8696e56042e02090b853f4bf1a862e2366c"
         }
       ],
       "licenses": [
@@ -1852,23 +1852,23 @@
         }
       ],
       "name": "@sentry/core",
-      "purl": "pkg:npm/%40sentry/core@11.8.0",
+      "purl": "pkg:npm/%40sentry/core@11.9.0",
       "scope": "required",
       "type": "library",
-      "version": "11.8.0"
+      "version": "11.9.0"
     },
     {
-      "bom-ref": "@sentry/node@11.8.0",
+      "bom-ref": "@sentry/node@11.9.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/node/-/node-11.8.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/node/-/node-11.9.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "f2f14f7c2458a14626b27a3e39876fb5fe5a908514bddec5bdcb8819c7eb81ef12fdb48b1512aae7c62d1665f6e4915cacc359da8403f2bd2392065f9bfda2b8"
+          "content": "733db5f4fcd56803d3950e1b4414d10423afc5b6645cad0a92acaa58f57a3a64a7eaf5a7f77e424df3acf8c29473503e96872f07c8bd39f0486ceeafd37041b9"
         }
       ],
       "licenses": [
@@ -1879,23 +1879,23 @@
         }
       ],
       "name": "@sentry/node",
-      "purl": "pkg:npm/%40sentry/node@11.8.0",
+      "purl": "pkg:npm/%40sentry/node@11.9.0",
       "scope": "required",
       "type": "library",
-      "version": "11.8.0"
+      "version": "11.9.0"
     },
     {
-      "bom-ref": "@sentry/opentelemetry@11.8.0",
+      "bom-ref": "@sentry/opentelemetry@11.9.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/opentelemetry/-/opentelemetry-11.8.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/opentelemetry/-/opentelemetry-11.9.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c0ab86d926c71e21834ff7e04f85f99f6bac3b802356461f023e35d34da6675f09654de634b782abeab0fe79c32186dcb1f20c3949bf78c8774a128213e0e95d"
+          "content": "14c0a401b11f06916d7abae447b9383fc2c469b5001078d931bbbec9c0e36e7235538a53db6b69c1c1493add3aa2b16469ca1636c613f7e11d7e692f6822ad48"
         }
       ],
       "licenses": [
@@ -1906,23 +1906,23 @@
         }
       ],
       "name": "@sentry/opentelemetry",
-      "purl": "pkg:npm/%40sentry/opentelemetry@11.8.0",
+      "purl": "pkg:npm/%40sentry/opentelemetry@11.9.0",
       "scope": "required",
       "type": "library",
-      "version": "11.8.0"
+      "version": "11.9.0"
     },
     {
-      "bom-ref": "@sentry/server-runtime-injection@11.8.0",
+      "bom-ref": "@sentry/server-runtime-injection@11.9.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/server-runtime-injection/-/server-runtime-injection-11.8.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/server-runtime-injection/-/server-runtime-injection-11.9.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e2e07813cfbd9e2e4d709e3adda60affe9f5853330fef4ade2cf80910f3808a8a0443c2fd8534d9c3d405a98a958d8ffc4443a7906d48ad1a5ef083bfd18bc3e"
+          "content": "4361b9c5a7a8898c0685e099c9ea99feffff49962344b9484e56a74ec64cfdfa31d6a93b7266c35fbfa8e2af89900a5557d56e5d0655c69a5a542b018257c328"
         }
       ],
       "licenses": [
@@ -1933,23 +1933,23 @@
         }
       ],
       "name": "@sentry/server-runtime-injection",
-      "purl": "pkg:npm/%40sentry/server-runtime-injection@11.8.0",
+      "purl": "pkg:npm/%40sentry/server-runtime-injection@11.9.0",
       "scope": "required",
       "type": "library",
-      "version": "11.8.0"
+      "version": "11.9.0"
     },
     {
-      "bom-ref": "@sentry/server-utils@11.8.0",
+      "bom-ref": "@sentry/server-utils@11.9.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/server-utils/-/server-utils-11.8.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/server-utils/-/server-utils-11.9.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "d8c445cf5ad7c67b8319a7e5ea8fe2b7028765e667e6151961e5cd6d02b4d76b8efdada95e111cf1987715e3b92f8b631ab2161f1e35f6c6801672b06d50b621"
+          "content": "c471138b1e63023b3fe2d63e6fd4427a3114ecee3da4d0621a00965f428544c4a959bc3d9a8a90f22f0deb66d2ecbfbf0499c1719e526759f079787bc3bf3b42"
         }
       ],
       "licenses": [
@@ -1960,10 +1960,10 @@
         }
       ],
       "name": "@sentry/server-utils",
-      "purl": "pkg:npm/%40sentry/server-utils@11.8.0",
+      "purl": "pkg:npm/%40sentry/server-utils@11.9.0",
       "scope": "required",
       "type": "library",
-      "version": "11.8.0"
+      "version": "11.9.0"
     },
     {
       "bom-ref": "@types/node@26.6.5",
@@ -3793,17 +3793,17 @@
       "version": "4.0.1"
     },
     {
-      "bom-ref": "livekit-server-sdk@2.19.1",
+      "bom-ref": "livekit-server-sdk@2.19.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/livekit-server-sdk/-/livekit-server-sdk-2.19.1.tgz"
+          "url": "https://registry.npmjs.org/livekit-server-sdk/-/livekit-server-sdk-2.19.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b6a8cce683c30cd06b91bffae1845eb5af5458fdf69756b69b41c75eaf163ae133c31878cec6978de659b4f1b812be1e54093892347e10cc47ee53cace0d60ea"
+          "content": "68d6fb89939d3185a38375f6dbb18ef62fe35aca91eae8946b695edd3d0939a2be1701376ccc7e6c48475684a2a0c14be0b438c64e33b73d47f132b120f8ead7"
         }
       ],
       "licenses": [
@@ -3814,10 +3814,10 @@
         }
       ],
       "name": "livekit-server-sdk",
-      "purl": "pkg:npm/livekit-server-sdk@2.19.1",
+      "purl": "pkg:npm/livekit-server-sdk@2.19.2",
       "scope": "required",
       "type": "library",
-      "version": "2.19.1"
+      "version": "2.19.2"
     },
     {
       "bom-ref": "long@5.3.2",
@@ -4812,10 +4812,10 @@
   "dependencies": [
     {
       "dependsOn": [
-        "@google/genai@2.30.0",
-        "@sentry/node@11.8.0",
+        "@google/genai@2.31.0",
+        "@sentry/node@11.9.0",
         "@vercel/blob@2.8.2",
-        "livekit-server-sdk@2.19.1",
+        "livekit-server-sdk@2.19.2",
         "@types/node@26.6.5",
         "tsx@4.23.15",
         "typescript@7.0.2",
@@ -4938,7 +4938,7 @@
         "protobufjs@7.6.5",
         "ws@8.21.2"
       ],
-      "ref": "@google/genai@2.30.0"
+      "ref": "@google/genai@2.31.0"
     },
     {
       "dependsOn": [],
@@ -4952,7 +4952,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "@opentelemetry/api@1.9.1"
+      "ref": "@opentelemetry/api@1.10.0"
     },
     {
       "dependsOn": [],
@@ -5074,7 +5074,7 @@
     },
     {
       "dependsOn": [
-        "@sentry/core@11.8.0",
+        "@sentry/core@11.9.0",
         "dotenv@17.4.2",
         "glob@13.0.6",
         "magic-string@1.4.3",
@@ -5082,7 +5082,7 @@
         "sentry@0.45.0",
         "supports-color@8.1.1"
       ],
-      "ref": "@sentry/bundler-plugins@11.8.0"
+      "ref": "@sentry/bundler-plugins@11.9.0"
     },
     {
       "dependsOn": [],
@@ -5092,42 +5092,42 @@
       "dependsOn": [
         "@sentry/conventions@0.27.0"
       ],
-      "ref": "@sentry/core@11.8.0"
+      "ref": "@sentry/core@11.9.0"
     },
     {
       "dependsOn": [
-        "@opentelemetry/api@1.9.1",
-        "@sentry/bundler-plugins@11.8.0",
+        "@opentelemetry/api@1.10.0",
+        "@sentry/bundler-plugins@11.9.0",
         "@sentry/conventions@0.27.0",
-        "@sentry/core@11.8.0",
-        "@sentry/opentelemetry@11.8.0",
-        "@sentry/server-runtime-injection@11.8.0",
-        "@sentry/server-utils@11.8.0"
+        "@sentry/core@11.9.0",
+        "@sentry/opentelemetry@11.9.0",
+        "@sentry/server-runtime-injection@11.9.0",
+        "@sentry/server-utils@11.9.0"
       ],
-      "ref": "@sentry/node@11.8.0"
+      "ref": "@sentry/node@11.9.0"
     },
     {
       "dependsOn": [
-        "@opentelemetry/api@1.9.1",
+        "@opentelemetry/api@1.10.0",
         "@sentry/conventions@0.27.0",
-        "@sentry/core@11.8.0"
+        "@sentry/core@11.9.0"
       ],
-      "ref": "@sentry/opentelemetry@11.8.0"
+      "ref": "@sentry/opentelemetry@11.9.0"
     },
     {
       "dependsOn": [
-        "@sentry/core@11.8.0",
-        "@sentry/server-utils@11.8.0"
+        "@sentry/core@11.9.0",
+        "@sentry/server-utils@11.9.0"
       ],
-      "ref": "@sentry/server-runtime-injection@11.8.0"
+      "ref": "@sentry/server-runtime-injection@11.9.0"
     },
     {
       "dependsOn": [
-        "@opentelemetry/api@1.9.1",
+        "@opentelemetry/api@1.10.0",
         "@sentry/conventions@0.27.0",
-        "@sentry/core@11.8.0"
+        "@sentry/core@11.9.0"
       ],
-      "ref": "@sentry/server-utils@11.8.0"
+      "ref": "@sentry/server-utils@11.9.0"
     },
     {
       "dependsOn": [
@@ -5467,7 +5467,7 @@
         "@livekit/protocol@1.51.0",
         "jose@5.10.0"
       ],
-      "ref": "livekit-server-sdk@2.19.1"
+      "ref": "livekit-server-sdk@2.19.2"
     },
     {
       "dependsOn": [],

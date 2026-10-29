@@ -18,16 +18,16 @@
     "@noble/hashes": "^2.4.0",
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
     "@types/node": "^26.6.5",
-    "dotenv": "^18.0.8",
-    "livekit-server-sdk": "^2.19.1",
+    "dotenv": "^18.0.9",
+    "livekit-server-sdk": "^2.19.2",
     "svelte": "^5.57.2",
     "svelte-check": "^4.7.7",
     "tsx": "^4.23.15",
     "typescript": "~6.0.2",
-    "vite": "^8.3.4"
+    "vite": "^8.3.5"
   },
   "dependencies": {
-    "@sentry/browser": "^11.8.0",
+    "@sentry/browser": "^11.9.0",
     "@userdispatch/sdk": "1.0.1",
     "livekit-client": "^2.23.0"
   }
