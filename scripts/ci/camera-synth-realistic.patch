@@ -1,0 +1,267 @@
+diff --git a/apps/desktop/src-tauri/src/transport/camera/mod.rs b/apps/desktop/src-tauri/src/transport/camera/mod.rs
+index f540ada6..b1926073 100644
+--- a/apps/desktop/src-tauri/src/transport/camera/mod.rs
++++ b/apps/desktop/src-tauri/src/transport/camera/mod.rs
+@@ -233,6 +233,142 @@ fn synthetic_camera_frame(
+     }
+ }
+ 
++/// `PETAL_CAMERA_SYNTH_REALISTIC=1` (debug builds only, and only together
++/// with `PETAL_CAMERA_SYNTH_SOURCE=1`): swap the 640x480 bar for a 1280x720
++/// camera-like picture -- detailed background with handheld-style global
++/// motion plus a moving, high-entropy "subject" -- so the encoder spends what
++/// a real webcam costs. The camera-freeze soak needs it: a flat test pattern
++/// encodes to almost nothing and cannot load the rate controller (#456).
++pub(crate) fn synthetic_camera_realistic_enabled() -> bool {
++    cfg!(debug_assertions)
++        && synthetic_camera_capture_enabled()
++        && std::env::var("PETAL_CAMERA_SYNTH_REALISTIC").as_deref() == Ok("1")
++}
++
++pub(crate) const SYNTH_REALISTIC_WIDTH: u32 = 1280;
++pub(crate) const SYNTH_REALISTIC_HEIGHT: u32 = 720;
++const SYNTH_REALISTIC_PAN: usize = 32;
++
++/// Pre-rendered texture the realistic frames are cut from. Per-frame work is
++/// row `memcpy`s only, so a debug build still holds 30 fps.
++struct RealisticCameraTexture {
++    width: usize,
++    height: usize,
++    tex_w: usize,
++    tex_h: usize,
++    luma: Vec<u8>,
++    chroma: Vec<u8>,
++}
++
++fn synth_hash(mut x: u32) -> u32 {
++    x ^= x >> 16;
++    x = x.wrapping_mul(0x7feb_352d);
++    x ^= x >> 15;
++    x = x.wrapping_mul(0x846c_a68b);
++    x ^ (x >> 16)
++}
++
++impl RealisticCameraTexture {
++    fn new(width: u32, height: u32) -> Self {
++        let (width, height) = (width as usize, height as usize);
++        // Twice the frame height so the subject can sample a region the
++        // background never shows.
++        let tex_w = width + 2 * SYNTH_REALISTIC_PAN;
++        let tex_h = 2 * height + 2 * SYNTH_REALISTIC_PAN;
++        let mut luma = vec![0u8; tex_w * tex_h];
++        for y in 0..tex_h {
++            for x in 0..tex_w {
++                let block = synth_hash(((x / 24) as u32) << 16 ^ (y / 24) as u32) % 96;
++                let grain = synth_hash((x as u32).wrapping_mul(7919) ^ (y as u32).wrapping_mul(104_729)) % 28;
++                let ramp = (x * 48 / tex_w + y * 32 / tex_h) as u32;
++                luma[y * tex_w + x] = (40 + block + grain + ramp).min(235) as u8;
++            }
++        }
++        let mut chroma = vec![128u8; tex_w * (tex_h / 2)];
++        for y in 0..tex_h / 2 {
++            for x in (0..tex_w).step_by(2) {
++                let h = synth_hash(((x / 32) as u32) << 16 ^ (y / 16) as u32);
++                chroma[y * tex_w + x] = 108 + (h % 40) as u8;
++                chroma[y * tex_w + x + 1] = 108 + ((h >> 8) % 40) as u8;
++            }
++        }
++        Self { width, height, tex_w, tex_h, luma, chroma }
++    }
++
++    fn frame(&self, frame_index: u64, capture_wall_time_us: u64) -> CameraFrame {
++        let (w, h, tw) = (self.width, self.height, self.tex_w);
++        let t = frame_index as f64 / f64::from(SYNTH_CAMERA_FPS);
++        let pan = SYNTH_REALISTIC_PAN as f64 - 2.0;
++        // Even offsets keep the NV12 chroma pairs aligned.
++        let dx = ((SYNTH_REALISTIC_PAN as f64 + pan * (t * 1.9).sin()) as usize) & !1;
++        let dy = ((SYNTH_REALISTIC_PAN as f64 + pan * (t * 1.3).cos()) as usize) & !1;
++        let mut y = Vec::with_capacity(w * h);
++        for row in 0..h {
++            let start = (row + dy) * tw + dx;
++            y.extend_from_slice(&self.luma[start..start + w]);
++        }
++        let mut uv = Vec::with_capacity(w * h / 2);
++        for row in 0..h / 2 {
++            let start = (row + dy / 2) * tw + dx;
++            uv.extend_from_slice(&self.chroma[start..start + w]);
++        }
++        // Subject: a third of the width, half the height, sweeping side to
++        // side; its content jumps every frame (talking head, hands), so motion
++        // compensation cannot make it free.
++        let sw = (w / 3) & !1;
++        let sh = (h / 2) & !1;
++        let sx = (((w - sw) as f64 / 2.0) * (1.0 + (t * 0.8).sin())) as usize & !1;
++        let sy = (h - sh) / 2;
++        let jx = (synth_hash(frame_index as u32) as usize % (tw - sw)) & !1;
++        let jy = h + (synth_hash(frame_index as u32 ^ 0x5bd1) as usize % (self.tex_h - h - sh));
++        for row in 0..sh {
++            let src = (jy + row) * tw + jx;
++            let dst = (sy + row) * w + sx;
++            y[dst..dst + sw].copy_from_slice(&self.luma[src..src + sw]);
++        }
++        CameraFrame {
++            width: w as u32,
++            height: h as u32,
++            y,
++            y_stride: w as u32,
++            uv,
++            uv_stride: w as u32,
++            capture_wall_time_us,
++        }
++    }
++}
++
++/// Mark the calling thread as a 30 fps periodic real-time thread, the way a
++/// capture device's delivery thread is scheduled.
++#[cfg(target_os = "macos")]
++fn synthetic_pump_time_constraint() {
++    let mut timebase = libc::mach_timebase_info { numer: 0, denom: 0 };
++    // SAFETY: plain out-parameter and policy calls on the current thread.
++    unsafe {
++        libc::mach_timebase_info(&mut timebase);
++        if timebase.numer == 0 {
++            return;
++        }
++        let abs = |ns: u64| (ns * u64::from(timebase.denom) / u64::from(timebase.numer)) as u32;
++        let period_ns = 1_000_000_000 / u64::from(SYNTH_CAMERA_FPS);
++        let mut policy = libc::thread_time_constraint_policy {
++            period: abs(period_ns),
++            computation: abs(5_000_000),
++            constraint: abs(10_000_000),
++            preemptible: 1,
++        };
++        let result = libc::thread_policy_set(
++            libc::mach_thread_self(),
++            libc::THREAD_TIME_CONSTRAINT_POLICY as _,
++            (&mut policy as *mut libc::thread_time_constraint_policy).cast(),
++            libc::THREAD_TIME_CONSTRAINT_POLICY_COUNT,
++        );
++        if result != 0 {
++            log::warn!("camera: synthetic pump time-constraint policy refused ({result})");
++        }
++    }
++}
++
+ fn wall_time_us() -> u64 {
+     std::time::SystemTime::now()
+         .duration_since(std::time::UNIX_EPOCH)
+@@ -260,6 +396,7 @@ impl CameraStatusSource for SyntheticCameraState {
+ /// [`SYNTH_CAMERA_FPS`] from its own thread, standing in for the platform
+ /// adapter at the `open_camera` boundary and nowhere deeper.
+ struct SyntheticCameraCapture {
++    dims: (u32, u32),
+     state: Arc<SyntheticCameraState>,
+     stop: Arc<std::sync::atomic::AtomicBool>,
+     pump: Option<std::thread::JoinHandle<()>>,
+@@ -270,28 +407,52 @@ impl SyntheticCameraCapture {
+         let state = Arc::new(SyntheticCameraState::default());
+         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+         let frozen = synthetic_camera_freeze_enabled();
++        let realistic = synthetic_camera_realistic_enabled()
++            .then(|| RealisticCameraTexture::new(SYNTH_REALISTIC_WIDTH, SYNTH_REALISTIC_HEIGHT));
++        let dims = match &realistic {
++            Some(texture) => (texture.width as u32, texture.height as u32),
++            None => (SYNTH_CAMERA_WIDTH, SYNTH_CAMERA_HEIGHT),
++        };
+         let pump_state = state.clone();
+         let pump_stop = stop.clone();
+         let pump = std::thread::Builder::new()
+             .name("petal-synthetic-camera".to_string())
+             .spawn(move || {
++                // A real camera is clocked by its hardware; a sleeping pump is
++                // not. Under timer coalescing a 33 ms sleep measured ~130 ms
++                // (14 fps); a time-constraint thread is not coalesced.
++                #[cfg(target_os = "macos")]
++                synthetic_pump_time_constraint();
+                 let interval =
+                     std::time::Duration::from_micros(1_000_000 / u64::from(SYNTH_CAMERA_FPS));
+                 let mut frame_index: u64 = 0;
++                let mut deadline = std::time::Instant::now();
+                 while !pump_stop.load(Ordering::Relaxed) {
+                     // Frozen still DELIVERS: a stopped pump is a different
+                     // failure (no frames at all) from the one the freeze
+                     // lever models (frames arriving, picture not changing).
+                     let index = if frozen { 0 } else { frame_index };
+-                    on_frame(synthetic_camera_frame(
+-                        SYNTH_CAMERA_WIDTH,
+-                        SYNTH_CAMERA_HEIGHT,
+-                        index,
+-                        wall_time_us(),
+-                    ));
++                    let frame = match &realistic {
++                        Some(texture) => texture.frame(index, wall_time_us()),
++                        None => synthetic_camera_frame(
++                            SYNTH_CAMERA_WIDTH,
++                            SYNTH_CAMERA_HEIGHT,
++                            index,
++                            wall_time_us(),
++                        ),
++                    };
++                    on_frame(frame);
+                     pump_state.frames_delivered.fetch_add(1, Ordering::Relaxed);
+                     frame_index = frame_index.wrapping_add(1);
+-                    std::thread::sleep(interval);
++                    // Deadline pacing: frame generation time must not lower
++                    // the delivered rate below SYNTH_CAMERA_FPS.
++                    deadline += interval;
++                    let now = std::time::Instant::now();
++                    if deadline > now {
++                        std::thread::sleep(deadline - now);
++                    } else {
++                        deadline = now;
++                    }
+                 }
+             })
+             .map_err(|error| {
+@@ -299,11 +460,15 @@ impl SyntheticCameraCapture {
+             })?;
+         log::warn!(
+             "camera: PETAL_CAMERA_SYNTH_SOURCE=1 -- publishing a synthetic \
+-             {SYNTH_CAMERA_WIDTH}x{SYNTH_CAMERA_HEIGHT}@{SYNTH_CAMERA_FPS} test pattern \
++             {}x{}@{SYNTH_CAMERA_FPS} test pattern \
+              INSTEAD of camera input (test hook; the rest of the publish path is unchanged; \
+-             frozen={frozen})"
++             frozen={frozen}, realistic={})",
++            dims.0,
++            dims.1,
++            dims != (SYNTH_CAMERA_WIDTH, SYNTH_CAMERA_HEIGHT)
+         );
+         Ok(Self {
++            dims,
+             state,
+             stop,
+             pump: Some(pump),
+@@ -320,7 +485,7 @@ impl CameraBackend for SyntheticCameraCapture {
+     }
+ 
+     fn dimensions(&self) -> (u32, u32) {
+-        (SYNTH_CAMERA_WIDTH, SYNTH_CAMERA_HEIGHT)
++        self.dims
+     }
+ 
+     fn frame_rate(&self) -> (u32, u32) {
+@@ -851,6 +1016,24 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn realistic_synthetic_camera_frames_are_720p_textured_and_moving() {
++        let texture = RealisticCameraTexture::new(SYNTH_REALISTIC_WIDTH, SYNTH_REALISTIC_HEIGHT);
++        let first = texture.frame(0, 1);
++        let next = texture.frame(1, 2);
++        assert_eq!((first.width, first.height), (1280, 720));
++        assert_eq!(first.y.len(), 1280 * 720);
++        assert_eq!(first.uv.len(), 1280 * 720 / 2);
++        let distinct: std::collections::HashSet<u8> = first.y.iter().copied().collect();
++        assert!(distinct.len() > 64, "a camera-like picture needs texture, got {} luma levels", distinct.len());
++        let changed = first.y.iter().zip(&next.y).filter(|(a, b)| a != b).count();
++        assert!(changed > first.y.len() / 10, "consecutive frames must differ broadly, {changed} pixels changed");
++        // Every frame index along a long run stays inside the texture.
++        for index in (0..20_000).step_by(37) {
++            texture.frame(index, 0);
++        }
++    }
++
+     /// The mutation counterpart of the test above: with the frame index held
+     /// (what `PETAL_CAMERA_SYNTH_FREEZE=1` does to the pump) the signal the
+     /// web oracle measures really is gone, so a live CAM-N2W run must go red.

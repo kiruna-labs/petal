@@ -7,9 +7,9 @@ Open Settings from the profile menu in the main window (click your avatar,
 then **Settings**) or from the menubar popover's **Settings** item. A row of
 chips under the title jumps to each section; the sections appear in this
 order, top to bottom: Devices, Permissions (macOS only), Privacy & Sharing,
-AI chat, Diagnostics, Account, About. Every on/off setting is a switch on its
+AI chat, Diagnostics, Server, Account, About. Every on/off setting is a switch on its
 row and takes effect as soon as you flip it — except AI chat, which asks you
-to confirm first.
+to confirm first, and Server, which applies the next time you join.
 
 ## Devices
 
@@ -99,6 +99,20 @@ so this section doesn't appear there.
   nothing is sent. In the browser, the same switch is in the profile card
   (click your avatar on the home screen). A build from source without an
   analytics key sends nothing either way.
+
+## Server
+
+- **Token server** — the address Petal uses to join meetings. Leave blank to
+  use this build’s default. Use `https://`, or `http://` only for
+  `localhost`, `127.0.0.1`, and `[::1]`. **Save** stores both fields in this
+  section; **Use default** clears that one. The next join uses the saved
+  server. If this launch was started with `PETAL_BACKEND_URL`, that value
+  still wins until you open Petal without it. While a saved server is the
+  one this launch will call, the home screen and the meeting show
+  "Custom server: <host>".
+- **Invite links** — origin copied invite links start with. Set this if you
+  host your own meeting page. The section's **Save** stores it with the
+  token server; **Use default** clears just this field.
 
 ## Account
 

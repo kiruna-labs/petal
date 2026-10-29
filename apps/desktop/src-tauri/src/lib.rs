@@ -58,6 +58,9 @@ pub mod ai_chat;
 // button. Cross-platform (unlike ai_chat, which is macOS-only) -- the Debug
 // button exists on both the macOS and Windows compositors.
 mod debug_settings;
+// Token-server / invite-origin user setting (#310): pick a backend without
+// rebuilding. Cross-platform, same persistence shape as debug_settings.
+mod server_settings;
 // `petal://join/<room>` invite-link handling (issue #2): pure URL
 // parsing (unit-tested) + the navigate-the-main-webview handler wired to
 // tauri-plugin-deep-link in run()/setup() below. Not macOS-gated: plain
@@ -1176,6 +1179,8 @@ pub fn run() {
             // registered again on the Windows invoke_handler list below.
             debug_settings::debug_mode_settings,
             debug_settings::set_debug_mode,
+            server_settings::server_settings,
+            server_settings::set_server_settings,
             #[cfg(target_os = "macos")]
             compositor::compositor_set_draw_active,
             #[cfg(target_os = "macos")]
@@ -1344,6 +1349,7 @@ pub fn run() {
             // Debug-mode setting (#669): cross-platform, unlike AI chat below
             // -- the Debug button it gates exists on both compositors.
             debug_settings::initialize(&app_data_dir);
+            server_settings::initialize(&app_data_dir);
             plugins::store::initialize(&app_data_dir);
             analytics::init(&app_data_dir);
             // #404 follow-up: undo a browser web accessibility switch that a
@@ -1660,6 +1666,7 @@ pub fn run() {
             // Debug-mode setting (#669): same cross-platform init as macOS
             // above, before `app_data_dir` is moved into `RoomsState::load`.
             debug_settings::initialize(&app_data_dir);
+            server_settings::initialize(&app_data_dir);
             plugins::store::initialize(&app_data_dir);
             analytics::init(&app_data_dir);
             // AI chat settings (#656): master switch + optional user Gemini
@@ -1806,6 +1813,8 @@ pub fn run() {
             // the macOS invoke_handler list above.
             debug_settings::debug_mode_settings,
             debug_settings::set_debug_mode,
+            server_settings::server_settings,
+            server_settings::set_server_settings,
             remote_control::remote_control_send,
             remote_control::remote_control_set_active,
             remote_control::remote_clipboard_copy,

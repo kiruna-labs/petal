@@ -23,6 +23,9 @@ private let blockWidth: CGFloat = 44
 private let blockHeight: CGFloat = 80
 private let logPath = ProcessInfo.processInfo.environment["PETAL_FREEZE_ANIMATOR_LOG"]
     ?? "/tmp/petal-freeze-animator-ticks.log"
+// Camera-freeze soak (#456): repaint only every N ms, like an editor someone
+// is reading, so the share is mostly static. 0 = the default 33 ms animation.
+private let staticEveryMs = Int(ProcessInfo.processInfo.environment["PETAL_FREEZE_ANIMATOR_STATIC_MS"] ?? "") ?? 0
 
 final class AnimatorView: NSView {
     var tick: UInt32 = 0
@@ -105,7 +108,8 @@ final class AnimatorDelegate: NSObject, NSApplicationDelegate {
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.orderFrontRegardless()
 
-        let timer = Timer(timeInterval: tickInterval, repeats: true) { [weak self] _ in
+        let interval = staticEveryMs > 0 ? TimeInterval(staticEveryMs) / 1000.0 : tickInterval
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             self?.advance()
         }
         RunLoop.main.add(timer, forMode: .common)

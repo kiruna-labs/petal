@@ -342,6 +342,7 @@ export function setupHomeScreen(options: HomeScreenOptions): HomeScreenApi {
         void copyRecentRoomInviteLink({
           credential: roomRecord.code,
           displayLabel: roomLabel,
+          origin: location.origin,
           showToast,
           logEvent,
         });
