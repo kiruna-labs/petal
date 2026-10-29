@@ -4065,11 +4065,25 @@ pub fn push_frame(
             // growth and shrinkage so the receiver window, telepointer, and
             // remote-control mapping follow a live selector resize. Ordinary
             // display/window shares retain metadata dimensions so a lower
-            // decoded layer cannot resize their user window.
-            if source_kind == SharedSourceKind::DisplayRegion
-                && region_frame_is_new_source_size(canonical_size, (source_width, source_height))
-            {
-                canonical_size = Some((source_width, source_height));
+            // decoded layer cannot resize their user window -- unless the
+            // decoded aspect proves those dimensions wrong (see
+            // `source_size_for_aspect_mismatched_frame`).
+            if source_kind == SharedSourceKind::DisplayRegion {
+                if region_frame_is_new_source_size(canonical_size, (source_width, source_height)) {
+                    canonical_size = Some((source_width, source_height));
+                    *win.canonical_source_pixel_size.lock_unpoisoned() = canonical_size;
+                }
+            } else if let Some(corrected) = source_size_for_aspect_mismatched_frame(
+                canonical_size,
+                (source_width, source_height),
+            ) {
+                log::info!(
+                    "compositor: window {window_id} decoded {source_width}x{source_height} does not match the published {:?} aspect; adopting {}x{} as the source size",
+                    canonical_size,
+                    corrected.0,
+                    corrected.1
+                );
+                canonical_size = Some(corrected);
                 *win.canonical_source_pixel_size.lock_unpoisoned() = canonical_size;
             }
             let logical_source_size =
@@ -4334,6 +4348,50 @@ fn region_frame_is_new_source_size(
     decoded: (u32, u32),
 ) -> bool {
     decoded.0 > 0 && decoded.1 > 0 && canonical != Some(decoded)
+}
+
+/// Relative aspect-ratio difference above which a decoded frame is treated as
+/// proof that the publisher's announced dimensions are wrong. Same threshold
+/// as the Windows compositor's `decoded_frame_has_source_aspect_change`;
+/// simulcast rounding stays well under 1% even on the smallest layer.
+const SOURCE_ASPECT_MISMATCH_RATIO: f64 = 0.05;
+
+/// Corrected source size when a decoded frame's aspect ratio materially
+/// disagrees with the publisher's announced dimensions; `None` otherwise.
+///
+/// Simulcast layers are uniform downscales of the published source, so a
+/// lower layer keeps the canonical aspect and stays on the canonical size. An
+/// aspect change means the announced size never described the stream: a
+/// browser sender announces `getSettings()` from before its first captured
+/// frame (e.g. the 2560x1600 `getDisplayMedia` ideal for a 2560x1072
+/// ultrawide), and a browser window share resizes in place without a
+/// republish. Sizing the panel from those dimensions left transparent bars
+/// above and below the video. The decoded frame may itself be a lower layer,
+/// so it is scaled up as far as the announced size allows (never below 1x)
+/// instead of shrinking the panel to that layer.
+fn source_size_for_aspect_mismatched_frame(
+    canonical: Option<(u32, u32)>,
+    decoded: (u32, u32),
+) -> Option<(u32, u32)> {
+    let (canonical_w, canonical_h) = canonical?;
+    let (decoded_w, decoded_h) = decoded;
+    if canonical_w == 0 || canonical_h == 0 || decoded_w == 0 || decoded_h == 0 {
+        return None;
+    }
+    let canonical_aspect = canonical_w as f64 / canonical_h as f64;
+    let decoded_aspect = decoded_w as f64 / decoded_h as f64;
+    if ((decoded_aspect - canonical_aspect) / canonical_aspect).abs()
+        <= SOURCE_ASPECT_MISMATCH_RATIO
+    {
+        return None;
+    }
+    let scale = (canonical_w as f64 / decoded_w as f64)
+        .min(canonical_h as f64 / decoded_h as f64)
+        .max(1.0);
+    Some((
+        (decoded_w as f64 * scale).round().max(1.0) as u32,
+        (decoded_h as f64 * scale).round().max(1.0) as u32,
+    ))
 }
 
 /// Select the publisher's dimensions whenever they are available. A decoded
@@ -7862,6 +7920,54 @@ mod tests {
             source_presentation_size_points(first.unwrap().0, first.unwrap().1, 2.0),
             source_presentation_size_points(lower_layer.unwrap().0, lower_layer.unwrap().1, 2.0),
         ));
+    }
+
+    #[test]
+    fn aspect_mismatched_frame_corrects_a_wrong_published_size() {
+        // Field case: a browser announced its 2560x1600 getDisplayMedia ideal
+        // while delivering a 3440x1440 ultrawide scaled to 2560x1072. The
+        // 16:10 panel showed the video with bars above and below.
+        assert_eq!(
+            source_size_for_aspect_mismatched_frame(Some((2560, 1600)), (2560, 1072)),
+            Some((2560, 1072))
+        );
+        // The first mismatched frame may be a lower layer: scale it up to the
+        // announced bounds rather than shrinking the panel to that layer.
+        assert_eq!(
+            source_size_for_aspect_mismatched_frame(Some((2560, 1600)), (640, 268)),
+            Some((2560, 1072))
+        );
+        // A portrait source is never shrunk below its decoded size.
+        assert_eq!(
+            source_size_for_aspect_mismatched_frame(Some((1920, 1080)), (1080, 1920)),
+            Some((1080, 1920))
+        );
+    }
+
+    #[test]
+    fn same_aspect_layers_and_missing_sizes_keep_the_published_size() {
+        assert_eq!(
+            source_size_for_aspect_mismatched_frame(Some((1920, 1080)), (640, 360)),
+            None
+        );
+        // Rounded small simulcast layer: well inside the tolerance.
+        assert_eq!(
+            source_size_for_aspect_mismatched_frame(Some((2560, 1072)), (426, 179)),
+            None
+        );
+        assert_eq!(
+            source_size_for_aspect_mismatched_frame(Some((1920, 1080)), (1920, 1080)),
+            None
+        );
+        assert_eq!(source_size_for_aspect_mismatched_frame(None, (640, 360)), None);
+        assert_eq!(
+            source_size_for_aspect_mismatched_frame(Some((1920, 1080)), (0, 360)),
+            None
+        );
+        assert_eq!(
+            source_size_for_aspect_mismatched_frame(Some((0, 1080)), (640, 360)),
+            None
+        );
     }
 
     #[test]
