@@ -102,6 +102,31 @@ on:
         required: false
         default: ""
         type: string
+      camera_soak_ref:
+        description: "CAMERA-FREEZE SOAK ONLY (#456): build this ref (tag/branch/sha) with the realistic synthetic camera and run ONLY the camera soak; every other job is skipped. Leave empty for a normal run."
+        required: false
+        default: ""
+        type: string
+      camera_soak_ms:
+        description: "Camera-freeze soak: measured duration, ms (60000-1500000; default 300000)"
+        required: false
+        default: ""
+        type: string
+      camera_soak_with_share:
+        description: "Camera-freeze soak: also share the animated fixture window, so camera and share contend for the uplink"
+        required: false
+        default: false
+        type: boolean
+      camera_soak_share_static_ms:
+        description: "Camera-freeze soak with share: repaint the shared window only every N ms (a mostly static share); empty = 30 fps animation"
+        required: false
+        default: ""
+        type: string
+      camera_soak_uplink_kbps:
+        description: "Camera-freeze soak: cap the VM's outbound UDP (the sender's media uplink) at N kbit/s via dummynet; empty = uncapped"
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       ref:
@@ -153,7 +178,9 @@ on:
         required: false
 
 concurrency:
-  group: nightly-loopback-${{ github.ref }}
+  # A camera-soak dispatch (#456) gets its own group: bisect runs queue on the
+  # one runner instead of cancelling each other.
+  group: nightly-loopback-${{ github.ref }}${{ inputs.camera_soak_ref && format('-camsoak-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -162,6 +189,8 @@ permissions:
 jobs:
   live-loopback:
     name: Live remote-control loopback
+    # A camera-freeze soak dispatch (#456) runs only the camera-freeze-soak job.
+    if: ${{ !inputs.camera_soak_ref }}
     # Repo owner setup required: register a self-hosted macOS runner with these
     # labels, logged in at a real display, with Chrome installed, livekit-server
     # on PATH, and Accessibility/Screen Recording grants already approved for
@@ -1117,7 +1146,7 @@ jobs:
     name: Share-freeze soak (LiveKit Cloud, two viewers)
     needs: live-loopback
     # Its verdict is independent of the loopback tiers'; run it either way.
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && !inputs.camera_soak_ref }}
     runs-on: [self-hosted, macOS]
     timeout-minutes: 45
     env:
@@ -1276,4 +1305,179 @@ jobs:
             ${{ runner.temp }}/petal-share-freeze/*.json
             ${{ runner.temp }}/petal-share-freeze/*.log
             ${{ runner.temp }}/petal-share-freeze/crashes/**
+          if-no-files-found: warn
+
+  # CAMERA-FREEZE SOAK (#456). Dispatch-only, REPORT-ONLY. Field data put a
+  # ~10x rise in camera freezes on 0.9.31+ senders, and nothing above
+  # publishes a camera at all. This builds `camera_soak_ref` (any tag, branch
+  # or sha, so a regression can be bisected), substitutes a camera-sized,
+  # camera-cost synthetic picture for AVFoundation (the VM has no camera;
+  # scripts/ci/camera-synth-realistic.patch is applied when the ref predates
+  # PETAL_CAMERA_SYNTH_REALISTIC), publishes it to a fresh room on the real
+  # LiveKit deployment, and records two web viewers' presented-frame gaps and
+  # inbound-rtp stats plus the sender's outbound stats and encoder log lines.
+  # The harness scripts always come from THIS workflow's ref.
+  camera-freeze-soak:
+    name: Camera-freeze soak (LiveKit Cloud, two viewers)
+    if: ${{ inputs.camera_soak_ref }}
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: ""
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      CARGO_INCREMENTAL: 0
+      PETAL_DISABLE_AUDIO: 1
+    steps:
+      - name: Check out the ref under test
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.camera_soak_ref }}
+          clean: false
+
+      - name: Check out the soak harness (this workflow's ref)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .camsoak-harness
+
+      - name: Apply the realistic synthetic camera when the ref lacks it
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ref under test: ${{ inputs.camera_soak_ref }} = $(git rev-parse HEAD) ($(git log -1 --format=%s | cut -c1-100))"
+          if grep -q PETAL_CAMERA_SYNTH_REALISTIC apps/desktop/src-tauri/src/transport/camera/mod.rs; then
+            echo "ref already carries PETAL_CAMERA_SYNTH_REALISTIC; nothing to apply"
+          else
+            git apply --verbose .camsoak-harness/scripts/ci/camera-synth-realistic.patch
+            echo "applied camera-synth-realistic.patch"
+          fi
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build desktop app (frontend + debug Rust)
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run build
+          cd src-tauri && cargo build --locked
+
+      - name: Run camera-freeze soak
+        shell: bash
+        timeout-minutes: 35
+        env:
+          SOAK_BACKEND_URL: ${{ inputs.backend_url || 'https://app.petal.live' }}
+          SOAK_HARNESS_URL: ${{ inputs.harness_url || 'https://meet.petal.live' }}
+          SOAK_MS: ${{ inputs.camera_soak_ms || '300000' }}
+          SOAK_WITH_SHARE: ${{ inputs.camera_soak_with_share && '1' || '0' }}
+          SOAK_SHARE_STATIC_MS: ${{ inputs.camera_soak_share_static_ms || '0' }}
+          SOAK_UPLINK_KBPS: ${{ inputs.camera_soak_uplink_kbps || '' }}
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: |
+          set -euo pipefail
+          H=.camsoak-harness
+          LOG_DIR="$RUNNER_TEMP/petal-camera-freeze"
+          rm -rf "$LOG_DIR"; mkdir -p "$LOG_DIR"
+          SOCKET="$LOG_DIR/petal-camsoak.sock"
+          PETAL_LOG="$LOG_DIR/petal-sender.log"
+          CRASH_MARK="$LOG_DIR/start.mark"; touch "$CRASH_MARK"
+          BIN="apps/desktop/src-tauri/target/debug/desktop"
+          case "$SOAK_MS" in *[!0-9]*|"") echo "::error::camera_soak_ms must be an integer"; exit 1 ;; esac
+          if [ "$SOAK_MS" -lt 60000 ] || [ "$SOAK_MS" -gt 1500000 ]; then echo "::error::camera_soak_ms must be 60000-1500000"; exit 1; fi
+          # shellcheck source=scripts/petal-instance-guard.sh
+          source "$H/scripts/petal-instance-guard.sh"
+          petal_guard_wait_for_instances_exit 300
+          echo "camera soak: ref=${{ inputs.camera_soak_ref }} backend=$SOAK_BACKEND_URL harness=$SOAK_HARNESS_URL soak=${SOAK_MS}ms with_share=$SOAK_WITH_SHARE share_static_ms=$SOAK_SHARE_STATIC_MS uplink_kbps=${SOAK_UPLINK_KBPS:-none}"
+          # libwebrtc LS_INFO maps to debug: the encoder reconfiguration lines
+          # (frame-rate clamp, VideoToolbox session creation) live there.
+          env -u LIVEKIT_URL -u LIVEKIT_API_KEY -u LIVEKIT_API_SECRET \
+            PETAL_AUTOTEST_SOCK="$SOCKET" PETAL_BACKEND_URL="$SOAK_BACKEND_URL" \
+            PETAL_CAMERA_SYNTH_SOURCE=1 PETAL_CAMERA_SYNTH_REALISTIC=1 \
+            RUST_LOG="info,libwebrtc=debug" \
+            "$BIN" >"$PETAL_LOG" 2>&1 &
+          PETAL_PID=$!
+          stop_petal() {
+            if ps -p "$PETAL_PID" >/dev/null 2>&1; then
+              kill "$PETAL_PID" 2>/dev/null || true
+              for _ in $(seq 1 20); do ps -p "$PETAL_PID" >/dev/null 2>&1 || break; sleep 0.5; done
+              ps -p "$PETAL_PID" >/dev/null 2>&1 && kill -9 "$PETAL_PID" 2>/dev/null || true
+            fi
+            ps -p "$PETAL_PID" >/dev/null 2>&1 && echo "::warning::Petal pid $PETAL_PID survived teardown" || true
+          }
+          uncap() { [ -z "$SOAK_UPLINK_KBPS" ] || bash "$H/scripts/ci/uplink-cap.sh" off || echo "::warning::uplink cap teardown failed"; }
+          trap 'stop_petal; uncap' EXIT
+          if [ -n "$SOAK_UPLINK_KBPS" ]; then bash "$H/scripts/ci/uplink-cap.sh" on "$SOAK_UPLINK_KBPS"; fi
+          waited=0
+          until [ -S "$SOCKET" ]; do
+            if ! ps -p "$PETAL_PID" >/dev/null 2>&1; then echo "::error::INFRA-INVALID: Petal exited before opening its autotest socket"; tail -50 "$PETAL_LOG"; exit 1; fi
+            if [ "$waited" -ge 180 ]; then echo "::error::INFRA-INVALID: no autotest socket within 180s"; exit 1; fi
+            sleep 1; waited=$((waited + 1))
+          done
+          set +e
+          node "$H/apps/desktop/scripts/camera-freeze-soak.mjs" --socket "$SOCKET" \
+            --harness-url "$SOAK_HARNESS_URL" --duration-ms "$SOAK_MS" --with-share "$SOAK_WITH_SHARE" \
+            --share-static-ms "$SOAK_SHARE_STATIC_MS" --out "$LOG_DIR"
+          soak_exit=$?
+          set -e
+          echo "camera-freeze harness exit $soak_exit"
+          stop_petal
+          uncap
+          NEW_CRASHES="$(find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'desktop*.ips' -newer "$CRASH_MARK" 2>/dev/null || true)"
+          if [ -n "$NEW_CRASHES" ]; then
+            echo "::warning::Petal wrote crash report(s) during the camera soak:"; echo "$NEW_CRASHES"
+            mkdir -p "$LOG_DIR/crashes"
+            while IFS= read -r f; do [ -n "$f" ] && cp "$f" "$LOG_DIR/crashes/" 2>/dev/null || true; done <<< "$NEW_CRASHES"
+          fi
+          echo "sender host: macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+          node "$H/scripts/ci/camera-freeze-summary.mjs" --raw "$LOG_DIR/camera-freeze-raw.json" \
+            --sender-log "$PETAL_LOG" --json "$LOG_DIR/camera-freeze-summary.json" \
+            --markdown "$LOG_DIR/camera-freeze-summary.md" || true
+          cat "$LOG_DIR/camera-freeze-summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo "==> camera-freeze soak finished (REPORT-ONLY)"
+
+      # A step timeout SIGKILLs bash before its EXIT trap runs; never leave the
+      # pf/dummynet uplink cap on the shared runner.
+      - name: Remove the uplink cap
+        if: always() && inputs.camera_soak_uplink_kbps != ''
+        shell: bash
+        run: bash .camsoak-harness/scripts/ci/uplink-cap.sh off || echo "::warning::uplink cap teardown failed"
+
+      - name: Scrub the deployment-protection bypass secret from artifacts
+        if: always()
+        env:
+          PETAL_VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${PETAL_VERCEL_BYPASS_SECRET:-}" ] || { echo "no bypass secret in play; nothing to scrub"; exit 0; }
+          python3 - "$RUNNER_TEMP/petal-camera-freeze" <<'PY'
+          import os, sys
+          needle = os.environ["PETAL_VERCEL_BYPASS_SECRET"].strip().encode()
+          for root, _dirs, files in os.walk(sys.argv[1]):
+              for name in files:
+                  path = os.path.join(root, name)
+                  try:
+                      data = open(path, "rb").read()
+                  except OSError:
+                      continue
+                  if needle in data:
+                      open(path, "wb").write(data.replace(needle, b"<redacted>"))
+          PY
+
+      - name: Upload camera-freeze artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: camera-freeze-soak-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/petal-camera-freeze/*.json
+            ${{ runner.temp }}/petal-camera-freeze/*.md
+            ${{ runner.temp }}/petal-camera-freeze/*.log
+            ${{ runner.temp }}/petal-camera-freeze/crashes/**
           if-no-files-found: warn
