@@ -272,3 +272,39 @@ test('the controller sends bundles only after the host advertises supportsRedund
     (globalThis as { document?: unknown }).document = priorDocument;
   }
 });
+
+test('a bundle rides the reliable channel while livekit reports the lossy buffer full', async () => {
+  const priorDocument = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = { querySelectorAll: () => [], getElementById: () => null };
+  try {
+    const published: Array<{ data: Uint8Array; options: { reliable: boolean } }> = [];
+    const ctx = uiContext(published);
+    const listeners: Array<(isLow: boolean, kind: number) => void> = [];
+    (ctx.state.room as unknown as { on: unknown }).on = (event: string, listener: (isLow: boolean, kind: number) => void) => {
+      if (event === 'dcBufferStatusChanged') listeners.push(listener);
+    };
+    const ui = setupRemoteControlUi(ctx);
+    ui.handleRemoteControlPayload(activeStatus({ supportsRedundantInput: true }), 'native-host');
+    const settle = () => new Promise((resolve) => setTimeout(resolve, MIN_BUNDLE_INTERVAL_MS + 5));
+
+    await ui.publishRemoteControl(key(1, 'down'));
+    assert.equal(published.at(-1)!.options.reliable, false, 'lossy while the buffer is low');
+
+    // livekit-client would now drop every lossy send (all copies at once).
+    for (const listener of listeners) listener(false, 1);
+    await settle();
+    await ui.publishRemoteControl(key(2, 'up'));
+    const congested = published.at(-1)!;
+    assert.equal(congested.options.reliable, true, 'a full lossy buffer must not swallow the bundle');
+    assert.equal(JSON.parse(new TextDecoder().decode(congested.data)).kind, INPUT_BUNDLE_KIND);
+
+    // The reliable channel's status never redirects bundles.
+    for (const listener of listeners) listener(true, 0);
+    for (const listener of listeners) listener(true, 1);
+    await settle();
+    await ui.publishRemoteControl(key(3, 'down'));
+    assert.equal(published.at(-1)!.options.reliable, false, 'back to lossy once the buffer drained');
+  } finally {
+    (globalThis as { document?: unknown }).document = priorDocument;
+  }
+});

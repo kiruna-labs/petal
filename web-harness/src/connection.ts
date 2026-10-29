@@ -451,16 +451,17 @@ export function setupConnection(
   }
 
   function backendApiUrl(path: string): string {
-    // Prefer an explicit build-time backend URL. In a PRODUCTION build with none
-    // set, fall back to the deployed backend so a public deploy can always mint
-    // tokens (issue #177 -- the web counterpart of the native "no baked
-    // backend URL" bug). In DEV, leave it empty so `/api/token` hits the local
-    // Vite token middleware (server/tokenPlugin.ts) talking to a local
-    // livekit-server, never the production backend.
+    // An explicit VITE_PETAL_BACKEND_URL (self-host, or dev against a deployed
+    // backend) wins. In a PRODUCTION build with none set, fall back to the
+    // deployed backend so a public deploy can always mint tokens (issue #177).
+    // In DEV, leave it empty so `/api/token` hits the local Vite token
+    // middleware (server/tokenPlugin.ts) talking to a local livekit-server,
+    // never the production backend.
     const env = (import.meta as ViteImportMeta).env;
     const configured = env?.VITE_PETAL_BACKEND_URL?.trim().replace(/\/$/, '');
-    const base = configured || (env?.PROD ? 'https://app.petal.live' : '');
-    return `${base}${path}`;
+    if (configured) return `${configured}${path}`;
+    if (env?.PROD) return `https://app.petal.live${path}`;
+    return path;
   }
 
   function syncAddressBar(meetingCode: string) {

@@ -1589,3 +1589,34 @@ Files to change together:
 - `web-harness/src/controls.ts`
 - `web-harness/tests/joinInput.test.ts`
 - `shared/logic/meetingCode.ts` if credential normalization changes
+
+## Server origin
+
+Desktop Settings and the native token client normalize a user-entered token
+server or invite origin with the same rules. The shared fixture's
+`serverOrigins` key pins each input to the origin that is kept, or to
+`null` plus the rejection message when it is refused.
+
+Rules:
+
+- Trim, then require `http://` or `https://`. Drop a trailing slash. A
+  default port (`:443` on https, `:80` on http) is omitted.
+- `/api` and `/api/token` are stripped (the client appends those itself).
+  Any other path is rejected. Userinfo (`user:pass@host`) is rejected.
+- `http://` is accepted only for `localhost`, `127.0.0.1`, and `[::1]`
+  (with or without a port). Every other host must be `https://`, because
+  the token request carries the meeting access code and the user's
+  identity. The message is `http:// is only allowed for localhost, 127.0.0.1, and [::1].`
+- IPv6 hosts are bracketed (`https://[2001:db8::1]`, `http://[::1]:8787`).
+- The runtime `PETAL_BACKEND_URL` override is not this rule. It still
+  accepts `http://` for any host; that path is a developer launch flag,
+  not a value Settings saved.
+
+Files to change together:
+
+- `contracts/petal-contracts.json` (`serverOrigins`)
+- `shared/logic/serverEndpoints.ts` (`normalizeServerOrigin`, `parseServerOriginInput`)
+- `apps/desktop/src-tauri/src/server_settings.rs` (`normalize_server_origin`)
+- `apps/desktop/tests/serverEndpoints.test.ts`
+- `apps/desktop/src-tauri/src/transport/token.rs` only if the runtime
+  `PETAL_BACKEND_URL` override changes — it must stay on the looser parser

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Custom server indicator fit fixture</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+      }
+      /* One surface fills the viewport: the join/create menu, or the meeting. */
+      #app {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./custom-server.js"></script>
+  </body>
+</html>

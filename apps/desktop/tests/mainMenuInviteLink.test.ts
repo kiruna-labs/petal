@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
+  applyInviteOrigin,
   inviteLinkCopiedToastMessage,
   inviteLinkForAccessCode,
   inviteLinkForRoom,
@@ -61,6 +62,18 @@ test('shared invite-link helper builds the deployed join URL', () => {
 
 test('invite-link helper does not invent a URL without an access code', () => {
   assert.equal(inviteLinkForAccessCode('Design Review!', null), null);
+});
+
+test('#310: copied invite links follow a saved origin override', () => {
+  try {
+    applyInviteOrigin('https://meet.example.test');
+    assert.equal(
+      inviteLinkForAccessCode('Design Review!', 'abc-defg-hjk'),
+      'https://meet.example.test/design-review/abc-defg-hjk'
+    );
+  } finally {
+    applyInviteOrigin(null);
+  }
 });
 
 test('shared invite-link copied toast message keeps label and URL on separate lines', () => {
