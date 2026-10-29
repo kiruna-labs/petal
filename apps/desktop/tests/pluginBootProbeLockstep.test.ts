@@ -61,9 +61,9 @@ test('the probe page and the PLUGIN-BOOT scenario agree on every journal marker'
 test('the probe page mounts the real plugin host, not a lookalike', () => {
   // If this ever became a hand-rolled iframe the scenario would prove nothing
   // about the shipped plugin path.
-  assert.match(probePage, /import PluginSurfaces from '\$lib\/plugins\/PluginSurfaces\.svelte'/);
+  assert.match(probePage, /import PluginSurfaces from '#lib\/plugins\/PluginSurfaces\.svelte'/);
   assert.match(probePage, /<PluginSurfaces/);
-  assert.match(probePage, /import \{ installedPlugins \} from '\$lib\/plugins\/pluginCatalog'/);
+  assert.match(probePage, /import \{ installedPlugins \} from '#lib\/plugins\/pluginCatalog\.js'/);
 });
 
 test('the host boot line the scenario reads for "was it even loaded?" is unchanged', () => {

@@ -8,7 +8,7 @@
 // Rust copy changes, change it here in the same commit — `aiChat.test.ts`
 // reads state.rs and fails when the two drift.
 
-import type { AiChatEndReason } from '$lib/ipc';
+import type { AiChatEndReason } from '#lib/ipc.js';
 import { SPARKLE_GLYPH } from '@petal/shared/ui/icons';
 
 /**
@@ -174,7 +174,7 @@ export function aiChatStatusLabel(phase: 'connecting' | 'live' | 'ended'): strin
  */
 export function hoverTabAiChatNextActiveState(
   currentActive: boolean,
-  event: Partial<import('$lib/ipc').AiChatStateEvent>,
+  event: Partial<import('#lib/ipc.js').AiChatStateEvent>,
   currentWindowId: number | null
 ): boolean {
   if (currentWindowId === null || event.windowId !== currentWindowId) {

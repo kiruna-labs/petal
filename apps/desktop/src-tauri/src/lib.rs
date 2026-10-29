@@ -1346,6 +1346,9 @@ pub fn run() {
             debug_settings::initialize(&app_data_dir);
             plugins::store::initialize(&app_data_dir);
             analytics::init(&app_data_dir);
+            // #404 follow-up: undo a browser web accessibility switch that a
+            // crashed or killed previous run left on.
+            remote_control::init_web_accessibility_journal(&app_data_dir);
             // AI chat settings (#656): master switch + optional user Gemini
             // key. Loaded here so the very first hover-tab render knows whether
             // the feature is on — it must be entirely invisible when it is not.

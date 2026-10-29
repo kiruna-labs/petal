@@ -11,10 +11,10 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount } from 'svelte';
   import Pill from '@petal/shared/ui/components/Pill.svelte';
-  import type { IdentityColor } from '$lib/components/Avatar.svelte';
-  import { identityColorCss, identityInkCss } from '$lib/data/identityColor';
-  import { session } from '$lib/stores/session.svelte';
-  import { COMMANDS, EVENTS } from '$lib/ipc';
+  import type { IdentityColor } from '#lib/components/Avatar.svelte';
+  import { identityColorCss, identityInkCss } from '#lib/data/identityColor.js';
+  import { session } from '#lib/stores/session.svelte.js';
+  import { COMMANDS, EVENTS } from '#lib/ipc.js';
   import type {
     AiChatEndReason,
     AiChatRefusedEvent,
@@ -29,13 +29,13 @@
     ShareControlModeChanged,
     SharePriority,
     WindowFrame
-  } from '$lib/ipc';
+  } from '#lib/ipc.js';
   import {
     buildShareOptionsMenuEntries,
     type HoverTabPosition
-  } from '$lib/data/shareOptionsMenu';
-  import { popupShareOptionsMenu } from '$lib/shareOptionsPopup';
-  import { isMac, isWindows } from '$lib/platform';
+  } from '#lib/data/shareOptionsMenu.js';
+  import { popupShareOptionsMenu } from '#lib/shareOptionsPopup.js';
+  import { isMac, isWindows } from '#lib/platform.js';
   import {
     beginHoverTabGesture,
     cancelHoverTabGesture,
@@ -51,11 +51,11 @@
     takeHoverTabPreview,
     type HoverTabGesture,
     type HoverTabPreviewState
-  } from '$lib/hoverTabDrag';
+  } from '#lib/hoverTabDrag.js';
   import {
     aiChatHoverTabOptionsTitle,
     hoverTabAiChatNextActiveState
-  } from '$lib/data/aiChat';
+  } from '#lib/data/aiChat.js';
 
   let visible = $state(false);
   let attachment = $state<HoverTabUpdate['attachment']>('outside');

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { COMMANDS } from '$lib/ipc';
+import { COMMANDS } from '#lib/ipc.js';
 
 export type CompositorResizeDirection =
   | 'North'

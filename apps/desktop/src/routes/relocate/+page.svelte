@@ -17,7 +17,7 @@
     relocateCopy,
     revealRunningBundle,
     type LaunchLocationClass
-  } from '$lib/data/launchLocation';
+  } from '#lib/data/launchLocation.js';
 
   let cls = $state<LaunchLocationClass>('other_read_only');
   let copy = $derived(relocateCopy(cls));

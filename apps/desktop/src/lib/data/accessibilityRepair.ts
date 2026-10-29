@@ -1,4 +1,4 @@
-import { STORAGE_KEYS, browserStorage, type StorageLike } from '$lib/data/storageKeys';
+import { STORAGE_KEYS, browserStorage, type StorageLike } from '#lib/data/storageKeys.js';
 
 export type AccessibilityRepairState = 'none' | 'restart-requested' | 'restart-failed';
 // `blocked` is accepted because Onboarding shares this status type with its

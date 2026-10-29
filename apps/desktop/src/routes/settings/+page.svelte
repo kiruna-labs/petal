@@ -20,8 +20,8 @@
   import { goto } from '$app/navigation';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount } from 'svelte';
-  import Settings from '$lib/components/Settings.svelte';
-  import type { PermissionStatus } from '$lib/components/PermissionRow.svelte';
+  import Settings from '#lib/components/Settings.svelte';
+  import type { PermissionStatus } from '#lib/components/PermissionRow.svelte';
   import {
     session,
     startSessionSync,
@@ -30,15 +30,15 @@
     updateLocalEchoEnabled,
     updateSentryEnabled,
     updateUsageStatsEnabled
-  } from '$lib/stores/session.svelte';
+  } from '#lib/stores/session.svelte.js';
   import {
     checkScreenRecording,
     checkMicrophone,
     checkCamera,
     checkAccessibility,
     type AuthStatus
-  } from '$lib/data/permissions';
-  import { hasTauriBridge } from '$lib/ipc';
+  } from '#lib/data/permissions.js';
+  import { hasTauriBridge } from '#lib/ipc.js';
 
   const displayName = $derived(session.name || 'Guest');
   const hasTauri = hasTauriBridge();

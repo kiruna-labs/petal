@@ -2640,6 +2640,10 @@ impl<L: log::Log> RepeatSuppressingLog<L> {
             return;
         }
         let message = record.args().to_string();
+        // #411: count VideoToolbox encode failures from the RAW stream -- the
+        // suppression below collapses ~20/s of them into one rollup per 30 s,
+        // which is fine for the file and useless for a per-interval count.
+        crate::transport::encoder_health::note_native_webrtc_message(&message);
         let key = NativeWebrtcRepeatKey {
             target: target.to_string(),
             level: record.level(),
@@ -5491,6 +5495,12 @@ fn install_panic_hook() {
         log::error!(target: PANIC_HOOK_LOG_TARGET, "PANIC at {location}: {message}");
 
         forward_panic_to_sentry(info);
+
+        // #404 follow-up: a main-thread panic ends the app without
+        // `RunEvent::Exit`; hand a shared browser its accessibility setting
+        // back first. Non-blocking, and a no-op on any other thread.
+        #[cfg(all(target_os = "macos", not(test)))]
+        crate::remote_control::restore_web_accessibility_on_panic();
 
         if let Ok(mut guard) = previous.lock() {
             if let Some(hook) = guard.take() {

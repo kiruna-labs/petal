@@ -653,6 +653,18 @@ export interface PipelineStatsMessage {
   publicationSid?: string | null;
   shareEpoch?: string | null;
   lifecycle?: PipelineLifecycle | null;
+  /**
+   * #408 additive v1 field, sender-only: whether the owner's lower simulcast
+   * rungs are funded / delivering. Native receivers use it to avoid falling
+   * back to a dead LOW layer. Absent means unknown (older or single-layer
+   * sender); the web harness never emits it (its sender is single-layer).
+   */
+  lowerRungs?: LowerRungsReport;
+}
+
+export interface LowerRungsReport {
+  funded: boolean;
+  delivering: boolean;
 }
 
 export interface DrawPoint {

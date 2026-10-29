@@ -14,7 +14,7 @@ async function renderFixture() {
   try {
     const [{ mount }, { default: MenuItem }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/MenuItem.svelte')
+      import('#lib/components/MenuItem.svelte')
     ]);
 
     // Mirror the popover's own shell + .utility-row rules verbatim.

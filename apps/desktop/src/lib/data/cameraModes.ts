@@ -1,10 +1,10 @@
 import { invoke } from '@tauri-apps/api/core';
-import { session } from '$lib/stores/session.svelte';
-import { COMMANDS, hasTauriBridge } from '$lib/ipc';
-import type { AppliedCameraDevice, CameraMode } from '$lib/ipc';
+import { session } from '#lib/stores/session.svelte.js';
+import { COMMANDS, hasTauriBridge } from '#lib/ipc.js';
+import type { AppliedCameraDevice, CameraMode } from '#lib/ipc.js';
 
-export { hasTauriBridge } from '$lib/ipc';
-export type { AppliedCameraDevice, CameraMode } from '$lib/ipc';
+export { hasTauriBridge } from '#lib/ipc.js';
+export type { AppliedCameraDevice, CameraMode } from '#lib/ipc.js';
 
 /** The resolution presets offered in Settings (16:9 / 4:3 fixed sizes). */
 export interface CameraResolutionPreset {

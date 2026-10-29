@@ -1,3 +1,5 @@
+import type { Reroute } from '@sveltejs/kit/hooks';
+
 // SvelteKit universal reroute hook — the fix for the "404 panels scattered
 // across the desktop" bug.
 //
@@ -19,15 +21,13 @@
 // resolve `/hover-tab.html` → `/hover-tab`, matching the existing route table.
 // It does NOT change the requested file or the URL bar — only which route the
 // client router resolves. One hook fixes every panel with zero Rust changes.
-import type { Reroute } from '@sveltejs/kit';
-
 export const reroute: Reroute = ({ url }) => {
   const p = url.pathname;
   if (p.endsWith('/index.html')) {
-    return p.slice(0, -'/index.html'.length) || '/';
+    return p.slice(0, -('/index.html').length) || '/';
   }
   if (p.endsWith('.html')) {
-    return p.slice(0, -'.html'.length);
+    return p.slice(0, -('.html').length);
   }
   return p;
 };

@@ -79,6 +79,7 @@ use livekit::prelude::*;
 use livekit::webrtc::video_frame::native::NativeBuffer;
 use livekit::webrtc::video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation};
 use livekit::webrtc::video_source::native::NativeVideoSource;
+use livekit::webrtc::rtp_parameters::DegradationPreference;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use tokio_util::sync::CancellationToken;
 
@@ -158,6 +159,43 @@ impl PostWakeEncoderFallbackRecovery {
 enum EncoderPublishOrigin {
     Ordinary,
     PostWakeRestart,
+}
+
+/// The session-owned answer to "the encoder is wedged" (#427). The publisher
+/// owns the only per-poll stats read, the session owns the share slot and the
+/// republish machinery, so the publisher reports the wedge through this handle
+/// and the session performs the repair. Multi-shot (unlike
+/// `PostWakeEncoderFallbackRecovery`, which is a one-shot fallback) because the
+/// escalation has two distinct steps and a session-side republish is awaited in
+/// the background rather than inline in the stats loop.
+#[derive(Clone)]
+pub(crate) struct EncoderWedgeRecovery {
+    request: Arc<dyn Fn(EncoderRecoveryStep) + Send + Sync>,
+    /// Recovery steps this SHARE has already spent. A republication created by
+    /// a recovery inherits it, so the budget survives the republish and a
+    /// permanently broken encoder escalates once more and then stops instead of
+    /// republishing forever (each publication would otherwise start fresh).
+    steps_used: u32,
+}
+
+impl EncoderWedgeRecovery {
+    pub(crate) fn new(
+        steps_used: u32,
+        request: impl Fn(EncoderRecoveryStep) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            request: Arc::new(request),
+            steps_used,
+        }
+    }
+
+    fn request(&self, step: EncoderRecoveryStep) {
+        (self.request)(step)
+    }
+
+    fn steps_used(&self) -> u32 {
+        self.steps_used
+    }
 }
 
 struct EncoderObservation {
@@ -811,6 +849,7 @@ mod share_fps_geometry_tests {
                 full,
                 FullShareSimulcastLadder::HighOnly,
                 false,
+                false,
                 Some(pin),
             )
             .video_encoding
@@ -831,6 +870,7 @@ mod share_fps_geometry_tests {
             1080,
             full,
             FullShareSimulcastLadder::HighOnly,
+            false,
             false,
             None,
         )
@@ -2219,6 +2259,37 @@ impl RoomConnection<Arc<Room>> {
             EncoderPublishOrigin::Ordinary,
             None,
             None,
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// [#427] [`publish_window_at`](Self::publish_window_at) with the session's
+    /// wedge-recovery action attached, and optionally forced onto the software
+    /// H.264 encoder. The session passes `force_software_encoder = true` only
+    /// for the escalation step after a recreate attempt failed to restore
+    /// encoder output; every ordinary caller keeps the platform default, and a
+    /// `None` action (the camera path, test publishes) simply logs the wedge.
+    pub(crate) async fn publish_window_at_with_recovery_context(
+        &self,
+        width: u32,
+        height: u32,
+        quality: ShareQuality,
+        window_id: Option<u32>,
+        recovery: Option<EncoderWedgeRecovery>,
+        force_software_encoder: bool,
+    ) -> Result<PublishedTrack, RoomConnectionError> {
+        self.publish_window_at_with_encoder_context(
+            width,
+            height,
+            quality,
+            window_id,
+            EncoderPublishOrigin::Ordinary,
+            None,
+            recovery,
+            force_software_encoder,
+            None,
         )
         .await
     }
@@ -2244,6 +2315,8 @@ impl RoomConnection<Arc<Room>> {
             window_id,
             EncoderPublishOrigin::Ordinary,
             None,
+            None,
+            false,
             Some(cadence_fps),
         )
         .await
@@ -2268,6 +2341,8 @@ impl RoomConnection<Arc<Room>> {
             EncoderPublishOrigin::PostWakeRestart,
             Some(recovery),
             None,
+            false,
+            None,
         )
         .await
     }
@@ -2283,6 +2358,8 @@ impl RoomConnection<Arc<Room>> {
         window_id: Option<u32>,
         encoder_origin: EncoderPublishOrigin,
         encoder_recovery: Option<PostWakeEncoderFallbackRecovery>,
+        encoder_wedge_recovery: Option<EncoderWedgeRecovery>,
+        force_software_encoder: bool,
         pinned_cadence_fps: Option<u32>,
     ) -> Result<PublishedTrack, RoomConnectionError> {
         validate_video_toolbox_h264_size(width, height)?;
@@ -2308,6 +2385,7 @@ impl RoomConnection<Arc<Room>> {
             quality,
             simulcast_ladder,
             is_display_region,
+            force_software_encoder,
             pinned_cadence_fps,
         );
         let publish_codec = publish_opts.video_codec;
@@ -2382,6 +2460,7 @@ impl RoomConnection<Arc<Room>> {
             let quality_for_stats = shared_quality.clone();
             let width_for_stats = published_width.clone();
             let height_for_stats = published_height.clone();
+            let encoder_wedge_recovery_for_stats = encoder_wedge_recovery.clone();
             let cancel = background_cancel.clone();
             tokio::spawn(async move {
                 log_window_share_encoder_stats(
@@ -2390,6 +2469,7 @@ impl RoomConnection<Arc<Room>> {
                     width_for_stats,
                     height_for_stats,
                     simulcast_ladder,
+                    encoder_wedge_recovery_for_stats,
                     cancel,
                 )
                 .await;
@@ -2460,6 +2540,7 @@ impl RoomConnection<Arc<Room>> {
         // Captured before `publish_track` consumes `publish_opts`; the startup
         // allocation floor's release task below needs the applied value.
         let startup_floor_bps = publish_opts.min_bitrate;
+        let degradation_preference = publish_opts.degradation_preference;
         let configured_bitrate = publish_opts
             .video_encoding
             .as_ref()
@@ -2475,7 +2556,7 @@ impl RoomConnection<Arc<Room>> {
             .await?;
 
         log::info!(
-            "Published camera track '{track_name}' {width}x{height} (H.264, content type: {} (is_screencast={CAMERA_SOURCE_IS_SCREENCAST}), requested encoder: {requested_encoder:?}, max bitrate: {} kbps, max fps: {}, startup floor: {} kbps)",
+            "Published camera track '{track_name}' {width}x{height} (H.264, content type: {} (is_screencast={CAMERA_SOURCE_IS_SCREENCAST}), requested encoder: {requested_encoder:?}, max bitrate: {} kbps, max fps: {}, startup floor: {} kbps, degradation: {degradation_preference:?})",
             video_content_type_label(CAMERA_SOURCE_IS_SCREENCAST),
             configured_bitrate.unwrap_or_default() / 1000,
             configured_framerate.unwrap_or_default(),
@@ -2580,6 +2661,20 @@ fn validate_video_toolbox_h264_size(width: u32, height: u32) -> Result<(), RoomC
 /// froze the camera into a keyframe-per-PLI loop (#313).
 const CAMERA_SOURCE_IS_SCREENCAST: bool = false;
 
+/// The camera sender's RTP degradation preference. macOS pins
+/// MAINTAIN_RESOLUTION: under libwebrtc's realtime default (MAINTAIN_FRAMERATE)
+/// the initial frame dropper and quality scaler resize the camera, and every
+/// resize re-creates the VideoToolbox encoder -- a keyframe and a frame gap
+/// each time, which receivers saw as repeated freezes from 0.9.31 (#456).
+/// Windows keeps the default so the camera can step down under a share (#313).
+fn camera_degradation_preference() -> Option<DegradationPreference> {
+    if cfg!(target_os = "macos") {
+        Some(DegradationPreference::MaintainResolution)
+    } else {
+        None
+    }
+}
+
 fn camera_video_source(width: u32, height: u32) -> NativeVideoSource {
     NativeVideoSource::new(VideoResolution { width, height }, CAMERA_SOURCE_IS_SCREENCAST)
 }
@@ -2631,10 +2726,11 @@ fn camera_publish_options(width: u32, height: u32, frame_rate: f64) -> TrackPubl
     TrackPublishOptions {
         source: TrackSource::Camera,
         video_codec: VideoCodec::H264,
-        video_encoder: select_encoder_backend(),
+        video_encoder: select_encoder_backend(false),
         simulcast: false,
         simulcast_layers: None,
         min_bitrate: startup_allocation_floor(|| camera_min_bitrate_bps(encoding.max_bitrate)),
+        degradation_preference: camera_degradation_preference(),
         video_encoding: Some(encoding),
         frame_metadata_features: {
             let mut f = livekit::options::FrameMetadataFeatures::default();
@@ -2652,7 +2748,7 @@ fn window_publish_options(
     quality: ShareQuality,
     simulcast_ladder: FullShareSimulcastLadder,
 ) -> TrackPublishOptions {
-    window_publish_options_for_region(width, height, quality, simulcast_ladder, false, None)
+    window_publish_options_for_region(width, height, quality, simulcast_ladder, false, false, None)
 }
 
 /// Resolve a publish-time startup allocation floor on the platforms that apply one.
@@ -2888,6 +2984,7 @@ fn window_publish_options_for_region(
     quality: ShareQuality,
     simulcast_ladder: FullShareSimulcastLadder,
     is_display_region: bool,
+    force_software_encoder: bool,
     pinned_cadence_fps: Option<u32>,
 ) -> TrackPublishOptions {
     // A Petal View track's dimensions are the selector's live ROI geometry.
@@ -2964,7 +3061,7 @@ fn window_publish_options_for_region(
     TrackPublishOptions {
         source: TrackSource::Screenshare,
         video_codec,
-        video_encoder: select_encoder_backend(),
+        video_encoder: select_encoder_backend(force_software_encoder),
         // The vendored LiveKit sender applies Detailed content and
         // MaintainResolution for this Screenshare source during creation.
         // #181: macOS screencast low-latency RC/QP cap only engage on a
@@ -3036,7 +3133,18 @@ pub fn full_share_ladder_rungs(width: u32, height: u32) -> Vec<(String, u32, u32
     rungs
 }
 
-fn select_encoder_backend() -> VideoEncoderBackend {
+/// `force_software` is the per-publication escape hatch added for #427: after a
+/// wedge-recovery recreate attempt, a VideoToolbox session that is still
+/// unavailable must be replaced by the software H.264 encoder instead of
+/// republishing another empty track. It is NOT an environment knob and never
+/// changes the default for any other publication.
+fn select_encoder_backend(force_software: bool) -> VideoEncoderBackend {
+    if force_software {
+        log::warn!(
+            "select_encoder_backend: forcing the software video encoder for this publication (#427 wedged-encoder recovery)"
+        );
+        return VideoEncoderBackend::Software;
+    }
     #[cfg(target_os = "macos")]
     {
         // Debug-only verification knob (same contract as the Windows branch
@@ -5100,7 +5208,7 @@ mod track_name_tests {
             // adaptive rung is half-resolution.
             assert_eq!(options.source, TrackSource::Screenshare);
             assert_eq!(options.video_codec, VideoCodec::H264);
-            assert_eq!(options.video_encoder, select_encoder_backend());
+            assert_eq!(options.video_encoder, select_encoder_backend(false));
             assert_eq!(
                 options.h264_profile_preference,
                 H264ProfilePreference::HighFirst
@@ -5160,6 +5268,7 @@ mod track_name_tests {
             ShareQuality::Full,
             FullShareSimulcastLadder::TwoRung,
             true,
+            false,
             None,
         );
         assert!(!options.simulcast);
@@ -5498,6 +5607,169 @@ mod track_name_tests {
 
     // ---- #907 step 2/7: top-rung starvation guard --------------------------
 
+    // ---- #427: the wedged-encoder recovery chain -----------------------
+
+    fn wedged_sample() -> EncoderOutputSample {
+        EncoderOutputSample {
+            frames_encoded: 0,
+            target_bitrate_bps: 3_000_000.0,
+            frames_per_second: 0.0,
+        }
+    }
+
+    fn unfunded_sample() -> EncoderOutputSample {
+        EncoderOutputSample {
+            frames_encoded: 0,
+            target_bitrate_bps: 0.0,
+            frames_per_second: 0.0,
+        }
+    }
+
+    fn encoding_sample(frames: u64) -> EncoderOutputSample {
+        EncoderOutputSample {
+            frames_encoded: frames,
+            target_bitrate_bps: 3_000_000.0,
+            frames_per_second: 30.0,
+        }
+    }
+
+    /// Drives `apply_encoder_wedge_guard_sample` -- the SAME function
+    /// production calls -- and records every recovery step the guard would
+    /// ask the session for. Only the session-owned republish is substituted.
+    struct WedgeHarness {
+        guard: EncoderWedgeGuard,
+        requested: Vec<EncoderRecoveryStep>,
+        action_wired: bool,
+    }
+
+    impl WedgeHarness {
+        fn new() -> Self {
+            Self {
+                guard: EncoderWedgeGuard::default(),
+                requested: Vec::new(),
+                action_wired: true,
+            }
+        }
+
+        fn with_steps_used(steps_used: u32) -> Self {
+            Self {
+                guard: EncoderWedgeGuard {
+                    recovery_steps: steps_used,
+                    ..EncoderWedgeGuard::default()
+                },
+                requested: Vec::new(),
+                action_wired: true,
+            }
+        }
+
+        fn poll(&mut self, sample: EncoderOutputSample) {
+            let requested = &mut self.requested;
+            let wired = self.action_wired;
+            let mut request = |step: EncoderRecoveryStep| {
+                requested.push(step);
+                wired
+            };
+            apply_encoder_wedge_guard_sample(&mut self.guard, sample, &mut request);
+        }
+
+        fn poll_n(&mut self, n: u32, sample: EncoderOutputSample) {
+            for _ in 0..n {
+                self.poll(sample);
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_wedge_waits_for_the_full_trigger_window_before_acting() {
+        // #427 fallback: the field symptom is a 60s+ run of 0fps, so acting on
+        // one noisy sample would republish a share that is merely between
+        // keyframes. The guard must stay silent until the window is full.
+        let mut harness = WedgeHarness::new();
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES - 1, wedged_sample());
+        assert!(
+            harness.requested.is_empty(),
+            "a wedge shorter than the trigger window must not republish"
+        );
+        harness.poll(wedged_sample());
+        assert_eq!(harness.requested, vec![EncoderRecoveryStep::Republish]);
+    }
+
+    #[test]
+    fn encoder_wedge_escalates_to_the_software_encoder_then_stops() {
+        // The issue's remediation order: recreate the encoder, and if
+        // VideoToolbox stays unavailable, fall back to software -- once. A
+        // permanently dead encoder must NOT turn this into a republish loop.
+        let mut harness = WedgeHarness::new();
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
+        assert_eq!(
+            harness.requested,
+            vec![
+                EncoderRecoveryStep::Republish,
+                EncoderRecoveryStep::FallBackToSoftware
+            ],
+            "recreate first, software only after the recreate did not help"
+        );
+        // Still zero frames after both steps: nothing further is requested.
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 3, wedged_sample());
+        assert_eq!(
+            harness.requested.len(),
+            ENCODER_WEDGE_MAX_RECOVERY_STEPS as usize,
+            "the recovery budget is per share and does not refill"
+        );
+        assert_eq!(harness.guard.recovery_steps, ENCODER_WEDGE_MAX_RECOVERY_STEPS);
+    }
+
+    #[test]
+    fn encoder_wedge_never_fires_on_an_unfunded_stream() {
+        // An unfunded rung (target 0bps) legitimately encodes nothing; that is
+        // allocator policy, not a wedged encoder, and republishing would churn
+        // a healthy share.
+        let mut harness = WedgeHarness::new();
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 4, unfunded_sample());
+        assert!(harness.requested.is_empty());
+    }
+
+    #[test]
+    fn encoder_wedge_streak_resets_when_the_encoder_produces_a_frame() {
+        let mut harness = WedgeHarness::new();
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES - 1, wedged_sample());
+        harness.poll(encoding_sample(150));
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES - 1, wedged_sample());
+        assert!(
+            harness.requested.is_empty(),
+            "a single encoded interval clears the streak"
+        );
+        harness.poll(wedged_sample());
+        assert_eq!(harness.requested, vec![EncoderRecoveryStep::Republish]);
+    }
+
+    #[test]
+    fn encoder_wedge_budget_survives_the_recovery_republish() {
+        // A republication created by a recovery inherits the spent budget, so
+        // the escalation continues (software) instead of starting over
+        // (recreate again).
+        let mut harness = WedgeHarness::with_steps_used(1);
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
+        assert_eq!(
+            harness.requested,
+            vec![EncoderRecoveryStep::FallBackToSoftware]
+        );
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 2, wedged_sample());
+        assert_eq!(harness.requested.len(), 1);
+    }
+
+    #[test]
+    fn encoder_wedge_without_a_wired_action_still_reports_but_does_not_act() {
+        // The camera path and test publishes attach no recovery action: the
+        // guard must not claim it asked for one.
+        let mut harness = WedgeHarness::new();
+        harness.action_wired = false;
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
+        assert_eq!(harness.requested.len(), 1);
+        assert_eq!(harness.guard.recovery_steps, 1);
+    }
+
     #[test]
     fn rung_is_starved_below_the_guard_fraction() {
         // Field-observed: 288kbps of a configured 8,000,000bps ceiling
@@ -5754,6 +6026,103 @@ mod track_name_tests {
             frames_per_second: 30.0,
         }];
         assert_eq!(lower_rung_activity(&only_top, guarded), DARK_LOWER);
+    }
+
+    /// #410: the macOS encoder is built with a level token that removes
+    /// RTCVideoEncoderH264's level-derived frame-rate clamp at every size
+    /// Petal encodes, while the negotiated Level 3.1 (what the SFU answers)
+    /// clamps exactly as the field logs showed. Calls the real C++ the ObjC
+    /// encoder factory runs (vendor/webrtc-sys/src/h264_encoder_level.cpp).
+    #[test]
+    fn h264_encoder_level_fits_every_published_resolution() {
+        use webrtc_sys::h264_encoder_level::ffi::{
+            EncoderH264ProfileLevelId, H264EncoderMaxFrameRate,
+        };
+        const NEGOTIATED: &str = "42e01f"; // Constrained Baseline, Level 3.1
+
+        // The negotiated level's clamp, per resolution -- each value matches a
+        // logged "maximal allowed frame rate N" line (#410).
+        for (width, height, logged_cap) in [
+            (1920, 1080, 13), // 1080p camera
+            (2560, 1820, 5),  // demand-capped Retina share
+            (3200, 2276, 3),  // full Retina share
+            (3024, 1964, 4),
+        ] {
+            assert_eq!(
+                H264EncoderMaxFrameRate(NEGOTIATED, width, height),
+                logged_cap,
+                "{width}x{height}"
+            );
+        }
+        // Level 3.1 only covers 30 fps up to ~1280x720-class frames.
+        assert!(H264EncoderMaxFrameRate(NEGOTIATED, 1280, 720) >= 30);
+
+        // Encoder-side id: same profile, AutoLevel token, for every profile
+        // the SFU/HighFirst preference can negotiate.
+        for (negotiated, fitted) in [
+            ("42e01f", "42e016"), // Constrained Baseline 3.1 -> 2.2
+            ("42001f", "420016"), // Baseline 3.1
+            ("4d001f", "4d0016"), // Main 3.1
+            ("640c1f", "640c16"), // Constrained High 3.1
+            ("64001f", "640016"), // High 3.1
+            ("640034", "640016"), // a higher negotiated level is fitted too
+        ] {
+            assert_eq!(EncoderH264ProfileLevelId(negotiated), fitted, "{negotiated}");
+        }
+        // Not an H.264 profile-level-id: passed through untouched.
+        assert_eq!(EncoderH264ProfileLevelId("zz"), "zz");
+        assert_eq!(EncoderH264ProfileLevelId(""), "");
+
+        // No clamp (0 = VideoToolbox decides) at any size up to the
+        // VideoToolbox long-edge cap, so 30 fps sources are encoded at 30 fps.
+        let fitted = EncoderH264ProfileLevelId(NEGOTIATED);
+        for (width, height) in [
+            (640, 360),
+            (1280, 720),
+            (1920, 1080),
+            (2560, 1820),
+            (3200, 2276),
+            (3024, 2582),
+            (VIDEO_TOOLBOX_H264_MAX_LONG_EDGE, 2304),
+        ] {
+            assert_eq!(
+                H264EncoderMaxFrameRate(&fitted, width, height),
+                0,
+                "{width}x{height}"
+            );
+        }
+    }
+
+    /// #408: the verdict receivers get is the guard's own lower-rung summary
+    /// from the same poll; a poll with no lower rung reports nothing
+    /// (unknown), never "not delivering".
+    #[test]
+    fn lower_rungs_report_mirrors_the_guard_summary_and_omits_missing_rungs() {
+        use crate::pipeline_stats::LowerRungsReport;
+        let guarded = "h";
+        let dark = [
+            RungSample { rid: "h".into(), target_bitrate_bps: 566_000.0, frames_per_second: 0.0 },
+            RungSample { rid: "q".into(), target_bitrate_bps: 0.0, frames_per_second: 0.0 },
+        ];
+        assert_eq!(
+            lower_rungs_report(&dark, guarded),
+            Some(LowerRungsReport { funded: false, delivering: false })
+        );
+        let live = [
+            RungSample { rid: "h".into(), target_bitrate_bps: 300_000.0, frames_per_second: 2.0 },
+            RungSample { rid: "q".into(), target_bitrate_bps: 2_000_000.0, frames_per_second: 30.0 },
+        ];
+        assert_eq!(
+            lower_rungs_report(&live, guarded),
+            Some(LowerRungsReport { funded: true, delivering: true })
+        );
+        let only_top = [RungSample {
+            rid: "h".into(),
+            target_bitrate_bps: 3_000_000.0,
+            frames_per_second: 30.0,
+        }];
+        assert_eq!(lower_rungs_report(&only_top, guarded), None);
+        assert_eq!(lower_rungs_report(&[], guarded), None);
     }
 
     #[test]
@@ -6181,12 +6550,32 @@ mod track_name_tests {
     }
 
     #[test]
+    fn camera_holds_its_resolution_on_macos_and_may_step_down_on_windows() {
+        // #456: a realtime camera on macOS was resized by the initial frame
+        // dropper and quality scaler, re-creating the VideoToolbox encoder on
+        // every step. #313: Windows must still be able to step down.
+        let options = camera_publish_options(1280, 720, 30.0);
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                options.degradation_preference,
+                Some(DegradationPreference::MaintainResolution)
+            );
+        } else {
+            assert_eq!(options.degradation_preference, None);
+        }
+        // The content type stays realtime video either way.
+        assert!(!CAMERA_SOURCE_IS_SCREENCAST);
+        // Screen shares are configured by the SDK's screenshare branch, not here.
+        assert_eq!(full_share_publish_options(1920, 1080).degradation_preference, None);
+    }
+
+    #[test]
     fn camera_publish_options_pin_single_source_encoding() {
         let options = camera_publish_options(1280, 720, 30.0);
 
         assert_eq!(options.source, TrackSource::Camera);
         assert_eq!(options.video_codec, VideoCodec::H264);
-        assert_eq!(options.video_encoder, select_encoder_backend());
+        assert_eq!(options.video_encoder, select_encoder_backend(false));
         assert!(options.frame_metadata_features.user_timestamp);
         assert!(options.frame_metadata_features.frame_id);
         assert!(!options.simulcast);
@@ -8034,6 +8423,61 @@ impl PublishedTrack {
         Ok(())
     }
 
+    /// #411: tear this camera's sender down and publish the SAME
+    /// `LocalVideoTrack` again, which builds a new sender, a new libwebrtc
+    /// `VideoStreamEncoder` and a new `VTCompressionSession`. This is the one
+    /// lever Petal has over a wedged VideoToolbox session: libwebrtc only
+    /// resets one itself for a synchronous `kVTInvalidSessionErr` /
+    /// `kVTVideoEncoderMalfunctionErr`, never for the asynchronous callback
+    /// failures #411 logged for 37 minutes. Same shape as the SDK's own
+    /// `handle_restarted` republish (unpublish, then publish the same track)
+    /// and as [`Self::republish_camera_after_reconnect`]. Unlike
+    /// [`Self::unpublish`] it leaves `background_cancel` alone: the track's
+    /// diagnostics and its encoder-health monitor outlive the re-creation.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) async fn recreate_camera_encoder(&self) -> Result<(), RoomConnectionError> {
+        let sid = self.sid();
+        if let Err(error) = self.room.local_participant().unpublish_track(&sid).await {
+            // Already gone (a reconnect raced us): publishing below is still
+            // the right repair.
+            log::warn!(
+                "publisher: camera encoder re-create: unpublish of the wedged sender failed ({error}); publishing anyway"
+            );
+        }
+        self.republish_camera_after_reconnect().await?;
+        log::info!(
+            "publisher: camera track '{}' re-created its encoder (#411)",
+            self.track.name()
+        );
+        Ok(())
+    }
+
+    /// #411: this track's encoded-frame total, summed over its video
+    /// `outbound-rtp` entries. `None` when stats cannot be read or carry no
+    /// video entry (between an unpublish and the next publish).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) async fn frames_encoded(&self) -> Option<u64> {
+        let stats = self.track.get_stats().await.ok()?;
+        let mut total = None;
+        for stat in stats {
+            let livekit::webrtc::stats::RtcStats::OutboundRtp(outbound) = stat else {
+                continue;
+            };
+            if outbound.stream.kind != "video" {
+                continue;
+            }
+            total = Some(total.unwrap_or(0u64) + u64::from(outbound.outbound.frames_encoded));
+        }
+        total
+    }
+
+    /// Cancelled when this track is terminally unpublished ([`Self::unpublish`]).
+    /// Background tasks bound to the publication's lifetime observe it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn lifecycle_token(&self) -> CancellationToken {
+        self.background_cancel.clone()
+    }
+
     /// Unpublish this track from its room. Does NOT close/disconnect the
     /// room itself -- callers with multiple tracks published on one room
     /// (SPEC.md §4.3 multi-window sharing) decide separately whether the
@@ -8998,6 +9442,150 @@ const RUNG_DELIVERY_DEGRADED_FPS: f64 = 3.0;
 /// samples of the session.
 const RUNG_FUNDED_MIN_BITRATE_BPS: f64 = 1.0;
 
+// ---- #427: a wedged encoder is a recovery trigger, not a log line --------
+//
+// Field failure: VideoToolbox returns `-12912` once and then `-12915` for
+// every subsequent frame, and the publication is dead for the rest of the
+// process -- every later share publishes a track that carries zero RTP,
+// including a different window at a different size. The #107 guard above
+// ALREADY observes this state (`RungDelivery::DegradedFunded`, "suspect the
+// encoder or the transport, not the allocator") and only logs it. The wedge
+// guard below is the missing decision on top of the same poll: it separates
+// "the encoder produced nothing" from "the link dropped it", and when that
+// holds for long enough it asks the session -- which owns the share slot and
+// the republish machinery -- for a bounded repair instead of publishing an
+// empty track forever.
+//
+// Detection is deliberately BEHAVIOURAL, not code-based: libwebrtc's
+// VideoToolbox error codes are logged inside the vendored encoder and never
+// reach this crate, so a wedge is only observable as "funded, and the encoder
+// produced zero frames". That also keeps this guard honest on Windows, where
+// the Media Foundation encoder can fail the same way with a different code.
+
+/// Consecutive 5s polls of a FUNDED stream with zero encoded frames before the
+/// publication is treated as wedged (~15s). Deliberately the same window as
+/// the #107 starvation guard's trigger: both read one poll, and neither may
+/// act on a single noisy sample.
+const ENCODER_WEDGE_TRIGGER_SAMPLES: u32 = 3;
+/// Recovery steps ONE publication may spend: the first recreates the encoder
+/// (republish at the same geometry), the second republishes onto the software
+/// H.264 encoder. Bounded per publication on purpose -- the failure being
+/// fixed is "never recovers", while an unbounded loop here would republish a
+/// genuinely broken share forever. A publication that exhausts both steps is
+/// reported once and then left alone.
+const ENCODER_WEDGE_MAX_RECOVERY_STEPS: u32 = 2;
+
+/// One poll's encoder-OUTPUT evidence for the wedge guard.
+///
+/// `frames_encoded` is the DELTA across the poll interval (the caller already
+/// computes it for the wire diagnostic), not the cumulative counter: a delta
+/// of zero means the encoder really produced nothing this interval, whereas a
+/// cumulative value latched from before a stall would keep looking alive --
+/// the same "latch makes a dead rung look healthy" trap `LowerRungActivity`
+/// documents for `frame_width`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct EncoderOutputSample {
+    frames_encoded: u64,
+    target_bitrate_bps: f64,
+    frames_per_second: f64,
+}
+
+impl EncoderOutputSample {
+    /// Funded AND producing nothing. An UNFUNDED stream (target 0bps) may
+    /// legitimately encode nothing -- the allocator asked for no layer -- so
+    /// it is never wedge evidence, exactly as `rung_is_starved` refuses a zero
+    /// target as starvation. The delivered-fps arm is the #107 threshold, so a
+    /// stream that encodes a token frame but delivers nothing at all is still
+    /// caught by the same evidence the field log line already names.
+    fn looks_wedged(&self) -> bool {
+        self.target_bitrate_bps >= RUNG_FUNDED_MIN_BITRATE_BPS
+            && self.frames_encoded == 0
+            && self.frames_per_second < RUNG_DELIVERY_DEGRADED_FPS
+    }
+}
+
+/// What the guard asks the session to do, in escalation order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EncoderRecoveryStep {
+    /// Recreate the encoder by republishing the track at its current
+    /// geometry/quality. The fresh VideoToolbox session is the cheap fix for a
+    /// session that is wedged rather than unavailable.
+    Republish,
+    /// Republish onto libwebrtc's software H.264 encoder: after a recreate
+    /// attempt, a VT session that is STILL unavailable (`-12915`) must not keep
+    /// publishing an empty track.
+    FallBackToSoftware,
+}
+
+impl EncoderRecoveryStep {
+    /// Short phrase for log lines and the session-side republish reason.
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Republish => "recreate the encoder",
+            Self::FallBackToSoftware => "fall back to the software H.264 encoder",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncoderWedgeDecision {
+    /// Producing frames, or unfunded. Nothing to do.
+    Healthy,
+    /// Wedged, but below the trigger window.
+    Suspect,
+    /// Wedged long enough to act: request this recovery step.
+    Recover(EncoderRecoveryStep),
+    /// Wedged and out of recovery budget. Reported once, never re-requested.
+    Exhausted,
+}
+
+/// Hysteresis for #427. Pure and unit-testable without a live encoder: it takes
+/// one poll's output evidence and returns the next decision. The caller applies
+/// the live republish only on `Recover` (see
+/// `apply_encoder_wedge_guard_sample`).
+#[derive(Debug, Default)]
+struct EncoderWedgeGuard {
+    consecutive_zero_encode_samples: u32,
+    recovery_steps: u32,
+    reported_exhausted: bool,
+}
+
+impl EncoderWedgeGuard {
+    fn observe(&mut self, sample: EncoderOutputSample) -> EncoderWedgeDecision {
+        if !sample.looks_wedged() {
+            // Any produced frame (or an unfunded layer) clears the streak. The
+            // recovery budget is NOT refilled: it is per publication, so a
+            // share that flaps between wedged and healthy cannot turn this into
+            // a republish loop.
+            self.consecutive_zero_encode_samples = 0;
+            return EncoderWedgeDecision::Healthy;
+        }
+        self.consecutive_zero_encode_samples =
+            self.consecutive_zero_encode_samples.saturating_add(1);
+        if self.consecutive_zero_encode_samples < ENCODER_WEDGE_TRIGGER_SAMPLES {
+            return EncoderWedgeDecision::Suspect;
+        }
+        if self.recovery_steps >= ENCODER_WEDGE_MAX_RECOVERY_STEPS {
+            if self.reported_exhausted {
+                return EncoderWedgeDecision::Suspect;
+            }
+            self.reported_exhausted = true;
+            return EncoderWedgeDecision::Exhausted;
+        }
+        let step = if self.recovery_steps == 0 {
+            EncoderRecoveryStep::Republish
+        } else {
+            EncoderRecoveryStep::FallBackToSoftware
+        };
+        self.recovery_steps += 1;
+        // Restart the streak: the NEXT escalation must be justified by another
+        // full trigger window of wedge evidence AFTER this recovery, not by the
+        // samples that led to it.
+        self.consecutive_zero_encode_samples = 0;
+        EncoderWedgeDecision::Recover(step)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RungFundingState {
     /// Publishing at its full configured ceiling; funding looks fine (or
@@ -9499,6 +10087,60 @@ fn apply_rung_starvation_guard_sample(
     }
 }
 
+/// One wedge-guard tick: observe this poll, log the transition, and -- on a
+/// decision that carries one -- request EXACTLY ONE recovery step. Production
+/// (`log_window_share_encoder_stats`) and tests both drive THIS function, so a
+/// test exercises the real observation -> decision -> request chain and not
+/// merely the pure state machine underneath it; only the session-owned
+/// republish action is substituted (the same effect-injection shape as
+/// `apply_rung_starvation_guard_sample`).
+///
+/// `request_recovery` returns whether a recovery action was actually wired: a
+/// publication created without one (the camera path, `session_stub`'s test
+/// publishes) must log the wedge rather than silently claim it acted.
+fn apply_encoder_wedge_guard_sample(
+    guard: &mut EncoderWedgeGuard,
+    sample: EncoderOutputSample,
+    request_recovery: &mut dyn FnMut(EncoderRecoveryStep) -> bool,
+) {
+    match guard.observe(sample) {
+        EncoderWedgeDecision::Healthy => {}
+        EncoderWedgeDecision::Suspect => log::warn!(
+            "publisher: window-share encoder produced 0 frames this interval while funded at {:.0}kbps (delivered {:.1}fps) for {} consecutive samples; below the {}sample #427 wedge trigger, watching",
+            sample.target_bitrate_bps / 1000.0,
+            sample.frames_per_second,
+            guard.consecutive_zero_encode_samples,
+            ENCODER_WEDGE_TRIGGER_SAMPLES,
+        ),
+        EncoderWedgeDecision::Recover(step) => {
+            let requested = request_recovery(step);
+            if requested {
+                log::warn!(
+                    "publisher: window-share encoder WEDGED -- 0 frames encoded while funded at {:.0}kbps (delivered {:.1}fps) for {} samples; recovery step {}/{}: {} (#427)",
+                    sample.target_bitrate_bps / 1000.0,
+                    sample.frames_per_second,
+                    ENCODER_WEDGE_TRIGGER_SAMPLES,
+                    guard.recovery_steps,
+                    ENCODER_WEDGE_MAX_RECOVERY_STEPS,
+                    step.description(),
+                );
+            } else {
+                log::error!(
+                    "publisher: window-share encoder WEDGED -- 0 frames encoded while funded at {:.0}kbps for {} samples, and this publication has no recovery action wired ({} not requested) (#427)",
+                    sample.target_bitrate_bps / 1000.0,
+                    ENCODER_WEDGE_TRIGGER_SAMPLES,
+                    step.description(),
+                );
+            }
+        }
+        EncoderWedgeDecision::Exhausted => log::error!(
+            "publisher: window-share encoder still produced 0 frames after {} recovery steps ({}); this publication is publishing an empty track and no further recovery is attempted -- reopen the share to retry the encoder (#427)",
+            ENCODER_WEDGE_MAX_RECOVERY_STEPS,
+            sample.target_bitrate_bps / 1000.0,
+        ),
+    }
+}
+
 /// The ladder's top rid's CURRENT configured `(max_bitrate, max_framerate)`,
 /// computed fresh from live, authoritative state -- the exact same
 /// computation `PublishedTrack::set_quality` uses to build its own updates,
@@ -9718,9 +10360,21 @@ async fn log_window_share_encoder_stats(
     published_width: Arc<std::sync::atomic::AtomicU32>,
     published_height: Arc<std::sync::atomic::AtomicU32>,
     ladder: FullShareSimulcastLadder,
+    encoder_wedge_recovery: Option<EncoderWedgeRecovery>,
     cancel: CancellationToken,
 ) {
     let mut guard: Option<RungStarvationGuard> = None;
+    // #427: rides the same poll as the guard above -- one source of truth for
+    // "the encoder produced nothing while it was funded". The budget is
+    // inherited from the share, so a publication created BY a recovery starts
+    // where the previous one stopped instead of resetting the escalation.
+    let mut wedge_guard = EncoderWedgeGuard {
+        recovery_steps: encoder_wedge_recovery
+            .as_ref()
+            .map(EncoderWedgeRecovery::steps_used)
+            .unwrap_or(0),
+        ..EncoderWedgeGuard::default()
+    };
     let mut guard_initialized = false;
     // Throttled warning for a repeatedly-failing `get_stats()` call (#907
     // review finding 8: silently ignoring every error left this diagnostic
@@ -9743,6 +10397,9 @@ async fn log_window_share_encoder_stats(
         send_delay_s: f64,
     }
     let mut wire_prev: Option<(std::time::Instant, OutboundTotals)> = None;
+    // #408: the SID this poll last published a lower-rung verdict under, so
+    // the verdict is withdrawn when the poll ends (unpublish/republish).
+    let mut reported_lower_rungs_sid: Option<String> = None;
     loop {
         // A publication that no longer exists must not keep polling: the guard
         // riding on this poll has nothing left to observe, and libwebrtc would
@@ -9869,6 +10526,29 @@ async fn log_window_share_encoder_stats(
                 .saturating_sub(prev.key_frames_encoded);
             let d_qp = totals.qp_sum.saturating_sub(prev.qp_sum);
             let d_send_delay_s = (totals.send_delay_s - prev.send_delay_s).max(0.0);
+            // #427: the wedge decision is taken from THIS interval's encoder
+            // output (`d_encoded`), before any log line: a zero delta on a
+            // funded stream is "the encoder produced nothing", which the
+            // delivered-fps gauge alone cannot distinguish from a transport
+            // stall caused by a healthy, throttled encoder.
+            let mut request_recovery = |step: EncoderRecoveryStep| match encoder_wedge_recovery
+                .as_ref()
+            {
+                Some(recovery) => {
+                    recovery.request(step);
+                    true
+                }
+                None => false,
+            };
+            apply_encoder_wedge_guard_sample(
+                &mut wedge_guard,
+                EncoderOutputSample {
+                    frames_encoded: d_encoded,
+                    target_bitrate_bps: target_bps,
+                    frames_per_second: enc_fps,
+                },
+                &mut request_recovery,
+            );
             log::debug!(
                 "publisher: outbound enc_fps={:.1} frames_encoded={} keyframes={} gop_frames={:.1} avg_qp={:.1} sent_kbps={:.0} frames_sent={} packets={} mean_send_delay_ms={:.2} send_delay_growth_ms={:.1} pli={} nack={} limitation={:?} target_kbps={:.0} bwe_kbps={:.0} rtt_ms={:.2}",
                 enc_fps,
@@ -9903,6 +10583,13 @@ async fn log_window_share_encoder_stats(
         }
 
         let Some(guard) = guard.as_mut() else { continue };
+        // #408: tell receivers whether a LOW fallback would land on anything.
+        // Same poll, same summary the guard below reads for its own premise.
+        let sid = track.sid().to_string();
+        if let Some(report) = lower_rungs_report(&samples, &guard.rid) {
+            crate::pipeline_stats::record_local_lower_rungs(&sid, report);
+            reported_lower_rungs_sid = Some(sid);
+        }
         let mut apply = |rid: &str, max_bitrate: u64, max_framerate: f64| {
             format!(
                 "{:?}",
@@ -9917,6 +10604,27 @@ async fn log_window_share_encoder_stats(
         };
         apply_rung_starvation_guard_sample(guard, &samples, current_top.as_ref(), &mut apply);
     }
+    if let Some(sid) = reported_lower_rungs_sid {
+        crate::pipeline_stats::clear_local_lower_rungs(&sid);
+    }
+}
+
+/// #408: the lower-rung verdict this poll publishes to receivers, or `None`
+/// when the poll saw no rung other than the guarded top one (nothing to
+/// report: a missing lower rung is "unknown", never "not delivering", so a
+/// half-read poll cannot suppress a receiver's fallback).
+fn lower_rungs_report(
+    samples: &[RungSample],
+    guarded_rid: &str,
+) -> Option<crate::pipeline_stats::LowerRungsReport> {
+    if !samples.iter().any(|sample| sample.rid != guarded_rid) {
+        return None;
+    }
+    let activity = lower_rung_activity(samples, guarded_rid);
+    Some(crate::pipeline_stats::LowerRungsReport {
+        funded: activity.funded,
+        delivering: activity.delivering,
+    })
 }
 
 /// Effect-injected form of [`log_encoder_once`]. Production and tests both

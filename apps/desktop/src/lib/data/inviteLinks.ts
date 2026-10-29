@@ -4,7 +4,7 @@ import {
   meetingDisplayLabelFromCredential,
   normalizeAccessCode
 } from './meetingCode.ts';
-import type { RoomRecord } from '$lib/ipc';
+import type { RoomRecord } from '#lib/ipc.js';
 
 // Origin for copied invite links. A self-hosted deployment overrides it at
 // build time with `VITE_PETAL_INVITE_ORIGIN` (docs/SELF_HOSTING.md); the

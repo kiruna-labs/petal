@@ -9,7 +9,7 @@
 // Pure apart from `syntheticCameraStream` (canvas + captureStream), so the
 // scenario maths can be unit-tested under node.
 
-import type { GalleryParticipant } from '$lib/components/Gallery.svelte';
+import type { GalleryParticipant } from '#lib/components/Gallery.svelte';
 
 export type LabLayoutMode = 'grid' | 'spotlight';
 

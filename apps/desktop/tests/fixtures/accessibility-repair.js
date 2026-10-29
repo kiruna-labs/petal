@@ -7,7 +7,7 @@ async function renderFixture() {
   try {
     const [{ mount }, { default: PermissionRow }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/PermissionRow.svelte')
+      import('#lib/components/PermissionRow.svelte')
     ]);
     mount(PermissionRow, {
       target: document.querySelector('#app'),

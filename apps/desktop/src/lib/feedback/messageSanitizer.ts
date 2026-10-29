@@ -1,5 +1,5 @@
 // Pure text sanitization for the feedback message field (#292). Kept
-// dependency-free (no `$lib/*` imports) so it's directly unit-testable
+// dependency-free (no `#lib/*` imports) so it's directly unit-testable
 // under plain `node --test` -- `userDispatch.ts` imports and re-exports
 // these for the rest of the feedback module.
 

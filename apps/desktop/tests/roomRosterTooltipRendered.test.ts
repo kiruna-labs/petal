@@ -167,7 +167,7 @@ test('#122: the room-roster tooltip shows on hover and focus, never clipped, nev
       resolve: {
         alias: {
           $lib: resolve(fileURLToPath(new URL('./src/lib', desktopRoot))),
-          '$app/environment': fixturePath('sveltekit-environment.ts'),
+          '$app/env': fixturePath('sveltekit-environment.ts'),
           '@petal/shared': resolve(fileURLToPath(new URL('../../shared', desktopRoot)))
         }
       },

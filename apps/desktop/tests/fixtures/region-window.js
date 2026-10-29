@@ -217,7 +217,7 @@ async function renderFixture() {
   try {
     const [{ mount, unmount }, { default: RegionWindow }] = await Promise.all([
       import('svelte'),
-      import('$lib/../routes/region-window/+page.svelte')
+      import('#lib/../routes/region-window/+page.svelte')
     ]);
     const mounted = mount(RegionWindow, { target: document.querySelector('#app') });
     if (new URLSearchParams(window.location.search).has('ipcProbe')) {

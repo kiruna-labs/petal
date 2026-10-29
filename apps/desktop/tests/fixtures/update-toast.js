@@ -40,8 +40,8 @@ async function renderFixture() {
 
     const [{ mount }, { default: ToastHost }, { markUpdateAvailable }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/ToastHost.svelte'),
-      import('$lib/stores/updateStatus.svelte')
+      import('#lib/components/ToastHost.svelte'),
+      import('#lib/stores/updateStatus.svelte.js')
     ]);
 
     markUpdateAvailable(UPDATE_VERSION);

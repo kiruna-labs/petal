@@ -102,6 +102,8 @@ fn main() {
         "src/apm.rs",
         "src/audio_mixer.rs",
         "src/packet_trailer.rs",
+        // PETAL PATCH (#410): H.264 encoder level helpers.
+        "src/h264_encoder_level.rs",
     ];
 
     if is_desktop {
@@ -141,6 +143,8 @@ fn main() {
         "src/apm.cpp",
         "src/audio_mixer.cpp",
         "src/packet_trailer.cpp",
+        // PETAL PATCH (#410): H.264 encoder level helpers.
+        "src/h264_encoder_level.cpp",
     ]);
 
     if is_desktop {

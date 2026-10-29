@@ -489,17 +489,17 @@
       "version": "0.42.6"
     },
     {
-      "bom-ref": "@astrojs/telemetry@3.3.3",
+      "bom-ref": "@astrojs/telemetry@3.4.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/telemetry/-/telemetry-3.3.3.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/telemetry/-/telemetry-3.4.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "0b54cb9f9b0f26bd31e2f939ea988758a6e7aa5101f012b2b5ee58e39574d94f83ec118ee5e32a6431f968f8e791741626082f9ac4d7c47d3740c67d36058bcd"
+          "content": "42dd93e911ad61a73257c39953721cc856eca7af6ceaa21c9d6bd0be7effa7d30a79b3c2a44b303f9262e118627c6dc37de057eded3b3e38f9b2691df937e9ed"
         }
       ],
       "licenses": [
@@ -510,10 +510,10 @@
         }
       ],
       "name": "@astrojs/telemetry",
-      "purl": "pkg:npm/%40astrojs/telemetry@3.3.3",
+      "purl": "pkg:npm/%40astrojs/telemetry@3.4.0",
       "scope": "required",
       "type": "library",
-      "version": "3.3.3"
+      "version": "3.4.0"
     },
     {
       "bom-ref": "@babel/helper-string-parser@7.29.7",
@@ -1137,17 +1137,17 @@
       "version": "1.2.3"
     },
     {
-      "bom-ref": "@expressive-code/core@0.44.2",
+      "bom-ref": "@expressive-code/core@0.44.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@expressive-code/core/-/core-0.44.2.tgz"
+          "url": "https://registry.npmjs.org/@expressive-code/core/-/core-0.44.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "630e4aa274020f51e838ed8ff3dcb8c227ea4bdaab25c1956342e454c52c5598e18bef9b873e16c10dfb8a77a728534e115a39d0fedc8e856c09d6959d46eaf3"
+          "content": "a5f7e4b45d13268c42d3c76035cbad97fd0b7129d3ae317abd7477f6a569c19d04cb1a703bdce323b75b9e2eac3bbc37c87a5104ed2fa0b16f87307e10f251b0"
         }
       ],
       "licenses": [
@@ -1158,10 +1158,10 @@
         }
       ],
       "name": "@expressive-code/core",
-      "purl": "pkg:npm/%40expressive-code/core@0.44.2",
+      "purl": "pkg:npm/%40expressive-code/core@0.44.3",
       "scope": "required",
       "type": "library",
-      "version": "0.44.2"
+      "version": "0.44.3"
     },
     {
       "bom-ref": "@expressive-code/plugin-frames@0.44.2",
@@ -2722,17 +2722,17 @@
       "version": "1.0.1"
     },
     {
-      "bom-ref": "@shikijs/core@4.4.3",
+      "bom-ref": "@shikijs/core@4.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@shikijs/core/-/core-4.4.3.tgz"
+          "url": "https://registry.npmjs.org/@shikijs/core/-/core-4.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "402478ab664efc82c912ec2204c7a5e3075c4c36f5246c1f8ca4f13c317ac7c8b139a96e3eb56a227d3a0bdf407113e1998941479e9dfc56fe18de7c1b3131a6"
+          "content": "e82220c2af9bb76259dce4a36ff9c1924c047ff09fa4771b6a6f8c8393e595ca3b1c0191436fc416166bac9b5bc8d4e02b09277d54be965b171b28220c6c095b"
         }
       ],
       "licenses": [
@@ -2743,23 +2743,23 @@
         }
       ],
       "name": "@shikijs/core",
-      "purl": "pkg:npm/%40shikijs/core@4.4.3",
+      "purl": "pkg:npm/%40shikijs/core@4.5.0",
       "scope": "required",
       "type": "library",
-      "version": "4.4.3"
+      "version": "4.5.0"
     },
     {
-      "bom-ref": "@shikijs/engine-javascript@4.4.3",
+      "bom-ref": "@shikijs/engine-javascript@4.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@shikijs/engine-javascript/-/engine-javascript-4.4.3.tgz"
+          "url": "https://registry.npmjs.org/@shikijs/engine-javascript/-/engine-javascript-4.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "15b3a3149a7d54b768d567afb35d0106d5718935b034ba998791a486381d6bf8a82f5e583a079297d9fee9731adea4653d0cdf84535eeb8d52af29c51d81b49d"
+          "content": "11de947448fce0bc989309f13390af48c5800fe89df44c5362b8b4ffec78d54f73ae03627cf492f65666d09a813f455f608f32afcb58e676cdabdfa9f51d2414"
         }
       ],
       "licenses": [
@@ -2770,23 +2770,23 @@
         }
       ],
       "name": "@shikijs/engine-javascript",
-      "purl": "pkg:npm/%40shikijs/engine-javascript@4.4.3",
+      "purl": "pkg:npm/%40shikijs/engine-javascript@4.5.0",
       "scope": "required",
       "type": "library",
-      "version": "4.4.3"
+      "version": "4.5.0"
     },
     {
-      "bom-ref": "@shikijs/engine-oniguruma@4.4.3",
+      "bom-ref": "@shikijs/engine-oniguruma@4.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@shikijs/engine-oniguruma/-/engine-oniguruma-4.4.3.tgz"
+          "url": "https://registry.npmjs.org/@shikijs/engine-oniguruma/-/engine-oniguruma-4.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "11c390931771190adcd51a30fdc0b673debfbf575b66a1a7115bb5a93b93fcc266a7af9c5c2bd0bacb28c15982bf94eaaf72ae63773b21b33a1d35b72c9d64f7"
+          "content": "74a5666c979c55d07dade725f1afc25388dda4d5f28c942b21c7ac224a52ef4b391d2d36a21a67092a4c51ba2d3e7114cdb01c2d0f92e21c1961b9010624dc27"
         }
       ],
       "licenses": [
@@ -2797,23 +2797,23 @@
         }
       ],
       "name": "@shikijs/engine-oniguruma",
-      "purl": "pkg:npm/%40shikijs/engine-oniguruma@4.4.3",
+      "purl": "pkg:npm/%40shikijs/engine-oniguruma@4.5.0",
       "scope": "required",
       "type": "library",
-      "version": "4.4.3"
+      "version": "4.5.0"
     },
     {
-      "bom-ref": "@shikijs/langs@4.4.3",
+      "bom-ref": "@shikijs/langs@4.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@shikijs/langs/-/langs-4.4.3.tgz"
+          "url": "https://registry.npmjs.org/@shikijs/langs/-/langs-4.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "78f89cd327c0246385f370f9c011caff4d048caeb9a1a841631164e5ea60ab7dd646fed7f54bb12c457c3ed474b330b4cfc765ec8348a48a1d07df49445951f8"
+          "content": "c30053ab076e5d2cf45f8bfd41ad8459e15a609130d5c9429dc5a3a1135045b543bb748f453456b9c9e8b986a92a3ddbf10fac93fe3555b73807973c9ee6332c"
         }
       ],
       "licenses": [
@@ -2824,23 +2824,23 @@
         }
       ],
       "name": "@shikijs/langs",
-      "purl": "pkg:npm/%40shikijs/langs@4.4.3",
+      "purl": "pkg:npm/%40shikijs/langs@4.5.0",
       "scope": "required",
       "type": "library",
-      "version": "4.4.3"
+      "version": "4.5.0"
     },
     {
-      "bom-ref": "@shikijs/primitive@4.4.3",
+      "bom-ref": "@shikijs/primitive@4.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@shikijs/primitive/-/primitive-4.4.3.tgz"
+          "url": "https://registry.npmjs.org/@shikijs/primitive/-/primitive-4.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "9b4c0178b0d00de23145d526ac23dd42a7ee51a983c112f98ac09f61b82e283e8d89a2a955bb2ffb727cd43c882a0356e61e1600822bf13e0492042b041c6f69"
+          "content": "50ced286503ca33d0e5b12cb3bc0663bd229e9f56a764b7cc85d041fb9ce0aa1dfaf1d5e100cc5d195152bb2fe23c34481ebb53c4592465c5a88f3de09be220e"
         }
       ],
       "licenses": [
@@ -2851,23 +2851,23 @@
         }
       ],
       "name": "@shikijs/primitive",
-      "purl": "pkg:npm/%40shikijs/primitive@4.4.3",
+      "purl": "pkg:npm/%40shikijs/primitive@4.5.0",
       "scope": "required",
       "type": "library",
-      "version": "4.4.3"
+      "version": "4.5.0"
     },
     {
-      "bom-ref": "@shikijs/themes@4.4.3",
+      "bom-ref": "@shikijs/themes@4.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@shikijs/themes/-/themes-4.4.3.tgz"
+          "url": "https://registry.npmjs.org/@shikijs/themes/-/themes-4.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c3c5078de527211f7ae4a31624750f5ce73698d2549cadefa552d82efc392185369a74d327cf44db83ab24304d8890d0d2acdbd2d73897b9ab217c79705788cb"
+          "content": "cc66fcec7dd405ba6e238ca8879520b81d576d4fb604353791f94ced47d9f82cb6856a3d941b6a8d254adb48262d8eae918974e34840ca9197320b9df6fba5f1"
         }
       ],
       "licenses": [
@@ -2878,23 +2878,23 @@
         }
       ],
       "name": "@shikijs/themes",
-      "purl": "pkg:npm/%40shikijs/themes@4.4.3",
+      "purl": "pkg:npm/%40shikijs/themes@4.5.0",
       "scope": "required",
       "type": "library",
-      "version": "4.4.3"
+      "version": "4.5.0"
     },
     {
-      "bom-ref": "@shikijs/types@4.4.3",
+      "bom-ref": "@shikijs/types@4.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@shikijs/types/-/types-4.4.3.tgz"
+          "url": "https://registry.npmjs.org/@shikijs/types/-/types-4.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "50427199147ef8c00647a86e827d2f8154b65bfea5580b6cf381454ab9e51fdb0fd0b36897b139f8d43bf76a47f25896521c8cca3853812507de4ee20fbb5ce6"
+          "content": "76bb4faed0fc3740c43720f6732b7a023cbe216b2208b80cc4e0f02d3a6f1f552c37a6bd8dff74b4d4cf8eac07bc0fb42f3bbd7b4b7193c0e37ea1f5a7d50947"
         }
       ],
       "licenses": [
@@ -2905,10 +2905,10 @@
         }
       ],
       "name": "@shikijs/types",
-      "purl": "pkg:npm/%40shikijs/types@4.4.3",
+      "purl": "pkg:npm/%40shikijs/types@4.5.0",
       "scope": "required",
       "type": "library",
-      "version": "4.4.3"
+      "version": "4.5.0"
     },
     {
       "bom-ref": "@shikijs/vscode-textmate@10.0.2",
@@ -3484,17 +3484,17 @@
       "version": "5.3.2"
     },
     {
-      "bom-ref": "astro@7.3.8",
+      "bom-ref": "astro@7.4.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/astro/-/astro-7.3.8.tgz"
+          "url": "https://registry.npmjs.org/astro/-/astro-7.4.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "2c7cc31d2695f98cd9891dc41677436132cb78d7ae32d3f5a97d452dc08d5141ce0aa4d32163dccf2d94577ce903956abc97b971666896a33d67c245a91da2f7"
+          "content": "e938595366e9edab0649c795727877af6ddd13cf07a58379bf1b67096618ae3afc969423c787835bafd6f1680d95c73e4ff6fccc7990fc4712e03a501b86683a"
         }
       ],
       "licenses": [
@@ -3505,10 +3505,10 @@
         }
       ],
       "name": "astro",
-      "purl": "pkg:npm/astro@7.3.8",
+      "purl": "pkg:npm/astro@7.4.0",
       "scope": "required",
       "type": "library",
-      "version": "7.3.8"
+      "version": "7.4.0"
     },
     {
       "bom-ref": "astro-expressive-code@0.44.2",
@@ -3538,17 +3538,17 @@
       "version": "0.44.2"
     },
     {
-      "bom-ref": "@astrojs/internal-helpers@0.12.0",
+      "bom-ref": "@astrojs/internal-helpers@0.13.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/internal-helpers/-/internal-helpers-0.12.0.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/internal-helpers/-/internal-helpers-0.13.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a4a3eec020ed3b42fbce09add4919df57e007acd7ed125f7204052a8134f1ec49c61d3cc95f99e77763b0d36d7c85ec4fbcca59dbe7ade8ff43b31903ce15e87"
+          "content": "db48f142a9d29a9b24706c9a77b37997a5dfd60cf45026ba94d75ee386c405d6971a99dc1187c0649d78dabd9983305a1b8754cb31a686a656bf520d5367a21d"
         }
       ],
       "licenses": [
@@ -3559,23 +3559,23 @@
         }
       ],
       "name": "@astrojs/internal-helpers",
-      "purl": "pkg:npm/%40astrojs/internal-helpers@0.12.0",
+      "purl": "pkg:npm/%40astrojs/internal-helpers@0.13.0",
       "scope": "required",
       "type": "library",
-      "version": "0.12.0"
+      "version": "0.13.0"
     },
     {
-      "bom-ref": "@astrojs/markdown-satteri@0.4.3",
+      "bom-ref": "@astrojs/markdown-satteri@0.4.4",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@astrojs/markdown-satteri/-/markdown-satteri-0.4.3.tgz"
+          "url": "https://registry.npmjs.org/@astrojs/markdown-satteri/-/markdown-satteri-0.4.4.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "3c56c41cf9f05252efa5777b457aeb28cfa3d766a41786c6f834ae36ea0dfb77a2c233b0a781da3e2f9041d6e4055ed01185e6cf229c6b9d0e26c986c6134850"
+          "content": "07285ef4202218526b84c0022a980dfc53dfe257306a9ab0150001ec4d6c3c42d310920d7c12298271183814d7cebfff7ef4923617e9fd7dc0a8de26515f69f8"
         }
       ],
       "licenses": [
@@ -3586,10 +3586,37 @@
         }
       ],
       "name": "@astrojs/markdown-satteri",
-      "purl": "pkg:npm/%40astrojs/markdown-satteri@0.4.3",
+      "purl": "pkg:npm/%40astrojs/markdown-satteri@0.4.4",
       "scope": "required",
       "type": "library",
-      "version": "0.4.3"
+      "version": "0.4.4"
+    },
+    {
+      "bom-ref": "@astrojs/prism@4.1.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/@astrojs/prism/-/prism-4.1.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "cef45a2f730a4c05d67d542b1c0958b687116565c133aaee177065ecb73b4201472d14dfc0c2a8df729cce592f9170d8faa732b4a84058e4fd77051460b53103"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "@astrojs/prism",
+      "purl": "pkg:npm/%40astrojs/prism@4.1.0",
+      "scope": "required",
+      "type": "library",
+      "version": "4.1.0"
     },
     {
       "bom-ref": "es-module-lexer@3.0.3",
@@ -4510,17 +4537,17 @@
       "version": "2.1.2"
     },
     {
-      "bom-ref": "devalue@5.9.4",
+      "bom-ref": "devalue@6.0.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/devalue/-/devalue-5.9.4.tgz"
+          "url": "https://registry.npmjs.org/devalue/-/devalue-6.0.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b0f013e29ced6eeeb9f3afe1ae13a730a4b5ec826bbe0d769978923d24b75b9a8378dd911a0bd9d1d8990a6df57416e77af7d59ae8cd3b720cdb0ad2e18d9186"
+          "content": "df0a0c1084dfb46d7029e3bfe1dfd05c7d4354a72d4d2660de33463e98e9f6136be47a2cf0c08517931c4cc2f966d80a0ce6e6d91e7dd41d2ca51a762157ab9c"
         }
       ],
       "licenses": [
@@ -4531,10 +4558,10 @@
         }
       ],
       "name": "devalue",
-      "purl": "pkg:npm/devalue@5.9.4",
+      "purl": "pkg:npm/devalue@6.0.3",
       "scope": "required",
       "type": "library",
-      "version": "5.9.4"
+      "version": "6.0.3"
     },
     {
       "bom-ref": "devlop@1.1.0",
@@ -5062,33 +5089,6 @@
       "version": "6.5.0"
     },
     {
-      "bom-ref": "find-proc@0.2.0",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/find-proc/-/find-proc-0.2.0.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "6ba8769d3ae00778395ab9f86aef54c7890c93b209b7217aa00f2e1a7fa6937c1e2d9b2c52d735729ea6787233cee5b6a35b2bac1031ce49972dbaa3464801eb"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "find-proc",
-      "purl": "pkg:npm/find-proc@0.2.0",
-      "scope": "required",
-      "type": "library",
-      "version": "0.2.0"
-    },
-    {
       "bom-ref": "flattie@1.1.1",
       "externalReferences": [
         {
@@ -5114,6 +5114,33 @@
       "scope": "required",
       "type": "library",
       "version": "1.1.1"
+    },
+    {
+      "bom-ref": "fnv1a-64@0.1.2",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/fnv1a-64/-/fnv1a-64-0.1.2.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9896dc20b4cfc9b011d6374ec2dfe556ff0dd9c7df7891453fe8156d20302c4c75ba35c7dbb4693ddf11a2479cfca5fd73be9460807a0a8f87e25433c4f9c97c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "fnv1a-64",
+      "purl": "pkg:npm/fnv1a-64@0.1.2",
+      "scope": "required",
+      "type": "library",
+      "version": "0.1.2"
     },
     {
       "bom-ref": "fontace@0.4.1",
@@ -7738,33 +7765,6 @@
       "version": "1.5.1"
     },
     {
-      "bom-ref": "ohash@2.0.12",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/ohash/-/ohash-2.0.12.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "eb94bfe6093d612b1a4637327fb35f6ba87f77713cff582c9695df2385bb0f19ffa1aa7c20a46e353e555e42d0d5814a2048386a9458e0f8fa6a2c05ceb0dd9b"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "name": "ohash",
-      "purl": "pkg:npm/ohash@2.0.12",
-      "scope": "required",
-      "type": "library",
-      "version": "2.0.12"
-    },
-    {
       "bom-ref": "oniguruma-parser@0.12.2",
       "externalReferences": [
         {
@@ -7846,17 +7846,17 @@
       "version": "7.3.3"
     },
     {
-      "bom-ref": "p-queue@9.3.3",
+      "bom-ref": "p-queue@9.3.5",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/p-queue/-/p-queue-9.3.3.tgz"
+          "url": "https://registry.npmjs.org/p-queue/-/p-queue-9.3.5.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "35700e76711ee45b1925f4f8a0af38944d58e5c145756951b8ea39b70c3c0f234cc72457c27dfd7c8914b4d2caa6970f0be51853f6d7ba33425060efd35cbb08"
+          "content": "2e48bfce15c55660e17ac0549ffc8744b5bd06d7bb984ef1a051f34d1f2c228995edadb3f8bc5800f906bdd7e274d8aee1f2927e3b5ac22c71487719722e5071"
         }
       ],
       "licenses": [
@@ -7867,23 +7867,23 @@
         }
       ],
       "name": "p-queue",
-      "purl": "pkg:npm/p-queue@9.3.3",
+      "purl": "pkg:npm/p-queue@9.3.5",
       "scope": "required",
       "type": "library",
-      "version": "9.3.3"
+      "version": "9.3.5"
     },
     {
-      "bom-ref": "p-timeout@7.0.1",
+      "bom-ref": "p-timeout@7.0.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/p-timeout/-/p-timeout-7.0.1.tgz"
+          "url": "https://registry.npmjs.org/p-timeout/-/p-timeout-7.0.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "0314ccdb00c63911c61243c2b7ccaac4e4cc8297db107a85e757ffe5f2429b0142dc2ff335c193eb74b2987dadb4e01a888c2cdb3560e3e8b34028eb6a47301e"
+          "content": "a6b6d7e19dd8b33ac53601fe316e59a1eab76da5eb32d3ff3109c57844fdd1407f1ad19c18343952c83d382cba1138d34e7b4ec3548bdb3f5f30f529a4ddc6bb"
         }
       ],
       "licenses": [
@@ -7894,23 +7894,23 @@
         }
       ],
       "name": "p-timeout",
-      "purl": "pkg:npm/p-timeout@7.0.1",
+      "purl": "pkg:npm/p-timeout@7.0.2",
       "scope": "required",
       "type": "library",
-      "version": "7.0.1"
+      "version": "7.0.2"
     },
     {
-      "bom-ref": "package-manager-detector@1.8.0",
+      "bom-ref": "package-manager-detector@1.9.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/package-manager-detector/-/package-manager-detector-1.8.0.tgz"
+          "url": "https://registry.npmjs.org/package-manager-detector/-/package-manager-detector-1.9.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "c900381f5f4098f12831479abcf30321ed618a0c9297f807ff2690ae44ffb34ed0a7eee9a76858cf7d0ddf3da5e4192356417d3b0ea8d308c96a69b6cbb4a7d0"
+          "content": "cc031f6ed6bd9cf03c00a900e167663404fc47cb3a0e4d3fc703eca8d9d189d30570ba356242ee3c34e0b367fae177734bcbdb2cd9e827eb9422481bcfba111c"
         }
       ],
       "licenses": [
@@ -7921,10 +7921,10 @@
         }
       ],
       "name": "package-manager-detector",
-      "purl": "pkg:npm/package-manager-detector@1.8.0",
+      "purl": "pkg:npm/package-manager-detector@1.9.0",
       "scope": "required",
       "type": "library",
-      "version": "1.8.0"
+      "version": "1.9.0"
     },
     {
       "bom-ref": "pagefind@1.5.2",
@@ -8149,17 +8149,17 @@
       "version": "8.5.29"
     },
     {
-      "bom-ref": "postcss-nested@6.2.0",
+      "bom-ref": "postcss-nested@7.0.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/postcss-nested/-/postcss-nested-6.2.0.tgz"
+          "url": "https://registry.npmjs.org/postcss-nested/-/postcss-nested-7.0.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "1d06eddbc2ae942e402731be719b63f64bca07ddc214274bbe88355852dfd43fb198cbcf1a506cb64a531197cae7e00df617c9a1cc81142362ab24b8f1ba60cd"
+          "content": "e68b29a68b85734551f7f558cd8c4ed3755a0daddef05db729f77affda9c653508f0fe7c18862502b3844f65aad32c12976a363e310b8583852385bb9794072b"
         }
       ],
       "licenses": [
@@ -8170,23 +8170,23 @@
         }
       ],
       "name": "postcss-nested",
-      "purl": "pkg:npm/postcss-nested@6.2.0",
+      "purl": "pkg:npm/postcss-nested@7.0.2",
       "scope": "required",
       "type": "library",
-      "version": "6.2.0"
+      "version": "7.0.2"
     },
     {
-      "bom-ref": "postcss-selector-parser@6.1.4",
+      "bom-ref": "postcss-selector-parser@7.1.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/postcss-selector-parser/-/postcss-selector-parser-6.1.4.tgz"
+          "url": "https://registry.npmjs.org/postcss-selector-parser/-/postcss-selector-parser-7.1.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "6c8a092ce9a308ed52f57758fc3727479849c6fac38abd4f6c60a1af35c6defc34fc53a58b2fdf037766761438e3591a87880abfe4f07241b37b1eb0352e5c9d"
+          "content": "c1606ba3fee1278d327ba4cf8979144285ca0b0db7c52b23ae252fa9ded496cf52b28de82e238dd5f95cd7c7027678e00915f0e1f055a9424978e7434e1dcfde"
         }
       ],
       "licenses": [
@@ -8197,10 +8197,10 @@
         }
       ],
       "name": "postcss-selector-parser",
-      "purl": "pkg:npm/postcss-selector-parser@6.1.4",
+      "purl": "pkg:npm/postcss-selector-parser@7.1.7",
       "scope": "required",
       "type": "library",
-      "version": "6.1.4"
+      "version": "7.1.7"
     },
     {
       "bom-ref": "prismjs@1.30.0",
@@ -8662,17 +8662,17 @@
       "version": "0.35.5"
     },
     {
-      "bom-ref": "shiki@4.4.3",
+      "bom-ref": "shiki@4.5.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/shiki/-/shiki-4.4.3.tgz"
+          "url": "https://registry.npmjs.org/shiki/-/shiki-4.5.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "31bfc6bd73c70405dd80621c9df5392f795da67d57731ac690f1f0aa0471d7bfc8d9745faa514a936bc6907588367d64757bf32597ae3b78ace88f4a2cf166d2"
+          "content": "39c456ef69e042f73e312556051228bc2fc14d6e7cf62504fd5c5abfb55e33845c63d3148ea07e211e882c6d64f67b96e8b886fe772df6e99ae3f301b6765b99"
         }
       ],
       "licenses": [
@@ -8683,10 +8683,10 @@
         }
       ],
       "name": "shiki",
-      "purl": "pkg:npm/shiki@4.4.3",
+      "purl": "pkg:npm/shiki@4.5.0",
       "scope": "required",
       "type": "library",
-      "version": "4.4.3"
+      "version": "4.5.0"
     },
     {
       "bom-ref": "sisteransi@1.0.5",
@@ -8743,17 +8743,17 @@
       "version": "9.0.1"
     },
     {
-      "bom-ref": "smol-toml@1.9.0",
+      "bom-ref": "smol-toml@1.9.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/smol-toml/-/smol-toml-1.9.0.tgz"
+          "url": "https://registry.npmjs.org/smol-toml/-/smol-toml-1.9.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "86977e1cb38dec77595ea61c84c33ff8b6934db74ad00537367808278295c966d8f5b7d0a9d2fd703fb8c9fe9d528536029e15b14d099108ba171008d41da65d"
+          "content": "8fb5b23dd7f4089a2eb4cccca0f2c5fdb5571ed299213f516f87867846d6c3c5f6b79a22ae33e0a4bf8ea5a10d66b20b61a5ea6309d51feaa053055b97ea5425"
         }
       ],
       "licenses": [
@@ -8764,10 +8764,10 @@
         }
       ],
       "name": "smol-toml",
-      "purl": "pkg:npm/smol-toml@1.9.0",
+      "purl": "pkg:npm/smol-toml@1.9.1",
       "scope": "required",
       "type": "library",
-      "version": "1.9.0"
+      "version": "1.9.1"
     },
     {
       "bom-ref": "source-map-js@1.2.2",
@@ -8855,6 +8855,33 @@
       "scope": "optional",
       "type": "library",
       "version": "0.27.0"
+    },
+    {
+      "bom-ref": "std-env@4.3.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/std-env/-/std-env-4.3.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3ad53f1204359089b92b0a90a410ba644317ad946e8b5d70f3381f4d6a7c71d3bd07c39a3ec6c0f1b4c73b63fe1cda3556551318c541c0f87276eea9a1e5e26a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "std-env",
+      "purl": "pkg:npm/std-env@4.3.0",
+      "scope": "required",
+      "type": "library",
+      "version": "4.3.0"
     },
     {
       "bom-ref": "stringify-entities@4.0.4",
@@ -9118,6 +9145,33 @@
       "version": "0.2.17"
     },
     {
+      "bom-ref": "tinyps@0.5.0",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/tinyps/-/tinyps-0.5.0.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2e5bbb9c4b553861e1ee3a24df697afae765bbee0da79bec61507bcde4caeb5e1ca12b2ba36aa3c2d7bb305b7fa2e2ccfe1e245ea6c65e4b5230cbccb2db520f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tinyps",
+      "purl": "pkg:npm/tinyps@0.5.0",
+      "scope": "required",
+      "type": "library",
+      "version": "0.5.0"
+    },
+    {
       "bom-ref": "trim-lines@3.0.1",
       "externalReferences": [
         {
@@ -9280,17 +9334,17 @@
       "version": "0.1.3"
     },
     {
-      "bom-ref": "undici@8.10.2",
+      "bom-ref": "undici@8.12.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/undici/-/undici-8.10.2.tgz"
+          "url": "https://registry.npmjs.org/undici/-/undici-8.12.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "ff2e3f6c7f58354e618bd348ae93aebc65c5731ae3dc232b57efc0629a300184e91e7f205ff5cf163372efae853e8618d2689085d5bdefb24558a18d841770c9"
+          "content": "5edb8359576a4cbaf7340c66da5cbdfe153a914b093a01a1d51012ccc05bb30e9a58239a4331dd5be4100df7444637c9d95e6f2f9a513dae117ad3bd51f8af0e"
         }
       ],
       "licenses": [
@@ -9301,10 +9355,10 @@
         }
       ],
       "name": "undici",
-      "purl": "pkg:npm/undici@8.10.2",
+      "purl": "pkg:npm/undici@8.12.2",
       "scope": "required",
       "type": "library",
-      "version": "8.10.2"
+      "version": "8.12.2"
     },
     {
       "bom-ref": "undici-types@7.18.2",
@@ -9361,17 +9415,17 @@
       "version": "11.0.5"
     },
     {
-      "bom-ref": "unifont@0.7.5",
+      "bom-ref": "unifont@1.0.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/unifont/-/unifont-0.7.5.tgz"
+          "url": "https://registry.npmjs.org/unifont/-/unifont-1.0.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "50b7bf0acf9922cabe75c1687cd921aa27a50ab5099dbe66afe61ce0404cd9594bfba39947af9c8ed236993d5b26f441ad59dca8701b2d447198f2dc097cd632"
+          "content": "5c69c4c23e6c59d09b8815f4d6658b4819dc4b4c8c4639cbca06aedc87dd3a57e331a70d210bd3196e151fba5606afa019602b7d279ffc27a7b0c2e332622bfc"
         }
       ],
       "licenses": [
@@ -9382,10 +9436,10 @@
         }
       ],
       "name": "unifont",
-      "purl": "pkg:npm/unifont@0.7.5",
+      "purl": "pkg:npm/unifont@1.0.3",
       "scope": "required",
       "type": "library",
-      "version": "0.7.5"
+      "version": "1.0.3"
     },
     {
       "bom-ref": "unist-util-find-after@5.0.0",
@@ -9940,17 +9994,17 @@
       "version": "1.2.2"
     },
     {
-      "bom-ref": "zod@4.6.5",
+      "bom-ref": "zod@4.6.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/zod/-/zod-4.6.5.tgz"
+          "url": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "bf997f6855d941e6a2e1ac0b6cea52a0779c13d52232b9dfc7be6d1172e33689d754047143998e7a2a538d1394721b3350d0aa9c4fa1a8032e8d1b111ecbadd9"
+          "content": "83c5b60f6914e9af2e9ed734e777d7d6e5412b333bcaa0315bfdf3c24f37fba472176f9228eb95f9cd30043854c335753da19aa66647fab99c5333dffb7086c2"
         }
       ],
       "licenses": [
@@ -9961,10 +10015,10 @@
         }
       ],
       "name": "zod",
-      "purl": "pkg:npm/zod@4.6.5",
+      "purl": "pkg:npm/zod@4.6.7",
       "scope": "required",
       "type": "library",
-      "version": "4.6.5"
+      "version": "4.6.7"
     },
     {
       "bom-ref": "zwitch@2.0.4",
@@ -9998,7 +10052,7 @@
     {
       "dependsOn": [
         "@astrojs/starlight@0.42.6",
-        "astro@7.3.8",
+        "astro@7.4.0",
         "sharp@0.35.5",
         "starlight-links-validator@0.27.0"
       ],
@@ -10076,8 +10130,8 @@
         "js-yaml@4.3.2",
         "picomatch@4.0.7",
         "retext-smartypants@6.2.0",
-        "shiki@4.4.3",
-        "smol-toml@1.9.0",
+        "shiki@4.5.0",
+        "smol-toml@1.9.1",
         "unified@11.0.5"
       ],
       "ref": "@astrojs/internal-helpers@0.11.0"
@@ -10093,7 +10147,7 @@
     },
     {
       "dependsOn": [
-        "astro@7.3.8",
+        "astro@7.4.0",
         "@astrojs/internal-helpers@0.11.0",
         "@astrojs/markdown-satteri@0.4.0",
         "es-module-lexer@2.3.2"
@@ -10109,13 +10163,13 @@
     {
       "dependsOn": [
         "sitemap@9.0.1",
-        "zod@4.6.5"
+        "zod@4.6.7"
       ],
       "ref": "@astrojs/sitemap@3.7.4"
     },
     {
       "dependsOn": [
-        "astro@7.3.8",
+        "astro@7.4.0",
         "@astrojs/markdown-satteri@0.4.0",
         "@astrojs/mdx@8.0.0",
         "@astrojs/sitemap@3.7.4",
@@ -10152,9 +10206,9 @@
         "ci-info@4.4.0",
         "dset@3.1.4",
         "is-docker@4.0.0",
-        "package-manager-detector@1.8.0"
+        "package-manager-detector@1.9.0"
       ],
-      "ref": "@astrojs/telemetry@3.3.3"
+      "ref": "@astrojs/telemetry@3.4.0"
     },
     {
       "dependsOn": [],
@@ -10289,28 +10343,28 @@
         "hast-util-to-text@4.0.2",
         "hastscript@9.0.1",
         "postcss@8.5.29",
-        "postcss-nested@6.2.0",
+        "postcss-nested@7.0.2",
         "unist-util-visit@5.1.0",
         "unist-util-visit-parents@6.0.2"
       ],
-      "ref": "@expressive-code/core@0.44.2"
+      "ref": "@expressive-code/core@0.44.3"
     },
     {
       "dependsOn": [
-        "@expressive-code/core@0.44.2"
+        "@expressive-code/core@0.44.3"
       ],
       "ref": "@expressive-code/plugin-frames@0.44.2"
     },
     {
       "dependsOn": [
-        "@expressive-code/core@0.44.2",
-        "shiki@4.4.3"
+        "@expressive-code/core@0.44.3",
+        "shiki@4.5.0"
       ],
       "ref": "@expressive-code/plugin-shiki@0.44.2"
     },
     {
       "dependsOn": [
-        "@expressive-code/core@0.44.2"
+        "@expressive-code/core@0.44.3"
       ],
       "ref": "@expressive-code/plugin-text-markers@0.44.2"
     },
@@ -10566,55 +10620,55 @@
     },
     {
       "dependsOn": [
-        "@shikijs/primitive@4.4.3",
-        "@shikijs/types@4.4.3",
+        "@shikijs/primitive@4.5.0",
+        "@shikijs/types@4.5.0",
         "@shikijs/vscode-textmate@10.0.2",
         "@types/hast@3.0.5",
         "hast-util-to-html@9.0.5"
       ],
-      "ref": "@shikijs/core@4.4.3"
+      "ref": "@shikijs/core@4.5.0"
     },
     {
       "dependsOn": [
-        "@shikijs/types@4.4.3",
+        "@shikijs/types@4.5.0",
         "@shikijs/vscode-textmate@10.0.2",
         "oniguruma-to-es@4.3.6"
       ],
-      "ref": "@shikijs/engine-javascript@4.4.3"
+      "ref": "@shikijs/engine-javascript@4.5.0"
     },
     {
       "dependsOn": [
-        "@shikijs/types@4.4.3",
+        "@shikijs/types@4.5.0",
         "@shikijs/vscode-textmate@10.0.2"
       ],
-      "ref": "@shikijs/engine-oniguruma@4.4.3"
+      "ref": "@shikijs/engine-oniguruma@4.5.0"
     },
     {
       "dependsOn": [
-        "@shikijs/types@4.4.3"
+        "@shikijs/types@4.5.0"
       ],
-      "ref": "@shikijs/langs@4.4.3"
+      "ref": "@shikijs/langs@4.5.0"
     },
     {
       "dependsOn": [
-        "@shikijs/types@4.4.3",
+        "@shikijs/types@4.5.0",
         "@shikijs/vscode-textmate@10.0.2",
         "@types/hast@3.0.5"
       ],
-      "ref": "@shikijs/primitive@4.4.3"
+      "ref": "@shikijs/primitive@4.5.0"
     },
     {
       "dependsOn": [
-        "@shikijs/types@4.4.3"
+        "@shikijs/types@4.5.0"
       ],
-      "ref": "@shikijs/themes@4.4.3"
+      "ref": "@shikijs/themes@4.5.0"
     },
     {
       "dependsOn": [
         "@shikijs/vscode-textmate@10.0.2",
         "@types/hast@3.0.5"
       ],
-      "ref": "@shikijs/types@4.4.3"
+      "ref": "@shikijs/types@4.5.0"
     },
     {
       "dependsOn": [],
@@ -10726,9 +10780,9 @@
     {
       "dependsOn": [
         "@astrojs/compiler-rs@0.5.1",
-        "@astrojs/internal-helpers@0.12.0",
-        "@astrojs/markdown-satteri@0.4.3",
-        "@astrojs/telemetry@3.3.3",
+        "@astrojs/internal-helpers@0.13.0",
+        "@astrojs/markdown-satteri@0.4.4",
+        "@astrojs/telemetry@3.4.0",
         "@capsizecss/unpack@4.0.1",
         "@clack/prompts@1.8.1",
         "@oslojs/encoding@1.1.0",
@@ -10739,11 +10793,10 @@
         "clsx@2.1.1",
         "common-ancestor-path@2.0.0",
         "cookie@2.0.1",
-        "devalue@5.9.4",
+        "devalue@6.0.3",
         "diff@9.0.0",
         "dset@3.1.4",
         "es-module-lexer@3.0.3",
-        "find-proc@0.2.0",
         "flattie@1.1.1",
         "fontace@0.4.1",
         "get-tsconfig@5.0.0-beta.6",
@@ -10757,33 +10810,34 @@
         "neotraverse@1.0.1",
         "obug@3.0.0",
         "p-limit@7.3.3",
-        "p-queue@9.3.3",
-        "package-manager-detector@1.8.0",
+        "p-queue@9.3.5",
+        "package-manager-detector@1.9.0",
         "piccolore@0.1.3",
         "picomatch@4.0.7",
         "rolldown@1.2.13",
-        "shiki@4.4.3",
-        "smol-toml@1.9.0",
+        "shiki@4.5.0",
+        "smol-toml@1.9.1",
         "svgo@4.1.0",
         "tinyclip@1.0.3",
         "tinyexec@1.3.1",
         "tinyglobby@0.2.17",
+        "tinyps@0.5.0",
         "ultrahtml@1.7.0",
-        "unifont@0.7.5",
+        "unifont@1.0.3",
         "unstorage@1.17.5",
         "verkit@0.5.0",
         "vite@8.3.4",
         "vitefu@1.1.3",
         "xxhash-wasm@1.1.0",
         "yargs-parser@22.0.0",
-        "zod@4.6.5",
+        "zod@4.6.7",
         "sharp@0.35.5"
       ],
-      "ref": "astro@7.3.8"
+      "ref": "astro@7.4.0"
     },
     {
       "dependsOn": [
-        "astro@7.3.8",
+        "astro@7.4.0",
         "rehype-expressive-code@0.44.2",
         "url-extras@0.1.0"
       ],
@@ -10795,21 +10849,27 @@
         "@types/mdast@4.0.4",
         "picomatch@4.0.7",
         "retext-smartypants@6.2.0",
-        "shiki@4.4.3",
-        "smol-toml@1.9.0",
+        "shiki@4.5.0",
+        "smol-toml@1.9.1",
         "unified@11.0.5",
         "yaml@2.9.1"
       ],
-      "ref": "@astrojs/internal-helpers@0.12.0"
+      "ref": "@astrojs/internal-helpers@0.13.0"
     },
     {
       "dependsOn": [
-        "@astrojs/internal-helpers@0.12.0",
-        "@astrojs/prism@4.0.2",
+        "@astrojs/internal-helpers@0.13.0",
+        "@astrojs/prism@4.1.0",
         "github-slugger@2.0.0",
         "satteri@0.10.5"
       ],
-      "ref": "@astrojs/markdown-satteri@0.4.3"
+      "ref": "@astrojs/markdown-satteri@0.4.4"
+    },
+    {
+      "dependsOn": [
+        "prismjs@1.30.0"
+      ],
+      "ref": "@astrojs/prism@4.1.0"
     },
     {
       "dependsOn": [],
@@ -10975,7 +11035,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "devalue@5.9.4"
+      "ref": "devalue@6.0.3"
     },
     {
       "dependsOn": [
@@ -11043,7 +11103,7 @@
     },
     {
       "dependsOn": [
-        "@expressive-code/core@0.44.2",
+        "@expressive-code/core@0.44.3",
         "@expressive-code/plugin-frames@0.44.2",
         "@expressive-code/plugin-shiki@0.44.2",
         "@expressive-code/plugin-text-markers@0.44.2"
@@ -11078,11 +11138,11 @@
     },
     {
       "dependsOn": [],
-      "ref": "find-proc@0.2.0"
+      "ref": "flattie@1.1.1"
     },
     {
       "dependsOn": [],
-      "ref": "flattie@1.1.1"
+      "ref": "fnv1a-64@0.1.2"
     },
     {
       "dependsOn": [
@@ -11766,10 +11826,6 @@
     },
     {
       "dependsOn": [],
-      "ref": "ohash@2.0.12"
-    },
-    {
-      "dependsOn": [],
       "ref": "oniguruma-parser@0.12.2"
     },
     {
@@ -11789,17 +11845,17 @@
     {
       "dependsOn": [
         "eventemitter3@5.0.4",
-        "p-timeout@7.0.1"
+        "p-timeout@7.0.2"
       ],
-      "ref": "p-queue@9.3.3"
+      "ref": "p-queue@9.3.5"
     },
     {
       "dependsOn": [],
-      "ref": "p-timeout@7.0.1"
+      "ref": "p-timeout@7.0.2"
     },
     {
       "dependsOn": [],
-      "ref": "package-manager-detector@1.8.0"
+      "ref": "package-manager-detector@1.9.0"
     },
     {
       "dependsOn": [
@@ -11858,16 +11914,16 @@
     {
       "dependsOn": [
         "postcss@8.5.29",
-        "postcss-selector-parser@6.1.4"
+        "postcss-selector-parser@7.1.7"
       ],
-      "ref": "postcss-nested@6.2.0"
+      "ref": "postcss-nested@7.0.2"
     },
     {
       "dependsOn": [
         "cssesc@3.0.0",
         "util-deprecate@1.0.2"
       ],
-      "ref": "postcss-selector-parser@6.1.4"
+      "ref": "postcss-selector-parser@7.1.7"
     },
     {
       "dependsOn": [],
@@ -12015,16 +12071,16 @@
     },
     {
       "dependsOn": [
-        "@shikijs/core@4.4.3",
-        "@shikijs/engine-javascript@4.4.3",
-        "@shikijs/engine-oniguruma@4.4.3",
-        "@shikijs/langs@4.4.3",
-        "@shikijs/themes@4.4.3",
-        "@shikijs/types@4.4.3",
+        "@shikijs/core@4.5.0",
+        "@shikijs/engine-javascript@4.5.0",
+        "@shikijs/engine-oniguruma@4.5.0",
+        "@shikijs/langs@4.5.0",
+        "@shikijs/themes@4.5.0",
+        "@shikijs/types@4.5.0",
         "@shikijs/vscode-textmate@10.0.2",
         "@types/hast@3.0.5"
       ],
-      "ref": "shiki@4.4.3"
+      "ref": "shiki@4.5.0"
     },
     {
       "dependsOn": [],
@@ -12041,7 +12097,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "smol-toml@1.9.0"
+      "ref": "smol-toml@1.9.1"
     },
     {
       "dependsOn": [],
@@ -12054,7 +12110,7 @@
     {
       "dependsOn": [
         "@astrojs/starlight@0.42.6",
-        "astro@7.3.8",
+        "astro@7.4.0",
         "@astrojs/markdown-satteri@0.4.0",
         "github-slugger@2.0.0",
         "hast-util-from-html@2.0.3",
@@ -12068,6 +12124,10 @@
         "yaml@2.9.1"
       ],
       "ref": "starlight-links-validator@0.27.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "std-env@4.3.0"
     },
     {
       "dependsOn": [
@@ -12127,6 +12187,10 @@
     },
     {
       "dependsOn": [],
+      "ref": "tinyps@0.5.0"
+    },
+    {
+      "dependsOn": [],
       "ref": "trim-lines@3.0.1"
     },
     {
@@ -12151,7 +12215,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "undici@8.10.2"
+      "ref": "undici@8.12.2"
     },
     {
       "dependsOn": [],
@@ -12172,10 +12236,11 @@
     {
       "dependsOn": [
         "css-tree@3.2.1",
-        "ohash@2.0.12",
-        "undici@8.10.2"
+        "fnv1a-64@0.1.2",
+        "std-env@4.3.0",
+        "undici@8.12.2"
       ],
-      "ref": "unifont@0.7.5"
+      "ref": "unifont@1.0.3"
     },
     {
       "dependsOn": [
@@ -12304,7 +12369,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "zod@4.6.5"
+      "ref": "zod@4.6.7"
     },
     {
       "dependsOn": [],

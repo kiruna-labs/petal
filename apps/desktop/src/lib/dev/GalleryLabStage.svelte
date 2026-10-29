@@ -9,12 +9,12 @@
 -->
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import MeetingChrome from '$lib/components/MeetingChrome.svelte';
-  import PluginToolbarButtons from '$lib/plugins/PluginToolbarButtons.svelte';
+  import MeetingChrome from '#lib/components/MeetingChrome.svelte';
+  import PluginToolbarButtons from '#lib/plugins/PluginToolbarButtons.svelte';
   import ChatDrawer from '@petal/shared/ui/components/ChatDrawer.svelte';
   import type { ChatMessage } from '@petal/shared/logic/chat';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
-  import type { GalleryParticipant } from '$lib/components/Gallery.svelte';
+  import type { GalleryParticipant } from '#lib/components/Gallery.svelte';
   import {
     labGalleryParticipants,
     labParticipantSpecs,

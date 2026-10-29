@@ -81,7 +81,7 @@ thread_local! {
 #[cfg(test)]
 const COMMON_KEYS: [&str; 5] = ["build_version", "os", "os_version", "arch", "client"];
 #[cfg(test)]
-const EVENT_NAMES: [&str; 14] = [
+const EVENT_NAMES: [&str; 15] = [
     "meeting_joined",
     "meeting_left",
     "join_failed",
@@ -103,6 +103,11 @@ const EVENT_NAMES: [&str; 14] = [
     // #370: one per participant per 60 s of active remote control. Integer-ms
     // latency percentiles, the scoped exception to "buckets, never raw ms".
     "remote_control_latency_summary",
+    // #411: a VideoToolbox H.264 encoder that stopped producing frames, and
+    // what the publisher did about it. Before this the only trace was a
+    // libwebrtc log line (breadcrumb-only for Sentry): ~58,000 of them in one
+    // meeting, zero field signal. Closed enums and a count BUCKET only.
+    "video_encoder_recovery",
 ];
 
 #[derive(Clone, Copy)]
@@ -357,6 +362,76 @@ impl RemoteControlInputKind {
     }
 }
 
+/// #404 follow-up: which host injection route delivered the input. A closed
+/// enum of route names -- never an element role, title, key or coordinate.
+/// Native host only: the web client cannot inject OS input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteControlRoute {
+    /// macOS: `AXPress` / `AXShowMenu` on a pressable element.
+    AxPressable,
+    /// macOS: `AXSelectedTextRange` caret/selection on a text element.
+    AxText,
+    /// macOS: AX scroll (scrollbar `AXValue`).
+    AxScroll,
+    /// macOS: Cmd+A/C/V serviced through AX (#170).
+    AxShortcut,
+    /// macOS: a real event on the HID session tap (moves the cursor).
+    SessionTap,
+    /// macOS: `SLEventPostToPid`.
+    SkyLight,
+    /// macOS: `CGEventPostToPid` (the keyboard route).
+    PidPost,
+    /// Windows: global `SendInput`.
+    SendInput,
+    /// Windows: `PostMessageW` into the target window.
+    PostMessage,
+    /// Windows: UI Automation invoke.
+    Uia,
+}
+
+impl RemoteControlRoute {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 10] = [
+        Self::AxPressable,
+        Self::AxText,
+        Self::AxScroll,
+        Self::AxShortcut,
+        Self::SessionTap,
+        Self::SkyLight,
+        Self::PidPost,
+        Self::SendInput,
+        Self::PostMessage,
+        Self::Uia,
+    ];
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::AxPressable => "ax_pressable",
+            Self::AxText => "ax_text",
+            Self::AxScroll => "ax_scroll",
+            Self::AxShortcut => "ax_shortcut",
+            Self::SessionTap => "session_tap",
+            Self::SkyLight => "skylight",
+            Self::PidPost => "pid_post",
+            Self::SendInput => "send_input",
+            Self::PostMessage => "post_message",
+            Self::Uia => "uia",
+        }
+    }
+}
+
+/// What one completed injection reported about its route. Both fields stay
+/// `None` when the injection did not say -- the event then omits them rather
+/// than guessing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemoteControlRouteReport {
+    pub(crate) route: Option<RemoteControlRoute>,
+    /// #404: an AX click on a text element also moves the app's keyboard
+    /// focus onto it. `Some(true)` = moved, `Some(false)` = the focus write
+    /// failed, `None` = not attempted (not a text click).
+    pub(crate) focus_moved: Option<bool>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeviceKind {
     Display,
@@ -410,6 +485,46 @@ impl DeviceChange {
     }
 }
 
+/// Which track's encoder failed (#411). Only the camera recovers today.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EncoderTrackKind {
+    Camera,
+}
+
+impl EncoderTrackKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Camera => "camera",
+        }
+    }
+}
+
+/// What the publisher did about a failing encoder (#411).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EncoderRecoveryOutcome {
+    /// The encoder was re-created (track republished).
+    Recreated,
+    /// A re-created encoder produced frames again.
+    Recovered,
+    /// The republish itself failed.
+    RecreateFailed,
+    /// Re-creating did not help within the flap budget; stopped trying.
+    GaveUp,
+}
+
+impl EncoderRecoveryOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Recreated => "recreated",
+            Self::Recovered => "recovered",
+            Self::RecreateFailed => "recreate_failed",
+            Self::GaveUp => "gave_up",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Event {
     MeetingJoined,
@@ -449,6 +564,10 @@ enum Event {
     },
     RemoteControlInput {
         kind: RemoteControlInputKind,
+        /// The route of the input that opened this burst / completed this
+        /// click. `type`/`scroll` coalesce, so later inputs of the same burst
+        /// are not represented.
+        route: RemoteControlRouteReport,
     },
     DeviceChanged {
         kind: DeviceKind,
@@ -458,6 +577,16 @@ enum Event {
         state: AnnotationState,
     },
     RemoteControlLatencySummary(Box<crate::rc_latency_telemetry::Summary>),
+    VideoEncoderRecovery {
+        track_kind: EncoderTrackKind,
+        outcome: EncoderRecoveryOutcome,
+        /// `encoder_health::VtFailureClass::tag()`, a closed set.
+        failure_class: &'static str,
+        /// `encoder_health::failure_count_bucket()`, a closed set.
+        failure_count_bucket: &'static str,
+        /// 1-based re-creation attempt inside the flap window, as a bucket.
+        attempt_bucket: &'static str,
+    },
 }
 
 impl Event {
@@ -477,6 +606,7 @@ impl Event {
             Self::DeviceChanged { .. } => "device_changed",
             Self::AnnotationToggled { .. } => "annotation_toggled",
             Self::RemoteControlLatencySummary(_) => "remote_control_latency_summary",
+            Self::VideoEncoderRecovery { .. } => "video_encoder_recovery",
         }
     }
 
@@ -513,8 +643,14 @@ impl Event {
             Self::PermissionDenied { kind } => {
                 extras.insert("kind", kind.as_str());
             }
-            Self::RemoteControlInput { kind } => {
+            Self::RemoteControlInput { kind, route } => {
                 extras.insert("kind", kind.as_str());
+                if let Some(name) = route.route {
+                    extras.insert("route", name.as_str());
+                }
+                if let Some(moved) = route.focus_moved {
+                    extras.insert("focus_moved", if moved { "yes" } else { "no" });
+                }
             }
             Self::DeviceChanged { kind, change } => {
                 extras.insert("kind", kind.as_str());
@@ -524,6 +660,19 @@ impl Event {
                 extras.insert("state", state.as_str());
             }
             Self::RemoteControlLatencySummary(_) => {}
+            Self::VideoEncoderRecovery {
+                track_kind,
+                outcome,
+                failure_class,
+                failure_count_bucket,
+                attempt_bucket,
+            } => {
+                extras.insert("track_kind", track_kind.as_str());
+                extras.insert("outcome", outcome.as_str());
+                extras.insert("failure_class", failure_class);
+                extras.insert("failure_count_bucket", failure_count_bucket);
+                extras.insert("attempt_bucket", attempt_bucket);
+            }
         }
         extras
     }
@@ -1324,8 +1473,11 @@ pub(crate) fn permission_denied(kind: PermissionKind) {
     capture(Event::PermissionDenied { kind });
 }
 
-pub(crate) fn note_remote_control_applied(message: &RemoteControlMessage) {
-    note_remote_control_applied_in(&COALESCER, Instant::now(), message);
+pub(crate) fn note_remote_control_applied(
+    message: &RemoteControlMessage,
+    route: RemoteControlRouteReport,
+) {
+    note_remote_control_applied_in(&COALESCER, Instant::now(), message, route);
 }
 
 /// Split out so tests drive coalescing with their OWN state and an explicit
@@ -1337,6 +1489,7 @@ fn note_remote_control_applied_in(
     coalescer: &Mutex<InputCoalescer>,
     now: Instant,
     message: &RemoteControlMessage,
+    route: RemoteControlRouteReport,
 ) {
     let Some(classified) = classify_remote_control(message) else {
         return;
@@ -1346,7 +1499,7 @@ fn note_remote_control_applied_in(
     let Some(kind) = kind else {
         return;
     };
-    capture(Event::RemoteControlInput { kind });
+    capture(Event::RemoteControlInput { kind, route });
 }
 
 pub(crate) fn device_changed(kind: DeviceKind, change: DeviceChange) {
@@ -1396,6 +1549,35 @@ pub(crate) fn annotation_toggled(active: bool) {
     });
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn encoder_attempt_bucket(attempt: u32) -> &'static str {
+    match attempt {
+        0 => "0",
+        1 => "1",
+        2 => "2",
+        _ => "3_plus",
+    }
+}
+
+/// #411: one event per encoder-recovery transition (never per frame or per
+/// sample). Every value is a closed tag or a bucket.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn video_encoder_recovery(
+    track_kind: EncoderTrackKind,
+    outcome: EncoderRecoveryOutcome,
+    failure_class: crate::transport::encoder_health::VtFailureClass,
+    failure_count: u64,
+    attempt: u32,
+) {
+    capture(Event::VideoEncoderRecovery {
+        track_kind,
+        outcome,
+        failure_class: failure_class.tag(),
+        failure_count_bucket: crate::transport::encoder_health::failure_count_bucket(failure_count),
+        attempt_bucket: encoder_attempt_bucket(attempt),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1418,6 +1600,47 @@ mod tests {
         *COALESCER.lock_unpoisoned() = InputCoalescer::new();
         *LAST_DISPLAY_RECONFIG.lock_unpoisoned() = None;
         (result, events)
+    }
+
+    #[test]
+    fn video_encoder_recovery_carries_only_closed_tags_and_buckets() {
+        use crate::transport::encoder_health::VtFailureClass;
+        let ((), events) = with_sink(|| {
+            video_encoder_recovery(
+                EncoderTrackKind::Camera,
+                EncoderRecoveryOutcome::Recreated,
+                VtFailureClass::Parameter,
+                58_000,
+                1,
+            );
+            video_encoder_recovery(
+                EncoderTrackKind::Camera,
+                EncoderRecoveryOutcome::GaveUp,
+                VtFailureClass::NotAvailableNow,
+                42,
+                7,
+            );
+        });
+        assert_eq!(names(&events), vec!["video_encoder_recovery", "video_encoder_recovery"]);
+        assert_eq!(extra(&events[0], "track_kind"), "camera");
+        assert_eq!(extra(&events[0], "outcome"), "recreated");
+        assert_eq!(extra(&events[0], "failure_class"), "parameter");
+        assert_eq!(extra(&events[0], "failure_count_bucket"), "1000_plus");
+        assert_eq!(extra(&events[0], "attempt_bucket"), "1");
+        assert_eq!(extra(&events[1], "outcome"), "gave_up");
+        assert_eq!(extra(&events[1], "failure_class"), "not_available_now");
+        assert_eq!(extra(&events[1], "failure_count_bucket"), "1_99");
+        assert_eq!(extra(&events[1], "attempt_bucket"), "3_plus");
+        // No raw number survives into a property value.
+        for event in &events {
+            for key in ["track_kind", "outcome", "failure_class", "failure_count_bucket", "attempt_bucket"] {
+                let value = extra(event, key);
+                assert!(
+                    !value.chars().all(|c| c.is_ascii_digit()) || value.len() <= 1,
+                    "{key}={value} looks like a raw count"
+                );
+            }
+        }
     }
 
     fn names(events: &[CapturedEvent]) -> Vec<&str> {
@@ -1486,6 +1709,7 @@ mod tests {
             },
             Event::RemoteControlInput {
                 kind: RemoteControlInputKind::Click,
+                route: RemoteControlRouteReport::default(),
             },
             Event::DeviceChanged {
                 kind: DeviceKind::Display,
@@ -1495,6 +1719,13 @@ mod tests {
                 state: AnnotationState::On,
             },
             Event::RemoteControlLatencySummary(Box::new(sample_latency_summary())),
+            Event::VideoEncoderRecovery {
+                track_kind: EncoderTrackKind::Camera,
+                outcome: EncoderRecoveryOutcome::Recreated,
+                failure_class: "parameter",
+                failure_count_bucket: "1000_plus",
+                attempt_bucket: "1",
+            },
         ]
         .iter()
         .map(Event::name)
@@ -1602,6 +1833,14 @@ mod tests {
             },
             Event::RemoteControlInput {
                 kind: RemoteControlInputKind::Scroll,
+                route: RemoteControlRouteReport::default(),
+            },
+            Event::RemoteControlInput {
+                kind: RemoteControlInputKind::Click,
+                route: RemoteControlRouteReport {
+                    route: Some(RemoteControlRoute::AxPressable),
+                    focus_moved: Some(true),
+                },
             },
             Event::DeviceChanged {
                 kind: DeviceKind::Mic,
@@ -1946,7 +2185,12 @@ mod tests {
         let t0 = Instant::now();
         let (_, events) = with_sink(|| {
             let at = |now: Instant, kind: &str, action: Option<&str>| {
-                note_remote_control_applied_in(&coalescer, now, &fixture(kind, action));
+                note_remote_control_applied_in(
+                    &coalescer,
+                    now,
+                    &fixture(kind, action),
+                    RemoteControlRouteReport::default(),
+                );
             };
             at(t0, "pointer", Some("move"));
             at(t0, "pointer", Some("click"));
@@ -1969,6 +2213,63 @@ mod tests {
         );
     }
 
+    /// #404 follow-up: the route of the input that emits rides on the event;
+    /// an unreported route is omitted, never sent as a guess.
+    #[test]
+    fn remote_control_input_carries_the_injection_route() {
+        let coalescer = Mutex::new(InputCoalescer::new());
+        let t0 = Instant::now();
+        let pressed = RemoteControlRouteReport {
+            route: Some(RemoteControlRoute::AxPressable),
+            focus_moved: Some(true),
+        };
+        let posted = RemoteControlRouteReport {
+            route: Some(RemoteControlRoute::PidPost),
+            focus_moved: None,
+        };
+        let (_, events) = with_sink(|| {
+            note_remote_control_applied_in(&coalescer, t0, &fixture("pointer", Some("click")), pressed);
+            note_remote_control_applied_in(&coalescer, t0, &fixture("key", Some("down")), posted);
+            note_remote_control_applied_in(
+                &coalescer,
+                t0,
+                &fixture("pointer", Some("click")),
+                RemoteControlRouteReport::default(),
+            );
+        });
+        let routes: Vec<_> = events
+            .iter()
+            .map(|event| {
+                (
+                    extra(event, "kind").to_string(),
+                    event.properties.get("route").cloned(),
+                    event.properties.get("focus_moved").cloned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            routes,
+            vec![
+                ("click".to_string(), Some("ax_pressable".to_string()), Some("yes".to_string())),
+                ("type".to_string(), Some("pid_post".to_string()), None),
+                ("click".to_string(), None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_control_route_names_are_closed_snake_case_tokens() {
+        let mut seen = std::collections::HashSet::new();
+        for route in RemoteControlRoute::ALL {
+            let name = route.as_str();
+            assert!(seen.insert(name), "duplicate route {name}");
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn a_concurrent_global_coalescer_writer_cannot_perturb_a_local_one() {
         // `remote_control.rs`'s replay worker calls the global entry point
@@ -1982,7 +2283,10 @@ mod tests {
             let stop = std::sync::Arc::clone(&stop);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    note_remote_control_applied(&fixture("key", Some("down")));
+                    note_remote_control_applied(
+                        &fixture("key", Some("down")),
+                        RemoteControlRouteReport::default(),
+                    );
                 }
             })
         };
@@ -1990,7 +2294,12 @@ mod tests {
         let coalescer = Mutex::new(InputCoalescer::new());
         let t0 = Instant::now();
         let (_, events) = with_sink(|| {
-            note_remote_control_applied_in(&coalescer, t0, &fixture("key", Some("down")));
+            note_remote_control_applied_in(
+                &coalescer,
+                t0,
+                &fixture("key", Some("down")),
+                RemoteControlRouteReport::default(),
+            );
         });
 
         stop.store(true, Ordering::Relaxed);

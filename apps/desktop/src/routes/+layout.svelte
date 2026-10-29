@@ -23,31 +23,31 @@
   // per-route component) so a real reconnect/network-change/mic-hot-swap
   // toast (`src-tauri/src/resilience.rs`) can surface no matter which route
   // the user is currently on.
-  import ToastHost from '$lib/components/ToastHost.svelte';
-  import ContextMenu from '$lib/components/ContextMenu.svelte';
+  import ToastHost from '#lib/components/ToastHost.svelte';
+  import ContextMenu from '#lib/components/ContextMenu.svelte';
 
   import { page } from '$app/state';
   import { goto, onNavigate } from '$app/navigation';
-  import { browser } from '$app/environment';
+  import { browser } from '$app/env';
   import { onMount } from 'svelte';
-  import { seedAudioDevicePreferences } from '$lib/data/audioDevices';
-  import { seedCameraDevicePreference } from '$lib/data/cameraDevices';
-  import { seedCameraModePreference } from '$lib/data/cameraModes';
-  import { STORAGE_KEYS } from '$lib/data/storageKeys';
+  import { seedAudioDevicePreferences } from '#lib/data/audioDevices.js';
+  import { seedCameraDevicePreference } from '#lib/data/cameraDevices.js';
+  import { seedCameraModePreference } from '#lib/data/cameraModes.js';
+  import { STORAGE_KEYS } from '#lib/data/storageKeys.js';
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { displayBuildVersion } from '$lib/buildInfo';
-  import { platformKey } from '$lib/platform';
-  import { stripNativeTooltipTitles } from '$lib/data/suppressNativeTooltips';
-  import { COMMANDS, EVENTS, hasTauriBridge, type BuildInfo, type ResilienceEvent } from '$lib/ipc';
-  import { checkForUpdate } from '$lib/updater';
+  import { displayBuildVersion } from '#lib/buildInfo.js';
+  import { platformKey } from '#lib/platform.js';
+  import { stripNativeTooltipTitles } from '#lib/data/suppressNativeTooltips.js';
+  import { COMMANDS, EVENTS, hasTauriBridge, type BuildInfo, type ResilienceEvent } from '#lib/ipc.js';
+  import { checkForUpdate } from '#lib/updater.js';
   import {
     startUpdateScheduler,
     type BackgroundCheckOutcome,
     type BackgroundCheckReason
-  } from '$lib/updateScheduler';
+  } from '#lib/updateScheduler.js';
   import { listen } from '@tauri-apps/api/event';
-  import { session } from '$lib/stores/session.svelte';
+  import { session } from '#lib/stores/session.svelte.js';
 
   let { children } = $props();
   let buildInfo = $state<BuildInfo>({
@@ -337,8 +337,8 @@
   // transparent overlay webviews).
   const routePath = $derived.by(() => {
     const p = page.url.pathname;
-    if (p.endsWith('/index.html')) return p.slice(0, -'/index.html'.length) || '/';
-    if (p.endsWith('.html')) return p.slice(0, -'.html'.length);
+    if (p.endsWith('/index.html')) return p.slice(0, -('/index.html').length) || '/';
+    if (p.endsWith('.html')) return p.slice(0, -('.html').length);
     return p;
   });
   // #782: SvelteKit REUSES +page.svelte when only a param changes on the same
@@ -384,7 +384,7 @@
     // (ask policy), same recipe as share-notice.
     // region-window: the hollow Petal View selector; its interior must stay
     // transparent so desktop pixels remain visible inside the boundary.
-    /^\/(compositor|hover-tab|share-border|menubar-popover|share-notice|control-consent|region-window)([/.]|$)/.test(routePath)
+    (/^\/(compositor|hover-tab|share-border|menubar-popover|share-notice|control-consent|region-window)([/.]|$)/).test(routePath)
   );
 </script>
 

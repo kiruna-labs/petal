@@ -6,7 +6,7 @@
 // unit test on an extracted helper proves nothing about the path that calls
 // it, the source assertions at the bottom pin the wiring in the shipped root
 // layout (which cannot be imported here -- it is a Svelte component using
-// `$lib` aliases and the Tauri bridge).
+// `#lib` aliases and the Tauri bridge).
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

@@ -1,17 +1,17 @@
 <!--
   The real in-meeting UI. On mount this route calls the real `join_room`
-  command (src-tauri/src/session.rs, via `$lib/data/rooms.ts`) with the real
+  command (src-tauri/src/session.rs, via `#lib/data/rooms.ts`) with the real
   onboarding identity, then hosts `MeetingChrome` — the large Gallery view
   <-> compact pill/bar view the user can toggle between (the main window
   stays visible during a meeting now; session.rs no longer hides it on join).
 
   This route is now composition-only: five subsystems live in rune
-  controllers under `$lib/meeting/` (issue #137) —
+  controllers under `#lib/meeting/` (issue #137) —
   - `pillWindow.svelte.ts`      gallery↔pill window mode / orientation / drag
   - `speakerSpotlight.svelte.ts` active-speaker promotion (via meetingSession)
   - `meetingSession.svelte.ts`  join/leave, presence, gallery bridge + model
   - `localToast.svelte.ts`      the local auto-dismissing toasts
-  and the shared `$lib/stores/toastHost.svelte.ts` rune. The route keeps
+  and the shared `#lib/stores/toastHost.svelte.ts` rune. The route keeps
   camera/mic/share/remote-control/elapsed + the template.
 
   Real vs. stand-in:
@@ -28,7 +28,7 @@
     <slug> H.264 track) so other participants receive it.
   - REMOTE camera tiles render REAL video via the gallery bridge
     (issue #26): a second, hidden, subscribe-only LiveKit participant
-    inside this webview (livekit-client, `$lib/data/galleryBridge.ts`;
+    inside this webview (livekit-client, `#lib/data/galleryBridge.ts`;
     token from the `gallery_bridge_config` command) subscribes to
     `petal-camera-*` tracks only. Window shares stay native-compositor-only
     (THE high-fidelity path per SPEC.md §4.4); remote SHARE tiles in the
@@ -41,34 +41,34 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-  import MeetingChrome from '$lib/components/MeetingChrome.svelte';
+  import MeetingChrome from '#lib/components/MeetingChrome.svelte';
   import ChatDrawer from '@petal/shared/ui/components/ChatDrawer.svelte';
-  import { createChatHost } from '$lib/chat/chatHost.svelte';
+  import { createChatHost } from '#lib/chat/chatHost.svelte.js';
   import type { ChatCommandOption } from '@petal/shared/logic/chat';
-  import FeedbackModal from '$lib/components/FeedbackModal.svelte';
+  import FeedbackModal from '#lib/components/FeedbackModal.svelte';
   import Toast from '@petal/shared/ui/components/Toast.svelte';
-  import type { ControlIcon } from '$lib/components/ControlButton.svelte';
-  import { toastTransition } from '$lib/motion';
-  import { session, startSessionSync } from '$lib/stores/session.svelte';
-  import { toastHostState } from '$lib/stores/toastHost.svelte';
-  import { cameraPreviewConstraints } from '$lib/data/cameraConstraints';
-  import { listCameraDevices } from '$lib/data/cameraDevices';
+  import type { ControlIcon } from '#lib/components/ControlButton.svelte';
+  import { toastTransition } from '#lib/motion.js';
+  import { session, startSessionSync } from '#lib/stores/session.svelte.js';
+  import { toastHostState } from '#lib/stores/toastHost.svelte.js';
+  import { cameraPreviewConstraints } from '#lib/data/cameraConstraints.js';
+  import { listCameraDevices } from '#lib/data/cameraDevices.js';
   import {
     previewCameraIdFor,
     streamCameraId,
     webCamerasFrom
-  } from '$lib/data/cameraPreviewDevice';
-  import { identityColorCss, identityInkCss } from '$lib/data/identityColor';
-  import { ensureCameraAccess, openPrivacySettings } from '$lib/data/permissions';
-  import { startNativeSelfView, stopNativeSelfView } from '$lib/data/selfView';
-  import { isWindows } from '$lib/platform';
+  } from '#lib/data/cameraPreviewDevice.js';
+  import { identityColorCss, identityInkCss } from '#lib/data/identityColor.js';
+  import { ensureCameraAccess, openPrivacySettings } from '#lib/data/permissions.js';
+  import { startNativeSelfView, stopNativeSelfView } from '#lib/data/selfView.js';
+  import { isWindows } from '#lib/platform.js';
   import {
     cameraPublishSyncPlan,
     meetingTeardownPlan,
     COMMANDS,
     EVENTS,
     hasTauriBridge
-  } from '$lib/ipc';
+  } from '#lib/ipc.js';
   import type {
     AiChatEndReason,
     AiChatRefusedEvent,
@@ -79,13 +79,13 @@
     RemoteControlStatus,
     MicMuteChanged,
     StartCameraPublishResult
-  } from '$lib/ipc';
-  import { aiChatEndReasonMessage, aiChatEndToastVariant } from '$lib/data/aiChat';
-  import { createPillWindow } from '$lib/meeting/pillWindow.svelte';
-  import { createMeetingSession } from '$lib/meeting/meetingSession.svelte';
-  import { createLocalToast } from '$lib/meeting/localToast.svelte';
-  import PluginSurfaces from '$lib/plugins/PluginSurfaces.svelte';
-  import PluginToolbarButtons from '$lib/plugins/PluginToolbarButtons.svelte';
+  } from '#lib/ipc.js';
+  import { aiChatEndReasonMessage, aiChatEndToastVariant } from '#lib/data/aiChat.js';
+  import { createPillWindow } from '#lib/meeting/pillWindow.svelte.js';
+  import { createMeetingSession } from '#lib/meeting/meetingSession.svelte.js';
+  import { createLocalToast } from '#lib/meeting/localToast.svelte.js';
+  import PluginSurfaces from '#lib/plugins/PluginSurfaces.svelte';
+  import PluginToolbarButtons from '#lib/plugins/PluginToolbarButtons.svelte';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
   import { getVersion } from '@tauri-apps/api/app';
   import {
@@ -93,9 +93,9 @@
     inviteCopyTooltip,
     inviteLinkCopiedToastMessage,
     inviteLinkForAccessCode
-  } from '$lib/data/inviteLinks';
-  import { meetingDisplayLabelFromCredential } from '$lib/data/meetingCode';
-  import { isFeedbackEnabled } from '$lib/feedback/config';
+  } from '#lib/data/inviteLinks.js';
+  import { meetingDisplayLabelFromCredential } from '#lib/data/meetingCode.js';
+  import { isFeedbackEnabled } from '#lib/feedback/config.js';
 
   const roomName = $derived(page.params.room ?? 'eng-sync');
 

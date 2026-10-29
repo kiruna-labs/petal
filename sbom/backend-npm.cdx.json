@@ -886,17 +886,17 @@
       "version": "0.28.1"
     },
     {
-      "bom-ref": "@google/genai@2.28.0",
+      "bom-ref": "@google/genai@2.30.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@google/genai/-/genai-2.28.0.tgz"
+          "url": "https://registry.npmjs.org/@google/genai/-/genai-2.30.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "872340263fb2c2edcbe3aaa566877a28efc9bdc4f740e373e950a23debc2fc558e8c00fe2d06fb0cc2d4a15f2fce82e9b7ad50d2bb905fdf62a9bc448cf2569b"
+          "content": "1a4bf58b1f2265ecbf577585e251da452f02ef53f9df78de9c34ff940f9f74f4c27d761f982547be8fb41f98d3833a27aac9913901bb429ccb264a683ffc7b6e"
         }
       ],
       "licenses": [
@@ -907,10 +907,10 @@
         }
       ],
       "name": "@google/genai",
-      "purl": "pkg:npm/%40google/genai@2.28.0",
+      "purl": "pkg:npm/%40google/genai@2.30.0",
       "scope": "required",
       "type": "library",
-      "version": "2.28.0"
+      "version": "2.30.0"
     },
     {
       "bom-ref": "@jridgewell/sourcemap-codec@1.6.0",
@@ -1777,17 +1777,17 @@
       "version": "1.1.2"
     },
     {
-      "bom-ref": "@sentry/bundler-plugins@11.6.0",
+      "bom-ref": "@sentry/bundler-plugins@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/bundler-plugins/-/bundler-plugins-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/bundler-plugins/-/bundler-plugins-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a8729080e41a6b246ec030965a802410c9097b5dd1670ae9007e58e5e74bddde570f619deee7a703a94f757170dea3f5b257b3792604ad5d0601d71560ca3c7e"
+          "content": "ad0adb2f69583f28a23ba9e07696db7cf2b213355542ccf5146f9a13c8d489462cef682f983999991ca5f550c218bac765f204c1a40c4f5b7a5901f99e8a6ee4"
         }
       ],
       "licenses": [
@@ -1798,23 +1798,23 @@
         }
       ],
       "name": "@sentry/bundler-plugins",
-      "purl": "pkg:npm/%40sentry/bundler-plugins@11.6.0",
+      "purl": "pkg:npm/%40sentry/bundler-plugins@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/conventions@0.26.0",
+      "bom-ref": "@sentry/conventions@0.27.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/conventions/-/conventions-0.26.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/conventions/-/conventions-0.27.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b6d4917282dfda4204343205cc7d7668969531dc6789d3182ef54dc045ff2635df5da428b7cbb9338ed09a000538e8552789d0dae53cc130a1f9fc123ebac27e"
+          "content": "32ba9dfe8ee7ff3eea59261f41003bc787c54c0d08a8e1ba24db1b0699c2f7b9213f0664ee7e833ed38eed881a62995297c47c40b45b073f57bf6955853a1202"
         }
       ],
       "licenses": [
@@ -1825,23 +1825,23 @@
         }
       ],
       "name": "@sentry/conventions",
-      "purl": "pkg:npm/%40sentry/conventions@0.26.0",
+      "purl": "pkg:npm/%40sentry/conventions@0.27.0",
       "scope": "required",
       "type": "library",
-      "version": "0.26.0"
+      "version": "0.27.0"
     },
     {
-      "bom-ref": "@sentry/core@11.6.0",
+      "bom-ref": "@sentry/core@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/core/-/core-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/core/-/core-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "3db2134f591f258289892f5f1f866d39cc0838d2b2b7eb54b136523ed7008cf7645033b330a4fad4c9146b565ed3b57336d2c02d3db865d50e73a77d2b862828"
+          "content": "e0c553b6193a0bfd684058db5487f2807c8d931d9819bc0d2e69749098e2d2f8c95f2e99365b3dcdd229d054c14e2e1edf5f3d21c49ce4e5c3e2a70976611e28"
         }
       ],
       "licenses": [
@@ -1852,23 +1852,23 @@
         }
       ],
       "name": "@sentry/core",
-      "purl": "pkg:npm/%40sentry/core@11.6.0",
+      "purl": "pkg:npm/%40sentry/core@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/node@11.6.0",
+      "bom-ref": "@sentry/node@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/node/-/node-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/node/-/node-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e6e1dd512002ca8766b5aafe2f1845978fcc748089d7fdfc9aba7996b3290ca7d6495ffbb6efca466af9803d89f4d9b8ec8ff1c5b8214b3fa88a727812d25ab5"
+          "content": "f2f14f7c2458a14626b27a3e39876fb5fe5a908514bddec5bdcb8819c7eb81ef12fdb48b1512aae7c62d1665f6e4915cacc359da8403f2bd2392065f9bfda2b8"
         }
       ],
       "licenses": [
@@ -1879,23 +1879,23 @@
         }
       ],
       "name": "@sentry/node",
-      "purl": "pkg:npm/%40sentry/node@11.6.0",
+      "purl": "pkg:npm/%40sentry/node@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/opentelemetry@11.6.0",
+      "bom-ref": "@sentry/opentelemetry@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/opentelemetry/-/opentelemetry-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/opentelemetry/-/opentelemetry-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "5ba6feffc4d57a31d2092396306b14db055063e77b147fe4236cc81585e621cc4909dec0fd42e13977b6f5461e87e557f7039b476dcbbc470452682c155a9fe8"
+          "content": "c0ab86d926c71e21834ff7e04f85f99f6bac3b802356461f023e35d34da6675f09654de634b782abeab0fe79c32186dcb1f20c3949bf78c8774a128213e0e95d"
         }
       ],
       "licenses": [
@@ -1906,23 +1906,23 @@
         }
       ],
       "name": "@sentry/opentelemetry",
-      "purl": "pkg:npm/%40sentry/opentelemetry@11.6.0",
+      "purl": "pkg:npm/%40sentry/opentelemetry@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/server-runtime-injection@11.6.0",
+      "bom-ref": "@sentry/server-runtime-injection@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/server-runtime-injection/-/server-runtime-injection-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/server-runtime-injection/-/server-runtime-injection-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "de9950cf041fbf3e072645cb0dfaf956e4102f9bf28daafb44a9fb5301677b78dcfbd3925d1931919e92d19dd174181b6853b51a41707ff985357e07f2735cbb"
+          "content": "e2e07813cfbd9e2e4d709e3adda60affe9f5853330fef4ade2cf80910f3808a8a0443c2fd8534d9c3d405a98a958d8ffc4443a7906d48ad1a5ef083bfd18bc3e"
         }
       ],
       "licenses": [
@@ -1933,23 +1933,23 @@
         }
       ],
       "name": "@sentry/server-runtime-injection",
-      "purl": "pkg:npm/%40sentry/server-runtime-injection@11.6.0",
+      "purl": "pkg:npm/%40sentry/server-runtime-injection@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
-      "bom-ref": "@sentry/server-utils@11.6.0",
+      "bom-ref": "@sentry/server-utils@11.8.0",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@sentry/server-utils/-/server-utils-11.6.0.tgz"
+          "url": "https://registry.npmjs.org/@sentry/server-utils/-/server-utils-11.8.0.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "a55a46ab0c413970cc4a78314d501146563211711f280dd653510d09d80b09e278c49e2f3517f838319760fbd7064d3392dd8d65916fadacb62475c87981beb6"
+          "content": "d8c445cf5ad7c67b8319a7e5ea8fe2b7028765e667e6151961e5cd6d02b4d76b8efdada95e111cf1987715e3b92f8b631ab2161f1e35f6c6801672b06d50b621"
         }
       ],
       "licenses": [
@@ -1960,10 +1960,10 @@
         }
       ],
       "name": "@sentry/server-utils",
-      "purl": "pkg:npm/%40sentry/server-utils@11.6.0",
+      "purl": "pkg:npm/%40sentry/server-utils@11.8.0",
       "scope": "required",
       "type": "library",
-      "version": "11.6.0"
+      "version": "11.8.0"
     },
     {
       "bom-ref": "@types/node@26.6.5",
@@ -2680,17 +2680,17 @@
       "version": "7.0.2"
     },
     {
-      "bom-ref": "@vercel/blob@2.8.1",
+      "bom-ref": "@vercel/blob@2.8.2",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@vercel/blob/-/blob-2.8.1.tgz"
+          "url": "https://registry.npmjs.org/@vercel/blob/-/blob-2.8.2.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "4055f5eec311a019cfb8dc87b10b18e46b18460f47a04f3218a29b7c1fd5fc92bd42ec90a75d11e6a78d9ed4fa120509e1c43747eb07dba9f997f2da71fcf313"
+          "content": "6545163b6540d34afd65346d2a01f8bdaec518e53152d81ed85691afd59999e797dacdc2dea55edad3932d36effed91c77e2fe8a3c5a23678ff52d7f9861dcf5"
         }
       ],
       "licenses": [
@@ -2701,10 +2701,10 @@
         }
       ],
       "name": "@vercel/blob",
-      "purl": "pkg:npm/%40vercel/blob@2.8.1",
+      "purl": "pkg:npm/%40vercel/blob@2.8.2",
       "scope": "required",
       "type": "library",
-      "version": "2.8.1"
+      "version": "2.8.2"
     },
     {
       "bom-ref": "undici@6.28.0",
@@ -4587,17 +4587,17 @@
       "version": "7.0.2"
     },
     {
-      "bom-ref": "undici@8.11.2",
+      "bom-ref": "undici@8.12.3",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/undici/-/undici-8.11.2.tgz"
+          "url": "https://registry.npmjs.org/undici/-/undici-8.12.3.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "bb8501dbf22b29d53a945c6e9879a6a356b77c240ee6dcd0965468adfa114badedc61ac1ef14e94a7d4f7edc02e2a10790e6aa3fde5f0965b8949cf012bc3385"
+          "content": "f9f7677544f004ff3a7158e2853a76d61647a3b77aa23d5cff8ed73c0de52fc98cd171ecf82e0491c8e6811b059c59367ff50e3460f2f48b4122d997b0b3901f"
         }
       ],
       "licenses": [
@@ -4614,10 +4614,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/undici@8.11.2",
+      "purl": "pkg:npm/undici@8.12.3",
       "scope": "optional",
       "type": "library",
-      "version": "8.11.2"
+      "version": "8.12.3"
     },
     {
       "bom-ref": "undici-types@8.9.0",
@@ -4812,14 +4812,14 @@
   "dependencies": [
     {
       "dependsOn": [
-        "@google/genai@2.28.0",
-        "@sentry/node@11.6.0",
-        "@vercel/blob@2.8.1",
+        "@google/genai@2.30.0",
+        "@sentry/node@11.8.0",
+        "@vercel/blob@2.8.2",
         "livekit-server-sdk@2.19.1",
         "@types/node@26.6.5",
         "tsx@4.23.15",
         "typescript@7.0.2",
-        "undici@8.11.2"
+        "undici@8.12.3"
       ],
       "ref": "petal-backend@0.1.0"
     },
@@ -4938,7 +4938,7 @@
         "protobufjs@7.6.5",
         "ws@8.21.2"
       ],
-      "ref": "@google/genai@2.28.0"
+      "ref": "@google/genai@2.30.0"
     },
     {
       "dependsOn": [],
@@ -5074,7 +5074,7 @@
     },
     {
       "dependsOn": [
-        "@sentry/core@11.6.0",
+        "@sentry/core@11.8.0",
         "dotenv@17.4.2",
         "glob@13.0.6",
         "magic-string@1.4.3",
@@ -5082,52 +5082,52 @@
         "sentry@0.45.0",
         "supports-color@8.1.1"
       ],
-      "ref": "@sentry/bundler-plugins@11.6.0"
+      "ref": "@sentry/bundler-plugins@11.8.0"
     },
     {
       "dependsOn": [],
-      "ref": "@sentry/conventions@0.26.0"
+      "ref": "@sentry/conventions@0.27.0"
     },
     {
       "dependsOn": [
-        "@sentry/conventions@0.26.0"
+        "@sentry/conventions@0.27.0"
       ],
-      "ref": "@sentry/core@11.6.0"
-    },
-    {
-      "dependsOn": [
-        "@opentelemetry/api@1.9.1",
-        "@sentry/bundler-plugins@11.6.0",
-        "@sentry/conventions@0.26.0",
-        "@sentry/core@11.6.0",
-        "@sentry/opentelemetry@11.6.0",
-        "@sentry/server-runtime-injection@11.6.0",
-        "@sentry/server-utils@11.6.0"
-      ],
-      "ref": "@sentry/node@11.6.0"
+      "ref": "@sentry/core@11.8.0"
     },
     {
       "dependsOn": [
         "@opentelemetry/api@1.9.1",
-        "@sentry/conventions@0.26.0",
-        "@sentry/core@11.6.0"
+        "@sentry/bundler-plugins@11.8.0",
+        "@sentry/conventions@0.27.0",
+        "@sentry/core@11.8.0",
+        "@sentry/opentelemetry@11.8.0",
+        "@sentry/server-runtime-injection@11.8.0",
+        "@sentry/server-utils@11.8.0"
       ],
-      "ref": "@sentry/opentelemetry@11.6.0"
-    },
-    {
-      "dependsOn": [
-        "@sentry/core@11.6.0",
-        "@sentry/server-utils@11.6.0"
-      ],
-      "ref": "@sentry/server-runtime-injection@11.6.0"
+      "ref": "@sentry/node@11.8.0"
     },
     {
       "dependsOn": [
         "@opentelemetry/api@1.9.1",
-        "@sentry/conventions@0.26.0",
-        "@sentry/core@11.6.0"
+        "@sentry/conventions@0.27.0",
+        "@sentry/core@11.8.0"
       ],
-      "ref": "@sentry/server-utils@11.6.0"
+      "ref": "@sentry/opentelemetry@11.8.0"
+    },
+    {
+      "dependsOn": [
+        "@sentry/core@11.8.0",
+        "@sentry/server-utils@11.8.0"
+      ],
+      "ref": "@sentry/server-runtime-injection@11.8.0"
+    },
+    {
+      "dependsOn": [
+        "@opentelemetry/api@1.9.1",
+        "@sentry/conventions@0.27.0",
+        "@sentry/core@11.8.0"
+      ],
+      "ref": "@sentry/server-utils@11.8.0"
     },
     {
       "dependsOn": [
@@ -5228,7 +5228,7 @@
         "throttleit@2.1.0",
         "undici@6.28.0"
       ],
-      "ref": "@vercel/blob@2.8.1"
+      "ref": "@vercel/blob@2.8.2"
     },
     {
       "dependsOn": [],
@@ -5685,7 +5685,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "undici@8.11.2"
+      "ref": "undici@8.12.3"
     },
     {
       "dependsOn": [],

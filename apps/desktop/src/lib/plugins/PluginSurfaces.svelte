@@ -16,7 +16,7 @@
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { COMMANDS, EVENTS, hasTauriBridge, type PluginDataEvent, type PluginStateChangedEvent } from '$lib/ipc';
+  import { COMMANDS, EVENTS, hasTauriBridge, type PluginDataEvent, type PluginStateChangedEvent } from '#lib/ipc.js';
   import { base64ToBytes } from '@petal/shared/plugin-host/topics';
   import { pluginsFromMetadata } from '@petal/shared/plugin-host/metadata';
   import { enabledPlugins } from './pluginCatalog';
@@ -24,7 +24,7 @@
   import PluginContextMenu from './PluginContextMenu.svelte';
   import { PLUGIN_MENU_DISABLE, pluginDisabledToast, type PluginMenuTarget } from '@petal/shared/plugin-host/provenance';
   import { writeEnabledOverride } from '@petal/shared/plugin-host/settingsModel';
-  import { browserStorage } from '$lib/data/storageKeys';
+  import { browserStorage } from '#lib/data/storageKeys.js';
 
   interface Props {
     participants: Participant[];

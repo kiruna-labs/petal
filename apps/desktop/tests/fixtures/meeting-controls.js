@@ -42,7 +42,7 @@ async function renderFixture() {
   try {
     const [{ mount }, { default: MeetingChrome }] = await Promise.all([
       import('svelte'),
-      import('$lib/components/MeetingChrome.svelte')
+      import('#lib/components/MeetingChrome.svelte')
     ]);
 
     const host = document.querySelector('#app');

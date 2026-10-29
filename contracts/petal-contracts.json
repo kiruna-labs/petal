@@ -345,6 +345,10 @@
       "tier": "gap"
     },
     {
+      "id": "RC-N2N-CHROME-BUTTON",
+      "tier": "gap"
+    },
+    {
       "id": "RC-N2W",
       "tier": "gap"
     },
@@ -461,7 +465,11 @@
         "receiverFreeze": null,
         "publicationSid": "TR_sender",
         "shareEpoch": "e1",
-        "lifecycle": "captureReady"
+        "lifecycle": "captureReady",
+        "lowerRungs": {
+          "funded": true,
+          "delivering": false
+        }
       },
       "fields": [
         "captureState",
@@ -469,6 +477,7 @@
         "encodedSent",
         "grabbed",
         "lifecycle",
+        "lowerRungs",
         "ownerIdentity",
         "publicationSid",
         "received",
@@ -504,6 +513,10 @@
         "framesDropped",
         "freezeCount",
         "qualityLimitationReason"
+      ],
+      "lowerRungsFields": [
+        "delivering",
+        "funded"
       ]
     },
     {

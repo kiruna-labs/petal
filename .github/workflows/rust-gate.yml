@@ -100,6 +100,12 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
+      # SvelteKit 3 requires Node >=22.17; never rely on the image default.
+      - uses: actions/setup-node@v7
+        if: env.RUN == 'true'
+        with:
+          node-version: 22
+
       - name: Install frontend deps
         if: env.RUN == 'true'
         working-directory: apps/desktop
@@ -191,6 +197,12 @@ jobs:
       # explicitly here (mirroring the macOS leg above) so that step is fast,
       # deterministic, and visible in its own log rather than buried inside
       # the cargo build step.
+      # SvelteKit 3 requires Node >=22.17; never rely on the image default.
+      - uses: actions/setup-node@v7
+        if: env.RUN == 'true'
+        with:
+          node-version: 22
+
       - name: Install frontend deps
         if: env.RUN == 'true'
         working-directory: apps/desktop

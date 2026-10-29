@@ -225,7 +225,7 @@ async function buildFixture(buildDir: string) {
     resolve: {
       alias: {
         $lib: fileURLToPath(new URL('./src/lib', desktopRoot)),
-        '$app/environment': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
+        '$app/env': fileURLToPath(new URL('./sveltekit-environment.ts', fixtureRoot)),
         '@petal/shared': fileURLToPath(new URL('../../shared', desktopRoot))
       }
     },
