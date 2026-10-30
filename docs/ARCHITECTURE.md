@@ -63,6 +63,20 @@ Roughly `platform → capture/transport → session → chrome → diagnostics`.
     mute, device hot-swap.
   - `camera/` — native webcam capture: `avf.rs` (AVFoundation, macOS),
     `mf.rs` (Media Foundation, Windows), `mod.rs` (the shared surface).
+- **`streaming/`** — live streaming a share to RTMP(S) from the sharer's
+  own computer: `plan.rs` (output size/fps/bitrate rules), `wire.rs` (the
+  `petal.live` and `petal.stream-optout` attributes, concurrent-stream
+  ordering), `live_state.rs` (the room's live streams, `stream-live-changed`),
+  the frame tap (`tap.rs`; on Windows `gpu_tap.rs` copies WGC frames into
+  keyed-mutex shared textures the encoder opens on the same adapter, with the
+  CPU copy as fallback), `audio_tap.rs` (meeting audio into the stream mix
+  and the mic's echo reference, minus opted-out participants), the
+  VideoToolbox/Media Foundation encoders, FLV packaging and the RTMP
+  publisher. `destinations.rs`/`keystore.rs` keep saved destinations (keys in
+  the OS keychain). `settings.rs` (`stream-settings.json`) and
+  `streamer_mode.rs` handle masking, plus capture exclusion while this
+  computer streams: `WDA_EXCLUDEFROMCAPTURE` on Windows, the display share's
+  SCK filter on macOS. Both emit `streamer-mode-changed`.
 ### Remote media subscription ownership
 
 The native room connects with `auto_subscribe = false`. Immediately after

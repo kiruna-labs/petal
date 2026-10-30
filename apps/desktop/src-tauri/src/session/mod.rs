@@ -154,7 +154,8 @@ pub use room::{join_room, leave_room};
 pub(crate) use share::VIEWER_DEMAND_STALE_AFTER;
 pub(crate) use share::MAX_CONCURRENT_SHARES;
 pub(crate) use share::{
-    expire_stale_viewer_demands, note_passive_viewer_demand, note_remote_interaction,
+    apply_streamer_capture_exclusion, expire_stale_viewer_demands, note_passive_viewer_demand,
+    note_remote_interaction,
     reconcile_quality_for_window, repair_active_share_publication,
     repair_active_share_publications_after_reconnect,
     repair_local_track_publication_after_reconnect,

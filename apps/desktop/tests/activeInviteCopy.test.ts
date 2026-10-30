@@ -41,7 +41,11 @@ test('active invite copy labels disclose only the public access code', () => {
 test('desktop active-meeting invite controls receive the public-code labels on every density', () => {
   assert.match(routeSource, /const inviteAccessCode = \$derived\(meeting\.inviteAccessCode\)/);
   assert.match(routeSource, /inviteLinkForAccessCode\([\s\S]*meeting\.inviteAccessCode\s*\)/);
-  assert.match(routeSource, /const inviteAriaLabel = \$derived\(inviteCopyAriaLabel\(inviteAccessCode\)\)/);
+  // Streamer mode drops the code from the label (data/inviteLinks.ts).
+  assert.match(
+    routeSource,
+    /const inviteAriaLabel = \$derived\(inviteCopyAriaLabel\(inviteAccessCode, streamerMode\.active\)\)/
+  );
   assert.match(routeSource, /<MeetingChrome[\s\S]*\{inviteAriaLabel\}[\s\S]*\{inviteTooltip\}/);
 
   assert.match(gallerySource, /aria-label=\{inviteAriaLabel\}/);

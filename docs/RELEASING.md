@@ -259,6 +259,21 @@ package and fail on malformed, zero, or mismatched metadata.
 
 Commit the bump before building.
 
+### Re-check the live-stream presets
+
+The go-live dialog pre-fills ingest URLs for YouTube, Twitch, Facebook Live and
+Kick (`apps/desktop/src/lib/data/streamServices.ts`). Platforms move these now
+and then, so confirm they still answer before each release:
+
+```
+node apps/desktop/scripts/check-stream-presets.mjs
+```
+
+It TLS-handshakes every preset and compares the Twitch entry with Twitch's
+ingest API; it sends no stream key. On a failure, update the preset from the
+platform's own help page. Either way, bump `STREAM_SERVICES_VERIFIED_ON` in
+that file when the list is confirmed.
+
 ---
 
 ## Local release (default)

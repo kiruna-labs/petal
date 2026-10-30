@@ -50,6 +50,9 @@ pub struct MenubarPillState {
     /// True when rendering minimal mode (glyph + dot only) because the menu
     /// bar squeezed us -- see `effective_mode`.
     pub minimal: bool,
+    /// True while the joined room is being live streamed (anyone's
+    /// `petal.live`, from `streaming::live_state`): the pill shows a red dot.
+    pub live: bool,
 }
 
 /// Label of the popover webview (a SvelteKit route), mirroring
@@ -244,6 +247,21 @@ pub fn update_meeting_state(app: &AppHandle, in_meeting: bool, participant_count
     }
 }
 
+/// Whether the room is being live streamed, for the pill's red LIVE dot.
+/// Fed from `streaming::live_state` on every `stream-live-changed`.
+pub fn update_live_state(app: &AppHandle, live: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.run_on_main_thread(move || {
+            platform::set_live_and_redraw(live);
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, live);
+    }
+}
+
 /// Idempotent init, called from `lib.rs`'s `.setup()` hook.
 pub fn init(app: &AppHandle) {
     #[cfg(target_os = "macos")]
@@ -331,6 +349,7 @@ mod platform {
     const DARK_INK: (f64, f64, f64) = (0.024, 0.169, 0.071); // #062B12
     const LEAVE_BG: (f64, f64, f64) = (0.039, 0.039, 0.047); // #0a0a0c
     const LEAVE_RED: (f64, f64, f64) = (1.0, 0.42, 0.369); // #FF6B5E
+    const LIVE_RED: (f64, f64, f64) = (1.0, 0.231, 0.188); // #FF3B30
 
     static STATE: Mutex<Option<MenubarPillState>> = Mutex::new(None);
 
@@ -413,6 +432,15 @@ mod platform {
             s.participant_count = participant_count;
             changed
         });
+        if changed {
+            redraw();
+        }
+    }
+
+    /// Same split: `streaming::live_state` owns whether the room is live.
+    /// Main-thread only (via `super::update_live_state`).
+    pub fn set_live_and_redraw(live: bool) {
+        let changed = with_state(|s| std::mem::replace(&mut s.live, live) != live);
         if changed {
             redraw();
         }
@@ -756,6 +784,29 @@ mod platform {
         } else {
             paint_minimal(rect, state);
         }
+        if state.in_meeting && state.live {
+            paint_live_dot(rect, state.minimal);
+        }
+    }
+
+    /// The room is being live streamed: a red dot, left of the mic on the
+    /// full pill (inside its rounded end), top-right of the glyph when
+    /// minimal (the green in-meeting dot keeps the bottom-right).
+    fn paint_live_dot(rect: NSRect, minimal: bool) {
+        let height = rect.size.height;
+        let (x, y, size) = if minimal {
+            let gx = (rect.size.width - MINIMAL_MIC_SIZE) / 2.0;
+            let gy = (height - MINIMAL_MIC_SIZE) / 2.0;
+            (gx + MINIMAL_MIC_SIZE - 4.5, gy + MINIMAL_MIC_SIZE - 5.0, 6.0)
+        } else {
+            (2.5, (height - 5.0) / 2.0, 5.0)
+        };
+        srgb(LIVE_RED, 1.0).set();
+        NSBezierPath::bezierPathWithOvalInRect(NSRect {
+            origin: NSPoint { x, y },
+            size: NSSize { width: size, height: size },
+        })
+        .fill();
     }
 
     /// Full in-call pill (canvas.html §3's "OUR ITEM: full-color, as

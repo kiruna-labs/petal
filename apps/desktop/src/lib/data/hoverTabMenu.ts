@@ -1,9 +1,10 @@
-import type { HoverTabSide, SharePriority } from '../ipc.ts';
+import type { HoverTabSide, LiveMenuAction, SharePriority } from '../ipc.ts';
 import {
   AI_CHAT_MENU_ITEM_ID,
   AI_CHAT_MENU_ITEM_LABEL,
   AI_CHAT_STOP_MENU_ITEM_LABEL
 } from './aiChat.ts';
+import { formatStreamElapsed } from './liveStream.ts';
 
 // Declarative vocabulary for the hover-tab native options menu. This module
 // stays free of Tauri dependencies so menu construction and dispatch rules are
@@ -48,6 +49,28 @@ export const SHARE_FPS_CHOICES: ReadonlyArray<{ value: number; label: string }> 
   { value: 30, label: 'Up to 30 fps' },
   { value: 60, label: 'Up to 60 fps' }
 ];
+
+/**
+ * Live streaming. At most one entry: the native side decides which action fits
+ * this share (`stream_menu_action`).
+ */
+export const LIVE_STREAM_MENU_ITEM_ID = 'share-live-stream';
+export const LIVE_STREAM_MENU_LABELS: Readonly<Record<LiveMenuAction, string>> = {
+  goLive: 'Go live…',
+  stop: 'Stop live stream',
+  resume: 'Resume live stream here',
+  switch: 'Switch live stream here'
+};
+
+/**
+ * The entry's text. While our stream is on its "Be right back" slate, Resume
+ * says so, with the time left before the stream ends (as of opening the menu).
+ */
+export function liveStreamMenuLabel(action: LiveMenuAction, slateRemainingS: number | null = null): string {
+  const label = LIVE_STREAM_MENU_LABELS[action];
+  if (action !== 'resume' || slateRemainingS === null) return label;
+  return `${label} (paused, ends in ${formatStreamElapsed(slateRemainingS * 1000)})`;
+}
 
 export const CURSOR_IN_VIDEO_MENU_ITEM_ID = 'share-cursor-in-video';
 export const CURSOR_IN_VIDEO_MENU_ITEM_LABEL = 'Show system cursor';
@@ -98,7 +121,8 @@ export type HoverTabMenuEntry =
   | { kind: 'annotation'; id: string; text: string; enabled: boolean; checked: boolean }
   | { kind: 'ai-chat'; id: string; text: string; enabled: boolean; checked: boolean }
   | { kind: 'remote-control-allowed'; id: string; text: string; enabled: boolean; checked: boolean }
-  | { kind: 'share-audio'; id: string; text: string; enabled: boolean; checked: boolean };
+  | { kind: 'share-audio'; id: string; text: string; enabled: boolean; checked: boolean }
+  | { kind: 'live-stream'; id: string; text: string; action: LiveMenuAction };
 
 export const REMOTE_CONTROL_ALLOWED_MENU_ITEM_ID = 'share-remote-control-allowed';
 export const REMOTE_CONTROL_ALLOWED_MENU_ITEM_LABEL = 'Allow remote control';
@@ -148,7 +172,9 @@ export function buildHoverTabMenuEntries(
   hoverTabSide: HoverTabSide = 'right',
   shareAudioEnabled = false,
   shareAudioAvailable = false,
-  windowsCapture?: WindowsCaptureMenuState
+  windowsCapture?: WindowsCaptureMenuState,
+  liveAction: LiveMenuAction | null = null,
+  liveSlateRemainingS: number | null = null
 ): HoverTabMenuEntry[] {
   // Only Windows passes `windowsCapture`; without it the menu is unchanged.
   // Every frame rate is listed, and one the geometry cannot carry is shown
@@ -279,6 +305,17 @@ export function buildHoverTabMenuEntries(
       enabled: true,
       checked: aiChatActive
     });
+  }
+  if (liveAction && shared) {
+    entries.push(
+      { kind: 'separator' },
+      {
+        kind: 'live-stream',
+        id: LIVE_STREAM_MENU_ITEM_ID,
+        text: liveStreamMenuLabel(liveAction, liveSlateRemainingS),
+        action: liveAction
+      }
+    );
   }
   return entries;
 }

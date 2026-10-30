@@ -1278,6 +1278,58 @@ html:has(> body > #meeting-screen:not(.hidden)) {
   background: rgba(255, 255, 255, 0.015);
 }
 
+/* liveStream.ts: shown under the topbar while a desktop participant streams
+   the meeting. Wraps rather than clipping at phone widths. */
+.live-stream-banner {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px max(22px, env(safe-area-inset-right)) 6px max(22px, env(safe-area-inset-left));
+  border-bottom: 1px solid var(--danger-tint-25);
+  background: var(--danger-tint-06);
+  color: var(--text-strong);
+  font-family: var(--font-ui);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+
+.live-stream-banner[hidden] {
+  display: none;
+}
+
+.live-stream-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+}
+
+.live-stream-text {
+  overflow-wrap: anywhere;
+}
+
+.live-stream-optout {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.live-stream-optout input {
+  margin: 0;
+  accent-color: var(--danger);
+}
+
+.live-stream-optout input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
 .live-dot {
   display: none;
   width: 7px;

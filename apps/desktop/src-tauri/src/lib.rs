@@ -212,6 +212,10 @@ mod share_capture_options;
 mod share_overlay;
 mod share_priority;
 mod share_target;
+// Live streaming to RTMP(S). The output rules and wire shapes are pinned to
+// contracts/petal-contracts.json; client mode ("This computer") encodes on
+// Windows and macOS.
+pub mod streaming;
 // Poison-tolerant lock helpers (#143): `.lock_unpoisoned()` etc.
 mod sync_ext;
 // Global keyboard shortcut (SPEC.md §4.2) -- macOS-only, same as every other
@@ -1284,6 +1288,22 @@ pub fn run() {
             remote_control::remote_control_answer_consent,
             #[cfg(target_os = "macos")]
             window_diag::log_window_stack_command,
+            streaming::commands::stream_destinations_list,
+            streaming::commands::stream_destination_delete,
+            streaming::commands::stream_preview,
+            streaming::commands::stream_go_live,
+            streaming::commands::stream_stop,
+            streaming::commands::stream_resume_here,
+            streaming::commands::stream_session_state,
+            streaming::commands::go_live_target,
+            streaming::commands::open_go_live_window,
+            streaming::commands::stream_menu_action,
+            streaming::commands::region_stream_menu_action,
+            streaming::commands::region_stream_action,
+            streaming::live_state::stream_live_state,
+            streaming::streamer_mode::streamer_mode_state,
+            streaming::settings::stream_settings,
+            streaming::settings::stream_settings_set,
             #[cfg(target_os = "macos")]
             window_resize::animate_main_window_resize
         ]);
@@ -1363,6 +1383,12 @@ pub fn run() {
             // the feature is on — it must be entirely invisible when it is not.
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             ai_chat::settings::initialize(&app_data_dir);
+            // Live streaming settings: "Always use streamer mode" must be
+            // known before the first window masks (or doesn't).
+            streaming::settings::initialize(&app_data_dir);
+            streaming::streamer_mode::initialize(
+                streaming::settings::current().always_streamer_mode,
+            );
             // #878 Phase 3 item 5: window-server-restart detection via
             // CGWindowID regression.
             #[cfg(target_os = "macos")]
@@ -1676,6 +1702,10 @@ pub fn run() {
             // key. Loaded here so the very first hover-tab render knows whether
             // the feature is on — it must be entirely invisible when it is not.
             ai_chat::settings::initialize(&app_data_dir);
+            streaming::settings::initialize(&app_data_dir);
+            streaming::streamer_mode::initialize(
+                streaming::settings::current().always_streamer_mode,
+            );
             app.manage(rooms::RoomsState::load(app_data_dir));
             log::info!("petal: Windows rooms persistence loaded, RoomsState managed");
             // #636: the main window is created `visible: false` on every
@@ -1904,6 +1934,22 @@ pub fn run() {
             control_consent::control_consent_present,
             #[cfg(target_os = "windows")]
             control_consent::control_consent_dismiss,
+            streaming::commands::stream_destinations_list,
+            streaming::commands::stream_destination_delete,
+            streaming::commands::stream_preview,
+            streaming::commands::stream_go_live,
+            streaming::commands::stream_stop,
+            streaming::commands::stream_resume_here,
+            streaming::commands::stream_session_state,
+            streaming::commands::go_live_target,
+            streaming::commands::open_go_live_window,
+            streaming::commands::stream_menu_action,
+            streaming::commands::region_stream_menu_action,
+            streaming::commands::region_stream_action,
+            streaming::live_state::stream_live_state,
+            streaming::streamer_mode::streamer_mode_state,
+            streaming::settings::stream_settings,
+            streaming::settings::stream_settings_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Petal");
