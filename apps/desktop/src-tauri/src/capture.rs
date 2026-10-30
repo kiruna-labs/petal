@@ -131,6 +131,11 @@ impl NativeCapturedPixelBuffer {
         self.pixel_buffer.pixel_format()
     }
 
+    /// The borrowed `CVPixelBuffer`, valid while `self` lives.
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
+        self.pixel_buffer.as_ptr()
+    }
+
     pub fn copy_nv12_payload(&self) -> Result<CapturedFramePayload, CaptureError> {
         self.copy_nv12_payload_with_pool(None)
     }
@@ -2098,7 +2103,14 @@ fn prepare_direct_display_region_source(
     })
 }
 
-fn prepare_direct_display_source(display_id: u32) -> Result<PreparedCaptureSource, CaptureError> {
+/// A whole-display filter. With `exclude_own`, Petal itself is left out --
+/// as an application, so windows it opens later (a remote share surface, a
+/// toast, the go-live dialog) stay out too. That is streamer mode while this
+/// computer is live: a public stream of a display never shows the meeting.
+fn direct_display_filter(
+    display_id: u32,
+    exclude_own: bool,
+) -> Result<(SCContentFilter, SCDisplay), CaptureError> {
     let content = SCShareableContent::create()
         .with_on_screen_windows_only(true)
         .with_exclude_desktop_windows(true)
@@ -2110,13 +2122,31 @@ fn prepare_direct_display_source(display_id: u32) -> Result<PreparedCaptureSourc
         .into_iter()
         .find(|d| d.display_id() == display_id)
         .ok_or(CaptureError::DisplayNotFound(display_id))?;
+    let own_app = exclude_own
+        .then(|| {
+            content
+                .applications()
+                .into_iter()
+                .find(|app| app.process_id() == std::process::id() as i32)
+        })
+        .flatten();
+    if exclude_own && own_app.is_none() {
+        log::warn!("capture: display {display_id}: Petal isn't in the shareable applications; its windows can't be excluded");
+    }
+    let builder = SCContentFilter::create().with_display(&display);
+    let filter = match own_app.as_ref() {
+        Some(app) => builder.with_excluding_applications(&[app], &[]).build(),
+        None => builder.with_excluding_windows(&[]).build(),
+    };
+    Ok((filter, display))
+}
+
+fn prepare_direct_display_source(display_id: u32) -> Result<PreparedCaptureSource, CaptureError> {
+    let exclude_own = crate::streaming::streamer_mode::capture_exclusion_active();
+    let (filter, display) = direct_display_filter(display_id, exclude_own)?;
 
     let color_profile = color_profile_for_display_id(display_id)
         .unwrap_or_else(VideoColorProfile::legacy_publish_default);
-    let filter = SCContentFilter::create()
-        .with_display(&display)
-        .with_excluding_windows(&[])
-        .build();
     Ok(PreparedCaptureSource {
         backing_scale: f64::from(filter.point_pixel_scale()).max(1.0),
         logical_width: f64::from(display.width()),
@@ -2194,6 +2224,24 @@ impl WindowCaptureConfig {
 
     pub(crate) fn configured_output(&self) -> (u32, u32) {
         self.configured_state.lock_unpoisoned().output
+    }
+
+    /// Streamer mode: rebuild a direct whole-display share's filter with or
+    /// without Petal's own windows. Only for a display share (the caller
+    /// checks the share's kind; `window_id` is then the raw display id).
+    /// Region shares already exclude Petal; a system-picker filter is the
+    /// picker's and is kept as chosen. Returns whether the filter changed.
+    pub(crate) fn set_display_own_windows_excluded(&self, excluded: bool) -> Result<bool, CaptureError> {
+        let _region_transaction = self.region_transaction.lock_unpoisoned();
+        if self.origin != CaptureSourceOrigin::DirectWindowId || self.source_rect.lock_unpoisoned().is_some() {
+            return Ok(false);
+        }
+        let (filter, _) = direct_display_filter(self.window_id, excluded)?;
+        self.stream
+            .update_content_filter(&filter)
+            .map_err(|e| CaptureError::ScreenCaptureKit(e.to_string()))?;
+        *self.filter.lock_unpoisoned() = filter;
+        Ok(true)
     }
 
     pub(crate) fn current_region_generation(&self) -> Option<u64> {

@@ -237,6 +237,13 @@ futures-util = "0.3"
 # livekit/serde_with/pbjson-types transitively, so this is a visibility
 # change, not a new dependency.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Live streaming: a sans-I/O RTMP publisher (Apache-2.0, zero dependencies).
+# Exact-pinned because only canary releases exist; `rtmp-rs`, the obvious
+# alternative, can only publish audio. The socket and RTMPS are ours
+# (`streaming/rtmp.rs`): tokio TCP plus tokio-native-tls, already resolved
+# transitively, so RTMPS adds no TLS stack.
+shiguredo_rtmp = "=2026.1.0-canary.6"
+tokio-native-tls = "0.3"
 
 [dev-dependencies]
 # Paused-time coverage for the single terminal room-join budget (#569).
@@ -263,7 +270,7 @@ clipboard-win = { version = "5.4.1", features = ["std"] }
 # the User32/Gdi/Dwm/Shell/Threading surface those modules use, and
 # Win32_UI_Accessibility (SetWinEventHook) for the window-change watcher
 # (window_change_watcher.rs) that drives the picker's auto-refresh.
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_System_WinRT_Direct3D11", "Security_Authorization_AppCapabilityAccess", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Accessibility", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation", "Wdk_System_SystemServices", "Win32_Security"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_System_WinRT_Direct3D11", "Security_Authorization_AppCapabilityAccess", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Accessibility", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation", "Wdk_System_SystemServices", "Win32_Security", "Win32_Security_Credentials", "Win32_System_Ole"] }
 windows-core = "0.62.2"
 # `windows` disables the async adapter's default `std` feature; the
 # borderless-capture consent operation needs its bounded completion bridge.
@@ -274,6 +281,9 @@ windows-future = { version = "0.3.2", features = ["std"] }
 webview2-com = "0.39"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Live-stream keys in the Keychain (`streaming/keystore.rs`). Already in
+# Cargo.lock (3.7.0) via native-tls, so the direct dependency adds no crate.
+security-framework = "3"
 screencapturekit = { version = "8.0.0", features = ["macos_15_0", "async"] }
 yuv-sys = "0.3"
 # Backs `instance_lock.rs`'s `flock(2)` call and Unix-socket handoff --
@@ -365,6 +375,12 @@ webrtc-sys = { path = "../vendor/webrtc-sys" }
 # (0.3.20) also moves WEBRTC_TAG, which would swap the prebuilt libwebrtc under the
 # `=0.3.35` pin above. See vendor/webrtc-sys-build/PETAL_PATCH.md.
 webrtc-sys-build = { path = "../vendor/webrtc-sys-build" }
+# Live streaming's RTMP publisher (see vendor/shiguredo_rtmp/PETAL_PATCH.md):
+# upstream's client drops a healthy connection when the server acknowledges
+# less often than the "Set Peer Bandwidth" size it advertised, which YouTube
+# does. This copy keeps publishing, as OBS and ffmpeg do; Petal's own write
+# timeout and backlog limit (streaming/rtmp.rs, queue.rs) catch dead links.
+shiguredo_rtmp = { path = "../vendor/shiguredo_rtmp" }
 
 # Locally patched fork of `tauri-nspanel` at the pinned rev above (see
 # apps/desktop/vendor/tauri-nspanel/PETAL_PATCH.md, issue #705): fixes a real

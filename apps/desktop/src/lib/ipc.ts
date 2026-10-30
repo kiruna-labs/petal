@@ -209,7 +209,25 @@ export const COMMANDS = {
   cancelTestCockpit: 'cancel_test_cockpit',
   toggleMenubarMic: 'toggle_menubar_mic',
   toggleWindowShare: 'toggle_window_share',
-  updateShareBorderFrame: 'update_share_border_frame'
+  updateShareBorderFrame: 'update_share_border_frame',
+  // Live streaming. Stream keys only ever flow into `streamGoLive`; nothing
+  // returns one.
+  streamDestinationsList: 'stream_destinations_list',
+  streamDestinationDelete: 'stream_destination_delete',
+  streamPreview: 'stream_preview',
+  streamGoLive: 'stream_go_live',
+  streamStop: 'stream_stop',
+  streamResumeHere: 'stream_resume_here',
+  streamSessionState: 'stream_session_state',
+  streamLiveState: 'stream_live_state',
+  streamMenuAction: 'stream_menu_action',
+  regionStreamMenuAction: 'region_stream_menu_action',
+  regionStreamAction: 'region_stream_action',
+  goLiveTarget: 'go_live_target',
+  openGoLiveWindow: 'open_go_live_window',
+  streamSettings: 'stream_settings',
+  streamSettingsSet: 'stream_settings_set',
+  streamerModeState: 'streamer_mode_state'
 } as const;
 
 export const EVENTS = {
@@ -330,6 +348,18 @@ export const EVENTS = {
   roomUpdated: 'room-updated',
   shareError: 'share-error',
   shareStateChanged: 'share-state-changed',
+  /** The room's live-stream state changed (`petal.live`). */
+  streamLiveChanged: 'stream-live-changed',
+  /** Our own client-mode stream: phase and stats, about once a second. */
+  streamSessionChanged: 'stream-session-changed',
+  /** Our own stream ended; `reason` says why. */
+  streamSessionEnded: 'stream-session-ended',
+  /** A destination marked Save couldn't be stored once the stream connected. */
+  streamDestinationSaveFailed: 'stream-destination-save-failed',
+  /** Streamer mode turned on or off (`StreamerModeState`). */
+  streamerModeChanged: 'streamer-mode-changed',
+  /** The go-live dialog was re-targeted at another share. */
+  goLiveTarget: 'go-live-target',
   shareAudioStateChanged: 'share-audio-state-changed',
   shareControlModeChanged: 'share-control-mode-changed',
   sharePickerChanged: 'share-picker-changed',
@@ -1574,8 +1604,132 @@ export interface RemoteWindowDebugStats {
   remoteControlAvailable: boolean;
 }
 
+/** Mirrors `streaming::plan::StreamResolution`: a standard 16:9 size, or Auto. */
+export type StreamResolution = 'auto' | '720p' | '1080p' | '1440p' | '4k';
+/** Mirrors `streaming::plan::StreamOrientation`. */
+export type StreamOrientation = 'auto' | 'landscape' | 'portrait';
+export type LiveMenuAction = 'goLive' | 'stop' | 'resume' | 'switch';
+
+/** Mirrors `streaming::destinations::SavedDestination`. Never carries a key. */
+export interface SavedStreamDestination {
+  id: string;
+  name: string;
+  serverUrl: string;
+}
+
+/** Mirrors `streaming::plan::StreamPlan`. */
+export interface StreamPlan {
+  width: number;
+  height: number;
+  fps: number;
+  bitrateBps: number;
+  maxBitrateBps: number;
+  /** The resolution in effect (Auto resolved). */
+  resolution: Exclude<StreamResolution, 'auto'>;
+}
+
+/** Mirrors `streaming::session::StreamPreview`. */
+export interface StreamPreview {
+  captureWidth: number;
+  captureHeight: number;
+  shareFps: number;
+  plan: StreamPlan;
+  clientAvailable: boolean;
+}
+
+export type StreamDestinationChoice =
+  | { kind: 'saved'; id: string }
+  | { kind: 'custom'; serverUrl: string; streamKey: string; save: boolean; name: string };
+
+/** Mirrors `streaming::session::GoLiveRequest`. */
+export interface GoLiveRequest {
+  windowId: number;
+  destination: StreamDestinationChoice;
+  resolution: StreamResolution;
+  orientation: StreamOrientation;
+  maxBitrateBps: number | null;
+}
+
+/** Mirrors `streaming::session::StreamSessionSnapshot`. */
+export interface StreamSessionSnapshot {
+  phase: 'connecting' | 'live' | 'paused' | 'reconnecting';
+  windowId: number;
+  startedAt: number;
+  width: number;
+  height: number;
+  fps: number;
+  targetBitrateBps: number;
+  actualBitrateBps: number;
+  droppedFrames: number;
+  slateRemainingS: number | null;
+  reconnectAttempt: number | null;
+  hardwareEncoder: boolean;
+}
+
+/** Mirrors `streaming::live_state::StreamLiveEntry`: one live share. */
+export interface StreamLiveEntry {
+  ownerIdentity: string;
+  windowId: number;
+  paused: boolean;
+  startedAt: number;
+}
+
+/**
+ * Mirrors `streaming::live_state::StreamLivePayload`. The top-level fields
+ * describe the earliest stream; `streams` lists every live share, earliest
+ * first.
+ */
+export interface StreamLiveState {
+  live: boolean;
+  ownerIdentity?: string;
+  windowId?: number;
+  paused: boolean;
+  startedAt?: number;
+  streams: StreamLiveEntry[];
+}
+
+/** Mirrors `streaming::settings::StreamSettings` (Settings → Live streaming). */
+export interface StreamSettings {
+  alwaysStreamerMode: boolean;
+  keepOffLiveStreams: boolean;
+}
+
+/** Mirrors `streaming::streamer_mode::StreamerModeState`. */
+export interface StreamerModeState {
+  /** Meeting names, codes and links are masked. */
+  active: boolean;
+  /** This computer is streaming (Petal's windows are kept out of captures). */
+  live: boolean;
+}
+
+export interface StreamSessionEnded {
+  reason: 'user' | 'left' | 'slate-timeout' | 'failed';
+  error?: string;
+}
+
 export interface CommandArgs {
   [COMMANDS.animateMainWindowResize]: { width: number; height: number };
+  [COMMANDS.streamDestinationsList]: Record<string, never>;
+  [COMMANDS.streamDestinationDelete]: { id: string };
+  [COMMANDS.streamPreview]: {
+    windowId: number;
+    resolution: StreamResolution;
+    orientation: StreamOrientation;
+    maxBitrateBps: number | null;
+  };
+  [COMMANDS.streamGoLive]: { request: GoLiveRequest };
+  [COMMANDS.streamStop]: Record<string, never>;
+  [COMMANDS.streamResumeHere]: { windowId: number };
+  [COMMANDS.streamSessionState]: Record<string, never>;
+  [COMMANDS.streamLiveState]: Record<string, never>;
+  [COMMANDS.streamMenuAction]: { windowId: number };
+  [COMMANDS.regionStreamMenuAction]: { windowLabel: string };
+  [COMMANDS.regionStreamAction]: { windowLabel: string; action: LiveMenuAction };
+  [COMMANDS.goLiveTarget]: Record<string, never>;
+  [COMMANDS.openGoLiveWindow]: { windowId: number };
+  [COMMANDS.streamSettings]: Record<string, never>;
+  [COMMANDS.streamSettingsSet]: { settings: StreamSettings };
+  [COMMANDS.streamerModeState]: Record<string, never>;
   [COMMANDS.captureWindowThumbnail]: { windowId: number; force?: boolean };
   [COMMANDS.cockpitStatus]: Record<string, never>;
   [COMMANDS.compositorActivateWindow]: { windowId: number; ownerIdentity?: string };
@@ -1859,6 +2013,22 @@ export interface CommandArgs {
 }
 
 export interface CommandReturns {
+  [COMMANDS.streamDestinationsList]: SavedStreamDestination[];
+  [COMMANDS.streamDestinationDelete]: void;
+  [COMMANDS.streamPreview]: StreamPreview;
+  [COMMANDS.streamGoLive]: StreamSessionSnapshot;
+  [COMMANDS.streamStop]: void;
+  [COMMANDS.streamResumeHere]: void;
+  [COMMANDS.streamSessionState]: StreamSessionSnapshot | null;
+  [COMMANDS.streamLiveState]: StreamLiveState;
+  [COMMANDS.streamMenuAction]: LiveMenuAction | null;
+  [COMMANDS.regionStreamMenuAction]: LiveMenuAction | null;
+  [COMMANDS.regionStreamAction]: void;
+  [COMMANDS.goLiveTarget]: number;
+  [COMMANDS.openGoLiveWindow]: void;
+  [COMMANDS.streamSettings]: StreamSettings;
+  [COMMANDS.streamSettingsSet]: StreamSettings;
+  [COMMANDS.streamerModeState]: StreamerModeState;
   [COMMANDS.autotestJoinResult]: AutotestJoinResult | null;
   [COMMANDS.startCameraPublish]: StartCameraPublishResult;
   [COMMANDS.cameraPublishState]: CameraPublishStateSnapshot;
@@ -2010,6 +2180,11 @@ export interface CommandReturns {
 }
 
 export interface EventPayloads {
+  [EVENTS.streamLiveChanged]: StreamLiveState;
+  [EVENTS.streamSessionChanged]: StreamSessionSnapshot;
+  [EVENTS.streamSessionEnded]: StreamSessionEnded;
+  [EVENTS.streamDestinationSaveFailed]: string;
+  [EVENTS.goLiveTarget]: number;
   [EVENTS.aiChatControlRequest]: AiChatControlRequestEvent;
   [EVENTS.aiChatControlResolved]: AiChatControlResolvedEvent;
   [EVENTS.aiChatRemoteState]: AiChatRemoteSessionState;

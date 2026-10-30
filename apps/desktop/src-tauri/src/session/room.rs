@@ -861,6 +861,9 @@ pub async fn join_room(
     // webview's plugin host routes to the right sandboxed plugin frame.
     crate::plugins::start_receiver_for_room(app, room_connection.room(), room_generation.clone());
     crate::chat::start_receiver_for_room(app, room_connection.room(), room_generation.clone());
+    // Live-stream state: `petal.live` -> `stream-live-changed` for the LIVE
+    // indicators.
+    crate::streaming::live_state::start_for_room(app, room_connection.room(), room_generation.clone());
 
     // AI chat (#657): start/stop requests, push-to-talk floor claims, and
     // remote session state. Every inbound message is authorized against the
@@ -1381,6 +1384,11 @@ async fn cleanup_left_room(
         connection_lost,
         user_leave || reason == "forced_disconnect",
     );
+
+    // A client-mode live stream ends with the meeting: stop it (and clear
+    // `petal.live`) while the room is still connected, before the shares stop
+    // and would only put up the slate.
+    crate::streaming::session::stop(app, crate::streaming::session::StopReason::Left).await;
 
     // Stop every active share first -- reuses `stop_share`'s own
     // capture-stop/pump-abort/unpublish logic exactly, rather than

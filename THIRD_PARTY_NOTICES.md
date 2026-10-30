@@ -85,6 +85,10 @@ binaries in `apps/desktop/src/assets/fonts/OFL.txt` and
 None of these families declares a Reserved Font Name, so the subsetting applied
 here is permitted without renaming.
 
+The live-stream "Be right back" slate (`apps/desktop/src-tauri/assets/stream-slate.png`)
+is a raster image whose text is set in Aileron (CC0 1.0, public domain); no
+font file is redistributed.
+
 ## Trademarks
 
 The Petal name and logo are not licensed under Apache-2.0. See `TRADEMARKS.md`.

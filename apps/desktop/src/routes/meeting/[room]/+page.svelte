@@ -43,6 +43,7 @@
   import { writeText } from '@tauri-apps/plugin-clipboard-manager';
   import MeetingChrome from '#lib/components/MeetingChrome.svelte';
   import { customServerState } from '#lib/data/customServer.svelte.js';
+  import LiveStreamBanner from '#lib/components/LiveStreamBanner.svelte';
   import ChatDrawer from '@petal/shared/ui/components/ChatDrawer.svelte';
   import { createChatHost } from '#lib/chat/chatHost.svelte.js';
   import type { ChatCommandOption } from '@petal/shared/logic/chat';
@@ -52,6 +53,8 @@
   import { toastTransition } from '#lib/motion.js';
   import { session, startSessionSync } from '#lib/stores/session.svelte.js';
   import { toastHostState } from '#lib/stores/toastHost.svelte.js';
+  import { streamerMode, watchStreamerMode } from '#lib/stores/streamerMode.svelte.js';
+  import { meetingLabelForDisplay } from '#lib/data/liveStream.js';
   import { cameraPreviewConstraints } from '#lib/data/cameraConstraints.js';
   import { listCameraDevices } from '#lib/data/cameraDevices.js';
   import {
@@ -79,7 +82,8 @@
     MenubarPillState,
     RemoteControlStatus,
     MicMuteChanged,
-    StartCameraPublishResult
+    StartCameraPublishResult,
+    StreamLiveState
   } from '#lib/ipc.js';
   import { aiChatEndReasonMessage, aiChatEndToastVariant } from '#lib/data/aiChat.js';
   import { createPillWindow } from '#lib/meeting/pillWindow.svelte.js';
@@ -221,8 +225,8 @@
   // credential. `meeting.joinedRoom` is authoritative after join; the saved
   // record covers the connecting window before then, which can last 45s+.
   const inviteAccessCode = $derived(meeting.inviteAccessCode);
-  const inviteAriaLabel = $derived(inviteCopyAriaLabel(inviteAccessCode));
-  const inviteTooltip = $derived(inviteCopyTooltip(inviteAccessCode));
+  const inviteAriaLabel = $derived(inviteCopyAriaLabel(inviteAccessCode, streamerMode.active));
+  const inviteTooltip = $derived(inviteCopyTooltip(inviteAccessCode, streamerMode.active));
 
   async function copyInviteLink() {
     const link = currentInviteLink();
@@ -241,8 +245,28 @@
         console.error('Failed to copy invite link', e);
       }
     }
-    inviteToast.show(inviteLinkCopiedToastMessage(link));
+    inviteToast.show(inviteLinkCopiedToastMessage(link, streamerMode.active));
   }
+
+  // Live streaming: streamer mode masks the meeting's name and code (never
+  // the invite link's contents, which only reach the clipboard), and the
+  // pill carries a LIVE dot while the room is streamed.
+  const shownRoomLabel = $derived(meetingLabelForDisplay(meeting.roomLabel, streamerMode.active));
+  let roomLive = $state(false);
+  onMount(() => {
+    const stopWatching = watchStreamerMode();
+    if (!hasTauriBridge()) return stopWatching;
+    void invoke<StreamLiveState>(COMMANDS.streamLiveState)
+      .then((state) => (roomLive = state.live))
+      .catch(() => {});
+    const unLive = listen<StreamLiveState>(EVENTS.streamLiveChanged, (event) => {
+      roomLive = event.payload.live;
+    });
+    return () => {
+      stopWatching();
+      unLive.then((u) => u()).catch(() => {});
+    };
+  });
 
   // When true, the camera toast is a TERMINAL failure: sticky (no
   // auto-dismiss) and carrying a working Retry affordance -- the user must
@@ -790,7 +814,8 @@
       <MeetingChrome
         bind:this={chromeRef}
         frameless
-        roomName={meeting.roomLabel}
+        roomName={shownRoomLabel}
+        live={roomLive}
         {elapsed}
         participants={meeting.galleryParticipants}
         {cameraDrawUpdates}
@@ -823,7 +848,7 @@
         onInviteLinkCopy={copyInviteLink}
         onOpenNetwork={openNetworkCockpit}
         onOpenSettings={openSettingsWindow}
-        onRenameRoom={meeting.handleRenameRoom}
+        onRenameRoom={streamerMode.active ? undefined : meeting.handleRenameRoom}
         onReportBug={feedbackEnabled ? () => (feedbackOpen = true) : undefined}
         customServerLabel={customServerState.label}
         {pluginActions}
@@ -838,7 +863,7 @@
         bind:chatCommands
         chat={{ post: (via, text) => chat.post(via, text), notice: (via, text) => chat.notice(via, text) }}
         participants={meeting.presence}
-        roomLabel={meeting.roomLabel}
+        roomLabel={shownRoomLabel}
         phase={meeting.meetingPhase}
         hostVersion={pluginHostVersion}
         onToast={(text, variant) => {
@@ -846,6 +871,10 @@
           pluginToast.show(text);
         }}
       />
+
+      {#if pill.expanded}
+        <LiveStreamBanner />
+      {/if}
 
       {#if pluginToast.visible}
         <div class="toast-anchor" transition:toastTransition>
