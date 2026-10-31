@@ -8409,17 +8409,27 @@ impl PublishedTrack {
     /// SDK's own republish shape (same Track Arc, new server-assigned SID).
     pub(crate) async fn republish_camera_after_reconnect(&self) -> Result<(), RoomConnectionError> {
         let (width, height) = self.published_size();
+        let publish_opts = camera_publish_options(width, height, self.published_frame_rate);
+        let startup_floor_bps = publish_opts.min_bitrate;
         self.room
             .local_participant()
-            .publish_track(
-                LocalTrack::Video(self.track.clone()),
-                camera_publish_options(width, height, self.published_frame_rate),
-            )
+            .publish_track(LocalTrack::Video(self.track.clone()), publish_opts)
             .await?;
         log::info!(
             "publisher: camera track '{}' republished after reconnect publication repair",
             self.track.name()
         );
+        // The republish builds a new sender with a new floor; without its own
+        // release it stays pinned for the rest of the call (#275). Clearing an
+        // already-clear floor is a no-op, so overlapping the original task is
+        // harmless.
+        if let Some(floor_bps) = startup_floor_bps {
+            let track_for_floor = self.track.clone();
+            let cancel = self.background_cancel.clone();
+            tokio::spawn(async move {
+                release_startup_min_bitrate(track_for_floor, floor_bps, cancel).await;
+            });
+        }
         Ok(())
     }
 
