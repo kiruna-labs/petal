@@ -249,16 +249,9 @@ fn set_remote_window_min_size(window: &tauri::WebviewWindow) {
     }
 }
 
-// Keep this native owner palette in lockstep with the TS PALETTE and hex map
-// in apps/desktop/src/lib/data/identityColor.ts.
-const OWNER_COLOR_PALETTE_HEX: [&str; 6] = [
-    "#f06cc9", // plum
-    "#6e8bff", // blue
-    "#7ff0a3", // green
-    "#e8b84b", // amber
-    "#d6b8f0", // lilac
-    "#8fa6b8", // slate
-];
+use crate::owner_palette::{owner_border_color_hex, OWNER_COLOR_PALETTE_HEX};
+#[cfg(test)]
+use crate::owner_palette::owner_color_hex;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct RemoteWindowKey {
@@ -504,36 +497,6 @@ fn surface_route_url(
             owner_palette_index,
         )
     )
-}
-
-fn owner_color_hex(owner: &str) -> &'static str {
-    let hash = owner.encode_utf16().fold(0u32, |hash, unit| {
-        hash.wrapping_mul(31).wrapping_add(unit as u32)
-    });
-    OWNER_COLOR_PALETTE_HEX[(hash as usize) % OWNER_COLOR_PALETTE_HEX.len()]
-}
-
-/// The remote-window border must match the header tint. The header keys on the
-/// owner IDENTITY, falling back to the display name — `colorForIdentity(
-/// ownerIdentity || ownerName)` in surface/+page.svelte. Keying the border on
-/// the display name alone diverged whenever identity != name (the normal case),
-/// so the border and header showed different colors. Mirror the header here.
-fn owner_border_color_hex(
-    owner_identity: &str,
-    owner_display_name: &str,
-    palette_index: Option<u8>,
-) -> &'static str {
-    if let Some(index) =
-        palette_index.filter(|index| (*index as usize) < OWNER_COLOR_PALETTE_HEX.len())
-    {
-        return OWNER_COLOR_PALETTE_HEX[index as usize];
-    }
-    let key = if owner_identity.trim().is_empty() {
-        owner_display_name
-    } else {
-        owner_identity
-    };
-    owner_color_hex(key)
 }
 
 /// #317: store the owner's chosen palette index and return the border color it

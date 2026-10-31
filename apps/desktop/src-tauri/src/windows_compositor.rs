@@ -106,29 +106,7 @@ const BORDER_STROKE_PX: i32 = 4;
 /// forwarded to the surface route as `borderRadius`.
 const BORDER_RADIUS_PX: i32 = 10;
 
-/// Keep this native owner palette in lockstep with the TS PALETTE and hex map
-/// in apps/desktop/src/lib/data/identityColor.ts and the macOS compositor's
-/// OWNER_COLOR_PALETTE_HEX (compositor.rs).
-const OWNER_COLOR_PALETTE_HEX: [&str; 6] = [
-    "#f06cc9", // plum
-    "#6e8bff", // blue
-    "#7ff0a3", // green
-    "#e8b84b", // amber
-    "#d6b8f0", // lilac
-    "#8fa6b8", // slate
-];
-
-/// Deterministic owner-palette pick matching the macOS compositor's
-/// `owner_color_hex` and the frontend's `colorForIdentity`: fold UTF-16 code
-/// units with `h = h * 31 + unit`, then mod the palette length. The header
-/// tint, ink, and border color all derive from this single hash of the owner
-/// identity, so a given sharer always gets the same color across peers.
-fn owner_palette_hex(owner_identity: &str) -> &'static str {
-    let hash = owner_identity.encode_utf16().fold(0u32, |hash, unit| {
-        hash.wrapping_mul(31).wrapping_add(unit as u32)
-    });
-    OWNER_COLOR_PALETTE_HEX[(hash as usize) % OWNER_COLOR_PALETTE_HEX.len()]
-}
+use crate::owner_palette::{owner_border_color_hex, valid_palette_index};
 
 /// Percent-encode a surface-route query value (arbitrary OS/user strings).
 fn percent_encode(s: &str) -> String {
@@ -140,8 +118,9 @@ fn percent_encode(s: &str) -> String {
 /// `surface_route_url` produces, so `RemoteWindowHeader.svelte` renders the
 /// identity-colored header and the webview paints the owner-colored border.
 /// `owner` is the human-readable display name (macOS passes the same); the
-/// UUID identity travels separately as `ownerIdentity` and drives the color
-/// hash, exactly like the macOS header query string.
+/// UUID identity travels separately as `ownerIdentity`. The border and header
+/// use the sharer's chosen `ownerPaletteIndex` when published, else the
+/// identity hash, exactly like the macOS header query string (#322).
 fn surface_route_url(
     window_id: u32,
     owner_identity: &str,
@@ -152,6 +131,7 @@ fn surface_route_url(
     remote_control_available: bool,
     share_instance_id: Option<&str>,
     control_mode: crate::remote_control_core::RemoteControlMode,
+    owner_palette_index: Option<u8>,
 ) -> String {
     let remote_control = u8::from(remote_control_available);
     let share_instance_id = share_instance_id.map(percent_encode).unwrap_or_default();
@@ -164,9 +144,13 @@ fn surface_route_url(
         percent_encode(owner_display_name),
         percent_encode(source_title),
         percent_encode(owner_identity),
-        &owner_palette_hex(owner_identity)[1..],
+        &owner_border_color_hex(owner_identity, owner_display_name, owner_palette_index)[1..],
         source_kind.as_wire(),
     );
+    if let Some(index) = valid_palette_index(owner_palette_index) {
+        route.push_str("&ownerPaletteIndex=");
+        route.push_str(&index.to_string());
+    }
     if let Some(source_url) =
         source_url.and_then(crate::browser_url::privacy_minimized_openable_url)
     {
@@ -2272,6 +2256,7 @@ pub(crate) async fn update_window_metadata(
     remote_control_available: bool,
     share_instance_id: Option<String>,
     control_mode: crate::remote_control_core::RemoteControlMode,
+    owner_palette_index: Option<u8>,
 ) {
     send_command_async(Command::UpdateMetadata {
         key: key.clone(),
@@ -2291,6 +2276,7 @@ pub(crate) async fn update_window_metadata(
         remote_control_available,
         share_instance_id.as_deref(),
         control_mode,
+        owner_palette_index,
     );
     let Some((_, query)) = route.split_once('?') else {
         return;
@@ -2336,6 +2322,7 @@ pub(crate) async fn create_window(
     share_instance_id: Option<String>,
     control_mode: crate::remote_control_core::RemoteControlMode,
     canonical_source_size: Option<(u32, u32)>,
+    owner_palette_index: Option<u8>,
 ) {
     if window_open_for(&key) {
         return;
@@ -2357,6 +2344,7 @@ pub(crate) async fn create_window(
         remote_control_available,
         share_instance_id.as_deref(),
         control_mode,
+        owner_palette_index,
     );
     let window = match WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::App(url.into()))
         .decorations(false)
@@ -3647,6 +3635,44 @@ mod tests {
     // flake -- see #617). Every test in this group takes this lock for its
     // whole body so they run one at a time.
     static DECODE_LOOP_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn route_with_palette(owner_palette_index: Option<u8>) -> String {
+        surface_route_url(
+            7,
+            "bob-identity",
+            "Bob",
+            "Notes",
+            None,
+            SharedSourceKind::Window,
+            true,
+            Some("share-1"),
+            crate::remote_control_core::RemoteControlMode::CursorPreserving,
+            owner_palette_index,
+        )
+    }
+
+    /// #322: the surface route carries the sharer's chosen palette index and
+    /// a border in that color, as macOS's header query does; without one it
+    /// keeps the identity hash.
+    #[test]
+    fn surface_route_uses_the_sharers_chosen_palette_color() {
+        use crate::owner_palette::{owner_color_hex, OWNER_COLOR_PALETTE_HEX};
+        let hashed = owner_color_hex("bob-identity");
+        let hashed_index = OWNER_COLOR_PALETTE_HEX.iter().position(|hex| *hex == hashed).unwrap();
+        let chosen = ((hashed_index + 1) % OWNER_COLOR_PALETTE_HEX.len()) as u8;
+
+        let route = route_with_palette(Some(chosen));
+        assert!(route.contains(&format!("&ownerPaletteIndex={chosen}")), "{route}");
+        assert!(
+            route.contains(&format!("borderColor=%23{}", &OWNER_COLOR_PALETTE_HEX[chosen as usize][1..])),
+            "{route}"
+        );
+
+        let route = route_with_palette(None);
+        assert!(!route.contains("ownerPaletteIndex"), "{route}");
+        assert!(route.contains(&format!("borderColor=%23{}", &hashed[1..])), "{route}");
+        assert!(!route_with_palette(Some(6)).contains("ownerPaletteIndex"), "an out-of-range index is ignored");
+    }
 
     #[test]
     fn initial_content_size_caps_large_remote_display_and_preserves_aspect() {
