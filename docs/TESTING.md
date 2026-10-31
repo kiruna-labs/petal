@@ -52,7 +52,7 @@ green "not applicable" line when they did not:
 | Workflow | Runner | Paths | What it runs |
 |---|---|---|---|
 | `rust-gate.yml` | `macos-26` + `windows-latest` | `apps/desktop/src-tauri/**`, `contracts/**`, `backend/**`, `scripts/ci-local.sh`, the two CI workflow files | `cargo build --locked`, `cargo build --examples`, `cargo test --lib`, the #99 no-CLT-rpath assertion |
-| `frontend-gate.yml` | `ubuntu-latest` | `apps/desktop/`'s `src/`, `tests/`, `scripts/`, `static/` + its build config, `shared/**`, `web-harness/**`, `plugins/**` | desktop `npm run check` + `npm run build` + the `tests/*.test.ts` suite and harness script suites; web-harness `npm run build` (all four of `check-package-escapes`, `svelte-check`, `tsc -p tests`, `vite build`) + `npm test` + the isolated-deploy build simulation (`scripts/deploy-web-harness.sh --build-only`, #662/#93); plugins `tsc --noEmit` + `npm test` |
+| `frontend-gate.yml` (also on every push to `main`, #269) | `ubuntu-latest` | `apps/desktop/`'s `src/`, `tests/`, `scripts/`, `static/` + its build config, `shared/**`, `web-harness/**`, `plugins/**` | desktop `npm run check` + `npm run build` + the `tests/*.test.ts` suite and harness script suites; web-harness `npm run build` (all four of `check-package-escapes`, `svelte-check`, `tsc -p tests`, `vite build`) + `npm test` + the isolated-deploy build simulation (`scripts/deploy-web-harness.sh --build-only`, #662/#93); plugins `tsc --noEmit` + `npm test` |
 
 The frontend gate exists because for a long time nothing gated the TypeScript
 half at all: two red desktop tests (#75) and a web-harness build failure that
