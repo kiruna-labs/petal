@@ -23,14 +23,22 @@
 # companion pair had to go: a mixed PR ran both and two check runs answered to
 # one required context name, and the two path lists were kept in step only by a
 # comment. One list, here, in the `filter` step.
+#
+# #269: it also runs after every merge to main. Two PRs that are each green on
+# their own can still clash once both land, and nothing else runs the frontend
+# suite on main. With no PR number, gate-paths-changed.sh runs every job for
+# real. A run on main is never cancelled by the next merge, so every merge
+# gets its own verdict.
 name: Frontend PR Gate
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 concurrency:
-  group: frontend-pr-gate-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: frontend-pr-gate-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
