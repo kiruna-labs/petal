@@ -218,9 +218,14 @@ where
     F: Future<Output = Result<T, E>>,
 {
     let metadata_started = Instant::now();
-    let metadata_wait = tokio::time::timeout(SHARE_METADATA_PUBLISH_BUDGET, metadata_task);
-    let (metadata_result, media_result) = tokio::join!(metadata_wait, media_publish);
-    let metadata_elapsed = metadata_started.elapsed();
+    // Time the metadata publish inside its own future: measured after the
+    // join, a slow MEDIA publish was reported as slow metadata (#274).
+    let metadata_wait = async {
+        let result = tokio::time::timeout(SHARE_METADATA_PUBLISH_BUDGET, metadata_task).await;
+        (result, metadata_started.elapsed())
+    };
+    let ((metadata_result, metadata_elapsed), media_result) =
+        tokio::join!(metadata_wait, media_publish);
     let outcome = if metadata_result.is_err() {
         MetadataPublishOutcome::ExceededBudget
     } else {
@@ -14970,6 +14975,28 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             elapsed < Duration::from_millis(180),
             "metadata and media were serialized: elapsed={:?}",
             elapsed
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn slow_media_publish_is_not_reported_as_slow_metadata() {
+        // #274: fast metadata racing a media publish that outlasts the budget
+        // is WithinBudget, and its elapsed time is the metadata's own.
+        let metadata_task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        });
+        let (media_result, metadata_outcome, metadata_elapsed) =
+            publish_media_while_metadata_runs(metadata_task, async {
+                tokio::time::sleep(SHARE_METADATA_PUBLISH_BUDGET + Duration::from_secs(1)).await;
+                Ok::<_, ()>(())
+            })
+            .await;
+
+        assert!(media_result.is_ok());
+        assert_eq!(metadata_outcome, MetadataPublishOutcome::WithinBudget);
+        assert!(
+            metadata_elapsed < Duration::from_millis(100),
+            "metadata elapsed included the media publish: {metadata_elapsed:?}"
         );
     }
 
