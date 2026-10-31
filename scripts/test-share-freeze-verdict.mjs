@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Unit tests for scripts/ci/share-freeze-verdict.mjs (#391), both directions:
+// Unit tests for scripts/ci/share-freeze-verdict.mjs (#391, #459, #439), both directions:
 // a healthy soak passes, an induced sender pause fails as a CORRELATED freeze,
 // a lone receiver stall fails as single-viewer, a source stall is not counted,
 // and every way the run can fail to measure is INFRA-INVALID, never a pass.
@@ -8,12 +8,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { FREEZE_GAP_THRESHOLD_MS, FREEZE_WARMUP_MS, correlateFreezes, freezeVerdict, gapHistogram, parseSenderLog, sourceActivity } from './ci/share-freeze-verdict.mjs';
+import { FREEZE_GAP_THRESHOLD_MS, FREEZE_WARMUP_MS, clusterNetworkImpairment, correlateFreezes, freezeVerdict, gapHistogram, parseSenderLog, sourceActivity } from './ci/share-freeze-verdict.mjs';
 
 // The sharer log's real line shape (logging.rs: UTC "YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [target] msg").
 function logLine(ms, message, level = 'WARN') {
@@ -348,4 +349,67 @@ test('wiring: the soak job is release-blocking (#391) and still uploads its repo
   assert.match(job, /- name: Run share-freeze soak\n\s+continue-on-error: \$\{\{ env\.E2E_FREEZE_SOAK_BLOCKING != 'true' \}\}/);
   assert.match(job, /node scripts\/ci\/e2e-gate-verdict\.mjs freeze --raw/);
   assert.match(job, /- name: Upload share-freeze artifacts\n\s+if: always\(\)/);
+});
+
+// #439: a freeze every viewer saw while every viewer's own path to the SFU
+// slowed down together is the network, not Petal. Never a pass: INFRA-INVALID,
+// so the action is a re-run. Real data first, trimmed from two nightly runs.
+const realSoak = (name) => JSON.parse(gunzipSync(readFileSync(fileURLToPath(new URL(`./fixtures/share-freeze/${name}.json.gz`, import.meta.url)))));
+
+test('network collapse (run 40004629026): every counted freeze inside it is INFRA-INVALID, not a product FAIL', () => {
+  const verdict = freezeVerdict({ raw: realSoak('network-collapse-40004629026'), warmupMs: FREEZE_WARMUP_MS });
+  assert.equal(verdict.outcome, 'infra-invalid', verdict.errors.join('\n'));
+  const counted = verdict.report.clusters.filter((c) => !c.warmup);
+  assert.ok(counted.length >= 10);
+  assert.equal(verdict.report.networkImpairedFreezes, counted.length, 'the recovery-tail freezes count as impaired too');
+  assert.match(verdict.errors[0], /^INFRA-INVALID: network to the SFU impaired during all \d+ counted freeze event\(s\): RTT 6\d-6\dms -> \d+-\d+ms on every viewer; re-run$/);
+  assert.ok(verdict.errors.some((e) => /^FREEZE all-viewers .*; RTT freeze-viewer-1 \d+->\d+ms, freeze-viewer-2 \d+->\d+ms \(network impaired\)$/.test(e)));
+});
+
+test('network collapse plus one ordinary freeze is still a product FAIL', () => {
+  // Without the warm-up the run's renderer stall at +11s counts, and its RTT was normal.
+  const verdict = freezeVerdict({ raw: realSoak('network-collapse-40004629026') });
+  assert.equal(verdict.outcome, 'fail');
+  assert.equal(verdict.report.clusters.filter((c) => !c.networkImpaired).length, 1);
+});
+
+test('clean path (run 39981700357): a freeze with normal RTT is a plain FAIL', () => {
+  const verdict = freezeVerdict({ raw: realSoak('clean-path-39981700357') });
+  assert.equal(verdict.outcome, 'fail');
+  assert.equal(verdict.report.networkImpairedFreezes, 0);
+  assert.doesNotMatch(verdict.errors.join('\n'), /network impaired|INFRA-INVALID/);
+});
+
+function withRtt(raw, rttFor) {
+  for (const viewer of raw.viewers) {
+    for (const row of viewer.stats) row.rttMs = rttFor(viewer.label, row.t - raw.measureStartMs);
+  }
+  return raw;
+}
+
+test('impairment needs EVERY viewer: one viewer\'s RTT spike is not the network', () => {
+  const spike = (label, rel) => (label === 'freeze-viewer-1' && rel >= 85_000 && rel <= 95_000 ? 600 : 40);
+  const one = freezeVerdict({ raw: withRtt(RED_SOAK(), spike), warmupMs: FREEZE_WARMUP_MS });
+  assert.equal(one.outcome, 'fail');
+  const all = freezeVerdict({ raw: withRtt(RED_SOAK(), (_, rel) => (rel >= 85_000 && rel <= 95_000 ? 600 : 40)), warmupMs: FREEZE_WARMUP_MS });
+  assert.equal(all.outcome, 'infra-invalid');
+  assert.match(all.errors[0], /RTT 40-40ms -> 600-600ms on every viewer/);
+});
+
+test('impairment thresholds: 3x or +150ms over baseline, and a viewer with no samples is not impaired', () => {
+  const cluster = { startMs: 100_000, endMs: 101_000 };
+  const viewer = (label, rtt) => ({ label, stats: [[0, 40], [30_000, 40], [99_000, rtt]].map(([t, rttMs]) => ({ t, rttMs })) });
+  assert.equal(clusterNetworkImpairment(cluster, [viewer('a', 119), viewer('b', 119)], 0).networkImpaired, false);
+  assert.equal(clusterNetworkImpairment(cluster, [viewer('a', 120), viewer('b', 120)], 0).networkImpaired, true, '3x');
+  const slowBaseline = (label, rtt) => ({ label, stats: [{ t: 0, rttMs: 100 }, { t: 99_000, rttMs: rtt }] });
+  assert.equal(clusterNetworkImpairment(cluster, [slowBaseline('a', 250), slowBaseline('b', 250)], 0).networkImpaired, true, '+150ms');
+  assert.equal(clusterNetworkImpairment(cluster, [viewer('a', 600), { label: 'b', stats: [] }], 0).networkImpaired, false);
+});
+
+test('CLI: a network-impaired run fails the gate as INFRA-INVALID, not as a freeze', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'share-freeze-verdict-'));
+  const run = runFreezeCli(dir, realSoak('network-collapse-40004629026'), 'collapse', 'true');
+  assert.equal(run.status, 1);
+  assert.equal(run.report.outcome, 'infra-invalid');
+  assert.match(run.stdout, /::error::INFRA-INVALID: network to the SFU impaired/);
 });
