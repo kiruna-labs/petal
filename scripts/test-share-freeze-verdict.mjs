@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { FREEZE_GAP_THRESHOLD_MS, correlateFreezes, freezeVerdict, gapHistogram, parseSenderLog, sourceActivity } from './ci/share-freeze-verdict.mjs';
+import { FREEZE_GAP_THRESHOLD_MS, FREEZE_WARMUP_MS, correlateFreezes, freezeVerdict, gapHistogram, parseSenderLog, sourceActivity } from './ci/share-freeze-verdict.mjs';
 
 // The sharer log's real line shape (logging.rs: UTC "YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [target] msg").
 function logLine(ms, message, level = 'WARN') {
@@ -253,17 +253,58 @@ test('helpers: histogram buckets, source activity, clustering slack', () => {
 });
 
 // #391: report-only unless E2E_FREEZE_SOAK_BLOCKING=true, in both directions.
-function runFreezeCli(dir, raw, name, blocking) {
+function runFreezeCli(dir, raw, name, blocking, warmupMs) {
   const rawPath = join(dir, `${name}-raw.json`);
   const out = join(dir, `${name}-report.json`);
   if (raw) writeFileSync(rawPath, JSON.stringify(raw));
   const env = { ...process.env };
   delete env.E2E_FREEZE_SOAK_BLOCKING;
   if (blocking !== undefined) env.E2E_FREEZE_SOAK_BLOCKING = blocking;
+  delete env.FREEZE_WARMUP_MS;
+  if (warmupMs !== undefined) env.FREEZE_WARMUP_MS = warmupMs;
   const result = spawnSync(process.execPath, [CLI, 'freeze', '--raw', rawPath, '--json', out], { encoding: 'utf8', env });
   return { status: result.status, stdout: result.stdout, report: JSON.parse(readFileSync(out, 'utf8')) };
 }
-const RED_SOAK = () => soak({ holes: { 'freeze-viewer-1': [[60_000, 62_000]], 'freeze-viewer-2': [[60_000, 62_000]] } });
+// Past the CLI's default warm-up (#459), so it counts.
+const RED_SOAK = () => soak({ holes: { 'freeze-viewer-1': [[90_000, 92_000]], 'freeze-viewer-2': [[90_000, 92_000]] } });
+const allViewersHole = (from, to) => soak({ holes: { 'freeze-viewer-1': [[from, to]], 'freeze-viewer-2': [[from, to]] } });
+
+// #459: the CI VM's startup stall (0.5-1.3s gaps within ~60s) is reported, not
+// counted; anything that ends past the warm-up still fails.
+test('warm-up: a freeze that ends inside the warm-up passes with a warning', () => {
+  const verdict = freezeVerdict({ raw: allViewersHole(9_000, 10_300), warmupMs: FREEZE_WARMUP_MS });
+  assert.equal(verdict.outcome, 'pass', verdict.errors.join('\n'));
+  assert.equal(verdict.report.warmupFreezes, 1);
+  assert.ok(verdict.warnings.some((w) => /^WARM-UP \(not counted, first 60000ms\): FREEZE all-viewers/.test(w)), verdict.warnings.join('\n'));
+});
+
+test('warm-up: the same freeze after the warm-up fails, and so does one straddling its edge', () => {
+  for (const [from, to] of [[90_000, 91_300], [59_000, 61_000]]) {
+    const verdict = freezeVerdict({ raw: allViewersHole(from, to), warmupMs: FREEZE_WARMUP_MS });
+    assert.equal(verdict.outcome, 'fail', `hole ${from}-${to}`);
+    assert.equal(verdict.report.warmupFreezes, 0);
+    assert.ok(verdict.errors.some((e) => /^FREEZE all-viewers/.test(e)));
+  }
+});
+
+test('warm-up: the library default counts everything; the warm-up is opt-in', () => {
+  assert.equal(freezeVerdict({ raw: allViewersHole(9_000, 10_300) }).outcome, 'fail');
+});
+
+test('CLI warm-up: 60s by default, overridable with FREEZE_WARMUP_MS', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'share-freeze-verdict-'));
+  const early = allViewersHole(9_000, 10_300);
+  const byDefault = runFreezeCli(dir, early, 'warmup-default', 'true');
+  assert.equal(byDefault.status, 0, byDefault.stdout);
+  assert.equal(byDefault.report.warmupMs, 60_000);
+  assert.match(byDefault.stdout, /WARM-UP \(not counted/);
+  const off = runFreezeCli(dir, early, 'warmup-off', 'true', '0');
+  assert.equal(off.status, 1, off.stdout);
+  assert.equal(off.report.outcome, 'fail');
+  const bad = spawnSync(process.execPath, [CLI, 'freeze', '--raw', join(dir, 'none.json')], { encoding: 'utf8', env: { ...process.env, FREEZE_WARMUP_MS: 'soon' } });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stdout, /FREEZE_WARMUP_MS must be a non-negative number/);
+});
 
 test('CLI blocking (E2E_FREEZE_SOAK_BLOCKING=true): exits 0 on a healthy soak, 1 on a freeze and on infra, and writes the report', () => {
   const dir = mkdtempSync(join(tmpdir(), 'share-freeze-verdict-'));

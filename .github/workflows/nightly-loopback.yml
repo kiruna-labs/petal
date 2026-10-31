@@ -98,7 +98,7 @@ on:
         default: ""
         type: string
       share_freeze_pause:
-        description: "RED-PROOF ONLY: '<afterMs>:<durationMs>' drops every window-share frame once (debug knob PETAL_TEST_SHARE_PAUSE) to prove the freeze gate fails. Leave empty."
+        description: "RED-PROOF ONLY: '<afterMs>:<durationMs>' drops every window-share frame once (debug knob PETAL_TEST_SHARE_PAUSE) to prove the freeze gate fails. Put afterMs past the 60 s freeze warm-up (#459), e.g. 90000:3000. Leave empty."
         required: false
         default: ""
         type: string
@@ -1155,10 +1155,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       CARGO_INCREMENTAL: 0
       PETAL_DISABLE_AUDIO: 1
-      # Report-only until #459 excludes the VM's startup stall (it failed
-      # every run and blocked the urgent 0.9.34 camera fix). #459 restores
-      # "true", the user's 2026-10-23 decision (#391).
-      E2E_FREEZE_SOAK_BLOCKING: "false"
+      E2E_FREEZE_SOAK_BLOCKING: "true"
     steps:
       - uses: actions/checkout@v7
         with:

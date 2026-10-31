@@ -33,6 +33,11 @@ const VIEWER_LAG_STALL_MS = 300;
 const GAP_BUCKETS = [50, 100, 200, 300, 500, 1000, 2000, 5000];
 /// Sender log events this close to a freeze are attached to it as evidence.
 const SENDER_EVENT_SLACK_MS = 5000;
+/// #459: the CI VM stalls for 0.5-1.3s within ~60s of the share starting, on
+/// every run. A freeze event that ENDS inside this much of the window is
+/// reported but not counted; one that runs past it still fails. The CLI sets
+/// it (FREEZE_WARMUP_MS); the library default of 0 counts everything.
+export const FREEZE_WARMUP_MS = 60_000;
 
 // Sharer capture/encode lines (session/share.rs, transport/publisher.rs) that
 // place a freeze on the CAPTURE side. Field reports (PETAL-DESKTOP-3H) tie the
@@ -321,12 +326,12 @@ function tickToPresentLatency(viewers, ticks, start, end) {
   return { samples: samples.length, p50Ms: round(percentile(samples, 50)), p95Ms: round(percentile(samples, 95)), note: 'report-only: fixture repaint -> viewer presentation, same host clock' };
 }
 
-export function freezeVerdict({ raw, senderLogText = null, thresholdMs = FREEZE_GAP_THRESHOLD_MS }) {
+export function freezeVerdict({ raw, senderLogText = null, thresholdMs = FREEZE_GAP_THRESHOLD_MS, warmupMs = 0 }) {
   const errors = [];
   const warnings = [];
   const notes = [];
   const infra = [];
-  const report = { outcome: null, thresholdMs, harnessUrl: raw?.harnessUrl ?? null };
+  const report = { outcome: null, thresholdMs, warmupMs, harnessUrl: raw?.harnessUrl ?? null };
   const done = () => {
     for (const problem of infra) errors.unshift(`INFRA-INVALID: ${problem}`);
     report.outcome = infra.length ? 'infra-invalid' : errors.length ? 'fail' : 'pass';
@@ -414,10 +419,17 @@ export function freezeVerdict({ raw, senderLogText = null, thresholdMs = FREEZE_
   report.receiverOnlyFreezes = report.clusters.filter((c) => c.scope === 'single-viewer').length;
   report.latency = tickToPresentLatency(raw.viewers ?? [], ticks, start, end);
 
+  const warmupEnd = start + warmupMs;
   for (const cluster of report.clusters) {
     const detail = cluster.members.map((m) => `${m.viewer} ${m.durationMs}ms`).join(', ');
-    errors.push(`FREEZE ${cluster.scope} at ${cluster.start} (${detail}) -- ${cluster.attribution}`);
+    cluster.warmup = cluster.endMs <= warmupEnd;
+    if (cluster.warmup) {
+      warnings.push(`WARM-UP (not counted, first ${warmupMs}ms): FREEZE ${cluster.scope} at ${cluster.start} (${detail}) -- ${cluster.attribution}`);
+    } else {
+      errors.push(`FREEZE ${cluster.scope} at ${cluster.start} (${detail}) -- ${cluster.attribution}`);
+    }
   }
+  report.warmupFreezes = report.clusters.filter((c) => c.warmup).length;
   for (const v of viewers) {
     const inbound = v.inbound;
     notes.push(`${v.label}: ${v.presentedFrames} frames ${v.fps}fps gap p50/p95/p99/max ${v.gapP50Ms}/${v.gapP95Ms}/${v.gapP99Ms}/${v.gapMaxMs}ms freezes>${thresholdMs}ms=${v.freezes.length} frozen=${v.frozenMs}ms res=${v.resolutions.join(',')}` +
@@ -429,6 +441,6 @@ export function freezeVerdict({ raw, senderLogText = null, thresholdMs = FREEZE_
   }
   notes.push(`sender capture (sharer log): ${JSON.stringify(report.senderCapture.eventCounts)} capture-diag fps min/p50 ${report.senderCapture.captureFpsMin}/${report.senderCapture.captureFpsP50}; host ${JSON.stringify(report.host)}`);
   notes.push(`source: repaint gap p50/p99/max ${report.source.repaintGapP50Ms}/${report.source.repaintGapP99Ms}/${report.source.repaintGapMaxMs}ms; tick->present latency p50/p95 ${report.latency.p50Ms}/${report.latency.p95Ms}ms (report-only)`);
-  notes.push(`share-freeze: ${report.clusters.length} freeze event(s) over ${thresholdMs}ms in ${Math.round((end - start) / 1000)}s: ${report.correlatedFreezes} correlated (all viewers), ${report.receiverOnlyFreezes} single-viewer`);
+  notes.push(`share-freeze: ${report.clusters.length} freeze event(s) over ${thresholdMs}ms in ${Math.round((end - start) / 1000)}s: ${report.correlatedFreezes} correlated (all viewers), ${report.receiverOnlyFreezes} single-viewer, ${report.warmupFreezes} inside the ${warmupMs}ms warm-up (not counted)`);
   return done();
 }
