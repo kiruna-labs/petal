@@ -38,6 +38,18 @@ const SENDER_EVENT_SLACK_MS = 5000;
 /// reported but not counted; one that runs past it still fails. The CLI sets
 /// it (FREEZE_WARMUP_MS); the library default of 0 counts everything.
 export const FREEZE_WARMUP_MS = 60_000;
+/// #439: a viewer's RTT baseline is its median over this much of the window.
+const RTT_BASELINE_MS = 60_000;
+/// A cluster's RTT window: from this long before it (a receiver is still
+/// recovering for a few seconds after the path does) to one ~2s stats
+/// interval after it, so a short freeze still has samples.
+const RTT_LOOKBACK_MS = 5_000;
+const RTT_STATS_SLACK_MS = 2_000;
+/// A viewer's path is impaired for a cluster when its peak RTT in that window
+/// is at least this multiple of its baseline, or this many ms above it. Run
+/// 40004629026's collapse went 66-68ms -> 260-890ms; clean runs peak ~1.2x.
+const RTT_IMPAIRED_FACTOR = 3;
+const RTT_IMPAIRED_EXCESS_MS = 150;
 
 // Sharer capture/encode lines (session/share.rs, transport/publisher.rs) that
 // place a freeze on the CAPTURE side. Field reports (PETAL-DESKTOP-3H) tie the
@@ -151,6 +163,27 @@ function inboundSummary(stats, start, end) {
     decoderImplementation: last.decoderImplementation ?? null,
     unsubscribedSamples: (stats ?? []).filter((r) => r.t >= start && r.t <= end && !r.subscribed).length,
   };
+}
+
+function rttSamples(stats, from, to) {
+  return (stats ?? []).filter((r) => r.t >= from && r.t <= to).map((r) => r.rttMs).filter(Number.isFinite).sort((a, b) => a - b);
+}
+
+/// #439: every viewer's own WebRTC path to the SFU slowed down together around
+/// the cluster, against its baseline. Three independent connections whose RTT
+/// jumps at once is the network between the host and the SFU, not Petal. A
+/// viewer with no samples to compare makes the cluster NOT impaired.
+export function clusterNetworkImpairment(cluster, rawViewers, start) {
+  const viewers = (rawViewers ?? []).map((v) => {
+    const baseline = rttSamples(v.stats, start, start + RTT_BASELINE_MS);
+    const during = rttSamples(v.stats, cluster.startMs - RTT_LOOKBACK_MS, cluster.endMs + RTT_STATS_SLACK_MS);
+    const baselineMs = baseline.length ? percentile(baseline, 50) : null;
+    const peakMs = during.length ? during[during.length - 1] : null;
+    const impaired = Number.isFinite(baselineMs) && Number.isFinite(peakMs) &&
+      (peakMs >= baselineMs * RTT_IMPAIRED_FACTOR || peakMs - baselineMs >= RTT_IMPAIRED_EXCESS_MS);
+    return { viewer: v.label, rttBaselineMs: round(baselineMs), rttPeakMs: round(peakMs), impaired };
+  });
+  return { networkImpaired: viewers.length > 0 && viewers.every((v) => v.impaired), rtt: viewers };
 }
 
 function senderSummary(sender, start, end) {
@@ -423,13 +456,27 @@ export function freezeVerdict({ raw, senderLogText = null, thresholdMs = FREEZE_
   for (const cluster of report.clusters) {
     const detail = cluster.members.map((m) => `${m.viewer} ${m.durationMs}ms`).join(', ');
     cluster.warmup = cluster.endMs <= warmupEnd;
+    Object.assign(cluster, clusterNetworkImpairment(cluster, raw.viewers, start));
+    const rtt = cluster.rtt.map((r) => `${r.viewer} ${r.rttBaselineMs}->${r.rttPeakMs}ms`).join(', ');
+    const line = `FREEZE ${cluster.scope} at ${cluster.start} (${detail}) -- ${cluster.attribution}; RTT ${rtt}${cluster.networkImpaired ? ' (network impaired)' : ''}`;
     if (cluster.warmup) {
-      warnings.push(`WARM-UP (not counted, first ${warmupMs}ms): FREEZE ${cluster.scope} at ${cluster.start} (${detail}) -- ${cluster.attribution}`);
+      warnings.push(`WARM-UP (not counted, first ${warmupMs}ms): ${line}`);
     } else {
-      errors.push(`FREEZE ${cluster.scope} at ${cluster.start} (${detail}) -- ${cluster.attribution}`);
+      errors.push(line);
     }
   }
   report.warmupFreezes = report.clusters.filter((c) => c.warmup).length;
+  // #439: never a pass, but when every counted freeze sat inside a network
+  // collapse every viewer saw, the run measured the path, not Petal: re-run.
+  const counted = report.clusters.filter((c) => !c.warmup);
+  report.networkImpairedFreezes = counted.filter((c) => c.networkImpaired).length;
+  if (counted.length && counted.every((c) => c.networkImpaired)) {
+    const fmt = (key) => {
+      const values = counted.flatMap((c) => c.rtt.map((r) => r[key])).filter(Number.isFinite);
+      return `${Math.round(Math.min(...values))}-${Math.round(Math.max(...values))}`;
+    };
+    infra.push(`network to the SFU impaired during all ${counted.length} counted freeze event(s): RTT ${fmt('rttBaselineMs')}ms -> ${fmt('rttPeakMs')}ms on every viewer; re-run`);
+  }
   for (const v of viewers) {
     const inbound = v.inbound;
     notes.push(`${v.label}: ${v.presentedFrames} frames ${v.fps}fps gap p50/p95/p99/max ${v.gapP50Ms}/${v.gapP95Ms}/${v.gapP99Ms}/${v.gapMaxMs}ms freezes>${thresholdMs}ms=${v.freezes.length} frozen=${v.frozenMs}ms res=${v.resolutions.join(',')}` +
