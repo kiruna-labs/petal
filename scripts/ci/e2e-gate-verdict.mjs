@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { attributionVerdict, envFlagTrue, IMPAIRED_BLOCKING_ENV, latencyVerdict } from './remote-control-latency-verdict.mjs';
-import { freezeVerdict } from './share-freeze-verdict.mjs';
+import { FREEZE_WARMUP_MS, freezeVerdict } from './share-freeze-verdict.mjs';
 
 // Skips that are structurally unavoidable on the release runner and carry no
 // signal there. Keyed by case id AND reason: the same case skipping for any
@@ -362,7 +362,12 @@ function main(argv) {
     // Share-freeze soak (#391): scripts/ci/share-freeze-verdict.mjs. The
     // report is written even when the run was INFRA-INVALID.
     const senderLog = args['sender-log'] && fs.existsSync(args['sender-log']) ? fs.readFileSync(args['sender-log'], 'utf8') : null;
-    verdict = freezeVerdict({ raw: args.raw && fs.existsSync(args.raw) ? readJson(args.raw) : null, senderLogText: senderLog });
+    const warmupMs = Number(process.env.FREEZE_WARMUP_MS || FREEZE_WARMUP_MS);
+    if (!Number.isFinite(warmupMs) || warmupMs < 0) {
+      console.log(`::error::e2e-gate-verdict: FREEZE_WARMUP_MS must be a non-negative number of ms, got '${process.env.FREEZE_WARMUP_MS}'`);
+      return 1;
+    }
+    verdict = freezeVerdict({ raw: args.raw && fs.existsSync(args.raw) ? readJson(args.raw) : null, senderLogText: senderLog, warmupMs });
     if (args.json) fs.writeFileSync(args.json, `${JSON.stringify(verdict.report, null, 2)}\n`);
     console.log(`share-freeze outcome: ${verdict.outcome.toUpperCase()}`);
     verdict = applyReportOnly(verdict, { blocking: envFlagTrue(process.env, FREEZE_SOAK_BLOCKING_ENV) });
