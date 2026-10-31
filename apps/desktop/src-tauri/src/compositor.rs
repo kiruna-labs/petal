@@ -3352,6 +3352,10 @@ fn create_chrome_webview(app: &AppHandle, parent_label: &str, spec: ChromeWebvie
         .inner_size(spec.width, spec.height)
         .decorations(false)
         .transparent(true)
+        // macOS 26 outlines a transparent window that keeps tao's default
+        // shadow in black around its opaque content (#406). These overlays
+        // must draw nothing but their content.
+        .shadow(false)
         .accept_first_mouse(true)
         .skip_taskbar(true)
         .resizable(false)
