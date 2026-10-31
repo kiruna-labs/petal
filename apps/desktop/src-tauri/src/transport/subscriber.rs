@@ -2767,6 +2767,10 @@ pub(crate) fn start_compositor_feed(
                             share_instance_id,
                             control_mode,
                             canonical_source_size,
+                            // #322: the sharer's chosen color, as on macOS.
+                            crate::transport::publisher::identity_palette_index_from_metadata(
+                                &participant.metadata(),
+                            ),
                         )
                         .await;
                     } else {
@@ -2895,6 +2899,9 @@ pub(crate) fn start_compositor_feed(
                             remote_control_available,
                             share_instance_id,
                             control_mode,
+                            crate::transport::publisher::identity_palette_index_from_metadata(
+                                &metadata,
+                            ),
                         )
                         .await;
                     }

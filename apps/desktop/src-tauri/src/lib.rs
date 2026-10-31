@@ -40,6 +40,9 @@ mod test_cockpit_bridge;
 mod cockpit_topic;
 #[cfg(target_os = "macos")]
 mod compositor;
+// Remote-window owner palette, shared by both compositors (#322).
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+mod owner_palette;
 // Crisp mode (#384 Phase 1 spike): native-to-native still-image path for
 // static shared windows. See crisp_still.rs's module doc comment for exact
 // scope (sender + wire protocol + invalidation logic implemented and unit
