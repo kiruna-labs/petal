@@ -4575,8 +4575,12 @@ struct CrashReportFacts {
 /// share the `.ips` suffix (hangs, resource-limit notices) and are never
 /// labelled a crash (#168).
 const IPS_BUG_TYPE_CRASH: &str = "309";
-/// How many frames of the faulting thread the next-launch event names.
-const CRASH_REPORT_FRAMES: usize = 3;
+/// How many frames of the faulting thread the next-launch event carries as a
+/// stacktrace. A WebKit crash's Petal/tao/wry frame is usually deeper than
+/// the top three (#432).
+const CRASH_REPORT_FRAMES: usize = 32;
+/// How many of those the message and log line name.
+const CRASH_REPORT_SUMMARY_FRAMES: usize = 3;
 /// Hard cap on the event message: build + taxonomy + three frames fit
 /// comfortably; anything longer is a schema surprise, not evidence.
 const CRASH_REPORT_MESSAGE_MAX_BYTES: usize = 512;
@@ -4671,13 +4675,67 @@ impl NativeSignalKind {
     }
 }
 
+/// Closed taxonomy of `exception.subtype` (#432). The subtype text carries
+/// the fault address, so only its class and whether the address is in the
+/// null page leave the machine -- never the address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeFaultKind {
+    InvalidAddress,
+    ProtectionFailure,
+    Other,
+}
+
+impl NativeFaultKind {
+    fn classify(subtype: &str) -> Self {
+        if subtype.starts_with("KERN_INVALID_ADDRESS") {
+            Self::InvalidAddress
+        } else if subtype.starts_with("KERN_PROTECTION_FAILURE") {
+            Self::ProtectionFailure
+        } else {
+            Self::Other
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidAddress => "invalid-address",
+            Self::ProtectionFailure => "protection-failure",
+            Self::Other => "other-fault",
+        }
+    }
+}
+
+/// `... at 0x<hex>` -> whether the address is in the null page (< 0x1000).
+fn subtype_fault_in_null_page(subtype: &str) -> Option<bool> {
+    let hex = subtype.split(" at 0x").nth(1)?.split_whitespace().next()?;
+    u64::from_str_radix(hex, 16).ok().map(|address| address < 0x1000)
+}
+
 /// One frame of the faulting thread: the image's basename and the offset
-/// into it. Never the image path, never a symbol -- symbolication is out of
-/// scope and paths can carry a home directory.
+/// into it. Never the image path, never a symbol -- paths can carry a home
+/// directory. `image_index` points into `NativeCrashCause::images`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCrashFrame {
     image: String,
     offset: u64,
+    image_index: Option<usize>,
+}
+
+/// One `usedImages` entry referenced by a frame, for Sentry's `debug_meta`
+/// (#432): basename, UUID and load range, so system frames can be
+/// symbolicated. Never the path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeCrashImage {
+    name: String,
+    uuid: sentry::protocol::Uuid,
+    base: u64,
+    size: u64,
+    arch: Option<String>,
+}
+
+/// `osVersion.build`, e.g. `25A354`: strictly alphanumeric, 4-12 chars.
+fn valid_os_build(build: &str) -> bool {
+    (4..=12).contains(&build.len()) && build.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// What a crash report says about the crash (#168). Every field is
@@ -4696,6 +4754,12 @@ struct NativeCrashCause {
     faulting_thread: Option<u64>,
     /// Top `CRASH_REPORT_FRAMES` frames of the faulting thread.
     frames: Vec<NativeCrashFrame>,
+    /// The `usedImages` entries those frames reference, by `image_index`.
+    images: Vec<Option<NativeCrashImage>>,
+    fault: Option<NativeFaultKind>,
+    fault_in_null_page: Option<bool>,
+    /// `osVersion.build`, validated by `valid_os_build`.
+    os_build: Option<String>,
     /// `bundleInfo.CFBundleShortVersionString`: the build that crashed,
     /// which is not necessarily the build reading the report.
     crashed_build: Option<String>,
@@ -4731,6 +4795,7 @@ impl NativeCrashCause {
         }
         self.frames
             .iter()
+            .take(CRASH_REPORT_SUMMARY_FRAMES)
             .map(|frame| format!("{}+0x{:x}", frame.image, frame.offset))
             .collect::<Vec<_>>()
             .join(", ")
@@ -4787,7 +4852,17 @@ fn parse_native_crash_cause(
         cause.signal = Some(NativeSignalKind::classify(
             exception.get("signal").and_then(|v| v.as_str()),
         ));
+        if let Some(subtype) = exception.get("subtype").and_then(|v| v.as_str()) {
+            cause.fault = Some(NativeFaultKind::classify(subtype));
+            cause.fault_in_null_page = subtype_fault_in_null_page(subtype);
+        }
     }
+    cause.os_build = body
+        .get("osVersion")
+        .and_then(|v| v.get("build"))
+        .and_then(|v| v.as_str())
+        .filter(|build| valid_os_build(build))
+        .map(str::to_string);
     if let Some(termination) = body.get("termination") {
         cause.termination_indicator = termination
             .get("indicator")
@@ -4816,27 +4891,63 @@ fn parse_native_crash_cause(
         .and_then(|t| t.get("frames"))
         .and_then(|v| v.as_array())
     {
+        let mut image_slots: Vec<usize> = Vec::new();
         for frame in frames.iter().take(CRASH_REPORT_FRAMES) {
             let offset = frame
                 .get("imageOffset")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
+            let used_index = frame
+                .get("imageIndex")
+                .and_then(|v| v.as_u64())
+                .and_then(|i| usize::try_from(i).ok());
+            let used = used_index.and_then(|i| images.and_then(|images| images.get(i)));
             // `name` only -- `path` is the on-disk location and can carry a
             // home directory. A missing name is reported as such, never
             // substituted from the path.
-            let image = frame
-                .get("imageIndex")
-                .and_then(|v| v.as_u64())
-                .and_then(|i| images.and_then(|images| images.get(usize::try_from(i).ok()?)))
+            let name = used
                 .and_then(|image| image.get("name"))
                 .and_then(|v| v.as_str())
                 .filter(|name| !name.is_empty() && !name.contains('/'))
-                .map(|name| name.chars().take(64).collect())
-                .unwrap_or_else(|| "?".to_string());
-            cause.frames.push(NativeCrashFrame { image, offset });
+                .map(|name| name.chars().take(64).collect::<String>());
+            let image_index = match (used_index, used) {
+                (Some(used_index), Some(used)) => {
+                    let slot = image_slots.iter().position(|&i| i == used_index).unwrap_or_else(|| {
+                        image_slots.push(used_index);
+                        cause.images.push(native_crash_image(used, name.as_deref()));
+                        image_slots.len() - 1
+                    });
+                    Some(slot)
+                }
+                _ => None,
+            };
+            cause.frames.push(NativeCrashFrame {
+                image: name.unwrap_or_else(|| "?".to_string()),
+                offset,
+                image_index,
+            });
         }
     }
     cause
+}
+
+/// A `usedImages` entry as a debug image, or `None` when it lacks a name, a
+/// UUID or a load address. Built from named fields only: `path` is never read.
+fn native_crash_image(image: &serde_json::Value, name: Option<&str>) -> Option<NativeCrashImage> {
+    Some(NativeCrashImage {
+        name: name?.to_string(),
+        uuid: image
+            .get("uuid")
+            .and_then(|v| v.as_str())
+            .and_then(|uuid| sentry::protocol::Uuid::parse_str(uuid).ok())?,
+        base: image.get("base").and_then(|v| v.as_u64())?,
+        size: image.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+        arch: image
+            .get("arch")
+            .and_then(|v| v.as_str())
+            .filter(|arch| arch.len() <= 16 && arch.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+            .map(str::to_string),
+    })
 }
 
 /// The next-launch Sentry event for an ATTRIBUTED crash report (#168): a
@@ -4872,31 +4983,95 @@ fn native_crash_report_event(cause: &NativeCrashCause) -> Option<sentry::protoco
     }
     let mut tags = sentry::protocol::Map::new();
     tags.insert("build_version".to_string(), crashed_build.clone());
+    if let Some(os_build) = &cause.os_build {
+        tags.insert("os_build".to_string(), os_build.clone());
+    }
+    let mut value = signal.as_str().to_string();
+    if let Some(fault) = cause.fault {
+        value.push(' ');
+        value.push_str(fault.as_str());
+    }
+    if let Some(null_page) = cause.fault_in_null_page {
+        value.push_str(if null_page { " null-page" } else { " non-null" });
+    }
+    value.push_str(&format!(" (bug_type {IPS_BUG_TYPE_CRASH})"));
+    // #432: one issue per crash shape AND faulting image, so a WebKit
+    // SIGSEGV and a libyuv SIGSEGV no longer merge.
+    let first_image = cause
+        .frames
+        .first()
+        .map(|frame| frame.image.clone())
+        .unwrap_or_else(|| "no-frames".to_string());
     Some(sentry::protocol::Event {
         level: sentry::protocol::Level::Fatal,
         message: Some(message),
         exception: vec![sentry::protocol::Exception {
             ty: exception.as_str().into(),
-            value: Some(format!(
-                "{} (bug_type {IPS_BUG_TYPE_CRASH})",
-                signal.as_str()
-            )),
+            value: Some(value),
             mechanism: Some(sentry::protocol::Mechanism {
                 ty: "native_crash_report".into(),
                 handled: Some(false),
                 ..Default::default()
             }),
+            stacktrace: native_crash_stacktrace(cause),
             ..Default::default()
         }]
         .into(),
         fingerprint: Cow::Owned(vec![
             Cow::Borrowed("native-crash-report"),
             Cow::Borrowed(exception.as_str()),
+            Cow::Owned(first_image),
         ]),
         release: Some(Cow::Owned(crashed_build)),
         tags,
+        debug_meta: Cow::Owned(sentry::protocol::DebugMeta {
+            images: cause
+                .images
+                .iter()
+                .flatten()
+                .map(|image| {
+                    sentry::protocol::AppleDebugImage {
+                        name: image.name.clone(),
+                        arch: image.arch.clone(),
+                        cpu_type: None,
+                        cpu_subtype: None,
+                        image_addr: sentry::protocol::Addr(image.base),
+                        image_size: image.size,
+                        image_vmaddr: sentry::protocol::Addr(0),
+                        uuid: image.uuid,
+                    }
+                    .into()
+                })
+                .collect(),
+            ..Default::default()
+        }),
         ..Default::default()
     })
+}
+
+/// The faulting thread as a Sentry stacktrace (#432): image basename plus,
+/// when the image's load address is known, `image base + offset`, so Sentry
+/// can symbolicate against `debug_meta`. Sentry wants the crashing frame
+/// LAST; the report lists it first.
+fn native_crash_stacktrace(cause: &NativeCrashCause) -> Option<sentry::protocol::Stacktrace> {
+    let frames = cause
+        .frames
+        .iter()
+        .map(|frame| {
+            let image = frame
+                .image_index
+                .and_then(|i| cause.images.get(i))
+                .and_then(Option::as_ref);
+            sentry::protocol::Frame {
+                package: Some(frame.image.clone()),
+                image_addr: image.map(|image| sentry::protocol::Addr(image.base)),
+                instruction_addr: image
+                    .map(|image| sentry::protocol::Addr(image.base.wrapping_add(frame.offset))),
+                ..Default::default()
+            }
+        })
+        .collect();
+    sentry::protocol::Stacktrace::from_frames_reversed(frames)
 }
 
 /// Bounded: a crash report is normally a few hundred KB, and this runs on
@@ -5717,7 +5892,8 @@ fn scrub_event_for_sentry(
             .unwrap_or_else(|| "log_error".to_string());
         event.tags.insert("error_category".to_string(), category);
     }
-    const ALLOWED_TAGS: &[&str] = &["build_version", "os_version", "error_category"];
+    // `os_build` is set only by the native crash report, validated there.
+    const ALLOWED_TAGS: &[&str] = &["build_version", "os_version", "os_build", "error_category"];
     event
         .tags
         .retain(|key, _| ALLOWED_TAGS.contains(&key.as_str()));
@@ -6913,6 +7089,7 @@ mod tests {
              {{\n  \"pid\" : {pid},\n  \"procName\" : \"desktop\",\n  \"procPath\" : \"{FIELD_EXECUTABLE}\",\n\
              \"exception\" : {{\"codes\":\"0x0000000000000001, 0x0000000000000010\",\"rawCodes\":[1,16],\"type\":\"EXC_BAD_ACCESS\",\"signal\":\"SIGSEGV\",\"subtype\":\"KERN_INVALID_ADDRESS at 0x0000000000000010\"}},\n\
              \"termination\" : {{\"flags\":0,\"code\":11,\"namespace\":\"SIGNAL\",\"indicator\":\"Segmentation fault: 11\",\"reasons\":[\"secret-room-name in a reason string\"],\"byProc\":\"exc handler\",\"byPid\":{pid}}},\n\
+             \"osVersion\" : {{\"train\":\"macOS 27.0.1\",\"build\":\"25A354\",\"releaseType\":\"User\"}},\n\
              \"faultingThread\" : 1,\n\
              \"threads\" : [\n\
                {{\"id\":100,\"name\":\"main\",\"frames\":[{{\"imageOffset\":1,\"imageIndex\":0}}]}},\n\
@@ -6985,24 +7162,37 @@ mod tests {
             cause.termination_indicator.as_deref(),
             Some("Segmentation fault: 11")
         );
-        // The faulting thread's top three frames, by image NAME, never path.
+        // The faulting thread's frames, by image NAME, never path; each
+        // points at its (deduplicated) image.
         assert_eq!(
             cause.frames,
             vec![
                 NativeCrashFrame {
                     image: "Petal".into(),
-                    offset: 4660
+                    offset: 4660,
+                    image_index: Some(0),
                 },
                 NativeCrashFrame {
                     image: "libsystem_kernel.dylib".into(),
-                    offset: 22136
+                    offset: 22136,
+                    image_index: Some(1),
                 },
                 NativeCrashFrame {
                     image: "Injected".into(),
-                    offset: 99
+                    offset: 99,
+                    image_index: Some(2),
+                },
+                NativeCrashFrame {
+                    image: "Petal".into(),
+                    offset: 7,
+                    image_index: Some(0),
                 },
             ]
         );
+        assert_eq!(cause.images.len(), 3, "one entry per referenced image");
+        assert_eq!(cause.fault, Some(NativeFaultKind::InvalidAddress));
+        assert_eq!(cause.fault_in_null_page, Some(true));
+        assert_eq!(cause.os_build.as_deref(), Some("25A354"));
         assert_eq!(
             cause.frames_summary(),
             "Petal+0x1234, libsystem_kernel.dylib+0x5678, Injected+0x63"
@@ -7040,14 +7230,19 @@ mod tests {
                 .iter()
                 .map(|f| f.as_ref())
                 .collect::<Vec<_>>(),
-            vec!["native-crash-report", "EXC_BAD_ACCESS"],
-            "one issue per crash shape, stable across builds"
+            vec!["native-crash-report", "EXC_BAD_ACCESS", "Petal"],
+            "one issue per crash shape and faulting image, stable across builds"
         );
         assert_eq!(event.exception.len(), 1);
         assert_eq!(event.exception[0].ty, "EXC_BAD_ACCESS");
         assert_eq!(
             event.exception[0].value.as_deref(),
-            Some("SIGSEGV (bug_type 309)")
+            Some("SIGSEGV invalid-address null-page (bug_type 309)")
+        );
+        assert_eq!(
+            event.tags.get("os_build").map(String::as_str),
+            Some("25A354"),
+            "the OS build survives the scrubber as an allow-listed tag"
         );
         let message = event.message.as_deref().unwrap_or_default();
         assert!(message.contains("build 0.9.7"), "{message}");
@@ -7093,6 +7288,13 @@ mod tests {
         for f in event.fingerprint.iter() {
             everything.push_str(f);
         }
+        // #432: the stack and debug images go out too; they must be as clean.
+        everything.push_str(&serde_json::to_string(&event.exception[0].stacktrace).unwrap());
+        everything.push_str(&serde_json::to_string(&event.debug_meta).unwrap());
+        assert!(
+            !everything.contains("0000000000000010") && !everything.contains("\"0x10\""),
+            "the fault address never leaves the machine: {everything}"
+        );
         assert!(
             !everything.contains('/'),
             "no path of any kind: {everything}"
@@ -7115,6 +7317,80 @@ mod tests {
             "symbols are out of scope: {everything}"
         );
         assert!(event.contexts.is_empty() && event.extra.is_empty() && event.user.is_none());
+    }
+
+    /// #432: a crash body whose faulting thread has `frames` frames spread
+    /// over `images` images, with the given subtype and OS build.
+    fn ips_deep_crash_body(frames: usize, first_image: &str, subtype: &str, os_build: &str) -> String {
+        let frame_list = (0..frames)
+            .map(|i| format!("{{\"imageOffset\":{},\"imageIndex\":{}}}", 16 * (i + 1), i % 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"app_name\":\"desktop\",\"timestamp\":\"2026-10-23 16:54:31.00 +0000\",\"bug_type\":\"309\"}}\n\
+             {{\"pid\":4242,\"procPath\":\"{FIELD_EXECUTABLE}\",\
+             \"exception\":{{\"type\":\"EXC_BAD_ACCESS\",\"signal\":\"SIGSEGV\",\"subtype\":\"{subtype}\"}},\
+             \"osVersion\":{{\"build\":\"{os_build}\"}},\"faultingThread\":0,\
+             \"threads\":[{{\"frames\":[{frame_list}]}}],\
+             \"usedImages\":[\
+               {{\"arch\":\"arm64e\",\"base\":8589934592,\"size\":4096,\"uuid\":\"a1b2c3d4-0000-1111-2222-333344445555\",\"path\":\"/System/Library/Frameworks/{first_image}.framework/{first_image}\",\"name\":\"{first_image}\"}},\
+               {{\"arch\":\"arm64e\",\"base\":12884901888,\"size\":8192,\"uuid\":\"b1b2c3d4-0000-1111-2222-333344445555\",\"path\":\"/Users/alice/Petal.app/Contents/MacOS/Petal\",\"name\":\"Petal\"}}\
+             ]}}\n"
+        )
+    }
+
+    fn deep_crash_event(frames: usize, first_image: &str, subtype: &str, os_build: &str) -> sentry::protocol::Event<'static> {
+        let facts = crash_report_facts_from_text(&ips_deep_crash_body(frames, first_image, subtype, os_build));
+        scrub_event_for_sentry(native_crash_report_event(&facts.cause).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_native_crash_event_carries_the_deep_stack_and_symbolicatable_images() {
+        let event = deep_crash_event(40, "WebCore", "KERN_INVALID_ADDRESS at 0x00000001deadbeef", "25A354");
+        let stack = event.exception[0].stacktrace.as_ref().expect("a stacktrace");
+        assert_eq!(stack.frames.len(), CRASH_REPORT_FRAMES, "capped, and deeper than the summary");
+        // Sentry wants the crashing frame LAST.
+        let crashing = stack.frames.last().unwrap();
+        assert_eq!(crashing.package.as_deref(), Some("WebCore"));
+        assert_eq!(crashing.image_addr, Some(sentry::protocol::Addr(8_589_934_592)));
+        assert_eq!(crashing.instruction_addr, Some(sentry::protocol::Addr(8_589_934_592 + 16)));
+        assert_eq!(stack.frames.first().unwrap().package.as_deref(), Some("Petal"));
+        assert_eq!(event.debug_meta.images.len(), 2);
+        let json = serde_json::to_string(&event.debug_meta).unwrap();
+        assert!(json.contains("a1b2c3d4-0000-1111-2222-333344445555"), "{json}");
+        assert!(!json.contains('/') && !json.contains("alice"), "no image paths: {json}");
+        assert_eq!(
+            event.exception[0].value.as_deref(),
+            Some("SIGSEGV invalid-address non-null (bug_type 309)")
+        );
+        let everything = format!("{json}{}", serde_json::to_string(&event.exception).unwrap());
+        assert!(!everything.to_lowercase().contains("deadbeef"), "no fault address: {everything}");
+        assert!(event.message.as_deref().unwrap().contains("frames: WebCore+0x10, Petal+0x20, WebCore+0x30"), "{:?}", event.message);
+        assert!(!event.message.as_deref().unwrap().contains("+0x40"), "the message keeps 3 frames");
+    }
+
+    #[test]
+    fn crashes_in_different_images_are_different_sentry_issues() {
+        let webkit = deep_crash_event(4, "WebCore", "KERN_INVALID_ADDRESS at 0x10", "25A354");
+        let libyuv = deep_crash_event(4, "libyuv", "KERN_INVALID_ADDRESS at 0x10", "25A354");
+        assert_ne!(webkit.fingerprint, libyuv.fingerprint);
+        assert_eq!(webkit.fingerprint[2], "WebCore");
+    }
+
+    #[test]
+    fn crash_fault_class_and_os_build_are_closed_and_validated() {
+        let protection = deep_crash_event(2, "WebKit", "KERN_PROTECTION_FAILURE at 0x0000000000000008", "26A5378c");
+        assert_eq!(
+            protection.exception[0].value.as_deref(),
+            Some("SIGSEGV protection-failure null-page (bug_type 309)")
+        );
+        assert_eq!(protection.tags.get("os_build").map(String::as_str), Some("26A5378c"));
+        let odd = deep_crash_event(2, "WebKit", "EXC_ARM_DA_ALIGN at 0xzz", "25A 354; rm");
+        assert_eq!(odd.exception[0].value.as_deref(), Some("SIGSEGV other-fault (bug_type 309)"));
+        assert!(odd.tags.get("os_build").is_none(), "an invalid build is dropped, not sanitized");
+        assert_eq!(subtype_fault_in_null_page("KERN_INVALID_ADDRESS at 0x0000000000000fff"), Some(true));
+        assert_eq!(subtype_fault_in_null_page("KERN_INVALID_ADDRESS at 0x1000"), Some(false));
+        assert_eq!(subtype_fault_in_null_page("KERN_INVALID_ADDRESS"), None);
     }
 
     #[test]
