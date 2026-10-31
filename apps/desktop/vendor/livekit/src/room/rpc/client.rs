@@ -57,8 +57,10 @@ impl RpcClientManager {
         let max_round_trip_latency = data.max_round_trip_latency;
         let min_effective_timeout = Duration::from_millis(1000);
 
-        if let Some(version_str) = transport.server_version() {
-            let server_version = Version::parse(&version_str).unwrap();
+        // Petal patch (#372): an unparseable version is "unknown", not a panic.
+        if let Some(server_version) =
+            transport.server_version().and_then(|version| Version::parse(&version).ok())
+        {
             let min_required_version = Version::parse("1.8.0").unwrap();
             if server_version < min_required_version {
                 return Err(RpcError::built_in(RpcErrorCode::UnsupportedServer, None));

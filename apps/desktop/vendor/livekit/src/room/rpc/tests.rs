@@ -762,3 +762,53 @@ async fn test_v2_handler_unsupported_method() {
     let err = extract_response_error(&transport).unwrap();
     assert_eq!(err.code, RpcErrorCode::UnsupportedMethod as u32);
 }
+
+// =========================================================================
+// Petal patch (#372): server version gating
+// =========================================================================
+
+#[test]
+fn reported_server_version_is_none_only_when_the_server_sent_none() {
+    assert_eq!(reported_server_version("1.9.4".to_string()).as_deref(), Some("1.9.4"));
+    assert_eq!(reported_server_version(String::new()), None);
+}
+
+#[tokio::test]
+async fn perform_rpc_rejects_a_server_older_than_1_8() {
+    let client = Arc::new(RpcClientManager::new());
+    let transport = Arc::new(MockTransport { server_ver: Some("1.7.9".to_string()), ..MockTransport::new() });
+    let result = spawn_perform_rpc(client, transport, PerformRpcData::new("dest", "greet"))
+        .await
+        .await
+        .expect("perform_rpc must not panic");
+    assert_eq!(result.unwrap_err().code, RpcErrorCode::UnsupportedServer as u32);
+}
+
+#[tokio::test]
+async fn perform_rpc_survives_an_empty_or_unparseable_server_version() {
+    for version in ["", "not-a-version"] {
+        let client = Arc::new(RpcClientManager::new());
+        let transport =
+            Arc::new(MockTransport { server_ver: Some(version.to_string()), ..MockTransport::new() });
+        let handle = spawn_perform_rpc(
+            client,
+            transport.clone(),
+            PerformRpcData::new("dest", "greet").with_response_timeout(Duration::from_millis(1)),
+        )
+        .await;
+        // The request goes out (the version is treated as unknown) ...
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while transport.packets().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("version {version:?}: no request was sent"));
+        handle.abort();
+        // ... and the task did not panic on the version.
+        match handle.await {
+            Err(error) => assert!(error.is_cancelled(), "version {version:?}: {error}"),
+            Ok(_) => {}
+        }
+    }
+}

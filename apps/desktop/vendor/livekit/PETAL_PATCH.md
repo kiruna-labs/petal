@@ -388,3 +388,32 @@ any non-Screenshare video track before the first frame is encoded.
 ## Updating
 
 Drop this patch once upstream exposes a per-publication degradation preference.
+
+# Petal patch: RPC server-version gate (#372)
+
+## Why this exists
+
+`RpcTransport::server_version` for `Room` had its test inverted
+(`info.version.is_empty().then(|| info.version)`): a real version read as
+`None`, so the `>= 1.8.0` gate in `perform_rpc` never ran, and an empty one
+read as `Some("")`, which `Version::parse("").unwrap()` turned into a panic.
+Petal does not call `perform_rpc` today, so this was latent.
+
+## The fix
+
+`reported_server_version` returns the version only when it is non-empty, and
+`perform_rpc` treats an unparseable version as unknown instead of unwrapping.
+Tests in `room/rpc/tests.rs`: the helper both ways, an old server rejected
+with `UnsupportedServer`, and an empty or garbage version not panicking.
+The vendored crate is not a workspace member, so run them from
+`apps/desktop/vendor/livekit` with the app's lockfile and patches:
+
+    cp ../../src-tauri/Cargo.lock . && cargo test --lib \
+      --config 'patch.crates-io.webrtc-sys.path="<abs>/vendor/webrtc-sys"' \
+      --config 'patch.crates-io.libwebrtc.path="<abs>/vendor/libwebrtc"' rpc:: \
+      && rm Cargo.lock
+
+## Updating
+
+Drop this patch once upstream's `server_version` returns the version when it
+is present and `perform_rpc` no longer unwraps the parse.
