@@ -84,6 +84,9 @@ step "Harness: capture-preflight contract (plan 6d step 2)"
 step "CI: PR-gate path filter, both directions (#133)"
 "$ROOT/scripts/test-gate-paths-changed.sh"
 
+step "CI: Tart runner job hand-off to the guest agent, both directions (#436)"
+"$ROOT/scripts/test-tart-runner-handoff.sh"
+
 # Self-installing, idempotent: makes scripts/git-hooks/pre-push (the local
 # replacement for the disabled .github/workflows/rust-gate.yml -- GitHub
 # Actions billing on macOS runners made that workflow unreliable) apply to
