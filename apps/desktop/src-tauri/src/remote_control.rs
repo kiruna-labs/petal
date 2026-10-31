@@ -214,6 +214,11 @@ thread_local! {
     /// injection -- leaves it false.
     static KEY_DOWN_DELIVERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
+    /// #368: set when THIS injection replays a host-synthesized release
+    /// (`ReplayTask::synthetic_release`). Same one-thread-per-event scoping.
+    static INJECTION_IS_SYNTHETIC_RELEASE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+
     /// #404 follow-up: the host route that delivered THIS injection, plus
     /// whether an AX text click moved the app's keyboard focus. Same
     /// one-thread-per-event scoping; the last route noted wins (a fallback
@@ -300,6 +305,32 @@ pub(crate) fn injection_was_cancelled() -> bool {
             .map(|flag| flag.load(Ordering::Acquire))
             .unwrap_or(false)
     })
+}
+
+/// #368: is the current injection a host-synthesized release (revoke, TTL,
+/// disconnect) rather than input the controller sent?
+pub(crate) fn injection_is_synthetic_release() -> bool {
+    INJECTION_IS_SYNTHETIC_RELEASE.with(|cell| cell.get())
+}
+
+/// Test-only: mark the current thread's injection as a synthetic release,
+/// cleared again when the guard drops.
+#[cfg(test)]
+pub(crate) struct SyntheticReleaseForTests;
+
+#[cfg(test)]
+impl SyntheticReleaseForTests {
+    pub(crate) fn set() -> Self {
+        INJECTION_IS_SYNTHETIC_RELEASE.with(|cell| cell.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SyntheticReleaseForTests {
+    fn drop(&mut self) {
+        INJECTION_IS_SYNTHETIC_RELEASE.with(|cell| cell.set(false));
+    }
 }
 
 /// Test-only: force `injection_was_cancelled()` to read `true`/`false` on the
@@ -3283,6 +3314,7 @@ fn run_replay_with_deadline_tracked(
     let message = task.message.clone();
     let frame = task.frame;
     let target_pid = task.target_pid;
+    let synthetic_release = task.synthetic_release;
     let cancelled = Arc::new(AtomicBool::new(false));
     let thread_cancelled = Arc::clone(&cancelled);
     let thread_shard_key = shard_key;
@@ -3290,6 +3322,7 @@ fn run_replay_with_deadline_tracked(
         .name("petal-rc-inject".to_string())
         .spawn(move || {
             INJECTION_CANCELLED.with(|cell| *cell.borrow_mut() = Some(thread_cancelled));
+            INJECTION_IS_SYNTHETIC_RELEASE.with(|cell| cell.set(synthetic_release));
             take_key_down_delivered();
             take_injection_route();
             let result = inject(&message, frame, target_pid);
@@ -12478,6 +12511,16 @@ pub(crate) mod input {
             // SkyLight fallback, silently dropping the click that a stored
             // GestureMode::PassThrough (right below) would have delivered.
             // Attempt the same fallback here instead of guaranteeing loss.
+            //
+            // #368: but never for a host-synthesized release. With no gesture
+            // nothing is held, and its Down was dropped by the revoke that
+            // queued it, so a click here acts after control is gone.
+            if super::injection_is_synthetic_release() {
+                log::info!(
+                    "remote-control: AX pointer up window_id={window_id} controller='{controller_id}' mode=<none> synthetic release, nothing held; no click"
+                );
+                return Ok(AxReplayOutcome::Handled);
+            }
             let outcome = sl_click_or_passthrough(pid, up_point, button, 0.0, click_count, sl);
             log::info!(
                 "remote-control: AX pointer up window_id={window_id} controller='{controller_id}' mode=<none> outcome={}",
@@ -20277,6 +20320,48 @@ pub(crate) mod input {
             // cursor takeover this gesture opened -- it is keyed by window id
             // and would otherwise leak into the next test.
             release_session_tap_gestures_with_backend(down.window_id, None, &tap);
+        }
+
+        /// #368: a revoke that races a queued Down drops the Down (stale
+        /// epoch) but replays its synthetic Up, which then finds no gesture.
+        /// That Up must not take the #446 orphaned-Up click fallback, while a
+        /// controller's own orphaned Up still must.
+        #[test]
+        fn a_synthetic_release_with_no_gesture_posts_no_click() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::untrusted();
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+
+            let sl = RecordingSlClickBackend::available();
+            {
+                let _synthetic = super::super::SyntheticReleaseForTests::set();
+                let _ = replay_with_backends(&up, frame, Some(1234), &sink, &ax, &sl, &pb, &tap);
+            }
+            assert!(
+                sl.clicks().is_empty(),
+                "a synthetic release with nothing held clicked after control was revoked: {:?}",
+                sl.clicks()
+            );
+            assert!(sink.events().is_empty(), "{:?}", sink.events());
+
+            clear_all_ax_control_state();
+            let sl = RecordingSlClickBackend::available();
+            let _ = replay_with_backends(&up, frame, Some(1234), &sink, &ax, &sl, &pb, &tap);
+            assert!(
+                !sl.clicks().is_empty(),
+                "a controller's own orphaned Up must still take the #446 click fallback"
+            );
         }
 
         /// #446 acceptance A7: revoking a SINGLE controller mid-drag.
