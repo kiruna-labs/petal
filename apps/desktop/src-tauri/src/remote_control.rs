@@ -1903,6 +1903,28 @@ pub(crate) fn revoke_all(app: &AppHandle) {
     }
 }
 
+/// `revoke_controller`'s grant removal, split out so the #365 interleaving
+/// test can drive it without an `AppHandle` (#368). Returns the windows the
+/// controller held a grant on.
+fn revoke_controller_input_authority(controller_id: &str, reason: &'static str) -> Vec<u32> {
+    // #365: drain + grant removal under the fence -- see `input_authority_fence`.
+    let fence = input_authority_fence().lock_unpoisoned();
+    let releases = drain_pressed_for_controller_id(controller_id);
+    let mut active = Vec::new();
+    sessions().lock_unpoisoned().retain(|key, _| {
+        if key.controller_id == controller_id {
+            active.push(key.window_id);
+            false
+        } else {
+            true
+        }
+    });
+    drop(fence);
+    note_control_grants_changed();
+    enqueue_synthetic_releases(releases, reason);
+    active
+}
+
 pub(crate) fn revoke_controller(app: &AppHandle, controller_id: &str, reason: &'static str) {
     remote_clipboard::clear_pending_copy_for_owner(controller_id);
     remote_clipboard::clear_copy_operations_for_sender(controller_id);
@@ -1919,21 +1941,7 @@ pub(crate) fn revoke_controller(app: &AppHandle, controller_id: &str, reason: &'
         remote_control_engine().remove_controller_grants_for_owner(controller_id);
         crate::windows_remote_control::clear_pending_controller_operations_for_owner(controller_id);
     }
-    // #365: drain + grant removal under the fence -- see `input_authority_fence`.
-    let fence = input_authority_fence().lock_unpoisoned();
-    let releases = drain_pressed_for_controller_id(controller_id);
-    let mut active = Vec::new();
-    sessions().lock_unpoisoned().retain(|key, _| {
-        if key.controller_id == controller_id {
-            active.push(key.window_id);
-            false
-        } else {
-            true
-        }
-    });
-    drop(fence);
-    note_control_grants_changed();
-    enqueue_synthetic_releases(releases, reason);
+    let active = revoke_controller_input_authority(controller_id, reason);
     last_unreliable_seqs()
         .lock_unpoisoned()
         .retain(|(_, stored_controller_id, _), _| stored_controller_id != controller_id);
@@ -24796,7 +24804,39 @@ mod tests {
         }
     }
 
+    /// #368 item 3: every grant-removal path that can run while the resolver
+    /// is between its auth gate and its commit. (`revoke_all` takes the same
+    /// fence but clears every grant in the process, so it is not driven from a
+    /// parallel test suite.)
+    #[derive(Clone, Copy, Debug)]
+    enum Issue365Removal {
+        Revoke,
+        RevokeController,
+        DrainWindow,
+    }
+
+    fn issue365_remove_grant(removal: Issue365Removal, ids: &RemoteControlTestIds) {
+        match removal {
+            Issue365Removal::Revoke => revoke(ids.window_id, &ids.controller_id),
+            Issue365Removal::RevokeController => {
+                revoke_controller_input_authority(&ids.controller_id, "test controller left");
+            }
+            Issue365Removal::DrainWindow => {
+                let (_, releases) = drain_window_control_releasing(ids.window_id, |_| {});
+                enqueue_synthetic_releases(releases, "test window drained");
+            }
+        }
+    }
+
     fn issue365_revoke_between_auth_and_commit(message_type: RemoteControlType, name: &str) {
+        issue365_removal_between_auth_and_commit(Issue365Removal::Revoke, message_type, name);
+    }
+
+    fn issue365_removal_between_auth_and_commit(
+        removal: Issue365Removal,
+        message_type: RemoteControlType,
+        name: &str,
+    ) {
         let _guard = pressed_input_test_lock();
         let ids = remote_control_test_ids(name);
         let sink = Issue365Sink::register(&ids.controller_id);
@@ -24806,8 +24846,9 @@ mod tests {
 
         // The resolver pops Down 12 and passes its auth gate...
         assert!(resolve_task_still_authorized(&down));
-        // ...the controller's Release is then handled inline on the receive path...
-        revoke(ids.window_id, &ids.controller_id);
+        // ...the grant is then removed (the controller's Release, its
+        // departure, or the share ending)...
+        issue365_remove_grant(removal, &ids);
         // ...before the resolver records and queues Down 12, then pops Up 13.
         let _ = commit_resolved_input(down, frame(0, 0, 100, 100), ISSUE365_PID, None, None, None);
         issue365_resolve(up);
@@ -24819,6 +24860,17 @@ mod tests {
                 .contains_key(&(ids.window_id, ids.controller_id.clone())),
             "revoked controller still has a held input: {:?}",
             sink.summary()
+        );
+
+        // #368: and a Down committed BEFORE the removal is drained by it.
+        let token = authorize_shared(ids.window_id, &ids.controller_id);
+        issue365_resolve(issue365_input(message_type, RemoteControlAction::Down, 20, &ids, &token));
+        let key = (ids.window_id, ids.controller_id.clone());
+        assert!(pressed_inputs().lock_unpoisoned().contains_key(&key), "{removal:?}: the Down was held");
+        issue365_remove_grant(removal, &ids);
+        assert!(
+            !pressed_inputs().lock_unpoisoned().contains_key(&key),
+            "{removal:?} left a committed {message_type:?} held"
         );
     }
 
@@ -24836,6 +24888,19 @@ mod tests {
             RemoteControlType::Pointer,
             "issue365_revoke_between_resolver_auth_and_commit_never_strands_a_button",
         );
+    }
+
+    #[test]
+    fn issue368_every_grant_removal_path_between_resolver_auth_and_commit_strands_nothing() {
+        for removal in [Issue365Removal::RevokeController, Issue365Removal::DrainWindow] {
+            for message_type in [RemoteControlType::Key, RemoteControlType::Pointer] {
+                issue365_removal_between_auth_and_commit(
+                    removal,
+                    message_type,
+                    &format!("issue368_removal_{removal:?}_{message_type:?}"),
+                );
+            }
+        }
     }
 
     #[test]
