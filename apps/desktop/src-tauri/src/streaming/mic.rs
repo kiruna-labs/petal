@@ -278,6 +278,8 @@ fn run(meeting: &dyn MeetingMic, mixer: &Mutex<AudioMixer>, reference: &Mutex<Au
     let mut muted_at = Instant::now();
     let mut device_at = Instant::now();
     let mut retry_at = Instant::now();
+    // The last open error, so a machine with no mic logs it once, not every retry.
+    let mut open_error: Option<String> = None;
     let mut level_at = Instant::now();
     while !stop.load(Ordering::Acquire) {
         let now = Instant::now();
@@ -307,9 +309,15 @@ fn run(meeting: &dyn MeetingMic, mixer: &Mutex<AudioMixer>, reference: &Mutex<Au
         }
         if capture.is_none() && now >= retry_at {
             match open_capture(device.as_deref()) {
-                Ok(open) => capture = Some(open),
+                Ok(open) => {
+                    capture = Some(open);
+                    open_error = None;
+                }
                 Err(error) => {
-                    log::warn!("streaming: stream mic unavailable: {error}");
+                    if open_error.as_deref() != Some(error.as_str()) {
+                        log::warn!("streaming: stream mic unavailable: {error}");
+                        open_error = Some(error);
+                    }
                     retry_at = now + RETRY_AFTER;
                 }
             }
