@@ -2070,6 +2070,23 @@ fn prepare_direct_display_region_source(
     })
 }
 
+/// The display whose whole-display capture streamer mode rebuilds, if this
+/// capture is one. A direct (restarted) display capture is keyed by the
+/// display id; a display picked in the share picker by its display source
+/// id, and its filter (`with_display(..).with_excluding_windows(&[])`) is
+/// exactly what `direct_display_filter(.., false)` restores. Region shares
+/// already exclude Petal; a picked window isn't a display.
+fn streamer_exclusion_display_id(origin: CaptureSourceOrigin, capture_id: u32, has_region: bool) -> Option<u32> {
+    if has_region {
+        return None;
+    }
+    match origin {
+        CaptureSourceOrigin::DirectWindowId => Some(capture_id),
+        CaptureSourceOrigin::SystemPicker => crate::window_source::is_display_source_id(capture_id)
+            .then(|| crate::window_source::display_id_from_source_id(capture_id)),
+    }
+}
+
 /// A whole-display filter. With `exclude_own`, Petal itself is left out --
 /// as an application, so windows it opens later (a remote share surface, a
 /// toast, the go-live dialog) stay out too. That is streamer mode while this
@@ -2193,17 +2210,18 @@ impl WindowCaptureConfig {
         self.configured_state.lock_unpoisoned().output
     }
 
-    /// Streamer mode: rebuild a direct whole-display share's filter with or
-    /// without Petal's own windows. Only for a display share (the caller
-    /// checks the share's kind; `window_id` is then the raw display id).
-    /// Region shares already exclude Petal; a system-picker filter is the
-    /// picker's and is kept as chosen. Returns whether the filter changed.
+    /// Streamer mode: rebuild a whole-display share's filter with or without
+    /// Petal's own windows. Only for a display share (the caller checks the
+    /// share's kind), whether picked in the share picker or restarted
+    /// directly ([`streamer_exclusion_display_id`]). Region shares already
+    /// exclude Petal. Returns whether the filter changed.
     pub(crate) fn set_display_own_windows_excluded(&self, excluded: bool) -> Result<bool, CaptureError> {
         let _region_transaction = self.region_transaction.lock_unpoisoned();
-        if self.origin != CaptureSourceOrigin::DirectWindowId || self.source_rect.lock_unpoisoned().is_some() {
+        let has_region = self.source_rect.lock_unpoisoned().is_some();
+        let Some(display_id) = streamer_exclusion_display_id(self.origin, self.window_id, has_region) else {
             return Ok(false);
-        }
-        let (filter, _) = direct_display_filter(self.window_id, excluded)?;
+        };
+        let (filter, _) = direct_display_filter(display_id, excluded)?;
         self.stream
             .update_content_filter(&filter)
             .map_err(|e| CaptureError::ScreenCaptureKit(e.to_string()))?;
@@ -3120,6 +3138,29 @@ fn cap_capture_size_to_long_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Streamer mode rebuilds the filter of a display picked in the share
+    /// picker, not only of a restarted direct display capture: the picker is
+    /// how every ordinary display share starts (2026-10-31 tier 3 on m1).
+    #[test]
+    fn streamer_exclusion_covers_picked_and_direct_display_captures() {
+        let picked_display = crate::window_source::display_source_id(9);
+        assert_eq!(
+            streamer_exclusion_display_id(CaptureSourceOrigin::SystemPicker, picked_display, false),
+            Some(9)
+        );
+        assert_eq!(streamer_exclusion_display_id(CaptureSourceOrigin::DirectWindowId, 9, false), Some(9));
+        assert_eq!(
+            streamer_exclusion_display_id(CaptureSourceOrigin::SystemPicker, 15803, false),
+            None,
+            "a picked window"
+        );
+        assert_eq!(
+            streamer_exclusion_display_id(CaptureSourceOrigin::SystemPicker, picked_display, true),
+            None,
+            "a region share"
+        );
+    }
 
     /// PETAL-DESKTOP-3C/-3D: a window CoreGraphics lists but the on-screen
     /// `SCShareableContent` omits is closed, excluded by its app, or worth
