@@ -2174,6 +2174,20 @@ fn dirty_rect_skip_enabled() -> bool {
     std::env::var(DIRTY_RECT_SKIP_ENV).as_deref() != Ok("1")
 }
 
+/// #373: does this captured frame show the result of an input?
+fn captured_content_change(frame: &crate::capture::CapturedFrame) -> crate::remote_control::CapturedContentChange {
+    use crate::remote_control::CapturedContentChange;
+    if !frame_status_allows_dirty_rect_skip(frame.frame_status) {
+        CapturedContentChange::None
+    } else if !frame.dirty_rects_known {
+        CapturedContentChange::Unknown
+    } else if frame.dirty_rect_count > 0 {
+        CapturedContentChange::Detected
+    } else {
+        CapturedContentChange::None
+    }
+}
+
 fn frame_status_allows_dirty_rect_skip(
     frame_status: Option<screencapturekit::cm::SCFrameStatus>,
 ) -> bool {
@@ -4464,18 +4478,13 @@ async fn start_capture_for_share(
                         capture_state,
                     );
                 }
-                if let Some((input_summary, injected_at_ms)) =
-                    crate::remote_control::take_input_latency_marker(window_id)
-                {
-                    let frame_shown_at_ms = crate::time_util::now_ms();
-                    log::info!(
-                        "remote-control-latency: host frame_shown_ts_ms={} {} inject_to_frame_ms={} capture_seq={}",
-                        frame_shown_at_ms,
-                        input_summary,
-                        frame_shown_at_ms.saturating_sub(injected_at_ms),
-                        frame.sequence
-                    );
-                }
+                // #373: only a frame that shows a change ends an input's
+                // inject-to-capture leg; an idle repaint must not consume it.
+                crate::remote_control::note_captured_frame(
+                    window_id,
+                    frame.sequence,
+                    captured_content_change(&frame),
+                );
                 if !first_frame_sent_cb.swap(true, Ordering::SeqCst) {
                     if let Some(size_tx) = size_tx_cb.lock_unpoisoned().take() {
                         let _ = size_tx.send((

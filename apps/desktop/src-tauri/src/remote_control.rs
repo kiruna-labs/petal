@@ -558,11 +558,13 @@ static RESOLVE_QUEUE: OnceLock<Arc<ResolveQueue>> = OnceLock::new();
 // and never calls into the target app itself, so it cannot block on a hung
 // app the way replay (which runs the real AX sequence) can.
 static REPLAY_SHARDS: OnceLock<Mutex<HashMap<ReplayShardKey, ReplayShard>>> = OnceLock::new();
-// #374 nit: still window-keyed (not per-controller) — with concurrent
-// controllers, the last one to inject before the frame callback consumes this
-// wins, so the `inject_to_frame_ms` diagnostic can mis-attribute to the wrong
-// controller. Log-only; no behavior depends on this value.
-static INPUT_LATENCY_MARKERS: OnceLock<Mutex<HashMap<u32, InputLatencyMarker>>> = OnceLock::new();
+// #373: keyed per (window, controller) so concurrent controllers never credit
+// each other's input; feeds `inject_to_capture_ms` and the sampled log line.
+static INPUT_LATENCY_MARKERS: OnceLock<Mutex<HashMap<(u32, String), InputLatencyMarker>>> =
+    OnceLock::new();
+/// #373: an input whose window shows no change within this long is dropped
+/// rather than credited to some later, unrelated repaint.
+const INPUT_LATENCY_MARKER_TTL: Duration = Duration::from_secs(1);
 static PRESSED_TTL_SWEEPER_STARTED: AtomicBool = AtomicBool::new(false);
 static RESOLVE_HIGH_RATE_DROPS: AtomicU32 = AtomicU32::new(0);
 static REPLAY_HIGH_RATE_DROPS: AtomicU32 = AtomicU32::new(0);
@@ -657,6 +659,20 @@ enum ClipboardShortcut {
 struct InputLatencyMarker {
     summary: String,
     injected_at_ms: u64,
+    injected_at: Instant,
+    /// Sampled for the `remote-control-latency:` log line.
+    log: bool,
+}
+
+/// #373: what the capture callback saw for the frame that consumes markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapturedContentChange {
+    /// Complete frame with dirty rects.
+    Detected,
+    /// Complete frame whose dirty rects ScreenCaptureKit did not report.
+    Unknown,
+    /// Idle/blank frame, or complete with zero dirty rects: shows no input.
+    None,
 }
 
 /// #372: fixed-capacity ring of recent successful-injection `elapsed_ms`
@@ -1119,7 +1135,7 @@ fn control_frame_cache() -> &'static Mutex<HashMap<u32, CachedControlFrame>> {
     CONTROL_FRAME_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn input_latency_markers() -> &'static Mutex<HashMap<u32, InputLatencyMarker>> {
+fn input_latency_markers() -> &'static Mutex<HashMap<(u32, String), InputLatencyMarker>> {
     INPUT_LATENCY_MARKERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -1394,7 +1410,9 @@ fn clear_control_caches_for_window(window_id: u32) {
     platform_control().clear_window_gestures(window_id);
     target_pid_cache().lock_unpoisoned().remove(&window_id);
     control_frame_cache().lock_unpoisoned().remove(&window_id);
-    input_latency_markers().lock_unpoisoned().remove(&window_id);
+    input_latency_markers()
+        .lock_unpoisoned()
+        .retain(|(marker_window, _), _| *marker_window != window_id);
 }
 
 pub(crate) fn invalidate_control_frame(window_id: u32) {
@@ -1423,22 +1441,78 @@ fn clear_all_control_caches() {
     input_latency_markers().lock_unpoisoned().clear();
 }
 
-pub(crate) fn take_input_latency_marker(window_id: u32) -> Option<(String, u64)> {
-    input_latency_markers()
-        .lock_unpoisoned()
-        .remove(&window_id)
-        .map(|marker| (marker.summary, marker.injected_at_ms))
+/// #373: the capture callback for `window_id` delivered a frame. A frame
+/// that shows a change consumes every pending marker for the window, one per
+/// controller, and records `inject_to_capture_ms` for each; an idle frame
+/// consumes nothing. Markers older than `INPUT_LATENCY_MARKER_TTL` expire.
+pub(crate) fn note_captured_frame(window_id: u32, capture_seq: u64, change: CapturedContentChange) {
+    let now = Instant::now();
+    for marker in take_input_latency_markers(window_id, change, now) {
+        let inject_to_capture = now.saturating_duration_since(marker.injected_at);
+        rc_latency_telemetry::record_stage(
+            RcRole::Host,
+            Stage::InjectToCaptureMs,
+            inject_to_capture.as_secs_f64() * 1000.0,
+        );
+        rc_latency_telemetry::set_dimension(
+            RcRole::Host,
+            rc_latency_telemetry::Dimension::ContentChange,
+            if change == CapturedContentChange::Detected { "detected" } else { "unknown" },
+        );
+        if marker.log {
+            let frame_shown_at_ms = now_ms();
+            log::info!(
+                "remote-control-latency: host frame_shown_ts_ms={} {} inject_to_frame_ms={} capture_seq={}",
+                frame_shown_at_ms,
+                marker.summary,
+                frame_shown_at_ms.saturating_sub(marker.injected_at_ms),
+                capture_seq
+            );
+        }
+    }
 }
 
+fn take_input_latency_markers(
+    window_id: u32,
+    change: CapturedContentChange,
+    now: Instant,
+) -> Vec<InputLatencyMarker> {
+    let mut markers = input_latency_markers().lock_unpoisoned();
+    markers.retain(|_, marker| now.saturating_duration_since(marker.injected_at) < INPUT_LATENCY_MARKER_TTL);
+    if change == CapturedContentChange::None {
+        return Vec::new();
+    }
+    let keys: Vec<_> = markers
+        .keys()
+        .filter(|(marker_window, _)| *marker_window == window_id)
+        .cloned()
+        .collect();
+    keys.into_iter().filter_map(|key| markers.remove(&key)).collect()
+}
+
+/// Every injected input gets a marker (#370: the summary covers all input;
+/// only the log line is sampled). The OLDEST pending input per controller is
+/// kept, so the measurement runs from the first input the frame reflects.
 fn record_input_latency_marker(message: &RemoteControlMessage, injected_at_ms: u64) {
-    if !should_log_latency_probe(message) {
+    record_input_latency_marker_at(message, injected_at_ms, Instant::now());
+}
+
+fn record_input_latency_marker_at(message: &RemoteControlMessage, injected_at_ms: u64, now: Instant) {
+    let key = (message.window_id, message.controller_id.clone());
+    let mut markers = input_latency_markers().lock_unpoisoned();
+    if markers
+        .get(&key)
+        .is_some_and(|pending| now.saturating_duration_since(pending.injected_at) < INPUT_LATENCY_MARKER_TTL)
+    {
         return;
     }
-    input_latency_markers().lock_unpoisoned().insert(
-        message.window_id,
+    markers.insert(
+        key,
         InputLatencyMarker {
             summary: message_summary(message),
             injected_at_ms,
+            injected_at: now,
+            log: should_log_latency_probe(message),
         },
     );
 }
@@ -25487,6 +25561,53 @@ mod tests {
         assert_eq!(input::ax_gesture_count_for_tests(), 1);
         clear_all_control_caches();
         assert_eq!(input::ax_gesture_count_for_tests(), 0);
+    }
+
+    /// #373: inject-to-capture markers are per (window, controller), only a
+    /// frame that shows a change consumes them, they expire, and the oldest
+    /// pending input per controller is the one measured.
+    #[test]
+    fn issue373_input_latency_markers_are_per_controller_and_need_a_changed_frame() {
+        // clear_all_control_caches (other tests) empties the marker map.
+        #[cfg(target_os = "macos")]
+        let _guard = input::ax_test_lock();
+        let a = remote_control_test_ids("issue373_markers_a");
+        let window = a.window_id;
+        let pointer = |controller: &str, seq: u64| {
+            test_message(RemoteControlType::Pointer, Some(RemoteControlAction::Down), seq, window, controller.to_string())
+        };
+        let t0 = Instant::now();
+        record_input_latency_marker_at(&pointer("ctrl-a", 1), 1_000, t0);
+        record_input_latency_marker_at(&pointer("ctrl-b", 2), 1_005, t0 + Duration::from_millis(5));
+        // A later input from A while its first is pending keeps the first.
+        record_input_latency_marker_at(&pointer("ctrl-a", 3), 1_050, t0 + Duration::from_millis(50));
+
+        let idle = take_input_latency_markers(window, CapturedContentChange::None, t0 + Duration::from_millis(60));
+        assert!(idle.is_empty(), "an idle frame consumes nothing");
+
+        let mut taken = take_input_latency_markers(window, CapturedContentChange::Detected, t0 + Duration::from_millis(80));
+        taken.sort_by_key(|marker| marker.injected_at_ms);
+        assert_eq!(
+            taken.iter().map(|marker| marker.injected_at_ms).collect::<Vec<_>>(),
+            vec![1_000, 1_005],
+            "one marker per controller, A's oldest"
+        );
+        assert!(
+            take_input_latency_markers(window, CapturedContentChange::Detected, t0 + Duration::from_millis(90)).is_empty(),
+            "consumed once"
+        );
+
+        record_input_latency_marker_at(&pointer("ctrl-a", 4), 2_000, t0);
+        assert!(
+            take_input_latency_markers(window, CapturedContentChange::Unknown, t0 + INPUT_LATENCY_MARKER_TTL).is_empty(),
+            "an input with no visible change within the TTL is dropped, not credited to a later repaint"
+        );
+        // An expired pending marker is replaced by the next input.
+        record_input_latency_marker_at(&pointer("ctrl-a", 5), 3_000, t0);
+        record_input_latency_marker_at(&pointer("ctrl-a", 6), 4_000, t0 + INPUT_LATENCY_MARKER_TTL);
+        let taken = take_input_latency_markers(window, CapturedContentChange::Detected, t0 + INPUT_LATENCY_MARKER_TTL);
+        assert_eq!(taken.iter().map(|marker| marker.injected_at_ms).collect::<Vec<_>>(), vec![4_000]);
+        assert!(take_input_latency_markers(window + 1, CapturedContentChange::Detected, t0).is_empty());
     }
 
     #[test]
