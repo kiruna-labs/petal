@@ -67,6 +67,80 @@ HERE="$(cd "$(dirname "${SELF_SRC:-${BASH_SOURCE[0]}}")" && pwd)"
 SELF_MTIME="$( [ -n "$SELF_SRC" ] && stat -f %m "$SELF_SRC" 2>/dev/null || echo 0 )"
 self_changed() { [ -n "$SELF_SRC" ] && [ "$(stat -f %m "$SELF_SRC" 2>/dev/null || echo 0)" != "$SELF_MTIME" ]; }
 
+# ---- job hand-off to the guest agent (#436) ---------------------------------
+# scripts/test-tart-runner-handoff.sh sources this block against a fake `tart`.
+#
+# The guest agent consumes and deletes job.env as soon as its probe finishes.
+# Its boot-time (RunAtLoad) run can still be mid-probe when the host delivers;
+# it then takes job.env, and a `kickstart -k` killed it before it registered,
+# so the restarted agent found nothing and the guest idled out. So: wait for
+# the boot-time run to finish, start the agent without -k (never kill one that
+# holds the job), and re-deliver with a fresh token if no listener appears.
+# Not agent.log: the golden image's own run already left an "idle" block there.
+AGENT_SETTLE_TIMEOUT_S="${PETAL_RUNNER_AGENT_SETTLE_TIMEOUT_S:-180}"
+LISTENER_WAIT_S="${PETAL_RUNNER_LISTENER_WAIT_S:-90}"
+HANDOFF_POLL_S="${PETAL_RUNNER_HANDOFF_POLL_S:-5}"
+HANDOFF_ATTEMPTS=3
+AGENT_LABEL="com.petal.tart-runner"
+
+# stdin: `launchctl print gui/<uid>/<label>`. True once the agent has run at
+# least once and is not running now. Only the top-level keys count.
+agent_run_settled() {
+  awk '/^\tstate = / && !s { s = $0; sub(/^\tstate = /, "", s) }
+       /^\truns = / && !r { r = $3 }
+       END { exit !(s == "not running" && r + 0 >= 1) }'
+}
+guest_agent_settled() {
+  tart exec "$1" bash -c "launchctl print \"gui/\$(id -u)/$AGENT_LABEL\"" 2>/dev/null | agent_run_settled
+}
+listener_running() { tart exec "$1" pgrep -x Runner.Listener >/dev/null 2>&1; }
+wait_for_boot_agent() {
+  local waited=0
+  until guest_agent_settled "$1"; do
+    [ "$waited" -ge "$AGENT_SETTLE_TIMEOUT_S" ] && return 1
+    sleep "$HANDOFF_POLL_S"; waited=$((waited + HANDOFF_POLL_S))
+  done
+}
+listener_up_within() {
+  local waited=0
+  until listener_running "$1"; do
+    [ "$waited" -ge "$2" ] && return 1
+    sleep "$HANDOFF_POLL_S"; waited=$((waited + HANDOFF_POLL_S))
+  done
+}
+# Verified write: one clone came up idle because this stdin hand-off silently
+# delivered nothing and the agent found no job.env.
+deliver_job_env() {
+  local name="$1" token="$2"
+  for _ in 1 2 3 4 5; do
+    printf 'RUNNER_URL=https://github.com/%s\nRUNNER_TOKEN=%s\nRUNNER_NAME=%s\nRUNNER_LABELS=%s\n' \
+      "$REPO" "$token" "$name" "$LABELS" | tart exec -i "$name" bash -c 'umask 077; cat > "$HOME/tart-runner/job.env"'
+    tart exec "$name" bash -c 'grep -q "^RUNNER_TOKEN=." "$HOME/tart-runner/job.env"' 2>/dev/null && return 0
+    sleep 3
+  done
+  return 1
+}
+# 0 once a Runner.Listener is up in the guest; 1 after HANDOFF_ATTEMPTS.
+hand_off_job() {
+  local name="$1" attempt token
+  for attempt in $(seq 1 "$HANDOFF_ATTEMPTS"); do
+    listener_running "$name" && return 0
+    if ! wait_for_boot_agent "$name"; then
+      listener_running "$name" && return 0
+      say "$name: guest agent still running after ${AGENT_SETTLE_TIMEOUT_S}s; delivering anyway"
+    fi
+    token="$(mint_registration_token)" || { say "could not mint a registration token for $REPO"; return 1; }
+    deliver_job_env "$name" "$token" || { say "could not deliver job.env to $name"; continue; }
+    unset token
+    tart exec "$name" launchctl kickstart "gui/$(tart exec "$name" id -u)/$AGENT_LABEL"
+    listener_up_within "$name" "$LISTENER_WAIT_S" && return 0
+    say "$name: no Runner.Listener ${LISTENER_WAIT_S}s after hand-off $attempt/$HANDOFF_ATTEMPTS"
+  done
+  return 1
+}
+mint_registration_token() { gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token; }
+# ---- end job hand-off --------------------------------------------------------
+
 MARK="$HOME/Library/Application Support/petal-tart-runner/$GOLDEN.provisioned"
 if [ ! -d "$HOME/.tart/vms/$GOLDEN" ] || [ ! -f "$MARK" ]; then   # dir, not `tart list` (flakes while a VM stops)
   say "golden guest '$GOLDEN' missing or never finished provisioning -- building it (make-golden.sh --headless)"
@@ -122,21 +196,7 @@ while :; do
   ok=0; for _ in $(seq 1 60); do tart exec "$NAME" true >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
   [ "$ok" -eq 1 ] || { say "guest agent never answered in $NAME"; cleanup_vm "$NAME"; CURRENT=""; sleep 30; continue; }
 
-  TOKEN="$(gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)" \
-    || { say "could not mint a registration token for $REPO"; cleanup_vm "$NAME"; CURRENT=""; sleep 60; continue; }
-  # job.env is consumed and deleted by the guest agent the moment it starts.
-  # Verified write: one clone came up idle because this stdin hand-off
-  # silently delivered nothing and the agent found no job.env.
-  wrote=0
-  for _ in 1 2 3 4 5; do
-    printf 'RUNNER_URL=https://github.com/%s\nRUNNER_TOKEN=%s\nRUNNER_NAME=%s\nRUNNER_LABELS=%s\n' \
-      "$REPO" "$TOKEN" "$NAME" "$LABELS" | tart exec -i "$NAME" bash -c 'umask 077; cat > "$HOME/tart-runner/job.env"'
-    if tart exec "$NAME" bash -c 'grep -q "^RUNNER_TOKEN=." "$HOME/tart-runner/job.env"' 2>/dev/null; then wrote=1; break; fi
-    sleep 3
-  done
-  unset TOKEN
-  [ "$wrote" -eq 1 ] || { say "could not deliver job.env to $NAME"; cleanup_vm "$NAME"; CURRENT=""; sleep 30; continue; }
-  tart exec "$NAME" launchctl kickstart -k "gui/$(tart exec "$NAME" id -u)/com.petal.tart-runner"
+  hand_off_job "$NAME" || { say "$NAME never started a Runner.Listener"; cleanup_vm "$NAME"; CURRENT=""; sleep 30; continue; }
   say "$NAME ($IP) registered; waiting for its one job"
 
   # Ephemeral listener exits after one job. Watch the process, not the API
