@@ -306,10 +306,15 @@ impl ReleasableCapture for Box<dyn CameraBackend> {
 /// capture the capture is RELEASED before the error is returned — a retry
 /// that reuses (or leaks) a wedged capture is exactly the failure mode this
 /// exists to prevent.
+///
+/// `report_failure` runs the moment the wait fails, BEFORE the release: a
+/// wedged device can block that release indefinitely, and the caller's own
+/// log line would then never be written (#274).
 pub(super) async fn await_first_frame_or_release<C: ReleasableCapture>(
     capture: C,
     size_rx: std::sync::mpsc::Receiver<(u32, u32)>,
     timeout: Duration,
+    report_failure: impl FnOnce(&str),
 ) -> Result<(C, (u32, u32)), String> {
     let timeout_secs = timeout.as_secs_f64();
     let size_result = tokio::task::spawn_blocking(move || size_rx.recv_timeout(timeout))
@@ -324,14 +329,23 @@ pub(super) async fn await_first_frame_or_release<C: ReleasableCapture>(
     }) {
         Ok(size) => Ok((capture, size)),
         Err(e) => {
+            report_failure(&e);
             // Stop + release the capture we just started before bailing.
             // Platform teardown blocks — run on a blocking thread.
+            let release_started = std::time::Instant::now();
             if tokio::task::spawn_blocking(move || capture.release_blocking())
                 .await
                 .is_err()
             {
                 log::error!(
                     "session: camera capture release task panicked after first-frame timeout"
+                );
+            }
+            let release_took = release_started.elapsed();
+            if release_took >= Duration::from_secs(1) {
+                log::warn!(
+                    "session: camera capture release took {:.1}s after the first-frame failure",
+                    release_took.as_secs_f64()
                 );
             }
             Err(e)
@@ -443,8 +457,15 @@ pub(crate) async fn start_camera_publish_with_device(
     // from a clean capture. A platform terminal error (e.g. Media Foundation
     // stream failure) is preferred over the generic timeout message.
     let (capture, (width, height)) =
-        match await_first_frame_or_release(capture, first_frame_rx, CAMERA_FIRST_FRAME_TIMEOUT)
-            .await
+        match await_first_frame_or_release(
+            capture,
+            first_frame_rx,
+            CAMERA_FIRST_FRAME_TIMEOUT,
+            |error| {
+                log::warn!("session: camera first-frame wait failed ({error}); releasing the capture")
+            },
+        )
+        .await
         {
             Ok(v) => v,
             Err(error) => {
@@ -1533,14 +1554,24 @@ mod tests {
         // not by disconnect).
         let released = Arc::new(AtomicBool::new(false));
         let (wedged_tx, wedged_rx) = std::sync::mpsc::channel::<(u32, u32)>();
+        let released_when_reported = Arc::new(std::sync::Mutex::new(None));
+        let observed = released_when_reported.clone();
+        let observed_flag = released.clone();
         let outcome = await_first_frame_or_release(
             FakeCapture {
                 released: released.clone(),
             },
             wedged_rx,
             Duration::from_millis(100),
+            move |_| *observed.lock().unwrap() = Some(observed_flag.load(Ordering::SeqCst)),
         )
         .await;
+        // #274: the failure is reported BEFORE the (possibly hanging) release.
+        assert_eq!(
+            *released_when_reported.lock().unwrap(),
+            Some(false),
+            "the failure must be reported before the capture is released"
+        );
         let error = outcome.err().expect("no frame within the bound must error");
         assert!(
             error.contains("no camera frames"),
@@ -1563,6 +1594,7 @@ mod tests {
             },
             ok_rx,
             Duration::from_millis(100),
+            |error| panic!("a successful wait reported a failure: {error}"),
         )
         .await
         .expect("a frame-delivering capture must succeed");
