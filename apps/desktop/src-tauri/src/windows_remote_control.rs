@@ -657,9 +657,7 @@ fn ensure_current_target(
     expected_kind: RemoteControlTargetKind,
     expected_pid: Option<i32>,
 ) -> Result<(), String> {
-    if crate::remote_control::injection_was_cancelled()
-        || !crate::remote_control::input_authority_is_current(message)
-    {
+    if !crate::remote_control::injection_may_proceed(message) {
         return Err("remote input superseded".to_string());
     }
     let target = crate::windows_capture_target::resolve(message.window_id)

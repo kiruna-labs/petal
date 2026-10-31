@@ -2078,6 +2078,15 @@ pub(crate) fn input_authority_is_current(message: &RemoteControlMessage) -> bool
     is_authorized_input(message)
 }
 
+/// #368: may the injection running on this thread still act? A
+/// host-synthesized release must, even though the revoke that queued it has
+/// already removed the grant and drained the pressed map -- refusing it leaves
+/// the target with a held key or button. A cancelled injection never may.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn injection_may_proceed(message: &RemoteControlMessage) -> bool {
+    !injection_was_cancelled() && (injection_is_synthetic_release() || is_authorized_input(message))
+}
+
 fn bind_trusted_sender(
     trusted_sender: Option<String>,
     message: RemoteControlMessage,
@@ -24921,6 +24930,30 @@ mod tests {
             RemoteControlType::Pointer,
             "issue365_revoke_between_resolver_auth_and_commit_never_strands_a_button",
         );
+    }
+
+    /// #368 item 2: Windows checks `injection_may_proceed` right before it
+    /// injects. A synthetic release for a controller whose grant is gone must
+    /// still go through (or the target keeps a held key/button), ordinary
+    /// input with a stale grant must not, and a cancelled injection never does.
+    #[test]
+    fn issue368_a_synthetic_release_outlives_the_grant_but_not_a_cancellation() {
+        let _guard = pressed_input_test_lock();
+        let ids = remote_control_test_ids("issue368_a_synthetic_release_outlives_the_grant");
+        let first = authorize_shared(ids.window_id, &ids.controller_id);
+        let up = issue365_input(RemoteControlType::Key, RemoteControlAction::Up, 3, &ids, &first);
+        assert!(injection_may_proceed(&up), "a current grant may inject");
+
+        // Rotating the grant makes `up`'s token stale, as a revoke does.
+        let _second = authorize_shared(ids.window_id, &ids.controller_id);
+        assert!(!injection_may_proceed(&up), "stale ordinary input is superseded");
+        {
+            let _synthetic = SyntheticReleaseForTests::set();
+            assert!(injection_may_proceed(&up), "the host's own release must still land");
+            let _cancelled = InjectionCancelledForTests::set();
+            assert!(!injection_may_proceed(&up), "a cancelled injection never acts");
+        }
+        assert!(!injection_may_proceed(&up), "the synthetic mark is per injection");
     }
 
     #[test]
