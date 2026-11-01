@@ -270,12 +270,7 @@ fn texture(
 }
 
 /// A borrowed BGRA frame from the capture callback.
-pub struct BgraView<'a> {
-    pub bgra: &'a [u8],
-    pub bytes_per_row: u32,
-    pub width: u32,
-    pub height: u32,
-}
+pub use super::cpu_convert::BgraView;
 
 struct Processor {
     input_size: (u32, u32),
