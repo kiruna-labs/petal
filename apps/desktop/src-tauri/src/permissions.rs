@@ -453,8 +453,9 @@ pub fn check_camera() -> String {
 
 /// Microphone — triggers the OS prompt (if not yet decided), blocks until the
 /// user answers (or a 60s timeout), then returns the resulting auth status
-/// string.
-#[tauri::command]
+/// string. `async`: Tauri runs a plain sync command on the main thread, and
+/// this wait would freeze every Petal window until the prompt is answered.
+#[tauri::command(async)]
 pub fn request_microphone() -> String {
     let status = macos::request_microphone();
     if status == "denied" || status == "restricted" {
@@ -465,7 +466,8 @@ pub fn request_microphone() -> String {
 
 /// Camera — triggers the OS prompt (if not yet decided), blocks until the user
 /// answers (or a 60s timeout), then returns the resulting auth status string.
-#[tauri::command]
+/// `async` for the same reason as `request_microphone`.
+#[tauri::command(async)]
 pub fn request_camera() -> String {
     let status = macos::request_camera();
     if status == "denied" || status == "restricted" {
