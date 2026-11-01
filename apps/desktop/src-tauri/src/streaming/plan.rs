@@ -62,6 +62,13 @@ pub const STREAM_BITRATE_OVERRIDE_MIN_BPS: u32 = 1_000_000;
 pub const STREAM_BITRATE_OVERRIDE_MAX_BPS: u32 = 50_000_000;
 /// Auto never picks above this: 1440p and 4K are deliberate choices.
 pub const STREAM_AUTO_MAX_RESOLUTION: StreamResolution = StreamResolution::P1080;
+/// Auto's ceiling when this computer encodes on the CPU (no D3D11 video
+/// device): the largest size the software path holds at 30 fps. Measured in
+/// the no-GPU Windows Sandbox (2026-10-31): 1080p30 held 30 fps every second
+/// with no dropped frames at about one core.
+pub const STREAM_CPU_AUTO_MAX_RESOLUTION: StreamResolution = StreamResolution::P1080;
+/// Auto's frame-rate ceiling on the CPU path.
+pub const STREAM_CPU_AUTO_MAX_FPS: u32 = 30;
 pub const STREAM_KEYFRAME_INTERVAL_S: u32 = 2;
 pub const STREAM_AUDIO_BITRATE_BPS: u32 = 128_000;
 pub const STREAM_AUDIO_SAMPLE_RATE: u32 = 48_000;
@@ -84,6 +91,11 @@ pub struct StreamPlanInput {
     /// Explicit override; `None` means "Auto" for the resolution.
     #[serde(default)]
     pub max_bitrate_bps: Option<u32>,
+    /// This computer encodes on the CPU: Auto stays within
+    /// [`STREAM_CPU_AUTO_MAX_RESOLUTION`] and [`STREAM_CPU_AUTO_MAX_FPS`].
+    /// Explicit sizes are the user's call.
+    #[serde(default)]
+    pub cpu_encode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,20 +133,26 @@ pub fn canvas_size(resolution: StreamResolution, portrait: bool) -> (u32, u32) {
 /// holds the share at 90% of its size or more (a little shrink is invisible;
 /// more costs legibility), else the largest.
 pub fn auto_resolution(width: u32, height: u32, portrait: bool) -> StreamResolution {
+    auto_resolution_up_to(width, height, portrait, STREAM_AUTO_MAX_RESOLUTION)
+}
+
+fn auto_resolution_up_to(width: u32, height: u32, portrait: bool, max: StreamResolution) -> StreamResolution {
     [StreamResolution::P720, StreamResolution::P1080]
         .into_iter()
+        .filter(|resolution| resolution.landscape().0 <= max.landscape().0)
         .find(|resolution| {
             let (cw, ch) = canvas_size(*resolution, portrait);
             10 * u64::from(cw) >= 9 * u64::from(width) && 10 * u64::from(ch) >= 9 * u64::from(height)
         })
-        .unwrap_or(STREAM_AUTO_MAX_RESOLUTION)
+        .unwrap_or(max)
 }
 
 /// The resolution the stream runs at, Auto resolved.
 pub fn effective_resolution(input: &StreamPlanInput) -> StreamResolution {
     let portrait = is_portrait(input.capture_width, input.capture_height, input.orientation);
+    let max = if input.cpu_encode { STREAM_CPU_AUTO_MAX_RESOLUTION } else { STREAM_AUTO_MAX_RESOLUTION };
     match input.resolution {
-        StreamResolution::Auto => auto_resolution(input.capture_width, input.capture_height, portrait),
+        StreamResolution::Auto => auto_resolution_up_to(input.capture_width, input.capture_height, portrait, max),
         resolution => resolution,
     }
 }
@@ -168,7 +186,10 @@ pub fn plan_stream_output(input: &StreamPlanInput) -> StreamPlan {
     let resolution = effective_resolution(input);
     let portrait = is_portrait(input.capture_width, input.capture_height, input.orientation);
     let (width, height) = canvas_size(resolution, portrait);
-    let fps = input.share_fps.max(1).min(stream_fps_ceiling_for_geometry(width, height));
+    let mut fps = input.share_fps.max(1).min(stream_fps_ceiling_for_geometry(width, height));
+    if input.cpu_encode && input.resolution == StreamResolution::Auto {
+        fps = fps.min(STREAM_CPU_AUTO_MAX_FPS);
+    }
     let max_bitrate_bps = effective_max_bitrate_bps(input);
     StreamPlan {
         width,
@@ -246,6 +267,7 @@ mod tests {
             resolution,
             orientation: StreamOrientation::Auto,
             max_bitrate_bps: None,
+            cpu_encode: false,
         }
     }
 
@@ -262,6 +284,30 @@ mod tests {
                     assert_eq!(plan.height > plan.width, h > w, "Auto orientation follows {w}x{h}");
                     if resolution == Auto {
                         assert!(plan.resolution.landscape().0 <= STREAM_AUTO_MAX_RESOLUTION.landscape().0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cpu_path_caps_auto_and_keeps_explicit_sizes() {
+        use StreamResolution::*;
+        for resolution in [Auto, P720, P1080, P1440, K4] {
+            for share_fps in [15, 30, 60] {
+                for w in (1..6000).step_by(397) {
+                    for h in (1..6000).step_by(409) {
+                        let gpu = StreamPlanInput { share_fps, ..input(w, h, resolution) };
+                        let cpu = plan_stream_output(&StreamPlanInput { cpu_encode: true, ..gpu });
+                        let (long, short) = (cpu.width.max(cpu.height), cpu.width.min(cpu.height));
+                        assert_eq!(long * 9, short * 16, "{w}x{h} -> {}x{}", cpu.width, cpu.height);
+                        assert_eq!(cpu.height > cpu.width, h > w, "Auto orientation follows {w}x{h}");
+                        if resolution == Auto {
+                            assert!(cpu.resolution.landscape().0 <= STREAM_CPU_AUTO_MAX_RESOLUTION.landscape().0);
+                            assert!(cpu.fps <= STREAM_CPU_AUTO_MAX_FPS);
+                        } else {
+                            assert_eq!(cpu, plan_stream_output(&gpu), "explicit {resolution:?} is unchanged");
+                        }
                     }
                 }
             }

@@ -250,7 +250,12 @@ streamer's echo reference, and the streamer's own setting never applies to
 their own stream. Fixture: `streamOptOutAttribute`.
 
 Output rules (size, fps, bitrate) live in
-`apps/desktop/src-tauri/src/streaming/plan.rs`. Fixtures:
+`apps/desktop/src-tauri/src/streaming/plan.rs`. A plan input with
+**`cpuEncode: true`** (absent means false) is for a computer that encodes on
+the CPU (Windows with no D3D11 video device): Auto stays within 1080p and
+30 fps there, and explicit sizes are unchanged. The go-live dialog's CPU hint
+quotes that ceiling (`STREAM_CPU_AUTO_MAX` in
+`apps/desktop/src/lib/data/liveStream.ts`). Fixtures:
 `streamOutputPlans`, `streamFpsCeilings`, `streamLiveAttribute`,
 `streamLiveDerivation`, `streamOptOutAttribute`. Files to change together:
 

@@ -47,10 +47,28 @@ export const STREAM_MISSING_ENCODERS_HINT =
   'On Windows N editions, install the Media Feature Pack.';
 export const STREAM_UNSUPPORTED_PLATFORM_HINT =
   'Streaming from this computer isn’t available on this platform yet.';
+/**
+ * Auto's ceiling when encoding on the CPU. Mirrors `STREAM_CPU_AUTO_MAX_RESOLUTION` and
+ * `STREAM_CPU_AUTO_MAX_FPS` in `streaming/plan.rs`.
+ */
+export const STREAM_CPU_AUTO_MAX = { label: '1080p', width: 1920, height: 1080, fps: 30 } as const;
+export const STREAM_CPU_HINT =
+  'This computer has no graphics driver that can process video, so Petal encodes the stream on ' +
+  `the processor instead. Auto streams at up to ${STREAM_CPU_AUTO_MAX.label} and ` +
+  `${STREAM_CPU_AUTO_MAX.fps} fps here.`;
+export const STREAM_CPU_LOAD_HINT =
+  'The processor may not keep up at this size or frame rate, so the stream can drop frames.';
 
 /** The go-live dialog's hints about how (or whether) this computer can encode. */
 export function streamClientHints(preview: StreamPreview): string[] {
   switch (preview.clientEncoder) {
+    case 'cpu': {
+      const { width, height, fps } = preview.plan;
+      const heavy =
+        width * height > STREAM_CPU_AUTO_MAX.width * STREAM_CPU_AUTO_MAX.height ||
+        fps > STREAM_CPU_AUTO_MAX.fps;
+      return heavy ? [STREAM_CPU_HINT, STREAM_CPU_LOAD_HINT] : [STREAM_CPU_HINT];
+    }
     case 'missingEncoders':
       return [STREAM_MISSING_ENCODERS_HINT];
     case 'unsupportedPlatform':
