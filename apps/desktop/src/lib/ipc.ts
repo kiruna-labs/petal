@@ -1627,6 +1627,8 @@ export interface StreamPreview {
   /** `clientEncoder` can go live. */
   clientAvailable: boolean;
   clientEncoder: StreamClientEncoder;
+  /** This computer has an audio output device (without one, others aren't heard on the stream). */
+  audioOutput: boolean;
 }
 
 export type StreamDestinationChoice =
@@ -1656,6 +1658,8 @@ export interface StreamSessionSnapshot {
   slateRemainingS: number | null;
   reconnectAttempt: number | null;
   hardwareEncoder: boolean;
+  /** No audio output device: others in the meeting aren't heard on the stream. */
+  noAudioOutput: boolean;
 }
 
 /** Mirrors `streaming::live_state::StreamLiveEntry`: one live share. */

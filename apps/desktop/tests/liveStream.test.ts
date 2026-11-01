@@ -13,6 +13,7 @@ import {
   STREAM_CPU_HINT,
   STREAM_CPU_LOAD_HINT,
   STREAM_MISSING_ENCODERS_HINT,
+  STREAM_NO_AUDIO_OUTPUT_HINT,
   STREAM_UNSUPPORTED_PLATFORM_HINT,
   formatStreamElapsed,
   isShareOnAir,
@@ -25,7 +26,8 @@ import {
   streamEndedMessage,
   streamIsDownscaled,
   streamPreviewLine,
-  streamStatusLine
+  streamStatusLine,
+  streamStatusTitle
 } from '../src/lib/data/liveStream.ts';
 import {
   CUSTOM_STREAM_SERVICE_ID,
@@ -85,7 +87,8 @@ const preview: StreamPreview = {
   shareFps: 30,
   plan: { width: 1920, height: 1080, fps: 30, bitrateBps: 6_000_000, maxBitrateBps: 7_200_000, resolution: '1080p' },
   clientAvailable: true,
-  clientEncoder: 'gpu'
+  clientEncoder: 'gpu',
+  audioOutput: true
 };
 
 test('preview line and downscale flag', () => {
@@ -157,7 +160,8 @@ test('status line per phase', () => {
     droppedFrames: 0,
     slateRemainingS: null,
     reconnectAttempt: null,
-    hardwareEncoder: true
+    hardwareEncoder: true,
+    noAudioOutput: false
   };
   const now = 1_000 + 245_000;
   assert.equal(streamStatusLine(base, now), 'LIVE 4:05 · 5.8 Mbps');
@@ -171,6 +175,33 @@ test('status line per phase', () => {
     'Reconnecting (attempt 2 of 3)…'
   );
   assert.equal(streamStatusLine({ ...base, phase: 'connecting' }, now), 'Connecting to the streaming server…');
+  assert.equal(streamStatusTitle(base), undefined);
+});
+
+test('with no audio output the dialog and the live banner say others are not heard', () => {
+  const silent = { ...preview, audioOutput: false };
+  assert.deepEqual(streamClientHints(silent), [STREAM_NO_AUDIO_OUTPUT_HINT]);
+  assert.equal(streamClientCanGoLive(silent), true, 'a hint, never a block');
+  assert.deepEqual(streamClientHints({ ...silent, clientEncoder: 'cpu' }), [STREAM_CPU_HINT, STREAM_NO_AUDIO_OUTPUT_HINT]);
+  assert.match(STREAM_NO_AUDIO_OUTPUT_HINT, /won’t be heard on the stream\. Connect speakers or headphones/);
+  const live: StreamSessionSnapshot = {
+    phase: 'live', windowId: 7, startedAt: 1_000, width: 1920, height: 1080, fps: 30, targetBitrateBps: 6_000_000,
+    actualBitrateBps: 5_800_000, droppedFrames: 0, slateRemainingS: null, reconnectAttempt: null,
+    hardwareEncoder: false, noAudioOutput: true
+  };
+  const now = 1_000 + 245_000;
+  assert.equal(streamStatusLine(live, now), 'LIVE 4:05 · 5.8 Mbps · No audio output');
+  assert.equal(streamStatusLine({ ...live, droppedFrames: 2 }, now), 'LIVE 4:05 · 5.8 Mbps · 2 dropped · No audio output');
+  assert.equal(
+    streamStatusLine({ ...live, phase: 'paused', slateRemainingS: 97 }, now),
+    'LIVE 4:05 · Be right back · ends in 97s · No audio output'
+  );
+  assert.equal(streamStatusLine({ ...live, phase: 'connecting' }, now), 'Connecting to the streaming server…');
+  assert.equal(streamStatusTitle(live), STREAM_NO_AUDIO_OUTPUT_HINT);
+  assert.equal(streamStatusTitle({ ...live, phase: 'paused' }), STREAM_NO_AUDIO_OUTPUT_HINT);
+  assert.equal(streamStatusTitle({ ...live, phase: 'reconnecting' }), undefined);
+  assert.equal(streamStatusTitle({ ...live, noAudioOutput: false }), undefined);
+  assert.equal(streamStatusTitle(null), undefined);
 });
 
 test('ended messages', () => {

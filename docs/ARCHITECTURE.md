@@ -66,7 +66,8 @@ Roughly `platform → capture/transport → session → chrome → diagnostics`.
 - **`streaming/`** — live streaming a share to RTMP(S) from the sharer's
   own computer: `capability.rs` (which encode path this computer has, probed
   once at startup: `gpu`, `cpu` with no D3D11 video device, or
-  `missingEncoders`), `plan.rs` (output size/fps/bitrate rules), `wire.rs` (the
+  `missingEncoders`; and whether it has an audio output device, without which
+  the meeting isn't heard on the stream), `plan.rs` (output size/fps/bitrate rules), `wire.rs` (the
   `petal.live` and `petal.stream-optout` attributes, concurrent-stream
   ordering), `live_state.rs` (the room's live streams, `stream-live-changed`),
   the frame tap (`tap.rs`; on Windows `gpu_tap.rs` copies WGC frames into
