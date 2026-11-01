@@ -494,7 +494,10 @@ pub(crate) async fn toggle_share_for_window_with_color(
     log::info!(
         "hover_tab: toggle_share_for_window(window {window_id}) done -- backend shared={actual_shared}"
     );
-    crate::region_window::emit_region_share_state(app, window_id, actual_shared);
+    // Every surface that shows share state hears it, not only the region window: a share
+    // toggled by another path (the global shortcut) while the hover tab already shows that
+    // window left the tab's menu greyed out until the pointer left the window.
+    emit_share_state_changed(app, window_id, actual_shared);
     actual_shared
 }
 
