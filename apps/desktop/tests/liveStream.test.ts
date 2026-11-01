@@ -10,12 +10,16 @@ import { readFileSync } from 'node:fs';
 import {
   HIDDEN_MEETING_LABEL,
   LIVE_MEETING_LABEL,
+  STREAM_MISSING_ENCODERS_HINT,
+  STREAM_UNSUPPORTED_PLATFORM_HINT,
   formatStreamElapsed,
   isShareOnAir,
   meetingLabelForDisplay,
   parseMaxBitrateMbps,
   recentRoomLabelForDisplay,
   showsOptOutToggle,
+  streamClientCanGoLive,
+  streamClientHints,
   streamEndedMessage,
   streamIsDownscaled,
   streamPreviewLine,
@@ -78,7 +82,8 @@ const preview: StreamPreview = {
   captureHeight: 1440,
   shareFps: 30,
   plan: { width: 1920, height: 1080, fps: 30, bitrateBps: 6_000_000, maxBitrateBps: 7_200_000, resolution: '1080p' },
-  clientAvailable: true
+  clientAvailable: true,
+  clientEncoder: 'gpu'
 };
 
 test('preview line and downscale flag', () => {
@@ -91,6 +96,20 @@ test('preview line and downscale flag', () => {
   // Wider than 16:9 but fitting: scaled up, letterboxed, not downscaled.
   assert.equal(streamIsDownscaled({ ...preview, captureWidth: 1708, captureHeight: 732 }), false);
   assert.equal(streamIsDownscaled({ ...preview, captureWidth: 2000, captureHeight: 800 }), true);
+});
+
+test('the dialog says when this computer cannot encode, and only then blocks', () => {
+  assert.deepEqual(streamClientHints(preview), []);
+  assert.equal(streamClientCanGoLive(preview), true);
+  assert.equal(streamClientCanGoLive({ ...preview, clientEncoder: 'cpu' }), true);
+  const missing = { ...preview, clientAvailable: false, clientEncoder: 'missingEncoders' as const };
+  assert.deepEqual(streamClientHints(missing), [STREAM_MISSING_ENCODERS_HINT]);
+  assert.match(STREAM_MISSING_ENCODERS_HINT, /Media Feature Pack/);
+  assert.equal(streamClientCanGoLive(missing), false);
+  const elsewhere = { ...preview, clientAvailable: false, clientEncoder: 'unsupportedPlatform' as const };
+  assert.deepEqual(streamClientHints(elsewhere), [STREAM_UNSUPPORTED_PLATFORM_HINT]);
+  assert.equal(streamClientCanGoLive(elsewhere), false);
+  assert.equal(streamClientCanGoLive(null), false);
 });
 
 test('max bitrate parsing', () => {

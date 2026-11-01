@@ -1391,6 +1391,8 @@ pub fn run() {
             streaming::streamer_mode::initialize(
                 streaming::settings::current().always_streamer_mode,
             );
+            // Which encode path go-live has here, ready before the dialog asks.
+            streaming::capability::start_probe();
             // #878 Phase 3 item 5: window-server-restart detection via
             // CGWindowID regression.
             #[cfg(target_os = "macos")]
@@ -1717,6 +1719,8 @@ pub fn run() {
             streaming::streamer_mode::initialize(
                 streaming::settings::current().always_streamer_mode,
             );
+            // Which encode path go-live has here, ready before the dialog asks.
+            streaming::capability::start_probe();
             app.manage(rooms::RoomsState::load(app_data_dir));
             log::info!("petal: Windows rooms persistence loaded, RoomsState managed");
             // #636: the main window is created `visible: false` on every

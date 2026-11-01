@@ -121,6 +121,51 @@ impl Drop for MediaRuntime {
     }
 }
 
+/// What this computer can encode with, for `capability::classify`. Runs on its
+/// own thread (COM and Media Foundation are started for the probe).
+pub fn probe() -> Result<super::capability::ProbeFacts, String> {
+    let _runtime = MediaRuntime::start()?;
+    let mut device = None;
+    // SAFETY: out-param is a valid Option; the device is dropped at once.
+    let created = unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+    };
+    let video_device = match (created, device) {
+        (Ok(()), Some(device)) => device.cast::<ID3D11VideoDevice>().is_ok(),
+        (Err(error), _) => {
+            log::info!("streaming: no D3D11 video device: {error}");
+            false
+        }
+        (Ok(()), None) => false,
+    };
+    let h264 = (
+        MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 },
+        MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 },
+    );
+    let aac = (
+        MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Audio, guidSubtype: MFAudioFormat_PCM },
+        MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Audio, guidSubtype: MFAudioFormat_AAC },
+    );
+    let count = |category, flags, (input, output)| enum_transforms(category, flags, input, output).len();
+    Ok(super::capability::ProbeFacts {
+        video_device,
+        hardware_h264: count(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, h264)
+            as u32,
+        software_h264: count(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER, h264) > 0,
+        aac: count(MFT_CATEGORY_AUDIO_ENCODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER, aac) > 0,
+    })
+}
+
 /// The encoder's own D3D11 device, video-capable and multithread-protected
 /// (Media Foundation touches it from its worker threads).
 pub struct EncoderDevice {
@@ -1114,6 +1159,16 @@ mod tests {
             encode_video(&device, allow_hardware);
         }
         encode_audio();
+    }
+
+    /// What the startup probe finds here (run it in the no-vGPU Sandbox too).
+    #[test]
+    #[ignore = "reports this machine's encoders"]
+    fn probe_finds_an_encode_path() {
+        let facts = probe().unwrap();
+        let encoder = crate::streaming::capability::classify(facts);
+        eprintln!("probe: {facts:?} -> {}", encoder.wire());
+        assert_ne!(encoder, crate::streaming::capability::ClientEncoder::MissingEncoders);
     }
 
     fn encode_video(device: &EncoderDevice, allow_hardware: bool) {
