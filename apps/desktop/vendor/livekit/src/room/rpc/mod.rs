@@ -100,8 +100,15 @@ impl RpcTransport for SessionTransport {
             .signal_client()
             .join_response()
             .server_info
-            .and_then(|info| info.version.is_empty().then(|| info.version))
+            .and_then(|info| reported_server_version(info.version))
     }
+}
+
+/// Petal patch (#372): the server's version, or `None` when it reported none.
+/// Upstream had the test inverted (`is_empty().then(..)`), so a real version
+/// read as `None` and an empty one as `Some("")`.
+pub(crate) fn reported_server_version(version: String) -> Option<String> {
+    (!version.is_empty()).then_some(version)
 }
 
 /// Parameters for performing an RPC call
