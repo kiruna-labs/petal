@@ -289,8 +289,8 @@ mod platform {
     };
     use objc2_app_kit::{
         NSApplication, NSApplicationDidChangeScreenParametersNotification, NSBezierPath, NSColor,
-        NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSStatusBar,
-        NSStatusItem,
+        NSEventType, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage,
+        NSStatusBar, NSStatusItem,
     };
     use objc2_foundation::{
         NSDictionary, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -388,6 +388,17 @@ mod platform {
         } else {
             ClickZone::Body
         }
+    }
+
+    /// The zone a status-item action lands in. `click_x` is the x of the
+    /// left-mouse event that triggered it, or `None` when it came without
+    /// one: an Accessibility press (VoiceOver, Switch Control) or keyboard
+    /// activation. Those open the popover, never mute or leave, because
+    /// there is no click position to hit-test.
+    fn action_zone(click_x: Option<f64>, width: f64, minimal: bool, in_meeting: bool) -> ClickZone {
+        click_x.map_or(ClickZone::Body, |x| {
+            click_zone(x, width, minimal, in_meeting)
+        })
     }
 
     fn with_state<R>(f: impl FnOnce(&mut MenubarPillState) -> R) -> R {
@@ -540,10 +551,16 @@ mod platform {
                 };
 
                 let _ = sender;
+                // Only a mouse click has a position. An Accessibility press
+                // arrives with no current event (or an unrelated one), which
+                // used to read as x = f64::MAX, the leave circle.
                 let click_x = NSApplication::sharedApplication(mtm)
                     .currentEvent()
-                    .map(|event| event.locationInWindow().x)
-                    .unwrap_or(f64::MAX);
+                    .filter(|event| {
+                        let kind = event.r#type();
+                        kind == NSEventType::LeftMouseDown || kind == NSEventType::LeftMouseUp
+                    })
+                    .map(|event| event.locationInWindow().x);
 
                 let ivars = self.ivars();
                 let state = with_state(|s| *s);
@@ -553,7 +570,7 @@ mod platform {
                     PILL_WIDTH_MINIMAL
                 };
 
-                match click_zone(click_x, width, state.minimal, state.in_meeting) {
+                match action_zone(click_x, width, state.minimal, state.in_meeting) {
                     ClickZone::Mic => {
                         // Real mute (SPEC.md §4.9): read+flip actual session
                         // mic state via the same `super::` helpers the
@@ -1680,6 +1697,21 @@ mod platform {
                     ClickZone::Body
                 );
             }
+        }
+
+        #[test]
+        fn action_without_a_mouse_event_opens_the_popover() {
+            // An Accessibility press (VoiceOver, Switch Control) has no click
+            // position: it opens the popover instead of leaving or muting.
+            assert_eq!(
+                action_zone(None, PILL_WIDTH_FULL, false, true),
+                ClickZone::Body
+            );
+            // A real click still hit-tests.
+            assert_eq!(
+                action_zone(Some(PILL_WIDTH_FULL), PILL_WIDTH_FULL, false, true),
+                ClickZone::Leave
+            );
         }
 
         #[test]
