@@ -6,6 +6,8 @@
 //!   DXGI surfaces through a DXGI device manager), falling back to
 //!   Microsoft's software MFT (sync, fed system memory). High profile, no
 //!   B-frames, a keyframe every 2 s, peak-constrained VBR, low latency.
+//!   With no D3D11 video device at all, [`super::cpu_convert`] converts on
+//!   the CPU and the software MFT takes its frames straight from memory.
 //! * [`AacEncoder`]: the Media Foundation AAC-LC MFT, 48 kHz stereo 128 kbps.
 //!
 //! Everything here runs on one encoder thread that owns its own D3D11 device
@@ -658,7 +660,6 @@ impl H264Encoder {
     ) -> Result<Self, String> {
         let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
         let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
-        let mut last_error = String::from("no H.264 encoder found");
         if allow_hardware && device.manager.is_some() {
             for activate in enum_transforms(
                 MFT_CATEGORY_VIDEO_ENCODER,
@@ -666,15 +667,31 @@ impl H264Encoder {
                 input,
                 output,
             ) {
-                match Self::open(device, activate, true, size, fps, bitrate_bps, max_bitrate_bps) {
+                match Self::open(Some(device), activate, true, size, fps, bitrate_bps, max_bitrate_bps) {
                     Ok(encoder) => return Ok(encoder),
-                    Err(error) => {
-                        log::warn!("streaming: hardware H.264 encoder unavailable: {error}");
-                        last_error = error;
-                    }
+                    Err(error) => log::warn!("streaming: hardware H.264 encoder unavailable: {error}"),
                 }
             }
         }
+        Self::open_software(Some(device), size, fps, bitrate_bps, max_bitrate_bps)
+    }
+
+    /// Microsoft's software encoder with no D3D11 device: frames come from
+    /// [`super::cpu_convert::CpuConverter`] through [`Self::encode_memory`].
+    pub fn new_software(size: (u32, u32), fps: u32, bitrate_bps: u32, max_bitrate_bps: u32) -> Result<Self, String> {
+        Self::open_software(None, size, fps, bitrate_bps, max_bitrate_bps)
+    }
+
+    fn open_software(
+        device: Option<&EncoderDevice>,
+        size: (u32, u32),
+        fps: u32,
+        bitrate_bps: u32,
+        max_bitrate_bps: u32,
+    ) -> Result<Self, String> {
+        let input = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
+        let output = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+        let mut last_error = String::from("no H.264 encoder found");
         for activate in enum_transforms(
             MFT_CATEGORY_VIDEO_ENCODER,
             MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
@@ -691,7 +708,7 @@ impl H264Encoder {
 
     #[allow(clippy::too_many_arguments)]
     fn open(
-        device: &EncoderDevice,
+        device: Option<&EncoderDevice>,
         activate: IMFActivate,
         hardware: bool,
         size: (u32, u32),
@@ -714,7 +731,8 @@ impl H264Encoder {
                 unsafe { attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1) }
                     .map_err(|e| fail(err("async unlock", e)))?;
             }
-            let (manager, _) = device.manager.as_ref().ok_or_else(|| fail("no DXGI manager".into()))?;
+            let (manager, _) =
+                device.and_then(|device| device.manager.as_ref()).ok_or_else(|| fail("no DXGI manager".into()))?;
             unsafe { transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize) }
                 .map_err(|e| fail(err("SET_D3D_MANAGER", e)))?;
             let events = transform
@@ -813,7 +831,6 @@ impl H264Encoder {
         pts_100ns: i64,
     ) -> Result<(Vec<EncodedVideo>, bool), String> {
         let mut out = self.poll()?;
-        let duration = 10_000_000 / i64::from(self.fps.max(1));
         let sample = match &mut self.drive {
             Drive::Async { credits, .. } => {
                 if *credits == 0 {
@@ -867,16 +884,50 @@ impl H264Encoder {
                 sample
             }
         };
+        out.extend(self.submit(&sample, pts_100ns)?);
+        Ok((out, true))
+    }
+
+    /// Submit one packed NV12 frame (`size` stride) from system memory, to the
+    /// software encoder.
+    pub fn encode_memory(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<(Vec<EncodedVideo>, bool), String> {
+        if matches!(self.drive, Drive::Async { .. }) {
+            return Err("a hardware encoder takes GPU surfaces".into());
+        }
+        let (width, height) = self.size;
+        let frame_len = width * height * 3 / 2;
+        if nv12.len() < frame_len as usize {
+            return Err("short NV12 frame".into());
+        }
+        // SAFETY: the locked MF buffer holds `frame_len` bytes and `nv12` at
+        // least as many.
+        let sample = unsafe {
+            let buffer = MFCreateMemoryBuffer(frame_len).map_err(|e| err("MFCreateMemoryBuffer", e))?;
+            let mut dst: *mut u8 = std::ptr::null_mut();
+            buffer.Lock(&mut dst, None, None).map_err(|e| err("Lock", e))?;
+            std::ptr::copy_nonoverlapping(nv12.as_ptr(), dst, frame_len as usize);
+            let _ = buffer.Unlock();
+            buffer.SetCurrentLength(frame_len).map_err(|e| err("SetCurrentLength", e))?;
+            let sample = MFCreateSample().map_err(|e| err("MFCreateSample", e))?;
+            sample.AddBuffer(&buffer).map_err(|e| err("AddBuffer", e))?;
+            sample
+        };
+        self.submit(&sample, pts_100ns).map(|out| (out, true))
+    }
+
+    /// Stamp and feed one input sample; returns the output ready after it.
+    fn submit(&mut self, sample: &IMFSample, pts_100ns: i64) -> Result<Vec<EncodedVideo>, String> {
+        let duration = 10_000_000 / i64::from(self.fps.max(1));
+        // SAFETY: COM calls on a live sample and transform.
         unsafe {
             sample.SetSampleTime(pts_100ns).map_err(|e| err("SetSampleTime", e))?;
             sample.SetSampleDuration(duration).map_err(|e| err("SetSampleDuration", e))?;
-            self.transform.ProcessInput(0, &sample, 0).map_err(|e| err("ProcessInput", e))?;
+            self.transform.ProcessInput(0, sample, 0).map_err(|e| err("ProcessInput", e))?;
         }
-        out.extend(match self.drive {
-            Drive::Sync { .. } => self.drain_sync()?,
-            Drive::Async { .. } => self.poll()?,
-        });
-        Ok((out, true))
+        match self.drive {
+            Drive::Sync { .. } => self.drain_sync(),
+            Drive::Async { .. } => self.poll(),
+        }
     }
 
     /// Collect output an async encoder produced since the last call.
@@ -1153,6 +1204,52 @@ mod tests {
         for allow_hardware in [true, false] {
             encode_video(&device, allow_hardware);
         }
+        encode_audio();
+    }
+
+    /// The no-GPU path: the CPU converter and the software H.264 encoder,
+    /// with no D3D11 device anywhere, plus AAC.
+    #[test]
+    #[ignore = "needs Media Foundation encoders"]
+    fn encodes_h264_and_aac_on_the_cpu_path() {
+        use crate::streaming::cpu_convert::CpuConverter;
+        let _runtime = MediaRuntime::start().unwrap();
+        let canvas = (1280, 720);
+        let mut converter = CpuConverter::new(canvas).unwrap();
+        let mut encoder = H264Encoder::new_software(canvas, 30, 3_000_000, 6_000_000).unwrap();
+        assert!(!encoder.hardware);
+        eprintln!("encoder: {}", encoder.name);
+        let (src_w, src_h) = (800u32, 600u32);
+        let dest = crate::streaming::plan::letterbox_rect(src_w, src_h, canvas.0, canvas.1);
+        let mut out = Vec::new();
+        for frame_index in 0..90i64 {
+            let shade = (frame_index * 3 % 255) as u8;
+            let bgra: Vec<u8> = (0..src_w * src_h).flat_map(|i| [shade, (i % 255) as u8, 255 - shade, 255]).collect();
+            converter
+                .upload(&BgraView { bgra: &bgra, bytes_per_row: src_w * 4, width: src_w, height: src_h })
+                .unwrap();
+            if frame_index == 45 {
+                encoder.force_keyframe();
+            }
+            let nv12 = converter.convert(dest).unwrap();
+            let (frames, accepted) = encoder.encode_memory(nv12, frame_index * 333_333).unwrap();
+            assert!(accepted);
+            out.extend(frames);
+        }
+        assert!(out.len() > 60, "only {} frames came out", out.len());
+        assert!(out[0].keyframe, "stream starts on a keyframe");
+        assert!(out.iter().filter(|f| f.keyframe).count() >= 2, "forced/GOP keyframes");
+        let pts: Vec<i64> = out.iter().map(|f| f.pts_100ns).collect();
+        assert!(pts.windows(2).all(|w| w[0] < w[1]), "monotonic, no reordering: {pts:?}");
+        let mut packager = AvcPackager::new();
+        if let Some(header) = encoder.sequence_header() {
+            packager.package(&split_annex_b(header), 0, false);
+        }
+        let packets: Vec<_> = out
+            .iter()
+            .flat_map(|frame| packager.package(&split_annex_b(&frame.data), (frame.pts_100ns / 10_000) as u32, frame.keyframe))
+            .collect();
+        assert!(packets[0].is_sequence_header(), "SPS/PPS found");
         encode_audio();
     }
 

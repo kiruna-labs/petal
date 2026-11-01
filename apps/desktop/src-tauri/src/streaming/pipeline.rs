@@ -9,6 +9,10 @@
 //! * audio: every 1024 samples (21.3 ms) one mixer block goes to AAC.
 //!
 //! Output is packaged to FLV, interleaved, and pushed to the RTMP queue.
+//!
+//! On a Windows computer with no D3D11 video device, frames are converted on
+//! the CPU ([`super::cpu_convert`]) for Microsoft's software H.264 encoder,
+//! and the tap keeps sending CPU copies.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -26,6 +30,8 @@ use super::macos_encode::{
     AacEncoder, BgraView, Converter, EncodedVideo, EncoderDevice, H264Encoder, MediaRuntime,
 };
 use super::tap::{LiveTap, TapFrame};
+#[cfg(target_os = "windows")]
+use super::cpu_convert::CpuConverter;
 #[cfg(target_os = "windows")]
 use super::tap::TapPixels;
 #[cfg(target_os = "windows")]
@@ -81,6 +87,17 @@ pub fn spawn(
     mixer: Arc<Mutex<AudioMixer>>,
     queue: Arc<MediaQueue>,
 ) -> Result<PipelineHandle, String> {
+    spawn_with(config, tap, mixer, queue, false)
+}
+
+/// `force_cpu`: the CPU path even where a GPU is present (its tests only).
+fn spawn_with(
+    config: PipelineConfig,
+    tap: Arc<LiveTap>,
+    mixer: Arc<Mutex<AudioMixer>>,
+    queue: Arc<MediaQueue>,
+    force_cpu: bool,
+) -> Result<PipelineHandle, String> {
     let (commands, command_rx) = std::sync::mpsc::channel();
     let stats = Arc::new(PipelineStats::default());
     let stop = Arc::new(AtomicBool::new(false));
@@ -89,7 +106,8 @@ pub fn spawn(
     let thread = std::thread::Builder::new()
         .name("petal-stream-encode".into())
         .spawn(move || {
-            let exit = match run(config, &tap, &mixer, &queue, &command_rx, &thread_stats, &thread_stop) {
+            let exit = match run(config, &tap, &mixer, &queue, &command_rx, &thread_stats, &thread_stop, force_cpu)
+            {
                 Ok(exit) => exit,
                 Err(error) => PipelineExit::Failed(error),
             };
@@ -101,50 +119,91 @@ pub fn spawn(
     Ok(PipelineHandle { thread, commands, stats, stop })
 }
 
-/// Hand a share frame to the converter: a GPU tap texture or CPU BGRA on
-/// Windows, the share's own pixel buffer on macOS. `Ok(false)`: not uploaded
-/// (a GPU frame after the GPU tap was turned off; the CPU copy replaces it
-/// with the capture's next frame).
-#[cfg(target_os = "windows")]
-fn upload_share(converter: &mut Converter, frame: &TapFrame, tap: &LiveTap) -> Result<bool, String> {
-    match &frame.pixels {
-        TapPixels::Bgra { bgra, bytes_per_row } => converter
-            .upload(&BgraView { bgra, bytes_per_row: *bytes_per_row, width: frame.width, height: frame.height })
-            .map(|()| true),
-        TapPixels::Gpu(_) if tap.gpu_disabled() => Ok(false),
-        TapPixels::Gpu(gpu) => match converter.upload_texture(gpu) {
-            Ok(()) => Ok(true),
-            Err(error) => {
-                tap.disable_gpu(&error);
-                Ok(false)
+/// Where frames become NV12: on the encoder's D3D11 device, or (Windows, no
+/// video device) on the CPU.
+enum Frames {
+    Gpu { device: EncoderDevice, converter: Converter },
+    #[cfg(target_os = "windows")]
+    Cpu(CpuConverter),
+}
+
+impl Frames {
+    /// A BGRA frame: the slate, or a share's CPU copy.
+    fn upload(&mut self, frame: &BgraView<'_>) -> Result<(), String> {
+        match self {
+            Self::Gpu { converter, .. } => converter.upload(frame),
+            #[cfg(target_os = "windows")]
+            Self::Cpu(converter) => converter.upload(frame),
+        }
+    }
+
+    /// Hand a share frame to the converter: a GPU tap texture or CPU BGRA.
+    /// `Ok(false)`: not uploaded (a GPU frame after the GPU tap was turned
+    /// off, or on the CPU path, which never accepts them; the CPU copy
+    /// replaces it with the capture's next frame).
+    #[cfg(target_os = "windows")]
+    fn upload_share(&mut self, frame: &TapFrame, tap: &LiveTap) -> Result<bool, String> {
+        let gpu = match &frame.pixels {
+            TapPixels::Bgra { bgra, bytes_per_row } => {
+                let view = BgraView { bgra, bytes_per_row: *bytes_per_row, width: frame.width, height: frame.height };
+                return self.upload(&view).map(|()| true);
             }
-        },
+            TapPixels::Gpu(gpu) => gpu,
+        };
+        match self {
+            Self::Gpu { converter, .. } if !tap.gpu_disabled() => match converter.upload_texture(gpu) {
+                Ok(()) => Ok(true),
+                Err(error) => {
+                    tap.disable_gpu(&error);
+                    Ok(false)
+                }
+            },
+            _ => Ok(false),
+        }
+    }
+
+    /// The share's own pixel buffer.
+    #[cfg(target_os = "macos")]
+    fn upload_share(&mut self, frame: &TapFrame, _tap: &LiveTap) -> Result<bool, String> {
+        let Self::Gpu { converter, .. } = self;
+        converter.upload_buffer(&frame.buffer).map(|()| true)
     }
 }
 
-#[cfg(target_os = "macos")]
-fn upload_share(converter: &mut Converter, frame: &TapFrame, _tap: &LiveTap) -> Result<bool, String> {
-    converter.upload_buffer(&frame.buffer).map(|()| true)
-}
-
-/// The encoder device. On Windows it goes on the share's capture adapter, so
-/// the capture thread's shared textures open on it (the GPU tap); if it
-/// can't, the stream keeps the CPU copy.
+/// The encoder device and converter. On Windows the device goes on the
+/// share's capture adapter, so the capture thread's shared textures open on
+/// it (the GPU tap); if it can't, the stream keeps the CPU copy. With no
+/// D3D11 video device at all (or `force_cpu`), frames are converted on the
+/// CPU for the software encoder.
 #[cfg(target_os = "windows")]
-fn create_device(tap: &LiveTap) -> Result<EncoderDevice, String> {
-    let capture = tap.capture_adapter();
-    let device = EncoderDevice::create_on(capture)?;
-    match (capture, device.adapter_luid()) {
-        (Some(capture), Some(encoder)) if capture == encoder => tap.accept_gpu(encoder),
-        (None, _) => tap.gpu_fell_back("the capture adapter is unknown"),
-        _ => tap.gpu_fell_back("the encoder couldn't open a device on the capture adapter"),
+fn open_frames(tap: &LiveTap, canvas: (u32, u32), force_cpu: bool) -> Result<Frames, String> {
+    if !force_cpu {
+        let capture = tap.capture_adapter();
+        let opened = EncoderDevice::create_on(capture)
+            .and_then(|device| Converter::new(&device, canvas).map(|converter| (device, converter)));
+        match opened {
+            Ok((device, converter)) => {
+                match (capture, device.adapter_luid()) {
+                    (Some(capture), Some(encoder)) if capture == encoder => tap.accept_gpu(encoder),
+                    (None, _) => tap.gpu_fell_back("the capture adapter is unknown"),
+                    _ => tap.gpu_fell_back("the encoder couldn't open a device on the capture adapter"),
+                }
+                return Ok(Frames::Gpu { device, converter });
+            }
+            Err(error) => log::warn!(
+                "streaming: no D3D11 video device ({error}); converting on the CPU for the software H.264 encoder"
+            ),
+        }
     }
-    Ok(device)
+    tap.gpu_fell_back("no D3D11 video device");
+    Ok(Frames::Cpu(CpuConverter::new(canvas)?))
 }
 
 #[cfg(target_os = "macos")]
-fn create_device(_tap: &LiveTap) -> Result<EncoderDevice, String> {
-    EncoderDevice::create()
+fn open_frames(_tap: &LiveTap, canvas: (u32, u32), _force_cpu: bool) -> Result<Frames, String> {
+    let device = EncoderDevice::create()?;
+    let converter = Converter::new(&device, canvas)?;
+    Ok(Frames::Gpu { device, converter })
 }
 
 fn to_100ns(duration: Duration) -> i64 {
@@ -152,22 +211,40 @@ fn to_100ns(duration: Duration) -> i64 {
 }
 
 struct Video {
-    converter: Converter,
+    frames: Frames,
     encoder: H264Encoder,
     packager: AvcPackager,
     canvas: (u32, u32),
 }
 
 impl Video {
-    fn open(device: &EncoderDevice, canvas: (u32, u32), fps: u32, bitrate: u32, max: u32) -> Result<Self, String> {
-        let converter = Converter::new(device, canvas)?;
-        let encoder = H264Encoder::new(device, canvas, fps, bitrate, max)?;
+    fn open(frames: Frames, canvas: (u32, u32), fps: u32, bitrate: u32, max: u32) -> Result<Self, String> {
+        let encoder = match &frames {
+            Frames::Gpu { device, .. } => H264Encoder::new(device, canvas, fps, bitrate, max)?,
+            #[cfg(target_os = "windows")]
+            Frames::Cpu(_) => H264Encoder::new_software(canvas, fps, bitrate, max)?,
+        };
         let mut packager = AvcPackager::new();
         if let Some(header) = encoder.sequence_header() {
             let nalus = split_annex_b(header);
             packager.package(&nalus, 0, false);
         }
-        Ok(Self { converter, encoder, packager, canvas })
+        Ok(Self { frames, encoder, packager, canvas })
+    }
+
+    /// Convert the current frame into `dest` and submit it at `pts`.
+    fn encode(&mut self, dest: (u32, u32, u32, u32), pts: i64) -> Result<(Vec<EncodedVideo>, bool), String> {
+        match &mut self.frames {
+            Frames::Gpu { device, converter } => {
+                let nv12 = converter.convert(dest)?;
+                self.encoder.encode(device, &nv12, pts)
+            }
+            #[cfg(target_os = "windows")]
+            Frames::Cpu(converter) => {
+                let nv12 = converter.convert(dest)?;
+                self.encoder.encode_memory(nv12, pts)
+            }
+        }
     }
 
     fn package(&mut self, frames: Vec<EncodedVideo>, out: &mut Interleaver) {
@@ -181,6 +258,7 @@ impl Video {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     config: PipelineConfig,
     tap: &LiveTap,
@@ -189,11 +267,12 @@ fn run(
     commands: &Receiver<PipelineCommand>,
     stats: &PipelineStats,
     stop: &AtomicBool,
+    force_cpu: bool,
 ) -> Result<PipelineExit, String> {
     let _runtime = MediaRuntime::start()?;
-    let device = create_device(tap)?;
+    let frames = open_frames(tap, config.canvas, force_cpu)?;
     let fps = config.fps.max(1);
-    let mut video = Video::open(&device, config.canvas, fps, config.bitrate_bps, config.max_bitrate_bps)?;
+    let mut video = Video::open(frames, config.canvas, fps, config.bitrate_bps, config.max_bitrate_bps)?;
     stats.hardware.store(video.encoder.hardware, Ordering::Relaxed);
     let mut aac = AacEncoder::new()?;
     let mut aac_packager = AacPackager::default();
@@ -257,7 +336,7 @@ fn run(
                     let (frame, generation) = latest.ok_or("frame vanished")?;
                     let size = (frame.width, frame.height);
                     if (last_generation != Some(generation) || showing_slate)
-                        && upload_share(&mut video.converter, &frame, tap)?
+                        && video.frames.upload_share(&frame, tap)?
                     {
                         last_generation = Some(generation);
                         showing_slate = false;
@@ -267,7 +346,7 @@ fn run(
                 SlateDecision::Slate => {
                     if !showing_slate {
                         let slate = render_slate(video.canvas.0, video.canvas.1);
-                        video.converter.upload(&BgraView {
+                        video.frames.upload(&BgraView {
                             bgra: &slate.bgra,
                             bytes_per_row: slate.width * 4,
                             width: slate.width,
@@ -288,8 +367,7 @@ fn run(
                 video.encoder.force_keyframe();
             }
             let dest = letterbox_rect(source_size.0, source_size.1, video.canvas.0, video.canvas.1);
-            let nv12 = video.converter.convert(dest)?;
-            let (frames, accepted) = video.encoder.encode(&device, &nv12, to_100ns(tick.pts))?;
+            let (frames, accepted) = video.encode(dest, to_100ns(tick.pts))?;
             if accepted {
                 stats.frames_encoded.fetch_add(1, Ordering::Relaxed);
             } else {
@@ -340,13 +418,27 @@ mod tests {
         TapFrame { buffer, width: 800, height: 600 }
     }
 
-    /// Tap -> slate/CFR -> GPU convert -> hardware H.264 + AAC -> FLV ->
-    /// RTMP, into an in-process server. Needs a GPU: `-- --ignored`.
+    /// Tap -> slate/CFR -> convert -> H.264 + AAC -> FLV -> RTMP, into an
+    /// in-process server, on whichever path this machine takes (on Windows
+    /// with no D3D11 video device, the CPU one). `-- --ignored`.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "needs a GPU and the platform's hardware encoders"]
+    #[ignore = "needs the platform's encoders"]
+    async fn streams_slate_then_share_end_to_end() {
+        slate_then_share(false).await;
+    }
+
+    /// The same on the CPU converter and the software encoder, GPU or not.
+    #[cfg(target_os = "windows")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs Media Foundation encoders"]
+    async fn streams_slate_then_share_end_to_end_on_the_cpu_path() {
+        assert!(!slate_then_share(true).await, "the software encoder");
+    }
+
+    /// Returns whether the stream used a hardware encoder.
     // The tap's test lock serializes the whole test, awaits included.
     #[allow(clippy::await_holding_lock)]
-    async fn streams_slate_then_share_end_to_end() {
+    async fn slate_then_share(force_cpu: bool) -> bool {
         let _guard = tap::test_lock();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -356,7 +448,7 @@ mod tests {
         let live_tap = tap::start(77);
         let mixer = Arc::new(Mutex::new(AudioMixer::new()));
         let queue = Arc::new(MediaQueue::new());
-        let pipeline = spawn(
+        let pipeline = spawn_with(
             PipelineConfig {
                 canvas: (1280, 720),
                 fps: 30,
@@ -366,6 +458,7 @@ mod tests {
             live_tap.clone(),
             mixer.clone(),
             queue.clone(),
+            force_cpu,
         )
         .unwrap();
         let destination = RtmpDestination::new(&format!("rtmp://127.0.0.1:{port}/live"), "k").unwrap();
@@ -399,6 +492,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         pipeline.stop.store(true, Ordering::Release);
+        let hardware = pipeline.stats.hardware.load(Ordering::Relaxed);
         let exit = tokio::task::spawn_blocking(move || pipeline.thread.join().unwrap()).await.unwrap();
         assert_eq!(exit, PipelineExit::Stopped);
         cancel.cancel();
@@ -425,6 +519,8 @@ mod tests {
         let audio_end = r.audio.last().unwrap().timestamp.as_millis();
         let video_end = *ts.last().unwrap();
         assert!(audio_end.abs_diff(video_end) < 200, "A/V ends {audio_end} vs {video_end}");
+        eprintln!("hardware encoder: {hardware}");
+        hardware
     }
 
     /// A texture on a "capture" device -> GPU tap pool -> the encoder device
