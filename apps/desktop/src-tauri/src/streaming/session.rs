@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
+use super::capability::{client_encoder_async, ClientEncoder};
 use super::destinations::DestinationStore;
 use super::keystore::platform_store;
 use super::plan::{
@@ -137,7 +138,36 @@ pub struct StreamPreview {
     pub capture_height: u32,
     pub share_fps: u32,
     pub plan: StreamPlan,
+    /// `client_encoder` can go live (kept for older dialogs).
     pub client_available: bool,
+    pub client_encoder: ClientEncoder,
+}
+
+/// The dialog's preview for a share of this size and cadence.
+pub fn build_preview(
+    (capture_width, capture_height): (u32, u32),
+    share_fps: u32,
+    resolution: StreamResolution,
+    orientation: StreamOrientation,
+    max_bitrate_bps: Option<u32>,
+    client_encoder: ClientEncoder,
+) -> StreamPreview {
+    let plan = plan_stream_output(&StreamPlanInput {
+        capture_width,
+        capture_height,
+        share_fps,
+        resolution,
+        orientation,
+        max_bitrate_bps,
+    });
+    StreamPreview {
+        capture_width,
+        capture_height,
+        share_fps,
+        plan,
+        client_available: client_encoder.available(),
+        client_encoder,
+    }
 }
 
 struct LiveSession {
@@ -189,7 +219,7 @@ fn room_context(_app: &AppHandle) -> Result<(Arc<livekit::Room>, String, Vec<u32
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const CLIENT_UNAVAILABLE: &str = "Streaming from this computer isn't available on this platform yet";
+const CLIENT_UNAVAILABLE: &str = super::capability::UNSUPPORTED_PLATFORM_ERROR;
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 fn session_state(app: &AppHandle) -> tauri::State<'_, crate::session::SessionState> {
@@ -266,23 +296,10 @@ pub async fn preview(
     if !shares.contains(&window_id) {
         return Err("Share this window first".into());
     }
-    let (capture_width, capture_height) = capture_geometry(app, window_id).unwrap_or((1920, 1080));
+    let capture = capture_geometry(app, window_id).unwrap_or((1920, 1080));
     let share_fps = share_fps(app, window_id);
-    let plan = plan_stream_output(&StreamPlanInput {
-        capture_width,
-        capture_height,
-        share_fps,
-        resolution,
-        orientation,
-        max_bitrate_bps,
-    });
-    Ok(StreamPreview {
-        capture_width,
-        capture_height,
-        share_fps,
-        plan,
-        client_available: cfg!(any(target_os = "windows", target_os = "macos")),
-    })
+    let client_encoder = client_encoder_async().await;
+    Ok(build_preview(capture, share_fps, resolution, orientation, max_bitrate_bps, client_encoder))
 }
 
 pub async fn go_live(app: &AppHandle, request: GoLiveRequest) -> Result<StreamSessionSnapshot, String> {
@@ -296,6 +313,9 @@ pub async fn go_live(app: &AppHandle, request: GoLiveRequest) -> Result<StreamSe
     }
     if super::live_state::derive_from_room(&room).live {
         return Err("This meeting is already being live streamed".into());
+    }
+    if let Some(refusal) = super::capability::refusal(client_encoder_async().await) {
+        return Err(refusal.into());
     }
     let mut pending_save = None;
     let destination = match &request.destination {
@@ -745,4 +765,27 @@ pub fn current() -> Option<StreamSessionSnapshot> {
             ..placeholder_snapshot(session.window_id.load(Ordering::Relaxed))
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_reports_the_encode_path_and_whether_it_can_go_live() {
+        for (encoder, available, wire) in [
+            (ClientEncoder::Gpu, true, "gpu"),
+            (ClientEncoder::Cpu, true, "cpu"),
+            (ClientEncoder::MissingEncoders, false, "missingEncoders"),
+            (ClientEncoder::UnsupportedPlatform, false, "unsupportedPlatform"),
+        ] {
+            let preview =
+                build_preview((2560, 1440), 30, StreamResolution::Auto, StreamOrientation::Auto, None, encoder);
+            assert_eq!((preview.plan.width, preview.plan.height), (1920, 1080));
+            assert_eq!(preview.client_available, available, "{encoder:?}");
+            let json = serde_json::to_value(&preview).unwrap();
+            assert_eq!(json["clientEncoder"], wire);
+            assert_eq!(json["clientAvailable"], available);
+        }
+    }
 }

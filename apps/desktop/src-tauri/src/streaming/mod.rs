@@ -2,7 +2,8 @@
 //!
 //! * [`plan`] and [`wire`]: the output rules and room-level wire shapes,
 //!   pinned to contracts/petal-contracts.json.
-//! * Encoding on this computer: [`clock`] (constant frame rate, follow
+//! * Encoding on this computer: [`capability`] (which encode path this
+//!   computer has, probed once), [`clock`] (constant frame rate, follow
 //!   the source), [`mixer`] (meeting audio), [`mic`] (the sharer's mic),
 //!   [`flv`] (packaging), [`queue`]
 //!   (backpressure, reconnect schedule), [`rtmp`] (the socket), [`slate`],
@@ -14,6 +15,7 @@
 //!   streams").
 
 pub mod audio_tap;
+pub mod capability;
 pub mod clock;
 pub mod commands;
 pub mod destinations;

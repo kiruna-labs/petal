@@ -1615,13 +1615,18 @@ export interface StreamPlan {
   resolution: Exclude<StreamResolution, 'auto'>;
 }
 
+/** Mirrors `streaming::capability::ClientEncoder`: the encode path go-live takes here. */
+export type StreamClientEncoder = 'gpu' | 'cpu' | 'missingEncoders' | 'unsupportedPlatform';
+
 /** Mirrors `streaming::session::StreamPreview`. */
 export interface StreamPreview {
   captureWidth: number;
   captureHeight: number;
   shareFps: number;
   plan: StreamPlan;
+  /** `clientEncoder` can go live. */
   clientAvailable: boolean;
+  clientEncoder: StreamClientEncoder;
 }
 
 export type StreamDestinationChoice =

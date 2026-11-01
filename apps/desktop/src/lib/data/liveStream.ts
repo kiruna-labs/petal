@@ -41,6 +41,30 @@ export function parseMaxBitrateMbps(input: string): number | null | undefined {
   return Math.round(value * 1_000_000);
 }
 
+/** The go-live hint when no encoder can stream from this computer. */
+export const STREAM_MISSING_ENCODERS_HINT =
+  'Live streaming needs Windows’ built-in video and audio encoders, which this computer doesn’t have. ' +
+  'On Windows N editions, install the Media Feature Pack.';
+export const STREAM_UNSUPPORTED_PLATFORM_HINT =
+  'Streaming from this computer isn’t available on this platform yet.';
+
+/** The go-live dialog's hints about how (or whether) this computer can encode. */
+export function streamClientHints(preview: StreamPreview): string[] {
+  switch (preview.clientEncoder) {
+    case 'missingEncoders':
+      return [STREAM_MISSING_ENCODERS_HINT];
+    case 'unsupportedPlatform':
+      return [STREAM_UNSUPPORTED_PLATFORM_HINT];
+    default:
+      return [];
+  }
+}
+
+/** Whether this computer can go live at all (the dialog's other checks aside). */
+export function streamClientCanGoLive(preview: StreamPreview | null): boolean {
+  return preview?.clientEncoder === 'gpu' || preview?.clientEncoder === 'cpu';
+}
+
 /** "4:05" or "1:02:03" */
 export function formatStreamElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));

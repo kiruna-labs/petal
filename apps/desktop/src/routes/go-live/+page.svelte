@@ -25,6 +25,8 @@
   } from '#lib/ipc.js';
   import {
     parseMaxBitrateMbps,
+    streamClientCanGoLive,
+    streamClientHints,
     streamIsDownscaled,
     streamPreviewLine
   } from '#lib/data/liveStream.js';
@@ -78,7 +80,7 @@
     !busy &&
       windowId !== 0 &&
       maxBitrateBps !== undefined &&
-      (preview?.clientAvailable ?? false) &&
+      streamClientCanGoLive(preview) &&
       (!usingNew || (serverUrl.trim() !== '' && streamKey.trim() !== ''))
   );
 
@@ -341,9 +343,9 @@
           The frame rate can’t exceed what the encoder level allows at this resolution.
         </p>
       {/if}
-      {#if !preview.clientAvailable}
-        <p class="hint">Streaming from this computer isn’t available on this platform yet.</p>
-      {/if}
+      {#each streamClientHints(preview) as hint (hint)}
+        <p class="hint">{hint}</p>
+      {/each}
     {/if}
 
     {#if error}
