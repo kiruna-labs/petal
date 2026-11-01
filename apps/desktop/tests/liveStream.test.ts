@@ -10,6 +10,8 @@ import { readFileSync } from 'node:fs';
 import {
   HIDDEN_MEETING_LABEL,
   LIVE_MEETING_LABEL,
+  STREAM_CPU_HINT,
+  STREAM_CPU_LOAD_HINT,
   STREAM_MISSING_ENCODERS_HINT,
   STREAM_UNSUPPORTED_PLATFORM_HINT,
   formatStreamElapsed,
@@ -96,6 +98,19 @@ test('preview line and downscale flag', () => {
   // Wider than 16:9 but fitting: scaled up, letterboxed, not downscaled.
   assert.equal(streamIsDownscaled({ ...preview, captureWidth: 1708, captureHeight: 732 }), false);
   assert.equal(streamIsDownscaled({ ...preview, captureWidth: 2000, captureHeight: 800 }), true);
+});
+
+test('on the CPU path the dialog explains it, and warns above the CPU default', () => {
+  const cpu = { ...preview, clientEncoder: 'cpu' as const };
+  assert.deepEqual(streamClientHints(cpu), [STREAM_CPU_HINT], '1080p30 is the CPU default');
+  assert.match(STREAM_CPU_HINT, /Auto streams at up to 1080p and 30 fps here\.$/);
+  const portrait = { ...cpu, plan: { ...preview.plan, width: 1080, height: 1920 } };
+  assert.deepEqual(streamClientHints(portrait), [STREAM_CPU_HINT], 'portrait 1080p is the same size');
+  const at1440 = { ...cpu, plan: { ...preview.plan, width: 2560, height: 1440, resolution: '1440p' as const } };
+  assert.deepEqual(streamClientHints(at1440), [STREAM_CPU_HINT, STREAM_CPU_LOAD_HINT], 'larger than the default');
+  const at60 = { ...cpu, plan: { ...preview.plan, fps: 60 } };
+  assert.deepEqual(streamClientHints(at60), [STREAM_CPU_HINT, STREAM_CPU_LOAD_HINT], 'above 30 fps');
+  assert.equal(streamClientCanGoLive(at1440), true, 'a warning, never a block');
 });
 
 test('the dialog says when this computer cannot encode, and only then blocks', () => {

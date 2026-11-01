@@ -3648,6 +3648,96 @@
         "maxBitrateBps": 6000000,
         "resolution": "720p"
       }
+    },
+    {
+      "name": "cpu: Auto with a 1080p share at 60 fps is held to 30 fps",
+      "input": {
+        "captureWidth": 1920,
+        "captureHeight": 1080,
+        "shareFps": 60,
+        "resolution": "auto",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrateBps": 4976640,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "cpu: Auto with a 720p share at 60 fps runs at 30 fps",
+      "input": {
+        "captureWidth": 1280,
+        "captureHeight": 720,
+        "shareFps": 60,
+        "resolution": "auto",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "bitrateBps": 3000000,
+        "maxBitrateBps": 6000000,
+        "resolution": "720p"
+      }
+    },
+    {
+      "name": "cpu: Auto with a 1440p display caps at 1080p30",
+      "input": {
+        "captureWidth": 2560,
+        "captureHeight": 1440,
+        "shareFps": 60,
+        "resolution": "auto",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 30,
+        "bitrateBps": 4976640,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "cpu: an explicit 1080p at 60 fps is kept",
+      "input": {
+        "captureWidth": 1920,
+        "captureHeight": 1080,
+        "shareFps": 60,
+        "resolution": "1080p",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 1920,
+        "height": 1080,
+        "fps": 60,
+        "bitrateBps": 6000000,
+        "maxBitrateBps": 6000000,
+        "resolution": "1080p"
+      }
+    },
+    {
+      "name": "cpu: an explicit 4K is kept",
+      "input": {
+        "captureWidth": 1920,
+        "captureHeight": 1080,
+        "shareFps": 30,
+        "resolution": "4k",
+        "cpuEncode": true
+      },
+      "output": {
+        "width": 3840,
+        "height": 2160,
+        "fps": 30,
+        "bitrateBps": 19906560,
+        "maxBitrateBps": 25000000,
+        "resolution": "4k"
+      }
     }
   ],
   "streamFpsCeilings": [

@@ -159,6 +159,7 @@ pub fn build_preview(
         resolution,
         orientation,
         max_bitrate_bps,
+        cpu_encode: client_encoder == ClientEncoder::Cpu,
     });
     StreamPreview {
         capture_width,
@@ -372,6 +373,7 @@ async fn start_client(
         resolution: request.resolution,
         orientation: request.orientation,
         max_bitrate_bps: request.max_bitrate_bps,
+        cpu_encode: client_encoder_async().await == ClientEncoder::Cpu,
     });
     log::info!(
         "streaming: going live window={window_id} {capture_width}x{capture_height} -> {}x{} ({:?}) @ {} fps, {} bps",
@@ -787,5 +789,17 @@ mod tests {
             assert_eq!(json["clientEncoder"], wire);
             assert_eq!(json["clientAvailable"], available);
         }
+    }
+
+    #[test]
+    fn the_cpu_path_previews_auto_within_its_ceiling() {
+        use super::super::plan::{STREAM_CPU_AUTO_MAX_FPS, STREAM_CPU_AUTO_MAX_RESOLUTION};
+        let cpu = build_preview((1920, 1080), 60, StreamResolution::Auto, StreamOrientation::Auto, None, ClientEncoder::Cpu);
+        assert_eq!(cpu.plan.resolution, STREAM_CPU_AUTO_MAX_RESOLUTION);
+        assert_eq!(cpu.plan.fps, STREAM_CPU_AUTO_MAX_FPS);
+        let gpu = build_preview((1920, 1080), 60, StreamResolution::Auto, StreamOrientation::Auto, None, ClientEncoder::Gpu);
+        assert_eq!((gpu.plan.resolution, gpu.plan.fps), (StreamResolution::P1080, 60));
+        let explicit = build_preview((1920, 1080), 60, StreamResolution::P1080, StreamOrientation::Auto, None, ClientEncoder::Cpu);
+        assert_eq!((explicit.plan.resolution, explicit.plan.fps), (StreamResolution::P1080, 60), "explicit sizes are kept");
     }
 }
