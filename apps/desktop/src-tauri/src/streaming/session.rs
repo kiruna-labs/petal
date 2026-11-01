@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
-use super::capability::{client_encoder_async, ClientEncoder};
+use super::capability::{audio_output_available_async, client_encoder_async, ClientEncoder};
 use super::destinations::DestinationStore;
 use super::keystore::platform_store;
 use super::plan::{
@@ -71,6 +71,9 @@ pub struct StreamSessionSnapshot {
     pub slate_remaining_s: Option<u32>,
     pub reconnect_attempt: Option<u32>,
     pub hardware_encoder: bool,
+    /// No audio output device: other people in the meeting aren't heard on
+    /// the stream (Petal never plays their audio). Checked every 2 s.
+    pub no_audio_output: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +144,9 @@ pub struct StreamPreview {
     /// `client_encoder` can go live (kept for older dialogs).
     pub client_available: bool,
     pub client_encoder: ClientEncoder,
+    /// This computer has an audio output device (without one, other people
+    /// aren't heard on the stream).
+    pub audio_output: bool,
 }
 
 /// The dialog's preview for a share of this size and cadence.
@@ -168,6 +174,7 @@ pub fn build_preview(
         plan,
         client_available: client_encoder.available(),
         client_encoder,
+        audio_output: true,
     }
 }
 
@@ -300,7 +307,10 @@ pub async fn preview(
     let capture = capture_geometry(app, window_id).unwrap_or((1920, 1080));
     let share_fps = share_fps(app, window_id);
     let client_encoder = client_encoder_async().await;
-    Ok(build_preview(capture, share_fps, resolution, orientation, max_bitrate_bps, client_encoder))
+    Ok(StreamPreview {
+        audio_output: audio_output_available_async().await,
+        ..build_preview(capture, share_fps, resolution, orientation, max_bitrate_bps, client_encoder)
+    })
 }
 
 pub async fn go_live(app: &AppHandle, request: GoLiveRequest) -> Result<StreamSessionSnapshot, String> {
@@ -454,6 +464,7 @@ async fn start_client(
         slate_remaining_s: None,
         reconnect_attempt: None,
         hardware_encoder: false,
+        no_audio_output: !audio_output_available_async().await,
     };
     *last_snapshot.lock_unpoisoned() = Some(snapshot.clone());
     let _ = app.emit(STREAM_SESSION_CHANGED_EVENT, &snapshot);
@@ -538,6 +549,7 @@ fn placeholder_snapshot(window_id: u32) -> StreamSessionSnapshot {
         slate_remaining_s: None,
         reconnect_attempt: None,
         hardware_encoder: false,
+        no_audio_output: false,
     }
 }
 
@@ -562,6 +574,7 @@ async fn monitor(
     let mut last_bytes = 0u64;
     let mut last_at = Instant::now();
     let mut attribute: Option<ClientLiveAttribute> = None;
+    let mut output_checked = Instant::now();
     let identity = room.local_participant().identity().to_string();
     loop {
         tokio::select! {
@@ -624,6 +637,10 @@ async fn monitor(
             pipeline.frames_dropped.load(Ordering::Relaxed) + queue.dropped_video_frames();
         snapshot.slate_remaining_s = on_slate.then(|| pipeline.slate_remaining_s.load(Ordering::Relaxed));
         snapshot.hardware_encoder = pipeline.hardware.load(Ordering::Relaxed);
+        if output_checked.elapsed() >= Duration::from_secs(2) {
+            snapshot.no_audio_output = !audio_output_available_async().await;
+            output_checked = Instant::now();
+        }
         *last_snapshot.lock_unpoisoned() = Some(snapshot.clone());
         let _ = app.emit(STREAM_SESSION_CHANGED_EVENT, &snapshot);
 
@@ -788,7 +805,10 @@ mod tests {
             let json = serde_json::to_value(&preview).unwrap();
             assert_eq!(json["clientEncoder"], wire);
             assert_eq!(json["clientAvailable"], available);
+            assert_eq!(json["audioOutput"], true);
         }
+        let snapshot = serde_json::to_value(placeholder_snapshot(7)).unwrap();
+        assert_eq!(snapshot["noAudioOutput"], false, "the banner's no-audio-output flag is on the wire");
     }
 
     #[test]

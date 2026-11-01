@@ -21,7 +21,8 @@
   import {
     formatStreamElapsed,
     showsOptOutToggle,
-    streamStatusLine
+    streamStatusLine,
+    streamStatusTitle
   } from '#lib/data/liveStream.js';
 
   let room = $state<StreamLiveState | null>(null);
@@ -91,7 +92,7 @@
 {#if visible}
   <div class="live-banner" class:paused={own?.phase === 'paused' || room?.paused} role="status">
     <span class="dot" aria-hidden="true"></span>
-    <span class="text">{label}</span>
+    <span class="text" title={streamStatusTitle(own)}>{label}</span>
     {#if own}
       <button type="button" onclick={stop} disabled={stopping}>Stop</button>
     {:else if optOutVisible && settings}

@@ -58,9 +58,21 @@ export const STREAM_CPU_HINT =
   `${STREAM_CPU_AUTO_MAX.fps} fps here.`;
 export const STREAM_CPU_LOAD_HINT =
   'The processor may not keep up at this size or frame rate, so the stream can drop frames.';
+/** Without an audio output device Petal never plays the meeting, so it can't be streamed. */
+export const STREAM_NO_AUDIO_OUTPUT_HINT =
+  'This computer has no audio output device, so other people in the meeting won’t be heard on ' +
+  'the stream. Connect speakers or headphones to include them.';
 
-/** The go-live dialog's hints about how (or whether) this computer can encode. */
+/**
+ * The go-live dialog's hints about this computer: how (or whether) it can encode, and whether
+ * the meeting's audio can reach the stream.
+ */
 export function streamClientHints(preview: StreamPreview): string[] {
+  const hints = encoderHints(preview);
+  return preview.audioOutput === false ? [...hints, STREAM_NO_AUDIO_OUTPUT_HINT] : hints;
+}
+
+function encoderHints(preview: StreamPreview): string[] {
   switch (preview.clientEncoder) {
     case 'cpu': {
       const { width, height, fps } = preview.plan;
@@ -96,6 +108,7 @@ export function formatStreamElapsed(ms: number): string {
 /** The sharer's notice line while live: "LIVE 4:05 · 5.8 Mbps · 3 dropped". */
 export function streamStatusLine(snapshot: StreamSessionSnapshot, nowMs: number): string {
   const elapsed = formatStreamElapsed(nowMs - snapshot.startedAt);
+  const noOutput = snapshot.noAudioOutput ? ' · No audio output' : '';
   switch (snapshot.phase) {
     case 'connecting':
       return 'Connecting to the streaming server…';
@@ -104,13 +117,19 @@ export function streamStatusLine(snapshot: StreamSessionSnapshot, nowMs: number)
     case 'paused':
       return `LIVE ${elapsed} · Be right back${
         snapshot.slateRemainingS !== null ? ` · ends in ${snapshot.slateRemainingS}s` : ''
-      }`;
+      }${noOutput}`;
     case 'live': {
       const parts = [`LIVE ${elapsed}`, `${mbps(snapshot.actualBitrateBps)} Mbps`];
       if (snapshot.droppedFrames > 0) parts.push(`${snapshot.droppedFrames} dropped`);
-      return parts.join(' · ');
+      return parts.join(' · ') + noOutput;
     }
   }
+}
+
+/** The status line's tooltip: why the meeting is missing from the stream, when it is. */
+export function streamStatusTitle(snapshot: StreamSessionSnapshot | null): string | undefined {
+  const onAir = snapshot?.phase === 'live' || snapshot?.phase === 'paused';
+  return onAir && snapshot?.noAudioOutput ? STREAM_NO_AUDIO_OUTPUT_HINT : undefined;
 }
 
 /**

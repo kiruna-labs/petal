@@ -5,6 +5,10 @@
 //! (`windows_encode::probe`) looks for a D3D11 video device and the Media
 //! Foundation encoders; macOS always has VideoToolbox. The probe only informs:
 //! each go-live still picks its own path when it opens the encoder.
+//!
+//! Also whether there is an audio output device: without one, Petal never
+//! plays (or decodes) the meeting's audio, so other people aren't in the
+//! stream. That one is checked live, since devices come and go.
 
 use std::sync::OnceLock;
 
@@ -136,6 +140,24 @@ pub fn client_encoder() -> ClientEncoder {
 /// [`client_encoder`] off the async runtime.
 pub async fn client_encoder_async() -> ClientEncoder {
     tokio::task::spawn_blocking(client_encoder).await.unwrap_or(ClientEncoder::MissingEncoders)
+}
+
+/// Whether this computer has a default audio output device right now (a Mac
+/// always does).
+pub fn audio_output_available() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        crate::windows_audio_device::default_playout_device_id().is_ok()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
+/// [`audio_output_available`] off the async runtime.
+pub async fn audio_output_available_async() -> bool {
+    tokio::task::spawn_blocking(audio_output_available).await.unwrap_or(true)
 }
 
 #[cfg(test)]
