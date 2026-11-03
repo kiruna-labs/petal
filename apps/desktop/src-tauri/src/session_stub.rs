@@ -855,6 +855,14 @@ impl SessionState {
         ))
     }
 
+    /// Live streaming (client mode): what share `token` captures, if we share
+    /// it (streamer mode hides Petal only from sources that can show it).
+    pub(crate) fn live_stream_source_kind(&self, token: u32) -> Option<SharedSourceKind> {
+        let joined = self.joined.lock_unpoisoned();
+        let session = joined.as_ref()?;
+        session.media.shares.iter().find(|share| share.token == token).map(|share| share.kind)
+    }
+
     /// Live streaming (client mode): the meeting's microphone, if published.
     pub(crate) fn live_stream_microphone(&self) -> Option<Arc<crate::transport::audio::MicTrack>> {
         self.joined.lock_unpoisoned().as_ref()?.media.microphone.clone()

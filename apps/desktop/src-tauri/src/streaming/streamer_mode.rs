@@ -8,14 +8,27 @@
 //! Capture exclusion follows only this computer's own stream, never the
 //! forced setting (OBS and similar tools still capture Petal normally):
 //!
-//! * Windows: every Petal top-level window except the Petal View selectors
-//!   (`region-window-*`, which keep their own lease) gets
-//!   `WDA_EXCLUDEFROMCAPTURE`, reconciled every second so windows opened
-//!   mid-stream are covered. Only windows that were `WDA_NONE` are changed,
-//!   so only those are restored; always-excluded overlays stay excluded.
+//! * Windows: while the stream's source can show Petal (a display or a Petal
+//!   View share, [`source_shows_petal`]), every Petal top-level window except
+//!   the Petal View selectors (`region-window-*`, which keep their own lease)
+//!   and popup menus gets `WDA_EXCLUDEFROMCAPTURE`, reconciled every second
+//!   so windows opened mid-stream are covered. Only windows that were
+//!   `WDA_NONE` are changed, so only those are restored; always-excluded
+//!   overlays stay excluded. The exclusion is in place, and one DWM
+//!   composition has passed, before the first frame from such a source is
+//!   tapped: when going live and when switching to it.
+//!
+//!   `WDA_EXCLUDEFROMCAPTURE` hides Petal from every capture on the PC, a
+//!   remote viewer (Moonlight, RustDesk, Parsec) included, so a streamer
+//!   driving the PC remotely would lose every control. A window share can't
+//!   show Petal's windows (the capture holds that window's own pixels), so
+//!   while one is streaming Petal stays capturable and its Stop buttons stay
+//!   reachable. For display streams the notification-area icon
+//!   (`live_tray`) is drawn by Explorer and offers "Stop live stream".
 //! * macOS: whole-display shares rebuild their ScreenCaptureKit filter
 //!   without Petal ([`crate::session::apply_streamer_capture_exclusion`]);
-//!   region shares already exclude it.
+//!   region shares already exclude it. That filter is Petal's own, so other
+//!   apps' captures still see Petal; macOS has no source rule.
 //!
 //! Either way a public stream of a display never shows the meeting, its
 //! chat, other participants' meeting-only shares, or the go-live dialog.
@@ -26,6 +39,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::sync_ext::MutexExt;
+use crate::transport::publisher::SharedSourceKind;
 
 pub const STREAMER_MODE_CHANGED_EVENT: &str = "streamer-mode-changed";
 
@@ -38,17 +52,41 @@ pub struct StreamerModeState {
     pub live: bool,
 }
 
-/// The two inputs; the state follows from them.
+/// The inputs; the state and the exclusion follow from them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Inputs {
     forced: bool,
     live: bool,
+    /// What the stream shows: `None` while not live, or where the platform
+    /// has no source rule (macOS), which counts as one that shows Petal.
+    source: Option<SharedSourceKind>,
 }
 
 impl Inputs {
     fn state(self) -> StreamerModeState {
         StreamerModeState { active: self.forced || self.live, live: self.live }
     }
+
+    /// Whether Petal's windows are left out of captures.
+    fn excludes_petal(self) -> bool {
+        self.live && self.source.is_none_or(source_shows_petal)
+    }
+}
+
+/// Whether a stream of this source can show Petal's own windows: a display
+/// (or a Petal View region of one) can; a window share holds only that
+/// window's pixels.
+pub fn source_shows_petal(kind: SharedSourceKind) -> bool {
+    match kind {
+        SharedSourceKind::Window => false,
+        SharedSourceKind::Display | SharedSourceKind::DisplayRegion => true,
+    }
+}
+
+/// The exclusion's new value, when a change of inputs turns it on or off.
+fn exclusion_change(before: Inputs, after: Inputs) -> Option<bool> {
+    let excluded = after.excludes_petal();
+    (excluded != before.excludes_petal()).then_some(excluded)
 }
 
 fn inputs() -> &'static Mutex<Inputs> {
@@ -56,13 +94,12 @@ fn inputs() -> &'static Mutex<Inputs> {
     INPUTS.get_or_init(|| Mutex::new(Inputs::default()))
 }
 
-/// Apply a change; `Some(new state)` when the state changed.
-fn change(update: impl FnOnce(&mut Inputs)) -> Option<StreamerModeState> {
+/// Apply a change; the inputs before and after it.
+fn change(update: impl FnOnce(&mut Inputs)) -> (Inputs, Inputs) {
     let mut guard = inputs().lock_unpoisoned();
-    let before = guard.state();
+    let before = *guard;
     update(&mut guard);
-    let after = guard.state();
-    (after != before).then_some(after)
+    (before, *guard)
 }
 
 pub fn current() -> StreamerModeState {
@@ -81,20 +118,83 @@ pub fn initialize(forced: bool) {
 
 /// "Always use streamer mode" changed.
 pub fn set_forced(app: &AppHandle, forced: bool) {
-    if let Some(state) = change(|inputs| inputs.forced = forced) {
+    let (before, after) = change(|inputs| inputs.forced = forced);
+    if after.state() != before.state() {
+        let _ = app.emit(STREAMER_MODE_CHANGED_EVENT, after.state());
+    }
+}
+
+/// This computer's stream started on `source` (`true`) or stopped.
+pub fn set_live(app: &AppHandle, live: bool, source: Option<SharedSourceKind>) {
+    let (before, after) = change(|inputs| {
+        inputs.live = live;
+        inputs.source = if live { source } else { None };
+    });
+    apply(app, before, after);
+}
+
+/// The live stream moved to `source` ("Switch/Resume live stream here").
+/// Moving onto a source that shows Petal must come before the tap rebinds;
+/// moving off one, after.
+pub fn set_live_source(app: &AppHandle, source: Option<SharedSourceKind>) {
+    let (before, after) = change(|inputs| {
+        if inputs.live {
+            inputs.source = source;
+        }
+    });
+    apply(app, before, after);
+}
+
+/// The live stream's source right now.
+pub fn live_source() -> Option<SharedSourceKind> {
+    inputs().lock_unpoisoned().source
+}
+
+fn apply(app: &AppHandle, before: Inputs, after: Inputs) {
+    if let Some(excluded) = exclusion_change(before, after) {
+        log::info!("streaming: streamer mode excludes Petal from captures={excluded} (source {:?})", after.source);
+        apply_capture_exclusion(app, excluded);
+    }
+    if after.state() != before.state() {
+        let state = after.state();
+        log::info!("streaming: streamer mode active={} live={}", state.active, state.live);
         let _ = app.emit(STREAMER_MODE_CHANGED_EVENT, state);
     }
 }
 
-/// This computer's stream started (`true`) or stopped.
-pub fn set_live(app: &AppHandle, live: bool) {
-    let before = current();
-    let Some(state) = change(|inputs| inputs.live = live) else { return };
-    if state.live != before.live {
-        apply_capture_exclusion(app, state.live);
+/// Petal left out of captures ahead of going live, so the stream's first
+/// frame already leaves it out (Windows, sources that show Petal). Dropped
+/// without [`GoLiveExclusion::hand_over`] (going live failed), it puts the
+/// windows back.
+#[must_use]
+pub struct GoLiveExclusion {
+    excluded: Option<AppHandle>,
+}
+
+pub fn exclude_before_going_live(app: &AppHandle, source: Option<SharedSourceKind>) -> GoLiveExclusion {
+    #[cfg(target_os = "windows")]
+    if source.is_none_or(source_shows_petal) {
+        log::info!("streaming: streamer mode excludes Petal ahead of going live (source {source:?})");
+        apply_capture_exclusion(app, true);
+        return GoLiveExclusion { excluded: Some(app.clone()) };
     }
-    log::info!("streaming: streamer mode active={} live={}", state.active, state.live);
-    let _ = app.emit(STREAMER_MODE_CHANGED_EVENT, state);
+    let _ = (app, source);
+    GoLiveExclusion { excluded: None }
+}
+
+impl GoLiveExclusion {
+    /// The stream is live: [`set_live`] owns the exclusion from here.
+    pub fn hand_over(mut self) {
+        self.excluded = None;
+    }
+}
+
+impl Drop for GoLiveExclusion {
+    fn drop(&mut self) {
+        if let Some(app) = self.excluded.take() {
+            apply_capture_exclusion(&app, false);
+        }
+    }
 }
 
 #[tauri::command]
@@ -104,7 +204,11 @@ pub fn streamer_mode_state() -> StreamerModeState {
 
 #[cfg(target_os = "windows")]
 fn apply_capture_exclusion(app: &AppHandle, excluded: bool) {
-    windows_affinity::set_active(app, excluded);
+    if excluded {
+        windows_affinity::exclude_now(app);
+    } else {
+        windows_affinity::set_active(app, false);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -159,6 +263,7 @@ mod windows_affinity {
     use tokio_util::sync::CancellationToken;
     use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::Graphics::Dwm::DwmFlush;
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowDisplayAffinity, GetWindowThreadProcessId, IsWindow,
         SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
@@ -177,6 +282,16 @@ mod windows_affinity {
     fn active() -> &'static Mutex<Active> {
         static ACTIVE: OnceLock<Mutex<Active>> = OnceLock::new();
         ACTIVE.get_or_init(|| Mutex::new(Active { ledger: AffinityLedger::default(), cancel: None }))
+    }
+
+    /// Exclude now, not at the next reconcile tick, and wait for one DWM
+    /// composition so the next captured frame already leaves Petal out.
+    pub fn exclude_now(app: &AppHandle) {
+        set_active(app, true);
+        reconcile(app);
+        // SAFETY: plain call; it only waits for the next composition (and
+        // fails harmlessly when there is none).
+        let _ = unsafe { DwmFlush() };
     }
 
     pub fn set_active(app: &AppHandle, on: bool) {
@@ -287,6 +402,54 @@ mod tests {
         assert_eq!(inputs.state(), StreamerModeState { active: true, live: true });
         inputs.live = false;
         assert_eq!(inputs.state(), StreamerModeState { active: false, live: false });
+    }
+
+    #[test]
+    fn only_display_sources_show_petal() {
+        assert!(!source_shows_petal(SharedSourceKind::Window));
+        assert!(source_shows_petal(SharedSourceKind::Display));
+        assert!(source_shows_petal(SharedSourceKind::DisplayRegion));
+    }
+
+    #[test]
+    fn the_exclusion_follows_the_live_source() {
+        let idle = Inputs::default();
+        let live_on = |source| Inputs { live: true, source: Some(source), ..idle };
+        let window = live_on(SharedSourceKind::Window);
+        let display = live_on(SharedSourceKind::Display);
+        let region = live_on(SharedSourceKind::DisplayRegion);
+
+        // Going live.
+        assert_eq!(exclusion_change(idle, window), None);
+        assert_eq!(exclusion_change(idle, display), Some(true));
+        assert_eq!(exclusion_change(idle, region), Some(true));
+        // Switching while live.
+        assert_eq!(exclusion_change(window, display), Some(true));
+        assert_eq!(exclusion_change(display, window), Some(false));
+        assert_eq!(exclusion_change(display, region), None);
+        // The live share ended (the slate): the source stays as it was.
+        assert_eq!(exclusion_change(display, display), None);
+        assert_eq!(exclusion_change(window, window), None);
+        // Stopping.
+        assert_eq!(exclusion_change(display, idle), Some(false));
+        assert_eq!(exclusion_change(window, idle), None);
+        // "Always use streamer mode" alone masks but never excludes.
+        let forced = Inputs { forced: true, ..idle };
+        assert_eq!(exclusion_change(idle, forced), None);
+        assert_eq!(exclusion_change(forced, Inputs { forced: true, ..window }), None);
+    }
+
+    #[test]
+    fn without_a_source_rule_the_exclusion_is_live() {
+        // macOS passes no source: its exclusion stays "live", as
+        // `capture_exclusion_active` reports.
+        let idle = Inputs::default();
+        let live = Inputs { live: true, ..idle };
+        assert!(live.excludes_petal() && live.state().live);
+        assert!(!idle.excludes_petal() && !idle.state().live);
+        assert_eq!(exclusion_change(idle, live), Some(true));
+        assert_eq!(exclusion_change(live, idle), Some(false));
+        assert!(!Inputs { forced: true, ..idle }.excludes_petal());
     }
 
     #[test]

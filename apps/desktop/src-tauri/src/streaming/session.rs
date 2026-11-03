@@ -234,6 +234,20 @@ fn session_state(app: &AppHandle) -> tauri::State<'_, crate::session::SessionSta
     tauri::Manager::state::<crate::session::SessionState>(app)
 }
 
+/// What share `window_id` captures, for streamer mode's exclusion (Windows;
+/// macOS has no source rule).
+fn live_source_kind(app: &AppHandle, window_id: u32) -> Option<crate::transport::publisher::SharedSourceKind> {
+    #[cfg(target_os = "windows")]
+    {
+        session_state(app).live_stream_source_kind(window_id)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, window_id);
+        None
+    }
+}
+
 fn capture_geometry(app: &AppHandle, window_id: u32) -> Option<(u32, u32)> {
     #[cfg(target_os = "windows")]
     {
@@ -371,6 +385,10 @@ async fn start_client(
     use super::pipeline::{spawn, PipelineConfig};
 
     let window_id = request.window_id;
+    let source = live_source_kind(app, window_id);
+    // Petal is out of captures before the tap's first frame; every failure
+    // below puts it back.
+    let exclusion = super::streamer_mode::exclude_before_going_live(app, source);
     let tap = super::tap::start(window_id);
     let Some((capture_width, capture_height)) = wait_for_first_frame(&tap).await else {
         super::tap::stop();
@@ -468,7 +486,8 @@ async fn start_client(
     };
     *last_snapshot.lock_unpoisoned() = Some(snapshot.clone());
     let _ = app.emit(STREAM_SESSION_CHANGED_EVENT, &snapshot);
-    super::streamer_mode::set_live(app, true);
+    super::streamer_mode::set_live(app, true, source);
+    exclusion.hand_over();
     tokio::spawn(monitor(
         app.clone(),
         room,
@@ -725,7 +744,7 @@ pub async fn stop(app: &AppHandle, reason: StopReason) {
         release_mic(mic).await;
     }
     super::tap::stop();
-    super::streamer_mode::set_live(app, false);
+    super::streamer_mode::set_live(app, false, None);
     #[cfg(target_os = "macos")]
     reconcile_share_quality(app, &[session.window_id.load(Ordering::Relaxed)]);
     super::region_lock::bind(app, None);
@@ -758,8 +777,20 @@ pub async fn resume_here(app: &AppHandle, window_id: u32) -> Result<(), String> 
     if session.window_id.load(Ordering::Relaxed) == window_id && !super::tap::live_share_ended() {
         return Ok(());
     }
+    // Onto a source that shows Petal: hide Petal before the first frame from
+    // there. Off one: show Petal again only once the old source is left.
+    let source = live_source_kind(app, window_id);
+    let previous_source = super::streamer_mode::live_source();
+    let hide_first = source.is_none_or(super::streamer_mode::source_shows_petal);
+    if hide_first {
+        super::streamer_mode::set_live_source(app, source);
+    }
     if !super::tap::rebind(window_id) {
+        super::streamer_mode::set_live_source(app, previous_source);
         return Err("No live stream to resume".into());
+    }
+    if !hide_first {
+        super::streamer_mode::set_live_source(app, source);
     }
     let previous = session.window_id.swap(window_id, Ordering::Relaxed);
     #[cfg(any(target_os = "windows", target_os = "macos"))]
