@@ -702,6 +702,7 @@ pub fn capture_one_shot(token: u32, timeout: Duration) -> Result<BgraFrame, Stri
         &mut roi_texture,
         region.as_ref(),
         &mut canvas_texture,
+        None,
     );
     let _ = session.Close();
     let _ = pool.Close();
@@ -726,6 +727,9 @@ struct CaptureSetup {
     region_paused: bool,
     closed_token: i64,
     arrival_token: i64,
+    /// The live stream's GPU frame tap for this capture (idle unless this
+    /// share is the one streaming); its texture pool goes with the session.
+    gpu_tap: crate::streaming::gpu_tap::Producer,
 }
 
 fn capture_thread_main(
@@ -977,6 +981,7 @@ fn setup_capture(
         region_paused: false,
         closed_token,
         arrival_token,
+        gpu_tap: crate::streaming::gpu_tap::Producer::default(),
     })
 }
 
@@ -1138,6 +1143,7 @@ fn run_pump_loop(
                 setup.region.as_ref(),
                 state,
                 on_frame,
+                Some((&mut setup.gpu_tap, token)),
             );
         }
         let delivered = state.frames_delivered.load(Ordering::Relaxed);
@@ -1175,6 +1181,7 @@ fn drain_and_push(
     region: Option<&RegionCaptureSpec>,
     state: &CaptureState,
     on_frame: &(impl Fn(BgraFrame) + Send + Sync),
+    gpu_tap: Option<(&mut crate::streaming::gpu_tap::Producer, u32)>,
 ) {
     // Latest-wins drain: release older frames, keep only the newest.
     let mut last: Option<Direct3D11CaptureFrame> = None;
@@ -1203,6 +1210,7 @@ fn drain_and_push(
         roi_texture,
         region,
         canvas_texture,
+        gpu_tap,
     ) {
         Ok(frame) => {
             state.frames_delivered.fetch_add(1, Ordering::Relaxed);
@@ -1225,6 +1233,7 @@ fn copy_frame_to_bgra(
     roi_texture: &mut Option<(ID3D11Texture2D, ID3D11Resource)>,
     region: Option<&RegionCaptureSpec>,
     canvas_texture: &mut Option<(ID3D11Resource, ID3D11RenderTargetView)>,
+    gpu_tap: Option<(&mut crate::streaming::gpu_tap::Producer, u32)>,
 ) -> Result<BgraFrame, String> {
     let content_size = frame
         .ContentSize()
@@ -1340,6 +1349,22 @@ fn copy_frame_to_bgra(
             None,
         )
     };
+
+    // Live stream (client mode): the same pixels the staging copy just read,
+    // copied on the GPU for the stream's encoder.
+    if let Some((producer, token)) = gpu_tap {
+        let tap_source = match (region, canvas_texture.as_ref()) {
+            (Some(_), Some((canvas_resource, _))) => canvas_resource,
+            _ => &source_resource,
+        };
+        producer.offer(
+            token,
+            device,
+            context,
+            tap_source,
+            (output_width as u32, output_height as u32),
+        );
+    }
 
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
     unsafe {

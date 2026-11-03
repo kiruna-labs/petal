@@ -698,7 +698,7 @@ pub(crate) fn emit_region_control_state_for_status(
     }
 }
 
-fn ensure_region_token(app: &tauri::AppHandle, window_label: &str) -> Result<u32, String> {
+pub(crate) fn ensure_region_token(app: &tauri::AppHandle, window_label: &str) -> Result<u32, String> {
     if !window_label.starts_with(REGION_WINDOW_LABEL_PREFIX) {
         return Err("region window: invalid window label".to_string());
     }

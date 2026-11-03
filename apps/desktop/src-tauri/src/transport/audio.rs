@@ -640,6 +640,17 @@ impl MicTrack {
             .map(|device| device.name)
     }
 
+    /// The recording device this track is on, by name. Read-only: live
+    /// streaming's own mic capture follows it (`streaming/mic.rs`).
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+    pub(crate) fn current_device_name(&self) -> Option<String> {
+        let id = self.current_device.lock_unpoisoned().as_ref()?.id.clone();
+        self.audio
+            .recording_devices()
+            .find(|device| device.id == id)
+            .map(|device| device.name.clone())
+    }
+
     /// This mic's current LiveKit track SID. Used by #713's reconnect
     /// publication-repair health check to tell whether the vendored SDK's
     /// own unpublish+republish-on-restart (`handle_restarted`) actually left

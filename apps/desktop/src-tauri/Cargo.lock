@@ -1410,11 +1410,13 @@ dependencies = [
  "percent-encoding",
  "reqwest 0.13.5",
  "screencapturekit",
+ "security-framework",
  "sentry",
  "sentry-log",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "shiguredo_rtmp",
  "system-configuration 0.8.0",
  "tar",
  "tauri",
@@ -1429,6 +1431,7 @@ dependencies = [
  "tauri-plugin-updater",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-native-tls",
  "tokio-tungstenite",
  "tokio-util",
  "webrtc-sys",
@@ -5421,6 +5424,10 @@ dependencies = [
  "cpufeatures 0.3.1",
  "digest 0.11.3",
 ]
+
+[[package]]
+name = "shiguredo_rtmp"
+version = "2026.1.0-canary.6"
 
 [[package]]
 name = "shlex"

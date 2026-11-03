@@ -220,6 +220,48 @@ the `roomCredentials` access code). Files to change together:
 - `web-harness/src/controls.ts` (`tokenRequestBody`)
 - `web-harness/tests/displayNames.test.ts`
 
+## Live streaming
+
+A sharer can go live with one share to an RTMP(S) destination, encoded on
+their own computer. One live stream per room. The room is LIVE when any
+participant has the **`petal.live` participant attribute**, set by the
+desktop sharer once publishing succeeds and cleared on stop/failure/leave:
+`{"mode":"client","startedAt":<ms>,"windowId":<u32>,"state":"live"|"paused"}`
+(exactly this key order). The live share is `(participant identity,
+windowId)`; viewers mark that share's surface LIVE.
+
+**Concurrent streams.** Every participant with a valid `petal.live` value
+is a stream; malformed values are ignored. Streams are ordered by
+`(startedAt, identity)` and the first is the room's live stream. Every
+client badges each stream's share, not only the first. A streamer whose own
+stream is not first stops with "Someone else in this meeting went live
+first", so two simultaneous starts leave exactly one. Fixture:
+`streamLiveDerivation`.
+
+**Opting out of streams.** A participant who keeps their audio off live
+streams sets the **`petal.stream-optout`** attribute to `"1"`; absent or any
+other value means included, and an empty value deletes the key. Desktop and
+browser clients write it on join (only when opted out) and on every change.
+The streamer's mix drops an opted-out participant's tracks at once and
+restores them when they opt back in. Those tracks still feed the
+streamer's echo reference, and the streamer's own setting never applies to
+their own stream. Fixture: `streamOptOutAttribute`.
+
+Output rules (size, fps, bitrate) live in
+`apps/desktop/src-tauri/src/streaming/plan.rs`. A plan input with
+**`cpuEncode: true`** (absent means false) is for a computer that encodes on
+the CPU (Windows with no D3D11 video device): Auto stays within 1080p and
+30 fps there, and explicit sizes are unchanged. The go-live dialog's CPU hint
+quotes that ceiling (`STREAM_CPU_AUTO_MAX` in
+`apps/desktop/src/lib/data/liveStream.ts`). Fixtures:
+`streamOutputPlans`, `streamFpsCeilings`, `streamLiveAttribute`,
+`streamLiveDerivation`, `streamOptOutAttribute`. Files to change together:
+
+- `apps/desktop/src-tauri/src/streaming/plan.rs`, `streaming/wire.rs`,
+  `streaming/audio_tap.rs`
+- `web-harness/src/liveStream.ts` (`tests/liveStream.test.ts`)
+- `apps/desktop/src/lib/data/liveStream.ts` (`tests/liveStream.test.ts`)
+
 ## Room status (proof of possession) — replaces the public directory
 
 There is **no public room directory.** `GET /api/rooms` returns **410 Gone**
