@@ -5871,6 +5871,13 @@ async fn start_share_with_capture_source(
     if let Some(demote_id) = window_id_to_demote {
         apply_quality(state, demote_id, ShareQuality::Reduced).await;
     }
+    // A stream may have started or ended while this capture was starting; a
+    // filter already in the right state is left alone.
+    apply_streamer_capture_exclusion(
+        state,
+        crate::streaming::streamer_mode::capture_exclusion_active(),
+    )
+    .await;
 
     // SPEC.md §4.2's global-shortcut target: record this as "the last window
     // toggled," so the shortcut has something to act on -- see
@@ -7689,6 +7696,11 @@ fn spawn_pump_failure_recovery(
         log::info!(
             "session: window {window_id} capture restarted in place after pump failure (seq {started_seq}, restart_generation {next_restart_generation})"
         );
+        apply_streamer_capture_exclusion(
+            state.inner(),
+            crate::streaming::streamer_mode::capture_exclusion_active(),
+        )
+        .await;
         crate::analytics::capture_restarted(crate::analytics::RestartOutcome::Recovered);
     });
 }
