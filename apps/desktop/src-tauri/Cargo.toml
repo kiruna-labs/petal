@@ -360,6 +360,11 @@ libwebrtc = { path = "../vendor/libwebrtc" }
 # This vendored copy adds `src/mf/*` — MF MFT-based encoder/decoder factories
 # compiled only for `target_os = "windows"`.
 webrtc-sys = { path = "../vendor/webrtc-sys" }
+# `webrtc-sys-build` 0.3.18 with one change: zip 0.6 -> ^9.0.5 (GHSA-m665-v7pm-7grj,
+# GHSA-q7v9-x93c-xqv3, GHSA-8hxf-qr8p-62x4). Upstream's first release on patched zip
+# (0.3.20) also moves WEBRTC_TAG, which would swap the prebuilt libwebrtc under the
+# `=0.3.35` pin above. See vendor/webrtc-sys-build/PETAL_PATCH.md.
+webrtc-sys-build = { path = "../vendor/webrtc-sys-build" }
 
 # Locally patched fork of `tauri-nspanel` at the pinned rev above (see
 # apps/desktop/vendor/tauri-nspanel/PETAL_PATCH.md, issue #705): fixes a real

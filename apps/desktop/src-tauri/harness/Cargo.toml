@@ -49,3 +49,6 @@ live-io = ["dep:desktop", "dep:tokio", "dep:log", "dep:env_logger"]
 # blocker returns at link time.
 [patch.crates-io]
 screencapturekit = { path = "../../vendor/screencapturekit" }
+# Same zip security patch as the desktop crate; see
+# ../../vendor/webrtc-sys-build/PETAL_PATCH.md.
+webrtc-sys-build = { path = "../../vendor/webrtc-sys-build" }
