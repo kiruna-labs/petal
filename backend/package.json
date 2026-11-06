@@ -22,5 +22,10 @@
     "tsx": "^4.23.15",
     "typescript": "~7.0.2",
     "undici": "^8.12.3"
+  },
+  "overrides": {
+    "@vercel/cli-config": {
+      "zod": "^4.6.6"
+    }
   }
 }

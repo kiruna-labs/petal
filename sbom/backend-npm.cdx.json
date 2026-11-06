@@ -2707,17 +2707,17 @@
       "version": "2.8.2"
     },
     {
-      "bom-ref": "undici@6.28.0",
+      "bom-ref": "undici@6.29.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/undici/-/undici-6.28.0.tgz"
+          "url": "https://registry.npmjs.org/undici/-/undici-6.29.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "2c863dd7483d4c8d77612f7996b305aecf119bfbbf8ab8077935a8282a2d79e274e02509f767847e3d2b567fbb54a30f06950f894a0129f84dc8b236dc413f28"
+          "content": "12f46552dfd0a8012f5dd41e44c6147f0390b1fce90f3b7292b1b6a3018413fac1381a18bfdb85dfd673b0d0e1e254c51e14ebd973998ca91882e783d7666618"
         }
       ],
       "licenses": [
@@ -2728,23 +2728,23 @@
         }
       ],
       "name": "undici",
-      "purl": "pkg:npm/undici@6.28.0",
+      "purl": "pkg:npm/undici@6.29.1",
       "scope": "required",
       "type": "library",
-      "version": "6.28.0"
+      "version": "6.29.1"
     },
     {
-      "bom-ref": "@vercel/cli-config@0.2.0",
+      "bom-ref": "@vercel/cli-config@0.3.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@vercel/cli-config/-/cli-config-0.2.0.tgz"
+          "url": "https://registry.npmjs.org/@vercel/cli-config/-/cli-config-0.3.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "7c9451441efbdf8043b9767cf72044680da7718847edb597df49a4d385bcd09e9501f41cfb8881f25cb301d686a45577fef36592df5566dfbfba8428597e94b1"
+          "content": "b0849bca0aa515761bf2a7cfbbffb609ffc0f088eb940b9978f75a83710342bd8f440e39e6ced466d97d468ebbe025ac07fb1a0519b3de3124c3462c42cf0ea1"
         }
       ],
       "licenses": [
@@ -2755,23 +2755,23 @@
         }
       ],
       "name": "@vercel/cli-config",
-      "purl": "pkg:npm/%40vercel/cli-config@0.2.0",
+      "purl": "pkg:npm/%40vercel/cli-config@0.3.1",
       "scope": "required",
       "type": "library",
-      "version": "0.2.0"
+      "version": "0.3.1"
     },
     {
-      "bom-ref": "@vercel/cli-exec@1.0.0",
+      "bom-ref": "@vercel/cli-exec@1.0.1",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@vercel/cli-exec/-/cli-exec-1.0.0.tgz"
+          "url": "https://registry.npmjs.org/@vercel/cli-exec/-/cli-exec-1.0.1.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "91017c2c689efc76ddabdfe9b09c4b13ba3045372a3103218326d4d38802791edc6d002be6df0eae379f0cd0a8949bf54124ae705b78a4bc118804559a53a7ba"
+          "content": "83d5dead5889fe9699ba3b9f5d872ee57608daf536aed078b207698d41dd7b94673a4766a6ed27807e3a2c21461e83d73bf0bea833d273320721137ef10d9829"
         }
       ],
       "licenses": [
@@ -2782,23 +2782,23 @@
         }
       ],
       "name": "@vercel/cli-exec",
-      "purl": "pkg:npm/%40vercel/cli-exec@1.0.0",
+      "purl": "pkg:npm/%40vercel/cli-exec@1.0.1",
       "scope": "required",
       "type": "library",
-      "version": "1.0.0"
+      "version": "1.0.1"
     },
     {
-      "bom-ref": "@vercel/oidc@3.8.0",
+      "bom-ref": "@vercel/oidc@3.8.10",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@vercel/oidc/-/oidc-3.8.0.tgz"
+          "url": "https://registry.npmjs.org/@vercel/oidc/-/oidc-3.8.10.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "af4d256865ba3efefbf11a11e8cd8dc57f75c9c4a3f8f070568f9f39bf4189ff85d08c942addb9cebbc1cdf133429780cdba8e80f6724226c4583743140a5df8"
+          "content": "b0fc359087d0100ebfd9d07ece50091e7861341449f2dfede077c5bca3be83410f040ecd6c22b21a8bee860015e8c9e5f3ae646bb1ea08482e232e7de9ccdd03"
         }
       ],
       "licenses": [
@@ -2809,10 +2809,10 @@
         }
       ],
       "name": "@vercel/oidc",
-      "purl": "pkg:npm/%40vercel/oidc@3.8.0",
+      "purl": "pkg:npm/%40vercel/oidc@3.8.10",
       "scope": "required",
       "type": "library",
-      "version": "3.8.0"
+      "version": "3.8.10"
     },
     {
       "bom-ref": "async-retry@1.3.3",
@@ -3137,33 +3137,6 @@
       "scope": "required",
       "type": "library",
       "version": "5.1.1"
-    },
-    {
-      "bom-ref": "signal-exit@3.0.7",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://registry.npmjs.org/signal-exit/-/signal-exit-3.0.7.tgz"
-        }
-      ],
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "c270f6644fa5f923c2feea12d2f5de13d2f5fb4c2e68ca8a95fcfd00c528dfc26cc8b48159215c1d1d51ae2eb62d9735daf2ebd606f78e5ee2c10860c2901b19"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "ISC"
-          }
-        }
-      ],
-      "name": "signal-exit",
-      "purl": "pkg:npm/signal-exit@3.0.7",
-      "scope": "required",
-      "type": "library",
-      "version": "3.0.7"
     },
     {
       "bom-ref": "extend@3.0.2",
@@ -4407,6 +4380,33 @@
       "version": "3.0.0"
     },
     {
+      "bom-ref": "signal-exit@3.0.7",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://registry.npmjs.org/signal-exit/-/signal-exit-3.0.7.tgz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c270f6644fa5f923c2feea12d2f5de13d2f5fb4c2e68ca8a95fcfd00c528dfc26cc8b48159215c1d1d51ae2eb62d9735daf2ebd606f78e5ee2c10860c2901b19"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "name": "signal-exit",
+      "purl": "pkg:npm/signal-exit@3.0.7",
+      "scope": "required",
+      "type": "library",
+      "version": "3.0.7"
+    },
+    {
       "bom-ref": "strip-final-newline@2.0.0",
       "externalReferences": [
         {
@@ -4587,17 +4587,17 @@
       "version": "7.0.2"
     },
     {
-      "bom-ref": "undici@8.12.3",
+      "bom-ref": "undici@8.12.4",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/undici/-/undici-8.12.3.tgz"
+          "url": "https://registry.npmjs.org/undici/-/undici-8.12.4.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "f9f7677544f004ff3a7158e2853a76d61647a3b77aa23d5cff8ed73c0de52fc98cd171ecf82e0491c8e6811b059c59367ff50e3460f2f48b4122d997b0b3901f"
+          "content": "f0cc7eb8d28a111d9b03801db5e764a916f050220916bda725c91745ee72ac3ab378fab02cfed535c72d37cfd77660d26c5ee64be8c9288b3394bfaf6da9b554"
         }
       ],
       "licenses": [
@@ -4614,10 +4614,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/undici@8.12.3",
+      "purl": "pkg:npm/undici@8.12.4",
       "scope": "optional",
       "type": "library",
-      "version": "8.12.3"
+      "version": "8.12.4"
     },
     {
       "bom-ref": "undici-types@8.9.0",
@@ -4782,17 +4782,17 @@
       "version": "7.3.0"
     },
     {
-      "bom-ref": "zod@4.1.11",
+      "bom-ref": "zod@4.6.7",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/zod/-/zod-4.1.11.tgz"
+          "url": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz"
         }
       ],
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "58fb2ac312134b6b73c756f38482ac12cd7d0010f9be60956b8c41a36b6afd2ad5e11359b5fc2cd449c25905cceb287c6c3d3c6b589dbe4079319481899b23c2"
+          "content": "83c5b60f6914e9af2e9ed734e777d7d6e5412b333bcaa0315bfdf3c24f37fba472176f9228eb95f9cd30043854c335753da19aa66647fab99c5333dffb7086c2"
         }
       ],
       "licenses": [
@@ -4803,10 +4803,10 @@
         }
       ],
       "name": "zod",
-      "purl": "pkg:npm/zod@4.1.11",
+      "purl": "pkg:npm/zod@4.6.7",
       "scope": "required",
       "type": "library",
-      "version": "4.1.11"
+      "version": "4.6.7"
     }
   ],
   "dependencies": [
@@ -4819,7 +4819,7 @@
         "@types/node@26.6.5",
         "tsx@4.23.15",
         "typescript@7.0.2",
-        "undici@8.12.3"
+        "undici@8.12.4"
       ],
       "ref": "petal-backend@0.1.0"
     },
@@ -5221,39 +5221,39 @@
     },
     {
       "dependsOn": [
-        "@vercel/oidc@3.8.0",
+        "@vercel/oidc@3.8.10",
         "async-retry@1.3.3",
         "is-buffer@2.0.5",
         "is-node-process@1.2.0",
         "throttleit@2.1.0",
-        "undici@6.28.0"
+        "undici@6.29.1"
       ],
       "ref": "@vercel/blob@2.8.2"
     },
     {
       "dependsOn": [],
-      "ref": "undici@6.28.0"
+      "ref": "undici@6.29.1"
     },
     {
       "dependsOn": [
         "xdg-app-paths@5.5.1",
-        "zod@4.1.11"
+        "zod@4.6.7"
       ],
-      "ref": "@vercel/cli-config@0.2.0"
+      "ref": "@vercel/cli-config@0.3.1"
     },
     {
       "dependsOn": [
         "execa@5.1.1"
       ],
-      "ref": "@vercel/cli-exec@1.0.0"
+      "ref": "@vercel/cli-exec@1.0.1"
     },
     {
       "dependsOn": [
-        "@vercel/cli-config@0.2.0",
-        "@vercel/cli-exec@1.0.0",
+        "@vercel/cli-config@0.3.1",
+        "@vercel/cli-exec@1.0.1",
         "jose@5.10.0"
       ],
-      "ref": "@vercel/oidc@3.8.0"
+      "ref": "@vercel/oidc@3.8.10"
     },
     {
       "dependsOn": [
@@ -5324,10 +5324,6 @@
         "strip-final-newline@2.0.0"
       ],
       "ref": "execa@5.1.1"
-    },
-    {
-      "dependsOn": [],
-      "ref": "signal-exit@3.0.7"
     },
     {
       "dependsOn": [],
@@ -5608,6 +5604,10 @@
     },
     {
       "dependsOn": [],
+      "ref": "signal-exit@3.0.7"
+    },
+    {
+      "dependsOn": [],
       "ref": "strip-final-newline@2.0.0"
     },
     {
@@ -5685,7 +5685,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "undici@8.12.3"
+      "ref": "undici@8.12.4"
     },
     {
       "dependsOn": [],
@@ -5720,7 +5720,7 @@
     },
     {
       "dependsOn": [],
-      "ref": "zod@4.1.11"
+      "ref": "zod@4.6.7"
     }
   ],
   "metadata": {
