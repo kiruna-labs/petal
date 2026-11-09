@@ -1642,6 +1642,91 @@
         "v",
         "windowId"
       ]
+    },
+    {
+      "name": "pointer-click-v2-sent-at",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "native-1",
+        "controllerId": "web-1",
+        "windowId": 42,
+        "seq": 15,
+        "kind": "pointer",
+        "action": "click",
+        "x": 0.5,
+        "y": 0.25,
+        "button": 0,
+        "buttons": 0,
+        "modifiers": {
+          "alt": false,
+          "ctrl": false,
+          "meta": false,
+          "shift": true
+        },
+        "controlSessionId": "grant_opaque_example",
+        "inputId": "input-example-000000000",
+        "inputSeq": 15,
+        "operationFingerprintVersion": 1,
+        "operationFingerprint": "b3b509e59b423c9c15ee5bde3bf661aa52ff0cd6a65c9cffd81f419ff09ccaa1",
+        "sentAtMs": 1700000000123
+      },
+      "fields": [
+        "action",
+        "button",
+        "buttons",
+        "controlSessionId",
+        "controllerId",
+        "inputId",
+        "inputSeq",
+        "kind",
+        "modifiers",
+        "operationFingerprint",
+        "operationFingerprintVersion",
+        "sentAtMs",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId",
+        "x",
+        "y"
+      ]
+    },
+    {
+      "name": "result-applied-v2-host-hold",
+      "reliable": true,
+      "message": {
+        "v": 1,
+        "targetUserId": "web-1",
+        "controllerId": "native-1",
+        "windowId": 42,
+        "seq": 16,
+        "kind": "result",
+        "controlSessionId": "grant_opaque_example",
+        "inputId": "AAAAAAAAAAAAAAAAAAAAAA",
+        "inputSeq": 15,
+        "operationFingerprintVersion": 1,
+        "operationFingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "outcome": "applied",
+        "deliveryRoute": "replay",
+        "hostHoldMs": 7
+      },
+      "fields": [
+        "controlSessionId",
+        "controllerId",
+        "deliveryRoute",
+        "hostHoldMs",
+        "inputId",
+        "inputSeq",
+        "kind",
+        "operationFingerprint",
+        "operationFingerprintVersion",
+        "outcome",
+        "seq",
+        "targetUserId",
+        "v",
+        "windowId"
+      ]
     }
   ],
   "remoteClipboardMessages": [
@@ -2790,6 +2875,9 @@
         "unknown"
       ]
     },
+    "counters": [
+      "input_stall_count"
+    ],
     "alwaysPresent": [
       "role",
       "rc_session_id",
@@ -2797,7 +2885,8 @@
       "final"
     ],
     "roles": [
-      "host"
+      "host",
+      "controller"
     ],
     "stageSuffixes": [
       "_p50",
@@ -2829,6 +2918,9 @@
             "n": 398
           }
         },
+        "counters": {
+          "input_stall_count": 2
+        },
         "dimensions": {
           "window_codec": "h264"
         }
@@ -2846,9 +2938,10 @@
         "replay_complete_ms_p95": 108,
         "replay_complete_ms_max": 240,
         "replay_complete_ms_n": 398,
+        "input_stall_count": 2,
         "window_codec": "h264"
       },
-      "logLine": "remote-control-latency-summary: role=host rc_session_id=0123456789abcdef0123456789abcdef interval_s=60 final=false replay_inject_ms_p50=3 replay_inject_ms_p95=9 replay_inject_ms_max=20 replay_inject_ms_n=400 replay_complete_ms_p50=5 replay_complete_ms_p95=108 replay_complete_ms_max=240 replay_complete_ms_n=398 window_codec=h264"
+      "logLine": "remote-control-latency-summary: role=host rc_session_id=0123456789abcdef0123456789abcdef interval_s=60 final=false replay_inject_ms_p50=3 replay_inject_ms_p95=9 replay_inject_ms_max=20 replay_inject_ms_n=400 replay_complete_ms_p50=5 replay_complete_ms_p95=108 replay_complete_ms_max=240 replay_complete_ms_n=398 input_stall_count=2 window_codec=h264"
     }
   },
   "aiTracks": [

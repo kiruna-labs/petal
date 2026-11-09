@@ -3,10 +3,11 @@
 //! Stage/dimension keys, histogram vectors and the summary log line are
 //! pinned by `contracts/petal-contracts.json` (`latencyHistogramVectors`,
 //! `remoteControlLatencySummary`). What lands with its first producer, not
-//! here: the TS mirror (#375), counters and the controller role (#371), the
+//! here: the TS mirror (#375), max-semantics counters (#371 follow-up), the
 //! Sentry degraded diagnostic (#371/#376).
 //!
-//! Producers call only [`record_stage`] and [`set_dimension`]. The owner
+//! Producers call only [`record_stage`], [`add_counter`] and
+//! [`set_dimension`]. The owner
 //! calls [`sync`] on a timer with the current "is control active" truth.
 //! Each interval with samples becomes one `remote_control_latency_summary`
 //! PostHog event and one `remote-control-latency-summary:` log line.
@@ -150,16 +151,18 @@ impl LatencyHistogram {
 }
 
 
-/// Only the host measures anything today; `Controller` arrives with #371.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RcRole {
     Host,
+    /// #371: the controlling side; today only `input_rtt_ms`.
+    Controller,
 }
 
 impl RcRole {
     pub(crate) fn key(self) -> &'static str {
         match self {
             Self::Host => "host",
+            Self::Controller => "controller",
         }
     }
 }
@@ -213,6 +216,11 @@ closed_keys!(Dimension {
 
 const DIMENSION_COUNT: usize = 7;
 
+// Sum-per-interval counters. A zero counter is never emitted.
+closed_keys!(Counter {
+    InputStallCount => "input_stall_count",
+});
+
 impl Dimension {
     /// `None` = free-form token (lowercase `[a-z0-9_-]`, at most 32 chars).
     pub(crate) fn allowed_values(self) -> Option<&'static [&'static str]> {
@@ -239,9 +247,9 @@ impl Dimension {
     }
 }
 
-/// One emitted interval. `stages` holds only stages with n > 0;
-/// `dimensions` only what a producer actually set this session (missing
-/// data is omitted, never sent as 0 or a guess).
+/// One emitted interval. `stages` holds only stages with n > 0, `counters`
+/// only non-zero counters, `dimensions` only what a producer actually set
+/// this session (missing data is omitted, never sent as 0 or a guess).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Summary {
     pub(crate) role: RcRole,
@@ -249,6 +257,7 @@ pub(crate) struct Summary {
     pub(crate) interval_s: u64,
     pub(crate) is_final: bool,
     pub(crate) stages: Vec<(Stage, HistogramStats)>,
+    pub(crate) counters: Vec<(Counter, u64)>,
     pub(crate) dimensions: Vec<(Dimension, String)>,
 }
 
@@ -271,6 +280,11 @@ impl Summary {
             out.push((format!("{key}_p95"), stats.p95.into()));
             out.push((format!("{key}_max"), stats.max.into()));
             out.push((format!("{key}_n"), stats.n.into()));
+        }
+        for (counter, value) in &self.counters {
+            if *value > 0 {
+                out.push((counter.key().to_string(), (*value).into()));
+            }
         }
         for (dimension, value) in &self.dimensions {
             out.push((dimension.key().to_string(), value.clone().into()));
@@ -298,6 +312,7 @@ struct Session {
     interval_started_at: Instant,
     events_emitted: u32,
     stages: Vec<LatencyHistogram>,
+    counters: Vec<u64>,
     dimensions: [Option<String>; DIMENSION_COUNT],
 }
 
@@ -308,21 +323,36 @@ impl Session {
             interval_started_at: now,
             events_emitted: 0,
             stages: Stage::ALL.iter().map(|_| LatencyHistogram::new()).collect(),
+            counters: vec![0; Counter::ALL.len()],
             dimensions: Default::default(),
         }
     }
 
-    /// Drain the current interval. `None` when it held no samples (an empty
-    /// interval never emits or spends the cap) or the per-session cap is spent.
+    fn has_counts(&self) -> bool {
+        self.counters.iter().any(|value| *value > 0)
+    }
+
+    /// Drain the current interval. `None` when it held no samples and no
+    /// non-zero counter (an empty interval never emits or spends the cap) or
+    /// the per-session cap is spent. Counters reset to 0, never "present 0":
+    /// that reset kept empty intervals emitting all-zero events (#371).
     fn take_interval(&mut self, role: RcRole, now: Instant, is_final: bool) -> Option<Summary> {
         let stages: Vec<(Stage, HistogramStats)> = Stage::ALL
             .iter()
             .filter_map(|stage| Some((*stage, self.stages[stage.index()].stats()?)))
             .collect();
+        let counters: Vec<(Counter, u64)> = Counter::ALL
+            .iter()
+            .map(|counter| (*counter, self.counters[counter.index()]))
+            .filter(|(_, value)| *value > 0)
+            .collect();
         let elapsed_ms = now.saturating_duration_since(self.interval_started_at).as_millis() as u64;
         self.interval_started_at = now;
         self.stages.iter_mut().for_each(LatencyHistogram::reset);
-        if stages.is_empty() || self.events_emitted >= MAX_EVENTS_PER_SESSION {
+        self.counters.iter_mut().for_each(|value| *value = 0);
+        if (stages.is_empty() && counters.is_empty())
+            || self.events_emitted >= MAX_EVENTS_PER_SESSION
+        {
             return None;
         }
         self.events_emitted += 1;
@@ -332,6 +362,7 @@ impl Session {
             interval_s: (elapsed_ms + 500) / 1000,
             is_final,
             stages,
+            counters,
             dimensions: Dimension::ALL
                 .iter()
                 .filter_map(|d| Some((*d, self.dimensions[d.index()].clone()?)))
@@ -389,6 +420,13 @@ impl Aggregator {
         });
     }
 
+    pub(crate) fn add_counter(&self, counter: Counter, delta: u64) {
+        self.with_session_nonblocking(|session| {
+            let slot = &mut session.counters[counter.index()];
+            *slot = slot.saturating_add(delta);
+        });
+    }
+
     /// False for a value outside the dimension's closed set (old value kept)
     /// or when no session is active.
     pub(crate) fn set_dimension(&self, dimension: Dimension, value: &str) -> bool {
@@ -413,7 +451,10 @@ impl Aggregator {
                 None
             }
             (false, Some(session)) => {
-                let enough = session.stages.iter().any(|h| h.n() >= FINAL_MIN_SAMPLES);
+                // A counter-only final partial still emits: the n >= 5 rule
+                // is about percentile quality, not about counts (#371).
+                let enough = session.has_counts()
+                    || session.stages.iter().any(|h| h.n() >= FINAL_MIN_SAMPLES);
                 let summary = enough.then(|| session.take_interval(self.role, now, true)).flatten();
                 *guard = None;
                 summary
@@ -434,10 +475,12 @@ impl Aggregator {
 }
 
 static HOST: Aggregator = Aggregator::new(RcRole::Host);
+static CONTROLLER: Aggregator = Aggregator::new(RcRole::Controller);
 
 fn aggregator(role: RcRole) -> &'static Aggregator {
     match role {
         RcRole::Host => &HOST,
+        RcRole::Controller => &CONTROLLER,
     }
 }
 
@@ -445,6 +488,12 @@ fn aggregator(role: RcRole) -> &'static Aggregator {
 /// blocks and never allocates; dropped when no session is active.
 pub(crate) fn record_stage(role: RcRole, stage: Stage, ms: f64) {
     aggregator(role).record_stage(stage, ms);
+}
+
+/// Add to a sum counter for `role`'s active session. Same non-blocking,
+/// dropped-without-a-session rules as [`record_stage`].
+pub(crate) fn add_counter(role: RcRole, counter: Counter, delta: u64) {
+    aggregator(role).add_counter(counter, delta);
 }
 
 /// Set a closed-value dimension for the rest of `role`'s session.
@@ -500,6 +549,7 @@ mod tests {
     #[serde(rename_all = "camelCase")]
     struct SummaryContract {
         stages: Vec<String>,
+        counters: Vec<String>,
         dimensions: serde_json::Map<String, serde_json::Value>,
         roles: Vec<String>,
         interval_ms: u64,
@@ -526,6 +576,8 @@ mod tests {
         #[serde(rename = "final")]
         is_final: bool,
         stages: serde_json::Map<String, serde_json::Value>,
+        #[serde(default)]
+        counters: serde_json::Map<String, serde_json::Value>,
         dimensions: serde_json::Map<String, serde_json::Value>,
     }
 
@@ -542,6 +594,7 @@ mod tests {
             interval_s: 60,
             is_final: false,
             stages,
+            counters: vec![],
             dimensions: vec![],
         }
     }
@@ -613,7 +666,10 @@ mod tests {
                 }
             }
         }
-        assert!(contract.roles.iter().any(|role| role == RcRole::Host.key()));
+        let counters: Vec<_> = Counter::ALL.iter().map(|c| c.key()).collect();
+        assert_eq!(counters, contract.counters);
+        let roles: Vec<_> = [RcRole::Host, RcRole::Controller].iter().map(|r| r.key()).collect();
+        assert_eq!(roles, contract.roles);
         assert_eq!(contract.interval_ms, EMIT_INTERVAL.as_millis() as u64);
         assert_eq!(contract.final_min_samples, FINAL_MIN_SAMPLES);
         assert_eq!(contract.max_events_per_session, MAX_EVENTS_PER_SESSION);
@@ -640,6 +696,10 @@ mod tests {
             stages: Stage::ALL
                 .iter()
                 .filter_map(|stage| Some((*stage, stats(input.stages.get(stage.key())?))))
+                .collect(),
+            counters: Counter::ALL
+                .iter()
+                .filter_map(|c| Some((*c, input.counters.get(c.key())?.as_u64()?)))
                 .collect(),
             dimensions: Dimension::ALL
                 .iter()
@@ -726,6 +786,61 @@ mod tests {
         assert_eq!(summary.dimensions, [(Dimension::WindowCodec, "h264".to_string())]);
         now += EMIT_INTERVAL;
         assert!(aggregator.sync_at(true, now).is_none(), "the next empty interval is silent again");
+    }
+
+    /// #371, direction 1: counters reset to 0 (not "present 0"), so an
+    /// interval with no samples and no non-zero counter stays silent.
+    #[test]
+    fn counter_reset_never_turns_empty_intervals_into_events() {
+        let aggregator = Aggregator::new(RcRole::Host);
+        let mut now = Instant::now();
+        aggregator.sync_at(true, now);
+        aggregator.add_counter(Counter::InputStallCount, 2);
+        now += EMIT_INTERVAL;
+        let summary = aggregator.sync_at(true, now).expect("a counter alone is data");
+        assert!(summary.stages.is_empty());
+        assert_eq!(summary.counters, [(Counter::InputStallCount, 2)]);
+        assert!(summary.log_line().ends_with(" input_stall_count=2"));
+        for _ in 0..200 {
+            now += EMIT_INTERVAL;
+            assert!(aggregator.sync_at(true, now).is_none(), "touched counters reset to absent");
+        }
+        aggregator.add_counter(Counter::InputStallCount, 0);
+        now += EMIT_INTERVAL;
+        assert!(aggregator.sync_at(true, now).is_none(), "a zero delta is not data");
+        assert!(aggregator.sync_at(false, now).is_none(), "nor is an empty final");
+    }
+
+    /// #371, direction 2: a final partial carrying only counters still emits;
+    /// the stage-only n >= 5 rule must not drop it.
+    #[test]
+    fn counter_only_final_partial_still_emits() {
+        let aggregator = Aggregator::new(RcRole::Host);
+        let t0 = Instant::now();
+        aggregator.sync_at(true, t0);
+        aggregator.record_stage(Stage::InputExcessDelayMs, 80.0);
+        aggregator.add_counter(Counter::InputStallCount, 1);
+        let last = aggregator
+            .sync_at(false, t0 + Duration::from_secs(10))
+            .expect("a counter-only final partial emits");
+        assert!(last.is_final);
+        assert_eq!(last.counters, [(Counter::InputStallCount, 1)]);
+        assert_eq!(last.stages.len(), 1, "the n = 1 stage rides along");
+    }
+
+    #[test]
+    fn controller_role_has_its_own_session() {
+        assert_eq!(RcRole::Controller.key(), "controller");
+        let aggregator = Aggregator::new(RcRole::Controller);
+        let t0 = Instant::now();
+        aggregator.sync_at(true, t0);
+        for ms in [20.0, 21.0, 22.0, 23.0, 24.0] {
+            aggregator.record_stage(Stage::InputRttMs, ms);
+        }
+        let summary = aggregator.sync_at(false, t0 + Duration::from_secs(3)).unwrap();
+        assert_eq!(summary.role, RcRole::Controller);
+        assert!(summary.log_line().contains("role=controller"));
+        assert_eq!(summary.stages[0].0, Stage::InputRttMs);
     }
 
     #[test]

@@ -157,6 +157,8 @@ export interface HarnessRemoteControlApi {
       failureCode?: Extract<RemoteControlMessage, { kind: 'result' }>['failureCode'];
       windowId: number;
       receivedAt: number;
+      /** #371: (receivedAt - sentAtMs) - hostHoldMs; absent from an old host. */
+      inputRttMs?: number;
     }>;
     pending: string[];
     /** #580: input packets published with no grant token; the host drops these. */

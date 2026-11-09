@@ -13,6 +13,7 @@ import {
   type RemoteControlMessage,
   type RemoteControlModifiers
 } from './trackNames.ts';
+import { remoteControlInputRttMs } from '@petal/shared/logic/remoteControlTiming';
 import { canonicalRemoteControlFingerprint, decodeRemoteControlHotPath, newRemoteControlInputId, parseRemoteControlJson, remoteControlGrantEnvelopeIsValid, remoteControlPublishOptions } from './remoteControl.ts';
 import {
   decodePhotonSentinelFrame,
@@ -101,6 +102,8 @@ type HarnessRemoteControlResultMetric = {
   failureCode?: Extract<RemoteControlMessage, { kind: 'result' }>['failureCode'];
   windowId: number;
   receivedAt: number;
+  /** #371: (receivedAt - sentAtMs) - hostHoldMs; absent from an old host. */
+  inputRttMs?: number;
 };
 
 type HarnessRemoteControlTerminalDisposition = Pick<
@@ -170,6 +173,7 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
     inputSeq: number;
     operationFingerprint: string;
     expiresAt: number;
+    sentAtMs?: number;
   }>();
   const outstandingLatencyProbes = new Map<string, Map<number, number>>();
   const latencyProbeMetrics: HarnessLatencyProbeMetric[] = [];
@@ -440,6 +444,8 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
       controllerId: state.room.localParticipant.identity,
       windowId: target.windowId,
       seq: rc.nextRemoteControlSeq(),
+      // #371: produced now; the result pairing below reads it back.
+      sentAtMs: Date.now(),
       // Omit the key entirely (rather than set it to undefined) to match the
       // wire's skip_serializing_if convention and keep object shape stable
       // for callers that compare the message strictly.
@@ -466,7 +472,8 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
       controlSessionId: envelope.controlSessionId,
       inputSeq: envelope.inputSeq,
       operationFingerprint,
-      expiresAt: sentAt + grant.dedupGuaranteeWindowMs
+      expiresAt: sentAt + grant.dedupGuaranteeWindowMs,
+      sentAtMs: message.sentAtMs
     });
     return { ...message, ...envelope, operationFingerprintVersion: 1, operationFingerprint };
   }
@@ -1062,6 +1069,8 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
       const localRecipient = state.room?.localParticipant.identity === message.targetUserId;
       if (correlated && knownOutcome && localRecipient) {
         pendingDiscrete.delete(message.inputId);
+        const receivedAt = Date.now();
+        const inputRttMs = remoteControlInputRttMs(pending.sentAtMs, receivedAt, message.hostHoldMs);
         resultMetrics.push({
           inputId: message.inputId,
           inputSeq: message.inputSeq,
@@ -1069,7 +1078,8 @@ export function setupHarnessApi(ctx: HarnessContext, rc: RemoteControlUiPrimitiv
           deliveryRoute: message.deliveryRoute,
           failureCode: message.failureCode,
           windowId: message.windowId,
-          receivedAt: Date.now()
+          receivedAt,
+          ...(inputRttMs === undefined ? {} : { inputRttMs })
         });
         if (resultMetrics.length > 120) resultMetrics.splice(0, resultMetrics.length - 120);
         if (replay && replay.packet.inputId === message.inputId) {

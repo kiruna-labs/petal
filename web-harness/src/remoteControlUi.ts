@@ -1,3 +1,4 @@
+import { stampSentAtMs } from '@petal/shared/logic/remoteControlTiming';
 import type { ActiveRemoteControl, HarnessContext } from './context.ts';
 import { REMOTE_CONTROL_TOPIC, type RemoteControlCapability, type RemoteControlMessage } from './trackNames.ts';
 import {
@@ -59,6 +60,15 @@ interface PendingWheel {
 // "Request control" affordance button. Shares its publish/seq/base primitives
 // with the automation API (harnessApi.ts) via the returned helpers.
 // ---------------------------------------------------------------------------
+const CONTROLLER_TO_HOST_KINDS: ReadonlySet<RemoteControlMessage['kind']> = new Set([
+  'request',
+  'release',
+  'pointer',
+  'wheel',
+  'key',
+  'text'
+]);
+
 export function setupRemoteControlUi(ctx: HarnessContext) {
   const { state } = ctx;
   const { logEvent, showToast } = ctx.ui;
@@ -519,6 +529,9 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
 
   function publishRemoteControl(message: RemoteControlMessage): Promise<void> {
     if (!state.room) return Promise.resolve();
+    // #371: builders stamp sentAtMs at production; this only covers a
+    // controller->host packet built without one. Host statuses never carry it.
+    if (CONTROLLER_TO_HOST_KINDS.has(message.kind)) message = stampSentAtMs(message);
     // #370 corrective pass (Bug C): never attempt the binary encoding unless
     // the CURRENT active session for this exact (windowId, targetUserId) has
     // observed the host advertise `supportsBinaryHotPath` on a real "active"
@@ -646,6 +659,8 @@ export function setupRemoteControlUi(ctx: HarnessContext) {
       controllerId: state.room.localParticipant.identity,
       windowId: active.windowId,
       seq: nextRemoteControlSeq(),
+      // #371: produced now; see stampSentAtMs.
+      sentAtMs: Date.now(),
       ...(grantToken !== undefined ? { grantToken } : {}),
       ...(active.controlSessionId && active.targetKind && active.shareInstanceId
         ? {

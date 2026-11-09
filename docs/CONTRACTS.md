@@ -884,6 +884,29 @@ The capability envelope is additive. Its optional fields are:
   discrete operation to one grant.
 - `deliveryRoute` and privacy-safe `failureCode` describe a terminal `result`.
 
+Timing fields (#371), additive and optional:
+
+- `sentAtMs`: the controller's wall clock, integer ms, when the input was
+  **produced**: stamped before any send queue (the native overlay's ordered
+  sender, #425), not at publish. Every controller-to-host kind (`request`,
+  `release`, `pointer`, `wheel`, `key`, `text`) may carry it, including the
+  inputs inside an `inputBundle`. It is not part of the operation fingerprint,
+  so a retry or redundant copy keeps the same identity. (Fixture vector:
+  `pointer-click-v2-sent-at`, same fingerprint as
+  `pointer-click-v2-canonical-fingerprint`.)
+- `hostHoldMs` (on `result` only): integer ms from host admission of the
+  discrete op to sending this result. The controller records
+  `input_rtt_ms = (result receive - sentAtMs) - hostHoldMs`, both ends on its
+  own clock. Without `hostHoldMs` (an old host) no sample is recorded.
+  (Fixture vector: `result-applied-v2-host-hold`.)
+- The host scores consecutive non-hover inputs per (controller, window):
+  `excess = receive gap - sentAtMs gap`, recorded as `input_excess_delay_ms`;
+  excess over 50 ms while the send gap is under 100 ms counts one
+  `input_stall_count`. A repeated input is skipped. Clock-free.
+- Old peers ignore both fields (no envelope uses `deny_unknown_fields`), and a
+  malformed value is dropped rather than rejecting the packet. The binary
+  hot-path frame does not carry `sentAtMs` yet.
+
 Unknown future values in optional `targetKind`, capability, reason,
 `deliveryRoute`, or `failureCode` metadata are ignored rather than making an
 otherwise known packet unparsable. Unknown packet `kind`, required `action`,
@@ -1453,10 +1476,14 @@ a producer (#375).
   emission order), the roles measured today, the cadence (60 s interval,
   final partial at n >= 5, 120 events per session cap, empty intervals never
   emit) and an `example` summary with its exact properties and
-  `remote-control-latency-summary:` log line. Counters (#371) and the
-  degraded thresholds (#371/#376) are added here with their producers.
+  `remote-control-latency-summary:` log line. `counters` (#371) are summed
+  per interval, emitted after the stages and only when non-zero; an interval
+  with no samples and no non-zero counter never emits, and a final partial
+  with only counters still emits. The degraded thresholds (#371/#376) are
+  added here with their producers.
 
-No wire field changed in #370, so there is no old-peer fixture. The
+No wire field changed in #370, so there is no old-peer fixture. The #371
+timing fields are wire fields; see "Timing fields" under Remote Control. The
 `telemetrySessionId` status field from #369's design is not added yet; the
 host mints its own `rc_session_id`.
 
