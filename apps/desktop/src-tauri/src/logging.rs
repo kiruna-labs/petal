@@ -3048,14 +3048,17 @@ pub fn init() -> PathBuf {
         log::warn!("logging: {warning}");
     }
 
-    report_previous_session(&analyze_previous_session(&PreviousSessionInputs {
-        tail: &previous_log_tail,
-        previous_log_mtime,
-        recorded_identity: previous_session_identity,
-        crash_report_dir: crash_report_dir(),
-        current_boot_time: current_boot_time_epoch(),
-        current_executable: current_executable_path(),
-    }));
+    report_previous_session(
+        &analyze_previous_session(&PreviousSessionInputs {
+            tail: &previous_log_tail,
+            previous_log_mtime,
+            recorded_identity: previous_session_identity,
+            crash_report_dir: crash_report_dir(),
+            current_boot_time: current_boot_time_epoch(),
+            current_executable: current_executable_path(),
+        }),
+        &previous_log_tail,
+    );
     // Written AFTER the previous record has been consumed above, so the
     // next startup can match a crash report's pid/procPath against this
     // session (#105).
@@ -4957,7 +4960,10 @@ fn native_crash_image(image: &serde_json::Value, name: Option<&str>) -> Option<N
 /// a crash (`bug_type` other than 309): those are described in petal.log
 /// and never labelled a crash. Goes through the single `before_send`
 /// scrubber like every other event; no attachments.
-fn native_crash_report_event(cause: &NativeCrashCause) -> Option<sentry::protocol::Event<'static>> {
+fn native_crash_report_event(
+    cause: &NativeCrashCause,
+    log_tail: &[String],
+) -> Option<sentry::protocol::Event<'static>> {
     if !cause.is_crash() {
         return None;
     }
@@ -5022,6 +5028,7 @@ fn native_crash_report_event(cause: &NativeCrashCause) -> Option<sentry::protoco
             Cow::Borrowed(exception.as_str()),
             Cow::Owned(first_image),
         ]),
+        breadcrumbs: previous_session_breadcrumbs(log_tail).into(),
         release: Some(Cow::Owned(crashed_build)),
         tags,
         debug_meta: Cow::Owned(sentry::protocol::DebugMeta {
@@ -5047,6 +5054,48 @@ fn native_crash_report_event(cause: &NativeCrashCause) -> Option<sentry::protoco
         }),
         ..Default::default()
     })
+}
+
+/// How many of the previous session's last log lines ride on its crash
+/// event (#432). The crashed process died before it could send anything, so
+/// these are the only record of what it was doing.
+const CRASH_REPORT_LOG_TAIL_LINES: usize = 40;
+
+/// The crashed session's last log lines as breadcrumbs, oldest first. They
+/// are the lines its own Sentry logger would have sent as breadcrumbs had it
+/// lived (the file sink holds info and up), and `scrub_event_for_sentry`
+/// runs every message through `redact_for_export`, like a live breadcrumb.
+fn previous_session_breadcrumbs(log_tail: &[String]) -> Vec<sentry::protocol::Breadcrumb> {
+    let start = log_tail.len().saturating_sub(CRASH_REPORT_LOG_TAIL_LINES);
+    log_tail[start..]
+        .iter()
+        .filter_map(|line| {
+            let timestamp = log_line_timestamp(line)?;
+            let rest = line.get(23..)?.trim_start();
+            let (level, message) = match rest.split_once("] ") {
+                Some((tag, message)) if tag.starts_with('[') => (&tag[1..], message),
+                _ => ("INFO", rest),
+            };
+            let level = match level {
+                "ERROR" => sentry::protocol::Level::Error,
+                "WARN" => sentry::protocol::Level::Warning,
+                "DEBUG" | "TRACE" => return None,
+                _ => sentry::protocol::Level::Info,
+            };
+            let (target, message) = match message.split_once("] ") {
+                Some((target, message)) if target.starts_with('[') => (&target[1..], message),
+                _ => ("unknown", message),
+            };
+            Some(sentry::protocol::Breadcrumb {
+                timestamp,
+                ty: "default".into(),
+                category: Some(format!("previous-session:{target}")),
+                level,
+                message: Some(message.to_string()),
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 /// The faulting thread as a Sentry stacktrace (#432): image basename plus,
@@ -5556,7 +5605,7 @@ fn previous_session_sentry_event(report: &PreviousSessionReport) -> Option<Sentr
     ))
 }
 
-fn report_previous_session(report: &PreviousSessionReport) {
+fn report_previous_session(report: &PreviousSessionReport, previous_log_tail: &[String]) {
     if let Some((level, message)) = crash_report_log_line(report) {
         log::log!(level, "{message}");
     }
@@ -5572,7 +5621,8 @@ fn report_previous_session(report: &PreviousSessionReport) {
     // invisible until the next launch, and a machine that never relaunches
     // never reports it.
     if let CrashAttribution::Attributed { cause, .. } = &report.crash {
-        if let Some(event) = native_crash_report_event(cause) {
+        let segment = previous_session_segment(previous_log_tail);
+        if let Some(event) = native_crash_report_event(cause, segment) {
             sentry::capture_event(event);
         }
     }
@@ -7139,7 +7189,7 @@ mod tests {
             None,
         );
         let events = match &report.crash {
-            CrashAttribution::Attributed { cause, .. } => native_crash_report_event(cause)
+            CrashAttribution::Attributed { cause, .. } => native_crash_report_event(cause, &[])
                 .into_iter()
                 .filter_map(scrub_event_for_sentry)
                 .collect(),
@@ -7341,7 +7391,31 @@ mod tests {
 
     fn deep_crash_event(frames: usize, first_image: &str, subtype: &str, os_build: &str) -> sentry::protocol::Event<'static> {
         let facts = crash_report_facts_from_text(&ips_deep_crash_body(frames, first_image, subtype, os_build));
-        scrub_event_for_sentry(native_crash_report_event(&facts.cause).unwrap()).unwrap()
+        scrub_event_for_sentry(native_crash_report_event(&facts.cause, &[]).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_native_crash_event_carries_the_previous_sessions_log_tail_scrubbed() {
+        let facts = crash_report_facts_from_text(&ips_deep_crash_body(4, "WebCore", "KERN_INVALID_ADDRESS at 0x0", "25A354"));
+        let mut tail: Vec<String> = (0..60)
+            .map(|i| format!("2026-10-23 16:54:{:02}.000 [INFO] [desktop_lib::compositor] step {i}", i % 60))
+            .collect();
+        tail.push("2026-10-23 16:54:30.500 [DEBUG] [desktop_lib::compositor] noisy".into());
+        tail.push("2026-10-23 16:54:30.600 [WARN] [desktop_lib::region_window] closing /Users/alice/Library/x for room 'Secret Plans'".into());
+        tail.push("not a log line".into());
+        let event = scrub_event_for_sentry(native_crash_report_event(&facts.cause, &tail).unwrap()).unwrap();
+        let crumbs = &event.breadcrumbs.values;
+        // The last 40 lines; the DEBUG line and the unparseable one are dropped.
+        assert_eq!(crumbs.len(), 38);
+        assert_eq!(crumbs[0].message.as_deref(), Some("step 23"));
+        let last = crumbs.last().unwrap();
+        assert_eq!(last.level, sentry::protocol::Level::Warning);
+        assert_eq!(last.category.as_deref(), Some("previous-session:desktop_lib::region_window"));
+        let message = last.message.as_deref().unwrap();
+        assert!(!message.contains("alice"), "home directory user name must be redacted: {message}");
+        assert!(!message.contains("Secret Plans"), "room name must be redacted: {message}");
+        assert!(crumbs.iter().all(|c| c.data.is_empty()));
+        assert!(previous_session_breadcrumbs(&[]).is_empty());
     }
 
     #[test]
@@ -7448,7 +7522,7 @@ mod tests {
         let CrashAttribution::Attributed { cause, .. } = &report.crash else {
             panic!("{:?}", report.crash);
         };
-        let event = scrub_event_for_sentry(native_crash_report_event(cause).unwrap()).unwrap();
+        let event = scrub_event_for_sentry(native_crash_report_event(cause, &[]).unwrap()).unwrap();
         assert_eq!(event.exception[0].ty, "EXC_UNKNOWN");
         assert_eq!(
             event.exception[0].value.as_deref(),

@@ -63,7 +63,9 @@ contact any of these.
 - **What is sent:** stack traces, app version, OS version, and Petal's own log
   breadcrumbs, scrubbed before they leave the machine. On desktop,
   `redact_for_export` masks room credentials, participant names and
-  identities, room names, window titles, and any email address. The browser
+  identities, room names, window titles, and any email address. After a
+  native crash, the next launch also sends the crashed session's last 40 log
+  lines as breadcrumbs, scrubbed the same way. The browser
   client masks the exact values it has registered: room names, invite codes,
   participant identities, and display names. It does not mask other email
   addresses or URLs by their shape.
