@@ -125,7 +125,9 @@ before(async () => {
   });
   browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-gpu', '--allow-file-access-from-files']
+    // Pin Chrome's frame-focus blocking on: whether a build enables it by
+    // default varies by version and platform, and real users get it.
+    args: ['--no-sandbox', '--disable-gpu', '--allow-file-access-from-files', '--enable-features=BlockingFocusWithoutUserActivation']
   });
 }, { timeout: 120_000 });
 
@@ -539,6 +541,11 @@ test('a plugin popover opened from the menu anchors to ⋯, not to its hidden bu
     );
     // placePopover: above the anchor, 8px clear of it.
     assert.ok(Math.abs(more.top - 8 - popover.bottom) <= 1, `popover ${JSON.stringify(popover)} not above ⋯ ${JSON.stringify(more)}`);
+    // The host hands focus to the popover frame, so the plugin's own focus()
+    // on its first row is allowed (Chrome blocks it in an unfocused frame).
+    const frame = await (await page.waitForSelector('.petal-plugin-popover iframe')).contentFrame();
+    await frame!.waitForFunction(() => document.activeElement?.tagName === 'BUTTON');
+    assert.match((await frame!.evaluate(() => document.activeElement?.getAttribute('aria-label'))) ?? '', /^React with /);
     assert.deepEqual(errors, []);
   } finally {
     await close();
