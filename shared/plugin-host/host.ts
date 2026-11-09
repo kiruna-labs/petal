@@ -516,6 +516,10 @@ export function createPluginHost(opts: PluginHostOptions): PluginHost {
     container.appendChild(frame);
     instance.container = container;
     mounts.popoverLayer.appendChild(container);
+    // Hand focus to the popover from the host. Chrome blocks a cross-origin
+    // frame's own focus() without user activation (focus-without-user-activation),
+    // so the plugin can only move focus inside a frame that already has it.
+    frame.focus();
     // Now that it is laid out, give a wrapped caption its extra line(s) back:
     // the frame keeps the height the plugin asked for and the caption is
     // never the thing that loses. Re-place so the taller box still fits.
