@@ -6064,6 +6064,31 @@ mod track_name_tests {
         assert_eq!(lower_rung_activity(&only_top, guarded), DARK_LOWER);
     }
 
+    /// #504: the Windows MF "hardware" H.264 encoder search must never
+    /// enumerate synchronous MFTs. With MFT_ENUM_FLAG_SYNCMFT in the mask, a
+    /// machine with no hardware encoder got Microsoft's synchronous software
+    /// MFT, the async-only encoder failed InitEncode, and every window share
+    /// encoded zero frames. Calls the real C++ policy the MF factory uses
+    /// (vendor/webrtc-sys/src/mf/mf_enum_flags.h).
+    #[test]
+    fn mf_hardware_h264_encoder_search_excludes_sync_software_mfts() {
+        use webrtc_sys::mf_enum_flags::ffi::{MfEnumIncludesSyncMfts, MfH264EncoderEnumFlags};
+        // mfapi.h MFT_ENUM_FLAG_* values.
+        const SYNCMFT: u32 = 0x1;
+        const ASYNCMFT: u32 = 0x2;
+        const HARDWARE: u32 = 0x4;
+        const SORTANDFILTER: u32 = 0x40;
+
+        let hardware_only = MfH264EncoderEnumFlags(true);
+        assert_eq!(hardware_only, HARDWARE | ASYNCMFT | SORTANDFILTER);
+        assert!(!MfEnumIncludesSyncMfts(hardware_only));
+        // The 0.9.35 mask must read as including sync MFTs, or the assertion
+        // above could pass for a detector that never fires.
+        assert!(MfEnumIncludesSyncMfts(SYNCMFT | ASYNCMFT | HARDWARE));
+        // The non-hardware search still admits software MFTs.
+        assert!(MfEnumIncludesSyncMfts(MfH264EncoderEnumFlags(false)));
+    }
+
     /// #410: the macOS encoder is built with a level token that removes
     /// RTCVideoEncoderH264's level-derived frame-rate clamp at every size
     /// Petal encodes, while the negotiated Level 3.1 (what the SFU answers)

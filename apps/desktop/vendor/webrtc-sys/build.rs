@@ -104,6 +104,8 @@ fn main() {
         "src/packet_trailer.rs",
         // PETAL PATCH (#410): H.264 encoder level helpers.
         "src/h264_encoder_level.rs",
+        // PETAL PATCH (#504): MF H.264 encoder enumeration policy.
+        "src/mf_enum_flags.rs",
     ];
 
     if is_desktop {
@@ -145,6 +147,8 @@ fn main() {
         "src/packet_trailer.cpp",
         // PETAL PATCH (#410): H.264 encoder level helpers.
         "src/h264_encoder_level.cpp",
+        // PETAL PATCH (#504): MF H.264 encoder enumeration policy.
+        "src/mf_enum_flags.cpp",
     ]);
 
     if is_desktop {

@@ -68,5 +68,8 @@ class VideoEncoderFactory : public webrtc::VideoEncoderFactory {
 
  private:
   std::unique_ptr<InternalFactory> internal_factory_;
+  // Software encoder factory used as the simulcast adapter's fallback when a
+  // primary encoder fails InitEncode. Windows (MF) only; null elsewhere (#504).
+  std::unique_ptr<webrtc::VideoEncoderFactory> software_fallback_factory_;
 };
 }  // namespace livekit_ffi

@@ -256,6 +256,41 @@ using Factory = webrtc::VideoEncoderFactoryTemplate<
 #endif
     webrtc::LibvpxVp9EncoderTemplateAdapter>;
 
+#if defined(USE_MF_VIDEO_CODEC)
+// Software-only (OpenH264/libvpx) factory handed to SimulcastEncoderAdapter
+// as its fallback, so a primary (MF) encoder whose InitEncode fails --
+// e.g. WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE -- is replaced by the software
+// encoder instead of leaving the track encoding zero frames (#504).
+// Stateless; owned by VideoEncoderFactory, which outlives every adapter.
+class SoftwareFallbackEncoderFactory : public webrtc::VideoEncoderFactory {
+ public:
+  std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
+    return Factory().GetSupportedFormats();
+  }
+
+  CodecSupport QueryCodecSupport(
+      const webrtc::SdpVideoFormat& format,
+      std::optional<std::string> scalability_mode) const override {
+    auto original_format = webrtc::FuzzyMatchSdpVideoFormat(
+        Factory().GetSupportedFormats(), StripBackendParameter(format));
+    return original_format
+               ? Factory().QueryCodecSupport(*original_format, scalability_mode)
+               : CodecSupport{.is_supported = false};
+  }
+
+  std::unique_ptr<webrtc::VideoEncoder> Create(
+      const webrtc::Environment& env,
+      const webrtc::SdpVideoFormat& format) override {
+    auto original_format = webrtc::FuzzyMatchSdpVideoFormat(
+        Factory().GetSupportedFormats(), StripBackendParameter(format));
+    if (!original_format) {
+      return nullptr;
+    }
+    return Factory().Create(env, *original_format);
+  }
+};
+#endif
+
 rust::Vec<VideoEncoderBackend> video_encoder_backend_list() {
   rust::Vec<VideoEncoderBackend> backends;
   backends.push_back(VideoEncoderBackend::Auto);
@@ -514,6 +549,10 @@ VideoEncoderFactory::InternalFactory::Create(
 
 VideoEncoderFactory::VideoEncoderFactory() {
   internal_factory_ = std::make_unique<InternalFactory>();
+#if defined(USE_MF_VIDEO_CODEC)
+  software_fallback_factory_ =
+      std::make_unique<SoftwareFallbackEncoderFactory>();
+#endif
 }
 
 std::vector<webrtc::SdpVideoFormat> VideoEncoderFactory::GetSupportedFormats()
@@ -537,8 +576,9 @@ std::unique_ptr<webrtc::VideoEncoder> VideoEncoderFactory::Create(
     const webrtc::SdpVideoFormat& format) {
   std::unique_ptr<webrtc::VideoEncoder> encoder;
   if (format.IsCodecInList(internal_factory_->GetSupportedFormats())) {
+    // Non-null only on Windows (MF): see SoftwareFallbackEncoderFactory.
     encoder = std::make_unique<webrtc::SimulcastEncoderAdapter>(
-        env, internal_factory_.get(), nullptr, format);
+        env, internal_factory_.get(), software_fallback_factory_.get(), format);
   }
 
   return encoder;
