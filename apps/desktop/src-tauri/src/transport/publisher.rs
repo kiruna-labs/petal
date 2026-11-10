@@ -6303,6 +6303,41 @@ mod track_name_tests {
         }
     }
 
+    /// PETAL-DESKTOP-4Y: libwebrtc aborts the whole process when
+    /// `CropAndScale` is asked for a zero-sized buffer (`I420Buffer::Create`
+    /// RTC_CHECK). `NativeVideoSource` cannot be driven offline into the
+    /// adapter's zero-size case (it needs a live encoder sink asking for an
+    /// alignment/downscale), so pin the vendored guard at the source: it must
+    /// test all four sizes, and run BEFORE the `CropAndScale` call.
+    #[test]
+    fn vendored_on_captured_frame_drops_non_positive_sizes_before_crop_and_scale() {
+        let src = vendored_video_track_cpp();
+        let guard_text = "adapted_width <= 0 || adapted_height <= 0 || crop_width <= 0 ||";
+        let mut calls = 0;
+        for (crop, _) in src.match_indices("->CropAndScale(") {
+            calls += 1;
+            let guard = src[..crop].rfind(guard_text).expect("guard before every CropAndScale");
+            let between = &src[guard..crop];
+            assert!(between.contains("crop_height <= 0"), "{between}");
+            assert!(between.contains("return false;"), "the guard must drop the frame");
+            assert!(
+                !between.contains("CropAndScale("),
+                "each CropAndScale needs its own guard: {between}"
+            );
+            assert!(
+                !between.contains("\nbool ") && !between.contains("\nvoid "),
+                "the guard must be in the same function as the call: {between}"
+            );
+        }
+        assert!(calls >= 1, "no CropAndScale call found; the pin is stale");
+    }
+
+    fn vendored_video_track_cpp() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../vendor/webrtc-sys/src/video_track.cpp");
+        std::fs::read_to_string(&path).expect("read vendored video_track.cpp")
+    }
+
     /// #500: no macOS H.264 encoder session is created with VideoToolbox
     /// low-latency rate control. In that mode a keyframe at a low bitrate
     /// followed by a bitrate ramp makes VideoToolbox drop most of the next ~8
