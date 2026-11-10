@@ -7914,6 +7914,14 @@ pub(crate) mod input {
         click_count: u32,
     }
 
+    thread_local! {
+        /// Set by `ax_pointer_up` for an Up with no recorded press that no
+        /// route delivered. `replay_with_backends` still returns the failure
+        /// to the controller but skips the release-failure report: nothing
+        /// was held (PETAL-DESKTOP-3B/3A).
+        static ORPHAN_UP_UNDELIVERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum AxReplayOutcome {
         Handled,
@@ -11399,6 +11407,7 @@ pub(crate) mod input {
         pb: &dyn PasteboardBackend,
         tap: &dyn SessionTapBackend,
     ) -> Result<(), String> {
+        ORPHAN_UP_UNDELIVERED.with(|flag| flag.set(false));
         if target_pid.is_some_and(is_display_target)
             && matches!(
                 message.message_type,
@@ -11534,6 +11543,9 @@ pub(crate) mod input {
             invalidate_ax_resolution_after_mutation(message.window_id);
         }
         if let Err(error) = &result {
+            if ORPHAN_UP_UNDELIVERED.with(|flag| flag.replace(false)) {
+                return result;
+            }
             note_pointer_release_not_injected(
                 message,
                 if error.contains("exhausted AX/SkyLight routes") {
@@ -12681,6 +12693,14 @@ pub(crate) mod input {
             // PETAL-DESKTOP-3B/3A: no press was recorded, so a click that
             // cannot be delivered is an orphan Up (lost Down, TTL/gap release),
             // not a stuck button. Never report it as a failed release.
+            // The controller still gets its failure; only the Sentry report is
+            // suppressed (see `ORPHAN_UP_UNDELIVERED`).
+            if matches!(outcome, AxReplayOutcome::PassThrough) {
+                log::info!(
+                    "remote-control: orphan Up not delivered, nothing held reason=orphan-up window_id={window_id} controller='{controller_id}'"
+                );
+                ORPHAN_UP_UNDELIVERED.with(|flag| flag.set(true));
+            }
             return Ok(outcome);
         };
         // Fable-review fix (#369): the map entry is always removed above (so
@@ -18271,6 +18291,41 @@ pub(crate) mod input {
                     PointerReleaseFailure::RoutesExhausted
                 )],
                 "an Up that exhausted every route must be reported as a PRIMARY-button release failure"
+            );
+        }
+
+        /// PETAL-DESKTOP-3B/3A: an Up with no recorded press (`mode=<none>`)
+        /// that no route can deliver was reported as a failed release, as if a
+        /// button could be stuck. Nothing was held, so it is an orphan and must
+        /// not reach the release-failure reporter. A real held press whose Up
+        /// fails stays covered by the test above.
+        #[test]
+        fn an_orphan_pointer_up_is_not_reported_as_a_failed_release() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let _ = take_release_failure_reports();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(80);
+            ax.set_capabilities(80, AxCapabilities::default());
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let tap = RecordingSessionTap::untrusted();
+            let pb = RecordingPasteboard::default();
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.20,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            assert!(
+                replay_with_backends(&up, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).is_err(),
+                "the controller must still be told the Up was not delivered"
+            );
+            assert!(
+                take_release_failure_reports().is_empty(),
+                "an Up with no recorded press is an orphan, not a failed release"
             );
         }
 
