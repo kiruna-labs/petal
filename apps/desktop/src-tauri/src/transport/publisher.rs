@@ -59,6 +59,7 @@
 //! require forking/rebuilding libwebrtc itself.
 
 use super::native_subscription::NativeSubscriptionCoordinator;
+use crate::logging::EncoderWedgeActionTag;
 use crate::sync_ext::MutexExt;
 use crate::video_color::{self, VideoColorProfile};
 use std::collections::{HashMap, VecDeque};
@@ -5679,6 +5680,41 @@ mod track_name_tests {
         }
     }
 
+    fn take_wedge_reports() -> Vec<crate::logging::SentryDiagnosticEvent> {
+        ENCODER_WEDGE_REPORTS.with(|reports| std::mem::take(&mut *reports.borrow_mut()))
+    }
+
+    #[test]
+    fn encoder_wedge_reports_the_first_action_and_the_exhaustion_to_sentry() {
+        use crate::logging::{EncoderWedgeDiagnostic, SentryDiagnosticEvent};
+        take_wedge_reports();
+        let mut harness = WedgeHarness::new();
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 3, wedged_sample());
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 2, wedged_sample());
+        assert_eq!(
+            take_wedge_reports(),
+            vec![
+                SentryDiagnosticEvent::EncoderWedged(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::Republish,
+                }),
+                SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::Exhausted,
+                }),
+            ],
+            "one report for the first step, one for exhaustion, nothing for the software step or after"
+        );
+
+        let mut unwired = WedgeHarness::new();
+        unwired.action_wired = false;
+        unwired.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
+        assert_eq!(
+            take_wedge_reports(),
+            vec![SentryDiagnosticEvent::EncoderWedged(EncoderWedgeDiagnostic {
+                action: EncoderWedgeActionTag::NotWired,
+            })]
+        );
+    }
+
     #[test]
     fn encoder_wedge_waits_for_the_full_trigger_window_before_acting() {
         // #427 fallback: the field symptom is a 60s+ run of 0fps, so acting on
@@ -9535,6 +9571,13 @@ impl EncoderRecoveryStep {
             Self::FallBackToSoftware => "fall back to the software H.264 encoder",
         }
     }
+
+    fn diagnostic_tag(self) -> EncoderWedgeActionTag {
+        match self {
+            Self::Republish => EncoderWedgeActionTag::Republish,
+            Self::FallBackToSoftware => EncoderWedgeActionTag::SoftwareEncoder,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10124,6 +10167,13 @@ fn apply_encoder_wedge_guard_sample(
         ),
         EncoderWedgeDecision::Recover(step) => {
             let requested = request_recovery(step);
+            // One report per share: the first trigger, with what was done.
+            if guard.recovery_steps == 1 {
+                let action = if requested { step.diagnostic_tag() } else { EncoderWedgeActionTag::NotWired };
+                report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedged(
+                    crate::logging::EncoderWedgeDiagnostic { action },
+                ));
+            }
             if requested {
                 log::warn!(
                     "publisher: window-share encoder WEDGED -- 0 frames encoded while funded at {:.0}kbps (delivered {:.1}fps) for {} samples; recovery step {}/{}: {} (#427)",
@@ -10143,12 +10193,32 @@ fn apply_encoder_wedge_guard_sample(
                 );
             }
         }
-        EncoderWedgeDecision::Exhausted => log::error!(
-            "publisher: window-share encoder still produced 0 frames after {} recovery steps ({}); this publication is publishing an empty track and no further recovery is attempted -- reopen the share to retry the encoder (#427)",
-            ENCODER_WEDGE_MAX_RECOVERY_STEPS,
-            sample.target_bitrate_bps / 1000.0,
-        ),
+        EncoderWedgeDecision::Exhausted => {
+            log::error!(
+                "publisher: window-share encoder still produced 0 frames after {} recovery steps (funded at {:.0}kbps); this publication is publishing an empty track and no further recovery is attempted -- reopen the share to retry the encoder (#427)",
+                ENCODER_WEDGE_MAX_RECOVERY_STEPS,
+                sample.target_bitrate_bps / 1000.0,
+            );
+            report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedgeExhausted(
+                crate::logging::EncoderWedgeDiagnostic { action: EncoderWedgeActionTag::Exhausted },
+            ));
+        }
     }
+}
+
+/// Sentry keeps the wedge as an event, not a warn breadcrumb (#427). Tests
+/// observe the reports through a thread-local sink instead.
+fn report_encoder_wedge(event: crate::logging::SentryDiagnosticEvent) {
+    #[cfg(test)]
+    ENCODER_WEDGE_REPORTS.with(|reports| reports.borrow_mut().push(event));
+    #[cfg(not(test))]
+    crate::logging::capture_sentry_diagnostic(event);
+}
+
+#[cfg(test)]
+thread_local! {
+    static ENCODER_WEDGE_REPORTS: std::cell::RefCell<Vec<crate::logging::SentryDiagnosticEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The ladder's top rid's CURRENT configured `(max_bitrate, max_framerate)`,

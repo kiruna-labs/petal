@@ -259,6 +259,42 @@ pub enum SentryDiagnosticEvent {
     WgcBorderRequestFailed(WgcBorderRequestFailedDiagnostic),
     RemoteVideoStalled(RemoteVideoStalledDiagnostic),
     CaptureRawStalled(CaptureRawStalledDiagnostic),
+    EncoderWedged(EncoderWedgeDiagnostic),
+    EncoderWedgeExhausted(EncoderWedgeDiagnostic),
+}
+
+/// A funded window-share encoder produced zero frames for the whole #427
+/// trigger window. `EncoderWedged` reports the first recovery action taken
+/// for a share; `EncoderWedgeExhausted` reports a share left publishing an
+/// empty track after every action failed. Two event names, not one, because
+/// the per-name rate limit would otherwise swallow the exhaustion that
+/// follows the first step ~30 s later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderWedgeDiagnostic {
+    pub action: EncoderWedgeActionTag,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderWedgeActionTag {
+    /// Republished at the same geometry.
+    Republish,
+    /// Republished onto the software H.264 encoder.
+    SoftwareEncoder,
+    /// The publication has no recovery action wired.
+    NotWired,
+    /// Every recovery step ran and the encoder is still silent.
+    Exhausted,
+}
+
+impl EncoderWedgeActionTag {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Republish => "republish",
+            Self::SoftwareEncoder => "software_encoder",
+            Self::NotWired => "not_wired",
+            Self::Exhausted => "exhausted",
+        }
+    }
 }
 
 /// Emitted (rate-limited) when the SHARER's raw ScreenCaptureKit watchdog
@@ -700,7 +736,7 @@ diagnostic_enum!(SinceLastFrameBucketTag {
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 20] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 22] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -721,6 +757,8 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 20] = [
     "wgc-border-request-failed",
     "remote-video-stalled",
     "capture-raw-stalled",
+    "encoder-wedged",
+    "encoder-wedge-exhausted",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -816,6 +854,7 @@ const CAPTURE_RAW_STALLED_MESSAGE_TAGS: &[&str] = &[
     "stream_updates_since_frame",
     "held_native_surfaces",
 ];
+const ENCODER_WEDGE_MESSAGE_TAGS: &[&str] = &["session_role", "recovery_action"];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
     "camera_direction",
@@ -860,6 +899,7 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "wgc-border-request-failed" => Some(WGC_BORDER_REQUEST_FAILED_MESSAGE_TAGS),
         "remote-video-stalled" => Some(REMOTE_VIDEO_STALLED_MESSAGE_TAGS),
         "capture-raw-stalled" => Some(CAPTURE_RAW_STALLED_MESSAGE_TAGS),
+        "encoder-wedged" | "encoder-wedge-exhausted" => Some(ENCODER_WEDGE_MESSAGE_TAGS),
         _ => None,
     }
 }
@@ -1209,6 +1249,8 @@ impl SentryDiagnosticEvent {
             Self::WgcBorderRequestFailed(_) => "wgc-border-request-failed",
             Self::RemoteVideoStalled(_) => "remote-video-stalled",
             Self::CaptureRawStalled(_) => "capture-raw-stalled",
+            Self::EncoderWedged(_) => "encoder-wedged",
+            Self::EncoderWedgeExhausted(_) => "encoder-wedge-exhausted",
         }
     }
 }
@@ -1976,6 +2018,33 @@ fn build_sentry_diagnostic_event(
             insert("held_native_surfaces", value.held_surfaces.tag());
             insert("recovery_burst", value.recovery_burst.tag());
             insert("concurrent_shares", value.concurrent_shares.tag());
+        }
+        SentryDiagnosticEvent::EncoderWedged(value)
+        | SentryDiagnosticEvent::EncoderWedgeExhausted(value) => {
+            insert("session_role", "sharer");
+            for key in DIAGNOSTIC_TAGS {
+                if !matches!(
+                    *key,
+                    "event_name"
+                        | "schema_version"
+                        | "build_version"
+                        | "os_version"
+                        | "architecture"
+                        | "session_role"
+                        | "recovery_action"
+                        | "raw_capture_action"
+                        | "raw_silence_cause"
+                        | "snapshot_content"
+                        | "stream_updates_since_frame"
+                        | "held_native_surfaces"
+                        | "recovery_burst"
+                        | "concurrent_shares"
+                        | "dedup_count_bucket"
+                ) {
+                    insert(*key, "not_applicable");
+                }
+            }
+            insert("recovery_action", value.action.tag());
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
@@ -5994,7 +6063,16 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
                 | "not_applicable"
         ),
         "camera_direction" => matches!(value, "publish" | "receive" | "not_applicable"),
-        "recovery_action" => matches!(value, "reanchor" | "letterbox" | "not_applicable"),
+        "recovery_action" => matches!(
+            value,
+            "reanchor"
+                | "letterbox"
+                | "republish"
+                | "software_encoder"
+                | "not_wired"
+                | "exhausted"
+                | "not_applicable"
+        ),
         "playout_transition" => {
             matches!(value, "repointed" | "unavailable" | "not_applicable")
         },
@@ -10385,6 +10463,34 @@ mod tests {
             assert_eq!(event.tags.get(key).map(String::as_str), Some("not_applicable"), "{key}");
         }
         assert!(valid_sentry_diagnostic_event(&event));
+    }
+
+    #[test]
+    fn encoder_wedge_events_carry_the_action_and_pass_before_send() {
+        for (event, name, action) in [
+            (
+                SentryDiagnosticEvent::EncoderWedged(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::SoftwareEncoder,
+                }),
+                "encoder-wedged",
+                "software_encoder",
+            ),
+            (
+                SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::Exhausted,
+                }),
+                "encoder-wedge-exhausted",
+                "exhausted",
+            ),
+        ] {
+            let event = build_sentry_diagnostic_event(event, "1");
+            assert_eq!(
+                event.message.as_deref(),
+                Some(format!("diagnostic: {name} session_role=sharer recovery_action={action}").as_str())
+            );
+            assert!(valid_sentry_diagnostic_event(&event), "{name} must pass before_send");
+            assert!(scrub_event_for_sentry(event).is_some());
+        }
     }
 
     #[test]
