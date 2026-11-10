@@ -8,7 +8,7 @@ import galleryTokenHandler from '../api/gallery-token.js';
 import indexHandler from '../api/index.js';
 import roomsHandler from '../api/rooms.js';
 import tokenHandler from '../api/token.js';
-import updaterHandler from '../api/updater.js';
+import updaterHandler, { MANIFEST_CACHE_CONTROL, resetUpdaterStateForTests } from '../api/updater.js';
 import { ACCESS_CODE_ALPHABET, credentialForAccessCode, generateAccessCode, normalizeAccessCode } from '../lib/slug.js';
 import {
   findBlobByPathname,
@@ -66,13 +66,37 @@ const originalFetch = globalThis.fetch;
 const blobApi = new MockAgent();
 const pool = blobApi.get('https://vercel.com');
 let manifestByUrl = new Map<string, unknown>();
+// URLs whose fetch never answers, like a hung Blob CDN read; it settles only
+// when the caller's AbortSignal fires, as real fetch does.
+const hangingUrls = new Set<string>();
 
 process.env.BLOB_READ_WRITE_TOKEN = 'vercel_blob_rw_teststore_secret';
 blobApi.disableNetConnect();
 setGlobalDispatcher(blobApi);
 
-globalThis.fetch = async (input: string | URL | Request) => {
+globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
   const url = input instanceof Request ? input.url : String(input);
+  if (hangingUrls.has(url)) {
+    return new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      // AbortSignal.timeout's timer is unref'd: hold the event loop open, or
+      // node exits 0 mid-test with this promise pending (a silent false pass).
+      const keepAlive = setInterval(() => {}, 1000);
+      const giveUp = setTimeout(() => {
+        clearInterval(keepAlive);
+        reject(new Error('hung fetch was never aborted'));
+      }, 4000);
+      signal?.addEventListener(
+        'abort',
+        () => {
+          clearInterval(keepAlive);
+          clearTimeout(giveUp);
+          reject(signal.reason);
+        },
+        { once: true }
+      );
+    });
+  }
   if (!manifestByUrl.has(url)) {
     throw new Error(`unexpected fetch: ${url}`);
   }
@@ -340,6 +364,7 @@ async function main() {
   });
 
   await test('/api/updater returns latest.json manifest verbatim', async () => {
+    resetUpdaterStateForTests();
     const latest = blob('latest.json', '2026-07-01T10:00:00.000Z');
     const manifest = {
       version: '1.2.3',
@@ -360,10 +385,129 @@ async function main() {
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.body, manifest);
     assert.equal(response.headers['content-type'], 'application/json');
+    assert.equal(response.headers['cache-control'], MANIFEST_CACHE_CONTROL);
+    assert.equal(response.headers['vary'], 'Origin');
     assert.equal(response.headers['access-control-allow-origin'], undefined);
   });
 
+  await test('/api/updater answers 204 before the function limit when the Blob read hangs', async () => {
+    resetUpdaterStateForTests(50);
+    const latest = blob('latest.json', '2026-07-01T10:00:00.000Z');
+    hangingUrls.add(latest.url);
+    listBlobs('latest.json', [latest]);
+    try {
+      const started = Date.now();
+      const response = await call(updaterHandler);
+      assert.equal(response.statusCode, 204);
+      assert.equal(response.ended, true);
+      assert.ok(Date.now() - started < 3000, 'handler must not wait on the hung read');
+    } finally {
+      hangingUrls.delete(latest.url);
+      resetUpdaterStateForTests();
+    }
+  });
+
+  await test('/api/updater serves the last good manifest when a later Blob read hangs', async () => {
+    resetUpdaterStateForTests(50);
+    const latest = blob('latest.json', '2026-07-01T10:00:00.000Z');
+    const manifest = { version: '1.2.3', platforms: {} };
+    manifestByUrl.set(latest.url, manifest);
+    listBlobs('latest.json', [latest]);
+    const first = await call(updaterHandler);
+    assert.equal(first.statusCode, 200);
+
+    hangingUrls.add(latest.url);
+    listBlobs('latest.json', [latest]);
+    try {
+      const started = Date.now();
+      const response = await call(updaterHandler);
+      assert.ok(Date.now() - started < 3000, 'handler must not wait on the hung read');
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.body, manifest);
+      assert.equal(response.headers['cache-control'], 'no-store');
+    } finally {
+      hangingUrls.delete(latest.url);
+      resetUpdaterStateForTests();
+    }
+  });
+
+  // The Blob SDK retries a timed-out or 5xx list() with backoff, so the deadline
+  // must not depend on it. Each case runs on its own MockAgent so a retry the
+  // SDK fires after the handler answered cannot eat a later test's intercept.
+  async function withIsolatedBlobApi(
+    setup: (pool: ReturnType<MockAgent['get']>) => void,
+    fn: () => Promise<void>
+  ): Promise<void> {
+    const isolated = new MockAgent();
+    isolated.disableNetConnect();
+    setup(isolated.get('https://vercel.com'));
+    setGlobalDispatcher(isolated);
+    try {
+      await fn();
+    } finally {
+      setGlobalDispatcher(blobApi);
+      await isolated.close();
+    }
+  }
+  const listPath = `/api/blob?prefix=${encodeURIComponent('latest.json')}`;
+  // Fails the test instead of hanging the suite when the handler never answers.
+  async function callUpdaterWithin(ms: number): Promise<TestResponse> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`handler did not answer within ${ms}ms`)), ms);
+    });
+    try {
+      return await Promise.race([call(updaterHandler), limit]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  await test('/api/updater answers 204 before the function limit when Blob list() hangs', async () => {
+    resetUpdaterStateForTests(200);
+    try {
+      await withIsolatedBlobApi(
+        (p) => {
+          p.intercept({ path: listPath, method: 'GET' })
+            .reply(200, { blobs: [], hasMore: false })
+            .delay(60_000);
+        },
+        async () => {
+          const started = Date.now();
+          const response = await callUpdaterWithin(3000);
+          assert.ok(Date.now() - started < 3000, 'handler must not wait on the hung list()');
+          assert.equal(response.statusCode, 204);
+          assert.equal(response.ended, true);
+        }
+      );
+    } finally {
+      resetUpdaterStateForTests();
+    }
+  });
+
+  await test('/api/updater answers 204 before the function limit when Blob list() keeps failing', async () => {
+    resetUpdaterStateForTests(200);
+    try {
+      await withIsolatedBlobApi(
+        (p) => {
+          p.intercept({ path: listPath, method: 'GET' })
+            .reply(503, { error: { code: 'service_unavailable', message: 'down' } })
+            .persist();
+        },
+        async () => {
+          const started = Date.now();
+          const response = await callUpdaterWithin(3000);
+          assert.ok(Date.now() - started < 3000, 'handler must not wait on list() retries');
+          assert.equal(response.statusCode, 204);
+        }
+      );
+    } finally {
+      resetUpdaterStateForTests();
+    }
+  });
+
   await test('/api/updater returns 204 when latest.json is absent', async () => {
+    resetUpdaterStateForTests();
     listBlobs('latest.json', [blob('latest.json.old', '2026-07-01T10:00:00.000Z')]);
 
     const response = await call(updaterHandler);
@@ -373,6 +517,7 @@ async function main() {
   });
 
   await test('/api/updater returns 204 when latest.json fetch fails', async () => {
+    resetUpdaterStateForTests();
     const latest = blob('latest.json', '2026-07-01T10:00:00.000Z');
     listBlobs('latest.json', [latest]);
 
