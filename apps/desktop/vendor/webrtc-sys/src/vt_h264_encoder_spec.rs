@@ -20,13 +20,22 @@ pub mod ffi {
         failed: u64,
     }
 
-    /// Result of starting one RTCVideoEncoderH264 (screenshare mode).
+    /// What one RTCVideoEncoderH264 start (screenshare mode) did, observed
+    /// on the calling thread only.
     #[derive(Debug, Clone, Copy)]
     struct VtH264EncoderProbe {
         /// `startEncodeWithSettings:` return code (0 = WEBRTC_VIDEO_CODEC_OK).
+        /// Non-zero when no encoder is available (e.g. some VMs); the session
+        /// creation is still attempted and observed.
         start_result: i64,
-        before: VtH264SessionCounters,
-        after: VtH264SessionCounters,
+        /// H.264 VTCompressionSessionCreate calls made by that start.
+        sessions: u64,
+        /// The last such call asked for low-latency rate control.
+        low_latency_requested: bool,
+        /// The last such call reached VideoToolbox with the key still set.
+        low_latency_forwarded: bool,
+        /// That call's OSStatus.
+        create_status: i32,
     }
 
     unsafe extern "C++" {
@@ -34,8 +43,8 @@ pub mod ffi {
 
         fn VtH264SessionCountersSnapshot() -> VtH264SessionCounters;
 
-        /// Starts and releases a real RTCVideoEncoderH264 at `width`x`height`,
-        /// returning the session counters around it.
+        /// Starts and releases a real RTCVideoEncoderH264 at `width`x`height`
+        /// and reports the session creation it made.
         fn VtH264StartEncoderProbe(width: u32, height: u32) -> VtH264EncoderProbe;
     }
 }

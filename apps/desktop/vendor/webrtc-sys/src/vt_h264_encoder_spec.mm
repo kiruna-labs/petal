@@ -55,6 +55,16 @@ std::atomic<uint64_t> g_low_latency_requested{0};
 std::atomic<uint64_t> g_low_latency_forwarded{0};
 std::atomic<uint64_t> g_failed{0};
 
+// The last H.264 creation on THIS thread, so the probe reads its own call even
+// while other threads (parallel tests) create sessions.
+struct ThreadObservation {
+  uint64_t sessions = 0;
+  bool requested = false;
+  bool forwarded = false;
+  int32_t status = 0;
+};
+thread_local ThreadObservation t_observation;
+
 VtCompressionSessionCreateFn RealVtCompressionSessionCreate() {
   // RTLD_NEXT skips this image (where the override lives) and finds
   // VideoToolbox's export.
@@ -119,6 +129,10 @@ extern "C" OSStatus VTCompressionSessionCreate(
     if (status != noErr) {
       g_failed.fetch_add(1, std::memory_order_relaxed);
     }
+    t_observation.sessions += 1;
+    t_observation.requested = requested;
+    t_observation.forwarded = kept;
+    t_observation.status = status;
     // WARNING, not INFO: the app's log sink drops libwebrtc INFO lines. One
     // line per session creation (encoder start / resolution change), like #410.
     RTC_LOG(LS_WARNING) << "PETAL #500: H.264 VTCompressionSession " << width << "x" << height
@@ -169,9 +183,14 @@ VtH264EncoderProbe VtH264StartEncoderProbe(uint32_t width, uint32_t height) {
     settings.maxFramerate = 30;
     settings.qpMax = 51;
     settings.mode = RTC_OBJC_TYPE(RTCVideoCodecModeScreensharing);
-    probe.before = VtH264SessionCountersSnapshot();
+    // startEncodeWithSettings: creates the session synchronously on this
+    // thread, so t_observation describes exactly this encoder's call.
+    t_observation = ThreadObservation{};
     probe.start_result = [encoder startEncodeWithSettings:settings numberOfCores:1];
-    probe.after = VtH264SessionCountersSnapshot();
+    probe.sessions = t_observation.sessions;
+    probe.low_latency_requested = t_observation.requested;
+    probe.low_latency_forwarded = t_observation.forwarded;
+    probe.create_status = t_observation.status;
     [encoder releaseEncoder];
     [settings release];
     [encoder release];

@@ -370,7 +370,8 @@ always takes precedence over a dylib export. The override:
   the source attributes, the callback) is forwarded unchanged to
   VideoToolbox's own function, which it finds with `dlsym(RTLD_NEXT, ...)`.
 - counts sessions created, low-latency requested, and low-latency forwarded
-  (which must stay 0), and logs one `PETAL #500: H.264 VTCompressionSession
+  (which must stay 0), records the last creation per thread for the test,
+  and logs one `PETAL #500: H.264 VTCompressionSession
   WxH created without low-latency rate control` WARNING per session creation
   (the app's sink drops libwebrtc INFO).
 
@@ -396,10 +397,20 @@ a steady 30 fps.
 
 The desktop crate's
 `macos_h264_encoder_sessions_never_enable_low_latency_rate_control` test
-starts a real `RTCVideoEncoderH264`. It asserts that its session went through
-the override, that the encoder still requested the key, and that VideoToolbox
-never received it. With the key-removal line disabled, the test fails
-(`low_latency_forwarded` 1 != 0).
+starts a real `RTCVideoEncoderH264` and asserts three things about its session
+creation:
+
+- it went through the override;
+- it requested the key;
+- VideoToolbox never received the key.
+
+The probe observes only its own call, through a thread-local filled in by the
+override, so parallel tests can't interfere. `startEncodeWithSettings:`
+creates the session synchronously on the calling thread. The test doesn't
+require the encoder to start: on hosts with no encoder (some VMs) the creation
+is still attempted and checked.
+
+With the key-removal line disabled, the test fails.
 
 ### Updating
 
