@@ -78,7 +78,9 @@ use livekit::options::{
 use livekit::prelude::*;
 #[cfg(target_os = "macos")]
 use livekit::webrtc::video_frame::native::NativeBuffer;
-use livekit::webrtc::video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation};
+use livekit::webrtc::video_frame::{
+    FrameMetadata, I420Buffer, VideoBuffer, VideoFrame, VideoRotation,
+};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::rtp_parameters::DegradationPreference;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
@@ -1406,6 +1408,9 @@ pub struct PublishedTrack {
     native_fallback_pool: CaptureBufferPool,
     native_publish_disabled_by_env: bool,
     native_zero_copy_latch: Mutex<NativeZeroCopyLatch>,
+    /// #506: spaces `capture_frame` calls so libwebrtc never drops one as
+    /// "Same/old NTP timestamp". Held across the call to serialize pushes.
+    source_push_spacer: Mutex<SourcePushSpacer>,
     push_drop_streak: Mutex<crate::logging::DropStreakDetector>,
     /// Rate-limits source-boundary logs while guaranteeing a sample at least
     /// every five seconds whenever frames reach the publisher.
@@ -1459,6 +1464,140 @@ fn share_frame_clock_us(capture_wall_time_us: u64) -> i64 {
     // Clamp rather than wrap: `timestamp_us` is `i64`, and a wrapped value would
     // become a negative -- i.e. pre-epoch -- frame clock.
     capture_wall_time_us.min(i64::MAX as u64) as i64
+}
+
+/// Minimum wall-clock gap between two `capture_frame` calls on one source (#506).
+///
+/// libwebrtc's `TimestampAligner::ClipTimestamp` forces each translated frame
+/// time into `[previous + 1ms, webrtc::TimeMicros()]`, and the upper bound wins.
+/// So a push within 1ms of the previous one is stamped "now", in the previous
+/// frame's millisecond, and `VideoStreamEncoder` drops it ("Same/old NTP
+/// timestamp") after the source already reported it accepted. No capture
+/// timestamp can fix that, because the clip caps the output at the push instant.
+/// Only the push instant itself can. The 100us margin absorbs the difference
+/// between `Instant` and libwebrtc's own clock.
+const SOURCE_PUSH_MIN_SPACING: std::time::Duration = std::time::Duration::from_micros(1_100);
+
+/// Keeps pushes into one native source at least [`SOURCE_PUSH_MIN_SPACING`]
+/// apart (#506). Record each call's *return* instant: the aligner reads its
+/// clock inside the call, so its previous output time is no later than that.
+#[derive(Debug, Default)]
+struct SourcePushSpacer {
+    last_return: Option<std::time::Instant>,
+}
+
+impl SourcePushSpacer {
+    /// How long to wait before a push at `now`. This is zero unless the previous
+    /// push returned less than the spacing ago, so the wait never accumulates
+    /// and never drifts from real time.
+    fn wait_before_push(&self, now: std::time::Instant) -> std::time::Duration {
+        self.last_return.map_or(std::time::Duration::ZERO, |last| {
+            (last + SOURCE_PUSH_MIN_SPACING).saturating_duration_since(now)
+        })
+    }
+
+    fn record_return(&mut self, returned_at: std::time::Instant) {
+        self.last_return = Some(returned_at);
+    }
+}
+
+#[cfg(test)]
+mod source_push_spacing_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A model of libwebrtc's `TimestampAligner::ClipTimestamp` (timestamp_aligner.cc)
+    /// followed by `VideoStreamEncoder`'s millisecond NTP check
+    /// (video_stream_encoder.cc). Times are microseconds on the aligner's clock.
+    struct AlignerModel {
+        prev_out_us: Option<i64>,
+        prev_ntp_ms: Option<i64>,
+    }
+
+    impl AlignerModel {
+        /// Returns `true` when the encoder would keep the frame.
+        fn push(&mut self, filtered_us: i64, system_us: i64) -> bool {
+            let mut out = filtered_us.min(system_us);
+            if let Some(prev) = self.prev_out_us {
+                if out < prev + 1_000 {
+                    out = (prev + 1_000).min(system_us);
+                }
+            }
+            self.prev_out_us = Some(out);
+            let ntp_ms = out / 1_000;
+            let kept = self.prev_ntp_ms.map_or(true, |prev| ntp_ms > prev);
+            if kept {
+                self.prev_ntp_ms = Some(ntp_ms);
+            }
+            kept
+        }
+    }
+
+    /// Drives the real spacer the way `capture_to_source` does: wait, push
+    /// (the aligner reads its clock at entry), then record the return.
+    fn push_at(
+        spacer: &mut SourcePushSpacer,
+        aligner: &mut AlignerModel,
+        base: Instant,
+        attempt_us: u64,
+        filtered_us: i64,
+    ) -> (bool, Duration) {
+        let attempt = base + Duration::from_micros(attempt_us);
+        let wait = spacer.wait_before_push(attempt);
+        let entered = attempt + wait;
+        let system_us = entered.duration_since(base).as_micros() as i64;
+        let kept = aligner.push(filtered_us, system_us);
+        spacer.record_return(entered + Duration::from_micros(20));
+        (kept, wait)
+    }
+
+    #[test]
+    fn a_push_within_a_millisecond_of_the_last_is_still_encoded() {
+        // 06:43:11.924 in the issue's clean log: snapshot, then a raw frame
+        // whose push came 206us later. The raw frame's capture instant is
+        // older than the snapshot's, so its filtered time falls behind.
+        let base = Instant::now();
+        let mut spacer = SourcePushSpacer::default();
+        let mut aligner = AlignerModel {
+            prev_out_us: None,
+            prev_ntp_ms: None,
+        };
+        let (snapshot_kept, _) = push_at(&mut spacer, &mut aligner, base, 10_000, 10_000);
+        assert!(snapshot_kept);
+        let (raw_kept, wait) = push_at(&mut spacer, &mut aligner, base, 10_226, 9_000);
+        assert!(
+            raw_kept,
+            "the second push must not land in the first one's millisecond (waited {wait:?})"
+        );
+        assert!(wait <= SOURCE_PUSH_MIN_SPACING);
+    }
+
+    #[test]
+    fn spaced_pushes_never_wait() {
+        let base = Instant::now();
+        let mut spacer = SourcePushSpacer::default();
+        assert_eq!(spacer.wait_before_push(base), Duration::ZERO);
+        spacer.record_return(base);
+        assert_eq!(
+            spacer.wait_before_push(base + SOURCE_PUSH_MIN_SPACING),
+            Duration::ZERO
+        );
+        assert_eq!(
+            spacer.wait_before_push(base + Duration::from_millis(33)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn the_wait_only_covers_the_rest_of_the_spacing() {
+        let base = Instant::now();
+        let mut spacer = SourcePushSpacer::default();
+        spacer.record_return(base);
+        assert_eq!(
+            spacer.wait_before_push(base + Duration::from_micros(400)),
+            SOURCE_PUSH_MIN_SPACING - Duration::from_micros(400)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2507,6 +2646,7 @@ impl RoomConnection<Arc<Room>> {
             native_fallback_pool: Arc::new(Mutex::new(Vec::new())),
             native_publish_disabled_by_env: native_publish_disabled_by_env(),
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
+            source_push_spacer: Mutex::new(SourcePushSpacer::default()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
             last_source_boundary_log: Mutex::new(None),
             background_cancel,
@@ -2622,6 +2762,7 @@ impl RoomConnection<Arc<Room>> {
             native_fallback_pool: Arc::new(Mutex::new(Vec::new())),
             native_publish_disabled_by_env: false,
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
+            source_push_spacer: Mutex::new(SourcePushSpacer::default()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
             last_source_boundary_log: Mutex::new(None),
             background_cancel,
@@ -8689,6 +8830,26 @@ impl PublishedTrack {
         }
     }
 
+    /// The single entry into `rtc_source.capture_frame` (#506): waits out
+    /// [`SOURCE_PUSH_MIN_SPACING`] since the previous push first. `started` is
+    /// reset after the wait so `capture_frame_return_ms` (and the zero-copy
+    /// stall latch fed by it) never counts the wait.
+    fn capture_to_source<T: AsRef<dyn VideoBuffer>>(
+        &self,
+        frame: &VideoFrame<T>,
+        started: &mut std::time::Instant,
+    ) -> bool {
+        let mut spacer = self.source_push_spacer.lock_unpoisoned();
+        let wait = spacer.wait_before_push(std::time::Instant::now());
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+        *started = std::time::Instant::now();
+        let accepted = self.rtc_source.capture_frame(frame);
+        spacer.record_return(std::time::Instant::now());
+        accepted
+    }
+
     /// Convert a captured frame to I420 and push it into the LiveKit
     /// video source, stamping SPEC.md §7's embedded measurement metadata
     /// (capture wall-clock timestamp + monotonic frame id) via LiveKit's
@@ -8807,7 +8968,7 @@ impl PublishedTrack {
         let frame_id = self
             .frame_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let capture_frame_started = std::time::Instant::now();
+        let mut capture_frame_started = std::time::Instant::now();
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             // #179: LiveKit's ObjC bridge consumes/releases the CVPixelBufferRef.
             // Hand it a fresh retain, never the frame's owned reference.
@@ -8822,7 +8983,7 @@ impl PublishedTrack {
                 }),
                 buffer: &native_buffer,
             };
-            self.rtc_source.capture_frame(&frame)
+            self.capture_to_source(&frame, &mut capture_frame_started)
         }));
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         if result.is_err() {
@@ -9053,8 +9214,8 @@ impl PublishedTrack {
             }
         };
 
-        let capture_frame_started = std::time::Instant::now();
-        let source_accepted = self.rtc_source.capture_frame(&frame);
+        let mut capture_frame_started = std::time::Instant::now();
+        let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started);
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         Some(PublishedFrameTiming {
             convert_ms,
@@ -9354,8 +9515,8 @@ impl PublishedTrack {
                 buffer: &scaled,
             }
         };
-        let capture_frame_started = std::time::Instant::now();
-        let source_accepted = self.rtc_source.capture_frame(&frame);
+        let mut capture_frame_started = std::time::Instant::now();
+        let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started);
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         Some(PublishedFrameTiming {
             convert_ms,
