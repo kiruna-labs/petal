@@ -2830,24 +2830,22 @@ mod tests {
     #[tokio::test]
     async fn a_permanent_401_is_not_retried() {
         // #908 review should-fix (Sol): retrying a permanent failure (bad/
-        // rotated key) only holds the single-consumer worker hostage for
-        // RETRY_BACKOFF + a second SEND_TIMEOUT while a real outage
-        // overflows the queue faster. Assert it returns near-instantly --
-        // if it were retrying, RETRY_BACKOFF (500ms) alone would blow this
-        // bound.
-        let url = spawn_fake_server(vec!["HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n"]);
+        // rotated key) holds the single-consumer worker hostage for
+        // RETRY_BACKOFF + a second SEND_TIMEOUT. Count attempts rather than
+        // timing the call: a wall-clock bound flaked under load.
+        let (url, requests) =
+            spawn_counting_server("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n");
         let client = reqwest::Client::builder()
             .timeout(SEND_TIMEOUT)
             .build()
             .unwrap();
         let body = json!({"event": "test"});
-        let start = Instant::now();
         let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
-        let elapsed = start.elapsed();
         assert_eq!(result, Err(SendOutcome::Http401));
-        assert!(
-            elapsed < Duration::from_millis(300),
-            "a permanent failure must return immediately, not after a retry backoff: {elapsed:?}"
+        assert_eq!(
+            requests.lock_unpoisoned().len(),
+            1,
+            "a permanent failure must not be retried"
         );
     }
 
