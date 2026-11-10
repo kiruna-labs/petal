@@ -1388,6 +1388,33 @@ fn silent_for_bucket(silent_for_us: u64) -> crate::logging::SinceLastFrameBucket
     }
 }
 
+/// #393: occlusion evidence at stall time. A covered window's SCK stream goes
+/// idle or silent while snapshot pulls keep advancing; Petal's own remote
+/// windows are the leading suspect, so they get their own tag. Telemetry
+/// only -- no restart/hold decision reads this. `None` = window not in the
+/// on-screen list (display share, minimized, other Space).
+fn occlusion_tags(
+    breakdown: Option<crate::platform::cg::OcclusionBreakdown>,
+) -> (
+    crate::logging::CaptureOcclusionTag,
+    crate::logging::OccludedByPetalTag,
+) {
+    use crate::logging::{CaptureOcclusionTag as Occ, OccludedByPetalTag as ByPetal};
+    match breakdown {
+        None => (Occ::Unknown, ByPetal::Unknown),
+        Some(b) => (
+            Occ::from_fraction(b.total()),
+            if !b.petal_known {
+                ByPetal::Unknown
+            } else if b.petal >= 0.05 {
+                ByPetal::Yes
+            } else {
+                ByPetal::No
+            },
+        ),
+    }
+}
+
 /// Sender-side evidence for one raw-capture stall verdict (#393): one
 /// `capture-stall-evidence:` log line plus a rate-limited Sentry event.
 fn capture_raw_stall_diagnostic(
@@ -1398,12 +1425,14 @@ fn capture_raw_stall_diagnostic(
     evidence: crate::capture::RawSilenceEvidence,
     recovery_burst: u32,
     concurrent_shares: usize,
+    occlusion: Option<crate::platform::cg::OcclusionBreakdown>,
 ) -> crate::logging::CaptureRawStalledDiagnostic {
     use crate::logging::SmallCountBucketTag as Count;
     let (pulls, changed) = snapshot_pulls_since_raw_of(window_id);
     let cause = evidence.cause();
+    let (occlusion_tag, by_petal_tag) = occlusion_tags(occlusion);
     log::warn!(
-        "capture-stall-evidence: window {window_id} action={} silent={:.1}s cause={cause:?} sck_callbacks={} no_image={} last_no_image_status={:?} layout_deferred={} layout_rejected={} pixel_format_rejected={} region_dropped={} stream_updates={} held_surfaces={} pulls={pulls} pulls_changed={changed} recovery_burst={recovery_burst} concurrent_shares={concurrent_shares} (#393)",
+        "capture-stall-evidence: window {window_id} action={} silent={:.1}s cause={cause:?} sck_callbacks={} no_image={} last_no_image_status={:?} layout_deferred={} layout_rejected={} pixel_format_rejected={} region_dropped={} stream_updates={} held_surfaces={} pulls={pulls} pulls_changed={changed} recovery_burst={recovery_burst} concurrent_shares={concurrent_shares} occlusion={occlusion_tag:?} occluded_by_petal={by_petal_tag:?} (#393)",
         action_label(action),
         silent_for_us as f64 / 1_000_000.0,
         evidence.callbacks,
@@ -1426,6 +1455,32 @@ fn capture_raw_stall_diagnostic(
         recovery_burst: Count::from_count(u64::from(recovery_burst)),
         concurrent_shares: Count::from_count(concurrent_shares as u64),
         silent_for: silent_for_bucket(silent_for_us),
+        occlusion: occlusion_tag,
+        occluded_by_petal: by_petal_tag,
+    }
+}
+
+/// Remote-share window numbers come from the compositor; every other Petal
+/// window (border, overlay, main window) is deliberately not coverage.
+fn stall_occlusion(
+    app: &tauri::AppHandle,
+    window_id: u32,
+) -> Option<crate::platform::cg::OcclusionBreakdown> {
+    #[cfg(target_os = "macos")]
+    {
+        let remote = crate::compositor::open_pointer_family_meta(app).map(|metas| {
+            metas
+                .into_iter()
+                .filter(|meta| meta.is_visible)
+                .flat_map(|meta| meta.family_ids)
+                .collect::<Vec<u32>>()
+        });
+        crate::platform::cg::occlusion_breakdown(window_id, remote.as_deref())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, window_id);
+        None
     }
 }
 
@@ -1449,6 +1504,9 @@ fn report_raw_capture_stall(
         capture_config.raw_silence_evidence(),
         pump_recovery_burst_len(window_id, now_us),
         concurrent_shares,
+        // Fresh sample, stall event only: the frame-callback sample never
+        // runs while the stream is silent, which is the case being reported.
+        stall_occlusion(app, window_id),
     );
     crate::logging::capture_sentry_diagnostic(
         crate::logging::SentryDiagnosticEvent::CaptureRawStalled(diagnostic),
@@ -14436,7 +14494,10 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             evidence,
             3,
             2,
+            Some(crate::platform::cg::OcclusionBreakdown { foreign: 0.0, petal: 1.0, combined: 1.0, petal_known: true }),
         );
+        assert_eq!(diagnostic.occlusion, crate::logging::CaptureOcclusionTag::Full);
+        assert_eq!(diagnostic.occluded_by_petal, crate::logging::OccludedByPetalTag::Yes);
         assert_eq!(diagnostic.action, RawCaptureActionTag::Restart);
         assert_eq!(diagnostic.cause, RawSilenceCauseTag::NoCallbacks);
         assert_eq!(diagnostic.snapshot_content, SnapshotContentTag::Changing);
@@ -14445,6 +14506,42 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         assert_eq!(diagnostic.recovery_burst, SmallCountBucketTag::ThreePlus);
         assert_eq!(diagnostic.concurrent_shares, SmallCountBucketTag::Two);
         assert_eq!(diagnostic.silent_for, SinceLastFrameBucketTag::OneToFiveMinutes);
+    }
+
+    #[test]
+    fn occlusion_tags_separate_petal_from_foreign_coverage_393() {
+        use crate::logging::{CaptureOcclusionTag as Occ, OccludedByPetalTag as ByPetal};
+        use crate::platform::cg::OcclusionBreakdown as B;
+        assert_eq!(occlusion_tags(None), (Occ::Unknown, ByPetal::Unknown));
+        assert_eq!(
+            occlusion_tags(Some(B { foreign: 0.0, petal: 0.0, combined: 0.0, petal_known: true })),
+            (Occ::None, ByPetal::No)
+        );
+        assert_eq!(
+            occlusion_tags(Some(B { foreign: 1.0, petal: 0.0, combined: 1.0, petal_known: true })),
+            (Occ::Full, ByPetal::No)
+        );
+        assert_eq!(
+            occlusion_tags(Some(B { foreign: 0.0, petal: 1.0, combined: 1.0, petal_known: true })),
+            (Occ::Full, ByPetal::Yes)
+        );
+        assert_eq!(
+            occlusion_tags(Some(B { foreign: 0.3, petal: 0.3, combined: 0.6, petal_known: true })),
+            (Occ::Mostly, ByPetal::Yes)
+        );
+        assert_eq!(
+            occlusion_tags(Some(B { foreign: 0.2, petal: 0.0, combined: 0.2, petal_known: true })),
+            (Occ::Partial, ByPetal::No)
+        );
+        assert_eq!(
+            occlusion_tags(Some(B { foreign: 0.2, petal: 0.0, combined: 0.2, petal_known: false })),
+            (Occ::Partial, ByPetal::Unknown)
+        );
+        // Overlap: combined (union) is what buckets, not foreign + petal.
+        assert_eq!(
+            occlusion_tags(Some(B { foreign: 0.6, petal: 0.6, combined: 0.6, petal_known: true })).0,
+            Occ::Mostly
+        );
     }
 
     #[test]

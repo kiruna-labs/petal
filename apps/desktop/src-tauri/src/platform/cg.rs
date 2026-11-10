@@ -6,6 +6,113 @@
 //! `CGWindowListCopyWindowInfo` and cursor-position calls the app already used
 //! in several places.
 
+/// The slice of a window-list entry that occlusion needs: no titles, no app
+/// names (privacy, #743). Kept outside the macOS module so the pure
+/// computation below is testable from a synthetic list.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OcclusionRect {
+    pub number: i64,
+    pub owner_pid: i64,
+    pub layer: i64,
+    pub alpha: f64,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// How much of a window is covered, split by who covers it. Fractions are
+/// 0.0..=1.0 of the target's area, measured on a coarse grid (diagnostic-
+/// grade), and `combined` is the UNION, so overlapping coverers are not
+/// double-counted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OcclusionBreakdown {
+    /// Covered by other apps' opaque normal-level windows.
+    pub foreign: f64,
+    /// Covered by Petal's remote-share windows ONLY. Every other Petal
+    /// window (share border, share overlay, hover tab, main window, picker,
+    /// settings, AI chat) is excluded: the border and overlay sit directly
+    /// above the shared window at its exact frame and are not coverage.
+    pub petal: f64,
+    /// Union of both.
+    pub combined: f64,
+    /// False when the remote-window set could not be read, so `petal` is
+    /// not evidence either way.
+    pub petal_known: bool,
+}
+
+impl OcclusionBreakdown {
+    pub fn total(self) -> f64 {
+        self.combined.clamp(0.0, 1.0)
+    }
+}
+
+const OCCLUSION_GRID: usize = 32;
+
+/// Pure occlusion computation over a front-to-back window list.
+/// `petal_remote_numbers` are the compositor's remote-share window numbers
+/// (`None` = unreadable). A window owned by `self_pid` that is not in that
+/// set is ignored. `None` result when `window_id` is not in the list
+/// (minimized, other Space, display sentinel).
+pub fn occlusion_breakdown_from(
+    entries: &[OcclusionRect],
+    window_id: u32,
+    self_pid: i64,
+    petal_remote_numbers: Option<&[u32]>,
+) -> Option<OcclusionBreakdown> {
+    let target_idx = entries
+        .iter()
+        .position(|e| e.number >= 0 && e.number as u32 == window_id)?;
+    let target = &entries[target_idx];
+    let petal_known = petal_remote_numbers.is_some();
+    if target.w * target.h <= 0.0 {
+        return Some(OcclusionBreakdown { foreign: 0.0, petal: 0.0, combined: 0.0, petal_known });
+    }
+    let remote = petal_remote_numbers.unwrap_or(&[]);
+    // (is_petal, rect) for every opaque coverer in front of the target.
+    let coverers: Vec<(bool, &OcclusionRect)> = entries[..target_idx]
+        .iter()
+        .filter_map(|front| {
+            if front.alpha < 0.99 {
+                return None;
+            }
+            if front.owner_pid == self_pid {
+                let is_remote = front.number >= 0 && remote.contains(&(front.number as u32));
+                (is_remote && (0..=3).contains(&front.layer)).then_some((true, front))
+            } else {
+                (front.layer == 0).then_some((false, front))
+            }
+        })
+        .collect();
+    let (mut foreign, mut petal, mut any) = (0usize, 0usize, 0usize);
+    for gy in 0..OCCLUSION_GRID {
+        for gx in 0..OCCLUSION_GRID {
+            let px = target.x + target.w * (gx as f64 + 0.5) / OCCLUSION_GRID as f64;
+            let py = target.y + target.h * (gy as f64 + 0.5) / OCCLUSION_GRID as f64;
+            let (mut by_foreign, mut by_petal) = (false, false);
+            for (is_petal, r) in &coverers {
+                if px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h {
+                    if *is_petal {
+                        by_petal = true;
+                    } else {
+                        by_foreign = true;
+                    }
+                }
+            }
+            foreign += by_foreign as usize;
+            petal += by_petal as usize;
+            any += (by_foreign || by_petal) as usize;
+        }
+    }
+    let cells = (OCCLUSION_GRID * OCCLUSION_GRID) as f64;
+    Some(OcclusionBreakdown {
+        foreign: foreign as f64 / cells,
+        petal: petal as f64 / cells,
+        combined: any as f64 / cells,
+        petal_known,
+    })
+}
+
 /// A window's on-screen frame in global, top-left-origin logical points.
 /// Equivalent to takt's `ScreenshotCoordinateFrame`.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -442,6 +549,35 @@ mod macos {
         Some((covered / target_area).clamp(0.0, 1.0))
     }
 
+    /// Fresh occlusion split into foreign vs Petal-owned coverage (#393).
+    /// Unlike `occlusion_fraction` this counts Petal's own remote windows,
+    /// separately, because they are the leading suspect for covered shares.
+    pub fn occlusion_breakdown(
+        window_id: u32,
+        petal_remote_numbers: Option<&[u32]>,
+    ) -> Option<super::OcclusionBreakdown> {
+        let entries = onscreen_windows_lean()?;
+        let rects: Vec<super::OcclusionRect> = entries
+            .iter()
+            .map(|e| super::OcclusionRect {
+                number: e.number,
+                owner_pid: e.owner_pid,
+                layer: e.layer,
+                alpha: e.alpha,
+                x: e.x,
+                y: e.y,
+                w: e.w,
+                h: e.h,
+            })
+            .collect();
+        super::occlusion_breakdown_from(
+            &rects,
+            window_id,
+            std::process::id() as i64,
+            petal_remote_numbers,
+        )
+    }
+
     /// All on-screen windows as `(window_number, frame)`, in front-to-back
     /// order. This preserves share_border.rs's previous behavior: window
     /// number and bounds are required, and bounds are truncated to i32.
@@ -478,13 +614,22 @@ mod macos {
 pub use macos::{
     all_windows_lean, capture_facts_for_window_id, cursor_position, escape_is_down,
     frame_for_window_id,
-    frame_for_window_id_raw, left_mouse_button_is_down, name_for_window_id, occlusion_fraction,
+    frame_for_window_id_raw, left_mouse_button_is_down, name_for_window_id, occlusion_breakdown,
+    occlusion_fraction,
     onscreen_stack, onscreen_windows, onscreen_windows_lean, owner_name_for_window_id,
     owner_pid_for_window_id, sharing_state_for_window_id, window_exists, WindowEntry,
 };
 
 #[cfg(not(target_os = "macos"))]
 pub fn occlusion_fraction(_window_id: u32) -> Option<f64> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn occlusion_breakdown(
+    _window_id: u32,
+    _petal_remote_numbers: Option<&[u32]>,
+) -> Option<OcclusionBreakdown> {
     None
 }
 
@@ -526,4 +671,88 @@ pub fn name_for_window_id(_window_id: u32) -> Option<String> {
 #[cfg(not(target_os = "macos"))]
 pub fn window_exists(_window_id: u32) -> bool {
     false
+}
+
+#[cfg(test)]
+mod occlusion_tests {
+    use super::*;
+
+    const SELF_PID: i64 = 100;
+    const REMOTE: u32 = 1;
+
+    fn rect(number: i64, owner_pid: i64, layer: i64, alpha: f64, x: f64, w: f64) -> OcclusionRect {
+        OcclusionRect { number, owner_pid, layer, alpha, x, y: 0.0, w, h: 100.0 }
+    }
+
+    fn breakdown(entries: &[OcclusionRect]) -> OcclusionBreakdown {
+        occlusion_breakdown_from(entries, 7, SELF_PID, Some(&[REMOTE])).unwrap()
+    }
+
+    /// #393: only the compositor's remote-share windows count as Petal
+    /// coverage; foreign coverage is counted separately.
+    #[test]
+    fn breakdown_splits_foreign_and_remote_window_coverage() {
+        let target = rect(7, 200, 0, 1.0, 0.0, 100.0);
+        let entries = [
+            rect(REMOTE as i64, SELF_PID, 0, 1.0, 0.0, 50.0),
+            rect(3, 300, 0, 1.0, 80.0, 40.0),
+            rect(4, 300, 0, 0.5, 0.0, 100.0),
+            target,
+            rect(5, 300, 0, 1.0, 0.0, 100.0),
+        ];
+        let b = breakdown(&entries);
+        assert!((b.petal - 0.5).abs() < 0.04, "{b:?}");
+        assert!((b.foreign - 0.2).abs() < 0.04, "{b:?}");
+        assert!((b.total() - 0.7).abs() < 0.04, "{b:?}");
+    }
+
+    /// The share border and overlay are Petal windows at layer 0 directly
+    /// above the shared window at its EXACT frame. They are not coverage.
+    #[test]
+    fn a_layer_zero_petal_border_at_the_exact_target_frame_is_not_coverage() {
+        let entries = [rect(50, SELF_PID, 0, 1.0, 0.0, 100.0), rect(7, 200, 0, 1.0, 0.0, 100.0)];
+        let b = breakdown(&entries);
+        assert_eq!((b.petal, b.foreign, b.total()), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_remote_share_window_over_sixty_percent_is_petal_coverage() {
+        let entries = [rect(REMOTE as i64, SELF_PID, 0, 1.0, 0.0, 60.0), rect(7, 200, 0, 1.0, 0.0, 100.0)];
+        let b = breakdown(&entries);
+        assert!((b.petal - 0.6).abs() < 0.04, "{b:?}");
+        assert_eq!(b.foreign, 0.0);
+    }
+
+    #[test]
+    fn the_petal_main_window_over_the_target_is_not_coverage() {
+        let entries = [rect(60, SELF_PID, 0, 1.0, 0.0, 100.0), rect(7, 200, 0, 1.0, 0.0, 100.0)];
+        assert_eq!(breakdown(&entries).total(), 0.0);
+    }
+
+    /// Overlapping coverers are a union, not a sum.
+    #[test]
+    fn overlapping_foreign_and_petal_coverers_are_not_double_counted() {
+        let entries = [
+            rect(REMOTE as i64, SELF_PID, 0, 1.0, 0.0, 60.0),
+            rect(3, 300, 0, 1.0, 0.0, 60.0),
+            rect(7, 200, 0, 1.0, 0.0, 100.0),
+        ];
+        let b = breakdown(&entries);
+        assert!((b.total() - 0.6).abs() < 0.04, "{b:?}");
+        assert!(b.foreign > 0.55 && b.petal > 0.55);
+    }
+
+    #[test]
+    fn an_unreadable_remote_set_marks_petal_unknown() {
+        let entries = [rect(REMOTE as i64, SELF_PID, 0, 1.0, 0.0, 60.0), rect(7, 200, 0, 1.0, 0.0, 100.0)];
+        let b = occlusion_breakdown_from(&entries, 7, SELF_PID, None).unwrap();
+        assert!(!b.petal_known);
+        assert_eq!(b.petal, 0.0);
+    }
+
+    #[test]
+    fn breakdown_is_none_for_a_window_not_on_screen() {
+        let entries = [rect(1, 300, 0, 1.0, 0.0, 100.0)];
+        assert_eq!(occlusion_breakdown_from(&entries, 99, SELF_PID, Some(&[])), None);
+    }
 }

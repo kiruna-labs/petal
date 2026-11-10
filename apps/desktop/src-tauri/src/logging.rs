@@ -313,6 +313,8 @@ pub struct CaptureRawStalledDiagnostic {
     pub recovery_burst: SmallCountBucketTag,
     pub concurrent_shares: SmallCountBucketTag,
     pub silent_for: SinceLastFrameBucketTag,
+    pub occlusion: CaptureOcclusionTag,
+    pub occluded_by_petal: OccludedByPetalTag,
 }
 
 /// Emitted (rate-limited) when a remote-control pointer RELEASE (an Up) fails
@@ -707,6 +709,34 @@ diagnostic_enum!(SnapshotContentTag {
     NotApplicable => "not_applicable"
 });
 // #393: small counts, bucketed so the tag vocabulary stays closed.
+// #393: how covered the shared window was at stall time, and whether Petal's
+// own remote windows were among the coverers. Buckets only: no titles or apps.
+diagnostic_enum!(CaptureOcclusionTag {
+    None => "none",
+    Partial => "partial",
+    Mostly => "mostly",
+    Full => "full",
+    Unknown => "unknown",
+    NotApplicable => "not_applicable"
+});
+diagnostic_enum!(OccludedByPetalTag {
+    Yes => "yes",
+    No => "no",
+    Unknown => "unknown",
+    NotApplicable => "not_applicable"
+});
+
+impl CaptureOcclusionTag {
+    pub fn from_fraction(fraction: f64) -> Self {
+        match fraction {
+            f if f < 0.05 => Self::None,
+            f if f < 0.5 => Self::Partial,
+            f if f < 0.95 => Self::Mostly,
+            _ => Self::Full,
+        }
+    }
+}
+
 diagnostic_enum!(SmallCountBucketTag {
     Zero => "0",
     One => "1",
@@ -807,6 +837,8 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "held_native_surfaces",
     "recovery_burst",
     "concurrent_shares",
+    "capture_occlusion",
+    "occluded_by_petal",
     "dedup_count_bucket",
 ];
 
@@ -853,6 +885,8 @@ const CAPTURE_RAW_STALLED_MESSAGE_TAGS: &[&str] = &[
     "snapshot_content",
     "stream_updates_since_frame",
     "held_native_surfaces",
+    "capture_occlusion",
+    "occluded_by_petal",
 ];
 const ENCODER_WEDGE_MESSAGE_TAGS: &[&str] = &["session_role", "recovery_action"];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
@@ -1284,6 +1318,8 @@ fn build_sentry_diagnostic_event(
         "held_native_surfaces",
         "recovery_burst",
         "concurrent_shares",
+        "capture_occlusion",
+        "occluded_by_petal",
     ] {
         insert(key, "not_applicable");
     }
@@ -2018,6 +2054,8 @@ fn build_sentry_diagnostic_event(
             insert("held_native_surfaces", value.held_surfaces.tag());
             insert("recovery_burst", value.recovery_burst.tag());
             insert("concurrent_shares", value.concurrent_shares.tag());
+            insert("capture_occlusion", value.occlusion.tag());
+            insert("occluded_by_petal", value.occluded_by_petal.tag());
         }
         SentryDiagnosticEvent::EncoderWedged(value)
         | SentryDiagnosticEvent::EncoderWedgeExhausted(value) => {
@@ -2039,6 +2077,8 @@ fn build_sentry_diagnostic_event(
                         | "held_native_surfaces"
                         | "recovery_burst"
                         | "concurrent_shares"
+                        | "capture_occlusion"
+                        | "occluded_by_petal"
                         | "dedup_count_bucket"
                 ) {
                     insert(*key, "not_applicable");
@@ -6255,6 +6295,11 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
         | "held_native_surfaces"
         | "recovery_burst"
         | "concurrent_shares" => matches!(value, "0" | "1" | "2" | "3_plus" | "not_applicable"),
+        "capture_occlusion" => matches!(
+            value,
+            "none" | "partial" | "mostly" | "full" | "unknown" | "not_applicable"
+        ),
+        "occluded_by_petal" => matches!(value, "yes" | "no" | "unknown" | "not_applicable"),
         "sharer_kind" => matches!(value, "native" | "web" | "not_applicable"),
         "remote_video_hold_reason" => {
             matches!(value, "no_frame_watchdog" | "not_held" | "not_applicable")
@@ -10494,6 +10539,8 @@ mod tests {
                 recovery_burst: SmallCountBucketTag::from_count(3),
                 concurrent_shares: SmallCountBucketTag::Two,
                 silent_for: SinceLastFrameBucketTag::OneToFiveMinutes,
+                occlusion: CaptureOcclusionTag::Full,
+                occluded_by_petal: OccludedByPetalTag::Yes,
             }),
             "1",
         );
@@ -10505,12 +10552,15 @@ mod tests {
         assert_eq!(tag("recovery_burst"), Some("3_plus"));
         assert_eq!(tag("concurrent_shares"), Some("2"));
         assert_eq!(tag("since_last_frame_bucket"), Some("1_5m"));
+        assert_eq!(tag("capture_occlusion"), Some("full"));
+        assert_eq!(tag("occluded_by_petal"), Some("yes"));
         assert_eq!(
             event.message.as_deref(),
             Some(
                 "diagnostic: capture-raw-stalled raw_capture_action=hold_on_pulls \
                  raw_silence_cause=no_callbacks snapshot_content=changing \
-                 stream_updates_since_frame=1 held_native_surfaces=3_plus"
+                 stream_updates_since_frame=1 held_native_surfaces=3_plus \
+                 capture_occlusion=full occluded_by_petal=yes"
             )
         );
         assert!(valid_sentry_diagnostic_event(&event));
@@ -10533,6 +10583,8 @@ mod tests {
             "held_native_surfaces",
             "recovery_burst",
             "concurrent_shares",
+            "capture_occlusion",
+            "occluded_by_petal",
         ] {
             assert_eq!(event.tags.get(key).map(String::as_str), Some("not_applicable"), "{key}");
         }
@@ -10565,6 +10617,43 @@ mod tests {
             assert!(valid_sentry_diagnostic_event(&event), "{name} must pass before_send");
             assert!(scrub_event_for_sentry(event).is_some());
         }
+    }
+
+    #[test]
+    fn capture_occlusion_tags_are_closed_buckets_that_pass_the_allowlist() {
+        assert_eq!(CaptureOcclusionTag::from_fraction(0.0), CaptureOcclusionTag::None);
+        assert_eq!(CaptureOcclusionTag::from_fraction(0.3), CaptureOcclusionTag::Partial);
+        assert_eq!(CaptureOcclusionTag::from_fraction(0.9), CaptureOcclusionTag::Mostly);
+        assert_eq!(CaptureOcclusionTag::from_fraction(0.95), CaptureOcclusionTag::Full);
+        for occ in [
+            CaptureOcclusionTag::None,
+            CaptureOcclusionTag::Partial,
+            CaptureOcclusionTag::Mostly,
+            CaptureOcclusionTag::Full,
+            CaptureOcclusionTag::Unknown,
+        ] {
+            for by_petal in [OccludedByPetalTag::Yes, OccludedByPetalTag::No, OccludedByPetalTag::Unknown] {
+                let event = build_sentry_diagnostic_event(
+                    SentryDiagnosticEvent::CaptureRawStalled(CaptureRawStalledDiagnostic {
+                        source: SourceSelectionClass::Window,
+                        action: RawCaptureActionTag::Restart,
+                        cause: RawSilenceCauseTag::NoCallbacks,
+                        snapshot_content: SnapshotContentTag::Changing,
+                        stream_updates: SmallCountBucketTag::Zero,
+                        held_surfaces: SmallCountBucketTag::Zero,
+                        recovery_burst: SmallCountBucketTag::One,
+                        concurrent_shares: SmallCountBucketTag::One,
+                        silent_for: SinceLastFrameBucketTag::UnderOneMinute,
+                        occlusion: occ,
+                        occluded_by_petal: by_petal,
+                    }),
+                    "1",
+                );
+                assert!(valid_sentry_diagnostic_event(&event));
+            }
+        }
+        assert!(!valid_diagnostic_tag("capture_occlusion", "Safari"));
+        assert!(!valid_diagnostic_tag("occluded_by_petal", "maybe"));
     }
 
     #[test]
