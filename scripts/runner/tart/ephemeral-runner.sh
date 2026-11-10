@@ -164,7 +164,11 @@ fi
 # A queued job whose labels include "self-hosted" is what we exist for.
 queued_self_hosted_job() {
   local ids id
-  ids="$(gh api "repos/$REPO/actions/runs?status=queued&per_page=20" --jq '.workflow_runs[].id' 2>/dev/null)" || return 1
+  # Filter client-side: GitHub's `?status=queued` filter has returned total_count 0 for a run that the unfiltered
+  # list reports as queued (2026-11-09, run 42709209106), and the guest was never provisioned.
+  ids="$(gh api "repos/$REPO/actions/runs?per_page=30" \
+    --jq '.workflow_runs[] | select(.status == "queued" or .status == "waiting" or .status == "pending" or .status == "requested") | .id' \
+    2>/dev/null)" || return 1
   for id in $ids; do
     if gh api "repos/$REPO/actions/runs/$id/jobs?per_page=50" --jq '.jobs[] | select(.status=="queued") | .labels[]' 2>/dev/null | grep -qx 'self-hosted'; then
       return 0
