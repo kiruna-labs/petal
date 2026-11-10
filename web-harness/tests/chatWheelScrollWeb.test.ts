@@ -79,6 +79,11 @@ const INIT = `(() => {
         window.__wheelLog.push(rec);
         setTimeout(() => { rec.dp = e.defaultPrevented; }, 0);
       }, { capture: true });
+      // WebKit's async scrolling only hands a wheel to the DOM where its
+      // committed event regions say a listener exists; a listener added this
+      // frame is not committed yet, so the page scrolls but never sees the
+      // event. Resolve after two rendering updates so the region is live.
+      return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     },
   };
 })();`;
