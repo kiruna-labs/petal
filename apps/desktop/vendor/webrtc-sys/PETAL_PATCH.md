@@ -324,3 +324,98 @@ absent.
 
 Drop this patch if upstream derives the level from the frame size (or stops
 clamping the frame rate from the negotiated level).
+
+## Patch 7: no VideoToolbox low-latency rate control on macOS H.264 (#500)
+
+### Why this exists
+
+The prebuilt libwebrtc's `RTCVideoEncoderH264` adds
+`kVTVideoEncoderSpecification_EnableLowLatencyRateControl` to its encoder
+specification on every macOS >= 11.3, inside
+`-resetCompressionSessionWithPixelFormat:`. You can confirm it in the archive:
+`nm -m RTCVideoEncoderH264.o` lists the key as a weak import next to a
+`__isPlatformVersionAtLeast(macOS, 11, 3)` call at the session-create site.
+In that mode, an H.264 keyframe at a low bitrate followed by a bitrate ramp
+makes VideoToolbox drop most of the next ~8 submitted frames
+(`kVTEncodeInfo_FrameDropped`, which libwebrtc logs at INFO as `H264 encode
+dropped frame.`). Recovery depends on how many frames are submitted, not on
+elapsed time.
+
+A simulcast layer that comes up behind the bandwidth ramp and takes the SFU's
+layer-lock PLIs hits exactly that sequence. For a sparse source, such as an idle
+window that redraws only when remote-control input changes it, each of those
+frames is an input that never reaches the viewer. This was the intermittent
+press-to-photon tail in the release gate (`h` layer late, a run of three
+samples at 350-1127 ms).
+
+A standalone VideoToolbox repro (960x600, keyframe at 274 kbps, then a ramp
+to 3.3 Mbps, nine sparse frames) drops 7 of 9 with the key and 0 of 9
+without it, with or without `DataRateLimits`, at gaps from 33 ms to 700 ms.
+
+### The fix
+
+`RTCVideoEncoderH264.mm` lives inside the downloaded libwebrtc and can't be
+edited, and the key is set at creation time, so a property set afterwards
+can't undo it. Reimplementing `-resetCompressionSessionWithPixelFormat:` in
+a subclass would need the encoder's static output callback and its private
+`FrameEncodeParams` layout, so that isn't an option either.
+
+Instead, `src/vt_h264_encoder_spec.mm` defines `VTCompressionSessionCreate`.
+libwebrtc.a is linked statically into this image, so its undefined reference
+binds to that definition at static-link time. An object-file definition
+always takes precedence over a dylib export. The override:
+
+- removes only that key, and only from `kCMVideoCodecType_H264`
+  specifications. Everything else (`EnableHardwareAcceleratedVideoEncoder`,
+  the source attributes, the callback) is forwarded unchanged to
+  VideoToolbox's own function, which it finds with `dlsym(RTLD_NEXT, ...)`.
+- counts sessions created, low-latency requested, and low-latency forwarded
+  (which must stay 0), records the last creation per thread for the test,
+  and logs one `PETAL #500: H.264 VTCompressionSession
+  WxH created without low-latency rate control` WARNING per session creation
+  (the app's sink drops libwebrtc INFO).
+
+`CreateObjCVideoEncoderFactory` calls `EnsureVtH264EncoderSpecOverrideLinked()`
+so the object file is always linked. Nothing else in Petal creates
+compression sessions. The file builds on macOS only; iOS still compiles
+`objc_video_factory.mm` but not the override.
+
+### Evidence
+
+Synthetic publisher (`examples/frame_hold_probe.rs`, not committed): 960x600,
+on a local livekit-server, using the real `full_share_publish_options`. It
+warms up for 2 s, then runs 30 sparse frames at 120-1020 ms gaps, then 20 s at
+a steady 30 fps.
+
+| | upstream (key set) | Patch 7 |
+| --- | --- | --- |
+| sparse input frames never delivered | 25 / 180 (6 runs: 0, 9, 0, 2, 6, 8) | **0 / 180** |
+| `H264 encode dropped frame.` lines per run | 10-38 (every run) | **0** |
+| steady push->receive latency p50 / p95 | 25-31 / 40-41 ms | 23-30 / 39-40 ms |
+| encode time per frame, h (960x600) | 3.54-3.92 ms | 3.62-3.84 ms |
+| encode time per frame, q (720x450) | 6.02-6.84 ms | 2.77-3.13 ms |
+
+The desktop crate's
+`macos_h264_encoder_sessions_never_enable_low_latency_rate_control` test
+starts a real `RTCVideoEncoderH264` and asserts three things about its session
+creation:
+
+- it went through the override;
+- it requested the key;
+- VideoToolbox never received the key.
+
+The probe observes only its own call, through a thread-local filled in by the
+override, so parallel tests can't interfere. `startEncodeWithSettings:`
+creates the session synchronously on the calling thread. The test doesn't
+require the encoder to start: on hosts with no encoder (some VMs) the creation
+is still attempted and checked.
+
+With the key-removal line disabled, the test fails.
+
+### Updating
+
+Keep this patch on any libwebrtc bump whose `RTCVideoEncoderH264` still
+sets the key. If a bump stops requesting the key, the test fails on its
+`low_latency_requested` assertion; at that point, delete the override, its
+bridge and the test. Also drop the patch if upstream exposes the encoder
+specification as a setting.
