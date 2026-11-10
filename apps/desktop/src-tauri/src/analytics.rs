@@ -2594,7 +2594,6 @@ mod tests {
     /// consumed one per accepted connection, written back verbatim as the
     /// full HTTP response (status line + headers + body).
     fn spawn_fake_server(responses: Vec<&'static str>) -> String {
-        use std::io::{Read, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local addr");
@@ -2603,13 +2602,54 @@ mod tests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
+                read_request(&mut stream);
+                write_closing_response(&mut stream, response);
             }
         });
         format!("http://{addr}/")
+    }
+
+    /// Reads one whole HTTP/1.1 request (headers, then `content-length` body
+    /// bytes). Closing a socket with request bytes still unread makes the
+    /// kernel send RST, which can discard the response before the client
+    /// reads it -- a transport error the code under test never caused.
+    fn read_request(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        let body_start = loop {
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                break end + 4;
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..body_start]).to_ascii_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while request.len() < body_start + content_length {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    /// Writes `response` with `connection: close` added. These stubs serve one
+    /// request per connection; without the header the client pools it and its
+    /// NEXT request can race the close onto a dead socket (`TransportOther`,
+    /// no retry, one request short) -- the "left: 2, right: 3" flake in
+    /// `events_before_the_startup_sync_wait_and_then_send_when_granted`.
+    fn write_closing_response(stream: &mut std::net::TcpStream, response: &str) {
+        use std::io::Write;
+        let response = response.replacen("\r\n", "\r\nconnection: close\r\n", 1);
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
     }
 
     /// Like `spawn_fake_server`, but serves ONE fixed response to as many
@@ -2628,7 +2668,6 @@ mod tests {
     fn spawn_counting_server(
         response: &'static str,
     ) -> (String, std::sync::Arc<Mutex<Vec<Instant>>>) {
-        use std::io::{Read, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local addr");
@@ -2642,11 +2681,9 @@ mod tests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
+                read_request(&mut stream);
                 recorder.lock_unpoisoned().push(Instant::now());
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
+                write_closing_response(&mut stream, response);
             }
         });
         (format!("http://{addr}/"), requests)
