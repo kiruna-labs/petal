@@ -6,7 +6,8 @@
 // While the meeting is connecting (first join, Try again, or a connection
 // recovery) that refusal is deferred instead: no toast, the toggle stays ON,
 // and the publish runs again once the meeting reports connected. Any other
-// failure, or a refusal while connected, reports exactly as before.
+// failure, or a refusal while connected, toasts with Retry as before (a
+// refusal while connected also stays deferred for a following recovery).
 
 import type { StartCameraPublishResult } from '#lib/ipc.js';
 import type { MeetingPhase } from './meetingSession.svelte';
@@ -34,7 +35,7 @@ export interface CameraJoinPublish {
   meetingConnected: () => Promise<void>;
   /** The camera was turned off or released: drop a deferred publish. */
   cancel: () => void;
-  /** True while a refused publish waits for the meeting to connect. */
+  /** True while a "not in room" refusal waits for the next connected edge. */
   readonly deferred: boolean;
 }
 
@@ -57,17 +58,25 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
     try {
       result = await seams.startPublish();
     } catch (error) {
-      const joining = phaseAtStart === 'connecting' || seams.meetingPhase() === 'connecting';
-      if (isNotInRoomRefusal(error) && joining) {
-        if (id !== request) return;
-        deferred = true;
-        // The meeting connected while this call was in flight: its
-        // connected edge has passed, so retry now (a second refusal while
-        // connected is a real failure and toasts).
-        if (seams.meetingPhase() === 'connected') await meetingConnected();
+      if (!isNotInRoomRefusal(error)) {
+        seams.onFailed(error);
         return;
       }
-      seams.onFailed(error);
+      if (id !== request) return;
+      // Keep the intent for the next connected edge either way: a refusal
+      // while the route still reads 'connected' can be the start of a lost
+      // connection, and the recovery should still publish it.
+      deferred = true;
+      const joining = phaseAtStart === 'connecting' || seams.meetingPhase() === 'connecting';
+      if (!joining) {
+        seams.onFailed(error);
+        return;
+      }
+      // The meeting connected while this call was in flight: its connected
+      // edge has passed, so retry now (a refusal while connected toasts).
+      if (seams.meetingPhase() === 'connected') {
+        await publish();
+      }
       return;
     }
     if (result.published === false) {

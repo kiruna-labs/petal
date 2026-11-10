@@ -63,7 +63,19 @@ test('a refusal while connected still shows the Retry toast', async () => {
   const { camera, log } = rig('connected', ['not in room']);
   await camera.publish();
   assert.deepEqual(log, ['start@connected', 'retry-toast:not in room']);
-  assert.equal(camera.deferred, false);
+});
+
+test('a refusal at the start of a connection loss toasts and still publishes after recovery', async () => {
+  // Native drops the room before room-left reaches the route, so the route
+  // still reads 'connected' when the refusal lands.
+  const { camera, log, state } = rig('connected', ['not in room', { published: true }]);
+  await camera.publish();
+  assert.deepEqual(log, ['start@connected', 'retry-toast:not in room']);
+  assert.equal(camera.deferred, true, 'the intent survives into the recovery');
+  state.phase = 'connecting';
+  state.phase = 'connected';
+  await camera.meetingConnected();
+  assert.deepEqual(log.slice(2), ['start@connected', 'published']);
 });
 
 test('a real failure while connecting still shows the Retry toast', async () => {
@@ -73,13 +85,23 @@ test('a real failure while connecting still shows the Retry toast', async () => 
   assert.equal(camera.deferred, false);
 });
 
-test('the deferred publish that fails after connect shows the Retry toast once', async () => {
+test('the deferred publish that fails after connect shows the Retry toast', async () => {
   const { camera, log, state } = rig('connecting', ['not in room', 'not in room']);
   await camera.publish();
   state.phase = 'connected';
   await camera.meetingConnected();
-  await camera.meetingConnected(); // a later connected edge has nothing left to retry
   assert.deepEqual(log, ['start@connecting', 'start@connected', 'retry-toast:not in room']);
+});
+
+test('a real failure after connect toasts and leaves nothing deferred', async () => {
+  const { camera, log, state } = rig('connecting', ['not in room', 'capture failed']);
+  await camera.publish();
+  state.phase = 'connected';
+  await camera.meetingConnected();
+  assert.deepEqual(log, ['start@connecting', 'start@connected', 'retry-toast:capture failed']);
+  assert.equal(camera.deferred, false);
+  await camera.meetingConnected();
+  assert.equal(log.length, 3);
 });
 
 test('a refusal that lands after the meeting connected retries at once', async () => {
@@ -143,9 +165,14 @@ test('the meeting route publishes through the join-aware controller', () => {
   assert.match(route, /meetingPhase: \(\) => meeting\.meetingPhase/);
   assert.match(
     route,
-    /if \(meeting\.meetingPhase !== 'connected'\) return;\s*untrack\(\(\) => void cameraPublish\.meetingConnected\(\)\);/,
+    /if \(!cameraListenerReady \|\| meeting\.meetingPhase !== 'connected'\) return;\s*untrack\(\(\) => void cameraPublish\.meetingConnected\(\)\);/,
     'the connected edge must run the deferred publish'
   );
+  // The connected edge must wait for the camera-publish-state listener, or
+  // a self-heal's terminal failure after the deferred publish is lost.
+  const listenerAt = route.indexOf('unlistenCameraPublishState = await listen');
+  const readyAt = route.indexOf('cameraListenerReady = true;');
+  assert.ok(listenerAt !== -1 && readyAt > listenerAt, 'ready only after the listener is registered');
   const release = route.match(/function releaseSelfViewPreview\(\)[\s\S]*?\n  \}/)?.[0] ?? '';
   assert.match(release, /cameraPublish\.cancel\(\);/, 'camera-off must drop a deferred publish');
 });

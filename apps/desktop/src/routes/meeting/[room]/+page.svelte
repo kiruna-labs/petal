@@ -359,6 +359,7 @@
       // No Tauri bridge (plain browser preview) — `listen` rejects; without
       // this guard the rejection aborts the rest of onMount.
     }
+    cameraListenerReady = true;
 
     // AFTER the camera-publish-state listener exists, so the rejoin
     // reconcile's outcome can't slip between this snapshot and the listener
@@ -541,8 +542,11 @@
     }
   });
 
+  // Gated on the camera-publish-state listener: a deferred publish that
+  // hands off to native self-heal must not lose its terminal outcome.
+  let cameraListenerReady = $state(false);
   $effect(() => {
-    if (meeting.meetingPhase !== 'connected') return;
+    if (!cameraListenerReady || meeting.meetingPhase !== 'connected') return;
     untrack(() => void cameraPublish.meetingConnected());
   });
 
