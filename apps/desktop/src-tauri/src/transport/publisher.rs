@@ -5857,6 +5857,63 @@ mod track_name_tests {
     }
 
     #[test]
+    fn encoder_wedge_log_lines_never_become_sentry_events() {
+        // PETAL-DESKTOP-48..58: error! lines with kbps in the text opened ~25
+        // Sentry issues for one wedge. The lines must stay breadcrumbs.
+        for kbps in [100.0, 732_000.0, 3_000_000.0] {
+            let sample = EncoderOutputSample {
+                target_bitrate_bps: kbps,
+                ..wedged_sample()
+            };
+            for (level, line) in [
+                encoder_wedge_not_wired_log_line(sample, EncoderRecoveryStep::Republish),
+                encoder_wedge_not_wired_log_line(sample, EncoderRecoveryStep::FallBackToSoftware),
+                encoder_wedge_exhausted_log_line(sample),
+            ] {
+                let metadata = log::Metadata::builder()
+                    .level(level)
+                    .target(module_path!())
+                    .build();
+                let filter = crate::logging::sentry_log_filter(&metadata);
+                assert!(
+                    !filter.intersects(
+                        sentry_log::LogFilter::Event | sentry_log::LogFilter::Exception
+                    ),
+                    "wedge line must not open a Sentry event: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_wedge_structured_events_do_not_depend_on_bitrate() {
+        // The structured event is the one Sentry signal; its payload has no
+        // bitrate, so every kbps value shares one fingerprint.
+        take_wedge_reports();
+        let mut reports = Vec::new();
+        for kbps in [100_000.0, 732_000.0, 3_000_000.0] {
+            let mut harness = WedgeHarness::new();
+            harness.poll_n(
+                ENCODER_WEDGE_TRIGGER_SAMPLES * 3,
+                EncoderOutputSample { target_bitrate_bps: kbps, ..wedged_sample() },
+            );
+            reports.extend(take_wedge_reports());
+        }
+        assert_eq!(reports.len(), 6);
+        let fingerprints: std::collections::HashSet<_> = reports
+            .iter()
+            .map(|r| {
+                crate::logging::build_sentry_diagnostic_event(r.clone(), "1")
+                    .fingerprint
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(fingerprints.len(), 2, "one fingerprint per event name, not per kbps");
+    }
+
+    #[test]
     fn encoder_wedge_waits_for_the_full_trigger_window_before_acting() {
         // #427 fallback: the field symptom is a 60s+ run of 0fps, so acting on
         // one noisy sample would republish a share that is merely between
@@ -10406,25 +10463,49 @@ fn apply_encoder_wedge_guard_sample(
                     step.description(),
                 );
             } else {
-                log::error!(
-                    "publisher: window-share encoder WEDGED -- 0 frames encoded while funded at {:.0}kbps for {} samples, and this publication has no recovery action wired ({} not requested) (#427)",
-                    sample.target_bitrate_bps / 1000.0,
-                    ENCODER_WEDGE_TRIGGER_SAMPLES,
-                    step.description(),
-                );
+                let (level, line) = encoder_wedge_not_wired_log_line(sample, step);
+                log::log!(level, "{line}");
             }
         }
         EncoderWedgeDecision::Exhausted => {
-            log::error!(
-                "publisher: window-share encoder still produced 0 frames after {} recovery steps (funded at {:.0}kbps); this publication is publishing an empty track and no further recovery is attempted -- reopen the share to retry the encoder (#427)",
-                ENCODER_WEDGE_MAX_RECOVERY_STEPS,
-                sample.target_bitrate_bps / 1000.0,
-            );
+            let (level, line) = encoder_wedge_exhausted_log_line(sample);
+            log::log!(level, "{line}");
             report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedgeExhausted(
                 crate::logging::EncoderWedgeDiagnostic { action: EncoderWedgeActionTag::Exhausted },
             ));
         }
     }
+}
+
+/// The two wedge lines that used to be `log::error!`. Never ERROR: `sentry_log`
+/// turns an error into an event titled with the text, and the kbps in it split
+/// one wedge into ~25 issues (PETAL-DESKTOP-48..58). The structured
+/// `encoder-wedged` / `encoder-wedge-exhausted` events carry the signal; these
+/// lines ride as breadcrumbs (#427).
+fn encoder_wedge_not_wired_log_line(
+    sample: EncoderOutputSample,
+    step: EncoderRecoveryStep,
+) -> (log::Level, String) {
+    (
+        log::Level::Warn,
+        format!(
+            "publisher: window-share encoder WEDGED -- 0 frames encoded while funded at {:.0}kbps for {} samples, and this publication has no recovery action wired ({} not requested) (#427)",
+            sample.target_bitrate_bps / 1000.0,
+            ENCODER_WEDGE_TRIGGER_SAMPLES,
+            step.description(),
+        ),
+    )
+}
+
+fn encoder_wedge_exhausted_log_line(sample: EncoderOutputSample) -> (log::Level, String) {
+    (
+        log::Level::Warn,
+        format!(
+            "publisher: window-share encoder still produced 0 frames after {} recovery steps (funded at {:.0}kbps); this publication is publishing an empty track and no further recovery is attempted -- reopen the share to retry the encoder (#427)",
+            ENCODER_WEDGE_MAX_RECOVERY_STEPS,
+            sample.target_bitrate_bps / 1000.0,
+        ),
+    )
 }
 
 /// Sentry keeps the wedge as an event, not a warn breadcrumb (#427). Tests
