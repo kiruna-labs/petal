@@ -4,8 +4,10 @@ import type { StartCameraPublishResult } from '#lib/ipc.js';
 export interface CameraOnSteps {
   /** Bring up the local self-view; false if the camera can't be opened. */
   acquireSelfView(): Promise<boolean>;
-  /** Resolves when the meeting is connected (true) or has failed (false). */
-  whenJoined(): Promise<boolean>;
+  /** Resolves when the meeting is connected (true) or has failed (false).
+   * Asked after a refusal, so an already-"connected" phase is only trusted
+   * once it has held for `settleMs` (it may not have heard room-left yet). */
+  whenJoined(settleMs: number): Promise<boolean>;
   /** False once the user turned the camera off (or retried) meanwhile. */
   stillWanted(): boolean;
   /** The native `start_camera_publish` command. */
@@ -21,6 +23,10 @@ export interface CameraOnSteps {
  *   failure arrives later as `camera-publish-state`. Nothing to show.
  * - `failed`: publishing was refused with the meeting connected.
  */
+/** How long a refusal waits for a "connected" meeting to report it dropped
+ * (room-left trails native's own leave) before treating it as real. */
+export const REFUSAL_SETTLE_MS = 1000;
+
 export type CameraOnOutcome =
   | { kind: 'no-preview' }
   | { kind: 'join-failed' }
@@ -43,7 +49,7 @@ export async function turnCameraOnSequence(steps: CameraOnSteps): Promise<Camera
     result = await steps.startPublish();
   } catch {
     if (!steps.stillWanted()) return { kind: 'superseded' };
-    if (!(await steps.whenJoined())) return { kind: 'join-failed' };
+    if (!(await steps.whenJoined(REFUSAL_SETTLE_MS))) return { kind: 'join-failed' };
     if (!steps.stillWanted()) return { kind: 'superseded' };
     try {
       result = await steps.startPublish();

@@ -101,8 +101,9 @@ export interface MeetingSession {
   join(): Promise<boolean>;
   /** Resolves once the meeting is connected (true), or false when it ends up
    * disconnected or the route is disposed. Immediate when already settled;
-   * waits through the first join and through connection recovery. */
-  whenJoined(): Promise<boolean>;
+   * waits through the first join and through connection recovery. With
+   * `settleMs`, an already-connected phase must hold that long first. */
+  whenJoined(opts?: { settleMs?: number }): Promise<boolean>;
   /** Tear down listeners, bridge, and all timers (call from onDestroy). */
   dispose(): void;
 }
@@ -714,7 +715,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   }
 
   return {
-    whenJoined: () => joinGate.whenJoined(),
+    whenJoined: (opts) => joinGate.whenJoined(opts),
     get joinedRoom() {
       return joinedRoom;
     },

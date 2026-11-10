@@ -1018,10 +1018,57 @@ where
             }
         }
     }
+    // A room change landed during the final attempt: its failure belongs to
+    // the old room and must not clear the new room's intent (PR #503 F2).
+    if !generation.is_current() {
+        return CameraHealOutcome::Cancelled;
+    }
     // Bounded retries exhausted: clear the intent so the toggle cannot keep
     // claiming ON, and report the terminal failure.
     state.set_camera_intent(false);
     CameraHealOutcome::TerminalFailure(last_error)
+}
+
+/// `drive_camera_publish_attempts`, re-targeted at each newer room: a room
+/// change cancels the attempts, but the new room's own start was refused as
+/// "already running" while this loop held the heal slot, so the camera is
+/// carried into the new room rather than dropped silently. Returns the
+/// outcome and the room generation it belongs to.
+pub(crate) async fn drive_camera_heal_following_rooms<Att, AttFut, Slp, SlpFut>(
+    state: &crate::session::SessionState,
+    schedule: &[Duration],
+    mut attempt: Att,
+    mut sleep: Slp,
+    in_room: impl Fn() -> bool,
+) -> (CameraHealOutcome, RoomGeneration)
+where
+    Att: FnMut() -> AttFut,
+    AttFut: Future<Output = Result<(), String>>,
+    Slp: FnMut(Duration) -> SlpFut,
+    SlpFut: Future<Output = ()>,
+{
+    let mut generation = state.current_room_generation();
+    loop {
+        let outcome =
+            drive_camera_publish_attempts(state, &generation, schedule, &mut attempt, &mut sleep)
+                .await;
+        // No follow cap (PR #503 F3): each follow needs a newer room, so it
+        // is bounded by real joins, and a capped heal exited with the intent
+        // ON and nothing left to publish it.
+        if matches!(outcome, CameraHealOutcome::Cancelled)
+            && heal_should_follow_new_room(
+                generation.is_current(),
+                state.camera_intent(),
+                state.camera_publishing(),
+                in_room(),
+            )
+        {
+            log::info!("session: camera self-heal following the camera into the new room");
+            generation = state.current_room_generation();
+            continue;
+        }
+        return (outcome, generation);
+    }
 }
 
 /// Drive the camera toward the user's intent (ON) with bounded, backed-off
@@ -1034,10 +1081,6 @@ pub(crate) async fn ensure_camera_published(
     state: &crate::session::SessionState,
     schedule: &[Duration],
 ) {
-    if !state.try_begin_camera_heal() {
-        log::info!("session: camera self-heal already running -- not starting a second loop");
-        return;
-    }
     // Clear the busy flag on every exit path.
     struct HealGuard<'a>(&'a crate::session::SessionState);
     impl Drop for HealGuard<'_> {
@@ -1045,14 +1088,15 @@ pub(crate) async fn ensure_camera_published(
             self.0.end_camera_heal();
         }
     }
-    let _guard = HealGuard(state);
+    let (outcome, generation, _guard) = loop {
+        if !state.try_begin_camera_heal() {
+            log::info!("session: camera self-heal already running -- not starting a second loop");
+            return;
+        }
+        let guard = HealGuard(state);
 
-    let mut generation = state.current_room_generation();
-    let mut follows = 0;
-    let outcome = loop {
-        let outcome = drive_camera_publish_attempts(
+        let (outcome, generation) = drive_camera_heal_following_rooms(
             state,
-            &generation,
             schedule,
             move || async move {
                 // Serialize against set_camera_device / the manual toggle, same
@@ -1072,26 +1116,24 @@ pub(crate) async fn ensure_camera_published(
                     .map(|_| ())
             },
             |delay| tokio::time::sleep(delay),
+            || state.is_in_room(),
         )
         .await;
-        // A room change cancelled this loop, but the new room's own start was
-        // refused as "already running" while it held the heal slot: carry
-        // the camera into the new room rather than dropping it silently.
-        if matches!(outcome, CameraHealOutcome::Cancelled)
-            && follows < MAX_HEAL_ROOM_FOLLOWS
-            && heal_should_follow_new_room(
+        if matches!(outcome, CameraHealOutcome::Cancelled) {
+            drop(guard);
+            // A join committing between the follow check and this release had
+            // its own publish refused by our slot: take the camera there.
+            if heal_should_follow_new_room(
                 generation.is_current(),
                 state.camera_intent(),
                 state.camera_publishing(),
                 state.is_in_room(),
-            )
-        {
-            follows += 1;
-            log::info!("session: camera self-heal following the camera into the new room");
-            generation = state.current_room_generation();
-            continue;
+            ) {
+                continue;
+            }
+            return;
         }
-        break outcome;
+        break (outcome, generation, guard);
     };
 
     let event = match outcome {
@@ -1110,8 +1152,10 @@ pub(crate) async fn ensure_camera_published(
                 "session: camera publish self-heal exhausted its retries -- camera intent cleared: {error}"
             );
             if !generation.is_current() {
-                // The room this heal belonged to is gone; the UI for a NEW
-                // room must not receive a stale terminal error.
+                // The room changed after the intent was cleared: the new
+                // room's UI gets no stale error, but must not keep showing
+                // ON for a camera nothing will publish.
+                announce_camera_off(app);
                 return;
             }
             // Intent was cleared with the retries exhausted and nothing
@@ -1497,9 +1541,6 @@ pub(crate) async fn start_camera_publish_intent(
     }
 }
 
-/// Bounds how often one heal loop re-targets a newer room (fast rejoins).
-const MAX_HEAL_ROOM_FOLLOWS: usize = 3;
-
 /// A heal loop cancelled by a room change keeps going in the NEW room when
 /// the user still wants the camera there and nothing is publishing it.
 pub(crate) fn heal_should_follow_new_room(
@@ -1523,7 +1564,14 @@ pub(crate) fn release_camera_deferred_to_failed_join(
     }
     log::info!("session: join failed -- dropping the camera that was waiting for it");
     state.set_camera_intent(false);
+    announce_camera_off(app);
+}
+
+/// Camera OFF with no error, to every surface: `camera-intent-changed` reaches
+/// Settings, `camera-publish-state` the meeting route and popover (#461).
+fn announce_camera_off(app: &tauri::AppHandle) {
     emit_camera_intent(app, false);
+    emit_camera_publish_state(app, false, None);
 }
 
 /// What `start_camera_publish_command` does with a "not in room" refusal.
@@ -1676,6 +1724,129 @@ mod tests {
             1,
             "one kick per join"
         );
+    }
+
+    /// PR #503 review F1: a join that fails drops the camera deferred to it.
+    /// `camera-intent-changed` only reaches Settings; the meeting route and
+    /// popover keep showing ON unless `camera-publish-state` says OFF too.
+    #[test]
+    fn a_failed_join_turns_every_camera_surface_off() {
+        let src = include_str!("camera_session.rs");
+        let start = src
+            .find("pub(crate) fn release_camera_deferred_to_failed_join(")
+            .expect("release fn present");
+        let body = &src[start..];
+        let body = &body[..body.find("\n}\n").expect("fn end")];
+        let announce = &src[src.find("fn announce_camera_off(").expect("helper present")..];
+        let announce = &announce[..announce.find("\n}\n").expect("fn end")];
+        assert!(
+            body.contains("emit_camera_publish_state(app, false, None)")
+                || (body.contains("announce_camera_off(app)")
+                    && announce.contains("emit_camera_publish_state(app, false, None)")
+                    && announce.contains("emit_camera_intent(app, false)")),
+            "a failed join must tell the meeting route the camera is off"
+        );
+    }
+
+    /// Fails every attempt; while `rooms_left > 0`, each attempt also lands a
+    /// new room mid-attempt (a fast rejoin during the publish).
+    fn fail_and_change_room(
+        state: &crate::session::SessionState,
+        attempts: &AtomicUsize,
+        rooms_left: &AtomicUsize,
+    ) -> Result<(), String> {
+        attempts.fetch_add(1, Ordering::SeqCst);
+        if rooms_left.load(Ordering::SeqCst) > 0 {
+            rooms_left.fetch_sub(1, Ordering::SeqCst);
+            state.begin_room_generation();
+            return Err("not in room".to_string());
+        }
+        Ok(())
+    }
+
+    /// PR #503 review F2: the old room's final attempt fails after a new room
+    /// landed. That stale failure must not clear the NEW room's intent; the
+    /// heal follows the camera into the new room instead.
+    #[tokio::test]
+    async fn a_stale_final_failure_keeps_the_new_rooms_camera() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        let generation = state.begin_room_generation();
+        let attempts = AtomicUsize::new(0);
+        let rooms_left = AtomicUsize::new(1);
+        let outcome = drive_camera_publish_attempts(
+            &state,
+            &generation,
+            &[Duration::ZERO],
+            || std::future::ready(fail_and_change_room(&state, &attempts, &rooms_left)),
+            |_d| async {},
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Cancelled);
+        assert!(state.camera_intent(), "the new room's camera intent must survive");
+
+        let rooms_left = AtomicUsize::new(1);
+        let attempts = AtomicUsize::new(0);
+        let (outcome, generation) = drive_camera_heal_following_rooms(
+            &state,
+            &[Duration::ZERO],
+            || std::future::ready(fail_and_change_room(&state, &attempts, &rooms_left)),
+            |_d| async {},
+            || true,
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Published);
+        assert!(generation.is_current());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "retried in the new room");
+    }
+
+    /// PR #503 review F3: however many rooms the camera crosses, the heal
+    /// never exits leaving the intent ON with nothing publishing it.
+    #[tokio::test]
+    async fn the_heal_follows_the_camera_through_any_number_of_rooms() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        state.begin_room_generation();
+        let attempts = AtomicUsize::new(0);
+        let rooms_left = AtomicUsize::new(6);
+        let (outcome, generation) = drive_camera_heal_following_rooms(
+            &state,
+            &[Duration::ZERO, Duration::from_secs(1)],
+            || std::future::ready(fail_and_change_room(&state, &attempts, &rooms_left)),
+            |_d| async {},
+            || true,
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Published);
+        assert!(generation.is_current());
+        assert!(state.camera_intent());
+        assert_eq!(attempts.load(Ordering::SeqCst), 7);
+    }
+
+    /// Following needs a real room change each time: a cancel in the same
+    /// room (camera turned off) ends the heal.
+    #[tokio::test]
+    async fn the_heal_stops_when_the_camera_is_turned_off() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        state.begin_room_generation();
+        let attempts = AtomicUsize::new(0);
+        let (outcome, _) = drive_camera_heal_following_rooms(
+            &state,
+            &[Duration::ZERO, Duration::from_secs(1)],
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err::<(), String>("no frames".to_string()))
+            },
+            |_d| {
+                state.set_camera_intent(false);
+                async {}
+            },
+            || true,
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Cancelled);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[test]

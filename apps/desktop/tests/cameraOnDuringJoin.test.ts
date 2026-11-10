@@ -119,3 +119,40 @@ test('join gate releases waiters as not-joined on dispose', async () => {
   assert.equal(await waiting, false);
   assert.equal(await gate.whenJoined(), false);
 });
+
+// PR #503 review F4: native can drop the room a moment before the meeting
+// route hears room-left. A refusal while the route still says connected must
+// not be retried instantly in that same stale phase.
+test('a refusal while still "connected" waits for the phase to move, not an instant retry', async () => {
+  const gate = createJoinGate('connected');
+  const calls: string[] = [];
+  let attempts = 0;
+  const run = turnCameraOnSequence(
+    steps({
+      calls,
+      whenJoined: (settleMs) => gate.whenJoined({ settleMs }),
+      startPublish: async () => {
+        calls.push('publish');
+        attempts += 1;
+        if (attempts === 1) throw 'not in room';
+        return { published: true };
+      }
+    })
+  );
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(calls, ['preview', 'publish'], 'no instant retry in the stale phase');
+  gate.update('connecting'); // room-left arrives: reconnecting
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(attempts, 1, 'still waiting through recovery');
+  gate.update('connected');
+  assert.deepEqual(await run, { kind: 'published' });
+  assert.equal(attempts, 2);
+});
+
+test('join gate settle: no phase change within the window means connected for real', async () => {
+  const gate = createJoinGate('connected');
+  assert.equal(await gate.whenJoined({ settleMs: 5 }), true);
+  const dropped = gate.whenJoined({ settleMs: 1000 });
+  gate.update('disconnected');
+  assert.equal(await dropped, false);
+});
