@@ -41,10 +41,11 @@ export async function findBlobByPathname(
 // recently uploaded match if more than one somehow exists.
 export async function findBlobByPrefixSuffix(
   prefix: string,
-  suffix: string
+  suffix: string,
+  opts: { signal?: AbortSignal } = {}
 ): Promise<ListBlobResultBlob | null> {
   const token = requireBlobToken();
-  const { blobs } = await list({ prefix, token });
+  const { blobs } = await list({ prefix, token, abortSignal: opts.signal });
   const matches = blobs.filter((b) => b.pathname.endsWith(suffix));
   if (matches.length === 0) return null;
   matches.sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime());
@@ -61,4 +62,41 @@ export async function fetchBlobJson(
     throw new Error(`blob fetch failed: ${res.status} ${res.statusText}`);
   }
   return res.json();
+}
+
+// A Blob read that hangs never throws, so a route awaiting it is killed by
+// Vercel at maxDuration (10s, vercel.json) with a 504 and its own error
+// handling never runs. Bound every route-level read with this. Do not pass
+// AbortSignal.timeout() to @vercel/blob instead: it retries a TimeoutError
+// (and 5xx) with backoff rather than stopping.
+export const BLOB_READ_DEADLINE_MS = 4000;
+let blobReadDeadlineMs = BLOB_READ_DEADLINE_MS;
+
+/** Test hook: shorten (or, with no argument, restore) the read deadline. */
+export function setBlobReadDeadlineForTests(ms = BLOB_READ_DEADLINE_MS): void {
+  blobReadDeadlineMs = ms;
+}
+
+export async function withBlobDeadline<T>(
+  what: string,
+  read: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  const controller = new AbortController();
+  const deadlineMs = blobReadDeadlineMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      // A plain abort() is an AbortError, which the Blob SDK honours (stops
+      // retrying) and which releases the socket.
+      controller.abort();
+      reject(new Error(`${what} read exceeded ${deadlineMs}ms`));
+    }, deadlineMs);
+  });
+  const result = read(controller.signal);
+  result.catch(() => {}); // the loser of the race must not surface as unhandled
+  try {
+    return await Promise.race([result, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
