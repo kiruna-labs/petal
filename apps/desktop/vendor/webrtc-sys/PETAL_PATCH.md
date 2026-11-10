@@ -183,6 +183,46 @@ pinning one could only make the stream wrong.
 Safe to drop on any vendor bump; it changes no published behaviour. Fold away if
 the MFT ever reports a trustworthy emitted profile through stats instead.
 
+## Patch 6: never pick a synchronous software MFT as the hardware encoder (#504)
+
+### Why this exists
+
+`MFTEnumEx` flags are a union of MFT kinds, not a filter. The "hardware only"
+H.264 encoder search (`FindAndActivateH264Mft(..., hardware_only=true)` and the
+factory's `IsSupported` probe) passed `SYNCMFT | ASYNCMFT | HARDWARE`, so on a
+machine with no hardware H.264 encoder it returned Microsoft's synchronous
+software MFT (CLSID `6ca50344-051a-4ded-9779-a43305165e35`). The MF factory then
+claimed the `Hardware` backend, `InitEncode` failed with `MFT is not
+asynchronous` / `WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE`, and because the
+simulcast adapter was built with no fallback factory, nothing fell back: every
+frame failed with `-7` (uninitialized) and every window share was black on
+every receiver. Reproduced on Windows 11 ARM VMs running the shipped 0.9.35.
+
+### The fix
+
+- `src/mf/mf_enum_flags.h`: one windows-free policy,
+  `H264EncoderEnumFlags(hardware_only)`; hardware-only is
+  `HARDWARE | SORTANDFILTER`. `SYNCMFT` and `ASYNCMFT` both add *software*
+  MFTs; hardware MFTs are asynchronous by contract and fully covered by
+  `HARDWARE`, so no hardware encoder is excluded. `mf_common.h` static_asserts the mirrored constants
+  against `mfapi.h`. With no async hardware MFT the MF factory now reports
+  unsupported, is not registered, and a `Hardware` request falls through
+  `InternalFactory::Create` to OpenH264.
+- `src/video_encoder_factory.cpp`: on Windows (`USE_MF_VIDEO_CODEC`) the
+  `SimulcastEncoderAdapter` gets a software-only fallback factory
+  (`SoftwareFallbackEncoderFactory`, OpenH264/libvpx via the builtin template
+  factory, backend tag stripped), so any primary encoder whose `InitEncode`
+  fails is replaced by the software encoder instead of encoding nothing.
+  macOS/Linux keep the null fallback (unchanged behaviour).
+- `src/mf_enum_flags.rs` exposes the policy over cxx; the desktop crate's
+  `mf_hardware_h264_encoder_search_excludes_sync_software_mfts` test runs it on
+  every host.
+
+### Updating
+
+Keep on any vendor bump that still carries `src/mf/*`. Drop the fallback
+factory only if upstream wires one into the adapter itself.
+
 ## #886: per-frame autorelease leak in `objc_video_frame_buffer.mm`
 
 `native_buffer_to_platform_image_buffer` runs once per DECODED frame on
