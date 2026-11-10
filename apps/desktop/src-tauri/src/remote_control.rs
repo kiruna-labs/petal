@@ -27,6 +27,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::platform::cg::WindowFrame;
 use crate::remote_clipboard;
+use crate::rc_input_timing;
 use crate::rc_latency_telemetry::{self, Dimension, RcRole, Stage};
 use crate::session::{RoomGeneration, SessionState, SharedWindowScreenStatus};
 use crate::transport::publisher::RoomConnection;
@@ -463,6 +464,8 @@ fn message_from_binary(
         grant_token: Some(active_token),
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: None,
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers {
             alt: modifiers & 1 != 0,
             ctrl: modifiers & 2 != 0,
@@ -1629,6 +1632,8 @@ fn ensure_pressed_ttl_sweeper() {
             // grant state (authority, not event order) and emit due intervals.
             let hosting = !sessions().lock_unpoisoned().is_empty();
             rc_latency_telemetry::sync(RcRole::Host, hosting);
+            // #371: same reconcile for the controller side, against presence.
+            rc_input_timing::sync_controller(remote_window_exists);
             ticks_since_summary += 1;
             if ticks_since_summary >= LATENCY_SUMMARY_TICK_INTERVAL {
                 ticks_since_summary = 0;
@@ -1981,6 +1986,7 @@ pub(crate) fn revoke_all(app: &AppHandle) {
     enqueue_synthetic_releases(releases, "all control revoked");
     warned_tokenless_inputs().lock_unpoisoned().clear();
     last_unreliable_seqs().lock_unpoisoned().clear();
+    rc_input_timing::clear_host_state();
     // Fable review fix (#372): same insert-only leak class as
     // warned_tokenless_inputs above.
     replay_failure_status_throttle().lock_unpoisoned().clear();
@@ -4129,6 +4135,8 @@ fn status_packet_for(status: &RemoteControlStatus, local_identity: &str) -> Remo
         // #399: same presence-is-the-signal rule; an old host never sets it,
         // so its controllers keep the reliable ordered path.
         supports_redundant_input: status.status == "active",
+        sent_at_ms: None,
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4178,6 +4186,8 @@ fn discrete_result_packet(
         grant_token: None,
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: None,
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4187,9 +4197,13 @@ fn send_discrete_result(
     admission: DiscreteAdmission,
     disposition: TerminalDisposition,
 ) {
-    let message = discrete_result_packet(&sender.local_identity, &admission, disposition);
+    let mut message = discrete_result_packet(&sender.local_identity, &admission, disposition);
+    // #371: host admission -> this send, re-measured per attempt.
+    let admitted_at = remote_control_engine().discrete_admitted_at(&admission);
+    let hold_ms = move || admitted_at.map(|at| at.elapsed().as_millis() as u64);
     let summary = message_summary(&message);
     tauri::async_runtime::spawn(async move {
+        message.host_hold_ms = hold_ms();
         if let Err(error) = publish_message(sender.publisher.clone(), message.clone()).await {
             // This is host-to-controller terminal delivery recovery, not the
             // controller retry protocol: retry capability remains advertised
@@ -4198,6 +4212,7 @@ fn send_discrete_result(
                 "remote-control: result publish failed for {summary}; retrying once: {error}"
             );
             tokio::time::sleep(Duration::from_millis(75)).await;
+            message.host_hold_ms = hold_ms();
             if let Err(retry_error) = publish_message(sender.publisher, message).await {
                 log::warn!(
                     "remote-control: result publish recovery failed for {summary}: {retry_error}"
@@ -4902,6 +4917,10 @@ fn handle_message(
                 crate::remote_control_core::ControllerStatusEffect::Terminate => Some(false),
                 crate::remote_control_core::ControllerStatusEffect::Feedback => None,
             };
+            rc_input_timing::controller_status(
+                &message,
+                crate::remote_control_core::controller_status_effect(status),
+            );
             if let Some(active) = overlay_active {
                 if let Err(e) = set_remote_window_control_active(
                     app,
@@ -5178,6 +5197,7 @@ fn handle_message(
                 );
                 return;
             }
+            rc_input_timing::controller_result(&message, now_ms());
             let Some((status, feedback)) = controller_result_feedback(message.failure_code) else {
                 return;
             };
@@ -5225,6 +5245,9 @@ fn handle_message(
                 unreliable_seq_accepted,
                 accessibility_trusted,
             };
+            if remote_control_allowed && authorized {
+                rc_input_timing::host_input(&message, received_at);
+            }
             let mut action =
                 plan_input_dispatch(gates, input_v2_snapshot_before_admission(&message));
             if matches!(action, InputDispatchAction::EvaluateV2Admission) {
@@ -6397,6 +6420,8 @@ fn clipboard_key_message(
         grant_token: Some(grant_token.to_string()),
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: None,
+        host_hold_ms: None,
         modifiers,
     }
 }
@@ -6656,6 +6681,7 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
                     );
                 }
                 let summary = message_summary(&chunk_message);
+                rc_input_timing::controller_sent(&chunk_message);
                 if let Err(e) = publish_controller_input(publisher.clone(), chunk_message).await {
                     log::warn!("remote-control: chunked text publish failed for {summary}: {e}");
                     return Err(e);
@@ -6677,6 +6703,8 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
         return Err("operation is unsupported by the active Windows control grant".to_string());
     }
     let summary = message_summary(&message);
+    // #371: after the v2 envelope is assigned, so the result can be paired.
+    rc_input_timing::controller_sent(&message);
     match publish_controller_input(publisher, message).await {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -6747,6 +6775,8 @@ pub async fn remote_control_set_active(
         grant_token: None,
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: Some(now_ms()),
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -6890,6 +6920,8 @@ pub async fn remote_control_request_escalation(
         grant_token: None,
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: Some(now_ms()),
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -15701,6 +15733,8 @@ pub(crate) mod input {
                 grant_token: None,
                 supports_binary_hot_path: false,
                 supports_redundant_input: false,
+                sent_at_ms: None,
+                host_hold_ms: None,
                 modifiers: RemoteControlModifiers::default(),
             }
         }
@@ -22079,6 +22113,8 @@ mod tests {
             grant_token: None,
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            sent_at_ms: None,
+            host_hold_ms: None,
             modifiers: RemoteControlModifiers::default(),
         }
     }
@@ -23001,6 +23037,8 @@ mod tests {
             grant_token: None,
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            sent_at_ms: None,
+            host_hold_ms: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -23229,6 +23267,8 @@ mod tests {
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            sent_at_ms: None,
+            host_hold_ms: None,
             modifiers: RemoteControlModifiers {
                 alt: false,
                 ctrl: false,
@@ -23304,6 +23344,8 @@ mod tests {
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            sent_at_ms: None,
+            host_hold_ms: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let value = serde_json::to_value(msg).unwrap();
@@ -23344,9 +23386,12 @@ mod tests {
             repeat: false,
             location: None,
             text: None,
+            sent_at_ms: Some(1_700_000_000_123),
             modifiers: RemoteControlModifiers::default(),
         };
         let msg = draft.into_message("owner".to_string(), "controller".to_string());
+        assert_eq!(msg.sent_at_ms, Some(1_700_000_000_123));
+        assert_eq!(msg.host_hold_ms, None);
         assert_eq!(msg.v, VERSION);
         assert_eq!(msg.target_user_id, "owner");
         assert_eq!(msg.controller_id, "controller");
@@ -23602,6 +23647,60 @@ mod tests {
             ControlGrantKey::for_message(&message).unwrap().target_kind,
             Some(RemoteControlTargetKind::Window)
         );
+    }
+
+    /// #371: `sentAtMs` / `hostHoldMs` are additive. They round-trip, stay
+    /// out of the operation fingerprint, and are omitted when absent so a
+    /// legacy packet's JSON is byte-identical to the pre-#371 fixtures.
+    #[test]
+    fn timing_fields_are_additive_and_outside_the_fingerprint() {
+        let fixture = contract_fixture();
+        let vector = |name: &str| {
+            fixture
+                .remote_control_messages
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing contract fixture {name}"))
+                .message
+                .clone()
+        };
+        let stamped: RemoteControlMessage =
+            serde_json::from_value(vector("pointer-click-v2-sent-at")).unwrap();
+        assert_eq!(stamped.sent_at_ms, Some(1_700_000_000_123));
+        let admission = v2_discrete_admission(&stamped).unwrap();
+        assert_eq!(
+            canonical_operation_fingerprint(&stamped, &admission),
+            stamped.operation_fingerprint.clone().unwrap(),
+            "sentAtMs must not change the fingerprint"
+        );
+        assert_eq!(serde_json::to_value(&stamped).unwrap()["sentAtMs"], 1_700_000_000_123u64);
+
+        let held: RemoteControlMessage =
+            serde_json::from_value(vector("result-applied-v2-host-hold")).unwrap();
+        assert_eq!(held.host_hold_ms, Some(7));
+
+        // Absent on every pre-#371 fixture, and never serialized as null.
+        for legacy in ["pointer-click-v2-canonical-fingerprint", "result-applied-v2", "key"] {
+            let message: RemoteControlMessage = serde_json::from_value(vector(legacy)).unwrap();
+            assert_eq!((message.sent_at_ms, message.host_hold_ms), (None, None), "{legacy}");
+            let json = serde_json::to_value(&message).unwrap();
+            assert!(json.get("sentAtMs").is_none() && json.get("hostHoldMs").is_none(), "{legacy}");
+        }
+
+        // Old-peer view: a receiver whose envelope predates the fields (serde
+        // without deny_unknown_fields, as every shipped build) still parses.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PreTimingEnvelope {
+            kind: RemoteControlType,
+            input_id: Option<String>,
+            outcome: Option<String>,
+        }
+        let old: PreTimingEnvelope =
+            serde_json::from_value(vector("result-applied-v2-host-hold")).unwrap();
+        assert_eq!(old.kind, RemoteControlType::Result);
+        assert_eq!(old.outcome.as_deref(), Some("applied"));
+        assert!(old.input_id.is_some());
     }
 
     #[test]

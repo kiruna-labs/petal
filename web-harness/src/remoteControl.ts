@@ -1,3 +1,4 @@
+import { wireMs } from '@petal/shared/logic/remoteControlTiming';
 import { normalizedPointInContainedMedia } from './telepointer.ts';
 import {
   REMOTE_CONTROL_TOPIC,
@@ -238,6 +239,11 @@ export function parseRemoteControlJson(payload: string): RemoteControlMessage | 
     ].includes(String(value.status))
   )
     return null;
+  // #371: additive timing fields; a malformed value is dropped, never fatal.
+  if (value.sentAtMs !== undefined && wireMs(value.sentAtMs) === undefined) delete value.sentAtMs;
+  if (value.hostHoldMs !== undefined && (value.kind !== 'result' || wireMs(value.hostHoldMs) === undefined)) {
+    delete value.hostHoldMs;
+  }
   if (value.kind === 'result') {
     // Delivery metadata is additive. Keep a correlated, known terminal
     // outcome usable when a newer peer sends a route/code this build does not

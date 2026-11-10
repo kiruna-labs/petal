@@ -130,6 +130,7 @@ mod control_consent;
 // `main.rs` isn't the only caller if a future example/binary ever wants the
 // same sink; today only `run()` below calls `logging::init()`.
 mod analytics;
+mod rc_input_timing;
 mod rc_latency_telemetry;
 pub mod logging;
 mod main_window;

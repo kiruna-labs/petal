@@ -96,7 +96,13 @@ test('allowlist documents the latency-summary exception and every stage', () => 
   const contract = JSON.parse(readFileSync(join(root, 'contracts', 'petal-contracts.json'), 'utf8'));
   const schema = contract.remoteControlLatencySummary;
   assert.match(allowlist, /\*\*Exception \(#370\): `remote_control_latency_summary`/);
-  for (const key of [...schema.stages, ...Object.keys(schema.dimensions), ...schema.alwaysPresent]) {
+  for (const key of [
+    ...schema.stages,
+    ...schema.counters,
+    ...Object.keys(schema.dimensions),
+    ...schema.alwaysPresent,
+    ...schema.roles
+  ]) {
     assert.match(allowlist, new RegExp(`\`${key}\``), `allowlist is missing ${key}`);
   }
   // The stale row (#370 cleanup): duration_bucket was removed from the event.

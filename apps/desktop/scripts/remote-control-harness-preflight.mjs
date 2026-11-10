@@ -170,7 +170,9 @@ const expectedRemoteControl = [
   ['result-submitted-capable-display', true],
   ['status-controller-upgrade-required', true],
   ['status-awaiting-consent', true],
-  ['status-denied', true]
+  ['status-denied', true],
+  ['pointer-click-v2-sent-at', true],
+  ['result-applied-v2-host-hold', true]
 ];
 assertDeepEqual(
   fixture.remoteControlMessages.map((entry) => [entry.name, entry.reliable]),

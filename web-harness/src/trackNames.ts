@@ -747,6 +747,9 @@ interface RemoteControlBase {
   inputSeq?: number;
   operationFingerprintVersion?: 1;
   operationFingerprint?: string;
+  /** #371: controller wall clock (integer ms) when the input was produced.
+   * Every controller->host kind may carry it; old hosts ignore it. */
+  sentAtMs?: number;
 }
 
 export type RemoteControlMessage =
@@ -849,6 +852,9 @@ export type RemoteControlMessage =
         | 'admissionOverloaded';
       /** Optional host stage for a correlated v2 terminal result. */
       deliveryRoute?: 'admission' | 'resolve' | 'replay';
+      /** #371: host admission -> result send (ms); the controller subtracts it
+       * from its round trip. Absent from old hosts. */
+      hostHoldMs?: number;
       /** Optional privacy-safe reason code. Unknown future values are ignored. */
       failureCode?:
         | 'unauthorized'

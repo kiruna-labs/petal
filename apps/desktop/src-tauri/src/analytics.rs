@@ -1734,7 +1734,9 @@ mod tests {
     }
 
     fn sample_latency_summary() -> crate::rc_latency_telemetry::Summary {
-        use crate::rc_latency_telemetry::{Dimension, HistogramStats, RcRole, Stage, Summary};
+        use crate::rc_latency_telemetry::{
+            Counter, Dimension, HistogramStats, RcRole, Stage, Summary,
+        };
         Summary {
             role: RcRole::Host,
             rc_session_id: "ab".repeat(16),
@@ -1744,6 +1746,7 @@ mod tests {
                 Stage::ReplayCompleteMs,
                 HistogramStats { p50: 4, p95: 108, max: 240, n: 400 },
             )],
+            counters: vec![(Counter::InputStallCount, 3)],
             dimensions: vec![(Dimension::WindowCodec, "h264".to_string())],
         }
     }
@@ -1760,6 +1763,7 @@ mod tests {
         assert_eq!(props["final"], json!(true));
         assert_eq!(props["role"], json!("host"));
         assert_eq!(props["window_codec"], json!("h264"));
+        assert_eq!(props["input_stall_count"], json!(3));
         assert!(props.get("replay_inject_ms_p50").is_none(), "n = 0 stages are omitted");
         let contract: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../contracts/petal-contracts.json"
@@ -1778,6 +1782,9 @@ mod tests {
         }
         for dimension in schema["dimensions"].as_object().unwrap().keys() {
             allowed.push(dimension.clone());
+        }
+        for counter in schema["counters"].as_array().unwrap() {
+            allowed.push(counter.as_str().unwrap().to_string());
         }
         for key in props.as_object().unwrap().keys() {
             assert!(allowed.contains(key), "latency summary leaked property {key}");
