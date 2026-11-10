@@ -33,7 +33,7 @@ pub async fn join_room_command(
     // (`true` -> Ask, never Auto -- consent is the default).
     let policy = remote_control_policy
         .unwrap_or_else(|| RemoteControlPolicy::from_allowed(remote_control_allowed, RemoteControlPolicy::Ask));
-    let result = join_room(
+    join_room(
         &app,
         &rooms,
         &state,
@@ -43,11 +43,7 @@ pub async fn join_room_command(
         policy,
         identity_palette_index,
     )
-    .await;
-    if result.is_err() {
-        crate::camera_session::release_camera_deferred_to_failed_join(&app, &state);
-    }
-    result
+    .await
 }
 
 /// Current meeting's remote-control allow state. This is not the persisted

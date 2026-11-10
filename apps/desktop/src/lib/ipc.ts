@@ -825,6 +825,8 @@ export interface MicMuteChanged {
 export interface CameraPublishState {
   publishing: boolean;
   error: string | null;
+  /** Room generation the outcome belongs to (see `StartCameraPublishResult`). */
+  generation: number;
 }
 
 /**
@@ -844,6 +846,9 @@ export interface CameraIntentChanged {
  * `camera-publish-state` event). */
 export interface StartCameraPublishResult {
   published: boolean;
+  /** Room generation the request is bound to (the joined room, or the join
+   * native deferred it to). An outcome from an older generation is stale. */
+  generation: number;
 }
 
 /** Mirrors native `CameraPublishStateSnapshot` -- lets a (re)mounting meeting

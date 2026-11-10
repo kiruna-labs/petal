@@ -637,12 +637,6 @@ pub async fn join_room(
     // at most one room at a time in this model).
     cleanup_left_room(app, state, true, "room_switch", false, false).await;
 
-    // From here until return, a camera turned on is deferred to this join
-    // (published by `publish_camera_requested_during_join` at commit) instead
-    // of being refused as "not in room". After the room-switch cleanup,
-    // which clears the previous room's camera intent.
-    let _join_attempt = state.begin_join_attempt();
-
     // `can_subscribe: true` -- telepointers (SPEC.md §4.5) need this process
     // to *receive* other participants' cursor data-channel messages on this
     // same room connection, not just publish video. `RoomEvent::DataReceived`
@@ -657,7 +651,12 @@ pub async fn join_room(
 
     // #569: one generation and one terminal deadline cover every external
     // await from room connect through palette/microphone publication.
-    let room_generation = state.begin_room_generation();
+    // The generation bump also opens the deferred-camera window: a camera
+    // turned on from here is kept for this join and published at its commit
+    // (`room_generation::DeferredCamera`, PR #503).
+    let (mut join_attempt, dropped_camera) = state.begin_join(&room_record.id);
+    crate::camera_session::announce_dropped_deferred_camera(app, state, dropped_camera);
+    let room_generation = join_attempt.generation().clone();
     let join_budget = JoinBudget::start();
 
     // #787: enable speaker playout BEFORE connecting. The native subscription
@@ -821,7 +820,9 @@ pub async fn join_room(
     // The room is committed: publish a camera turned on while connecting
     // now, not after the audio tail (which can hold join_room for tens of
     // seconds).
-    crate::camera_session::publish_camera_requested_during_join(app, state);
+    if join_attempt.commit() {
+        crate::camera_session::publish_deferred_camera(app, room_generation.clone());
+    }
 
     // Telepointers (SPEC.md §4.5): start this process's receiver task on the
     // room connection we just made, exactly once per connection (not once
@@ -1369,6 +1370,12 @@ async fn cleanup_left_room(
         // flag) is what a same-room rejoin consumes.
         state.set_camera_intent(false);
     }
+    crate::camera_session::deferred_camera_room_left(
+        app,
+        state,
+        connection_lost,
+        user_leave || reason == "forced_disconnect",
+    );
 
     // Stop every active share first -- reuses `stop_share`'s own
     // capture-stop/pump-abort/unpublish logic exactly, rather than

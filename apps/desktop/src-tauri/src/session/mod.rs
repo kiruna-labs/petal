@@ -377,9 +377,9 @@ pub struct SessionState {
     /// Ensures at most one camera self-heal loop runs at a time (see
     /// `camera_session::ensure_camera_published`).
     camera_heal_active: AtomicBool,
-    /// Joins that have started connecting but not yet returned (see
-    /// `room_generation::JoinAttempts`).
-    join_attempts: crate::room_generation::JoinAttempts,
+    /// A camera turned on while a join is pending (see
+    /// `room_generation::DeferredCamera`).
+    deferred_camera: crate::room_generation::DeferredCamera,
     /// Serializes camera start/stop/device-switch sequences process-wide —
     /// the unified replacement for the old `CameraDevicePreferences.switch_lock`
     /// (equivalent serialization, moved onto the session so the shared
@@ -444,7 +444,7 @@ impl Default for SessionState {
             desired_camera_on: AtomicBool::new(false),
             leave_publish_carryover: Mutex::new(None),
             camera_heal_active: AtomicBool::new(false),
-            join_attempts: crate::room_generation::JoinAttempts::default(),
+            deferred_camera: crate::room_generation::DeferredCamera::default(),
             camera_control_lock: tokio::sync::Mutex::new(()),
             desired_mic_muted: AtomicBool::new(true),
             last_toggled_window: Mutex::new(None),
@@ -461,14 +461,19 @@ impl Default for SessionState {
 }
 
 impl SessionState {
-    /// Mark a room join as in flight until the guard drops.
-    pub(crate) fn begin_join_attempt(&self) -> crate::room_generation::JoinAttemptGuard<'_> {
-        self.join_attempts.begin()
+    /// Begin a join of `room_id`: bumps the room generation and opens the
+    /// deferred-camera window in one step. Returns the attempt and whether a
+    /// camera deferred to a different room was dropped.
+    pub(crate) fn begin_join(
+        &self,
+        room_id: &str,
+    ) -> (crate::room_generation::JoinAttempt<'_>, bool) {
+        self.deferred_camera
+            .begin_join(room_id, || self.begin_room_generation())
     }
 
-    /// True while a room join is connecting but has not returned yet.
-    pub(crate) fn join_in_flight(&self) -> bool {
-        self.join_attempts.in_flight()
+    pub(crate) fn deferred_camera(&self) -> &crate::room_generation::DeferredCamera {
+        &self.deferred_camera
     }
 
     pub(crate) fn begin_room_generation(&self) -> RoomGeneration {
