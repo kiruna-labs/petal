@@ -89,6 +89,11 @@ fn release_platform_window_gestures(window_id: u32) {
     platform_control().release_window_gestures(window_id);
 }
 
+#[cfg(not(target_os = "macos"))]
+fn release_platform_all_gestures() {
+    input::release_all_session_tap_gestures();
+}
+
 #[cfg(target_os = "macos")]
 fn remote_window_exists(owner_identity: &str, window_id: u32) -> bool {
     crate::compositor::has_window_for_owner(owner_identity, window_id)
@@ -1435,6 +1440,28 @@ pub(crate) fn update_control_frame(window_id: u32, frame: WindowFrame) {
 }
 
 fn clear_all_control_caches() {
+    #[cfg(target_os = "macos")]
+    clear_all_control_caches_with(&input::SystemSessionTapBackend);
+    #[cfg(not(target_os = "macos"))]
+    {
+        release_platform_all_gestures();
+        clear_all_control_state();
+    }
+}
+
+/// Release every held session-tap button, THEN clear (#446 A7 ordering for
+/// the revoke-all path, PETAL-DESKTOP-3B family). `tap` is injected so a test
+/// drives the real chain against a recorder.
+#[cfg(target_os = "macos")]
+fn clear_all_control_caches_with(tap: &dyn input::SessionTapBackend) {
+    // Must run first: the clear below keeps only SlDrag gestures, so a
+    // session-tap drag (display share) would lose its record and the target
+    // app would keep the button held after leave/disconnect/RC-off.
+    input::release_all_session_tap_gestures_with_backend(tap);
+    clear_all_control_state();
+}
+
+fn clear_all_control_state() {
     remote_clipboard::clear_pending_copy();
     remote_clipboard::clear_copy_operations();
     remote_clipboard::clear_paste_operations();
@@ -1969,8 +1996,10 @@ pub(crate) fn revoke_all(app: &AppHandle) {
     remote_control_engine().clear_controller_grants();
     #[cfg(target_os = "windows")]
     crate::windows_remote_control::clear_all_pending_controller_operations();
-    clear_all_control_caches();
+    // Epochs first: a replay already in flight is then rejected instead of
+    // posting a session-tap Down whose record the release/clear would miss.
     bump_all_replay_epochs("all control revoked");
+    clear_all_control_caches();
     // #365: drain + grant removal under the fence -- see `input_authority_fence`.
     let fence = input_authority_fence().lock_unpoisoned();
     let releases = drain_all_pressed();
@@ -10533,7 +10562,7 @@ pub(crate) mod input {
         HitTestVerdict::NothingInFront
     }
 
-    trait SessionTapBackend: Sync {
+    pub(super) trait SessionTapBackend: Sync {
         fn post_mouse(
             &self,
             point: super::GlobalPoint,
@@ -10597,7 +10626,7 @@ pub(crate) mod input {
         }
     }
 
-    struct SystemSessionTapBackend;
+    pub(super) struct SystemSessionTapBackend;
 
     impl SystemSessionTapBackend {
         fn post(event: *mut c_void) {
@@ -12649,6 +12678,9 @@ pub(crate) mod input {
                 "remote-control: AX pointer up window_id={window_id} controller='{controller_id}' mode=<none> outcome={}",
                 ax_replay_outcome_name(outcome)
             );
+            // PETAL-DESKTOP-3B/3A: no press was recorded, so a click that
+            // cannot be delivered is an orphan Up (lost Down, TTL/gap release),
+            // not a stuck button. Never report it as a failed release.
             return Ok(outcome);
         };
         // Fable-review fix (#369): the map entry is always removed above (so
@@ -12987,6 +13019,21 @@ pub(crate) mod input {
     pub fn release_session_tap_gestures_for_window(window_id: u32) {
         let tap = SystemSessionTapBackend;
         release_session_tap_gestures_with_backend(window_id, None, &tap);
+    }
+
+    pub(super) fn release_all_session_tap_gestures_with_backend(tap: &dyn SessionTapBackend) -> usize {
+        let mut windows: Vec<u32> = ax_pointer_gestures()
+            .lock_unpoisoned()
+            .iter()
+            .filter(|(_, state)| matches!(state.mode, GestureMode::SessionTap))
+            .map(|((window_id, _), _)| *window_id)
+            .collect();
+        windows.sort_unstable();
+        windows.dedup();
+        windows
+            .into_iter()
+            .map(|window_id| release_session_tap_gestures_with_backend(window_id, None, tap))
+            .sum()
     }
 
     /// `only_controller` scopes the cancellation to one controller: #374
@@ -20447,6 +20494,96 @@ pub(crate) mod input {
             release_session_tap_gestures_with_backend(down.window_id, None, &tap);
         }
 
+        /// PETAL-DESKTOP-3B family: `revoke_all` (room leave, disconnect, RC
+        /// turned off) cleared every gesture except SlDrag without posting the
+        /// session-tap Up, leaving the host's button held after a display-share
+        /// drag. Drives the real dispatcher for the Down, then the revoke-all
+        /// release, and checks the Up reaches the injection seam at the last
+        /// pointer position.
+        #[test]
+        fn revoke_all_release_posts_up_for_every_open_session_tap_gesture() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::trusted();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).unwrap();
+            assert_eq!(tap.mouse_kinds(), vec![MouseKind::LeftDown]);
+
+            let released = release_all_session_tap_gestures_with_backend(&tap);
+
+            assert_eq!(released, 1);
+            assert_eq!(
+                tap.mouse_kinds(),
+                vec![MouseKind::LeftDown, MouseKind::LeftUp],
+                "a held session-tap button must get its Up before the gesture record is dropped"
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// The production wiring of the revoke-all release: a Down through
+        /// the real dispatcher, then the real `clear_all_control_caches_with`
+        /// (what `clear_all_control_caches` calls with the system backend).
+        /// The Up must be posted AND the gesture map empty -- the release
+        /// runs before the clear drops the record.
+        #[test]
+        fn clearing_all_control_caches_releases_the_held_button_then_empties_gestures() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::trusted();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).unwrap();
+            assert_eq!(ax_gesture_count_for_tests(), 1);
+
+            super::super::clear_all_control_caches_with(&tap);
+
+            assert_eq!(
+                tap.mouse_kinds(),
+                vec![MouseKind::LeftDown, MouseKind::LeftUp]
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// Source guard: `revoke_all` must reach the release through
+        /// `clear_all_control_caches`, which must use the PRODUCTION backend,
+        /// and epochs must be bumped before the release so in-flight replays
+        /// are rejected. A no-op'd wiring leaves every behavioural test green.
+        #[test]
+        fn revoke_all_wiring_uses_the_production_release_after_bumping_epochs() {
+            let src = include_str!("remote_control.rs");
+            let body = |name: &str| {
+                let start = src.find(name).unwrap_or_else(|| panic!("missing {name}"));
+                &src[start..start + 1500.min(src.len() - start)]
+            };
+            let revoke = body("pub(crate) fn revoke_all(app: &AppHandle)");
+            let bump = revoke.find("bump_all_replay_epochs(\"all control revoked\")").unwrap();
+            let clear = revoke.find("clear_all_control_caches();").unwrap();
+            assert!(bump < clear, "epochs must be bumped before the release/clear");
+            assert!(body("fn clear_all_control_caches() {")
+                .contains("clear_all_control_caches_with(&input::SystemSessionTapBackend)"));
+        }
+
         /// #368: a revoke that races a queued Down drops the Down (stale
         /// epoch) but replays its synthetic Up, which then finds no gesture.
         /// That Up must not take the #446 orphaned-Up click fallback, while a
@@ -21739,6 +21876,8 @@ pub(crate) mod input {
     pub fn release_session_tap_gestures_for_window(window_id: u32) {
         crate::windows_remote_control::clear_window(window_id);
     }
+
+    pub fn release_all_session_tap_gestures() {}
     use crate::platform::cg::WindowFrame;
 
     pub fn accessibility_trusted() -> bool {
@@ -21800,6 +21939,8 @@ pub(crate) mod input {
     pub fn clear_ax_resolution_cache_for_window(_window_id: u32) {}
 
     pub fn clear_ax_gesture_for_window(_window_id: u32) {}
+
+    pub fn release_all_session_tap_gestures() {}
 
     pub fn clear_ax_gesture_for_controller(_window_id: u32, _controller_id: &str) {}
 
