@@ -22,6 +22,18 @@ export const FRAME_RUNTIME_SOURCE = String.raw`
   var listeners = new Map();
   var definition = null;
   var init = null;
+  // Keyboard focus is inside this frame while a popover is open, so the host
+  // never sees Escape; forward it as a dismiss request. Listening from the
+  // start: the host focuses the frame before init arrives.
+  var escapeBeforeInit = false;
+  function sendDismiss() {
+    send({ v: PROTOCOL, kind: 'evt', event: 'dismiss', payload: { surfaceId: init.surface.id } });
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    if (!init) escapeBeforeInit = true;
+    else if (init.surface) sendDismiss();
+  });
   var activated = false;
   var surfacePort = null;
   var channels = new Map();
@@ -282,13 +294,9 @@ export const FRAME_RUNTIME_SOURCE = String.raw`
       if (init) return;
       if (event.ports && event.ports[0]) surfacePort = event.ports[0];
       applyInit(env.payload || {});
-      if (init.surface) {
-        // Keyboard focus is inside this frame while a popover is open, so the
-        // host never sees Escape; forward it as a dismiss request.
-        document.addEventListener('keydown', function (e) {
-          if (e.key === 'Escape') send({ v: PROTOCOL, kind: 'evt', event: 'dismiss', payload: { surfaceId: init.surface.id } });
-        });
-      }
+      // An Escape pressed before init (the host focuses a popover's frame as it
+      // loads) is sent now rather than lost.
+      if (init.surface && escapeBeforeInit) sendDismiss();
       send({ v: PROTOCOL, kind: 'evt', event: 'ready', payload: { pluginId: petal.plugin.id } });
       maybeActivate();
       return;
