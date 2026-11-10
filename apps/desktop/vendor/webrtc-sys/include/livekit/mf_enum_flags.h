@@ -11,5 +11,6 @@ namespace livekit_ffi {
 
 uint32_t MfH264EncoderEnumFlags(bool hardware_only);
 bool MfEnumIncludesSyncMfts(uint32_t flags);
+bool MfEnumIncludesSoftwareMfts(uint32_t flags);
 
 }  // namespace livekit_ffi

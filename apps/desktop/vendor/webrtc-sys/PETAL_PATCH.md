@@ -202,9 +202,9 @@ every receiver. Reproduced on Windows 11 ARM VMs running the shipped 0.9.35.
 
 - `src/mf/mf_enum_flags.h`: one windows-free policy,
   `H264EncoderEnumFlags(hardware_only)`; hardware-only is
-  `HARDWARE | ASYNCMFT | SORTANDFILTER`. Hardware MFTs are asynchronous by
-  contract, and the encoder can only drive async MFTs anyway, so no usable
-  encoder is excluded. `mf_common.h` static_asserts the mirrored constants
+  `HARDWARE | SORTANDFILTER`. `SYNCMFT` and `ASYNCMFT` both add *software*
+  MFTs; hardware MFTs are asynchronous by contract and fully covered by
+  `HARDWARE`, so no hardware encoder is excluded. `mf_common.h` static_asserts the mirrored constants
   against `mfapi.h`. With no async hardware MFT the MF factory now reports
   unsupported, is not registered, and a `Hardware` request falls through
   `InternalFactory::Create` to OpenH264.

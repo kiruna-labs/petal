@@ -16,4 +16,8 @@ bool MfEnumIncludesSyncMfts(uint32_t flags) {
   return webrtc::mf_enum::EnumIncludesSyncMfts(flags);
 }
 
+bool MfEnumIncludesSoftwareMfts(uint32_t flags) {
+  return webrtc::mf_enum::EnumIncludesSoftwareMfts(flags);
+}
+
 }  // namespace livekit_ffi

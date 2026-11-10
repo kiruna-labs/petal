@@ -22,23 +22,34 @@ inline constexpr uint32_t kSortAndFilter = 0x00000040;  // MFT_ENUM_FLAG_SORTAND
 // never carry SYNCMFT -- with it, a machine with no hardware encoder gets
 // Microsoft's synchronous software H.264 MFT, which the async-only encoder
 // cannot drive, and every window share encodes zero frames (#504).
-// Hardware MFTs are asynchronous by contract, so HARDWARE|ASYNCMFT loses none.
+// ASYNCMFT likewise adds asynchronous SOFTWARE MFTs, so it is excluded too:
+// hardware MFTs are asynchronous by contract and are fully covered by
+// HARDWARE alone.
 constexpr uint32_t H264EncoderEnumFlags(bool hardware_only) {
-  return hardware_only ? (kHardware | kAsyncMft | kSortAndFilter)
+  return hardware_only ? (kHardware | kSortAndFilter)
                        : (kSyncMft | kAsyncMft | kHardware | kSortAndFilter);
 }
 
 // True when an enumeration with `flags` can return a synchronous software
-// MFT.
+// MFT. MFTEnumEx treats a mask with no kind bits (SYNC/ASYNC/HARDWARE) as
+// SYNCMFT.
 constexpr bool EnumIncludesSyncMfts(uint32_t flags) {
-  return (flags & kSyncMft) != 0;
+  return (flags & kSyncMft) != 0 ||
+         (flags & (kSyncMft | kAsyncMft | kHardware)) == 0;
+}
+
+// True when an enumeration with `flags` can return a software MFT of either
+// kind.
+constexpr bool EnumIncludesSoftwareMfts(uint32_t flags) {
+  return EnumIncludesSyncMfts(flags) || (flags & kAsyncMft) != 0;
 }
 
 static_assert(!EnumIncludesSyncMfts(H264EncoderEnumFlags(true)),
               "hardware-only encoder enumeration must exclude sync MFTs (#504)");
-static_assert((H264EncoderEnumFlags(true) & kHardware) != 0 &&
-                  (H264EncoderEnumFlags(true) & kAsyncMft) != 0,
-              "hardware-only encoder enumeration must include async hardware MFTs");
+static_assert(!EnumIncludesSoftwareMfts(H264EncoderEnumFlags(true)),
+              "hardware-only encoder enumeration must exclude software MFTs");
+static_assert((H264EncoderEnumFlags(true) & kHardware) != 0,
+              "hardware-only encoder enumeration must include hardware MFTs");
 
 }  // namespace mf_enum
 }  // namespace webrtc

@@ -6072,19 +6072,27 @@ mod track_name_tests {
     /// (vendor/webrtc-sys/src/mf/mf_enum_flags.h).
     #[test]
     fn mf_hardware_h264_encoder_search_excludes_sync_software_mfts() {
-        use webrtc_sys::mf_enum_flags::ffi::{MfEnumIncludesSyncMfts, MfH264EncoderEnumFlags};
+        use webrtc_sys::mf_enum_flags::ffi::{
+            MfEnumIncludesSoftwareMfts, MfEnumIncludesSyncMfts, MfH264EncoderEnumFlags,
+        };
         // mfapi.h MFT_ENUM_FLAG_* values.
         const SYNCMFT: u32 = 0x1;
         const ASYNCMFT: u32 = 0x2;
         const HARDWARE: u32 = 0x4;
         const SORTANDFILTER: u32 = 0x40;
 
+        // ASYNCMFT adds asynchronous *software* MFTs; hardware MFTs are
+        // asynchronous by contract and covered by HARDWARE alone.
         let hardware_only = MfH264EncoderEnumFlags(true);
-        assert_eq!(hardware_only, HARDWARE | ASYNCMFT | SORTANDFILTER);
+        assert_eq!(hardware_only, HARDWARE | SORTANDFILTER);
         assert!(!MfEnumIncludesSyncMfts(hardware_only));
-        // The 0.9.35 mask must read as including sync MFTs, or the assertion
+        assert!(!MfEnumIncludesSoftwareMfts(hardware_only));
+        // The 0.9.35 mask must read as including sync MFTs, or the assertions
         // above could pass for a detector that never fires.
         assert!(MfEnumIncludesSyncMfts(SYNCMFT | ASYNCMFT | HARDWARE));
+        assert!(MfEnumIncludesSoftwareMfts(ASYNCMFT | HARDWARE));
+        // MFTEnumEx treats a mask with no kind bits as SYNCMFT.
+        assert!(MfEnumIncludesSyncMfts(SORTANDFILTER));
         // The non-hardware search still admits software MFTs.
         assert!(MfEnumIncludesSyncMfts(MfH264EncoderEnumFlags(false)));
     }

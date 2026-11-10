@@ -128,8 +128,8 @@ inline bool MftAcceptsH264Subtype(IMFTransform* transform, bool is_output) {
 }
 
 
-// Enumerate MFTs of the given category, optionally restricted to async
-// hardware MFTs (`hardware_only`: HARDWARE|ASYNCMFT, never SYNCMFT). Returns the first activated MFT whose output
+// Enumerate MFTs of the given category, optionally restricted to hardware
+// MFTs (`hardware_only`: HARDWARE|SORTANDFILTER, never SYNCMFT/ASYNCMFT). Returns the first activated MFT whose output
 // subtypes include H264 (for encoders) / input subtypes include H264 (for
 // decoders). `match_clsid` may be set to a specific MFT CLSID (as a debug
 // hint / for determinism); when null the first matching MFT is used.

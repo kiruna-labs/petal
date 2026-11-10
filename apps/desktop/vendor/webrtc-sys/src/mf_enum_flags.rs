@@ -15,5 +15,9 @@ pub mod ffi {
         /// True when an MFTEnumEx call with `flags` can return a synchronous
         /// (software) MFT.
         fn MfEnumIncludesSyncMfts(flags: u32) -> bool;
+
+        /// True when an MFTEnumEx call with `flags` can return any software
+        /// (synchronous or asynchronous) MFT.
+        fn MfEnumIncludesSoftwareMfts(flags: u32) -> bool;
     }
 }
