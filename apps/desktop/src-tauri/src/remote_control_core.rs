@@ -2250,6 +2250,18 @@ fn pressed_inputs() -> &'static Mutex<HashMap<(u32, String), PressedInputs>> {
     remote_control_engine().pressed_inputs()
 }
 
+/// Every test that puts held input in the process-wide pressed map must hold
+/// this for its whole body. Taking it clears the map, and some tests drain all
+/// of it (`drain_all_pressed`): a parallel test outside the lock loses its
+/// held key between `track_pressed_input` and its drain and sees 0 releases.
+#[cfg(test)]
+pub(crate) fn pressed_input_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let guard = LOCK.lock_unpoisoned();
+    pressed_inputs().lock_unpoisoned().clear();
+    guard
+}
+
 pub(crate) const HELD_INPUT_TTL: Duration = Duration::from_millis(1_200);
 pub(crate) fn button_from_wire(button: Option<i16>) -> RemoteControlButton {
     match button {
@@ -3111,6 +3123,7 @@ mod tests {
 
     #[test]
     fn held_input_ownership_releases_on_revoke_and_expiry() {
+        let _guard = pressed_input_test_lock();
         let frame = WindowFrame {
             x: 0,
             y: 0,
@@ -3143,6 +3156,7 @@ mod tests {
 
     #[test]
     fn repeated_keydown_does_not_duplicate_the_held_release() {
+        let _guard = pressed_input_test_lock();
         let frame = WindowFrame {
             x: 0,
             y: 0,

@@ -22049,12 +22049,6 @@ mod tests {
             .expect("remote-control contract must include pointer fields")
     }
 
-    fn pressed_input_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let guard = LOCK.get_or_init(|| Mutex::new(())).lock_unpoisoned();
-        pressed_inputs().lock_unpoisoned().clear();
-        guard
-    }
     #[cfg(target_os = "macos")]
     fn platform_input_test_lock() -> std::sync::MutexGuard<'static, ()> {
         input::ax_test_lock()
@@ -25376,6 +25370,7 @@ mod tests {
 
     #[test]
     fn redundant_input_gap_that_loses_an_up_releases_the_held_key() {
+        let _guard = pressed_input_test_lock();
         let ids = remote_control_test_ids("redundant_input_gap_that_loses_an_up_releases_the_held_key");
         let frame = WindowFrame { x: 0, y: 0, width: 100, height: 100 };
         let key = |seq: u64, action: RemoteControlAction| {
@@ -25429,6 +25424,7 @@ mod tests {
 
     #[test]
     fn redundant_input_gap_that_loses_drag_moves_keeps_the_button_held() {
+        let _guard = pressed_input_test_lock();
         let ids =
             remote_control_test_ids("redundant_input_gap_that_loses_drag_moves_keeps_the_button_held");
         let frame = WindowFrame { x: 0, y: 0, width: 100, height: 100 };
