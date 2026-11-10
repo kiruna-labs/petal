@@ -1415,6 +1415,10 @@ pub struct PublishedTrack {
     /// Rate-limits source-boundary logs while guaranteeing a sample at least
     /// every five seconds whenever frames reach the publisher.
     last_source_boundary_log: Mutex<Option<std::time::Instant>>,
+    /// Rate-limits the degenerate-frame skip warning (PETAL-DESKTOP-4Y).
+    last_degenerate_skip_log: Mutex<Option<std::time::Instant>>,
+    /// [`min_publishable_edge`] for this track's ladder, computed once.
+    min_publish_edge: u32,
     /// Cancels the detached encoder diagnostics when this track is terminal.
     background_cancel: CancellationToken,
     /// Windows: set once a re-anchor failed to re-apply the cadence, so the
@@ -1665,6 +1669,56 @@ struct CameraSizeRecovery {
     last_reanchor_at: Option<std::time::Instant>,
     /// Sticky for the track's lifetime once the flap guard trips.
     letterbox_locked: bool,
+}
+
+/// The source's own alignment: `VideoTrackSource::InternalSource` is built as
+/// `AdaptedVideoTrackSource(4)` (video_track.cpp), combined with the sink's
+/// (video_adapter.h `source_resolution_alignment`). The adapter rounds the crop
+/// to a multiple of `scale.denominator * alignment`, never past the input, so
+/// at scale 1/1 ANY edge below 4 crops to 0 and aborts in `CropAndScale`. No
+/// downscale is needed; capture sizes are even, so the real edge is 2 px.
+/// Pinned to the C++ constructor by a source test.
+const ADAPTER_MIN_EDGE: u32 = 4;
+const DEGENERATE_SKIP_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// Reference size to measure a ladder's rung scale-down factors on.
+const MIN_EDGE_REFERENCE_SIZE: u32 = 1200;
+
+/// PETAL-DESKTOP-4Y: the smallest width/height (px) we hand libwebrtc.
+/// Below it, the adapter can size a frame to 0 and `I420Buffer::Create`
+/// aborts the process. The floor is [`ADAPTER_MIN_EDGE`], raised by a
+/// conservative margin for our ladder's sink alignment (2^rungs) times its
+/// largest rung scale-down (`into_rtp_encodings`' ratio).
+fn min_publishable_edge(ladder: FullShareSimulcastLadder) -> u32 {
+    let rungs = full_share_simulcast_layers(MIN_EDGE_REFERENCE_SIZE, MIN_EDGE_REFERENCE_SIZE, ladder);
+    let alignment = 1u32 << rungs.len();
+    let smallest = rungs
+        .iter()
+        .map(|rung| rung.width.min(rung.height))
+        .min()
+        .unwrap_or(MIN_EDGE_REFERENCE_SIZE)
+        .max(1);
+    let max_scale_down = MIN_EDGE_REFERENCE_SIZE.div_ceil(smallest);
+    (alignment * max_scale_down).max(ADAPTER_MIN_EDGE)
+}
+
+/// Which edge of a below-floor frame is under it, for the closed diagnostic tag.
+fn degenerate_axis(
+    width: u32,
+    height: u32,
+    min_edge: u32,
+) -> crate::logging::DegenerateAxisTag {
+    use crate::logging::DegenerateAxisTag;
+    match (width < min_edge, height < min_edge) {
+        (true, true) => DegenerateAxisTag::Both,
+        (true, false) => DegenerateAxisTag::Width,
+        (false, true) => DegenerateAxisTag::Height,
+        (false, false) => DegenerateAxisTag::NotApplicable,
+    }
+}
+
+/// True when a frame of this size must not reach `capture_frame`.
+fn frame_below_publishable_edge(width: u32, height: u32, min_edge: u32) -> bool {
+    width < min_edge || height < min_edge
 }
 
 /// Bucket a frame size for the closed diagnostic schema. No caller may send raw
@@ -2649,6 +2703,8 @@ impl RoomConnection<Arc<Room>> {
             source_push_spacer: Mutex::new(SourcePushSpacer::default()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
             last_source_boundary_log: Mutex::new(None),
+            last_degenerate_skip_log: Mutex::new(None),
+            min_publish_edge: min_publishable_edge(simulcast_ladder),
             background_cancel,
             #[cfg(target_os = "windows")]
             geometry_reapply_warned: AtomicBool::new(false),
@@ -2765,6 +2821,9 @@ impl RoomConnection<Arc<Room>> {
             source_push_spacer: Mutex::new(SourcePushSpacer::default()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
             last_source_boundary_log: Mutex::new(None),
+            last_degenerate_skip_log: Mutex::new(None),
+            min_publish_edge: // Camera: one encoding, no ladder -- only the adapter floor applies.
+            min_publishable_edge(FullShareSimulcastLadder::HighOnly),
             background_cancel,
             #[cfg(target_os = "windows")]
             geometry_reapply_warned: AtomicBool::new(false),
@@ -6303,6 +6362,50 @@ mod track_name_tests {
         }
     }
 
+    /// PETAL-DESKTOP-4Y: the publish floor comes from the ladder in use, never
+    /// below the adapter's own denominator floor.
+    #[test]
+    fn min_publishable_edge_is_derived_from_the_simulcast_ladder() {
+        for (ladder, expected) in [
+            (FullShareSimulcastLadder::Legacy, 16),
+            (FullShareSimulcastLadder::LegacyBottom30, 16),
+            (FullShareSimulcastLadder::Raised, 8),
+            (FullShareSimulcastLadder::TwoRung, 4),
+            (FullShareSimulcastLadder::ReducedQ, 4),
+            (FullShareSimulcastLadder::HighOnly, ADAPTER_MIN_EDGE),
+        ] {
+            assert_eq!(min_publishable_edge(ladder), expected, "{ladder:?}");
+        }
+    }
+
+    #[test]
+    fn frames_below_the_publish_floor_are_skipped_on_either_axis() {
+        let edge = min_publishable_edge(FullShareSimulcastLadder::TwoRung);
+        assert!(frame_below_publishable_edge(0, 600, edge));
+        assert!(frame_below_publishable_edge(1200, 2, edge), "thin window");
+        assert!(frame_below_publishable_edge(edge - 1, 600, edge));
+        assert!(!frame_below_publishable_edge(edge, edge, edge));
+        assert!(!frame_below_publishable_edge(1920, 1080, edge));
+    }
+
+    /// The only entry into `NativeVideoSource::capture_frame` must run the
+    /// floor first (`PublishedTrack` cannot be built offline), and must not
+    /// unpublish or hide anything when it skips.
+    #[test]
+    fn capture_to_source_checks_the_publish_floor_before_capture_frame() {
+        let src = include_str!("publisher.rs");
+        let start = src.find(concat!("    fn capture_to_source", "<")).expect("capture_to_source");
+        let body = &src[start..];
+        let guard = body.find("frame_below_publishable_edge(").expect("floor check");
+        let push = body.find("self.rtc_source.capture_frame(").expect("capture_frame");
+        assert!(guard < push, "the floor check must precede capture_frame");
+        let skip = &body[guard..push];
+        assert!(skip.contains("return None;"), "a skipped frame never reached the source");
+        assert!(skip.contains("self.min_publish_edge"), "floor is cached at construction");
+        assert!(!skip.contains(concat!("min_publishable_edge", "(")), "no per-frame ladder walk");
+        assert!(!skip.contains("unpublish") && !skip.contains("hide"), "{skip}");
+    }
+
     /// PETAL-DESKTOP-4Y: libwebrtc aborts the whole process when
     /// `CropAndScale` is asked for a zero-sized buffer (`I420Buffer::Create`
     /// RTC_CHECK). `NativeVideoSource` cannot be driven offline into the
@@ -6332,10 +6435,51 @@ mod track_name_tests {
         assert!(calls >= 1, "no CropAndScale call found; the pin is stale");
     }
 
+    /// The floor rests on `AdaptedVideoTrackSource(4)`: a bump that changes it
+    /// must re-derive `ADAPTER_MIN_EDGE`.
+    #[test]
+    fn adapter_min_edge_matches_the_vendored_source_alignment() {
+        let src = vendored_video_track_cpp();
+        let at = src.find("webrtc::AdaptedVideoTrackSource(").expect("source ctor");
+        let digits: String = src[at + "webrtc::AdaptedVideoTrackSource(".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        assert_eq!(digits.parse::<u32>().expect("alignment literal"), ADAPTER_MIN_EDGE);
+    }
+
     fn vendored_video_track_cpp() -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../vendor/webrtc-sys/src/video_track.cpp");
         std::fs::read_to_string(&path).expect("read vendored video_track.cpp")
+    }
+
+    #[test]
+    fn degenerate_axis_names_the_edge_under_the_floor() {
+        use crate::logging::DegenerateAxisTag::*;
+        assert_eq!(degenerate_axis(2, 600, 4), Width);
+        assert_eq!(degenerate_axis(1200, 2, 4), Height);
+        assert_eq!(degenerate_axis(2, 2, 4), Both);
+        assert_eq!(degenerate_axis(4, 4, 4), NotApplicable);
+    }
+
+    /// A skip is `None` ("never reached the source"), not `Some(false)` (a
+    /// limiter rejection the pump retries): `PublishedTrack` cannot be built
+    /// offline, so pin the real chokepoint and its callers.
+    #[test]
+    fn a_skipped_frame_is_none_and_every_caller_propagates_it() {
+        let src = include_str!("publisher.rs");
+        let start = src.find(concat!("    fn capture_to_source", "<")).expect("capture_to_source");
+        let end = start + src[start..].find("fn note_degenerate_frame_skipped").expect("end");
+        let body = &src[start..end];
+        assert!(body.contains("-> Option<bool>"), "{body}");
+        assert!(body.contains("return None;"), "a skip must be None: {body}");
+        let callers = src.matches(concat!("self.capture_to_source(", "&frame")).count();
+        let propagated = src.matches(concat!("&mut capture_frame_started)", "?;")).count();
+        assert_eq!(callers, 3, "capture_to_source callers changed; re-audit the skip outcome");
+        assert_eq!(propagated, 2, "the two copied-frame callers must `?` the skip");
+        assert!(src.contains(concat!("Ok(None) => return ", "None,")), "zero-copy skip must return None");
+        assert!(!src.contains(concat!("result.unwrap_or", "(false)")));
     }
 
     /// #500: no macOS H.264 encoder session is created with VideoToolbox
@@ -8869,11 +9013,26 @@ impl PublishedTrack {
     /// [`SOURCE_PUSH_MIN_SPACING`] since the previous push first. `started` is
     /// reset after the wait so `capture_frame_return_ms` (and the zero-copy
     /// stall latch fed by it) never counts the wait.
+    ///
+    /// `None` means the frame never reached the source (skipped as
+    /// degenerate): callers return `None` too, so the pump's retry loop,
+    /// pushed counters and first-frame stage never count it. `Some(false)` is
+    /// a real limiter rejection and stays retryable.
     fn capture_to_source<T: AsRef<dyn VideoBuffer>>(
         &self,
         frame: &VideoFrame<T>,
         started: &mut std::time::Instant,
-    ) -> bool {
+    ) -> Option<bool> {
+        // PETAL-DESKTOP-4Y: skip, never push, a frame libwebrtc may size to 0
+        // (process abort). The receiver holds its last frame; nothing unpublishes.
+        let (frame_width, frame_height) = {
+            let buffer = frame.buffer.as_ref();
+            (buffer.width(), buffer.height())
+        };
+        if frame_below_publishable_edge(frame_width, frame_height, self.min_publish_edge) {
+            self.note_degenerate_frame_skipped(frame_width, frame_height);
+            return None;
+        }
         let mut spacer = self.source_push_spacer.lock_unpoisoned();
         let wait = spacer.wait_before_push(std::time::Instant::now());
         if !wait.is_zero() {
@@ -8882,7 +9041,39 @@ impl PublishedTrack {
         *started = std::time::Instant::now();
         let accepted = self.rtc_source.capture_frame(frame);
         spacer.record_return(std::time::Instant::now());
-        accepted
+        Some(accepted)
+    }
+
+    fn note_degenerate_frame_skipped(&self, frame_width: u32, frame_height: u32) {
+        let now = std::time::Instant::now();
+        let should_log = {
+            let mut last = self.last_degenerate_skip_log.lock_unpoisoned();
+            let due = last.is_none_or(|previous| {
+                now.duration_since(previous) >= DEGENERATE_SKIP_LOG_INTERVAL
+            });
+            if due {
+                *last = Some(now);
+            }
+            due
+        };
+        if !should_log {
+            return;
+        }
+        let (published_width, published_height) = self.published_size();
+        log::warn!(
+            "publisher: skipping degenerate {frame_width}x{frame_height} frame on '{}' (published {published_width}x{published_height}, minimum edge {}); holding the last frame",
+            self.track.name(),
+            self.min_publish_edge,
+        );
+        crate::logging::capture_sentry_diagnostic(
+            crate::logging::SentryDiagnosticEvent::DegenerateFrameSkipped(
+                crate::logging::DegenerateFrameDiagnostic {
+                    frame_geometry: camera_geometry_bucket(frame_width, frame_height),
+                    published_geometry: camera_geometry_bucket(published_width, published_height),
+                    axis: degenerate_axis(frame_width, frame_height, self.min_publish_edge),
+                },
+            ),
+        );
     }
 
     /// Convert a captured frame to I420 and push it into the LiveKit
@@ -8959,7 +9150,8 @@ impl PublishedTrack {
                         .native_attempt_due(std::time::Instant::now());
                 if native_attempt_due {
                     match self.push_native(pixel_buffer, capture_wall_time_us) {
-                        Ok(timing) => {
+                        Ok(None) => return None,
+                        Ok(Some(timing)) => {
                             self.record_native_capture_transition(
                                 std::time::Duration::from_secs_f64(
                                     timing.capture_frame_return_ms / 1000.0,
@@ -8999,7 +9191,7 @@ impl PublishedTrack {
         &self,
         pixel_buffer: &crate::capture::NativeCapturedPixelBuffer,
         capture_wall_time_us: u64,
-    ) -> Result<PublishedFrameTiming, NativeCaptureFailure> {
+    ) -> Result<Option<PublishedFrameTiming>, NativeCaptureFailure> {
         let frame_id = self
             .frame_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -9021,22 +9213,24 @@ impl PublishedTrack {
             self.capture_to_source(&frame, &mut capture_frame_started)
         }));
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
-        if result.is_err() {
+        let Ok(source_accepted) = result else {
             return Err(NativeCaptureFailure {
                 reason: "native capture_frame panicked",
                 capture_frame_elapsed: capture_frame_started.elapsed(),
             });
-        }
-        Ok(PublishedFrameTiming {
+        };
+        // `None`: skipped as degenerate, never reached the source. Not a
+        // native failure, so the zero-copy latch is left alone.
+        let Some(source_accepted) = source_accepted else {
+            return Ok(None);
+        };
+        Ok(Some(PublishedFrameTiming {
             convert_ms: 0.0,
             capture_frame_return_ms,
             capture_age_ms: capture_age_ms(capture_wall_time_us),
             frame_id,
-            // The native path reports a panicked closure as Err, not as a
-            // rejection: a missing value here means the frame never reached
-            // the source at all.
-            source_accepted: result.unwrap_or(false),
-        })
+            source_accepted,
+        }))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -9044,7 +9238,7 @@ impl PublishedTrack {
         &self,
         _pixel_buffer: &crate::capture::NativeCapturedPixelBuffer,
         _capture_wall_time_us: u64,
-    ) -> Result<PublishedFrameTiming, NativeCaptureFailure> {
+    ) -> Result<Option<PublishedFrameTiming>, NativeCaptureFailure> {
         Err(NativeCaptureFailure {
             reason: "native capture buffers are not implemented for this platform",
             capture_frame_elapsed: std::time::Duration::ZERO,
@@ -9250,7 +9444,7 @@ impl PublishedTrack {
         };
 
         let mut capture_frame_started = std::time::Instant::now();
-        let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started);
+        let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started)?;
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         Some(PublishedFrameTiming {
             convert_ms,
@@ -9551,7 +9745,7 @@ impl PublishedTrack {
             }
         };
         let mut capture_frame_started = std::time::Instant::now();
-        let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started);
+        let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started)?;
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
         Some(PublishedFrameTiming {
             convert_ms,

@@ -1623,6 +1623,12 @@ impl RejectedPushRetry {
     }
 }
 
+/// A push counts as published only when it reached the source. `None` is a
+/// conversion failure or a skipped degenerate frame (PETAL-DESKTOP-4Y).
+fn push_reached_source(timing: Option<crate::transport::publisher::PublishedFrameTiming>) -> bool {
+    timing.is_some()
+}
+
 fn trace_interaction_push(
     trace: &mut InteractionPushTrace,
     signal: &InteractionSignal,
@@ -5913,24 +5919,29 @@ fn spawn_share_pump(
                     record_published_frame_timing(&pump_diagnostics, window_id, timing);
                     rejected_push_retry
                         .observe_push(timing.map(|t| t.source_accepted), Instant::now());
-                    if !first_pushed_frame_recorded {
-                        first_pushed_frame_recorded = true;
-                        if let Some(diagnostics) = pump_diagnostics.as_ref() {
-                            diagnostics.record_native_startup_stage(
-                                window_id,
-                                NativeStartupStageKind::FirstFramePushed,
-                                Some(current.width()),
-                                Some(current.height()),
-                                Some("idle_static_refresh".to_string()),
+                    // A push that never reached the source (a skipped
+                    // degenerate frame) is not a published frame.
+                    if push_reached_source(timing) {
+                        if !first_pushed_frame_recorded {
+                            first_pushed_frame_recorded = true;
+                            if let Some(diagnostics) = pump_diagnostics.as_ref() {
+                                diagnostics.record_native_startup_stage(
+                                    window_id,
+                                    NativeStartupStageKind::FirstFramePushed,
+                                    Some(current.width()),
+                                    Some(current.height()),
+                                    Some("idle_static_refresh".to_string()),
+                                );
+                            }
+                        }
+                        pump_last_push_for_task.store(refresh_at_us, Ordering::Relaxed);
+                        let pushed =
+                            pump_pushed_frames_for_task.fetch_add(1, Ordering::Relaxed) + 1;
+                        if pushed == 1 || pushed % 300 == 0 {
+                            log::info!(
+                                "session: window {window_id} frame pump heartbeat -- pushed {pushed} frame(s), last decision={last_push_decision}"
                             );
                         }
-                    }
-                    pump_last_push_for_task.store(refresh_at_us, Ordering::Relaxed);
-                    let pushed = pump_pushed_frames_for_task.fetch_add(1, Ordering::Relaxed) + 1;
-                    if pushed == 1 || pushed % 300 == 0 {
-                        log::info!(
-                            "session: window {window_id} frame pump heartbeat -- pushed {pushed} frame(s), last decision={last_push_decision}"
-                        );
                     }
                 }
 
@@ -6083,6 +6094,9 @@ fn spawn_share_pump(
                                             window_id,
                                             timing,
                                         );
+                                        // Never reached the source (skipped
+                                        // degenerate frame): not a pushed frame.
+                                        if push_reached_source(timing) {
                                         if let Some(diagnostics) = pump_diagnostics.as_ref() {
                                             let stage = if first_pushed_frame_recorded {
                                                 NativeStartupStageKind::SnapshotPullPushed
@@ -6115,6 +6129,7 @@ fn spawn_share_pump(
                                             log::info!(
                                                 "session: window {window_id} share liveness confirmed -- {moving} moving frame(s) pushed (last decision={last_push_decision})"
                                             );
+                                        }
                                         }
                                     }
                                 } else if hash_changed {
@@ -6411,6 +6426,10 @@ fn spawn_share_pump(
             );
             rejected_push_retry.observe_push(timing.map(|t| t.source_accepted), Instant::now());
             record_published_frame_timing(&pump_diagnostics, window_id, timing);
+            if !push_reached_source(timing) {
+                // Never reached the source (skipped degenerate frame): not pushed.
+                continue;
+            }
             if !first_pushed_frame_recorded {
                 first_pushed_frame_recorded = true;
                 if let Some(diagnostics) = pump_diagnostics.as_ref() {
@@ -14323,6 +14342,32 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         assert!(!retry.take_due(), "a deadline fires once");
         retry.observe_push(Some(true), now);
         assert_eq!(retry, RejectedPushRetry::default());
+    }
+
+    #[test]
+    fn a_skipped_degenerate_frame_is_not_retried_or_counted_but_a_rejection_is() {
+        use crate::transport::publisher::PublishedFrameTiming;
+        let now = Instant::now();
+        let timing = |source_accepted| PublishedFrameTiming {
+            convert_ms: 0.0,
+            capture_frame_return_ms: 0.0,
+            capture_age_ms: 0.0,
+            frame_id: 1,
+            source_accepted,
+        };
+        // Skipped: the publisher returns None, so nothing arms or counts.
+        let mut retry = RejectedPushRetry::default();
+        let skipped: Option<PublishedFrameTiming> = None;
+        retry.observe_push(skipped.map(|t| t.source_accepted), now);
+        assert_eq!(retry, RejectedPushRetry::default(), "a skip is never retried");
+        assert!(!push_reached_source(skipped), "a skip is not a pushed frame");
+        // A real limiter rejection still retries and still counts as reaching the source.
+        retry.observe_push(Some(timing(false)).map(|t| t.source_accepted), now);
+        assert_eq!(retry.deadline, Some(now + REJECTED_PUSH_RETRY_DELAY));
+        assert!(push_reached_source(Some(timing(false))));
+        // The pump's three counting sites (idle refresh, snapshot, raw) all gate on it.
+        let sites = include_str!("share.rs").matches(concat!("push_reached_source", "(timing)")).count();
+        assert_eq!(sites, 3);
     }
 
     #[test]
