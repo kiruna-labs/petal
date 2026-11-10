@@ -1020,6 +1020,9 @@ where
     }
     // A room change landed during the final attempt: its failure belongs to
     // the old room and must not clear the new room's intent (PR #503 F2).
+    // Checked and cleared under the control lock, which every intent-ON
+    // writer holds, so a new room's camera can't land between the two.
+    let _control = state.lock_camera_control().await;
     if !generation.is_current() {
         return CameraHealOutcome::Cancelled;
     }
@@ -1798,6 +1801,34 @@ mod tests {
         assert_eq!(outcome, CameraHealOutcome::Published);
         assert!(generation.is_current());
         assert_eq!(attempts.load(Ordering::SeqCst), 2, "retried in the new room");
+    }
+
+    /// Re-review of F2: the generation check and the intent clear must not
+    /// straddle a camera action for a new room. A click that holds the control
+    /// lock (mid-join) and lands a new room must win: the stale clear waits
+    /// for the lock, re-checks, and leaves the new intent alone.
+    #[tokio::test]
+    async fn a_stale_clear_waits_for_an_in_flight_camera_action() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        let generation = state.begin_room_generation();
+        let control = state.lock_camera_control().await;
+        let heal = drive_camera_publish_attempts(
+            &state,
+            &generation,
+            &[Duration::ZERO],
+            || std::future::ready(Err::<(), String>("no frames".to_string())),
+            |_d| async {},
+        );
+        let click = async {
+            tokio::task::yield_now().await;
+            state.begin_room_generation();
+            state.set_camera_intent(true);
+            drop(control);
+        };
+        let (outcome, ()) = tokio::join!(heal, click);
+        assert_eq!(outcome, CameraHealOutcome::Cancelled);
+        assert!(state.camera_intent(), "the new room's camera must survive");
     }
 
     /// PR #503 review F3: however many rooms the camera crosses, the heal

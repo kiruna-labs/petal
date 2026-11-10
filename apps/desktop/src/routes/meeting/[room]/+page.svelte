@@ -543,7 +543,8 @@
       // user's own camera); publish once the room join lands, silently.
       const outcome = await turnCameraOnSequence({
         acquireSelfView,
-        whenJoined: (settleMs) => meeting.whenJoined({ settleMs }),
+        whenJoined: meeting.whenJoined,
+        afterRefusal: meeting.afterRefusal,
         stillWanted: () => request === cameraRequest && camActive,
         startPublish: () => invoke<StartCameraPublishResult>(COMMANDS.startCameraPublish)
       });

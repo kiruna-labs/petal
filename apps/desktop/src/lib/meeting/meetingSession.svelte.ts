@@ -44,7 +44,7 @@ import { COMMANDS, EVENTS, hasTauriBridge } from '#lib/ipc.js';
 import type { PresentParticipant, ResilienceEvent, RoomLeftEvent } from '#lib/ipc.js';
 import { createSpeakerSpotlight } from './speakerSpotlight.svelte';
 import { clearMeetingRouteRoom, setMeetingRouteRoom } from '#lib/stores/meetingRoute.js';
-import { createJoinGate } from '#lib/meeting/joinGate.js';
+import { createJoinGate, type RefusalPhase } from '#lib/meeting/joinGate.js';
 import { joinFailureMessage } from '#lib/data/joinFailure.js';
 import {
   GALLERY_BRIDGE_MAX_RESTARTS,
@@ -101,9 +101,10 @@ export interface MeetingSession {
   join(): Promise<boolean>;
   /** Resolves once the meeting is connected (true), or false when it ends up
    * disconnected or the route is disposed. Immediate when already settled;
-   * waits through the first join and through connection recovery. With
-   * `settleMs`, an already-connected phase must hold that long first. */
-  whenJoined(opts?: { settleMs?: number }): Promise<boolean>;
+   * waits through the first join and through connection recovery. */
+  whenJoined(): Promise<boolean>;
+  /** After a control was refused as "not in room" (see `joinGate.ts`). */
+  afterRefusal(settleMs: number): Promise<RefusalPhase>;
   /** Tear down listeners, bridge, and all timers (call from onDestroy). */
   dispose(): void;
 }
@@ -715,7 +716,8 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   }
 
   return {
-    whenJoined: (opts) => joinGate.whenJoined(opts),
+    whenJoined: () => joinGate.whenJoined(),
+    afterRefusal: (settleMs) => joinGate.afterRefusal(settleMs),
     get joinedRoom() {
       return joinedRoom;
     },

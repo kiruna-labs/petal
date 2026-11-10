@@ -1269,7 +1269,12 @@ fn spawn_local_publish_reconcile(app: &tauri::AppHandle, room_id: String) {
         log::info!("session: reconciling local publish state after rejoin (camera_on=true)");
 
         if !state.camera_publishing() {
-            state.set_camera_intent(true);
+            {
+                // Under the control lock like every intent-ON writer, so a
+                // stale heal's clear can't interleave (camera_session).
+                let _control = state.lock_camera_control().await;
+                state.set_camera_intent(true);
+            }
             // Same contract as the manual toggle: announce the intent before
             // the reconcile reaches for the device, so a Settings preview
             // yields it (see `camera_session::emit_camera_intent`).
