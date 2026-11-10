@@ -41,10 +41,11 @@ export async function findBlobByPathname(
 // recently uploaded match if more than one somehow exists.
 export async function findBlobByPrefixSuffix(
   prefix: string,
-  suffix: string
+  suffix: string,
+  opts: { signal?: AbortSignal } = {}
 ): Promise<ListBlobResultBlob | null> {
   const token = requireBlobToken();
-  const { blobs } = await list({ prefix, token });
+  const { blobs } = await list({ prefix, token, abortSignal: opts.signal });
   const matches = blobs.filter((b) => b.pathname.endsWith(suffix));
   if (matches.length === 0) return null;
   matches.sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime());
@@ -61,4 +62,33 @@ export async function fetchBlobJson(
     throw new Error(`blob fetch failed: ${res.status} ${res.statusText}`);
   }
   return res.json();
+}
+
+// Run a Blob read under a hard deadline, so a hung or retrying read cannot run
+// a function into Vercel's maxDuration (a 504 that skips the route's own error
+// handling). Do not pass AbortSignal.timeout() to @vercel/blob instead: its
+// retry loop only stops on an AbortError, so it retries a TimeoutError (and
+// any 5xx) with backoff past the limit. This races its own timer, then aborts
+// with a plain AbortError, which the SDK honours and which frees the socket.
+export async function withBlobDeadline<T>(
+  ms: number,
+  read: (signal: AbortSignal) => Promise<T>
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`blob read exceeded ${ms}ms`));
+    }, ms);
+  });
+  // Deferred so a callback that throws synchronously still rejects inside the
+  // race (and the timer is still cleared) rather than escaping it.
+  const pending = Promise.resolve().then(() => read(controller.signal));
+  pending.catch(() => {}); // the loser of the race must not surface as unhandled
+  try {
+    return await Promise.race([pending, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

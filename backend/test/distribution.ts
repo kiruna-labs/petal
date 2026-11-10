@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { getGlobalDispatcher, MockAgent, setGlobalDispatcher } from 'undici';
 import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
 import adminHandler from '../api/admin.js';
-import downloadHandler from '../api/download.js';
+import downloadHandler, { setDownloadDeadlineForTests } from '../api/download.js';
 import galleryTokenHandler from '../api/gallery-token.js';
 import indexHandler from '../api/index.js';
 import roomsHandler from '../api/rooms.js';
@@ -451,13 +451,16 @@ async function main() {
   }
   const listPath = `/api/blob?prefix=${encodeURIComponent('latest.json')}`;
   // Fails the test instead of hanging the suite when the handler never answers.
-  async function callUpdaterWithin(ms: number): Promise<TestResponse> {
+  async function callWithin(
+    handler: (req: VercelRequest, res: VercelResponse) => Promise<void>,
+    ms: number
+  ): Promise<TestResponse> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const limit = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error(`handler did not answer within ${ms}ms`)), ms);
     });
     try {
-      return await Promise.race([call(updaterHandler), limit]);
+      return await Promise.race([call(handler), limit]);
     } finally {
       clearTimeout(timer);
     }
@@ -474,7 +477,7 @@ async function main() {
         },
         async () => {
           const started = Date.now();
-          const response = await callUpdaterWithin(3000);
+          const response = await callWithin(updaterHandler, 3000);
           assert.ok(Date.now() - started < 3000, 'handler must not wait on the hung list()');
           assert.equal(response.statusCode, 204);
           assert.equal(response.ended, true);
@@ -496,7 +499,7 @@ async function main() {
         },
         async () => {
           const started = Date.now();
-          const response = await callUpdaterWithin(3000);
+          const response = await callWithin(updaterHandler, 3000);
           assert.ok(Date.now() - started < 3000, 'handler must not wait on list() retries');
           assert.equal(response.statusCode, 204);
         }
@@ -728,6 +731,38 @@ async function main() {
     assert.equal(response.headers.location, currentInstaller.url);
     assert.equal(response.ended, true);
   });
+
+  for (const [label, setup] of [
+    [
+      'hangs',
+      (p: ReturnType<MockAgent['get']>) =>
+        p
+          .intercept({ path: `/api/blob?prefix=${encodeURIComponent('Petal_')}`, method: 'GET' })
+          .reply(200, { blobs: [], hasMore: false })
+          .delay(60_000),
+    ],
+    [
+      'keeps failing',
+      (p: ReturnType<MockAgent['get']>) =>
+        p
+          .intercept({ path: `/api/blob?prefix=${encodeURIComponent('Petal_')}`, method: 'GET' })
+          .reply(503, { error: { code: 'service_unavailable', message: 'down' } })
+          .persist(),
+    ],
+  ] as const) {
+    await test(`/api/download answers 502 before the function limit when Blob list() ${label}`, async () => {
+      setDownloadDeadlineForTests(200);
+      try {
+        await withIsolatedBlobApi(setup, async () => {
+          const response = await callWithin(downloadHandler, 3000);
+          assert.equal(response.statusCode, 502);
+          assert.deepEqual(response.body, { error: 'download service unavailable' });
+        });
+      } finally {
+        setDownloadDeadlineForTests();
+      }
+    });
+  }
 
   await test('/api/download rejects an unknown platform before listing blobs', async () => {
     const response = await call(downloadHandler, 'GET', { platform: 'linux' });

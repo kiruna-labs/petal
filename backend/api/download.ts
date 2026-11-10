@@ -3,9 +3,20 @@
 // deterministic platform-specific artifact for websites and invite surfaces.
 
 import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
-import { findBlobByPrefixSuffix } from '../lib/blob.js';
+import { findBlobByPrefixSuffix, withBlobDeadline } from '../lib/blob.js';
 import { recordDownload } from '../lib/distributionMetrics.js';
 import { applyCors, sendApiError } from '../lib/http.js';
+
+// The Blob list must finish well inside maxDuration (vercel.json, 10s) so a
+// hung store answers 502 "download service unavailable" promptly instead of a
+// 10s platform 504 that skips sendApiError and the Sentry report.
+export const DOWNLOAD_BLOB_DEADLINE_MS = 4000;
+let downloadBlobDeadlineMs = DOWNLOAD_BLOB_DEADLINE_MS;
+
+/** Test hook: shorten the deadline. */
+export function setDownloadDeadlineForTests(ms = DOWNLOAD_BLOB_DEADLINE_MS): void {
+  downloadBlobDeadlineMs = ms;
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return;
@@ -26,7 +37,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const suffix = platform === 'windows' ? '_windows_x86_64-setup.exe' : '_universal.dmg';
 
   try {
-    const blob = await findBlobByPrefixSuffix('Petal_', suffix);
+    const blob = await withBlobDeadline(downloadBlobDeadlineMs, (signal) =>
+      findBlobByPrefixSuffix('Petal_', suffix, { signal })
+    );
     if (!blob) {
       res.status(404).json({ error: 'no release published yet' });
       return;
