@@ -28,10 +28,11 @@ function requireBlobToken(): string {
 // Find the current blob at an exact stable pathname (e.g. "latest.json").
 // Returns null if it doesn't exist yet (no release published).
 export async function findBlobByPathname(
-  pathname: string
+  pathname: string,
+  opts: { signal?: AbortSignal } = {}
 ): Promise<ListBlobResultBlob | null> {
   const token = requireBlobToken();
-  const { blobs } = await list({ prefix: pathname, token });
+  const { blobs } = await list({ prefix: pathname, token, abortSignal: opts.signal });
   return blobs.find((b) => b.pathname === pathname) ?? null;
 }
 
@@ -51,8 +52,11 @@ export async function findBlobByPrefixSuffix(
 }
 
 // Fetch and parse a JSON blob's contents verbatim (used for latest.json).
-export async function fetchBlobJson(blob: ListBlobResultBlob): Promise<unknown> {
-  const res = await fetch(blob.url);
+export async function fetchBlobJson(
+  blob: ListBlobResultBlob,
+  opts: { signal?: AbortSignal } = {}
+): Promise<unknown> {
+  const res = await fetch(blob.url, { signal: opts.signal });
   if (!res.ok) {
     throw new Error(`blob fetch failed: ${res.status} ${res.statusText}`);
   }
