@@ -12,18 +12,15 @@
 // builds would send; /api/download is the countable endpoint today.
 
 import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
-import { findBlobByPathname, fetchBlobJson } from '../lib/blob.js';
+import {
+  BLOB_READ_DEADLINE_MS,
+  fetchBlobJson,
+  findBlobByPathname,
+  setBlobReadDeadlineForTests,
+  withBlobDeadline,
+} from '../lib/blob.js';
 import { applyCors } from '../lib/http.js';
 import { captureApiError, errorTypeName, flushSentry } from '../lib/sentry.js';
-
-// The whole Blob read (list + manifest fetch) must finish well inside the
-// function's 10s maxDuration (vercel.json), leaving room for the Sentry flush.
-// A Blob call that hangs never throws, so without a deadline Vercel kills the
-// function with a 504 and the fallback below never runs. Do not pass
-// AbortSignal.timeout() to @vercel/blob: it retries a TimeoutError (and 5xx)
-// with backoff instead of stopping, so this route races its own timer.
-export const BLOB_READ_DEADLINE_MS = 4000;
-let blobReadDeadlineMs = BLOB_READ_DEADLINE_MS;
 
 // Edge-cache a good manifest briefly so most checks never touch Blob. Keep
 // stale-while-revalidate short: a pulled release must stop being served soon.
@@ -38,34 +35,19 @@ let lastGoodManifest: unknown = null;
 /** Test hooks: forget the warm-instance manifest; shorten the deadline. */
 export function resetUpdaterStateForTests(deadlineMs = BLOB_READ_DEADLINE_MS): void {
   lastGoodManifest = null;
-  blobReadDeadlineMs = deadlineMs;
+  setBlobReadDeadlineForTests(deadlineMs);
 }
 
 type ReadResult = { kind: 'absent' } | { kind: 'manifest'; manifest: unknown };
 
-async function readManifestWithDeadline(): Promise<ReadResult> {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      // A plain abort() is an AbortError, which the Blob SDK honours (stops
-      // retrying) and which releases the socket.
-      controller.abort();
-      reject(new Error(`latest.json read exceeded ${blobReadDeadlineMs}ms`));
-    }, blobReadDeadlineMs);
-  });
-  const read = (async (): Promise<ReadResult> => {
-    const signal = controller.signal;
+// The whole read (list + manifest fetch) shares one deadline, well inside the
+// 10s maxDuration and leaving room for the Sentry flush below.
+function readManifestWithDeadline(): Promise<ReadResult> {
+  return withBlobDeadline('latest.json', async (signal): Promise<ReadResult> => {
     const blob = await findBlobByPathname('latest.json', { signal });
     if (!blob) return { kind: 'absent' };
     return { kind: 'manifest', manifest: await fetchBlobJson(blob, { signal }) };
-  })();
-  read.catch(() => {}); // the loser of the race must not surface as unhandled
-  try {
-    return await Promise.race([read, deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
+  });
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {

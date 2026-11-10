@@ -13,6 +13,7 @@ import { ACCESS_CODE_ALPHABET, credentialForAccessCode, generateAccessCode, norm
 import {
   findBlobByPathname,
   findBlobByPrefixSuffix,
+  setBlobReadDeadlineForTests,
 } from '../lib/blob.js';
 import { sendApiError } from '../lib/http.js';
 import {
@@ -451,13 +452,17 @@ async function main() {
   }
   const listPath = `/api/blob?prefix=${encodeURIComponent('latest.json')}`;
   // Fails the test instead of hanging the suite when the handler never answers.
-  async function callUpdaterWithin(ms: number): Promise<TestResponse> {
+  async function callWithin(
+    ms: number,
+    handler: Parameters<typeof call>[0] = updaterHandler,
+    query?: Record<string, string>
+  ): Promise<TestResponse> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const limit = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => reject(new Error(`handler did not answer within ${ms}ms`)), ms);
     });
     try {
-      return await Promise.race([call(updaterHandler), limit]);
+      return await Promise.race([call(handler, 'GET', query), limit]);
     } finally {
       clearTimeout(timer);
     }
@@ -474,7 +479,7 @@ async function main() {
         },
         async () => {
           const started = Date.now();
-          const response = await callUpdaterWithin(3000);
+          const response = await callWithin(3000);
           assert.ok(Date.now() - started < 3000, 'handler must not wait on the hung list()');
           assert.equal(response.statusCode, 204);
           assert.equal(response.ended, true);
@@ -496,7 +501,7 @@ async function main() {
         },
         async () => {
           const started = Date.now();
-          const response = await callUpdaterWithin(3000);
+          const response = await callWithin(3000);
           assert.ok(Date.now() - started < 3000, 'handler must not wait on list() retries');
           assert.equal(response.statusCode, 204);
         }
@@ -744,6 +749,51 @@ async function main() {
 
     assert.equal(response.statusCode, 404);
     assert.deepEqual(response.body, { error: 'no release published yet' });
+  });
+
+  const installerListPath = `/api/blob?prefix=${encodeURIComponent('Petal_')}`;
+
+  await test('/api/download answers 502 before the function limit when Blob list() hangs', async () => {
+    setBlobReadDeadlineForTests(200);
+    try {
+      await withIsolatedBlobApi(
+        (p) => {
+          p.intercept({ path: installerListPath, method: 'GET' })
+            .reply(200, { blobs: [], hasMore: false })
+            .delay(60_000);
+        },
+        async () => {
+          const started = Date.now();
+          const response = await callWithin(3000, downloadHandler, { platform: 'windows' });
+          assert.ok(Date.now() - started < 3000, 'handler must not wait on the hung list()');
+          assert.equal(response.statusCode, 502);
+          assert.deepEqual(response.body, { error: 'download service unavailable' });
+        }
+      );
+    } finally {
+      setBlobReadDeadlineForTests();
+    }
+  });
+
+  await test('/api/download answers 502 before the function limit when Blob list() keeps failing', async () => {
+    setBlobReadDeadlineForTests(200);
+    try {
+      await withIsolatedBlobApi(
+        (p) => {
+          p.intercept({ path: installerListPath, method: 'GET' })
+            .reply(503, { error: { code: 'service_unavailable', message: 'down' } })
+            .persist();
+        },
+        async () => {
+          const started = Date.now();
+          const response = await callWithin(3000, downloadHandler);
+          assert.ok(Date.now() - started < 3000, 'handler must not wait on list() retries');
+          assert.equal(response.statusCode, 502);
+        }
+      );
+    } finally {
+      setBlobReadDeadlineForTests();
+    }
   });
 
   // #125 download observability. `/api/download` recorded NOTHING before
