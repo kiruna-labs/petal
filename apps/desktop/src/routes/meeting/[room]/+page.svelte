@@ -85,6 +85,7 @@
   import { createPillWindow } from '#lib/meeting/pillWindow.svelte.js';
   import { createMeetingSession } from '#lib/meeting/meetingSession.svelte.js';
   import { createLocalToast } from '#lib/meeting/localToast.svelte.js';
+  import { createCameraJoinPublish } from '#lib/meeting/cameraJoinPublish.js';
   import PluginSurfaces from '#lib/plugins/PluginSurfaces.svelte';
   import PluginToolbarButtons from '#lib/plugins/PluginToolbarButtons.svelte';
   import type { ToolbarButtonModel } from '@petal/shared/plugin-host/surfaces';
@@ -331,6 +332,7 @@
             return;
           }
           console.error('native camera publish failed or stopped', event.payload.error);
+          cameraPublish.cancel();
           localCameraStream?.getTracks().forEach((t) => t.stop());
           localCameraStream = null;
           camActive = false;
@@ -357,6 +359,7 @@
       // No Tauri bridge (plain browser preview) — `listen` rejects; without
       // this guard the rejection aborts the rest of onMount.
     }
+    cameraListenerReady = true;
 
     // AFTER the camera-publish-state listener exists, so the rejoin
     // reconcile's outcome can't slip between this snapshot and the listener
@@ -395,6 +398,7 @@
   });
 
   function releaseSelfViewPreview() {
+    cameraPublish.cancel();
     localCameraStream?.getTracks().forEach((t) => t.stop());
     localCameraStream = null;
     camActive = false;
@@ -522,6 +526,30 @@
     void followSelectedCamera();
   });
 
+  // A "not in room" refusal while the meeting is connecting is deferred, not
+  // toasted, and published on the connected edge below (#503).
+  const cameraPublish = createCameraJoinPublish({
+    startPublish: () => invoke<StartCameraPublishResult>(COMMANDS.startCameraPublish),
+    meetingPhase: () => meeting.meetingPhase,
+    onPublished: () => {
+      camActive = true;
+      dismissCameraToast();
+    },
+    onRetrying: () => showCameraToast('Camera is on for you — still connecting it for others…'),
+    onFailed: (e) => {
+      console.error('native camera publish failed', e);
+      showCameraRetryToast('Camera is on, but publishing to others failed');
+    }
+  });
+
+  // Gated on the camera-publish-state listener: a deferred publish that
+  // hands off to native self-heal must not lose its terminal outcome.
+  let cameraListenerReady = $state(false);
+  $effect(() => {
+    if (!cameraListenerReady || meeting.meetingPhase !== 'connected') return;
+    untrack(() => void cameraPublish.meetingConnected());
+  });
+
   // The native snapshot declares whether this platform needs its WebView
   // preview before publication (macOS) or treats it as best-effort (Windows).
   async function turnCameraOn() {
@@ -538,20 +566,7 @@
       // publish half fails — the local preview is the user's own camera.
       if (!(await acquireSelfView())) return;
 
-      try {
-        const result = await invoke<StartCameraPublishResult>(COMMANDS.startCameraPublish);
-        if (result.published === false) {
-          showCameraToast('Camera is on for you — still connecting it for others…');
-          return;
-        }
-        camActive = true;
-        dismissCameraToast();
-      } catch (e) {
-        console.error('native camera publish failed', e);
-        showCameraRetryToast('Camera is on, but publishing to others failed');
-        return;
-      }
-
+      await cameraPublish.publish();
       return;
     }
 
