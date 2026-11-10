@@ -124,6 +124,16 @@ test('a macOS install failure reaches the user as something they can act on (#87
       'The update could not be completed. Your previous Petal is safe at /Applications/.petal-update-123/old -- move it back to /Applications/Petal.app.',
       'see the logs to restore your previous Petal',
     ],
+    // A server-side error (504 from the update endpoint) is not the user's
+    // connection, even though the text contains "fetch".
+    [
+      'update check failed: Could not fetch a valid release JSON from the remote',
+      'The update server had a problem — try again later',
+    ],
+    [
+      'update endpoint did not respond with a successful status code',
+      'The update server had a problem — try again later',
+    ],
   ];
 
   for (const [raw, expected] of cases) {
