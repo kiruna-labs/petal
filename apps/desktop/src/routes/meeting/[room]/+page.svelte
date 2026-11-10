@@ -84,6 +84,7 @@
   import { aiChatEndReasonMessage, aiChatEndToastVariant } from '#lib/data/aiChat.js';
   import { createPillWindow } from '#lib/meeting/pillWindow.svelte.js';
   import { createMeetingSession } from '#lib/meeting/meetingSession.svelte.js';
+  import { turnCameraOnSequence } from '#lib/meeting/cameraOn.js';
   import { createLocalToast } from '#lib/meeting/localToast.svelte.js';
   import PluginSurfaces from '#lib/plugins/PluginSurfaces.svelte';
   import PluginToolbarButtons from '#lib/plugins/PluginToolbarButtons.svelte';
@@ -248,6 +249,9 @@
   // never be left with a toggle that says ON and does nothing, nor an error
   // that vanishes before they can act on it.
   let cameraToastRetry = $state(false);
+  // Bumped on every camera on/off so a turnCameraOn awaiting the join can
+  // tell it was superseded.
+  let cameraRequest = 0;
 
   function showCameraToast(message: string) {
     cameraToastRetry = false;
@@ -395,6 +399,7 @@
   });
 
   function releaseSelfViewPreview() {
+    cameraRequest += 1; // cancels a turnCameraOn still waiting on the join
     localCameraStream?.getTracks().forEach((t) => t.stop());
     localCameraStream = null;
     camActive = false;
@@ -533,26 +538,32 @@
     }
 
     if (hasTauri) {
-      // Every platform has a webview self-view now (Windows: the native-fed
-      // canvas stream; macOS: getUserMedia), and it stays up even if the
-      // publish half fails — the local preview is the user's own camera.
-      if (!(await acquireSelfView())) return;
-
-      try {
-        const result = await invoke<StartCameraPublishResult>(COMMANDS.startCameraPublish);
-        if (result.published === false) {
-          showCameraToast('Camera is on for you — still connecting it for others…');
+      const request = ++cameraRequest;
+      // Preview right away (it stays up even if publishing fails — it's the
+      // user's own camera); publish once the room join lands, silently.
+      const outcome = await turnCameraOnSequence({
+        acquireSelfView,
+        whenJoined: meeting.whenJoined,
+        stillWanted: () => request === cameraRequest && camActive,
+        startPublish: () => invoke<StartCameraPublishResult>(COMMANDS.startCameraPublish)
+      });
+      switch (outcome.kind) {
+        case 'join-failed':
+          // The meeting shows its own join error — drop the preview quietly.
+          if (request === cameraRequest) releaseSelfViewPreview();
           return;
-        }
-        camActive = true;
-        dismissCameraToast();
-      } catch (e) {
-        console.error('native camera publish failed', e);
-        showCameraRetryToast('Camera is on, but publishing to others failed');
-        return;
+        case 'published':
+          dismissCameraToast();
+          return;
+        case 'failed':
+          console.error('native camera publish failed', outcome.error);
+          showCameraRetryToast('Camera is on, but publishing to others failed');
+          return;
+        default:
+          // no-preview already toasted; publishing reports a real failure
+          // via `camera-publish-state`; superseded needs nothing.
+          return;
       }
-
-      return;
     }
 
     if (!(await acquireSelfView())) return;

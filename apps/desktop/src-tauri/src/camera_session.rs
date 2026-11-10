@@ -1047,31 +1047,52 @@ pub(crate) async fn ensure_camera_published(
     }
     let _guard = HealGuard(state);
 
-    let generation = state.current_room_generation();
-    let outcome = drive_camera_publish_attempts(
-        state,
-        &generation,
-        schedule,
-        move || async move {
-            // Serialize against set_camera_device / the manual toggle, same
-            // lock discipline as start_camera_publish_command.
-            let _control = state.lock_camera_control().await;
-            let (preferred_device, preferred_mode) = app
-                .try_state::<CameraDevicePreferences>()
-                .map(|preferences| {
-                    (
-                        preferences.preferred_device(),
-                        preferences.preferred_mode(),
-                    )
-                })
-                .unwrap_or((None, None));
-            start_camera_publish_with_device(app, state, preferred_device, preferred_mode)
-                .await
-                .map(|_| ())
-        },
-        |delay| tokio::time::sleep(delay),
-    )
-    .await;
+    let mut generation = state.current_room_generation();
+    let mut follows = 0;
+    let outcome = loop {
+        let outcome = drive_camera_publish_attempts(
+            state,
+            &generation,
+            schedule,
+            move || async move {
+                // Serialize against set_camera_device / the manual toggle, same
+                // lock discipline as start_camera_publish_command.
+                let _control = state.lock_camera_control().await;
+                let (preferred_device, preferred_mode) = app
+                    .try_state::<CameraDevicePreferences>()
+                    .map(|preferences| {
+                        (
+                            preferences.preferred_device(),
+                            preferences.preferred_mode(),
+                        )
+                    })
+                    .unwrap_or((None, None));
+                start_camera_publish_with_device(app, state, preferred_device, preferred_mode)
+                    .await
+                    .map(|_| ())
+            },
+            |delay| tokio::time::sleep(delay),
+        )
+        .await;
+        // A room change cancelled this loop, but the new room's own start was
+        // refused as "already running" while it held the heal slot: carry
+        // the camera into the new room rather than dropping it silently.
+        if matches!(outcome, CameraHealOutcome::Cancelled)
+            && follows < MAX_HEAL_ROOM_FOLLOWS
+            && heal_should_follow_new_room(
+                generation.is_current(),
+                state.camera_intent(),
+                state.camera_publishing(),
+                state.is_in_room(),
+            )
+        {
+            follows += 1;
+            log::info!("session: camera self-heal following the camera into the new room");
+            generation = state.current_room_generation();
+            continue;
+        }
+        break outcome;
+    };
 
     let event = match outcome {
         CameraHealOutcome::Published => {
@@ -1439,28 +1460,117 @@ pub(crate) async fn start_camera_publish_intent(
     {
         Ok(_) => Ok(StartCameraPublishResult { published: true }),
         Err(error) if error == "not in room" => {
-            // Not retryable — there is no room to publish into. Intent is
-            // cleared so a later join doesn't surprise-start the camera.
-            state.set_camera_intent(false);
-            emit_camera_intent(app, false);
-            Err(error)
+            match not_in_room_disposition(state.join_in_flight(), state.is_in_room()) {
+                NotInRoomDisposition::DeferToJoin => {
+                    // Clicked while the join is still connecting: keep the
+                    // intent; the join publishes it once it commits
+                    // (`publish_camera_requested_during_join`). No error.
+                    log::info!(
+                        "session: camera turned on while the room join is connecting -- publishing once joined"
+                    );
+                    Ok(StartCameraPublishResult { published: false })
+                }
+                NotInRoomDisposition::RetryNow => {
+                    // The join committed between our room check and now.
+                    log::info!(
+                        "session: room join completed during camera start -- retrying publish"
+                    );
+                    spawn_camera_heal(app, CAMERA_REJOIN_ATTEMPT_SCHEDULE);
+                    Ok(StartCameraPublishResult { published: false })
+                }
+                NotInRoomDisposition::Refuse => {
+                    // No room and none coming. Intent is cleared so a later
+                    // join doesn't surprise-start the camera.
+                    state.set_camera_intent(false);
+                    emit_camera_intent(app, false);
+                    Err(error)
+                }
+            }
         }
         Err(error) => {
             log::warn!(
                 "session: start_camera_publish_command immediate attempt failed, starting self-heal: {error}"
             );
-            let heal_app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let Some(state) =
-                    tauri::Manager::try_state::<crate::session::SessionState>(&heal_app)
-                else {
-                    return;
-                };
-                ensure_camera_published(&heal_app, &state, CAMERA_HEAL_RETRY_BACKOFF).await;
-            });
+            spawn_camera_heal(app, CAMERA_HEAL_RETRY_BACKOFF);
             Ok(StartCameraPublishResult { published: false })
         }
     }
+}
+
+/// Bounds how often one heal loop re-targets a newer room (fast rejoins).
+const MAX_HEAL_ROOM_FOLLOWS: usize = 3;
+
+/// A heal loop cancelled by a room change keeps going in the NEW room when
+/// the user still wants the camera there and nothing is publishing it.
+pub(crate) fn heal_should_follow_new_room(
+    generation_current: bool,
+    intent: bool,
+    publishing: bool,
+    in_room: bool,
+) -> bool {
+    !generation_current && intent && !publishing && in_room
+}
+
+/// A join that failed leaves no room for a camera deferred to it: clear the
+/// intent (and tell the UI / Settings preview) unless another join is
+/// already under way or a room is joined after all.
+pub(crate) fn release_camera_deferred_to_failed_join(
+    app: &tauri::AppHandle,
+    state: &crate::session::SessionState,
+) {
+    if !state.camera_intent() || state.join_in_flight() || state.is_in_room() {
+        return;
+    }
+    log::info!("session: join failed -- dropping the camera that was waiting for it");
+    state.set_camera_intent(false);
+    emit_camera_intent(app, false);
+}
+
+/// What `start_camera_publish_command` does with a "not in room" refusal.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NotInRoomDisposition {
+    /// A join is connecting: keep the intent, the join publishes it.
+    DeferToJoin,
+    /// The join committed after the refusal: publish now.
+    RetryNow,
+    /// No room and no join under way: a real refusal.
+    Refuse,
+}
+
+pub(crate) fn not_in_room_disposition(join_in_flight: bool, in_room: bool) -> NotInRoomDisposition {
+    if in_room {
+        NotInRoomDisposition::RetryNow
+    } else if join_in_flight {
+        NotInRoomDisposition::DeferToJoin
+    } else {
+        NotInRoomDisposition::Refuse
+    }
+}
+
+fn spawn_camera_heal(app: &tauri::AppHandle, schedule: &'static [Duration]) {
+    let heal_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = tauri::Manager::try_state::<crate::session::SessionState>(&heal_app)
+        else {
+            return;
+        };
+        ensure_camera_published(&heal_app, &state, schedule).await;
+    });
+}
+
+/// Called by both platforms' `join_room` right after the room is committed:
+/// publishes a camera the user turned on while the join was still
+/// connecting (the command deferred it instead of failing). Its outcome
+/// reaches the UI as the usual `camera-publish-state` event.
+pub(crate) fn publish_camera_requested_during_join(
+    app: &tauri::AppHandle,
+    state: &crate::session::SessionState,
+) {
+    if !state.camera_intent() || state.camera_publishing() {
+        return;
+    }
+    log::info!("session: publishing the camera requested while the join was connecting");
+    spawn_camera_heal(app, CAMERA_REJOIN_ATTEMPT_SCHEDULE);
 }
 
 /// Turn OFF the native webcam publish. Idempotent. Clears the user's camera
@@ -1506,6 +1616,99 @@ pub fn camera_publish_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Camera clicked right after "Join": the refusal must not surface as a
+    /// publish failure while the join is still connecting.
+    #[test]
+    fn not_in_room_during_a_join_is_deferred_not_refused() {
+        assert_eq!(
+            not_in_room_disposition(true, false),
+            NotInRoomDisposition::DeferToJoin
+        );
+        assert_eq!(
+            not_in_room_disposition(false, true),
+            NotInRoomDisposition::RetryNow
+        );
+        assert_eq!(
+            not_in_room_disposition(true, true),
+            NotInRoomDisposition::RetryNow
+        );
+        assert_eq!(
+            not_in_room_disposition(false, false),
+            NotInRoomDisposition::Refuse
+        );
+    }
+
+    /// Wiring guard: the deferral only works if BOTH platform joins hold
+    /// the in-flight guard, publish the deferred camera, and release it when
+    /// the join fails. A pure-function test can't see a deleted call.
+    #[test]
+    fn both_platform_joins_wire_the_mid_join_camera() {
+        let mac_join = include_str!("session/room.rs");
+        let mac_command = include_str!("session/commands.rs");
+        let windows = include_str!("session_stub.rs");
+        for (platform, join) in [("macOS", mac_join), ("Windows", windows)] {
+            assert!(
+                join.contains("state.begin_join_attempt()"),
+                "{platform} join must mark itself in flight"
+            );
+            assert!(
+                join.contains("publish_camera_requested_during_join("),
+                "{platform} join must publish a camera turned on mid-join"
+            );
+        }
+        for (platform, command) in [("macOS", mac_command), ("Windows", windows)] {
+            assert!(
+                command.contains("release_camera_deferred_to_failed_join("),
+                "{platform} join command must drop a deferred camera on failure"
+            );
+        }
+        // macOS publishes at the room commit, not after the audio tail.
+        let kick = mac_join
+            .find("publish_camera_requested_during_join(")
+            .expect("kick present");
+        let audio_tail = mac_join
+            .find("prepare_microphone(")
+            .expect("audio tail present");
+        assert!(kick < audio_tail, "macOS camera kick must precede the audio tail");
+        assert_eq!(
+            mac_join.matches("publish_camera_requested_during_join(").count(),
+            1,
+            "one kick per join"
+        );
+    }
+
+    #[test]
+    fn heal_follows_the_camera_into_a_new_room_only_when_still_wanted() {
+        assert!(heal_should_follow_new_room(false, true, false, true));
+        assert!(!heal_should_follow_new_room(true, true, false, true), "same room: a real cancel");
+        assert!(!heal_should_follow_new_room(false, false, false, true), "camera turned off");
+        assert!(!heal_should_follow_new_room(false, true, true, true), "already publishing");
+        assert!(!heal_should_follow_new_room(false, true, false, false), "no room yet: the join kicks");
+    }
+
+    /// The real gate the command consults: a started join defers, a
+    /// returned one (success or failure) no longer does.
+    #[test]
+    fn session_join_attempt_drives_the_deferral() {
+        let state = crate::session::SessionState::default();
+        assert_eq!(
+            not_in_room_disposition(state.join_in_flight(), state.is_in_room()),
+            NotInRoomDisposition::Refuse
+        );
+        {
+            let _join = state.begin_join_attempt();
+            assert_eq!(
+                not_in_room_disposition(state.join_in_flight(), state.is_in_room()),
+                NotInRoomDisposition::DeferToJoin
+            );
+        }
+        assert_eq!(
+            not_in_room_disposition(state.join_in_flight(), state.is_in_room()),
+            NotInRoomDisposition::Refuse
+        );
+    }
+
     use std::sync::atomic::AtomicUsize;
 
     #[test]

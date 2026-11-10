@@ -44,6 +44,7 @@ import { COMMANDS, EVENTS, hasTauriBridge } from '#lib/ipc.js';
 import type { PresentParticipant, ResilienceEvent, RoomLeftEvent } from '#lib/ipc.js';
 import { createSpeakerSpotlight } from './speakerSpotlight.svelte';
 import { clearMeetingRouteRoom, setMeetingRouteRoom } from '#lib/stores/meetingRoute.js';
+import { createJoinGate } from '#lib/meeting/joinGate.js';
 import { joinFailureMessage } from '#lib/data/joinFailure.js';
 import {
   GALLERY_BRIDGE_MAX_RESTARTS,
@@ -98,6 +99,10 @@ export interface MeetingSession {
   /** Run the real join on mount; resolves to true if it redirected to the
    * canonical room route (caller should abort the rest of its mount). */
   join(): Promise<boolean>;
+  /** Resolves once the meeting is connected (true), or false when it ends up
+   * disconnected or the route is disposed. Immediate when already settled;
+   * waits through the first join and through connection recovery. */
+  whenJoined(): Promise<boolean>;
   /** Tear down listeners, bridge, and all timers (call from onDestroy). */
   dispose(): void;
 }
@@ -127,6 +132,11 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   const roomLabel = $derived(knownRoom ? roomDisplayLabel(knownRoom) : safeRouteRoomLabel);
 
   let meetingPhase = $state<MeetingPhase>('connecting');
+  // Controls used mid-join wait on this (see `whenJoined`).
+  const joinGate = createJoinGate();
+  const stopJoinGate = $effect.root(() => {
+    $effect(() => joinGate.update(meetingPhase));
+  });
   let disconnectDetail = $state('Returning to rooms.');
   // #356: the join failed; the card explains why and offers Try again
   // instead of auto-returning to the room list.
@@ -691,6 +701,8 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
 
   function dispose() {
     disposed = true;
+    stopJoinGate();
+    joinGate.dispose();
     unlistenPresence?.();
     unlistenRoomLeft?.();
     clearMeetingRouteRoom(roomName);
@@ -702,6 +714,7 @@ export function createMeetingSession(options: MeetingSessionOptions): MeetingSes
   }
 
   return {
+    whenJoined: () => joinGate.whenJoined(),
     get joinedRoom() {
       return joinedRoom;
     },

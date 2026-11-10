@@ -472,6 +472,9 @@ pub struct SessionState {
     /// Ensures at most one camera self-heal loop runs at a time (see
     /// `camera_session::ensure_camera_published`).
     camera_heal_active: AtomicBool,
+    /// Joins that have started connecting but not yet returned (see
+    /// `room_generation::JoinAttempts`).
+    join_attempts: crate::room_generation::JoinAttempts,
 }
 
 impl Default for SessionState {
@@ -491,6 +494,7 @@ impl Default for SessionState {
             room_generation: Arc::new(AtomicU64::new(0)),
             next_audio_share_id: AtomicU64::new(1),
             camera_heal_active: AtomicBool::new(false),
+            join_attempts: crate::room_generation::JoinAttempts::default(),
         }
     }
 }
@@ -502,6 +506,16 @@ impl SessionState {
 
     fn next_audio_share_id(&self) -> u64 {
         self.next_audio_share_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Mark a room join as in flight until the guard drops.
+    pub(crate) fn begin_join_attempt(&self) -> crate::room_generation::JoinAttemptGuard<'_> {
+        self.join_attempts.begin()
+    }
+
+    /// True while a room join is connecting but has not returned yet.
+    pub(crate) fn join_in_flight(&self) -> bool {
+        self.join_attempts.in_flight()
     }
 
     pub(crate) fn begin_room_generation(&self) -> RoomGeneration {
@@ -2992,6 +3006,36 @@ pub async fn join_room_command(
     remote_control_policy: Option<RemoteControlPolicy>,
     identity_palette_index: Option<u8>,
 ) -> Result<crate::rooms::RoomRecord, SessionError> {
+    let result = join_room_windows(
+        app.clone(),
+        rooms,
+        state.clone(),
+        room_name,
+        identity,
+        display_name,
+        remote_control_allowed,
+        remote_control_policy,
+        identity_palette_index,
+    )
+    .await;
+    if result.is_err() {
+        crate::camera_session::release_camera_deferred_to_failed_join(&app, &state);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn join_room_windows(
+    app: tauri::AppHandle,
+    rooms: tauri::State<'_, crate::rooms::RoomsState>,
+    state: tauri::State<'_, SessionState>,
+    room_name: String,
+    identity: String,
+    display_name: String,
+    remote_control_allowed: bool,
+    remote_control_policy: Option<RemoteControlPolicy>,
+    identity_palette_index: Option<u8>,
+) -> Result<crate::rooms::RoomRecord, SessionError> {
     let remote_control_policy = remote_control_policy.unwrap_or_else(|| {
         RemoteControlPolicy::from_allowed(remote_control_allowed, RemoteControlPolicy::Ask)
     });
@@ -3012,6 +3056,10 @@ pub async fn join_room_command(
     }
 
     leave_room_inner(&app, &state, true, "room_switch", false, false).await;
+
+    // Defer a camera turned on mid-join to this join instead of refusing it
+    // (see `camera_session::publish_camera_requested_during_join`).
+    let _join_attempt = state.begin_join_attempt();
 
     let generation = state.begin_room_generation();
     let connected = match crate::meeting_core::connect_room(
@@ -3213,6 +3261,7 @@ pub async fn join_room_command(
         crate::logging::log_safe_quoted(&identity)
     );
     crate::analytics::meeting_joined();
+    crate::camera_session::publish_camera_requested_during_join(&app, &state);
     Ok(room_record)
 }
 

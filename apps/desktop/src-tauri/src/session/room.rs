@@ -637,6 +637,12 @@ pub async fn join_room(
     // at most one room at a time in this model).
     cleanup_left_room(app, state, true, "room_switch", false, false).await;
 
+    // From here until return, a camera turned on is deferred to this join
+    // (published by `publish_camera_requested_during_join` at commit) instead
+    // of being refused as "not in room". After the room-switch cleanup,
+    // which clears the previous room's camera intent.
+    let _join_attempt = state.begin_join_attempt();
+
     // `can_subscribe: true` -- telepointers (SPEC.md §4.5) need this process
     // to *receive* other participants' cursor data-channel messages on this
     // same room connection, not just publish video. `RoomEvent::DataReceived`
@@ -812,6 +818,10 @@ pub async fn join_room(
             "join attempt was superseded".to_string(),
         ));
     }
+    // The room is committed: publish a camera turned on while connecting
+    // now, not after the audio tail (which can hold join_room for tens of
+    // seconds).
+    crate::camera_session::publish_camera_requested_during_join(app, state);
 
     // Telepointers (SPEC.md §4.5): start this process's receiver task on the
     // room connection we just made, exactly once per connection (not once
