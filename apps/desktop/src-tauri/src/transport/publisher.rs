@@ -196,7 +196,7 @@ impl EncoderWedgeRecovery {
         (self.request)(step)
     }
 
-    fn steps_used(&self) -> u32 {
+    pub(crate) fn steps_used(&self) -> u32 {
         self.steps_used
     }
 }
@@ -2472,6 +2472,7 @@ impl RoomConnection<Arc<Room>> {
         quality: ShareQuality,
         window_id: u32,
         recovery: PostWakeEncoderFallbackRecovery,
+        encoder_wedge_recovery: Option<EncoderWedgeRecovery>,
     ) -> Result<PublishedTrack, RoomConnectionError> {
         self.publish_window_at_with_encoder_context(
             width,
@@ -2480,7 +2481,7 @@ impl RoomConnection<Arc<Room>> {
             Some(window_id),
             EncoderPublishOrigin::PostWakeRestart,
             Some(recovery),
-            None,
+            encoder_wedge_recovery,
             false,
             None,
         )
