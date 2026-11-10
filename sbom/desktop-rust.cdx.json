@@ -21217,7 +21217,7 @@
         "registry+https://github.com/rust-lang/crates.io-index#yuv-sys@0.3.15",
         "registry+https://github.com/rust-lang/crates.io-index#zip@9.4.1"
       ],
-      "ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.36"
+      "ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.37"
     },
     {
       "dependsOn": [
@@ -26922,21 +26922,21 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.36",
+      "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.37",
       "components": [
         {
-          "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.36 bin-target-0",
+          "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.37 bin-target-0",
           "name": "desktop_lib",
-          "purl": "pkg:cargo/desktop@0.9.36?download_url=file://.#src/lib.rs",
+          "purl": "pkg:cargo/desktop@0.9.37?download_url=file://.#src/lib.rs",
           "type": "library",
-          "version": "0.9.36"
+          "version": "0.9.37"
         },
         {
-          "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.36 bin-target-1",
+          "bom-ref": "path+file:///petal/apps/desktop/src-tauri#desktop@0.9.37 bin-target-1",
           "name": "desktop",
-          "purl": "pkg:cargo/desktop@0.9.36?download_url=file://.#src/main.rs",
+          "purl": "pkg:cargo/desktop@0.9.37?download_url=file://.#src/main.rs",
           "type": "application",
-          "version": "0.9.36"
+          "version": "0.9.37"
         }
       ],
       "description": "Low-latency, multi-window screensharing for macOS",
@@ -26946,10 +26946,10 @@
         }
       ],
       "name": "desktop",
-      "purl": "pkg:cargo/desktop@0.9.36?download_url=file://.",
+      "purl": "pkg:cargo/desktop@0.9.37?download_url=file://.",
       "scope": "required",
       "type": "application",
-      "version": "0.9.36"
+      "version": "0.9.37"
     },
     "properties": [
       {
