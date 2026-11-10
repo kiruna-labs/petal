@@ -26,6 +26,9 @@
 
 #include "livekit/h264_encoder_level.h"
 #include "rtc_base/logging.h"
+#if TARGET_OS_OSX
+#include "livekit/vt_h264_encoder_spec.h"
+#endif
 
 // PETAL PATCH (#410): build every H.264 encoder with a level that fits the
 // frame instead of the negotiated Level 3.1 -- see h264_encoder_level.cpp
@@ -114,6 +117,11 @@ namespace livekit_ffi {
 // ObjC work since these run on pool-less Rust threads (same hazard as
 // objc_video_frame_buffer.mm's #886 patch).
 std::unique_ptr<webrtc::VideoEncoderFactory> CreateObjCVideoEncoderFactory() {
+#if TARGET_OS_OSX
+  // PETAL PATCH (#500): keeps the VTCompressionSessionCreate override (no
+  // low-latency rate control on H.264) linked -- see PETAL_PATCH.md "Patch 7".
+  EnsureVtH264EncoderSpecOverrideLinked();
+#endif
   @autoreleasepool {
     RTC_OBJC_TYPE(RTCDefaultVideoEncoderFactory)* defaultFactory = [[RTC_OBJC_TYPE(RTCDefaultVideoEncoderFactory) alloc] init];
     // PETAL PATCH (#410): every encoder (each simulcast layer included) is

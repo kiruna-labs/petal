@@ -42,6 +42,9 @@ pub mod rtp_transceiver;
 pub mod video_frame;
 pub mod video_frame_buffer;
 pub mod video_track;
+// PETAL PATCH (#500): see PETAL_PATCH.md "Patch 7".
+#[cfg(target_os = "macos")]
+pub mod vt_h264_encoder_spec;
 pub mod webrtc;
 pub mod yuv_helper;
 

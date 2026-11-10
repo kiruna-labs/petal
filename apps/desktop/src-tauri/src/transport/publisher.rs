@@ -6162,6 +6162,36 @@ mod track_name_tests {
         }
     }
 
+    /// #500: no macOS H.264 encoder session is created with VideoToolbox
+    /// low-latency rate control. In that mode a keyframe at a low bitrate
+    /// followed by a bitrate ramp makes VideoToolbox drop most of the next ~8
+    /// frames, so a sparse (idle-window) share loses remote-control input
+    /// frames. Starts the prebuilt RTCVideoEncoderH264 for real and reads the
+    /// VTCompressionSessionCreate override's counters
+    /// (vendor/webrtc-sys/src/vt_h264_encoder_spec.mm, PETAL_PATCH.md Patch 7).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_h264_encoder_sessions_never_enable_low_latency_rate_control() {
+        use webrtc_sys::vt_h264_encoder_spec::ffi::{
+            VtH264SessionCountersSnapshot, VtH264StartEncoderProbe,
+        };
+        let probe = VtH264StartEncoderProbe(960, 600);
+        assert_eq!(probe.start_result, 0, "RTCVideoEncoderH264 failed to start: {probe:?}");
+        let (before, after) = (probe.before, probe.after);
+        // The encoder's session went through the override...
+        assert!(after.sessions > before.sessions, "{probe:?}");
+        // ...the prebuilt encoder still asks for low-latency rate control (if
+        // it stops, this patch is obsolete -- see PETAL_PATCH.md)...
+        assert!(
+            after.low_latency_requested > before.low_latency_requested,
+            "{probe:?}"
+        );
+        // ...and VideoToolbox never received it, process-wide.
+        assert_eq!(after.low_latency_forwarded, 0, "{probe:?}");
+        assert_eq!(after.failed, before.failed, "{probe:?}");
+        assert_eq!(VtH264SessionCountersSnapshot().low_latency_forwarded, 0);
+    }
+
     /// #408: the verdict receivers get is the guard's own lower-rung summary
     /// from the same poll; a poll with no lower rung reports nothing
     /// (unknown), never "not delivering".
