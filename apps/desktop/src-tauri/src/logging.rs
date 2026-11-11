@@ -2944,6 +2944,37 @@ fn sentry_logger_chain<L: log::Log>(
     )
 }
 
+/// The formatted, filtered dispatch every sink hangs off. Split out of
+/// `init()` so tests can drive the real filter without installing a logger.
+fn log_dispatch(filter: env_filter::Filter, max_level: log::LevelFilter) -> fern::Dispatch {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            let message = redact_room_credentials(&message.to_string());
+            out.finish(format_args!(
+                "{} [{}] [{}] {}",
+                chrono_like_timestamp(),
+                record.level(),
+                record.target(),
+                message
+            ))
+        })
+        // fern's own base level is left at the same ceiling as the real
+        // filter (`max_level`, `env_filter::Filter::filter()`'s max across
+        // every directive) so it never filters out anything the closure
+        // below would otherwise allow. ALL real filtering -- the global
+        // default, per-module `RUST_LOG` directives, and the noisy-third-
+        // party-crate denylist -- happens in `.filter(...)`'s
+        // `env_filter::Filter`, kept as the single source of truth instead
+        // of two competing per-target systems (see `resolve_log_filter`'s
+        // doc comment for why that split bit us before).
+        .level(max_level)
+        // The shutdown marker bypasses `RUST_LOG` (PETAL-DESKTOP-22).
+        .level_for(SHUTDOWN_MARKER_TARGET, log::LevelFilter::Info)
+        .filter(move |metadata| {
+            metadata.target() == SHUTDOWN_MARKER_TARGET || filter.enabled(metadata)
+        })
+}
+
 /// Install the file-based logging sink + panic hook. Must be called exactly
 /// once, as the very first thing in `run()`, before any other startup code
 /// (including `dotenvy::from_path`) so that even a failure in that early
@@ -3036,28 +3067,7 @@ pub fn init() -> PathBuf {
     // second (cheap, append-mode) open of the same file, not a conflict.
     let file_open_check = OpenOptions::new().create(true).append(true).open(&log_path);
 
-    let mut dispatch = fern::Dispatch::new()
-        .format(|out, message, record| {
-            let message = redact_room_credentials(&message.to_string());
-            out.finish(format_args!(
-                "{} [{}] [{}] {}",
-                chrono_like_timestamp(),
-                record.level(),
-                record.target(),
-                message
-            ))
-        })
-        // fern's own base level is left at the same ceiling as the real
-        // filter (`max_level`, `env_filter::Filter::filter()`'s max across
-        // every directive) so it never filters out anything the closure
-        // below would otherwise allow. ALL real filtering -- the global
-        // default, per-module `RUST_LOG` directives, and the noisy-third-
-        // party-crate denylist -- happens in `.filter(...)`'s
-        // `env_filter::Filter`, kept as the single source of truth instead
-        // of two competing per-target systems (see `resolve_log_filter`'s
-        // doc comment for why that split bit us before).
-        .level(max_level)
-        .filter(move |metadata| filter.enabled(metadata))
+    let mut dispatch = log_dispatch(filter, max_level)
         // Always echo to stdout too -- still useful for `cargo run`/`tauri dev`
         // where a terminal IS attached; this is additive, not a replacement.
         .chain(std::io::stdout());
@@ -5439,9 +5449,27 @@ pub(crate) fn exit_requested_shutdown_line(code: Option<i32>) -> Option<&'static
 /// explicit flush covers any wrapper that buffers (PETAL-DESKTOP-22).
 pub(crate) fn log_run_event_shutdown(event: &tauri::RunEvent) {
     if let Some(line) = run_event_shutdown_line(event) {
-        log::info!("{line}");
-        log::logger().flush();
+        write_shutdown_marker(log::logger(), line);
     }
+}
+
+/// Target the shutdown marker is logged under. `log_dispatch` admits it
+/// whatever `RUST_LOG` says: a filtered-out marker (e.g.
+/// `RUST_LOG=info,desktop_lib::logging=warn`) makes a Cmd-Q read as VANISHED.
+pub(crate) const SHUTDOWN_MARKER_TARGET: &str = "petal::shutdown";
+
+/// Hands the marker straight to `logger`, NOT via `log::info!`: the macro
+/// drops the record against `log::max_level()` (e.g. `RUST_LOG=warn`)
+/// before any logger sees it (PETAL-DESKTOP-22).
+pub(crate) fn write_shutdown_marker(logger: &dyn log::Log, line: &str) {
+    logger.log(
+        &log::Record::builder()
+            .args(format_args!("{line}"))
+            .level(log::Level::Info)
+            .target(SHUTDOWN_MARKER_TARGET)
+            .build(),
+    );
+    logger.flush();
 }
 
 const VANISHED_SESSION_SHUTDOWN_MARKERS: &[&str] = &[
@@ -8235,6 +8263,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The marker must survive a `RUST_LOG` that still admits meeting
+    /// activity but filters the module the marker is logged from. Drives
+    /// the real `resolve_log_filter` + `log_dispatch` + file sink chain.
+    #[test]
+    fn shutdown_marker_survives_rust_log_filtering() {
+        for spec in ["info,desktop_lib::logging=warn", "warn,desktop_lib::session=info", "error"] {
+            let dir = temp_dir("shutdown-marker-filtered");
+            let resolved = resolve_log_filter(Some(spec));
+            assert!(resolved.parse_warning.is_none(), "{spec}");
+            let (_, dispatch) = log_dispatch(resolved.filter, resolved.max_level)
+                .chain(Box::new(DailyLogSink::new(dir.clone())) as Box<dyn log::Log>)
+                .into_log();
+            let logger = RepeatSuppressingLog::new(dispatch);
+            let info = |target: &str, msg: &str| {
+                log::Log::log(
+                    &logger,
+                    &log::Record::builder()
+                        .args(format_args!("{msg}"))
+                        .level(log::Level::Info)
+                        .target(target)
+                        .build(),
+                )
+            };
+            info("desktop_lib::session", "session: joined room ops");
+            info("desktop_lib::logging", "logging: filtered probe");
+            write_shutdown_marker(&logger, run_event_shutdown_line(&tauri::RunEvent::Exit).unwrap());
+            let path = dir.join(daily_log_file_name(&today_utc_string()));
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(!text.contains("logging: filtered probe"), "{spec}: filter not applied\n{text}");
+            assert!(text.contains(QUIT_APP_EXIT_MARKER), "{spec}: marker dropped\n{text}");
+            if spec.starts_with("info,") {
+                assert!(text.contains("session: joined room ops"), "{spec}\n{text}");
+                let lines: Vec<String> = text.lines().map(str::to_string).collect();
+                assert_eq!(
+                    classify_previous_session(&lines, CrashAttribution::NoReport, None).outcome,
+                    PreviousSessionOutcome::CleanShutdown,
+                    "{spec}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     /// `tauri::RunEvent::ExitRequested` cannot be constructed outside tauri
     /// (its `api` field is private), so pin the wiring by source: the
     /// `.run(...)` callback is `handle_run_event`, whose first statement
@@ -8264,7 +8335,7 @@ mod tests {
             .nth(1)
             .expect("helper exists");
         let helper = &helper[..helper.find("\n}\n").unwrap()];
-        assert!(helper.contains("log::info!") && helper.contains("log::logger().flush()"));
+        assert!(helper.contains("write_shutdown_marker(log::logger(), line)"), "{helper}");
     }
 
     #[test]
