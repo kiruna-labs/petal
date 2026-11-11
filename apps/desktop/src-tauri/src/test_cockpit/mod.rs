@@ -11115,6 +11115,9 @@ const STALL_TICK_MAX_DRAW_FPS: u64 = 60;
 /// Frames of slack on the resume budget: the source starts drawing before
 /// its animate ack arrives, and samples are taken late in a 2s interval.
 const STALL_TICK_SLACK_FRAMES: u16 = 120;
+/// A held counter only fails the scenario when one of the last this-many
+/// resume captures decoded it; otherwise the end of the window was occluded.
+const STALL_TICK_HELD_TAIL_SAMPLES: usize = 3;
 
 /// Parse a phase length from its env var (milliseconds), bounded to
 /// `STALL_PHASE_MIN..=STALL_PHASE_MAX`; anything unparsable is the default.
@@ -11382,7 +11385,7 @@ enum StallTickCheck {
     Held { frozen: u16, last: Option<u16> },
     /// No freeze capture showed the calibrated pattern.
     FreezeUncalibrated { best_matches: u8, capture: Option<String> },
-    /// The freeze did, but no resume capture did.
+    /// The freeze did, but none of the last resume captures did.
     ResumeUncalibrated { best_matches: u8, capture: Option<String> },
 }
 
@@ -11423,7 +11426,12 @@ fn stall_tick_check(evidence: &StallEvidence) -> StallTickCheck {
             after_ms: at.saturating_sub(evidence.animate_ack_offset_ms),
         };
     }
-    let (resume_decoded, resume_best, resume_capture) = stall_tick_evidence(&evidence.resume);
+    // Held is only a verdict when the END of the resume window was observable:
+    // one early decode of the frozen frame followed by occluded captures says
+    // nothing about whether the share resumed later.
+    let tail_start = evidence.resume.len().saturating_sub(STALL_TICK_HELD_TAIL_SAMPLES);
+    let (resume_decoded, resume_best, resume_capture) =
+        stall_tick_evidence(&evidence.resume[tail_start..]);
     if !resume_decoded {
         return StallTickCheck::ResumeUncalibrated {
             best_matches: resume_best,
@@ -11453,7 +11461,7 @@ impl StallTickCheck {
                 capture.as_deref().unwrap_or("(no capture)")
             ),
             Self::ResumeUncalibrated { best_matches, capture } => format!(
-                "OCCLUDED: no resume-phase capture showed the sharer's calibrated pattern (best {best_matches}/{corners} corner squares) -- the panel was covered or moved after the freeze; see {}",
+                "OCCLUDED: none of the last resume-phase captures showed the sharer's calibrated pattern (best {best_matches}/{corners} corner squares) -- the panel was covered or moved after the freeze; see {}",
                 capture.as_deref().unwrap_or("(no capture)")
             ),
         }
@@ -11804,19 +11812,19 @@ fn write_stall_timeline(
 struct HiddenTestPatternSource(Option<tauri::WebviewWindow>);
 
 impl HiddenTestPatternSource {
-    fn hide(app: &AppHandle) -> Self {
+    /// `Err` when the window is up and could not be hidden: it draws the
+    /// SAME calibrated pattern, so a sampler aimed through it could decode
+    /// its counter as the share's. The scenario cannot run then.
+    fn hide(app: &AppHandle) -> Result<Self, String> {
         let window = app
             .get_webview_window(crate::dev_test_pattern::TEST_PATTERN_DEV_LABEL)
             .filter(|window| window.is_visible().unwrap_or(false));
         match window {
-            Some(window) => match window.hide() {
-                Ok(()) => Self(Some(window)),
-                Err(error) => {
-                    log::warn!("stall: could not hide the native test-pattern source: {error}");
-                    Self(None)
-                }
-            },
-            None => Self(None),
+            Some(window) => window
+                .hide()
+                .map(|()| Self(Some(window)))
+                .map_err(|error| error.to_string()),
+            None => Ok(Self(None)),
         }
     }
 
@@ -11920,7 +11928,17 @@ async fn run_web_share_stall_scenario(
     // The native test-pattern source an earlier scenario left up is
     // always-on-top and sat over this panel on every runner capture (#498).
     // Hide it for the sampling, and put it back however this returns.
-    let occluder = HiddenTestPatternSource::hide(app);
+    let occluder = match HiddenTestPatternSource::hide(app) {
+        Ok(occluder) => occluder,
+        Err(error) => {
+            return infra_fail_outcome(
+                scenario,
+                format!(
+                    "the always-on-top native test-pattern window could not be hidden ({error}); it would cover the receiver's panel with the same calibrated pattern"
+                ),
+            )
+        }
+    };
     let _ = writer.write(
         "stall-occluder",
         Some(scenario.id),
@@ -11987,6 +12005,9 @@ async fn run_web_share_stall_scenario(
     // The red proof (#498) skips the animate, so the source never resumes.
     let red_no_resume = env::var(STALL_RED_NO_RESUME_ENV).is_ok_and(|value| value.trim() == "1");
     let animate_sent_ms = crate::time_util::now_ms();
+    // The source starts drawing before its ack travels back, so the resume
+    // budget runs from the command, not the ack.
+    let animate_sent_offset_ms = freeze_ack_at.elapsed().as_millis() as u64;
     let animate_ack = if red_no_resume {
         log::warn!("stall: {STALL_RED_NO_RESUME_ENV}=1 -- pattern-animate NOT sent (red proof only)");
         serde_json::json!({ "redProof": STALL_RED_NO_RESUME_ENV, "sent": false })
@@ -12044,7 +12065,7 @@ async fn run_web_share_stall_scenario(
         if let (None, Some(frozen), Some(PatternTick::Decoded { counter })) =
             (evidence.resumed_tick_offset_ms, frozen_tick, sample.tick)
         {
-            let since_animate = sample.offset_ms.saturating_sub(evidence.animate_ack_offset_ms);
+            let since_animate = sample.offset_ms.saturating_sub(animate_sent_offset_ms);
             if pattern_tick_resumed(frozen, counter, since_animate) {
                 evidence.resumed_tick_offset_ms = Some(sample.offset_ms);
                 evidence.resumed_tick = Some(counter);
@@ -13819,6 +13840,24 @@ mod tests {
         let verdict = stall_verdict(&evidence);
         assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
         assert!(verdict.summary.contains("resume-phase"), "{}", verdict.summary);
+    }
+
+    /// One early decode of the frozen frame, then occluded captures to the end
+    /// of the window, is not evidence the share stayed held.
+    #[test]
+    fn stall_verdict_is_infra_when_only_an_early_resume_capture_decoded() {
+        let mut evidence = healthy_stall_evidence();
+        evidence.resume[1].tick = Some(PatternTick::Uncalibrated { matches: 3 });
+        for offset in [14_500, 16_500, 18_500] {
+            evidence
+                .resume
+                .push(stall_sample("resume", offset, 1000, Some(118.0), None, true));
+        }
+        evidence.resumed_tick_offset_ms = None;
+        evidence.resumed_tick = None;
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
+        assert!(verdict.summary.contains("OCCLUDED"), "{}", verdict.summary);
     }
 
     /// The frozen reference falls back to the last decoded freeze counter
