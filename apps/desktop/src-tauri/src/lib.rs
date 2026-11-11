@@ -1915,14 +1915,33 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             control_consent::control_consent_dismiss,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Petal");
+        .build(tauri::generate_context!())
+        .expect("error while building Petal")
+        .run(handle_run_event);
+}
+
+/// The non-macOS `.run(...)` callback. Without it every orderly Windows
+/// quit (tray/menu Quit that skips `quit_app`, logout, `restart_app`)
+/// reads as VANISHED on the next launch (#526). Keep the marker first.
+#[cfg(not(target_os = "macos"))]
+fn handle_run_event(_app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
+    logging::log_run_event_shutdown(&event);
 }
 
 fn load_env_file(path: &'static str) {
     match dotenvy::from_path(path) {
         Ok(_) => log::info!("petal: loaded .env from {path}"),
         Err(e) => log::info!("petal: no .env loaded from {path} ({e})"),
+    }
+}
+
+/// Windows-gated (#526): the non-macOS `run()` hands tauri this exact
+/// callback; pin that it compiles there with the run-callback signature.
+#[cfg(all(test, not(target_os = "macos")))]
+mod run_event_callback_tests {
+    #[test]
+    fn non_macos_run_callback_has_the_run_signature() {
+        let _callback: fn(&tauri::AppHandle, tauri::RunEvent) = super::handle_run_event;
     }
 }
 
