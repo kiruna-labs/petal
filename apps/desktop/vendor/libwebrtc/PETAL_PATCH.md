@@ -141,3 +141,23 @@ Fold away once upstream carries the field through directly. To revert,
 `git checkout -- src/rtp_parameters.rs src/native/rtp_parameters.rs`; a publisher
 that stops setting `TrackPublishOptions::min_bitrate` restores prior behaviour
 without reverting anything.
+
+## Degenerate-frame drop counter on native video sources (#534)
+
+### Why this exists
+
+webrtc-sys Patch 8 drops a frame the adapter sizes to zero instead of letting
+`CropAndScale` abort the process. `capture_frame` returns `false` for that
+drop, but also for an ordinary adapter rejection (frame-rate limiting, no
+sink), so the boolean alone cannot tell the publisher that a frame was lost
+to the guard.
+
+### The fix
+
+Additive: `NativeVideoSource::degenerate_frames_dropped() -> u64` (both the
+inner and the safe wrapper) reads the per-source counter webrtc-sys Patch 9
+exposes. `transport/publisher.rs` reads it around each `capture_frame` call.
+
+### Updating
+
+Keep while webrtc-sys Patch 8/9 are applied; drop together with them.

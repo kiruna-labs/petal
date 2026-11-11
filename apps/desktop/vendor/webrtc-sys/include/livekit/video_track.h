@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 
 #include "api/media_stream_interface.h"
@@ -105,7 +107,11 @@ class VideoTrackSource {
     void set_packet_trailer_handler(
         std::shared_ptr<PacketTrailerHandler> handler);
 
+    // Petal #534: frames the degenerate-size guard dropped (Patch 9).
+    uint64_t degenerate_frames_dropped() const;
+
    private:
+    std::atomic<uint64_t> degenerate_frames_dropped_{0};
     mutable webrtc::Mutex mutex_;
     webrtc::TimestampAligner timestamp_aligner_;
     VideoResolution resolution_;
@@ -134,6 +140,10 @@ class VideoTrackSource {
 
   void set_packet_trailer_handler(
       std::shared_ptr<PacketTrailerHandler> handler) const;
+
+  // Petal #534: monotonic count of frames on_captured_frame dropped because
+  // the adapter sized them to zero. Rust compares it around capture_frame.
+  uint64_t degenerate_frames_dropped() const;
 
   webrtc::scoped_refptr<InternalSource> get() const;
 

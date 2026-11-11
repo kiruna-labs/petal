@@ -279,6 +279,7 @@ pub struct DegenerateFrameDiagnostic {
     pub frame_geometry: GeometryBucket,
     pub published_geometry: GeometryBucket,
     /// Which edge was below the floor: size buckets cannot tell thin from small.
+    /// `Adapter`: the source itself dropped it past the Rust floor (#534).
     pub axis: DegenerateAxisTag,
 }
 
@@ -562,7 +563,7 @@ diagnostic_enum!(PixelFormatClass { Bgra => "bgra", Nv12 => "nv12", OtherSupport
 diagnostic_enum!(ScaleBucket { OneX => "1x", TwoX => "2x", Fractional => "fractional", Other => "other", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(EncoderImplementationClass { Hardware => "hardware", Software => "software", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(CaptureLayoutStage { Validation => "validation", Reconfiguration => "reconfiguration", FirstFrame => "first_frame", Publish => "publish", Unknown => "unknown" });
-diagnostic_enum!(DegenerateAxisTag { Width => "width", Height => "height", Both => "both", NotApplicable => "not_applicable" });
+diagnostic_enum!(DegenerateAxisTag { Width => "width", Height => "height", Both => "both", Adapter => "adapter", NotApplicable => "not_applicable" });
 diagnostic_enum!(CameraDirection { Publish => "publish", Receive => "receive" });
 diagnostic_enum!(OverlayClearReasonTag { NoPublication => "no_publication", Retired => "retired", HidePending => "hide_pending" });
 diagnostic_enum!(CadenceBucket { Healthy => "healthy", Reduced => "reduced", Severe => "severe", Stalled => "stalled", Unknown => "unknown", NotApplicable => "not_applicable" });
@@ -6557,7 +6558,9 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
         | "held_native_surfaces"
         | "recovery_burst"
         | "concurrent_shares" => matches!(value, "0" | "1" | "2" | "3_plus" | "not_applicable"),
-        "degenerate_axis" => matches!(value, "width" | "height" | "both" | "not_applicable"),
+        "degenerate_axis" => {
+            matches!(value, "width" | "height" | "both" | "adapter" | "not_applicable")
+        }
         "capture_occlusion" => matches!(
             value,
             "none" | "partial" | "mostly" | "full" | "unknown" | "not_applicable"
@@ -11368,7 +11371,16 @@ mod tests {
         assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
         assert!(valid_sentry_diagnostic_event(&event));
         assert!(scrub_event_for_sentry(event).is_some());
-        for axis in [DegenerateAxisTag::Width, DegenerateAxisTag::Height, DegenerateAxisTag::Both] {
+        // #534: `adapter` is a C++-side drop past the Rust floor.
+        assert_eq!(DegenerateAxisTag::Adapter.tag(), "adapter");
+        assert!(valid_diagnostic_tag("degenerate_axis", "adapter"));
+        assert!(!valid_diagnostic_tag("degenerate_axis", "crop"));
+        for axis in [
+            DegenerateAxisTag::Width,
+            DegenerateAxisTag::Height,
+            DegenerateAxisTag::Both,
+            DegenerateAxisTag::Adapter,
+        ] {
             let event = build_sentry_diagnostic_event(
                 SentryDiagnosticEvent::DegenerateFrameSkipped(DegenerateFrameDiagnostic {
                     frame_geometry: GeometryBucket::Tiny,

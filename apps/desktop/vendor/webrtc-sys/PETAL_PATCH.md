@@ -452,3 +452,21 @@ and `vendored_degenerate_frame_warning_logs_no_raw_sizes` in the desktop
 crate, and at runtime by `transport::tiny_frame_runtime` (#535), which pushes
 1x1/2x2/3x3/2x720/1280x2 frames through a real sinked `NativeVideoSource` in a
 child process; without this patch each one aborts it. Keep this on any webrtc-sys bump.
+
+## Patch 9: expose the Patch 8 drop to Rust (#534)
+
+Patch 8's guard returns `false`, which Rust cannot tell apart from an ordinary
+`AdaptFrame` rejection (frame-rate limiting, no sink). So a frame the guard
+dropped was still counted as published and never reached Sentry.
+
+`InternalSource` now keeps a per-source `std::atomic<uint64_t>
+degenerate_frames_dropped_`, bumped inside the guard, and
+`VideoTrackSource::degenerate_frames_dropped()` returns it over the cxx bridge
+(`src/video_track.rs`; libwebrtc wraps it as
+`NativeVideoSource::degenerate_frames_dropped`). The publisher reads it before
+and after `capture_frame`; a rise means the frame never reached the encoder, so
+the push counts as a degenerate skip (not published) and fires
+`degenerate-frame-skipped` with `degenerate_axis=adapter`. Additive: no
+signature changes. Proven at runtime by `transport::tiny_frame_runtime`, which
+pushes below-floor frames straight into a sinked source and asserts the counter
+and the skip outcome. Keep with Patch 8 on any webrtc-sys bump.

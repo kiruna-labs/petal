@@ -1453,6 +1453,8 @@ pub struct PublishedTrack {
     last_source_boundary_log: Mutex<Option<std::time::Instant>>,
     /// Rate-limits the degenerate-frame skip warning (PETAL-DESKTOP-4Y).
     last_degenerate_skip_log: Mutex<Option<std::time::Instant>>,
+    /// Rate-limits the warning for a frame the source itself dropped (#534).
+    last_source_degenerate_drop_log: Mutex<Option<std::time::Instant>>,
     /// [`min_publishable_edge`] for this track's ladder, computed once.
     min_publish_edge: u32,
     /// Cancels the detached encoder diagnostics when this track is terminal.
@@ -1714,7 +1716,7 @@ struct CameraSizeRecovery {
 /// at scale 1/1 ANY edge below 4 crops to 0 and aborts in `CropAndScale`. No
 /// downscale is needed; capture sizes are even, so the real edge is 2 px.
 /// Pinned to the C++ constructor by a source test.
-const ADAPTER_MIN_EDGE: u32 = 4;
+pub(super) const ADAPTER_MIN_EDGE: u32 = 4;
 const DEGENERATE_SKIP_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 /// Reference size to measure a ladder's rung scale-down factors on.
 const MIN_EDGE_REFERENCE_SIZE: u32 = 1200;
@@ -1770,8 +1772,37 @@ fn degenerate_skip_warning(
     )
 }
 
+/// Push one frame into the source and tell a webrtc-sys Patch 8 guard drop
+/// apart from an ordinary adapter rejection (both return `false`) by the
+/// source's own drop counter (#534). `Err(Adapter)`: the frame never reached
+/// the encoder. Pushes per track are serialized, so a rise is this frame's.
+pub(super) fn capture_frame_counting_source_drops<T: AsRef<dyn VideoBuffer>>(
+    source: &NativeVideoSource,
+    frame: &VideoFrame<T>,
+) -> Result<bool, crate::logging::DegenerateAxisTag> {
+    let dropped_before = source.degenerate_frames_dropped();
+    let accepted = source.capture_frame(frame);
+    if source.degenerate_frames_dropped() > dropped_before {
+        return Err(crate::logging::DegenerateAxisTag::Adapter);
+    }
+    Ok(accepted)
+}
+
+/// The closed-bucket `degenerate-frame-skipped` payload for one skip or drop.
+pub(super) fn degenerate_frame_diagnostic(
+    (frame_width, frame_height): (u32, u32),
+    (published_width, published_height): (u32, u32),
+    axis: crate::logging::DegenerateAxisTag,
+) -> crate::logging::DegenerateFrameDiagnostic {
+    crate::logging::DegenerateFrameDiagnostic {
+        frame_geometry: camera_geometry_bucket(frame_width, frame_height),
+        published_geometry: camera_geometry_bucket(published_width, published_height),
+        axis,
+    }
+}
+
 /// True when a frame of this size must not reach `capture_frame`.
-fn frame_below_publishable_edge(width: u32, height: u32, min_edge: u32) -> bool {
+pub(super) fn frame_below_publishable_edge(width: u32, height: u32, min_edge: u32) -> bool {
     width < min_edge || height < min_edge
 }
 
@@ -2770,6 +2801,7 @@ impl RoomConnection<Arc<Room>> {
             frames_pushed,
             last_source_boundary_log: Mutex::new(None),
             last_degenerate_skip_log: Mutex::new(None),
+            last_source_degenerate_drop_log: Mutex::new(None),
             min_publish_edge: min_publishable_edge(simulcast_ladder),
             background_cancel,
             #[cfg(target_os = "windows")]
@@ -2889,6 +2921,7 @@ impl RoomConnection<Arc<Room>> {
             frames_pushed: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_source_boundary_log: Mutex::new(None),
             last_degenerate_skip_log: Mutex::new(None),
+            last_source_degenerate_drop_log: Mutex::new(None),
             min_publish_edge: // Camera: one encoding, no ladder -- only the adapter floor applies.
             min_publishable_edge(FullShareSimulcastLadder::HighOnly),
             background_cancel,
@@ -6868,7 +6901,9 @@ mod track_name_tests {
         let start = src.find(concat!("    fn capture_to_source", "<")).expect("capture_to_source");
         let body = &src[start..];
         let guard = body.find("frame_below_publishable_edge(").expect("floor check");
-        let push = body.find("self.rtc_source.capture_frame(").expect("capture_frame");
+        let push = body
+            .find(concat!("capture_frame_counting_source_drops(", "&self.rtc_source"))
+            .expect("capture_frame");
         assert!(guard < push, "the floor check must precede capture_frame");
         let skip = &body[guard..push];
         assert!(
@@ -6878,6 +6913,15 @@ mod track_name_tests {
         assert!(skip.contains("self.min_publish_edge"), "floor is cached at construction");
         assert!(!skip.contains(concat!("min_publishable_edge", "(")), "no per-frame ladder walk");
         assert!(!skip.contains("unpublish") && !skip.contains("hide"), "{skip}");
+        // #534: a drop inside the source is the same outcome, never published.
+        let end = body.find("fn note_degenerate_frame_skipped").expect("end");
+        let after = &body[push..end];
+        assert!(
+            after.contains(concat!("self.note_degenerate_frame_skipped(frame_width, frame_height, ", "axis);"))
+                && after.contains(concat!("PushMiss::", "SkippedDegenerate")),
+            "a source drop must fire the diagnostic and count as skipped: {after}"
+        );
+        assert!(!after.contains("Ok(true)"), "{after}");
     }
 
     /// PETAL-DESKTOP-4Y: libwebrtc aborts the whole process when
@@ -9602,7 +9646,11 @@ impl PublishedTrack {
             (buffer.width(), buffer.height())
         };
         if frame_below_publishable_edge(frame_width, frame_height, self.min_publish_edge) {
-            self.note_degenerate_frame_skipped(frame_width, frame_height);
+            self.note_degenerate_frame_skipped(
+                frame_width,
+                frame_height,
+                degenerate_axis(frame_width, frame_height, self.min_publish_edge),
+            );
             return Err(PushMiss::SkippedDegenerate);
         }
         let mut spacer = self.source_push_spacer.lock_unpoisoned();
@@ -9611,15 +9659,32 @@ impl PublishedTrack {
             std::thread::sleep(wait);
         }
         *started = std::time::Instant::now();
-        let accepted = self.rtc_source.capture_frame(frame);
+        let captured = capture_frame_counting_source_drops(&self.rtc_source, frame);
         spacer.record_return(std::time::Instant::now());
-        Ok(accepted)
+        drop(spacer);
+        // #534: the webrtc-sys guard dropped it (Patch 8/9). Same outcome as
+        // the floor skip above: not published, and the diagnostic fires.
+        captured.map_err(|axis| {
+            self.note_degenerate_frame_skipped(frame_width, frame_height, axis);
+            PushMiss::SkippedDegenerate
+        })
     }
 
-    fn note_degenerate_frame_skipped(&self, frame_width: u32, frame_height: u32) {
+    fn note_degenerate_frame_skipped(
+        &self,
+        frame_width: u32,
+        frame_height: u32,
+        axis: crate::logging::DegenerateAxisTag,
+    ) {
         let now = std::time::Instant::now();
+        // Own slot for source drops, so a floor-skip storm cannot hide them.
+        let slot = if axis == crate::logging::DegenerateAxisTag::Adapter {
+            &self.last_source_degenerate_drop_log
+        } else {
+            &self.last_degenerate_skip_log
+        };
         let should_log = {
-            let mut last = self.last_degenerate_skip_log.lock_unpoisoned();
+            let mut last = slot.lock_unpoisoned();
             let due = last.is_none_or(|previous| {
                 now.duration_since(previous) >= DEGENERATE_SKIP_LOG_INTERVAL
             });
@@ -9633,11 +9698,11 @@ impl PublishedTrack {
         }
         let (published_width, published_height) = self.published_size();
         let track_name = self.track.name();
-        let diagnostic = crate::logging::DegenerateFrameDiagnostic {
-            frame_geometry: camera_geometry_bucket(frame_width, frame_height),
-            published_geometry: camera_geometry_bucket(published_width, published_height),
-            axis: degenerate_axis(frame_width, frame_height, self.min_publish_edge),
-        };
+        let diagnostic = degenerate_frame_diagnostic(
+            (frame_width, frame_height),
+            (published_width, published_height),
+            axis,
+        );
         // WARN and INFO become Sentry breadcrumbs: closed buckets only there.
         // Raw sizes and the (identity-bearing) track name stay at DEBUG.
         log::warn!("{}", degenerate_skip_warning(&track_name, diagnostic));
