@@ -211,9 +211,58 @@ fn relocation_refusal_message(
     }
 }
 
+/// The updater the install command checks and installs through. The
+/// plugin's own `updater_builder()` hook only runs `cleanup_before_exit`;
+/// replacing it must keep that call. On Windows the hook runs just before
+/// `std::process::exit(0)`, skipping `RunEvent::Exit` (#526).
+fn updater_for_install(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let cleanup = app.clone();
+    app.updater_builder()
+        .on_before_exit(move || {
+            run_installer_handoff(log::logger(), || cleanup.cleanup_before_exit())
+        })
+        .build()
+        .map_err(|e| format!("updater unavailable: {e}"))
+}
+
+/// Marker first, flushed, then cleanup: if cleanup hangs or panics the
+/// marker is already on disk. Do NOT reorder (#526).
+fn run_installer_handoff(logger: &dyn log::Log, cleanup: impl FnOnce()) {
+    crate::logging::write_shutdown_marker(logger, crate::logging::UPDATER_HANDOFF_SHUTDOWN_LINE);
+    cleanup();
+}
+
+/// Bound on the pre-install leave: a dead network must not stall the update.
+#[cfg(not(target_os = "macos"))]
+const LEAVE_BEFORE_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Windows: `install()` exits the process, so leave the room first and peers
+/// see a leave, not a drop (#526).
+#[cfg(not(target_os = "macos"))]
+async fn leave_room_before_installer_handoff(app: &AppHandle) {
+    use tauri::Manager;
+    // An owned task, not a dropped future: the Windows teardown is not
+    // cancellation-safe, so on timeout it must keep running to the end.
+    let owned = app.clone();
+    let leave = tauri::async_runtime::spawn(async move {
+        if let Some(state) = owned.try_state::<crate::session::SessionState>() {
+            crate::session::leave_room(&owned, state.inner()).await;
+        }
+    });
+    if tokio::time::timeout(LEAVE_BEFORE_INSTALL_TIMEOUT, leave)
+        .await
+        .is_err()
+    {
+        log::warn!(
+            "updater: leaving the room before the installer hand-off timed out after {:?}; installing anyway (the leave keeps running)",
+            LEAVE_BEFORE_INSTALL_TIMEOUT
+        );
+    }
+}
+
 #[tauri::command]
-pub async fn download_and_install_compatible_update<R: Runtime>(
-    app: AppHandle<R>,
+pub async fn download_and_install_compatible_update(
+    app: AppHandle,
 ) -> Result<GuardedUpdateResult, String> {
     if let Some(disabled) = disabled_updater_result(&app) {
         return Ok(disabled);
@@ -228,12 +277,7 @@ pub async fn download_and_install_compatible_update<R: Runtime>(
         );
         return Err(message.to_string());
     }
-    let update = match app
-        .updater()
-        .map_err(|e| format!("updater unavailable: {e}"))?
-        .check()
-        .await
-    {
+    let update = match updater_for_install(&app)?.check().await {
         Ok(update) => update,
         // A manifest with no entry for this platform (e.g. only `darwin-aarch64`
         // published while this process runs on Windows) means "no update for
@@ -312,9 +356,18 @@ pub async fn download_and_install_compatible_update<R: Runtime>(
         }
     }
     #[cfg(not(target_os = "macos"))]
-    update
-        .install(&bytes)
-        .map_err(|e| format!("update install failed: {e}"))?;
+    {
+        leave_room_before_installer_handoff(&app).await;
+        if let Err(e) = update.install(&bytes) {
+            // The hook may already have logged the hand-off marker before
+            // the installer failed to launch; this process lives on (#526).
+            crate::logging::write_shutdown_marker(
+                log::logger(),
+                crate::logging::UPDATER_HANDOFF_FAILED_LINE,
+            );
+            return Err(format!("update install failed: {e}"));
+        }
+    }
     log::info!("updater: installed compatible update {version}");
 
     Ok(GuardedUpdateResult {
@@ -1185,6 +1238,133 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records every log record and flush, in order, alongside the cleanup.
+    #[derive(Default)]
+    struct RecordingLog(std::sync::Mutex<Vec<String>>);
+
+    impl log::Log for RecordingLog {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("log {} {}", record.target(), record.args()));
+        }
+        fn flush(&self) {
+            self.0.lock().unwrap().push("flush".to_string());
+        }
+    }
+
+    /// #526: the hook writes the marker to the shutdown target and flushes
+    /// it BEFORE the plugin's cleanup runs, and still runs that cleanup.
+    #[test]
+    fn installer_handoff_writes_and_flushes_the_marker_before_cleanup() {
+        let logger = RecordingLog::default();
+        run_installer_handoff(&logger, || {
+            logger.0.lock().unwrap().push("cleanup".to_string())
+        });
+        let events = logger.0.into_inner().unwrap();
+        assert_eq!(
+            events,
+            vec![
+                format!(
+                    "log {} {}",
+                    crate::logging::SHUTDOWN_MARKER_TARGET,
+                    crate::logging::UPDATER_HANDOFF_SHUTDOWN_LINE
+                ),
+                "flush".to_string(),
+                "cleanup".to_string(),
+            ]
+        );
+    }
+
+    /// The hook only takes effect if the install command checks through the
+    /// updater that carries it, and the hook must keep the plugin's own
+    /// `cleanup_before_exit` (replacing the hook drops it otherwise).
+    #[test]
+    fn install_command_checks_through_the_hooked_updater() {
+        let source = include_str!("updater.rs");
+        let builder = source
+            .split("fn updater_for_install(")
+            .nth(1)
+            .expect("updater_for_install exists");
+        let builder = &builder[..builder.find("\n}\n").unwrap()];
+        assert!(builder.contains("app.updater_builder()"), "{builder}");
+        assert!(builder.contains(".on_before_exit("), "{builder}");
+        assert!(
+            builder
+                .contains("run_installer_handoff(log::logger(), || cleanup.cleanup_before_exit())"),
+            "{builder}"
+        );
+        let command = source
+            .split("pub async fn download_and_install_compatible_update(")
+            .nth(1)
+            .expect("install command exists");
+        let command = &command[..command.find("\n}\n").unwrap()];
+        assert!(
+            command.contains("updater_for_install(&app)?.check()"),
+            "{command}"
+        );
+        assert!(
+            !command.contains(".updater()"),
+            "install must not use the unhooked updater"
+        );
+    }
+
+    /// Windows: `install()` exits the process, so the room is left first
+    /// (#526). Pinned by source: there is no way to drive a real NSIS
+    /// hand-off in a unit test.
+    #[test]
+    fn non_macos_install_leaves_the_room_before_the_installer_handoff() {
+        let source = include_str!("updater.rs");
+        let command = source
+            .split("pub async fn download_and_install_compatible_update(")
+            .nth(1)
+            .expect("install command exists");
+        let leave = command
+            .find("leave_room_before_installer_handoff(&app).await;")
+            .expect("install command leaves the room");
+        let install = command.find("update.install(&bytes)").expect("install call");
+        assert!(leave < install, "leave must precede install()");
+        // A failed launch revokes the hook's premature marker.
+        let failed = &command[install..];
+        let failed = &failed[..failed.find("return Err(").expect("install error path")];
+        assert!(
+            failed.contains("crate::logging::UPDATER_HANDOFF_FAILED_LINE"),
+            "{failed}"
+        );
+        let helper = source
+            .split("async fn leave_room_before_installer_handoff(")
+            .nth(1)
+            .expect("helper exists");
+        let helper = &helper[..helper.find("\n}\n").unwrap()];
+        assert!(
+            helper.contains("crate::session::leave_room(&owned, state.inner())"),
+            "{helper}"
+        );
+        // Spawned, so a timeout never drops a half-done teardown.
+        assert!(
+            helper.contains("tauri::async_runtime::spawn(async move"),
+            "{helper}"
+        );
+        assert!(
+            helper.contains("tokio::time::timeout(LEAVE_BEFORE_INSTALL_TIMEOUT"),
+            "{helper}"
+        );
+    }
+
+    /// Windows-gated: the bound is short enough that a dead network cannot
+    /// stall the update, and the leave helper is the one compiled there.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn windows_leave_before_install_is_bounded() {
+        assert!(LEAVE_BEFORE_INSTALL_TIMEOUT <= std::time::Duration::from_secs(10));
+        assert!(LEAVE_BEFORE_INSTALL_TIMEOUT >= std::time::Duration::from_secs(1));
+        let _leave = leave_room_before_installer_handoff;
+    }
 
     /// #332: every class that needs relocation is refused before the download,
     /// and no class that can install in place is.

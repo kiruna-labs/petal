@@ -5490,6 +5490,20 @@ pub(crate) fn run_event_shutdown_line(event: &tauri::RunEvent) -> Option<&'stati
     }
 }
 
+/// Written by the updater's `on_before_exit` hook. On Windows the plugin
+/// ends the NSIS hand-off with `std::process::exit(0)`, which never reaches
+/// `RunEvent::Exit`, so this is that exit's only marker (#526).
+pub(crate) const UPDATER_HANDOFF_SHUTDOWN_LINE: &str =
+    "quit: restart -- updater handing off to the installer (on_before_exit)";
+
+/// Cancels an earlier terminal marker in the same session. Written when
+/// the installer hand-off fails after its hook already logged
+/// `UPDATER_HANDOFF_SHUTDOWN_LINE`, so a later crash still reads as VANISHED.
+/// Must NOT contain `QUIT_RESTART_MARKER` / `QUIT_APP_EXIT_MARKER` (#526).
+pub(crate) const SHUTDOWN_MARKER_REVOKED: &str = "shutdown marker revoked";
+pub(crate) const UPDATER_HANDOFF_FAILED_LINE: &str =
+    "shutdown marker revoked -- the installer hand-off failed; this session continues";
+
 pub(crate) fn exit_requested_shutdown_line(code: Option<i32>) -> Option<&'static str> {
     (code == Some(tauri::RESTART_EXIT_CODE))
         .then_some("quit: restart requested (RunEvent::ExitRequested)")
@@ -5582,13 +5596,24 @@ fn classify_previous_session(
     // The run-event markers are TERMINAL anywhere in the segment: the exit
     // happens in-room, so periodic writers ("compositor feed:") log after
     // them and must not re-arm the vanish (PETAL-DESKTOP-22). Exit is final.
-    let terminal_exit = segment.iter().any(|line| {
+    // A revocation after the last terminal marker cancels it: the updater
+    // hook writes its marker BEFORE the installer launches, and a failed
+    // launch returns with this process still running (#526).
+    let last_terminal = segment.iter().rposition(|line| {
         line.contains(QUIT_APP_EXIT_MARKER) || line.contains(QUIT_RESTART_MARKER)
     });
+    let terminal_exit = last_terminal.is_some_and(|terminal| {
+        !segment[terminal + 1..]
+            .iter()
+            .any(|line| line.contains(SHUTDOWN_MARKER_REVOKED))
+    });
+    // Terminal markers are decided above only, so a revoked one cannot
+    // sneak back in through this position-sensitive scan (#526).
     let shut_down = terminal_exit
         || after.iter().any(|line| {
             VANISHED_SESSION_SHUTDOWN_MARKERS
                 .iter()
+                .filter(|marker| **marker != QUIT_APP_EXIT_MARKER && **marker != QUIT_RESTART_MARKER)
                 .any(|marker| line.contains(marker))
         });
     if shut_down {
@@ -8369,29 +8394,134 @@ mod tests {
     #[test]
     fn the_run_callback_logs_the_shutdown_line_first() {
         let lib = include_str!("lib.rs");
-        assert!(lib.contains(".run(handle_run_event);"), "run closure not wired");
-        let body = lib
-            .split("#[cfg(target_os = \"macos\")]\nfn handle_run_event(")
-            .nth(1)
-            .expect("macOS handle_run_event exists");
-        let stmts: Vec<&str> = body
-            .lines()
-            .skip(1)
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with("//"))
-            .take(3)
-            .collect();
-        let at = stmts
-            .iter()
-            .position(|l| *l == "logging::log_run_event_shutdown(&event);")
-            .expect("marker call within the first statements");
-        assert!(at == 0 || !stmts[at - 1].starts_with("#[cfg"), "{stmts:?}");
+        // One per `run()`: macOS and the non-macOS (Windows) entry point
+        // both hand `.run(...)` a callback (#526: Windows had none at all).
+        assert_eq!(
+            lib.matches(".run(handle_run_event);").count(),
+            2,
+            "both run() entry points must wire the run-event callback"
+        );
+        for cfg in ["#[cfg(target_os = \"macos\")]", "#[cfg(not(target_os = \"macos\"))]"] {
+            let body = lib
+                .split(&format!("{cfg}\nfn handle_run_event("))
+                .nth(1)
+                .unwrap_or_else(|| panic!("{cfg} handle_run_event exists"));
+            let stmts: Vec<&str> = body
+                .lines()
+                .skip(1)
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with("//"))
+                .take(3)
+                .collect();
+            let at = stmts
+                .iter()
+                .position(|l| *l == "logging::log_run_event_shutdown(&event);")
+                .unwrap_or_else(|| panic!("{cfg}: marker call within the first statements"));
+            assert!(at == 0 || !stmts[at - 1].starts_with("#[cfg"), "{cfg}: {stmts:?}");
+        }
         let helper = include_str!("logging.rs")
             .split("pub(crate) fn log_run_event_shutdown(")
             .nth(1)
             .expect("helper exists");
         let helper = &helper[..helper.find("\n}\n").unwrap()];
         assert!(helper.contains("write_shutdown_marker(log::logger(), line)"), "{helper}");
+    }
+
+    /// #526: the Windows installer hand-off exits via `std::process::exit`,
+    /// so the updater hook's line is that exit's only marker. Drives the
+    /// real filter + dispatch + file sink, under a `RUST_LOG` that filters
+    /// the updater module, then classifies what was read back.
+    #[test]
+    fn updater_handoff_marker_survives_filtering_and_classifies_clean() {
+        let dir = temp_dir("updater-handoff-marker");
+        let resolved = resolve_log_filter(Some("warn,desktop_lib::session=info"));
+        let (_, dispatch) = log_dispatch(resolved.filter, resolved.max_level)
+            .chain(Box::new(DailyLogSink::new(dir.clone())) as Box<dyn log::Log>)
+            .into_log();
+        let logger = RepeatSuppressingLog::new(dispatch);
+        let info = |target: &str, msg: &str| {
+            log::Log::log(
+                &logger,
+                &log::Record::builder()
+                    .args(format_args!("{msg}"))
+                    .level(log::Level::Info)
+                    .target(target)
+                    .build(),
+            )
+        };
+        info("desktop_lib::session", "windows session: joined room ops");
+        info("desktop_lib::updater", "updater: installed; relaunching");
+        // Periodic writers may still log while the installer starts.
+        info("desktop_lib::session", "compositor feed: ok");
+        let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
+        let path = dir.join(daily_log_file_name(&today_utc_string()));
+        let before = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            classify_previous_session(&lines(&before), CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::Vanished,
+            "without the marker the hand-off must read as VANISHED\n{before}"
+        );
+        write_shutdown_marker(&logger, UPDATER_HANDOFF_SHUTDOWN_LINE);
+        info("desktop_lib::session", "compositor feed: still ok");
+        let after = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(after.contains(UPDATER_HANDOFF_SHUTDOWN_LINE), "marker dropped\n{after}");
+        assert!(!after.contains("updater: installed"), "filter not applied\n{after}");
+        assert_eq!(
+            classify_previous_session(&lines(&after), CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::CleanShutdown,
+            "{after}"
+        );
+        // The installer failed to launch: the session lives on, so a later
+        // death must read as VANISHED again, not as the earlier hand-off.
+        write_shutdown_marker(&logger, UPDATER_HANDOFF_FAILED_LINE);
+        info("desktop_lib::session", "compositor feed: ok after failed hand-off");
+        let revoked = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(revoked.contains(UPDATER_HANDOFF_FAILED_LINE), "revocation dropped\n{revoked}");
+        assert_eq!(
+            classify_previous_session(&lines(&revoked), CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::Vanished,
+            "{revoked}"
+        );
+        // ...and a real exit after the revocation is clean again.
+        write_shutdown_marker(&logger, run_event_shutdown_line(&tauri::RunEvent::Exit).unwrap());
+        let exited = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            classify_previous_session(&lines(&exited), CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::CleanShutdown,
+            "{exited}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The revocation must also hold when nothing logs after it: the
+    /// hand-off marker sits after the last activity line (#526).
+    #[test]
+    fn a_revoked_handoff_with_no_later_activity_reads_as_vanished() {
+        let tail = [
+            "windows session: joined room ops",
+            UPDATER_HANDOFF_SHUTDOWN_LINE,
+            UPDATER_HANDOFF_FAILED_LINE,
+        ];
+        assert_eq!(classify(&tail), PreviousSessionOutcome::Vanished);
+        assert_eq!(classify(&tail[..2]), PreviousSessionOutcome::CleanShutdown);
+        // A clean leave after the revocation still counts.
+        assert_eq!(
+            classify(&[
+                "windows session: joined room ops",
+                UPDATER_HANDOFF_SHUTDOWN_LINE,
+                UPDATER_HANDOFF_FAILED_LINE,
+                "session: left room ops",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+    }
+
+    #[test]
+    fn the_revocation_line_is_not_itself_a_shutdown_marker() {
+        assert!(UPDATER_HANDOFF_FAILED_LINE.contains(SHUTDOWN_MARKER_REVOKED));
+        for marker in VANISHED_SESSION_SHUTDOWN_MARKERS {
+            assert!(!UPDATER_HANDOFF_FAILED_LINE.contains(marker), "{marker}");
+        }
     }
 
     #[test]
