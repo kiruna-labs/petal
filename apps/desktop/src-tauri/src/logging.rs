@@ -197,6 +197,10 @@ const SENTRY_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 /// local `petal.log`/stdout sinks at all -- fern's own per-target rules
 /// don't reference this target, so it logs there exactly as before.
 const PANIC_HOOK_LOG_TARGET: &str = "petal::panic_hook_internal";
+/// How the panic hook's line reads in the file sink (`log_dispatch` prints
+/// `[target] message`). The previous-session classifier matches this, not
+/// the bare target, so a message merely naming the target is no panic (#539).
+const PANIC_HOOK_LINE_SIGNATURE: &str = "[petal::panic_hook_internal] PANIC at ";
 
 /// Same reasoning as `PANIC_HOOK_LOG_TARGET`, for the ObjC uncaught-exception
 /// handler's own local-file summary line.
@@ -4580,6 +4584,9 @@ enum PreviousSessionOutcome {
     WentDownWithTheMachine,
     /// In-meeting, no shutdown marker, and nothing explains the gap.
     Vanished,
+    /// A panic was logged after the last unrevoked run-event shutdown
+    /// marker: exit cleanup (which runs after the marker) panicked (#539).
+    CrashedDuringShutdown,
 }
 
 /// Whether a `desktop-*.ips` could be tied to the previous session (#105).
@@ -5646,6 +5653,35 @@ fn classify_previous_session(
     crash: CrashAttribution,
     rebooted_at: Option<std::time::SystemTime>,
 ) -> PreviousSessionReport {
+    // The run-event markers are TERMINAL anywhere in the segment: the exit
+    // happens in-room, so periodic writers ("compositor feed:") log after
+    // them and must not re-arm the vanish (PETAL-DESKTOP-22). Exit is final.
+    // A revocation after the last terminal marker cancels it: the updater
+    // hook writes its marker BEFORE the installer launches, and a failed
+    // launch returns with this process still running (#526).
+    let last_terminal = segment.iter().rposition(|line| {
+        line.contains(QUIT_APP_EXIT_MARKER) || line.contains(QUIT_RESTART_MARKER)
+    });
+    let terminal_exit = last_terminal.filter(|terminal| {
+        !segment[terminal + 1..]
+            .iter()
+            .any(|line| line.contains(SHUTDOWN_MARKER_REVOKED))
+    });
+    // The marker is logged BEFORE exit cleanup runs, so a panic in that
+    // cleanup lands after it: never read that as clean (#539).
+    if terminal_exit.is_some_and(|terminal| {
+        segment[terminal + 1..]
+            .iter()
+            .any(|line| line.contains(PANIC_HOOK_LINE_SIGNATURE))
+    }) {
+        return PreviousSessionReport {
+            outcome: PreviousSessionOutcome::CrashedDuringShutdown,
+            crash,
+            display_slept: false,
+            rebooted_at: None,
+            previous_version: None,
+        };
+    }
     let Some(last_activity_index) = segment.iter().rposition(|line| {
         VANISHED_SESSION_ACTIVITY_MARKERS
             .iter()
@@ -5660,23 +5696,9 @@ fn classify_previous_session(
         };
     };
     let after = &segment[last_activity_index + 1..];
-    // The run-event markers are TERMINAL anywhere in the segment: the exit
-    // happens in-room, so periodic writers ("compositor feed:") log after
-    // them and must not re-arm the vanish (PETAL-DESKTOP-22). Exit is final.
-    // A revocation after the last terminal marker cancels it: the updater
-    // hook writes its marker BEFORE the installer launches, and a failed
-    // launch returns with this process still running (#526).
-    let last_terminal = segment.iter().rposition(|line| {
-        line.contains(QUIT_APP_EXIT_MARKER) || line.contains(QUIT_RESTART_MARKER)
-    });
-    let terminal_exit = last_terminal.is_some_and(|terminal| {
-        !segment[terminal + 1..]
-            .iter()
-            .any(|line| line.contains(SHUTDOWN_MARKER_REVOKED))
-    });
     // Terminal markers are decided above only, so a revoked one cannot
     // sneak back in through this position-sensitive scan (#526).
-    let shut_down = terminal_exit
+    let shut_down = terminal_exit.is_some()
         || after.iter().any(|line| {
             VANISHED_SESSION_SHUTDOWN_MARKERS
                 .iter()
@@ -5871,6 +5893,10 @@ fn previous_session_log_line(report: &PreviousSessionReport) -> Option<(log::Lev
     };
     match report.outcome {
         PreviousSessionOutcome::CleanShutdown => None,
+        PreviousSessionOutcome::CrashedDuringShutdown => Some((
+            log::Level::Warn,
+            "previous session PANICKED during shutdown (a panic was logged after its shutdown marker; the panic hook reported the panic itself) -- see #539".to_string(),
+        )),
         PreviousSessionOutcome::WentDownWithTheMachine => Some((
             log::Level::Info,
             format!(
@@ -8582,6 +8608,121 @@ mod tests {
                 "session: left room ops",
             ]),
             PreviousSessionOutcome::CleanShutdown
+        );
+    }
+
+    /// #539: the run-event marker is written BEFORE exit cleanup, so a
+    /// panic in that cleanup lands after it. Drives the real filter +
+    /// dispatch + file sink and classifies what was read back off disk.
+    #[test]
+    fn a_panic_after_the_shutdown_marker_is_a_crash_during_shutdown() {
+        let source = include_str!("logging.rs");
+        assert!(
+            source.contains(r#"log::error!(target: PANIC_HOOK_LOG_TARGET, "PANIC at {location}: {message}");"#),
+            "the panic hook must keep logging under PANIC_HOOK_LOG_TARGET"
+        );
+        assert_eq!(PANIC_HOOK_LINE_SIGNATURE, format!("[{PANIC_HOOK_LOG_TARGET}] PANIC at "));
+        let dir = temp_dir("panic-after-shutdown-marker");
+        let resolved = resolve_log_filter(Some("warn,desktop_lib::session=info"));
+        let (_, dispatch) = log_dispatch(resolved.filter, resolved.max_level)
+            .chain(Box::new(DailyLogSink::new(dir.clone())) as Box<dyn log::Log>)
+            .into_log();
+        let logger = RepeatSuppressingLog::new(dispatch);
+        let emit = |level: log::Level, target: &str, msg: &str| {
+            log::Log::log(
+                &logger,
+                &log::Record::builder()
+                    .args(format_args!("{msg}"))
+                    .level(level)
+                    .target(target)
+                    .build(),
+            )
+        };
+        let read = || {
+            std::fs::read_to_string(dir.join(daily_log_file_name(&today_utc_string())))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let outcome = |lines: &[String]| {
+            classify_previous_session(lines, CrashAttribution::NoReport, None).outcome
+        };
+        emit(log::Level::Info, "desktop_lib::session", "session: joined room ops");
+        write_shutdown_marker(&logger, run_event_shutdown_line(&tauri::RunEvent::Exit).unwrap());
+        emit(log::Level::Info, "desktop_lib::session", "compositor feed: ok");
+        let marker_only = read();
+        assert_eq!(outcome(&marker_only), PreviousSessionOutcome::CleanShutdown, "{marker_only:?}");
+        emit(
+            log::Level::Error,
+            PANIC_HOOK_LOG_TARGET,
+            "PANIC at src/lib.rs:1:1: exit cleanup failed",
+        );
+        let panicked = read();
+        assert_eq!(
+            outcome(&panicked),
+            PreviousSessionOutcome::CrashedDuringShutdown,
+            "{panicked:?}"
+        );
+        let report = classify_previous_session(&panicked, CrashAttribution::NoReport, None);
+        assert_eq!(previous_session_sentry_event(&report), None, "not a VANISHED event");
+        assert!(previous_session_log_line(&report).is_some_and(|(level, line)| {
+            level == log::Level::Warn && !line.contains("VANISHED")
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panics_outside_an_effective_shutdown_do_not_read_as_crash_during_shutdown() {
+        let panic = "2026-01-01 00:00:00.000 [ERROR] [petal::panic_hook_internal] PANIC at x.rs:1:1: boom";
+        // A line that only NAMES the panic target is not a panic.
+        assert_eq!(
+            classify(&[
+                "session: joined room ops",
+                QUIT_APP_EXIT_MARKER,
+                "2026-01-01 00:00:00.000 [INFO] [desktop_lib::logging] filter skips petal::panic_hook_internal",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+        // An OLDER session's shutdown panic is cut off by the segmenter.
+        assert_eq!(
+            analyze_fixture(
+                &[
+                    "petal: app startup begin",
+                    "session: joined room ops",
+                    QUIT_APP_EXIT_MARKER,
+                    panic,
+                    "petal: app startup begin",
+                    "session: joined room ops",
+                    QUIT_APP_EXIT_MARKER,
+                ],
+                None,
+                None,
+                None,
+            )
+            .outcome,
+            PreviousSessionOutcome::CleanShutdown
+        );
+        // Before the marker: the session survived it and then exited.
+        assert_eq!(
+            classify(&["session: joined room ops", panic, QUIT_APP_EXIT_MARKER]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+        // After a REVOKED marker: the session lived on, so the verdict is
+        // the ordinary in-meeting one (#526), not a shutdown crash.
+        assert_eq!(
+            classify(&[
+                "windows session: joined room ops",
+                UPDATER_HANDOFF_SHUTDOWN_LINE,
+                UPDATER_HANDOFF_FAILED_LINE,
+                panic,
+            ]),
+            PreviousSessionOutcome::Vanished
+        );
+        // After the updater hand-off marker that was NOT revoked.
+        assert_eq!(
+            classify(&["windows session: joined room ops", UPDATER_HANDOFF_SHUTDOWN_LINE, panic]),
+            PreviousSessionOutcome::CrashedDuringShutdown
         );
     }
 
