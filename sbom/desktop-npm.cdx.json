@@ -4658,7 +4658,7 @@
         "typescript@6.0.3",
         "vite@8.3.6"
       ],
-      "ref": "desktop@0.9.37"
+      "ref": "desktop@0.9.38"
     },
     {
       "dependsOn": [],
@@ -5446,7 +5446,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "desktop@0.9.37",
+      "bom-ref": "desktop@0.9.38",
       "description": "Petal desktop app - low-latency, multi-window screensharing for macOS and Windows",
       "licenses": [
         {
@@ -5456,10 +5456,10 @@
         }
       ],
       "name": "desktop",
-      "purl": "pkg:npm/desktop@0.9.37",
+      "purl": "pkg:npm/desktop@0.9.38",
       "scope": "required",
       "type": "library",
-      "version": "0.9.37"
+      "version": "0.9.38"
     },
     "lifecycles": [
       {

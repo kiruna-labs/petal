@@ -4191,7 +4191,7 @@
         "typescript@6.0.3",
         "vite@8.3.6"
       ],
-      "ref": "web-harness@0.9.37"
+      "ref": "web-harness@0.9.38"
     },
     {
       "dependsOn": [],
@@ -4905,7 +4905,7 @@
   ],
   "metadata": {
     "component": {
-      "bom-ref": "web-harness@0.9.37",
+      "bom-ref": "web-harness@0.9.38",
       "description": "Petal browser client",
       "licenses": [
         {
@@ -4921,10 +4921,10 @@
           "value": "true"
         }
       ],
-      "purl": "pkg:npm/web-harness@0.9.37",
+      "purl": "pkg:npm/web-harness@0.9.38",
       "scope": "required",
       "type": "library",
-      "version": "0.9.37"
+      "version": "0.9.38"
     },
     "lifecycles": [
       {
