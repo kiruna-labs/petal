@@ -326,6 +326,9 @@ struct SharePumpShared {
     /// publication in `published` was created with. Sticky across recovery
     /// republishes; a request from any other publication is stale.
     wedge_steps_used: std::sync::atomic::AtomicU32,
+    /// #556: the share's "exhaustion already reported" flag, carried by every
+    /// publication of it so exhaustion reports once per share, not per publish.
+    exhaustion_reported: Arc<AtomicBool>,
 }
 
 /// Window token -> instant until which the frame pump runs in remote-input
@@ -2005,6 +2008,9 @@ pub(crate) async fn start_share_token(
         }
     };
 
+    // #556: one exhaustion flag for every publication of this share, the
+    // first included (it is published before `SharePumpShared` exists).
+    let exhaustion_reported = Arc::new(AtomicBool::new(false));
     let published = match room_connection
         .publish_window_at_cadence(
             width,
@@ -2022,6 +2028,7 @@ pub(crate) async fn start_share_token(
                 token,
                 share_instance_id.clone(),
                 0,
+                exhaustion_reported.clone(),
             )),
             false,
         )
@@ -2067,6 +2074,7 @@ pub(crate) async fn start_share_token(
     let shared = Arc::new(SharePumpShared {
         published: Mutex::new(published),
         wedge_steps_used: std::sync::atomic::AtomicU32::new(0),
+        exhaustion_reported,
     });
     let url_refresh = (kind == SharedSourceKind::Window).then(|| {
         start_share_url_refresh(
@@ -2224,25 +2232,48 @@ fn wedge_recovery_for_windows_share(
     token: u32,
     share_instance_id: String,
     steps_used: u32,
+    exhaustion_reported: Arc<AtomicBool>,
 ) -> crate::transport::publisher::EncoderWedgeRecovery {
-    crate::transport::publisher::EncoderWedgeRecovery::new(steps_used, move |step| {
+    windows_share_recovery(steps_used, exhaustion_reported, move |step, exhaustion_reported| {
         let app = app.clone();
         let share_instance_id = share_instance_id.clone();
         tauri::async_runtime::spawn(async move {
             // #527: a failed publish leaves the wedged publication live with
             // this step already spent, so it is retried once.
-            crate::transport::publisher::drive_wedge_recovery_step(step, None, |_is_retry| {
-                recover_wedged_windows_share(
-                    app.clone(),
-                    token,
-                    share_instance_id.clone(),
-                    steps_used,
-                    step,
-                )
-            })
+            crate::transport::publisher::drive_wedge_recovery_step(
+                step,
+                Some(exhaustion_reported),
+                |_is_retry| {
+                    recover_wedged_windows_share(
+                        app.clone(),
+                        token,
+                        share_instance_id.clone(),
+                        steps_used,
+                        step,
+                    )
+                },
+            )
             .await;
         });
     })
+}
+
+/// [#556] The AppHandle-free core of `wedge_recovery_for_windows_share`: the
+/// publication's guard AND its recovery driver share the SHARE's exhaustion
+/// flag, so exhaustion and `RecoveryRepublishFailed` report once per share.
+fn windows_share_recovery(
+    steps_used: u32,
+    exhaustion_reported: Arc<AtomicBool>,
+    request: impl Fn(crate::transport::publisher::EncoderRecoveryStep, Arc<AtomicBool>)
+        + Send
+        + Sync
+        + 'static,
+) -> crate::transport::publisher::EncoderWedgeRecovery {
+    let for_driver = exhaustion_reported.clone();
+    crate::transport::publisher::EncoderWedgeRecovery::new(steps_used, move |step| {
+        request(step, for_driver.clone())
+    })
+    .with_share_exhaustion_flag(exhaustion_reported)
 }
 
 /// [#525] Publish the replacement for one wedge step. `publish` receives the
@@ -2304,10 +2335,17 @@ async fn recover_wedged_windows_share(
     let old = shared.published.lock_unpoisoned().clone();
     let next_app = app.clone();
     let next_instance_id = share_instance_id.clone();
+    let exhaustion_reported = shared.exhaustion_reported.clone();
     let published = publish_wedge_replacement(
         step,
         move |steps_used| {
-            wedge_recovery_for_windows_share(next_app, token, next_instance_id, steps_used)
+            wedge_recovery_for_windows_share(
+                next_app,
+                token,
+                next_instance_id,
+                steps_used,
+                exhaustion_reported,
+            )
         },
         |force_software_encoder, recovery| {
             // Not wrapped in a timeout: LiveKit's publish is not cancellation
@@ -4133,6 +4171,58 @@ mod tests {
         assert_eq!(seen, vec![(false, Some(1)), (true, Some(2))]);
     }
 
+    /// #556: a Windows share that exhausts its recovery reports it ONCE: the
+    /// first publication's guard, #527's failed last step and every later
+    /// republication all share the flag `windows_share_recovery` attaches.
+    #[tokio::test(start_paused = true)]
+    async fn windows_share_reports_exhaustion_once_across_republications() {
+        use crate::logging::SentryDiagnosticEvent;
+        use crate::transport::publisher::{
+            drive_wedge_recovery_step, drive_wedged_publication_for_test,
+            take_encoder_wedge_reports, EncoderRecoveryStep, WedgeRecoveryAttempt,
+        };
+        take_encoder_wedge_reports();
+        let flag = Arc::new(AtomicBool::new(false));
+        let handed = Arc::new(Mutex::new(Vec::new()));
+        let recorder = handed.clone();
+        let first = windows_share_recovery(0, flag.clone(), move |step, driver_flag| {
+            recorder.lock_unpoisoned().push((step, driver_flag))
+        });
+        // The first publication's recoveries never replace it: it exhausts.
+        let steps = drive_wedged_publication_for_test(&first, 30);
+        assert_eq!(
+            steps,
+            vec![EncoderRecoveryStep::Republish, EncoderRecoveryStep::FallBackToSoftware]
+        );
+        // Each step reaches the action production attaches.
+        for step in steps {
+            first.request(step);
+        }
+        let handed = std::mem::take(&mut *handed.lock_unpoisoned());
+        assert_eq!(handed.len(), 2);
+        // #527: the last step's republish fails twice through the driver the
+        // production request runs, with the flag the request was handed.
+        for (step, driver_flag) in handed {
+            assert!(Arc::ptr_eq(&driver_flag, &flag), "the driver gets the share's flag");
+            if step == EncoderRecoveryStep::FallBackToSoftware {
+                let result = drive_wedge_recovery_step(step, Some(driver_flag), |_is_retry| async {
+                    WedgeRecoveryAttempt::NotReplaced
+                })
+                .await;
+                assert_eq!(result, WedgeRecoveryAttempt::NotReplaced);
+            }
+        }
+        for _republication in 0..3 {
+            let replacement = windows_share_recovery(2, flag.clone(), |_, _| {});
+            assert!(drive_wedged_publication_for_test(&replacement, 30).is_empty());
+        }
+        let exhausted = take_encoder_wedge_reports()
+            .into_iter()
+            .filter(|event| matches!(event, SentryDiagnosticEvent::EncoderWedgeExhausted(_)))
+            .count();
+        assert_eq!(exhausted, 1, "one exhaustion report per Windows share");
+    }
+
     /// #525: source guard for the wiring the unit test above cannot reach
     /// without a live room. Share start attaches recovery (budget 0); the
     /// recovery republishes through `publish_wedge_replacement`, passing its
@@ -4157,8 +4247,14 @@ mod tests {
         let publish = &publish[..publish.find(".await").expect("start publish await")];
         assert!(
             publish.contains("Some(wedge_recovery_for_windows_share(")
-                && publish.contains("share_instance_id.clone(),\n                0,\n            )),\n            false,"),
+                && publish.contains("share_instance_id.clone(),\n                0,\n                exhaustion_reported.clone(),\n            )),\n            false,"),
             "share start must attach recovery with a fresh budget on the default encoder"
+        );
+        // #556: the share's ONE exhaustion flag reaches its first publication,
+        // the shared slot, and every recovery replacement built from it.
+        assert!(
+            start.contains("wedge_steps_used: std::sync::atomic::AtomicU32::new(0),\n        exhaustion_reported,\n    });"),
+            "the share stores the flag its first publication carries"
         );
         let recover = source
             .split_once("async fn recover_wedged_windows_share(")
@@ -4170,6 +4266,11 @@ mod tests {
         assert!(
             closure.contains("recovery,\n                force_software_encoder,"),
             "the RESOLVED values must reach the publisher"
+        );
+        assert!(
+            recover.contains("let exhaustion_reported = shared.exhaustion_reported.clone();")
+                && recover.contains("steps_used,\n                exhaustion_reported,\n            )"),
+            "a recovery replacement must carry the share's exhaustion flag (#556)"
         );
         let cas = recover.find("Arc::ptr_eq(&*slot, &old)").expect("compare-and-swap");
         let swap = recover.find("*slot = replacement.clone();").expect("slot swap");
@@ -4184,12 +4285,17 @@ mod tests {
             .map(|(_, rest)| &rest[..rest.find("\n}\n").expect("action end")])
             .expect("wedge_recovery_for_windows_share");
         let driver = action
-            .find("drive_wedge_recovery_step(step,")
+            .find("drive_wedge_recovery_step(")
             .expect("the retrying driver");
         let attempt = action
             .find("recover_wedged_windows_share(")
             .expect("each attempt");
         assert!(driver < attempt, "every attempt runs inside the driver");
+        assert!(
+            action.contains("windows_share_recovery(steps_used, exhaustion_reported,")
+                && action.contains("Some(exhaustion_reported),"),
+            "the guard and the driver must both get the share's flag (#556)"
+        );
         assert!(
             recover.contains("return WedgeRecoveryAttempt::NotReplaced;"),
             "a failed publish must be reported for retry, not as done"

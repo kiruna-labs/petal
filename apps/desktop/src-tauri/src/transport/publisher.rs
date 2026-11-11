@@ -224,7 +224,7 @@ impl EncoderWedgeRecovery {
         self.hardware_probe.is_some()
     }
 
-    fn request(&self, step: EncoderRecoveryStep) {
+    pub(crate) fn request(&self, step: EncoderRecoveryStep) {
         (self.request)(step)
     }
 
@@ -10652,7 +10652,7 @@ pub(crate) const WEDGE_RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Du
 /// `attempt(is_retry)` performs one republish and classifies it.
 pub(crate) async fn drive_wedge_recovery_step<Fut>(
     step: EncoderRecoveryStep,
-    // #528: the share's exhaustion flag; `None` (Windows) reports per call.
+    // #528: the share's exhaustion flag; `None` reports on every call.
     share_exhaustion_reported: Option<Arc<AtomicBool>>,
     mut attempt: impl FnMut(bool) -> Fut,
 ) -> WedgeRecoveryAttempt
