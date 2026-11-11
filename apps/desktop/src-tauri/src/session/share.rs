@@ -672,6 +672,61 @@ fn record_last_stopped_share_generation(
 struct RepublishCoordinator {
     generation: AtomicU64,
     apply_lock: tokio::sync::Mutex<()>,
+    /// #427: the share's wedge-recovery state. It lives here because this is
+    /// the one object every republish of a share already carries, and a new
+    /// share builds a new one, so it resets exactly when the share stops.
+    encoder_recovery: Mutex<StickyEncoderRecovery>,
+}
+
+type EncoderWedgeRecoveryFactory =
+    Arc<dyn Fn(u32) -> EncoderWedgeRecovery + Send + Sync>;
+
+/// Per-share encoder recovery that survives every republish (#427, macOS).
+/// Dropping it on a quality/resize/resolution republish put the share back on
+/// VideoToolbox with no recovery attached: it wedged again and logged "not
+/// wired" then "exhausted" after the software fallback had already worked.
+#[derive(Default)]
+struct StickyEncoderRecovery {
+    software: bool,
+    steps_used: u32,
+    factory: Option<EncoderWedgeRecoveryFactory>,
+}
+
+impl RepublishCoordinator {
+    fn attach_encoder_recovery(&self, factory: EncoderWedgeRecoveryFactory) {
+        self.encoder_recovery.lock_unpoisoned().factory = Some(factory);
+    }
+
+    /// Records a wedge step the moment it is taken, so a republish queued
+    /// behind it (or racing it) already sees the spent budget and fallback.
+    fn note_wedge_recovery_step(&self, step: EncoderRecoveryStep) {
+        let mut state = self.encoder_recovery.lock_unpoisoned();
+        match step {
+            EncoderRecoveryStep::Republish => state.steps_used = state.steps_used.max(1),
+            EncoderRecoveryStep::FallBackToSoftware => {
+                state.software = true;
+                state.steps_used = state.steps_used.max(2);
+            }
+        }
+    }
+
+    /// The encoder choice and recovery action for ANY republish of this share.
+    /// `republish_window_with_target` calls it for every caller, so a caller
+    /// can neither drop the software fallback nor forget to attach recovery.
+    fn encoder_settings_for_republish(
+        &self,
+        force_software_encoder: bool,
+        explicit_recovery: Option<EncoderWedgeRecovery>,
+    ) -> (bool, Option<EncoderWedgeRecovery>) {
+        let state = self.encoder_recovery.lock_unpoisoned();
+        let recovery = explicit_recovery.or_else(|| {
+            state
+                .factory
+                .as_ref()
+                .map(|factory| factory(state.steps_used))
+        });
+        (force_software_encoder || state.software, recovery)
+    }
 }
 
 struct StartedShareCapture {
@@ -5291,6 +5346,7 @@ async fn start_share_with_capture_source(
                     ShareQuality::Full,
                     window_id,
                     recovery,
+                    Some(wedge_recovery_for_share(&app, window_id, started_seq, 0)),
                 ),
             )
             .await
@@ -5424,6 +5480,13 @@ async fn start_share_with_capture_source(
 
     let published = Arc::new(Mutex::new(Arc::new(published)));
     let republish_intent = Arc::new(RepublishCoordinator::default());
+    {
+        // #427: every later republish of this share attaches recovery.
+        let app_for_recovery = app.clone();
+        republish_intent.attach_encoder_recovery(Arc::new(move |steps_used| {
+            wedge_recovery_for_share(&app_for_recovery, window_id, started_seq, steps_used)
+        }));
+    }
     let interaction_signal = Arc::new(InteractionSignal::default());
     register_interaction_signal(window_id, &interaction_signal);
     let (monitor_activation_tx, monitor_activation_rx) = tokio::sync::oneshot::channel();
@@ -8954,6 +9017,7 @@ pub(crate) async fn recover_wedged_encoder_publication(
 
     let force_software_encoder = step == EncoderRecoveryStep::FallBackToSoftware;
     let steps_used = if force_software_encoder { 2 } else { 1 };
+    republish_intent.note_wedge_recovery_step(step);
     let next_recovery = wedge_recovery_for_share(&app, window_id, started_seq, steps_used);
     let reason = format!("wedged encoder: {}", step.description());
     let outcome = republish_window_with_target(
@@ -9304,6 +9368,23 @@ impl RepublishTarget {
     }
 }
 
+/// The one place a republish's encoder settings are resolved and handed to the
+/// publisher. `publish` receives the RESOLVED values, so a test with a fake
+/// publish sees exactly what production would pass (#427).
+async fn publish_with_sticky_encoder_settings<T, Fut>(
+    coordinator: &RepublishCoordinator,
+    force_software_encoder: bool,
+    explicit_recovery: Option<EncoderWedgeRecovery>,
+    publish: impl FnOnce(bool, Option<EncoderWedgeRecovery>) -> Fut,
+) -> T
+where
+    Fut: std::future::Future<Output = T>,
+{
+    let (software, recovery) =
+        coordinator.encoder_settings_for_republish(force_software_encoder, explicit_recovery);
+    publish(software, recovery).await
+}
+
 async fn republish_window_with_target(
     room_connection: Arc<RoomConnection>,
     slot: Arc<Mutex<Arc<crate::transport::publisher::PublishedTrack>>>,
@@ -9380,15 +9461,25 @@ async fn republish_window_with_target(
             (observed, target)
         };
 
-        let Some(new_published) = publish_window_with_timeout(
-            &room_connection,
-            window_id,
-            target.width,
-            target.height,
-            target.quality,
-            reason,
+        // #427: settings resolve here, per attempt and under the apply lock, so
+        // a wedge step that just republished is visible and no caller can
+        // publish with its raw (false, None).
+        let Some(new_published) = publish_with_sticky_encoder_settings(
+            &republish_intent,
             force_software_encoder,
             encoder_wedge_recovery.clone(),
+            |resolved_software, resolved_recovery| {
+                publish_window_with_timeout(
+                    &room_connection,
+                    window_id,
+                    target.width,
+                    target.height,
+                    target.quality,
+                    reason,
+                    resolved_software,
+                    resolved_recovery,
+                )
+            },
         )
         .await
         else {
@@ -10650,6 +10741,154 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
     }
 
     use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    fn sticky_test_factory() -> EncoderWedgeRecoveryFactory {
+        Arc::new(|steps_used| EncoderWedgeRecovery::new(steps_used, |_| {}))
+    }
+
+    /// Runs the real resolve-and-publish step with a fake publisher and
+    /// returns the (software, recovery steps_used) it would have published with.
+    fn republish_args(
+        coordinator: &RepublishCoordinator,
+        force_software: bool,
+        explicit: Option<EncoderWedgeRecovery>,
+    ) -> (bool, Option<u32>) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(publish_with_sticky_encoder_settings(
+            coordinator,
+            force_software,
+            explicit,
+            |software, recovery| async move {
+                (software, recovery.map(|recovery| recovery.steps_used()))
+            },
+        ))
+    }
+
+    #[test]
+    fn wedge_recovery_survives_every_later_republish_of_the_share() {
+        // #427 macOS: wedge -> software fallback -> receiver-demand quality
+        // republish put VideoToolbox back with no recovery attached.
+        let coordinator = RepublishCoordinator::default();
+        coordinator.attach_encoder_recovery(sticky_test_factory());
+
+        assert_eq!(republish_args(&coordinator, false, None), (false, Some(0)));
+        coordinator.note_wedge_recovery_step(EncoderRecoveryStep::Republish);
+        assert_eq!(
+            republish_args(&coordinator, false, None),
+            (false, Some(1)),
+            "a recreate must not force software"
+        );
+        coordinator.note_wedge_recovery_step(EncoderRecoveryStep::FallBackToSoftware);
+
+        // The argument shapes real callers pass: the quality/resize/resolution/
+        // reconcile/repair wrappers pass (false, None); the post-wake retry
+        // passes (false, None) (its `true` is force_republish); the wedge path
+        // passes (software, Some(next)).
+        let shapes: [(&str, bool, Option<u32>); 3] = [
+            ("quality/resize/resolution/reconcile/repair", false, None),
+            ("post-wake software retry", false, None),
+            ("wedge step 2", true, Some(2)),
+        ];
+        for (caller, force, explicit_steps) in shapes {
+            let explicit = explicit_steps.map(|n| EncoderWedgeRecovery::new(n, |_| {}));
+            assert_eq!(
+                republish_args(&coordinator, force, explicit),
+                (true, Some(2)),
+                "{caller} must stay on software with recovery and the spent budget"
+            );
+        }
+    }
+
+    #[test]
+    fn every_share_builds_its_own_republish_coordinator() {
+        // Source-level: sticky state is reset by construction, so the property
+        // is that ONE site builds a coordinator, inside start-share, and nothing
+        // stores one across shares.
+        let full = include_str!("share.rs");
+        let source = full
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map(|(prod, _)| prod)
+            .expect("share.rs must keep its test module in one #[cfg(test)] block");
+        let build = concat!("Arc::new(RepublishCoordinator::", "default())");
+        assert_eq!(source.matches(build).count(), 1, "one construction site");
+        let start = source
+            .find("fn start_share_with_capture_source(")
+            .expect("start_share_with_capture_source");
+        let at = source.find(build).expect("construction");
+        assert!(at > start, "the coordinator is built inside start-share");
+        let between = &source[start..at];
+        assert!(
+            !between.contains("\nfn ")
+                && !between.contains("\nasync fn ")
+                && !between.contains("\npub fn ")
+                && !between.contains("\npub(crate) fn "),
+            "construction must be in the body of start_share_with_capture_source"
+        );
+        assert!(
+            !source.contains(concat!("static ", "REPUBLISH")),
+            "no coordinator is kept in a static across shares"
+        );
+    }
+
+    #[test]
+    fn every_republish_resolves_encoder_settings_through_the_sticky_state() {
+        // Source-level by design: a real republish needs a live LiveKit room
+        // and PublishedTrack. The fake-publish test above covers the resolution;
+        // this pins that production uses it and cannot be bypassed.
+        let full = include_str!("share.rs");
+        let source = full
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map(|(prod, _)| prod)
+            .expect("share.rs must keep its test module in one #[cfg(test)] block");
+        let publish_call = concat!("publish_window_with_", "timeout(");
+        assert_eq!(source.matches(publish_call).count(), 2, "one definition, one caller");
+        let direct = concat!("publish_window_at_with_recovery_", "context(");
+        assert_eq!(
+            source.matches(direct).count(),
+            2,
+            "exactly start-share and publish_window_with_timeout may publish directly"
+        );
+        let body = source
+            .split_once("\nasync fn republish_window_with_target(")
+            .map(|(_, rest)| rest)
+            .expect("republish_window_with_target");
+        let wrapper = body
+            .find(concat!("publish_with_sticky_encoder_", "settings("))
+            .expect("republish goes through the sticky resolver");
+        let call = body.find(publish_call).expect("publish call inside the closure");
+        assert!(wrapper < call);
+        let closure = &body[call..body.len().min(call + 400)];
+        assert!(
+            closure.contains("resolved_software,") && closure.contains("resolved_recovery,"),
+            "the RESOLVED values, not the caller's raw ones, must reach the publisher"
+        );
+        assert!(
+            !closure.contains("force_software_encoder,")
+                && !closure.contains("encoder_wedge_recovery.clone()"),
+            "raw caller values must not be passed to the publisher"
+        );
+        let wedge_fn = source
+            .split_once("pub(crate) async fn recover_wedged_encoder_publication(")
+            .map(|(_, rest)| rest)
+            .expect("recover_wedged_encoder_publication");
+        let note = wedge_fn
+            .find("republish_intent.note_wedge_recovery_step(step)")
+            .expect("a wedge step must be recorded in the sticky state");
+        let republish = wedge_fn
+            .find("republish_window_with_target(")
+            .expect("wedge republish");
+        assert!(note < republish, "record the step before republishing");
+        let after_wake = source
+            .split_once("room_connection.publish_window_at_after_wake(")
+            .map(|(_, rest)| &rest[..rest.len().min(400)])
+            .expect("post-wake restart publish");
+        assert!(
+            after_wake.contains("wedge_recovery_for_share("),
+            "post-wake restart must attach wedge recovery"
+        );
+    }
 
     #[test]
     fn every_stop_share_exit_reconciles_overlay_from_session_authority() {
