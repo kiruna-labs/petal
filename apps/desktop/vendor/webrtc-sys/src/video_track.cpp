@@ -177,11 +177,12 @@ bool VideoTrackSource::InternalSource::on_captured_frame(
       crop_height <= 0) {
     static std::atomic<uint32_t> dropped{0};
     if (dropped.fetch_add(1) % 300 == 0) {  // 1st, then every 10s at 30fps
-      RTC_LOG(LS_WARNING) << "VideoTrackSource: dropping degenerate frame "
-                          << buffer->width() << "x" << buffer->height()
-                          << " (adapted " << adapted_width << "x"
-                          << adapted_height << ", crop " << crop_width << "x"
-                          << crop_height << ")";
+      // Closed reason only: this line becomes a Sentry breadcrumb, and raw
+      // sizes are not exported (the patch's closed-bucket contract).
+      const char* which =
+          (adapted_width <= 0 || adapted_height <= 0) ? "adapted" : "crop";
+      RTC_LOG(LS_WARNING) << "VideoTrackSource: dropping degenerate frame ("
+                          << which << " size zero)";
     }
     return false;
   }

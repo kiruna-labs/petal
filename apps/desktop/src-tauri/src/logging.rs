@@ -275,6 +275,18 @@ pub struct DegenerateFrameDiagnostic {
     pub axis: DegenerateAxisTag,
 }
 
+impl DegenerateFrameDiagnostic {
+    /// Closed-bucket text for the skip's WARN line (a Sentry breadcrumb).
+    pub(crate) fn closed_summary(self) -> String {
+        format!(
+            "frame {}, published {}, axis {}",
+            self.frame_geometry.tag(),
+            self.published_geometry.tag(),
+            self.axis.tag()
+        )
+    }
+}
+
 /// A funded window-share encoder produced zero frames for the whole #427
 /// trigger window. `EncoderWedged` reports the first recovery action taken
 /// for a share; `EncoderWedgeExhausted` reports a share left publishing an

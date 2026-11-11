@@ -442,8 +442,11 @@ practice exactly 2 px. (From the headers and upstream behaviour: the prebuilt
 `video_adapter.cc` is not in the tree.)
 
 The fix returns `false` (frame dropped, the receiver holds its last frame)
-when any of the four sizes is `<= 0`, with a rate-limited WARNING. The
-Linux-only `capture_dmabuf_frame` also refuses a non-positive width/height
-before building its buffer. Guarded by
+when any of the four sizes is `<= 0`, with a rate-limited WARNING. The warning
+names only a closed reason (`adapted` or `crop` size zero), never raw sizes:
+native WebRTC lines become Sentry breadcrumbs and the scrubber does not redact
+dimensions. The Linux-only `capture_dmabuf_frame` also refuses a non-positive
+width/height before building its buffer. Guarded by
 `vendored_on_captured_frame_drops_non_positive_sizes_before_crop_and_scale`
-in the desktop crate. Keep this on any webrtc-sys bump.
+and `vendored_degenerate_frame_warning_logs_no_raw_sizes` in the desktop
+crate. Keep this on any webrtc-sys bump.

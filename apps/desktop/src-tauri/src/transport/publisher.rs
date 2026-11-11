@@ -1720,6 +1720,24 @@ fn degenerate_axis(
     }
 }
 
+/// The WARN line for a degenerate skip. It becomes a Sentry breadcrumb, which
+/// the scrubber does not redact sizes or track names from, so it carries only
+/// closed values: track kind, size buckets and the axis (PETAL-DESKTOP-4Y).
+fn degenerate_skip_warning(
+    track_name: &str,
+    diagnostic: crate::logging::DegenerateFrameDiagnostic,
+) -> String {
+    let kind = if track_name.starts_with(CAMERA_TRACK_PREFIX) {
+        "camera"
+    } else {
+        "window"
+    };
+    format!(
+        "publisher: skipping degenerate {kind} frame ({}); holding the last frame",
+        diagnostic.closed_summary()
+    )
+}
+
 /// True when a frame of this size must not reach `capture_frame`.
 fn frame_below_publishable_edge(width: u32, height: u32, min_edge: u32) -> bool {
     width < min_edge || height < min_edge
@@ -6055,7 +6073,7 @@ mod track_name_tests {
             2,
             "push_frame and push_nv12 must both record the push outcome"
         );
-        let bump = concat!("note_frame_pushed(&self.frames_", "pushed, outcome);");
+        let bump = concat!("note_frame_pushed(&self.frames_", "pushed, outcome.ok());");
         assert_eq!(source.matches(bump).count(), 1, "record_push_outcome bumps the counter");
         let clone = concat!("let frames_pushed_for_stats = frames_", "pushed.clone();");
         assert_eq!(source.matches(clone).count(), 1, "stats loop gets a clone of the track's Arc");
@@ -6567,7 +6585,10 @@ mod track_name_tests {
         let push = body.find("self.rtc_source.capture_frame(").expect("capture_frame");
         assert!(guard < push, "the floor check must precede capture_frame");
         let skip = &body[guard..push];
-        assert!(skip.contains("return None;"), "a skipped frame never reached the source");
+        assert!(
+            skip.contains(concat!("return Err(PushMiss::", "SkippedDegenerate);")),
+            "a skipped frame never reached the source"
+        );
         assert!(skip.contains("self.min_publish_edge"), "floor is cached at construction");
         assert!(!skip.contains(concat!("min_publishable_edge", "(")), "no per-frame ladder walk");
         assert!(!skip.contains("unpublish") && !skip.contains("hide"), "{skip}");
@@ -6602,6 +6623,28 @@ mod track_name_tests {
         assert!(calls >= 1, "no CropAndScale call found; the pin is stale");
     }
 
+    /// Native WebRTC lines become Sentry breadcrumbs and the scrubber leaves
+    /// sizes alone, so the drop warning must not stream any dimension.
+    #[test]
+    fn vendored_degenerate_frame_warning_logs_no_raw_sizes() {
+        let src = vendored_video_track_cpp();
+        let guard = src
+            .find("adapted_width <= 0 || adapted_height <= 0 || crop_width <= 0 ||")
+            .expect("guard");
+        let end = guard + src[guard..].find("return false;").expect("guard return");
+        let block = &src[guard..end];
+        let log = block.find("RTC_LOG(").expect("the drop is still logged");
+        let stmt = &block[log..log + block[log..].find(';').expect("log statement end")];
+        for streamed in stmt.split("<<").skip(1) {
+            let streamed = streamed.trim();
+            assert!(
+                streamed.starts_with('"') || streamed == "which",
+                "only literals or the closed reason may be logged, got `{streamed}`"
+            );
+        }
+        assert!(block.contains("? \"adapted\" : \"crop\""), "closed reason: {block}");
+    }
+
     /// The floor rests on `AdaptedVideoTrackSource(4)`: a bump that changes it
     /// must re-derive `ADAPTER_MIN_EDGE`.
     #[test]
@@ -6619,6 +6662,39 @@ mod track_name_tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../vendor/webrtc-sys/src/video_track.cpp");
         std::fs::read_to_string(&path).expect("read vendored video_track.cpp")
+    }
+
+    /// WARN records become Sentry breadcrumbs and the scrubber leaves sizes
+    /// and track names alone, so the skip warning must carry neither.
+    #[test]
+    fn degenerate_skip_warning_carries_no_raw_size_or_track_name() {
+        use crate::logging::{DegenerateAxisTag, DegenerateFrameDiagnostic};
+        let diagnostic = DegenerateFrameDiagnostic {
+            frame_geometry: camera_geometry_bucket(2, 600),
+            published_geometry: camera_geometry_bucket(1280, 720),
+            axis: degenerate_axis(2, 600, 4),
+        };
+        assert_eq!(diagnostic.axis, DegenerateAxisTag::Width);
+        let camera = degenerate_skip_warning("petal-camera-alice@example.com", diagnostic);
+        let redacted = crate::logging::redact_for_export(&camera);
+        for line in [&camera, &redacted] {
+            assert!(!line.contains("alice"), "{line}");
+            assert!(!line.chars().any(|c| c.is_ascii_digit()), "raw size in {line}");
+        }
+        assert!(camera.contains("camera") && camera.contains("axis width"), "{camera}");
+        let window = degenerate_skip_warning("petal-window-1234", diagnostic);
+        assert!(!window.contains("1234") && window.contains("window"), "{window}");
+        assert_eq!(
+            window,
+            "publisher: skipping degenerate window frame (frame tiny, published medium, axis width); holding the last frame"
+        );
+        // The only warn! in the skip path is this closed line.
+        let src = include_str!("publisher.rs");
+        let start = src.find(concat!("    fn note_degenerate_frame", "_skipped(")).expect("fn");
+        let body = &src[start..start + src[start..].find("\n    }\n").expect("end")];
+        assert_eq!(body.matches("log::warn!(").count(), 1, "{body}");
+        assert!(body.contains(concat!("log::warn!(\"{}\", degenerate_skip_", "warning(")), "{body}");
+        assert!(!body.contains("log::info!("), "INFO is a breadcrumb too: {body}");
     }
 
     #[test]
@@ -6639,13 +6715,19 @@ mod track_name_tests {
         let start = src.find(concat!("    fn capture_to_source", "<")).expect("capture_to_source");
         let end = start + src[start..].find("fn note_degenerate_frame_skipped").expect("end");
         let body = &src[start..end];
-        assert!(body.contains("-> Option<bool>"), "{body}");
-        assert!(body.contains("return None;"), "a skip must be None: {body}");
+        assert!(body.contains("-> Result<bool, PushMiss>"), "{body}");
+        assert!(
+            body.contains(concat!("return Err(PushMiss::", "SkippedDegenerate);")),
+            "a skip must be SkippedDegenerate: {body}"
+        );
         let callers = src.matches(concat!("self.capture_to_source(", "&frame")).count();
         let propagated = src.matches(concat!("&mut capture_frame_started)", "?;")).count();
         assert_eq!(callers, 3, "capture_to_source callers changed; re-audit the skip outcome");
         assert_eq!(propagated, 2, "the two copied-frame callers must `?` the skip");
-        assert!(src.contains(concat!("Ok(None) => return ", "None,")), "zero-copy skip must return None");
+        assert!(
+            src.contains(concat!("Ok(None) => return Err(PushMiss::", "SkippedDegenerate),")),
+            "zero-copy skip must propagate as SkippedDegenerate"
+        );
         assert!(!src.contains(concat!("result.unwrap_or", "(false)")));
     }
 
@@ -8748,6 +8830,35 @@ fn live_encoding_shape_covers_updates(
     updates.iter().all(|update| live_rids.contains(&update.rid))
 }
 
+/// How one push counts toward the publish-drop streak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushStreakOutcome {
+    Published,
+    Failed,
+    SkippedDegenerate,
+}
+
+/// Why a push did not reach the source. Carried per push, so a skip can
+/// never be confused with a failure on another push of the same track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushMiss {
+    /// Conversion, geometry or capture failure: a dropped push.
+    Failed,
+    /// Below the publish floor, skipped on purpose (PETAL-DESKTOP-4Y).
+    SkippedDegenerate,
+}
+
+/// The push chain's internal result; the public entry points expose `.ok()`.
+type PushResult = Result<PublishedFrameTiming, PushMiss>;
+
+fn push_streak_outcome(result: PushResult) -> PushStreakOutcome {
+    match result {
+        Ok(_) => PushStreakOutcome::Published,
+        Err(PushMiss::Failed) => PushStreakOutcome::Failed,
+        Err(PushMiss::SkippedDegenerate) => PushStreakOutcome::SkippedDegenerate,
+    }
+}
+
 /// Core of `PublishedTrack::record_push_outcome`, extracted so a #866-shaped
 /// storm (a long run of consecutive failed/mismatched pushes) is
 /// unit-testable without a live `PublishedTrack` -- it holds an `Arc<Room>`
@@ -8757,9 +8868,16 @@ fn live_encoding_shape_covers_updates(
 fn push_drop_streak_diagnostic(
     detector: &Mutex<crate::logging::DropStreakDetector>,
     track_name: &str,
-    published: bool,
+    outcome: PushStreakOutcome,
     now: std::time::Instant,
 ) -> Option<crate::logging::SentryDiagnosticEvent> {
+    let published = match outcome {
+        PushStreakOutcome::Published => true,
+        PushStreakOutcome::Failed => false,
+        // A deliberate degenerate-frame skip is neither: it must not trip
+        // publish-drop-streak, nor reset a real streak (PETAL-DESKTOP-4Y).
+        PushStreakOutcome::SkippedDegenerate => return None,
+    };
     let mut guard = detector.lock_unpoisoned();
     let tripped = guard.record(published, now);
     drop(guard);
@@ -8965,13 +9083,12 @@ impl PublishedTrack {
     /// One place where a push outcome updates the drop-streak detector. A window
     /// share and a camera reach it from different entry points; the scope tag comes
     /// from the track name so the Sentry event says which one stopped (#788).
-    fn record_push_outcome(&self, outcome: Option<PublishedFrameTiming>) {
-        let published = outcome.is_some();
-        note_frame_pushed(&self.frames_pushed, outcome);
+    fn record_push_outcome(&self, outcome: PushResult) {
+        note_frame_pushed(&self.frames_pushed, outcome.ok());
         if let Some(event) = push_drop_streak_diagnostic(
             &self.push_drop_streak,
             &self.track.name(),
-            published,
+            push_streak_outcome(outcome),
             std::time::Instant::now(),
         ) {
             crate::logging::capture_sentry_diagnostic(event);
@@ -9183,15 +9300,16 @@ impl PublishedTrack {
     /// reset after the wait so `capture_frame_return_ms` (and the zero-copy
     /// stall latch fed by it) never counts the wait.
     ///
-    /// `None` means the frame never reached the source (skipped as
-    /// degenerate): callers return `None` too, so the pump's retry loop,
-    /// pushed counters and first-frame stage never count it. `Some(false)` is
-    /// a real limiter rejection and stays retryable.
+    /// `Err(SkippedDegenerate)` means the frame never reached the source: it
+    /// propagates to the public entry points as `None`, so the pump's retry
+    /// loop, pushed counters and first-frame stage never count it, and the
+    /// drop streak treats it as neutral. `Ok(false)` is a real limiter
+    /// rejection and stays retryable.
     fn capture_to_source<T: AsRef<dyn VideoBuffer>>(
         &self,
         frame: &VideoFrame<T>,
         started: &mut std::time::Instant,
-    ) -> Option<bool> {
+    ) -> Result<bool, PushMiss> {
         // PETAL-DESKTOP-4Y: skip, never push, a frame libwebrtc may size to 0
         // (process abort). The receiver holds its last frame; nothing unpublishes.
         let (frame_width, frame_height) = {
@@ -9200,7 +9318,7 @@ impl PublishedTrack {
         };
         if frame_below_publishable_edge(frame_width, frame_height, self.min_publish_edge) {
             self.note_degenerate_frame_skipped(frame_width, frame_height);
-            return None;
+            return Err(PushMiss::SkippedDegenerate);
         }
         let mut spacer = self.source_push_spacer.lock_unpoisoned();
         let wait = spacer.wait_before_push(std::time::Instant::now());
@@ -9210,7 +9328,7 @@ impl PublishedTrack {
         *started = std::time::Instant::now();
         let accepted = self.rtc_source.capture_frame(frame);
         spacer.record_return(std::time::Instant::now());
-        Some(accepted)
+        Ok(accepted)
     }
 
     fn note_degenerate_frame_skipped(&self, frame_width: u32, frame_height: u32) {
@@ -9229,19 +9347,21 @@ impl PublishedTrack {
             return;
         }
         let (published_width, published_height) = self.published_size();
-        log::warn!(
-            "publisher: skipping degenerate {frame_width}x{frame_height} frame on '{}' (published {published_width}x{published_height}, minimum edge {}); holding the last frame",
-            self.track.name(),
+        let track_name = self.track.name();
+        let diagnostic = crate::logging::DegenerateFrameDiagnostic {
+            frame_geometry: camera_geometry_bucket(frame_width, frame_height),
+            published_geometry: camera_geometry_bucket(published_width, published_height),
+            axis: degenerate_axis(frame_width, frame_height, self.min_publish_edge),
+        };
+        // WARN and INFO become Sentry breadcrumbs: closed buckets only there.
+        // Raw sizes and the (identity-bearing) track name stay at DEBUG.
+        log::warn!("{}", degenerate_skip_warning(&track_name, diagnostic));
+        log::debug!(
+            "publisher: degenerate frame detail track='{track_name}' frame={frame_width}x{frame_height} published={published_width}x{published_height} min_edge={}",
             self.min_publish_edge,
         );
         crate::logging::capture_sentry_diagnostic(
-            crate::logging::SentryDiagnosticEvent::DegenerateFrameSkipped(
-                crate::logging::DegenerateFrameDiagnostic {
-                    frame_geometry: camera_geometry_bucket(frame_width, frame_height),
-                    published_geometry: camera_geometry_bucket(published_width, published_height),
-                    axis: degenerate_axis(frame_width, frame_height, self.min_publish_edge),
-                },
-            ),
+            crate::logging::SentryDiagnosticEvent::DegenerateFrameSkipped(diagnostic),
         );
     }
 
@@ -9285,18 +9405,18 @@ impl PublishedTrack {
             return None;
         }
         let result = self.push_frame_inner(captured, capture_wall_time_us);
-        if let Some(timing) = result {
+        if let Ok(timing) = result {
             self.log_source_boundary(timing);
         }
         self.record_push_outcome(result);
-        result
+        result.ok()
     }
 
     fn push_frame_inner(
         &self,
         captured: &CapturedFrame,
         capture_wall_time_us: u64,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         match &captured.payload {
             CapturedFramePayload::Native { pixel_buffer } => {
                 // The zero-copy CVPixelBuffer path hands the buffer straight
@@ -9319,14 +9439,14 @@ impl PublishedTrack {
                         .native_attempt_due(std::time::Instant::now());
                 if native_attempt_due {
                     match self.push_native(pixel_buffer, capture_wall_time_us) {
-                        Ok(None) => return None,
+                        Ok(None) => return Err(PushMiss::SkippedDegenerate),
                         Ok(Some(timing)) => {
                             self.record_native_capture_transition(
                                 std::time::Duration::from_secs_f64(
                                     timing.capture_frame_return_ms / 1000.0,
                                 ),
                             );
-                            return Some(timing);
+                            return Ok(timing);
                         }
                         Err(failure) => {
                             self.disable_native_zero_copy_after_capture_failure(
@@ -9388,9 +9508,9 @@ impl PublishedTrack {
                 capture_frame_elapsed: capture_frame_started.elapsed(),
             });
         };
-        // `None`: skipped as degenerate, never reached the source. Not a
-        // native failure, so the zero-copy latch is left alone.
-        let Some(source_accepted) = source_accepted else {
+        // `Err(SkippedDegenerate)`: never reached the source. Not a native
+        // failure, so the zero-copy latch is left alone.
+        let Ok(source_accepted) = source_accepted else {
             return Ok(None);
         };
         Ok(Some(PublishedFrameTiming {
@@ -9421,14 +9541,14 @@ impl PublishedTrack {
         height: u32,
         color_profile: VideoColorProfile,
         capture_wall_time_us: u64,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let convert_started = std::time::Instant::now();
         let payload =
             match pixel_buffer.copy_nv12_payload_with_pool(Some(&self.native_fallback_pool)) {
                 Ok(payload) => payload,
                 Err(e) => {
                     log::warn!("publisher: native fallback could not copy NV12 payload: {e}");
-                    return None;
+                    return Err(PushMiss::Failed);
                 }
             };
         self.push_copied_payload(
@@ -9449,7 +9569,7 @@ impl PublishedTrack {
         color_profile: VideoColorProfile,
         capture_wall_time_us: u64,
         convert_started: std::time::Instant,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         match payload {
             CapturedFramePayload::Nv12 {
                 y,
@@ -9497,7 +9617,7 @@ impl PublishedTrack {
         color_profile: VideoColorProfile,
         capture_wall_time_us: u64,
         convert_started: std::time::Instant,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let mut i420_pool = self.i420_pool.lock_unpoisoned();
         let i420 = i420_pool.buffer(width, height);
         let (stride_y, stride_u, stride_v) = i420.strides();
@@ -9520,7 +9640,7 @@ impl PublishedTrack {
             height,
             published_window_color_profile(color_profile),
         ) {
-            return None;
+            return Err(PushMiss::Failed);
         }
         let convert_ms = convert_started.elapsed().as_secs_f64() * 1000.0;
 
@@ -9599,7 +9719,7 @@ impl PublishedTrack {
                 // Never-black-frame hard rule: `scaled` is a black-filled
                 // canvas on failure. Drop this frame; the receiver holds the
                 // last good one, and the next capture gets a fresh attempt.
-                return None;
+                return Err(PushMiss::Failed);
             }
             VideoFrame {
                 rotation: VideoRotation::VideoRotation0,
@@ -9615,7 +9735,7 @@ impl PublishedTrack {
         let mut capture_frame_started = std::time::Instant::now();
         let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started)?;
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
-        Some(PublishedFrameTiming {
+        Ok(PublishedFrameTiming {
             convert_ms,
             capture_frame_return_ms,
             capture_age_ms: capture_age_ms(capture_wall_time_us),
@@ -9769,11 +9889,11 @@ impl PublishedTrack {
             height,
             capture_wall_time_us,
         );
-        if let Some(timing) = result {
+        if let Ok(timing) = result {
             self.log_source_boundary(timing);
         }
         self.record_push_outcome(result);
-        result
+        result.ok()
     }
 
     fn push_nv12_inner(
@@ -9785,7 +9905,7 @@ impl PublishedTrack {
         width: u32,
         height: u32,
         capture_wall_time_us: u64,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let decision = resolve_camera_push_size(
             &self.camera_size_recovery,
             &self.published_width,
@@ -9797,7 +9917,7 @@ impl PublishedTrack {
             crate::logging::capture_sentry_diagnostic(event);
         }
         if decision.verdict == CameraPushVerdict::Drop {
-            return None;
+            return Err(PushMiss::Failed);
         }
 
         self.push_nv12_with_convert_started(
@@ -9822,7 +9942,7 @@ impl PublishedTrack {
         height: u32,
         capture_wall_time_us: u64,
         convert_started: std::time::Instant,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let mut i420_pool = self.i420_pool.lock_unpoisoned();
         let i420 = i420_pool.buffer(width, height);
         let (stride_y, stride_u, stride_v) = i420.strides();
@@ -9845,7 +9965,7 @@ impl PublishedTrack {
             height,
         ) {
             log::warn!("publisher: NV12->I420 conversion failed for {width}x{height}");
-            return None;
+            return Err(PushMiss::Failed);
         }
         let convert_ms = convert_started.elapsed().as_secs_f64() * 1000.0;
         self.push_i420_letterboxed(&*i420, width, height, capture_wall_time_us, convert_ms)
@@ -9872,7 +9992,7 @@ impl PublishedTrack {
         height: u32,
         capture_wall_time_us: u64,
         convert_ms: f64,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let frame_id = self
             .frame_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -9901,7 +10021,7 @@ impl PublishedTrack {
                 // Never-black-frame hard rule: `scaled` is a black-filled
                 // canvas on failure. Drop this frame; the receiver holds the
                 // last good one, and the next capture gets a fresh attempt.
-                return None;
+                return Err(PushMiss::Failed);
             }
             VideoFrame {
                 rotation: VideoRotation::VideoRotation0,
@@ -9916,7 +10036,7 @@ impl PublishedTrack {
         let mut capture_frame_started = std::time::Instant::now();
         let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started)?;
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
-        Some(PublishedFrameTiming {
+        Ok(PublishedFrameTiming {
             convert_ms,
             capture_frame_return_ms,
             capture_age_ms: capture_age_ms(capture_wall_time_us),
@@ -12469,7 +12589,7 @@ mod tests {
         for frame in 0..100u64 {
             let now = t0 + std::time::Duration::from_millis(frame * 33);
             if let Some(event) =
-                push_drop_streak_diagnostic(&detector, "petal-camera-alice", false, now)
+                push_drop_streak_diagnostic(&detector, "petal-camera-alice", PushStreakOutcome::Failed, now)
             {
                 fired = Some(event);
                 fired_at = Some(frame);
@@ -12506,7 +12626,7 @@ mod tests {
         for frame in 0..100u64 {
             let now = t0 + std::time::Duration::from_millis(frame * 33);
             if let Some(event) =
-                push_drop_streak_diagnostic(&detector, "petal-window-1234", false, now)
+                push_drop_streak_diagnostic(&detector, "petal-window-1234", PushStreakOutcome::Failed, now)
             {
                 fired = Some(event);
                 fired_at = Some(frame);
@@ -12536,14 +12656,96 @@ mod tests {
             let now = t0 + std::time::Duration::from_millis(frame * 33);
             // Every 5th push succeeds, resetting the streak before it can
             // reach the consecutive-frame threshold.
-            let published = frame % 5 == 0;
+            let outcome = if frame % 5 == 0 {
+                PushStreakOutcome::Published
+            } else {
+                PushStreakOutcome::Failed
+            };
             let fired =
-                push_drop_streak_diagnostic(&detector, "petal-camera-alice", published, now);
+                push_drop_streak_diagnostic(&detector, "petal-camera-alice", outcome, now);
             assert!(
                 fired.is_none(),
                 "an intermittent hiccup with regular successful pushes must never trip the storm detector"
             );
         }
+    }
+
+    /// PETAL-DESKTOP-4Y: a window held below the publish floor skips every
+    /// frame on purpose. That is not a dropped push, so publish-drop-streak
+    /// must stay quiet however long it lasts.
+    #[test]
+    fn a_window_held_below_the_publish_floor_never_trips_publish_drop_streak() {
+        let detector = Mutex::new(crate::logging::DropStreakDetector::default());
+        let t0 = std::time::Instant::now();
+        for frame in 0..600u64 {
+            let now = t0 + std::time::Duration::from_millis(frame * 33);
+            let outcome = push_streak_outcome(Err(PushMiss::SkippedDegenerate));
+            assert_eq!(outcome, PushStreakOutcome::SkippedDegenerate);
+            assert!(
+                push_drop_streak_diagnostic(&detector, "petal-window-1234", outcome, now).is_none(),
+                "a degenerate skip tripped publish-drop-streak at frame {frame}"
+            );
+        }
+        // A skip is neutral, not a success: real failures around skips still trip.
+        let mut fired = false;
+        for frame in 600..800u64 {
+            let now = t0 + std::time::Duration::from_millis(frame * 33);
+            let miss = if frame % 2 == 0 {
+                PushMiss::SkippedDegenerate
+            } else {
+                PushMiss::Failed
+            };
+            let outcome = push_streak_outcome(Err(miss));
+            fired |= push_drop_streak_diagnostic(&detector, "petal-window-1234", outcome, now)
+                .is_some();
+        }
+        assert!(fired, "skips interleaved with real failures must not mask the streak");
+        assert_eq!(push_streak_outcome(Err(PushMiss::Failed)), PushStreakOutcome::Failed);
+    }
+
+    /// The skip reaches the streak as `SkippedDegenerate` through the push's
+    /// own result, never shared track state, and the public entry points
+    /// still report it as `None`. `PublishedTrack` cannot be built offline.
+    #[test]
+    fn a_degenerate_skip_travels_in_the_push_result_to_record_push_outcome() {
+        let src = include_str!("publisher.rs");
+        let start = src.find(concat!("    fn record_push_", "outcome(")).expect("record_push_outcome");
+        let end = start + src[start..].find("\n    }\n").expect("end");
+        let record = &src[start..end];
+        assert!(record.contains(concat!("outcome: Push", "Result")), "{record}");
+        assert!(record.contains(concat!("push_streak_outcome(", "outcome)")), "{record}");
+        assert_eq!(src.matches(concat!("self.record_push_outcome(", "result);")).count(), 2);
+        assert_eq!(src.matches(concat!("        result.", "ok()\n    }")).count(), 2);
+        assert_eq!(
+            push_streak_outcome(Ok(PublishedFrameTiming {
+                convert_ms: 0.0,
+                capture_frame_return_ms: 0.0,
+                capture_age_ms: 0.0,
+                frame_id: 1,
+                source_accepted: false,
+            })),
+            PushStreakOutcome::Published
+        );
+    }
+
+    /// #520 already keeps the wedge guard away from a skipping share: a skip
+    /// never reaches the source, so the guard sees zero input and stays idle.
+    #[test]
+    fn a_degenerate_skip_gives_the_wedge_guard_no_input() {
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        for _ in 0..30 {
+            note_frame_pushed(&counter, None);
+        }
+        let mut prev = 0;
+        let sample = encoder_output_sample_for_poll(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            &mut prev,
+            0,
+            RUNG_FUNDED_MIN_BITRATE_BPS * 4.0,
+            0.0,
+        );
+        assert_eq!(sample.frames_pushed, 0);
+        assert!(!sample.looks_wedged(), "a skipping share must never look wedged");
     }
 
     // #714: `letterbox_scale_i420` was previously exercised only through
