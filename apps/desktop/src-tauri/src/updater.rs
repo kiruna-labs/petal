@@ -219,42 +219,49 @@ fn updater_for_install(app: &AppHandle) -> Result<tauri_plugin_updater::Updater,
     let cleanup = app.clone();
     app.updater_builder()
         .on_before_exit(move || {
-            run_installer_handoff(log::logger(), || cleanup.cleanup_before_exit())
+            run_installer_handoff(
+                log::logger(),
+                || leave_room_before_installer_launch(&cleanup),
+                || cleanup.cleanup_before_exit(),
+            )
         })
         .build()
         .map_err(|e| format!("updater unavailable: {e}"))
 }
 
-/// Marker first, flushed, then cleanup: if cleanup hangs or panics the
-/// marker is already on disk. Do NOT reorder (#526).
-fn run_installer_handoff(logger: &dyn log::Log, cleanup: impl FnOnce()) {
+/// Marker first, flushed, then leave, then cleanup: if either hangs or
+/// panics the marker is already on disk. Do NOT reorder (#526).
+fn run_installer_handoff(logger: &dyn log::Log, leave: impl FnOnce(), cleanup: impl FnOnce()) {
     crate::logging::write_shutdown_marker(logger, crate::logging::UPDATER_HANDOFF_SHUTDOWN_LINE);
+    leave();
     cleanup();
 }
 
-/// Bound on the pre-install leave: a dead network must not stall the update.
-#[cfg(not(target_os = "macos"))]
+/// Bound on the pre-launch leave: a dead network must not stall the update.
 const LEAVE_BEFORE_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Windows: `install()` exits the process, so leave the room first and peers
-/// see a leave, not a drop (#526).
-#[cfg(not(target_os = "macos"))]
-async fn leave_room_before_installer_handoff(app: &AppHandle) {
+/// Leave the room so peers see a leave, not a drop (#526). Runs inside the
+/// hook, which the plugin calls only after the installer extracted: leaving
+/// before `install()` dropped the user from the meeting on a failed update.
+/// On timeout `install()` exits the process anyway; the bound only stops a
+/// dead network from stalling the update.
+fn leave_room_before_installer_launch(app: &AppHandle) {
     use tauri::Manager;
-    // An owned task, not a dropped future: the Windows teardown is not
-    // cancellation-safe, so on timeout it must keep running to the end.
     let owned = app.clone();
-    let leave = tauri::async_runtime::spawn(async move {
-        if let Some(state) = owned.try_state::<crate::session::SessionState>() {
-            crate::session::leave_room(&owned, state.inner()).await;
-        }
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    // The hook runs on an async-runtime worker, where `block_on` panics, so
+    // the leave runs on its own thread behind a bounded wait.
+    std::thread::spawn(move || {
+        tauri::async_runtime::block_on(async {
+            if let Some(state) = owned.try_state::<crate::session::SessionState>() {
+                crate::session::leave_room(&owned, state.inner()).await;
+            }
+        });
+        let _ = done_tx.send(());
     });
-    if tokio::time::timeout(LEAVE_BEFORE_INSTALL_TIMEOUT, leave)
-        .await
-        .is_err()
-    {
+    if done_rx.recv_timeout(LEAVE_BEFORE_INSTALL_TIMEOUT).is_err() {
         log::warn!(
-            "updater: leaving the room before the installer hand-off timed out after {:?}; installing anyway (the leave keeps running)",
+            "updater: leaving the room before the installer launch timed out after {:?}; launching anyway, so peers may see a drop",
             LEAVE_BEFORE_INSTALL_TIMEOUT
         );
     }
@@ -357,7 +364,8 @@ pub async fn download_and_install_compatible_update(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        leave_room_before_installer_handoff(&app).await;
+        // The hook leaves the room once extraction succeeds, so an
+        // extraction failure keeps the user in the meeting.
         if let Err(e) = update.install(&bytes) {
             // The hook may already have logged the hand-off marker before
             // the installer failed to launch; this process lives on (#526).
@@ -1259,13 +1267,15 @@ mod tests {
     }
 
     /// #526: the hook writes the marker to the shutdown target and flushes
-    /// it BEFORE the plugin's cleanup runs, and still runs that cleanup.
+    /// it BEFORE the leave and the plugin's cleanup, and still runs both.
     #[test]
     fn installer_handoff_writes_and_flushes_the_marker_before_cleanup() {
         let logger = RecordingLog::default();
-        run_installer_handoff(&logger, || {
-            logger.0.lock().unwrap().push("cleanup".to_string())
-        });
+        run_installer_handoff(
+            &logger,
+            || logger.0.lock().unwrap().push("leave".to_string()),
+            || logger.0.lock().unwrap().push("cleanup".to_string()),
+        );
         let events = logger.0.into_inner().unwrap();
         assert_eq!(
             events,
@@ -1276,6 +1286,7 @@ mod tests {
                     crate::logging::UPDATER_HANDOFF_SHUTDOWN_LINE
                 ),
                 "flush".to_string(),
+                "leave".to_string(),
                 "cleanup".to_string(),
             ]
         );
@@ -1295,8 +1306,11 @@ mod tests {
         assert!(builder.contains("app.updater_builder()"), "{builder}");
         assert!(builder.contains(".on_before_exit("), "{builder}");
         assert!(
-            builder
-                .contains("run_installer_handoff(log::logger(), || cleanup.cleanup_before_exit())"),
+            builder.contains("|| leave_room_before_installer_launch(&cleanup),"),
+            "{builder}"
+        );
+        assert!(
+            builder.contains("|| cleanup.cleanup_before_exit(),"),
             "{builder}"
         );
         let command = source
@@ -1314,22 +1328,23 @@ mod tests {
         );
     }
 
-    /// Windows: `install()` exits the process, so the room is left first
-    /// (#526). Pinned by source: there is no way to drive a real NSIS
-    /// hand-off in a unit test.
+    /// The room is left inside the hook, after extraction, never before
+    /// `install()`: a failed update must not drop the user from the meeting
+    /// (#526). Pinned by source: a real NSIS hand-off can't run in a unit test.
     #[test]
-    fn non_macos_install_leaves_the_room_before_the_installer_handoff() {
+    fn install_leaves_the_room_only_inside_the_installer_hook() {
         let source = include_str!("updater.rs");
         let command = source
             .split("pub async fn download_and_install_compatible_update(")
             .nth(1)
             .expect("install command exists");
-        let leave = command
-            .find("leave_room_before_installer_handoff(&app).await;")
-            .expect("install command leaves the room");
-        let install = command.find("update.install(&bytes)").expect("install call");
-        assert!(leave < install, "leave must precede install()");
+        let command = &command[..command.find("\n}\n").unwrap()];
+        assert!(
+            !command.contains("leave_room"),
+            "the install command must not leave the room before install(): {command}"
+        );
         // A failed launch revokes the hook's premature marker.
+        let install = command.find("update.install(&bytes)").expect("install call");
         let failed = &command[install..];
         let failed = &failed[..failed.find("return Err(").expect("install error path")];
         assert!(
@@ -1337,7 +1352,7 @@ mod tests {
             "{failed}"
         );
         let helper = source
-            .split("async fn leave_room_before_installer_handoff(")
+            .split("fn leave_room_before_installer_launch(")
             .nth(1)
             .expect("helper exists");
         let helper = &helper[..helper.find("\n}\n").unwrap()];
@@ -1345,25 +1360,14 @@ mod tests {
             helper.contains("crate::session::leave_room(&owned, state.inner())"),
             "{helper}"
         );
-        // Spawned, so a timeout never drops a half-done teardown.
+        // Own thread: `block_on` on the hook's runtime worker would panic.
+        assert!(helper.contains("std::thread::spawn(move"), "{helper}");
         assert!(
-            helper.contains("tauri::async_runtime::spawn(async move"),
+            helper.contains("recv_timeout(LEAVE_BEFORE_INSTALL_TIMEOUT)"),
             "{helper}"
         );
-        assert!(
-            helper.contains("tokio::time::timeout(LEAVE_BEFORE_INSTALL_TIMEOUT"),
-            "{helper}"
-        );
-    }
-
-    /// Windows-gated: the bound is short enough that a dead network cannot
-    /// stall the update, and the leave helper is the one compiled there.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn windows_leave_before_install_is_bounded() {
         assert!(LEAVE_BEFORE_INSTALL_TIMEOUT <= std::time::Duration::from_secs(10));
         assert!(LEAVE_BEFORE_INSTALL_TIMEOUT >= std::time::Duration::from_secs(1));
-        let _leave = leave_room_before_installer_handoff;
     }
 
     /// #332: every class that needs relocation is refused before the download,
