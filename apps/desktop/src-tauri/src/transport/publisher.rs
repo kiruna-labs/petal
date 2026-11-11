@@ -1775,7 +1775,9 @@ fn degenerate_skip_warning(
 /// Push one frame into the source and tell a webrtc-sys Patch 8 guard drop
 /// apart from an ordinary adapter rejection (both return `false`) by the
 /// source's own drop counter (#534). `Err(Adapter)`: the frame never reached
-/// the encoder. Pushes per track are serialized, so a rise is this frame's.
+/// the encoder. The counter is per source and this is its only writer (pushes
+/// serialized by the spacer lock), so a rise is this frame's: pinned by
+/// `the_source_drop_counter_has_a_single_serialized_writer`.
 pub(super) fn capture_frame_counting_source_drops<T: AsRef<dyn VideoBuffer>>(
     source: &NativeVideoSource,
     frame: &VideoFrame<T>,
@@ -6922,6 +6924,43 @@ mod track_name_tests {
             "a source drop must fire the diagnostic and count as skipped: {after}"
         );
         assert!(!after.contains("Ok(true)"), "{after}");
+    }
+
+    /// #534: the counter delta is only attributable to one frame while the
+    /// source has exactly one writer. Every publish source is pushed only via
+    /// `capture_frame_counting_source_drops`, from `capture_to_source` (which
+    /// holds the spacer lock), and nothing reaches the source via the SDK's
+    /// `LocalVideoTrack::rtc_source()`.
+    #[test]
+    fn the_source_drop_counter_has_a_single_serialized_writer() {
+        // Test literals here are concat!-split, so whole-file counts are production.
+        let production = include_str!("publisher.rs");
+        let push = concat!("capture_frame_counting_source_", "drops(&self.rtc_source");
+        assert_eq!(production.matches(push).count(), 1, "one push site");
+        assert_eq!(production.matches(concat!(".capture_", "frame(")).count(), 1, "only the helper");
+        let start = production.find(concat!("    fn capture_to_source", "<")).expect("fn");
+        let body = &production[start..];
+        let lock = body.find(concat!("self.source_push_spacer", ".lock_unpoisoned()")).expect("spacer");
+        assert!(lock < body.find(push).expect("push"), "the push must hold the spacer lock");
+        // No module reaches a published video source through the SDK's
+        // `rtc_source()` (audio.rs's is `PlatformAudio`'s audio source).
+        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut scanned = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    scanned += 1;
+                    let text = std::fs::read_to_string(&path).expect("read");
+                    let hits = text.matches(concat!(".rtc_", "source()")).count();
+                    let allowed = usize::from(path.ends_with("transport/audio.rs"));
+                    assert_eq!(hits, allowed, "{}", path.display());
+                }
+            }
+        }
+        assert!(scanned > 50, "scanned only {scanned} files");
     }
 
     /// PETAL-DESKTOP-4Y: libwebrtc aborts the whole process when
