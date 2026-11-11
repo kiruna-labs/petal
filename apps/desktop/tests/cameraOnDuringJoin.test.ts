@@ -316,6 +316,21 @@ test('an OFF emitted after the start decided wins over its publish', async () =>
   assert.deepEqual(log, ['off', 'off']);
 });
 
+// Round-4 review: a self-heal gave up (seq reserved under the control lock),
+// the user turned the camera on again, and the heal's failure is emitted only
+// after that start returned. Its seq is older than the start's: ignored.
+test("a heal failure from before the user's start never turns it off", async () => {
+  const { camera, log, resolve } = inFlightRig();
+  const pending = camera.publish();
+  resolve({ published: true, generation: 5, seq: 9 });
+  await pending;
+  camera.receive(
+    { publishing: false, error: 'no camera frames within 5s', generation: 5, seq: 8 },
+    (a) => log.push(a)
+  );
+  assert.deepEqual(log, ['published'], 'no OFF, no failure toast');
+});
+
 // PR #503 F4: the deferred camera is published at the room commit, before
 // join() resolves (the macOS audio tail can hold it for tens of seconds), so
 // the route must already be listening when it calls join(), and every

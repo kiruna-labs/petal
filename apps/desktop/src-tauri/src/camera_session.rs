@@ -334,8 +334,10 @@ pub(crate) enum CameraHealOutcome {
     /// The room was left/superseded or the user turned the camera off.
     Cancelled,
     /// Every attempt failed; the camera intent has been CLEARED so no
-    /// surface keeps claiming ON for a publish that will never happen.
-    TerminalFailure(String),
+    /// surface keeps claiming ON for a publish that will never happen. The
+    /// `u64` is its camera-publish-state seq, reserved under the control lock
+    /// with the clear, so a start that takes the lock after it is newer.
+    TerminalFailure(String, u64),
 }
 
 /// A running camera capture that can be synchronously stopped + released on
@@ -934,11 +936,15 @@ pub(crate) fn emit_camera_publish_state(
     publishing: bool,
     error: Option<String>,
 ) {
-    if let Err(error) = tauri::Emitter::emit(
+    send_camera_publish_state(
         app,
-        "camera-publish-state",
         camera_publish_state_event(generation, publishing, error),
-    ) {
+    );
+}
+
+/// Emit an already-stamped payload (a seq reserved under the control lock).
+fn send_camera_publish_state(app: &tauri::AppHandle, event: CameraPublishStateEvent) {
+    if let Err(error) = tauri::Emitter::emit(app, "camera-publish-state", event) {
         log::warn!("session: failed to emit camera-publish-state: {error}");
     }
 }
@@ -1080,9 +1086,11 @@ where
         return CameraHealOutcome::Cancelled;
     }
     // Bounded retries exhausted: clear the intent so the toggle cannot keep
-    // claiming ON, and report the terminal failure.
+    // claiming ON, and report the terminal failure. Its seq is taken here,
+    // under the lock: emitted later, it must still order before any start
+    // that follows the clear (PR #503 round 4).
     state.set_camera_intent(false);
-    CameraHealOutcome::TerminalFailure(last_error)
+    CameraHealOutcome::TerminalFailure(last_error, next_camera_event_seq())
 }
 
 /// `drive_camera_publish_attempts`, re-targeted at each newer room: a room
@@ -1192,7 +1200,7 @@ pub(crate) async fn ensure_camera_published(
         break (outcome, generation, guard);
     };
 
-    let (publishing, error) = match outcome {
+    let (error, seq) = match outcome {
         CameraHealOutcome::Published => {
             announce_heal_published(
                 state,
@@ -1203,7 +1211,7 @@ pub(crate) async fn ensure_camera_published(
             return;
         }
         CameraHealOutcome::Cancelled => return,
-        CameraHealOutcome::TerminalFailure(error) => {
+        CameraHealOutcome::TerminalFailure(error, seq) => {
             log::error!(
                 "session: camera publish self-heal exhausted its retries -- camera intent cleared: {error}"
             );
@@ -1215,10 +1223,18 @@ pub(crate) async fn ensure_camera_published(
             // Intent was cleared with the retries exhausted and nothing
             // acquired -- the device is free for a Settings preview again.
             emit_camera_intent(app, false);
-            (false, Some(error))
+            (error, seq)
         }
     };
-    emit_camera_publish_state(app, generation.value(), publishing, error);
+    send_camera_publish_state(
+        app,
+        CameraPublishStateEvent {
+            publishing: false,
+            error: Some(error),
+            generation: generation.value(),
+            seq,
+        },
+    );
 }
 
 /// #461: check-and-announce a heal's publish UNDER the control lock. Checked
@@ -2112,6 +2128,52 @@ mod tests {
         assert!(emit.contains("camera_publish_state_event(generation, publishing, error)"));
     }
 
+    /// Round-4 review: the heal gives up (clearing the intent under the
+    /// control lock), the user turns the camera on again and that start
+    /// returns, and only then is the old heal's failure emitted. Its seq was
+    /// reserved with the clear, so it is older than the start's and the route
+    /// drops it instead of turning the new camera OFF.
+    #[tokio::test]
+    async fn a_late_heal_failure_orders_before_the_start_that_followed_it() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        let generation = state.begin_room_generation();
+        let outcome = drive_camera_publish_attempts(
+            &state,
+            &generation,
+            &[Duration::ZERO],
+            || std::future::ready(Err::<(), String>("no frames".to_string())),
+            |_d| async {},
+        )
+        .await;
+        let CameraHealOutcome::TerminalFailure(_, failure_seq) = outcome else {
+            panic!("expected TerminalFailure, got {outcome:?}");
+        };
+        // The user's start takes the lock after the give-up released it
+        // (`start_camera_publish_intent` decides its result under it).
+        let start = {
+            let _control = state.lock_camera_control().await;
+            state.set_camera_intent(true);
+            StartCameraPublishResult::decided(true, generation.value())
+        };
+        // Some other surface emits meanwhile; the heal's emit comes last.
+        let _other = camera_publish_state_event(generation.value(), true, None);
+        assert!(
+            failure_seq <= start.seq,
+            "the stale failure ({failure_seq}) must not be newer than the start ({})",
+            start.seq
+        );
+        // And `ensure_camera_published` emits it with that reserved seq, not
+        // a fresh one stamped at emit time.
+        let src = include_str!("camera_session.rs");
+        let arm = &src[src.find("CameraHealOutcome::TerminalFailure(error, seq) => {").unwrap()..];
+        let arm = &arm[..arm.find("\n}\n").unwrap()];
+        assert!(arm.contains("send_camera_publish_state("), "{arm}");
+        assert!(arm.contains("            seq,\n"), "sent with the reserved seq");
+        assert!(!arm.contains("camera_publish_state_event("), "never re-stamped");
+        assert!(!arm.contains("emit_camera_publish_state("), "never re-stamped");
+    }
+
     /// Wiring guard for item 3: the command is registered on both platforms.
     #[test]
     fn abandon_pending_join_is_registered_on_both_platforms() {
@@ -2146,7 +2208,7 @@ mod tests {
     #[test]
     fn a_stale_terminal_heal_announces_nothing() {
         let src = include_str!("camera_session.rs");
-        let start = src.find("CameraHealOutcome::TerminalFailure(error) => {").expect("arm");
+        let start = src.find("CameraHealOutcome::TerminalFailure(error, seq) => {").expect("arm");
         let arm = &src[start..];
         let stale = &arm[arm.find("if !generation.is_current() {").expect("stale check")..];
         let stale = &stale[..stale.find("return;").expect("return")];
@@ -2592,7 +2654,7 @@ mod tests {
         .await;
 
         match outcome {
-            CameraHealOutcome::TerminalFailure(error) => {
+            CameraHealOutcome::TerminalFailure(error, _) => {
                 assert!(error.contains("no camera frames"));
             }
             other => panic!("expected TerminalFailure, got {other:?}"),
