@@ -1964,26 +1964,33 @@ mod tests {
         assert_eq!(click_while_not_in_room(&state), CameraDeferral::Refused);
     }
 
-    /// The route can go while its join is still in flight: the camera is
-    /// dropped at once, and the meeting ends if that attempt then fails.
+    /// The route can go while its join is still in flight. The abandon sent
+    /// at dispose leaves that join alone (it may be a replacement route's
+    /// join of the same room); the one sent when the route's own join
+    /// settles ends it.
     #[tokio::test]
-    async fn a_join_abandoned_in_flight_ends_when_it_fails() {
+    async fn a_join_in_flight_at_dispose_ends_when_it_settles() {
         let state = crate::session::SessionState::default();
         let attempt = state.begin_join("room-a", "room-a");
         assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(!abandon_pending_join_inner(&state, "room-a").await, "in flight: untouched");
+        drop(attempt); // ...it fails, and the route's join settles
         assert!(abandon_pending_join_inner(&state, "room-a").await);
-        assert!(
-            !state.deferred_camera().defer_if_pending(),
-            "an abandoned join takes no new camera (a start racing the dispose)"
-        );
-        drop(attempt); // ...and then it fails
         assert_eq!(click_while_not_in_room(&state), CameraDeferral::Refused);
+    }
 
-        // An abandoned attempt that commits is a real meeting, without the camera.
-        let (mut join, _) = state.begin_join("room-a", "room-a");
+    /// Round-2 review: the old route's late abandon for the same room lands
+    /// while a replacement route's join is in flight. The replacement keeps
+    /// its camera.
+    #[tokio::test]
+    async fn a_late_abandon_never_ends_a_replacement_routes_join() {
+        let state = crate::session::SessionState::default();
+        drop(state.begin_join("room-a", "room-a")); // old route: failed
+        let (mut join, _) = state.begin_join("room-a", "room-a"); // replacement
         assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
-        assert!(abandon_pending_join_inner(&state, "room-a").await);
-        assert!(!join.commit(), "the dropped camera is not published");
+        assert!(!abandon_pending_join_inner(&state, "room-a").await);
+        assert!(state.camera_intent());
+        assert!(join.commit(), "the replacement still publishes its camera");
     }
 
     /// Abandoning never touches a joined room (a route remount, or a dispose

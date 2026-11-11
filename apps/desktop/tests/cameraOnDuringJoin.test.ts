@@ -271,6 +271,26 @@ test('a camera turned off while its start is in flight stays off', async () => {
   assert.deepEqual(log, ['off']);
 });
 
+// Round-2 review: OFF then a quick ON. The stop's OFF (same generation) lands
+// while the new start is in flight; native serializes the two, so the start's
+// `published: true` is the newer truth and the toggle ends ON.
+test('a held OFF from just before the start does not discard its publish', async () => {
+  let resolveStart!: (result: StartCameraPublishResult) => void;
+  const log: string[] = [];
+  const camera = createCameraJoinPublish({
+    startPublish: () => new Promise((resolve) => (resolveStart = resolve)),
+    meetingPhase: () => 'connected',
+    onPublished: () => log.push('published'),
+    onRetrying: () => log.push('retrying'),
+    onFailed: () => log.push('failed')
+  });
+  const pending = camera.publish();
+  camera.receive({ publishing: false, error: null, generation: 5 }, (a) => log.push(a));
+  resolveStart({ published: true, generation: 5 });
+  await pending;
+  assert.deepEqual(log, ['off', 'published']);
+});
+
 // PR #503 F4: the deferred camera is published at the room commit, before
 // join() resolves (the macOS audio tail can hold it for tens of seconds), so
 // the route must already be listening when it calls join(), and every

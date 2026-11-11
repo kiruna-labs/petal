@@ -303,7 +303,6 @@
               return;
             }
             console.error('native camera publish failed or stopped', event.payload.error);
-            cameraPublish.cancel();
             localCameraStream?.getTracks().forEach((t) => t.stop());
             localCameraStream = null;
             camActive = false;
@@ -542,6 +541,8 @@
     onPublished: () => {
       camActive = true;
       dismissCameraToast();
+      // A held OFF from just before this start may have stopped the preview.
+      if (!localCameraStream) void acquireSelfView();
     },
     onRetrying: () => showCameraToast('Camera is on for you — still connecting it for others…'),
     onFailed: (e) => {

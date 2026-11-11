@@ -71,15 +71,12 @@ struct DeferredCameraState {
     joined: bool,
     /// A camera turned on while the meeting was pending.
     camera: bool,
-    /// The meeting route gave up on the join in flight: if it fails, the
-    /// meeting ends with it (nothing will try again).
-    abandoned: bool,
 }
 
 impl DeferredCameraState {
     /// A join is pending that a camera turned on now can be kept for.
     fn pending(&self) -> bool {
-        self.room.is_some() && !self.joined && !self.abandoned
+        self.room.is_some() && !self.joined
     }
 }
 
@@ -114,7 +111,6 @@ impl DeferredCamera {
         state.room_name = Some(room_name.to_string());
         state.connecting = Some(generation.value());
         state.joined = false;
-        state.abandoned = false;
         drop(state);
         (
             JoinAttempt {
@@ -185,23 +181,22 @@ impl DeferredCamera {
     }
 
     /// The meeting route for `room_name` is gone, so no "Try again" or
-    /// recovery will follow a failed attempt. Drops the deferred camera and
-    /// ends the pending meeting; one whose join is still in flight takes no
-    /// camera and ends when that attempt fails. A joined room, or a meeting
-    /// another route is joining, is untouched. Returns whether a deferred
-    /// camera was dropped.
+    /// recovery will follow a failed attempt: drops the deferred camera and
+    /// ends the pending meeting. A joined room, another room's meeting, or a
+    /// join in flight (it may be a replacement route's; the route re-sends
+    /// this when its own in-flight join settles) is untouched. Returns
+    /// whether a deferred camera was dropped.
     pub(crate) fn abandon(&self, room_name: &str) -> bool {
         let mut state = self.0.lock_unpoisoned();
-        if state.room.is_none() || state.joined || state.room_name.as_deref() != Some(room_name) {
+        if state.room.is_none()
+            || state.joined
+            || state.connecting.is_some()
+            || state.room_name.as_deref() != Some(room_name)
+        {
             return false;
         }
         let dropped = state.camera;
-        if state.connecting.is_some() {
-            state.camera = false;
-            state.abandoned = true;
-        } else {
-            *state = DeferredCameraState::default();
-        }
+        *state = DeferredCameraState::default();
         dropped
     }
 
@@ -221,8 +216,8 @@ impl DeferredCamera {
 
 /// One join attempt. Dropped without `commit` (every failure path of the
 /// join), it leaves the meeting pending and the camera kept for the next
-/// attempt: a failed attempt is not a terminal failure, unless the meeting
-/// route has abandoned the join (`DeferredCamera::abandon`).
+/// attempt: a failed attempt is not a terminal failure (the meeting route
+/// ends the meeting with `DeferredCamera::abandon` when it gives up).
 pub(crate) struct JoinAttempt<'a> {
     owner: &'a DeferredCamera,
     generation: RoomGeneration,
@@ -244,7 +239,6 @@ impl JoinAttempt<'_> {
         }
         state.connecting = None;
         state.joined = true;
-        state.abandoned = false;
         state.camera
     }
 }
@@ -257,9 +251,6 @@ impl Drop for JoinAttempt<'_> {
         let mut state = self.owner.0.lock_unpoisoned();
         if state.connecting == Some(self.generation.value()) {
             state.connecting = None;
-            if state.abandoned {
-                *state = DeferredCameraState::default();
-            }
         }
     }
 }

@@ -76,35 +76,48 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
   let inFlight = 0;
   let held: Array<[CameraPublishState, (action: CameraStateAction) => void]> = [];
 
-  function deliver(event: CameraPublishState, apply: (action: CameraStateAction) => void) {
+  function deliver(
+    event: CameraPublishState,
+    apply: (action: CameraStateAction) => void
+  ): CameraStateAction | 'ignore' {
     const action = cameraStateAction(event, boundGeneration);
-    if (action === 'ignore') return;
+    if (action === 'ignore') return action;
     boundGeneration = Math.max(boundGeneration, event.generation);
-    // An authoritative OFF ends the request: a start still returning (or
-    // whose held outcome this is) must not turn it back ON or re-toast.
-    if (action !== 'on') cancel();
+    // Native stopped it: nothing is left waiting for the connected edge. Not
+    // a request bump (`cancel`): native serializes stop and start, so a start
+    // that returns `published: true` after a held OFF is the newer truth
+    // (OFF then a quick ON).
+    if (action !== 'on') deferred = false;
     apply(action);
+    return action;
   }
 
   function receive(event: CameraPublishState, apply: (action: CameraStateAction) => void) {
     if (inFlight > 0) held.push([event, apply]);
-    else deliver(event, apply);
+    else void deliver(event, apply);
   }
 
-  async function start(): Promise<StartCameraPublishResult> {
+  /** Resolves the start, plus whether an OFF or failure for this request
+   * landed while it was in flight (applied once the start returns). */
+  async function start(): Promise<{ result: StartCameraPublishResult; stopped: boolean }> {
     inFlight += 1;
+    let result: StartCameraPublishResult;
+    let stopped = false;
     try {
-      const result = await seams.startPublish();
+      result = await seams.startPublish();
       boundGeneration = Math.max(boundGeneration, result.generation);
-      return result;
     } finally {
       inFlight -= 1;
       if (inFlight === 0) {
         const ready = held;
         held = [];
-        for (const [event, apply] of ready) deliver(event, apply);
+        for (const [event, apply] of ready) {
+          const action = deliver(event, apply);
+          if (action === 'off' || action === 'failed') stopped = true;
+        }
       }
     }
+    return { result, stopped };
   }
 
   async function publish(): Promise<void> {
@@ -112,8 +125,9 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
     deferred = false;
     const phaseAtStart = seams.meetingPhase();
     let result: StartCameraPublishResult;
+    let stopped: boolean;
     try {
-      result = await start();
+      ({ result, stopped } = await start());
     } catch (error) {
       if (!isNotInRoomRefusal(error)) {
         seams.onFailed(error);
@@ -136,12 +150,13 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
       }
       return;
     }
-    // Turned off, or an OFF for this request arrived, while it was in flight.
+    // The user turned it off (or retried) while it was in flight.
     if (id !== request) return;
     if (result.published === false) {
       // While connecting, native holds it for the join's commit and reports
-      // the outcome as camera-publish-state: nothing to show yet.
-      if (seams.meetingPhase() !== 'connecting') seams.onRetrying();
+      // the outcome as camera-publish-state: nothing to show yet. A failure
+      // that already landed keeps its Retry toast.
+      if (!stopped && seams.meetingPhase() !== 'connecting') seams.onRetrying();
       return;
     }
     seams.onPublished();
