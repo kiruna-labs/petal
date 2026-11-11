@@ -47,6 +47,9 @@ pub mod publisher;
 /// rollback-and-re-offer recovery. Test-only.
 #[cfg(test)]
 mod negotiation_recovery;
+/// #535: tiny frames through the real libwebrtc capture path. Test-only.
+#[cfg(test)]
+mod tiny_frame_runtime;
 // Receiver-side authoritative publication reconciliation (#298).
 pub mod reconcile;
 pub mod room_directory;

@@ -449,4 +449,6 @@ dimensions. The Linux-only `capture_dmabuf_frame` also refuses a non-positive
 width/height before building its buffer. Guarded by
 `vendored_on_captured_frame_drops_non_positive_sizes_before_crop_and_scale`
 and `vendored_degenerate_frame_warning_logs_no_raw_sizes` in the desktop
-crate. Keep this on any webrtc-sys bump.
+crate, and at runtime by `transport::tiny_frame_runtime` (#535), which pushes
+1x1/2x2/3x3/2x720/1280x2 frames through a real sinked `NativeVideoSource` in a
+child process; without this patch each one aborts it. Keep this on any webrtc-sys bump.

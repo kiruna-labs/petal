@@ -6728,10 +6728,9 @@ mod track_name_tests {
 
     /// PETAL-DESKTOP-4Y: libwebrtc aborts the whole process when
     /// `CropAndScale` is asked for a zero-sized buffer (`I420Buffer::Create`
-    /// RTC_CHECK). `NativeVideoSource` cannot be driven offline into the
-    /// adapter's zero-size case (it needs a live encoder sink asking for an
-    /// alignment/downscale), so pin the vendored guard at the source: it must
-    /// test all four sizes, and run BEFORE the `CropAndScale` call.
+    /// RTC_CHECK). The runtime proof is `transport::tiny_frame_runtime`
+    /// (#535); this pin also covers `CropAndScale` sites it cannot reach: the
+    /// guard must test all four sizes, and run BEFORE every call.
     #[test]
     fn vendored_on_captured_frame_drops_non_positive_sizes_before_crop_and_scale() {
         let src = vendored_video_track_cpp();
