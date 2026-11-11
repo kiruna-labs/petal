@@ -2792,6 +2792,10 @@ pub(crate) struct PointerFamilyMeta {
     /// panel, so without this a cursor passing over where an invisible panel
     /// WOULD be already looked like a hit (#906 DoD item).
     pub(crate) is_visible: bool,
+    /// False when a visibility or window-number read failed, so `family_ids`
+    /// / `is_visible` may under-report this panel. Pointer gating ignores it;
+    /// occlusion evidence must not bucket a definitive union from it (#540).
+    pub(crate) read_complete: bool,
 }
 
 /// Batch-read `PointerFamilyMeta` for every currently-open remote compositor
@@ -2816,21 +2820,20 @@ pub(crate) struct PointerFamilyMeta {
 /// meant a single slow tick could wipe a healthy cache and fail every remote
 /// telepointer target closed until the next successful refresh.
 pub(crate) fn open_pointer_family_meta(app: &AppHandle) -> Option<Vec<PointerFamilyMeta>> {
-    let keys: Vec<RemoteWindowKey> = with_state(|s| s.windows.keys().cloned().collect());
-    if keys.is_empty() {
+    if with_state(|s| s.windows.is_empty()) {
         // Genuinely nothing to gate -- authoritative, not a failure. Also
         // means a pure sharer (no remote panels open) never pays the
         // main-thread round trip below at all.
         return Some(Vec::new());
     }
     if crate::platform::appkit::is_main_thread() {
-        return Some(pointer_family_meta_on_main(app, &keys));
+        return Some(pointer_family_meta_on_main(app));
     }
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let app_main = app.clone();
     if app
         .run_on_main_thread(move || {
-            let _ = sender.send(pointer_family_meta_on_main(&app_main, &keys));
+            let _ = sender.send(pointer_family_meta_on_main(&app_main));
         })
         .is_err()
     {
@@ -2839,34 +2842,50 @@ pub(crate) fn open_pointer_family_meta(app: &AppHandle) -> Option<Vec<PointerFam
     receiver.recv_timeout(Duration::from_millis(150)).ok()
 }
 
-fn pointer_family_meta_on_main(app: &AppHandle, keys: &[RemoteWindowKey]) -> Vec<PointerFamilyMeta> {
+/// Keys are snapshotted here, on the main thread, so a panel revealed while
+/// this call was queued is read rather than silently missing (#540 review).
+fn pointer_family_meta_on_main(app: &AppHandle) -> Vec<PointerFamilyMeta> {
+    let keys: Vec<RemoteWindowKey> = with_state(|s| s.windows.keys().cloned().collect());
     keys.iter()
-        .filter_map(|key| {
-            let panel = app.get_webview_window(&panel_label_for_key(key))?;
-            let is_visible = panel.is_visible().unwrap_or(false);
-            let mut family_ids = Vec::with_capacity(4);
-            if let Ok(number) = crate::platform::appkit::window_number(&panel) {
-                family_ids.push(number);
-            }
+        .map(|key| {
+            // A keyed panel with no webview is an unread entry, not a dropped
+            // one (#540); pointer gating treats it like a missing meta.
+            let Some(panel) = app.get_webview_window(&panel_label_for_key(key)) else {
+                return family_meta_from_reads(key, None, Vec::new());
+            };
+            let visible = panel.is_visible().ok();
+            let mut numbers = Vec::with_capacity(4);
+            numbers.push(crate::platform::appkit::window_number(&panel).ok());
             for label in [
                 control_label_for_key(key),
                 pointer_label_for_key(key),
                 ai_chat_label_for_key(key),
             ] {
                 if let Some(chrome) = app.get_webview_window(&label) {
-                    if let Ok(number) = crate::platform::appkit::window_number(&chrome) {
-                        family_ids.push(number);
-                    }
+                    numbers.push(crate::platform::appkit::window_number(&chrome).ok());
                 }
             }
-            Some(PointerFamilyMeta {
-                window_id: key.window_id,
-                owner_identity: key.owner_identity.clone(),
-                family_ids,
-                is_visible,
-            })
+            family_meta_from_reads(key, visible, numbers)
         })
         .collect()
+}
+
+/// A failed visibility read still means "hidden" and a failed number read is
+/// still skipped (pointer gating is unchanged), but either marks the entry
+/// incomplete for occlusion evidence (#540).
+fn family_meta_from_reads(
+    key: &RemoteWindowKey,
+    visible: Option<bool>,
+    numbers: Vec<Option<u32>>,
+) -> PointerFamilyMeta {
+    let read_complete = visible.is_some() && numbers.iter().all(Option::is_some);
+    PointerFamilyMeta {
+        window_id: key.window_id,
+        owner_identity: key.owner_identity.clone(),
+        family_ids: numbers.into_iter().flatten().collect(),
+        is_visible: visible.unwrap_or(false),
+        read_complete,
+    }
 }
 
 pub(crate) fn content_frame_and_scale_for_window(
@@ -7451,6 +7470,22 @@ mod tests {
     use super::*;
     use crate::native_display::{display_filter_for_geometry, DisplayLayerFilter};
     use std::collections::BTreeMap;
+
+    /// #540: a failed read keeps the pointer-gating shape (skipped id, hidden
+    /// panel) but marks the entry incomplete for occlusion evidence.
+    #[test]
+    fn family_meta_from_reads_marks_failed_reads_incomplete_540() {
+        let key = RemoteWindowKey::new("sharer", 7);
+        let full = family_meta_from_reads(&key, Some(true), vec![Some(10), Some(11)]);
+        assert_eq!((full.family_ids.clone(), full.is_visible, full.read_complete), (vec![10, 11], true, true));
+        let lost_number = family_meta_from_reads(&key, Some(true), vec![None, Some(11)]);
+        assert_eq!((lost_number.family_ids, lost_number.is_visible, lost_number.read_complete), (vec![11], true, false));
+        let lost_visibility = family_meta_from_reads(&key, None, vec![Some(10)]);
+        assert_eq!((lost_visibility.family_ids, lost_visibility.is_visible, lost_visibility.read_complete), (vec![10], false, false));
+        // A keyed panel whose webview is gone: hidden, no ids, incomplete.
+        let missing = family_meta_from_reads(&key, None, Vec::new());
+        assert_eq!((missing.family_ids, missing.is_visible, missing.read_complete), (Vec::<u32>::new(), false, false));
+    }
 
     // ------------------------------------------------------------------
     // Attach seam: measured content size (defect E2, 2026-07-30).

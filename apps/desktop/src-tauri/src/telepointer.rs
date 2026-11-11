@@ -2680,6 +2680,24 @@ mod tests {
         assert_eq!(targets[1].surface_owner_id.as_deref(), Some("sharer-b"));
     }
 
+    /// #540: `read_complete` is occlusion-evidence only. An incomplete entry
+    /// still gates on its surviving ids and visibility, and a placeholder for
+    /// an unread panel gates exactly like no meta at all.
+    #[test]
+    fn incomplete_family_meta_does_not_change_pointer_gating_540() {
+        let remote = vec![(8u32, frame(0, 0, 100, 100), "sharer-b".to_string())];
+        let mut partial = remote_meta(8, "sharer-b", &[81, 82], true);
+        partial.read_complete = false;
+        let targets = pointer_targets_with_owners(&[], &remote, &[partial], "sharer-a");
+        assert_eq!((targets[0].panel_family_ids.clone(), targets[0].is_visible), (vec![81, 82], true));
+        let mut unread = remote_meta(8, "sharer-b", &[], false);
+        unread.read_complete = false;
+        assert_eq!(
+            pointer_targets_with_owners(&[], &remote, &[unread], "sharer-a"),
+            pointer_targets_with_owners(&[], &remote, &[], "sharer-a")
+        );
+    }
+
     fn remote_meta(
         window_id: u32,
         owner_identity: &str,
@@ -2691,6 +2709,7 @@ mod tests {
             owner_identity: owner_identity.to_string(),
             family_ids: family_ids.to_vec(),
             is_visible,
+            read_complete: true,
         }
     }
 
