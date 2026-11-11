@@ -2229,7 +2229,18 @@ fn wedge_recovery_for_windows_share(
         let app = app.clone();
         let share_instance_id = share_instance_id.clone();
         tauri::async_runtime::spawn(async move {
-            recover_wedged_windows_share(app, token, share_instance_id, steps_used, step).await;
+            // #527: a failed publish leaves the wedged publication live with
+            // this step already spent, so it is retried once.
+            crate::transport::publisher::drive_wedge_recovery_step(step, |_is_retry| {
+                recover_wedged_windows_share(
+                    app.clone(),
+                    token,
+                    share_instance_id.clone(),
+                    steps_used,
+                    step,
+                )
+            })
+            .await;
         });
     })
 }
@@ -2255,16 +2266,18 @@ where
 /// geometry and cadence); step 2 republishes onto the software encoder. The
 /// replacement is published BEFORE the old one is unpublished and swapped into
 /// the slot the frame pump reads, so receivers hold the last frame rather than
-/// losing the share. Returns whether the replacement became the share's track.
+/// losing the share. A stale share or an already-replaced publication is
+/// `NoLongerNeeded`; a failed publish is `NotReplaced` (#527).
 async fn recover_wedged_windows_share(
     app: tauri::AppHandle,
     token: u32,
     share_instance_id: String,
     requested_by_steps: u32,
     step: crate::transport::publisher::EncoderRecoveryStep,
-) -> bool {
+) -> crate::transport::publisher::WedgeRecoveryAttempt {
+    use crate::transport::publisher::WedgeRecoveryAttempt;
     let Some(state) = app.try_state::<SessionState>() else {
-        return false;
+        return WedgeRecoveryAttempt::NoLongerNeeded;
     };
     let state = state.inner();
     let current_share = |session: &WindowsMediaSession| {
@@ -2286,7 +2299,7 @@ async fn recover_wedged_windows_share(
             "windows session: skipping wedged-encoder recovery for stale share {token} ({})",
             step.description()
         );
-        return false;
+        return WedgeRecoveryAttempt::NoLongerNeeded;
     };
     let old = shared.published.lock_unpoisoned().clone();
     let next_app = app.clone();
@@ -2319,7 +2332,7 @@ async fn recover_wedged_windows_share(
                 "windows session: share {token} wedged-encoder recovery ({}) publish failed: {error}",
                 step.description()
             );
-            return false;
+            return WedgeRecoveryAttempt::NotReplaced;
         }
     };
     // Swap under the session lock: `stop_share_token` removes the share under
@@ -2356,7 +2369,11 @@ async fn recover_wedged_windows_share(
             "was superseded (share stopped or already replaced); dropped the replacement"
         }
     );
-    committed
+    if committed {
+        WedgeRecoveryAttempt::Replaced
+    } else {
+        WedgeRecoveryAttempt::NoLongerNeeded
+    }
 }
 
 /// Bounded retry: a failed unpublish here would otherwise drop the only handle
@@ -4161,6 +4178,22 @@ mod tests {
             .expect("retire the losing track");
         assert!(cas < swap, "swap only the publication this recovery replaced");
         assert!(replacement < swap && swap < unpublish, "publish, swap, then unpublish");
+        // #527: a failed publish is retried once through the shared driver.
+        let action = source
+            .split_once("fn wedge_recovery_for_windows_share(")
+            .map(|(_, rest)| &rest[..rest.find("\n}\n").expect("action end")])
+            .expect("wedge_recovery_for_windows_share");
+        let driver = action
+            .find("drive_wedge_recovery_step(step,")
+            .expect("the retrying driver");
+        let attempt = action
+            .find("recover_wedged_windows_share(")
+            .expect("each attempt");
+        assert!(driver < attempt, "every attempt runs inside the driver");
+        assert!(
+            recover.contains("return WedgeRecoveryAttempt::NotReplaced;"),
+            "a failed publish must be reported for retry, not as done"
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -4649,7 +4682,8 @@ mod tests {
                 0,
                 crate::transport::publisher::EncoderRecoveryStep::Republish,
             )
-            .await,
+            .await
+                == crate::transport::publisher::WedgeRecoveryAttempt::Replaced,
             "the wedge recovery must replace the live share's track"
         );
         {
