@@ -11411,6 +11411,21 @@ fn stall_tick_evidence(samples: &[StallSample]) -> (bool, u8, Option<String>) {
     (decoded, best_matches, capture)
 }
 
+/// The decoded counter IS the frozen one, or a little behind it.
+fn pattern_tick_held(frozen: u16, decoded: u16) -> bool {
+    frozen.wrapping_sub(decoded) <= STALL_TICK_SLACK_FRAMES
+}
+
+fn decoded_counters(samples: &[StallSample]) -> Vec<u16> {
+    samples
+        .iter()
+        .filter_map(|sample| match sample.tick {
+            Some(PatternTick::Decoded { counter }) => Some(counter),
+            _ => None,
+        })
+        .collect()
+}
+
 fn stall_tick_check(evidence: &StallEvidence) -> StallTickCheck {
     let (freeze_decoded, freeze_best, freeze_capture) = stall_tick_evidence(&evidence.freeze);
     let frozen = match (freeze_decoded, stall_frozen_reference(evidence)) {
@@ -11422,6 +11437,15 @@ fn stall_tick_check(evidence: &StallEvidence) -> StallTickCheck {
             }
         }
     };
+    // The freeze must have shown the SHARER's counter, not merely some
+    // calibrated pattern: otherwise a foreign one could later "resume".
+    let freeze_counters = decoded_counters(&evidence.freeze);
+    if !freeze_counters.iter().any(|counter| pattern_tick_held(frozen, *counter)) {
+        return StallTickCheck::Foreign {
+            frozen,
+            counter: freeze_counters.last().copied().unwrap_or(frozen),
+        };
+    }
     if let (Some(at), Some(counter)) = (evidence.resumed_tick_offset_ms, evidence.resumed_tick) {
         return StallTickCheck::Resumed {
             frozen,
@@ -11441,23 +11465,16 @@ fn stall_tick_check(evidence: &StallEvidence) -> StallTickCheck {
             capture: resume_capture,
         };
     }
-    let tail: Vec<u16> = evidence.resume[tail_start..]
-        .iter()
-        .filter_map(|sample| match sample.tick {
-            Some(PatternTick::Decoded { counter }) => Some(counter),
-            _ => None,
-        })
-        .collect();
-    // Held means the decoded counter IS the frozen one (or a little behind).
-    // A calibrated counter far from it is some other pattern on screen.
-    let last = tail
-        .iter()
-        .rev()
+    // Judge by the LAST decoded counter: held if it is the frozen one, else
+    // some other calibrated pattern is on screen.
+    let last = decoded_counters(&evidence.resume[tail_start..])
+        .last()
         .copied()
-        .find(|counter| frozen.wrapping_sub(*counter) <= STALL_TICK_SLACK_FRAMES);
-    match last {
-        Some(_) => StallTickCheck::Held { frozen, last },
-        None => StallTickCheck::Foreign { frozen, counter: tail.last().copied().unwrap_or(frozen) },
+        .unwrap_or(frozen);
+    if pattern_tick_held(frozen, last) {
+        StallTickCheck::Held { frozen, last: Some(last) }
+    } else {
+        StallTickCheck::Foreign { frozen, counter: last }
     }
 }
 
@@ -11473,7 +11490,7 @@ impl StallTickCheck {
                 evidence.resume.len()
             ),
             Self::Foreign { frozen, counter } => format!(
-                "OCCLUDED: the region decoded counter {counter}, neither the frozen {frozen} nor an advance a 60fps source could draw -- another calibrated pattern window is over the receiver's panel"
+                "OCCLUDED: the region decoded counter {counter}, not the sharer's frozen {frozen} or an advance a 60fps source could draw -- another calibrated pattern window is over the receiver's panel"
             ),
             Self::FreezeUncalibrated { best_matches, capture } => format!(
                 "OCCLUDED: no freeze-phase capture showed the sharer's calibrated pattern (best {best_matches}/{corners} corner squares) -- another window covers the receiver's panel or the panel is off-screen; see {}",
@@ -13894,6 +13911,28 @@ mod tests {
         let verdict = stall_verdict(&evidence);
         assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
         assert!(verdict.summary.contains("2376"), "{}", verdict.summary);
+    }
+
+    #[test]
+    fn stall_tick_judges_by_the_last_decode_and_needs_a_frozen_freeze_decode() {
+        // Tail [397, 2376, 2376]: the latest captures show another pattern.
+        let mut evidence = healthy_stall_evidence();
+        evidence.resume[1].tick = Some(PatternTick::Decoded { counter: 2376 });
+        evidence
+            .resume
+            .push(stall_sample("resume", 14_500, 1000, Some(118.0), Some(2376), true));
+        evidence.resumed_tick_offset_ms = None;
+        evidence.resumed_tick = None;
+        assert_eq!(stall_verdict(&evidence).verdict, ScenarioVerdict::InfraFail);
+
+        // A freeze that only ever decoded a counter far from the ack's.
+        let mut evidence = healthy_stall_evidence();
+        for sample in evidence.freeze.iter_mut() {
+            sample.tick = Some(PatternTick::Decoded { counter: 5000 });
+        }
+        let verdict = stall_verdict(&evidence);
+        assert_eq!(verdict.verdict, ScenarioVerdict::InfraFail, "{}", verdict.summary);
+        assert!(verdict.summary.contains("5000"), "{}", verdict.summary);
     }
 
     /// The frozen reference falls back to the last decoded freeze counter
