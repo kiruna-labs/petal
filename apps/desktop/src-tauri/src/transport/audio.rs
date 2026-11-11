@@ -202,6 +202,7 @@ use crate::screen_audio::{
     SCREEN_AUDIO_SAMPLE_RATE,
 };
 use crate::session::RoomGeneration;
+use crate::transport::playout_format::{self, FormatDecision, PlayoutFormatTracker};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
@@ -956,6 +957,23 @@ pub enum PlayoutDeviceRefresh {
     Failed(String),
 }
 
+/// One poll of the playout device's output format (#544).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlayoutFormatRefresh {
+    Unchanged,
+    /// The format changed under live playout and the device was re-applied.
+    Reapplied {
+        from: String,
+        to: String,
+    },
+    /// The format changed but re-applying the device failed.
+    Failed {
+        from: String,
+        to: String,
+        error: String,
+    },
+}
+
 /// Retains the shared ADM's speaker side and owns its default-vs-explicit
 /// selection state for one joined media session on either platform.
 pub struct SpeakerPlayout {
@@ -964,6 +982,8 @@ pub struct SpeakerPlayout {
     user_pinned: AtomicBool,
     /// See [`saved_device_to_restore`].
     do_not_retry: Mutex<HashSet<String>>,
+    /// The output format playout was last (re)initialized against (#544).
+    format: Mutex<PlayoutFormatTracker>,
 }
 
 impl SpeakerPlayout {
@@ -1008,12 +1028,85 @@ impl SpeakerPlayout {
             }
         }
 
-        Ok(Self {
+        let playout = Self {
             audio,
             current_device: Mutex::new(current_device),
             user_pinned: AtomicBool::new(user_pinned),
             do_not_retry: Mutex::new(failed_switch.into_iter().collect()),
-        })
+            format: Mutex::new(PlayoutFormatTracker::default()),
+        };
+        playout.record_applied_format("playout started");
+        Ok(playout)
+    }
+
+    /// The ADM GUID of the device playout currently targets.
+    fn current_device_guid(&self) -> String {
+        self.current_device
+            .lock_unpoisoned()
+            .as_ref()
+            .map(|snapshot| snapshot.id.as_str().to_owned())
+            .unwrap_or_else(|| "default".to_owned())
+    }
+
+    /// Baseline the output format after playout was (re)initialized (#544).
+    fn record_applied_format(&self, why: &str) {
+        let format = playout_format::read_output_format(&self.current_device_guid());
+        match &format {
+            Some(format) => log::info!("audio: playout output {format} ({why})"),
+            None if cfg!(target_os = "macos") => {
+                log::info!("audio: playout output format unreadable ({why})")
+            }
+            None => {}
+        }
+        self.format.lock_unpoisoned().applied(format);
+    }
+
+    /// Re-apply the current playout device when its output format changed
+    /// under live playout (#544): WebRTC's macOS ADM keeps converting to the
+    /// old rate, so audio plays slow until playout is re-initialized. Debounced
+    /// by one poll; a device change is re-baselined, never re-applied.
+    pub fn refresh_output_format(&self) -> PlayoutFormatRefresh {
+        let guid = self.current_device_guid();
+        let observed = playout_format::read_output_format(&guid);
+        let decision = self.format.lock_unpoisoned().observe(observed);
+        match decision {
+            FormatDecision::Unchanged => PlayoutFormatRefresh::Unchanged,
+            FormatDecision::DeviceChanged { from, to } => {
+                log::info!("audio: playout output device changed {from} -> {to} (#544)");
+                PlayoutFormatRefresh::Unchanged
+            }
+            FormatDecision::Settling { from, to } => {
+                log::info!(
+                    "audio: playout output format changing {from} -> {to}; confirming (#544)"
+                );
+                PlayoutFormatRefresh::Unchanged
+            }
+            FormatDecision::Reapply { from, to } => {
+                let id = livekit::PlayoutDeviceId::from_unchecked_guid(&guid);
+                match self.audio.switch_playout_device(&id) {
+                    Ok(()) => {
+                        self.record_applied_format("re-applied after format change");
+                        PlayoutFormatRefresh::Reapplied {
+                            from: from.to_string(),
+                            to: to.to_string(),
+                        }
+                    }
+                    Err(error) => {
+                        // A failed switch can leave playout stopped, and a
+                        // second switch would then only set the GUID. Re-drive
+                        // Init+Start once (#787) and baseline, so a persistent
+                        // failure cannot restart playout every poll.
+                        self.audio.reassert_playout();
+                        self.record_applied_format("re-asserted after failed re-apply");
+                        PlayoutFormatRefresh::Failed {
+                            from: from.to_string(),
+                            to: to.to_string(),
+                            error: error.to_string(),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn set_playout_device(&self, device_id: &str) -> Result<String, String> {
@@ -1036,6 +1129,7 @@ impl SpeakerPlayout {
             id: target.id.clone(),
         });
         log::info!("audio: playout hot-swapped to '{}' (pinned)", target.name);
+        self.record_applied_format("device switched");
         Ok(target.name.clone())
     }
 
@@ -1078,6 +1172,7 @@ impl SpeakerPlayout {
             "audio: playout hot-swapped to system default '{}'",
             default.name
         );
+        self.record_applied_format("device switched");
         Ok(default.name.clone())
     }
 
@@ -1784,41 +1879,23 @@ pub fn set_audio_devices(
     }
 
     if let Some(id) = &playout_id {
-        // In-room, so `session.rs` holds a live `PlatformAudio` playout
-        // handle -- this `new()` joins the same ref-counted ADM and the
-        // switch affects the live call's speaker output.
-        match PlatformAudio::new() {
-            Ok(audio) => {
-                let device = if id.is_empty() {
-                    audio.playout_devices().next()
+        // Through the room's `SpeakerPlayout`, never a throwaway
+        // `PlatformAudio`: the #544 format watch and the #867 default-device
+        // watch both read its device state, and a switch that bypasses it left
+        // them re-applying the device the user had just switched away from.
+        match state.current_playout() {
+            Some(playout) => {
+                let switched = if id.is_empty() {
+                    playout.use_default_playout_device()
                 } else {
-                    audio
-                        .playout_devices()
-                        .find(|device| device.id.as_str() == id.as_str())
+                    playout.set_playout_device(id)
                 };
-                match device {
-                    Some(device) => match audio.switch_playout_device(&device.id) {
-                        Ok(()) => {
-                            result.speaker_applied = true;
-                            log::info!("audio: playout hot-swapped to '{}'", device.name);
-                        }
-                        Err(error) => {
-                            result.speaker_error =
-                                Some(format!("failed to switch playout device: {error}"));
-                        }
-                    },
-                    None => {
-                        result.speaker_error = Some(if id.is_empty() {
-                            "no playout devices available".to_string()
-                        } else {
-                            format!("playout device not found: {id}")
-                        })
-                    }
+                match switched {
+                    Ok(_) => result.speaker_applied = true,
+                    Err(error) => result.speaker_error = Some(error),
                 }
             }
-            Err(error) => {
-                result.speaker_error = Some(format!("audio devices unavailable: {error}"));
-            }
+            None => result.speaker_error = Some("no live speaker playout".to_string()),
         }
     }
 
