@@ -2231,7 +2231,7 @@ fn wedge_recovery_for_windows_share(
         tauri::async_runtime::spawn(async move {
             // #527: a failed publish leaves the wedged publication live with
             // this step already spent, so it is retried once.
-            crate::transport::publisher::drive_wedge_recovery_step(step, |_is_retry| {
+            crate::transport::publisher::drive_wedge_recovery_step(step, None, |_is_retry| {
                 recover_wedged_windows_share(
                     app.clone(),
                     token,
