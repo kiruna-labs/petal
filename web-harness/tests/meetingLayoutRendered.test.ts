@@ -137,7 +137,42 @@ async function setLayout(page: Page, label: 'Grid view' | 'Vertical view' | 'Spo
   await page.evaluate((wanted: string) => {
     document.querySelector<HTMLButtonElement>(`.layout-mode-button[aria-label="${wanted}"]`)!.click();
   }, label);
-  await page.waitForTimeout(350); // FLIP settles
+  await motionSettled(page);
+}
+
+/**
+ * Resolves once every finite animation and transition has finished. A fixed
+ * sleep raced the 220 ms tile FLIP under ci-local load: mid-FLIP tiles still
+ * paint at their old spots, so a 3+2 grid read as five one-tile rows. The
+ * sleep also capped motion length; that cap is now an explicit check on each
+ * animation's own timing, which load cannot stretch.
+ */
+const MAX_MOTION_MS = 1000;
+
+async function motionSettled(page: Page) {
+  await page.evaluate(async (maxMotionMs: number) => {
+    // No named inner functions in page code (tsx keepNames, see the hit probes).
+    for (let round = 0; round < 20; round += 1) {
+      // The FLIP starts its animations one frame after the layout change.
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const moving = document.getAnimations().filter((animation) => {
+        const end = animation.effect?.getComputedTiming().endTime;
+        return animation.playState === 'running' && typeof end === 'number' && Number.isFinite(end);
+      });
+      if (moving.length === 0) return;
+      for (const animation of moving) {
+        const end = Number(animation.effect!.getComputedTiming().endTime);
+        const target = (animation.effect as KeyframeEffect | null)?.target;
+        if (end > maxMotionMs) {
+          throw new Error(`a ${Math.round(end)} ms animation on ${target?.id || target?.className || 'an element'} exceeds ${maxMotionMs} ms`);
+        }
+      }
+      const finished = Promise.all(moving.map((animation) => animation.finished.catch(() => undefined)));
+      const stalled = new Promise((_, fail) => setTimeout(() => fail(new Error('a running animation never finished within 10 s')), 10_000));
+      await Promise.race([finished, stalled]);
+    }
+    throw new Error('motion never settled: animations kept starting for 20 rounds');
+  }, MAX_MOTION_MS);
 }
 
 function rect(page: Page, selector: string) {
@@ -222,7 +257,7 @@ test('#239 the meeting page never scrolls on any device, and desktop keeps its d
 test('#239 on a phone ?dev=1 slides the developer sheet up, and closing it parks it again', { timeout: 60_000 }, async () => {
   const page = await openMeeting(PORTRAIT_PHONE, 2, { query: 'dev=1' });
   try {
-    await page.waitForTimeout(400); // the sheet's slide
+    await motionSettled(page); // the sheet's slide
     const open = await rect(page, '#dev-panel');
     assert.ok(open.top < 839 && open.bottom <= 839 + 1, `the sheet is on screen (${open.top}-${open.bottom})`);
     assert.ok(open.height <= 839 * 0.45 + 1, 'at most 45% of the screen');
@@ -230,7 +265,9 @@ test('#239 on a phone ?dev=1 slides the developer sheet up, and closing it parks
     // Automation clicks #share-btn by script whether or not the sheet is up.
     assert.equal(await page.locator('#share-btn').count(), 1);
     await page.locator('#dev-panel > summary').click();
-    await page.waitForTimeout(400);
+    // The details `toggle` event that parks the sheet is queued as a task.
+    await page.waitForFunction(() => !document.querySelector('#dev-panel')!.classList.contains('is-open'));
+    await motionSettled(page);
     assert.ok((await rect(page, '#dev-panel')).top >= 839 - 1, 'closed, it is parked below the screen');
   } finally {
     await page.context().close();
@@ -353,7 +390,6 @@ test('#204 a tall window with too many people packs one column that scrolls, til
       window.dispatchEvent(new Event('resize'));
     });
     await setLayout(page, 'Grid view');
-    await page.waitForTimeout(350);
     const few = await read();
     assert.equal(few.scrollClass, false, 'three people do not scroll');
   } finally {

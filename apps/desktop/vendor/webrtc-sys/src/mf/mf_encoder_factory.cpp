@@ -24,11 +24,10 @@ bool FindH264EncoderMftOnce(bool prefer_hardware_only) {
   EnsureComInitialized();
   MFT_REGISTER_TYPE_INFO input_type = {MFMediaType_Video, MFVideoFormat_NV12};
   MFT_REGISTER_TYPE_INFO output_type = {MFMediaType_Video, MFVideoFormat_H264};
-  DWORD flags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
-                MFT_ENUM_FLAG_SORTANDFILTER;
-  if (prefer_hardware_only) {
-    flags |= MFT_ENUM_FLAG_HARDWARE;
-  }
+  // #504: with SYNCMFT here, Microsoft's synchronous software H.264 MFT made
+  // this report "supported" on machines with no hardware encoder, so the MF
+  // factory claimed the Hardware backend and every share encoded nothing.
+  const DWORD flags = mf_enum::H264EncoderEnumFlags(prefer_hardware_only);
   IMFActivate** activates = nullptr;
   UINT32 count = 0;
   HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, &input_type,

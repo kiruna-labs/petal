@@ -1734,7 +1734,9 @@ mod tests {
     }
 
     fn sample_latency_summary() -> crate::rc_latency_telemetry::Summary {
-        use crate::rc_latency_telemetry::{Dimension, HistogramStats, RcRole, Stage, Summary};
+        use crate::rc_latency_telemetry::{
+            Counter, Dimension, HistogramStats, RcRole, Stage, Summary,
+        };
         Summary {
             role: RcRole::Host,
             rc_session_id: "ab".repeat(16),
@@ -1744,6 +1746,7 @@ mod tests {
                 Stage::ReplayCompleteMs,
                 HistogramStats { p50: 4, p95: 108, max: 240, n: 400 },
             )],
+            counters: vec![(Counter::InputStallCount, 3)],
             dimensions: vec![(Dimension::WindowCodec, "h264".to_string())],
         }
     }
@@ -1760,6 +1763,7 @@ mod tests {
         assert_eq!(props["final"], json!(true));
         assert_eq!(props["role"], json!("host"));
         assert_eq!(props["window_codec"], json!("h264"));
+        assert_eq!(props["input_stall_count"], json!(3));
         assert!(props.get("replay_inject_ms_p50").is_none(), "n = 0 stages are omitted");
         let contract: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../contracts/petal-contracts.json"
@@ -1778,6 +1782,9 @@ mod tests {
         }
         for dimension in schema["dimensions"].as_object().unwrap().keys() {
             allowed.push(dimension.clone());
+        }
+        for counter in schema["counters"].as_array().unwrap() {
+            allowed.push(counter.as_str().unwrap().to_string());
         }
         for key in props.as_object().unwrap().keys() {
             assert!(allowed.contains(key), "latency summary leaked property {key}");
@@ -2587,7 +2594,6 @@ mod tests {
     /// consumed one per accepted connection, written back verbatim as the
     /// full HTTP response (status line + headers + body).
     fn spawn_fake_server(responses: Vec<&'static str>) -> String {
-        use std::io::{Read, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local addr");
@@ -2596,13 +2602,54 @@ mod tests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
+                read_request(&mut stream);
+                write_closing_response(&mut stream, response);
             }
         });
         format!("http://{addr}/")
+    }
+
+    /// Reads one whole HTTP/1.1 request (headers, then `content-length` body
+    /// bytes). Closing a socket with request bytes still unread makes the
+    /// kernel send RST, which can discard the response before the client
+    /// reads it -- a transport error the code under test never caused.
+    fn read_request(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        let body_start = loop {
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                break end + 4;
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..body_start]).to_ascii_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while request.len() < body_start + content_length {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    /// Writes `response` with `connection: close` added. These stubs serve one
+    /// request per connection; without the header the client pools it and its
+    /// NEXT request can race the close onto a dead socket (`TransportOther`,
+    /// no retry, one request short) -- the "left: 2, right: 3" flake in
+    /// `events_before_the_startup_sync_wait_and_then_send_when_granted`.
+    fn write_closing_response(stream: &mut std::net::TcpStream, response: &str) {
+        use std::io::Write;
+        let response = response.replacen("\r\n", "\r\nconnection: close\r\n", 1);
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
     }
 
     /// Like `spawn_fake_server`, but serves ONE fixed response to as many
@@ -2621,7 +2668,6 @@ mod tests {
     fn spawn_counting_server(
         response: &'static str,
     ) -> (String, std::sync::Arc<Mutex<Vec<Instant>>>) {
-        use std::io::{Read, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local addr");
@@ -2635,11 +2681,9 @@ mod tests {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
+                read_request(&mut stream);
                 recorder.lock_unpoisoned().push(Instant::now());
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
+                write_closing_response(&mut stream, response);
             }
         });
         (format!("http://{addr}/"), requests)
@@ -2786,24 +2830,22 @@ mod tests {
     #[tokio::test]
     async fn a_permanent_401_is_not_retried() {
         // #908 review should-fix (Sol): retrying a permanent failure (bad/
-        // rotated key) only holds the single-consumer worker hostage for
-        // RETRY_BACKOFF + a second SEND_TIMEOUT while a real outage
-        // overflows the queue faster. Assert it returns near-instantly --
-        // if it were retrying, RETRY_BACKOFF (500ms) alone would blow this
-        // bound.
-        let url = spawn_fake_server(vec!["HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n"]);
+        // rotated key) holds the single-consumer worker hostage for
+        // RETRY_BACKOFF + a second SEND_TIMEOUT. Count attempts rather than
+        // timing the call: a wall-clock bound flaked under load.
+        let (url, requests) =
+            spawn_counting_server("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n");
         let client = reqwest::Client::builder()
             .timeout(SEND_TIMEOUT)
             .build()
             .unwrap();
         let body = json!({"event": "test"});
-        let start = Instant::now();
         let result = send_with_retry(&client, &url, &body, &AtomicU8::new(CONSENT_GRANTED)).await;
-        let elapsed = start.elapsed();
         assert_eq!(result, Err(SendOutcome::Http401));
-        assert!(
-            elapsed < Duration::from_millis(300),
-            "a permanent failure must return immediately, not after a retry backoff: {elapsed:?}"
+        assert_eq!(
+            requests.lock_unpoisoned().len(),
+            1,
+            "a permanent failure must not be retried"
         );
     }
 

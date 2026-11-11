@@ -127,7 +127,7 @@ use std::time::{Duration, Instant};
 
 use crate::resilience_event::ResilienceEvent;
 use crate::session::RoomGeneration;
-use crate::transport::audio::{PlayoutDeviceRefresh, RecordingDeviceRefresh};
+use crate::transport::audio::{PlayoutDeviceRefresh, PlayoutFormatRefresh, RecordingDeviceRefresh};
 use tauri::{AppHandle, Manager};
 
 /// How often to poll for default audio-device changes (SPEC.md §4.8).
@@ -1466,6 +1466,7 @@ fn on_network_store_change(
 trait AudioDeviceWatchContext {
     fn refresh_recording(&self) -> Option<RecordingDeviceRefresh>;
     fn refresh_playout(&self) -> Option<PlayoutDeviceRefresh>;
+    fn refresh_playout_format(&self) -> Option<PlayoutFormatRefresh>;
     fn emit_event(&self, event: ResilienceEvent);
     fn clear_playout_preference(&self);
     fn capture_playout_diagnostic(&self, transition: crate::logging::PlayoutTransitionTag);
@@ -1490,6 +1491,13 @@ impl AudioDeviceWatchContext for AppAudioDeviceWatchContext {
             .as_ref()
             .and_then(SpeakerWatchHandle::current)
             .map(|playout| playout.refresh_default_playout_device())
+    }
+
+    fn refresh_playout_format(&self) -> Option<PlayoutFormatRefresh> {
+        self.speaker
+            .as_ref()
+            .and_then(SpeakerWatchHandle::current)
+            .map(|playout| playout.refresh_output_format())
     }
 
     fn emit_event(&self, event: ResilienceEvent) {
@@ -1573,6 +1581,20 @@ fn audio_device_watch_tick(ctx: &dyn AudioDeviceWatchContext, reporting: &mut Au
         }
         None => reporting.speaker_failure_reported = false,
     }
+
+    // After the device check, so a device swap this tick re-baselines the
+    // format rather than reading as a format change (#544).
+    match ctx.refresh_playout_format() {
+        Some(PlayoutFormatRefresh::Reapplied { from, to }) => log::warn!(
+            "audio: playout output format changed mid-call ({from} -> {to}) -- re-initialized \
+             playout so it is not stuck converting to the old rate (#544)"
+        ),
+        Some(PlayoutFormatRefresh::Failed { from, to, error }) => log::warn!(
+            "audio: playout output format changed mid-call ({from} -> {to}) but re-initializing \
+             playout failed: {error} -- audio may play at the wrong speed (#544)"
+        ),
+        Some(PlayoutFormatRefresh::Unchanged) | None => {}
+    }
 }
 
 /// SPEC.md §4.8 mic and speaker hot-swap poll -- see the module doc comment
@@ -1612,6 +1634,7 @@ mod tests {
         emitted: Mutex<Vec<ResilienceEvent>>,
         preference_clears: Mutex<Vec<()>>,
         diagnostics: Mutex<Vec<crate::logging::PlayoutTransitionTag>>,
+        calls: Mutex<Vec<&'static str>>,
     }
 
     impl FakeAudioDeviceWatchContext {
@@ -1625,6 +1648,7 @@ mod tests {
                 emitted: Mutex::new(Vec::new()),
                 preference_clears: Mutex::new(Vec::new()),
                 diagnostics: Mutex::new(Vec::new()),
+                calls: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1635,7 +1659,13 @@ mod tests {
         }
 
         fn refresh_playout(&self) -> Option<PlayoutDeviceRefresh> {
+            self.calls.lock_unpoisoned().push("playout");
             self.playout.lock_unpoisoned().pop_front().flatten()
+        }
+
+        fn refresh_playout_format(&self) -> Option<PlayoutFormatRefresh> {
+            self.calls.lock_unpoisoned().push("format");
+            None
         }
 
         fn emit_event(&self, event: ResilienceEvent) {
@@ -1774,6 +1804,60 @@ mod tests {
             "transport::audio unwraps SpeakerPlayout back to a bare \
              PlatformAudio again; that discards the only handle capable of \
              following a default-device change mid-call (#867)"
+        );
+    }
+
+    #[test]
+    fn every_watch_tick_checks_the_playout_format_after_the_device() {
+        let context = FakeAudioDeviceWatchContext::new([None, None], [None, None]);
+        let mut reporting = AudioWatchReporting::default();
+        audio_device_watch_tick(&context, &mut reporting);
+        audio_device_watch_tick(&context, &mut reporting);
+        assert_eq!(
+            context.calls.lock_unpoisoned().as_slice(),
+            ["playout", "format", "playout", "format"],
+            "the #544 format check must run on every tick, after the device check"
+        );
+    }
+
+    /// Same reasoning as the #867 pin above: the fake context cannot see
+    /// whether the production context still asks the live playout handle.
+    #[test]
+    fn the_production_audio_watch_still_checks_the_playout_format() {
+        let resilience = include_str!("resilience.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first element");
+        assert!(
+            resilience.contains("playout.refresh_output_format()"),
+            "AppAudioDeviceWatchContext no longer calls refresh_output_format -- \
+             a mid-call output rate change leaves playout slow again (#544)"
+        );
+        let audio = include_str!("transport/audio.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first element");
+        assert!(
+            audio.contains("playout.record_applied_format(\"playout started\")"),
+            "SpeakerPlayout::new no longer baselines the output format at join -- a \
+             Bluetooth profile switch during the first poll would go unseen (#544)"
+        );
+        assert!(
+            audio.contains("FormatDecision::Reapply { from, to } => {")
+                && audio.contains("self.audio.switch_playout_device(&id)"),
+            "refresh_output_format no longer re-applies the device through \
+             switch_playout_device on a confirmed format change (#544)"
+        );
+        let mac_command = audio
+            .split("pub fn set_audio_devices(")
+            .nth(1)
+            .and_then(|rest| rest.split("result.log_failures(").next())
+            .expect("the macOS set_audio_devices command is still in transport/audio.rs");
+        assert!(
+            mac_command.contains("state.current_playout()")
+                && !mac_command.contains("PlatformAudio::new()"),
+            "the macOS speaker picker switches playout behind SpeakerPlayout's back \
+             again -- the format watch would re-apply the device the user left (#544)"
         );
     }
 

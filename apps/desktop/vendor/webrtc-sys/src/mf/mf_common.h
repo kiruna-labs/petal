@@ -19,6 +19,8 @@
 #include <mftransform.h>
 #include <wrl/client.h>
 
+#include "mf_enum_flags.h"
+
 #if defined(_MSC_VER)
 #pragma comment(lib, "mfplat")
 #pragma comment(lib, "mf")
@@ -38,6 +40,12 @@ inline const GUID kCategoryVideoEncoder = {
 inline const GUID kCategoryVideoDecoder = {
     0xD6C02D4B, 0x6833, 0x45B4, {0x97, 0x1A, 0x05, 0xA4, 0xB0, 0x4B, 0xAB, 0x91}};
 }  // namespace mf_guids
+
+static_assert(mf_enum::kSyncMft == MFT_ENUM_FLAG_SYNCMFT &&
+                  mf_enum::kAsyncMft == MFT_ENUM_FLAG_ASYNCMFT &&
+                  mf_enum::kHardware == MFT_ENUM_FLAG_HARDWARE &&
+                  mf_enum::kSortAndFilter == MFT_ENUM_FLAG_SORTANDFILTER,
+              "mf_enum_flags.h mirrors must match mfapi.h");
 
 // CoInitializeEx + MFStartup once per process. Safe to call repeatedly.
 inline bool EnsureMediaFoundationStarted() {
@@ -121,7 +129,7 @@ inline bool MftAcceptsH264Subtype(IMFTransform* transform, bool is_output) {
 
 
 // Enumerate MFTs of the given category, optionally restricted to hardware
-// (MFT_ENUM_FLAG_HARDWARE). Returns the first activated MFT whose output
+// MFTs (`hardware_only`: HARDWARE|SORTANDFILTER, never SYNCMFT/ASYNCMFT). Returns the first activated MFT whose output
 // subtypes include H264 (for encoders) / input subtypes include H264 (for
 // decoders). `match_clsid` may be set to a specific MFT CLSID (as a debug
 // hint / for determinism); when null the first matching MFT is used.
@@ -150,11 +158,8 @@ inline HRESULT FindAndActivateH264Mft(
       MFMediaType_Video,
       is_encoder ? mf_guids::kH264 : mf_guids::kNv12};
 
-  UINT32 flags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
-                 MFT_ENUM_FLAG_HARDWARE;
-  if (!hardware_only) {
-    flags |= MFT_ENUM_FLAG_SORTANDFILTER;
-  }
+  // #504: never SYNCMFT when hardware_only -- see mf_enum_flags.h.
+  const UINT32 flags = mf_enum::H264EncoderEnumFlags(hardware_only);
 
   Microsoft::WRL::ComPtr<IMFTransform> chosen;
   {

@@ -12,9 +12,43 @@
 // builds would send; /api/download is the countable endpoint today.
 
 import type { VercelRequest, VercelResponse } from '../lib/vercel.js';
-import { findBlobByPathname, fetchBlobJson } from '../lib/blob.js';
+import {
+  BLOB_READ_DEADLINE_MS,
+  fetchBlobJson,
+  findBlobByPathname,
+  setBlobReadDeadlineForTests,
+  withBlobDeadline,
+} from '../lib/blob.js';
 import { applyCors } from '../lib/http.js';
 import { captureApiError, errorTypeName, flushSentry } from '../lib/sentry.js';
+
+// Edge-cache a good manifest briefly so most checks never touch Blob. Keep
+// stale-while-revalidate short: a pulled release must stop being served soon.
+export const MANIFEST_CACHE_CONTROL = 'public, max-age=0, s-maxage=60, stale-while-revalidate=120';
+
+// Last manifest this warm instance served. On a slow or failed Blob read it is
+// served instead of a 204, so a flaky store hides no update from anyone. It is
+// signed release metadata, so a stale copy is safe: at worst it names an older
+// version, which the client treats as "no update".
+let lastGoodManifest: unknown = null;
+
+/** Test hooks: forget the warm-instance manifest; shorten the deadline. */
+export function resetUpdaterStateForTests(deadlineMs = BLOB_READ_DEADLINE_MS): void {
+  lastGoodManifest = null;
+  setBlobReadDeadlineForTests(deadlineMs);
+}
+
+type ReadResult = { kind: 'absent' } | { kind: 'manifest'; manifest: unknown };
+
+// The whole read (list + manifest fetch) shares one deadline, well inside the
+// 10s maxDuration and leaving room for the Sentry flush below.
+function readManifestWithDeadline(): Promise<ReadResult> {
+  return withBlobDeadline('latest.json', async (signal): Promise<ReadResult> => {
+    const blob = await findBlobByPathname('latest.json', { signal });
+    if (!blob) return { kind: 'absent' };
+    return { kind: 'manifest', manifest: await fetchBlobJson(blob, { signal }) };
+  });
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (applyCors(req, res)) return;
@@ -22,9 +56,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(405).json({ error: 'method not allowed' });
     return;
   }
+  // The cached 200 varies by Origin even when this request had none, so a
+  // no-Origin copy is never served to a browser caller.
+  res.setHeader('Vary', 'Origin');
   try {
-    const blob = await findBlobByPathname('latest.json');
-    if (!blob) {
+    const result = await readManifestWithDeadline();
+    if (result.kind === 'absent') {
       // No release published yet. Return 204 No Content, which
       // tauri-plugin-updater reads as "no update available" (silent). A 404 is
       // treated as an endpoint error and logged as "update endpoint did not
@@ -32,16 +69,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       res.status(204).end();
       return;
     }
-    const manifest = await fetchBlobJson(blob);
+    const manifest = result.manifest;
+    lastGoodManifest = manifest;
     res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Cache-Control', MANIFEST_CACHE_CONTROL);
     res.status(200).json(manifest);
   } catch (err) {
-    // #177: this route deliberately downgrades to a silent 204 (read as "no
-    // update available" by tauri-plugin-updater) rather than a 5xx — that
-    // response contract is unchanged. #282 only adds server-side visibility
-    // alongside the existing warn: report to Sentry (5xx-equivalent, since a
-    // real failure is being masked from the caller) and flush before this
-    // function returns, same as every other route.
+    // #177: never a 5xx here. Serve the last good manifest if this instance
+    // has one, otherwise a silent 204 ("no update available"). #282: report
+    // the masked failure to Sentry and flush before returning.
     console.warn(
       'updater: latest.json unavailable',
       err instanceof Error ? err.message : 'unknown error'
@@ -49,10 +85,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     await captureApiError(err, {
       operation: '/api/updater GET',
       route: '/api/updater GET',
-      statusCode: 204,
+      statusCode: lastGoodManifest ? 200 : 204,
       errorType: errorTypeName(err),
     });
     await flushSentry(2000);
+    if (lastGoodManifest) {
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json(lastGoodManifest);
+      return;
+    }
     res.status(204).end();
   }
 }

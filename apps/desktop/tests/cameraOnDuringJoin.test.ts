@@ -1,169 +1,214 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import {
+  cameraStateAction,
+  createCameraJoinPublish,
+  isNotInRoomRefusal,
+  type CameraJoinPublishSeams
+} from '../src/lib/meeting/cameraJoinPublish.ts';
+import type { MeetingPhase } from '../src/lib/meeting/meetingSession.svelte.ts';
+import type { CameraPublishState, StartCameraPublishResult } from '../src/lib/ipc.ts';
 
-// Namespace import: each test fails on its own against an older module.
-import * as cameraOn from '../src/lib/meeting/cameraOn';
-import type { CameraOnSteps } from '../src/lib/meeting/cameraOn';
-import { createJoinGate } from '../src/lib/meeting/joinGate';
+// #503: clicking Camera while the meeting was still joining showed the sticky
+// "publishing to others failed" toast, because native refuses with "not in
+// room" until the room commits. Retry a moment later always worked.
 
-const notInRoom = async (): Promise<never> => {
-  throw 'not in room';
-};
+type Step = StartCameraPublishResult | string;
 
-function steps(overrides: Partial<CameraOnSteps> & { calls?: string[] } = {}): CameraOnSteps {
-  const calls = overrides.calls ?? [];
-  return {
-    acquireSelfView: async () => (calls.push('preview'), true),
-    whenJoined: async () => (calls.push('joined'), true),
-    stillWanted: () => true,
-    startPublish: async () => (calls.push('publish'), { published: true, generation: 1 }),
-    ...overrides
+function rig(phase: MeetingPhase, steps: Step[]) {
+  const log: string[] = [];
+  const state = { phase };
+  const scripted = [...steps];
+  const seams: CameraJoinPublishSeams = {
+    startPublish: async () => {
+      log.push(`start@${state.phase}`);
+      const next = scripted.shift() ?? 'no more scripted results';
+      if (typeof next === 'string') throw next;
+      return next;
+    },
+    meetingPhase: () => state.phase,
+    onPublished: () => log.push('published'),
+    onRetrying: () => log.push('retrying-toast'),
+    onFailed: (e) => log.push(`retry-toast:${String(e)}`)
   };
+  const camera = createCameraJoinPublish(seams);
+  return { camera, log, state };
 }
 
-test('mid-join click: native keeps it for the join, nothing is shown', async () => {
-  const outcome = await cameraOn.turnCameraOnSequence(
-    steps({ startPublish: async () => ({ published: false, generation: 7 }) })
+test('a not-in-room refusal while connecting shows no toast and publishes after connect', async () => {
+  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1 }]);
+  await camera.publish();
+  assert.deepEqual(log, ['start@connecting'], 'no toast of any kind during the join');
+  assert.equal(camera.deferred, true, 'the camera intent is kept for the join');
+
+  state.phase = 'connected';
+  await camera.meetingConnected();
+  assert.deepEqual(log, ['start@connecting', 'start@connected', 'published']);
+  assert.equal(camera.deferred, false);
+});
+
+test('a refusal during connection recovery is deferred the same way', async () => {
+  // recoverLostConnection reports 'connecting' for the whole rejoin.
+  const { camera, log, state } = rig('connecting', ['not in room', 'not in room', { published: true, generation: 1 }]);
+  await camera.publish();
+  await camera.publish(); // the user clicks again mid-recovery
+  assert.deepEqual(log, ['start@connecting', 'start@connecting']);
+  state.phase = 'connected';
+  await camera.meetingConnected();
+  assert.deepEqual(log.slice(2), ['start@connected', 'published']);
+});
+
+test('a refusal while connected still shows the Retry toast', async () => {
+  const { camera, log } = rig('connected', ['not in room']);
+  await camera.publish();
+  assert.deepEqual(log, ['start@connected', 'retry-toast:not in room']);
+});
+
+test('a refusal at the start of a connection loss toasts and still publishes after recovery', async () => {
+  // Native drops the room before room-left reaches the route, so the route
+  // still reads 'connected' when the refusal lands.
+  const { camera, log, state } = rig('connected', ['not in room', { published: true, generation: 1 }]);
+  await camera.publish();
+  assert.deepEqual(log, ['start@connected', 'retry-toast:not in room']);
+  assert.equal(camera.deferred, true, 'the intent survives into the recovery');
+  state.phase = 'connecting';
+  state.phase = 'connected';
+  await camera.meetingConnected();
+  assert.deepEqual(log.slice(2), ['start@connected', 'published']);
+});
+
+test('a real failure while connecting still shows the Retry toast', async () => {
+  const { camera, log } = rig('connecting', ['camera capture failed: device busy']);
+  await camera.publish();
+  assert.deepEqual(log, ['start@connecting', 'retry-toast:camera capture failed: device busy']);
+  assert.equal(camera.deferred, false);
+});
+
+test('the deferred publish that fails after connect shows the Retry toast', async () => {
+  const { camera, log, state } = rig('connecting', ['not in room', 'not in room']);
+  await camera.publish();
+  state.phase = 'connected';
+  await camera.meetingConnected();
+  assert.deepEqual(log, ['start@connecting', 'start@connected', 'retry-toast:not in room']);
+});
+
+test('a real failure after connect toasts and leaves nothing deferred', async () => {
+  const { camera, log, state } = rig('connecting', ['not in room', 'capture failed']);
+  await camera.publish();
+  state.phase = 'connected';
+  await camera.meetingConnected();
+  assert.deepEqual(log, ['start@connecting', 'start@connected', 'retry-toast:capture failed']);
+  assert.equal(camera.deferred, false);
+  await camera.meetingConnected();
+  assert.equal(log.length, 3);
+});
+
+test('a refusal that lands after the meeting connected retries at once', async () => {
+  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1 }]);
+  const first = camera.publish();
+  state.phase = 'connected'; // the connected edge passes while start is in flight
+  await first;
+  assert.deepEqual(log, ['start@connecting', 'start@connected', 'published']);
+});
+
+test('turning the camera off drops a deferred publish', async () => {
+  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1 }]);
+  await camera.publish();
+  camera.cancel();
+  state.phase = 'connected';
+  await camera.meetingConnected();
+  assert.deepEqual(log, ['start@connecting']);
+});
+
+test('a refusal that arrives after the camera was turned off does not re-arm it', async () => {
+  const { camera, log, state } = rig('connecting', ['not in room', { published: true, generation: 1 }]);
+  const pending = camera.publish();
+  camera.cancel();
+  await pending;
+  state.phase = 'connected';
+  await camera.meetingConnected();
+  assert.deepEqual(log, ['start@connecting']);
+});
+
+test('self-heal and success results report as before', async () => {
+  const healing = rig('connected', [{ published: false, generation: 1 }]);
+  await healing.camera.publish();
+  assert.deepEqual(healing.log, ['start@connected', 'retrying-toast']);
+  const ok = rig('connecting', [{ published: true, generation: 1 }]);
+  await ok.camera.publish();
+  assert.deepEqual(ok.log, ['start@connecting', 'published']);
+});
+
+test('only the exact native "not in room" refusal is deferrable', () => {
+  assert.equal(isNotInRoomRefusal('not in room'), true);
+  assert.equal(isNotInRoomRefusal(new Error('not in room')), true);
+  assert.equal(isNotInRoomRefusal('camera start cancelled'), false);
+  assert.equal(isNotInRoomRefusal(undefined), false);
+});
+
+// The meeting route must actually route the Video toggle through the
+// controller, call it on the connected edge, and drop it on camera-off.
+const route = readFileSync(
+  fileURLToPath(new URL('../src/routes/meeting/[room]/+page.svelte', import.meta.url)),
+  'utf8'
+);
+
+test('the meeting route publishes through the join-aware controller', () => {
+  const turnOn = route.match(/async function turnCameraOn\(\)[\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.match(turnOn, /await cameraPublish\.publish\(\);/);
+  assert.doesNotMatch(
+    turnOn,
+    /invoke<StartCameraPublishResult>\(COMMANDS\.startCameraPublish\)/,
+    'turnCameraOn must not call start_camera_publish directly'
   );
-  assert.deepEqual(outcome, { kind: 'requested', result: { published: false, generation: 7 } });
-});
-
-test("refused before this route's join reached native: waits for it, asks once more", async () => {
-  const gate = createJoinGate();
-  const calls: string[] = [];
-  let attempts = 0;
-  const run = cameraOn.turnCameraOnSequence(
-    steps({
-      calls,
-      whenJoined: () => gate.whenJoined(),
-      startPublish: async () => {
-        calls.push('publish');
-        attempts += 1;
-        if (attempts === 1) throw 'not in room';
-        return { published: true, generation: 2 };
-      }
-    })
+  assert.match(route, /meetingPhase: \(\) => meeting\.meetingPhase/);
+  assert.match(
+    route,
+    /if \(!cameraListenerReady \|\| meeting\.meetingPhase !== 'connected'\) return;\s*untrack\(\(\) => void cameraPublish\.meetingConnected\(\)\);/,
+    'the connected edge must run the deferred publish'
   );
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(calls, ['preview', 'publish'], 'no second attempt before joining');
-  gate.update('connected');
-  assert.equal((await run).kind, 'requested');
-  assert.equal(attempts, 2);
+  // The connected edge must wait for the camera-publish-state listener, or
+  // a self-heal's terminal failure after the deferred publish is lost.
+  const listenerAt = route.indexOf('unlistenCameraPublishState = await listen');
+  const readyAt = route.indexOf('cameraListenerReady = true;');
+  assert.ok(listenerAt !== -1 && readyAt > listenerAt, 'ready only after the listener is registered');
+  const release = route.match(/function releaseSelfViewPreview\(\)[\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.match(release, /cameraPublish\.cancel\(\);/, 'camera-off must drop a deferred publish');
 });
 
-// PR #503 F2: a refusal means native has no meeting pending at all, so it is
-// never a publish failure, and there is no settle window to wait out: a
-// second refusal in a stale "connected" phase drops the preview at once.
-test('a refusal is never a publish failure and waits on no timer', async () => {
-  const gate = createJoinGate('connected');
-  let attempts = 0;
-  const started = Date.now();
-  const outcome = await cameraOn.turnCameraOnSequence(
-    steps({
-      whenJoined: () => gate.whenJoined(),
-      startPublish: async () => {
-        attempts += 1;
-        return notInRoom();
-      }
-    })
-  );
-  assert.deepEqual(outcome, { kind: 'no-room' });
-  assert.equal(attempts, 2);
-  assert.ok(Date.now() - started < 1000, 'no grace period');
-  const source = readFileSync(new URL('../src/lib/meeting/cameraOn.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /setTimeout|SETTLE/);
+// PR #503: native keeps a camera turned on while a join is in flight and
+// publishes it at the commit, answering `published: false`. That is not a
+// self-heal: nothing to show while the meeting is connecting.
+test('a camera native keeps for the in-flight join shows nothing while connecting', async () => {
+  const { camera, log } = rig('connecting', [{ published: false, generation: 2 }]);
+  await camera.publish();
+  assert.deepEqual(log, ['start@connecting']);
+  assert.equal(camera.deferred, false, 'native owns it now; the connected edge does nothing');
 });
 
-test('a meeting that fails to join drops the preview quietly', async () => {
-  const outcome = await cameraOn.turnCameraOnSequence(
-    steps({ whenJoined: async () => false, startPublish: notInRoom })
-  );
-  assert.deepEqual(outcome, { kind: 'no-room' });
-});
-
-test('camera turned off while waiting never publishes again', async () => {
-  let wanted = true;
-  const gate = createJoinGate();
-  let attempts = 0;
-  const run = cameraOn.turnCameraOnSequence(
-    steps({
-      whenJoined: () => gate.whenJoined(),
-      stillWanted: () => wanted,
-      startPublish: async () => {
-        attempts += 1;
-        throw 'not in room';
-      }
-    })
-  );
-  await new Promise((r) => setTimeout(r, 0));
-  wanted = false;
-  gate.update('connected');
-  assert.deepEqual(await run, { kind: 'superseded' });
-  assert.equal(attempts, 1);
-});
-
-test('no preview means no publish attempt', async () => {
-  const calls: string[] = [];
-  const outcome = await cameraOn.turnCameraOnSequence(steps({ calls, acquireSelfView: async () => false }));
-  assert.deepEqual(outcome, { kind: 'no-preview' });
-  assert.deepEqual(calls, []);
-});
-
-// PR #503 F5: an OFF (or failure) from an older room generation answers a
-// request that is gone; it must not stop the camera started for the new
-// room, nor toast. A current one still does both.
-test('camera-publish-state from an older generation is ignored', () => {
-  const bound = 5;
-  assert.equal(cameraOn.cameraPublishStateAction({ publishing: false, error: null, generation: 4 }, bound), 'ignore');
-  assert.equal(cameraOn.cameraPublishStateAction({ publishing: false, error: 'x', generation: 4 }, bound), 'ignore');
-  assert.equal(cameraOn.cameraPublishStateAction({ publishing: false, error: 'x', generation: 5 }, bound), 'failed');
-  assert.equal(cameraOn.cameraPublishStateAction({ publishing: false, error: null, generation: 6 }, bound), 'off');
-  assert.equal(cameraOn.cameraPublishStateAction({ publishing: true, error: null, generation: 6 }, bound), 'on');
+test('camera-publish-state from an older room generation is ignored', () => {
+  const at = (publishing: boolean, error: string | null, generation: number): CameraPublishState => ({
+    publishing,
+    error,
+    generation
+  });
+  assert.equal(cameraStateAction(at(false, null, 4), 5), 'ignore');
+  assert.equal(cameraStateAction(at(false, 'x', 4), 5), 'ignore');
+  assert.equal(cameraStateAction(at(false, 'x', 5), 5), 'failed');
+  assert.equal(cameraStateAction(at(false, null, 6), 5), 'off');
+  assert.equal(cameraStateAction(at(true, null, 6), 5), 'on');
 });
 
 // PR #503 F4: the deferred camera is published at the room commit, before
 // join() resolves (the macOS audio tail can hold it for tens of seconds), so
-// the route must already be listening when it calls join().
+// the route must already be listening when it calls join(), and every
+// outcome must go through the controller's generation filter.
 test('the meeting route listens for camera-publish-state before it joins', () => {
-  const route = readFileSync(
-    new URL('../src/routes/meeting/[room]/+page.svelte', import.meta.url),
-    'utf8'
-  );
   const listener = route.indexOf('listen<CameraPublishState>(');
   const join = route.indexOf('await meeting.join()');
   assert.ok(listener > 0 && join > 0);
   assert.ok(listener < join, 'listener registered before join()');
-  assert.match(route, /cameraPublishStateAction\(event\.payload, cameraGeneration\)/);
-});
-
-test('join gate follows the live phase across a failed join, retry and reconnect', async () => {
-  const gate = createJoinGate();
-  const first = gate.whenJoined();
-  gate.update('disconnected'); // initial join failed
-  assert.equal(await first, false);
-  assert.equal(await gate.whenJoined(), false);
-
-  gate.update('connecting'); // user pressed retry
-  const second = gate.whenJoined();
-  gate.update('connected');
-  assert.equal(await second, true);
-  assert.equal(await gate.whenJoined(), true);
-
-  gate.update('connecting'); // connection lost, recovering
-  const third = gate.whenJoined();
-  let settled = false;
-  void third.then(() => (settled = true));
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(settled, false, 'waits through recovery');
-  gate.update('connected');
-  assert.equal(await third, true);
-});
-
-test('join gate releases waiters as not-joined on dispose', async () => {
-  const gate = createJoinGate();
-  const waiting = gate.whenJoined();
-  gate.dispose();
-  assert.equal(await waiting, false);
-  assert.equal(await gate.whenJoined(), false);
+  assert.match(route, /cameraPublish\.receive\(event\.payload, \(action\) =>/);
 });

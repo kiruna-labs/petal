@@ -609,6 +609,16 @@ impl RemoteControlEngine {
         true
     }
 
+    /// #371: when this discrete op was admitted (host receive), for the
+    /// result's `hostHoldMs`. `None` once the entry was pruned.
+    pub(crate) fn discrete_admitted_at(&self, admission: &DiscreteAdmission) -> Option<Instant> {
+        self.discrete_admissions
+            .lock_unpoisoned()
+            .entries
+            .get(&DiscreteAdmissionKey::from(admission))
+            .map(|entry| entry.admitted_at)
+    }
+
     pub(crate) fn admission_is_still_inflight(
         &self,
         admission: &DiscreteAdmission,
@@ -1396,6 +1406,10 @@ pub struct RemoteControlDraft {
     pub text: Option<String>,
     #[serde(default)]
     pub grant_token: Option<String>,
+    /// #371: stamped by the overlay when the input is produced, before the
+    /// ordered send queue (#425), so queue wait stays in the measurement.
+    #[serde(default)]
+    pub sent_at_ms: Option<u64>,
     #[serde(default)]
     pub modifiers: RemoteControlModifiers,
 }
@@ -1552,6 +1566,15 @@ pub struct RemoteControlMessage {
     /// (`remote_control_redundant`); otherwise it keeps the reliable path.
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_redundant_input: bool,
+    /// #371: controller wall clock (integer ms) when the input was produced,
+    /// on every controller->host kind. Additive: old hosts ignore it, and it
+    /// is not part of the operation fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at_ms: Option<u64>,
+    /// #371: on `result` only -- host admission -> result send, so the
+    /// controller can subtract host time from its round trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_hold_ms: Option<u64>,
     #[serde(default)]
     pub modifiers: RemoteControlModifiers,
 }
@@ -1614,6 +1637,8 @@ impl RemoteControlDraft {
             grant_token: self.grant_token,
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            sent_at_ms: self.sent_at_ms,
+            host_hold_ms: None,
             modifiers: self.modifiers,
         }
     }
@@ -2223,6 +2248,18 @@ fn replay_epoch(window_id: u32, controller_id: &str) -> u64 {
 
 fn pressed_inputs() -> &'static Mutex<HashMap<(u32, String), PressedInputs>> {
     remote_control_engine().pressed_inputs()
+}
+
+/// Every test that puts held input in the process-wide pressed map must hold
+/// this for its whole body. Taking it clears the map, and some tests drain all
+/// of it (`drain_all_pressed`): a parallel test outside the lock loses its
+/// held key between `track_pressed_input` and its drain and sees 0 releases.
+#[cfg(test)]
+pub(crate) fn pressed_input_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let guard = LOCK.lock_unpoisoned();
+    pressed_inputs().lock_unpoisoned().clear();
+    guard
 }
 
 pub(crate) const HELD_INPUT_TTL: Duration = Duration::from_millis(1_200);
@@ -2940,6 +2977,8 @@ mod tests {
             engine.admit_discrete_operation(&message, &admission, now),
             AdmissionDecision::InFlightDuplicate
         );
+        // #371: hostHoldMs is measured from the first admission, not a duplicate's.
+        assert_eq!(engine.discrete_admitted_at(&admission), Some(now));
         let submitted =
             TerminalDisposition::success("submitted", RemoteControlDeliveryRoute::Replay);
         assert!(engine.complete_discrete_operation(&admission, submitted));
@@ -3084,6 +3123,7 @@ mod tests {
 
     #[test]
     fn held_input_ownership_releases_on_revoke_and_expiry() {
+        let _guard = pressed_input_test_lock();
         let frame = WindowFrame {
             x: 0,
             y: 0,
@@ -3116,6 +3156,7 @@ mod tests {
 
     #[test]
     fn repeated_keydown_does_not_duplicate_the_held_release() {
+        let _guard = pressed_input_test_lock();
         let frame = WindowFrame {
             x: 0,
             y: 0,

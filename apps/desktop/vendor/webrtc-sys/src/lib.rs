@@ -29,6 +29,7 @@ pub mod helper;
 pub mod jsep;
 pub mod media_stream;
 pub mod media_stream_track;
+pub mod mf_enum_flags;
 pub mod packet_trailer;
 pub mod peer_connection;
 pub mod peer_connection_factory;
@@ -41,6 +42,9 @@ pub mod rtp_transceiver;
 pub mod video_frame;
 pub mod video_frame_buffer;
 pub mod video_track;
+// PETAL PATCH (#500): see PETAL_PATCH.md "Patch 7".
+#[cfg(target_os = "macos")]
+pub mod vt_h264_encoder_spec;
 pub mod webrtc;
 pub mod yuv_helper;
 

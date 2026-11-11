@@ -54,7 +54,11 @@ test('the publisher timing struct carries acceptance, capture age and frame id',
   // defaults and the evidence lies. Match only constructions (`Ok(…)` /
   // `Some(…)`); a bare `-> Option<PublishedFrameTiming> {` signature would
   // otherwise match the type name and look like a field-less literal.
-  const constructions = publisher.match(/(?:Ok|Some)\(PublishedFrameTiming \{[\s\S]*?\n\s*\}\)/g) ?? [];
+  // Production code only: Rust test modules build fixtures of the struct too.
+  const testModule = publisher.indexOf('\n#[cfg(test)]\nmod tests {');
+  assert.ok(testModule > 0, 'publisher.rs test module marker moved');
+  const production = publisher.slice(0, testModule);
+  const constructions = production.match(/(?:Ok|Some)\(PublishedFrameTiming \{[\s\S]*?\n\s*\}\)/g) ?? [];
   assert.equal(constructions.length, 3, `expected the three push paths, saw ${constructions.length}`);
   for (const site of constructions) {
     // Field shorthand (`frame_id,`) is used in some paths, so accept both forms.

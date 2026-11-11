@@ -130,6 +130,7 @@ mod control_consent;
 // `main.rs` isn't the only caller if a future example/binary ever wants the
 // same sink; today only `run()` below calls `logging::init()`.
 mod analytics;
+mod rc_input_timing;
 mod rc_latency_telemetry;
 pub mod logging;
 mod main_window;
@@ -1558,39 +1559,48 @@ pub fn run() {
         })
         .build(context)
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            // Red traffic dot hides the main window, so a Dock click MUST be
-            // able to bring it back: with no handler here the event is
-            // discarded and the user is stranded with an invisible app.
-            // Deliberately NOT reveal_main_window -- that one-shot fires once
-            // per process, so a second reopen would silently do nothing.
-            //
-            // Restore ONLY when main is actually gone. Activating on every
-            // Dock click yanks the 400px main window over arranged remote
-            // share windows mid-meeting and steals key focus. Ask the window
-            // itself -- NOT the event's `has_visible_windows`, which a visible
-            // pill or share panel makes true while main is hidden, re-stranding
-            // exactly the user this handler exists for.
-            // #404: remote control may have switched a shared browser's web
-            // accessibility on for a grant; hand it back on the way out.
-            if let tauri::RunEvent::Exit = event {
-                remote_control::restore_web_accessibility_on_exit();
+        .run(handle_run_event);
+}
+
+/// The `.run(...)` callback. Its first act is the orderly-exit marker:
+/// Cmd-Q, Dock Quit, logout and the in-app update relaunch all reach
+/// `RunEvent::Exit` without `quit_app`, so without this line the next
+/// launch reports a false "VANISHED" (PETAL-DESKTOP-22). Do not move it
+/// below anything that can block or panic.
+#[cfg(target_os = "macos")]
+fn handle_run_event(app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
+    logging::log_run_event_shutdown(&event);
+    // Red traffic dot hides the main window, so a Dock click MUST be
+    // able to bring it back: with no handler here the event is
+    // discarded and the user is stranded with an invisible app.
+    // Deliberately NOT reveal_main_window -- that one-shot fires once
+    // per process, so a second reopen would silently do nothing.
+    //
+    // Restore ONLY when main is actually gone. Activating on every
+    // Dock click yanks the 400px main window over arranged remote
+    // share windows mid-meeting and steals key focus. Ask the window
+    // itself -- NOT the event's `has_visible_windows`, which a visible
+    // pill or share panel makes true while main is hidden, re-stranding
+    // exactly the user this handler exists for.
+    // #404: remote control may have switched a shared browser's web
+    // accessibility on for a grant; hand it back on the way out.
+    if let tauri::RunEvent::Exit = event {
+        remote_control::restore_web_accessibility_on_exit();
+    }
+    if let tauri::RunEvent::Reopen { .. } = event {
+        if let Some(window) = tauri::Manager::get_webview_window(app_handle, "main") {
+            // Both defaults mean "assume there is nothing to restore".
+            // A failed query must degrade to a missed restore -- which
+            // a second Dock click fixes -- not to a spurious activation
+            // that yanks this window over the user's arranged share
+            // windows mid-meeting. Do NOT "tidy" these to false/true.
+            let hidden = !window.is_visible().unwrap_or(true);
+            let minimized = window.is_minimized().unwrap_or(false);
+            if hidden || minimized {
+                show_and_activate_main_window(app_handle, "dock-reopen");
             }
-            if let tauri::RunEvent::Reopen { .. } = event {
-                if let Some(window) = tauri::Manager::get_webview_window(app_handle, "main") {
-                    // Both defaults mean "assume there is nothing to restore".
-                    // A failed query must degrade to a missed restore -- which
-                    // a second Dock click fixes -- not to a spurious activation
-                    // that yanks this window over the user's arranged share
-                    // windows mid-meeting. Do NOT "tidy" these to false/true.
-                    let hidden = !window.is_visible().unwrap_or(true);
-                    let minimized = window.is_minimized().unwrap_or(false);
-                    if hidden || minimized {
-                        show_and_activate_main_window(app_handle, "dock-reopen");
-                    }
-                }
-            }
-        });
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1905,14 +1915,33 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             control_consent::control_consent_dismiss,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Petal");
+        .build(tauri::generate_context!())
+        .expect("error while building Petal")
+        .run(handle_run_event);
+}
+
+/// The non-macOS `.run(...)` callback. Without it every orderly Windows
+/// quit (tray/menu Quit that skips `quit_app`, logout, `restart_app`)
+/// reads as VANISHED on the next launch (#526). Keep the marker first.
+#[cfg(not(target_os = "macos"))]
+fn handle_run_event(_app_handle: &tauri::AppHandle, event: tauri::RunEvent) {
+    logging::log_run_event_shutdown(&event);
 }
 
 fn load_env_file(path: &'static str) {
     match dotenvy::from_path(path) {
         Ok(_) => log::info!("petal: loaded .env from {path}"),
         Err(e) => log::info!("petal: no .env loaded from {path} ({e})"),
+    }
+}
+
+/// Windows-gated (#526): the non-macOS `run()` hands tauri this exact
+/// callback; pin that it compiles there with the run-callback signature.
+#[cfg(all(test, not(target_os = "macos")))]
+mod run_event_callback_tests {
+    #[test]
+    fn non_macos_run_callback_has_the_run_signature() {
+        let _callback: fn(&tauri::AppHandle, tauri::RunEvent) = super::handle_run_event;
     }
 }
 

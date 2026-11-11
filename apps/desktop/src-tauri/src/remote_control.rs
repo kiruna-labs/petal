@@ -27,6 +27,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::platform::cg::WindowFrame;
 use crate::remote_clipboard;
+use crate::rc_input_timing;
 use crate::rc_latency_telemetry::{self, Dimension, RcRole, Stage};
 use crate::session::{RoomGeneration, SessionState, SharedWindowScreenStatus};
 use crate::transport::publisher::RoomConnection;
@@ -86,6 +87,11 @@ fn platform_control() -> &'static dyn PlatformControl {
 
 fn release_platform_window_gestures(window_id: u32) {
     platform_control().release_window_gestures(window_id);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn release_platform_all_gestures() {
+    input::release_all_session_tap_gestures();
 }
 
 #[cfg(target_os = "macos")]
@@ -347,6 +353,13 @@ impl InjectionCancelledForTests {
         INJECTION_CANCELLED.with(|cell| *cell.borrow_mut() = Some(Arc::new(AtomicBool::new(true))));
         Self
     }
+
+    /// #537: install a live flag the test flips mid-injection, as an
+    /// abandoning deadline waiter does.
+    pub(crate) fn with_flag(flag: Arc<AtomicBool>) -> Self {
+        INJECTION_CANCELLED.with(|cell| *cell.borrow_mut() = Some(flag));
+        Self
+    }
 }
 
 #[cfg(test)]
@@ -463,6 +476,8 @@ fn message_from_binary(
         grant_token: Some(active_token),
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: None,
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers {
             alt: modifiers & 1 != 0,
             ctrl: modifiers & 2 != 0,
@@ -1432,6 +1447,28 @@ pub(crate) fn update_control_frame(window_id: u32, frame: WindowFrame) {
 }
 
 fn clear_all_control_caches() {
+    #[cfg(target_os = "macos")]
+    clear_all_control_caches_with(&input::SystemSessionTapBackend);
+    #[cfg(not(target_os = "macos"))]
+    {
+        release_platform_all_gestures();
+        clear_all_control_state();
+    }
+}
+
+/// Release every held session-tap button, THEN clear (#446 A7 ordering for
+/// the revoke-all path, PETAL-DESKTOP-3B family). `tap` is injected so a test
+/// drives the real chain against a recorder.
+#[cfg(target_os = "macos")]
+fn clear_all_control_caches_with(tap: &dyn input::SessionTapBackend) {
+    // Must run first: the clear below keeps only SlDrag gestures, so a
+    // session-tap drag (display share) would lose its record and the target
+    // app would keep the button held after leave/disconnect/RC-off.
+    input::release_all_session_tap_gestures_with_backend(tap);
+    clear_all_control_state();
+}
+
+fn clear_all_control_state() {
     remote_clipboard::clear_pending_copy();
     remote_clipboard::clear_copy_operations();
     remote_clipboard::clear_paste_operations();
@@ -1629,6 +1666,8 @@ fn ensure_pressed_ttl_sweeper() {
             // grant state (authority, not event order) and emit due intervals.
             let hosting = !sessions().lock_unpoisoned().is_empty();
             rc_latency_telemetry::sync(RcRole::Host, hosting);
+            // #371: same reconcile for the controller side, against presence.
+            rc_input_timing::sync_controller(remote_window_exists);
             ticks_since_summary += 1;
             if ticks_since_summary >= LATENCY_SUMMARY_TICK_INTERVAL {
                 ticks_since_summary = 0;
@@ -1964,8 +2003,11 @@ pub(crate) fn revoke_all(app: &AppHandle) {
     remote_control_engine().clear_controller_grants();
     #[cfg(target_os = "windows")]
     crate::windows_remote_control::clear_all_pending_controller_operations();
-    clear_all_control_caches();
+    // Epochs first: a queued replay that has not started is then rejected.
+    // A Down already mid-injection can still post after the release/clear;
+    // the `drain_all_pressed` synthetic Up below releases it (same shard).
     bump_all_replay_epochs("all control revoked");
+    clear_all_control_caches();
     // #365: drain + grant removal under the fence -- see `input_authority_fence`.
     let fence = input_authority_fence().lock_unpoisoned();
     let releases = drain_all_pressed();
@@ -1981,6 +2023,7 @@ pub(crate) fn revoke_all(app: &AppHandle) {
     enqueue_synthetic_releases(releases, "all control revoked");
     warned_tokenless_inputs().lock_unpoisoned().clear();
     last_unreliable_seqs().lock_unpoisoned().clear();
+    rc_input_timing::clear_host_state();
     // Fable review fix (#372): same insert-only leak class as
     // warned_tokenless_inputs above.
     replay_failure_status_throttle().lock_unpoisoned().clear();
@@ -4129,6 +4172,8 @@ fn status_packet_for(status: &RemoteControlStatus, local_identity: &str) -> Remo
         // #399: same presence-is-the-signal rule; an old host never sets it,
         // so its controllers keep the reliable ordered path.
         supports_redundant_input: status.status == "active",
+        sent_at_ms: None,
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4178,6 +4223,8 @@ fn discrete_result_packet(
         grant_token: None,
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: None,
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
     }
 }
@@ -4187,9 +4234,13 @@ fn send_discrete_result(
     admission: DiscreteAdmission,
     disposition: TerminalDisposition,
 ) {
-    let message = discrete_result_packet(&sender.local_identity, &admission, disposition);
+    let mut message = discrete_result_packet(&sender.local_identity, &admission, disposition);
+    // #371: host admission -> this send, re-measured per attempt.
+    let admitted_at = remote_control_engine().discrete_admitted_at(&admission);
+    let hold_ms = move || admitted_at.map(|at| at.elapsed().as_millis() as u64);
     let summary = message_summary(&message);
     tauri::async_runtime::spawn(async move {
+        message.host_hold_ms = hold_ms();
         if let Err(error) = publish_message(sender.publisher.clone(), message.clone()).await {
             // This is host-to-controller terminal delivery recovery, not the
             // controller retry protocol: retry capability remains advertised
@@ -4198,6 +4249,7 @@ fn send_discrete_result(
                 "remote-control: result publish failed for {summary}; retrying once: {error}"
             );
             tokio::time::sleep(Duration::from_millis(75)).await;
+            message.host_hold_ms = hold_ms();
             if let Err(retry_error) = publish_message(sender.publisher, message).await {
                 log::warn!(
                     "remote-control: result publish recovery failed for {summary}: {retry_error}"
@@ -4902,6 +4954,10 @@ fn handle_message(
                 crate::remote_control_core::ControllerStatusEffect::Terminate => Some(false),
                 crate::remote_control_core::ControllerStatusEffect::Feedback => None,
             };
+            rc_input_timing::controller_status(
+                &message,
+                crate::remote_control_core::controller_status_effect(status),
+            );
             if let Some(active) = overlay_active {
                 if let Err(e) = set_remote_window_control_active(
                     app,
@@ -5178,6 +5234,7 @@ fn handle_message(
                 );
                 return;
             }
+            rc_input_timing::controller_result(&message, now_ms());
             let Some((status, feedback)) = controller_result_feedback(message.failure_code) else {
                 return;
             };
@@ -5225,6 +5282,9 @@ fn handle_message(
                 unreliable_seq_accepted,
                 accessibility_trusted,
             };
+            if remote_control_allowed && authorized {
+                rc_input_timing::host_input(&message, received_at);
+            }
             let mut action =
                 plan_input_dispatch(gates, input_v2_snapshot_before_admission(&message));
             if matches!(action, InputDispatchAction::EvaluateV2Admission) {
@@ -6397,6 +6457,8 @@ fn clipboard_key_message(
         grant_token: Some(grant_token.to_string()),
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: None,
+        host_hold_ms: None,
         modifiers,
     }
 }
@@ -6656,6 +6718,7 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
                     );
                 }
                 let summary = message_summary(&chunk_message);
+                rc_input_timing::controller_sent(&chunk_message);
                 if let Err(e) = publish_controller_input(publisher.clone(), chunk_message).await {
                     log::warn!("remote-control: chunked text publish failed for {summary}: {e}");
                     return Err(e);
@@ -6677,6 +6740,8 @@ pub async fn remote_control_send(app: AppHandle, draft: RemoteControlDraft) -> R
         return Err("operation is unsupported by the active Windows control grant".to_string());
     }
     let summary = message_summary(&message);
+    // #371: after the v2 envelope is assigned, so the result can be paired.
+    rc_input_timing::controller_sent(&message);
     match publish_controller_input(publisher, message).await {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -6747,6 +6812,8 @@ pub async fn remote_control_set_active(
         grant_token: None,
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: Some(now_ms()),
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -6890,6 +6957,8 @@ pub async fn remote_control_request_escalation(
         grant_token: None,
         supports_binary_hot_path: false,
         supports_redundant_input: false,
+        sent_at_ms: Some(now_ms()),
+        host_hold_ms: None,
         modifiers: RemoteControlModifiers::default(),
     };
     #[cfg(target_os = "windows")]
@@ -7339,6 +7408,8 @@ pub(crate) mod input {
         fn CGEventPost(tap: u32, event: *mut c_void);
         fn CGEventCreate(source: *const c_void) -> *mut c_void;
         fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+        // #529: HID-level (physical) button state; see `host_button_is_down`.
+        fn CGEventSourceButtonState(state: u32, button: u32) -> bool;
         fn CFRetain(cf: *const c_void) -> *const c_void;
         fn CFRelease(cf: *const c_void);
         fn dlopen(path: *const c_char, mode: i32) -> *mut c_void;
@@ -7851,6 +7922,15 @@ pub(crate) mod input {
         /// Up so the SL/CGEvent fallback path can post the correct
         /// click_state (a separate Up wire message may not repeat it).
         click_count: u32,
+    }
+
+    thread_local! {
+        /// Set by `ax_pointer_up` for an Up with no recorded press (an
+        /// orphan). `replay_with_backends` consumes it before EVERY
+        /// release-failure report, the cancellation return included (#530):
+        /// nothing was held (PETAL-DESKTOP-3B/3A). The controller still gets
+        /// its failure.
+        static ORPHAN_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10501,7 +10581,7 @@ pub(crate) mod input {
         HitTestVerdict::NothingInFront
     }
 
-    trait SessionTapBackend: Sync {
+    pub(super) trait SessionTapBackend: Sync {
         fn post_mouse(
             &self,
             point: super::GlobalPoint,
@@ -10563,9 +10643,16 @@ pub(crate) mod input {
         fn petal_click_through_window_ids(&self) -> Vec<u32> {
             Vec::new()
         }
+
+        /// #529: is the host's PHYSICAL `button` down right now? Defaults to
+        /// false (nobody at the host's mouse) so recording backends are
+        /// unaffected.
+        fn host_button_is_down(&self, _button: RemoteControlButton) -> bool {
+            false
+        }
     }
 
-    struct SystemSessionTapBackend;
+    pub(super) struct SystemSessionTapBackend;
 
     impl SystemSessionTapBackend {
         fn post(event: *mut c_void) {
@@ -10686,6 +10773,13 @@ pub(crate) mod input {
 
         fn move_cursor(&self, point: super::GlobalPoint) -> Result<(), String> {
             self.post_mouse(point, RemoteControlButton::Left, MouseKind::Moved, 1)
+        }
+
+        fn host_button_is_down(&self, button: RemoteControlButton) -> bool {
+            // kCGEventSourceStateHIDSystemState = 1: hardware sources only.
+            // Our CGEventPost(kCGSessionEventTap) posts enter downstream of
+            // it, so a held session-tap Down never reads as down here.
+            unsafe { CGEventSourceButtonState(1, button_number(button)) }
         }
 
         fn raise(&self, pid: i32, window_id: u32) -> bool {
@@ -11338,6 +11432,7 @@ pub(crate) mod input {
         pb: &dyn PasteboardBackend,
         tap: &dyn SessionTapBackend,
     ) -> Result<(), String> {
+        ORPHAN_UP.with(|flag| flag.set(false));
         if target_pid.is_some_and(is_display_target)
             && matches!(
                 message.message_type,
@@ -11411,7 +11506,12 @@ pub(crate) mod input {
             // #134: this returns SUCCESS for an event that was never posted. For
             // an Up that means a phantom held button on the host, reported to
             // the controller as released.
-            note_pointer_release_not_injected(message, PointerReleaseFailure::InjectionCancelled);
+            if !ORPHAN_UP.with(|flag| flag.replace(false)) {
+                note_pointer_release_not_injected(
+                    message,
+                    PointerReleaseFailure::InjectionCancelled,
+                );
+            }
             return Ok(());
         }
         // #404: an AX-serviced shortcut (Cmd+A/C/V) is a delivered key-down.
@@ -11473,6 +11573,9 @@ pub(crate) mod input {
             invalidate_ax_resolution_after_mutation(message.window_id);
         }
         if let Err(error) = &result {
+            if ORPHAN_UP.with(|flag| flag.replace(false)) {
+                return result;
+            }
             note_pointer_release_not_injected(
                 message,
                 if error.contains("exhausted AX/SkyLight routes") {
@@ -12268,9 +12371,11 @@ pub(crate) mod input {
         // Fable-review fix (#369): same reasoning as the middle-click branch
         // above -- check-and-insert while holding the lock so a concurrent
         // Up's `remove()` can't interleave between the check and the insert.
-        {
+        let abandoned = {
             let mut gestures = ax_pointer_gestures().lock_unpoisoned();
-            if !super::injection_was_cancelled() {
+            if super::injection_was_cancelled() {
+                Some(mode)
+            } else {
                 gestures.insert(
                     (window_id, controller_id.to_string()),
                     PointerGestureState {
@@ -12281,9 +12386,69 @@ pub(crate) mod input {
                         click_count,
                     },
                 );
+                None
             }
+        };
+        if let Some(mode) = abandoned {
+            release_abandoned_down(window_id, pid, point, button, &mode, sl, tap);
         }
         Ok(outcome)
+    }
+
+    /// #537: the takeover is per window, so keep it while another
+    /// controller's session-tap gesture is open there.
+    fn end_cursor_takeover_unless_window_busy(window_id: u32, tap: &dyn SessionTapBackend) {
+        let window_busy = ax_pointer_gestures().lock_unpoisoned().iter().any(
+            |((stored_window_id, _), state)| {
+                *stored_window_id == window_id && matches!(state.mode, GestureMode::SessionTap)
+            },
+        );
+        if !window_busy {
+            end_cursor_takeover(window_id, tap);
+        }
+    }
+
+    /// #537: a cancelled Down is never recorded (#369). If it already posted
+    /// a real Down (SlDrag / SessionTap) the button is physically held and
+    /// nothing will release it -- the controller's Up already failed on the
+    /// busy shard -- so post the matching release now.
+    #[allow(clippy::too_many_arguments)]
+    fn release_abandoned_down(
+        window_id: u32,
+        pid: i32,
+        point: super::GlobalPoint,
+        button: RemoteControlButton,
+        mode: &GestureMode,
+        sl: &dyn SlClickBackend,
+        tap: &dyn SessionTapBackend,
+    ) {
+        let released = match mode {
+            GestureMode::SessionTap => {
+                let kind = match button {
+                    RemoteControlButton::Left => MouseKind::LeftUp,
+                    RemoteControlButton::Right => MouseKind::RightUp,
+                    RemoteControlButton::Middle => MouseKind::OtherUp,
+                };
+                let posted = tap.post_mouse(point, button, kind, 1);
+                end_cursor_takeover_unless_window_busy(window_id, tap);
+                posted
+            }
+            GestureMode::SlDrag => {
+                post_sl_release_with_retry(pid, point, button, sl).map_err(|error| match error {
+                    SlClickError::Unavailable => "SkyLight unavailable".to_string(),
+                    SlClickError::Failed(error) => error,
+                })
+            }
+            _ => return,
+        };
+        match released {
+            Ok(()) => log::info!(
+                "remote-control: pointer down released window_id={window_id} button={button:?} reason=down-cancelled-after-post"
+            ),
+            Err(error) => log::warn!(
+                "remote-control: pointer down release failed window_id={window_id} reason=down-cancelled-after-post: {error} -- button may remain held"
+            ),
+        }
     }
 
     /// Open a session-tap gesture: raise the target, warp into it, post the
@@ -12301,6 +12466,16 @@ pub(crate) mod input {
             log::info!(
                 "remote-control: session-tap pointer down unavailable window_id={window_id}: {error}"
             );
+            return GestureMode::PassThrough;
+        }
+        // #537: preparation (raise, hit test, warp) can outlive the replay
+        // deadline. The waiter has then abandoned this Down and the next task
+        // on the shard already failed, so a Down posted now is never released.
+        if super::injection_was_cancelled() {
+            log::info!(
+                "remote-control: session-tap pointer down skipped window_id={window_id} reason=down-cancelled-after-prepare"
+            );
+            end_cursor_takeover_unless_window_busy(window_id, tap);
             return GestureMode::PassThrough;
         }
         let kind = match button {
@@ -12360,17 +12535,26 @@ pub(crate) mod input {
             mode
         };
         let is_sl_drag = matches!(&mode, GestureMode::SlDrag | GestureMode::SessionTap);
-        if !super::injection_was_cancelled() {
-            ax_pointer_gestures().lock_unpoisoned().insert(
-                (window_id, controller_id.to_string()),
-                PointerGestureState {
-                    mode,
-                    down_point: point,
-                    last_point: point,
-                    button,
-                    click_count,
-                },
-            );
+        let abandoned = {
+            let mut gestures = ax_pointer_gestures().lock_unpoisoned();
+            if super::injection_was_cancelled() {
+                Some(mode)
+            } else {
+                gestures.insert(
+                    (window_id, controller_id.to_string()),
+                    PointerGestureState {
+                        mode,
+                        down_point: point,
+                        last_point: point,
+                        button,
+                        click_count,
+                    },
+                );
+                None
+            }
+        };
+        if let Some(mode) = abandoned {
+            release_abandoned_down(window_id, pid, point, button, &mode, sl, tap);
         }
         Ok(if is_sl_drag {
             AxReplayOutcome::Handled
@@ -12606,6 +12790,7 @@ pub(crate) mod input {
             // #368: but never for a host-synthesized release. With no gesture
             // nothing is held, and its Down was dropped by the revoke that
             // queued it, so a click here acts after control is gone.
+            ORPHAN_UP.with(|flag| flag.set(true));
             if super::injection_is_synthetic_release() {
                 log::info!(
                     "remote-control: AX pointer up window_id={window_id} controller='{controller_id}' mode=<none> synthetic release, nothing held; no click"
@@ -12617,7 +12802,36 @@ pub(crate) mod input {
                 "remote-control: AX pointer up window_id={window_id} controller='{controller_id}' mode=<none> outcome={}",
                 ax_replay_outcome_name(outcome)
             );
+            // PETAL-DESKTOP-3B/3A: no press was recorded, so a click that
+            // cannot be delivered is an orphan Up (lost Down, TTL/gap release),
+            // not a stuck button. Never report it as a failed release.
+            // The controller still gets its failure; only the Sentry report is
+            // suppressed (see `ORPHAN_UP`).
+            if matches!(outcome, AxReplayOutcome::PassThrough) {
+                log::info!(
+                    "remote-control: orphan Up not delivered, nothing held reason=orphan-up window_id={window_id} controller='{controller_id}'"
+                );
+            }
             return Ok(outcome);
+        };
+        // #550: a host-synthesized release (held-input TTL, sequencer gap,
+        // reconnect) is a teardown, not the controller's Up. Apply the #545
+        // guard (never end the sharer's own drag) and release where the drag
+        // is, not at the Down point its copied message carries (#611).
+        let up_point = if matches!(state.mode, GestureMode::SessionTap)
+            && super::injection_is_synthetic_release()
+        {
+            if tap.host_button_is_down(state.button) {
+                log::info!(
+                    "remote-control: session-tap synthetic release skipped window_id={window_id} button={:?} reason=local-drag-in-progress",
+                    state.button
+                );
+                end_cursor_takeover_unless_window_busy(window_id, tap);
+                return Ok(AxReplayOutcome::Handled);
+            }
+            state.last_point
+        } else {
+            up_point
         };
         // Fable-review fix (#369): the map entry is always removed above (so
         // no orphan lingers), but if THIS event's own deadline waiter already
@@ -12957,6 +13171,21 @@ pub(crate) mod input {
         release_session_tap_gestures_with_backend(window_id, None, &tap);
     }
 
+    pub(super) fn release_all_session_tap_gestures_with_backend(tap: &dyn SessionTapBackend) -> usize {
+        let mut windows: Vec<u32> = ax_pointer_gestures()
+            .lock_unpoisoned()
+            .iter()
+            .filter(|(_, state)| matches!(state.mode, GestureMode::SessionTap))
+            .map(|((window_id, _), _)| *window_id)
+            .collect();
+        windows.sort_unstable();
+        windows.dedup();
+        windows
+            .into_iter()
+            .map(|window_id| release_session_tap_gestures_with_backend(window_id, None, tap))
+            .sum()
+    }
+
     /// `only_controller` scopes the cancellation to one controller: #374
     /// keys gesture state per (window, controller), so a concurrent
     /// controller's in-progress drag on the same window must survive a
@@ -12997,6 +13226,15 @@ pub(crate) mod input {
             (open, remaining)
         };
         for (point, button) in &open {
+            // #529: a record (often stale: the controller's Up was lost) must
+            // not end the sharer's own physical drag. Their HID Up releases
+            // the button, so dropping the record is enough.
+            if tap.host_button_is_down(*button) {
+                log::info!(
+                    "remote-control: session-tap cancellation release skipped window_id={window_id} button={button:?} reason=local-drag-in-progress"
+                );
+                continue;
+            }
             let kind = match button {
                 RemoteControlButton::Left => MouseKind::LeftUp,
                 RemoteControlButton::Right => MouseKind::RightUp,
@@ -14908,6 +15146,9 @@ pub(crate) mod input {
             stack: Option<Vec<StackWindow>>,
             /// #334: Petal panels reported click-through by construction.
             click_through: Vec<u32>,
+            /// #529: what `host_button_is_down` reports -- true simulates the
+            /// sharer physically holding the button.
+            host_button_down: std::sync::atomic::AtomicBool,
         }
 
         impl RecordingSessionTap {
@@ -14922,6 +15163,7 @@ pub(crate) mod input {
                     windows: vec![42],
                     stack: None,
                     click_through: Vec::new(),
+                    host_button_down: std::sync::atomic::AtomicBool::new(false),
                 }
             }
 
@@ -15197,6 +15439,10 @@ pub(crate) mod input {
 
             fn petal_click_through_window_ids(&self) -> Vec<u32> {
                 self.click_through.clone()
+            }
+
+            fn host_button_is_down(&self, _button: RemoteControlButton) -> bool {
+                self.host_button_down.load(Ordering::SeqCst)
             }
         }
 
@@ -15701,6 +15947,8 @@ pub(crate) mod input {
                 grant_token: None,
                 supports_binary_hot_path: false,
                 supports_redundant_input: false,
+                sent_at_ms: None,
+                host_hold_ms: None,
                 modifiers: RemoteControlModifiers::default(),
             }
         }
@@ -18193,9 +18441,45 @@ pub(crate) mod input {
             );
         }
 
+        /// PETAL-DESKTOP-3B/3A: an Up with no recorded press (`mode=<none>`)
+        /// that no route can deliver was reported as a failed release, as if a
+        /// button could be stuck. Nothing was held, so it is an orphan and must
+        /// not reach the release-failure reporter. A real held press whose Up
+        /// fails stays covered by the test above.
+        #[test]
+        fn an_orphan_pointer_up_is_not_reported_as_a_failed_release() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let _ = take_release_failure_reports();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(80);
+            ax.set_capabilities(80, AxCapabilities::default());
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let tap = RecordingSessionTap::untrusted();
+            let pb = RecordingPasteboard::default();
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.20,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            assert!(
+                replay_with_backends(&up, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).is_err(),
+                "the controller must still be told the Up was not delivered"
+            );
+            assert!(
+                take_release_failure_reports().is_empty(),
+                "an Up with no recorded press is an orphan, not a failed release"
+            );
+        }
+
         /// #134: the cancelled path returns `Ok(())` without injecting -- the
         /// exact shape of "the controller is told the button came up and it
-        /// never did". Success upstream must still report the release failure.
+        /// never did". Success upstream must still report the release failure
+        /// for an Up whose press WAS recorded.
         #[test]
         fn a_cancelled_release_reports_even_though_the_replay_returns_ok() {
             let _guard = ax_test_lock();
@@ -18209,6 +18493,15 @@ pub(crate) mod input {
             let sink = RecordingSink::default();
             let tap = RecordingSessionTap::untrusted();
             let pb = RecordingPasteboard::default();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.20,
+                0.10,
+                RemoteControlButton::Right,
+                0,
+            );
+            let _ = replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap);
+            assert_eq!(ax_gesture_count_for_tests(), 1, "the press must be recorded");
             let up = pointer_message(
                 RemoteControlAction::Up,
                 0.20,
@@ -18226,6 +18519,44 @@ pub(crate) mod input {
                     PointerReleaseFailure::InjectionCancelled
                 )],
             );
+        }
+
+        /// #530: a cancelled Up with no recorded press is an orphan too. The
+        /// cancellation early return used to report it as
+        /// `InjectionCancelled` before the orphan marker was read, sending a
+        /// false phantom-button event. Covers a controller's orphan Up and a
+        /// host-synthesized one.
+        #[test]
+        fn a_cancelled_orphan_pointer_up_is_not_reported_as_a_failed_release() {
+            let _guard = ax_test_lock();
+            let frame = unit_frame();
+            let ax = RecordingAxBackend::default();
+            ax.resolve_to(80);
+            ax.set_capabilities(80, AxCapabilities::default());
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let tap = RecordingSessionTap::untrusted();
+            let pb = RecordingPasteboard::default();
+            let up = pointer_message(
+                RemoteControlAction::Up,
+                0.20,
+                0.10,
+                RemoteControlButton::Right,
+                0,
+            );
+            for synthetic in [false, true] {
+                clear_all_ax_control_state();
+                let _ = take_release_failure_reports();
+                let _synthetic = synthetic.then(super::super::SyntheticReleaseForTests::set);
+                let _cancelled = super::super::InjectionCancelledForTests::set();
+                let result =
+                    replay_with_backends(&up, frame, Some(1234), &sink, &ax, &sl, &pb, &tap);
+                assert!(result.is_ok(), "synthetic={synthetic}: cancelled path returns Ok");
+                assert!(
+                    take_release_failure_reports().is_empty(),
+                    "synthetic={synthetic}: a cancelled Up with no recorded press is an orphan, not a failed release"
+                );
+            }
         }
 
         #[test]
@@ -20413,6 +20744,626 @@ pub(crate) mod input {
             release_session_tap_gestures_with_backend(down.window_id, None, &tap);
         }
 
+        /// PETAL-DESKTOP-3B family: `revoke_all` (room leave, disconnect, RC
+        /// turned off) cleared every gesture except SlDrag without posting the
+        /// session-tap Up, leaving the host's button held after a display-share
+        /// drag. Drives the real dispatcher for the Down, then the revoke-all
+        /// release, and checks the Up reaches the injection seam at the last
+        /// pointer position.
+        #[test]
+        fn revoke_all_release_posts_up_for_every_open_session_tap_gesture() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::trusted();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).unwrap();
+            assert_eq!(tap.mouse_kinds(), vec![MouseKind::LeftDown]);
+
+            let released = release_all_session_tap_gestures_with_backend(&tap);
+
+            assert_eq!(released, 1);
+            assert_eq!(
+                tap.mouse_kinds(),
+                vec![MouseKind::LeftDown, MouseKind::LeftUp],
+                "a held session-tap button must get its Up before the gesture record is dropped"
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// The production wiring of the revoke-all release: a Down through
+        /// the real dispatcher, then the real `clear_all_control_caches_with`
+        /// (what `clear_all_control_caches` calls with the system backend).
+        /// The Up must be posted AND the gesture map empty -- the release
+        /// runs before the clear drops the record.
+        #[test]
+        fn clearing_all_control_caches_releases_the_held_button_then_empties_gestures() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let tap = RecordingSessionTap::trusted();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).unwrap();
+            assert_eq!(ax_gesture_count_for_tests(), 1);
+
+            super::super::clear_all_control_caches_with(&tap);
+
+            assert_eq!(
+                tap.mouse_kinds(),
+                vec![MouseKind::LeftDown, MouseKind::LeftUp]
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// Runs the revoke-all release + clear from inside the Down's target
+        /// preparation (`raise`), i.e. after the Down passed its epoch check
+        /// but before it posts.
+        struct RevokeDuringRaise<'a> {
+            inner: &'a RecordingSessionTap,
+            fired: std::sync::atomic::AtomicBool,
+        }
+
+        impl SessionTapBackend for RevokeDuringRaise<'_> {
+            fn post_mouse(
+                &self,
+                point: super::super::GlobalPoint,
+                button: RemoteControlButton,
+                kind: MouseKind,
+                click_state: u32,
+            ) -> Result<(), String> {
+                self.inner.post_mouse(point, button, kind, click_state)
+            }
+            fn post_scroll(
+                &self,
+                point: super::super::GlobalPoint,
+                delta_y: i32,
+                delta_x: i32,
+                flags: u64,
+            ) -> Result<(), String> {
+                self.inner.post_scroll(point, delta_y, delta_x, flags)
+            }
+            fn post_key(
+                &self,
+                keycode: u16,
+                down: bool,
+                flags: u64,
+                unicode: Option<&str>,
+            ) -> Result<(), String> {
+                self.inner.post_key(keycode, down, flags, unicode)
+            }
+            fn cursor_position(&self) -> Option<super::super::GlobalPoint> {
+                self.inner.cursor_position()
+            }
+            fn move_cursor(&self, point: super::super::GlobalPoint) -> Result<(), String> {
+                self.inner.move_cursor(point)
+            }
+            fn raise(&self, pid: i32, window_id: u32) -> bool {
+                let raised = self.inner.raise(pid, window_id);
+                if !self.fired.swap(true, Ordering::SeqCst) {
+                    super::super::clear_all_control_caches_with(self.inner);
+                }
+                raised
+            }
+            fn onscreen_stack(&self) -> Option<Vec<StackWindow>> {
+                self.inner.onscreen_stack()
+            }
+            fn is_trusted(&self) -> bool {
+                self.inner.is_trusted()
+            }
+            fn petal_click_through_window_ids(&self) -> Vec<u32> {
+                self.inner.petal_click_through_window_ids()
+            }
+        }
+
+        /// Review question on #522: a Down already past its epoch check can
+        /// pause in target preparation while `revoke_all` releases (nothing
+        /// held yet) and clears, then post its Down. The button must still end
+        /// up released: `revoke_all` drains `pressed_inputs` (tracked at
+        /// enqueue, before the Down ran) into a synthetic Up on the same
+        /// serial per-pid shard, which runs after the Down and finds the
+        /// gesture the late Down recorded.
+        #[test]
+        fn a_down_that_posts_after_revoke_all_is_released_by_the_drained_synthetic_up() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let inner = RecordingSessionTap::trusted();
+            let tap = RevokeDuringRaise {
+                inner: &inner,
+                fired: std::sync::atomic::AtomicBool::new(false),
+            };
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            // What `track_pressed_input` stores at enqueue and
+            // `drain_all_pressed` hands back to `revoke_all`.
+            let drained_release = super::super::release_pointer_task(&down, frame, Some(1234));
+
+            replay_with_backends(&down, frame, Some(1234), &sink, &ax, &sl, &pb, &tap).unwrap();
+            assert!(tap.fired.load(Ordering::SeqCst), "the revoke never interleaved");
+            assert_eq!(
+                inner.mouse_kinds(),
+                vec![MouseKind::LeftDown],
+                "the late Down posted after the revoke-all release/clear"
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 1);
+
+            {
+                let _synthetic = super::super::SyntheticReleaseForTests::set();
+                replay_with_backends(
+                    &drained_release.message,
+                    frame,
+                    Some(1234),
+                    &sink,
+                    &ax,
+                    &sl,
+                    &pb,
+                    &inner,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                inner.mouse_kinds(),
+                vec![MouseKind::LeftDown, MouseKind::LeftUp],
+                "the drained synthetic Up must release a Down that posted after revoke_all"
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// #537: where in a session-tap Down the replay deadline fires.
+        #[derive(Clone, Copy)]
+        enum CancelAt {
+            /// Inside target preparation (`raise`), before the post.
+            Preparation,
+            /// Right after the Down reached the injection seam.
+            AfterPost,
+        }
+
+        /// #537: flips the injection-cancelled flag the way an abandoning
+        /// `run_replay_with_deadline_tracked` waiter does, at a chosen point.
+        struct CancellingTap<'a> {
+            inner: &'a RecordingSessionTap,
+            flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            at: CancelAt,
+        }
+
+        impl SessionTapBackend for CancellingTap<'_> {
+            fn post_mouse(
+                &self,
+                point: super::super::GlobalPoint,
+                button: RemoteControlButton,
+                kind: MouseKind,
+                click_state: u32,
+            ) -> Result<(), String> {
+                let result = self.inner.post_mouse(point, button, kind, click_state);
+                if matches!(self.at, CancelAt::AfterPost)
+                    && matches!(
+                        kind,
+                        MouseKind::LeftDown | MouseKind::RightDown | MouseKind::OtherDown
+                    )
+                {
+                    self.flag.store(true, Ordering::Release);
+                }
+                result
+            }
+            fn post_scroll(
+                &self,
+                point: super::super::GlobalPoint,
+                delta_y: i32,
+                delta_x: i32,
+                flags: u64,
+            ) -> Result<(), String> {
+                self.inner.post_scroll(point, delta_y, delta_x, flags)
+            }
+            fn post_key(
+                &self,
+                keycode: u16,
+                down: bool,
+                flags: u64,
+                unicode: Option<&str>,
+            ) -> Result<(), String> {
+                self.inner.post_key(keycode, down, flags, unicode)
+            }
+            fn cursor_position(&self) -> Option<super::super::GlobalPoint> {
+                self.inner.cursor_position()
+            }
+            fn move_cursor(&self, point: super::super::GlobalPoint) -> Result<(), String> {
+                self.inner.move_cursor(point)
+            }
+            fn raise(&self, pid: i32, window_id: u32) -> bool {
+                let raised = self.inner.raise(pid, window_id);
+                if matches!(self.at, CancelAt::Preparation) {
+                    self.flag.store(true, Ordering::Release);
+                }
+                raised
+            }
+            fn onscreen_stack(&self) -> Option<Vec<StackWindow>> {
+                self.inner.onscreen_stack()
+            }
+            fn is_trusted(&self) -> bool {
+                self.inner.is_trusted()
+            }
+            fn petal_click_through_window_ids(&self) -> Vec<u32> {
+                self.inner.petal_click_through_window_ids()
+            }
+        }
+
+        /// #537: run one Down through the real dispatcher on an injection
+        /// thread whose deadline fires at `at`. Left takes `ax_pointer_down`,
+        /// Middle takes `pass_through_pointer_down`.
+        fn replay_down_cancelled_at(
+            inner: &RecordingSessionTap,
+            button: RemoteControlButton,
+            at: CancelAt,
+        ) {
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let tap = CancellingTap {
+                inner,
+                flag: std::sync::Arc::clone(&flag),
+                at,
+            };
+            let down = pointer_message(RemoteControlAction::Down, 0.10, 0.10, button, 0);
+            {
+                let _cancelled = super::super::InjectionCancelledForTests::with_flag(
+                    std::sync::Arc::clone(&flag),
+                );
+                let _ = replay_with_backends(&down, unit_frame(), Some(1234), &sink, &ax, &sl, &pb, &tap);
+            }
+            assert!(flag.load(Ordering::Acquire), "the deadline never fired");
+        }
+
+        /// #537 step 1: the deadline fires while the target is being
+        /// prepared. The waiter has given up and the controller's Up already
+        /// failed, so posting the Down now would hold a button forever.
+        #[test]
+        fn a_session_tap_down_cancelled_during_preparation_posts_nothing() {
+            for button in [RemoteControlButton::Left, RemoteControlButton::Middle] {
+                let _guard = ax_test_lock();
+                clear_all_ax_control_state();
+                let inner = RecordingSessionTap::trusted();
+
+                replay_down_cancelled_at(&inner, button, CancelAt::Preparation);
+
+                assert_eq!(
+                    inner.mouse_kinds(),
+                    Vec::<MouseKind>::new(),
+                    "{button:?}: a Down abandoned during preparation must not post"
+                );
+                assert_eq!(ax_gesture_count_for_tests(), 0, "{button:?}");
+            }
+        }
+
+        /// #537 step 2: the deadline fires after the Down was posted. The
+        /// button is physically held and the controller's Up already failed
+        /// on the busy shard, so the abandoned Down must release it itself,
+        /// leaving no record for a later Down to overwrite.
+        #[test]
+        fn a_session_tap_down_cancelled_after_its_post_releases_the_button() {
+            for (button, down, up) in [
+                (RemoteControlButton::Left, MouseKind::LeftDown, MouseKind::LeftUp),
+                (RemoteControlButton::Middle, MouseKind::OtherDown, MouseKind::OtherUp),
+            ] {
+                let _guard = ax_test_lock();
+                clear_all_ax_control_state();
+                let inner = RecordingSessionTap::trusted();
+
+                replay_down_cancelled_at(&inner, button, CancelAt::AfterPost);
+
+                assert_eq!(
+                    inner.mouse_kinds(),
+                    vec![down, up],
+                    "{button:?}: an abandoned posted Down must be released"
+                );
+                assert_eq!(ax_gesture_count_for_tests(), 0, "{button:?}");
+            }
+        }
+
+        /// #537: both Down insert sites must hand a cancelled, already-posted
+        /// Down to the release. The SlDrag route is opt-in (env), so its
+        /// dispatch cannot be driven here; a dropped call would stay green.
+        #[test]
+        fn both_pointer_down_insert_sites_release_an_abandoned_down() {
+            let src = include_str!("remote_control.rs");
+            let call = "release_abandoned_down(window_id, pid, point, button, &mode, sl, tap);";
+            for name in ["fn ax_pointer_down(", "fn pass_through_pointer_down("] {
+                let start = src.find(name).unwrap_or_else(|| panic!("missing {name}"));
+                let end = start + src[start..].find("\n    }\n").expect("fn end");
+                assert!(src[start..end].contains(call), "{name} lost the #537 release");
+            }
+        }
+
+        /// #537 step 2, SkyLight drag: the same rule for an abandoned SlDrag
+        /// Down (that route is opt-in, so drive the release directly).
+        #[test]
+        fn an_abandoned_sl_drag_down_posts_its_release() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let sl = RecordingSlClickBackend::available();
+            let tap = RecordingSessionTap::trusted();
+
+            release_abandoned_down(
+                42,
+                1234,
+                super::super::GlobalPoint { x: 10.0, y: 10.0 },
+                RemoteControlButton::Left,
+                &GestureMode::SlDrag,
+                &sl,
+                &tap,
+            );
+
+            assert!(
+                sl.events().contains(&SlMouseEvent::Up),
+                "an abandoned SlDrag Down must get its SL release, got {:?}",
+                sl.events()
+            );
+            assert_eq!(tap.mouse_kinds(), Vec::<MouseKind>::new());
+        }
+
+        /// #529: open a session-tap gesture through the real dispatcher whose
+        /// controller Up is then lost, leaving a stale record.
+        fn open_session_tap_gesture(tap: &RecordingSessionTap) -> u32 {
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&down, unit_frame(), Some(1234), &sink, &ax, &sl, &pb, tap)
+                .unwrap();
+            assert_eq!(tap.mouse_kinds(), vec![MouseKind::LeftDown]);
+            assert_eq!(ax_gesture_count_for_tests(), 1);
+            down.window_id
+        }
+
+        /// #529: revoke-all (leave / disconnect / RC off) while the sharer is
+        /// physically dragging. The teardown must not post an Up that ends
+        /// their drag, and the stale record must still be dropped.
+        #[test]
+        fn revoke_all_release_does_not_end_the_hosts_own_physical_drag() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+            open_session_tap_gesture(&tap);
+            tap.host_button_down.store(true, Ordering::SeqCst);
+
+            super::super::clear_all_control_caches_with(&tap);
+
+            assert_eq!(
+                tap.mouse_kinds(),
+                vec![MouseKind::LeftDown],
+                "a stale record's teardown Up would end the sharer's own drag"
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// #529: the per-window drain path (share ended, revoke, deadline
+        /// abandon) shares the release; same guard.
+        #[test]
+        fn window_drain_release_does_not_end_the_hosts_own_physical_drag() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+            let window_id = open_session_tap_gesture(&tap);
+            tap.host_button_down.store(true, Ordering::SeqCst);
+
+            release_session_tap_gestures_with_backend(window_id, None, &tap);
+
+            assert_eq!(tap.mouse_kinds(), vec![MouseKind::LeftDown]);
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// #550: a Down and a drag through the real dispatcher, tracked as
+        /// the resolver tracks them; the controller goes silent and the
+        /// held-input TTL's synthetic Up replays on the shard. Returns the
+        /// drag point.
+        fn drag_then_expire_held_input(tap: &RecordingSessionTap) -> (i64, i64) {
+            let frame = unit_frame();
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                1,
+            );
+            let drag = pointer_message(
+                RemoteControlAction::Move,
+                0.80,
+                0.10,
+                RemoteControlButton::Left,
+                1,
+            );
+            for message in [&down, &drag] {
+                super::super::track_pressed_input(message, frame, Some(1234));
+                replay_with_backends(message, frame, Some(1234), &sink, &ax, &sl, &pb, tap)
+                    .unwrap();
+            }
+            let dragged = tap
+                .events()
+                .into_iter()
+                .find_map(|event| match event {
+                    TapEvent::Mouse(MouseKind::LeftDragged, x, y) => Some((x, y)),
+                    _ => None,
+                })
+                .expect("the drag Move was posted");
+
+            let expired = std::time::Instant::now()
+                + super::super::HELD_INPUT_TTL
+                + std::time::Duration::from_millis(1);
+            let releases = super::super::drain_expired_pressed(expired);
+            assert_eq!(releases.len(), 1, "the TTL must synthesize one release");
+            let _synthetic = super::super::SyntheticReleaseForTests::set();
+            for task in releases {
+                replay_with_backends(
+                    &task.message,
+                    task.frame,
+                    task.target_pid,
+                    &sink,
+                    &ax,
+                    &sl,
+                    &pb,
+                    tap,
+                )
+                .unwrap();
+            }
+            dragged
+        }
+
+        /// #550: the TTL's synthetic Up must apply the #545 guard. The sharer
+        /// is physically dragging, so posting an Up would end their drag.
+        #[test]
+        fn a_held_input_ttl_release_does_not_end_the_hosts_own_physical_drag() {
+            let _guard = ax_test_lock();
+            let _pressed = super::super::pressed_input_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+            tap.host_button_down.store(true, Ordering::SeqCst);
+
+            drag_then_expire_held_input(&tap);
+
+            assert!(
+                !tap.mouse_kinds().contains(&MouseKind::LeftUp),
+                "a synthetic release ended the sharer's own drag: {:?}",
+                tap.events()
+            );
+            assert_eq!(
+                ax_gesture_count_for_tests(),
+                0,
+                "the record must still be dropped"
+            );
+            clear_all_ax_control_state();
+        }
+
+        /// #550 + #537: a skipped synthetic release must not hand the cursor
+        /// back while another controller is still mid-drag on the window.
+        #[test]
+        fn a_skipped_ttl_release_keeps_another_controllers_cursor_takeover() {
+            let _guard = ax_test_lock();
+            let _pressed = super::super::pressed_input_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+            let mut other = pointer_message(
+                RemoteControlAction::Down,
+                0.50,
+                0.50,
+                RemoteControlButton::Left,
+                1,
+            );
+            other.controller_id = "viewer-b-550".to_string();
+            replay_with_backends(
+                &other,
+                unit_frame(),
+                Some(1234),
+                &RecordingSink::default(),
+                &ax_hostile_backend(),
+                &RecordingSlClickBackend::unavailable(),
+                &RecordingPasteboard::default(),
+                &tap,
+            )
+            .unwrap();
+            tap.host_button_down.store(true, Ordering::SeqCst);
+
+            drag_then_expire_held_input(&tap);
+
+            assert_eq!(ax_gesture_count_for_tests(), 1, "only the expired record goes");
+            assert!(
+                !matches!(tap.events().last(), Some(TapEvent::MoveCursor(..))),
+                "the cursor was handed back mid-drag for the other controller: {:?}",
+                tap.events()
+            );
+            tap.host_button_down.store(false, Ordering::SeqCst);
+            release_session_tap_gestures_with_backend(other.window_id, None, &tap);
+            clear_all_ax_control_state();
+        }
+
+        /// #550: the TTL's synthetic Up copies the Down message, so it carried
+        /// the drag origin. It must release where the drag is (#611).
+        #[test]
+        fn a_held_input_ttl_release_lands_at_the_last_drag_point() {
+            let _guard = ax_test_lock();
+            let _pressed = super::super::pressed_input_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+
+            let dragged = drag_then_expire_held_input(&tap);
+
+            let ups: Vec<(i64, i64)> = tap
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    TapEvent::Mouse(MouseKind::LeftUp, x, y) => Some((x, y)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                ups,
+                vec![dragged],
+                "one LeftUp, at the last drag point: {:?}",
+                tap.events()
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+            clear_all_ax_control_state();
+        }
+
+        /// Source guard: `revoke_all` must reach the release through
+        /// `clear_all_control_caches`, which must use the PRODUCTION backend,
+        /// and epochs must be bumped before the release so queued replays
+        /// are rejected. A no-op'd wiring leaves every behavioural test green.
+        #[test]
+        fn revoke_all_wiring_uses_the_production_release_after_bumping_epochs() {
+            let src = include_str!("remote_control.rs");
+            let body = |name: &str| {
+                let start = src.find(name).unwrap_or_else(|| panic!("missing {name}"));
+                &src[start..start + 1500.min(src.len() - start)]
+            };
+            let revoke = body("pub(crate) fn revoke_all(app: &AppHandle)");
+            let bump = revoke.find("bump_all_replay_epochs(\"all control revoked\")").unwrap();
+            let clear = revoke.find("clear_all_control_caches();").unwrap();
+            assert!(bump < clear, "epochs must be bumped before the release/clear");
+            assert!(body("fn clear_all_control_caches() {")
+                .contains("clear_all_control_caches_with(&input::SystemSessionTapBackend)"));
+        }
+
         /// #368: a revoke that races a queued Down drops the Down (stale
         /// epoch) but replays its synthetic Up, which then finds no gesture.
         /// That Up must not take the #446 orphaned-Up click fallback, while a
@@ -21705,6 +22656,8 @@ pub(crate) mod input {
     pub fn release_session_tap_gestures_for_window(window_id: u32) {
         crate::windows_remote_control::clear_window(window_id);
     }
+
+    pub fn release_all_session_tap_gestures() {}
     use crate::platform::cg::WindowFrame;
 
     pub fn accessibility_trusted() -> bool {
@@ -21766,6 +22719,8 @@ pub(crate) mod input {
     pub fn clear_ax_resolution_cache_for_window(_window_id: u32) {}
 
     pub fn clear_ax_gesture_for_window(_window_id: u32) {}
+
+    pub fn release_all_session_tap_gestures() {}
 
     pub fn clear_ax_gesture_for_controller(_window_id: u32, _controller_id: &str) {}
 
@@ -22015,12 +22970,6 @@ mod tests {
             .expect("remote-control contract must include pointer fields")
     }
 
-    fn pressed_input_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let guard = LOCK.get_or_init(|| Mutex::new(())).lock_unpoisoned();
-        pressed_inputs().lock_unpoisoned().clear();
-        guard
-    }
     #[cfg(target_os = "macos")]
     fn platform_input_test_lock() -> std::sync::MutexGuard<'static, ()> {
         input::ax_test_lock()
@@ -22079,6 +23028,8 @@ mod tests {
             grant_token: None,
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            sent_at_ms: None,
+            host_hold_ms: None,
             modifiers: RemoteControlModifiers::default(),
         }
     }
@@ -23001,6 +23952,8 @@ mod tests {
             grant_token: None,
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            sent_at_ms: None,
+            host_hold_ms: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -23229,6 +24182,8 @@ mod tests {
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            sent_at_ms: None,
+            host_hold_ms: None,
             modifiers: RemoteControlModifiers {
                 alt: false,
                 ctrl: false,
@@ -23304,6 +24259,8 @@ mod tests {
             grant_token: Some("0123456789abcdef0123456789abcdef".to_string()),
             supports_binary_hot_path: false,
             supports_redundant_input: false,
+            sent_at_ms: None,
+            host_hold_ms: None,
             modifiers: RemoteControlModifiers::default(),
         };
         let value = serde_json::to_value(msg).unwrap();
@@ -23344,9 +24301,12 @@ mod tests {
             repeat: false,
             location: None,
             text: None,
+            sent_at_ms: Some(1_700_000_000_123),
             modifiers: RemoteControlModifiers::default(),
         };
         let msg = draft.into_message("owner".to_string(), "controller".to_string());
+        assert_eq!(msg.sent_at_ms, Some(1_700_000_000_123));
+        assert_eq!(msg.host_hold_ms, None);
         assert_eq!(msg.v, VERSION);
         assert_eq!(msg.target_user_id, "owner");
         assert_eq!(msg.controller_id, "controller");
@@ -23602,6 +24562,60 @@ mod tests {
             ControlGrantKey::for_message(&message).unwrap().target_kind,
             Some(RemoteControlTargetKind::Window)
         );
+    }
+
+    /// #371: `sentAtMs` / `hostHoldMs` are additive. They round-trip, stay
+    /// out of the operation fingerprint, and are omitted when absent so a
+    /// legacy packet's JSON is byte-identical to the pre-#371 fixtures.
+    #[test]
+    fn timing_fields_are_additive_and_outside_the_fingerprint() {
+        let fixture = contract_fixture();
+        let vector = |name: &str| {
+            fixture
+                .remote_control_messages
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing contract fixture {name}"))
+                .message
+                .clone()
+        };
+        let stamped: RemoteControlMessage =
+            serde_json::from_value(vector("pointer-click-v2-sent-at")).unwrap();
+        assert_eq!(stamped.sent_at_ms, Some(1_700_000_000_123));
+        let admission = v2_discrete_admission(&stamped).unwrap();
+        assert_eq!(
+            canonical_operation_fingerprint(&stamped, &admission),
+            stamped.operation_fingerprint.clone().unwrap(),
+            "sentAtMs must not change the fingerprint"
+        );
+        assert_eq!(serde_json::to_value(&stamped).unwrap()["sentAtMs"], 1_700_000_000_123u64);
+
+        let held: RemoteControlMessage =
+            serde_json::from_value(vector("result-applied-v2-host-hold")).unwrap();
+        assert_eq!(held.host_hold_ms, Some(7));
+
+        // Absent on every pre-#371 fixture, and never serialized as null.
+        for legacy in ["pointer-click-v2-canonical-fingerprint", "result-applied-v2", "key"] {
+            let message: RemoteControlMessage = serde_json::from_value(vector(legacy)).unwrap();
+            assert_eq!((message.sent_at_ms, message.host_hold_ms), (None, None), "{legacy}");
+            let json = serde_json::to_value(&message).unwrap();
+            assert!(json.get("sentAtMs").is_none() && json.get("hostHoldMs").is_none(), "{legacy}");
+        }
+
+        // Old-peer view: a receiver whose envelope predates the fields (serde
+        // without deny_unknown_fields, as every shipped build) still parses.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PreTimingEnvelope {
+            kind: RemoteControlType,
+            input_id: Option<String>,
+            outcome: Option<String>,
+        }
+        let old: PreTimingEnvelope =
+            serde_json::from_value(vector("result-applied-v2-host-hold")).unwrap();
+        assert_eq!(old.kind, RemoteControlType::Result);
+        assert_eq!(old.outcome.as_deref(), Some("applied"));
+        assert!(old.input_id.is_some());
     }
 
     #[test]
@@ -25277,6 +26291,7 @@ mod tests {
 
     #[test]
     fn redundant_input_gap_that_loses_an_up_releases_the_held_key() {
+        let _guard = pressed_input_test_lock();
         let ids = remote_control_test_ids("redundant_input_gap_that_loses_an_up_releases_the_held_key");
         let frame = WindowFrame { x: 0, y: 0, width: 100, height: 100 };
         let key = |seq: u64, action: RemoteControlAction| {
@@ -25330,6 +26345,7 @@ mod tests {
 
     #[test]
     fn redundant_input_gap_that_loses_drag_moves_keeps_the_button_held() {
+        let _guard = pressed_input_test_lock();
         let ids =
             remote_control_test_ids("redundant_input_gap_that_loses_drag_moves_keeps_the_button_held");
         let frame = WindowFrame { x: 0, y: 0, width: 100, height: 100 };

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { stampSentAtMs } from '@petal/shared/logic/remoteControlTiming';
 import { createOrderedSender } from '../src/lib/orderedSend.ts';
 
 function delay(ms: number) {
@@ -53,7 +54,22 @@ test('the control overlay routes remote_control_send through the ordered sender'
     'utf8'
   );
   const sendBody = page.slice(page.indexOf('function send(draft'), page.indexOf('function isClipboardModifier'));
-  assert.match(sendBody, /sendOrdered\(draft\)/);
+  // #371: sentAtMs is stamped at production, before the queue wait.
+  assert.match(sendBody, /sendOrdered\(stampSentAtMs\(draft\)\)/);
   assert.doesNotMatch(sendBody, /invoke\(COMMANDS\.remoteControlSend/);
   assert.match(page, /createOrderedSender\(\(draft[^)]*\) =>\s*invoke\(COMMANDS\.remoteControlSend/);
+});
+
+test('#371: the production stamp survives a slow queue ahead of it', async () => {
+  const delivered: Array<{ seq: number; sentAtMs: number }> = [];
+  let clock = 1_000;
+  const send = createOrderedSender(async (draft: { seq: number; sentAtMs: number }) => {
+    await delay(draft.seq === 1 ? 15 : 0);
+    clock += 50;
+    delivered.push(draft);
+  });
+  // Both produced at t=1000; the second waits behind the first in the queue.
+  void send(stampSentAtMs({ seq: 1 }, clock));
+  await send(stampSentAtMs({ seq: 2 }, clock));
+  assert.deepEqual(delivered.map((draft) => draft.sentAtMs), [1_000, 1_000]);
 });

@@ -1265,6 +1265,8 @@ export interface RemoteControlDraft {
   repeat?: boolean;
   location?: number;
   text?: string;
+  /** #371: controller wall clock (ms) when the input was produced. */
+  sentAtMs?: number;
   modifiers?: RemoteControlModifiers;
 }
 

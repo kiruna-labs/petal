@@ -104,10 +104,16 @@ fn main() {
         "src/packet_trailer.rs",
         // PETAL PATCH (#410): H.264 encoder level helpers.
         "src/h264_encoder_level.rs",
+        // PETAL PATCH (#504): MF H.264 encoder enumeration policy.
+        "src/mf_enum_flags.rs",
     ];
 
     if is_desktop {
         rust_files.push("src/desktop_capturer.rs");
+    }
+    if target_os == "macos" {
+        // PETAL PATCH (#500): VideoToolbox H.264 encoder specification.
+        rust_files.push("src/vt_h264_encoder_spec.rs");
     }
 
     let mut builder = cxx_build::bridges(rust_files);
@@ -145,6 +151,8 @@ fn main() {
         "src/packet_trailer.cpp",
         // PETAL PATCH (#410): H.264 encoder level helpers.
         "src/h264_encoder_level.cpp",
+        // PETAL PATCH (#504): MF H.264 encoder enumeration policy.
+        "src/mf_enum_flags.cpp",
     ]);
 
     if is_desktop {
@@ -397,6 +405,8 @@ fn main() {
             builder
                 .file("src/objc_video_factory.mm")
                 .file("src/objc_video_frame_buffer.mm")
+                // PETAL PATCH (#500): no low-latency rate control on H.264.
+                .file("src/vt_h264_encoder_spec.mm")
                 .flag("-stdlib=libc++")
                 .flag("-std=c++20")
                 .flag("-Wno-nullability-completeness");

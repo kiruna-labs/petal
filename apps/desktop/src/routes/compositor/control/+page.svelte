@@ -16,6 +16,7 @@
   import { identityColorCss } from '#lib/data/identityColor.js';
   import { platformKey } from '#lib/platform.js';
   import { createOrderedSender } from '#lib/orderedSend.js';
+  import { stampSentAtMs } from '@petal/shared/logic/remoteControlTiming';
   import {
     findRemoteWindowDebugTrack,
     formatDebugMetric,
@@ -328,7 +329,8 @@
   );
 
   function send(draft: Draft | RemoteControlDraft) {
-    void sendOrdered(draft);
+    // #371: stamp at production, before the ordered queue.
+    void sendOrdered(stampSentAtMs(draft));
   }
 
   function isClipboardModifier(event: KeyboardEvent): boolean {

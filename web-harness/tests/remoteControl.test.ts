@@ -230,7 +230,9 @@ test('remoteControlPublishOptions sends only hover moves unreliably', () => {
 test('legacy and capable v2 fingerprints match the shared vectors', async () => {
   for (const name of [
     'pointer-click-v2-canonical-fingerprint',
-    'pointer-click-capable-window'
+    'pointer-click-capable-window',
+    // #371: sentAtMs is not part of the operation fingerprint.
+    'pointer-click-v2-sent-at'
   ]) {
     const vector = contractFixture.remoteControlMessages.find((entry) => entry.name === name);
     assert.ok(vector);
@@ -451,7 +453,9 @@ test('remote-control harness simple click is one reliable semantic packet', asyn
   });
 
   assert.equal(published.length, 1);
-  assert.deepEqual(published[0], {
+  const { sentAtMs, ...packet } = published[0];
+  assert.ok(Number.isSafeInteger(sentAtMs), '#371: every controller packet is stamped');
+  assert.deepEqual(packet, {
     v: 1,
     targetUserId: 'native',
     controllerId: 'web',
@@ -1522,4 +1526,71 @@ test('#580 request without a share tile fails loudly instead of publishing a tok
   } finally {
     restore();
   }
+});
+
+// #371: sentAtMs and hostHoldMs are additive envelope fields.
+test('#371: sentAtMs/hostHoldMs fixtures parse, and absent or malformed values are dropped', () => {
+  const byName = new Map(contractFixture.remoteControlMessages.map((vector) => [vector.name, vector.message]));
+  const stamped = parseRemoteControlJson(JSON.stringify(byName.get('pointer-click-v2-sent-at')));
+  assert.equal(stamped?.sentAtMs, 1_700_000_000_123);
+  const held = parseRemoteControlJson(JSON.stringify(byName.get('result-applied-v2-host-hold')));
+  assert.equal(held?.kind === 'result' ? held.hostHoldMs : null, 7);
+  // Old-peer view: the same packet without the fields is the pre-#371 fixture.
+  const legacy = parseRemoteControlJson(JSON.stringify(byName.get('result-applied-v2')));
+  assert.equal(legacy?.kind === 'result' ? legacy.hostHoldMs : null, undefined);
+  assert.equal(legacy?.sentAtMs, undefined);
+  const malformed = parseRemoteControlJson(JSON.stringify({
+    ...byName.get('result-applied-v2'), hostHoldMs: -3, sentAtMs: 'soon'
+  }));
+  assert.equal(malformed?.kind, 'result', 'a bad timing field never rejects the packet');
+  assert.equal(malformed?.sentAtMs, undefined);
+  assert.equal(malformed?.kind === 'result' ? malformed.hostHoldMs : null, undefined);
+  const misplaced = parseRemoteControlJson(JSON.stringify({ ...byName.get('key'), hostHoldMs: 5 }));
+  assert.equal((misplaced as Record<string, unknown> | null)?.hostHoldMs, undefined);
+  // Delivery policy is unchanged by the stamp.
+  assert.deepEqual(
+    remoteControlPublishOptions(byName.get('pointer-click-v2-sent-at') as RemoteControlMessage),
+    remoteControlPublishOptions(byName.get('pointer-click-v2-canonical-fingerprint') as RemoteControlMessage)
+  );
+});
+
+test('#371: the harness controller stamps sentAtMs and derives input rtt from a paired result', async () => {
+  async function clickAndResult(resultOverrides: Record<string, unknown>) {
+    const published: RemoteControlMessage[] = [];
+    const firstPublish = boundedPublisherCallbackWait();
+    const ctx = remoteControlContext(() => Promise.resolve());
+    const api = setupHarnessApi(ctx, {
+      nextRemoteControlSeq: () => ++ctx.state.remoteControlSeq,
+      publishRemoteControl: async (message) => {
+        published.push(message);
+        firstPublish.notify();
+      },
+      startRemoteControl: () => {},
+      stopRemoteControl: () => {}
+    });
+    activateHarnessV2(api);
+    const realNow = Date.now;
+    let fakeNow = 1_700_000_000_000;
+    Date.now = () => fakeNow;
+    try {
+      ctx.hook.remoteControl!.click({ targetUserId: 'native', windowId: 7, x: 0.5, y: 0.5, button: 0 });
+      await firstPublish.wait();
+      const input = published[0] as Extract<RemoteControlMessage, { kind: 'pointer' }>;
+      fakeNow += 400;
+      api.handleRemoteControlPayload(encodeJson(terminalResultFor(input, resultOverrides)), 'native');
+      return { input, results: ctx.hook.remoteControl!.metrics().results };
+    } finally {
+      Date.now = realNow;
+    }
+  }
+
+  const { input, results } = await clickAndResult({ hostHoldMs: 150 });
+  assert.equal(input.sentAtMs, 1_700_000_000_000, 'stamped when the input was produced');
+  assert.equal(results.length, 1);
+  assert.equal(results[0].inputRttMs, 250, '(400 ms round trip) - (150 ms host hold)');
+
+  // An old host sends no hostHoldMs: no rtt sample, the result still counts.
+  const legacy = await clickAndResult({});
+  assert.equal(legacy.results.length, 1);
+  assert.equal('inputRttMs' in legacy.results[0], false);
 });

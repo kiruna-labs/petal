@@ -17,7 +17,7 @@ use crate::screen_audio::{
 use crate::share_priority::SharePriority;
 use crate::time_util::now_us;
 use crate::transport::publisher::{
-    CaptureResolution, EncoderRecoveryStep, EncoderWedgeRecovery,
+    CaptureResolution, EncoderRecoveryStep, EncoderWedgeRecovery, WedgeRecoveryAttempt,
     PostWakeEncoderFallbackRecovery, RoomConnection, RoomConnectionError, ShareQuality,
     SharedSourceKind,
 };
@@ -672,6 +672,56 @@ fn record_last_stopped_share_generation(
 struct RepublishCoordinator {
     generation: AtomicU64,
     apply_lock: tokio::sync::Mutex<()>,
+    /// #427: the share's wedge-recovery state. It lives here because this is
+    /// the one object every republish of a share already carries, and a new
+    /// share builds a new one, so it resets exactly when the share stops.
+    encoder_recovery: Mutex<StickyEncoderRecovery>,
+}
+
+type EncoderWedgeRecoveryFactory =
+    Arc<dyn Fn(u32) -> EncoderWedgeRecovery + Send + Sync>;
+
+/// Per-share encoder recovery that survives every republish (#427, macOS).
+/// Dropping it on a quality/resize/resolution republish put the share back on
+/// VideoToolbox with no recovery attached: it wedged again and logged "not
+/// wired" then "exhausted" after the software fallback had already worked.
+#[derive(Default)]
+struct StickyEncoderRecovery {
+    software: bool,
+    steps_used: u32,
+    factory: Option<EncoderWedgeRecoveryFactory>,
+}
+
+impl RepublishCoordinator {
+    fn attach_encoder_recovery(&self, factory: EncoderWedgeRecoveryFactory) {
+        self.encoder_recovery.lock_unpoisoned().factory = Some(factory);
+    }
+
+    /// Records a wedge step the moment it is taken, so a republish queued
+    /// behind it (or racing it) already sees the spent budget and fallback.
+    fn note_wedge_recovery_step(&self, step: EncoderRecoveryStep) {
+        let mut state = self.encoder_recovery.lock_unpoisoned();
+        state.software |= step.forces_software_encoder();
+        state.steps_used = state.steps_used.max(step.steps_used_after());
+    }
+
+    /// The encoder choice and recovery action for ANY republish of this share.
+    /// `republish_window_with_target` calls it for every caller, so a caller
+    /// can neither drop the software fallback nor forget to attach recovery.
+    fn encoder_settings_for_republish(
+        &self,
+        force_software_encoder: bool,
+        explicit_recovery: Option<EncoderWedgeRecovery>,
+    ) -> (bool, Option<EncoderWedgeRecovery>) {
+        let state = self.encoder_recovery.lock_unpoisoned();
+        let recovery = explicit_recovery.or_else(|| {
+            state
+                .factory
+                .as_ref()
+                .map(|factory| factory(state.steps_used))
+        });
+        (force_software_encoder || state.software, recovery)
+    }
 }
 
 struct StartedShareCapture {
@@ -1388,6 +1438,54 @@ fn silent_for_bucket(silent_for_us: u64) -> crate::logging::SinceLastFrameBucket
     }
 }
 
+/// #393: occlusion evidence at stall time. A covered window's SCK stream goes
+/// idle or silent while snapshot pulls keep advancing; Petal's own remote
+/// windows are the leading suspect, so they get their own tag. Telemetry
+/// only -- no restart/hold decision reads this. Display/region shares are
+/// `not_applicable` (no window to cover). `None` = window not in the
+/// on-screen list (minimized, other Space). With the Petal set unreadable the
+/// union is only a lower bound: report `unknown`, never a definitive `none`.
+fn occlusion_tags(
+    source: SourceSelectionClass,
+    breakdown: Option<crate::platform::cg::OcclusionBreakdown>,
+) -> (
+    crate::logging::CaptureOcclusionTag,
+    crate::logging::OccludedByPetalTag,
+) {
+    use crate::logging::{CaptureOcclusionTag as Occ, OccludedByPetalTag as ByPetal};
+    if source == SourceSelectionClass::Display {
+        return (Occ::NotApplicable, ByPetal::NotApplicable);
+    }
+    match breakdown {
+        None => (Occ::Unknown, ByPetal::Unknown),
+        Some(b) if !b.petal_known => {
+            // A lower bound already at `full` is still definitive.
+            let occ = match Occ::from_fraction(b.total()) {
+                Occ::Full => Occ::Full,
+                _ => Occ::Unknown,
+            };
+            (occ, ByPetal::Unknown)
+        }
+        Some(b) => (
+            Occ::from_fraction(b.total()),
+            if b.petal >= 0.05 { ByPetal::Yes } else { ByPetal::No },
+        ),
+    }
+}
+
+/// The documented evidence keys with their lowercase closed-enum values, so a
+/// local-log query matches the same `capture_occlusion=full` the Sentry tag uses.
+fn occlusion_log_fields(
+    occlusion: crate::logging::CaptureOcclusionTag,
+    by_petal: crate::logging::OccludedByPetalTag,
+) -> String {
+    format!(
+        "capture_occlusion={} occluded_by_petal={}",
+        occlusion.as_str(),
+        by_petal.as_str()
+    )
+}
+
 /// Sender-side evidence for one raw-capture stall verdict (#393): one
 /// `capture-stall-evidence:` log line plus a rate-limited Sentry event.
 fn capture_raw_stall_diagnostic(
@@ -1398,12 +1496,15 @@ fn capture_raw_stall_diagnostic(
     evidence: crate::capture::RawSilenceEvidence,
     recovery_burst: u32,
     concurrent_shares: usize,
+    occlusion: Option<crate::platform::cg::OcclusionBreakdown>,
 ) -> crate::logging::CaptureRawStalledDiagnostic {
     use crate::logging::SmallCountBucketTag as Count;
     let (pulls, changed) = snapshot_pulls_since_raw_of(window_id);
     let cause = evidence.cause();
+    let (occlusion_tag, by_petal_tag) = occlusion_tags(source, occlusion);
+    let occlusion_fields = occlusion_log_fields(occlusion_tag, by_petal_tag);
     log::warn!(
-        "capture-stall-evidence: window {window_id} action={} silent={:.1}s cause={cause:?} sck_callbacks={} no_image={} last_no_image_status={:?} layout_deferred={} layout_rejected={} pixel_format_rejected={} region_dropped={} stream_updates={} held_surfaces={} pulls={pulls} pulls_changed={changed} recovery_burst={recovery_burst} concurrent_shares={concurrent_shares} (#393)",
+        "capture-stall-evidence: window {window_id} action={} silent={:.1}s cause={cause:?} sck_callbacks={} no_image={} last_no_image_status={:?} layout_deferred={} layout_rejected={} pixel_format_rejected={} region_dropped={} stream_updates={} held_surfaces={} pulls={pulls} pulls_changed={changed} recovery_burst={recovery_burst} concurrent_shares={concurrent_shares} {occlusion_fields} (#393)",
         action_label(action),
         silent_for_us as f64 / 1_000_000.0,
         evidence.callbacks,
@@ -1426,7 +1527,50 @@ fn capture_raw_stall_diagnostic(
         recovery_burst: Count::from_count(u64::from(recovery_burst)),
         concurrent_shares: Count::from_count(concurrent_shares as u64),
         silent_for: silent_for_bucket(silent_for_us),
+        occlusion: occlusion_tag,
+        occluded_by_petal: by_petal_tag,
     }
+}
+
+/// Remote-share window numbers come from the compositor; every other Petal
+/// window (border, overlay, main window) is deliberately not coverage.
+fn stall_occlusion(
+    app: &tauri::AppHandle,
+    window_id: u32,
+) -> Option<crate::platform::cg::OcclusionBreakdown> {
+    #[cfg(target_os = "macos")]
+    {
+        stall_occlusion_from(crate::compositor::open_pointer_family_meta(app), |remote| {
+            crate::platform::cg::occlusion_breakdown(window_id, remote)
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, window_id);
+        None
+    }
+}
+
+/// A partly-read Petal set (#540) is a lower bound like an unreadable one:
+/// measure with what was read, but never as `petal_known`.
+#[cfg(target_os = "macos")]
+fn stall_occlusion_from(
+    metas: Option<Vec<crate::compositor::PointerFamilyMeta>>,
+    measure: impl FnOnce(Option<&[u32]>) -> Option<crate::platform::cg::OcclusionBreakdown>,
+) -> Option<crate::platform::cg::OcclusionBreakdown> {
+    let complete = metas
+        .as_ref()
+        .is_some_and(|metas| metas.iter().all(|meta| meta.read_complete));
+    let remote = metas.map(|metas| {
+        metas
+            .into_iter()
+            .filter(|meta| meta.is_visible)
+            .flat_map(|meta| meta.family_ids)
+            .collect::<Vec<u32>>()
+    });
+    let mut breakdown = measure(remote.as_deref())?;
+    breakdown.petal_known &= complete;
+    Some(breakdown)
 }
 
 fn report_raw_capture_stall(
@@ -1449,6 +1593,12 @@ fn report_raw_capture_stall(
         capture_config.raw_silence_evidence(),
         pump_recovery_burst_len(window_id, now_us),
         concurrent_shares,
+        // Fresh sample, stall event only: the frame-callback sample never
+        // runs while the stream is silent, which is the case being reported.
+        // A display/region id is not a CGWindowID: skip the sample entirely.
+        (source != SourceSelectionClass::Display)
+            .then(|| stall_occlusion(app, window_id))
+            .flatten(),
     );
     crate::logging::capture_sentry_diagnostic(
         crate::logging::SentryDiagnosticEvent::CaptureRawStalled(diagnostic),
@@ -1621,6 +1771,12 @@ impl RejectedPushRetry {
     fn take_due(&mut self) -> bool {
         self.deadline.take().is_some()
     }
+}
+
+/// A push counts as published only when it reached the source. `None` is a
+/// conversion failure or a skipped degenerate frame (PETAL-DESKTOP-4Y).
+fn push_reached_source(timing: Option<crate::transport::publisher::PublishedFrameTiming>) -> bool {
+    timing.is_some()
 }
 
 fn trace_interaction_push(
@@ -5285,6 +5441,7 @@ async fn start_share_with_capture_source(
                     ShareQuality::Full,
                     window_id,
                     recovery,
+                    Some(wedge_recovery_for_share(&app, window_id, started_seq, 0)),
                 ),
             )
             .await
@@ -5418,6 +5575,13 @@ async fn start_share_with_capture_source(
 
     let published = Arc::new(Mutex::new(Arc::new(published)));
     let republish_intent = Arc::new(RepublishCoordinator::default());
+    {
+        // #427: every later republish of this share attaches recovery.
+        let app_for_recovery = app.clone();
+        republish_intent.attach_encoder_recovery(Arc::new(move |steps_used| {
+            wedge_recovery_for_share(&app_for_recovery, window_id, started_seq, steps_used)
+        }));
+    }
     let interaction_signal = Arc::new(InteractionSignal::default());
     register_interaction_signal(window_id, &interaction_signal);
     let (monitor_activation_tx, monitor_activation_rx) = tokio::sync::oneshot::channel();
@@ -5913,24 +6077,29 @@ fn spawn_share_pump(
                     record_published_frame_timing(&pump_diagnostics, window_id, timing);
                     rejected_push_retry
                         .observe_push(timing.map(|t| t.source_accepted), Instant::now());
-                    if !first_pushed_frame_recorded {
-                        first_pushed_frame_recorded = true;
-                        if let Some(diagnostics) = pump_diagnostics.as_ref() {
-                            diagnostics.record_native_startup_stage(
-                                window_id,
-                                NativeStartupStageKind::FirstFramePushed,
-                                Some(current.width()),
-                                Some(current.height()),
-                                Some("idle_static_refresh".to_string()),
+                    // A push that never reached the source (a skipped
+                    // degenerate frame) is not a published frame.
+                    if push_reached_source(timing) {
+                        if !first_pushed_frame_recorded {
+                            first_pushed_frame_recorded = true;
+                            if let Some(diagnostics) = pump_diagnostics.as_ref() {
+                                diagnostics.record_native_startup_stage(
+                                    window_id,
+                                    NativeStartupStageKind::FirstFramePushed,
+                                    Some(current.width()),
+                                    Some(current.height()),
+                                    Some("idle_static_refresh".to_string()),
+                                );
+                            }
+                        }
+                        pump_last_push_for_task.store(refresh_at_us, Ordering::Relaxed);
+                        let pushed =
+                            pump_pushed_frames_for_task.fetch_add(1, Ordering::Relaxed) + 1;
+                        if pushed == 1 || pushed % 300 == 0 {
+                            log::info!(
+                                "session: window {window_id} frame pump heartbeat -- pushed {pushed} frame(s), last decision={last_push_decision}"
                             );
                         }
-                    }
-                    pump_last_push_for_task.store(refresh_at_us, Ordering::Relaxed);
-                    let pushed = pump_pushed_frames_for_task.fetch_add(1, Ordering::Relaxed) + 1;
-                    if pushed == 1 || pushed % 300 == 0 {
-                        log::info!(
-                            "session: window {window_id} frame pump heartbeat -- pushed {pushed} frame(s), last decision={last_push_decision}"
-                        );
                     }
                 }
 
@@ -6083,6 +6252,9 @@ fn spawn_share_pump(
                                             window_id,
                                             timing,
                                         );
+                                        // Never reached the source (skipped
+                                        // degenerate frame): not a pushed frame.
+                                        if push_reached_source(timing) {
                                         if let Some(diagnostics) = pump_diagnostics.as_ref() {
                                             let stage = if first_pushed_frame_recorded {
                                                 NativeStartupStageKind::SnapshotPullPushed
@@ -6115,6 +6287,7 @@ fn spawn_share_pump(
                                             log::info!(
                                                 "session: window {window_id} share liveness confirmed -- {moving} moving frame(s) pushed (last decision={last_push_decision})"
                                             );
+                                        }
                                         }
                                     }
                                 } else if hash_changed {
@@ -6411,6 +6584,10 @@ fn spawn_share_pump(
             );
             rejected_push_retry.observe_push(timing.map(|t| t.source_accepted), Instant::now());
             record_published_frame_timing(&pump_diagnostics, window_id, timing);
+            if !push_reached_source(timing) {
+                // Never reached the source (skipped degenerate frame): not pushed.
+                continue;
+            }
             if !first_pushed_frame_recorded {
                 first_pushed_frame_recorded = true;
                 if let Some(diagnostics) = pump_diagnostics.as_ref() {
@@ -8847,6 +9024,7 @@ async fn retry_post_wake_software_encoder_fallback(
         None,
         false,
         None,
+        None,
     )
     .await;
     log::info!(
@@ -8902,9 +9080,52 @@ pub(crate) async fn recover_wedged_encoder_publication(
     started_seq: u64,
     step: EncoderRecoveryStep,
 ) {
+    // #527: the wedged publication this recovery replaces. A superseded or
+    // failed attempt that leaves it in the slot is retried once; one that
+    // finds it already replaced (the replacement inherited the sticky
+    // settings) or the share gone stops.
+    let wedged: Arc<Mutex<Option<Arc<crate::transport::publisher::PublishedTrack>>>> =
+        Arc::default();
+    crate::transport::publisher::drive_wedge_recovery_step(step, |is_retry| {
+        let app = app.clone();
+        let wedged = wedged.clone();
+        async move {
+            let expected = wedged.lock_unpoisoned().clone();
+            let (attempt, observed) = wedged_encoder_recovery_attempt(
+                app,
+                window_id,
+                started_seq,
+                step,
+                is_retry,
+                expected,
+            )
+            .await;
+            let mut wedged = wedged.lock_unpoisoned();
+            if wedged.is_none() {
+                *wedged = observed;
+            }
+            attempt
+        }
+    })
+    .await;
+}
+
+/// One republish for `recover_wedged_encoder_publication`. Returns how it went
+/// and the publication that was live when it started.
+async fn wedged_encoder_recovery_attempt(
+    app: tauri::AppHandle,
+    window_id: u32,
+    started_seq: u64,
+    step: EncoderRecoveryStep,
+    is_retry: bool,
+    wedged: Option<Arc<crate::transport::publisher::PublishedTrack>>,
+) -> (
+    WedgeRecoveryAttempt,
+    Option<Arc<crate::transport::publisher::PublishedTrack>>,
+) {
     let state = app.state::<SessionState>();
     let state = state.inner();
-    let Some((room_connection, slot, republish_intent, intent_generation, capture_config)) = ({
+    let Some((room_connection, slot, republish_intent, intent_generation, capture_config, live)) = ({
         let guard = state.inner.lock_unpoisoned();
         let share = guard
             .shares
@@ -8915,31 +9136,47 @@ pub(crate) async fn recover_wedged_encoder_publication(
                 .joined
                 .as_ref()
                 .map(|joined| joined.room_connection.clone())?;
+            let live = share.published.lock_unpoisoned().clone();
+            if wedged
+                .as_ref()
+                .is_some_and(|wedged| !Arc::ptr_eq(wedged, &live))
+            {
+                return None;
+            }
             let capture_config = share.capture.configuration_handle();
-            let intent_generation = begin_republish_intent(&share.republish_intent);
+            // The retry joins the CURRENT generation instead of starting a
+            // newer one, so it never supersedes a quality/resize intent that
+            // is queued or arrives later: that intent wins (#527).
+            let intent_generation = if is_retry {
+                share.republish_intent.generation.load(Ordering::SeqCst)
+            } else {
+                begin_republish_intent(&share.republish_intent)
+            };
             Some((
                 room_connection,
                 share.published.clone(),
                 share.republish_intent.clone(),
                 intent_generation,
                 capture_config,
+                live,
             ))
         })
     }) else {
         log::info!(
-            "session: skipping wedged-encoder recovery for stale share {window_id}/{started_seq} ({})",
+            "session: skipping wedged-encoder recovery for stale share {window_id}/{started_seq} ({}; share gone or its wedged publication already replaced)",
             step.description()
         );
-        return;
+        return (WedgeRecoveryAttempt::NoLongerNeeded, None);
     };
 
-    let force_software_encoder = step == EncoderRecoveryStep::FallBackToSoftware;
-    let steps_used = if force_software_encoder { 2 } else { 1 };
+    let force_software_encoder = step.forces_software_encoder();
+    let steps_used = step.steps_used_after();
+    republish_intent.note_wedge_recovery_step(step);
     let next_recovery = wedge_recovery_for_share(&app, window_id, started_seq, steps_used);
     let reason = format!("wedged encoder: {}", step.description());
     let outcome = republish_window_with_target(
         room_connection,
-        slot,
+        slot.clone(),
         republish_intent,
         intent_generation,
         &capture_config,
@@ -8956,17 +9193,29 @@ pub(crate) async fn recover_wedged_encoder_publication(
         None,
         force_software_encoder,
         Some(next_recovery),
+        wedged.as_ref(),
     )
     .await;
     log::warn!(
-        "session: window {window_id} wedged-encoder recovery ({}) {}",
+        "session: window {window_id} wedged-encoder recovery ({}{}) {}",
         step.description(),
+        if is_retry { ", retry" } else { "" },
         if outcome.replaced() {
             "republished the track"
         } else {
             "did not replace the active track"
         }
     );
+    let attempt = if outcome.replaced() {
+        WedgeRecoveryAttempt::Replaced
+    } else if !Arc::ptr_eq(&slot.lock_unpoisoned(), &live) {
+        // Whatever superseded this republish replaced the wedged publication
+        // (with the sticky encoder settings): nothing left to repair.
+        WedgeRecoveryAttempt::NoLongerNeeded
+    } else {
+        WedgeRecoveryAttempt::NotReplaced
+    };
+    (attempt, Some(live))
 }
 
 /// Repair a publication retired by a receiver's no-frame watchdog. The
@@ -9015,6 +9264,7 @@ pub async fn repair_active_share_publication(state: &SessionState, window_id: u3
         REPUBLISH_RETRY_ATTEMPTS,
         None,
         false,
+        None,
         None,
     )
     .await
@@ -9285,6 +9535,23 @@ impl RepublishTarget {
     }
 }
 
+/// The one place a republish's encoder settings are resolved and handed to the
+/// publisher. `publish` receives the RESOLVED values, so a test with a fake
+/// publish sees exactly what production would pass (#427).
+async fn publish_with_sticky_encoder_settings<T, Fut>(
+    coordinator: &RepublishCoordinator,
+    force_software_encoder: bool,
+    explicit_recovery: Option<EncoderWedgeRecovery>,
+    publish: impl FnOnce(bool, Option<EncoderWedgeRecovery>) -> Fut,
+) -> T
+where
+    Fut: std::future::Future<Output = T>,
+{
+    let (software, recovery) =
+        coordinator.encoder_settings_for_republish(force_software_encoder, explicit_recovery);
+    publish(software, recovery).await
+}
+
 async fn republish_window_with_target(
     room_connection: Arc<RoomConnection>,
     slot: Arc<Mutex<Arc<crate::transport::publisher::PublishedTrack>>>,
@@ -9309,6 +9576,10 @@ async fn republish_window_with_target(
     // in a loop (the budget is per share, not per publication).
     force_software_encoder: bool,
     encoder_wedge_recovery: Option<crate::transport::publisher::EncoderWedgeRecovery>,
+    // #527: republish only while this publication is still the live one,
+    // checked under the apply lock (a wedge-recovery retry must not replace a
+    // track another republish already swapped in).
+    only_if_publication: Option<&Arc<crate::transport::publisher::PublishedTrack>>,
 ) -> RepublishOutcome {
     // Capture the resolution once for this transaction. Reading the config's
     // mutex at each await boundary could mix the old and new preference and
@@ -9321,6 +9592,14 @@ async fn republish_window_with_target(
             "session: window {window_id} skipping superseded republish intent {intent_generation} ({reason})"
         );
         return reconnect_republish_superseded_outcome(reconnect_guard);
+    }
+    if only_if_publication
+        .is_some_and(|expected| !Arc::ptr_eq(expected, &slot.lock_unpoisoned()))
+    {
+        log::info!(
+            "session: window {window_id} skipping republish ({reason}); its publication was already replaced"
+        );
+        return RepublishOutcome::Cancelled;
     }
     let mut retry_delay = REPUBLISH_RETRY_INITIAL_DELAY;
     for attempt in 0..max_publish_attempts.max(1) {
@@ -9361,15 +9640,25 @@ async fn republish_window_with_target(
             (observed, target)
         };
 
-        let Some(new_published) = publish_window_with_timeout(
-            &room_connection,
-            window_id,
-            target.width,
-            target.height,
-            target.quality,
-            reason,
+        // #427: settings resolve here, per attempt and under the apply lock, so
+        // a wedge step that just republished is visible and no caller can
+        // publish with its raw (false, None).
+        let Some(new_published) = publish_with_sticky_encoder_settings(
+            &republish_intent,
             force_software_encoder,
             encoder_wedge_recovery.clone(),
+            |resolved_software, resolved_recovery| {
+                publish_window_with_timeout(
+                    &room_connection,
+                    window_id,
+                    target.width,
+                    target.height,
+                    target.quality,
+                    reason,
+                    resolved_software,
+                    resolved_recovery,
+                )
+            },
         )
         .await
         else {
@@ -9612,6 +9901,7 @@ async fn republish_window_for_quality(
         None,
         false,
         None,
+        None,
     )
     .await
     .replaced()
@@ -9657,6 +9947,7 @@ async fn republish_window_for_quality_forced(
         REPUBLISH_RETRY_ATTEMPTS,
         Some(&transaction_guard),
         false,
+        None,
         None,
     )
     .await
@@ -9706,6 +9997,7 @@ async fn republish_window_for_resize(
         None,
         false,
         None,
+        None,
     )
     .await
     .replaced()
@@ -9742,6 +10034,7 @@ async fn republish_window_for_resolution(
         REPUBLISH_RETRY_ATTEMPTS,
         None,
         false,
+        None,
         None,
     )
     .await
@@ -10631,6 +10924,195 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
     }
 
     use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    fn sticky_test_factory() -> EncoderWedgeRecoveryFactory {
+        Arc::new(|steps_used| EncoderWedgeRecovery::new(steps_used, |_| {}))
+    }
+
+    /// Runs the real resolve-and-publish step with a fake publisher and
+    /// returns the (software, recovery steps_used) it would have published with.
+    fn republish_args(
+        coordinator: &RepublishCoordinator,
+        force_software: bool,
+        explicit: Option<EncoderWedgeRecovery>,
+    ) -> (bool, Option<u32>) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(publish_with_sticky_encoder_settings(
+            coordinator,
+            force_software,
+            explicit,
+            |software, recovery| async move {
+                (software, recovery.map(|recovery| recovery.steps_used()))
+            },
+        ))
+    }
+
+    #[test]
+    fn wedge_recovery_survives_every_later_republish_of_the_share() {
+        // #427 macOS: wedge -> software fallback -> receiver-demand quality
+        // republish put VideoToolbox back with no recovery attached.
+        let coordinator = RepublishCoordinator::default();
+        coordinator.attach_encoder_recovery(sticky_test_factory());
+
+        assert_eq!(republish_args(&coordinator, false, None), (false, Some(0)));
+        coordinator.note_wedge_recovery_step(EncoderRecoveryStep::Republish);
+        assert_eq!(
+            republish_args(&coordinator, false, None),
+            (false, Some(1)),
+            "a recreate must not force software"
+        );
+        coordinator.note_wedge_recovery_step(EncoderRecoveryStep::FallBackToSoftware);
+
+        // The argument shapes real callers pass: the quality/resize/resolution/
+        // reconcile/repair wrappers pass (false, None); the post-wake retry
+        // passes (false, None) (its `true` is force_republish); the wedge path
+        // passes (software, Some(next)).
+        let shapes: [(&str, bool, Option<u32>); 3] = [
+            ("quality/resize/resolution/reconcile/repair", false, None),
+            ("post-wake software retry", false, None),
+            ("wedge step 2", true, Some(2)),
+        ];
+        for (caller, force, explicit_steps) in shapes {
+            let explicit = explicit_steps.map(|n| EncoderWedgeRecovery::new(n, |_| {}));
+            assert_eq!(
+                republish_args(&coordinator, force, explicit),
+                (true, Some(2)),
+                "{caller} must stay on software with recovery and the spent budget"
+            );
+        }
+    }
+
+    #[test]
+    fn every_share_builds_its_own_republish_coordinator() {
+        // Source-level: sticky state is reset by construction, so the property
+        // is that ONE site builds a coordinator, inside start-share, and nothing
+        // stores one across shares.
+        let full = include_str!("share.rs");
+        let source = full
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map(|(prod, _)| prod)
+            .expect("share.rs must keep its test module in one #[cfg(test)] block");
+        let build = concat!("Arc::new(RepublishCoordinator::", "default())");
+        assert_eq!(source.matches(build).count(), 1, "one construction site");
+        let start = source
+            .find("fn start_share_with_capture_source(")
+            .expect("start_share_with_capture_source");
+        let at = source.find(build).expect("construction");
+        assert!(at > start, "the coordinator is built inside start-share");
+        let between = &source[start..at];
+        assert!(
+            !between.contains("\nfn ")
+                && !between.contains("\nasync fn ")
+                && !between.contains("\npub fn ")
+                && !between.contains("\npub(crate) fn "),
+            "construction must be in the body of start_share_with_capture_source"
+        );
+        assert!(
+            !source.contains(concat!("static ", "REPUBLISH")),
+            "no coordinator is kept in a static across shares"
+        );
+    }
+
+    #[test]
+    fn every_republish_resolves_encoder_settings_through_the_sticky_state() {
+        // Source-level by design: a real republish needs a live LiveKit room
+        // and PublishedTrack. The fake-publish test above covers the resolution;
+        // this pins that production uses it and cannot be bypassed.
+        let full = include_str!("share.rs");
+        let source = full
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map(|(prod, _)| prod)
+            .expect("share.rs must keep its test module in one #[cfg(test)] block");
+        let publish_call = concat!("publish_window_with_", "timeout(");
+        assert_eq!(source.matches(publish_call).count(), 2, "one definition, one caller");
+        let direct = concat!("publish_window_at_with_recovery_", "context(");
+        assert_eq!(
+            source.matches(direct).count(),
+            2,
+            "exactly start-share and publish_window_with_timeout may publish directly"
+        );
+        let body = source
+            .split_once("\nasync fn republish_window_with_target(")
+            .map(|(_, rest)| rest)
+            .expect("republish_window_with_target");
+        let wrapper = body
+            .find(concat!("publish_with_sticky_encoder_", "settings("))
+            .expect("republish goes through the sticky resolver");
+        let call = body.find(publish_call).expect("publish call inside the closure");
+        assert!(wrapper < call);
+        let closure = &body[call..body.len().min(call + 400)];
+        assert!(
+            closure.contains("resolved_software,") && closure.contains("resolved_recovery,"),
+            "the RESOLVED values, not the caller's raw ones, must reach the publisher"
+        );
+        assert!(
+            !closure.contains("force_software_encoder,")
+                && !closure.contains("encoder_wedge_recovery.clone()"),
+            "raw caller values must not be passed to the publisher"
+        );
+        let wedge_fn = source
+            .split_once("pub(crate) async fn recover_wedged_encoder_publication(")
+            .map(|(_, rest)| rest)
+            .expect("recover_wedged_encoder_publication");
+        let note = wedge_fn
+            .find("republish_intent.note_wedge_recovery_step(step)")
+            .expect("a wedge step must be recorded in the sticky state");
+        let republish = wedge_fn
+            .find("republish_window_with_target(")
+            .expect("wedge republish");
+        assert!(note < republish, "record the step before republishing");
+        // #527: a superseded/failed step is retried once through the shared
+        // driver, and a retry republishes only while the wedged publication
+        // is still the live one.
+        let entry = &wedge_fn[..wedge_fn.find("\n}\n").expect("recover fn end")];
+        assert!(
+            entry.contains("drive_wedge_recovery_step(step,")
+                && entry.contains("wedged_encoder_recovery_attempt("),
+            "the wedge recovery must run through the retrying driver"
+        );
+        let attempt_fn = source
+            .split_once("async fn wedged_encoder_recovery_attempt(")
+            .map(|(_, rest)| rest)
+            .expect("wedged_encoder_recovery_attempt");
+        let still_live = attempt_fn
+            .find("!Arc::ptr_eq(wedged, &live)")
+            .expect("a retry checks the wedged publication is still live");
+        let begin = attempt_fn
+            .find("begin_republish_intent(&share.republish_intent)")
+            .expect("recovery intent");
+        assert!(still_live < begin, "check before superseding anything");
+        assert!(
+            attempt_fn.contains("WedgeRecoveryAttempt::NotReplaced"),
+            "a republish that did not replace the track is reported for retry"
+        );
+        assert!(
+            attempt_fn.contains(
+                "if is_retry {\n                share.republish_intent.generation.load(Ordering::SeqCst)"
+            ),
+            "the retry must join the current generation, never supersede a queued intent"
+        );
+        let attempt_call = &attempt_fn[attempt_fn.find("republish_window_with_target(").expect("call")..];
+        assert!(
+            attempt_call[..attempt_call.find(".await").expect("await")]
+                .contains("wedged.as_ref(),"),
+            "the retry republishes only while the wedged publication is live"
+        );
+        let lock = body.find("republish_intent.apply_lock.lock().await").expect("apply lock");
+        let only_if = body
+            .find("only_if_publication\n        .is_some_and(|expected| !Arc::ptr_eq(expected,")
+            .expect("live-publication guard");
+        assert!(lock < only_if && only_if < wrapper, "checked under the lock, before publishing");
+        let after_wake = source
+            .split_once("room_connection.publish_window_at_after_wake(")
+            .map(|(_, rest)| &rest[..rest.len().min(400)])
+            .expect("post-wake restart publish");
+        assert!(
+            after_wake.contains("wedge_recovery_for_share("),
+            "post-wake restart must attach wedge recovery"
+        );
+    }
 
     #[test]
     fn every_stop_share_exit_reconciles_overlay_from_session_authority() {
@@ -12460,7 +12942,8 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             2.0,
             CaptureResolution::Auto,
             Some(2560),
-        );
+        )
+        .expect("a non-degenerate source always sizes");
         assert_eq!(
             (from_frame.0, from_frame.1),
             (2556, 1652),
@@ -12476,7 +12959,8 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             2.0,
             CaptureResolution::Auto,
             Some(2560),
-        );
+        )
+        .expect("a non-degenerate source always sizes");
         assert_eq!((from_source.0, from_source.1), (2560, 1654));
         assert_ne!((from_frame.0, from_frame.1), (from_source.0, from_source.1));
 
@@ -12487,7 +12971,8 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             2.0,
             CaptureResolution::P1080,
             None,
-        );
+        )
+        .expect("a non-degenerate source always sizes");
         assert_eq!((capped.0, capped.1), (1920, 1080));
     }
 
@@ -14326,6 +14811,32 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
     }
 
     #[test]
+    fn a_skipped_degenerate_frame_is_not_retried_or_counted_but_a_rejection_is() {
+        use crate::transport::publisher::PublishedFrameTiming;
+        let now = Instant::now();
+        let timing = |source_accepted| PublishedFrameTiming {
+            convert_ms: 0.0,
+            capture_frame_return_ms: 0.0,
+            capture_age_ms: 0.0,
+            frame_id: 1,
+            source_accepted,
+        };
+        // Skipped: the publisher returns None, so nothing arms or counts.
+        let mut retry = RejectedPushRetry::default();
+        let skipped: Option<PublishedFrameTiming> = None;
+        retry.observe_push(skipped.map(|t| t.source_accepted), now);
+        assert_eq!(retry, RejectedPushRetry::default(), "a skip is never retried");
+        assert!(!push_reached_source(skipped), "a skip is not a pushed frame");
+        // A real limiter rejection still retries and still counts as reaching the source.
+        retry.observe_push(Some(timing(false)).map(|t| t.source_accepted), now);
+        assert_eq!(retry.deadline, Some(now + REJECTED_PUSH_RETRY_DELAY));
+        assert!(push_reached_source(Some(timing(false))));
+        // The pump's three counting sites (idle refresh, snapshot, raw) all gate on it.
+        let sites = include_str!("share.rs").matches(concat!("push_reached_source", "(timing)")).count();
+        assert_eq!(sites, 3);
+    }
+
+    #[test]
     fn rejected_push_retry_gives_up_after_its_budget_and_ignores_failed_pushes() {
         let now = Instant::now();
         let mut retry = RejectedPushRetry::default();
@@ -14436,7 +14947,10 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             evidence,
             3,
             2,
+            Some(crate::platform::cg::OcclusionBreakdown { foreign: 0.0, petal: 1.0, combined: 1.0, petal_known: true }),
         );
+        assert_eq!(diagnostic.occlusion, crate::logging::CaptureOcclusionTag::Full);
+        assert_eq!(diagnostic.occluded_by_petal, crate::logging::OccludedByPetalTag::Yes);
         assert_eq!(diagnostic.action, RawCaptureActionTag::Restart);
         assert_eq!(diagnostic.cause, RawSilenceCauseTag::NoCallbacks);
         assert_eq!(diagnostic.snapshot_content, SnapshotContentTag::Changing);
@@ -14445,6 +14959,169 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
         assert_eq!(diagnostic.recovery_burst, SmallCountBucketTag::ThreePlus);
         assert_eq!(diagnostic.concurrent_shares, SmallCountBucketTag::Two);
         assert_eq!(diagnostic.silent_for, SinceLastFrameBucketTag::OneToFiveMinutes);
+    }
+
+    #[test]
+    fn occlusion_tags_separate_petal_from_foreign_coverage_393() {
+        use crate::logging::{CaptureOcclusionTag as Occ, OccludedByPetalTag as ByPetal};
+        use crate::platform::cg::OcclusionBreakdown as B;
+        const W: SourceSelectionClass = SourceSelectionClass::Window;
+        assert_eq!(occlusion_tags(W, None), (Occ::Unknown, ByPetal::Unknown));
+        assert_eq!(
+            occlusion_tags(W, Some(B { foreign: 0.0, petal: 0.0, combined: 0.0, petal_known: true })),
+            (Occ::None, ByPetal::No)
+        );
+        assert_eq!(
+            occlusion_tags(W, Some(B { foreign: 1.0, petal: 0.0, combined: 1.0, petal_known: true })),
+            (Occ::Full, ByPetal::No)
+        );
+        assert_eq!(
+            occlusion_tags(W, Some(B { foreign: 0.0, petal: 1.0, combined: 1.0, petal_known: true })),
+            (Occ::Full, ByPetal::Yes)
+        );
+        assert_eq!(
+            occlusion_tags(W, Some(B { foreign: 0.3, petal: 0.3, combined: 0.6, petal_known: true })),
+            (Occ::Mostly, ByPetal::Yes)
+        );
+        assert_eq!(
+            occlusion_tags(W, Some(B { foreign: 0.2, petal: 0.0, combined: 0.2, petal_known: true })),
+            (Occ::Partial, ByPetal::No)
+        );
+        assert_eq!(
+            occlusion_tags(W, Some(B { foreign: 0.2, petal: 0.0, combined: 0.2, petal_known: false })),
+            (Occ::Unknown, ByPetal::Unknown)
+        );
+        // Overlap: combined (union) is what buckets, not foreign + petal.
+        assert_eq!(
+            occlusion_tags(W, Some(B { foreign: 0.6, petal: 0.6, combined: 0.6, petal_known: true })).0,
+            Occ::Mostly
+        );
+    }
+
+    /// Review of #524: with the Petal set unreadable, `combined` excludes every
+    /// Petal window, so a source fully covered by remote windows would read
+    /// `none`. It must be `unknown` (a lower bound at `full` stays `full`).
+    #[test]
+    fn unreadable_petal_set_never_reports_a_definitive_union_393() {
+        use crate::logging::{CaptureOcclusionTag as Occ, OccludedByPetalTag as ByPetal};
+        use crate::platform::cg::OcclusionBreakdown as B;
+        const W: SourceSelectionClass = SourceSelectionClass::Window;
+        for combined in [0.0, 0.3, 0.9] {
+            assert_eq!(
+                occlusion_tags(W, Some(B { foreign: combined, petal: 0.0, combined, petal_known: false })),
+                (Occ::Unknown, ByPetal::Unknown),
+                "combined={combined}"
+            );
+        }
+        assert_eq!(
+            occlusion_tags(W, Some(B { foreign: 1.0, petal: 0.0, combined: 1.0, petal_known: false })),
+            (Occ::Full, ByPetal::Unknown)
+        );
+    }
+
+    /// #540: a remote panel whose window-number or visibility read failed is
+    /// missing from the union, so a source it fully covers must bucket
+    /// `unknown`, not `none`. Driven through the real stall sampling and
+    /// diagnostic path; only the AppKit read and CG window list are faked.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn partial_petal_window_list_never_reports_a_definitive_union_540() {
+        use crate::compositor::PointerFamilyMeta;
+        use crate::logging::{
+            CaptureOcclusionTag as Occ, OccludedByPetalTag as ByPetal, RawCaptureActionTag,
+        };
+        use crate::platform::cg::{occlusion_breakdown_from, OcclusionRect};
+        const SELF_PID: i64 = 4242;
+        const TARGET: u32 = 540_001;
+        let rect = |number: i64, owner_pid: i64, w: f64| OcclusionRect {
+            number,
+            owner_pid,
+            layer: 0,
+            alpha: 1.0,
+            x: 0.0,
+            y: 0.0,
+            w,
+            h: 100.0,
+        };
+        let meta = |family_ids: &[u32], is_visible: bool, read_complete: bool| PointerFamilyMeta {
+            window_id: 1,
+            owner_identity: "sharer".into(),
+            family_ids: family_ids.to_vec(),
+            is_visible,
+            read_complete,
+        };
+        // Petal panel 900 fully covers the target; panel 901 covers ~a third.
+        let entries = [rect(900, SELF_PID, 100.0), rect(901, SELF_PID, 30.0), rect(TARGET as i64, 7, 100.0)];
+        let tags = |metas: Vec<PointerFamilyMeta>| {
+            let sample = stall_occlusion_from(Some(metas), |remote| {
+                occlusion_breakdown_from(&entries, TARGET, SELF_PID, remote)
+            });
+            let d = capture_raw_stall_diagnostic(
+                TARGET,
+                SourceSelectionClass::Window,
+                RawCaptureActionTag::Restart,
+                91_000_000,
+                crate::capture::RawSilenceEvidence::default(),
+                1,
+                1,
+                sample,
+            );
+            (d.occlusion, d.occluded_by_petal)
+        };
+        // Number read failed for 900: only 901's third was measured.
+        assert_eq!(tags(vec![meta(&[], true, false), meta(&[901], true, true)]), (Occ::Unknown, ByPetal::Unknown));
+        // Visibility read failed for 900: treated as hidden, still not definitive.
+        assert_eq!(tags(vec![meta(&[900], false, false)]), (Occ::Unknown, ByPetal::Unknown));
+        // Measured coverage already `full` stays `full` despite the gap.
+        assert_eq!(tags(vec![meta(&[900], true, true), meta(&[], true, false)]), (Occ::Full, ByPetal::Unknown));
+        // A complete list is unchanged.
+        assert_eq!(tags(vec![meta(&[900], true, true)]), (Occ::Full, ByPetal::Yes));
+        assert_eq!(tags(vec![meta(&[901], true, true)]), (Occ::Partial, ByPetal::Yes));
+        assert_eq!(tags(vec![]), (Occ::None, ByPetal::No));
+    }
+
+    /// Review of #524: display and region shares have no window to cover, so
+    /// both tags are `not_applicable`, distinct from a failed sample.
+    #[test]
+    fn display_and_region_stalls_report_occlusion_not_applicable_393() {
+        use crate::logging::{
+            CaptureOcclusionTag as Occ, OccludedByPetalTag as ByPetal, RawCaptureActionTag,
+        };
+        use crate::platform::cg::OcclusionBreakdown as B;
+        for kind in [SharedSourceKind::Display, SharedSourceKind::DisplayRegion] {
+            let source = diagnostic_source_for_kind(kind);
+            // Even a (bogus) breakdown for a colliding id must not leak through.
+            for sample in [None, Some(B { foreign: 1.0, petal: 1.0, combined: 1.0, petal_known: true })] {
+                let diagnostic = capture_raw_stall_diagnostic(
+                    393_002,
+                    source,
+                    RawCaptureActionTag::Restart,
+                    91_000_000,
+                    crate::capture::RawSilenceEvidence::default(),
+                    1,
+                    1,
+                    sample,
+                );
+                assert_eq!(diagnostic.occlusion, Occ::NotApplicable, "{kind:?}");
+                assert_eq!(diagnostic.occluded_by_petal, ByPetal::NotApplicable, "{kind:?}");
+            }
+        }
+        assert_eq!(occlusion_tags(SourceSelectionClass::Window, None).0, Occ::Unknown);
+    }
+
+    /// Review of #524: the local evidence line uses the documented keys and
+    /// lowercase closed-enum values, never the Rust `Debug` names.
+    #[test]
+    fn occlusion_log_fields_use_documented_keys_and_values_393() {
+        use crate::logging::{CaptureOcclusionTag as Occ, OccludedByPetalTag as ByPetal};
+        assert_eq!(
+            occlusion_log_fields(Occ::Full, ByPetal::Yes),
+            "capture_occlusion=full occluded_by_petal=yes"
+        );
+        assert_eq!(
+            occlusion_log_fields(Occ::NotApplicable, ByPetal::NotApplicable),
+            "capture_occlusion=not_applicable occluded_by_petal=not_applicable"
+        );
     }
 
     #[test]

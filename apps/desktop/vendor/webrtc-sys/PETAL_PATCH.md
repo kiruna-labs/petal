@@ -183,6 +183,46 @@ pinning one could only make the stream wrong.
 Safe to drop on any vendor bump; it changes no published behaviour. Fold away if
 the MFT ever reports a trustworthy emitted profile through stats instead.
 
+## Patch 6: never pick a synchronous software MFT as the hardware encoder (#504)
+
+### Why this exists
+
+`MFTEnumEx` flags are a union of MFT kinds, not a filter. The "hardware only"
+H.264 encoder search (`FindAndActivateH264Mft(..., hardware_only=true)` and the
+factory's `IsSupported` probe) passed `SYNCMFT | ASYNCMFT | HARDWARE`, so on a
+machine with no hardware H.264 encoder it returned Microsoft's synchronous
+software MFT (CLSID `6ca50344-051a-4ded-9779-a43305165e35`). The MF factory then
+claimed the `Hardware` backend, `InitEncode` failed with `MFT is not
+asynchronous` / `WEBRTC_VIDEO_CODEC_FALLBACK_SOFTWARE`, and because the
+simulcast adapter was built with no fallback factory, nothing fell back: every
+frame failed with `-7` (uninitialized) and every window share was black on
+every receiver. Reproduced on Windows 11 ARM VMs running the shipped 0.9.35.
+
+### The fix
+
+- `src/mf/mf_enum_flags.h`: one windows-free policy,
+  `H264EncoderEnumFlags(hardware_only)`; hardware-only is
+  `HARDWARE | SORTANDFILTER`. `SYNCMFT` and `ASYNCMFT` both add *software*
+  MFTs; hardware MFTs are asynchronous by contract and fully covered by
+  `HARDWARE`, so no hardware encoder is excluded. `mf_common.h` static_asserts the mirrored constants
+  against `mfapi.h`. With no async hardware MFT the MF factory now reports
+  unsupported, is not registered, and a `Hardware` request falls through
+  `InternalFactory::Create` to OpenH264.
+- `src/video_encoder_factory.cpp`: on Windows (`USE_MF_VIDEO_CODEC`) the
+  `SimulcastEncoderAdapter` gets a software-only fallback factory
+  (`SoftwareFallbackEncoderFactory`, OpenH264/libvpx via the builtin template
+  factory, backend tag stripped), so any primary encoder whose `InitEncode`
+  fails is replaced by the software encoder instead of encoding nothing.
+  macOS/Linux keep the null fallback (unchanged behaviour).
+- `src/mf_enum_flags.rs` exposes the policy over cxx; the desktop crate's
+  `mf_hardware_h264_encoder_search_excludes_sync_software_mfts` test runs it on
+  every host.
+
+### Updating
+
+Keep on any vendor bump that still carries `src/mf/*`. Drop the fallback
+factory only if upstream wires one into the adapter itself.
+
 ## #886: per-frame autorelease leak in `objc_video_frame_buffer.mm`
 
 `native_buffer_to_platform_image_buffer` runs once per DECODED frame on
@@ -284,3 +324,129 @@ absent.
 
 Drop this patch if upstream derives the level from the frame size (or stops
 clamping the frame rate from the negotiated level).
+
+## Patch 7: no VideoToolbox low-latency rate control on macOS H.264 (#500)
+
+### Why this exists
+
+The prebuilt libwebrtc's `RTCVideoEncoderH264` adds
+`kVTVideoEncoderSpecification_EnableLowLatencyRateControl` to its encoder
+specification on every macOS >= 11.3, inside
+`-resetCompressionSessionWithPixelFormat:`. You can confirm it in the archive:
+`nm -m RTCVideoEncoderH264.o` lists the key as a weak import next to a
+`__isPlatformVersionAtLeast(macOS, 11, 3)` call at the session-create site.
+In that mode, an H.264 keyframe at a low bitrate followed by a bitrate ramp
+makes VideoToolbox drop most of the next ~8 submitted frames
+(`kVTEncodeInfo_FrameDropped`, which libwebrtc logs at INFO as `H264 encode
+dropped frame.`). Recovery depends on how many frames are submitted, not on
+elapsed time.
+
+A simulcast layer that comes up behind the bandwidth ramp and takes the SFU's
+layer-lock PLIs hits exactly that sequence. For a sparse source, such as an idle
+window that redraws only when remote-control input changes it, each of those
+frames is an input that never reaches the viewer. This was the intermittent
+press-to-photon tail in the release gate (`h` layer late, a run of three
+samples at 350-1127 ms).
+
+A standalone VideoToolbox repro (960x600, keyframe at 274 kbps, then a ramp
+to 3.3 Mbps, nine sparse frames) drops 7 of 9 with the key and 0 of 9
+without it, with or without `DataRateLimits`, at gaps from 33 ms to 700 ms.
+
+### The fix
+
+`RTCVideoEncoderH264.mm` lives inside the downloaded libwebrtc and can't be
+edited, and the key is set at creation time, so a property set afterwards
+can't undo it. Reimplementing `-resetCompressionSessionWithPixelFormat:` in
+a subclass would need the encoder's static output callback and its private
+`FrameEncodeParams` layout, so that isn't an option either.
+
+Instead, `src/vt_h264_encoder_spec.mm` defines `VTCompressionSessionCreate`.
+libwebrtc.a is linked statically into this image, so its undefined reference
+binds to that definition at static-link time. An object-file definition
+always takes precedence over a dylib export. The override:
+
+- removes only that key, and only from `kCMVideoCodecType_H264`
+  specifications. Everything else (`EnableHardwareAcceleratedVideoEncoder`,
+  the source attributes, the callback) is forwarded unchanged to
+  VideoToolbox's own function, which it finds with `dlsym(RTLD_NEXT, ...)`.
+- counts sessions created, low-latency requested, and low-latency forwarded
+  (which must stay 0), records the last creation per thread for the test,
+  and logs one `PETAL #500: H.264 VTCompressionSession
+  WxH created without low-latency rate control` WARNING per session creation
+  (the app's sink drops libwebrtc INFO).
+
+`CreateObjCVideoEncoderFactory` calls `EnsureVtH264EncoderSpecOverrideLinked()`
+so the object file is always linked. Nothing else in Petal creates
+compression sessions. The file builds on macOS only; iOS still compiles
+`objc_video_factory.mm` but not the override.
+
+### Evidence
+
+Synthetic publisher (`examples/frame_hold_probe.rs`, not committed): 960x600,
+on a local livekit-server, using the real `full_share_publish_options`. It
+warms up for 2 s, then runs 30 sparse frames at 120-1020 ms gaps, then 20 s at
+a steady 30 fps.
+
+| | upstream (key set) | Patch 7 |
+| --- | --- | --- |
+| sparse input frames never delivered | 25 / 180 (6 runs: 0, 9, 0, 2, 6, 8) | **0 / 180** |
+| `H264 encode dropped frame.` lines per run | 10-38 (every run) | **0** |
+| steady push->receive latency p50 / p95 | 25-31 / 40-41 ms | 23-30 / 39-40 ms |
+| encode time per frame, h (960x600) | 3.54-3.92 ms | 3.62-3.84 ms |
+| encode time per frame, q (720x450) | 6.02-6.84 ms | 2.77-3.13 ms |
+
+The desktop crate's
+`macos_h264_encoder_sessions_never_enable_low_latency_rate_control` test
+starts a real `RTCVideoEncoderH264` and asserts three things about its session
+creation:
+
+- it went through the override;
+- it requested the key;
+- VideoToolbox never received the key.
+
+The probe observes only its own call, through a thread-local filled in by the
+override, so parallel tests can't interfere. `startEncodeWithSettings:`
+creates the session synchronously on the calling thread. The test doesn't
+require the encoder to start: on hosts with no encoder (some VMs) the creation
+is still attempted and checked.
+
+With the key-removal line disabled, the test fails.
+
+### Updating
+
+Keep this patch on any libwebrtc bump whose `RTCVideoEncoderH264` still
+sets the key. If a bump stops requesting the key, the test fails on its
+`low_latency_requested` assertion; at that point, delete the override, its
+bridge and the test. Also drop the patch if upstream exposes the encoder
+specification as a setting.
+
+## Patch 8: drop frames the adapter sizes to zero (PETAL-DESKTOP-4Y)
+
+`VideoTrackSource::InternalSource::on_captured_frame` calls `AdaptFrame` and,
+when the adapted size differs from the frame, `CropAndScale(crop_x, crop_y,
+crop_w, crop_h, adapted_w, adapted_h)`. The prebuilt libwebrtc's
+`I420Buffer::Create` RTC_CHECKs positive dimensions, so a zero adapted or crop
+size aborted the process (SIGABRT on a tokio worker, 0.9.35, symbolicated
+`CheckValidDimensions` <- `I420Buffer::Create` <- `CropAndScale` <-
+`on_captured_frame`).
+
+Why the adapter yields zero: `InternalSource` is constructed as
+`AdaptedVideoTrackSource(4)`, a `source_resolution_alignment` of 4 combined
+with the sink's alignment (`video_adapter.h`). The adapter rounds the crop to a
+multiple of `scale.denominator * alignment`, never past the input. So at scale
+1/1 (screencast, maintain-resolution) with no sink alignment, ANY edge below 4
+px gives crop 0 and adapted 0, then `CropAndScale(..., 0, 0)`. No simulcast or
+downscale is involved. Capture sizes are even (`even_capture_dimension(..)
+.unwrap_or(2)` turns degenerate dimensions into 2), so the crashing edge is in
+practice exactly 2 px. (From the headers and upstream behaviour: the prebuilt
+`video_adapter.cc` is not in the tree.)
+
+The fix returns `false` (frame dropped, the receiver holds its last frame)
+when any of the four sizes is `<= 0`, with a rate-limited WARNING. The warning
+names only a closed reason (`adapted` or `crop` size zero), never raw sizes:
+native WebRTC lines become Sentry breadcrumbs and the scrubber does not redact
+dimensions. The Linux-only `capture_dmabuf_frame` also refuses a non-positive
+width/height before building its buffer. Guarded by
+`vendored_on_captured_frame_drops_non_positive_sizes_before_crop_and_scale`
+and `vendored_degenerate_frame_warning_logs_no_raw_sizes` in the desktop
+crate. Keep this on any webrtc-sys bump.

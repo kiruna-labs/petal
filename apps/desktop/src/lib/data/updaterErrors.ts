@@ -22,6 +22,7 @@ export type UpdateFailureCategory =
   | 'incompatible'
   | 'install'
   | 'signature'
+  | 'server'
   | 'network'
   | 'unknown';
 
@@ -51,8 +52,17 @@ export function updateFailureCategory(raw: string): UpdateFailureCategory {
   }
   if (lower.includes('signature') || lower.includes('verify')) return 'signature';
   if (lower.includes('architecture') || lower.includes('not supported')) return 'incompatible';
+  // The server answered with an error (e.g. a 504), so the connection worked.
+  // Tested before 'network': this text contains "fetch" and used to tell the
+  // user to check a connection that was fine.
+  if (lower.includes('valid release json') || lower.includes('successful status code')) {
+    return 'server';
+  }
   if (
     lower.includes('network') ||
+    // reqwest's Display for any connect/DNS/TLS/timeout failure: what an
+    // offline check or download actually reports.
+    lower.includes('error sending request') ||
     lower.includes('fetch') ||
     lower.includes('dns') ||
     lower.includes('timeout') ||
@@ -96,6 +106,8 @@ export function friendlyUpdateErrorMessage(raw: string): string {
       return "Couldn't install the update — try again later";
     case 'signature':
       return 'Update failed a security check and was rejected';
+    case 'server':
+      return 'The update server had a problem — try again later';
     case 'network':
       return "Couldn't reach the update server — check your connection";
     case 'unknown':

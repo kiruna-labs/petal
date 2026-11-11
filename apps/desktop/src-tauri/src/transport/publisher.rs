@@ -59,6 +59,7 @@
 //! require forking/rebuilding libwebrtc itself.
 
 use super::native_subscription::NativeSubscriptionCoordinator;
+use crate::logging::EncoderWedgeActionTag;
 use crate::sync_ext::MutexExt;
 use crate::video_color::{self, VideoColorProfile};
 use std::collections::{HashMap, VecDeque};
@@ -77,7 +78,9 @@ use livekit::options::{
 use livekit::prelude::*;
 #[cfg(target_os = "macos")]
 use livekit::webrtc::video_frame::native::NativeBuffer;
-use livekit::webrtc::video_frame::{FrameMetadata, I420Buffer, VideoFrame, VideoRotation};
+use livekit::webrtc::video_frame::{
+    FrameMetadata, I420Buffer, VideoBuffer, VideoFrame, VideoRotation,
+};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::rtp_parameters::DegradationPreference;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
@@ -193,7 +196,7 @@ impl EncoderWedgeRecovery {
         (self.request)(step)
     }
 
-    fn steps_used(&self) -> u32 {
+    pub(crate) fn steps_used(&self) -> u32 {
         self.steps_used
     }
 }
@@ -1405,10 +1408,21 @@ pub struct PublishedTrack {
     native_fallback_pool: CaptureBufferPool,
     native_publish_disabled_by_env: bool,
     native_zero_copy_latch: Mutex<NativeZeroCopyLatch>,
+    /// #506: spaces `capture_frame` calls so libwebrtc never drops one as
+    /// "Same/old NTP timestamp". Held across the call to serialize pushes.
+    source_push_spacer: Mutex<SourcePushSpacer>,
     push_drop_streak: Mutex<crate::logging::DropStreakDetector>,
+    /// Frames this track's source ACCEPTED (cumulative, `source_accepted`). The #427 wedge guard
+    /// reads its per-poll delta: an encoder that was handed nothing is idle,
+    /// not wedged.
+    frames_pushed: Arc<std::sync::atomic::AtomicU64>,
     /// Rate-limits source-boundary logs while guaranteeing a sample at least
     /// every five seconds whenever frames reach the publisher.
     last_source_boundary_log: Mutex<Option<std::time::Instant>>,
+    /// Rate-limits the degenerate-frame skip warning (PETAL-DESKTOP-4Y).
+    last_degenerate_skip_log: Mutex<Option<std::time::Instant>>,
+    /// [`min_publishable_edge`] for this track's ladder, computed once.
+    min_publish_edge: u32,
     /// Cancels the detached encoder diagnostics when this track is terminal.
     background_cancel: CancellationToken,
     /// Windows: set once a re-anchor failed to re-apply the cadence, so the
@@ -1458,6 +1472,140 @@ fn share_frame_clock_us(capture_wall_time_us: u64) -> i64 {
     // Clamp rather than wrap: `timestamp_us` is `i64`, and a wrapped value would
     // become a negative -- i.e. pre-epoch -- frame clock.
     capture_wall_time_us.min(i64::MAX as u64) as i64
+}
+
+/// Minimum wall-clock gap between two `capture_frame` calls on one source (#506).
+///
+/// libwebrtc's `TimestampAligner::ClipTimestamp` forces each translated frame
+/// time into `[previous + 1ms, webrtc::TimeMicros()]`, and the upper bound wins.
+/// So a push within 1ms of the previous one is stamped "now", in the previous
+/// frame's millisecond, and `VideoStreamEncoder` drops it ("Same/old NTP
+/// timestamp") after the source already reported it accepted. No capture
+/// timestamp can fix that, because the clip caps the output at the push instant.
+/// Only the push instant itself can. The 100us margin absorbs the difference
+/// between `Instant` and libwebrtc's own clock.
+const SOURCE_PUSH_MIN_SPACING: std::time::Duration = std::time::Duration::from_micros(1_100);
+
+/// Keeps pushes into one native source at least [`SOURCE_PUSH_MIN_SPACING`]
+/// apart (#506). Record each call's *return* instant: the aligner reads its
+/// clock inside the call, so its previous output time is no later than that.
+#[derive(Debug, Default)]
+struct SourcePushSpacer {
+    last_return: Option<std::time::Instant>,
+}
+
+impl SourcePushSpacer {
+    /// How long to wait before a push at `now`. This is zero unless the previous
+    /// push returned less than the spacing ago, so the wait never accumulates
+    /// and never drifts from real time.
+    fn wait_before_push(&self, now: std::time::Instant) -> std::time::Duration {
+        self.last_return.map_or(std::time::Duration::ZERO, |last| {
+            (last + SOURCE_PUSH_MIN_SPACING).saturating_duration_since(now)
+        })
+    }
+
+    fn record_return(&mut self, returned_at: std::time::Instant) {
+        self.last_return = Some(returned_at);
+    }
+}
+
+#[cfg(test)]
+mod source_push_spacing_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A model of libwebrtc's `TimestampAligner::ClipTimestamp` (timestamp_aligner.cc)
+    /// followed by `VideoStreamEncoder`'s millisecond NTP check
+    /// (video_stream_encoder.cc). Times are microseconds on the aligner's clock.
+    struct AlignerModel {
+        prev_out_us: Option<i64>,
+        prev_ntp_ms: Option<i64>,
+    }
+
+    impl AlignerModel {
+        /// Returns `true` when the encoder would keep the frame.
+        fn push(&mut self, filtered_us: i64, system_us: i64) -> bool {
+            let mut out = filtered_us.min(system_us);
+            if let Some(prev) = self.prev_out_us {
+                if out < prev + 1_000 {
+                    out = (prev + 1_000).min(system_us);
+                }
+            }
+            self.prev_out_us = Some(out);
+            let ntp_ms = out / 1_000;
+            let kept = self.prev_ntp_ms.map_or(true, |prev| ntp_ms > prev);
+            if kept {
+                self.prev_ntp_ms = Some(ntp_ms);
+            }
+            kept
+        }
+    }
+
+    /// Drives the real spacer the way `capture_to_source` does: wait, push
+    /// (the aligner reads its clock at entry), then record the return.
+    fn push_at(
+        spacer: &mut SourcePushSpacer,
+        aligner: &mut AlignerModel,
+        base: Instant,
+        attempt_us: u64,
+        filtered_us: i64,
+    ) -> (bool, Duration) {
+        let attempt = base + Duration::from_micros(attempt_us);
+        let wait = spacer.wait_before_push(attempt);
+        let entered = attempt + wait;
+        let system_us = entered.duration_since(base).as_micros() as i64;
+        let kept = aligner.push(filtered_us, system_us);
+        spacer.record_return(entered + Duration::from_micros(20));
+        (kept, wait)
+    }
+
+    #[test]
+    fn a_push_within_a_millisecond_of_the_last_is_still_encoded() {
+        // 06:43:11.924 in the issue's clean log: snapshot, then a raw frame
+        // whose push came 206us later. The raw frame's capture instant is
+        // older than the snapshot's, so its filtered time falls behind.
+        let base = Instant::now();
+        let mut spacer = SourcePushSpacer::default();
+        let mut aligner = AlignerModel {
+            prev_out_us: None,
+            prev_ntp_ms: None,
+        };
+        let (snapshot_kept, _) = push_at(&mut spacer, &mut aligner, base, 10_000, 10_000);
+        assert!(snapshot_kept);
+        let (raw_kept, wait) = push_at(&mut spacer, &mut aligner, base, 10_226, 9_000);
+        assert!(
+            raw_kept,
+            "the second push must not land in the first one's millisecond (waited {wait:?})"
+        );
+        assert!(wait <= SOURCE_PUSH_MIN_SPACING);
+    }
+
+    #[test]
+    fn spaced_pushes_never_wait() {
+        let base = Instant::now();
+        let mut spacer = SourcePushSpacer::default();
+        assert_eq!(spacer.wait_before_push(base), Duration::ZERO);
+        spacer.record_return(base);
+        assert_eq!(
+            spacer.wait_before_push(base + SOURCE_PUSH_MIN_SPACING),
+            Duration::ZERO
+        );
+        assert_eq!(
+            spacer.wait_before_push(base + Duration::from_millis(33)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn the_wait_only_covers_the_rest_of_the_spacing() {
+        let base = Instant::now();
+        let mut spacer = SourcePushSpacer::default();
+        spacer.record_return(base);
+        assert_eq!(
+            spacer.wait_before_push(base + Duration::from_micros(400)),
+            SOURCE_PUSH_MIN_SPACING - Duration::from_micros(400)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1525,6 +1673,74 @@ struct CameraSizeRecovery {
     last_reanchor_at: Option<std::time::Instant>,
     /// Sticky for the track's lifetime once the flap guard trips.
     letterbox_locked: bool,
+}
+
+/// The source's own alignment: `VideoTrackSource::InternalSource` is built as
+/// `AdaptedVideoTrackSource(4)` (video_track.cpp), combined with the sink's
+/// (video_adapter.h `source_resolution_alignment`). The adapter rounds the crop
+/// to a multiple of `scale.denominator * alignment`, never past the input, so
+/// at scale 1/1 ANY edge below 4 crops to 0 and aborts in `CropAndScale`. No
+/// downscale is needed; capture sizes are even, so the real edge is 2 px.
+/// Pinned to the C++ constructor by a source test.
+const ADAPTER_MIN_EDGE: u32 = 4;
+const DEGENERATE_SKIP_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+/// Reference size to measure a ladder's rung scale-down factors on.
+const MIN_EDGE_REFERENCE_SIZE: u32 = 1200;
+
+/// PETAL-DESKTOP-4Y: the smallest width/height (px) we hand libwebrtc.
+/// Below it, the adapter can size a frame to 0 and `I420Buffer::Create`
+/// aborts the process. The floor is [`ADAPTER_MIN_EDGE`], raised by a
+/// conservative margin for our ladder's sink alignment (2^rungs) times its
+/// largest rung scale-down (`into_rtp_encodings`' ratio).
+fn min_publishable_edge(ladder: FullShareSimulcastLadder) -> u32 {
+    let rungs = full_share_simulcast_layers(MIN_EDGE_REFERENCE_SIZE, MIN_EDGE_REFERENCE_SIZE, ladder);
+    let alignment = 1u32 << rungs.len();
+    let smallest = rungs
+        .iter()
+        .map(|rung| rung.width.min(rung.height))
+        .min()
+        .unwrap_or(MIN_EDGE_REFERENCE_SIZE)
+        .max(1);
+    let max_scale_down = MIN_EDGE_REFERENCE_SIZE.div_ceil(smallest);
+    (alignment * max_scale_down).max(ADAPTER_MIN_EDGE)
+}
+
+/// Which edge of a below-floor frame is under it, for the closed diagnostic tag.
+fn degenerate_axis(
+    width: u32,
+    height: u32,
+    min_edge: u32,
+) -> crate::logging::DegenerateAxisTag {
+    use crate::logging::DegenerateAxisTag;
+    match (width < min_edge, height < min_edge) {
+        (true, true) => DegenerateAxisTag::Both,
+        (true, false) => DegenerateAxisTag::Width,
+        (false, true) => DegenerateAxisTag::Height,
+        (false, false) => DegenerateAxisTag::NotApplicable,
+    }
+}
+
+/// The WARN line for a degenerate skip. It becomes a Sentry breadcrumb, which
+/// the scrubber does not redact sizes or track names from, so it carries only
+/// closed values: track kind, size buckets and the axis (PETAL-DESKTOP-4Y).
+fn degenerate_skip_warning(
+    track_name: &str,
+    diagnostic: crate::logging::DegenerateFrameDiagnostic,
+) -> String {
+    let kind = if track_name.starts_with(CAMERA_TRACK_PREFIX) {
+        "camera"
+    } else {
+        "window"
+    };
+    format!(
+        "publisher: skipping degenerate {kind} frame ({}); holding the last frame",
+        diagnostic.closed_summary()
+    )
+}
+
+/// True when a frame of this size must not reach `capture_frame`.
+fn frame_below_publishable_edge(width: u32, height: u32, min_edge: u32) -> bool {
+    width < min_edge || height < min_edge
 }
 
 /// Bucket a frame size for the closed diagnostic schema. No caller may send raw
@@ -2299,14 +2515,21 @@ impl RoomConnection<Arc<Room>> {
     /// cadence on a republish). The published cadence is that ceiling capped to
     /// the geometry's Level 5.2 limit, and the encoder's `max_framerate`, the
     /// bitrate ask and [`PublishedTrack::cadence_fps`] all use it.
+    ///
+    /// `recovery` is the share's wedge-recovery action and
+    /// `force_software_encoder` the step-2 software fallback, exactly as in
+    /// [`publish_window_at_with_recovery_context`](Self::publish_window_at_with_recovery_context)
+    /// (#525: Windows shares were published with neither).
     #[cfg(target_os = "windows")]
-    pub async fn publish_window_at_cadence(
+    pub(crate) async fn publish_window_at_cadence(
         &self,
         width: u32,
         height: u32,
         quality: ShareQuality,
         window_id: Option<u32>,
         cadence_fps: u32,
+        recovery: Option<EncoderWedgeRecovery>,
+        force_software_encoder: bool,
     ) -> Result<PublishedTrack, RoomConnectionError> {
         self.publish_window_at_with_encoder_context(
             width,
@@ -2315,8 +2538,8 @@ impl RoomConnection<Arc<Room>> {
             window_id,
             EncoderPublishOrigin::Ordinary,
             None,
-            None,
-            false,
+            recovery,
+            force_software_encoder,
             Some(cadence_fps),
         )
         .await
@@ -2332,6 +2555,7 @@ impl RoomConnection<Arc<Room>> {
         quality: ShareQuality,
         window_id: u32,
         recovery: PostWakeEncoderFallbackRecovery,
+        encoder_wedge_recovery: Option<EncoderWedgeRecovery>,
     ) -> Result<PublishedTrack, RoomConnectionError> {
         self.publish_window_at_with_encoder_context(
             width,
@@ -2340,7 +2564,7 @@ impl RoomConnection<Arc<Room>> {
             Some(window_id),
             EncoderPublishOrigin::PostWakeRestart,
             Some(recovery),
-            None,
+            encoder_wedge_recovery,
             false,
             None,
         )
@@ -2440,6 +2664,7 @@ impl RoomConnection<Arc<Room>> {
         let published_width = Arc::new(std::sync::atomic::AtomicU32::new(width));
         let published_height = Arc::new(std::sync::atomic::AtomicU32::new(height));
         let shared_quality = Arc::new(Mutex::new(quality));
+        let frames_pushed = Arc::new(std::sync::atomic::AtomicU64::new(0));
         // The cadence this share publishes at, already capped by
         // `video_encoding`'s geometry ceiling. Held rather than re-derived per
         // consumer so a live quality switch, the encoder and the session's push
@@ -2461,10 +2686,12 @@ impl RoomConnection<Arc<Room>> {
             let width_for_stats = published_width.clone();
             let height_for_stats = published_height.clone();
             let encoder_wedge_recovery_for_stats = encoder_wedge_recovery.clone();
+            let frames_pushed_for_stats = frames_pushed.clone();
             let cancel = background_cancel.clone();
             tokio::spawn(async move {
                 log_window_share_encoder_stats(
                     track_for_stats,
+                    frames_pushed_for_stats,
                     quality_for_stats,
                     width_for_stats,
                     height_for_stats,
@@ -2506,8 +2733,12 @@ impl RoomConnection<Arc<Room>> {
             native_fallback_pool: Arc::new(Mutex::new(Vec::new())),
             native_publish_disabled_by_env: native_publish_disabled_by_env(),
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
+            source_push_spacer: Mutex::new(SourcePushSpacer::default()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
+            frames_pushed,
             last_source_boundary_log: Mutex::new(None),
+            last_degenerate_skip_log: Mutex::new(None),
+            min_publish_edge: min_publishable_edge(simulcast_ladder),
             background_cancel,
             #[cfg(target_os = "windows")]
             geometry_reapply_warned: AtomicBool::new(false),
@@ -2621,8 +2852,13 @@ impl RoomConnection<Arc<Room>> {
             native_fallback_pool: Arc::new(Mutex::new(Vec::new())),
             native_publish_disabled_by_env: false,
             native_zero_copy_latch: Mutex::new(NativeZeroCopyLatch::new()),
+            source_push_spacer: Mutex::new(SourcePushSpacer::default()),
             push_drop_streak: Mutex::new(crate::logging::DropStreakDetector::default()),
+            frames_pushed: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_source_boundary_log: Mutex::new(None),
+            last_degenerate_skip_log: Mutex::new(None),
+            min_publish_edge: // Camera: one encoding, no ladder -- only the adapter floor applies.
+            min_publishable_edge(FullShareSimulcastLadder::HighOnly),
             background_cancel,
             #[cfg(target_os = "windows")]
             geometry_reapply_warned: AtomicBool::new(false),
@@ -5611,6 +5847,7 @@ mod track_name_tests {
 
     fn wedged_sample() -> EncoderOutputSample {
         EncoderOutputSample {
+            frames_pushed: 150,
             frames_encoded: 0,
             target_bitrate_bps: 3_000_000.0,
             frames_per_second: 0.0,
@@ -5619,6 +5856,7 @@ mod track_name_tests {
 
     fn unfunded_sample() -> EncoderOutputSample {
         EncoderOutputSample {
+            frames_pushed: 150,
             frames_encoded: 0,
             target_bitrate_bps: 0.0,
             frames_per_second: 0.0,
@@ -5627,6 +5865,7 @@ mod track_name_tests {
 
     fn encoding_sample(frames: u64) -> EncoderOutputSample {
         EncoderOutputSample {
+            frames_pushed: 150,
             frames_encoded: frames,
             target_bitrate_bps: 3_000_000.0,
             frames_per_second: 30.0,
@@ -5677,6 +5916,195 @@ mod track_name_tests {
                 self.poll(sample);
             }
         }
+    }
+
+    fn take_wedge_reports() -> Vec<crate::logging::SentryDiagnosticEvent> {
+        ENCODER_WEDGE_REPORTS.with(|reports| std::mem::take(&mut *reports.borrow_mut()))
+    }
+
+    #[test]
+    fn encoder_wedge_reports_the_first_action_and_the_exhaustion_to_sentry() {
+        use crate::logging::{EncoderWedgeDiagnostic, SentryDiagnosticEvent};
+        take_wedge_reports();
+        let mut harness = WedgeHarness::new();
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 3, wedged_sample());
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 2, wedged_sample());
+        assert_eq!(
+            take_wedge_reports(),
+            vec![
+                SentryDiagnosticEvent::EncoderWedged(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::Republish,
+                }),
+                SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::Exhausted,
+                }),
+            ],
+            "one report for the first step, one for exhaustion, nothing for the software step or after"
+        );
+
+        let mut unwired = WedgeHarness::new();
+        unwired.action_wired = false;
+        unwired.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
+        assert_eq!(
+            take_wedge_reports(),
+            vec![SentryDiagnosticEvent::EncoderWedged(EncoderWedgeDiagnostic {
+                action: EncoderWedgeActionTag::NotWired,
+            })]
+        );
+    }
+
+    #[test]
+    fn encoder_wedge_log_lines_never_become_sentry_events() {
+        // PETAL-DESKTOP-48..58: error! lines with kbps in the text opened ~25
+        // Sentry issues for one wedge. The lines must stay breadcrumbs.
+        for kbps in [100.0, 732_000.0, 3_000_000.0] {
+            let sample = EncoderOutputSample {
+                target_bitrate_bps: kbps,
+                ..wedged_sample()
+            };
+            for (level, line) in [
+                encoder_wedge_not_wired_log_line(sample, EncoderRecoveryStep::Republish),
+                encoder_wedge_not_wired_log_line(sample, EncoderRecoveryStep::FallBackToSoftware),
+                encoder_wedge_exhausted_log_line(sample),
+            ] {
+                let metadata = log::Metadata::builder()
+                    .level(level)
+                    .target(module_path!())
+                    .build();
+                let filter = crate::logging::sentry_log_filter(&metadata);
+                assert!(
+                    !filter.intersects(
+                        sentry_log::LogFilter::Event | sentry_log::LogFilter::Exception
+                    ),
+                    "wedge line must not open a Sentry event: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_wedge_structured_events_do_not_depend_on_bitrate() {
+        // The structured event is the one Sentry signal; its payload has no
+        // bitrate, so every kbps value shares one fingerprint.
+        take_wedge_reports();
+        let mut reports = Vec::new();
+        for kbps in [100_000.0, 732_000.0, 3_000_000.0] {
+            let mut harness = WedgeHarness::new();
+            harness.poll_n(
+                ENCODER_WEDGE_TRIGGER_SAMPLES * 3,
+                EncoderOutputSample { target_bitrate_bps: kbps, ..wedged_sample() },
+            );
+            reports.extend(take_wedge_reports());
+        }
+        assert_eq!(reports.len(), 6);
+        let fingerprints: std::collections::HashSet<_> = reports
+            .iter()
+            .map(|r| {
+                crate::logging::build_sentry_diagnostic_event(r.clone(), "1")
+                    .fingerprint
+                    .iter()
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(fingerprints.len(), 2, "one fingerprint per event name, not per kbps");
+    }
+
+    /// Polls through the same sample builder the stats loop uses.
+    fn poll_from_counters(harness: &mut WedgeHarness, pushed_per_poll: u64, encoded_per_poll: u64, polls: u32) {
+        let mut pushed_total = 0u64;
+        let mut pushed_prev = 0u64;
+        for _ in 0..polls {
+            pushed_total += pushed_per_poll;
+            let sample = encoder_output_sample_for_poll(
+                pushed_total,
+                &mut pushed_prev,
+                encoded_per_poll,
+                3_000_000.0,
+                if encoded_per_poll == 0 { 0.0 } else { 30.0 },
+            );
+            harness.poll(sample);
+        }
+    }
+
+    #[test]
+    fn encoder_wedge_needs_input_before_it_counts() {
+        // Minimized window: pump_pushed=0 x3 read as a wedge and republished
+        // a healthy share (#427, Windows field logs).
+        take_wedge_reports();
+        let mut no_input = WedgeHarness::new();
+        poll_from_counters(&mut no_input, 0, 0, ENCODER_WEDGE_TRIGGER_SAMPLES * 4);
+        assert!(no_input.requested.is_empty(), "no input must not recover");
+        assert!(take_wedge_reports().is_empty(), "no input must not report");
+        assert_eq!(no_input.guard.recovery_steps, 0);
+
+        // Static window: idle re-push (~2 frames / 5s) with zero output is wedged.
+        let mut idle_repush = WedgeHarness::new();
+        poll_from_counters(&mut idle_repush, 2, 0, ENCODER_WEDGE_TRIGGER_SAMPLES);
+        assert_eq!(idle_repush.requested, vec![EncoderRecoveryStep::Republish]);
+
+        // Normal: input and output.
+        let mut normal = WedgeHarness::new();
+        poll_from_counters(&mut normal, 150, 150, ENCODER_WEDGE_TRIGGER_SAMPLES * 4);
+        assert!(normal.requested.is_empty());
+        take_wedge_reports();
+    }
+
+    #[test]
+    fn frame_counter_counts_only_frames_the_source_accepted() {
+        // The counter's failure mode is silence: stuck at 0, every wedge is
+        // gated off as "idle" on every platform.
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        let timing = |source_accepted| PublishedFrameTiming {
+            convert_ms: 0.0,
+            capture_frame_return_ms: 0.0,
+            capture_age_ms: 0.0,
+            frame_id: 1,
+            source_accepted,
+        };
+        note_frame_pushed(&counter, Some(timing(true)));
+        note_frame_pushed(&counter, Some(timing(true)));
+        note_frame_pushed(&counter, Some(timing(false)));
+        note_frame_pushed(&counter, None);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn frame_counter_is_wired_from_both_push_entry_points_to_the_stats_loop() {
+        // Needles are built with concat! so this test's own text never matches
+        // itself when it scans the file.
+        let source = include_str!("publisher.rs");
+        let record = concat!("self.record_push_", "outcome(result);");
+        assert_eq!(
+            source.matches(record).count(),
+            2,
+            "push_frame and push_nv12 must both record the push outcome"
+        );
+        let bump = concat!("note_frame_pushed(&self.frames_", "pushed, outcome.ok());");
+        assert_eq!(source.matches(bump).count(), 1, "record_push_outcome bumps the counter");
+        let clone = concat!("let frames_pushed_for_stats = frames_", "pushed.clone();");
+        assert_eq!(source.matches(clone).count(), 1, "stats loop gets a clone of the track's Arc");
+        let handed = concat!("track_for_stats,\n                    frames_", "pushed_for_stats,");
+        assert_eq!(source.matches(handed).count(), 1, "the clone is passed to the stats loop");
+        let ctor = concat!(
+            "track,\n            published_width,\n            published_height,\n            cadence_fps: shared_cadence,",
+        );
+        let tail = source.split_once(ctor).map(|(_, r)| r).expect("window-share constructor");
+        assert!(
+            tail[..tail.len().min(2500)].contains(concat!("\n            frames_", "pushed,\n")),
+            "the window-share track must store the same Arc the stats loop clones"
+        );
+    }
+
+    #[test]
+    fn encoder_wedge_input_gap_resets_the_streak() {
+        // Two wedged samples, a minimized (no input) sample, then one more
+        // wedged sample must NOT reach the 3-sample trigger.
+        let mut harness = WedgeHarness::new();
+        harness.poll_n(2, wedged_sample());
+        harness.poll(EncoderOutputSample { frames_pushed: 0, ..wedged_sample() });
+        harness.poll(wedged_sample());
+        assert!(harness.requested.is_empty());
     }
 
     #[test]
@@ -5759,15 +6187,140 @@ mod track_name_tests {
         assert_eq!(harness.requested.len(), 1);
     }
 
+    /// #527: drives `drive_wedge_recovery_step` with fake attempts and returns
+    /// the `is_retry` flag of every attempt made plus the final outcome.
+    async fn drive_with(
+        step: EncoderRecoveryStep,
+        outcomes: &[WedgeRecoveryAttempt],
+    ) -> (Vec<bool>, WedgeRecoveryAttempt) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = drive_wedge_recovery_step(step, |is_retry| {
+            let index = {
+                let mut calls = calls.borrow_mut();
+                calls.push(is_retry);
+                calls.len() - 1
+            };
+            let outcome = outcomes[index];
+            async move { outcome }
+        })
+        .await;
+        (calls.into_inner(), result)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn superseded_then_failed_last_wedge_step_retries_once_and_reports() {
+        use crate::logging::{EncoderWedgeDiagnostic, SentryDiagnosticEvent};
+        use WedgeRecoveryAttempt::*;
+        take_wedge_reports();
+        // Superseded with the wedged publication still live, then the retry's
+        // publish fails: exactly one retry, then a distinct exhaustion report.
+        let (calls, result) =
+            drive_with(EncoderRecoveryStep::FallBackToSoftware, &[NotReplaced, NotReplaced]).await;
+        assert_eq!(calls, vec![false, true], "one attempt plus exactly one retry");
+        assert_eq!(result, NotReplaced);
+        assert_eq!(
+            take_wedge_reports(),
+            vec![SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                action: EncoderWedgeActionTag::RecoveryRepublishFailed,
+            })]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wedge_step_retry_that_replaces_the_track_recovers_quietly() {
+        use WedgeRecoveryAttempt::*;
+        take_wedge_reports();
+        let (calls, result) =
+            drive_with(EncoderRecoveryStep::FallBackToSoftware, &[NotReplaced, Replaced]).await;
+        assert_eq!(calls, vec![false, true]);
+        assert_eq!(result, Replaced);
+        assert!(take_wedge_reports().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wedge_step_that_replaced_or_became_moot_is_not_retried() {
+        use WedgeRecoveryAttempt::*;
+        take_wedge_reports();
+        for first in [Replaced, NoLongerNeeded] {
+            let (calls, result) = drive_with(EncoderRecoveryStep::FallBackToSoftware, &[first]).await;
+            assert_eq!(calls, vec![false], "{first:?} must not retry");
+            assert_eq!(result, first);
+        }
+        // A retry that finds the wedged publication already replaced (or the
+        // share gone) is done, not a failure.
+        let (calls, result) =
+            drive_with(EncoderRecoveryStep::FallBackToSoftware, &[NotReplaced, NoLongerNeeded])
+                .await;
+        assert_eq!(calls, vec![false, true]);
+        assert_eq!(result, NoLongerNeeded);
+        assert!(take_wedge_reports().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_first_wedge_step_retries_but_leaves_exhaustion_to_the_escalation() {
+        use WedgeRecoveryAttempt::*;
+        take_wedge_reports();
+        // Step 1 failing twice still leaves step 2 on the wedged publication's
+        // guard, so it is not reported as exhausted.
+        let (calls, result) =
+            drive_with(EncoderRecoveryStep::Republish, &[NotReplaced, NotReplaced]).await;
+        assert_eq!(calls, vec![false, true]);
+        assert_eq!(result, NotReplaced);
+        assert!(take_wedge_reports().is_empty());
+    }
+
     #[test]
     fn encoder_wedge_without_a_wired_action_still_reports_but_does_not_act() {
         // The camera path and test publishes attach no recovery action: the
-        // guard must not claim it asked for one.
+        // guard must not claim it asked for one, must not spend budget it
+        // cannot use, and must not then report a fake exhaustion (#525: every
+        // Windows wedge read "after 2 recovery steps" after zero attempts).
+        take_wedge_reports();
         let mut harness = WedgeHarness::new();
         harness.action_wired = false;
+        harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 3, wedged_sample());
+        assert_eq!(harness.requested.len(), 1, "asked once, then quiet");
+        assert_eq!(harness.guard.recovery_steps, 0, "no step was taken");
+        assert_eq!(
+            take_wedge_reports(),
+            vec![crate::logging::SentryDiagnosticEvent::EncoderWedged(
+                crate::logging::EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::NotWired,
+                }
+            )],
+            "exactly one not-wired report and no Exhausted"
+        );
+    }
+
+    #[test]
+    fn encoder_wedge_recovery_chain_uses_the_step_settings_both_sessions_share() {
+        // Each step's replacement inherits `steps_used_after` as its starting
+        // budget (as the stats loop seeds the guard from the recovery), so the
+        // chain is recreate -> software -> exhausted across publications.
+        let mut harness = WedgeHarness::new();
         harness.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
-        assert_eq!(harness.requested.len(), 1);
-        assert_eq!(harness.guard.recovery_steps, 1);
+        assert_eq!(harness.requested, vec![EncoderRecoveryStep::Republish]);
+        let step = harness.requested[0];
+        assert!(!step.forces_software_encoder());
+
+        let mut replacement = WedgeHarness::with_steps_used(step.steps_used_after());
+        replacement.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES, wedged_sample());
+        assert_eq!(replacement.requested, vec![EncoderRecoveryStep::FallBackToSoftware]);
+        let step = replacement.requested[0];
+        assert!(step.forces_software_encoder());
+
+        take_wedge_reports();
+        let mut software = WedgeHarness::with_steps_used(step.steps_used_after());
+        software.poll_n(ENCODER_WEDGE_TRIGGER_SAMPLES * 2, wedged_sample());
+        assert!(software.requested.is_empty(), "the budget is spent");
+        assert_eq!(
+            take_wedge_reports(),
+            vec![crate::logging::SentryDiagnosticEvent::EncoderWedgeExhausted(
+                crate::logging::EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::Exhausted,
+                }
+            )]
+        );
     }
 
     #[test]
@@ -6028,6 +6581,39 @@ mod track_name_tests {
         assert_eq!(lower_rung_activity(&only_top, guarded), DARK_LOWER);
     }
 
+    /// #504: the Windows MF "hardware" H.264 encoder search must never
+    /// enumerate synchronous MFTs. With MFT_ENUM_FLAG_SYNCMFT in the mask, a
+    /// machine with no hardware encoder got Microsoft's synchronous software
+    /// MFT, the async-only encoder failed InitEncode, and every window share
+    /// encoded zero frames. Calls the real C++ policy the MF factory uses
+    /// (vendor/webrtc-sys/src/mf/mf_enum_flags.h).
+    #[test]
+    fn mf_hardware_h264_encoder_search_excludes_sync_software_mfts() {
+        use webrtc_sys::mf_enum_flags::ffi::{
+            MfEnumIncludesSoftwareMfts, MfEnumIncludesSyncMfts, MfH264EncoderEnumFlags,
+        };
+        // mfapi.h MFT_ENUM_FLAG_* values.
+        const SYNCMFT: u32 = 0x1;
+        const ASYNCMFT: u32 = 0x2;
+        const HARDWARE: u32 = 0x4;
+        const SORTANDFILTER: u32 = 0x40;
+
+        // ASYNCMFT adds asynchronous *software* MFTs; hardware MFTs are
+        // asynchronous by contract and covered by HARDWARE alone.
+        let hardware_only = MfH264EncoderEnumFlags(true);
+        assert_eq!(hardware_only, HARDWARE | SORTANDFILTER);
+        assert!(!MfEnumIncludesSyncMfts(hardware_only));
+        assert!(!MfEnumIncludesSoftwareMfts(hardware_only));
+        // The 0.9.35 mask must read as including sync MFTs, or the assertions
+        // above could pass for a detector that never fires.
+        assert!(MfEnumIncludesSyncMfts(SYNCMFT | ASYNCMFT | HARDWARE));
+        assert!(MfEnumIncludesSoftwareMfts(ASYNCMFT | HARDWARE));
+        // MFTEnumEx treats a mask with no kind bits as SYNCMFT.
+        assert!(MfEnumIncludesSyncMfts(SORTANDFILTER));
+        // The non-hardware search still admits software MFTs.
+        assert!(MfEnumIncludesSyncMfts(MfH264EncoderEnumFlags(false)));
+    }
+
     /// #410: the macOS encoder is built with a level token that removes
     /// RTCVideoEncoderH264's level-derived frame-rate clamp at every size
     /// Petal encodes, while the negotiated Level 3.1 (what the SFU answers)
@@ -6091,6 +6677,217 @@ mod track_name_tests {
                 "{width}x{height}"
             );
         }
+    }
+
+    /// PETAL-DESKTOP-4Y: the publish floor comes from the ladder in use, never
+    /// below the adapter's own denominator floor.
+    #[test]
+    fn min_publishable_edge_is_derived_from_the_simulcast_ladder() {
+        for (ladder, expected) in [
+            (FullShareSimulcastLadder::Legacy, 16),
+            (FullShareSimulcastLadder::LegacyBottom30, 16),
+            (FullShareSimulcastLadder::Raised, 8),
+            (FullShareSimulcastLadder::TwoRung, 4),
+            (FullShareSimulcastLadder::ReducedQ, 4),
+            (FullShareSimulcastLadder::HighOnly, ADAPTER_MIN_EDGE),
+        ] {
+            assert_eq!(min_publishable_edge(ladder), expected, "{ladder:?}");
+        }
+    }
+
+    #[test]
+    fn frames_below_the_publish_floor_are_skipped_on_either_axis() {
+        let edge = min_publishable_edge(FullShareSimulcastLadder::TwoRung);
+        assert!(frame_below_publishable_edge(0, 600, edge));
+        assert!(frame_below_publishable_edge(1200, 2, edge), "thin window");
+        assert!(frame_below_publishable_edge(edge - 1, 600, edge));
+        assert!(!frame_below_publishable_edge(edge, edge, edge));
+        assert!(!frame_below_publishable_edge(1920, 1080, edge));
+    }
+
+    /// The only entry into `NativeVideoSource::capture_frame` must run the
+    /// floor first (`PublishedTrack` cannot be built offline), and must not
+    /// unpublish or hide anything when it skips.
+    #[test]
+    fn capture_to_source_checks_the_publish_floor_before_capture_frame() {
+        let src = include_str!("publisher.rs");
+        let start = src.find(concat!("    fn capture_to_source", "<")).expect("capture_to_source");
+        let body = &src[start..];
+        let guard = body.find("frame_below_publishable_edge(").expect("floor check");
+        let push = body.find("self.rtc_source.capture_frame(").expect("capture_frame");
+        assert!(guard < push, "the floor check must precede capture_frame");
+        let skip = &body[guard..push];
+        assert!(
+            skip.contains(concat!("return Err(PushMiss::", "SkippedDegenerate);")),
+            "a skipped frame never reached the source"
+        );
+        assert!(skip.contains("self.min_publish_edge"), "floor is cached at construction");
+        assert!(!skip.contains(concat!("min_publishable_edge", "(")), "no per-frame ladder walk");
+        assert!(!skip.contains("unpublish") && !skip.contains("hide"), "{skip}");
+    }
+
+    /// PETAL-DESKTOP-4Y: libwebrtc aborts the whole process when
+    /// `CropAndScale` is asked for a zero-sized buffer (`I420Buffer::Create`
+    /// RTC_CHECK). `NativeVideoSource` cannot be driven offline into the
+    /// adapter's zero-size case (it needs a live encoder sink asking for an
+    /// alignment/downscale), so pin the vendored guard at the source: it must
+    /// test all four sizes, and run BEFORE the `CropAndScale` call.
+    #[test]
+    fn vendored_on_captured_frame_drops_non_positive_sizes_before_crop_and_scale() {
+        let src = vendored_video_track_cpp();
+        let guard_text = "adapted_width <= 0 || adapted_height <= 0 || crop_width <= 0 ||";
+        let mut calls = 0;
+        for (crop, _) in src.match_indices("->CropAndScale(") {
+            calls += 1;
+            let guard = src[..crop].rfind(guard_text).expect("guard before every CropAndScale");
+            let between = &src[guard..crop];
+            assert!(between.contains("crop_height <= 0"), "{between}");
+            assert!(between.contains("return false;"), "the guard must drop the frame");
+            assert!(
+                !between.contains("CropAndScale("),
+                "each CropAndScale needs its own guard: {between}"
+            );
+            assert!(
+                !between.contains("\nbool ") && !between.contains("\nvoid "),
+                "the guard must be in the same function as the call: {between}"
+            );
+        }
+        assert!(calls >= 1, "no CropAndScale call found; the pin is stale");
+    }
+
+    /// Native WebRTC lines become Sentry breadcrumbs and the scrubber leaves
+    /// sizes alone, so the drop warning must not stream any dimension.
+    #[test]
+    fn vendored_degenerate_frame_warning_logs_no_raw_sizes() {
+        let src = vendored_video_track_cpp();
+        let guard = src
+            .find("adapted_width <= 0 || adapted_height <= 0 || crop_width <= 0 ||")
+            .expect("guard");
+        let end = guard + src[guard..].find("return false;").expect("guard return");
+        let block = &src[guard..end];
+        let log = block.find("RTC_LOG(").expect("the drop is still logged");
+        let stmt = &block[log..log + block[log..].find(';').expect("log statement end")];
+        for streamed in stmt.split("<<").skip(1) {
+            let streamed = streamed.trim();
+            assert!(
+                streamed.starts_with('"') || streamed == "which",
+                "only literals or the closed reason may be logged, got `{streamed}`"
+            );
+        }
+        assert!(block.contains("? \"adapted\" : \"crop\""), "closed reason: {block}");
+    }
+
+    /// The floor rests on `AdaptedVideoTrackSource(4)`: a bump that changes it
+    /// must re-derive `ADAPTER_MIN_EDGE`.
+    #[test]
+    fn adapter_min_edge_matches_the_vendored_source_alignment() {
+        let src = vendored_video_track_cpp();
+        let at = src.find("webrtc::AdaptedVideoTrackSource(").expect("source ctor");
+        let digits: String = src[at + "webrtc::AdaptedVideoTrackSource(".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        assert_eq!(digits.parse::<u32>().expect("alignment literal"), ADAPTER_MIN_EDGE);
+    }
+
+    fn vendored_video_track_cpp() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../vendor/webrtc-sys/src/video_track.cpp");
+        std::fs::read_to_string(&path).expect("read vendored video_track.cpp")
+    }
+
+    /// WARN records become Sentry breadcrumbs and the scrubber leaves sizes
+    /// and track names alone, so the skip warning must carry neither.
+    #[test]
+    fn degenerate_skip_warning_carries_no_raw_size_or_track_name() {
+        use crate::logging::{DegenerateAxisTag, DegenerateFrameDiagnostic};
+        let diagnostic = DegenerateFrameDiagnostic {
+            frame_geometry: camera_geometry_bucket(2, 600),
+            published_geometry: camera_geometry_bucket(1280, 720),
+            axis: degenerate_axis(2, 600, 4),
+        };
+        assert_eq!(diagnostic.axis, DegenerateAxisTag::Width);
+        let camera = degenerate_skip_warning("petal-camera-alice@example.com", diagnostic);
+        let redacted = crate::logging::redact_for_export(&camera);
+        for line in [&camera, &redacted] {
+            assert!(!line.contains("alice"), "{line}");
+            assert!(!line.chars().any(|c| c.is_ascii_digit()), "raw size in {line}");
+        }
+        assert!(camera.contains("camera") && camera.contains("axis width"), "{camera}");
+        let window = degenerate_skip_warning("petal-window-1234", diagnostic);
+        assert!(!window.contains("1234") && window.contains("window"), "{window}");
+        assert_eq!(
+            window,
+            "publisher: skipping degenerate window frame (frame tiny, published medium, axis width); holding the last frame"
+        );
+        // The only warn! in the skip path is this closed line.
+        let src = include_str!("publisher.rs");
+        let start = src.find(concat!("    fn note_degenerate_frame", "_skipped(")).expect("fn");
+        let body = &src[start..start + src[start..].find("\n    }\n").expect("end")];
+        assert_eq!(body.matches("log::warn!(").count(), 1, "{body}");
+        assert!(body.contains(concat!("log::warn!(\"{}\", degenerate_skip_", "warning(")), "{body}");
+        assert!(!body.contains("log::info!("), "INFO is a breadcrumb too: {body}");
+    }
+
+    #[test]
+    fn degenerate_axis_names_the_edge_under_the_floor() {
+        use crate::logging::DegenerateAxisTag::*;
+        assert_eq!(degenerate_axis(2, 600, 4), Width);
+        assert_eq!(degenerate_axis(1200, 2, 4), Height);
+        assert_eq!(degenerate_axis(2, 2, 4), Both);
+        assert_eq!(degenerate_axis(4, 4, 4), NotApplicable);
+    }
+
+    /// A skip is `None` ("never reached the source"), not `Some(false)` (a
+    /// limiter rejection the pump retries): `PublishedTrack` cannot be built
+    /// offline, so pin the real chokepoint and its callers.
+    #[test]
+    fn a_skipped_frame_is_none_and_every_caller_propagates_it() {
+        let src = include_str!("publisher.rs");
+        let start = src.find(concat!("    fn capture_to_source", "<")).expect("capture_to_source");
+        let end = start + src[start..].find("fn note_degenerate_frame_skipped").expect("end");
+        let body = &src[start..end];
+        assert!(body.contains("-> Result<bool, PushMiss>"), "{body}");
+        assert!(
+            body.contains(concat!("return Err(PushMiss::", "SkippedDegenerate);")),
+            "a skip must be SkippedDegenerate: {body}"
+        );
+        let callers = src.matches(concat!("self.capture_to_source(", "&frame")).count();
+        let propagated = src.matches(concat!("&mut capture_frame_started)", "?;")).count();
+        assert_eq!(callers, 3, "capture_to_source callers changed; re-audit the skip outcome");
+        assert_eq!(propagated, 2, "the two copied-frame callers must `?` the skip");
+        assert!(
+            src.contains(concat!("Ok(None) => return Err(PushMiss::", "SkippedDegenerate),")),
+            "zero-copy skip must propagate as SkippedDegenerate"
+        );
+        assert!(!src.contains(concat!("result.unwrap_or", "(false)")));
+    }
+
+    /// #500: no macOS H.264 encoder session is created with VideoToolbox
+    /// low-latency rate control. In that mode a keyframe at a low bitrate
+    /// followed by a bitrate ramp makes VideoToolbox drop most of the next ~8
+    /// frames, so a sparse (idle-window) share loses remote-control input
+    /// frames. Starts the prebuilt RTCVideoEncoderH264 for real and reads the
+    /// VTCompressionSessionCreate override's counters
+    /// (vendor/webrtc-sys/src/vt_h264_encoder_spec.mm, PETAL_PATCH.md Patch 7).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_h264_encoder_sessions_never_enable_low_latency_rate_control() {
+        use webrtc_sys::vt_h264_encoder_spec::ffi::{
+            VtH264SessionCountersSnapshot, VtH264StartEncoderProbe,
+        };
+        // Observed on this thread only, so parallel tests cannot interfere.
+        // The start itself may fail where no encoder exists (some VMs); the
+        // session creation is attempted, and checked, either way.
+        let probe = VtH264StartEncoderProbe(960, 600);
+        // The encoder's session went through the override...
+        assert!(probe.sessions >= 1, "{probe:?}");
+        // ...the prebuilt encoder still asks for low-latency rate control (if
+        // it stops, this patch is obsolete -- see PETAL_PATCH.md)...
+        assert!(probe.low_latency_requested, "{probe:?}");
+        // ...and VideoToolbox never received it, here or anywhere in-process.
+        assert!(!probe.low_latency_forwarded, "{probe:?}");
+        assert_eq!(VtH264SessionCountersSnapshot().low_latency_forwarded, 0);
     }
 
     /// #408: the verdict receivers get is the guard's own lower-rung summary
@@ -8165,6 +8962,35 @@ fn live_encoding_shape_covers_updates(
     updates.iter().all(|update| live_rids.contains(&update.rid))
 }
 
+/// How one push counts toward the publish-drop streak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushStreakOutcome {
+    Published,
+    Failed,
+    SkippedDegenerate,
+}
+
+/// Why a push did not reach the source. Carried per push, so a skip can
+/// never be confused with a failure on another push of the same track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushMiss {
+    /// Conversion, geometry or capture failure: a dropped push.
+    Failed,
+    /// Below the publish floor, skipped on purpose (PETAL-DESKTOP-4Y).
+    SkippedDegenerate,
+}
+
+/// The push chain's internal result; the public entry points expose `.ok()`.
+type PushResult = Result<PublishedFrameTiming, PushMiss>;
+
+fn push_streak_outcome(result: PushResult) -> PushStreakOutcome {
+    match result {
+        Ok(_) => PushStreakOutcome::Published,
+        Err(PushMiss::Failed) => PushStreakOutcome::Failed,
+        Err(PushMiss::SkippedDegenerate) => PushStreakOutcome::SkippedDegenerate,
+    }
+}
+
 /// Core of `PublishedTrack::record_push_outcome`, extracted so a #866-shaped
 /// storm (a long run of consecutive failed/mismatched pushes) is
 /// unit-testable without a live `PublishedTrack` -- it holds an `Arc<Room>`
@@ -8174,9 +9000,16 @@ fn live_encoding_shape_covers_updates(
 fn push_drop_streak_diagnostic(
     detector: &Mutex<crate::logging::DropStreakDetector>,
     track_name: &str,
-    published: bool,
+    outcome: PushStreakOutcome,
     now: std::time::Instant,
 ) -> Option<crate::logging::SentryDiagnosticEvent> {
+    let published = match outcome {
+        PushStreakOutcome::Published => true,
+        PushStreakOutcome::Failed => false,
+        // A deliberate degenerate-frame skip is neither: it must not trip
+        // publish-drop-streak, nor reset a real streak (PETAL-DESKTOP-4Y).
+        PushStreakOutcome::SkippedDegenerate => return None,
+    };
     let mut guard = detector.lock_unpoisoned();
     let tripped = guard.record(published, now);
     drop(guard);
@@ -8382,11 +9215,12 @@ impl PublishedTrack {
     /// One place where a push outcome updates the drop-streak detector. A window
     /// share and a camera reach it from different entry points; the scope tag comes
     /// from the track name so the Sentry event says which one stopped (#788).
-    fn record_push_outcome(&self, published: bool) {
+    fn record_push_outcome(&self, outcome: PushResult) {
+        note_frame_pushed(&self.frames_pushed, outcome.ok());
         if let Some(event) = push_drop_streak_diagnostic(
             &self.push_drop_streak,
             &self.track.name(),
-            published,
+            push_streak_outcome(outcome),
             std::time::Instant::now(),
         ) {
             crate::logging::capture_sentry_diagnostic(event);
@@ -8593,6 +9427,76 @@ impl PublishedTrack {
         }
     }
 
+    /// The single entry into `rtc_source.capture_frame` (#506): waits out
+    /// [`SOURCE_PUSH_MIN_SPACING`] since the previous push first. `started` is
+    /// reset after the wait so `capture_frame_return_ms` (and the zero-copy
+    /// stall latch fed by it) never counts the wait.
+    ///
+    /// `Err(SkippedDegenerate)` means the frame never reached the source: it
+    /// propagates to the public entry points as `None`, so the pump's retry
+    /// loop, pushed counters and first-frame stage never count it, and the
+    /// drop streak treats it as neutral. `Ok(false)` is a real limiter
+    /// rejection and stays retryable.
+    fn capture_to_source<T: AsRef<dyn VideoBuffer>>(
+        &self,
+        frame: &VideoFrame<T>,
+        started: &mut std::time::Instant,
+    ) -> Result<bool, PushMiss> {
+        // PETAL-DESKTOP-4Y: skip, never push, a frame libwebrtc may size to 0
+        // (process abort). The receiver holds its last frame; nothing unpublishes.
+        let (frame_width, frame_height) = {
+            let buffer = frame.buffer.as_ref();
+            (buffer.width(), buffer.height())
+        };
+        if frame_below_publishable_edge(frame_width, frame_height, self.min_publish_edge) {
+            self.note_degenerate_frame_skipped(frame_width, frame_height);
+            return Err(PushMiss::SkippedDegenerate);
+        }
+        let mut spacer = self.source_push_spacer.lock_unpoisoned();
+        let wait = spacer.wait_before_push(std::time::Instant::now());
+        if !wait.is_zero() {
+            std::thread::sleep(wait);
+        }
+        *started = std::time::Instant::now();
+        let accepted = self.rtc_source.capture_frame(frame);
+        spacer.record_return(std::time::Instant::now());
+        Ok(accepted)
+    }
+
+    fn note_degenerate_frame_skipped(&self, frame_width: u32, frame_height: u32) {
+        let now = std::time::Instant::now();
+        let should_log = {
+            let mut last = self.last_degenerate_skip_log.lock_unpoisoned();
+            let due = last.is_none_or(|previous| {
+                now.duration_since(previous) >= DEGENERATE_SKIP_LOG_INTERVAL
+            });
+            if due {
+                *last = Some(now);
+            }
+            due
+        };
+        if !should_log {
+            return;
+        }
+        let (published_width, published_height) = self.published_size();
+        let track_name = self.track.name();
+        let diagnostic = crate::logging::DegenerateFrameDiagnostic {
+            frame_geometry: camera_geometry_bucket(frame_width, frame_height),
+            published_geometry: camera_geometry_bucket(published_width, published_height),
+            axis: degenerate_axis(frame_width, frame_height, self.min_publish_edge),
+        };
+        // WARN and INFO become Sentry breadcrumbs: closed buckets only there.
+        // Raw sizes and the (identity-bearing) track name stay at DEBUG.
+        log::warn!("{}", degenerate_skip_warning(&track_name, diagnostic));
+        log::debug!(
+            "publisher: degenerate frame detail track='{track_name}' frame={frame_width}x{frame_height} published={published_width}x{published_height} min_edge={}",
+            self.min_publish_edge,
+        );
+        crate::logging::capture_sentry_diagnostic(
+            crate::logging::SentryDiagnosticEvent::DegenerateFrameSkipped(diagnostic),
+        );
+    }
+
     /// Convert a captured frame to I420 and push it into the LiveKit
     /// video source, stamping SPEC.md §7's embedded measurement metadata
     /// (capture wall-clock timestamp + monotonic frame id) via LiveKit's
@@ -8633,18 +9537,18 @@ impl PublishedTrack {
             return None;
         }
         let result = self.push_frame_inner(captured, capture_wall_time_us);
-        if let Some(timing) = result {
+        if let Ok(timing) = result {
             self.log_source_boundary(timing);
         }
-        self.record_push_outcome(result.is_some());
-        result
+        self.record_push_outcome(result);
+        result.ok()
     }
 
     fn push_frame_inner(
         &self,
         captured: &CapturedFrame,
         capture_wall_time_us: u64,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         match &captured.payload {
             CapturedFramePayload::Native { pixel_buffer } => {
                 // The zero-copy CVPixelBuffer path hands the buffer straight
@@ -8667,13 +9571,14 @@ impl PublishedTrack {
                         .native_attempt_due(std::time::Instant::now());
                 if native_attempt_due {
                     match self.push_native(pixel_buffer, capture_wall_time_us) {
-                        Ok(timing) => {
+                        Ok(None) => return Err(PushMiss::SkippedDegenerate),
+                        Ok(Some(timing)) => {
                             self.record_native_capture_transition(
                                 std::time::Duration::from_secs_f64(
                                     timing.capture_frame_return_ms / 1000.0,
                                 ),
                             );
-                            return Some(timing);
+                            return Ok(timing);
                         }
                         Err(failure) => {
                             self.disable_native_zero_copy_after_capture_failure(
@@ -8707,11 +9612,11 @@ impl PublishedTrack {
         &self,
         pixel_buffer: &crate::capture::NativeCapturedPixelBuffer,
         capture_wall_time_us: u64,
-    ) -> Result<PublishedFrameTiming, NativeCaptureFailure> {
+    ) -> Result<Option<PublishedFrameTiming>, NativeCaptureFailure> {
         let frame_id = self
             .frame_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let capture_frame_started = std::time::Instant::now();
+        let mut capture_frame_started = std::time::Instant::now();
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             // #179: LiveKit's ObjC bridge consumes/releases the CVPixelBufferRef.
             // Hand it a fresh retain, never the frame's owned reference.
@@ -8726,25 +9631,27 @@ impl PublishedTrack {
                 }),
                 buffer: &native_buffer,
             };
-            self.rtc_source.capture_frame(&frame)
+            self.capture_to_source(&frame, &mut capture_frame_started)
         }));
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
-        if result.is_err() {
+        let Ok(source_accepted) = result else {
             return Err(NativeCaptureFailure {
                 reason: "native capture_frame panicked",
                 capture_frame_elapsed: capture_frame_started.elapsed(),
             });
-        }
-        Ok(PublishedFrameTiming {
+        };
+        // `Err(SkippedDegenerate)`: never reached the source. Not a native
+        // failure, so the zero-copy latch is left alone.
+        let Ok(source_accepted) = source_accepted else {
+            return Ok(None);
+        };
+        Ok(Some(PublishedFrameTiming {
             convert_ms: 0.0,
             capture_frame_return_ms,
             capture_age_ms: capture_age_ms(capture_wall_time_us),
             frame_id,
-            // The native path reports a panicked closure as Err, not as a
-            // rejection: a missing value here means the frame never reached
-            // the source at all.
-            source_accepted: result.unwrap_or(false),
-        })
+            source_accepted,
+        }))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -8752,7 +9659,7 @@ impl PublishedTrack {
         &self,
         _pixel_buffer: &crate::capture::NativeCapturedPixelBuffer,
         _capture_wall_time_us: u64,
-    ) -> Result<PublishedFrameTiming, NativeCaptureFailure> {
+    ) -> Result<Option<PublishedFrameTiming>, NativeCaptureFailure> {
         Err(NativeCaptureFailure {
             reason: "native capture buffers are not implemented for this platform",
             capture_frame_elapsed: std::time::Duration::ZERO,
@@ -8766,14 +9673,14 @@ impl PublishedTrack {
         height: u32,
         color_profile: VideoColorProfile,
         capture_wall_time_us: u64,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let convert_started = std::time::Instant::now();
         let payload =
             match pixel_buffer.copy_nv12_payload_with_pool(Some(&self.native_fallback_pool)) {
                 Ok(payload) => payload,
                 Err(e) => {
                     log::warn!("publisher: native fallback could not copy NV12 payload: {e}");
-                    return None;
+                    return Err(PushMiss::Failed);
                 }
             };
         self.push_copied_payload(
@@ -8794,7 +9701,7 @@ impl PublishedTrack {
         color_profile: VideoColorProfile,
         capture_wall_time_us: u64,
         convert_started: std::time::Instant,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         match payload {
             CapturedFramePayload::Nv12 {
                 y,
@@ -8842,7 +9749,7 @@ impl PublishedTrack {
         color_profile: VideoColorProfile,
         capture_wall_time_us: u64,
         convert_started: std::time::Instant,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let mut i420_pool = self.i420_pool.lock_unpoisoned();
         let i420 = i420_pool.buffer(width, height);
         let (stride_y, stride_u, stride_v) = i420.strides();
@@ -8865,7 +9772,7 @@ impl PublishedTrack {
             height,
             published_window_color_profile(color_profile),
         ) {
-            return None;
+            return Err(PushMiss::Failed);
         }
         let convert_ms = convert_started.elapsed().as_secs_f64() * 1000.0;
 
@@ -8944,7 +9851,7 @@ impl PublishedTrack {
                 // Never-black-frame hard rule: `scaled` is a black-filled
                 // canvas on failure. Drop this frame; the receiver holds the
                 // last good one, and the next capture gets a fresh attempt.
-                return None;
+                return Err(PushMiss::Failed);
             }
             VideoFrame {
                 rotation: VideoRotation::VideoRotation0,
@@ -8957,10 +9864,10 @@ impl PublishedTrack {
             }
         };
 
-        let capture_frame_started = std::time::Instant::now();
-        let source_accepted = self.rtc_source.capture_frame(&frame);
+        let mut capture_frame_started = std::time::Instant::now();
+        let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started)?;
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
-        Some(PublishedFrameTiming {
+        Ok(PublishedFrameTiming {
             convert_ms,
             capture_frame_return_ms,
             capture_age_ms: capture_age_ms(capture_wall_time_us),
@@ -9114,11 +10021,11 @@ impl PublishedTrack {
             height,
             capture_wall_time_us,
         );
-        if let Some(timing) = result {
+        if let Ok(timing) = result {
             self.log_source_boundary(timing);
         }
-        self.record_push_outcome(result.is_some());
-        result
+        self.record_push_outcome(result);
+        result.ok()
     }
 
     fn push_nv12_inner(
@@ -9130,7 +10037,7 @@ impl PublishedTrack {
         width: u32,
         height: u32,
         capture_wall_time_us: u64,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let decision = resolve_camera_push_size(
             &self.camera_size_recovery,
             &self.published_width,
@@ -9142,7 +10049,7 @@ impl PublishedTrack {
             crate::logging::capture_sentry_diagnostic(event);
         }
         if decision.verdict == CameraPushVerdict::Drop {
-            return None;
+            return Err(PushMiss::Failed);
         }
 
         self.push_nv12_with_convert_started(
@@ -9167,7 +10074,7 @@ impl PublishedTrack {
         height: u32,
         capture_wall_time_us: u64,
         convert_started: std::time::Instant,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let mut i420_pool = self.i420_pool.lock_unpoisoned();
         let i420 = i420_pool.buffer(width, height);
         let (stride_y, stride_u, stride_v) = i420.strides();
@@ -9190,7 +10097,7 @@ impl PublishedTrack {
             height,
         ) {
             log::warn!("publisher: NV12->I420 conversion failed for {width}x{height}");
-            return None;
+            return Err(PushMiss::Failed);
         }
         let convert_ms = convert_started.elapsed().as_secs_f64() * 1000.0;
         self.push_i420_letterboxed(&*i420, width, height, capture_wall_time_us, convert_ms)
@@ -9217,7 +10124,7 @@ impl PublishedTrack {
         height: u32,
         capture_wall_time_us: u64,
         convert_ms: f64,
-    ) -> Option<PublishedFrameTiming> {
+    ) -> PushResult {
         let frame_id = self
             .frame_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -9246,7 +10153,7 @@ impl PublishedTrack {
                 // Never-black-frame hard rule: `scaled` is a black-filled
                 // canvas on failure. Drop this frame; the receiver holds the
                 // last good one, and the next capture gets a fresh attempt.
-                return None;
+                return Err(PushMiss::Failed);
             }
             VideoFrame {
                 rotation: VideoRotation::VideoRotation0,
@@ -9258,10 +10165,10 @@ impl PublishedTrack {
                 buffer: &scaled,
             }
         };
-        let capture_frame_started = std::time::Instant::now();
-        let source_accepted = self.rtc_source.capture_frame(&frame);
+        let mut capture_frame_started = std::time::Instant::now();
+        let source_accepted = self.capture_to_source(&frame, &mut capture_frame_started)?;
         let capture_frame_return_ms = capture_frame_started.elapsed().as_secs_f64() * 1000.0;
-        Some(PublishedFrameTiming {
+        Ok(PublishedFrameTiming {
             convert_ms,
             capture_frame_return_ms,
             capture_age_ms: capture_age_ms(capture_wall_time_us),
@@ -9495,6 +10402,10 @@ const ENCODER_WEDGE_MAX_RECOVERY_STEPS: u32 = 2;
 /// documents for `frame_width`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct EncoderOutputSample {
+    /// Frames the source accepted this interval (delta). Zero means the
+    /// encoder was given nothing (minimized or occluded window): idle, not
+    /// wedged (#427). The static-window idle re-push still counts as input.
+    frames_pushed: u64,
     frames_encoded: u64,
     target_bitrate_bps: f64,
     frames_per_second: f64,
@@ -9509,6 +10420,7 @@ impl EncoderOutputSample {
     /// caught by the same evidence the field log line already names.
     fn looks_wedged(&self) -> bool {
         self.target_bitrate_bps >= RUNG_FUNDED_MIN_BITRATE_BPS
+            && self.frames_pushed > 0
             && self.frames_encoded == 0
             && self.frames_per_second < RUNG_DELIVERY_DEGRADED_FPS
     }
@@ -9535,6 +10447,90 @@ impl EncoderRecoveryStep {
             Self::FallBackToSoftware => "fall back to the software H.264 encoder",
         }
     }
+
+    /// Whether the replacement publication for this step uses the software
+    /// H.264 encoder. One answer for both sessions (macOS + Windows, #525).
+    pub(crate) fn forces_software_encoder(self) -> bool {
+        self == Self::FallBackToSoftware
+    }
+
+    /// The share's spent recovery budget once this step is taken. The
+    /// replacement publication inherits it, so the escalation continues
+    /// instead of restarting (#427/#525).
+    pub(crate) fn steps_used_after(self) -> u32 {
+        match self {
+            Self::Republish => 1,
+            Self::FallBackToSoftware => 2,
+        }
+    }
+
+    fn diagnostic_tag(self) -> EncoderWedgeActionTag {
+        match self {
+            Self::Republish => EncoderWedgeActionTag::Republish,
+            Self::FallBackToSoftware => EncoderWedgeActionTag::SoftwareEncoder,
+        }
+    }
+}
+
+/// What one wedge-recovery republish attempt achieved (#527).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WedgeRecoveryAttempt {
+    /// The replacement became the share's track.
+    Replaced,
+    /// Nothing left to repair: the share stopped, or another republish already
+    /// replaced the wedged publication (and inherited the sticky settings).
+    NoLongerNeeded,
+    /// The wedged publication is still the live one: the republish was
+    /// superseded by a request that never replaced it, or the publish failed.
+    NotReplaced,
+}
+
+/// Pause before the one retry, so a superseding republish can settle first.
+pub(crate) const WEDGE_RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Run one wedge-recovery step for either session (#527). The guard already
+/// spent this step on the wedged publication, so a step that leaves that
+/// publication live would strand the share on an empty track: retry once, and
+/// if the LAST step still fails, report it instead of going quiet.
+/// `attempt(is_retry)` performs one republish and classifies it.
+pub(crate) async fn drive_wedge_recovery_step<Fut>(
+    step: EncoderRecoveryStep,
+    mut attempt: impl FnMut(bool) -> Fut,
+) -> WedgeRecoveryAttempt
+where
+    Fut: std::future::Future<Output = WedgeRecoveryAttempt>,
+{
+    let first = attempt(false).await;
+    if first != WedgeRecoveryAttempt::NotReplaced {
+        return first;
+    }
+    log::warn!(
+        "publisher: wedged-encoder recovery ({}) left the wedged publication live; retrying once in {:.1}s (#527)",
+        step.description(),
+        WEDGE_RECOVERY_RETRY_DELAY.as_secs_f64()
+    );
+    tokio::time::sleep(WEDGE_RECOVERY_RETRY_DELAY).await;
+    let retried = attempt(true).await;
+    if retried == WedgeRecoveryAttempt::NotReplaced {
+        if step.steps_used_after() >= ENCODER_WEDGE_MAX_RECOVERY_STEPS {
+            log::warn!(
+                "publisher: wedged-encoder recovery ({}) failed twice; the share is left on an empty track -- reopen the share to retry the encoder (#527)",
+                step.description()
+            );
+            report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedgeExhausted(
+                crate::logging::EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::RecoveryRepublishFailed,
+                },
+            ));
+        } else {
+            // A step remains: the wedged publication's guard escalates to it.
+            log::warn!(
+                "publisher: wedged-encoder recovery ({}) failed twice; the next wedge trigger escalates (#527)",
+                step.description()
+            );
+        }
+    }
+    retried
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9556,8 +10552,14 @@ enum EncoderWedgeDecision {
 #[derive(Debug, Default)]
 struct EncoderWedgeGuard {
     consecutive_zero_encode_samples: u32,
+    /// Steps actually TAKEN (a wired action ran). An unwired request never
+    /// counts, so it cannot fake "after 2 recovery steps" (#525).
     recovery_steps: u32,
     reported_exhausted: bool,
+    /// No recovery action is wired: reported once, then never requested again
+    /// (later wedged polls are `Suspect` warnings), instead of spending budget
+    /// it cannot use and then reporting a fake `Exhausted`.
+    not_wired: bool,
 }
 
 impl EncoderWedgeGuard {
@@ -9572,7 +10574,7 @@ impl EncoderWedgeGuard {
         }
         self.consecutive_zero_encode_samples =
             self.consecutive_zero_encode_samples.saturating_add(1);
-        if self.consecutive_zero_encode_samples < ENCODER_WEDGE_TRIGGER_SAMPLES {
+        if self.consecutive_zero_encode_samples < ENCODER_WEDGE_TRIGGER_SAMPLES || self.not_wired {
             return EncoderWedgeDecision::Suspect;
         }
         if self.recovery_steps >= ENCODER_WEDGE_MAX_RECOVERY_STEPS {
@@ -9587,12 +10589,22 @@ impl EncoderWedgeGuard {
         } else {
             EncoderRecoveryStep::FallBackToSoftware
         };
-        self.recovery_steps += 1;
-        // Restart the streak: the NEXT escalation must be justified by another
+        // The budget is spent in `record_recovery_request`, once the caller
+        // knows whether an action actually ran (#525). Restart the streak: the NEXT escalation must be justified by another
         // full trigger window of wedge evidence AFTER this recovery, not by the
         // samples that led to it.
         self.consecutive_zero_encode_samples = 0;
         EncoderWedgeDecision::Recover(step)
+    }
+
+    /// Apply the outcome of a `Recover` decision: a wired action spends one
+    /// step; an unwired publication is marked and never asks again.
+    fn record_recovery_request(&mut self, requested: bool) {
+        if requested {
+            self.recovery_steps += 1;
+        } else {
+            self.not_wired = true;
+        }
     }
 }
 
@@ -10097,6 +11109,36 @@ fn apply_rung_starvation_guard_sample(
     }
 }
 
+/// Counts a frame the SOURCE accepted (`source_accepted`), not one merely
+/// handed over: a rejected `capture_frame` never reached the encoder. The #427
+/// wedge guard reads this counter's delta; if it stayed at 0, detection and
+/// both Sentry events would go silent on every platform.
+fn note_frame_pushed(counter: &std::sync::atomic::AtomicU64, outcome: Option<PublishedFrameTiming>) {
+    if outcome.is_some_and(|timing| timing.source_accepted) {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Builds one poll's guard evidence, advancing the pushed-frame baseline. The
+/// stats loop and the tests both go through this, so the input term cannot be
+/// dropped from production while a test still passes.
+fn encoder_output_sample_for_poll(
+    pushed_total: u64,
+    pushed_prev: &mut u64,
+    d_encoded: u64,
+    target_bitrate_bps: f64,
+    frames_per_second: f64,
+) -> EncoderOutputSample {
+    let frames_pushed = pushed_total.saturating_sub(*pushed_prev);
+    *pushed_prev = pushed_total;
+    EncoderOutputSample {
+        frames_pushed,
+        frames_encoded: d_encoded,
+        target_bitrate_bps,
+        frames_per_second,
+    }
+}
+
 /// One wedge-guard tick: observe this poll, log the transition, and -- on a
 /// decision that carries one -- request EXACTLY ONE recovery step. Production
 /// (`log_window_share_encoder_stats`) and tests both drive THIS function, so a
@@ -10116,14 +11158,24 @@ fn apply_encoder_wedge_guard_sample(
     match guard.observe(sample) {
         EncoderWedgeDecision::Healthy => {}
         EncoderWedgeDecision::Suspect => log::warn!(
-            "publisher: window-share encoder produced 0 frames this interval while funded at {:.0}kbps (delivered {:.1}fps) for {} consecutive samples; below the {}sample #427 wedge trigger, watching",
+            "publisher: window-share encoder produced 0 frames this interval while funded at {:.0}kbps (delivered {:.1}fps, {} frames pushed this interval) for {} consecutive samples; below the {}sample #427 wedge trigger, watching",
             sample.target_bitrate_bps / 1000.0,
             sample.frames_per_second,
+            sample.frames_pushed,
             guard.consecutive_zero_encode_samples,
             ENCODER_WEDGE_TRIGGER_SAMPLES,
         ),
         EncoderWedgeDecision::Recover(step) => {
+            let first_for_share = guard.recovery_steps == 0;
             let requested = request_recovery(step);
+            guard.record_recovery_request(requested);
+            // One report per share: the first trigger, with what was done.
+            if first_for_share {
+                let action = if requested { step.diagnostic_tag() } else { EncoderWedgeActionTag::NotWired };
+                report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedged(
+                    crate::logging::EncoderWedgeDiagnostic { action },
+                ));
+            }
             if requested {
                 log::warn!(
                     "publisher: window-share encoder WEDGED -- 0 frames encoded while funded at {:.0}kbps (delivered {:.1}fps) for {} samples; recovery step {}/{}: {} (#427)",
@@ -10135,20 +11187,64 @@ fn apply_encoder_wedge_guard_sample(
                     step.description(),
                 );
             } else {
-                log::error!(
-                    "publisher: window-share encoder WEDGED -- 0 frames encoded while funded at {:.0}kbps for {} samples, and this publication has no recovery action wired ({} not requested) (#427)",
-                    sample.target_bitrate_bps / 1000.0,
-                    ENCODER_WEDGE_TRIGGER_SAMPLES,
-                    step.description(),
-                );
+                let (level, line) = encoder_wedge_not_wired_log_line(sample, step);
+                log::log!(level, "{line}");
             }
         }
-        EncoderWedgeDecision::Exhausted => log::error!(
-            "publisher: window-share encoder still produced 0 frames after {} recovery steps ({}); this publication is publishing an empty track and no further recovery is attempted -- reopen the share to retry the encoder (#427)",
+        EncoderWedgeDecision::Exhausted => {
+            let (level, line) = encoder_wedge_exhausted_log_line(sample);
+            log::log!(level, "{line}");
+            report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedgeExhausted(
+                crate::logging::EncoderWedgeDiagnostic { action: EncoderWedgeActionTag::Exhausted },
+            ));
+        }
+    }
+}
+
+/// The two wedge lines that used to be `log::error!`. Never ERROR: `sentry_log`
+/// turns an error into an event titled with the text, and the kbps in it split
+/// one wedge into ~25 issues (PETAL-DESKTOP-48..58). The structured
+/// `encoder-wedged` / `encoder-wedge-exhausted` events carry the signal; these
+/// lines ride as breadcrumbs (#427).
+fn encoder_wedge_not_wired_log_line(
+    sample: EncoderOutputSample,
+    step: EncoderRecoveryStep,
+) -> (log::Level, String) {
+    (
+        log::Level::Warn,
+        format!(
+            "publisher: window-share encoder WEDGED -- 0 frames encoded while funded at {:.0}kbps for {} samples, and this publication has no recovery action wired ({} not requested) (#427)",
+            sample.target_bitrate_bps / 1000.0,
+            ENCODER_WEDGE_TRIGGER_SAMPLES,
+            step.description(),
+        ),
+    )
+}
+
+fn encoder_wedge_exhausted_log_line(sample: EncoderOutputSample) -> (log::Level, String) {
+    (
+        log::Level::Warn,
+        format!(
+            "publisher: window-share encoder still produced 0 frames after {} recovery steps (funded at {:.0}kbps); this publication is publishing an empty track and no further recovery is attempted -- reopen the share to retry the encoder (#427)",
             ENCODER_WEDGE_MAX_RECOVERY_STEPS,
             sample.target_bitrate_bps / 1000.0,
         ),
-    }
+    )
+}
+
+/// Sentry keeps the wedge as an event, not a warn breadcrumb (#427). Tests
+/// observe the reports through a thread-local sink instead.
+fn report_encoder_wedge(event: crate::logging::SentryDiagnosticEvent) {
+    #[cfg(test)]
+    ENCODER_WEDGE_REPORTS.with(|reports| reports.borrow_mut().push(event));
+    #[cfg(not(test))]
+    crate::logging::capture_sentry_diagnostic(event);
+}
+
+#[cfg(test)]
+thread_local! {
+    static ENCODER_WEDGE_REPORTS: std::cell::RefCell<Vec<crate::logging::SentryDiagnosticEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The ladder's top rid's CURRENT configured `(max_bitrate, max_framerate)`,
@@ -10366,6 +11462,7 @@ async fn release_startup_min_bitrate(
 
 async fn log_window_share_encoder_stats(
     track: LocalVideoTrack,
+    frames_pushed: Arc<std::sync::atomic::AtomicU64>,
     quality: Arc<Mutex<ShareQuality>>,
     published_width: Arc<std::sync::atomic::AtomicU32>,
     published_height: Arc<std::sync::atomic::AtomicU32>,
@@ -10407,6 +11504,7 @@ async fn log_window_share_encoder_stats(
         send_delay_s: f64,
     }
     let mut wire_prev: Option<(std::time::Instant, OutboundTotals)> = None;
+    let mut pushed_prev: u64 = frames_pushed.load(std::sync::atomic::Ordering::Relaxed);
     // #408: the SID this poll last published a lower-rung verdict under, so
     // the verdict is withdrawn when the poll ends (unpublish/republish).
     let mut reported_lower_rungs_sid: Option<String> = None;
@@ -10550,17 +11648,16 @@ async fn log_window_share_encoder_stats(
                 }
                 None => false,
             };
-            apply_encoder_wedge_guard_sample(
-                &mut wedge_guard,
-                EncoderOutputSample {
-                    frames_encoded: d_encoded,
-                    target_bitrate_bps: target_bps,
-                    frames_per_second: enc_fps,
-                },
-                &mut request_recovery,
+            let sample = encoder_output_sample_for_poll(
+                frames_pushed.load(std::sync::atomic::Ordering::Relaxed),
+                &mut pushed_prev,
+                d_encoded,
+                target_bps,
+                enc_fps,
             );
+            apply_encoder_wedge_guard_sample(&mut wedge_guard, sample, &mut request_recovery);
             log::debug!(
-                "publisher: outbound enc_fps={:.1} frames_encoded={} keyframes={} gop_frames={:.1} avg_qp={:.1} sent_kbps={:.0} frames_sent={} packets={} mean_send_delay_ms={:.2} send_delay_growth_ms={:.1} pli={} nack={} limitation={:?} target_kbps={:.0} bwe_kbps={:.0} rtt_ms={:.2}",
+                "publisher: outbound enc_fps={:.1} frames_encoded={} keyframes={} gop_frames={:.1} avg_qp={:.1} sent_kbps={:.0} frames_sent={} packets={} mean_send_delay_ms={:.2} send_delay_growth_ms={:.1} pli={} nack={} limitation={:?} target_kbps={:.0} bwe_kbps={:.0} rtt_ms={:.2} frames_pushed={}",
                 enc_fps,
                 d_encoded,
                 d_keyframes,
@@ -10589,6 +11686,7 @@ async fn log_window_share_encoder_stats(
                 target_bps / 1000.0,
                 bwe_kbps,
                 rtt_ms,
+                sample.frames_pushed,
             );
         }
 
@@ -11718,7 +12816,7 @@ mod tests {
         for frame in 0..100u64 {
             let now = t0 + std::time::Duration::from_millis(frame * 33);
             if let Some(event) =
-                push_drop_streak_diagnostic(&detector, "petal-camera-alice", false, now)
+                push_drop_streak_diagnostic(&detector, "petal-camera-alice", PushStreakOutcome::Failed, now)
             {
                 fired = Some(event);
                 fired_at = Some(frame);
@@ -11755,7 +12853,7 @@ mod tests {
         for frame in 0..100u64 {
             let now = t0 + std::time::Duration::from_millis(frame * 33);
             if let Some(event) =
-                push_drop_streak_diagnostic(&detector, "petal-window-1234", false, now)
+                push_drop_streak_diagnostic(&detector, "petal-window-1234", PushStreakOutcome::Failed, now)
             {
                 fired = Some(event);
                 fired_at = Some(frame);
@@ -11785,14 +12883,96 @@ mod tests {
             let now = t0 + std::time::Duration::from_millis(frame * 33);
             // Every 5th push succeeds, resetting the streak before it can
             // reach the consecutive-frame threshold.
-            let published = frame % 5 == 0;
+            let outcome = if frame % 5 == 0 {
+                PushStreakOutcome::Published
+            } else {
+                PushStreakOutcome::Failed
+            };
             let fired =
-                push_drop_streak_diagnostic(&detector, "petal-camera-alice", published, now);
+                push_drop_streak_diagnostic(&detector, "petal-camera-alice", outcome, now);
             assert!(
                 fired.is_none(),
                 "an intermittent hiccup with regular successful pushes must never trip the storm detector"
             );
         }
+    }
+
+    /// PETAL-DESKTOP-4Y: a window held below the publish floor skips every
+    /// frame on purpose. That is not a dropped push, so publish-drop-streak
+    /// must stay quiet however long it lasts.
+    #[test]
+    fn a_window_held_below_the_publish_floor_never_trips_publish_drop_streak() {
+        let detector = Mutex::new(crate::logging::DropStreakDetector::default());
+        let t0 = std::time::Instant::now();
+        for frame in 0..600u64 {
+            let now = t0 + std::time::Duration::from_millis(frame * 33);
+            let outcome = push_streak_outcome(Err(PushMiss::SkippedDegenerate));
+            assert_eq!(outcome, PushStreakOutcome::SkippedDegenerate);
+            assert!(
+                push_drop_streak_diagnostic(&detector, "petal-window-1234", outcome, now).is_none(),
+                "a degenerate skip tripped publish-drop-streak at frame {frame}"
+            );
+        }
+        // A skip is neutral, not a success: real failures around skips still trip.
+        let mut fired = false;
+        for frame in 600..800u64 {
+            let now = t0 + std::time::Duration::from_millis(frame * 33);
+            let miss = if frame % 2 == 0 {
+                PushMiss::SkippedDegenerate
+            } else {
+                PushMiss::Failed
+            };
+            let outcome = push_streak_outcome(Err(miss));
+            fired |= push_drop_streak_diagnostic(&detector, "petal-window-1234", outcome, now)
+                .is_some();
+        }
+        assert!(fired, "skips interleaved with real failures must not mask the streak");
+        assert_eq!(push_streak_outcome(Err(PushMiss::Failed)), PushStreakOutcome::Failed);
+    }
+
+    /// The skip reaches the streak as `SkippedDegenerate` through the push's
+    /// own result, never shared track state, and the public entry points
+    /// still report it as `None`. `PublishedTrack` cannot be built offline.
+    #[test]
+    fn a_degenerate_skip_travels_in_the_push_result_to_record_push_outcome() {
+        let src = include_str!("publisher.rs");
+        let start = src.find(concat!("    fn record_push_", "outcome(")).expect("record_push_outcome");
+        let end = start + src[start..].find("\n    }\n").expect("end");
+        let record = &src[start..end];
+        assert!(record.contains(concat!("outcome: Push", "Result")), "{record}");
+        assert!(record.contains(concat!("push_streak_outcome(", "outcome)")), "{record}");
+        assert_eq!(src.matches(concat!("self.record_push_outcome(", "result);")).count(), 2);
+        assert_eq!(src.matches(concat!("        result.", "ok()\n    }")).count(), 2);
+        assert_eq!(
+            push_streak_outcome(Ok(PublishedFrameTiming {
+                convert_ms: 0.0,
+                capture_frame_return_ms: 0.0,
+                capture_age_ms: 0.0,
+                frame_id: 1,
+                source_accepted: false,
+            })),
+            PushStreakOutcome::Published
+        );
+    }
+
+    /// #520 already keeps the wedge guard away from a skipping share: a skip
+    /// never reaches the source, so the guard sees zero input and stays idle.
+    #[test]
+    fn a_degenerate_skip_gives_the_wedge_guard_no_input() {
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        for _ in 0..30 {
+            note_frame_pushed(&counter, None);
+        }
+        let mut prev = 0;
+        let sample = encoder_output_sample_for_poll(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            &mut prev,
+            0,
+            RUNG_FUNDED_MIN_BITRATE_BPS * 4.0,
+            0.0,
+        );
+        assert_eq!(sample.frames_pushed, 0);
+        assert!(!sample.looks_wedged(), "a skipping share must never look wedged");
     }
 
     // #714: `letterbox_scale_i420` was previously exercised only through

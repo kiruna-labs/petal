@@ -847,6 +847,8 @@ test('remote-control topic and all-variant JSON field names are pinned', () => {
       'status-controller-upgrade-required',
       'status-awaiting-consent',
       'status-denied',
+      'pointer-click-v2-sent-at',
+      'result-applied-v2-host-hold',
     ],
   );
 

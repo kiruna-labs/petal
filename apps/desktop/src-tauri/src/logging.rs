@@ -197,6 +197,10 @@ const SENTRY_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 /// local `petal.log`/stdout sinks at all -- fern's own per-target rules
 /// don't reference this target, so it logs there exactly as before.
 const PANIC_HOOK_LOG_TARGET: &str = "petal::panic_hook_internal";
+/// How the panic hook's line reads in the file sink (`log_dispatch` prints
+/// `[target] message`). The previous-session classifier matches this, not
+/// the bare target, so a message merely naming the target is no panic (#539).
+const PANIC_HOOK_LINE_SIGNATURE: &str = "[petal::panic_hook_internal] PANIC at ";
 
 /// Same reasoning as `PANIC_HOOK_LOG_TARGET`, for the ObjC uncaught-exception
 /// handler's own local-file summary line.
@@ -259,6 +263,70 @@ pub enum SentryDiagnosticEvent {
     WgcBorderRequestFailed(WgcBorderRequestFailedDiagnostic),
     RemoteVideoStalled(RemoteVideoStalledDiagnostic),
     CaptureRawStalled(CaptureRawStalledDiagnostic),
+    EncoderWedged(EncoderWedgeDiagnostic),
+    EncoderWedgeExhausted(EncoderWedgeDiagnostic),
+    DegenerateFrameSkipped(DegenerateFrameDiagnostic),
+}
+
+/// A frame too small for libwebrtc's adapter to size without hitting a fatal
+/// RTC_CHECK was skipped before `capture_frame` (PETAL-DESKTOP-4Y). Only
+/// closed size buckets leave the device, never raw dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DegenerateFrameDiagnostic {
+    pub frame_geometry: GeometryBucket,
+    pub published_geometry: GeometryBucket,
+    /// Which edge was below the floor: size buckets cannot tell thin from small.
+    pub axis: DegenerateAxisTag,
+}
+
+impl DegenerateFrameDiagnostic {
+    /// Closed-bucket text for the skip's WARN line (a Sentry breadcrumb).
+    pub(crate) fn closed_summary(self) -> String {
+        format!(
+            "frame {}, published {}, axis {}",
+            self.frame_geometry.tag(),
+            self.published_geometry.tag(),
+            self.axis.tag()
+        )
+    }
+}
+
+/// A funded window-share encoder produced zero frames for the whole #427
+/// trigger window. `EncoderWedged` reports the first recovery action taken
+/// for a share; `EncoderWedgeExhausted` reports a share left publishing an
+/// empty track after every action failed. Two event names, not one, because
+/// the per-name rate limit would otherwise swallow the exhaustion that
+/// follows the first step ~30 s later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderWedgeDiagnostic {
+    pub action: EncoderWedgeActionTag,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderWedgeActionTag {
+    /// Republished at the same geometry.
+    Republish,
+    /// Republished onto the software H.264 encoder.
+    SoftwareEncoder,
+    /// The publication has no recovery action wired.
+    NotWired,
+    /// Every recovery step ran and the encoder is still silent.
+    Exhausted,
+    /// The last recovery step's republish was superseded or failed, and its
+    /// one retry too, so the share stays on the wedged publication (#527).
+    RecoveryRepublishFailed,
+}
+
+impl EncoderWedgeActionTag {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Republish => "republish",
+            Self::SoftwareEncoder => "software_encoder",
+            Self::NotWired => "not_wired",
+            Self::Exhausted => "exhausted",
+            Self::RecoveryRepublishFailed => "recovery_republish_failed",
+        }
+    }
 }
 
 /// Emitted (rate-limited) when the SHARER's raw ScreenCaptureKit watchdog
@@ -277,6 +345,8 @@ pub struct CaptureRawStalledDiagnostic {
     pub recovery_burst: SmallCountBucketTag,
     pub concurrent_shares: SmallCountBucketTag,
     pub silent_for: SinceLastFrameBucketTag,
+    pub occlusion: CaptureOcclusionTag,
+    pub occluded_by_petal: OccludedByPetalTag,
 }
 
 /// Emitted (rate-limited) when a remote-control pointer RELEASE (an Up) fails
@@ -445,6 +515,10 @@ pub struct WindowServerPortDeadDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviousSessionVanishedDiagnostic {
     pub crash_report: VanishedSessionCrashReportTag,
+    /// Whether the previous session ran this same build. `different` marks
+    /// an update-relaunch candidate (PETAL-DESKTOP-22). A closed tag, not a
+    /// version string: the diagnostic tag schema is a fixed allowlist.
+    pub previous_build: PreviousBuildTag,
 }
 
 /// Emitted once at startup when the highest `CGWindowID` this session has
@@ -481,6 +555,7 @@ diagnostic_enum!(PixelFormatClass { Bgra => "bgra", Nv12 => "nv12", OtherSupport
 diagnostic_enum!(ScaleBucket { OneX => "1x", TwoX => "2x", Fractional => "fractional", Other => "other", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(EncoderImplementationClass { Hardware => "hardware", Software => "software", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(CaptureLayoutStage { Validation => "validation", Reconfiguration => "reconfiguration", FirstFrame => "first_frame", Publish => "publish", Unknown => "unknown" });
+diagnostic_enum!(DegenerateAxisTag { Width => "width", Height => "height", Both => "both", NotApplicable => "not_applicable" });
 diagnostic_enum!(CameraDirection { Publish => "publish", Receive => "receive" });
 diagnostic_enum!(OverlayClearReasonTag { NoPublication => "no_publication", Retired => "retired", HidePending => "hide_pending" });
 diagnostic_enum!(CadenceBucket { Healthy => "healthy", Reduced => "reduced", Severe => "severe", Stalled => "stalled", Unknown => "unknown", NotApplicable => "not_applicable" });
@@ -504,6 +579,7 @@ diagnostic_enum!(InstallDestinationClassTag { Applications => "applications", Us
 // `Unverified` (#105): a `desktop-*.ips` exists in the scan window but
 // could NOT be attributed to the dead session. Distinct from `Found` on
 // purpose -- it must never read as an explanation.
+diagnostic_enum!(PreviousBuildTag { Same => "same", Different => "different", Unknown => "unknown", NotApplicable => "not_applicable" });
 diagnostic_enum!(VanishedSessionCrashReportTag { Found => "found", NotFound => "not_found", Unverified => "unverified", NotApplicable => "not_applicable" });
 diagnostic_enum!(PressureLevelTag { Warn => "warn", Critical => "critical", NotApplicable => "not_applicable" });
 // #106: WHICH allocation owner held the most dirty bytes when a
@@ -671,6 +747,45 @@ diagnostic_enum!(SnapshotContentTag {
     NotApplicable => "not_applicable"
 });
 // #393: small counts, bucketed so the tag vocabulary stays closed.
+// #393: how covered the shared window was at stall time, and whether Petal's
+// own remote windows were among the coverers. Buckets only: no titles or apps.
+diagnostic_enum!(CaptureOcclusionTag {
+    None => "none",
+    Partial => "partial",
+    Mostly => "mostly",
+    Full => "full",
+    Unknown => "unknown",
+    NotApplicable => "not_applicable"
+});
+diagnostic_enum!(OccludedByPetalTag {
+    Yes => "yes",
+    No => "no",
+    Unknown => "unknown",
+    NotApplicable => "not_applicable"
+});
+
+impl CaptureOcclusionTag {
+    /// The closed-enum wire value, for the local `capture-stall-evidence:` line.
+    pub(crate) fn as_str(self) -> &'static str {
+        self.tag()
+    }
+
+    pub fn from_fraction(fraction: f64) -> Self {
+        match fraction {
+            f if f < 0.05 => Self::None,
+            f if f < 0.5 => Self::Partial,
+            f if f < 0.95 => Self::Mostly,
+            _ => Self::Full,
+        }
+    }
+}
+
+impl OccludedByPetalTag {
+    pub(crate) fn as_str(self) -> &'static str {
+        self.tag()
+    }
+}
+
 diagnostic_enum!(SmallCountBucketTag {
     Zero => "0",
     One => "1",
@@ -700,7 +815,7 @@ diagnostic_enum!(SinceLastFrameBucketTag {
 
 const SENTRY_DIAGNOSTIC_SCHEMA_VERSION: &str = "1";
 const SENTRY_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(60);
-const DIAGNOSTIC_EVENT_NAMES: [&str; 20] = [
+const DIAGNOSTIC_EVENT_NAMES: [&str; 23] = [
     "capture-layout-invalid",
     "camera-health",
     "camera-size-mismatch-recovery",
@@ -721,6 +836,9 @@ const DIAGNOSTIC_EVENT_NAMES: [&str; 20] = [
     "wgc-border-request-failed",
     "remote-video-stalled",
     "capture-raw-stalled",
+    "encoder-wedged",
+    "encoder-wedge-exhausted",
+    "degenerate-frame-skipped",
 ];
 const DIAGNOSTIC_TAGS: &[&str] = &[
     "event_name",
@@ -769,6 +887,10 @@ const DIAGNOSTIC_TAGS: &[&str] = &[
     "held_native_surfaces",
     "recovery_burst",
     "concurrent_shares",
+    "degenerate_axis",
+    "previous_build",
+    "capture_occlusion",
+    "occluded_by_petal",
     "dedup_count_bucket",
 ];
 
@@ -815,7 +937,12 @@ const CAPTURE_RAW_STALLED_MESSAGE_TAGS: &[&str] = &[
     "snapshot_content",
     "stream_updates_since_frame",
     "held_native_surfaces",
+    "capture_occlusion",
+    "occluded_by_petal",
 ];
+const ENCODER_WEDGE_MESSAGE_TAGS: &[&str] = &["session_role", "recovery_action"];
+const DEGENERATE_FRAME_MESSAGE_TAGS: &[&str] =
+    &["session_role", "capture_geometry", "configured_geometry", "degenerate_axis"];
 const CAMERA_SIZE_MISMATCH_MESSAGE_TAGS: &[&str] = &[
     "session_role",
     "camera_direction",
@@ -860,6 +987,8 @@ fn diagnostic_message_tags(event_name: &str) -> Option<&'static [&'static str]> 
         "wgc-border-request-failed" => Some(WGC_BORDER_REQUEST_FAILED_MESSAGE_TAGS),
         "remote-video-stalled" => Some(REMOTE_VIDEO_STALLED_MESSAGE_TAGS),
         "capture-raw-stalled" => Some(CAPTURE_RAW_STALLED_MESSAGE_TAGS),
+        "encoder-wedged" | "encoder-wedge-exhausted" => Some(ENCODER_WEDGE_MESSAGE_TAGS),
+        "degenerate-frame-skipped" => Some(DEGENERATE_FRAME_MESSAGE_TAGS),
         _ => None,
     }
 }
@@ -1209,11 +1338,14 @@ impl SentryDiagnosticEvent {
             Self::WgcBorderRequestFailed(_) => "wgc-border-request-failed",
             Self::RemoteVideoStalled(_) => "remote-video-stalled",
             Self::CaptureRawStalled(_) => "capture-raw-stalled",
+            Self::EncoderWedged(_) => "encoder-wedged",
+            Self::EncoderWedgeExhausted(_) => "encoder-wedge-exhausted",
+            Self::DegenerateFrameSkipped(_) => "degenerate-frame-skipped",
         }
     }
 }
 
-fn build_sentry_diagnostic_event(
+pub(crate) fn build_sentry_diagnostic_event(
     diagnostic: SentryDiagnosticEvent,
     dedup_count_bucket: &'static str,
 ) -> sentry::protocol::Event<'static> {
@@ -1242,6 +1374,10 @@ fn build_sentry_diagnostic_event(
         "held_native_surfaces",
         "recovery_burst",
         "concurrent_shares",
+        "degenerate_axis",
+        "previous_build",
+        "capture_occlusion",
+        "occluded_by_petal",
     ] {
         insert(key, "not_applicable");
     }
@@ -1630,6 +1766,7 @@ fn build_sentry_diagnostic_event(
             insert("install_destination_class", "not_applicable");
             insert("overlay_clear_reason", "not_applicable");
             insert("crash_report_status", value.crash_report.tag());
+            insert("previous_build", value.previous_build.tag());
             insert("pressure_level", "not_applicable");
             insert("browser_url_extraction_cause", "not_applicable");
             insert("descriptor_pressure_stage", "not_applicable");
@@ -1976,6 +2113,67 @@ fn build_sentry_diagnostic_event(
             insert("held_native_surfaces", value.held_surfaces.tag());
             insert("recovery_burst", value.recovery_burst.tag());
             insert("concurrent_shares", value.concurrent_shares.tag());
+            insert("capture_occlusion", value.occlusion.tag());
+            insert("occluded_by_petal", value.occluded_by_petal.tag());
+        }
+        SentryDiagnosticEvent::EncoderWedged(value)
+        | SentryDiagnosticEvent::EncoderWedgeExhausted(value) => {
+            insert("session_role", "sharer");
+            for key in DIAGNOSTIC_TAGS {
+                if !matches!(
+                    *key,
+                    "event_name"
+                        | "schema_version"
+                        | "build_version"
+                        | "os_version"
+                        | "architecture"
+                        | "session_role"
+                        | "recovery_action"
+                        | "raw_capture_action"
+                        | "raw_silence_cause"
+                        | "snapshot_content"
+                        | "stream_updates_since_frame"
+                        | "held_native_surfaces"
+                        | "recovery_burst"
+                        | "concurrent_shares"
+                        | "capture_occlusion"
+                        | "occluded_by_petal"
+                        | "dedup_count_bucket"
+                ) {
+                    insert(*key, "not_applicable");
+                }
+            }
+            insert("recovery_action", value.action.tag());
+        }
+        SentryDiagnosticEvent::DegenerateFrameSkipped(value) => {
+            for key in DIAGNOSTIC_TAGS {
+                if !matches!(
+                    *key,
+                    "event_name"
+                        | "schema_version"
+                        | "build_version"
+                        | "os_version"
+                        | "architecture"
+                        | "session_role"
+                        | "capture_geometry"
+                        | "configured_geometry"
+                        | "degenerate_axis"
+                        | "raw_capture_action"
+                        | "raw_silence_cause"
+                        | "snapshot_content"
+                        | "stream_updates_since_frame"
+                        | "held_native_surfaces"
+                        | "recovery_burst"
+                        | "concurrent_shares"
+                        | "dedup_count_bucket"
+                ) {
+                    insert(*key, "not_applicable");
+                }
+            }
+            insert("session_role", "sharer");
+            insert("capture_geometry", value.frame_geometry.tag());
+            insert("configured_geometry", value.published_geometry.tag());
+            insert("degenerate_axis", value.axis.tag());
         }
     }
     insert("dedup_count_bucket", dedup_count_bucket);
@@ -2831,7 +3029,7 @@ impl<L: log::Log> log::Log for LivekitTransientErrorDowngrade<L> {
 
 /// The Sentry bridge's per-target policy (see the call site in
 /// `init_logging`). Extracted so tests exercise the production filter.
-fn sentry_log_filter(metadata: &log::Metadata) -> sentry_log::LogFilter {
+pub(crate) fn sentry_log_filter(metadata: &log::Metadata) -> sentry_log::LogFilter {
     if metadata.target() == PANIC_HOOK_LOG_TARGET
         || metadata.target() == OBJC_EXCEPTION_HOOK_LOG_TARGET
     {
@@ -2865,6 +3063,37 @@ fn sentry_logger_chain<L: log::Log>(
     LivekitTransientErrorDowngrade::new(
         sentry_log::SentryLogger::with_dest(dest).filter(sentry_log_filter),
     )
+}
+
+/// The formatted, filtered dispatch every sink hangs off. Split out of
+/// `init()` so tests can drive the real filter without installing a logger.
+fn log_dispatch(filter: env_filter::Filter, max_level: log::LevelFilter) -> fern::Dispatch {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            let message = redact_room_credentials(&message.to_string());
+            out.finish(format_args!(
+                "{} [{}] [{}] {}",
+                chrono_like_timestamp(),
+                record.level(),
+                record.target(),
+                message
+            ))
+        })
+        // fern's own base level is left at the same ceiling as the real
+        // filter (`max_level`, `env_filter::Filter::filter()`'s max across
+        // every directive) so it never filters out anything the closure
+        // below would otherwise allow. ALL real filtering -- the global
+        // default, per-module `RUST_LOG` directives, and the noisy-third-
+        // party-crate denylist -- happens in `.filter(...)`'s
+        // `env_filter::Filter`, kept as the single source of truth instead
+        // of two competing per-target systems (see `resolve_log_filter`'s
+        // doc comment for why that split bit us before).
+        .level(max_level)
+        // The shutdown marker bypasses `RUST_LOG` (PETAL-DESKTOP-22).
+        .level_for(SHUTDOWN_MARKER_TARGET, log::LevelFilter::Info)
+        .filter(move |metadata| {
+            metadata.target() == SHUTDOWN_MARKER_TARGET || filter.enabled(metadata)
+        })
 }
 
 /// Install the file-based logging sink + panic hook. Must be called exactly
@@ -2959,28 +3188,7 @@ pub fn init() -> PathBuf {
     // second (cheap, append-mode) open of the same file, not a conflict.
     let file_open_check = OpenOptions::new().create(true).append(true).open(&log_path);
 
-    let mut dispatch = fern::Dispatch::new()
-        .format(|out, message, record| {
-            let message = redact_room_credentials(&message.to_string());
-            out.finish(format_args!(
-                "{} [{}] [{}] {}",
-                chrono_like_timestamp(),
-                record.level(),
-                record.target(),
-                message
-            ))
-        })
-        // fern's own base level is left at the same ceiling as the real
-        // filter (`max_level`, `env_filter::Filter::filter()`'s max across
-        // every directive) so it never filters out anything the closure
-        // below would otherwise allow. ALL real filtering -- the global
-        // default, per-module `RUST_LOG` directives, and the noisy-third-
-        // party-crate denylist -- happens in `.filter(...)`'s
-        // `env_filter::Filter`, kept as the single source of truth instead
-        // of two competing per-target systems (see `resolve_log_filter`'s
-        // doc comment for why that split bit us before).
-        .level(max_level)
-        .filter(move |metadata| filter.enabled(metadata))
+    let mut dispatch = log_dispatch(filter, max_level)
         // Always echo to stdout too -- still useful for `cargo run`/`tauri dev`
         // where a terminal IS attached; this is additive, not a replacement.
         .chain(std::io::stdout());
@@ -3048,14 +3256,17 @@ pub fn init() -> PathBuf {
         log::warn!("logging: {warning}");
     }
 
-    report_previous_session(&analyze_previous_session(&PreviousSessionInputs {
-        tail: &previous_log_tail,
-        previous_log_mtime,
-        recorded_identity: previous_session_identity,
-        crash_report_dir: crash_report_dir(),
-        current_boot_time: current_boot_time_epoch(),
-        current_executable: current_executable_path(),
-    }));
+    report_previous_session(
+        &analyze_previous_session(&PreviousSessionInputs {
+            tail: &previous_log_tail,
+            previous_log_mtime,
+            recorded_identity: previous_session_identity,
+            crash_report_dir: crash_report_dir(),
+            current_boot_time: current_boot_time_epoch(),
+            current_executable: current_executable_path(),
+        }),
+        &previous_log_tail,
+    );
     // Written AFTER the previous record has been consumed above, so the
     // next startup can match a crash report's pid/procPath against this
     // session (#105).
@@ -4373,6 +4584,9 @@ enum PreviousSessionOutcome {
     WentDownWithTheMachine,
     /// In-meeting, no shutdown marker, and nothing explains the gap.
     Vanished,
+    /// A panic was logged after the last unrevoked run-event shutdown
+    /// marker: exit cleanup (which runs after the marker) panicked (#539).
+    CrashedDuringShutdown,
 }
 
 /// Whether a `desktop-*.ips` could be tied to the previous session (#105).
@@ -4414,6 +4628,9 @@ struct PreviousSessionReport {
     /// from an in-use crash -- say so rather than picking one.
     display_slept: bool,
     rebooted_at: Option<std::time::SystemTime>,
+    /// Build version the previous session recorded in `last-session.json`.
+    /// Local log text and the `previous_build` tag only; never sent raw.
+    previous_version: Option<String>,
 }
 
 /// What the previous session recorded about ITSELF, assembled from its own
@@ -4444,6 +4661,10 @@ struct SessionIdentityRecord {
     /// which initializes far later in `setup()`.
     #[serde(default)]
     boot_time_epoch: Option<i64>,
+    /// The build that wrote this record, so the next launch can tell an
+    /// update relaunch (version changed) from a same-build death.
+    #[serde(default)]
+    build_version: Option<String>,
 }
 
 const SESSION_IDENTITY_FILE: &str = "last-session.json";
@@ -4487,6 +4708,7 @@ fn current_session_identity() -> SessionIdentityRecord {
             .ok()
             .map(|d| d.as_secs()),
         boot_time_epoch: current_boot_time_epoch(),
+        build_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
 }
 
@@ -4957,7 +5179,10 @@ fn native_crash_image(image: &serde_json::Value, name: Option<&str>) -> Option<N
 /// a crash (`bug_type` other than 309): those are described in petal.log
 /// and never labelled a crash. Goes through the single `before_send`
 /// scrubber like every other event; no attachments.
-fn native_crash_report_event(cause: &NativeCrashCause) -> Option<sentry::protocol::Event<'static>> {
+fn native_crash_report_event(
+    cause: &NativeCrashCause,
+    log_tail: &[String],
+) -> Option<sentry::protocol::Event<'static>> {
     if !cause.is_crash() {
         return None;
     }
@@ -5022,6 +5247,7 @@ fn native_crash_report_event(cause: &NativeCrashCause) -> Option<sentry::protoco
             Cow::Borrowed(exception.as_str()),
             Cow::Owned(first_image),
         ]),
+        breadcrumbs: previous_session_breadcrumbs(log_tail).into(),
         release: Some(Cow::Owned(crashed_build)),
         tags,
         debug_meta: Cow::Owned(sentry::protocol::DebugMeta {
@@ -5047,6 +5273,48 @@ fn native_crash_report_event(cause: &NativeCrashCause) -> Option<sentry::protoco
         }),
         ..Default::default()
     })
+}
+
+/// How many of the previous session's last log lines ride on its crash
+/// event (#432). The crashed process died before it could send anything, so
+/// these are the only record of what it was doing.
+const CRASH_REPORT_LOG_TAIL_LINES: usize = 40;
+
+/// The crashed session's last log lines as breadcrumbs, oldest first. They
+/// are the lines its own Sentry logger would have sent as breadcrumbs had it
+/// lived (the file sink holds info and up), and `scrub_event_for_sentry`
+/// runs every message through `redact_for_export`, like a live breadcrumb.
+fn previous_session_breadcrumbs(log_tail: &[String]) -> Vec<sentry::protocol::Breadcrumb> {
+    let start = log_tail.len().saturating_sub(CRASH_REPORT_LOG_TAIL_LINES);
+    log_tail[start..]
+        .iter()
+        .filter_map(|line| {
+            let timestamp = log_line_timestamp(line)?;
+            let rest = line.get(23..)?.trim_start();
+            let (level, message) = match rest.split_once("] ") {
+                Some((tag, message)) if tag.starts_with('[') => (&tag[1..], message),
+                _ => ("INFO", rest),
+            };
+            let level = match level {
+                "ERROR" => sentry::protocol::Level::Error,
+                "WARN" => sentry::protocol::Level::Warning,
+                "DEBUG" | "TRACE" => return None,
+                _ => sentry::protocol::Level::Info,
+            };
+            let (target, message) = match message.split_once("] ") {
+                Some((target, message)) if target.starts_with('[') => (&target[1..], message),
+                _ => ("unknown", message),
+            };
+            Some(sentry::protocol::Breadcrumb {
+                timestamp,
+                ty: "default".into(),
+                category: Some(format!("previous-session:{target}")),
+                level,
+                message: Some(message.to_string()),
+                ..Default::default()
+            })
+        })
+        .collect()
 }
 
 /// The faulting thread as a Sentry stacktrace (#432): image basename plus,
@@ -5276,8 +5544,80 @@ fn machine_rebooted_into_this_session(
     within_window.then_some(boot_at)
 }
 
-const VANISHED_SESSION_SHUTDOWN_MARKERS: &[&str] =
-    &["left room", "quit: quit_app", "event journal loop stopped"];
+/// Written synchronously by `lib.rs`'s run-event handler on every ORDERLY
+/// process exit that is not `quit_app`: Cmd-Q, Dock/app-menu Quit, logout,
+/// and `RunEvent::Exit` after an in-app update relaunch. Do NOT log these
+/// from any path a crash can reach: a kill/abort must still read as
+/// VANISHED (PETAL-DESKTOP-22).
+pub(crate) const QUIT_APP_EXIT_MARKER: &str = "quit: app exit";
+pub(crate) const QUIT_RESTART_MARKER: &str = "quit: restart";
+
+/// The shutdown line for a run event, or `None` when the event is not an
+/// orderly exit. `ExitRequested` only counts for the restart code (update
+/// relaunch / `restart_app`); other exit requests are followed by `Exit`.
+pub(crate) fn run_event_shutdown_line(event: &tauri::RunEvent) -> Option<&'static str> {
+    match event {
+        tauri::RunEvent::Exit => Some("quit: app exit (RunEvent::Exit)"),
+        tauri::RunEvent::ExitRequested { code, .. } => exit_requested_shutdown_line(*code),
+        _ => None,
+    }
+}
+
+/// Written by the updater's `on_before_exit` hook. On Windows the plugin
+/// ends the NSIS hand-off with `std::process::exit(0)`, which never reaches
+/// `RunEvent::Exit`, so this is that exit's only marker (#526).
+pub(crate) const UPDATER_HANDOFF_SHUTDOWN_LINE: &str =
+    "quit: restart -- updater handing off to the installer (on_before_exit)";
+
+/// Cancels an earlier terminal marker in the same session. Written when
+/// the installer hand-off fails after its hook already logged
+/// `UPDATER_HANDOFF_SHUTDOWN_LINE`, so a later crash still reads as VANISHED.
+/// Must NOT contain `QUIT_RESTART_MARKER` / `QUIT_APP_EXIT_MARKER` (#526).
+pub(crate) const SHUTDOWN_MARKER_REVOKED: &str = "shutdown marker revoked";
+#[cfg_attr(target_os = "macos", allow(dead_code))] // written by the non-macOS install path
+pub(crate) const UPDATER_HANDOFF_FAILED_LINE: &str =
+    "shutdown marker revoked -- the installer hand-off failed; this session continues";
+
+pub(crate) fn exit_requested_shutdown_line(code: Option<i32>) -> Option<&'static str> {
+    (code == Some(tauri::RESTART_EXIT_CODE))
+        .then_some("quit: restart requested (RunEvent::ExitRequested)")
+}
+
+/// Log the run event's shutdown line (if any) and flush, so it is on disk
+/// before the process exits. The file sink is an unbuffered `File`; the
+/// explicit flush covers any wrapper that buffers (PETAL-DESKTOP-22).
+pub(crate) fn log_run_event_shutdown(event: &tauri::RunEvent) {
+    if let Some(line) = run_event_shutdown_line(event) {
+        write_shutdown_marker(log::logger(), line);
+    }
+}
+
+/// Target the shutdown marker is logged under. `log_dispatch` admits it
+/// whatever `RUST_LOG` says: a filtered-out marker (e.g.
+/// `RUST_LOG=info,desktop_lib::logging=warn`) makes a Cmd-Q read as VANISHED.
+pub(crate) const SHUTDOWN_MARKER_TARGET: &str = "petal::shutdown";
+
+/// Hands the marker straight to `logger`, NOT via `log::info!`: the macro
+/// drops the record against `log::max_level()` (e.g. `RUST_LOG=warn`)
+/// before any logger sees it (PETAL-DESKTOP-22).
+pub(crate) fn write_shutdown_marker(logger: &dyn log::Log, line: &str) {
+    logger.log(
+        &log::Record::builder()
+            .args(format_args!("{line}"))
+            .level(log::Level::Info)
+            .target(SHUTDOWN_MARKER_TARGET)
+            .build(),
+    );
+    logger.flush();
+}
+
+const VANISHED_SESSION_SHUTDOWN_MARKERS: &[&str] = &[
+    "left room",
+    "quit: quit_app",
+    QUIT_APP_EXIT_MARKER,
+    QUIT_RESTART_MARKER,
+    "event journal loop stopped",
+];
 
 /// Lines that only appear while a meeting is (or was moments ago) live.
 /// The join line alone is NOT sufficient evidence (#882 review): the tail
@@ -5313,6 +5653,35 @@ fn classify_previous_session(
     crash: CrashAttribution,
     rebooted_at: Option<std::time::SystemTime>,
 ) -> PreviousSessionReport {
+    // The run-event markers are TERMINAL anywhere in the segment: the exit
+    // happens in-room, so periodic writers ("compositor feed:") log after
+    // them and must not re-arm the vanish (PETAL-DESKTOP-22). Exit is final.
+    // A revocation after the last terminal marker cancels it: the updater
+    // hook writes its marker BEFORE the installer launches, and a failed
+    // launch returns with this process still running (#526).
+    let last_terminal = segment.iter().rposition(|line| {
+        line.contains(QUIT_APP_EXIT_MARKER) || line.contains(QUIT_RESTART_MARKER)
+    });
+    let terminal_exit = last_terminal.filter(|terminal| {
+        !segment[terminal + 1..]
+            .iter()
+            .any(|line| line.contains(SHUTDOWN_MARKER_REVOKED))
+    });
+    // The marker is logged BEFORE exit cleanup runs, so a panic in that
+    // cleanup lands after it: never read that as clean (#539).
+    if terminal_exit.is_some_and(|terminal| {
+        segment[terminal + 1..]
+            .iter()
+            .any(|line| line.contains(PANIC_HOOK_LINE_SIGNATURE))
+    }) {
+        return PreviousSessionReport {
+            outcome: PreviousSessionOutcome::CrashedDuringShutdown,
+            crash,
+            display_slept: false,
+            rebooted_at: None,
+            previous_version: None,
+        };
+    }
     let Some(last_activity_index) = segment.iter().rposition(|line| {
         VANISHED_SESSION_ACTIVITY_MARKERS
             .iter()
@@ -5323,20 +5692,26 @@ fn classify_previous_session(
             crash,
             display_slept: false,
             rebooted_at: None,
+            previous_version: None,
         };
     };
     let after = &segment[last_activity_index + 1..];
-    let shut_down = after.iter().any(|line| {
-        VANISHED_SESSION_SHUTDOWN_MARKERS
-            .iter()
-            .any(|marker| line.contains(marker))
-    });
+    // Terminal markers are decided above only, so a revoked one cannot
+    // sneak back in through this position-sensitive scan (#526).
+    let shut_down = terminal_exit.is_some()
+        || after.iter().any(|line| {
+            VANISHED_SESSION_SHUTDOWN_MARKERS
+                .iter()
+                .filter(|marker| **marker != QUIT_APP_EXIT_MARKER && **marker != QUIT_RESTART_MARKER)
+                .any(|marker| line.contains(marker))
+        });
     if shut_down {
         return PreviousSessionReport {
             outcome: PreviousSessionOutcome::CleanShutdown,
             crash,
             display_slept: false,
             rebooted_at: None,
+            previous_version: None,
         };
     }
     let display_slept = match after
@@ -5358,6 +5733,7 @@ fn classify_previous_session(
         crash,
         display_slept,
         rebooted_at,
+        previous_version: None,
     }
 }
 
@@ -5443,7 +5819,22 @@ fn analyze_previous_session(inputs: &PreviousSessionInputs<'_>) -> PreviousSessi
         last_log_line,
     );
 
-    classify_previous_session(segment, crash, rebooted_at)
+    let mut report = classify_previous_session(segment, crash, rebooted_at);
+    report.previous_version = inputs
+        .recorded_identity
+        .as_ref()
+        .and_then(|record| record.build_version.clone());
+    report
+}
+
+/// Same build / different build / nothing recorded. A `different` vanish
+/// is an update-relaunch candidate (PETAL-DESKTOP-22).
+fn previous_build_tag(previous: Option<&str>, current: &str) -> PreviousBuildTag {
+    match previous {
+        None => PreviousBuildTag::Unknown,
+        Some(version) if version == current => PreviousBuildTag::Same,
+        Some(_) => PreviousBuildTag::Different,
+    }
 }
 
 /// The crash-report statement, or `None` when there is nothing to say.
@@ -5496,8 +5887,16 @@ fn previous_session_log_line(report: &PreviousSessionReport) -> Option<(log::Lev
     } else {
         ""
     };
+    let build_note = match report.previous_version.as_deref() {
+        Some(previous) => format!(" (previous build {previous}, this build {})", env!("CARGO_PKG_VERSION")),
+        None => String::new(),
+    };
     match report.outcome {
         PreviousSessionOutcome::CleanShutdown => None,
+        PreviousSessionOutcome::CrashedDuringShutdown => Some((
+            log::Level::Warn,
+            "previous session PANICKED during shutdown (a panic was logged after its shutdown marker; the panic hook reported the panic itself) -- see #539".to_string(),
+        )),
         PreviousSessionOutcome::WentDownWithTheMachine => Some((
             log::Level::Info,
             format!(
@@ -5519,19 +5918,19 @@ fn previous_session_log_line(report: &PreviousSessionReport) -> Option<(log::Lev
             CrashAttribution::Unattributed { .. } => Some((
                 log::Level::Warn,
                 format!(
-                    "previous session VANISHED mid-meeting (no shutdown marker; a crash report exists but is NOT attributable to this session, so it explains nothing){sleep_note} -- see #878/#105"
+                    "previous session VANISHED mid-meeting (no shutdown marker; a crash report exists but is NOT attributable to this session, so it explains nothing){sleep_note}{build_note} -- see #878/#105"
                 ),
             )),
             CrashAttribution::NoReport => Some((
                 log::Level::Warn,
                 format!(
-                    "previous session VANISHED mid-meeting (no shutdown marker, no crash report){sleep_note} -- see #878"
+                    "previous session VANISHED mid-meeting (no shutdown marker, no crash report){sleep_note}{build_note} -- see #878"
                 ),
             )),
             CrashAttribution::NotScanned => Some((
                 log::Level::Warn,
                 format!(
-                    "previous session VANISHED mid-meeting (no shutdown marker; no crash report was scanned for -- nothing on record identifies the previous session){sleep_note} -- see #878"
+                    "previous session VANISHED mid-meeting (no shutdown marker; no crash report was scanned for -- nothing on record identifies the previous session){sleep_note}{build_note} -- see #878"
                 ),
             )),
         },
@@ -5552,11 +5951,17 @@ fn previous_session_sentry_event(report: &PreviousSessionReport) -> Option<Sentr
         CrashAttribution::NotScanned => VanishedSessionCrashReportTag::NotApplicable,
     };
     Some(SentryDiagnosticEvent::PreviousSessionVanished(
-        PreviousSessionVanishedDiagnostic { crash_report },
+        PreviousSessionVanishedDiagnostic {
+            crash_report,
+            previous_build: previous_build_tag(
+                report.previous_version.as_deref(),
+                env!("CARGO_PKG_VERSION"),
+            ),
+        },
     ))
 }
 
-fn report_previous_session(report: &PreviousSessionReport) {
+fn report_previous_session(report: &PreviousSessionReport, previous_log_tail: &[String]) {
     if let Some((level, message)) = crash_report_log_line(report) {
         log::log!(level, "{message}");
     }
@@ -5572,7 +5977,8 @@ fn report_previous_session(report: &PreviousSessionReport) {
     // invisible until the next launch, and a machine that never relaunches
     // never reports it.
     if let CrashAttribution::Attributed { cause, .. } = &report.crash {
-        if let Some(event) = native_crash_report_event(cause) {
+        let segment = previous_session_segment(previous_log_tail);
+        if let Some(event) = native_crash_report_event(cause, segment) {
             sentry::capture_event(event);
         }
     }
@@ -5994,7 +6400,17 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
                 | "not_applicable"
         ),
         "camera_direction" => matches!(value, "publish" | "receive" | "not_applicable"),
-        "recovery_action" => matches!(value, "reanchor" | "letterbox" | "not_applicable"),
+        "recovery_action" => matches!(
+            value,
+            "reanchor"
+                | "letterbox"
+                | "republish"
+                | "software_encoder"
+                | "not_wired"
+                | "exhausted"
+                | "recovery_republish_failed"
+                | "not_applicable"
+        ),
         "playout_transition" => {
             matches!(value, "repointed" | "unavailable" | "not_applicable")
         },
@@ -6045,6 +6461,7 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
             value,
             "found" | "not_found" | "unverified" | "not_applicable"
         ),
+        "previous_build" => matches!(value, "same" | "different" | "unknown" | "not_applicable"),
         "pressure_level" => matches!(value, "warn" | "critical" | "not_applicable"),
         // #106: the closed set mirrored from `platform::mem::VmOwner`. Kept a
         // hand-written `matches!` rather than a loop over `MemoryOwnerTag` so
@@ -6127,6 +6544,12 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
         | "held_native_surfaces"
         | "recovery_burst"
         | "concurrent_shares" => matches!(value, "0" | "1" | "2" | "3_plus" | "not_applicable"),
+        "degenerate_axis" => matches!(value, "width" | "height" | "both" | "not_applicable"),
+        "capture_occlusion" => matches!(
+            value,
+            "none" | "partial" | "mostly" | "full" | "unknown" | "not_applicable"
+        ),
+        "occluded_by_petal" => matches!(value, "yes" | "no" | "unknown" | "not_applicable"),
         "sharer_kind" => matches!(value, "native" | "web" | "not_applicable"),
         "remote_video_hold_reason" => {
             matches!(value, "no_frame_watchdog" | "not_held" | "not_applicable")
@@ -7027,6 +7450,7 @@ mod tests {
             executable: Some(FIELD_EXECUTABLE.to_string()),
             started_unix: None,
             boot_time_epoch: Some(1_787_686_278),
+            build_version: None,
         }
     }
 
@@ -7139,7 +7563,7 @@ mod tests {
             None,
         );
         let events = match &report.crash {
-            CrashAttribution::Attributed { cause, .. } => native_crash_report_event(cause)
+            CrashAttribution::Attributed { cause, .. } => native_crash_report_event(cause, &[])
                 .into_iter()
                 .filter_map(scrub_event_for_sentry)
                 .collect(),
@@ -7341,7 +7765,31 @@ mod tests {
 
     fn deep_crash_event(frames: usize, first_image: &str, subtype: &str, os_build: &str) -> sentry::protocol::Event<'static> {
         let facts = crash_report_facts_from_text(&ips_deep_crash_body(frames, first_image, subtype, os_build));
-        scrub_event_for_sentry(native_crash_report_event(&facts.cause).unwrap()).unwrap()
+        scrub_event_for_sentry(native_crash_report_event(&facts.cause, &[]).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_native_crash_event_carries_the_previous_sessions_log_tail_scrubbed() {
+        let facts = crash_report_facts_from_text(&ips_deep_crash_body(4, "WebCore", "KERN_INVALID_ADDRESS at 0x0", "25A354"));
+        let mut tail: Vec<String> = (0..60)
+            .map(|i| format!("2026-10-23 16:54:{:02}.000 [INFO] [desktop_lib::compositor] step {i}", i % 60))
+            .collect();
+        tail.push("2026-10-23 16:54:30.500 [DEBUG] [desktop_lib::compositor] noisy".into());
+        tail.push("2026-10-23 16:54:30.600 [WARN] [desktop_lib::region_window] closing /Users/alice/Library/x for room 'Secret Plans'".into());
+        tail.push("not a log line".into());
+        let event = scrub_event_for_sentry(native_crash_report_event(&facts.cause, &tail).unwrap()).unwrap();
+        let crumbs = &event.breadcrumbs.values;
+        // The last 40 lines; the DEBUG line and the unparseable one are dropped.
+        assert_eq!(crumbs.len(), 38);
+        assert_eq!(crumbs[0].message.as_deref(), Some("step 23"));
+        let last = crumbs.last().unwrap();
+        assert_eq!(last.level, sentry::protocol::Level::Warning);
+        assert_eq!(last.category.as_deref(), Some("previous-session:desktop_lib::region_window"));
+        let message = last.message.as_deref().unwrap();
+        assert!(!message.contains("alice"), "home directory user name must be redacted: {message}");
+        assert!(!message.contains("Secret Plans"), "room name must be redacted: {message}");
+        assert!(crumbs.iter().all(|c| c.data.is_empty()));
+        assert!(previous_session_breadcrumbs(&[]).is_empty());
     }
 
     #[test]
@@ -7448,7 +7896,7 @@ mod tests {
         let CrashAttribution::Attributed { cause, .. } = &report.crash else {
             panic!("{:?}", report.crash);
         };
-        let event = scrub_event_for_sentry(native_crash_report_event(cause).unwrap()).unwrap();
+        let event = scrub_event_for_sentry(native_crash_report_event(cause, &[]).unwrap()).unwrap();
         assert_eq!(event.exception[0].ty, "EXC_UNKNOWN");
         assert_eq!(
             event.exception[0].value.as_deref(),
@@ -7575,6 +8023,7 @@ mod tests {
             Some(SentryDiagnosticEvent::PreviousSessionVanished(
                 PreviousSessionVanishedDiagnostic {
                     crash_report: VanishedSessionCrashReportTag::Unverified,
+                    previous_build: PreviousBuildTag::Unknown,
                 }
             ))
         );
@@ -7675,6 +8124,7 @@ mod tests {
             Some(SentryDiagnosticEvent::PreviousSessionVanished(
                 PreviousSessionVanishedDiagnostic {
                     crash_report: VanishedSessionCrashReportTag::NotFound,
+                    previous_build: PreviousBuildTag::Unknown,
                 }
             ))
         );
@@ -7886,6 +8336,446 @@ mod tests {
             classify(&["session: joined room ops", "quit: quit_app invoked"]),
             PreviousSessionOutcome::CleanShutdown
         );
+    }
+
+    // PETAL-DESKTOP-22: orderly exits that skip `quit_app` (update relaunch,
+    // Cmd-Q, logout) must leave a shutdown line; a kill must not.
+    #[test]
+    fn run_event_exit_and_restart_lines_count_as_shutdown() {
+        let exit = run_event_shutdown_line(&tauri::RunEvent::Exit).expect("Exit logs a line");
+        let restart = exit_requested_shutdown_line(Some(tauri::RESTART_EXIT_CODE))
+            .expect("restart request logs a line");
+        assert!(exit.contains(QUIT_APP_EXIT_MARKER), "{exit}");
+        assert!(restart.contains(QUIT_RESTART_MARKER), "{restart}");
+        assert_ne!(exit, restart, "log reader must tell a quit from a restart");
+        for line in [exit, restart] {
+            assert_eq!(
+                classify(&["session: joined room ops", "camera publish health -- ok", line]),
+                PreviousSessionOutcome::CleanShutdown,
+                "{line}"
+            );
+        }
+        // A plain exit request (code None / 0) is followed by `Exit`; only
+        // the restart code gets its own line.
+        assert_eq!(exit_requested_shutdown_line(None), None);
+        assert_eq!(exit_requested_shutdown_line(Some(0)), None);
+    }
+
+    #[test]
+    fn run_event_markers_are_terminal_even_with_later_activity() {
+        assert_eq!(
+            classify(&[
+                "session: joined room ops",
+                "quit: app exit (RunEvent::Exit)",
+                "compositor feed: ok",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+        assert_eq!(
+            classify(&[
+                "session: joined room ops",
+                "quit: restart requested (RunEvent::ExitRequested)",
+                "camera publish health -- ok",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+        // "left room" stays position-sensitive.
+        assert_eq!(
+            classify(&[
+                "session: joined room ops",
+                "session: left room ops",
+                "session: joined room ops",
+                "compositor feed: ok",
+            ]),
+            PreviousSessionOutcome::Vanished
+        );
+        assert_eq!(
+            classify(&["session: joined room ops", "compositor feed: ok"]),
+            PreviousSessionOutcome::Vanished
+        );
+    }
+
+    #[test]
+    fn crash_like_tails_still_read_as_vanished() {
+        for tail in [
+            &["session: joined room ops", "compositor feed: ok"][..],
+            // The marker must not be matched by near-miss lines.
+            &["session: joined room ops", "quit: requested by user, not yet exiting"][..],
+            &["session: joined room ops", "updater: installed; relaunching"][..],
+        ] {
+            assert_eq!(classify(tail), PreviousSessionOutcome::Vanished, "{tail:?}");
+        }
+    }
+
+    /// Drives the real file sink with the line the real run-event helper
+    /// produces, then classifies what was read back off disk.
+    #[test]
+    fn run_event_exit_line_reaches_the_log_file_and_classifies_clean() {
+        let dir = temp_dir("run-event-exit-marker");
+        let sink = DailyLogSink::new(dir.clone());
+        let write = |msg: &str| {
+            log::Log::log(
+                &sink,
+                &log::Record::builder()
+                    .args(format_args!("{msg}"))
+                    .level(log::Level::Info)
+                    .target("test")
+                    .build(),
+            )
+        };
+        write("session: joined room ops");
+        write(run_event_shutdown_line(&tauri::RunEvent::Exit).unwrap());
+        log::Log::flush(&sink);
+        let path = dir.join(daily_log_file_name(&today_utc_string()));
+        let lines: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            classify_previous_session(&lines, CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::CleanShutdown
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The marker must survive a `RUST_LOG` that still admits meeting
+    /// activity but filters the module the marker is logged from. Drives
+    /// the real `resolve_log_filter` + `log_dispatch` + file sink chain.
+    #[test]
+    fn shutdown_marker_survives_rust_log_filtering() {
+        for spec in ["info,desktop_lib::logging=warn", "warn,desktop_lib::session=info", "error"] {
+            let dir = temp_dir("shutdown-marker-filtered");
+            let resolved = resolve_log_filter(Some(spec));
+            assert!(resolved.parse_warning.is_none(), "{spec}");
+            let (_, dispatch) = log_dispatch(resolved.filter, resolved.max_level)
+                .chain(Box::new(DailyLogSink::new(dir.clone())) as Box<dyn log::Log>)
+                .into_log();
+            let logger = RepeatSuppressingLog::new(dispatch);
+            let info = |target: &str, msg: &str| {
+                log::Log::log(
+                    &logger,
+                    &log::Record::builder()
+                        .args(format_args!("{msg}"))
+                        .level(log::Level::Info)
+                        .target(target)
+                        .build(),
+                )
+            };
+            info("desktop_lib::session", "session: joined room ops");
+            info("desktop_lib::logging", "logging: filtered probe");
+            write_shutdown_marker(&logger, run_event_shutdown_line(&tauri::RunEvent::Exit).unwrap());
+            let path = dir.join(daily_log_file_name(&today_utc_string()));
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(!text.contains("logging: filtered probe"), "{spec}: filter not applied\n{text}");
+            assert!(text.contains(QUIT_APP_EXIT_MARKER), "{spec}: marker dropped\n{text}");
+            if spec.starts_with("info,") {
+                assert!(text.contains("session: joined room ops"), "{spec}\n{text}");
+                let lines: Vec<String> = text.lines().map(str::to_string).collect();
+                assert_eq!(
+                    classify_previous_session(&lines, CrashAttribution::NoReport, None).outcome,
+                    PreviousSessionOutcome::CleanShutdown,
+                    "{spec}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// `tauri::RunEvent::ExitRequested` cannot be constructed outside tauri
+    /// (its `api` field is private), so pin the wiring by source: the
+    /// `.run(...)` callback is `handle_run_event`, whose first statement
+    /// logs through the helper tested above.
+    #[test]
+    fn the_run_callback_logs_the_shutdown_line_first() {
+        let lib = include_str!("lib.rs");
+        // One per `run()`: macOS and the non-macOS (Windows) entry point
+        // both hand `.run(...)` a callback (#526: Windows had none at all).
+        assert_eq!(
+            lib.matches(".run(handle_run_event);").count(),
+            2,
+            "both run() entry points must wire the run-event callback"
+        );
+        for cfg in ["#[cfg(target_os = \"macos\")]", "#[cfg(not(target_os = \"macos\"))]"] {
+            let body = lib
+                .split(&format!("{cfg}\nfn handle_run_event("))
+                .nth(1)
+                .unwrap_or_else(|| panic!("{cfg} handle_run_event exists"));
+            let stmts: Vec<&str> = body
+                .lines()
+                .skip(1)
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with("//"))
+                .take(3)
+                .collect();
+            let at = stmts
+                .iter()
+                .position(|l| *l == "logging::log_run_event_shutdown(&event);")
+                .unwrap_or_else(|| panic!("{cfg}: marker call within the first statements"));
+            assert!(at == 0 || !stmts[at - 1].starts_with("#[cfg"), "{cfg}: {stmts:?}");
+        }
+        let helper = include_str!("logging.rs")
+            .split("pub(crate) fn log_run_event_shutdown(")
+            .nth(1)
+            .expect("helper exists");
+        let helper = &helper[..helper.find("\n}\n").unwrap()];
+        assert!(helper.contains("write_shutdown_marker(log::logger(), line)"), "{helper}");
+    }
+
+    /// #526: the Windows installer hand-off exits via `std::process::exit`,
+    /// so the updater hook's line is that exit's only marker. Drives the
+    /// real filter + dispatch + file sink, under a `RUST_LOG` that filters
+    /// the updater module, then classifies what was read back.
+    #[test]
+    fn updater_handoff_marker_survives_filtering_and_classifies_clean() {
+        let dir = temp_dir("updater-handoff-marker");
+        let resolved = resolve_log_filter(Some("warn,desktop_lib::session=info"));
+        let (_, dispatch) = log_dispatch(resolved.filter, resolved.max_level)
+            .chain(Box::new(DailyLogSink::new(dir.clone())) as Box<dyn log::Log>)
+            .into_log();
+        let logger = RepeatSuppressingLog::new(dispatch);
+        let info = |target: &str, msg: &str| {
+            log::Log::log(
+                &logger,
+                &log::Record::builder()
+                    .args(format_args!("{msg}"))
+                    .level(log::Level::Info)
+                    .target(target)
+                    .build(),
+            )
+        };
+        info("desktop_lib::session", "windows session: joined room ops");
+        info("desktop_lib::updater", "updater: installed; relaunching");
+        // Periodic writers may still log while the installer starts.
+        info("desktop_lib::session", "compositor feed: ok");
+        let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
+        let path = dir.join(daily_log_file_name(&today_utc_string()));
+        let before = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            classify_previous_session(&lines(&before), CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::Vanished,
+            "without the marker the hand-off must read as VANISHED\n{before}"
+        );
+        write_shutdown_marker(&logger, UPDATER_HANDOFF_SHUTDOWN_LINE);
+        info("desktop_lib::session", "compositor feed: still ok");
+        let after = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(after.contains(UPDATER_HANDOFF_SHUTDOWN_LINE), "marker dropped\n{after}");
+        assert!(!after.contains("updater: installed"), "filter not applied\n{after}");
+        assert_eq!(
+            classify_previous_session(&lines(&after), CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::CleanShutdown,
+            "{after}"
+        );
+        // The installer failed to launch: the session lives on, so a later
+        // death must read as VANISHED again, not as the earlier hand-off.
+        write_shutdown_marker(&logger, UPDATER_HANDOFF_FAILED_LINE);
+        info("desktop_lib::session", "compositor feed: ok after failed hand-off");
+        let revoked = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(revoked.contains(UPDATER_HANDOFF_FAILED_LINE), "revocation dropped\n{revoked}");
+        assert_eq!(
+            classify_previous_session(&lines(&revoked), CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::Vanished,
+            "{revoked}"
+        );
+        // ...and a real exit after the revocation is clean again.
+        write_shutdown_marker(&logger, run_event_shutdown_line(&tauri::RunEvent::Exit).unwrap());
+        let exited = std::fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            classify_previous_session(&lines(&exited), CrashAttribution::NoReport, None).outcome,
+            PreviousSessionOutcome::CleanShutdown,
+            "{exited}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The revocation must also hold when nothing logs after it: the
+    /// hand-off marker sits after the last activity line (#526).
+    #[test]
+    fn a_revoked_handoff_with_no_later_activity_reads_as_vanished() {
+        let tail = [
+            "windows session: joined room ops",
+            UPDATER_HANDOFF_SHUTDOWN_LINE,
+            UPDATER_HANDOFF_FAILED_LINE,
+        ];
+        assert_eq!(classify(&tail), PreviousSessionOutcome::Vanished);
+        assert_eq!(classify(&tail[..2]), PreviousSessionOutcome::CleanShutdown);
+        // A clean leave after the revocation still counts.
+        assert_eq!(
+            classify(&[
+                "windows session: joined room ops",
+                UPDATER_HANDOFF_SHUTDOWN_LINE,
+                UPDATER_HANDOFF_FAILED_LINE,
+                "session: left room ops",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+    }
+
+    /// #539: the run-event marker is written BEFORE exit cleanup, so a
+    /// panic in that cleanup lands after it. Drives the real filter +
+    /// dispatch + file sink and classifies what was read back off disk.
+    #[test]
+    fn a_panic_after_the_shutdown_marker_is_a_crash_during_shutdown() {
+        let source = include_str!("logging.rs");
+        assert!(
+            source.contains(r#"log::error!(target: PANIC_HOOK_LOG_TARGET, "PANIC at {location}: {message}");"#),
+            "the panic hook must keep logging under PANIC_HOOK_LOG_TARGET"
+        );
+        assert_eq!(PANIC_HOOK_LINE_SIGNATURE, format!("[{PANIC_HOOK_LOG_TARGET}] PANIC at "));
+        let dir = temp_dir("panic-after-shutdown-marker");
+        let resolved = resolve_log_filter(Some("warn,desktop_lib::session=info"));
+        let (_, dispatch) = log_dispatch(resolved.filter, resolved.max_level)
+            .chain(Box::new(DailyLogSink::new(dir.clone())) as Box<dyn log::Log>)
+            .into_log();
+        let logger = RepeatSuppressingLog::new(dispatch);
+        let emit = |level: log::Level, target: &str, msg: &str| {
+            log::Log::log(
+                &logger,
+                &log::Record::builder()
+                    .args(format_args!("{msg}"))
+                    .level(level)
+                    .target(target)
+                    .build(),
+            )
+        };
+        let read = || {
+            std::fs::read_to_string(dir.join(daily_log_file_name(&today_utc_string())))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let outcome = |lines: &[String]| {
+            classify_previous_session(lines, CrashAttribution::NoReport, None).outcome
+        };
+        emit(log::Level::Info, "desktop_lib::session", "session: joined room ops");
+        write_shutdown_marker(&logger, run_event_shutdown_line(&tauri::RunEvent::Exit).unwrap());
+        emit(log::Level::Info, "desktop_lib::session", "compositor feed: ok");
+        let marker_only = read();
+        assert_eq!(outcome(&marker_only), PreviousSessionOutcome::CleanShutdown, "{marker_only:?}");
+        emit(
+            log::Level::Error,
+            PANIC_HOOK_LOG_TARGET,
+            "PANIC at src/lib.rs:1:1: exit cleanup failed",
+        );
+        let panicked = read();
+        assert_eq!(
+            outcome(&panicked),
+            PreviousSessionOutcome::CrashedDuringShutdown,
+            "{panicked:?}"
+        );
+        let report = classify_previous_session(&panicked, CrashAttribution::NoReport, None);
+        assert_eq!(previous_session_sentry_event(&report), None, "not a VANISHED event");
+        assert!(previous_session_log_line(&report).is_some_and(|(level, line)| {
+            level == log::Level::Warn && !line.contains("VANISHED")
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panics_outside_an_effective_shutdown_do_not_read_as_crash_during_shutdown() {
+        let panic = "2026-01-01 00:00:00.000 [ERROR] [petal::panic_hook_internal] PANIC at x.rs:1:1: boom";
+        // A line that only NAMES the panic target is not a panic.
+        assert_eq!(
+            classify(&[
+                "session: joined room ops",
+                QUIT_APP_EXIT_MARKER,
+                "2026-01-01 00:00:00.000 [INFO] [desktop_lib::logging] filter skips petal::panic_hook_internal",
+            ]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+        // An OLDER session's shutdown panic is cut off by the segmenter.
+        assert_eq!(
+            analyze_fixture(
+                &[
+                    "petal: app startup begin",
+                    "session: joined room ops",
+                    QUIT_APP_EXIT_MARKER,
+                    panic,
+                    "petal: app startup begin",
+                    "session: joined room ops",
+                    QUIT_APP_EXIT_MARKER,
+                ],
+                None,
+                None,
+                None,
+            )
+            .outcome,
+            PreviousSessionOutcome::CleanShutdown
+        );
+        // Before the marker: the session survived it and then exited.
+        assert_eq!(
+            classify(&["session: joined room ops", panic, QUIT_APP_EXIT_MARKER]),
+            PreviousSessionOutcome::CleanShutdown
+        );
+        // After a REVOKED marker: the session lived on, so the verdict is
+        // the ordinary in-meeting one (#526), not a shutdown crash.
+        assert_eq!(
+            classify(&[
+                "windows session: joined room ops",
+                UPDATER_HANDOFF_SHUTDOWN_LINE,
+                UPDATER_HANDOFF_FAILED_LINE,
+                panic,
+            ]),
+            PreviousSessionOutcome::Vanished
+        );
+        // After the updater hand-off marker that was NOT revoked.
+        assert_eq!(
+            classify(&["windows session: joined room ops", UPDATER_HANDOFF_SHUTDOWN_LINE, panic]),
+            PreviousSessionOutcome::CrashedDuringShutdown
+        );
+    }
+
+    #[test]
+    fn the_revocation_line_is_not_itself_a_shutdown_marker() {
+        assert!(UPDATER_HANDOFF_FAILED_LINE.contains(SHUTDOWN_MARKER_REVOKED));
+        for marker in VANISHED_SESSION_SHUTDOWN_MARKERS {
+            assert!(!UPDATER_HANDOFF_FAILED_LINE.contains(marker), "{marker}");
+        }
+    }
+
+    #[test]
+    fn previous_build_tag_distinguishes_update_relaunch() {
+        assert_eq!(previous_build_tag(None, "0.9.37"), PreviousBuildTag::Unknown);
+        assert_eq!(previous_build_tag(Some("0.9.37"), "0.9.37"), PreviousBuildTag::Same);
+        assert_eq!(previous_build_tag(Some("0.9.36"), "0.9.37"), PreviousBuildTag::Different);
+    }
+
+    #[test]
+    fn vanish_event_carries_the_previous_build_tag_and_passes_the_allowlist() {
+        let mut identity = field_identity(4242);
+        identity.build_version = Some("0.0.1-previous".to_string());
+        let report = analyze_fixture(
+            &["session: joined room ops", "compositor feed: ok"],
+            Some(identity),
+            None,
+            None,
+        );
+        assert_eq!(report.previous_version.as_deref(), Some("0.0.1-previous"));
+        let Some(SentryDiagnosticEvent::PreviousSessionVanished(diag)) =
+            previous_session_sentry_event(&report)
+        else {
+            panic!("a vanish must produce the diagnostic");
+        };
+        assert_eq!(diag.previous_build, PreviousBuildTag::Different);
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::PreviousSessionVanished(diag),
+            "1",
+        );
+        assert_eq!(event.tags.get("previous_build").map(String::as_str), Some("different"));
+        assert!(valid_sentry_diagnostic_event(&event));
+        let (_, message) = previous_session_log_line(&report).unwrap();
+        assert!(message.contains("previous build 0.0.1-previous"), "{message}");
+    }
+
+    #[test]
+    fn session_identity_records_the_build_and_old_files_still_load() {
+        assert_eq!(
+            current_session_identity().build_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        let old: SessionIdentityRecord = serde_json::from_str(r#"{"pid":7}"#).unwrap();
+        assert_eq!(old.build_version, None);
     }
 
     #[test]
@@ -10342,6 +11232,8 @@ mod tests {
                 recovery_burst: SmallCountBucketTag::from_count(3),
                 concurrent_shares: SmallCountBucketTag::Two,
                 silent_for: SinceLastFrameBucketTag::OneToFiveMinutes,
+                occlusion: CaptureOcclusionTag::Full,
+                occluded_by_petal: OccludedByPetalTag::Yes,
             }),
             "1",
         );
@@ -10353,12 +11245,15 @@ mod tests {
         assert_eq!(tag("recovery_burst"), Some("3_plus"));
         assert_eq!(tag("concurrent_shares"), Some("2"));
         assert_eq!(tag("since_last_frame_bucket"), Some("1_5m"));
+        assert_eq!(tag("capture_occlusion"), Some("full"));
+        assert_eq!(tag("occluded_by_petal"), Some("yes"));
         assert_eq!(
             event.message.as_deref(),
             Some(
                 "diagnostic: capture-raw-stalled raw_capture_action=hold_on_pulls \
                  raw_silence_cause=no_callbacks snapshot_content=changing \
-                 stream_updates_since_frame=1 held_native_surfaces=3_plus"
+                 stream_updates_since_frame=1 held_native_surfaces=3_plus \
+                 capture_occlusion=full occluded_by_petal=yes"
             )
         );
         assert!(valid_sentry_diagnostic_event(&event));
@@ -10381,10 +11276,128 @@ mod tests {
             "held_native_surfaces",
             "recovery_burst",
             "concurrent_shares",
+            "capture_occlusion",
+            "occluded_by_petal",
         ] {
             assert_eq!(event.tags.get(key).map(String::as_str), Some("not_applicable"), "{key}");
         }
         assert!(valid_sentry_diagnostic_event(&event));
+    }
+
+    #[test]
+    fn encoder_wedge_events_carry_the_action_and_pass_before_send() {
+        for (event, name, action) in [
+            (
+                SentryDiagnosticEvent::EncoderWedged(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::SoftwareEncoder,
+                }),
+                "encoder-wedged",
+                "software_encoder",
+            ),
+            (
+                SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::Exhausted,
+                }),
+                "encoder-wedge-exhausted",
+                "exhausted",
+            ),
+            (
+                SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::RecoveryRepublishFailed,
+                }),
+                "encoder-wedge-exhausted",
+                "recovery_republish_failed",
+            ),
+        ] {
+            let event = build_sentry_diagnostic_event(event, "1");
+            assert_eq!(
+                event.message.as_deref(),
+                Some(format!("diagnostic: {name} session_role=sharer recovery_action={action}").as_str())
+            );
+            assert!(valid_sentry_diagnostic_event(&event), "{name} must pass before_send");
+            assert!(scrub_event_for_sentry(event).is_some());
+        }
+    }
+
+    #[test]
+    fn degenerate_frame_skipped_is_a_registered_valid_diagnostic_event() {
+        assert!(DIAGNOSTIC_EVENT_NAMES.contains(&"degenerate-frame-skipped"));
+        assert_eq!(
+            diagnostic_message_tags("degenerate-frame-skipped"),
+            Some(DEGENERATE_FRAME_MESSAGE_TAGS)
+        );
+        let event = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::DegenerateFrameSkipped(DegenerateFrameDiagnostic {
+                frame_geometry: GeometryBucket::Tiny,
+                published_geometry: GeometryBucket::Large,
+                axis: DegenerateAxisTag::Height,
+            }),
+            "1",
+        );
+        assert_eq!(
+            event.message.as_deref(),
+            Some("diagnostic: degenerate-frame-skipped session_role=sharer capture_geometry=tiny configured_geometry=large degenerate_axis=height")
+        );
+        assert_eq!(event.tags.len(), DIAGNOSTIC_TAGS.len());
+        assert!(valid_sentry_diagnostic_event(&event));
+        assert!(scrub_event_for_sentry(event).is_some());
+        for axis in [DegenerateAxisTag::Width, DegenerateAxisTag::Height, DegenerateAxisTag::Both] {
+            let event = build_sentry_diagnostic_event(
+                SentryDiagnosticEvent::DegenerateFrameSkipped(DegenerateFrameDiagnostic {
+                    frame_geometry: GeometryBucket::Tiny,
+                    published_geometry: GeometryBucket::Tiny,
+                    axis,
+                }),
+                "1",
+            );
+            assert_eq!(event.tags.get("degenerate_axis").map(String::as_str), Some(axis.tag()));
+            assert!(valid_sentry_diagnostic_event(&event), "{axis:?}");
+        }
+        // Every other event reports the new tag as not_applicable.
+        let other = build_sentry_diagnostic_event(
+            SentryDiagnosticEvent::DescriptorPressure(DescriptorPressureDiagnostic {
+                stage: DescriptorPressureStageTag::Exhausted,
+            }),
+            "1",
+        );
+        assert_eq!(other.tags.get("degenerate_axis").map(String::as_str), Some("not_applicable"));
+    }
+
+    #[test]
+    fn capture_occlusion_tags_are_closed_buckets_that_pass_the_allowlist() {
+        assert_eq!(CaptureOcclusionTag::from_fraction(0.0), CaptureOcclusionTag::None);
+        assert_eq!(CaptureOcclusionTag::from_fraction(0.3), CaptureOcclusionTag::Partial);
+        assert_eq!(CaptureOcclusionTag::from_fraction(0.9), CaptureOcclusionTag::Mostly);
+        assert_eq!(CaptureOcclusionTag::from_fraction(0.95), CaptureOcclusionTag::Full);
+        for occ in [
+            CaptureOcclusionTag::None,
+            CaptureOcclusionTag::Partial,
+            CaptureOcclusionTag::Mostly,
+            CaptureOcclusionTag::Full,
+            CaptureOcclusionTag::Unknown,
+        ] {
+            for by_petal in [OccludedByPetalTag::Yes, OccludedByPetalTag::No, OccludedByPetalTag::Unknown] {
+                let event = build_sentry_diagnostic_event(
+                    SentryDiagnosticEvent::CaptureRawStalled(CaptureRawStalledDiagnostic {
+                        source: SourceSelectionClass::Window,
+                        action: RawCaptureActionTag::Restart,
+                        cause: RawSilenceCauseTag::NoCallbacks,
+                        snapshot_content: SnapshotContentTag::Changing,
+                        stream_updates: SmallCountBucketTag::Zero,
+                        held_surfaces: SmallCountBucketTag::Zero,
+                        recovery_burst: SmallCountBucketTag::One,
+                        concurrent_shares: SmallCountBucketTag::One,
+                        silent_for: SinceLastFrameBucketTag::UnderOneMinute,
+                        occlusion: occ,
+                        occluded_by_petal: by_petal,
+                    }),
+                    "1",
+                );
+                assert!(valid_sentry_diagnostic_event(&event));
+            }
+        }
+        assert!(!valid_diagnostic_tag("capture_occlusion", "Safari"));
+        assert!(!valid_diagnostic_tag("occluded_by_petal", "maybe"));
     }
 
     #[test]

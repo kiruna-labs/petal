@@ -231,6 +231,7 @@ impl From<CaptureError> for ShareSessionError {
             CaptureError::DisplayNotFound(id) => Self::DisplayNotFound(id),
             CaptureError::WindowCaptureExcluded(id) => Self::WindowCaptureExcluded(id),
             CaptureError::ScreenCaptureKit(msg) => Self::Capture(msg),
+            e @ CaptureError::DegenerateSourceSize(_) => Self::Capture(e.to_string()),
         }
     }
 }
