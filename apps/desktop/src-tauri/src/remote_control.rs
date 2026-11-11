@@ -7408,6 +7408,8 @@ pub(crate) mod input {
         fn CGEventPost(tap: u32, event: *mut c_void);
         fn CGEventCreate(source: *const c_void) -> *mut c_void;
         fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+        // #529: HID-level (physical) button state; see `host_button_is_down`.
+        fn CGEventSourceButtonState(state: u32, button: u32) -> bool;
         fn CFRetain(cf: *const c_void) -> *const c_void;
         fn CFRelease(cf: *const c_void);
         fn dlopen(path: *const c_char, mode: i32) -> *mut c_void;
@@ -10641,6 +10643,13 @@ pub(crate) mod input {
         fn petal_click_through_window_ids(&self) -> Vec<u32> {
             Vec::new()
         }
+
+        /// #529: is the host's PHYSICAL `button` down right now? Defaults to
+        /// false (nobody at the host's mouse) so recording backends are
+        /// unaffected.
+        fn host_button_is_down(&self, _button: RemoteControlButton) -> bool {
+            false
+        }
     }
 
     pub(super) struct SystemSessionTapBackend;
@@ -10764,6 +10773,13 @@ pub(crate) mod input {
 
         fn move_cursor(&self, point: super::GlobalPoint) -> Result<(), String> {
             self.post_mouse(point, RemoteControlButton::Left, MouseKind::Moved, 1)
+        }
+
+        fn host_button_is_down(&self, button: RemoteControlButton) -> bool {
+            // kCGEventSourceStateHIDSystemState = 1: hardware sources only.
+            // Our CGEventPost(kCGSessionEventTap) posts enter downstream of
+            // it, so a held session-tap Down never reads as down here.
+            unsafe { CGEventSourceButtonState(1, button_number(button)) }
         }
 
         fn raise(&self, pid: i32, window_id: u32) -> bool {
@@ -13191,6 +13207,15 @@ pub(crate) mod input {
             (open, remaining)
         };
         for (point, button) in &open {
+            // #529: a record (often stale: the controller's Up was lost) must
+            // not end the sharer's own physical drag. Their HID Up releases
+            // the button, so dropping the record is enough.
+            if tap.host_button_is_down(*button) {
+                log::info!(
+                    "remote-control: session-tap cancellation release skipped window_id={window_id} button={button:?} reason=local-drag-in-progress"
+                );
+                continue;
+            }
             let kind = match button {
                 RemoteControlButton::Left => MouseKind::LeftUp,
                 RemoteControlButton::Right => MouseKind::RightUp,
@@ -15102,6 +15127,9 @@ pub(crate) mod input {
             stack: Option<Vec<StackWindow>>,
             /// #334: Petal panels reported click-through by construction.
             click_through: Vec<u32>,
+            /// #529: what `host_button_is_down` reports -- true simulates the
+            /// sharer physically holding the button.
+            host_button_down: std::sync::atomic::AtomicBool,
         }
 
         impl RecordingSessionTap {
@@ -15116,6 +15144,7 @@ pub(crate) mod input {
                     windows: vec![42],
                     stack: None,
                     click_through: Vec::new(),
+                    host_button_down: std::sync::atomic::AtomicBool::new(false),
                 }
             }
 
@@ -15391,6 +15420,10 @@ pub(crate) mod input {
 
             fn petal_click_through_window_ids(&self) -> Vec<u32> {
                 self.click_through.clone()
+            }
+
+            fn host_button_is_down(&self, _button: RemoteControlButton) -> bool {
+                self.host_button_down.load(Ordering::SeqCst)
             }
         }
 
@@ -21077,6 +21110,64 @@ pub(crate) mod input {
                 sl.events()
             );
             assert_eq!(tap.mouse_kinds(), Vec::<MouseKind>::new());
+        }
+
+        /// #529: open a session-tap gesture through the real dispatcher whose
+        /// controller Up is then lost, leaving a stale record.
+        fn open_session_tap_gesture(tap: &RecordingSessionTap) -> u32 {
+            let ax = ax_hostile_backend();
+            let sl = RecordingSlClickBackend::unavailable();
+            let sink = RecordingSink::default();
+            let pb = RecordingPasteboard::default();
+            let down = pointer_message(
+                RemoteControlAction::Down,
+                0.10,
+                0.10,
+                RemoteControlButton::Left,
+                0,
+            );
+            replay_with_backends(&down, unit_frame(), Some(1234), &sink, &ax, &sl, &pb, tap)
+                .unwrap();
+            assert_eq!(tap.mouse_kinds(), vec![MouseKind::LeftDown]);
+            assert_eq!(ax_gesture_count_for_tests(), 1);
+            down.window_id
+        }
+
+        /// #529: revoke-all (leave / disconnect / RC off) while the sharer is
+        /// physically dragging. The teardown must not post an Up that ends
+        /// their drag, and the stale record must still be dropped.
+        #[test]
+        fn revoke_all_release_does_not_end_the_hosts_own_physical_drag() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+            open_session_tap_gesture(&tap);
+            tap.host_button_down.store(true, Ordering::SeqCst);
+
+            super::super::clear_all_control_caches_with(&tap);
+
+            assert_eq!(
+                tap.mouse_kinds(),
+                vec![MouseKind::LeftDown],
+                "a stale record's teardown Up would end the sharer's own drag"
+            );
+            assert_eq!(ax_gesture_count_for_tests(), 0);
+        }
+
+        /// #529: the per-window drain path (share ended, revoke, deadline
+        /// abandon) shares the release; same guard.
+        #[test]
+        fn window_drain_release_does_not_end_the_hosts_own_physical_drag() {
+            let _guard = ax_test_lock();
+            clear_all_ax_control_state();
+            let tap = RecordingSessionTap::trusted();
+            let window_id = open_session_tap_gesture(&tap);
+            tap.host_button_down.store(true, Ordering::SeqCst);
+
+            release_session_tap_gestures_with_backend(window_id, None, &tap);
+
+            assert_eq!(tap.mouse_kinds(), vec![MouseKind::LeftDown]);
+            assert_eq!(ax_gesture_count_for_tests(), 0);
         }
 
         /// Source guard: `revoke_all` must reach the release through

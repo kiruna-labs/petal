@@ -17,7 +17,7 @@ use crate::screen_audio::{
 use crate::share_priority::SharePriority;
 use crate::time_util::now_us;
 use crate::transport::publisher::{
-    CaptureResolution, EncoderRecoveryStep, EncoderWedgeRecovery,
+    CaptureResolution, EncoderRecoveryStep, EncoderWedgeRecovery, WedgeRecoveryAttempt,
     PostWakeEncoderFallbackRecovery, RoomConnection, RoomConnectionError, ShareQuality,
     SharedSourceKind,
 };
@@ -9007,6 +9007,7 @@ async fn retry_post_wake_software_encoder_fallback(
         None,
         false,
         None,
+        None,
     )
     .await;
     log::info!(
@@ -9062,9 +9063,52 @@ pub(crate) async fn recover_wedged_encoder_publication(
     started_seq: u64,
     step: EncoderRecoveryStep,
 ) {
+    // #527: the wedged publication this recovery replaces. A superseded or
+    // failed attempt that leaves it in the slot is retried once; one that
+    // finds it already replaced (the replacement inherited the sticky
+    // settings) or the share gone stops.
+    let wedged: Arc<Mutex<Option<Arc<crate::transport::publisher::PublishedTrack>>>> =
+        Arc::default();
+    crate::transport::publisher::drive_wedge_recovery_step(step, |is_retry| {
+        let app = app.clone();
+        let wedged = wedged.clone();
+        async move {
+            let expected = wedged.lock_unpoisoned().clone();
+            let (attempt, observed) = wedged_encoder_recovery_attempt(
+                app,
+                window_id,
+                started_seq,
+                step,
+                is_retry,
+                expected,
+            )
+            .await;
+            let mut wedged = wedged.lock_unpoisoned();
+            if wedged.is_none() {
+                *wedged = observed;
+            }
+            attempt
+        }
+    })
+    .await;
+}
+
+/// One republish for `recover_wedged_encoder_publication`. Returns how it went
+/// and the publication that was live when it started.
+async fn wedged_encoder_recovery_attempt(
+    app: tauri::AppHandle,
+    window_id: u32,
+    started_seq: u64,
+    step: EncoderRecoveryStep,
+    is_retry: bool,
+    wedged: Option<Arc<crate::transport::publisher::PublishedTrack>>,
+) -> (
+    WedgeRecoveryAttempt,
+    Option<Arc<crate::transport::publisher::PublishedTrack>>,
+) {
     let state = app.state::<SessionState>();
     let state = state.inner();
-    let Some((room_connection, slot, republish_intent, intent_generation, capture_config)) = ({
+    let Some((room_connection, slot, republish_intent, intent_generation, capture_config, live)) = ({
         let guard = state.inner.lock_unpoisoned();
         let share = guard
             .shares
@@ -9075,22 +9119,37 @@ pub(crate) async fn recover_wedged_encoder_publication(
                 .joined
                 .as_ref()
                 .map(|joined| joined.room_connection.clone())?;
+            let live = share.published.lock_unpoisoned().clone();
+            if wedged
+                .as_ref()
+                .is_some_and(|wedged| !Arc::ptr_eq(wedged, &live))
+            {
+                return None;
+            }
             let capture_config = share.capture.configuration_handle();
-            let intent_generation = begin_republish_intent(&share.republish_intent);
+            // The retry joins the CURRENT generation instead of starting a
+            // newer one, so it never supersedes a quality/resize intent that
+            // is queued or arrives later: that intent wins (#527).
+            let intent_generation = if is_retry {
+                share.republish_intent.generation.load(Ordering::SeqCst)
+            } else {
+                begin_republish_intent(&share.republish_intent)
+            };
             Some((
                 room_connection,
                 share.published.clone(),
                 share.republish_intent.clone(),
                 intent_generation,
                 capture_config,
+                live,
             ))
         })
     }) else {
         log::info!(
-            "session: skipping wedged-encoder recovery for stale share {window_id}/{started_seq} ({})",
+            "session: skipping wedged-encoder recovery for stale share {window_id}/{started_seq} ({}; share gone or its wedged publication already replaced)",
             step.description()
         );
-        return;
+        return (WedgeRecoveryAttempt::NoLongerNeeded, None);
     };
 
     let force_software_encoder = step.forces_software_encoder();
@@ -9100,7 +9159,7 @@ pub(crate) async fn recover_wedged_encoder_publication(
     let reason = format!("wedged encoder: {}", step.description());
     let outcome = republish_window_with_target(
         room_connection,
-        slot,
+        slot.clone(),
         republish_intent,
         intent_generation,
         &capture_config,
@@ -9117,17 +9176,29 @@ pub(crate) async fn recover_wedged_encoder_publication(
         None,
         force_software_encoder,
         Some(next_recovery),
+        wedged.as_ref(),
     )
     .await;
     log::warn!(
-        "session: window {window_id} wedged-encoder recovery ({}) {}",
+        "session: window {window_id} wedged-encoder recovery ({}{}) {}",
         step.description(),
+        if is_retry { ", retry" } else { "" },
         if outcome.replaced() {
             "republished the track"
         } else {
             "did not replace the active track"
         }
     );
+    let attempt = if outcome.replaced() {
+        WedgeRecoveryAttempt::Replaced
+    } else if !Arc::ptr_eq(&slot.lock_unpoisoned(), &live) {
+        // Whatever superseded this republish replaced the wedged publication
+        // (with the sticky encoder settings): nothing left to repair.
+        WedgeRecoveryAttempt::NoLongerNeeded
+    } else {
+        WedgeRecoveryAttempt::NotReplaced
+    };
+    (attempt, Some(live))
 }
 
 /// Repair a publication retired by a receiver's no-frame watchdog. The
@@ -9176,6 +9247,7 @@ pub async fn repair_active_share_publication(state: &SessionState, window_id: u3
         REPUBLISH_RETRY_ATTEMPTS,
         None,
         false,
+        None,
         None,
     )
     .await
@@ -9487,6 +9559,10 @@ async fn republish_window_with_target(
     // in a loop (the budget is per share, not per publication).
     force_software_encoder: bool,
     encoder_wedge_recovery: Option<crate::transport::publisher::EncoderWedgeRecovery>,
+    // #527: republish only while this publication is still the live one,
+    // checked under the apply lock (a wedge-recovery retry must not replace a
+    // track another republish already swapped in).
+    only_if_publication: Option<&Arc<crate::transport::publisher::PublishedTrack>>,
 ) -> RepublishOutcome {
     // Capture the resolution once for this transaction. Reading the config's
     // mutex at each await boundary could mix the old and new preference and
@@ -9499,6 +9575,14 @@ async fn republish_window_with_target(
             "session: window {window_id} skipping superseded republish intent {intent_generation} ({reason})"
         );
         return reconnect_republish_superseded_outcome(reconnect_guard);
+    }
+    if only_if_publication
+        .is_some_and(|expected| !Arc::ptr_eq(expected, &slot.lock_unpoisoned()))
+    {
+        log::info!(
+            "session: window {window_id} skipping republish ({reason}); its publication was already replaced"
+        );
+        return RepublishOutcome::Cancelled;
     }
     let mut retry_delay = REPUBLISH_RETRY_INITIAL_DELAY;
     for attempt in 0..max_publish_attempts.max(1) {
@@ -9800,6 +9884,7 @@ async fn republish_window_for_quality(
         None,
         false,
         None,
+        None,
     )
     .await
     .replaced()
@@ -9845,6 +9930,7 @@ async fn republish_window_for_quality_forced(
         REPUBLISH_RETRY_ATTEMPTS,
         Some(&transaction_guard),
         false,
+        None,
         None,
     )
     .await
@@ -9894,6 +9980,7 @@ async fn republish_window_for_resize(
         None,
         false,
         None,
+        None,
     )
     .await
     .replaced()
@@ -9930,6 +10017,7 @@ async fn republish_window_for_resolution(
         REPUBLISH_RETRY_ATTEMPTS,
         None,
         false,
+        None,
         None,
     )
     .await
@@ -10958,6 +11046,47 @@ vm_resident_mb=n/a vm_mapped_dirty_mb=n/a vm_top=n/a vm_other_tag=n/a"
             .find("republish_window_with_target(")
             .expect("wedge republish");
         assert!(note < republish, "record the step before republishing");
+        // #527: a superseded/failed step is retried once through the shared
+        // driver, and a retry republishes only while the wedged publication
+        // is still the live one.
+        let entry = &wedge_fn[..wedge_fn.find("\n}\n").expect("recover fn end")];
+        assert!(
+            entry.contains("drive_wedge_recovery_step(step,")
+                && entry.contains("wedged_encoder_recovery_attempt("),
+            "the wedge recovery must run through the retrying driver"
+        );
+        let attempt_fn = source
+            .split_once("async fn wedged_encoder_recovery_attempt(")
+            .map(|(_, rest)| rest)
+            .expect("wedged_encoder_recovery_attempt");
+        let still_live = attempt_fn
+            .find("!Arc::ptr_eq(wedged, &live)")
+            .expect("a retry checks the wedged publication is still live");
+        let begin = attempt_fn
+            .find("begin_republish_intent(&share.republish_intent)")
+            .expect("recovery intent");
+        assert!(still_live < begin, "check before superseding anything");
+        assert!(
+            attempt_fn.contains("WedgeRecoveryAttempt::NotReplaced"),
+            "a republish that did not replace the track is reported for retry"
+        );
+        assert!(
+            attempt_fn.contains(
+                "if is_retry {\n                share.republish_intent.generation.load(Ordering::SeqCst)"
+            ),
+            "the retry must join the current generation, never supersede a queued intent"
+        );
+        let attempt_call = &attempt_fn[attempt_fn.find("republish_window_with_target(").expect("call")..];
+        assert!(
+            attempt_call[..attempt_call.find(".await").expect("await")]
+                .contains("wedged.as_ref(),"),
+            "the retry republishes only while the wedged publication is live"
+        );
+        let lock = body.find("republish_intent.apply_lock.lock().await").expect("apply lock");
+        let only_if = body
+            .find("only_if_publication\n        .is_some_and(|expected| !Arc::ptr_eq(expected,")
+            .expect("live-publication guard");
+        assert!(lock < only_if && only_if < wrapper, "checked under the lock, before publishing");
         let after_wake = source
             .split_once("room_connection.publish_window_at_after_wake(")
             .map(|(_, rest)| &rest[..rest.len().min(400)])
