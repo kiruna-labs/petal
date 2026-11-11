@@ -241,10 +241,11 @@ fn run_installer_handoff(logger: &dyn log::Log, leave: impl FnOnce(), cleanup: i
 const LEAVE_BEFORE_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Leave the room so peers see a leave, not a drop (#526). Runs inside the
-/// hook, which the plugin calls only after the installer extracted: leaving
-/// before `install()` dropped the user from the meeting on a failed update.
-/// On timeout `install()` exits the process anyway; the bound only stops a
-/// dead network from stalling the update.
+/// hook, which the plugin calls after extraction and just before
+/// `ShellExecuteW`, so an extraction failure keeps the user in the meeting.
+/// A failed `ShellExecuteW` still leaves them disconnected; the plugin has no
+/// later hook. On timeout the leave may still be running when the process
+/// exits, so peers can see a drop.
 fn leave_room_before_installer_launch(app: &AppHandle) {
     use tauri::Manager;
     let owned = app.clone();
@@ -367,8 +368,12 @@ pub async fn download_and_install_compatible_update(
         // The hook leaves the room once extraction succeeds, so an
         // extraction failure keeps the user in the meeting.
         if let Err(e) = update.install(&bytes) {
-            // The hook may already have logged the hand-off marker before
-            // the installer failed to launch; this process lives on (#526).
+            // The hook may already have logged the hand-off marker and left
+            // the room before the installer failed to launch; this process
+            // lives on, disconnected if it got that far (#526).
+            log::warn!(
+                "updater: install failed after the hand-off hook may have left the room; rejoin needed if so"
+            );
             crate::logging::write_shutdown_marker(
                 log::logger(),
                 crate::logging::UPDATER_HANDOFF_FAILED_LINE,
