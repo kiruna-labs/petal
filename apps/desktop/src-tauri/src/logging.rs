@@ -1261,7 +1261,7 @@ impl SentryDiagnosticEvent {
     }
 }
 
-fn build_sentry_diagnostic_event(
+pub(crate) fn build_sentry_diagnostic_event(
     diagnostic: SentryDiagnosticEvent,
     dedup_count_bucket: &'static str,
 ) -> sentry::protocol::Event<'static> {
@@ -2908,7 +2908,7 @@ impl<L: log::Log> log::Log for LivekitTransientErrorDowngrade<L> {
 
 /// The Sentry bridge's per-target policy (see the call site in
 /// `init_logging`). Extracted so tests exercise the production filter.
-fn sentry_log_filter(metadata: &log::Metadata) -> sentry_log::LogFilter {
+pub(crate) fn sentry_log_filter(metadata: &log::Metadata) -> sentry_log::LogFilter {
     if metadata.target() == PANIC_HOOK_LOG_TARGET
         || metadata.target() == OBJC_EXCEPTION_HOOK_LOG_TARGET
     {
