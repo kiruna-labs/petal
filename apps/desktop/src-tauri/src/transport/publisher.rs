@@ -6110,6 +6110,88 @@ mod track_name_tests {
         assert_eq!(harness.requested.len(), 1);
     }
 
+    /// #527: drives `drive_wedge_recovery_step` with fake attempts and returns
+    /// the `is_retry` flag of every attempt made plus the final outcome.
+    async fn drive_with(
+        step: EncoderRecoveryStep,
+        outcomes: &[WedgeRecoveryAttempt],
+    ) -> (Vec<bool>, WedgeRecoveryAttempt) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = drive_wedge_recovery_step(step, |is_retry| {
+            let index = {
+                let mut calls = calls.borrow_mut();
+                calls.push(is_retry);
+                calls.len() - 1
+            };
+            let outcome = outcomes[index];
+            async move { outcome }
+        })
+        .await;
+        (calls.into_inner(), result)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn superseded_then_failed_last_wedge_step_retries_once_and_reports() {
+        use crate::logging::{EncoderWedgeDiagnostic, SentryDiagnosticEvent};
+        use WedgeRecoveryAttempt::*;
+        take_wedge_reports();
+        // Superseded with the wedged publication still live, then the retry's
+        // publish fails: exactly one retry, then a distinct exhaustion report.
+        let (calls, result) =
+            drive_with(EncoderRecoveryStep::FallBackToSoftware, &[NotReplaced, NotReplaced]).await;
+        assert_eq!(calls, vec![false, true], "one attempt plus exactly one retry");
+        assert_eq!(result, NotReplaced);
+        assert_eq!(
+            take_wedge_reports(),
+            vec![SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                action: EncoderWedgeActionTag::RecoveryRepublishFailed,
+            })]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wedge_step_retry_that_replaces_the_track_recovers_quietly() {
+        use WedgeRecoveryAttempt::*;
+        take_wedge_reports();
+        let (calls, result) =
+            drive_with(EncoderRecoveryStep::FallBackToSoftware, &[NotReplaced, Replaced]).await;
+        assert_eq!(calls, vec![false, true]);
+        assert_eq!(result, Replaced);
+        assert!(take_wedge_reports().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wedge_step_that_replaced_or_became_moot_is_not_retried() {
+        use WedgeRecoveryAttempt::*;
+        take_wedge_reports();
+        for first in [Replaced, NoLongerNeeded] {
+            let (calls, result) = drive_with(EncoderRecoveryStep::FallBackToSoftware, &[first]).await;
+            assert_eq!(calls, vec![false], "{first:?} must not retry");
+            assert_eq!(result, first);
+        }
+        // A retry that finds the wedged publication already replaced (or the
+        // share gone) is done, not a failure.
+        let (calls, result) =
+            drive_with(EncoderRecoveryStep::FallBackToSoftware, &[NotReplaced, NoLongerNeeded])
+                .await;
+        assert_eq!(calls, vec![false, true]);
+        assert_eq!(result, NoLongerNeeded);
+        assert!(take_wedge_reports().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_first_wedge_step_retries_but_leaves_exhaustion_to_the_escalation() {
+        use WedgeRecoveryAttempt::*;
+        take_wedge_reports();
+        // Step 1 failing twice still leaves step 2 on the wedged publication's
+        // guard, so it is not reported as exhausted.
+        let (calls, result) =
+            drive_with(EncoderRecoveryStep::Republish, &[NotReplaced, NotReplaced]).await;
+        assert_eq!(calls, vec![false, true]);
+        assert_eq!(result, NotReplaced);
+        assert!(take_wedge_reports().is_empty());
+    }
+
     #[test]
     fn encoder_wedge_without_a_wired_action_still_reports_but_does_not_act() {
         // The camera path and test publishes attach no recovery action: the
@@ -10039,6 +10121,67 @@ impl EncoderRecoveryStep {
             Self::FallBackToSoftware => EncoderWedgeActionTag::SoftwareEncoder,
         }
     }
+}
+
+/// What one wedge-recovery republish attempt achieved (#527).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WedgeRecoveryAttempt {
+    /// The replacement became the share's track.
+    Replaced,
+    /// Nothing left to repair: the share stopped, or another republish already
+    /// replaced the wedged publication (and inherited the sticky settings).
+    NoLongerNeeded,
+    /// The wedged publication is still the live one: the republish was
+    /// superseded by a request that never replaced it, or the publish failed.
+    NotReplaced,
+}
+
+/// Pause before the one retry, so a superseding republish can settle first.
+pub(crate) const WEDGE_RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Run one wedge-recovery step for either session (#527). The guard already
+/// spent this step on the wedged publication, so a step that leaves that
+/// publication live would strand the share on an empty track: retry once, and
+/// if the LAST step still fails, report it instead of going quiet.
+/// `attempt(is_retry)` performs one republish and classifies it.
+pub(crate) async fn drive_wedge_recovery_step<Fut>(
+    step: EncoderRecoveryStep,
+    mut attempt: impl FnMut(bool) -> Fut,
+) -> WedgeRecoveryAttempt
+where
+    Fut: std::future::Future<Output = WedgeRecoveryAttempt>,
+{
+    let first = attempt(false).await;
+    if first != WedgeRecoveryAttempt::NotReplaced {
+        return first;
+    }
+    log::warn!(
+        "publisher: wedged-encoder recovery ({}) left the wedged publication live; retrying once in {:.1}s (#527)",
+        step.description(),
+        WEDGE_RECOVERY_RETRY_DELAY.as_secs_f64()
+    );
+    tokio::time::sleep(WEDGE_RECOVERY_RETRY_DELAY).await;
+    let retried = attempt(true).await;
+    if retried == WedgeRecoveryAttempt::NotReplaced {
+        if step.steps_used_after() >= ENCODER_WEDGE_MAX_RECOVERY_STEPS {
+            log::warn!(
+                "publisher: wedged-encoder recovery ({}) failed twice; the share is left on an empty track -- reopen the share to retry the encoder (#527)",
+                step.description()
+            );
+            report_encoder_wedge(crate::logging::SentryDiagnosticEvent::EncoderWedgeExhausted(
+                crate::logging::EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::RecoveryRepublishFailed,
+                },
+            ));
+        } else {
+            // A step remains: the wedged publication's guard escalates to it.
+            log::warn!(
+                "publisher: wedged-encoder recovery ({}) failed twice; the next wedge trigger escalates (#527)",
+                step.description()
+            );
+        }
+    }
+    retried
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

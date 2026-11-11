@@ -284,6 +284,9 @@ pub enum EncoderWedgeActionTag {
     NotWired,
     /// Every recovery step ran and the encoder is still silent.
     Exhausted,
+    /// The last recovery step's republish was superseded or failed, and its
+    /// one retry too, so the share stays on the wedged publication (#527).
+    RecoveryRepublishFailed,
 }
 
 impl EncoderWedgeActionTag {
@@ -293,6 +296,7 @@ impl EncoderWedgeActionTag {
             Self::SoftwareEncoder => "software_encoder",
             Self::NotWired => "not_wired",
             Self::Exhausted => "exhausted",
+            Self::RecoveryRepublishFailed => "recovery_republish_failed",
         }
     }
 }
@@ -6290,6 +6294,7 @@ fn valid_diagnostic_tag(key: &str, value: &str) -> bool {
                 | "software_encoder"
                 | "not_wired"
                 | "exhausted"
+                | "recovery_republish_failed"
                 | "not_applicable"
         ),
         "playout_transition" => {
@@ -10960,6 +10965,13 @@ mod tests {
                 }),
                 "encoder-wedge-exhausted",
                 "exhausted",
+            ),
+            (
+                SentryDiagnosticEvent::EncoderWedgeExhausted(EncoderWedgeDiagnostic {
+                    action: EncoderWedgeActionTag::RecoveryRepublishFailed,
+                }),
+                "encoder-wedge-exhausted",
+                "recovery_republish_failed",
             ),
         ] {
             let event = build_sentry_diagnostic_event(event, "1");
