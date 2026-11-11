@@ -28,9 +28,9 @@ test('Windows media gate covers the required live recovery matrix', () => {
     'set_video_quality(VideoQuality::Low)',
     'set_video_quality(VideoQuality::High)',
     'let capable_observer = RoomConnection::connect',
-    'publish_window_at_cadence(',
-    'old_published.cadence_fps()',
-    'old_published\n            .unpublish()',
+    'recover_wedged_windows_share(',
+    'assert!(!Arc::ptr_eq(&replacement, &old_published))',
+    'assert_eq!(replacement.cadence_fps(), old_published.cadence_fps())',
     'capable_replacement_frames.load(Ordering::Acquire) > 0',
     'reconnect the capable LiveKit observer',
     'reconnected_frame',
@@ -61,8 +61,8 @@ test('Windows media gate covers the required live recovery matrix', () => {
     'let (source_width, source_height)',
     'capable observer did not decode the source/top dimensions',
     'single-encoding Windows share did not keep the source encoding',
-    'let replacement = Arc::new(',
-    'old_published\n            .unpublish()',
+    'recover_wedged_windows_share(',
+    'assert!(!Arc::ptr_eq(&replacement, &old_published))',
     'capable_replacement_frames.load(Ordering::Acquire) > 0',
     'let reconnected = RoomConnection::connect',
     'reconnected_frame',
@@ -203,10 +203,17 @@ test('Windows thumbnails use the WGC one-shot capture path', () => {
 
 test('Windows share session wires publish_window_at_cadence + push_frame into ActiveShare', () => {
   assert.match(sessionStub, /struct ActiveShare \{/);
-  assert.match(
-    sessionStub,
-    /\.publish_window_at_cadence\(\s*width,\s*height,\s*crate::transport::publisher::ShareQuality::Full,\s*Some\(token\),[\s\S]*?crate::share_capture_options::pending\(token\),?\s*\)/,
-    'shares must publish at ShareQuality::Full under petal-window-<token>, at the window`s frame-rate ceiling'
+  const startPublish = sessionStub.match(
+    /\.publish_window_at_cadence\(\s*width,\s*height,\s*crate::transport::publisher::ShareQuality::Full,\s*Some\(token\),[\s\S]*?\.await/
+  );
+  assert.ok(startPublish, 'shares must publish at ShareQuality::Full under petal-window-<token>');
+  assert.ok(
+    startPublish[0].includes('crate::share_capture_options::pending(token)'),
+    'shares must publish at the window`s frame-rate ceiling'
+  );
+  assert.ok(
+    startPublish[0].includes('Some(wedge_recovery_for_windows_share('),
+    'share start must attach wedge recovery to its publication (#525)'
   );
   assert.match(
     sessionStub,
