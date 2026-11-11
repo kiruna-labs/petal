@@ -288,6 +288,32 @@
     elapsedTimer = setInterval(() => (elapsedSecs += 1), 1000);
 
     remoteControlAllowed = session.remoteControlPolicy !== 'off';
+    // BEFORE the join (PR #503): native publishes a camera turned on mid-join
+    // at the room commit, and that outcome can land before join() resolves.
+    // Stale outcomes (an older room generation) are dropped by the controller.
+    try {
+      unlistenCameraPublishState = await listen<CameraPublishState>(
+        EVENTS.cameraPublishState,
+        (event) =>
+          cameraPublish.receive(event.payload, (action) => {
+            if (action === 'on') {
+              dismissCameraToast();
+              camActive = true;
+              if (!localCameraStream) void acquireSelfView();
+              return;
+            }
+            console.error('native camera publish failed or stopped', event.payload.error);
+            localCameraStream?.getTracks().forEach((t) => t.stop());
+            localCameraStream = null;
+            camActive = false;
+            if (action === 'failed') {
+              showCameraRetryToast('Camera publish failed — others can’t see your video');
+            }
+          })
+      );
+    } catch {
+      // No Tauri bridge (plain browser preview).
+    }
     const redirected = await meeting.join();
     if (redirected) return; // meeting.join() already navigated to the canonical route.
 
@@ -322,25 +348,6 @@
       unlistenMicMute = await listen<MicMuteChanged>(EVENTS.micMuteChanged, (event) => {
         micMuted = event.payload.muted;
       });
-      unlistenCameraPublishState = await listen<CameraPublishState>(
-        EVENTS.cameraPublishState,
-        (event) => {
-          if (event.payload.publishing) {
-            dismissCameraToast();
-            camActive = true;
-            if (!localCameraStream) void acquireSelfView();
-            return;
-          }
-          console.error('native camera publish failed or stopped', event.payload.error);
-          cameraPublish.cancel();
-          localCameraStream?.getTracks().forEach((t) => t.stop());
-          localCameraStream = null;
-          camActive = false;
-          if (event.payload.error) {
-            showCameraRetryToast('Camera publish failed — others can’t see your video');
-          }
-        }
-      );
       unlistenDrawUpdate = await listen<DrawUpdate>(EVENTS.drawUpdate, (event) => {
         if ((event.payload.windowId & 0x8000_0000) === 0) return;
         cameraDrawUpdates = [...cameraDrawUpdates.slice(-240), event.payload];
@@ -534,6 +541,8 @@
     onPublished: () => {
       camActive = true;
       dismissCameraToast();
+      // A held OFF from just before this start may have stopped the preview.
+      if (!localCameraStream) void acquireSelfView();
     },
     onRetrying: () => showCameraToast('Camera is on for you — still connecting it for others…'),
     onFailed: (e) => {

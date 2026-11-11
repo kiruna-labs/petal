@@ -378,6 +378,9 @@ pub struct SessionState {
     /// Ensures at most one camera self-heal loop runs at a time (see
     /// `camera_session::ensure_camera_published`).
     camera_heal_active: AtomicBool,
+    /// A camera turned on while a join is pending (see
+    /// `room_generation::DeferredCamera`).
+    deferred_camera: crate::room_generation::DeferredCamera,
     /// Serializes camera start/stop/device-switch sequences process-wide —
     /// the unified replacement for the old `CameraDevicePreferences.switch_lock`
     /// (equivalent serialization, moved onto the session so the shared
@@ -442,6 +445,7 @@ impl Default for SessionState {
             desired_camera_on: AtomicBool::new(false),
             leave_publish_carryover: Mutex::new(None),
             camera_heal_active: AtomicBool::new(false),
+            deferred_camera: crate::room_generation::DeferredCamera::default(),
             camera_control_lock: tokio::sync::Mutex::new(()),
             desired_mic_muted: AtomicBool::new(true),
             last_toggled_window: Mutex::new(None),
@@ -458,6 +462,23 @@ impl Default for SessionState {
 }
 
 impl SessionState {
+    /// Begin a join of `room_id` (requested by the route as `room_name`):
+    /// bumps the room generation and opens the deferred-camera window in one
+    /// step. Returns the attempt and whether a camera deferred to a different
+    /// room was dropped.
+    pub(crate) fn begin_join(
+        &self,
+        room_id: &str,
+        room_name: &str,
+    ) -> (crate::room_generation::JoinAttempt<'_>, bool) {
+        self.deferred_camera
+            .begin_join(room_id, room_name, || self.begin_room_generation())
+    }
+
+    pub(crate) fn deferred_camera(&self) -> &crate::room_generation::DeferredCamera {
+        &self.deferred_camera
+    }
+
     pub(crate) fn begin_room_generation(&self) -> RoomGeneration {
         let value = self.room_generation.fetch_add(1, Ordering::SeqCst) + 1;
         RoomGeneration::new(self.room_generation.clone(), value)

@@ -479,6 +479,9 @@ pub struct SessionState {
     /// Ensures at most one camera self-heal loop runs at a time (see
     /// `camera_session::ensure_camera_published`).
     camera_heal_active: AtomicBool,
+    /// A camera turned on while a join is pending (see
+    /// `room_generation::DeferredCamera`).
+    deferred_camera: crate::room_generation::DeferredCamera,
 }
 
 impl Default for SessionState {
@@ -498,6 +501,7 @@ impl Default for SessionState {
             room_generation: Arc::new(AtomicU64::new(0)),
             next_audio_share_id: AtomicU64::new(1),
             camera_heal_active: AtomicBool::new(false),
+            deferred_camera: crate::room_generation::DeferredCamera::default(),
         }
     }
 }
@@ -509,6 +513,23 @@ impl SessionState {
 
     fn next_audio_share_id(&self) -> u64 {
         self.next_audio_share_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Begin a join of `room_id` (requested by the route as `room_name`):
+    /// bumps the room generation and opens the deferred-camera window in one
+    /// step. Returns the attempt and whether a camera deferred to a different
+    /// room was dropped.
+    pub(crate) fn begin_join(
+        &self,
+        room_id: &str,
+        room_name: &str,
+    ) -> (crate::room_generation::JoinAttempt<'_>, bool) {
+        self.deferred_camera
+            .begin_join(room_id, room_name, || self.begin_room_generation())
+    }
+
+    pub(crate) fn deferred_camera(&self) -> &crate::room_generation::DeferredCamera {
+        &self.deferred_camera
     }
 
     pub(crate) fn begin_room_generation(&self) -> RoomGeneration {
@@ -3253,7 +3274,16 @@ pub async fn join_room_command(
 
     leave_room_inner(&app, &state, true, "room_switch", false, false).await;
 
-    let generation = state.begin_room_generation();
+    // Opens the deferred-camera window with the generation bump (see
+    // `room_generation::DeferredCamera`, PR #503).
+    let (mut join_attempt, dropped_camera) = state.begin_join(&room_record.id, &room_name);
+    let generation = join_attempt.generation().clone();
+    // Tagged older than this join: its route must not take the drop as its own.
+    crate::camera_session::announce_dropped_deferred_camera(
+        &app,
+        generation.value() - 1,
+        dropped_camera,
+    );
     let connected = match crate::meeting_core::connect_room(
         &rooms,
         room_record,
@@ -3453,6 +3483,9 @@ pub async fn join_room_command(
         crate::logging::log_safe_quoted(&identity)
     );
     crate::analytics::meeting_joined();
+    if join_attempt.commit() {
+        crate::camera_session::publish_deferred_camera(&app, generation.clone());
+    }
     Ok(room_record)
 }
 
@@ -3955,6 +3988,12 @@ async fn leave_room_inner(
     // self-terminates once the picker is no longer visible).
     crate::window_picker::hide_picker_on_meeting_exit(app);
     state.set_camera_intent(false);
+    crate::camera_session::deferred_camera_room_left(
+        app,
+        state,
+        connection_lost,
+        user_leave || reason == "forced_disconnect",
+    );
     // Stop the published webcam FIRST, while the room connection is still
     // live and before `joined` is taken — the camera slot lives in
     // `joined.media`, and the shared teardown needs the state to reach it.

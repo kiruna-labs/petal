@@ -8,8 +8,17 @@
 // and the publish runs again once the meeting reports connected. Any other
 // failure, or a refusal while connected, toasts with Retry as before (a
 // refusal while connected also stays deferred for a following recovery).
+//
+// Native keeps a camera turned on while a join is in flight and publishes it
+// at the commit (`room_generation::DeferredCamera`); that start returns
+// `published: false` and needs no toast while connecting. Outcomes carry the
+// room generation and a native emit seq. One from an older generation is
+// stale, and an OFF whose seq is not above the latest start's was emitted
+// before that start decided its result. An outcome that lands while a start
+// is in flight is held until the start returns its generation and seq; a
+// held OFF emitted after it wins over its `published: true` (PR #503).
 
-import type { StartCameraPublishResult } from '#lib/ipc.js';
+import type { CameraPublishState, StartCameraPublishResult } from '#lib/ipc.js';
 import type { MeetingPhase } from './meetingSession.svelte';
 
 /** The native refusal for a publish with no committed room (camera_session.rs). */
@@ -35,8 +44,27 @@ export interface CameraJoinPublish {
   meetingConnected: () => Promise<void>;
   /** The camera was turned off or released: drop a deferred publish. */
   cancel: () => void;
+  /** A `camera-publish-state` event: `apply` runs with what it means, now
+   * or once an in-flight start returns, or never if it is stale. */
+  receive: (event: CameraPublishState, apply: (action: CameraStateAction) => void) => void;
   /** True while a "not in room" refusal waits for the next connected edge. */
   readonly deferred: boolean;
+}
+
+export type CameraStateAction = 'on' | 'off' | 'failed';
+
+/** What an outcome means given the generation the camera request is bound
+ * to and the seq of the latest start's result; `ignore` for an outcome from
+ * an older room generation, or an OFF emitted before that start decided. */
+export function cameraStateAction(
+  event: CameraPublishState,
+  boundGeneration: number,
+  startSeq = 0
+): CameraStateAction | 'ignore' {
+  if (event.generation < boundGeneration) return 'ignore';
+  if (event.publishing) return 'on';
+  if (event.seq <= startSeq) return 'ignore';
+  return event.error ? 'failed' : 'off';
 }
 
 export function isNotInRoomRefusal(error: unknown): boolean {
@@ -49,14 +77,62 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
   // Bumped by cancel() and each publish, so a refusal that lands after the
   // user turned the camera off (or after a newer attempt) can't re-arm it.
   let request = 0;
+  let boundGeneration = 0;
+  let startSeq = 0;
+  let inFlight = 0;
+  let held: Array<[CameraPublishState, (action: CameraStateAction) => void]> = [];
+
+  function deliver(
+    event: CameraPublishState,
+    apply: (action: CameraStateAction) => void
+  ): CameraStateAction | 'ignore' {
+    const action = cameraStateAction(event, boundGeneration, startSeq);
+    if (action === 'ignore') return action;
+    boundGeneration = Math.max(boundGeneration, event.generation);
+    // Native stopped it: nothing is left waiting for the connected edge. Not
+    // a request bump (`cancel`), which only the user's own toggle makes.
+    if (action !== 'on') deferred = false;
+    apply(action);
+    return action;
+  }
+
+  function receive(event: CameraPublishState, apply: (action: CameraStateAction) => void) {
+    if (inFlight > 0) held.push([event, apply]);
+    else void deliver(event, apply);
+  }
+
+  /** Resolves the start, plus whether an OFF or failure for this request
+   * landed while it was in flight (applied once the start returns). */
+  async function start(): Promise<{ result: StartCameraPublishResult; stopped: boolean }> {
+    inFlight += 1;
+    let result: StartCameraPublishResult;
+    let stopped = false;
+    try {
+      result = await seams.startPublish();
+      boundGeneration = Math.max(boundGeneration, result.generation);
+      startSeq = Math.max(startSeq, result.seq);
+    } finally {
+      inFlight -= 1;
+      if (inFlight === 0) {
+        const ready = held;
+        held = [];
+        for (const [event, apply] of ready) {
+          const action = deliver(event, apply);
+          if (action === 'off' || action === 'failed') stopped = true;
+        }
+      }
+    }
+    return { result, stopped };
+  }
 
   async function publish(): Promise<void> {
     const id = ++request;
     deferred = false;
     const phaseAtStart = seams.meetingPhase();
     let result: StartCameraPublishResult;
+    let stopped: boolean;
     try {
-      result = await seams.startPublish();
+      ({ result, stopped } = await start());
     } catch (error) {
       if (!isNotInRoomRefusal(error)) {
         seams.onFailed(error);
@@ -79,8 +155,14 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
       }
       return;
     }
+    // The user turned it off (or retried) while it was in flight, or native
+    // stopped it after this start decided (a held OFF with a newer seq).
+    if (id !== request || stopped) return;
     if (result.published === false) {
-      seams.onRetrying();
+      // While connecting, native holds it for the join's commit and reports
+      // the outcome as camera-publish-state: nothing to show yet. A failure
+      // that already landed keeps its Retry toast.
+      if (seams.meetingPhase() !== 'connecting') seams.onRetrying();
       return;
     }
     seams.onPublished();
@@ -100,6 +182,7 @@ export function createCameraJoinPublish(seams: CameraJoinPublishSeams): CameraJo
     publish,
     meetingConnected,
     cancel,
+    receive,
     get deferred() {
       return deferred;
     }

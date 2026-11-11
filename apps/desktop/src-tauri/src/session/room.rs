@@ -651,7 +651,17 @@ pub async fn join_room(
 
     // #569: one generation and one terminal deadline cover every external
     // await from room connect through palette/microphone publication.
-    let room_generation = state.begin_room_generation();
+    // The generation bump also opens the deferred-camera window: a camera
+    // turned on from here is kept for this join and published at its commit
+    // (`room_generation::DeferredCamera`, PR #503).
+    let (mut join_attempt, dropped_camera) = state.begin_join(&room_record.id, &room_name);
+    let room_generation = join_attempt.generation().clone();
+    // Tagged older than this join: its route must not take the drop as its own.
+    crate::camera_session::announce_dropped_deferred_camera(
+        app,
+        room_generation.value() - 1,
+        dropped_camera,
+    );
     let join_budget = JoinBudget::start();
 
     // #787: enable speaker playout BEFORE connecting. The native subscription
@@ -811,6 +821,12 @@ pub async fn join_room(
         return Err(ShareSessionError::RoomConnect(
             "join attempt was superseded".to_string(),
         ));
+    }
+    // The room is committed: publish a camera turned on while connecting
+    // now, not after the audio tail (which can hold join_room for tens of
+    // seconds).
+    if join_attempt.commit() {
+        crate::camera_session::publish_deferred_camera(app, room_generation.clone());
     }
 
     // Telepointers (SPEC.md §4.5): start this process's receiver task on the
@@ -1259,7 +1275,12 @@ fn spawn_local_publish_reconcile(app: &tauri::AppHandle, room_id: String) {
         log::info!("session: reconciling local publish state after rejoin (camera_on=true)");
 
         if !state.camera_publishing() {
-            state.set_camera_intent(true);
+            {
+                // Under the control lock like every intent-ON writer, so a
+                // stale heal's clear can't interleave (camera_session).
+                let _control = state.lock_camera_control().await;
+                state.set_camera_intent(true);
+            }
             // Same contract as the manual toggle: announce the intent before
             // the reconcile reaches for the device, so a Settings preview
             // yields it (see `camera_session::emit_camera_intent`).
@@ -1354,6 +1375,12 @@ async fn cleanup_left_room(
         // flag) is what a same-room rejoin consumes.
         state.set_camera_intent(false);
     }
+    crate::camera_session::deferred_camera_room_left(
+        app,
+        state,
+        connection_lost,
+        user_leave || reason == "forced_disconnect",
+    );
 
     // Stop every active share first -- reuses `stop_share`'s own
     // capture-stop/pump-abort/unpublish logic exactly, rather than

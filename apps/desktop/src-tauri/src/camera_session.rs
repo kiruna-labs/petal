@@ -6,7 +6,7 @@
 //! `transport::camera`.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,7 @@ use crate::logging::{
     CadenceBucket, CameraDirection, CameraHealthDiagnostic, CameraStallCauseTag,
     DecoderRenderHealth, DiagnosticRole, QueueBackpressureBucket, SentryDiagnosticEvent,
 };
-use crate::room_generation::RoomGeneration;
+use crate::room_generation::{CameraDeferral, RoomGeneration};
 use crate::sync_ext::MutexExt;
 use crate::transport::camera::{
     CameraBackend, CameraDeviceInfo, CameraDevicePreferences, CameraFrame, CameraMode,
@@ -235,6 +235,41 @@ pub(crate) struct CameraPublishStateEvent {
     /// Terminal error after the bounded self-heal retries were exhausted.
     /// `None` when `publishing` is true.
     pub error: Option<String>,
+    /// Room generation the outcome belongs to: a surface ignores an outcome
+    /// older than its own camera request (PR #503).
+    pub generation: u64,
+    /// Process-wide emit order ([`camera_event_seq`]). Orders an outcome
+    /// against a start's result within one room generation (PR #503).
+    pub seq: u64,
+}
+
+/// One counter for every `camera-publish-state` emit, so a surface can tell
+/// an OFF emitted before its start from one emitted after (PR #503).
+static CAMERA_EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_camera_event_seq() -> u64 {
+    CAMERA_EVENT_SEQ.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// The seq of the latest `camera-publish-state` emitted. A start reads it
+/// under the camera control lock: every outcome with a higher seq was
+/// emitted after the start's own result was decided.
+pub(crate) fn camera_event_seq() -> u64 {
+    CAMERA_EVENT_SEQ.load(Ordering::SeqCst)
+}
+
+/// A `camera-publish-state` payload, stamped with the next seq.
+pub(crate) fn camera_publish_state_event(
+    generation: u64,
+    publishing: bool,
+    error: Option<String>,
+) -> CameraPublishStateEvent {
+    CameraPublishStateEvent {
+        publishing,
+        error,
+        generation,
+        seq: next_camera_event_seq(),
+    }
 }
 
 /// Payload of the `camera-intent-changed` event: the user's camera INTENT,
@@ -259,6 +294,23 @@ pub(crate) struct CameraIntentEvent {
 #[serde(rename_all = "camelCase")]
 pub struct StartCameraPublishResult {
     pub published: bool,
+    /// Room generation this request is bound to (the joined room, or the
+    /// join it was deferred to); later outcomes carry the same or newer.
+    pub generation: u64,
+    /// [`camera_event_seq`] read under the camera control lock as the result
+    /// was decided: an OFF with a higher seq came after this start.
+    pub seq: u64,
+}
+
+impl StartCameraPublishResult {
+    /// Build under the camera control lock (see `seq`).
+    fn decided(published: bool, generation: u64) -> Self {
+        Self {
+            published,
+            generation,
+            seq: camera_event_seq(),
+        }
+    }
 }
 
 /// Snapshot for UI surfaces syncing their camera toggle to reality (e.g. the
@@ -282,8 +334,10 @@ pub(crate) enum CameraHealOutcome {
     /// The room was left/superseded or the user turned the camera off.
     Cancelled,
     /// Every attempt failed; the camera intent has been CLEARED so no
-    /// surface keeps claiming ON for a publish that will never happen.
-    TerminalFailure(String),
+    /// surface keeps claiming ON for a publish that will never happen. The
+    /// `u64` is its camera-publish-state seq, reserved under the control lock
+    /// with the clear, so a start that takes the lock after it is newer.
+    TerminalFailure(String, u64),
 }
 
 /// A running camera capture that can be synchronously stopped + released on
@@ -822,7 +876,7 @@ fn start_camera_loss_monitor(
             teardown_active_camera(camera, false).await;
             state.set_camera_intent(false);
             emit_camera_intent(&app, false);
-            emit_camera_publish_state(&app, false, Some(error));
+            emit_camera_publish_state(&app, generation.value(), false, Some(error));
             break;
         }
     })
@@ -878,14 +932,19 @@ pub(crate) async fn stop_camera_publish(
 
 pub(crate) fn emit_camera_publish_state(
     app: &tauri::AppHandle,
+    generation: u64,
     publishing: bool,
     error: Option<String>,
 ) {
-    if let Err(error) = tauri::Emitter::emit(
+    send_camera_publish_state(
         app,
-        "camera-publish-state",
-        CameraPublishStateEvent { publishing, error },
-    ) {
+        camera_publish_state_event(generation, publishing, error),
+    );
+}
+
+/// Emit an already-stamped payload (a seq reserved under the control lock).
+fn send_camera_publish_state(app: &tauri::AppHandle, event: CameraPublishStateEvent) {
+    if let Err(error) = tauri::Emitter::emit(app, "camera-publish-state", event) {
         log::warn!("session: failed to emit camera-publish-state: {error}");
     }
 }
@@ -1018,10 +1077,62 @@ where
             }
         }
     }
+    // A room change landed during the final attempt: its failure belongs to
+    // the old room and must not clear the new room's intent (PR #503 F2).
+    // Checked and cleared under the control lock, which every intent-ON
+    // writer holds, so a new room's camera can't land between the two.
+    let _control = state.lock_camera_control().await;
+    if !generation.is_current() {
+        return CameraHealOutcome::Cancelled;
+    }
     // Bounded retries exhausted: clear the intent so the toggle cannot keep
-    // claiming ON, and report the terminal failure.
+    // claiming ON, and report the terminal failure. Its seq is taken here,
+    // under the lock: emitted later, it must still order before any start
+    // that follows the clear (PR #503 round 4).
     state.set_camera_intent(false);
-    CameraHealOutcome::TerminalFailure(last_error)
+    CameraHealOutcome::TerminalFailure(last_error, next_camera_event_seq())
+}
+
+/// `drive_camera_publish_attempts`, re-targeted at each newer room: a room
+/// change cancels the attempts, but the new room's own start was refused as
+/// "already running" while this loop held the heal slot, so the camera is
+/// carried into the new room rather than dropped silently. Returns the
+/// outcome and the room generation it belongs to.
+pub(crate) async fn drive_camera_heal_following_rooms<Att, AttFut, Slp, SlpFut>(
+    state: &crate::session::SessionState,
+    schedule: &[Duration],
+    mut attempt: Att,
+    mut sleep: Slp,
+    in_room: impl Fn() -> bool,
+) -> (CameraHealOutcome, RoomGeneration)
+where
+    Att: FnMut() -> AttFut,
+    AttFut: Future<Output = Result<(), String>>,
+    Slp: FnMut(Duration) -> SlpFut,
+    SlpFut: Future<Output = ()>,
+{
+    let mut generation = state.current_room_generation();
+    loop {
+        let outcome =
+            drive_camera_publish_attempts(state, &generation, schedule, &mut attempt, &mut sleep)
+                .await;
+        // No follow cap (PR #503 F3): each follow needs a newer room, so it
+        // is bounded by real joins, and a capped heal exited with the intent
+        // ON and nothing left to publish it.
+        if matches!(outcome, CameraHealOutcome::Cancelled)
+            && heal_should_follow_new_room(
+                generation.is_current(),
+                state.camera_intent(),
+                state.camera_publishing(),
+                in_room(),
+            )
+        {
+            log::info!("session: camera self-heal following the camera into the new room");
+            generation = state.current_room_generation();
+            continue;
+        }
+        return (outcome, generation);
+    }
 }
 
 /// Drive the camera toward the user's intent (ON) with bounded, backed-off
@@ -1034,10 +1145,6 @@ pub(crate) async fn ensure_camera_published(
     state: &crate::session::SessionState,
     schedule: &[Duration],
 ) {
-    if !state.try_begin_camera_heal() {
-        log::info!("session: camera self-heal already running -- not starting a second loop");
-        return;
-    }
     // Clear the busy flag on every exit path.
     struct HealGuard<'a>(&'a crate::session::SessionState);
     impl Drop for HealGuard<'_> {
@@ -1045,46 +1152,66 @@ pub(crate) async fn ensure_camera_published(
             self.0.end_camera_heal();
         }
     }
-    let _guard = HealGuard(state);
+    let (outcome, generation, _guard) = loop {
+        if !state.try_begin_camera_heal() {
+            log::info!("session: camera self-heal already running -- not starting a second loop");
+            return;
+        }
+        let guard = HealGuard(state);
 
-    let generation = state.current_room_generation();
-    let outcome = drive_camera_publish_attempts(
-        state,
-        &generation,
-        schedule,
-        move || async move {
-            // Serialize against set_camera_device / the manual toggle, same
-            // lock discipline as start_camera_publish_command.
-            let _control = state.lock_camera_control().await;
-            let (preferred_device, preferred_mode) = app
-                .try_state::<CameraDevicePreferences>()
-                .map(|preferences| {
-                    (
-                        preferences.preferred_device(),
-                        preferences.preferred_mode(),
-                    )
-                })
-                .unwrap_or((None, None));
-            start_camera_publish_with_device(app, state, preferred_device, preferred_mode)
-                .await
-                .map(|_| ())
-        },
-        |delay| tokio::time::sleep(delay),
-    )
-    .await;
+        let (outcome, generation) = drive_camera_heal_following_rooms(
+            state,
+            schedule,
+            move || async move {
+                // Serialize against set_camera_device / the manual toggle, same
+                // lock discipline as start_camera_publish_command.
+                let _control = state.lock_camera_control().await;
+                let (preferred_device, preferred_mode) = app
+                    .try_state::<CameraDevicePreferences>()
+                    .map(|preferences| {
+                        (
+                            preferences.preferred_device(),
+                            preferences.preferred_mode(),
+                        )
+                    })
+                    .unwrap_or((None, None));
+                start_camera_publish_with_device(app, state, preferred_device, preferred_mode)
+                    .await
+                    .map(|_| ())
+            },
+            |delay| tokio::time::sleep(delay),
+            || state.is_in_room(),
+        )
+        .await;
+        if matches!(outcome, CameraHealOutcome::Cancelled) {
+            drop(guard);
+            // A join committing between the follow check and this release had
+            // its own publish refused by our slot: take the camera there.
+            if heal_should_follow_new_room(
+                generation.is_current(),
+                state.camera_intent(),
+                state.camera_publishing(),
+                state.is_in_room(),
+            ) {
+                continue;
+            }
+            return;
+        }
+        break (outcome, generation, guard);
+    };
 
-    let event = match outcome {
+    let (error, seq) = match outcome {
         CameraHealOutcome::Published => {
             announce_heal_published(
                 state,
                 || state.camera_publishing() && state.camera_intent(),
-                || emit_camera_publish_state(app, true, None),
+                || emit_camera_publish_state(app, generation.value(), true, None),
             )
             .await;
             return;
         }
         CameraHealOutcome::Cancelled => return,
-        CameraHealOutcome::TerminalFailure(error) => {
+        CameraHealOutcome::TerminalFailure(error, seq) => {
             log::error!(
                 "session: camera publish self-heal exhausted its retries -- camera intent cleared: {error}"
             );
@@ -1096,13 +1223,18 @@ pub(crate) async fn ensure_camera_published(
             // Intent was cleared with the retries exhausted and nothing
             // acquired -- the device is free for a Settings preview again.
             emit_camera_intent(app, false);
-            CameraPublishStateEvent {
-                publishing: false,
-                error: Some(error),
-            }
+            (error, seq)
         }
     };
-    emit_camera_publish_state(app, event.publishing, event.error);
+    send_camera_publish_state(
+        app,
+        CameraPublishStateEvent {
+            publishing: false,
+            error: Some(error),
+            generation: generation.value(),
+            seq,
+        },
+    );
 }
 
 /// #461: check-and-announce a heal's publish UNDER the control lock. Checked
@@ -1289,7 +1421,12 @@ pub async fn set_camera_prefs(
         Err(error) => {
             state.set_camera_intent(false);
             emit_camera_intent(&app, false);
-            emit_camera_publish_state(&app, false, Some(error.clone()));
+            emit_camera_publish_state(
+                &app,
+                state.current_room_generation().value(),
+                false,
+                Some(error.clone()),
+            );
             Ok(crate::transport::camera::AppliedCameraDevice {
                 applied: false,
                 in_room: true,
@@ -1390,7 +1527,12 @@ pub(crate) async fn apply_camera_device(
             );
             state.set_camera_intent(false);
             emit_camera_intent(app, false);
-            emit_camera_publish_state(app, false, Some(error.clone()));
+            emit_camera_publish_state(
+                app,
+                state.current_room_generation().value(),
+                false,
+                Some(error.clone()),
+            );
             Ok(crate::transport::camera::AppliedCameraDevice {
                 applied: false,
                 in_room: true,
@@ -1429,6 +1571,17 @@ pub(crate) async fn start_camera_publish_intent(
     // Announce the intent BEFORE acquiring: the Settings window's preview
     // holds the same physical device and has to let go for this to succeed.
     emit_camera_intent(app, true);
+    // A join is pending: its commit publishes it (`publish_deferred_camera`).
+    // Asked before the room slot, which Windows fills before it commits.
+    if state.deferred_camera().defer_if_pending() {
+        log::info!(
+            "session: camera turned on while the room join is pending -- publishing once joined"
+        );
+        return Ok(StartCameraPublishResult::decided(
+            false,
+            state.current_room_generation().value(),
+        ));
+    }
     match start_camera_publish_with_device(
         app,
         state,
@@ -1437,30 +1590,143 @@ pub(crate) async fn start_camera_publish_intent(
     )
     .await
     {
-        Ok(_) => Ok(StartCameraPublishResult { published: true }),
+        Ok(_) => Ok(StartCameraPublishResult::decided(
+            true,
+            state.current_room_generation().value(),
+        )),
         Err(error) if error == "not in room" => {
-            // Not retryable — there is no room to publish into. Intent is
-            // cleared so a later join doesn't surprise-start the camera.
-            state.set_camera_intent(false);
-            emit_camera_intent(app, false);
-            Err(error)
+            let generation = state.current_room_generation().value();
+            match state.deferred_camera().defer(|| state.is_in_room()) {
+                CameraDeferral::Deferred => {
+                    // Clicked while a join is pending: its commit publishes
+                    // it (`publish_deferred_camera`). No error.
+                    log::info!(
+                        "session: camera turned on while the room join is pending -- publishing once joined"
+                    );
+                    Ok(StartCameraPublishResult::decided(false, generation))
+                }
+                CameraDeferral::RetryNow => {
+                    // The join committed between our room check and now.
+                    log::info!(
+                        "session: room join completed during camera start -- retrying publish"
+                    );
+                    spawn_camera_heal(app, CAMERA_REJOIN_ATTEMPT_SCHEDULE);
+                    Ok(StartCameraPublishResult::decided(
+                        false,
+                        state.current_room_generation().value(),
+                    ))
+                }
+                CameraDeferral::Refused => {
+                    // No room and none pending. Intent is cleared so a later
+                    // join doesn't surprise-start the camera.
+                    state.set_camera_intent(false);
+                    emit_camera_intent(app, false);
+                    Err(error)
+                }
+            }
         }
         Err(error) => {
             log::warn!(
                 "session: start_camera_publish_command immediate attempt failed, starting self-heal: {error}"
             );
-            let heal_app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let Some(state) =
-                    tauri::Manager::try_state::<crate::session::SessionState>(&heal_app)
-                else {
-                    return;
-                };
-                ensure_camera_published(&heal_app, &state, CAMERA_HEAL_RETRY_BACKOFF).await;
-            });
-            Ok(StartCameraPublishResult { published: false })
+            spawn_camera_heal(app, CAMERA_HEAL_RETRY_BACKOFF);
+            Ok(StartCameraPublishResult::decided(
+                false,
+                state.current_room_generation().value(),
+            ))
         }
     }
+}
+
+/// A heal loop cancelled by a room change keeps going in the NEW room when
+/// the user still wants the camera there and nothing is publishing it.
+pub(crate) fn heal_should_follow_new_room(
+    generation_current: bool,
+    intent: bool,
+    publishing: bool,
+    in_room: bool,
+) -> bool {
+    !generation_current && intent && !publishing && in_room
+}
+
+fn spawn_camera_heal(app: &tauri::AppHandle, schedule: &'static [Duration]) {
+    let heal_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = tauri::Manager::try_state::<crate::session::SessionState>(&heal_app)
+        else {
+            return;
+        };
+        ensure_camera_published(&heal_app, &state, schedule).await;
+    });
+}
+
+/// Called by both platforms' `join_room` when the room commits with a camera
+/// waiting for it (`JoinAttempt::commit`). Taken under the control lock, so a
+/// camera turned off since the commit stays off.
+pub(crate) fn publish_deferred_camera(app: &tauri::AppHandle, generation: RoomGeneration) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = tauri::Manager::try_state::<crate::session::SessionState>(&app) else {
+            return;
+        };
+        if !take_deferred_camera(&state, &generation).await {
+            return;
+        }
+        log::info!("session: publishing the camera turned on while the join was pending");
+        emit_camera_intent(&app, true);
+        ensure_camera_published(&app, &state, CAMERA_REJOIN_ATTEMPT_SCHEDULE).await;
+    });
+}
+
+/// The commit's hand-off: the deferred camera becomes the room's intent, if
+/// it is still wanted and the committed room is still the current one (a
+/// room lost since keeps it pending for the recovery's commit).
+pub(crate) async fn take_deferred_camera(
+    state: &crate::session::SessionState,
+    generation: &RoomGeneration,
+) -> bool {
+    let _control = state.lock_camera_control().await;
+    state
+        .deferred_camera()
+        .take_camera(generation, || state.set_camera_intent(true))
+}
+
+/// Room teardown's hand-off to the deferred camera: a lost connection keeps
+/// the meeting pending for the route's recovery; a meeting that is over
+/// drops whatever was waiting for it.
+pub(crate) fn deferred_camera_room_left(
+    app: &tauri::AppHandle,
+    state: &crate::session::SessionState,
+    connection_lost: bool,
+    meeting_over: bool,
+) {
+    if connection_lost {
+        state.deferred_camera().connection_lost();
+    } else if meeting_over {
+        announce_dropped_deferred_camera(
+            app,
+            state.current_room_generation().value(),
+            state.deferred_camera().end(),
+        );
+    }
+}
+
+/// A deferred camera was dropped: camera OFF with no error, to every surface
+/// (`camera-intent-changed` reaches Settings, `camera-publish-state` the
+/// meeting route and popover, #461).
+/// `generation` is the generation the dropped camera belonged to (or older),
+/// never a newer join's, so that join's route filters it out.
+pub(crate) fn announce_dropped_deferred_camera(
+    app: &tauri::AppHandle,
+    generation: u64,
+    dropped: bool,
+) {
+    if !dropped {
+        return;
+    }
+    log::info!("session: meeting over -- dropping the camera that was waiting for its join");
+    emit_camera_intent(app, false);
+    emit_camera_publish_state(app, generation, false, None);
 }
 
 /// Turn OFF the native webcam publish. Idempotent. Clears the user's camera
@@ -1482,12 +1748,47 @@ pub(crate) async fn stop_camera_publish_intent(
     state: &crate::session::SessionState,
 ) {
     let _control = state.lock_camera_control().await;
+    // Tagged before the teardown awaits: a room joined meanwhile must not
+    // take this OFF as its own (PR #503).
+    let generation = state.current_room_generation().value();
     state.set_camera_intent(false);
+    state.deferred_camera().cancel_camera();
     stop_camera_publish(app, state).await;
     // #461: every surface showing ON (meeting route, popover) must drop it.
     // `camera-intent-changed` alone reaches only Settings. Not in
     // `stop_camera_publish`, so a device switch's stop/start doesn't flicker.
-    emit_camera_publish_state(app, false, None);
+    emit_camera_publish_state(app, generation, false, None);
+}
+
+/// The meeting route is gone. A join it left pending (failed, waiting on
+/// "Try again" or a recovery that will never run) ends here, so a later
+/// camera-on outside any meeting is refused rather than kept for a join that
+/// will never come (PR #503). A joined room is untouched.
+#[tauri::command]
+pub async fn abandon_pending_join(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::session::SessionState>,
+    room_name: String,
+) -> Result<(), ()> {
+    // Read before abandoning: never a newer join's generation.
+    let generation = state.current_room_generation().value();
+    let dropped = abandon_pending_join_inner(state.inner(), &room_name).await;
+    announce_dropped_deferred_camera(&app, generation, dropped);
+    Ok(())
+}
+
+/// The body of [`abandon_pending_join`]: returns whether a deferred camera
+/// was dropped (its intent is cleared with it, under the control lock).
+pub(crate) async fn abandon_pending_join_inner(
+    state: &crate::session::SessionState,
+    room_name: &str,
+) -> bool {
+    let _control = state.lock_camera_control().await;
+    let dropped = state.deferred_camera().abandon(room_name);
+    if dropped {
+        state.set_camera_intent(false);
+    }
+    dropped
 }
 
 /// Real camera publish/intent snapshot — lets a (re)mounting UI surface
@@ -1506,6 +1807,552 @@ pub fn camera_publish_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The command's own decisions while no room is committed (the exact
+    /// calls `start_camera_publish_intent` makes, in its order).
+    fn click_while_not_in_room(state: &crate::session::SessionState) -> CameraDeferral {
+        state.set_camera_intent(true);
+        if state.deferred_camera().defer_if_pending() {
+            return CameraDeferral::Deferred;
+        }
+        state.deferred_camera().defer(|| state.is_in_room())
+    }
+
+    /// Wiring guard: both platform joins open the window with the generation
+    /// bump, publish at the commit, and hand room teardown to the owner. The
+    /// command consults the owner. A pure-function test can't see a deleted
+    /// call; there is no `tauri::test` harness to drive `join_room` itself.
+    #[test]
+    fn both_platform_joins_and_the_command_wire_the_deferred_camera() {
+        let mac_join = include_str!("session/room.rs");
+        let windows = include_str!("session_stub.rs");
+        for (platform, join) in [("macOS", mac_join), ("Windows", windows)] {
+            let begin = join.find("state.begin_join(&room_record.id, &room_name)");
+            let commit = join.find("if join_attempt.commit() {");
+            let publish = join.find("publish_deferred_camera(");
+            assert!(begin.is_some(), "{platform} join must bump the generation via begin_join");
+            assert!(commit.is_some() && publish.is_some(), "{platform} commit must publish");
+            assert!(begin < commit && commit < publish, "{platform}: begin, commit, publish");
+            assert!(
+                join.contains("deferred_camera_room_left("),
+                "{platform} teardown must tell the owner whether the meeting is over"
+            );
+            assert!(
+                !join.contains("begin_join_attempt") && !join.contains("release_camera_deferred"),
+                "{platform}: one owner, no per-attempt release"
+            );
+        }
+        // macOS publishes at the room commit, not after the audio tail.
+        let kick = mac_join.find("publish_deferred_camera(").expect("kick present");
+        let audio_tail = mac_join.find("prepare_microphone(").expect("audio tail present");
+        assert!(kick < audio_tail, "macOS camera kick must precede the audio tail");
+        let src = include_str!("camera_session.rs");
+        let command = &src[src.find("pub(crate) async fn start_camera_publish_intent(").unwrap()..];
+        let pending = command.find("defer_if_pending()").expect("asks the owner first");
+        let attempt = command.find("start_camera_publish_with_device(").expect("attempt");
+        assert!(pending < attempt, "a pending join is asked before the room slot");
+        assert!(command.contains("match state.deferred_camera().defer(|| state.is_in_room())"));
+    }
+
+    /// Round-1 review: Windows fills the room slot before its late commit. A
+    /// click in that gap still belongs to the join (the owner is asked before
+    /// the slot), so a join that then fails keeps it for the next attempt.
+    #[tokio::test]
+    async fn a_click_before_the_late_commit_is_still_the_joins() {
+        let state = crate::session::SessionState::default();
+        {
+            let (_attempt, _) = state.begin_join("room-a", "room-a");
+            // Slot filled, not committed: the owner still says pending.
+            assert!(state.deferred_camera().defer_if_pending());
+        } // media startup saw the room drop: the attempt fails
+        let (mut next, _) = state.begin_join("room-a", "room-a");
+        assert!(next.commit());
+        assert!(take_deferred_camera(&state, next.generation()).await);
+    }
+
+    /// Round-1 review: a connection loss landing inside the commit hand-off
+    /// either sees the intent set (and carries it over) or leaves the camera
+    /// with the owner. It can never consume it with neither.
+    #[tokio::test]
+    async fn a_connection_loss_cannot_split_the_hand_off() {
+        let state = crate::session::SessionState::default();
+        let (mut join, _) = state.begin_join("room-a", "room-a");
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(join.commit());
+        // Teardown has invalidated the room but not yet told the owner.
+        state.invalidate_room_generation();
+        assert!(!take_deferred_camera(&state, join.generation()).await);
+        state.deferred_camera().connection_lost();
+        assert!(state.deferred_camera().camera_deferred(), "kept for the recovery");
+        let (mut rejoin, _) = state.begin_join("room-a", "room-a");
+        assert!(rejoin.commit());
+        assert!(take_deferred_camera(&state, rejoin.generation()).await);
+        assert!(state.camera_intent(), "intent set in the same step as the take");
+    }
+
+    /// PR #503 F1: the deferred window opens in the same step as the
+    /// generation bump, so a camera turned on mid-join is keyed to that join,
+    /// and a stale heal of the previous room cannot drop it.
+    #[tokio::test]
+    async fn a_camera_turned_on_mid_join_belongs_to_that_join() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        let old_room = state.begin_room_generation();
+        state.invalidate_room_generation(); // the room-switch cleanup
+        state.set_camera_intent(false);
+
+        let (mut join, dropped) = state.begin_join("room-b", "room-b");
+        assert!(!dropped);
+        assert!(join.generation().is_current(), "bumped with the window");
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+
+        // The previous room's heal runs out of retries.
+        let outcome = drive_camera_publish_attempts(
+            &state,
+            &old_room,
+            &[Duration::ZERO],
+            || std::future::ready(Err::<(), String>("no frames".to_string())),
+            |_d| async {},
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Cancelled);
+
+        assert!(join.commit(), "the commit sees the camera");
+        assert!(take_deferred_camera(&state, join.generation()).await);
+        assert!(state.camera_intent(), "published into the joined room");
+    }
+
+    /// PR #503 F3: a failed attempt is not terminal. Connection recovery's
+    /// next attempt (same room) adopts the camera and its commit publishes
+    /// it; a click between attempts is kept too.
+    #[tokio::test]
+    async fn a_failed_attempt_keeps_the_camera_for_the_next_attempt() {
+        let state = crate::session::SessionState::default();
+        {
+            let (_attempt, _) = state.begin_join("room-a", "room-a");
+            assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        } // attempt 1 fails
+        state.invalidate_room_generation();
+        state.set_camera_intent(false); // attempt 2's room-switch cleanup
+        let (mut second, dropped) = state.begin_join("room-a", "room-a");
+        assert!(!dropped, "same meeting: kept");
+        assert!(second.commit());
+        assert!(take_deferred_camera(&state, second.generation()).await);
+        assert!(state.camera_intent());
+
+        // Turned on between two attempts.
+        let state = crate::session::SessionState::default();
+        drop(state.begin_join("room-a", "room-a"));
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        let (mut next, _) = state.begin_join("room-a", "room-a");
+        assert!(next.commit());
+    }
+
+    /// PR #503 F2: native can drop the room before room-left reaches the
+    /// route. A click then is deferred to the recovery, not refused, so the
+    /// route needs no grace period to tell a stale "connected" from a real
+    /// refusal.
+    #[tokio::test]
+    async fn a_click_after_the_connection_dropped_is_kept_for_recovery() {
+        let state = crate::session::SessionState::default();
+        let (mut join, _) = state.begin_join("room-a", "room-a");
+        assert!(!join.commit());
+        drop(join);
+        // Connected, then lost (what the forced-disconnect cleanup reports).
+        state.invalidate_room_generation();
+        state.deferred_camera().connection_lost();
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        let (mut rejoin, _) = state.begin_join("room-a", "room-a");
+        assert!(rejoin.commit());
+        assert!(take_deferred_camera(&state, rejoin.generation()).await);
+    }
+
+    /// The camera is dropped only when the meeting is over: leave, meeting
+    /// ended, a join of a different room, or the camera turned off.
+    #[tokio::test]
+    async fn the_deferred_camera_is_dropped_only_when_the_meeting_is_over() {
+        let state = crate::session::SessionState::default();
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Refused, "no meeting");
+
+        drop(state.begin_join("room-a", "room-a"));
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(state.deferred_camera().end(), "leave drops it");
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Refused);
+
+        drop(state.begin_join("room-a", "room-a"));
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        let (mut other, dropped) = state.begin_join("room-b", "room-b");
+        assert!(dropped, "never carried into a different room");
+        assert!(!other.commit());
+
+        let (mut join, _) = state.begin_join("room-c", "room-c");
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        state.deferred_camera().cancel_camera(); // camera off mid-join
+        assert!(!join.commit());
+    }
+
+    /// PR #503 round 2, item 3: a failed join the meeting route then abandons
+    /// ("Back to rooms", a recovery that gave up) must not leave the owner
+    /// pending, or a later camera-on outside any meeting is deferred to a
+    /// join that will never come and waits forever.
+    #[tokio::test]
+    async fn an_abandoned_failed_join_refuses_a_later_camera_on() {
+        let state = crate::session::SessionState::default();
+        drop(state.begin_join("room-a", "room-a")); // the join fails
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(state.camera_intent());
+        // The route is gone (`abandon_pending_join` from its dispose).
+        assert!(abandon_pending_join_inner(&state, "room-a").await, "the waiting camera is dropped");
+        assert!(!state.camera_intent(), "its intent drops with it");
+        assert_eq!(
+            click_while_not_in_room(&state),
+            CameraDeferral::Refused,
+            "outside any meeting: refused, never kept"
+        );
+        // Abandoned with nothing waiting: still ends the pending meeting.
+        drop(state.begin_join("room-a", "room-a"));
+        assert!(!abandon_pending_join_inner(&state, "room-a").await);
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Refused);
+    }
+
+    /// The route can go while its join is still in flight. The abandon sent
+    /// at dispose leaves that join alone (it may be a replacement route's
+    /// join of the same room); the one sent when the route's own join
+    /// settles ends it.
+    #[tokio::test]
+    async fn a_join_in_flight_at_dispose_ends_when_it_settles() {
+        let state = crate::session::SessionState::default();
+        let attempt = state.begin_join("room-a", "room-a");
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(!abandon_pending_join_inner(&state, "room-a").await, "in flight: untouched");
+        drop(attempt); // ...it fails, and the route's join settles
+        assert!(abandon_pending_join_inner(&state, "room-a").await);
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Refused);
+    }
+
+    /// Round-2 review: the old route's late abandon for the same room lands
+    /// while a replacement route's join is in flight. The replacement keeps
+    /// its camera.
+    #[tokio::test]
+    async fn a_late_abandon_never_ends_a_replacement_routes_join() {
+        let state = crate::session::SessionState::default();
+        drop(state.begin_join("room-a", "room-a")); // old route: failed
+        let (mut join, _) = state.begin_join("room-a", "room-a"); // replacement
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(!abandon_pending_join_inner(&state, "room-a").await);
+        assert!(state.camera_intent());
+        assert!(join.commit(), "the replacement still publishes its camera");
+    }
+
+    /// Abandoning never touches a joined room (a route remount, or a dispose
+    /// after leave), but a recovery that the route stopped running is over.
+    #[tokio::test]
+    async fn abandoning_leaves_a_joined_room_alone() {
+        let state = crate::session::SessionState::default();
+        let (mut join, _) = state.begin_join("room-a", "room-a");
+        assert!(!join.commit());
+        drop(join);
+        state.set_camera_intent(true);
+        assert!(!abandon_pending_join_inner(&state, "room-a").await);
+        assert!(state.camera_intent(), "a joined room's camera is untouched");
+
+        state.invalidate_room_generation();
+        state.deferred_camera().connection_lost();
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(abandon_pending_join_inner(&state, "room-a").await, "no route left to recover it");
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Refused);
+    }
+
+    /// Abandon is scoped to the route's room: a late abandon from the route
+    /// for room A never ends room B's pending join and its camera.
+    #[tokio::test]
+    async fn a_late_abandon_never_ends_another_rooms_join() {
+        let state = crate::session::SessionState::default();
+        let (mut join, _) = state.begin_join("room-b", "room-b");
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(!abandon_pending_join_inner(&state, "room-a").await);
+        assert!(state.camera_intent());
+        assert!(join.commit(), "room B still publishes its camera");
+    }
+
+    /// Round-3 review: a start's result and every camera-publish-state share
+    /// one order. An event emitted before the result was decided has a seq
+    /// at or below the result's; one emitted after has a higher seq.
+    #[test]
+    fn a_start_result_is_ordered_against_emitted_events() {
+        let before = camera_publish_state_event(1, false, None);
+        let result = StartCameraPublishResult::decided(true, 1);
+        let after = camera_publish_state_event(1, false, None);
+        assert!(before.seq <= result.seq, "emitted before: not newer than the start");
+        assert!(after.seq > result.seq, "emitted after: newer than the start");
+        assert!(after.seq > before.seq);
+    }
+
+    /// The stop/start pair is serialized by the camera control lock: a stop
+    /// that holds it emits before a waiting start decides, and a stop that
+    /// waits for a start emits after it (the seq read is under the lock).
+    #[tokio::test]
+    async fn the_control_lock_orders_a_stop_against_a_start() {
+        let state = crate::session::SessionState::default();
+        let control = state.lock_camera_control().await;
+        let start = async {
+            let _control = state.lock_camera_control().await;
+            StartCameraPublishResult::decided(true, 1)
+        };
+        let stop = async {
+            let event = camera_publish_state_event(1, false, None);
+            drop(control);
+            event
+        };
+        let (result, stop_off) = tokio::join!(start, stop);
+        assert!(stop_off.seq <= result.seq, "an OFF before the start never stops it");
+        let control = state.lock_camera_control().await;
+        let later_off = camera_publish_state_event(1, false, None);
+        drop(control);
+        assert!(later_off.seq > result.seq, "an OFF after the start wins");
+    }
+
+    /// Wiring guard: every start result is decided under the control lock,
+    /// and every emit is stamped through the one counter.
+    #[test]
+    fn start_results_and_emits_use_the_shared_seq() {
+        let src = include_str!("camera_session.rs");
+        let body = &src[src.find("pub(crate) async fn start_camera_publish_intent(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let lock = body.find("let _control = state.lock_camera_control().await;").unwrap();
+        let first = body.find("StartCameraPublishResult::decided(").unwrap();
+        assert!(lock < first, "decided under the control lock");
+        assert!(!body.contains("StartCameraPublishResult {"), "no seq-less literal");
+        let emit = &src[src.find("pub(crate) fn emit_camera_publish_state(").unwrap()..];
+        let emit = &emit[..emit.find("\n}\n").unwrap()];
+        assert!(emit.contains("camera_publish_state_event(generation, publishing, error)"));
+    }
+
+    /// Round-4 review: the heal gives up (clearing the intent under the
+    /// control lock), the user turns the camera on again and that start
+    /// returns, and only then is the old heal's failure emitted. Its seq was
+    /// reserved with the clear, so it is older than the start's and the route
+    /// drops it instead of turning the new camera OFF.
+    #[tokio::test]
+    async fn a_late_heal_failure_orders_before_the_start_that_followed_it() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        let generation = state.begin_room_generation();
+        let outcome = drive_camera_publish_attempts(
+            &state,
+            &generation,
+            &[Duration::ZERO],
+            || std::future::ready(Err::<(), String>("no frames".to_string())),
+            |_d| async {},
+        )
+        .await;
+        let CameraHealOutcome::TerminalFailure(_, failure_seq) = outcome else {
+            panic!("expected TerminalFailure, got {outcome:?}");
+        };
+        // The user's start takes the lock after the give-up released it
+        // (`start_camera_publish_intent` decides its result under it).
+        let start = {
+            let _control = state.lock_camera_control().await;
+            state.set_camera_intent(true);
+            StartCameraPublishResult::decided(true, generation.value())
+        };
+        // Some other surface emits meanwhile; the heal's emit comes last.
+        let _other = camera_publish_state_event(generation.value(), true, None);
+        assert!(
+            failure_seq <= start.seq,
+            "the stale failure ({failure_seq}) must not be newer than the start ({})",
+            start.seq
+        );
+        // And `ensure_camera_published` emits it with that reserved seq, not
+        // a fresh one stamped at emit time.
+        let src = include_str!("camera_session.rs");
+        let arm = &src[src.find("CameraHealOutcome::TerminalFailure(error, seq) => {").unwrap()..];
+        let arm = &arm[..arm.find("\n}\n").unwrap()];
+        assert!(arm.contains("send_camera_publish_state("), "{arm}");
+        assert!(arm.contains("            seq,\n"), "sent with the reserved seq");
+        assert!(!arm.contains("camera_publish_state_event("), "never re-stamped");
+        assert!(!arm.contains("emit_camera_publish_state("), "never re-stamped");
+    }
+
+    /// Wiring guard for item 3: the command is registered on both platforms.
+    #[test]
+    fn abandon_pending_join_is_registered_on_both_platforms() {
+        let lib = include_str!("lib.rs");
+        assert_eq!(lib.matches("camera_session::abandon_pending_join,").count(), 2);
+    }
+
+    /// Camera off lands between the commit and its hand-off: it stays off.
+    #[tokio::test]
+    async fn a_camera_turned_off_after_the_commit_stays_off() {
+        let state = crate::session::SessionState::default();
+        let (mut join, _) = state.begin_join("room-a", "room-a");
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(join.commit());
+        state.set_camera_intent(false);
+        state.deferred_camera().cancel_camera();
+        assert!(!take_deferred_camera(&state, join.generation()).await);
+        assert!(!state.camera_intent());
+
+        // A room lost before the hand-off keeps it for the recovery's commit.
+        let (mut join, _) = state.begin_join("room-a", "room-a");
+        assert_eq!(click_while_not_in_room(&state), CameraDeferral::Deferred);
+        assert!(join.commit());
+        state.invalidate_room_generation();
+        state.deferred_camera().connection_lost();
+        assert!(!take_deferred_camera(&state, join.generation()).await);
+        assert!(state.deferred_camera().camera_deferred());
+    }
+
+    /// PR #503 F5: a heal whose room is gone emits nothing: a stale OFF would
+    /// stop a camera the user started for the new room.
+    #[test]
+    fn a_stale_terminal_heal_announces_nothing() {
+        let src = include_str!("camera_session.rs");
+        let start = src.find("CameraHealOutcome::TerminalFailure(error, seq) => {").expect("arm");
+        let arm = &src[start..];
+        let stale = &arm[arm.find("if !generation.is_current() {").expect("stale check")..];
+        let stale = &stale[..stale.find("return;").expect("return")];
+        assert!(!stale.contains("emit_") && !stale.contains("announce"), "{stale}");
+    }
+
+    /// Fails every attempt; while `rooms_left > 0`, each attempt also lands a
+    /// new room mid-attempt (a fast rejoin during the publish).
+    fn fail_and_change_room(
+        state: &crate::session::SessionState,
+        attempts: &AtomicUsize,
+        rooms_left: &AtomicUsize,
+    ) -> Result<(), String> {
+        attempts.fetch_add(1, Ordering::SeqCst);
+        if rooms_left.load(Ordering::SeqCst) > 0 {
+            rooms_left.fetch_sub(1, Ordering::SeqCst);
+            state.begin_room_generation();
+            return Err("not in room".to_string());
+        }
+        Ok(())
+    }
+
+    /// PR #503 review F2: the old room's final attempt fails after a new room
+    /// landed. That stale failure must not clear the NEW room's intent; the
+    /// heal follows the camera into the new room instead.
+    #[tokio::test]
+    async fn a_stale_final_failure_keeps_the_new_rooms_camera() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        let generation = state.begin_room_generation();
+        let attempts = AtomicUsize::new(0);
+        let rooms_left = AtomicUsize::new(1);
+        let outcome = drive_camera_publish_attempts(
+            &state,
+            &generation,
+            &[Duration::ZERO],
+            || std::future::ready(fail_and_change_room(&state, &attempts, &rooms_left)),
+            |_d| async {},
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Cancelled);
+        assert!(state.camera_intent(), "the new room's camera intent must survive");
+
+        let rooms_left = AtomicUsize::new(1);
+        let attempts = AtomicUsize::new(0);
+        let (outcome, generation) = drive_camera_heal_following_rooms(
+            &state,
+            &[Duration::ZERO],
+            || std::future::ready(fail_and_change_room(&state, &attempts, &rooms_left)),
+            |_d| async {},
+            || true,
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Published);
+        assert!(generation.is_current());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "retried in the new room");
+    }
+
+    /// Re-review of F2: the generation check and the intent clear must not
+    /// straddle a camera action for a new room. A click that holds the control
+    /// lock (mid-join) and lands a new room must win: the stale clear waits
+    /// for the lock, re-checks, and leaves the new intent alone.
+    #[tokio::test]
+    async fn a_stale_clear_waits_for_an_in_flight_camera_action() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        let generation = state.begin_room_generation();
+        let control = state.lock_camera_control().await;
+        let heal = drive_camera_publish_attempts(
+            &state,
+            &generation,
+            &[Duration::ZERO],
+            || std::future::ready(Err::<(), String>("no frames".to_string())),
+            |_d| async {},
+        );
+        let click = async {
+            tokio::task::yield_now().await;
+            state.begin_room_generation();
+            state.set_camera_intent(true);
+            drop(control);
+        };
+        let (outcome, ()) = tokio::join!(heal, click);
+        assert_eq!(outcome, CameraHealOutcome::Cancelled);
+        assert!(state.camera_intent(), "the new room's camera must survive");
+    }
+
+    /// PR #503 review F3: however many rooms the camera crosses, the heal
+    /// never exits leaving the intent ON with nothing publishing it.
+    #[tokio::test]
+    async fn the_heal_follows_the_camera_through_any_number_of_rooms() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        state.begin_room_generation();
+        let attempts = AtomicUsize::new(0);
+        let rooms_left = AtomicUsize::new(6);
+        let (outcome, generation) = drive_camera_heal_following_rooms(
+            &state,
+            &[Duration::ZERO, Duration::from_secs(1)],
+            || std::future::ready(fail_and_change_room(&state, &attempts, &rooms_left)),
+            |_d| async {},
+            || true,
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Published);
+        assert!(generation.is_current());
+        assert!(state.camera_intent());
+        assert_eq!(attempts.load(Ordering::SeqCst), 7);
+    }
+
+    /// Following needs a real room change each time: a cancel in the same
+    /// room (camera turned off) ends the heal.
+    #[tokio::test]
+    async fn the_heal_stops_when_the_camera_is_turned_off() {
+        let state = crate::session::SessionState::default();
+        state.set_camera_intent(true);
+        state.begin_room_generation();
+        let attempts = AtomicUsize::new(0);
+        let (outcome, _) = drive_camera_heal_following_rooms(
+            &state,
+            &[Duration::ZERO, Duration::from_secs(1)],
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err::<(), String>("no frames".to_string()))
+            },
+            |_d| {
+                state.set_camera_intent(false);
+                async {}
+            },
+            || true,
+        )
+        .await;
+        assert_eq!(outcome, CameraHealOutcome::Cancelled);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn heal_follows_the_camera_into_a_new_room_only_when_still_wanted() {
+        assert!(heal_should_follow_new_room(false, true, false, true));
+        assert!(!heal_should_follow_new_room(true, true, false, true), "same room: a real cancel");
+        assert!(!heal_should_follow_new_room(false, false, false, true), "camera turned off");
+        assert!(!heal_should_follow_new_room(false, true, true, true), "already publishing");
+        assert!(!heal_should_follow_new_room(false, true, false, false), "no room yet: the join kicks");
+    }
+
     use std::sync::atomic::AtomicUsize;
 
     #[test]
@@ -1807,7 +2654,7 @@ mod tests {
         .await;
 
         match outcome {
-            CameraHealOutcome::TerminalFailure(error) => {
+            CameraHealOutcome::TerminalFailure(error, _) => {
                 assert!(error.contains("no camera frames"));
             }
             other => panic!("expected TerminalFailure, got {other:?}"),
