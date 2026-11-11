@@ -2137,26 +2137,40 @@ probes and the repair request), sends `pattern-animate`, and samples every 2 s
 until the receiver resumes or `PETAL_COCKPIT_STALL_RESUME_MS` elapses.
 
 Each sample reads the recv track (fps, `framesDecoded`, stream state), whether
-the receiver still has an open ON-SCREEN window for the sharer, and the mean
+the receiver still has an open ON-SCREEN window for the sharer, the mean
 luma + a coarse content hash of that window's on-screen content REGION
 (`screencapture -R`, never the backing store -- see "Never show a black
-frame"). The receiver's own transitions (`stall:` lines journalled by
+frame"), and the sharer's frame counter DECODED from that region (#498): the
+web test pattern draws its counter as a 16-bit Gray code between four colour
+calibration squares, pinned for Rust and TypeScript by `testPatternCounter`
+in `contracts/petal-contracts.json`. The native test-pattern window an earlier
+scenario leaves up is always-on-top and covered the panel on every runner
+capture, so the scenario hides it while it samples and shows it again after.
+The receiver's own transitions (`stall:` lines journalled by
 `transport/subscriber.rs` and the compositor: LOW downgrade, HIGH probe,
 repair request, no-frame hold, resumed live media) are collected from the
 diagnostics journal as `stall-transition` records.
 
 Verdict (`stall_verdict`, unit-tested): TEST-FAIL if the window vanished, the
 content region ever read black (luma < 8), `framesDecoded` never advanced past
-its value at the animate ack, or the on-screen pixels never changed after the
-source resumed; INFRA-FAIL if no region capture ever succeeded (the
-never-black rule cannot be checked, so it is never a pass); else PASS. The
-full timeline is the `stall-timeline` record in `run.jsonl`, with the
+its value at the animate ack, or the decoded counter never advanced past the
+value the sharer froze on (`stall-resumed-tick`; cell-change fractions could
+not separate a held frame from a resumed one, #234). INFRA-FAIL if no region
+capture ever succeeded, or if no capture in the freeze (or resume) phase
+showed the calibrated pattern -- the region was OCCLUDED or misaimed, and the
+summary names the best corner-square match and a capture to look at. Else
+PASS. The full timeline is the `stall-timeline` record in `run.jsonl`, with the
 per-sample PNGs under `stall/`.
 
 Soak-length measurement (#202): dispatch `nightly-loopback.yml` with
 `cockpit_selector=SHARE-W2N-STALL`, `stall_freeze_ms=300000`,
 `stall_resume_ms=300000`, or locally
 `PETAL_COCKPIT_STALL_FREEZE_MS=300000 ... --test-case=SHARE-W2N-STALL`.
+
+Red proof (#498): dispatch with `stall_red_no_resume=true`
+(`PETAL_COCKPIT_STALL_RED_NO_RESUME=1`). The engine never sends
+`pattern-animate`, so the source stays frozen, and the scenario must TEST-FAIL
+on `stall-resumed-tick`.
 
 ### SHARE-W2N-Q walking skeleton and Rust engine (#254/#257)
 
@@ -3157,6 +3171,7 @@ still rejects translated execution for release evidence, and that stays true.
 | `PETAL_HARNESS_URL` | `apps/desktop/scripts/cockpit.mjs`, `test_cockpit` engine | web-harness origin the headless Chrome peer navigates to; default `https://meet.petal.live`. The release e2e gate points it at the STAGED web-harness deployment (#42). |
 | `PETAL_COCKPIT_STALL_FREEZE_MS` | `test_cockpit` engine (`SHARE-W2N-STALL`, #202) | How long the browser sharer freezes its test-pattern source, in ms; clamped to 10000–900000, default 90000 (gate-sized). Stretch it (e.g. 300000) for a soak measurement: `nightly-loopback.yml`'s `stall_freeze_ms` dispatch input sets it. |
 | `PETAL_COCKPIT_STALL_RESUME_MS` | `test_cockpit` engine (`SHARE-W2N-STALL`, #202) | How long the native receiver gets to resume decoding AND on-screen pixels after the source animates again, in ms; clamped to 10000–900000, default 30000. |
+| `PETAL_COCKPIT_STALL_RED_NO_RESUME` | `test_cockpit` engine (`SHARE-W2N-STALL`, #498) | RED PROOF ONLY. `1` skips `pattern-animate`, so the source never resumes and the scenario must TEST-FAIL on `stall-resumed-tick`. `nightly-loopback.yml`'s `stall_red_no_resume` dispatch input sets it. |
 | `PETAL_VERCEL_BYPASS_SECRET` | `transport/backend_http.rs`, `test_cockpit` engine | Vercel "Protection Bypass for Automation" secret, used ONLY when `PETAL_BACKEND_URL`/`PETAL_HARNESS_URL` point at a protected staged deployment. The Rust backend client sends it as the `x-vercel-protection-bypass` header; the Chrome web peer cannot set a header, so it rides the first navigation as `&x-vercel-protection-bypass=…&x-vercel-set-bypass-cookie=true` and is exchanged for a `_vercel_jwt` cookie. Unset in every normal build, and never recorded in `run.jsonl` (`WebPeer.url` keeps the plain URL). |
 | `PETAL_CHROME_BIN` | `apps/desktop/scripts/cockpit.mjs`, `scripts/verify-no-black-frame.mjs`, `scripts/verify-web-harness-browser.mjs`, `scripts/verify-speaker-playout.sh`, `test_cockpit/mod.rs`, the browser-driven `apps/desktop/tests/*.test.ts` | Path to the branded Google Chrome binary to launch headless; default `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`. |
 | `PETAL_COCKPIT_ARTIFACT_RETENTION_DAYS` | `test_cockpit` engine | Max age for pruning video/audio artifacts referenced by `run.jsonl`; default `14`. Structured `run.jsonl` and `scorecard.json` are never pruned. |

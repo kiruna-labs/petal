@@ -67,6 +67,11 @@ on:
         required: false
         default: ""
         type: string
+      stall_red_no_resume:
+        description: "RED-PROOF ONLY (#498): SHARE-W2N-STALL never sends pattern-animate, so the source never resumes and the scenario must TEST-FAIL on stall-resumed-tick. Leave unchecked."
+        required: false
+        default: false
+        type: boolean
       gate:
         description: "Run with release-gate strictness: a runner without the Cockpit setup marker FAILS instead of skipping the Cockpit tier"
         required: false
@@ -380,6 +385,8 @@ jobs:
           COCKPIT_SELECTOR: ${{ inputs.cockpit_selector || 'quick' }}
           PETAL_COCKPIT_STALL_FREEZE_MS: ${{ inputs.stall_freeze_ms || '' }}
           PETAL_COCKPIT_STALL_RESUME_MS: ${{ inputs.stall_resume_ms || '' }}
+          # Red proof only (#498); dispatch-only input, empty everywhere else.
+          PETAL_COCKPIT_STALL_RED_NO_RESUME: ${{ inputs.stall_red_no_resume && '1' || '' }}
           # 1 when this run IS the release gate (release.yml / workflow_call
           # default), 0 for a plain manual dispatch.
           E2E_GATE: ${{ inputs.gate && '1' || '0' }}
@@ -442,6 +449,9 @@ jobs:
           echo "cockpit web target: $COCKPIT_HARNESS_URL"
           echo "cockpit backend target: $COCKPIT_BACKEND_URL"
           echo "cockpit selector: $COCKPIT_SELECTOR (stall freeze/resume ms: '${PETAL_COCKPIT_STALL_FREEZE_MS}'/'${PETAL_COCKPIT_STALL_RESUME_MS}')"
+          if [ "$PETAL_COCKPIT_STALL_RED_NO_RESUME" = "1" ]; then
+            echo "::warning::RED-PROOF RUN: SHARE-W2N-STALL never resumes its source; the scenario is expected to TEST-FAIL."
+          fi
           set +e
           # PETAL_BACKEND_URL is read at RUNTIME first (transport/token.rs);
           # an EMPTY value means "no backend" (the loopback tier's setting), so

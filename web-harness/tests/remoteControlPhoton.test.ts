@@ -1,15 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   CORNER_CALIBRATION_SQUARES,
+  GRAY_CODE_BITS,
   GRAY_CODE_BLOCK_RECTS,
+  TARGET_DRAW_FPS,
   TEST_PATTERN_HEIGHT,
   TEST_PATTERN_WIDTH,
   frameCounterToGrayBlocks,
   type Rect
 } from '../src/testPattern.ts';
 import {
+  CALIBRATION_CHANNEL_TOLERANCE,
+  GRAY_ONE_MIN_LUMA,
+  GRAY_ZERO_MAX_LUMA,
+  SAMPLE_INSET,
   decodePhotonSentinelFrame,
   matchesExpectedPhotonGeneration,
   nextPhotonGeneration
@@ -89,4 +96,34 @@ test('photon generation matching rejects stale frames and handles wraparound', (
   assert.equal(matchesExpectedPhotonGeneration(stale, 43), false);
   assert.equal(matchesExpectedPhotonGeneration(expected, 43), true);
   assert.equal(nextPhotonGeneration(0xffff), 0);
+});
+
+// #498: the native Test Cockpit decodes this same counter from a receiver's
+// screen capture (test_cockpit/mod.rs decode_pattern_tick). Both sides read
+// the geometry and thresholds pinned in contracts/petal-contracts.json.
+test('test-pattern counter geometry and thresholds match the shared contract', () => {
+  const contract = JSON.parse(
+    readFileSync(new URL('../../contracts/petal-contracts.json', import.meta.url), 'utf8')
+  ).testPatternCounter;
+  assert.equal(contract.width, TEST_PATTERN_WIDTH);
+  assert.equal(contract.height, TEST_PATTERN_HEIGHT);
+  assert.equal(contract.bits, GRAY_CODE_BITS);
+  const first = GRAY_CODE_BLOCK_RECTS[0];
+  assert.deepEqual(contract.firstBlock, [first.x, first.y, first.w, first.h]);
+  GRAY_CODE_BLOCK_RECTS.forEach((rect, index) => {
+    assert.deepEqual(rect, { x: first.x + index * first.w, y: first.y, w: first.w, h: first.h });
+  });
+  assert.deepEqual(
+    contract.corners,
+    CORNER_CALIBRATION_SQUARES.map(({ name, x, y, w, h, color }) => ({ name, rect: [x, y, w, h], color }))
+  );
+  assert.equal(contract.sampleInset, SAMPLE_INSET);
+  assert.equal(contract.zeroMaxLuma, GRAY_ZERO_MAX_LUMA);
+  assert.equal(contract.oneMinLuma, GRAY_ONE_MIN_LUMA);
+  assert.equal(contract.calibrationTolerance, CALIBRATION_CHANNEL_TOLERANCE);
+  assert.equal(contract.maxDrawFps, TARGET_DRAW_FPS);
+  for (const vector of contract.grayVectors) {
+    const blocks = frameCounterToGrayBlocks(vector.counter).map((bit) => (bit ? '1' : '0')).join('');
+    assert.equal(blocks, vector.blocks, String(vector.counter));
+  }
 });

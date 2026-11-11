@@ -110,7 +110,7 @@ function drawDecorativeCircle(ctx: CanvasRenderingContext2D, frameCount: number)
 // repaints from a timer at a rate comfortably above the 30fps capture so every
 // captured frame is fresh (#254 fps ceiling). 60fps draws cost little and give
 // margin for timer jitter.
-const TARGET_DRAW_FPS = 60;
+export const TARGET_DRAW_FPS = 60;
 
 /**
  * Allocate the capture canvas once, before the animation starts.

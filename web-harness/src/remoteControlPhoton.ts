@@ -19,10 +19,10 @@ export interface PhotonSentinelFrame {
   calibrationMatches: number;
 }
 
-const SAMPLE_INSET = 0.25;
-const GRAY_ZERO_MAX_LUMA = 96;
-const GRAY_ONE_MIN_LUMA = 159;
-const CALIBRATION_CHANNEL_TOLERANCE = 100;
+export const SAMPLE_INSET = 0.25;
+export const GRAY_ZERO_MAX_LUMA = 96;
+export const GRAY_ONE_MIN_LUMA = 159;
+export const CALIBRATION_CHANNEL_TOLERANCE = 100;
 const GENERATION_MASK = 0xffff;
 
 export function nextPhotonGeneration(generation: number): number {
