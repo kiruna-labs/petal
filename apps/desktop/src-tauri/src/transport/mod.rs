@@ -40,6 +40,8 @@ pub(crate) mod encoder_health;
 // The native room's single subscription-ownership seam: audio + shared-window
 // video in, remote cameras out (the hidden gallery bridge owns those).
 pub(crate) mod native_subscription;
+// #544: re-init playout when the output device's stream format changes mid-call.
+pub(crate) mod playout_format;
 pub mod publisher;
 /// #169: two-peer-connection tests for the vendored publisher transport's
 /// rollback-and-re-offer recovery. Test-only.
